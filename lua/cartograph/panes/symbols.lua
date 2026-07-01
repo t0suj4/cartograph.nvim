@@ -12,6 +12,15 @@ local SHOWN = { ['function'] = true, method = true }
 local M = { line_node = {}, node_line = {} }
 
 local ns = vim.api.nvim_create_namespace('cartograph_symbols_dep')
+local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
+
+-- File-usage badges. Separates truly-unused from loaded-for-side-effects, so a
+-- side-effect-only module never reads as dead code.
+local BADGE = {
+    orphan     = { text = '  ○ no inbound',    hl = 'DiagnosticWarn' },
+    sideeffect = { text = '  ↻ side-effect',   hl = 'Comment' },
+    -- 'value' and 'used' are genuinely used → no badge (keeps the list quiet)
+}
 
 -- Relationship tints: dependencies (things the focus uses) in green, dependents
 -- (things that use the focus) in amber; depth-1 saturated, depth-2 muted. Each
@@ -40,14 +49,20 @@ function M.create()
     vim.bo[buf].filetype  = 'cartograph-symbols'
 
     local lines, line_node, node_line = {}, {}, {}
+    local badges = {} -- { {row0, col0, hl}, ... } applied after the lines land
     for _, file in ipairs(store.files) do
         local defs = {}
         for _, n in ipairs(store.by_file[file] or {}) do
             if SHOWN[n.kind] then defs[#defs + 1] = n end
         end
         if #defs > 0 then
-            lines[#lines + 1] = ('▸ %s  (%d)'):format(file, #defs)
+            local base = ('▸ %s  (%d)'):format(file, #defs)
+            local badge = BADGE[store.classify(file)]
+            lines[#lines + 1] = base .. (badge and badge.text or '')
             line_node[#lines] = false -- header row
+            if badge then
+                badges[#badges + 1] = { row = #lines - 1, col = #base, hl = badge.hl }
+            end
             for _, n in ipairs(defs) do
                 local icon = n.kind == 'method' and ':' or 'ƒ'
                 lines[#lines + 1] = ('  %s %-24s L%d'):format(icon, n.name or '?', n.range.start.line + 1)
@@ -58,6 +73,9 @@ function M.create()
     end
 
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    for _, b in ipairs(badges) do
+        vim.api.nvim_buf_set_extmark(buf, ns_class, b.row, b.col, { end_col = #lines[b.row + 1], hl_group = b.hl })
+    end
     vim.bo[buf].modifiable = false
     M.buf       = buf
     M.line_node = line_node

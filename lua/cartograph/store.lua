@@ -37,14 +37,37 @@ function M.load(path)
     M.uses   = {} -- id -> { to_id, ... }   (functions this one references)
     M.usedby = {} -- id -> { from_id, ... } (functions that reference this one)
     M.occ    = {} -- "from\31to" -> { {start,end}, ... }  reference sites in `from`
+    M.imports_in = {} -- file -> { {from=file, sideeffect=bool}, ... }  inbound requires
     for _, e in ipairs(M.data.edges or {}) do
         if e.kind == 'ref' then
             M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
             M.usedby[e.to]   = M.usedby[e.to]   or {}; table.insert(M.usedby[e.to], e.from)
             M.occ[e.from .. '\31' .. e.to] = e.at
+        elseif e.kind == 'import' then
+            M.imports_in[e.to] = M.imports_in[e.to] or {}
+            table.insert(M.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
         end
     end
     return M.data
+end
+
+--- Classify a file's usage. Crucially separates "loaded for side effects" from
+--- "truly unused" — a bare `require 'm'` is a use, just an invisible one, so a
+--- file that's only side-effect-required must NOT read as dead code.
+---   'used'       a symbol in the file is referenced somewhere
+---   'value'      imported and its return value is bound (symbol uses unresolved)
+---   'sideeffect' imported only via bare requires (return discarded)
+---   'orphan'     nothing imports or references it (incl. entry points)
+function M.classify(file)
+    for _, n in ipairs(M.by_file[file] or {}) do
+        if M.usedby[n.id] and #M.usedby[n.id] > 0 then return 'used' end
+    end
+    local ins = M.imports_in[file]
+    if not ins or #ins == 0 then return 'orphan' end
+    for _, imp in ipairs(ins) do
+        if not imp.sideeffect then return 'value' end
+    end
+    return 'sideeffect'
 end
 
 ---@param fn fun(id: string)
