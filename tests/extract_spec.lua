@@ -70,7 +70,23 @@ test('extract: refuses a selection that cuts a loop body', function ()
     local p = extract.plan { df = loopdf, sel = { first = 3, last = 5 }, fn_start = 1, body_end = 7,
                              file_lines = lines, name = 'x' }
     ok(not p.ok)
-    ok(p.reason:match('whole statements'), p.reason)
+    ok(p.reason:match('starts or ends inside'), p.reason)
+end)
+
+test('extract: a selection nested inside a block explains the top-level limit', function ()
+    -- lines 4..5 sit inside the loop body; no top-level statement starts there
+    local loopdf = { inputs = {}, stmts = {
+        { l = 2, def = { 'acc' }, use = {}, dep = {} },
+        { l = 3, def = {}, use = { 'acc' }, dep = { dep(1, 'acc') } }, -- loop, spans 3..6
+        { l = 7, def = {}, use = { 'acc' }, dep = { dep(1, 'acc') } },
+    } }
+    local lines = { 'local function g()', '    local acc = {}', '    for i = 1, 10 do',
+                    '        acc[i] = i', '        munge(acc)', '    end', '    return acc', 'end' }
+    local p = extract.plan { df = loopdf, sel = { first = 4, last = 5 }, fn_start = 1, body_end = 7,
+                             file_lines = lines, name = 'x' }
+    ok(not p.ok)
+    ok(p.reason:match('nested inside'), p.reason)
+    ok(p.reason:match('TOP.LEVEL'), p.reason)
 end)
 
 test('extract: a side-effecting statement extracts with params and no returns', function ()

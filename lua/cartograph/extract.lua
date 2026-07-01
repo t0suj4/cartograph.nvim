@@ -45,6 +45,16 @@ function M.plan(opts)
     end
     local stmts = df.stmts
 
+    -- control escape first — it's the clearest reason and is independent of the
+    -- statement-boundary analysis below.
+    local sel_lines = {}
+    for i = sel.first, sel.last do sel_lines[#sel_lines + 1] = lines[i] end
+    if has_control_escape(sel_lines) then
+        return { ok = false, reason =
+            'the selection contains return/break/goto. Extracting it would change control flow — '
+            .. 'the return/break would only exit the new function, not the original. Not supported.' }
+    end
+
     -- statement i spans [stmts[i].l, end(i)]; end(i) is the line before the next
     -- statement, or the last body line.
     local function stmt_end(i)
@@ -60,18 +70,16 @@ function M.plan(opts)
         end
     end
     if not firstIdx then
-        return { ok = false, reason = 'selection covers no complete statement' }
+        return { ok = false, reason =
+            'the selection is nested inside a loop or branch. Extract works on whole TOP-LEVEL '
+            .. 'statements of a function; it cannot yet reach inside control structures.' }
     end
     -- alignment: the selection must start and end exactly on statement boundaries,
     -- else it cuts into a loop/branch body the analysis cannot see.
     if sel.first ~= stmts[firstIdx].l or sel.last ~= stmt_end(lastIdx) then
-        return { ok = false, reason = 'selection must cover whole statements (not part of a loop/branch body)' }
-    end
-
-    local sel_lines = {}
-    for i = sel.first, sel.last do sel_lines[#sel_lines + 1] = lines[i] end
-    if has_control_escape(sel_lines) then
-        return { ok = false, reason = 'selection contains a return/break/goto — cannot extract safely' }
+        return { ok = false, reason =
+            'the selection starts or ends inside a loop/branch body. Extract works on whole '
+            .. 'top-level statements; it cannot split a control structure yet.' }
     end
 
     -- params = locals used in the selection whose reaching def is BEFORE it

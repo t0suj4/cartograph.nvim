@@ -113,6 +113,14 @@ function M.extract(line1, line2, name)
     local plan = extract.plan { df = node.df, sel = { first = file_first, last = file_last },
         fn_start = fn_start, body_end = body_end, file_lines = all, name = name }
     if not plan.ok then
+        -- persist the reason in the bottom pane (a transient notify is easy to miss)
+        if M.buf_bot and vim.api.nvim_buf_is_valid(M.buf_bot) then
+            local msg = { ('── cannot extract lines %d-%d'):format(file_first, file_last), '' }
+            msg[#msg + 1] = plan.reason
+            msg[#msg + 1] = ''
+            msg[#msg + 1] = 'Extract works on whole top-level statements of a function.'
+            set_lines(M.buf_bot, msg)
+        end
         return vim.notify('cartograph: cannot extract — ' .. plan.reason, vim.log.levels.WARN)
     end
 
