@@ -34,6 +34,10 @@ A cockpit of independent panes over a shared state store:
   **colours the source pane's lines by concern** (where they line up with the
   real code); cycling away clears it. Comprehension only — locals, not
   control/aliasing, so it reveals tangle and makes no safety/reorder claim.
+
+`<Tab>` / `<S-Tab>` cycle the view/lens **from the code pane** (as well as the
+minimap), so you can toggle the concern colouring without leaving the source
+you're reading.
 - **plan** — the staged move set and its computed impact (references to
   rewrite, imports to fix) and hazards (scope coupling, load order)
 

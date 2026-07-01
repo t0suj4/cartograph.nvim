@@ -84,6 +84,16 @@ local function apply_concerns(node)
     end
 end
 
+-- Cycle the view/lens from wherever you're reading. Switching lives in the code
+-- pane (not only the minimap) so toggling the concern colouring doesn't require
+-- leaving the source you're looking at.
+local function bind_cycle(buf)
+    vim.keymap.set('n', '<Tab>',   function () require('cartograph.panes.minimap').cycle(1) end,
+        { buffer = buf, desc = 'cartograph: cycle view / lens' })
+    vim.keymap.set('n', '<S-Tab>', function () require('cartograph.panes.minimap').cycle(-1) end,
+        { buffer = buf, desc = 'cartograph: cycle view / lens (back)' })
+end
+
 function M.create()
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = 'wipe'
@@ -95,6 +105,7 @@ function M.create()
     store.on_highlight(function (hlv) M.highlight(hlv) end)
     store.on_context(function (ctx) M.context(ctx) end)
     store.on_lens(function () apply_concerns(M.cur) end)
+    bind_cycle(buf)
     return buf
 end
 
@@ -112,6 +123,7 @@ function M.attach(win)
     M.buf_bot = b
     vim.api.nvim_win_set_buf(M.win_bot, b)
     vim.api.nvim_win_set_height(M.win_bot, math.max(6, math.floor(h * 0.4)))
+    bind_cycle(b)
 
     vim.api.nvim_set_current_win(win)
     M.context(nil)
