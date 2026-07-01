@@ -41,6 +41,21 @@ you're reading.
 - **plan** — the staged move set and its computed impact (references to
   rewrite, imports to fix) and hazards (scope coupling, load order)
 
+### Extracting a function
+
+In the **source** pane, visually select whole statements and run
+`:'<,'>CartographExtract <name>`. The engine computes the new function's
+parameters (locals read but defined before the selection) and return values
+(locals defined in the selection and used after it) from the data-flow, shows a
+**preview** in the bottom pane, and writes to disk only after you confirm.
+
+It is deliberately conservative: it works on **whole top-level statements** and
+**refuses** a selection that cuts a loop/branch body or contains a
+`return`/`break`/`goto`. It cannot see non-local (table/global) state, so that
+risk is disclosed as a hazard on the preview rather than silently assumed away —
+verify those by eye. After applying, regenerate the graph dump to refresh the
+cockpit.
+
 ### Staging a move
 
 Moving a function is modelled as **cut & paste**, so the keys are the ones you

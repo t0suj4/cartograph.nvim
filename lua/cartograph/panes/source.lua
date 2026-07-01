@@ -9,6 +9,7 @@
 
 local store    = require 'cartograph.store'
 local untangle = require 'cartograph.untangle'
+local extract  = require 'cartograph.extract'
 local hl       = require 'cartograph.hl'
 
 local HEADER_ROWS = 2 -- header line + blank before the code body
@@ -94,11 +95,54 @@ local function bind_cycle(buf)
         { buffer = buf, desc = 'cartograph: cycle view / lens (back)' })
 end
 
+-- Extract the selected TOP-pane lines into a new local function. `line1`/`line2`
+-- are 1-based rows in the top buffer; the body starts at row HEADER_ROWS. Shows
+-- a preview in the bottom pane and asks before writing anything to disk.
+function M.extract(line1, line2, name)
+    local node = M.cur
+    if not node then return vim.notify('cartograph: no function focused', vim.log.levels.WARN) end
+    local fn_start = node.range.start.line + 1        -- 1-based
+    local body_end = node.range['end'].line           -- last body line (before `end`)
+    -- top buffer row 3 (1-based) shows file line fn_start
+    local file_first = fn_start + (line1 - (HEADER_ROWS + 1))
+    local file_last  = fn_start + (line2 - (HEADER_ROWS + 1))
+
+    local ok, all = pcall(vim.fn.readfile, store.abspath(node))
+    if not ok then return vim.notify('cartograph: cannot read ' .. node.file, vim.log.levels.ERROR) end
+
+    local plan = extract.plan { df = node.df, sel = { first = file_first, last = file_last },
+        fn_start = fn_start, body_end = body_end, file_lines = all, name = name }
+    if not plan.ok then
+        return vim.notify('cartograph: cannot extract — ' .. plan.reason, vim.log.levels.WARN)
+    end
+
+    -- preview in the bottom pane
+    local prev = { ('── extract preview: %s(%s)%s'):format(name, table.concat(plan.params, ', '),
+        #plan.returns > 0 and ('  ->  ' .. table.concat(plan.returns, ', ')) or ''), '' }
+    for _, l in ipairs(plan.new_fn) do prev[#prev + 1] = l end
+    prev[#prev + 1] = ''
+    prev[#prev + 1] = ('call replaces %s:%d-%d:'):format(node.file, plan.replace.first, plan.replace.last)
+    for _, l in ipairs(plan.call) do prev[#prev + 1] = l end
+    for _, h in ipairs(plan.hazards) do prev[#prev + 1] = '⚠ ' .. h end
+    if M.buf_bot and vim.api.nvim_buf_is_valid(M.buf_bot) then set_lines(M.buf_bot, prev) end
+
+    if vim.fn.confirm(('Extract %d line(s) into %s()?'):format(file_last - file_first + 1, name),
+            '&Apply\n&Cancel', 2) ~= 1 then
+        return vim.notify('cartograph: extract cancelled', vim.log.levels.INFO)
+    end
+    vim.fn.writefile(extract.apply(plan, all), store.abspath(node))
+    vim.notify(('cartograph: extracted %s(). Regenerate the graph dump to refresh the cockpit.'):format(name),
+        vim.log.levels.INFO)
+end
+
 function M.create()
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = 'wipe'
     vim.bo[buf].filetype  = 'lua'
     M.buf = buf
+    vim.api.nvim_buf_create_user_command(buf, 'CartographExtract', function (o)
+        M.extract(o.line1, o.line2, o.fargs[1])
+    end, { range = true, nargs = 1, desc = 'cartograph: extract selected lines into a function' })
     hl.setup()
     vim.api.nvim_create_autocmd('ColorScheme', { callback = hl.setup })
     store.on_focus(function (id) M.render(id) end)
