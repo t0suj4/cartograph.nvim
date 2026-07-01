@@ -38,6 +38,12 @@ A cockpit of independent panes over a shared state store:
 `<Tab>` / `<S-Tab>` cycle the view/lens **from the code pane** (as well as the
 minimap), so you can toggle the concern colouring without leaving the source
 you're reading.
+
+`:CartographHeat` (from the symbols pane) toggles a **hub/heat overlay**: each
+symbol is annotated with fan-in / fan-out and a role — `hub` (many callers,
+load-bearing), `coordinator` (calls many), `leaf`, `api` (exported, no static
+caller — public surface, *not* dead), `unused?` (a local with no caller), or
+`isolated`. A quick map of where a module's weight sits.
 - **plan** — the staged move set and its computed impact (references to
   rewrite, imports to fix) and hazards (scope coupling, load order)
 

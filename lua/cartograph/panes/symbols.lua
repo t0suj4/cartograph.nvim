@@ -11,9 +11,12 @@ local SHOWN = { ['function'] = true, method = true }
 
 local M = { line_node = {}, node_line = {}, line_file = {}, file_header = {} }
 
+local heat = require 'cartograph.heat'
+
 local ns = vim.api.nvim_create_namespace('cartograph_symbols_dep')
 local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
 local ns_stage = vim.api.nvim_create_namespace('cartograph_symbols_stage')
+local ns_heat  = vim.api.nvim_create_namespace('cartograph_symbols_heat')
 
 -- File-usage markers, shown in the gutter on each file header (keeps the narrow
 -- header text clean). Separates truly-unused from loaded-for-side-effects, so a
@@ -155,6 +158,34 @@ function M.paint(id)
     end
 end
 
+-- Hub/heat overlay: annotate each symbol with fan-in / fan-out and its role
+-- (hub / coordinator / leaf / api / unused? / isolated). Static, toggled on
+-- demand so it doesn't clutter navigation. Shown as end-of-line virtual text.
+M.heat_on = false
+function M.render_heat()
+    if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
+    vim.api.nvim_buf_clear_namespace(M.buf, ns_heat, 0, -1)
+    if not M.heat_on then return end
+    for id, row in pairs(M.node_line) do
+        local n = store.node(id)
+        if n then
+            local fanin  = #(store.usedby[id] or {})
+            local fanout = #(store.uses[id] or {})
+            local exported = n.kind == 'method' or (n.name and n.name:find('%.') ~= nil)
+            local r = heat.role(fanin, fanout, exported)
+            local text = ('  in:%d out:%d%s'):format(fanin, fanout, r.tag ~= '' and ('  ◀ ' .. r.tag) or '')
+            vim.api.nvim_buf_set_extmark(M.buf, ns_heat, row - 1, 0,
+                { virt_text = { { text, r.hl } }, virt_text_pos = 'eol' })
+        end
+    end
+end
+
+function M.toggle_heat()
+    M.heat_on = not M.heat_on
+    M.render_heat()
+    vim.notify('cartograph: heat overlay ' .. (M.heat_on and 'on' or 'off'), vim.log.levels.INFO)
+end
+
 --- Wire cursor movement in `win` to focus (so source/tree follow), and keep the
 --- list cursor synced to the focused node (so a pivot elsewhere shows here too).
 function M.attach(win)
@@ -205,6 +236,9 @@ function M.attach(win)
 
     store.on_plan(function () M.restage() end)
     M.restage()
+
+    vim.api.nvim_buf_create_user_command(M.buf, 'CartographHeat', function () M.toggle_heat() end,
+        { desc = 'cartograph: toggle the hub/heat overlay (fan-in/out + role)' })
 end
 
 return M
