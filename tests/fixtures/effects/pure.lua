@@ -1,0 +1,12 @@
+-- pure module: only defines locals and returns a table -> no load-time effects
+local M = {}
+
+function M.add(a, b)
+    return a + b
+end
+
+function M.mul(a, b)
+    return a * b
+end
+
+return M

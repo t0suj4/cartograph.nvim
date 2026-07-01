@@ -41,6 +41,18 @@ A cockpit of independent panes over a shared state store:
    store; a *layout* is a composition of panes. Layouts are meant to be
    swappable/customizable.
 
+## Tests
+
+```sh
+./tests/run.sh
+```
+
+A dependency-free runner (`nvim --headless`, no plenary). `tests/*_spec.lua`
+use the globals `test` / `eq` / `ok` / `skip`. The store classifier is covered
+with in-memory graphs via `store.ingest`; the extractor's load-time `effects`
+detection is covered by a golden test that runs the real `--graph` CLI over
+`tests/fixtures/effects` (self-skips if the CLI isn't installed).
+
 ## License
 
 TBD

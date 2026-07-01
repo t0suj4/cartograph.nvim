@@ -15,7 +15,14 @@ function M.load(path)
     local f = assert(io.open(path, 'r'), 'cartograph: cannot open ' .. path)
     local txt = f:read('a')
     f:close()
-    M.data    = vim.json.decode(txt)
+    return M.ingest(vim.json.decode(txt))
+end
+
+--- Build all indexes from a decoded graph (schema #1). Split out from load() so
+--- it can be driven directly from in-memory graphs (tests, non-file providers).
+---@param data table
+function M.ingest(data)
+    M.data    = data
     M.by_id   = {}
     M.by_file = {}
     M.files   = {}
