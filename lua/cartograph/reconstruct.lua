@@ -57,7 +57,22 @@ function M.run(opts)
         labels[i] = (sh { 'git', '-C', repo, 'log', '-1', '--format=%s', rev }):gsub('%s+$', '')
     end
 
-    -- extract a graph per commit in a throwaway worktree (sha-cached)
+    local graphs = M.extract_graphs(repo, revs, { cache = cache, bin = bin, progress = opts.progress })
+    local steps = ledger.reconstruct(graphs, labels)
+    return { steps = steps, lines = ledger.render(steps) }
+end
+
+--- Extract the symbol graph at each of `revs` (in a throwaway worktree, sha-cached).
+--- Shared by the ledger and the coupling miner. Returns a graph per rev (parallel).
+---@param repo string
+---@param revs string[]
+---@param opts { cache:string?, bin:string?, progress:boolean? }
+---@return table[] graphs
+function M.extract_graphs(repo, revs, opts)
+    opts = opts or {}
+    local bin   = opts.bin or vim.fn.expand '~/.local/lib/lua-language-server/bin/lua-language-server'
+    local cache = opts.cache or (vim.fn.stdpath('cache') .. '/cartograph-ledger')
+    vim.fn.mkdir(cache, 'p')
     local wt = cache .. '/wt'
     sh { 'git', '-C', repo, 'worktree', 'add', '-q', '--force', '--detach', wt, revs[1] }
     local graphs = {}
@@ -70,17 +85,13 @@ function M.run(opts)
                     '--logpath=' .. cache .. '/' .. rev .. '.log' }, { text = true }):wait()
             end
             graphs[i] = assert(read_json(json), 'no graph produced for ' .. rev)
-            if opts.progress then
-                io.write(('\r  extracted %d/%d'):format(i, #revs)); io.flush()
-            end
+            if opts.progress then io.write(('\r  extracted %d/%d'):format(i, #revs)); io.flush() end
         end
     end)
     sh { 'git', '-C', repo, 'worktree', 'remove', '--force', wt }
     if opts.progress then io.write('\n') end
     if not okrun then error(err) end
-
-    local steps = ledger.reconstruct(graphs, labels)
-    return { steps = steps, lines = ledger.render(steps) }
+    return graphs
 end
 
 return M
