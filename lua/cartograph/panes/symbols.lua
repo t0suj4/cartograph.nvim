@@ -9,14 +9,14 @@ local store = require 'cartograph.store'
 -- dump for later panes).
 local SHOWN = { ['function'] = true, method = true }
 
-local M = { line_node = {} }
+local M = { line_node = {}, node_line = {} }
 
 function M.create()
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = 'wipe'
     vim.bo[buf].filetype  = 'cartograph-symbols'
 
-    local lines, line_node = {}, {}
+    local lines, line_node, node_line = {}, {}, {}
     for _, file in ipairs(store.files) do
         local defs = {}
         for _, n in ipairs(store.by_file[file] or {}) do
@@ -29,19 +29,23 @@ function M.create()
                 local icon = n.kind == 'method' and ':' or 'ƒ'
                 lines[#lines + 1] = ('  %s %-24s L%d'):format(icon, n.name or '?', n.range.start.line + 1)
                 line_node[#lines] = n.id
+                node_line[n.id]   = #lines
             end
         end
     end
 
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].modifiable = false
-    M.buf = buf
+    M.buf       = buf
     M.line_node = line_node
+    M.node_line = node_line
     return buf
 end
 
---- Wire cursor movement in `win` to focus, so the source pane follows.
+--- Wire cursor movement in `win` to focus (so source/tree follow), and keep the
+--- list cursor synced to the focused node (so a pivot elsewhere shows here too).
 function M.attach(win)
+    M.win = win
     vim.api.nvim_create_autocmd('CursorMoved', {
         buffer = M.buf,
         callback = function ()
@@ -50,6 +54,14 @@ function M.attach(win)
             if id then store.set_focus(id) end
         end,
     })
+    store.on_focus(function (id)
+        local ln = M.node_line[id]
+        if ln and M.win and vim.api.nvim_win_is_valid(M.win)
+            and vim.api.nvim_win_get_buf(M.win) == M.buf then
+            -- set_focus is idempotent, so the CursorMoved this triggers no-ops
+            vim.api.nvim_win_set_cursor(M.win, { ln, 2 })
+        end
+    end)
 end
 
 return M
