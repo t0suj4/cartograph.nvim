@@ -32,6 +32,16 @@ function M.load(path)
     for _, list in pairs(M.by_file) do
         table.sort(list, function (a, b) return a.order < b.order end)
     end
+
+    -- edge indexes for the dependency tree (symbol-level `ref` edges)
+    M.uses   = {} -- id -> { to_id, ... }   (functions this one references)
+    M.usedby = {} -- id -> { from_id, ... } (functions that reference this one)
+    for _, e in ipairs(M.data.edges or {}) do
+        if e.kind == 'ref' then
+            M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
+            M.usedby[e.to]   = M.usedby[e.to]   or {}; table.insert(M.usedby[e.to], e.from)
+        end
+    end
     return M.data
 end
 

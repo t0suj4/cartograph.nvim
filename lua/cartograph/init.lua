@@ -23,22 +23,30 @@ function M.open(dump_path)
     local store   = require 'cartograph.store'
     local symbols = require 'cartograph.panes.symbols'
     local source  = require 'cartograph.panes.source'
+    local tree    = require 'cartograph.panes.tree'
 
     store.load(vim.fn.expand(dump_path))
 
+    -- ONE hardcoded layout for now: symbols | source | tree (left to right).
     vim.cmd('tabnew')
-    local left = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(left, symbols.create())
+    local w_symbols = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(w_symbols, symbols.create())
 
     vim.cmd('rightbelow vsplit')
-    local right = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(right, source.create())
+    local w_source = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(w_source, source.create())
 
-    vim.api.nvim_set_current_win(left)
-    vim.api.nvim_win_set_width(left, 40)
-    symbols.attach(left)
+    vim.cmd('rightbelow vsplit')
+    local w_tree = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(w_tree, tree.create())
 
-    -- focus the first real symbol so the source pane isn't blank
+    vim.api.nvim_win_set_width(w_symbols, 34)
+    vim.api.nvim_win_set_width(w_tree, 40)
+
+    vim.api.nvim_set_current_win(w_symbols)
+    symbols.attach(w_symbols)
+
+    -- focus the first real symbol so source/tree aren't blank
     vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
 end
 
