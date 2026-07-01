@@ -40,15 +40,30 @@ end
 ---@return { coupling:table, commits:integer }
 function M.run(opts)
     local repo = assert(opts.repo, 'couplingmine: repo required')
-    local revs = {}
-    for line in sh({ 'git', '-C', repo, 'rev-list', '--reverse', opts.from .. '..' .. opts.to }):gmatch('[^\n]+') do
-        revs[#revs + 1] = line
+    -- commit list, optionally filtered to commits that touch given paths
+    local revcmd = { 'git', '-C', repo, 'rev-list', '--reverse', opts.from .. '..' .. opts.to }
+    if opts.paths then
+        revcmd[#revcmd + 1] = '--'
+        for _, p in ipairs(opts.paths) do revcmd[#revcmd + 1] = p end
     end
+    local revs = {}
+    for line in sh(revcmd):gmatch('[^\n]+') do revs[#revs + 1] = line end
     local graphs = reconstruct.extract_graphs(repo, revs, opts)
 
     local sets = {}
     for i, rev in ipairs(revs) do
-        sets[#sets + 1] = coupling.attribute(graphs[i].nodes, changed_lines(repo, rev))
+        local nodes = graphs[i].nodes
+        -- when extraction was scoped to a subdir, node files are subdir-relative;
+        -- prefix it back so they match the repo-relative paths in the diff.
+        if opts.subdir then
+            local remapped = {}
+            for _, n in ipairs(nodes) do
+                remapped[#remapped + 1] = { file = opts.subdir .. '/' .. n.file,
+                    name = n.name, kind = n.kind, range = n.range }
+            end
+            nodes = remapped
+        end
+        sets[#sets + 1] = coupling.attribute(nodes, changed_lines(repo, rev))
     end
     return { coupling = coupling.accumulate(sets), commits = #revs }
 end

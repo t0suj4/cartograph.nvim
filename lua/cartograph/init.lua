@@ -59,6 +59,21 @@ function M.open(dump_path)
     symbols.attach(w_symbols)
     tree.attach(w_tree)
 
+    -- graph-aware lint -> quickfix
+    pcall(vim.api.nvim_del_user_command, 'CartographLint')
+    vim.api.nvim_create_user_command('CartographLint', function ()
+        local findings = require('cartograph.lint').run(store)
+        if #findings == 0 then return vim.notify('cartograph: no lint findings', vim.log.levels.INFO) end
+        local qf = {}
+        for _, f in ipairs(findings) do
+            qf[#qf + 1] = { filename = f.file, lnum = f.line, col = 1,
+                type = f.severity == 'warn' and 'W' or 'E',
+                text = ('[%s] %s'):format(f.rule, f.message) }
+        end
+        vim.fn.setqflist({}, ' ', { title = 'cartograph lint', items = qf })
+        vim.cmd('copen')
+    end, { desc = 'cartograph: graph-aware lint (dead code, redundant requires, call cycles) -> quickfix' })
+
     -- focus the first real symbol so source/tree aren't blank
     vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
 end

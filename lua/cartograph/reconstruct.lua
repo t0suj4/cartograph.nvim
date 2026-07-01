@@ -81,7 +81,10 @@ function M.extract_graphs(repo, revs, opts)
             local json = cache .. '/' .. rev .. '.json'
             if not read_json(json) then
                 sh { 'git', '-C', wt, 'checkout', '-q', '--detach', rev }
-                vim.system({ bin, '--graph=' .. wt, '--graphout=' .. cache .. '/' .. rev,
+                -- scope extraction to a subdir when given (faster, focused); node
+                -- files are then relative to that subdir — the caller reconciles.
+                local graphdir = opts.subdir and (wt .. '/' .. opts.subdir) or wt
+                vim.system({ bin, '--graph=' .. graphdir, '--graphout=' .. cache .. '/' .. rev,
                     '--logpath=' .. cache .. '/' .. rev .. '.log' }, { text = true }):wait()
             end
             graphs[i] = assert(read_json(json), 'no graph produced for ' .. rev)

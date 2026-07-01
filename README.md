@@ -87,6 +87,24 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
    store; a *layout* is a composition of panes. Layouts are meant to be
    swappable/customizable.
 
+## Lint
+
+`:CartographLint` runs graph-aware, whole-program checks and drops the findings
+into the quickfix list. Not a luacheck replacement — it makes the *cross-file*
+checks luacheck can't:
+
+- **dead-function** — a *local* function with no caller anywhere (exported
+  functions and metamethods are excluded — public/dynamically-dispatched surface
+  isn't dead).
+- **redundant-require** — a pure module `require`d only for effect, but it has
+  none, so the require does nothing.
+- **call-cycle** — mutual recursion / cyclic call clusters (plain self-recursion
+  is not flagged). Structural, and a load-order signal.
+
+Structural smells, not proofs — dynamically-invoked functions (event handlers,
+test cases run by a harness) can still read as "no caller". Rules live in
+`lint.lua` and are pure/testable.
+
 ## Ledger reconstruction
 
 The inverse of the ImpactEngine: instead of predicting a move's edits, recover
