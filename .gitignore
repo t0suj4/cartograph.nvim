@@ -1,0 +1,8 @@
+# scratch / local experiment data (graph dumps, ad-hoc notes)
+scratch/
+*.dump.json
+
+# editor / OS
+.DS_Store
+*.swp
+tags
