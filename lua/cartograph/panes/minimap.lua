@@ -11,7 +11,7 @@
 
 local store = require 'cartograph.store'
 
-local VARIANTS = { 'file', 'spread', 'graph' }
+local VARIANTS = { 'file', 'spread', 'graph', 'flow' }
 
 local M = { variant = 1, win = nil }
 
@@ -122,6 +122,30 @@ local function render_graph(node)
     return out
 end
 
+-- ── variant 4: statement-level data flow ───────────────────────────────────
+-- Zooms below the function: local def-use within the body, from the provider's
+-- `df`. COMPREHENSION ONLY — locals, no control/anti/aliasing, so it explains
+-- flow but is not a reorder-safety claim (see the ledger/PDG notes).
+local function render_flow(node)
+    local df = node.df
+    if not df then return { '(no data-flow info for this node)' } end
+    local out = { ('inputs: %s'):format(#df.inputs > 0 and table.concat(df.inputs, ', ') or '(none)'),
+                  '───────────────────  locals only' }
+    for _, s in ipairs(df.stmts) do
+        local parts = {}
+        if #s.def > 0 then parts[#parts + 1] = 'def ' .. table.concat(s.def, ',') end
+        if #s.use > 0 then parts[#parts + 1] = 'use ' .. table.concat(s.use, ',') end
+        local deps = {}
+        for _, d in ipairs(s.dep) do
+            local from = df.stmts[d.from]
+            deps[#deps + 1] = ('L%s·%s'):format(from and from.l or ('#' .. d.from), d.var)
+        end
+        out[#out + 1] = ('L%-4d %-30s%s'):format(s.l, table.concat(parts, '  '),
+            #deps > 0 and ('  <- ' .. table.concat(deps, ' ')) or '')
+    end
+    return out
+end
+
 -- ── pane machinery ──────────────────────────────────────────────────────────
 function M.render(id)
     if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
@@ -137,6 +161,8 @@ function M.render(id)
         body = render_file(node, rows)
     elseif variant == 'spread' then
         body = render_spread(node)
+    elseif variant == 'flow' then
+        body = render_flow(node)
     else
         body = render_graph(node)
     end
