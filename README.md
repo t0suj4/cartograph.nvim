@@ -55,6 +55,21 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
    store; a *layout* is a composition of panes. Layouts are meant to be
    swappable/customizable.
 
+## Ledger reconstruction
+
+The inverse of the ImpactEngine: instead of predicting a move's edits, recover
+what a series of edits *did* to the structure. `reconstruct.run{repo, from, to}`
+extracts the symbol graph at each commit in a range and diffs consecutive
+snapshots into a per-commit structural ledger — added / removed / renamed
+symbols and reference-edge changes, each classified (`extract`, `rename`,
+`inline`, `rewire`, `restructure`, `internal`). Graphs are cached by commit sha.
+
+Node identity across snapshots is `(file, name, kind)`, not the node id (which
+embeds a line number and shifts as code moves). It sees *structural* change
+only: commits that transform code *inside* a function (hoist to upvalue, reorder
+args, closure→iterator) show up as `internal` — a real, deliberate limit of the
+named-symbol graph.
+
 ## Tests
 
 ```sh
