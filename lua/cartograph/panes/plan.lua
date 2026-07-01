@@ -34,8 +34,9 @@ function M.render()
         set_lines(M.buf, {
             'PLAN  —  nothing staged',
             '',
-            "  stage a function with 'm' in the symbol list; set destination with 'd' on a file header",
-            "  clear with 'X'",
+            "  dd  cut a function into the move-set      (visual d cuts a selection)",
+            "  p   paste — set the destination to the file under the cursor",
+            "  u   unstage the last cut",
         })
         return
     end
@@ -43,7 +44,7 @@ function M.render()
     local plan = impact.compute(store, ids, dest)
 
     lines[#lines + 1] = hl(marks, #lines,
-        ('PLAN  %d staged  →  %s'):format(#plan.moves, dest or '(no destination — press d on a file header)'),
+        ('PLAN  %d staged  →  %s'):format(#plan.moves, dest or '(no destination — press p on a file)'),
         'Title')
 
     -- staged symbols, grouped by source file

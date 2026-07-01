@@ -127,18 +127,43 @@ end
 -- This is what the plan bar reads; marks live in the symbol list. A separate
 -- channel from focus/highlight because staging persists as you navigate.
 M.moveset  = {}   -- id -> true
+M._order   = {}   -- ids in staging order (for `u` / unstage-last)
 M.dest     = nil  -- destination file
 M._plan_subs = {}
 ---@param fn fun()
 function M.on_plan(fn) table.insert(M._plan_subs, fn) end
 local function fire_plan() for _, fn in ipairs(M._plan_subs) do pcall(fn) end end
 
---- Toggle whether `id` is staged to move. Returns the new state.
+--- Stage `id` for moving (idempotent). Cut-into-the-move-set.
+function M.stage(id)
+    if not id or M.moveset[id] then return end
+    M.moveset[id] = true
+    M._order[#M._order + 1] = id
+    fire_plan()
+end
+
+--- Unstage `id`.
+function M.unstage(id)
+    if not id or not M.moveset[id] then return end
+    M.moveset[id] = nil
+    for i = #M._order, 1, -1 do
+        if M._order[i] == id then table.remove(M._order, i) end
+    end
+    fire_plan()
+end
+
+--- Toggle whether `id` is staged. Returns the new state.
 function M.toggle_stage(id)
     if not id then return false end
-    M.moveset[id] = not M.moveset[id] or nil
-    fire_plan()
+    if M.moveset[id] then M.unstage(id) else M.stage(id) end
     return M.moveset[id] == true
+end
+
+--- Unstage the most recently staged symbol (the `u` / undo action).
+function M.unstage_last()
+    local id = M._order[#M._order]
+    if id then M.unstage(id) end
+    return id
 end
 
 function M.is_staged(id) return M.moveset[id] == true end
@@ -166,6 +191,7 @@ end
 --- Clear the whole move-set and destination.
 function M.clear_stage()
     M.moveset = {}
+    M._order = {}
     M.dest = nil
     fire_plan()
 end

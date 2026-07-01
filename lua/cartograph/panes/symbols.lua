@@ -178,19 +178,30 @@ function M.attach(win)
         M.paint(id)
     end)
 
-    -- staging: marks live here, in the list of movable symbols
+    -- staging as cut & paste: dd cuts a function into the move-set, visual d
+    -- cuts a selection, p pastes at the file under the cursor (= destination),
+    -- u unstages the last. Marks live here, in the list of movable symbols.
     local function row() return vim.api.nvim_win_get_cursor(win)[1] end
-    vim.keymap.set('n', 'm', function ()
+    vim.keymap.set('n', 'dd', function ()
         local id = M.line_node[row()]
         if id then store.toggle_stage(id) end
-    end, { buffer = M.buf, desc = 'cartograph: stage/unstage this symbol for moving' })
-    vim.keymap.set('n', 'd', function ()
+    end, { buffer = M.buf, desc = 'cartograph: cut (stage) this function for moving' })
+    vim.keymap.set('x', 'd', function ()
+        local a, b = vim.fn.line('v'), vim.fn.line('.')
+        if a > b then a, b = b, a end
+        for r = a, b do
+            local id = M.line_node[r]
+            if id then store.stage(id) end
+        end
+        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
+    end, { buffer = M.buf, desc = 'cartograph: cut (stage) the selected functions' })
+    vim.keymap.set('n', 'p', function ()
         local file = M.line_file[row()]
-        if file then store.set_dest(file == store.dest and nil or file) end
-    end, { buffer = M.buf, desc = 'cartograph: set/clear move destination to this file' })
-    vim.keymap.set('n', 'X', function ()
-        store.clear_stage()
-    end, { buffer = M.buf, desc = 'cartograph: clear the whole move-set' })
+        if file then store.set_dest(file) end
+    end, { buffer = M.buf, desc = 'cartograph: paste — set move destination to this file' })
+    vim.keymap.set('n', 'u', function ()
+        store.unstage_last()
+    end, { buffer = M.buf, desc = 'cartograph: unstage the last cut function' })
 
     store.on_plan(function () M.restage() end)
     M.restage()

@@ -32,11 +32,17 @@ A cockpit of independent panes over a shared state store:
 
 ### Staging a move
 
-In the **symbols** list: `m` stages/unstages the symbol under the cursor, `d`
-sets (or clears) the destination to the file under the cursor, `X` clears the
-whole move-set. The **plan** bar updates live — staged symbols, call sites to
-rewrite, requires to add, and hazards. Nothing is written yet: the plan
-*describes* the move (preview-then-apply is the next step).
+Moving a function is modelled as **cut & paste**, so the keys are the ones you
+already know. In the **symbols** list:
+
+- `dd` — cut (stage) the function under the cursor into the move-set; `dd` again
+  un-cuts it. In visual mode, `d` cuts the selected functions.
+- `p` — paste: set the destination to the file under the cursor.
+- `u` — unstage the last cut.
+
+The **plan** bar updates live — staged symbols, call sites to rewrite, requires
+to add, and hazards. Nothing is written yet: the plan *describes* the move
+(preview-then-apply is the next step, and `p` will become the commit).
 
 ## Architecture (three seams)
 
