@@ -84,10 +84,14 @@ function M.extract_graphs(repo, revs, opts)
                 -- scope extraction to a subdir when given (faster, focused); node
                 -- files are then relative to that subdir — the caller reconciles.
                 local graphdir = opts.subdir and (wt .. '/' .. opts.subdir) or wt
+                -- timeout so a lua-ls that hangs on shutdown (it can) cannot wedge
+                -- the whole run; that commit just yields no graph.
                 vim.system({ bin, '--graph=' .. graphdir, '--graphout=' .. cache .. '/' .. rev,
-                    '--logpath=' .. cache .. '/' .. rev .. '.log' }, { text = true }):wait()
+                    '--logpath=' .. cache .. '/' .. rev .. '.log' },
+                    { text = true, timeout = opts.timeout or 90000 }):wait()
             end
-            graphs[i] = assert(read_json(json), 'no graph produced for ' .. rev)
+            -- tolerate a missing graph (timeout/parse failure): empty, skipped.
+            graphs[i] = read_json(json) or { nodes = {}, edges = {} }
             if opts.progress then io.write(('\r  extracted %d/%d'):format(i, #revs)); io.flush() end
         end
     end)
