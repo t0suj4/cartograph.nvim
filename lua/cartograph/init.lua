@@ -24,6 +24,7 @@ function M.open(dump_path)
     local symbols = require 'cartograph.panes.symbols'
     local source  = require 'cartograph.panes.source'
     local tree    = require 'cartograph.panes.tree'
+    local minimap = require 'cartograph.panes.minimap'
 
     store.load(vim.fn.expand(dump_path))
 
@@ -44,6 +45,7 @@ function M.open(dump_path)
     vim.api.nvim_win_set_width(w_tree, 40)
 
     source.attach(w_source)
+    minimap.attach(w_tree)
     vim.api.nvim_set_current_win(w_symbols)
     symbols.attach(w_symbols)
     tree.attach(w_tree)
