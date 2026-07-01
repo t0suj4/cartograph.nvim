@@ -52,11 +52,13 @@ function M.load(path)
 end
 
 --- Classify a file's usage. Crucially separates "loaded for side effects" from
---- "truly unused" — a bare `require 'm'` is a use, just an invisible one, so a
---- file that's only side-effect-required must NOT read as dead code.
+--- "truly unused" — and, within discarded requires, a module that actually DOES
+--- something at load time from a pure module whose discarded require is dead.
 ---   'used'       a symbol in the file is referenced somewhere
 ---   'value'      imported and its return value is bound (symbol uses unresolved)
----   'sideeffect' imported only via bare requires (return discarded)
+---   'sideeffect' discarded require(s) only, and the module has load-time effects
+---   'deadimport' discarded require(s) only, but the module is pure → the require
+---                is pointless (real dead code, not a benign side-effect load)
 ---   'orphan'     nothing imports or references it (incl. entry points)
 function M.classify(file)
     for _, n in ipairs(M.by_file[file] or {}) do
@@ -67,7 +69,11 @@ function M.classify(file)
     for _, imp in ipairs(ins) do
         if not imp.sideeffect then return 'value' end
     end
-    return 'sideeffect'
+    -- all inbound requires discard the result: a genuine side-effect load only if
+    -- the module does something at load time; otherwise the require is dead.
+    local mod = M.by_id[file]
+    if mod and mod.effects then return 'sideeffect' end
+    return 'deadimport'
 end
 
 ---@param fn fun(id: string)

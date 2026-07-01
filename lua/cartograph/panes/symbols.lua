@@ -18,6 +18,7 @@ local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
 -- side-effect-only module never reads as dead code.
 local BADGE = {
     orphan     = { text = '  ○ no inbound',    hl = 'DiagnosticWarn' },
+    deadimport = { text = '  ⚠ unused import', hl = 'DiagnosticWarn' },
     sideeffect = { text = '  ↻ side-effect',   hl = 'Comment' },
     -- 'value' and 'used' are genuinely used → no badge (keeps the list quiet)
 }
