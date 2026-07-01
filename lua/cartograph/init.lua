@@ -42,8 +42,4 @@ function M.open(dump_path)
     vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
 end
 
-vim.api.nvim_create_user_command('Cartograph', function (o)
-    M.open(o.args)
-end, { nargs = 1, complete = 'file', desc = 'Open the cartograph cockpit on a graph dump' })
-
 return M
