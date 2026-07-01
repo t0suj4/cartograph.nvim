@@ -11,6 +11,29 @@ local SHOWN = { ['function'] = true, method = true }
 
 local M = { line_node = {}, node_line = {} }
 
+local ns = vim.api.nvim_create_namespace('cartograph_symbols_dep')
+
+-- Relationship tints: dependencies (things the focus uses) in green, dependents
+-- (things that use the focus) in amber; depth-1 saturated, depth-2 muted. Each
+-- is a whole-line background blended over the real Normal bg so it tracks the
+-- colorscheme rather than fighting it.
+local function hl_setup()
+    local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
+    local bg = normal.bg or 0x222436
+    local function blend(hue, alpha)
+        local function ch(c, n) return math.floor(c / n) % 256 end
+        local r = math.floor(ch(hue, 65536) * alpha + ch(bg, 65536) * (1 - alpha) + 0.5)
+        local g = math.floor(ch(hue, 256) * alpha + ch(bg, 256) * (1 - alpha) + 0.5)
+        local b = math.floor((hue % 256) * alpha + (bg % 256) * (1 - alpha) + 0.5)
+        return string.format('#%02x%02x%02x', r, g, b)
+    end
+    local GREEN, AMBER = 0x9ece6a, 0xff9e64
+    vim.api.nvim_set_hl(0, 'CartographDep1',  { bg = blend(GREEN, 0.24) })
+    vim.api.nvim_set_hl(0, 'CartographDep2',  { bg = blend(GREEN, 0.11) })
+    vim.api.nvim_set_hl(0, 'CartographRdep1', { bg = blend(AMBER, 0.24) })
+    vim.api.nvim_set_hl(0, 'CartographRdep2', { bg = blend(AMBER, 0.11) })
+end
+
 function M.create()
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = 'wipe'
@@ -39,7 +62,50 @@ function M.create()
     M.buf       = buf
     M.line_node = line_node
     M.node_line = node_line
+
+    hl_setup()
+    vim.api.nvim_create_autocmd('ColorScheme', { callback = hl_setup })
     return buf
+end
+
+-- Tint the list by each row's relationship to `id`: dependencies (uses) and
+-- dependents (used-by), out to 2 levels, with depth-1 stronger than depth-2.
+-- Priority (high wins): uses¹ > used-by¹ > uses² > used-by². The focus row is
+-- left to the cursorline.
+function M.paint(id)
+    if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
+    vim.api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
+    if not id then return end
+
+    local uses1, uses2, rdep1, rdep2 = {}, {}, {}, {}
+    for _, t in ipairs(store.uses[id]   or {}) do uses1[t] = true end
+    for _, f in ipairs(store.usedby[id] or {}) do rdep1[f] = true end
+    for t in pairs(uses1) do
+        for _, t2 in ipairs(store.uses[t] or {}) do
+            if t2 ~= id and not uses1[t2] then uses2[t2] = true end
+        end
+    end
+    for f in pairs(rdep1) do
+        for _, f2 in ipairs(store.usedby[f] or {}) do
+            if f2 ~= id and not rdep1[f2] then rdep2[f2] = true end
+        end
+    end
+
+    local focus_row = M.node_line[id]
+    local mark = {} -- row -> { g = group, p = priority }
+    local function put(nid, group, prio)
+        local r = M.node_line[nid]
+        if not r or r == focus_row then return end
+        if not mark[r] or prio > mark[r].p then mark[r] = { g = group, p = prio } end
+    end
+    for nid in pairs(uses2) do put(nid, 'CartographDep2',  20) end
+    for nid in pairs(rdep2) do put(nid, 'CartographRdep2', 10) end
+    for nid in pairs(uses1) do put(nid, 'CartographDep1',  40) end
+    for nid in pairs(rdep1) do put(nid, 'CartographRdep1', 30) end
+
+    for r, m in pairs(mark) do
+        vim.api.nvim_buf_set_extmark(M.buf, ns, r - 1, 0, { line_hl_group = m.g })
+    end
 end
 
 --- Wire cursor movement in `win` to focus (so source/tree follow), and keep the
@@ -61,6 +127,7 @@ function M.attach(win)
             -- set_focus is idempotent, so the CursorMoved this triggers no-ops
             vim.api.nvim_win_set_cursor(M.win, { ln, 2 })
         end
+        M.paint(id)
     end)
 end
 
