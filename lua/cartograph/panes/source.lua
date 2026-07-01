@@ -7,10 +7,13 @@
 -- Together: def above, call site below — compare where you are with where a
 -- reference actually happens, without leaving the focused node.
 
-local store = require 'cartograph.store'
+local store    = require 'cartograph.store'
+local untangle = require 'cartograph.untangle'
+local hl       = require 'cartograph.hl'
 
 local HEADER_ROWS = 2 -- header line + blank before the code body
 local ns = vim.api.nvim_create_namespace('cartograph_source_hl')
+local ns_concern = vim.api.nvim_create_namespace('cartograph_source_concern')
 
 local M = { cur = nil, ctx = nil }
 
@@ -58,14 +61,40 @@ local function apply_hl(buf, node, ranges)
     end
 end
 
+-- Untangle lens: colour the TOP body's lines by concern (the untangle
+-- partition of the focused function). Each statement colours the line range
+-- from its line up to the next statement's, so concerns read as bands over the
+-- real code. Active only while the 'concerns' lens is on (minimap <Tab> to flow).
+local function apply_concerns(node)
+    if not vim.api.nvim_buf_is_valid(M.buf) then return end
+    vim.api.nvim_buf_clear_namespace(M.buf, ns_concern, 0, -1)
+    if store.lens ~= 'concerns' or not node or not node.df then return end
+    local a = untangle.analyze(node.df)
+    local stmts, endLine = node.df.stmts, node.range['end'].line + 1 -- 1-based
+    for i, s in ipairs(stmts) do
+        local last = (stmts[i + 1] and stmts[i + 1].l - 1) or endLine
+        local group = hl.concern(a.comp[i])
+        for fl = s.l, last do
+            local row = buf_row(node, fl - 1) -- buf_row takes 0-based file line
+            if row then
+                pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_concern, row, 0,
+                    { line_hl_group = group })
+            end
+        end
+    end
+end
+
 function M.create()
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = 'wipe'
     vim.bo[buf].filetype  = 'lua'
     M.buf = buf
+    hl.setup()
+    vim.api.nvim_create_autocmd('ColorScheme', { callback = hl.setup })
     store.on_focus(function (id) M.render(id) end)
-    store.on_highlight(function (hl) M.highlight(hl) end)
+    store.on_highlight(function (hlv) M.highlight(hlv) end)
     store.on_context(function (ctx) M.context(ctx) end)
+    store.on_lens(function () apply_concerns(M.cur) end)
     return buf
 end
 
@@ -93,6 +122,7 @@ function M.render(id)
     local node = store.node(id)
     M.cur = node
     set_lines(M.buf, body_lines(node))
+    apply_concerns(node)  -- repaint concern bands if the lens is on
     M.context(nil) -- a new focus clears the stale bottom view
 end
 

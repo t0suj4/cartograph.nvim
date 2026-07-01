@@ -18,28 +18,6 @@ local VARIANTS = { 'file', 'spread', 'graph', 'flow' }
 
 local M = { variant = 1, win = nil }
 
-local ns_flow = vim.api.nvim_create_namespace('cartograph_minimap_flow')
-
--- concern colour bands (line backgrounds) for the untangle lens, blended over
--- the real Normal bg so the tangle reads as interleaved colour stripes.
-local CONCERN = { 'CartographConcern0', 'CartographConcern1', 'CartographConcern2',
-                  'CartographConcern3', 'CartographConcern4', 'CartographConcern5' }
-local function hl_setup()
-    local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
-    local bg = normal.bg or 0x222436
-    local function blend(hue, alpha)
-        local function ch(c, n) return math.floor(c / n) % 256 end
-        local r = math.floor(ch(hue, 65536) * alpha + ch(bg, 65536) * (1 - alpha) + 0.5)
-        local g = math.floor(ch(hue, 256) * alpha + ch(bg, 256) * (1 - alpha) + 0.5)
-        local b = math.floor((hue % 256) * alpha + (bg % 256) * (1 - alpha) + 0.5)
-        return string.format('#%02x%02x%02x', r, g, b)
-    end
-    local hues = { 0x9ece6a, 0x7dcfff, 0xff9e64, 0xbb9af7, 0x2ac3de, 0xf7768e }
-    for i, hue in ipairs(hues) do
-        vim.api.nvim_set_hl(0, CONCERN[i], { bg = blend(hue, 0.16) })
-    end
-end
-
 -- ── shared helpers ────────────────────────────────────────────────────────
 local function set_lines(buf, lines)
     vim.bo[buf].modifiable = true
@@ -151,10 +129,13 @@ end
 -- Zooms below the function: local def-use within the body, from the provider's
 -- `df`. COMPREHENSION ONLY — locals, no control/anti/aliasing, so it explains
 -- flow but is not a reorder-safety claim (see the ledger/PDG notes).
--- returns (lines, marks) where marks = { {row=body-relative 0-based, comp=n}, … }
+-- statement-level def-use with the untangle lens: each statement is tagged with
+-- its concern (A, B, C…) and the header shows the tangle metrics. The concern
+-- *colours* land in the source pane (via the 'concerns' lens), where they line
+-- up with the real code; here the letters carry the grouping.
 local function render_flow(node)
     local df = node.df
-    if not df then return { '(no data-flow info for this node)' }, {} end
+    if not df then return { '(no data-flow info for this node)' } end
     local a = untangle.analyze(df)
     local function tag(c) return string.char(65 + (c % 26)) end -- A, B, C…
     local out = {
@@ -162,7 +143,6 @@ local function render_flow(node)
         ('concerns: %d   tangle: %d   maxspan: %d      locals only'):format(a.ncomp, a.tangle, a.maxspan),
         '─────────────────────────',
     }
-    local marks = {}
     for i, s in ipairs(df.stmts) do
         local parts = {}
         if #s.def > 0 then parts[#parts + 1] = 'def ' .. table.concat(s.def, ',') end
@@ -174,9 +154,8 @@ local function render_flow(node)
         end
         out[#out + 1] = ('%s L%-4d %-26s%s'):format(tag(a.comp[i]), s.l, table.concat(parts, '  '),
             #deps > 0 and ('  <- ' .. table.concat(deps, ' ')) or '')
-        marks[#marks + 1] = { row = #out - 1, comp = a.comp[i] }
     end
-    return out, marks
+    return out
 end
 
 -- ── pane machinery ──────────────────────────────────────────────────────────
@@ -185,7 +164,7 @@ function M.render(id)
     local node = store.node(id)
     local variant = VARIANTS[M.variant]
     local header = ('── minimap · %s   (<Tab> switch)'):format(variant)
-    local body, marks
+    local body
     if not node then
         body = { '(no selection)' }
     elseif variant == 'file' then
@@ -195,22 +174,19 @@ function M.render(id)
     elseif variant == 'spread' then
         body = render_spread(node)
     elseif variant == 'flow' then
-        body, marks = render_flow(node)
+        body = render_flow(node)
     else
         body = render_graph(node)
     end
-    local lines = { header, '' }  -- 2 rows prepended before the body
+    local lines = { header, '' }
     for _, l in ipairs(body) do lines[#lines + 1] = l end
     set_lines(M.buf, lines)
-    vim.api.nvim_buf_clear_namespace(M.buf, ns_flow, 0, -1)
-    for _, mk in ipairs(marks or {}) do
-        pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_flow, 2 + mk.row, 0,
-            { line_hl_group = CONCERN[(mk.comp % #CONCERN) + 1] })
-    end
 end
 
 function M.cycle(delta)
     M.variant = (M.variant - 1 + delta) % #VARIANTS + 1
+    -- the flow variant turns on the concern lens (the source pane colours by it)
+    store.set_lens(VARIANTS[M.variant] == 'flow' and 'concerns' or nil)
     M.render(store.focused)
 end
 
@@ -219,8 +195,6 @@ function M.create()
     vim.bo[buf].bufhidden = 'wipe'
     vim.bo[buf].filetype  = 'cartograph-minimap'
     M.buf = buf
-    hl_setup()
-    vim.api.nvim_create_autocmd('ColorScheme', { callback = hl_setup })
     store.on_focus(function (id) M.render(id) end)
     vim.keymap.set('n', '<Tab>',   function () M.cycle(1)  end, { buffer = buf, desc = 'cartograph: next minimap variant' })
     vim.keymap.set('n', '<S-Tab>', function () M.cycle(-1) end, { buffer = buf, desc = 'cartograph: prev minimap variant' })
