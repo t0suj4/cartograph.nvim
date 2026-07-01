@@ -14,13 +14,15 @@ local M = { line_node = {}, node_line = {} }
 local ns = vim.api.nvim_create_namespace('cartograph_symbols_dep')
 local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
 
--- File-usage badges. Separates truly-unused from loaded-for-side-effects, so a
+-- File-usage markers, shown in the gutter on each file header (keeps the narrow
+-- header text clean). Separates truly-unused from loaded-for-side-effects, so a
 -- side-effect-only module never reads as dead code.
-local BADGE = {
-    orphan     = { text = '  ○ no inbound',    hl = 'DiagnosticWarn' },
-    deadimport = { text = '  ⚠ unused import', hl = 'DiagnosticWarn' },
-    sideeffect = { text = '  ↻ side-effect',   hl = 'Comment' },
-    -- 'value' and 'used' are genuinely used → no badge (keeps the list quiet)
+--   ○ orphan (no inbound)   ⚠ unused import (pure module)   ↻ side-effect
+local SIGN = {
+    orphan     = { text = '○ ', hl = 'DiagnosticWarn' },
+    deadimport = { text = '⚠ ', hl = 'DiagnosticWarn' },
+    sideeffect = { text = '↻ ', hl = 'Comment' },
+    -- 'value' and 'used' are genuinely used → no marker (keeps the list quiet)
 }
 
 -- Relationship tints: dependencies (things the focus uses) in green, dependents
@@ -50,20 +52,17 @@ function M.create()
     vim.bo[buf].filetype  = 'cartograph-symbols'
 
     local lines, line_node, node_line = {}, {}, {}
-    local badges = {} -- { {row0, col0, hl}, ... } applied after the lines land
+    local signs = {} -- { {row0, sign}, ... } applied after the lines land
     for _, file in ipairs(store.files) do
         local defs = {}
         for _, n in ipairs(store.by_file[file] or {}) do
             if SHOWN[n.kind] then defs[#defs + 1] = n end
         end
         if #defs > 0 then
-            local base = ('▸ %s  (%d)'):format(file, #defs)
-            local badge = BADGE[store.classify(file)]
-            lines[#lines + 1] = base .. (badge and badge.text or '')
+            lines[#lines + 1] = ('▸ %s  (%d)'):format(file, #defs)
             line_node[#lines] = false -- header row
-            if badge then
-                badges[#badges + 1] = { row = #lines - 1, col = #base, hl = badge.hl }
-            end
+            local sign = SIGN[store.classify(file)]
+            if sign then signs[#signs + 1] = { row = #lines - 1, sign = sign } end
             for _, n in ipairs(defs) do
                 local icon = n.kind == 'method' and ':' or 'ƒ'
                 lines[#lines + 1] = ('  %s %-24s L%d'):format(icon, n.name or '?', n.range.start.line + 1)
@@ -74,8 +73,10 @@ function M.create()
     end
 
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    for _, b in ipairs(badges) do
-        vim.api.nvim_buf_set_extmark(buf, ns_class, b.row, b.col, { end_col = #lines[b.row + 1], hl_group = b.hl })
+    for _, s in ipairs(signs) do
+        vim.api.nvim_buf_set_extmark(buf, ns_class, s.row, 0, {
+            sign_text = s.sign.text, sign_hl_group = s.sign.hl,
+        })
     end
     vim.bo[buf].modifiable = false
     M.buf       = buf
@@ -131,6 +132,7 @@ end
 --- list cursor synced to the focused node (so a pivot elsewhere shows here too).
 function M.attach(win)
     M.win = win
+    vim.wo[win].signcolumn = 'yes:1' -- stable-width gutter for the class markers
     vim.api.nvim_create_autocmd('CursorMoved', {
         buffer = M.buf,
         callback = function ()
