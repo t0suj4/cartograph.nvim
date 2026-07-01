@@ -28,8 +28,10 @@ A cockpit of independent panes over a shared state store:
 - **dependencies** — the hovered symbol's uses / used-by tree
 - **minimap** — its 1-hop neighborhood, cyclable (`<Tab>`) through a few
   perspectives including **data flow**: the statement-level local def-use *inside*
-  the focused function (a zoom below the symbol layer). Comprehension only —
-  locals, not control/aliasing, so it explains flow but makes no safety claim.
+  the focused function (a zoom below the symbol layer), with an **untangle lens** —
+  statements are grouped/coloured by independent concern and scored for how
+  interleaved those concerns are (`tangle`). Comprehension only — locals, not
+  control/aliasing, so it reveals tangle and makes no safety/reorder claim.
 - **plan** — the staged move set and its computed impact (references to
   rewrite, imports to fix) and hazards (scope coupling, load order)
 

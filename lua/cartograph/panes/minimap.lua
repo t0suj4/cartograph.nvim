@@ -8,12 +8,37 @@
 --   2 'spread' — one line per file the 1-hop neighborhood touches, with
 --                uses / used-by counts. The "which files does a move touch" view.
 --   3 'graph'  — a tiny node sketch: used-by above, focus, uses below.
+--   4 'flow'   — statement-level local def-use, with the untangle lens: each
+--                statement tagged/coloured by independent concern + a tangle score.
 
-local store = require 'cartograph.store'
+local store    = require 'cartograph.store'
+local untangle = require 'cartograph.untangle'
 
 local VARIANTS = { 'file', 'spread', 'graph', 'flow' }
 
 local M = { variant = 1, win = nil }
+
+local ns_flow = vim.api.nvim_create_namespace('cartograph_minimap_flow')
+
+-- concern colour bands (line backgrounds) for the untangle lens, blended over
+-- the real Normal bg so the tangle reads as interleaved colour stripes.
+local CONCERN = { 'CartographConcern0', 'CartographConcern1', 'CartographConcern2',
+                  'CartographConcern3', 'CartographConcern4', 'CartographConcern5' }
+local function hl_setup()
+    local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
+    local bg = normal.bg or 0x222436
+    local function blend(hue, alpha)
+        local function ch(c, n) return math.floor(c / n) % 256 end
+        local r = math.floor(ch(hue, 65536) * alpha + ch(bg, 65536) * (1 - alpha) + 0.5)
+        local g = math.floor(ch(hue, 256) * alpha + ch(bg, 256) * (1 - alpha) + 0.5)
+        local b = math.floor((hue % 256) * alpha + (bg % 256) * (1 - alpha) + 0.5)
+        return string.format('#%02x%02x%02x', r, g, b)
+    end
+    local hues = { 0x9ece6a, 0x7dcfff, 0xff9e64, 0xbb9af7, 0x2ac3de, 0xf7768e }
+    for i, hue in ipairs(hues) do
+        vim.api.nvim_set_hl(0, CONCERN[i], { bg = blend(hue, 0.16) })
+    end
+end
 
 -- ── shared helpers ────────────────────────────────────────────────────────
 local function set_lines(buf, lines)
@@ -126,12 +151,19 @@ end
 -- Zooms below the function: local def-use within the body, from the provider's
 -- `df`. COMPREHENSION ONLY — locals, no control/anti/aliasing, so it explains
 -- flow but is not a reorder-safety claim (see the ledger/PDG notes).
+-- returns (lines, marks) where marks = { {row=body-relative 0-based, comp=n}, … }
 local function render_flow(node)
     local df = node.df
-    if not df then return { '(no data-flow info for this node)' } end
-    local out = { ('inputs: %s'):format(#df.inputs > 0 and table.concat(df.inputs, ', ') or '(none)'),
-                  '───────────────────  locals only' }
-    for _, s in ipairs(df.stmts) do
+    if not df then return { '(no data-flow info for this node)' }, {} end
+    local a = untangle.analyze(df)
+    local function tag(c) return string.char(65 + (c % 26)) end -- A, B, C…
+    local out = {
+        ('inputs: %s'):format(#df.inputs > 0 and table.concat(df.inputs, ', ') or '(none)'),
+        ('concerns: %d   tangle: %d   maxspan: %d      locals only'):format(a.ncomp, a.tangle, a.maxspan),
+        '─────────────────────────',
+    }
+    local marks = {}
+    for i, s in ipairs(df.stmts) do
         local parts = {}
         if #s.def > 0 then parts[#parts + 1] = 'def ' .. table.concat(s.def, ',') end
         if #s.use > 0 then parts[#parts + 1] = 'use ' .. table.concat(s.use, ',') end
@@ -140,10 +172,11 @@ local function render_flow(node)
             local from = df.stmts[d.from]
             deps[#deps + 1] = ('L%s·%s'):format(from and from.l or ('#' .. d.from), d.var)
         end
-        out[#out + 1] = ('L%-4d %-30s%s'):format(s.l, table.concat(parts, '  '),
+        out[#out + 1] = ('%s L%-4d %-26s%s'):format(tag(a.comp[i]), s.l, table.concat(parts, '  '),
             #deps > 0 and ('  <- ' .. table.concat(deps, ' ')) or '')
+        marks[#marks + 1] = { row = #out - 1, comp = a.comp[i] }
     end
-    return out
+    return out, marks
 end
 
 -- ── pane machinery ──────────────────────────────────────────────────────────
@@ -152,7 +185,7 @@ function M.render(id)
     local node = store.node(id)
     local variant = VARIANTS[M.variant]
     local header = ('── minimap · %s   (<Tab> switch)'):format(variant)
-    local body
+    local body, marks
     if not node then
         body = { '(no selection)' }
     elseif variant == 'file' then
@@ -162,13 +195,18 @@ function M.render(id)
     elseif variant == 'spread' then
         body = render_spread(node)
     elseif variant == 'flow' then
-        body = render_flow(node)
+        body, marks = render_flow(node)
     else
         body = render_graph(node)
     end
-    local lines = { header, '' }
+    local lines = { header, '' }  -- 2 rows prepended before the body
     for _, l in ipairs(body) do lines[#lines + 1] = l end
     set_lines(M.buf, lines)
+    vim.api.nvim_buf_clear_namespace(M.buf, ns_flow, 0, -1)
+    for _, mk in ipairs(marks or {}) do
+        pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_flow, 2 + mk.row, 0,
+            { line_hl_group = CONCERN[(mk.comp % #CONCERN) + 1] })
+    end
 end
 
 function M.cycle(delta)
@@ -181,6 +219,8 @@ function M.create()
     vim.bo[buf].bufhidden = 'wipe'
     vim.bo[buf].filetype  = 'cartograph-minimap'
     M.buf = buf
+    hl_setup()
+    vim.api.nvim_create_autocmd('ColorScheme', { callback = hl_setup })
     store.on_focus(function (id) M.render(id) end)
     vim.keymap.set('n', '<Tab>',   function () M.cycle(1)  end, { buffer = buf, desc = 'cartograph: next minimap variant' })
     vim.keymap.set('n', '<S-Tab>', function () M.cycle(-1) end, { buffer = buf, desc = 'cartograph: prev minimap variant' })
