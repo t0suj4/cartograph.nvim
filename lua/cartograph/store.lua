@@ -59,7 +59,8 @@ end
 
 -- occurrence highlight channel: a lighter signal than focus. Panes publish "the
 -- reference sites for this uses-edge" and the source pane draws them, without
--- changing the rooted node.
+-- changing the rooted node. This drives the TOP source view (highlights the call
+-- site inside the focused function, for a `uses` edge).
 M._hl_subs = {}
 ---@param fn fun(hl: {file:string, ranges:table}?)
 function M.on_highlight(fn) table.insert(M._hl_subs, fn) end
@@ -67,6 +68,18 @@ function M.on_highlight(fn) table.insert(M._hl_subs, fn) end
 function M.set_highlight(hl)
     M.highlight = hl
     for _, fn in ipairs(M._hl_subs) do pcall(fn, hl) end
+end
+
+-- context channel: "the other end of the hovered edge" to show in the BOTTOM
+-- source view. For a `uses` entry that's the callee's definition; for a `used by`
+-- entry it's the caller's body, and `ranges` are the call site(s) inside it.
+M._ctx_subs = {}
+---@param fn fun(ctx: {node:string, ranges:table?}?)
+function M.on_context(fn) table.insert(M._ctx_subs, fn) end
+---@param ctx {node:string, ranges:table?}?
+function M.set_context(ctx)
+    M.context = ctx
+    for _, fn in ipairs(M._ctx_subs) do pcall(fn, ctx) end
 end
 
 --- Occurrences of `to_id` inside `from_id` (the uses-edge call sites).

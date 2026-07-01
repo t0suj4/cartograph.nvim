@@ -43,6 +43,7 @@ function M.open(dump_path)
     vim.api.nvim_win_set_width(w_symbols, 34)
     vim.api.nvim_win_set_width(w_tree, 40)
 
+    source.attach(w_source)
     vim.api.nvim_set_current_win(w_symbols)
     symbols.attach(w_symbols)
     tree.attach(w_tree)
