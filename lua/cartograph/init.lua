@@ -25,10 +25,12 @@ function M.open(dump_path)
     local source  = require 'cartograph.panes.source'
     local tree    = require 'cartograph.panes.tree'
     local minimap = require 'cartograph.panes.minimap'
+    local plan    = require 'cartograph.panes.plan'
 
     store.load(vim.fn.expand(dump_path))
 
-    -- ONE hardcoded layout for now: symbols | source | tree (left to right).
+    -- ONE hardcoded layout for now: symbols | source | tree across the top, and
+    -- a full-width plan bar along the bottom.
     vim.cmd('tabnew')
     local w_symbols = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(w_symbols, symbols.create())
@@ -46,6 +48,13 @@ function M.open(dump_path)
 
     source.attach(w_source)
     minimap.attach(w_tree)
+
+    -- full-width plan bar at the very bottom
+    vim.cmd('botright split')
+    local w_plan = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(w_plan, plan.create())
+    vim.api.nvim_win_set_height(w_plan, 10)
+
     vim.api.nvim_set_current_win(w_symbols)
     symbols.attach(w_symbols)
     tree.attach(w_tree)

@@ -123,6 +123,53 @@ function M.occurrences(from_id, to_id)
     return M.occ[(from_id or '') .. '\31' .. (to_id or '')]
 end
 
+-- staging channel: the move-set (symbols marked to move) and destination file.
+-- This is what the plan bar reads; marks live in the symbol list. A separate
+-- channel from focus/highlight because staging persists as you navigate.
+M.moveset  = {}   -- id -> true
+M.dest     = nil  -- destination file
+M._plan_subs = {}
+---@param fn fun()
+function M.on_plan(fn) table.insert(M._plan_subs, fn) end
+local function fire_plan() for _, fn in ipairs(M._plan_subs) do pcall(fn) end end
+
+--- Toggle whether `id` is staged to move. Returns the new state.
+function M.toggle_stage(id)
+    if not id then return false end
+    M.moveset[id] = not M.moveset[id] or nil
+    fire_plan()
+    return M.moveset[id] == true
+end
+
+function M.is_staged(id) return M.moveset[id] == true end
+
+--- Ordered list of staged ids (stable: by file then name).
+function M.staged_ids()
+    local ids = {}
+    for id in pairs(M.moveset) do ids[#ids + 1] = id end
+    table.sort(ids, function (a, b)
+        local na, nb = M.node(a), M.node(b)
+        local fa, fb = na and na.file or a, nb and nb.file or b
+        if fa ~= fb then return fa < fb end
+        return (na and na.name or a) < (nb and nb.name or b)
+    end)
+    return ids
+end
+
+--- Set (or clear, with nil) the destination file.
+function M.set_dest(file)
+    if file == M.dest then return end
+    M.dest = file
+    fire_plan()
+end
+
+--- Clear the whole move-set and destination.
+function M.clear_stage()
+    M.moveset = {}
+    M.dest = nil
+    fire_plan()
+end
+
 function M.node(id) return id and M.by_id[id] or nil end
 function M.abspath(node) return M.data.root .. '/' .. node.file end
 

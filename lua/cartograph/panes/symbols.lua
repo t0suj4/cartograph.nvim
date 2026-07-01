@@ -9,10 +9,11 @@ local store = require 'cartograph.store'
 -- dump for later panes).
 local SHOWN = { ['function'] = true, method = true }
 
-local M = { line_node = {}, node_line = {} }
+local M = { line_node = {}, node_line = {}, line_file = {}, file_header = {} }
 
 local ns = vim.api.nvim_create_namespace('cartograph_symbols_dep')
 local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
+local ns_stage = vim.api.nvim_create_namespace('cartograph_symbols_stage')
 
 -- File-usage markers, shown in the gutter on each file header (keeps the narrow
 -- header text clean). Separates truly-unused from loaded-for-side-effects, so a
@@ -52,6 +53,7 @@ function M.create()
     vim.bo[buf].filetype  = 'cartograph-symbols'
 
     local lines, line_node, node_line = {}, {}, {}
+    local line_file, file_header = {}, {}
     local signs = {} -- { {row0, sign}, ... } applied after the lines land
     for _, file in ipairs(store.files) do
         local defs = {}
@@ -61,6 +63,8 @@ function M.create()
         if #defs > 0 then
             lines[#lines + 1] = ('▸ %s  (%d)'):format(file, #defs)
             line_node[#lines] = false -- header row
+            line_file[#lines] = file
+            file_header[file] = #lines
             local sign = SIGN[store.classify(file)]
             if sign then signs[#signs + 1] = { row = #lines - 1, sign = sign } end
             for _, n in ipairs(defs) do
@@ -68,6 +72,7 @@ function M.create()
                 lines[#lines + 1] = ('  %s %-24s L%d'):format(icon, n.name or '?', n.range.start.line + 1)
                 line_node[#lines] = n.id
                 node_line[n.id]   = #lines
+                line_file[#lines] = file
             end
         end
     end
@@ -79,13 +84,35 @@ function M.create()
         })
     end
     vim.bo[buf].modifiable = false
-    M.buf       = buf
-    M.line_node = line_node
-    M.node_line = node_line
+    M.buf         = buf
+    M.line_node   = line_node
+    M.node_line   = node_line
+    M.line_file   = line_file
+    M.file_header = file_header
 
     hl_setup()
     vim.api.nvim_create_autocmd('ColorScheme', { callback = hl_setup })
     return buf
+end
+
+-- Redraw the staging marks: a ✓ in the gutter on each staged symbol, and a
+-- "◀ destination" tag on the destination file header. Driven by the store's
+-- plan channel so it stays in sync however staging is changed.
+function M.restage()
+    if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
+    vim.api.nvim_buf_clear_namespace(M.buf, ns_stage, 0, -1)
+    for _, id in ipairs(store.staged_ids()) do
+        local r = M.node_line[id]
+        if r then
+            vim.api.nvim_buf_set_extmark(M.buf, ns_stage, r - 1, 0,
+                { sign_text = '✓ ', sign_hl_group = 'DiagnosticOk' })
+        end
+    end
+    local dr = store.dest and M.file_header[store.dest]
+    if dr then
+        vim.api.nvim_buf_set_extmark(M.buf, ns_stage, dr - 1, 0,
+            { virt_text = { { '  ◀ destination', 'DiagnosticInfo' } }, virt_text_pos = 'eol' })
+    end
 end
 
 -- Tint the list by each row's relationship to `id`: dependencies (uses) and
@@ -150,6 +177,23 @@ function M.attach(win)
         end
         M.paint(id)
     end)
+
+    -- staging: marks live here, in the list of movable symbols
+    local function row() return vim.api.nvim_win_get_cursor(win)[1] end
+    vim.keymap.set('n', 'm', function ()
+        local id = M.line_node[row()]
+        if id then store.toggle_stage(id) end
+    end, { buffer = M.buf, desc = 'cartograph: stage/unstage this symbol for moving' })
+    vim.keymap.set('n', 'd', function ()
+        local file = M.line_file[row()]
+        if file then store.set_dest(file == store.dest and nil or file) end
+    end, { buffer = M.buf, desc = 'cartograph: set/clear move destination to this file' })
+    vim.keymap.set('n', 'X', function ()
+        store.clear_stage()
+    end, { buffer = M.buf, desc = 'cartograph: clear the whole move-set' })
+
+    store.on_plan(function () M.restage() end)
+    M.restage()
 end
 
 return M

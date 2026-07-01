@@ -30,6 +30,14 @@ A cockpit of independent panes over a shared state store:
 - **plan** — the staged move set and its computed impact (references to
   rewrite, imports to fix) and hazards (scope coupling, load order)
 
+### Staging a move
+
+In the **symbols** list: `m` stages/unstages the symbol under the cursor, `d`
+sets (or clears) the destination to the file under the cursor, `X` clears the
+whole move-set. The **plan** bar updates live — staged symbols, call sites to
+rewrite, requires to add, and hazards. Nothing is written yet: the plan
+*describes* the move (preview-then-apply is the next step).
+
 ## Architecture (three seams)
 
 1. **GraphProvider** — supplies `nodes{id,name,kind,file,range,order}` and
