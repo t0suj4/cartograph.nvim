@@ -100,6 +100,15 @@ checks luacheck can't:
   none, so the require does nothing.
 - **call-cycle** — mutual recursion / cyclic call clusters (plain self-recursion
   is not flagged). Structural, and a load-order signal.
+- **listener-audit** — for a wiretap-style paired API (`register_listener` /
+  `subscribe` / `unsubscribe`, keyed by a listener-name argument): flags
+  subscribe/unsubscribe to an unregistered name (a runtime error), a listener
+  registered but never subscribed, one subscribed but never unsubscribed
+  (leak-prone), and registration inside a function rather than at load
+  (register-after-init risk). Honest: a *dynamic* subscribe/unsubscribe (name
+  from a variable) suppresses the dead/leak checks, since it could cover any
+  name. Configurable via `lint.listener_config`; generalises to lock/unlock,
+  open/close — any argument-keyed acquire/release.
 
 Structural smells, not proofs — dynamically-invoked functions (event handlers,
 test cases run by a harness) can still read as "no caller". Rules live in

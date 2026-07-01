@@ -45,7 +45,80 @@ local function sccs(ids, adj)
     return comps
 end
 
+-- Paired-key listener audit (wiretap-style register/subscribe/unsubscribe). The
+-- listener NAME is a call argument; `at` is its logical index (self is skipped
+-- automatically for method calls via the call's `method` flag). Generalises to
+-- any register/acquire/release keyed by an argument.
+M.listener_config = {
+    register    = { verb = 'register_listener', at = 1 },
+    subscribe   = { verb = 'subscribe',   at = 2 },
+    unsubscribe = { verb = 'unsubscribe', at = 2 },
+}
+
+local function listener_findings(store)
+    local cfg, calls = M.listener_config, store.data.calls
+    if not calls or #calls == 0 then return {} end
+    local function abs(c) return store.data.root .. '/' .. c.file end
+    local function keyname(c, spec)
+        local a = c.args[spec.at + (c.method and 1 or 0)]
+        return (a and a ~= '') and a or nil
+    end
+
+    local reg, reg_site, subL, sub_site, subDyn, unsubL, unsubDyn = {}, {}, {}, {}, false, {}, false
+    local out = {}
+    for _, c in ipairs(calls) do
+        if c.callee == cfg.register.verb then
+            local n = keyname(c, cfg.register)
+            if n then reg[n] = true; reg_site[n] = reg_site[n] or c end
+            if not c.top then
+                out[#out + 1] = { file = abs(c), line = c.line + 1,
+                    message = ("listener '%s' is registered inside a function, not at load — may register after init"):format(n or '?') }
+            end
+        elseif c.callee == cfg.subscribe.verb then
+            local n = keyname(c, cfg.subscribe)
+            if n then subL[n] = true; sub_site[n] = sub_site[n] or c else subDyn = true end
+        elseif c.callee == cfg.unsubscribe.verb then
+            local n = keyname(c, cfg.unsubscribe)
+            if n then unsubL[n] = true else unsubDyn = true end
+        end
+    end
+    if not next(reg) then return out end -- no register_listener anywhere: not a listener project
+
+    -- subscribe/unsubscribe to a name that's never registered -> runtime error
+    for _, c in ipairs(calls) do
+        local spec = (c.callee == cfg.subscribe.verb and cfg.subscribe)
+            or (c.callee == cfg.unsubscribe.verb and cfg.unsubscribe) or nil
+        local n = spec and keyname(c, spec)
+        if n and not reg[n] then
+            out[#out + 1] = { file = abs(c), line = c.line + 1,
+                message = ("%s to '%s', which is never registered (would error: 'Could not find listener')"):format(c.callee, n) }
+        end
+    end
+    -- registered but never subscribed — suppressed if any dynamic subscribe could cover it
+    if not subDyn then
+        local names = {}; for n in pairs(reg) do names[#names + 1] = n end; table.sort(names)
+        for _, n in ipairs(names) do
+            if not subL[n] then
+                out[#out + 1] = { file = abs(reg_site[n]), line = reg_site[n].line + 1,
+                    message = ("listener '%s' is registered but never subscribed"):format(n) }
+            end
+        end
+    end
+    -- subscribed but never unsubscribed — suppressed if any dynamic unsubscribe could cover it
+    if not unsubDyn then
+        local names = {}; for n in pairs(subL) do names[#names + 1] = n end; table.sort(names)
+        for _, n in ipairs(names) do
+            if not unsubL[n] then
+                out[#out + 1] = { file = abs(sub_site[n]), line = sub_site[n].line + 1,
+                    message = ("'%s' is subscribed but never unsubscribed (leak-prone)"):format(n) }
+            end
+        end
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'listener-audit', severity = 'warn', run = listener_findings },
     {
         name = 'dead-function', severity = 'warn',
         run = function (store)
