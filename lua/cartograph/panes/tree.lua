@@ -23,6 +23,25 @@ function M.create()
     return buf
 end
 
+--- Hovering a `uses` entry highlights its call site(s) in the source pane.
+function M.attach(win)
+    vim.api.nvim_create_autocmd('CursorMoved', {
+        buffer = M.buf,
+        callback = function ()
+            local row     = vim.api.nvim_win_get_cursor(win)[1]
+            local id      = M.line_node[row]
+            local focused = store.focused
+            -- a `uses` entry has occurrences of `id` inside the focused function
+            local occ = id and focused and store.occurrences(focused, id)
+            if occ then
+                store.set_highlight({ file = store.node(focused).file, ranges = occ })
+            else
+                store.set_highlight(nil)
+            end
+        end,
+    })
+end
+
 -- append a labelled branch; record entry rows -> node id in `line_node`
 local function branch(lines, line_node, label, ids, from)
     local list = {}

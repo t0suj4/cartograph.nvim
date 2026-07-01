@@ -45,6 +45,7 @@ function M.open(dump_path)
 
     vim.api.nvim_set_current_win(w_symbols)
     symbols.attach(w_symbols)
+    tree.attach(w_tree)
 
     -- focus the first real symbol so source/tree aren't blank
     vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })

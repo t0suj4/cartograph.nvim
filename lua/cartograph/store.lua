@@ -36,10 +36,12 @@ function M.load(path)
     -- edge indexes for the dependency tree (symbol-level `ref` edges)
     M.uses   = {} -- id -> { to_id, ... }   (functions this one references)
     M.usedby = {} -- id -> { from_id, ... } (functions that reference this one)
+    M.occ    = {} -- "from\31to" -> { {start,end}, ... }  reference sites in `from`
     for _, e in ipairs(M.data.edges or {}) do
         if e.kind == 'ref' then
             M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
             M.usedby[e.to]   = M.usedby[e.to]   or {}; table.insert(M.usedby[e.to], e.from)
+            M.occ[e.from .. '\31' .. e.to] = e.at
         end
     end
     return M.data
@@ -53,6 +55,23 @@ function M.set_focus(id)
     if id == M.focused then return end
     M.focused = id
     for _, fn in ipairs(M._subs) do pcall(fn, id) end
+end
+
+-- occurrence highlight channel: a lighter signal than focus. Panes publish "the
+-- reference sites for this uses-edge" and the source pane draws them, without
+-- changing the rooted node.
+M._hl_subs = {}
+---@param fn fun(hl: {file:string, ranges:table}?)
+function M.on_highlight(fn) table.insert(M._hl_subs, fn) end
+---@param hl {file:string, ranges:table}?
+function M.set_highlight(hl)
+    M.highlight = hl
+    for _, fn in ipairs(M._hl_subs) do pcall(fn, hl) end
+end
+
+--- Occurrences of `to_id` inside `from_id` (the uses-edge call sites).
+function M.occurrences(from_id, to_id)
+    return M.occ[(from_id or '') .. '\31' .. (to_id or '')]
 end
 
 function M.node(id) return id and M.by_id[id] or nil end
