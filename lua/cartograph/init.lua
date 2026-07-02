@@ -107,10 +107,15 @@ function M.open(dump_path)
             fix.text, vim.fn.fnamemodify(fix.file, ':t'), fix.line + 1), vim.log.levels.INFO)
     end, { desc = 'cartograph: apply the annotation quick fix of the current quickfix entry' })
 
-    -- open the browser on the first file and focus its first symbol, so
-    -- source/tree aren't blank ('-' ascends to the file tree from there)
+    -- open the browser on the first file, and focus its first function
+    -- explicitly (hover never focuses — pivots are conscious)
     symbols.show('file', store.files[1])
-    vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
+    for _, n in ipairs(store.by_file[store.files[1]] or {}) do
+        if n.kind == 'function' or n.kind == 'method' then
+            store.set_focus(n.id)
+            break
+        end
+    end
 end
 
 return M

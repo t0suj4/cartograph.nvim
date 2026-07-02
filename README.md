@@ -92,8 +92,15 @@ All standard vim idioms — no new keys to learn:
   isn't the lens toggle, since most terminals can't tell them apart.)
 - `gf` — **leave the cockpit**: open the real file at the corresponding line
   (in a reused tab), from the source, symbols, or tree pane.
-- In the symbols pane, focus follows where the cursor *settles* (debounced),
-  so holding `j`/`k` scans the list without re-rendering every pane per line.
+- **Pivoting is a conscious act.** In the browser, moving the cursor only
+  *tints* relationships (dependencies green, dependents amber) — it never
+  re-roots the cockpit. `<CR>` pivots (focus without changing altitude);
+  `l` descends (and pivots where that means entering something). So the
+  world changes only when you decide it should.
+- **History restores places, not just symbols.** Every pivot snapshots the
+  browser's location — level, file, cursor row — so `<C-o>` puts you back
+  *where you were standing*, mid-exploration, not merely on the symbol you
+  had focused.
 
 ### Tracing a parameter
 

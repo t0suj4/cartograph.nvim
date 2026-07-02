@@ -2,13 +2,14 @@
 -- navigated with two keys — <CR> descends, `-` ascends (the dirvish idiom):
 --
 --   files   one row per file (with usage-classification gutter signs)
---   file    one file's definitions in source order: functions, methods, AND
---           module-level vars/fields — the whole file, not just the movable units
---   fn      inside one function: its statement-level locals (from the data
---           flow), each row hover-highlighting the real line in the source pane
+--   file    one file's definitions in source order: functions, blocks (runs
+--           of top-level statements), methods — the whole file
+--   fn      inside one function: callers row + statement-level locals, each
+--           row hover-highlighting the real line in the source pane
 --
--- At the `file` level the cursor row IS the focus (drives source/tree), and
--- staging (dd / p / u) lives here, on the movable units.
+-- PIVOTING IS CONSCIOUS: hover only tints relationships; <CR> focuses, l
+-- descends. History (store.pivot/back) snapshots the browser location.
+-- Staging (dd / p / u) lives at the file level, on the movable units.
 
 local store  = require 'cartograph.store'
 local heat   = require 'cartograph.heat'
@@ -334,11 +335,13 @@ end
 --- Switch level (re-rendering) and land the cursor on the first useful row.
 function M.show(level, ctx_val)
     M.view.level = level
-    if level == 'file' then M.view.file = ctx_val
-    elseif level == 'fn' then M.view.fn = ctx_val
-    elseif level == 'block' then M.view.block = ctx_val
-    elseif level == 'var' then M.view.var = ctx_val
-    elseif level == 'callers' then M.view.callers = ctx_val end
+    if ctx_val ~= nil then
+        if level == 'file' then M.view.file = ctx_val
+        elseif level == 'fn' then M.view.fn = ctx_val
+        elseif level == 'block' then M.view.block = ctx_val
+        elseif level == 'var' then M.view.var = ctx_val
+        elseif level == 'callers' then M.view.callers = ctx_val end
+    end
     M.render()
     if M.win and vim.api.nvim_win_is_valid(M.win) then
         local first = 1
@@ -467,7 +470,7 @@ end
 function M.attach(win)
     M.win = win
     vim.wo[win].signcolumn = 'yes:1' -- stable-width gutter for the class markers
-    vim.wo[win].cursorline = true    -- the cursor row IS the focus
+    vim.wo[win].cursorline = true
     local keys = config.keys
     local function row() return vim.api.nvim_win_get_cursor(win)[1] end
 
@@ -482,8 +485,10 @@ function M.attach(win)
                 if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
                 local r = row()
                 if M.view.level == 'file' or M.view.level == 'block' then
+                    -- hover only TINTS relationships; it never re-roots the
+                    -- cockpit (pivoting is a conscious <CR>/l)
                     local id = M.line_node[r]
-                    if id then store.set_focus(id) end
+                    if id then M.paint(id) end
                 elseif M.view.level == 'fn' then
                     local l = M.line_stmt[r]
                     local n = store.node(M.view.fn)
@@ -502,15 +507,38 @@ function M.attach(win)
         end,
     })
 
+    -- location history: each pivot snapshots the browser's place, so <C-o>
+    -- restores WHERE you were (level, file, cursor row), not just what was
+    -- focused
+    store.loc_provider = {
+        get = function ()
+            return { level = M.view.level, file = M.view.file, fn = M.view.fn,
+                block = M.view.block, var = M.view.var, callers = M.view.callers,
+                files_mode = M.files_mode,
+                row = (M.win and vim.api.nvim_win_is_valid(M.win))
+                    and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
+        end,
+        set = function (loc)
+            M.files_mode = loc.files_mode or M.files_mode
+            M.view.file, M.view.fn, M.view.block, M.view.var, M.view.callers =
+                loc.file, loc.fn, loc.block, loc.var, loc.callers
+            M.show(loc.level)
+            if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
+        end,
+    }
+
     store.on_focus(function (id)
         local n = store.node(id)
-        if M.view.level == 'file' and n and not M.node_line[id] and n.file ~= M.view.file then
-            M.show('file', n.file) -- a pivot into another file re-scopes the browser
+        -- conscious pivots re-scope the browser to where they landed
+        if n and M.view.level == 'fn' and STAGEABLE[n.kind] and M.view.fn ~= id then
+            M.show('fn', id)
+        elseif n and (M.view.level == 'file' or M.view.level == 'files')
+            and not M.node_line[id] and n.file ~= M.view.file then
+            M.show('file', n.file)
         end
         local ln = M.node_line[id]
         if ln and M.win and vim.api.nvim_win_is_valid(M.win)
             and vim.api.nvim_win_get_buf(M.win) == M.buf then
-            -- set_focus is idempotent, so the CursorMoved this triggers no-ops
             vim.api.nvim_win_set_cursor(M.win, { ln, 2 })
         end
         M.paint(id)
@@ -587,16 +615,16 @@ function M.attach(win)
         elseif M.view.level == 'file' then
             local n = store.node(M.line_node[r])
             if n and STAGEABLE[n.kind] then
-                store.set_focus(n.id)
+                store.pivot(n.id)
                 M.show('fn', n.id)
             elseif n and n.kind == 'block' then
-                store.set_focus(n.id) -- source pane shows the block's span
+                store.pivot(n.id) -- source pane shows the block's span
                 M.show('block', n.id)
             end
         elseif M.view.level == 'block' then
             local n = store.node(M.line_node[r])
             if n and n.kind == 'var' then
-                store.set_focus(n.id)
+                store.pivot(n.id)
                 M.show('var', n.id)
             end
         elseif M.view.level == 'var' or M.view.level == 'callers' then
@@ -615,8 +643,13 @@ function M.attach(win)
     end
     vim.keymap.set('n', keys.descend, descend,
         { buffer = M.buf, desc = 'cartograph: descend (into file / into function)' })
-    vim.keymap.set('n', keys.pivot, descend,
-        { buffer = M.buf, nowait = true, desc = 'cartograph: descend (into file / into function)' })
+    vim.keymap.set('n', keys.pivot, function ()
+        if M.view.level == 'file' or M.view.level == 'block' then
+            local id = M.line_node[row()]
+            if id then return store.pivot(id) end -- focus, stay at this altitude
+        end
+        descend()
+    end, { buffer = M.buf, nowait = true, desc = 'cartograph: pivot here (focus without zooming)' })
     -- ascending lands the cursor ON what we came from (the file-manager rule),
     -- not on the first row of the wider view
     vim.keymap.set('n', keys.ascend, function ()

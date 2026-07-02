@@ -136,34 +136,48 @@ function M.set_focus(id)
     for _, fn in ipairs(M._subs) do pcall(fn, id) end
 end
 
--- navigation history: a jumplist over focus. Deliberate pivots (tree <CR>,
--- source <C-]>) record where they jumped from; scrolling the symbol list moves
--- focus without recording — the same rule as vim's own jumplist (jumps record,
--- line motions don't).
+-- navigation history: a jumplist over LOCATIONS. Deliberate pivots (<CR>/l in
+-- the browser, source <C-]>) record where they jumped from; moving the cursor
+-- doesn't — the same rule as vim's own jumplist. Each entry is a snapshot:
+-- the focused node plus whatever the location provider captures (the
+-- browser's level/file/cursor), so back() restores the PLACE, not just the
+-- focus.
 M._nav_back, M._nav_fwd = {}, {}
+M.loc_provider = nil -- { get = fn() -> loc, set = fn(loc) }, set by the browser
+
+local function snapshot()
+    return { id = M.focused, loc = M.loc_provider and M.loc_provider.get() or nil }
+end
+
+local function restore(entry)
+    M.set_focus(entry.id)
+    -- loc AFTER focus: focus subscribers may re-scope the browser; the
+    -- recorded location wins
+    if M.loc_provider and entry.loc then M.loc_provider.set(entry.loc) end
+end
 
 --- A deliberate jump: remember where we came from, then focus.
 function M.pivot(id)
     if not id or id == M.focused then return end
-    if M.focused then M._nav_back[#M._nav_back + 1] = M.focused end
+    M._nav_back[#M._nav_back + 1] = snapshot()
     M._nav_fwd = {}
     M.set_focus(id)
 end
 
---- <C-o> / <C-t>: return to the focus at the previous pivot.
+--- <C-o> / <C-t>: return to the location of the previous pivot.
 function M.back()
-    local id = table.remove(M._nav_back)
-    if not id then return end
-    if M.focused then M._nav_fwd[#M._nav_fwd + 1] = M.focused end
-    M.set_focus(id)
+    local e = table.remove(M._nav_back)
+    if not e then return end
+    M._nav_fwd[#M._nav_fwd + 1] = snapshot()
+    restore(e)
 end
 
 --- <C-i>: undo a back().
 function M.forward()
-    local id = table.remove(M._nav_fwd)
-    if not id then return end
-    if M.focused then M._nav_back[#M._nav_back + 1] = M.focused end
-    M.set_focus(id)
+    local e = table.remove(M._nav_fwd)
+    if not e then return end
+    M._nav_back[#M._nav_back + 1] = snapshot()
+    restore(e)
 end
 
 -- occurrence highlight channel: a lighter signal than focus. Panes publish "the

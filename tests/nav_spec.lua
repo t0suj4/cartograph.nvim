@@ -53,6 +53,22 @@ test('nav: scrolling (plain set_focus) between pivots does not record', function
     store.back(); eq('a', store.focused)
 end)
 
+test('nav: history restores the browser location, not just the focus', function ()
+    graph({ node('a', 'a'), node('b', 'b') })
+    local restored
+    store.loc_provider = {
+        get = function () return { level = 'fn', fn = store.focused } end,
+        set = function (loc) restored = loc end,
+    }
+    store.set_focus('a')
+    store.pivot('b')       -- snapshots {level='fn', fn='a'}
+    store.back()
+    eq('a', store.focused)
+    eq('fn', restored.level)
+    eq('a', restored.fn)
+    store.loc_provider = nil
+end)
+
 test('nav: ingest resets the history', function ()
     graph({ node('a', 'a'), node('b', 'b') })
     store.set_focus('a')
