@@ -41,13 +41,17 @@ function M.ingest(data)
         table.sort(list, function (a, b) return a.order < b.order end)
     end
 
-    -- call-inventory index for data tracing: calls whose target resolved to a
-    -- workspace function, keyed by that function's node id
-    M.calls_to = {}
+    -- call-inventory indexes: by resolved target (data tracing) and by
+    -- enclosing function (the browser's per-statement callee targets)
+    M.calls_to, M.calls_by_fn = {}, {}
     for _, c in ipairs(M.data.calls or {}) do
         if c.to then
             M.calls_to[c.to] = M.calls_to[c.to] or {}
             table.insert(M.calls_to[c.to], c)
+        end
+        if c.fn then
+            M.calls_by_fn[c.fn] = M.calls_by_fn[c.fn] or {}
+            table.insert(M.calls_by_fn[c.fn], c)
         end
     end
 
@@ -56,6 +60,7 @@ function M.ingest(data)
     M.usedby = {} -- id -> { from_id, ... } (functions that reference this one)
     M.occ    = {} -- "from\31to" -> { {start,end}, ... }  reference sites in `from`
     M.edge_inferred = {} -- "from\31to" -> true (resolved by unique name, not vm)
+    M.var_usedby = {} -- var node id -> { {from=fn id, at=ranges}, ... }
     M.imports_in  = {} -- file -> { {from=file, sideeffect=bool}, ... }  inbound requires
     M.imports_out = {} -- file -> { file, ... }  outbound requires (include tree)
     for _, e in ipairs(M.data.edges or {}) do
@@ -69,6 +74,9 @@ function M.ingest(data)
             table.insert(M.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
             M.imports_out[e.from] = M.imports_out[e.from] or {}
             table.insert(M.imports_out[e.from], e.to)
+        elseif e.kind == 'use' then
+            M.var_usedby[e.to] = M.var_usedby[e.to] or {}
+            table.insert(M.var_usedby[e.to], { from = e.from, at = e.at or {} })
         end
     end
     return M.data

@@ -36,4 +36,21 @@ test('blocks: statement runs roll up, functions break them', function ()
     ok(blocks[2].range['end'].line >= my_line, 'block 2 spans through M.y')
     -- vars still emitted individually (they populate the block level)
     eq(6, #vars) -- a, b, c, M, M.x, M.y
+
+    -- use edges: f() reads `a`, M.g() reads `b` — the descend-on-var data
+    local function usedby_names(varname)
+        local out = {}
+        for _, v in ipairs(vars) do
+            if v.name == varname then
+                for _, u in ipairs(store.var_usedby[v.id] or {}) do
+                    out[#out + 1] = store.node(u.from).name
+                    ok(#u.at > 0, 'occurrence recorded')
+                end
+            end
+        end
+        return table.concat(out, ',')
+    end
+    eq('f',   usedby_names('a'))
+    eq('M.g', usedby_names('b'))
+    eq('',    usedby_names('c')) -- never read
 end)

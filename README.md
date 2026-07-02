@@ -41,6 +41,16 @@ A cockpit of independent panes over a shared state store:
   navigable; a function opens into its **statement-level locals** (from the
   data flow), where hovering a row highlights the real line in the source
   pane. At the file level the cursor row is the focus, and staging lives here.
+
+  Below the fn level, descend keeps going **into the graph**, acting on the
+  name under the cursor: statement rows name their calls (`→ callee`), so
+  `l` on a callee follows the call into that function (recorded in the
+  jumplist — `<C-o>` walks back); on a **parameter** it opens the origin
+  trace; on a **local** it jumps to the defining statement; with no name
+  targeted it follows the statement's only resolvable call. A **var** row
+  descends into its usage sites (every function that reads it, from the
+  extractor's `use` edges) — hovering a site shows the read in the bottom
+  source view, and descending enters the reading function.
 - **source** — the real code at the focused location (def, or a call site),
   splittable to compare the two
 - **dependencies** — the hovered symbol's uses / used-by tree. Edges vm-typed

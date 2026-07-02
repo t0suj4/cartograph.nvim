@@ -40,6 +40,7 @@ local M = {
     view = { level = 'files', file = nil, fn = nil },
     files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
+    line_stmtidx = {}, line_calls = {}, line_site = {},
 }
 
 -- Relationship tints: dependencies (things the focus uses) in green, dependents
@@ -141,6 +142,36 @@ local function render_file(ctx, file)
     end
 end
 
+-- A var's usage sites: every function that reads it, one row per occurrence.
+local function render_var(ctx, id)
+    local node = store.node(id)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    local sites = {}
+    for _, u in ipairs(store.var_usedby[id] or {}) do
+        local fn = store.node(u.from)
+        for _, r in ipairs(u.at) do
+            sites[#sites + 1] = { fn = u.from, name = fn and fn.name or u.from,
+                file = fn and fn.file, line = r.start.line, range = r }
+        end
+    end
+    table.sort(sites, function (a, b)
+        if a.file ~= b.file then return (a.file or '') < (b.file or '') end
+        return a.line < b.line
+    end)
+    ctx.lines[1] = ('· %s — used by (%d)'):format(node.name or '?', #sites)
+    ctx.marks[1] = { { 0, 2, 'CartographDim' }, { 2, 2 + #(node.name or '?'), 'CartographTitle' },
+                     { 2 + #(node.name or '?'), -1, 'CartographDim' } }
+    for _, s in ipairs(sites) do
+        ctx.lines[#ctx.lines + 1] = '  ' .. s.name
+        ctx.vnums[#ctx.lines] = tostring(s.line + 1)
+        ctx.line_site[#ctx.lines] = s
+    end
+    if #sites == 0 then
+        ctx.lines[2] = '  (no reads found — writes only, or dynamic access)'
+        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+    end
+end
+
 -- Inside a block: its declarations (the var nodes within the block's range).
 local function render_block(ctx, id)
     local node = store.node(id)
@@ -177,7 +208,21 @@ local function render_fn(ctx, id)
     end
     ctx.lines[2] = ('inputs: %s'):format(#df.inputs > 0 and table.concat(df.inputs, ', ') or '(none)')
     ctx.marks[2] = { { 0, -1, 'CartographDim' } }
-    for _, s in ipairs(df.stmts) do
+    -- callees per STATEMENT, so rows can name their calls as descend targets.
+    -- df statements are the body's top-level ones; a call nested in an if/for
+    -- body belongs to the last statement starting at or before its line.
+    local calls_at = {}
+    for _, c in ipairs(store.calls_by_fn[id] or {}) do
+        local li, best = c.line + 1, nil
+        for i = 1, #df.stmts do
+            if df.stmts[i].l <= li then best = i else break end
+        end
+        if best then
+            calls_at[best] = calls_at[best] or {}
+            table.insert(calls_at[best], c)
+        end
+    end
+    for i, s in ipairs(df.stmts) do
         local defs = table.concat(s.def, ', ')
         local uses = table.concat(s.use, ', ')
         local text, dim_from
@@ -188,26 +233,40 @@ local function render_fn(ctx, id)
         else
             text = '  · ' .. uses; dim_from = 0
         end
+        local cs = calls_at[i]
+        if cs then
+            local names, seen = {}, {}
+            for _, c in ipairs(cs) do
+                if not seen[c.callee] then seen[c.callee] = true; names[#names + 1] = c.callee end
+            end
+            if dim_from == nil then dim_from = #text end
+            text = text .. '   → ' .. table.concat(names, ' ')
+        end
         ctx.lines[#ctx.lines + 1] = text
         if dim_from then ctx.marks[#ctx.lines] = { { dim_from, -1, 'CartographDim' } } end
         ctx.vnums[#ctx.lines] = tostring(s.l)
-        ctx.line_stmt[#ctx.lines] = s.l -- 1-based file line
+        ctx.line_stmt[#ctx.lines] = s.l   -- 1-based file line
+        ctx.line_stmtidx[#ctx.lines] = i  -- index into df.stmts
+        ctx.line_calls[#ctx.lines] = cs   -- call entries on this row's line
     end
 end
 
 function M.render()
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
-        line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {} }
+        line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
+        line_stmtidx = {}, line_calls = {}, line_site = {} }
     local v = M.view
     if v.level == 'files' then
         if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
     elseif v.level == 'file' then render_file(ctx, v.file)
     elseif v.level == 'block' then render_block(ctx, v.block)
+    elseif v.level == 'var' then render_var(ctx, v.var)
     else render_fn(ctx, v.fn) end
 
     M.line_node, M.node_line = ctx.line_node, ctx.node_line
     M.line_file, M.file_header, M.line_stmt = ctx.line_file, ctx.file_header, ctx.line_stmt
+    M.line_stmtidx, M.line_calls, M.line_site = ctx.line_stmtidx, ctx.line_calls, ctx.line_site
 
     vim.bo[M.buf].modifiable = true
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
@@ -238,12 +297,13 @@ function M.show(level, ctx_val)
     M.view.level = level
     if level == 'file' then M.view.file = ctx_val
     elseif level == 'fn' then M.view.fn = ctx_val
-    elseif level == 'block' then M.view.block = ctx_val end
+    elseif level == 'block' then M.view.block = ctx_val
+    elseif level == 'var' then M.view.var = ctx_val end
     M.render()
     if M.win and vim.api.nvim_win_is_valid(M.win) then
         local first = 1
         for row = 1, vim.api.nvim_buf_line_count(M.buf) do
-            if M.line_node[row] or M.line_stmt[row]
+            if M.line_node[row] or M.line_stmt[row] or M.line_site[row]
                 or (level == 'files' and M.line_file[row]) then
                 first = row
                 break
@@ -388,6 +448,12 @@ function M.attach(win)
                         store.set_highlight({ file = n.file, ranges = {
                             { start = { line = l - 1, char = 0 }, ['end'] = { line = l, char = 0 } } } })
                     end
+                elseif M.view.level == 'var' then
+                    -- hover a usage site -> its function in the bottom source
+                    -- view, the read highlighted (same pattern as trace hover)
+                    local s = M.line_site[r]
+                    if s then store.set_context({ node = s.fn, ranges = { s.range } })
+                    else store.set_context(nil) end
                 end
             end, 60)
         end,
@@ -407,8 +473,69 @@ function M.attach(win)
         M.paint(id)
     end)
 
-    -- zoom: l / <CR> descend (files -> file -> inside a function), h ascends —
-    -- h/l are free in a linear list, so sideways becomes altitude
+    -- zoom: l / <CR> descend, h ascends — sideways is free in a linear list,
+    -- so it becomes altitude. Below the fn level, descend keeps going INTO
+    -- the graph: it acts on the name under the cursor (callee -> that
+    -- function, param -> its origin trace, local -> its def statement),
+    -- falling back to the statement's only resolvable callee; a var row
+    -- descends into its usage sites, and a usage site into its function.
+    local function word_at(text, col)
+        local init = 1
+        while true do
+            local s, e = text:find('[%w_]+', init)
+            if not s then return nil end
+            if col + 1 >= s and col + 1 <= e then return text:sub(s, e) end
+            init = e + 1
+        end
+    end
+    local function descend_fn_row(r)
+        local node = store.node(M.view.fn)
+        if not node then return end
+        local col  = vim.api.nvim_win_get_cursor(win)[2]
+        local text = vim.api.nvim_buf_get_lines(M.buf, r - 1, r, false)[1] or ''
+        local word = word_at(text, col)
+        -- 1. a callee named under the cursor: follow the call
+        for _, c in ipairs(M.line_calls[r] or {}) do
+            if c.callee == word and c.to and store.node(c.to) then
+                store.pivot(c.to)
+                return M.show('fn', c.to)
+            end
+        end
+        -- 2. a parameter: where does it come from? (the origin trace)
+        for pi, p in ipairs(node.params or {}) do
+            if p == word then
+                return require('cartograph.panes.trace').open(node.id, pi, p)
+            end
+        end
+        -- 3. a local: jump to its defining statement (latest before this row)
+        local i, df = M.line_stmtidx[r], node.df
+        if word and i and df then
+            local best
+            for j = 1, #df.stmts do
+                if j ~= i then
+                    for _, d in ipairs(df.stmts[j].def) do
+                        if d == word and (j < i or not best) then best = j end
+                    end
+                end
+            end
+            if best then
+                for rr, jj in pairs(M.line_stmtidx) do
+                    if jj == best then
+                        return pcall(vim.api.nvim_win_set_cursor, win, { rr, 2 })
+                    end
+                end
+            end
+        end
+        -- 4. fallback: the statement's only resolvable callee
+        local sole
+        for _, c in ipairs(M.line_calls[r] or {}) do
+            if c.to and store.node(c.to) then sole = (sole == nil) and c or false end
+        end
+        if sole and sole ~= false then
+            store.pivot(sole.to)
+            M.show('fn', sole.to)
+        end
+    end
     local function descend()
         local r = row()
         if M.view.level == 'files' then
@@ -423,6 +550,21 @@ function M.attach(win)
                 store.set_focus(n.id) -- source pane shows the block's span
                 M.show('block', n.id)
             end
+        elseif M.view.level == 'block' then
+            local n = store.node(M.line_node[r])
+            if n and n.kind == 'var' then
+                store.set_focus(n.id)
+                M.show('var', n.id)
+            end
+        elseif M.view.level == 'var' then
+            local s = M.line_site[r]
+            if s and store.node(s.fn) then
+                store.set_context(nil)
+                store.pivot(s.fn)
+                M.show('fn', s.fn)
+            end
+        elseif M.view.level == 'fn' then
+            descend_fn_row(r)
         end
     end
     vim.keymap.set('n', keys.descend, descend,
@@ -432,7 +574,13 @@ function M.attach(win)
     -- ascending lands the cursor ON what we came from (the file-manager rule),
     -- not on the first row of the wider view
     vim.keymap.set('n', keys.ascend, function ()
-        if M.view.level == 'fn' or M.view.level == 'block' then
+        if M.view.level == 'var' then
+            store.set_context(nil)
+            local id = M.view.var
+            M.show('block', M.view.block)
+            local r = M.node_line[id]
+            if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
+        elseif M.view.level == 'fn' or M.view.level == 'block' then
             store.set_highlight(nil)
             local id = M.view.level == 'fn' and M.view.fn or M.view.block
             local n = store.node(id)
@@ -494,11 +642,12 @@ function M.attach(win)
     end, { buffer = M.buf, desc = 'cartograph: unstage the last cut function' })
     vim.keymap.set('n', keys.open_file, function ()
         local r = row()
-        local n = store.node(M.line_node[r])
-        local file = n and n.file or M.line_file[r] or (M.view.level == 'fn'
-            and store.node(M.view.fn) and store.node(M.view.fn).file)
+        local site = M.line_site[r]
+        local n = store.node(M.line_node[r]) or (site and store.node(site.fn))
+        local file = (site and site.file) or (n and n.file) or M.line_file[r]
+            or (M.view.level == 'fn' and store.node(M.view.fn) and store.node(M.view.fn).file)
         if not file then return end
-        local lnum = (M.view.level == 'fn' and M.line_stmt[r])
+        local lnum = (site and site.line + 1) or (M.view.level == 'fn' and M.line_stmt[r])
             or (n and n.range.start.line + 1) or 1
         vim.cmd('tab drop ' .. vim.fn.fnameescape(store.data.root .. '/' .. file))
         pcall(vim.api.nvim_win_set_cursor, 0, { lnum, 0 })
