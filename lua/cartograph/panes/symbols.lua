@@ -191,12 +191,19 @@ end
 function M.attach(win)
     M.win = win
     vim.wo[win].signcolumn = 'yes:1' -- stable-width gutter for the class markers
+    -- debounced: focus follows where the cursor SETTLES, so holding j/k scans
+    -- the list without re-rendering the whole cockpit on every line in between
+    local gen = 0
     vim.api.nvim_create_autocmd('CursorMoved', {
         buffer = M.buf,
         callback = function ()
-            local row = vim.api.nvim_win_get_cursor(win)[1]
-            local id  = M.line_node[row]
-            if id then store.set_focus(id) end
+            gen = gen + 1
+            local g = gen
+            vim.defer_fn(function ()
+                if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
+                local id = M.line_node[vim.api.nvim_win_get_cursor(win)[1]]
+                if id then store.set_focus(id) end
+            end, 60)
         end,
     })
     store.on_focus(function (id)
@@ -233,6 +240,14 @@ function M.attach(win)
     vim.keymap.set('n', 'u', function ()
         store.unstage_last()
     end, { buffer = M.buf, desc = 'cartograph: unstage the last cut function' })
+    vim.keymap.set('n', 'gf', function ()
+        local r = row()
+        local n = store.node(M.line_node[r])
+        local file = n and n.file or M.line_file[r]
+        if not file then return end
+        vim.cmd('tab drop ' .. vim.fn.fnameescape(store.data.root .. '/' .. file))
+        if n then pcall(vim.api.nvim_win_set_cursor, 0, { n.range.start.line + 1, 0 }) end
+    end, { buffer = M.buf, desc = 'cartograph: open the real file here' })
 
     store.on_plan(function () M.restage() end)
     M.restage()

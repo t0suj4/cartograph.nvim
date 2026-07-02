@@ -40,6 +40,22 @@ A cockpit of independent panes over a shared state store:
 minimap), so you can toggle the concern colouring without leaving the source
 you're reading.
 
+### Navigation
+
+All standard vim idioms — no new keys to learn:
+
+- `<C-]>` — **in the source pane**, jump to the definition of the call under
+  the cursor (resolved from the graph's recorded call sites, with a
+  word-match fallback). In the tree pane it pivots like `<CR>`.
+- `<C-o>` / `<C-t>` — go **back** to where the last pivot happened; `<C-i>`
+  goes forward again. Vim-jumplist semantics: deliberate pivots record,
+  scrolling the symbol list doesn't. (`<C-i>` is bound only where `<Tab>`
+  isn't the lens cycle, since most terminals can't tell them apart.)
+- `gf` — **leave the cockpit**: open the real file at the corresponding line
+  (in a reused tab), from the source, symbols, or tree pane.
+- In the symbols pane, focus follows where the cursor *settles* (debounced),
+  so holding `j`/`k` scans the list without re-rendering every pane per line.
+
 `:CartographHeat` (from the symbols pane) toggles a **hub/heat overlay**: each
 symbol is annotated with fan-in / fan-out and a role — `hub` (many callers,
 load-bearing), `coordinator` (calls many), `leaf`, `api` (exported, no static

@@ -85,6 +85,67 @@ local function apply_concerns(node)
     end
 end
 
+-- Resolve a <C-]> jump target under the cursor: prefer the recorded occurrence
+-- range at (file_line, col); fall back to matching the cursor word against the
+-- names of `node`'s uses-edges (last path segment, so `M.foo` matches `foo`) —
+-- nil when nothing matches or the word is ambiguous.
+function M.resolve_jump(node, file_line, col, cword)
+    if not node then return nil end
+    local byword
+    for _, to in ipairs(store.uses[node.id] or {}) do
+        for _, r in ipairs(store.occurrences(node.id, to) or {}) do
+            if r.start.line == file_line and col >= r.start.char
+                and (r['end'].line > file_line or col < r['end'].char) then
+                return to
+            end
+        end
+        local tn = store.node(to)
+        local last = tn and tn.name and tn.name:match('([%w_]+)$')
+        if cword and cword ~= '' and last == cword then
+            byword = byword == nil and to or false -- false = ambiguous
+        end
+    end
+    return byword or nil
+end
+
+-- The file line (0-based) the cursor in `win` is sitting on, given the node the
+-- buffer renders; nil on the header rows.
+local function cursor_file_line(win, node)
+    if not node then return nil end
+    local row0 = vim.api.nvim_win_get_cursor(win)[1] - 1
+    if row0 < HEADER_ROWS then return nil end
+    local fl = node.range.start.line + (row0 - HEADER_ROWS)
+    if fl > node.range['end'].line then return nil end
+    return fl
+end
+
+-- gf: leave the cockpit — open the real file in a (reused) tab, at the line the
+-- cursor corresponds to (the node's first line when on a header row).
+local function goto_real(win, node)
+    if not node then return end
+    local fl = cursor_file_line(win, node) or node.range.start.line
+    vim.cmd('tab drop ' .. vim.fn.fnameescape(store.abspath(node)))
+    pcall(vim.api.nvim_win_set_cursor, 0, { fl + 1, 0 })
+end
+
+-- Navigation verbs for a source buffer: <C-]> pivots to the definition of the
+-- call under the cursor (tags idiom), gf opens the real file. `which` picks the
+-- node the buffer renders (focused def on top, hovered context below).
+local function bind_nav(buf, which)
+    vim.keymap.set('n', '<C-]>', function ()
+        local node = which()
+        if not node then return end
+        local win = vim.api.nvim_get_current_win()
+        local fl  = cursor_file_line(win, node)
+        local col = vim.api.nvim_win_get_cursor(win)[2]
+        local to  = M.resolve_jump(node, fl, col, vim.fn.expand('<cword>'))
+        if to then store.pivot(to)
+        else vim.notify('cartograph: no known callee under the cursor', vim.log.levels.INFO) end
+    end, { buffer = buf, desc = 'cartograph: jump to the definition under the cursor' })
+    vim.keymap.set('n', 'gf', function () goto_real(vim.api.nvim_get_current_win(), which()) end,
+        { buffer = buf, desc = 'cartograph: open the real file here' })
+end
+
 -- Cycle the view/lens from wherever you're reading. Switching lives in the code
 -- pane (not only the minimap) so toggling the concern colouring doesn't require
 -- leaving the source you're looking at.
@@ -158,6 +219,7 @@ function M.create()
     store.on_context(function (ctx) M.context(ctx) end)
     store.on_lens(function () apply_concerns(M.cur) end)
     bind_cycle(buf)
+    bind_nav(buf, function () return M.cur end)
     return buf
 end
 
@@ -176,6 +238,7 @@ function M.attach(win)
     vim.api.nvim_win_set_buf(M.win_bot, b)
     vim.api.nvim_win_set_height(M.win_bot, math.max(6, math.floor(h * 0.4)))
     bind_cycle(b)
+    bind_nav(b, function () return M.ctx end)
 
     vim.api.nvim_set_current_win(win)
     M.context(nil)

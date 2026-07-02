@@ -14,11 +14,19 @@ function M.create()
     M.buf = buf
     store.on_focus(function (id) M.render(id) end)
 
-    vim.keymap.set('n', '<CR>', function ()
+    local function pivot()
         local row = vim.api.nvim_win_get_cursor(0)[1]
         local id  = M.line_node[row]
-        if id then store.set_focus(id) end
-    end, { buffer = buf, nowait = true, desc = 'cartograph: pivot to this node' })
+        if id then store.pivot(id) end
+    end
+    vim.keymap.set('n', '<CR>',  pivot, { buffer = buf, nowait = true, desc = 'cartograph: pivot to this node' })
+    vim.keymap.set('n', '<C-]>', pivot, { buffer = buf, desc = 'cartograph: pivot to this node' })
+    vim.keymap.set('n', 'gf', function ()
+        local n = store.node(M.line_node[vim.api.nvim_win_get_cursor(0)[1]])
+        if not n then return end
+        vim.cmd('tab drop ' .. vim.fn.fnameescape(store.abspath(n)))
+        pcall(vim.api.nvim_win_set_cursor, 0, { n.range.start.line + 1, 0 })
+    end, { buffer = buf, desc = 'cartograph: open the real file at this node' })
 
     return buf
 end
@@ -28,31 +36,43 @@ end
 --- (bottom). A `used by` entry shows the caller's body (bottom) with the call
 --- site highlighted there.
 function M.attach(win)
+    -- debounced: reading the cursor after a short settle keeps held-j scrolling
+    -- from re-rendering the bottom source view on every line passed through
+    local gen = 0
     vim.api.nvim_create_autocmd('CursorMoved', {
         buffer = M.buf,
         callback = function ()
-            local row     = vim.api.nvim_win_get_cursor(win)[1]
-            local id      = M.line_node[row]
-            local dir     = M.line_dir[row]
-            local focused = store.focused
-            if not (id and focused) then
-                store.set_highlight(nil); store.set_context(nil); return
-            end
-            if dir == 'uses' then
-                -- call site lives in the focused function; callee below
-                local occ = store.occurrences(focused, id)
-                store.set_highlight(occ and { file = store.node(focused).file, ranges = occ } or nil)
-                store.set_context({ node = id })
-            elseif dir == 'usedby' then
-                -- call site lives in the caller's body; show it below, highlighted
-                local occ = store.occurrences(id, focused)
-                store.set_highlight(nil)
-                store.set_context({ node = id, ranges = occ })
-            else
-                store.set_highlight(nil); store.set_context(nil)
-            end
+            gen = gen + 1
+            local g = gen
+            vim.defer_fn(function ()
+                if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
+                M.hover(win)
+            end, 60)
         end,
     })
+end
+
+function M.hover(win)
+    local row     = vim.api.nvim_win_get_cursor(win)[1]
+    local id      = M.line_node[row]
+    local dir     = M.line_dir[row]
+    local focused = store.focused
+    if not (id and focused) then
+        store.set_highlight(nil); store.set_context(nil); return
+    end
+    if dir == 'uses' then
+        -- call site lives in the focused function; callee below
+        local occ = store.occurrences(focused, id)
+        store.set_highlight(occ and { file = store.node(focused).file, ranges = occ } or nil)
+        store.set_context({ node = id })
+    elseif dir == 'usedby' then
+        -- call site lives in the caller's body; show it below, highlighted
+        local occ = store.occurrences(id, focused)
+        store.set_highlight(nil)
+        store.set_context({ node = id, ranges = occ })
+    else
+        store.set_highlight(nil); store.set_context(nil)
+    end
 end
 
 -- append a labelled branch; record entry rows -> node id in `line_node` and the

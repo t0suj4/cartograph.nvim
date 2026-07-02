@@ -23,6 +23,7 @@ end
 ---@param data table
 function M.ingest(data)
     M.data    = data
+    M._nav_back, M._nav_fwd = {}, {}
     M.by_id   = {}
     M.by_file = {}
     M.files   = {}
@@ -91,6 +92,36 @@ function M.set_focus(id)
     if id == M.focused then return end
     M.focused = id
     for _, fn in ipairs(M._subs) do pcall(fn, id) end
+end
+
+-- navigation history: a jumplist over focus. Deliberate pivots (tree <CR>,
+-- source <C-]>) record where they jumped from; scrolling the symbol list moves
+-- focus without recording — the same rule as vim's own jumplist (jumps record,
+-- line motions don't).
+M._nav_back, M._nav_fwd = {}, {}
+
+--- A deliberate jump: remember where we came from, then focus.
+function M.pivot(id)
+    if not id or id == M.focused then return end
+    if M.focused then M._nav_back[#M._nav_back + 1] = M.focused end
+    M._nav_fwd = {}
+    M.set_focus(id)
+end
+
+--- <C-o> / <C-t>: return to the focus at the previous pivot.
+function M.back()
+    local id = table.remove(M._nav_back)
+    if not id then return end
+    if M.focused then M._nav_fwd[#M._nav_fwd + 1] = M.focused end
+    M.set_focus(id)
+end
+
+--- <C-i>: undo a back().
+function M.forward()
+    local id = table.remove(M._nav_fwd)
+    if not id then return end
+    if M.focused then M._nav_back[#M._nav_back + 1] = M.focused end
+    M.set_focus(id)
 end
 
 -- occurrence highlight channel: a lighter signal than focus. Panes publish "the
