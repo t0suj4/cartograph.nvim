@@ -102,7 +102,13 @@ local function branch(ctx, label, dir, ids, from)
     L[#L + 1] = ('%s (%d)'):format(label, #list)
     ctx.marks[#L] = { { 0, #label, 'CartographSection' }, { #label, -1, 'CartographDim' } }
     for _, x in ipairs(list) do
-        L[#L + 1] = '  ' .. x.name
+        -- ~ = resolved by unique method name, not type inference (vm couldn't
+        -- type the receiver, e.g. an instance fetched out of a storage table)
+        local inf = from and store.edge_inferred[
+            dir == 'uses' and (from.id .. '\31' .. x.id) or (x.id .. '\31' .. from.id)]
+        local line = '  ' .. x.name .. (inf and ' ~' or '')
+        L[#L + 1] = line
+        if inf then ctx.marks[#L] = { { #line - 2, -1, 'CartographDim' } } end
         ctx.line_node[#L] = x.id
         ctx.line_dir[#L]  = dir
         if x.node and from and x.node.file ~= from.file then

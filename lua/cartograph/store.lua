@@ -55,12 +55,14 @@ function M.ingest(data)
     M.uses   = {} -- id -> { to_id, ... }   (functions this one references)
     M.usedby = {} -- id -> { from_id, ... } (functions that reference this one)
     M.occ    = {} -- "from\31to" -> { {start,end}, ... }  reference sites in `from`
+    M.edge_inferred = {} -- "from\31to" -> true (resolved by unique name, not vm)
     M.imports_in = {} -- file -> { {from=file, sideeffect=bool}, ... }  inbound requires
     for _, e in ipairs(M.data.edges or {}) do
         if e.kind == 'ref' then
             M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
             M.usedby[e.to]   = M.usedby[e.to]   or {}; table.insert(M.usedby[e.to], e.from)
             M.occ[e.from .. '\31' .. e.to] = e.at
+            if e.inferred then M.edge_inferred[e.from .. '\31' .. e.to] = true end
         elseif e.kind == 'import' then
             M.imports_in[e.to] = M.imports_in[e.to] or {}
             table.insert(M.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })

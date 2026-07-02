@@ -25,7 +25,11 @@ A cockpit of independent panes over a shared state store:
 - **symbols** — the current file's definitions, in source order
 - **source** — the real code at the focused location (def, or a call site),
   splittable to compare the two
-- **dependencies** — the hovered symbol's uses / used-by tree
+- **dependencies** — the hovered symbol's uses / used-by tree. Edges vm-typed
+  resolution can't see — a method called on an instance fetched out of a
+  storage table (the Factorio pattern) — are recovered by **unique method
+  name** and marked `~`: honest, but name-matched rather than type-proven.
+  Ambiguous names refuse to link rather than guess.
 `<Tab>` in the code pane toggles the **flow lens**: statements are grouped by
 independent concern (from the statement-level local def-use) and the source
 lines are **coloured by concern**, with the tangle metrics on the header line.
