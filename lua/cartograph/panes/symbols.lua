@@ -358,13 +358,25 @@ function M.attach(win)
         { buffer = M.buf, desc = 'cartograph: descend (into file / into function)' })
     vim.keymap.set('n', keys.pivot, descend,
         { buffer = M.buf, nowait = true, desc = 'cartograph: descend (into file / into function)' })
+    -- ascending lands the cursor ON what we came from (the file-manager rule),
+    -- not on the first row of the wider view
     vim.keymap.set('n', keys.ascend, function ()
         if M.view.level == 'fn' then
             store.set_highlight(nil)
-            local n = store.node(M.view.fn)
+            local id = M.view.fn
+            local n = store.node(id)
             M.show('file', n and n.file or M.view.file)
+            local r = M.node_line[id]
+            if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
         elseif M.view.level == 'file' then
+            local from = M.view.file
             M.show('files')
+            for r, f in pairs(M.line_file) do
+                if f == from then
+                    pcall(vim.api.nvim_win_set_cursor, win, { r, 0 })
+                    break
+                end
+            end
         end
     end, { buffer = M.buf, desc = 'cartograph: ascend (to file / to file tree)' })
 
