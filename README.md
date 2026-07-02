@@ -49,19 +49,21 @@ A cockpit of independent panes over a shared state store:
   trace; on a **local** it jumps to the defining statement; with no name
   targeted it follows the statement's only resolvable call. A **var** row
   descends into its usage sites (every function that reads it, from the
-  extractor's `use` edges) — hovering a site shows the read in the bottom
-  source view, and descending enters the reading function.
+  extractor's `use` edges) — hovering a site shows the read in the
+  source pane, and descending enters the reading function.
 
   Inside a function, the `↖ callers (N)` row descends into the **call
   sites**: one row per call, hover shows the caller's code with the call
-  highlighted below, descend enters the caller. Edges vm-typed resolution
+  highlighted in the source pane, descend enters the caller. Edges vm-typed resolution
   can't see — a method called on an instance fetched out of a storage table
   (the Factorio pattern) — are recovered by **unique method name** and
   marked `~`: honest, but name-matched rather than type-proven. Ambiguous
   names refuse to link rather than guess.
-- **source** — the real code at the focused location (def, or a call site),
-  splittable to compare the two. With uses and callers living in the
-  browser, the code takes the rest of the width.
+- **source** — the real code, taking the full width and height beside the
+  browser. It shows the focused body; hovering a call site / var read /
+  trace origin **temporarily takes over the pane** (the site's function,
+  its line highlighted, auto-scrolled) and the focused body returns when
+  the hover clears. One window, two moments.
 `<Tab>` in the code pane toggles the **flow lens**: statements are grouped by
 independent concern (from the statement-level local def-use) and the source
 lines are **coloured by concern**, with the tangle metrics on the header line.
@@ -119,7 +121,7 @@ statements, a local origin steps to its defining statements and the locals
 Frontiers are honest and labelled instead of silently dropped: a table field
 (writes can alias from anywhere), a global, varargs, a computed expression, a
 dynamically-dispatched function (e.g. an event handler — "no resolved call
-sites"). Hovering a row shows the origin's code in the **bottom source view**
+sites"). Hovering a row shows the origin's code in the **source pane**
 with the origin line highlighted (the same pattern as hovering the dependency
 tree); `gf` jumps to its real file; `<C-]>` pivots the cockpit to its
 function; the trace opens in its own right-hand split, and `q` closes it.
@@ -143,7 +145,7 @@ In the **source** pane, visually select whole statements and run
 `:'<,'>CartographExtract <name>`. The engine computes the new function's
 parameters (locals read but defined before the selection) and return values
 (locals defined in the selection and used after it) from the data-flow, shows a
-**preview** in the bottom pane, and writes to disk only after you confirm.
+**preview** in the source pane, and writes to disk only after you confirm.
 
 It is deliberately conservative: it works on **whole top-level statements** and
 **refuses** a selection that cuts a loop/branch body or contains a

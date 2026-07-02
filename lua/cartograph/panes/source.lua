@@ -220,19 +220,27 @@ function M.extract(line1, line2, name)
 
     local plan = extract.plan { df = node.df, sel = { first = file_first, last = file_last },
         fn_start = fn_start, body_end = body_end, file_lines = all, name = name }
+    local function show_then_restore(lines, prompt)
+        set_lines(M.buf, lines)
+        scroll_top(M.win_top)
+        local choice = prompt and vim.fn.confirm(prompt, '&Apply\n&Cancel', 2)
+        if not prompt then vim.fn.confirm('(press Enter)', '&Ok', 1) end
+        set_lines(M.buf, body_lines(M.cur))
+        scroll_top(M.win_top)
+        apply_concerns(M.cur)
+        return choice == 1
+    end
     if not plan.ok then
-        -- persist the reason in the bottom pane (a transient notify is easy to miss)
-        if M.buf_bot and vim.api.nvim_buf_is_valid(M.buf_bot) then
-            local msg = { ('── cannot extract lines %d-%d'):format(file_first, file_last), '' }
-            msg[#msg + 1] = plan.reason
-            msg[#msg + 1] = ''
-            msg[#msg + 1] = 'Extract works on whole top-level statements of a function.'
-            set_lines(M.buf_bot, msg)
-        end
-        return vim.notify('cartograph: cannot extract — ' .. plan.reason, vim.log.levels.WARN)
+        local msg = { ('── cannot extract lines %d-%d'):format(file_first, file_last), '' }
+        msg[#msg + 1] = plan.reason
+        msg[#msg + 1] = ''
+        msg[#msg + 1] = 'Extract works on whole top-level statements of a function.'
+        vim.notify('cartograph: cannot extract — ' .. plan.reason, vim.log.levels.WARN)
+        show_then_restore(msg)
+        return
     end
 
-    -- preview in the bottom pane
+    -- preview in the pane, confirm before touching disk
     local prev = { ('── extract preview: %s(%s)%s'):format(name, table.concat(plan.params, ', '),
         #plan.returns > 0 and ('  ->  ' .. table.concat(plan.returns, ', ')) or ''), '' }
     for _, l in ipairs(plan.new_fn) do prev[#prev + 1] = l end
@@ -240,10 +248,8 @@ function M.extract(line1, line2, name)
     prev[#prev + 1] = ('call replaces %s:%d-%d:'):format(node.file, plan.replace.first, plan.replace.last)
     for _, l in ipairs(plan.call) do prev[#prev + 1] = l end
     for _, h in ipairs(plan.hazards) do prev[#prev + 1] = '⚠ ' .. h end
-    if M.buf_bot and vim.api.nvim_buf_is_valid(M.buf_bot) then set_lines(M.buf_bot, prev) end
-
-    if vim.fn.confirm(('Extract %d line(s) into %s()?'):format(file_last - file_first + 1, name),
-            '&Apply\n&Cancel', 2) ~= 1 then
+    if not show_then_restore(prev,
+            ('Extract %d line(s) into %s()?'):format(file_last - file_first + 1, name)) then
         return vim.notify('cartograph: extract cancelled', vim.log.levels.INFO)
     end
     vim.fn.writefile(extract.apply(plan, all), store.abspath(node))
@@ -266,67 +272,59 @@ function M.create()
     store.on_context(function (ctx) M.context(ctx) end)
     store.on_lens(function () apply_concerns(M.cur) end)
     bind_cycle(buf)
-    bind_nav(buf, function () return M.cur end)
+    bind_nav(buf, function () return M.ctx or M.cur end)
     return buf
 end
 
--- Create the BOTTOM view by splitting the source window horizontally.
 function M.attach(win)
     M.win_top = win
     set_margin(win)
-    local h = vim.api.nvim_win_get_height(win)
-    vim.api.nvim_set_current_win(win)
-    vim.cmd('belowright split')
-    M.win_bot = vim.api.nvim_get_current_win()
-    set_margin(M.win_bot)
-
-    local b = vim.api.nvim_create_buf(false, true)
-    vim.bo[b].bufhidden = 'wipe'
-    vim.bo[b].filetype  = 'lua'
-    M.buf_bot = b
-    vim.api.nvim_win_set_buf(M.win_bot, b)
-    vim.api.nvim_win_set_height(M.win_bot, math.max(6, math.floor(h * 0.4)))
-    bind_cycle(b)
-    bind_nav(b, function () return M.ctx end)
-
-    vim.api.nvim_set_current_win(win)
     M.context(nil)
 end
 
 ---@param id string?
 function M.render(id)
     local node = store.node(id)
-    M.cur = node
+    M.cur, M.ctx = node, nil
     set_lines(M.buf, body_lines(node))
     scroll_top(M.win_top) -- a fresh body starts at its header
     apply_concerns(node)  -- repaint concern bands if the lens is on
-    M.context(nil) -- a new focus clears the stale bottom view
 end
 
 ---@param hl {file:string, ranges:table}?
 function M.highlight(hl)
     if not vim.api.nvim_buf_is_valid(M.buf) then return end
     vim.api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
-    if not hl or not M.cur or hl.file ~= M.cur.file then return end
-    apply_hl(M.buf, M.cur, hl.ranges)
+    local shown = M.ctx or M.cur
+    if not hl or not shown or hl.file ~= shown.file then return end
+    apply_hl(M.buf, shown, hl.ranges)
     local r = hl.ranges and hl.ranges[1]
-    if r then ensure_visible(M.win_top, buf_row(M.cur, r.start.line)) end
+    if r then ensure_visible(M.win_top, buf_row(shown, r.start.line)) end
 end
 
+--- The "other end" temporarily takes over the pane: a hovered call site /
+--- var read / trace origin renders here (its line highlighted); clearing the
+--- context restores the focused body. One window, two moments.
 ---@param ctx {node:string, ranges:table?}?
 function M.context(ctx)
-    if not M.buf_bot or not vim.api.nvim_buf_is_valid(M.buf_bot) then return end
+    if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
+    local prev = M.ctx
     M.ctx = ctx and store.node(ctx.node) or nil
     if not M.ctx then
-        set_lines(M.buf_bot, { '', '   (hover a dependency to see the other side)' })
+        if prev then -- restore the focused body only if a context was showing
+            set_lines(M.buf, body_lines(M.cur))
+            scroll_top(M.win_top)
+            apply_concerns(M.cur)
+        end
         return
     end
-    set_lines(M.buf_bot, body_lines(M.ctx))
-    scroll_top(M.win_bot)
+    set_lines(M.buf, body_lines(M.ctx))
+    vim.api.nvim_buf_clear_namespace(M.buf, ns_concern, 0, -1)
+    scroll_top(M.win_top)
     if ctx.ranges then
-        apply_hl(M.buf_bot, M.ctx, ctx.ranges)
+        apply_hl(M.buf, M.ctx, ctx.ranges)
         local r = ctx.ranges[1]
-        if r then ensure_visible(M.win_bot, buf_row(M.ctx, r.start.line)) end
+        if r then ensure_visible(M.win_top, buf_row(M.ctx, r.start.line)) end
     end
 end
 

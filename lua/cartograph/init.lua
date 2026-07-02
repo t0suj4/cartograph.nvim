@@ -58,8 +58,7 @@ function M.open(dump_path)
     -- where the cycle key (<Tab> = <C-i> in most terminals) isn't taken —
     -- symbols uses <Tab> for the file-view toggle, source for the lens.
     local keys = require('cartograph.config').keys
-    for _, b in ipairs({ { symbols.buf }, { plan.buf, true },
-                         { source.buf }, { source.buf_bot } }) do
+    for _, b in ipairs({ { symbols.buf }, { plan.buf, true }, { source.buf } }) do
         local buf, fwd = b[1], b[2]
         if buf and vim.api.nvim_buf_is_valid(buf) then
             vim.keymap.set('n', keys.back,     store.back, { buffer = buf, desc = 'cartograph: back (previous pivot)' })
