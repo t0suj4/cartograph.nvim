@@ -41,7 +41,7 @@ local M = {
     view = { level = 'files', file = nil, fn = nil },
     files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
-    line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {},
+    line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
     trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
@@ -255,18 +255,36 @@ local function render_fn(ctx, id)
     end
     ctx.lines[3] = ('inputs: %s'):format(#df.inputs > 0 and table.concat(df.inputs, ', ') or '(none)')
     ctx.marks[3] = { { 0, -1, 'CartographDim' } }
-    -- callees per STATEMENT, so rows can name their calls as descend targets.
-    -- df statements are the body's top-level ones; a call nested in an if/for
-    -- body belongs to the last statement starting at or before its line.
-    local calls_at = {}
-    for _, c in ipairs(store.calls_by_fn[id] or {}) do
-        local li, best = c.line + 1, nil
+    -- callees AND module-var reads per STATEMENT, so rows can name them as
+    -- descend targets. df statements are the body's top-level ones; anything
+    -- nested in an if/for body belongs to the last statement starting at or
+    -- before its line.
+    local function stmt_of(line0)
+        local li, best = line0 + 1, nil
         for i = 1, #df.stmts do
             if df.stmts[i].l <= li then best = i else break end
         end
+        return best
+    end
+    local calls_at = {}
+    for _, c in ipairs(store.calls_by_fn[id] or {}) do
+        local best = stmt_of(c.line)
         if best then
             calls_at[best] = calls_at[best] or {}
             table.insert(calls_at[best], c)
+        end
+    end
+    local vars_at = {}
+    for _, u in ipairs(store.var_uses[id] or {}) do
+        local vn = store.node(u.to)
+        if vn then
+            for _, r in ipairs(u.at) do
+                local best = stmt_of(r.start.line)
+                if best then
+                    vars_at[best] = vars_at[best] or {}
+                    table.insert(vars_at[best], { name = vn.name, id = u.to })
+                end
+            end
         end
     end
     for i, s in ipairs(df.stmts) do
@@ -289,12 +307,22 @@ local function render_fn(ctx, id)
             if dim_from == nil then dim_from = #text end
             text = text .. '   → ' .. table.concat(names, ' ')
         end
+        local vs = vars_at[i]
+        if vs then
+            local names, seen = {}, {}
+            for _, v in ipairs(vs) do
+                if not seen[v.name] then seen[v.name] = true; names[#names + 1] = v.name end
+            end
+            if dim_from == nil then dim_from = #text end
+            text = text .. '   · ' .. table.concat(names, ' ')
+        end
         ctx.lines[#ctx.lines + 1] = text
         if dim_from then ctx.marks[#ctx.lines] = { { dim_from, -1, 'CartographDim' } } end
         ctx.vnums[#ctx.lines] = tostring(s.l)
         ctx.line_stmt[#ctx.lines] = s.l   -- 1-based file line
         ctx.line_stmtidx[#ctx.lines] = i  -- index into df.stmts
         ctx.line_calls[#ctx.lines] = cs   -- call entries on this row's line
+        ctx.line_vars[#ctx.lines]  = vs   -- module vars read by this statement
     end
 end
 
@@ -302,7 +330,7 @@ function M.render()
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
-        line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {} }
+        line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {} }
     local v = M.view
     if v.level == 'files' then
         if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
@@ -315,7 +343,7 @@ function M.render()
     M.line_node, M.node_line = ctx.line_node, ctx.node_line
     M.line_file, M.file_header, M.line_stmt = ctx.line_file, ctx.file_header, ctx.line_stmt
     M.line_stmtidx, M.line_calls, M.line_site = ctx.line_stmtidx, ctx.line_calls, ctx.line_site
-    M.line_callers = ctx.line_callers
+    M.line_callers, M.line_vars = ctx.line_callers, ctx.line_vars
 
     vim.bo[M.buf].modifiable = true
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
@@ -642,7 +670,15 @@ function M.attach(win)
                 end
             end
         end
-        -- 4. fallback: the statement's only resolvable callee
+        -- 4. a module var / global read named under the cursor: its usages
+        for _, v in ipairs(M.line_vars[r] or {}) do
+            for seg in (v.name or ''):gmatch('[%w_]+') do
+                if seg == word then
+                    return enter('var', v.id, v.id)
+                end
+            end
+        end
+        -- 5. fallback: the statement's only resolvable callee
         local sole
         for _, c in ipairs(M.line_calls[r] or {}) do
             if c.to and store.node(c.to) then sole = (sole == nil) and c or false end

@@ -53,4 +53,13 @@ test('blocks: statement runs roll up, functions break them', function ()
     eq('f',   usedby_names('a'))
     eq('M.g', usedby_names('b'))
     eq('',    usedby_names('c')) -- never read
+
+    -- and the forward index: f's var reads include `a`
+    local f_id
+    for id, n in pairs(store.by_id) do if n.name == 'f' then f_id = id end end
+    local reads = {}
+    for _, u in ipairs(store.var_uses[f_id] or {}) do
+        reads[#reads + 1] = store.node(u.to).name
+    end
+    eq('a', table.concat(reads, ','))
 end)

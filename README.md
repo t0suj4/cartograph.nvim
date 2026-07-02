@@ -43,11 +43,13 @@ A cockpit of independent panes over a shared state store:
   pane. At the file level the cursor row is the focus, and staging lives here.
 
   Below the fn level, descend keeps going **into the graph**, acting on the
-  name under the cursor: statement rows name their calls (`→ callee`), so
-  `l` on a callee follows the call into that function (recorded in the
-  jumplist — `<C-o>` walks back); on a **parameter** it opens the origin
-  trace; on a **local** it jumps to the defining statement; with no name
-  targeted it follows the statement's only resolvable call. A **var** row
+  name under the cursor: statement rows name their calls (`→ callee`) and
+  the module vars / globals they read (`· var`), so `l` on a callee follows
+  the call into that function (recorded in the jumplist — `<C-o>` walks
+  back), and on a var it opens that var's usage sites; on a **parameter**
+  it opens the origin trace; on a **local** it jumps to the defining
+  statement; with no name targeted it follows the statement's only
+  resolvable call. A **var** row
   descends into its usage sites (every function that reads it, from the
   extractor's `use` edges) — hovering a site shows the read in the
   source pane, and descending enters the reading function.

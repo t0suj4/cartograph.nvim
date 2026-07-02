@@ -61,6 +61,7 @@ function M.ingest(data)
     M.occ    = {} -- "from\31to" -> { {start,end}, ... }  reference sites in `from`
     M.edge_inferred = {} -- "from\31to" -> true (resolved by unique name, not vm)
     M.var_usedby = {} -- var node id -> { {from=fn id, at=ranges}, ... }
+    M.var_uses   = {} -- fn node id  -> { {to=var id,  at=ranges}, ... }
     M.imports_in  = {} -- file -> { {from=file, sideeffect=bool}, ... }  inbound requires
     M.imports_out = {} -- file -> { file, ... }  outbound requires (include tree)
     for _, e in ipairs(M.data.edges or {}) do
@@ -77,6 +78,8 @@ function M.ingest(data)
         elseif e.kind == 'use' then
             M.var_usedby[e.to] = M.var_usedby[e.to] or {}
             table.insert(M.var_usedby[e.to], { from = e.from, at = e.at or {} })
+            M.var_uses[e.from] = M.var_uses[e.from] or {}
+            table.insert(M.var_uses[e.from], { to = e.to, at = e.at or {} })
         end
     end
     return M.data
