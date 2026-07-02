@@ -339,8 +339,9 @@ function M.attach(win)
         M.paint(id)
     end)
 
-    -- zoom: <CR> descends (files -> file -> inside a function), `-` ascends
-    vim.keymap.set('n', keys.pivot, function ()
+    -- zoom: l / <CR> descend (files -> file -> inside a function), h ascends —
+    -- h/l are free in a linear list, so sideways becomes altitude
+    local function descend()
         local r = row()
         if M.view.level == 'files' then
             local f = M.line_file[r]
@@ -352,7 +353,11 @@ function M.attach(win)
                 M.show('fn', n.id)
             end
         end
-    end, { buffer = M.buf, nowait = true, desc = 'cartograph: descend (into file / into function)' })
+    end
+    vim.keymap.set('n', keys.descend, descend,
+        { buffer = M.buf, desc = 'cartograph: descend (into file / into function)' })
+    vim.keymap.set('n', keys.pivot, descend,
+        { buffer = M.buf, nowait = true, desc = 'cartograph: descend (into file / into function)' })
     vim.keymap.set('n', keys.ascend, function ()
         if M.view.level == 'fn' then
             store.set_highlight(nil)

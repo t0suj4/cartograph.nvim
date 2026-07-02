@@ -22,7 +22,8 @@ scale), never a context-free list.
 
 A cockpit of independent panes over a shared state store:
 
-- **symbols** — a zoomable *altitude browser*: `<CR>` descends, `-` ascends.
+- **symbols** — a zoomable *altitude browser*: `l` (or `<CR>`) descends, `h`
+  ascends — sideways is free in a linear list, so it becomes altitude.
   Top level is the **file tree** (one row per file, with usage-classification
   gutter signs); a file opens into **all its definitions** in source order —
   functions, methods, *and* module-level vars/fields, so the whole file is

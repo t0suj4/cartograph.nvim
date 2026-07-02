@@ -15,7 +15,9 @@ M.keys = {
     back_alt   = '<C-t>',   -- also back (tag-pop idiom; works where <C-o> may be taken)
     forward    = '<C-i>',   -- jumplist forward (bound only where <Tab> isn't the lens)
     open_file  = 'gf',      -- open the real file here
-    ascend     = '-',       -- symbols: zoom out (function -> file -> file tree)
+    ascend     = 'h',       -- symbols: zoom out (function -> file -> file tree);
+    descend    = 'l',       -- symbols: zoom in — h/l are free in a linear list
+                            -- (<CR> also descends, like the tree's pivot)
     trace      = 'gr',      -- source: trace where the parameter under the cursor comes from
     cycle      = '<Tab>',   -- source: toggle the flow (concern) lens
     cycle_back = '<S-Tab>',
