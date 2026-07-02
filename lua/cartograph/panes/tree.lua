@@ -1,27 +1,39 @@
 -- CENTER pane: the focus+context dependency tree. For the focused function it
--- shows `uses ▾` (functions it references) and `used by ▾` (functions that
--- reference it) — cross-file edges marked. <CR> on an entry PIVOTS: re-roots the
--- whole cockpit on that node (navigation = re-rooting).
+-- shows `uses` (functions it references) and `used by` (functions that
+-- reference it). <CR> on an entry PIVOTS: re-roots the whole cockpit on that
+-- node (navigation = re-rooting).
+--
+-- Presentation: the pane is narrow, so locations live in right-aligned virtual
+-- text (dim, clipped by nvim) instead of eating line columns, and structure is
+-- carried by highlight groups rather than ASCII markers.
 
-local store = require 'cartograph.store'
+local store  = require 'cartograph.store'
+local hl     = require 'cartograph.hl'
+local config = require 'cartograph.config'
+
+local ns = vim.api.nvim_create_namespace('cartograph_tree')
 
 local M = { line_node = {}, line_dir = {} }
 
 function M.create()
     local buf = vim.api.nvim_create_buf(false, true)
-    vim.bo[buf].bufhidden = 'wipe'
+    -- 'hide', not 'wipe': the trace pane borrows this window, and 'wipe' would
+    -- destroy the tree buffer the moment it stops being displayed
+    vim.bo[buf].bufhidden = 'hide'
     vim.bo[buf].filetype  = 'cartograph-tree'
     M.buf = buf
+    hl.ui()
     store.on_focus(function (id) M.render(id) end)
 
+    local keys = config.keys
     local function pivot()
         local row = vim.api.nvim_win_get_cursor(0)[1]
         local id  = M.line_node[row]
         if id then store.pivot(id) end
     end
-    vim.keymap.set('n', '<CR>',  pivot, { buffer = buf, nowait = true, desc = 'cartograph: pivot to this node' })
-    vim.keymap.set('n', '<C-]>', pivot, { buffer = buf, desc = 'cartograph: pivot to this node' })
-    vim.keymap.set('n', 'gf', function ()
+    vim.keymap.set('n', keys.pivot, pivot, { buffer = buf, nowait = true, desc = 'cartograph: pivot to this node' })
+    vim.keymap.set('n', keys.jump,  pivot, { buffer = buf, desc = 'cartograph: pivot to this node' })
+    vim.keymap.set('n', keys.open_file, function ()
         local n = store.node(M.line_node[vim.api.nvim_win_get_cursor(0)[1]])
         if not n then return end
         vim.cmd('tab drop ' .. vim.fn.fnameescape(store.abspath(n)))
@@ -36,6 +48,7 @@ end
 --- (bottom). A `used by` entry shows the caller's body (bottom) with the call
 --- site highlighted there.
 function M.attach(win)
+    vim.wo[win].cursorline = true
     -- debounced: reading the cursor after a short settle keeps held-j scrolling
     -- from re-rendering the bottom source view on every line passed through
     local gen = 0
@@ -77,7 +90,7 @@ end
 
 -- append a labelled branch; record entry rows -> node id in `line_node` and the
 -- branch direction ('uses'/'usedby') in `line_dir`.
-local function branch(lines, line_node, line_dir, label, dir, ids, from)
+local function branch(ctx, label, dir, ids, from)
     local list = {}
     for _, id in ipairs(ids or {}) do
         local n = store.node(id)
@@ -85,45 +98,53 @@ local function branch(lines, line_node, line_dir, label, dir, ids, from)
     end
     table.sort(list, function (a, b) return a.name < b.name end)
 
-    lines[#lines + 1] = ('%s ▾  (%d)'):format(label, #list)
-    line_node[#lines] = false
-    if #list == 0 then
-        lines[#lines + 1] = '    ·'
-        line_node[#lines] = false
-        return
-    end
+    local L = ctx.lines
+    L[#L + 1] = ('%s (%d)'):format(label, #list)
+    ctx.marks[#L] = { { 0, #label, 'CartographSection' }, { #label, -1, 'CartographDim' } }
     for _, x in ipairs(list) do
-        local cross = x.node and from and x.node.file ~= from.file
-        lines[#lines + 1] = ('  %s %s%s'):format(
-            cross and '→' or '·',
-            x.name,
-            (cross and x.node) and ('   [' .. x.node.file .. ']') or '')
-        line_node[#lines] = x.id
-        line_dir[#lines]  = dir
+        L[#L + 1] = '  ' .. x.name
+        ctx.line_node[#L] = x.id
+        ctx.line_dir[#L]  = dir
+        if x.node and from and x.node.file ~= from.file then
+            ctx.virt[#L] = x.node.file
+        end
     end
 end
 
 ---@param id string?
 function M.render(id)
+    if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
     local node = store.node(id)
-    local lines, line_node, line_dir = {}, {}, {}
+    local ctx = { lines = {}, line_node = {}, line_dir = {}, marks = {}, virt = {} }
     if not node then
-        lines = { '(no selection)' }
+        ctx.lines[1] = '(no selection)'
+        ctx.marks[1] = { { 0, -1, 'CartographDim' } }
     else
-        lines[#lines + 1] = (node.kind == 'method' and ': ' or 'ƒ ') .. node.name
-        line_node[#lines] = false
-        lines[#lines + 1] = ''
-        line_node[#lines] = false
-        branch(lines, line_node, line_dir, 'uses',    'uses',   store.uses[id],   node)
-        lines[#lines + 1] = ''
-        line_node[#lines] = false
-        branch(lines, line_node, line_dir, 'used by', 'usedby', store.usedby[id], node)
+        local pre = node.kind == 'method' and ': ' or 'ƒ '
+        ctx.lines[1] = pre .. (node.name or '?')
+        ctx.marks[1] = { { 0, #pre, 'CartographDim' }, { #pre, -1, 'CartographTitle' } }
+        ctx.lines[2] = ''
+        branch(ctx, 'uses', 'uses', store.uses[id], node)
+        ctx.lines[#ctx.lines + 1] = ''
+        branch(ctx, 'used by', 'usedby', store.usedby[id], node)
     end
-    M.line_node = line_node
-    M.line_dir  = line_dir
+    M.line_node, M.line_dir = ctx.line_node, ctx.line_dir
+
     vim.bo[M.buf].modifiable = true
-    vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, lines)
+    vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
     vim.bo[M.buf].modifiable = false
+    vim.api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
+    for row, ms in pairs(ctx.marks) do
+        for _, m in ipairs(ms) do
+            local endc = m[2] >= 0 and m[2] or #ctx.lines[row]
+            pcall(vim.api.nvim_buf_set_extmark, M.buf, ns, row - 1, m[1],
+                { end_col = endc, hl_group = m[3] })
+        end
+    end
+    for row, file in pairs(ctx.virt) do
+        pcall(vim.api.nvim_buf_set_extmark, M.buf, ns, row - 1, 0,
+            { virt_text = { { file .. ' ', 'CartographDim' } }, virt_text_pos = 'right_align' })
+    end
 end
 
 return M

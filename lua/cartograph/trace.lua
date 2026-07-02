@@ -151,30 +151,31 @@ local function short(store, fn_id)
     return n and n.name or (fn_id and fn_id:match('::(.-)@') or 'top level')
 end
 
---- One-line description of an origin's value, for display.
-function M.describe(store, origin)
+--- Compact one-line description of an origin's value, for display. Returns
+--- (text, expandable, kind-class) — the class picks a highlight: 'lit' for
+--- answers, 'dim' for frontiers, nil for traceable values. The owning function
+--- is NOT in the text (the pane shows it as location virtual text).
+function M.describe(_store, origin)
     local v, k = origin.v, origin.v.k
     if k == 'lit' then
         local val = type(v.v) == 'string' and ("'" .. v.v .. "'") or tostring(v.v)
-        return 'literal ' .. val, false
+        return val, false, 'lit'
     end
-    if k == 'nil' then return 'literal nil', false end
-    if k == 'absent' then return 'not passed — parameter is nil here', false end
-    if k == 'param' then
-        return ('param #%d %s of %s'):format(v.i or 0, v.name or '?', short(store, origin.fn)), true
-    end
+    if k == 'nil' then return 'nil', false, 'lit' end
+    if k == 'absent' then return '(not passed — nil here)', false, 'dim' end
+    if k == 'param' then return ('param %s'):format(v.name or '?'), true end
     if k == 'local' then return ('local %s'):format(v.name or '?'), true end
     if k == 'def' then
-        local from = (v.use and #v.use > 0) and ('  <- ' .. table.concat(v.use, ', ')) or ''
-        return ('%s = ...%s'):format(v.name or '?', from), v.use and #v.use > 0
+        local from = (v.use and #v.use > 0) and ('  ← ' .. table.concat(v.use, ', ')) or ''
+        return ('%s = …%s'):format(v.name or '?', from), v.use and #v.use > 0
     end
-    if k == 'call' then return ('return of %s()'):format(v.callee or '?'), v.to ~= nil end
-    if k == 'field' then return ('field %s'):format(v.path or '?'), false end
-    if k == 'global' then return ('global %s'):format(v.name or '?'), false end
-    if k == 'table' then return 'table constructor', false end
-    if k == 'func' then return 'function value', false end
-    if k == 'vararg' then return '...', false end
-    return 'expression', false
+    if k == 'call' then return ('%s() →'):format(v.callee or '?'), v.to ~= nil end
+    if k == 'field' then return ('field %s'):format(v.path or '?'), false, 'dim' end
+    if k == 'global' then return ('global %s'):format(v.name or '?'), false, 'dim' end
+    if k == 'table' then return '{…} constructed here', false, 'dim' end
+    if k == 'func' then return 'function value', false, 'dim' end
+    if k == 'vararg' then return '...', false, 'dim' end
+    return 'expression', false, 'dim'
 end
 
 M.short = short

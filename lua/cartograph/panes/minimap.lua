@@ -117,8 +117,9 @@ function M.create()
     vim.bo[buf].filetype  = 'cartograph-minimap'
     M.buf = buf
     store.on_focus(function (id) M.render(id) end)
-    vim.keymap.set('n', '<Tab>',   function () M.cycle(1)  end, { buffer = buf, desc = 'cartograph: next minimap variant' })
-    vim.keymap.set('n', '<S-Tab>', function () M.cycle(-1) end, { buffer = buf, desc = 'cartograph: prev minimap variant' })
+    local keys = require('cartograph.config').keys
+    vim.keymap.set('n', keys.cycle,      function () M.cycle(1)  end, { buffer = buf, desc = 'cartograph: next minimap variant' })
+    vim.keymap.set('n', keys.cycle_back, function () M.cycle(-1) end, { buffer = buf, desc = 'cartograph: prev minimap variant' })
     return buf
 end
 

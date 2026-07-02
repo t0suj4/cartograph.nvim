@@ -9,11 +9,13 @@
 local M = {}
 
 ---@class cartograph.Config
+---@field keys table<string, string>?  remap any binding (see cartograph/config.lua)
 local defaults = {}
 
 ---@param opts cartograph.Config?
 function M.setup(opts)
     M.config = vim.tbl_deep_extend('force', defaults, opts or {})
+    require('cartograph.config').apply(opts)
 end
 
 --- Open the cockpit on a graph dump (neutral-schema JSON produced by the
@@ -59,17 +61,17 @@ function M.open(dump_path)
     symbols.attach(w_symbols)
     tree.attach(w_tree)
 
-    -- focus history, vim-jumplist style: <C-o>/<C-t> back, <C-i> forward. <C-t>
-    -- is the tag-stack idiom pairing <C-]>, and works in every pane; <C-i> only
-    -- where <Tab> (the same key in most terminals) isn't the lens cycle.
+    -- focus history, vim-jumplist style: back/back_alt everywhere, forward only
+    -- where the cycle key (<Tab> = <C-i> in most terminals) isn't the lens.
+    local keys = require('cartograph.config').keys
     for _, b in ipairs({ { symbols.buf, true }, { tree.buf, true }, { plan.buf, true },
                          { source.buf }, { source.buf_bot }, { minimap.buf } }) do
         local buf, fwd = b[1], b[2]
         if buf and vim.api.nvim_buf_is_valid(buf) then
-            vim.keymap.set('n', '<C-o>', store.back, { buffer = buf, desc = 'cartograph: back (previous pivot)' })
-            vim.keymap.set('n', '<C-t>', store.back, { buffer = buf, desc = 'cartograph: back (previous pivot)' })
+            vim.keymap.set('n', keys.back,     store.back, { buffer = buf, desc = 'cartograph: back (previous pivot)' })
+            vim.keymap.set('n', keys.back_alt, store.back, { buffer = buf, desc = 'cartograph: back (previous pivot)' })
             if fwd then
-                vim.keymap.set('n', '<C-i>', store.forward, { buffer = buf, desc = 'cartograph: forward' })
+                vim.keymap.set('n', keys.forward, store.forward, { buffer = buf, desc = 'cartograph: forward' })
             end
         end
     end

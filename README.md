@@ -40,6 +40,17 @@ A cockpit of independent panes over a shared state store:
 minimap), so you can toggle the concern colouring without leaving the source
 you're reading.
 
+### Configuration
+
+Every binding is remappable (defaults assume qwerty; dvorak/colemak users can
+rebind anything without touching pane code):
+
+```lua
+require('cartograph').setup {
+    keys = { jump = '<C-j>', back = '<C-h>' },  -- names in lua/cartograph/config.lua
+}
+```
+
 ### Navigation
 
 All standard vim idioms — no new keys to learn:

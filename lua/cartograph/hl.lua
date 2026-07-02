@@ -31,4 +31,16 @@ end
 --- Group name for a 0-based concern id (cycles through the palette).
 function M.concern(id) return M.CONCERN[(id % #M.CONCERN) + 1] end
 
+--- UI groups for the tree/trace panes. `default = true` links so a colorscheme
+--- (or the user) can override without fighting us. Idempotent.
+function M.ui()
+    local link = function (name, to) vim.api.nvim_set_hl(0, name, { link = to, default = true }) end
+    link('CartographTitle',    'Function')   -- the rooted node / trace subject
+    link('CartographSection',  'Title')      -- 'uses' / 'used by' headers
+    link('CartographDim',      'Comment')    -- locations, counts, frontier reasons
+    link('CartographLit',      'String')     -- literal values (trace answers)
+    link('CartographMarker',   'Special')    -- expand/collapse markers
+    link('CartographFrontier', 'WarningMsg') -- the ⊘ frontier marker
+end
+
 return M

@@ -4,44 +4,88 @@
 -- Frontiers that can't be traced statically (fields/globals, dynamic calls,
 -- varargs) stay visible with the reason, instead of silently vanishing.
 --
+-- Presentation: descriptions are compact (a literal is shown as itself — it IS
+-- the answer), locations are dim virtual text after the row, kinds are
+-- distinguished by highlight, not by longer words.
+--
 -- Borrows the tree pane's window while open; `q` gives it back.
 
-local store = require 'cartograph.store'
-local trace = require 'cartograph.trace'
+local store  = require 'cartograph.store'
+local trace  = require 'cartograph.trace'
+local hl     = require 'cartograph.hl'
+local config = require 'cartograph.config'
+
+local ns = vim.api.nvim_create_namespace('cartograph_trace')
 
 local M = { rows = {} } -- rows[i] = { origin, depth, open, note }
 
-local function set_lines(buf, lines)
-    vim.bo[buf].modifiable = true
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.bo[buf].modifiable = false
-end
+local HEADER = 2 -- title + blank, before the first row
 
-local HEADER = 2 -- title + rule, before the first row
+local MARK = {
+    open     = { '▾', 'CartographMarker' },
+    closed   = { '▸', 'CartographMarker' },
+    terminal = { '·', 'CartographLit' },
+    frontier = { '⊘', 'CartographFrontier' },
+}
 
 local function render()
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
-    local lines = {
-        ('trace: where does `%s` (param #%d of %s) come from?'):format(M.pname, M.pidx, M.fname),
-        '─────────────────────────────────────────────',
-    }
+    local lines, marks, virt = {}, {}, {}
+    local pre = 'origins of '
+    lines[1] = ('%s%s   (%s)'):format(pre, M.pname, M.fname)
+    marks[1] = { { 0, #pre, 'CartographDim' }, { #pre, #pre + #M.pname, 'CartographTitle' },
+                 { #pre + #M.pname, -1, 'CartographDim' } }
+    lines[2] = ''
+
     for _, r in ipairs(M.rows) do
-        local desc, expandable = trace.describe(store, r.origin)
-        local mark = r.note and '⊘' or (expandable and (r.open and '▾' or '▸') or '·')
-        local where = r.origin.site
-            and ('%s:%d'):format(r.origin.site.file, r.origin.site.line + 1) or ''
-        local infn = r.origin.fn and ('  (in %s)'):format(trace.short(store, r.origin.fn)) or ''
-        lines[#lines + 1] = ('%s%s %-38s %s%s'):format(
-            string.rep('  ', r.depth), mark, desc, where, infn)
+        local desc, expandable, class = trace.describe(store, r.origin)
+        local mark = r.note and MARK.frontier
+            or (expandable and (r.open and MARK.open or MARK.closed) or MARK.terminal)
+        local indent = string.rep('  ', r.depth)
+        lines[#lines + 1] = ('%s%s %s'):format(indent, mark[1], desc)
+        local mstart = #indent
+        local dstart = mstart + #mark[1] + 1
+        marks[#lines] = { { mstart, dstart, mark[2] } }
+        if class == 'lit' then
+            marks[#lines][#marks[#lines] + 1] = { dstart, -1, 'CartographLit' }
+        elseif class == 'dim' then
+            marks[#lines][#marks[#lines] + 1] = { dstart, -1, 'CartographDim' }
+        end
+        local s = r.origin.site
+        if s then
+            local loc = ('%s:%d'):format(s.file, s.line + 1)
+            local fn = r.origin.fn and trace.short(store, r.origin.fn)
+            virt[#lines] = fn and (loc .. ' · ' .. fn) or loc
+        end
         if r.note then
-            lines[#lines + 1] = ('%s   └ %s'):format(string.rep('  ', r.depth), r.note)
+            lines[#lines + 1] = ('%s   └ %s'):format(indent, r.note)
+            marks[#lines] = { { 0, -1, 'CartographDim' } }
         end
     end
     if #M.rows == 0 then
         lines[#lines + 1] = '(no resolved call sites)'
-        if M.note then lines[#lines + 1] = '└ ' .. M.note end
+        marks[#lines] = { { 0, -1, 'CartographDim' } }
+        if M.note then
+            lines[#lines + 1] = '└ ' .. M.note
+            marks[#lines] = { { 0, -1, 'CartographDim' } }
+        end
     end
-    set_lines(M.buf, lines)
+
+    vim.bo[M.buf].modifiable = true
+    vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, lines)
+    vim.bo[M.buf].modifiable = false
+    vim.api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
+    for row, ms in pairs(marks) do
+        for _, m in ipairs(ms) do
+            local endc = m[2] >= 0 and m[2] or #lines[row]
+            pcall(vim.api.nvim_buf_set_extmark, M.buf, ns, row - 1, m[1],
+                { end_col = endc, hl_group = m[3] })
+        end
+    end
+    for row, text in pairs(virt) do
+        pcall(vim.api.nvim_buf_set_extmark, M.buf, ns, row - 1, 0,
+            { virt_text = { { text, 'CartographDim' } }, virt_text_pos = 'eol' })
+    end
 end
 
 -- map a buffer line back to its row index (notes belong to the row above)
@@ -92,25 +136,27 @@ local function create()
     vim.bo[buf].bufhidden = 'wipe'
     vim.bo[buf].filetype  = 'cartograph-trace'
     M.buf = buf
+    hl.ui()
+    local keys = config.keys
     local function cur_row() return row_at(vim.api.nvim_win_get_cursor(0)[1]) end
-    vim.keymap.set('n', '<CR>', function ()
+    vim.keymap.set('n', keys.pivot, function ()
         local ri = cur_row()
         if ri then toggle(ri) end
     end, { buffer = buf, nowait = true, desc = 'cartograph: expand / collapse this origin' })
-    vim.keymap.set('n', 'gf', function ()
+    vim.keymap.set('n', keys.open_file, function ()
         local r = M.rows[cur_row() or -1]
         if not (r and r.origin.site) then return end
         vim.cmd('tab drop ' .. vim.fn.fnameescape(store.data.root .. '/' .. r.origin.site.file))
         pcall(vim.api.nvim_win_set_cursor, 0, { r.origin.site.line + 1, 0 })
     end, { buffer = buf, desc = 'cartograph: open the real file at this origin' })
-    vim.keymap.set('n', '<C-]>', function ()
+    vim.keymap.set('n', keys.jump, function ()
         local r = M.rows[cur_row() or -1]
         if r and r.origin.fn then store.pivot(r.origin.fn) end
     end, { buffer = buf, desc = 'cartograph: pivot the cockpit to this origin\'s function' })
-    vim.keymap.set('n', 'q', M.close, { buffer = buf, desc = 'cartograph: close the trace' })
-    vim.keymap.set('n', '<C-o>', store.back,    { buffer = buf, desc = 'cartograph: back' })
-    vim.keymap.set('n', '<C-t>', store.back,    { buffer = buf, desc = 'cartograph: back' })
-    vim.keymap.set('n', '<C-i>', store.forward, { buffer = buf, desc = 'cartograph: forward' })
+    vim.keymap.set('n', keys.close, M.close, { buffer = buf, desc = 'cartograph: close the trace' })
+    vim.keymap.set('n', keys.back,     store.back,    { buffer = buf, desc = 'cartograph: back' })
+    vim.keymap.set('n', keys.back_alt, store.back,    { buffer = buf, desc = 'cartograph: back' })
+    vim.keymap.set('n', keys.forward,  store.forward, { buffer = buf, desc = 'cartograph: forward' })
     return buf
 end
 

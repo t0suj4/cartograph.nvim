@@ -132,7 +132,8 @@ end
 -- call under the cursor (tags idiom), gf opens the real file. `which` picks the
 -- node the buffer renders (focused def on top, hovered context below).
 local function bind_nav(buf, which)
-    vim.keymap.set('n', '<C-]>', function ()
+    local keys = require('cartograph.config').keys
+    vim.keymap.set('n', keys.jump, function ()
         local node = which()
         if not node then return end
         local win = vim.api.nvim_get_current_win()
@@ -142,11 +143,11 @@ local function bind_nav(buf, which)
         if to then store.pivot(to)
         else vim.notify('cartograph: no known callee under the cursor', vim.log.levels.INFO) end
     end, { buffer = buf, desc = 'cartograph: jump to the definition under the cursor' })
-    vim.keymap.set('n', 'gf', function () goto_real(vim.api.nvim_get_current_win(), which()) end,
+    vim.keymap.set('n', keys.open_file, function () goto_real(vim.api.nvim_get_current_win(), which()) end,
         { buffer = buf, desc = 'cartograph: open the real file here' })
-    -- gr: trace where the parameter under the cursor comes from ("references"
+    -- trace where the parameter under the cursor comes from ("references"
     -- flavoured — the places that feed this value)
-    vim.keymap.set('n', 'gr', function ()
+    vim.keymap.set('n', keys.trace, function ()
         local node = which()
         if not node then return end
         local cword = vim.fn.expand '<cword>'
@@ -164,9 +165,10 @@ end
 -- pane (not only the minimap) so toggling the concern colouring doesn't require
 -- leaving the source you're looking at.
 local function bind_cycle(buf)
-    vim.keymap.set('n', '<Tab>',   function () require('cartograph.panes.minimap').cycle(1) end,
+    local keys = require('cartograph.config').keys
+    vim.keymap.set('n', keys.cycle, function () require('cartograph.panes.minimap').cycle(1) end,
         { buffer = buf, desc = 'cartograph: cycle view / lens' })
-    vim.keymap.set('n', '<S-Tab>', function () require('cartograph.panes.minimap').cycle(-1) end,
+    vim.keymap.set('n', keys.cycle_back, function () require('cartograph.panes.minimap').cycle(-1) end,
         { buffer = buf, desc = 'cartograph: cycle view / lens (back)' })
 end
 
