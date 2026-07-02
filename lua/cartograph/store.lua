@@ -56,7 +56,8 @@ function M.ingest(data)
     M.usedby = {} -- id -> { from_id, ... } (functions that reference this one)
     M.occ    = {} -- "from\31to" -> { {start,end}, ... }  reference sites in `from`
     M.edge_inferred = {} -- "from\31to" -> true (resolved by unique name, not vm)
-    M.imports_in = {} -- file -> { {from=file, sideeffect=bool}, ... }  inbound requires
+    M.imports_in  = {} -- file -> { {from=file, sideeffect=bool}, ... }  inbound requires
+    M.imports_out = {} -- file -> { file, ... }  outbound requires (include tree)
     for _, e in ipairs(M.data.edges or {}) do
         if e.kind == 'ref' then
             M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
@@ -66,6 +67,8 @@ function M.ingest(data)
         elseif e.kind == 'import' then
             M.imports_in[e.to] = M.imports_in[e.to] or {}
             table.insert(M.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
+            M.imports_out[e.from] = M.imports_out[e.from] or {}
+            table.insert(M.imports_out[e.from], e.to)
         end
     end
     return M.data

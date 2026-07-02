@@ -35,6 +35,7 @@ local SIGN = {
 
 local M = {
     view = { level = 'files', file = nil, fn = nil },
+    files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
 }
 
@@ -69,14 +70,45 @@ local function shown_defs(file)
     return defs
 end
 
+local function file_row(ctx, file, depth, dim)
+    local indent = string.rep('  ', depth or 0)
+    ctx.lines[#ctx.lines + 1] = ('%s%s  (%d)%s'):format(indent, file, #shown_defs(file), dim and ' …' or '')
+    ctx.marks[#ctx.lines] = dim and { { 0, -1, 'CartographDim' } }
+        or { { #indent, #indent + #file, 'CartographSection' }, { #indent + #file, -1, 'CartographDim' } }
+    ctx.line_file[#ctx.lines] = file
+    local sign = SIGN[store.classify(file)]
+    if sign then ctx.signs[#ctx.signs + 1] = { row = #ctx.lines - 1, sign = sign } end
+end
+
 local function render_files(ctx)
     for _, file in ipairs(store.files) do
-        local defs = shown_defs(file)
-        ctx.lines[#ctx.lines + 1] = ('%s  (%d)'):format(file, #defs)
-        ctx.marks[#ctx.lines] = { { 0, #file, 'CartographSection' }, { #file, -1, 'CartographDim' } }
-        ctx.line_file[#ctx.lines] = file
-        local sign = SIGN[store.classify(file)]
-        if sign then ctx.signs[#ctx.signs + 1] = { row = #ctx.lines - 1, sign = sign } end
+        file_row(ctx, file, 0)
+    end
+end
+
+-- Include tree: files organized by who requires whom. Roots are the files
+-- nothing requires (entry points / orphans); a file already shown appears dim
+-- with `…` and is not expanded again (which also makes require-cycles safe).
+local function render_files_tree(ctx)
+    local shown = {}
+    local function add(file, depth)
+        if shown[file] then
+            file_row(ctx, file, depth, true)
+            return
+        end
+        shown[file] = true
+        file_row(ctx, file, depth)
+        local kids = {}
+        for _, k in ipairs(store.imports_out[file] or {}) do kids[#kids + 1] = k end
+        table.sort(kids)
+        for _, k in ipairs(kids) do add(k, depth + 1) end
+    end
+    for _, f in ipairs(store.files) do
+        if not (store.imports_in[f] and #store.imports_in[f] > 0) then add(f, 0) end
+    end
+    -- anything left is only reachable through a cycle: show it as a root too
+    for _, f in ipairs(store.files) do
+        if not shown[f] then add(f, 0) end
     end
 end
 
@@ -135,7 +167,8 @@ function M.render()
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {} }
     local v = M.view
-    if v.level == 'files' then render_files(ctx)
+    if v.level == 'files' then
+        if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
     elseif v.level == 'file' then render_file(ctx, v.file)
     else render_fn(ctx, v.fn) end
 
@@ -371,14 +404,32 @@ function M.attach(win)
         elseif M.view.level == 'file' then
             local from = M.view.file
             M.show('files')
-            for r, f in pairs(M.line_file) do
-                if f == from then
+            -- numeric scan: in tree mode a file can appear twice; land on the
+            -- first (expanded) occurrence, deterministically
+            for r = 1, vim.api.nvim_buf_line_count(M.buf) do
+                if M.line_file[r] == from then
                     pcall(vim.api.nvim_win_set_cursor, win, { r, 0 })
                     break
                 end
             end
         end
     end, { buffer = M.buf, desc = 'cartograph: ascend (to file / to file tree)' })
+
+    -- <Tab> at the files level: flat list <-> include tree (who requires whom).
+    -- Note this shadows <C-i>-forward here (terminals conflate Tab/C-i), the
+    -- same trade the source pane makes for the lens.
+    vim.keymap.set('n', keys.cycle, function ()
+        if M.view.level ~= 'files' then return end
+        local under = M.line_file[row()]
+        M.files_mode = M.files_mode == 'tree' and 'flat' or 'tree'
+        M.show('files')
+        for r = 1, vim.api.nvim_buf_line_count(M.buf) do
+            if M.line_file[r] == under then
+                pcall(vim.api.nvim_win_set_cursor, win, { r, 0 })
+                break
+            end
+        end
+    end, { buffer = M.buf, desc = 'cartograph: toggle file view (flat / include tree)' })
 
     -- staging as cut & paste: dd cuts a function into the move-set, visual d
     -- cuts a selection, p pastes at the file under the cursor (= destination),

@@ -60,9 +60,10 @@ function M.open(dump_path)
     tree.attach(w_tree)
 
     -- focus history, vim-jumplist style: back/back_alt everywhere, forward only
-    -- where the cycle key (<Tab> = <C-i> in most terminals) isn't the lens.
+    -- where the cycle key (<Tab> = <C-i> in most terminals) isn't taken —
+    -- symbols now uses <Tab> for the file-view toggle, source for the lens.
     local keys = require('cartograph.config').keys
-    for _, b in ipairs({ { symbols.buf, true }, { tree.buf, true }, { plan.buf, true },
+    for _, b in ipairs({ { symbols.buf }, { tree.buf, true }, { plan.buf, true },
                          { source.buf }, { source.buf_bot } }) do
         local buf, fwd = b[1], b[2]
         if buf and vim.api.nvim_buf_is_valid(buf) then

@@ -25,7 +25,10 @@ A cockpit of independent panes over a shared state store:
 - **symbols** — a zoomable *altitude browser*: `l` (or `<CR>`) descends, `h`
   ascends — sideways is free in a linear list, so it becomes altitude.
   Top level is the **file tree** (one row per file, with usage-classification
-  gutter signs); a file opens into **all its definitions** in source order —
+  gutter signs), and `<Tab>` toggles it between the flat list and the
+  **include tree** — files nested under whoever requires them, roots being
+  the entry points nothing requires; a file already shown appears dim with
+  `…` instead of expanding again (require-cycle safe); a file opens into **all its definitions** in source order —
   functions, methods, *and* module-level vars/fields, so the whole file is
   navigable; a function opens into its **statement-level locals** (from the
   data flow), where hovering a row highlights the real line in the source
