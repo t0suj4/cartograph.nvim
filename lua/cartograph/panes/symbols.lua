@@ -14,9 +14,11 @@ local store  = require 'cartograph.store'
 local heat   = require 'cartograph.heat'
 local config = require 'cartograph.config'
 
-local SHOW_L2   = { ['function'] = true, method = true, var = true }
+-- file level shows functions and BLOCKS (runs of top-level statements rolled
+-- up under their first line); the individual vars live one level down
+local SHOW_L2   = { ['function'] = true, method = true, block = true }
 local STAGEABLE = { ['function'] = true, method = true }
-local ICON      = { ['function'] = 'ƒ', method = ':', var = '·' }
+local ICON      = { ['function'] = 'ƒ', method = ':', var = '·', block = '≡' }
 
 local ns       = vim.api.nvim_create_namespace('cartograph_symbols_dep')
 local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
@@ -139,6 +141,28 @@ local function render_file(ctx, file)
     end
 end
 
+-- Inside a block: its declarations (the var nodes within the block's range).
+local function render_block(ctx, id)
+    local node = store.node(id)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    ctx.lines[1] = ('≡ %s'):format(node.name or '?')
+    ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
+    local s, e = node.range.start.line, node.range['end'].line
+    for _, n in ipairs(store.by_file[node.file] or {}) do
+        if n.kind == 'var' and n.range.start.line >= s and n.range.start.line <= e then
+            ctx.lines[#ctx.lines + 1] = ('  · %s'):format(n.name or '?')
+            ctx.marks[#ctx.lines] = { { 2, 3, 'CartographDim' } }
+            ctx.vnums[#ctx.lines] = tostring(n.range.start.line + 1)
+            ctx.line_node[#ctx.lines] = n.id
+            ctx.node_line[n.id]       = #ctx.lines
+        end
+    end
+    if #ctx.lines == 1 then
+        ctx.lines[2] = '  (no declarations — calls / control flow only)'
+        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+    end
+end
+
 local function render_fn(ctx, id)
     local node = store.node(id)
     if not node then ctx.lines[1] = '(gone)'; return end
@@ -179,6 +203,7 @@ function M.render()
     if v.level == 'files' then
         if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
     elseif v.level == 'file' then render_file(ctx, v.file)
+    elseif v.level == 'block' then render_block(ctx, v.block)
     else render_fn(ctx, v.fn) end
 
     M.line_node, M.node_line = ctx.line_node, ctx.node_line
@@ -212,7 +237,8 @@ end
 function M.show(level, ctx_val)
     M.view.level = level
     if level == 'file' then M.view.file = ctx_val
-    elseif level == 'fn' then M.view.fn = ctx_val end
+    elseif level == 'fn' then M.view.fn = ctx_val
+    elseif level == 'block' then M.view.block = ctx_val end
     M.render()
     if M.win and vim.api.nvim_win_is_valid(M.win) then
         local first = 1
@@ -352,7 +378,7 @@ function M.attach(win)
             vim.defer_fn(function ()
                 if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
                 local r = row()
-                if M.view.level == 'file' then
+                if M.view.level == 'file' or M.view.level == 'block' then
                     local id = M.line_node[r]
                     if id then store.set_focus(id) end
                 elseif M.view.level == 'fn' then
@@ -393,6 +419,9 @@ function M.attach(win)
             if n and STAGEABLE[n.kind] then
                 store.set_focus(n.id)
                 M.show('fn', n.id)
+            elseif n and n.kind == 'block' then
+                store.set_focus(n.id) -- source pane shows the block's span
+                M.show('block', n.id)
             end
         end
     end
@@ -403,9 +432,9 @@ function M.attach(win)
     -- ascending lands the cursor ON what we came from (the file-manager rule),
     -- not on the first row of the wider view
     vim.keymap.set('n', keys.ascend, function ()
-        if M.view.level == 'fn' then
+        if M.view.level == 'fn' or M.view.level == 'block' then
             store.set_highlight(nil)
-            local id = M.view.fn
+            local id = M.view.level == 'fn' and M.view.fn or M.view.block
             local n = store.node(id)
             M.show('file', n and n.file or M.view.file)
             local r = M.node_line[id]
