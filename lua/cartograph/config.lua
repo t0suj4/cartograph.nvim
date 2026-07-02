@@ -29,9 +29,23 @@ M.keys = {
     unstage    = 'u',
 }
 
+-- Entry points: files EXPECTED to have no inbound require (a runtime loads
+-- them directly). They classify as 'entry' (▶) instead of 'orphan' (○ — the
+-- warning), and sort first among the include tree's roots. Lua patterns,
+-- matched against the workspace-relative path; defaults cover the Factorio
+-- lifecycle plus the common generic mains. Override the whole list via
+-- setup{ entrypoints = {...} }.
+M.entrypoints = {
+    'control%.lua$', 'data%.lua$', 'settings%.lua$',
+    'data%-updates%.lua$', 'data%-final%-fixes%.lua$',
+    'settings%-updates%.lua$', 'settings%-final%-fixes%.lua$',
+    'main%.lua$',
+}
+
 --- Merge user options (called from cartograph.setup).
 function M.apply(opts)
     for k, v in pairs((opts or {}).keys or {}) do M.keys[k] = v end
+    if (opts or {}).entrypoints then M.entrypoints = opts.entrypoints end
 end
 
 return M

@@ -27,7 +27,8 @@ local ns_ui    = vim.api.nvim_create_namespace('cartograph_symbols_ui')
 -- File-usage markers, shown in the gutter on file rows.
 --   ○ orphan (no inbound)   ⚠ unused import (pure module)   ↻ side-effect
 local SIGN = {
-    orphan     = { text = '○ ', hl = 'DiagnosticWarn' },
+    entry      = { text = '▶ ', hl = 'DiagnosticOk' },   -- runtime-loaded root, by design
+    orphan     = { text = '○ ', hl = 'DiagnosticWarn' }, -- nothing loads it, NOT an entry point
     deadimport = { text = '⚠ ', hl = 'DiagnosticWarn' },
     sideeffect = { text = '↻ ', hl = 'Comment' },
     -- 'value' and 'used' are genuinely used → no marker (keeps the list quiet)
@@ -103,9 +104,17 @@ local function render_files_tree(ctx)
         table.sort(kids)
         for _, k in ipairs(kids) do add(k, depth + 1) end
     end
+    -- entry points first among the roots, then the accidental ones
+    local roots = {}
     for _, f in ipairs(store.files) do
-        if not (store.imports_in[f] and #store.imports_in[f] > 0) then add(f, 0) end
+        if not (store.imports_in[f] and #store.imports_in[f] > 0) then roots[#roots + 1] = f end
     end
+    table.sort(roots, function (a, b)
+        local ea, eb = store.is_entrypoint(a), store.is_entrypoint(b)
+        if ea ~= eb then return ea end
+        return a < b
+    end)
+    for _, f in ipairs(roots) do add(f, 0) end
     -- anything left is only reachable through a cycle: show it as a root too
     for _, f in ipairs(store.files) do
         if not shown[f] then add(f, 0) end

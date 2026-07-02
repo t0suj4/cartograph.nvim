@@ -82,12 +82,31 @@ end
 ---   'sideeffect' discarded require(s) only, and the module has load-time effects
 ---   'deadimport' discarded require(s) only, but the module is pure → the require
 ---                is pointless (real dead code, not a benign side-effect load)
----   'orphan'     nothing imports or references it (incl. entry points)
-function M.classify(file)
-    for _, n in ipairs(M.by_file[file] or {}) do
-        if M.usedby[n.id] and #M.usedby[n.id] > 0 then return 'used' end
+---   'entry'      nothing imports it, but it matches a configured entry-point
+---                pattern — a root the runtime loads directly, not dead
+---   'orphan'     nothing imports or references it, and it is NOT an entry point
+function M.is_entrypoint(file)
+    for _, pat in ipairs(require('cartograph.config').entrypoints) do
+        if file:match(pat) then return true end
     end
+    return false
+end
+
+function M.classify(file)
+    -- entry first: an unimported file matching an entry-point pattern is a
+    -- runtime-loaded root, and that's its salient fact even when its globals
+    -- are also referenced cross-file (control.lua defines AND exports).
     local ins = M.imports_in[file]
+    if (not ins or #ins == 0) and M.is_entrypoint(file) then return 'entry' end
+    -- 'used' = a symbol referenced from ANOTHER file (the no-require global
+    -- access pattern). Intra-file calls say nothing about how the project
+    -- loads this file, so they don't count.
+    for _, n in ipairs(M.by_file[file] or {}) do
+        for _, from in ipairs(M.usedby[n.id] or {}) do
+            local fn = M.by_id[from]
+            if fn and fn.file ~= file then return 'used' end
+        end
+    end
     if not ins or #ins == 0 then return 'orphan' end
     for _, imp in ipairs(ins) do
         if not imp.sideeffect then return 'value' end

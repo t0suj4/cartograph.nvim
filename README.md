@@ -28,7 +28,12 @@ A cockpit of independent panes over a shared state store:
   gutter signs), and `<Tab>` toggles it between the flat list and the
   **include tree** — files nested under whoever requires them, roots being
   the entry points nothing requires; a file already shown appears dim with
-  `…` instead of expanding again (require-cycle safe); a file opens into **all its definitions** in source order —
+  `…` instead of expanding again (require-cycle safe). **Entry points** are
+  first-class: files matching `setup{ entrypoints = {...} }` patterns
+  (defaults cover the Factorio lifecycle — `control.lua`, `data.lua`,
+  `settings.lua`, the `-updates`/`-final-fixes` variants — plus `main.lua`)
+  get a `▶` sign instead of the `○` orphan warning, and sort first among
+  the tree's roots; a file opens into **all its definitions** in source order —
   functions, methods, *and* module-level vars/fields, so the whole file is
   navigable; a function opens into its **statement-level locals** (from the
   data flow), where hovering a row highlights the real line in the source

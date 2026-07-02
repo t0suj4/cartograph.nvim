@@ -29,6 +29,19 @@ test('classify: orphan when nothing imports or references it', function ()
     eq('orphan', store.classify('a.lua'))
 end)
 
+test('classify: entry when unimported but a configured entry point', function ()
+    graph({ mod('control.lua', false), fn('control.lua', 'f'),
+            mod('scen/control.lua', false), fn('scen/control.lua', 'g') })
+    eq('entry', store.classify('control.lua'))
+    eq('entry', store.classify('scen/control.lua')) -- pattern matches the basename
+end)
+
+test('classify: an imported entry point is just a normal module', function ()
+    graph({ mod('control.lua', false), fn('control.lua', 'f'), mod('b.lua', false) },
+          { import('b.lua', 'control.lua', false) })
+    eq('value', store.classify('control.lua'))
+end)
+
 test('classify: used when a symbol is referenced', function ()
     graph({ mod('a.lua', false), fn('a.lua', 'f'), mod('b.lua', false), fn('b.lua', 'g') },
           { ref('b.lua::g', 'a.lua::f') })
