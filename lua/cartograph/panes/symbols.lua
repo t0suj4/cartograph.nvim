@@ -177,6 +177,26 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
     end
 end
 
+-- A table var's members: nodes named `T.x` / `T:y` anywhere in the file,
+-- plus functions defined INSIDE the constructor span (callback tables).
+local function table_members(id)
+    local node = store.node(id)
+    if not node or not node.name then return {} end
+    local p1, p2 = node.name .. '.', node.name .. ':'
+    local s, e = node.range.start.line, node.range['end'].line
+    local out = {}
+    for _, n in ipairs(store.by_file[node.file] or {}) do
+        if n.id ~= id and n.kind ~= 'block' and n.kind ~= 'module' then
+            local named = n.name and (n.name:sub(1, #p1) == p1 or n.name:sub(1, #p2) == p2)
+            local inside = n.kind ~= 'var'
+                and n.range.start.line >= s and n.range['end'].line <= e
+            if named or inside then out[#out + 1] = n end
+        end
+    end
+    table.sort(out, function (a, b) return a.range.start.line < b.range.start.line end)
+    return out
+end
+
 -- A var's usage sites: every function that reads it.
 local function render_var(ctx, id)
     local node = store.node(id)
@@ -209,6 +229,31 @@ local function render_callers(ctx, id)
     end
     render_sites(ctx, node, ICON[node.kind] or 'ƒ', 'callers', sites,
         '(no callers found — entry point, or dynamically dispatched)')
+end
+
+-- Inside a TABLE var: its members (methods, fields, callback functions),
+-- with the usage-sites view one row away.
+local function render_tbl(ctx, id)
+    local node = store.node(id)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    ctx.lines[1] = ('· %s'):format(node.name or '?')
+    ctx.marks[1] = { { 0, 1, 'CartographDim' }, { 1, -1, 'CartographTitle' } }
+    local nsites = 0
+    for _, u in ipairs(store.var_usedby[id] or {}) do nsites = nsites + #u.at end
+    ctx.lines[2] = ('↖ used by (%d)'):format(nsites)
+    ctx.marks[2] = { { 0, -1, 'CartographSection' } }
+    ctx.line_callers[2] = id
+    for _, n in ipairs(table_members(id)) do
+        local icon = ICON[n.kind] or '?'
+        local name = n.name or '?'
+        local pref = node.name and name:sub(1, #node.name) == node.name
+        if pref then name = name:sub(#node.name + 1) end -- .foo / :bar
+        ctx.lines[#ctx.lines + 1] = ('  %s %s'):format(icon, name)
+        ctx.marks[#ctx.lines] = { { 2, 2 + #icon, 'CartographDim' } }
+        ctx.vnums[#ctx.lines] = tostring(n.range.start.line + 1)
+        ctx.line_node[#ctx.lines] = n.id
+        ctx.node_line[n.id]       = #ctx.lines
+    end
 end
 
 -- Inside a block: its declarations (the var nodes within the block's range).
@@ -337,6 +382,7 @@ function M.render()
     elseif v.level == 'file' then render_file(ctx, v.file)
     elseif v.level == 'block' then render_block(ctx, v.block)
     elseif v.level == 'var' then render_var(ctx, v.var)
+    elseif v.level == 'tbl' then render_tbl(ctx, v.tbl)
     elseif v.level == 'callers' then render_callers(ctx, v.callers)
     else render_fn(ctx, v.fn) end
 
@@ -377,6 +423,7 @@ function M.show(level, ctx_val)
         elseif level == 'fn' then M.view.fn = ctx_val
         elseif level == 'block' then M.view.block = ctx_val
         elseif level == 'var' then M.view.var = ctx_val
+        elseif level == 'tbl' then M.view.tbl = ctx_val
         elseif level == 'callers' then M.view.callers = ctx_val end
     end
     M.render()
@@ -521,7 +568,8 @@ function M.attach(win)
             vim.defer_fn(function ()
                 if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
                 local r = row()
-                if M.view.level == 'file' or M.view.level == 'block' then
+                if M.view.level == 'file' or M.view.level == 'block'
+                    or M.view.level == 'tbl' then
                     -- hover TINTS relationships and PREVIEWS the row in the
                     -- source pane (context takeover, restored on leave); it
                     -- never re-roots the cockpit (pivoting stays a conscious
@@ -580,6 +628,11 @@ function M.attach(win)
     -- Descend into (level, ctxval): if that's exactly the place the last h
     -- left, restore it (cursor row and all); a different descend branches,
     -- which invalidates the forward memory — the two-stack h/l pair.
+    -- a var with members is a TABLE: descend shows them; a scalar shows sites
+    local function enter_var(id)
+        if #table_members(id) > 0 then return 'tbl' end
+        return 'var'
+    end
     local function enter(level, ctxval, pivot_id)
         push_trail()
         if pivot_id then browser_pivot(pivot_id) end
@@ -683,7 +736,7 @@ function M.attach(win)
         for _, v in ipairs(M.line_vars[r] or {}) do
             for seg in (v.name or ''):gmatch('[%w_]+') do
                 if seg == word then
-                    return enter('var', v.id, v.id)
+                    return enter(enter_var(v.id), v.id, v.id)
                 end
             end
         end
@@ -711,13 +764,23 @@ function M.attach(win)
         elseif M.view.level == 'block' then
             local n = store.node(M.line_node[r])
             if n and n.kind == 'var' then
-                enter('var', n.id, n.id)
+                enter(enter_var(n.id), n.id, n.id)
             end
         elseif M.view.level == 'var' or M.view.level == 'callers' then
             local s = M.line_site[r]
             if s and store.node(s.fn) then
                 store.set_context(nil)
                 enter('fn', s.fn, s.fn)
+            end
+        elseif M.view.level == 'tbl' then
+            if M.line_callers[r] then
+                return enter('var', M.line_callers[r])
+            end
+            local n = store.node(M.line_node[r])
+            if n and STAGEABLE[n.kind] then
+                enter('fn', n.id, n.id)
+            elseif n and n.kind == 'var' then
+                enter(enter_var(n.id), n.id, n.id)
             end
         elseif M.view.level == 'fn' then
             if M.line_callers[r] then
@@ -759,9 +822,11 @@ function M.attach(win)
             store.set_context(nil)
             M.show('fn', M.view.callers)
             pcall(vim.api.nvim_win_set_cursor, win, { 2, 0 })
-        elseif M.view.level == 'fn' or M.view.level == 'block' then
+        elseif M.view.level == 'fn' or M.view.level == 'block'
+            or M.view.level == 'tbl' then
             store.set_highlight(nil)
-            local id = M.view.level == 'fn' and M.view.fn or M.view.block
+            local id = (M.view.level == 'fn' and M.view.fn)
+                or (M.view.level == 'block' and M.view.block) or M.view.tbl
             local n = store.node(id)
             M.show('file', n and n.file or M.view.file)
             local r = M.node_line[id]
