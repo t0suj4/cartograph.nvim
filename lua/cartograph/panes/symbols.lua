@@ -42,7 +42,8 @@ local M = {
     files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {},
-    trail = {}, -- descent trail: l pushes where you were, h pops (journey-back)
+    trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
+    fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
 
 -- Relationship tints: dependencies (things the focus uses) in green, dependents
@@ -532,14 +533,31 @@ function M.attach(win)
         store.pivot(id)
         M._own_pivot = false
     end
+    -- Descend into (level, ctxval): if that's exactly the place the last h
+    -- left, restore it (cursor row and all); a different descend branches,
+    -- which invalidates the forward memory — the two-stack h/l pair.
+    local function enter(level, ctxval, pivot_id)
+        push_trail()
+        if pivot_id then browser_pivot(pivot_id) end
+        local top = M.fwd_trail[#M.fwd_trail]
+        if top and top.level == level and top[level] == ctxval then
+            table.remove(M.fwd_trail)
+            restore_loc(top)
+        else
+            M.fwd_trail = {}
+            M.show(level, ctxval)
+        end
+    end
     store.loc_provider = {
         get = function ()
             local l = view_loc()
             l.trail = vim.list_extend({}, M.trail)
+            l.fwd_trail = vim.list_extend({}, M.fwd_trail)
             return l
         end,
         set = function (loc)
             M.trail = loc.trail and vim.list_extend({}, loc.trail) or {}
+            M.fwd_trail = loc.fwd_trail and vim.list_extend({}, loc.fwd_trail) or {}
             restore_loc(loc)
         end,
     }
@@ -550,11 +568,11 @@ function M.attach(win)
         -- EXTERNAL pivot (source <C-]>) starts a fresh journey, so the trail
         -- clears — h ascends structurally from there
         if n and M.view.level == 'fn' and STAGEABLE[n.kind] and M.view.fn ~= id then
-            if not M._own_pivot then M.trail = {} end
+            if not M._own_pivot then M.trail, M.fwd_trail = {}, {} end
             M.show('fn', id)
         elseif n and (M.view.level == 'file' or M.view.level == 'files')
             and not M.node_line[id] and n.file ~= M.view.file then
-            if not M._own_pivot then M.trail = {} end
+            if not M._own_pivot then M.trail, M.fwd_trail = {}, {} end
             M.show('file', n.file)
         end
         local ln = M.node_line[id]
@@ -589,9 +607,7 @@ function M.attach(win)
         -- 1. a callee named under the cursor: follow the call
         for _, c in ipairs(M.line_calls[r] or {}) do
             if c.callee == word and c.to and store.node(c.to) then
-                push_trail()
-                browser_pivot(c.to)
-                return M.show('fn', c.to)
+                return enter('fn', c.to, c.to)
             end
         end
         -- 2. a parameter: where does it come from? (the origin trace)
@@ -625,49 +641,35 @@ function M.attach(win)
             if c.to and store.node(c.to) then sole = (sole == nil) and c or false end
         end
         if sole and sole ~= false then
-            push_trail()
-            browser_pivot(sole.to)
-            M.show('fn', sole.to)
+            enter('fn', sole.to, sole.to)
         end
     end
     local function descend()
         local r = row()
         if M.view.level == 'files' then
             local f = M.line_file[r]
-            if f then
-                push_trail()
-                M.show('file', f)
-            end
+            if f then enter('file', f) end
         elseif M.view.level == 'file' then
             local n = store.node(M.line_node[r])
             if n and STAGEABLE[n.kind] then
-                push_trail()
-                browser_pivot(n.id)
-                M.show('fn', n.id)
+                enter('fn', n.id, n.id)
             elseif n and n.kind == 'block' then
-                push_trail()
-                browser_pivot(n.id) -- source pane shows the block's span
-                M.show('block', n.id)
+                enter('block', n.id, n.id) -- source pane shows the block's span
             end
         elseif M.view.level == 'block' then
             local n = store.node(M.line_node[r])
             if n and n.kind == 'var' then
-                push_trail()
-                browser_pivot(n.id)
-                M.show('var', n.id)
+                enter('var', n.id, n.id)
             end
         elseif M.view.level == 'var' or M.view.level == 'callers' then
             local s = M.line_site[r]
             if s and store.node(s.fn) then
-                push_trail()
                 store.set_context(nil)
-                browser_pivot(s.fn)
-                M.show('fn', s.fn)
+                enter('fn', s.fn, s.fn)
             end
         elseif M.view.level == 'fn' then
             if M.line_callers[r] then
-                push_trail()
-                return M.show('callers', M.line_callers[r])
+                return enter('callers', M.line_callers[r])
             end
             descend_fn_row(r)
         end
@@ -684,6 +686,9 @@ function M.attach(win)
     -- ascending lands the cursor ON what we came from (the file-manager rule),
     -- not on the first row of the wider view
     vim.keymap.set('n', keys.ascend, function ()
+        if #M.trail == 0 and M.view.level == 'files' then return end
+        -- remember exactly where we left, so l can return there (row and all)
+        M.fwd_trail[#M.fwd_trail + 1] = view_loc()
         -- journey-back: return the way you came (l pushed it); structural
         -- ascent is the fallback for places you jumped into
         if #M.trail > 0 then

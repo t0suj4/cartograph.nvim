@@ -103,10 +103,14 @@ All standard vim idioms — no new keys to learn:
   browser's location — level, file, cursor row — so `<C-o>` puts you back
   *where you were standing*, mid-exploration, not merely on the symbol you
   had focused.
-- **`h` returns the way you came.** Descending keeps a trail: entering a
-  caller from the callers list, `h` goes back to that list (on the row you
-  left), not to the caller's file. Structural ascent (fn → file → files) is
-  the fallback for places you *jumped* into (`<C-]>` starts a fresh journey).
+- **`h` returns the way you came — and `l` returns the way you left.**
+  Descending keeps a trail: entering a caller from the callers list, `h`
+  goes back to that list (on the row you left), not to the caller's file.
+  And `h` remembers where it came *from*: leave a function body at row 7,
+  and `l` on that function drops you back on row 7 — bounce `h`/`l` freely
+  without losing your place. Descending somewhere *else* branches, which
+  clears the forward memory. Structural ascent (fn → file → files) is the
+  fallback for places you *jumped* into (`<C-]>` starts a fresh journey).
 
 ### Tracing a parameter
 
