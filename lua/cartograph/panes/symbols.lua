@@ -42,6 +42,7 @@ local M = {
     files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {},
+    trail = {}, -- descent trail: l pushes where you were, h pops (journey-back)
 }
 
 -- Relationship tints: dependencies (things the focus uses) in green, dependents
@@ -510,30 +511,50 @@ function M.attach(win)
     -- location history: each pivot snapshots the browser's place, so <C-o>
     -- restores WHERE you were (level, file, cursor row), not just what was
     -- focused
+    local function view_loc()
+        return { level = M.view.level, file = M.view.file, fn = M.view.fn,
+            block = M.view.block, var = M.view.var, callers = M.view.callers,
+            files_mode = M.files_mode,
+            row = (M.win and vim.api.nvim_win_is_valid(M.win))
+                and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
+    end
+    local function restore_loc(loc)
+        M.files_mode = loc.files_mode or M.files_mode
+        M.view.file, M.view.fn, M.view.block, M.view.var, M.view.callers =
+            loc.file, loc.fn, loc.block, loc.var, loc.callers
+        M.show(loc.level)
+        if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
+    end
+    local function push_trail() M.trail[#M.trail + 1] = view_loc() end
+    -- browser-initiated pivots must not clear the trail (see on_focus)
+    local function browser_pivot(id)
+        M._own_pivot = true
+        store.pivot(id)
+        M._own_pivot = false
+    end
     store.loc_provider = {
         get = function ()
-            return { level = M.view.level, file = M.view.file, fn = M.view.fn,
-                block = M.view.block, var = M.view.var, callers = M.view.callers,
-                files_mode = M.files_mode,
-                row = (M.win and vim.api.nvim_win_is_valid(M.win))
-                    and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
+            local l = view_loc()
+            l.trail = vim.list_extend({}, M.trail)
+            return l
         end,
         set = function (loc)
-            M.files_mode = loc.files_mode or M.files_mode
-            M.view.file, M.view.fn, M.view.block, M.view.var, M.view.callers =
-                loc.file, loc.fn, loc.block, loc.var, loc.callers
-            M.show(loc.level)
-            if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
+            M.trail = loc.trail and vim.list_extend({}, loc.trail) or {}
+            restore_loc(loc)
         end,
     }
 
     store.on_focus(function (id)
         local n = store.node(id)
-        -- conscious pivots re-scope the browser to where they landed
+        -- conscious pivots re-scope the browser to where they landed; an
+        -- EXTERNAL pivot (source <C-]>) starts a fresh journey, so the trail
+        -- clears — h ascends structurally from there
         if n and M.view.level == 'fn' and STAGEABLE[n.kind] and M.view.fn ~= id then
+            if not M._own_pivot then M.trail = {} end
             M.show('fn', id)
         elseif n and (M.view.level == 'file' or M.view.level == 'files')
             and not M.node_line[id] and n.file ~= M.view.file then
+            if not M._own_pivot then M.trail = {} end
             M.show('file', n.file)
         end
         local ln = M.node_line[id]
@@ -568,7 +589,8 @@ function M.attach(win)
         -- 1. a callee named under the cursor: follow the call
         for _, c in ipairs(M.line_calls[r] or {}) do
             if c.callee == word and c.to and store.node(c.to) then
-                store.pivot(c.to)
+                push_trail()
+                browser_pivot(c.to)
                 return M.show('fn', c.to)
             end
         end
@@ -603,7 +625,8 @@ function M.attach(win)
             if c.to and store.node(c.to) then sole = (sole == nil) and c or false end
         end
         if sole and sole ~= false then
-            store.pivot(sole.to)
+            push_trail()
+            browser_pivot(sole.to)
             M.show('fn', sole.to)
         end
     end
@@ -611,31 +634,39 @@ function M.attach(win)
         local r = row()
         if M.view.level == 'files' then
             local f = M.line_file[r]
-            if f then M.show('file', f) end
+            if f then
+                push_trail()
+                M.show('file', f)
+            end
         elseif M.view.level == 'file' then
             local n = store.node(M.line_node[r])
             if n and STAGEABLE[n.kind] then
-                store.pivot(n.id)
+                push_trail()
+                browser_pivot(n.id)
                 M.show('fn', n.id)
             elseif n and n.kind == 'block' then
-                store.pivot(n.id) -- source pane shows the block's span
+                push_trail()
+                browser_pivot(n.id) -- source pane shows the block's span
                 M.show('block', n.id)
             end
         elseif M.view.level == 'block' then
             local n = store.node(M.line_node[r])
             if n and n.kind == 'var' then
-                store.pivot(n.id)
+                push_trail()
+                browser_pivot(n.id)
                 M.show('var', n.id)
             end
         elseif M.view.level == 'var' or M.view.level == 'callers' then
             local s = M.line_site[r]
             if s and store.node(s.fn) then
+                push_trail()
                 store.set_context(nil)
-                store.pivot(s.fn)
+                browser_pivot(s.fn)
                 M.show('fn', s.fn)
             end
         elseif M.view.level == 'fn' then
             if M.line_callers[r] then
+                push_trail()
                 return M.show('callers', M.line_callers[r])
             end
             descend_fn_row(r)
@@ -653,6 +684,14 @@ function M.attach(win)
     -- ascending lands the cursor ON what we came from (the file-manager rule),
     -- not on the first row of the wider view
     vim.keymap.set('n', keys.ascend, function ()
+        -- journey-back: return the way you came (l pushed it); structural
+        -- ascent is the fallback for places you jumped into
+        if #M.trail > 0 then
+            local loc = table.remove(M.trail)
+            store.set_highlight(nil)
+            store.set_context(nil)
+            return restore_loc(loc)
+        end
         if M.view.level == 'var' then
             store.set_context(nil)
             local id = M.view.var
