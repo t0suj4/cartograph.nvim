@@ -7,6 +7,10 @@ local function f()
     return a
 end
 
+local function loop_()
+    return loop_()
+end
+
 M.x = 5
 print("top-level call, no declaration")
 M.y = 6

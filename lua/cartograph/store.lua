@@ -66,8 +66,12 @@ function M.ingest(data)
     M.imports_out = {} -- file -> { file, ... }  outbound requires (include tree)
     for _, e in ipairs(M.data.edges or {}) do
         if e.kind == 'ref' then
-            M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
-            M.usedby[e.to]   = M.usedby[e.to]   or {}; table.insert(M.usedby[e.to], e.from)
+            -- self edges (recursion) carry occurrences only: they must not
+            -- inflate usedby/uses (dead-function lint, heat, tints)
+            if e.from ~= e.to then
+                M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
+                M.usedby[e.to]   = M.usedby[e.to]   or {}; table.insert(M.usedby[e.to], e.from)
+            end
             M.occ[e.from .. '\31' .. e.to] = e.at
             if e.inferred then M.edge_inferred[e.from .. '\31' .. e.to] = true end
         elseif e.kind == 'import' then

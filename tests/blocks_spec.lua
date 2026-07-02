@@ -54,6 +54,13 @@ test('blocks: statement runs roll up, functions break them', function ()
     eq('M.g', usedby_names('b'))
     eq('',    usedby_names('c')) -- never read
 
+    -- recursion: the self edge carries occurrences but never inflates usedby
+    local loop_id
+    for id, n in pairs(store.by_id) do if n.name == 'loop_' then loop_id = id end end
+    ok(loop_id, 'loop_ node exists')
+    ok(#(store.occurrences(loop_id, loop_id) or {}) >= 1, 'self occurrence recorded')
+    eq(0, #(store.usedby[loop_id] or {}))
+
     -- and the forward index: f's var reads include `a`
     local f_id
     for id, n in pairs(store.by_id) do if n.name == 'f' then f_id = id end end

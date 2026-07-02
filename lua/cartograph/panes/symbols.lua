@@ -156,18 +156,37 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
         if not seen[k] then seen[k] = true; uniq[#uniq + 1] = s end
     end
     sites = uniq
+    -- external sites first; self/internal (the entity's own class, or itself)
+    -- after, dimmed — usually the majority and the least surprising
     table.sort(sites, function (a, b)
+        if (a.internal or false) ~= (b.internal or false) then return not a.internal end
         if a.file ~= b.file then return (a.file or '') < (b.file or '') end
         return a.line < b.line
     end)
+    local nint = 0
+    for _, s in ipairs(sites) do if s.internal then nint = nint + 1 end end
+    local counts = (#sites - nint > 0 and nint > 0)
+            and ('%d + %d self'):format(#sites - nint, nint)
+        or (nint > 0 and ('%d self'):format(nint))
+        or tostring(#sites)
     local name = node.name or '?'
-    ctx.lines[1] = ('%s %s — %s (%d)'):format(icon, name, label, #sites)
+    ctx.lines[1] = ('%s %s — %s (%s)'):format(icon, name, label, counts)
     ctx.marks[1] = { { 0, #icon, 'CartographDim' }, { #icon + 1, #icon + 1 + #name, 'CartographTitle' },
                      { #icon + 1 + #name, -1, 'CartographDim' } }
     for _, s in ipairs(sites) do
-        local text = '  ' .. s.name .. (s.inferred and ' ~' or '')
+        local text = '  ' .. s.name .. (s.rec and ' ⟳' or '') .. (s.inferred and ' ~' or '')
         ctx.lines[#ctx.lines + 1] = text
-        if s.inferred then ctx.marks[#ctx.lines] = { { #text - 2, -1, 'CartographDim' } } end
+        if s.internal then
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        elseif s.inferred then
+            ctx.marks[#ctx.lines] = { { #text - 2, -1, 'CartographDim' } }
+        end
+        if s.rec then
+            local at = #('  ' .. s.name)
+            local m = ctx.marks[#ctx.lines] or {}
+            m[#m + 1] = { at, at + 4, 'CartographMarker' } -- ' ⟳' (space + 3-byte glyph)
+            ctx.marks[#ctx.lines] = m
+        end
         ctx.vnums[#ctx.lines] = tostring(s.line + 1)
         ctx.line_site[#ctx.lines] = s
     end
@@ -175,6 +194,11 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
         ctx.lines[2] = '  ' .. empty_note
         ctx.marks[2] = { { 0, -1, 'CartographDim' } }
     end
+end
+
+-- Which class does a name belong to? 'BnwForce:trigger' -> 'BnwForce'
+local function class_of(name)
+    return name and name:match('^(.-)[.:][%w_]+$')
 end
 
 -- A table var's members: nodes named `T.x` / `T:y` anywhere in the file,
@@ -202,11 +226,15 @@ local function render_var(ctx, id)
     local node = store.node(id)
     if not node then ctx.lines[1] = '(gone)'; return end
     local sites = {}
+    local p1, p2 = (node.name or '') .. '.', (node.name or '') .. ':'
     for _, u in ipairs(store.var_usedby[id] or {}) do
         local fn = store.node(u.from)
+        local member = fn and fn.name
+            and (fn.name:sub(1, #p1) == p1 or fn.name:sub(1, #p2) == p2) or nil
         for _, r in ipairs(u.at) do
             sites[#sites + 1] = { fn = u.from, name = fn and fn.name or u.from,
-                file = fn and fn.file, line = r.start.line, range = r }
+                file = fn and fn.file, line = r.start.line, range = r,
+                internal = member }
         end
     end
     render_sites(ctx, node, '·', 'used by', sites,
@@ -219,12 +247,20 @@ local function render_callers(ctx, id)
     local node = store.node(id)
     if not node then ctx.lines[1] = '(gone)'; return end
     local sites = {}
+    local cls = class_of(node.name)
+    for _, r in ipairs(store.occurrences(id, id) or {}) do -- recursion (self edge)
+        sites[#sites + 1] = { fn = id, name = node.name or id, file = node.file,
+            line = r.start.line, range = r, rec = true, internal = true }
+    end
     for _, from in ipairs(store.usedby[id] or {}) do
         local fn = store.node(from)
         local inf = store.edge_inferred[from .. '\31' .. id]
+        local rec = from == id or nil
+        local internal = rec or (cls ~= nil and class_of(fn and fn.name) == cls) or nil
         for _, r in ipairs(store.occurrences(from, id) or {}) do
             sites[#sites + 1] = { fn = from, name = fn and fn.name or from,
-                file = fn and fn.file, line = r.start.line, range = r, inferred = inf }
+                file = fn and fn.file, line = r.start.line, range = r, inferred = inf,
+                rec = rec, internal = internal }
         end
     end
     render_sites(ctx, node, ICON[node.kind] or 'ƒ', 'callers', sites,

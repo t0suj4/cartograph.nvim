@@ -56,7 +56,10 @@ A cockpit of independent panes over a shared state store:
 
   Inside a function, the `↖ callers (N)` row descends into the **call
   sites**: one row per call, hover shows the caller's code with the call
-  highlighted in the source pane, descend enters the caller. Edges vm-typed resolution
+  highlighted in the source pane, descend enters the caller. **Self
+  references are distinct** in every sites view: external sites sort first,
+  same-class / same-entity sites follow dimmed, the header shows the split
+  (`used by (2 + 140 self)`), and recursion is marked `⟳`. Edges vm-typed resolution
   can't see — a method called on an instance fetched out of a storage table
   (the Factorio pattern) — are recovered by **unique method name** and
   marked `~`: honest, but name-matched rather than type-proven. Ambiguous
