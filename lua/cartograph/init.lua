@@ -25,12 +25,13 @@ function M.open(dump_path)
     local store   = require 'cartograph.store'
     local symbols = require 'cartograph.panes.symbols'
     local source  = require 'cartograph.panes.source'
-    local tree    = require 'cartograph.panes.tree'
     local plan    = require 'cartograph.panes.plan'
 
     store.load(vim.fn.expand(dump_path))
 
-    -- ONE hardcoded layout for now: symbols | source | tree across the top, and
+    -- ONE hardcoded layout for now: the browser on the left, the source split
+    -- taking the rest (the browser's descend covers uses/callers now, so the
+    -- code gets the width; the trace pane opens its own split on demand), and
     -- a full-width plan bar along the bottom.
     vim.cmd('tabnew')
     local w_symbols = vim.api.nvim_get_current_win()
@@ -40,12 +41,7 @@ function M.open(dump_path)
     local w_source = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(w_source, source.create())
 
-    vim.cmd('rightbelow vsplit')
-    local w_tree = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(w_tree, tree.create())
-
-    vim.api.nvim_win_set_width(w_symbols, 34)
-    vim.api.nvim_win_set_width(w_tree, 40)
+    vim.api.nvim_win_set_width(w_symbols, 38)
 
     source.attach(w_source)
 
@@ -57,13 +53,12 @@ function M.open(dump_path)
 
     vim.api.nvim_set_current_win(w_symbols)
     symbols.attach(w_symbols)
-    tree.attach(w_tree)
 
     -- focus history, vim-jumplist style: back/back_alt everywhere, forward only
     -- where the cycle key (<Tab> = <C-i> in most terminals) isn't taken —
-    -- symbols now uses <Tab> for the file-view toggle, source for the lens.
+    -- symbols uses <Tab> for the file-view toggle, source for the lens.
     local keys = require('cartograph.config').keys
-    for _, b in ipairs({ { symbols.buf }, { tree.buf, true }, { plan.buf, true },
+    for _, b in ipairs({ { symbols.buf }, { plan.buf, true },
                          { source.buf }, { source.buf_bot } }) do
         local buf, fwd = b[1], b[2]
         if buf and vim.api.nvim_buf_is_valid(buf) then

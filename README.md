@@ -51,13 +51,17 @@ A cockpit of independent panes over a shared state store:
   descends into its usage sites (every function that reads it, from the
   extractor's `use` edges) — hovering a site shows the read in the bottom
   source view, and descending enters the reading function.
+
+  Inside a function, the `↖ callers (N)` row descends into the **call
+  sites**: one row per call, hover shows the caller's code with the call
+  highlighted below, descend enters the caller. Edges vm-typed resolution
+  can't see — a method called on an instance fetched out of a storage table
+  (the Factorio pattern) — are recovered by **unique method name** and
+  marked `~`: honest, but name-matched rather than type-proven. Ambiguous
+  names refuse to link rather than guess.
 - **source** — the real code at the focused location (def, or a call site),
-  splittable to compare the two
-- **dependencies** — the hovered symbol's uses / used-by tree. Edges vm-typed
-  resolution can't see — a method called on an instance fetched out of a
-  storage table (the Factorio pattern) — are recovered by **unique method
-  name** and marked `~`: honest, but name-matched rather than type-proven.
-  Ambiguous names refuse to link rather than guess.
+  splittable to compare the two. With uses and callers living in the
+  browser, the code takes the rest of the width.
 `<Tab>` in the code pane toggles the **flow lens**: statements are grouped by
 independent concern (from the statement-level local def-use) and the source
 lines are **coloured by concern**, with the tangle metrics on the header line.
@@ -107,7 +111,7 @@ dynamically-dispatched function (e.g. an event handler — "no resolved call
 sites"). Hovering a row shows the origin's code in the **bottom source view**
 with the origin line highlighted (the same pattern as hovering the dependency
 tree); `gf` jumps to its real file; `<C-]>` pivots the cockpit to its
-function; `q` gives the window back to the dependency tree.
+function; the trace opens in its own right-hand split, and `q` closes it.
 
 Powered by extractor-side classification: call arguments (`argv`) and `return`
 values are classified (literal / param / local / call / field / …), calls carry

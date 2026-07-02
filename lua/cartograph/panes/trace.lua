@@ -138,12 +138,11 @@ end
 
 function M.close()
     store.set_context(nil)
-    if M.borrowed_win and vim.api.nvim_win_is_valid(M.borrowed_win) then
-        local tree = require 'cartograph.panes.tree'
-        if tree.buf and vim.api.nvim_buf_is_valid(tree.buf) then
-            vim.api.nvim_win_set_buf(M.borrowed_win, tree.buf)
-        end
+    if M.win and vim.api.nvim_win_is_valid(M.win)
+        and #vim.api.nvim_tabpage_list_wins(0) > 1 then
+        vim.api.nvim_win_close(M.win, true)
     end
+    M.win = nil
 end
 
 local function create()
@@ -200,20 +199,18 @@ function M.open(fn_id, i, pname)
     for _, o in ipairs(origins) do M.rows[#M.rows + 1] = { origin = o, depth = 0 } end
 
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then create() end
-    -- borrow the tree pane's window (or split if it isn't visible)
-    local tree = require 'cartograph.panes.tree'
-    local wins = tree.buf and vim.fn.win_findbuf(tree.buf) or {}
-    M.borrowed_win = wins[1]
-    if not M.borrowed_win then
+    -- the trace owns a right-hand split, opened on demand and reused
+    if not (M.win and vim.api.nvim_win_is_valid(M.win)) then
         vim.cmd('botright vsplit')
-        M.borrowed_win = vim.api.nvim_get_current_win()
+        M.win = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_width(M.win, 44)
     end
-    vim.api.nvim_win_set_buf(M.borrowed_win, M.buf)
-    vim.api.nvim_set_current_win(M.borrowed_win)
-    vim.wo[M.borrowed_win].cursorline = true
+    vim.api.nvim_win_set_buf(M.win, M.buf)
+    vim.api.nvim_set_current_win(M.win)
+    vim.wo[M.win].cursorline = true
     render()
-    pcall(vim.api.nvim_win_set_cursor, M.borrowed_win, { HEADER + 1, 0 })
-    hover(M.borrowed_win) -- show the first origin's context immediately
+    pcall(vim.api.nvim_win_set_cursor, M.win, { HEADER + 1, 0 })
+    hover(M.win) -- show the first origin's context immediately
 end
 
 return M
