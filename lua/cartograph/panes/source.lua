@@ -46,6 +46,27 @@ local function buf_row(node, file_line)
     return HEADER_ROWS + (file_line - start)
 end
 
+-- Smart scroll: keep buffer row `row0` visible in `win`. No motion while it's
+-- on-screen; once off-screen, center it — centering naturally tops out at the
+-- buffer start, so early lines keep the header in view instead of leaving
+-- blank space above.
+local function ensure_visible(win, row0)
+    if not (win and vim.api.nvim_win_is_valid(win)) or not row0 then return end
+    local lnum = row0 + 1
+    if lnum >= vim.fn.line('w0', win) and lnum <= vim.fn.line('w$', win) then return end
+    vim.api.nvim_win_call(win, function ()
+        pcall(vim.api.nvim_win_set_cursor, win, { lnum, 0 })
+        vim.cmd('normal! zz')
+    end)
+end
+
+-- A fresh body render must not inherit the window's old scroll position.
+local function scroll_top(win)
+    if win and vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+    end
+end
+
 -- Draw IncSearch extmarks for `ranges` (occurrence sites) inside `node`'s body.
 local function apply_hl(buf, node, ranges)
     vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
@@ -271,6 +292,7 @@ function M.render(id)
     local node = store.node(id)
     M.cur = node
     set_lines(M.buf, body_lines(node))
+    scroll_top(M.win_top) -- a fresh body starts at its header
     apply_concerns(node)  -- repaint concern bands if the lens is on
     M.context(nil) -- a new focus clears the stale bottom view
 end
@@ -281,6 +303,8 @@ function M.highlight(hl)
     vim.api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
     if not hl or not M.cur or hl.file ~= M.cur.file then return end
     apply_hl(M.buf, M.cur, hl.ranges)
+    local r = hl.ranges and hl.ranges[1]
+    if r then ensure_visible(M.win_top, buf_row(M.cur, r.start.line)) end
 end
 
 ---@param ctx {node:string, ranges:table?}?
@@ -292,7 +316,12 @@ function M.context(ctx)
         return
     end
     set_lines(M.buf_bot, body_lines(M.ctx))
-    if ctx.ranges then apply_hl(M.buf_bot, M.ctx, ctx.ranges) end
+    scroll_top(M.win_bot)
+    if ctx.ranges then
+        apply_hl(M.buf_bot, M.ctx, ctx.ranges)
+        local r = ctx.ranges[1]
+        if r then ensure_visible(M.win_bot, buf_row(M.ctx, r.start.line)) end
+    end
 end
 
 return M
