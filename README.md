@@ -26,19 +26,11 @@ A cockpit of independent panes over a shared state store:
 - **source** — the real code at the focused location (def, or a call site),
   splittable to compare the two
 - **dependencies** — the hovered symbol's uses / used-by tree
-- **minimap** — its 1-hop neighborhood, cyclable (`<Tab>`) between two
-  perspectives: a **graph** sketch (used-by / focus / uses) and **data flow**:
-  the statement-level local def-use *inside*
-  the focused function (a zoom below the symbol layer), with an **untangle lens** —
-  statements are grouped by independent concern and scored for how interleaved
-  those concerns are (`tangle`). Cycling to `flow` turns on the lens, which
-  **colours the source pane's lines by concern** (where they line up with the
-  real code); cycling away clears it. Comprehension only — locals, not
-  control/aliasing, so it reveals tangle and makes no safety/reorder claim.
-
-`<Tab>` / `<S-Tab>` cycle the view/lens **from the code pane** (as well as the
-minimap), so you can toggle the concern colouring without leaving the source
-you're reading.
+`<Tab>` in the code pane toggles the **flow lens**: statements are grouped by
+independent concern (from the statement-level local def-use) and the source
+lines are **coloured by concern**, with the tangle metrics on the header line.
+Comprehension only — locals, not control/aliasing, so it reveals tangle and
+makes no safety/reorder claim.
 
 ### Configuration
 
@@ -61,7 +53,7 @@ All standard vim idioms — no new keys to learn:
 - `<C-o>` / `<C-t>` — go **back** to where the last pivot happened; `<C-i>`
   goes forward again. Vim-jumplist semantics: deliberate pivots record,
   scrolling the symbol list doesn't. (`<C-i>` is bound only where `<Tab>`
-  isn't the lens cycle, since most terminals can't tell them apart.)
+  isn't the lens toggle, since most terminals can't tell them apart.)
 - `gf` — **leave the cockpit**: open the real file at the corresponding line
   (in a reused tab), from the source, symbols, or tree pane.
 - In the symbols pane, focus follows where the cursor *settles* (debounced),
@@ -80,8 +72,10 @@ statements, a local origin steps to its defining statements and the locals
 Frontiers are honest and labelled instead of silently dropped: a table field
 (writes can alias from anywhere), a global, varargs, a computed expression, a
 dynamically-dispatched function (e.g. an event handler — "no resolved call
-sites"). `gf` jumps to any origin's real code; `<C-]>` pivots the cockpit to
-its function; `q` gives the window back to the dependency tree.
+sites"). Hovering a row shows the origin's code in the **bottom source view**
+with the origin line highlighted (the same pattern as hovering the dependency
+tree); `gf` jumps to its real file; `<C-]>` pivots the cockpit to its
+function; `q` gives the window back to the dependency tree.
 
 Powered by extractor-side classification: call arguments (`argv`) and `return`
 values are classified (literal / param / local / call / field / …), calls carry

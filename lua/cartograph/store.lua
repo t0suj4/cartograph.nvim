@@ -166,7 +166,7 @@ end
 
 -- lens channel: an active overlay that other panes render (e.g. 'concerns' =
 -- colour the source by untangle concern). Set by whichever pane owns the toggle
--- (the minimap's <Tab> cycle); read by the source pane.
+-- (the source pane's <Tab>); read by the source pane.
 M.lens = nil
 M._lens_subs = {}
 ---@param fn fun(lens: string?)

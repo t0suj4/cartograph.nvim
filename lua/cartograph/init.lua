@@ -26,7 +26,6 @@ function M.open(dump_path)
     local symbols = require 'cartograph.panes.symbols'
     local source  = require 'cartograph.panes.source'
     local tree    = require 'cartograph.panes.tree'
-    local minimap = require 'cartograph.panes.minimap'
     local plan    = require 'cartograph.panes.plan'
 
     store.load(vim.fn.expand(dump_path))
@@ -49,7 +48,6 @@ function M.open(dump_path)
     vim.api.nvim_win_set_width(w_tree, 40)
 
     source.attach(w_source)
-    minimap.attach(w_tree)
 
     -- full-width plan bar at the very bottom
     vim.cmd('botright split')
@@ -65,7 +63,7 @@ function M.open(dump_path)
     -- where the cycle key (<Tab> = <C-i> in most terminals) isn't the lens.
     local keys = require('cartograph.config').keys
     for _, b in ipairs({ { symbols.buf, true }, { tree.buf, true }, { plan.buf, true },
-                         { source.buf }, { source.buf_bot }, { minimap.buf } }) do
+                         { source.buf }, { source.buf_bot } }) do
         local buf, fwd = b[1], b[2]
         if buf and vim.api.nvim_buf_is_valid(buf) then
             vim.keymap.set('n', keys.back,     store.back, { buffer = buf, desc = 'cartograph: back (previous pivot)' })

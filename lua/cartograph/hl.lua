@@ -1,6 +1,6 @@
 -- Shared highlight groups. Concern colours (for the untangle lens) are defined
--- once here and reused by any pane that paints by concern, so the minimap's
--- statement tags and the source pane's line bands agree on the palette.
+-- once here and reused by any pane that paints by concern, so every view
+-- agrees on the palette.
 
 local M = {}
 

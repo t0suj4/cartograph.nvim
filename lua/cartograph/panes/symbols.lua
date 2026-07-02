@@ -17,6 +17,7 @@ local ns = vim.api.nvim_create_namespace('cartograph_symbols_dep')
 local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
 local ns_stage = vim.api.nvim_create_namespace('cartograph_symbols_stage')
 local ns_heat  = vim.api.nvim_create_namespace('cartograph_symbols_heat')
+local ns_ui    = vim.api.nvim_create_namespace('cartograph_symbols_ui')
 
 -- File-usage markers, shown in the gutter on each file header (keeps the narrow
 -- header text clean). Separates truly-unused from loaded-for-side-effects, so a
@@ -58,13 +59,15 @@ function M.create()
     local lines, line_node, node_line = {}, {}, {}
     local line_file, file_header = {}, {}
     local signs = {} -- { {row0, sign}, ... } applied after the lines land
+    local marks, vnums = {}, {} -- row -> hl spans / right-aligned line number
     for _, file in ipairs(store.files) do
         local defs = {}
         for _, n in ipairs(store.by_file[file] or {}) do
             if SHOWN[n.kind] then defs[#defs + 1] = n end
         end
         if #defs > 0 then
-            lines[#lines + 1] = ('▸ %s  (%d)'):format(file, #defs)
+            lines[#lines + 1] = ('%s  (%d)'):format(file, #defs)
+            marks[#lines] = { { 0, #file, 'CartographSection' }, { #file, -1, 'CartographDim' } }
             line_node[#lines] = false -- header row
             line_file[#lines] = file
             file_header[file] = #lines
@@ -72,7 +75,9 @@ function M.create()
             if sign then signs[#signs + 1] = { row = #lines - 1, sign = sign } end
             for _, n in ipairs(defs) do
                 local icon = n.kind == 'method' and ':' or 'ƒ'
-                lines[#lines + 1] = ('  %s %-24s L%d'):format(icon, n.name or '?', n.range.start.line + 1)
+                lines[#lines + 1] = ('  %s %s'):format(icon, n.name or '?')
+                marks[#lines] = { { 2, 2 + #icon, 'CartographDim' } }
+                vnums[#lines] = tostring(n.range.start.line + 1)
                 line_node[#lines] = n.id
                 node_line[n.id]   = #lines
                 line_file[#lines] = file
@@ -86,6 +91,17 @@ function M.create()
             sign_text = s.sign.text, sign_hl_group = s.sign.hl,
         })
     end
+    for row, ms in pairs(marks) do
+        for _, m in ipairs(ms) do
+            local endc = m[2] >= 0 and m[2] or #lines[row]
+            pcall(vim.api.nvim_buf_set_extmark, buf, ns_ui, row - 1, m[1],
+                { end_col = endc, hl_group = m[3] })
+        end
+    end
+    for row, num in pairs(vnums) do
+        pcall(vim.api.nvim_buf_set_extmark, buf, ns_ui, row - 1, 0,
+            { virt_text = { { num .. ' ', 'CartographDim' } }, virt_text_pos = 'right_align' })
+    end
     vim.bo[buf].modifiable = false
     M.buf         = buf
     M.line_node   = line_node
@@ -94,6 +110,7 @@ function M.create()
     M.file_header = file_header
 
     hl_setup()
+    require('cartograph.hl').ui()
     vim.api.nvim_create_autocmd('ColorScheme', { callback = hl_setup })
     return buf
 end
@@ -191,6 +208,7 @@ end
 function M.attach(win)
     M.win = win
     vim.wo[win].signcolumn = 'yes:1' -- stable-width gutter for the class markers
+    vim.wo[win].cursorline = true    -- the cursor row IS the focus
     -- debounced: focus follows where the cursor SETTLES, so holding j/k scans
     -- the list without re-rendering the whole cockpit on every line in between
     local gen = 0

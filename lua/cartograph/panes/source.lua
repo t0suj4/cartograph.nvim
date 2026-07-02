@@ -65,12 +65,18 @@ end
 -- Untangle lens: colour the TOP body's lines by concern (the untangle
 -- partition of the focused function). Each statement colours the line range
 -- from its line up to the next statement's, so concerns read as bands over the
--- real code. Active only while the 'concerns' lens is on (minimap <Tab> to flow).
+-- real code. Active while the 'concerns' lens is on (<Tab> here toggles it);
+-- the tangle metrics ride the header line as virtual text.
 local function apply_concerns(node)
     if not vim.api.nvim_buf_is_valid(M.buf) then return end
     vim.api.nvim_buf_clear_namespace(M.buf, ns_concern, 0, -1)
     if store.lens ~= 'concerns' or not node or not node.df then return end
     local a = untangle.analyze(node.df)
+    pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_concern, 0, 0, {
+        virt_text = { { ('concerns %d · tangle %d · span %d'):format(a.ncomp, a.tangle, a.maxspan),
+            'CartographDim' } },
+        virt_text_pos = 'eol',
+    })
     local stmts, endLine = node.df.stmts, node.range['end'].line + 1 -- 1-based
     for i, s in ipairs(stmts) do
         local last = (stmts[i + 1] and stmts[i + 1].l - 1) or endLine
@@ -161,15 +167,15 @@ local function bind_nav(buf, which)
     end, { buffer = buf, desc = 'cartograph: trace where this parameter comes from' })
 end
 
--- Cycle the view/lens from wherever you're reading. Switching lives in the code
--- pane (not only the minimap) so toggling the concern colouring doesn't require
--- leaving the source you're looking at.
+-- The flow lens lives in the code pane, where the concern colours land on the
+-- real code: <Tab> toggles it without leaving the source you're reading.
 local function bind_cycle(buf)
     local keys = require('cartograph.config').keys
-    vim.keymap.set('n', keys.cycle, function () require('cartograph.panes.minimap').cycle(1) end,
-        { buffer = buf, desc = 'cartograph: cycle view / lens' })
-    vim.keymap.set('n', keys.cycle_back, function () require('cartograph.panes.minimap').cycle(-1) end,
-        { buffer = buf, desc = 'cartograph: cycle view / lens (back)' })
+    local function toggle()
+        store.set_lens(store.lens ~= 'concerns' and 'concerns' or nil)
+    end
+    vim.keymap.set('n', keys.cycle, toggle, { buffer = buf, desc = 'cartograph: toggle the flow (concern) lens' })
+    vim.keymap.set('n', keys.cycle_back, toggle, { buffer = buf, desc = 'cartograph: toggle the flow (concern) lens' })
 end
 
 -- Extract the selected TOP-pane lines into a new local function. `line1`/`line2`

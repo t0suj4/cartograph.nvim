@@ -122,7 +122,22 @@ local function toggle(ri)
     render()
 end
 
+-- Hovering a row drives the BOTTOM source view, like the dependency tree's
+-- hover: show the origin's function with the origin line highlighted.
+local function hover(win)
+    local r = M.rows[row_at(vim.api.nvim_win_get_cursor(win)[1]) or -1]
+    if r and r.origin.fn and r.origin.site then
+        store.set_context({ node = r.origin.fn, ranges = {
+            { start = { line = r.origin.site.line, char = 0 },
+              ['end'] = { line = r.origin.site.line + 1, char = 0 } },
+        } })
+    else
+        store.set_context(nil)
+    end
+end
+
 function M.close()
+    store.set_context(nil)
     if M.borrowed_win and vim.api.nvim_win_is_valid(M.borrowed_win) then
         local tree = require 'cartograph.panes.tree'
         if tree.buf and vim.api.nvim_buf_is_valid(tree.buf) then
@@ -157,6 +172,21 @@ local function create()
     vim.keymap.set('n', keys.back,     store.back,    { buffer = buf, desc = 'cartograph: back' })
     vim.keymap.set('n', keys.back_alt, store.back,    { buffer = buf, desc = 'cartograph: back' })
     vim.keymap.set('n', keys.forward,  store.forward, { buffer = buf, desc = 'cartograph: forward' })
+
+    -- debounced hover -> bottom source view (same pattern as the tree pane)
+    local gen = 0
+    vim.api.nvim_create_autocmd('CursorMoved', {
+        buffer = buf,
+        callback = function ()
+            gen = gen + 1
+            local g = gen
+            vim.defer_fn(function ()
+                if g ~= gen then return end
+                local win = (vim.fn.win_findbuf(buf) or {})[1]
+                if win then hover(win) end
+            end, 60)
+        end,
+    })
     return buf
 end
 
@@ -180,8 +210,10 @@ function M.open(fn_id, i, pname)
     end
     vim.api.nvim_win_set_buf(M.borrowed_win, M.buf)
     vim.api.nvim_set_current_win(M.borrowed_win)
+    vim.wo[M.borrowed_win].cursorline = true
     render()
     pcall(vim.api.nvim_win_set_cursor, M.borrowed_win, { HEADER + 1, 0 })
+    hover(M.borrowed_win) -- show the first origin's context immediately
 end
 
 return M

@@ -16,7 +16,7 @@ M.keys = {
     forward    = '<C-i>',   -- jumplist forward (bound only where <Tab> isn't the lens)
     open_file  = 'gf',      -- open the real file here
     trace      = 'gr',      -- source: trace where the parameter under the cursor comes from
-    cycle      = '<Tab>',   -- minimap/source: next view / lens
+    cycle      = '<Tab>',   -- source: toggle the flow (concern) lens
     cycle_back = '<S-Tab>',
     close      = 'q',       -- trace: give the window back
     -- staging (symbols pane)
