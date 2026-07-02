@@ -111,7 +111,9 @@ function M.open(dump_path)
             fix.text, vim.fn.fnamemodify(fix.file, ':t'), fix.line + 1), vim.log.levels.INFO)
     end, { desc = 'cartograph: apply the annotation quick fix of the current quickfix entry' })
 
-    -- focus the first real symbol so source/tree aren't blank
+    -- open the browser on the first file and focus its first symbol, so
+    -- source/tree aren't blank ('-' ascends to the file tree from there)
+    symbols.show('file', store.files[1])
     vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
 end
 

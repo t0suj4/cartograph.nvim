@@ -1,33 +1,41 @@
--- LEFT pane: the movable definitions (functions/methods) grouped by file, in
--- source order. Not a flat alphabetical dump — the ordering is the file's, and
--- moving the cursor writes focus to the store (which drives the source pane).
+-- LEFT pane: a zoomable ALTITUDE browser over the project. Three levels, all
+-- navigated with two keys — <CR> descends, `-` ascends (the dirvish idiom):
+--
+--   files   one row per file (with usage-classification gutter signs)
+--   file    one file's definitions in source order: functions, methods, AND
+--           module-level vars/fields — the whole file, not just the movable units
+--   fn      inside one function: its statement-level locals (from the data
+--           flow), each row hover-highlighting the real line in the source pane
+--
+-- At the `file` level the cursor row IS the focus (drives source/tree), and
+-- staging (dd / p / u) lives here, on the movable units.
 
-local store = require 'cartograph.store'
+local store  = require 'cartograph.store'
+local heat   = require 'cartograph.heat'
+local config = require 'cartograph.config'
 
--- The cockpit's unit is the function. documentSymbol emits every local/field/
--- constant too; we show only the movable units here (richer nodes stay in the
--- dump for later panes).
-local SHOWN = { ['function'] = true, method = true }
+local SHOW_L2   = { ['function'] = true, method = true, var = true }
+local STAGEABLE = { ['function'] = true, method = true }
+local ICON      = { ['function'] = 'ƒ', method = ':', var = '·' }
 
-local M = { line_node = {}, node_line = {}, line_file = {}, file_header = {} }
-
-local heat = require 'cartograph.heat'
-
-local ns = vim.api.nvim_create_namespace('cartograph_symbols_dep')
+local ns       = vim.api.nvim_create_namespace('cartograph_symbols_dep')
 local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
 local ns_stage = vim.api.nvim_create_namespace('cartograph_symbols_stage')
 local ns_heat  = vim.api.nvim_create_namespace('cartograph_symbols_heat')
 local ns_ui    = vim.api.nvim_create_namespace('cartograph_symbols_ui')
 
--- File-usage markers, shown in the gutter on each file header (keeps the narrow
--- header text clean). Separates truly-unused from loaded-for-side-effects, so a
--- side-effect-only module never reads as dead code.
+-- File-usage markers, shown in the gutter on file rows.
 --   ○ orphan (no inbound)   ⚠ unused import (pure module)   ↻ side-effect
 local SIGN = {
     orphan     = { text = '○ ', hl = 'DiagnosticWarn' },
     deadimport = { text = '⚠ ', hl = 'DiagnosticWarn' },
     sideeffect = { text = '↻ ', hl = 'Comment' },
     -- 'value' and 'used' are genuinely used → no marker (keeps the list quiet)
+}
+
+local M = {
+    view = { level = 'files', file = nil, fn = nil },
+    line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
 }
 
 -- Relationship tints: dependencies (things the focus uses) in green, dependents
@@ -51,64 +59,137 @@ local function hl_setup()
     vim.api.nvim_set_hl(0, 'CartographRdep2', { bg = blend(AMBER, 0.11) })
 end
 
+-- ── per-level renderers (fill ctx.lines/marks/vnums/signs + row mappings) ────
+
+local function shown_defs(file)
+    local defs = {}
+    for _, n in ipairs(store.by_file[file] or {}) do
+        if SHOW_L2[n.kind] then defs[#defs + 1] = n end
+    end
+    return defs
+end
+
+local function render_files(ctx)
+    for _, file in ipairs(store.files) do
+        local defs = shown_defs(file)
+        ctx.lines[#ctx.lines + 1] = ('%s  (%d)'):format(file, #defs)
+        ctx.marks[#ctx.lines] = { { 0, #file, 'CartographSection' }, { #file, -1, 'CartographDim' } }
+        ctx.line_file[#ctx.lines] = file
+        local sign = SIGN[store.classify(file)]
+        if sign then ctx.signs[#ctx.signs + 1] = { row = #ctx.lines - 1, sign = sign } end
+    end
+end
+
+local function render_file(ctx, file)
+    ctx.lines[1] = ('%s  (%d)'):format(file, #shown_defs(file))
+    ctx.marks[1] = { { 0, #file, 'CartographSection' }, { #file, -1, 'CartographDim' } }
+    ctx.line_file[1] = file
+    ctx.file_header[file] = 1
+    local sign = SIGN[store.classify(file)]
+    if sign then ctx.signs[#ctx.signs + 1] = { row = 0, sign = sign } end
+    for _, n in ipairs(shown_defs(file)) do
+        local icon = ICON[n.kind] or '?'
+        ctx.lines[#ctx.lines + 1] = ('  %s %s'):format(icon, n.name or '?')
+        ctx.marks[#ctx.lines] = { { 2, 2 + #icon, 'CartographDim' } }
+        ctx.vnums[#ctx.lines] = tostring(n.range.start.line + 1)
+        ctx.line_node[#ctx.lines] = n.id
+        ctx.node_line[n.id]       = #ctx.lines
+        ctx.line_file[#ctx.lines] = file
+    end
+end
+
+local function render_fn(ctx, id)
+    local node = store.node(id)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    local pre = ICON[node.kind] or 'ƒ'
+    ctx.lines[1] = ('%s %s'):format(pre, node.name or '?')
+    ctx.marks[1] = { { 0, #pre, 'CartographDim' }, { #pre, -1, 'CartographTitle' } }
+    local df = node.df
+    if not df then
+        ctx.lines[2] = '  (no data-flow info)'
+        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        return
+    end
+    ctx.lines[2] = ('inputs: %s'):format(#df.inputs > 0 and table.concat(df.inputs, ', ') or '(none)')
+    ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+    for _, s in ipairs(df.stmts) do
+        local defs = table.concat(s.def, ', ')
+        local uses = table.concat(s.use, ', ')
+        local text, dim_from
+        if defs ~= '' and uses ~= '' then
+            text = ('  %s  ← %s'):format(defs, uses); dim_from = 2 + #defs
+        elseif defs ~= '' then
+            text = '  ' .. defs
+        else
+            text = '  · ' .. uses; dim_from = 0
+        end
+        ctx.lines[#ctx.lines + 1] = text
+        if dim_from then ctx.marks[#ctx.lines] = { { dim_from, -1, 'CartographDim' } } end
+        ctx.vnums[#ctx.lines] = tostring(s.l)
+        ctx.line_stmt[#ctx.lines] = s.l -- 1-based file line
+    end
+end
+
+function M.render()
+    if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
+    local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
+        line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {} }
+    local v = M.view
+    if v.level == 'files' then render_files(ctx)
+    elseif v.level == 'file' then render_file(ctx, v.file)
+    else render_fn(ctx, v.fn) end
+
+    M.line_node, M.node_line = ctx.line_node, ctx.node_line
+    M.line_file, M.file_header, M.line_stmt = ctx.line_file, ctx.file_header, ctx.line_stmt
+
+    vim.bo[M.buf].modifiable = true
+    vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
+    vim.bo[M.buf].modifiable = false
+    for _, n in ipairs({ ns_ui, ns_class }) do vim.api.nvim_buf_clear_namespace(M.buf, n, 0, -1) end
+    for _, s in ipairs(ctx.signs) do
+        vim.api.nvim_buf_set_extmark(M.buf, ns_class, s.row, 0,
+            { sign_text = s.sign.text, sign_hl_group = s.sign.hl })
+    end
+    for row, ms in pairs(ctx.marks) do
+        for _, m in ipairs(ms) do
+            local endc = m[2] >= 0 and m[2] or #ctx.lines[row]
+            pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_ui, row - 1, m[1],
+                { end_col = endc, hl_group = m[3] })
+        end
+    end
+    for row, num in pairs(ctx.vnums) do
+        pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_ui, row - 1, 0,
+            { virt_text = { { num .. ' ', 'CartographDim' } }, virt_text_pos = 'right_align' })
+    end
+    M.restage()
+    M.render_heat()
+    M.paint(store.focused)
+end
+
+--- Switch level (re-rendering) and land the cursor on the first useful row.
+function M.show(level, ctx_val)
+    M.view.level = level
+    if level == 'file' then M.view.file = ctx_val
+    elseif level == 'fn' then M.view.fn = ctx_val end
+    M.render()
+    if M.win and vim.api.nvim_win_is_valid(M.win) then
+        local first = 1
+        for row = 1, vim.api.nvim_buf_line_count(M.buf) do
+            if M.line_node[row] or M.line_stmt[row]
+                or (level == 'files' and M.line_file[row]) then
+                first = row
+                break
+            end
+        end
+        pcall(vim.api.nvim_win_set_cursor, M.win, { first, 2 })
+    end
+end
+
 function M.create()
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = 'wipe'
     vim.bo[buf].filetype  = 'cartograph-symbols'
-
-    local lines, line_node, node_line = {}, {}, {}
-    local line_file, file_header = {}, {}
-    local signs = {} -- { {row0, sign}, ... } applied after the lines land
-    local marks, vnums = {}, {} -- row -> hl spans / right-aligned line number
-    for _, file in ipairs(store.files) do
-        local defs = {}
-        for _, n in ipairs(store.by_file[file] or {}) do
-            if SHOWN[n.kind] then defs[#defs + 1] = n end
-        end
-        if #defs > 0 then
-            lines[#lines + 1] = ('%s  (%d)'):format(file, #defs)
-            marks[#lines] = { { 0, #file, 'CartographSection' }, { #file, -1, 'CartographDim' } }
-            line_node[#lines] = false -- header row
-            line_file[#lines] = file
-            file_header[file] = #lines
-            local sign = SIGN[store.classify(file)]
-            if sign then signs[#signs + 1] = { row = #lines - 1, sign = sign } end
-            for _, n in ipairs(defs) do
-                local icon = n.kind == 'method' and ':' or 'ƒ'
-                lines[#lines + 1] = ('  %s %s'):format(icon, n.name or '?')
-                marks[#lines] = { { 2, 2 + #icon, 'CartographDim' } }
-                vnums[#lines] = tostring(n.range.start.line + 1)
-                line_node[#lines] = n.id
-                node_line[n.id]   = #lines
-                line_file[#lines] = file
-            end
-        end
-    end
-
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    for _, s in ipairs(signs) do
-        vim.api.nvim_buf_set_extmark(buf, ns_class, s.row, 0, {
-            sign_text = s.sign.text, sign_hl_group = s.sign.hl,
-        })
-    end
-    for row, ms in pairs(marks) do
-        for _, m in ipairs(ms) do
-            local endc = m[2] >= 0 and m[2] or #lines[row]
-            pcall(vim.api.nvim_buf_set_extmark, buf, ns_ui, row - 1, m[1],
-                { end_col = endc, hl_group = m[3] })
-        end
-    end
-    for row, num in pairs(vnums) do
-        pcall(vim.api.nvim_buf_set_extmark, buf, ns_ui, row - 1, 0,
-            { virt_text = { { num .. ' ', 'CartographDim' } }, virt_text_pos = 'right_align' })
-    end
-    vim.bo[buf].modifiable = false
-    M.buf         = buf
-    M.line_node   = line_node
-    M.node_line   = node_line
-    M.line_file   = line_file
-    M.file_header = file_header
-
+    M.buf = buf
     hl_setup()
     require('cartograph.hl').ui()
     vim.api.nvim_create_autocmd('ColorScheme', { callback = hl_setup })
@@ -116,7 +197,7 @@ function M.create()
 end
 
 -- Redraw the staging marks: a ✓ in the gutter on each staged symbol, and a
--- "◀ destination" tag on the destination file header. Driven by the store's
+-- "◀ destination" tag on the destination file row. Driven by the store's
 -- plan channel so it stays in sync however staging is changed.
 function M.restage()
     if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
@@ -128,10 +209,17 @@ function M.restage()
                 { sign_text = '✓ ', sign_hl_group = 'DiagnosticOk' })
         end
     end
-    local dr = store.dest and M.file_header[store.dest]
-    if dr then
-        vim.api.nvim_buf_set_extmark(M.buf, ns_stage, dr - 1, 0,
-            { virt_text = { { '  ◀ destination', 'DiagnosticInfo' } }, virt_text_pos = 'eol' })
+    if store.dest then
+        local dr = M.file_header[store.dest]
+        if not dr and M.view.level == 'files' then
+            for row, f in pairs(M.line_file) do
+                if f == store.dest then dr = row break end
+            end
+        end
+        if dr then
+            vim.api.nvim_buf_set_extmark(M.buf, ns_stage, dr - 1, 0,
+                { virt_text = { { '  ◀ destination', 'DiagnosticInfo' } }, virt_text_pos = 'eol' })
+        end
     end
 end
 
@@ -142,7 +230,7 @@ end
 function M.paint(id)
     if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
     vim.api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
-    if not id then return end
+    if not id or M.view.level ~= 'file' then return end
 
     local uses1, uses2, rdep1, rdep2 = {}, {}, {}, {}
     for _, t in ipairs(store.uses[id]   or {}) do uses1[t] = true end
@@ -182,10 +270,10 @@ M.heat_on = false
 function M.render_heat()
     if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
     vim.api.nvim_buf_clear_namespace(M.buf, ns_heat, 0, -1)
-    if not M.heat_on then return end
+    if not M.heat_on or M.view.level ~= 'file' then return end
     for id, row in pairs(M.node_line) do
         local n = store.node(id)
-        if n then
+        if n and STAGEABLE[n.kind] then
             local fanin  = #(store.usedby[id] or {})
             local fanout = #(store.uses[id] or {})
             local exported = n.kind == 'method' or (n.name and n.name:find('%.') ~= nil)
@@ -203,14 +291,16 @@ function M.toggle_heat()
     vim.notify('cartograph: heat overlay ' .. (M.heat_on and 'on' or 'off'), vim.log.levels.INFO)
 end
 
---- Wire cursor movement in `win` to focus (so source/tree follow), and keep the
---- list cursor synced to the focused node (so a pivot elsewhere shows here too).
+--- Wire cursor movement in `win` to focus (so source/tree follow), the zoom
+--- keys, staging, and keep the cursor synced to pivots from elsewhere.
 function M.attach(win)
     M.win = win
     vim.wo[win].signcolumn = 'yes:1' -- stable-width gutter for the class markers
     vim.wo[win].cursorline = true    -- the cursor row IS the focus
-    -- debounced: focus follows where the cursor SETTLES, so holding j/k scans
-    -- the list without re-rendering the whole cockpit on every line in between
+    local keys = config.keys
+    local function row() return vim.api.nvim_win_get_cursor(win)[1] end
+
+    -- debounced: focus (or statement highlight) follows where the cursor SETTLES
     local gen = 0
     vim.api.nvim_create_autocmd('CursorMoved', {
         buffer = M.buf,
@@ -219,12 +309,27 @@ function M.attach(win)
             local g = gen
             vim.defer_fn(function ()
                 if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
-                local id = M.line_node[vim.api.nvim_win_get_cursor(win)[1]]
-                if id then store.set_focus(id) end
+                local r = row()
+                if M.view.level == 'file' then
+                    local id = M.line_node[r]
+                    if id then store.set_focus(id) end
+                elseif M.view.level == 'fn' then
+                    local l = M.line_stmt[r]
+                    local n = store.node(M.view.fn)
+                    if l and n then
+                        store.set_highlight({ file = n.file, ranges = {
+                            { start = { line = l - 1, char = 0 }, ['end'] = { line = l, char = 0 } } } })
+                    end
+                end
             end, 60)
         end,
     })
+
     store.on_focus(function (id)
+        local n = store.node(id)
+        if M.view.level == 'file' and n and not M.node_line[id] and n.file ~= M.view.file then
+            M.show('file', n.file) -- a pivot into another file re-scopes the browser
+        end
         local ln = M.node_line[id]
         if ln and M.win and vim.api.nvim_win_is_valid(M.win)
             and vim.api.nvim_win_get_buf(M.win) == M.buf then
@@ -234,21 +339,43 @@ function M.attach(win)
         M.paint(id)
     end)
 
+    -- zoom: <CR> descends (files -> file -> inside a function), `-` ascends
+    vim.keymap.set('n', keys.pivot, function ()
+        local r = row()
+        if M.view.level == 'files' then
+            local f = M.line_file[r]
+            if f then M.show('file', f) end
+        elseif M.view.level == 'file' then
+            local n = store.node(M.line_node[r])
+            if n and STAGEABLE[n.kind] then
+                store.set_focus(n.id)
+                M.show('fn', n.id)
+            end
+        end
+    end, { buffer = M.buf, nowait = true, desc = 'cartograph: descend (into file / into function)' })
+    vim.keymap.set('n', keys.ascend, function ()
+        if M.view.level == 'fn' then
+            store.set_highlight(nil)
+            local n = store.node(M.view.fn)
+            M.show('file', n and n.file or M.view.file)
+        elseif M.view.level == 'file' then
+            M.show('files')
+        end
+    end, { buffer = M.buf, desc = 'cartograph: ascend (to file / to file tree)' })
+
     -- staging as cut & paste: dd cuts a function into the move-set, visual d
     -- cuts a selection, p pastes at the file under the cursor (= destination),
-    -- u unstages the last. Marks live here, in the list of movable symbols.
-    local keys = require('cartograph.config').keys
-    local function row() return vim.api.nvim_win_get_cursor(win)[1] end
+    -- u unstages the last. Marks live on the movable units (functions/methods).
     vim.keymap.set('n', keys.cut, function ()
-        local id = M.line_node[row()]
-        if id then store.toggle_stage(id) end
+        local n = store.node(M.line_node[row()])
+        if n and STAGEABLE[n.kind] then store.toggle_stage(n.id) end
     end, { buffer = M.buf, desc = 'cartograph: cut (stage) this function for moving' })
     vim.keymap.set('x', keys.cut_visual, function ()
         local a, b = vim.fn.line('v'), vim.fn.line('.')
         if a > b then a, b = b, a end
         for r = a, b do
-            local id = M.line_node[r]
-            if id then store.stage(id) end
+            local n = store.node(M.line_node[r])
+            if n and STAGEABLE[n.kind] then store.stage(n.id) end
         end
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
     end, { buffer = M.buf, desc = 'cartograph: cut (stage) the selected functions' })
@@ -262,14 +389,16 @@ function M.attach(win)
     vim.keymap.set('n', keys.open_file, function ()
         local r = row()
         local n = store.node(M.line_node[r])
-        local file = n and n.file or M.line_file[r]
+        local file = n and n.file or M.line_file[r] or (M.view.level == 'fn'
+            and store.node(M.view.fn) and store.node(M.view.fn).file)
         if not file then return end
+        local lnum = (M.view.level == 'fn' and M.line_stmt[r])
+            or (n and n.range.start.line + 1) or 1
         vim.cmd('tab drop ' .. vim.fn.fnameescape(store.data.root .. '/' .. file))
-        if n then pcall(vim.api.nvim_win_set_cursor, 0, { n.range.start.line + 1, 0 }) end
+        pcall(vim.api.nvim_win_set_cursor, 0, { lnum, 0 })
     end, { buffer = M.buf, desc = 'cartograph: open the real file here' })
 
     store.on_plan(function () M.restage() end)
-    M.restage()
 
     vim.api.nvim_buf_create_user_command(M.buf, 'CartographHeat', function () M.toggle_heat() end,
         { desc = 'cartograph: toggle the hub/heat overlay (fan-in/out + role)' })

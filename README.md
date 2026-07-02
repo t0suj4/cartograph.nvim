@@ -22,7 +22,13 @@ scale), never a context-free list.
 
 A cockpit of independent panes over a shared state store:
 
-- **symbols** — the current file's definitions, in source order
+- **symbols** — a zoomable *altitude browser*: `<CR>` descends, `-` ascends.
+  Top level is the **file tree** (one row per file, with usage-classification
+  gutter signs); a file opens into **all its definitions** in source order —
+  functions, methods, *and* module-level vars/fields, so the whole file is
+  navigable; a function opens into its **statement-level locals** (from the
+  data flow), where hovering a row highlights the real line in the source
+  pane. At the file level the cursor row is the focus, and staging lives here.
 - **source** — the real code at the focused location (def, or a call site),
   splittable to compare the two
 - **dependencies** — the hovered symbol's uses / used-by tree. Edges vm-typed
