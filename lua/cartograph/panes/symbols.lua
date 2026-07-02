@@ -149,6 +149,13 @@ end
 -- in the bottom source view, descend enters the using function. Serves both
 -- the var level (reads of a module var) and the callers level (calls of a fn).
 local function render_sites(ctx, node, icon, label, sites, empty_note)
+    -- defensive: one row per distinct (function, position)
+    local seen, uniq = {}, {}
+    for _, s in ipairs(sites) do
+        local k = ('%s\31%d\31%d'):format(s.fn, s.line, s.range and s.range.start.char or 0)
+        if not seen[k] then seen[k] = true; uniq[#uniq + 1] = s end
+    end
+    sites = uniq
     table.sort(sites, function (a, b)
         if a.file ~= b.file then return (a.file or '') < (b.file or '') end
         return a.line < b.line
