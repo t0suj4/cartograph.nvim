@@ -7,7 +7,7 @@
 -- so is validated by running it, not by unit tests; the diff logic it drives
 -- lives in ledger.lua and is unit-tested there.
 
-local ledger = require 'cartograph.ledger'
+local ledger = require 'cartograph.history.ledger'
 
 local M = {}
 

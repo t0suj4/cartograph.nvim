@@ -117,14 +117,21 @@ test cases run by a harness) can still read as "no caller". Rules live in
 
 ## Offline: history archaeology
 
-Two tools that run *outside* the live cockpit — they read git history rather
-than the current buffer, and produce reports rather than driving panes. They
-share the cockpit's graph extractor (one dump per commit, cached by sha).
+A sibling tool that lives under `cartograph.history` and runs *outside* the live
+cockpit — it reads git history rather than the current buffer, and produces
+reports rather than driving panes. It shares the cockpit's graph extractor (one
+dump per commit, cached by sha) but nothing else, so it stands on its own:
+
+```lua
+local history = require 'cartograph.history'
+history.reconstruct.run{ repo = '…', from = 'HEAD~50', to = 'HEAD' }
+history.couplingmine.run{ repo = '…', from = 'HEAD~50', to = 'HEAD' }
+```
 
 ### Ledger reconstruction
 
 The inverse of the ImpactEngine: instead of predicting a move's edits, recover
-what a series of edits *did* to the structure. `reconstruct.run{repo, from, to}`
+what a series of edits *did* to the structure. `history.reconstruct.run{repo, from, to}`
 extracts the symbol graph at each commit in a range and diffs consecutive
 snapshots into a per-commit structural ledger — added / removed / renamed
 symbols and reference-edge changes, each classified (`extract`, `rename`,
@@ -138,7 +145,7 @@ named-symbol graph.
 
 ### Temporal coupling
 
-`couplingmine.run{repo, from, to}` attributes each commit's changed lines to the
+`history.couplingmine.run{repo, from, to}` attributes each commit's changed lines to the
 functions whose ranges they fell in (at *that* commit), then accumulates
 co-occurrence across the range. The output is **change coupling**: functions
 that keep changing together even when no static reference edge links them —

@@ -1,6 +1,6 @@
 -- Unit tests for temporal-coupling attribution and co-occurrence.
 
-local coupling = require 'cartograph.coupling'
+local coupling = require 'cartograph.history.coupling'
 
 local R = function (s, e) return { start = { line = s, char = 0 }, ['end'] = { line = e, char = 0 } } end
 local function fn(file, name, s, e) return { file = file, name = name, kind = 'function', range = R(s, e) } end

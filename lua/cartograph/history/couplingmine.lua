@@ -3,8 +3,8 @@
 -- graph, sha-cached via reconstruct.extract_graphs), and accumulates co-change.
 -- Needs git + the extractor; the counting logic it drives is in coupling.lua.
 
-local coupling    = require 'cartograph.coupling'
-local reconstruct = require 'cartograph.reconstruct'
+local coupling    = require 'cartograph.history.coupling'
+local reconstruct = require 'cartograph.history.reconstruct'
 
 local M = {}
 

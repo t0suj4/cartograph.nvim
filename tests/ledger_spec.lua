@@ -1,7 +1,7 @@
 -- Unit tests for ledger reconstruction: diffing two graph snapshots into a
 -- structural delta and classifying the operation.
 
-local ledger = require 'cartograph.ledger'
+local ledger = require 'cartograph.history.ledger'
 
 local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
 -- id embeds a line to mimic real dumps (proves matching is by file/name/kind)
