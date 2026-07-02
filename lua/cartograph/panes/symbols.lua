@@ -522,10 +522,19 @@ function M.attach(win)
                 if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
                 local r = row()
                 if M.view.level == 'file' or M.view.level == 'block' then
-                    -- hover only TINTS relationships; it never re-roots the
-                    -- cockpit (pivoting is a conscious <CR>/l)
+                    -- hover TINTS relationships and PREVIEWS the row in the
+                    -- source pane (context takeover, restored on leave); it
+                    -- never re-roots the cockpit (pivoting stays a conscious
+                    -- <CR>/l): the view follows the eye, focus follows intent
                     local id = M.line_node[r]
-                    if id then M.paint(id) end
+                    if id then
+                        M.paint(id)
+                        if id ~= store.focused then
+                            store.set_context({ node = id })
+                        else
+                            store.set_context(nil)
+                        end
+                    end
                 elseif M.view.level == 'fn' then
                     local l = M.line_stmt[r]
                     local n = store.node(M.view.fn)

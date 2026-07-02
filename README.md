@@ -96,11 +96,13 @@ All standard vim idioms — no new keys to learn:
   isn't the lens toggle, since most terminals can't tell them apart.)
 - `gf` — **leave the cockpit**: open the real file at the corresponding line
   (in a reused tab), from the source, symbols, or tree pane.
-- **Pivoting is a conscious act.** In the browser, moving the cursor only
-  *tints* relationships (dependencies green, dependents amber) — it never
-  re-roots the cockpit. `<CR>` pivots (focus without changing altitude);
-  `l` descends (and pivots where that means entering something). So the
-  world changes only when you decide it should.
+- **The view follows the eye; focus follows intent.** In the browser,
+  moving the cursor *tints* relationships (dependencies green, dependents
+  amber) and *previews* the row in the source pane (a temporary takeover,
+  restored when you move off) — but it never re-roots the cockpit: no
+  focus change, no history entry, no re-scoping. `<CR>` pivots (focus
+  without changing altitude); `l` descends (and pivots where that means
+  entering something). Reading is free; commitment is a keypress.
 - **History restores places, not just symbols.** Every pivot snapshots the
   browser's location — level, file, cursor row — so `<C-o>` puts you back
   *where you were standing*, mid-exploration, not merely on the symbol you
