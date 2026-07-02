@@ -144,6 +144,20 @@ local function bind_nav(buf, which)
     end, { buffer = buf, desc = 'cartograph: jump to the definition under the cursor' })
     vim.keymap.set('n', 'gf', function () goto_real(vim.api.nvim_get_current_win(), which()) end,
         { buffer = buf, desc = 'cartograph: open the real file here' })
+    -- gr: trace where the parameter under the cursor comes from ("references"
+    -- flavoured — the places that feed this value)
+    vim.keymap.set('n', 'gr', function ()
+        local node = which()
+        if not node then return end
+        local cword = vim.fn.expand '<cword>'
+        for i, p in ipairs(node.params or {}) do
+            if p == cword then
+                return require('cartograph.panes.trace').open(node.id, i, p)
+            end
+        end
+        vim.notify(('cartograph: %q is not a parameter of %s'):format(cword, node.name or '?'),
+            vim.log.levels.INFO)
+    end, { buffer = buf, desc = 'cartograph: trace where this parameter comes from' })
 end
 
 -- Cycle the view/lens from wherever you're reading. Switching lives in the code

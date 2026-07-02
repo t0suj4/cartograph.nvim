@@ -56,6 +56,27 @@ All standard vim idioms — no new keys to learn:
 - In the symbols pane, focus follows where the cursor *settles* (debounced),
   so holding `j`/`k` scans the list without re-rendering every pane per line.
 
+### Tracing a parameter
+
+`gr` on a parameter name in the source pane answers *"where does this value
+come from?"* — an origin tree with one row per call site, showing what each
+site passes: a literal (the answer), another function's parameter, a local, a
+call result, a field. `<CR>` expands a row **incrementally**: a param origin
+climbs to *its* callers, a call origin traces through the target's `return`
+statements, a local origin steps to its defining statements and the locals
+*they* read. You steer the fan-out; nothing explodes eagerly.
+
+Frontiers are honest and labelled instead of silently dropped: a table field
+(writes can alias from anywhere), a global, varargs, a computed expression, a
+dynamically-dispatched function (e.g. an event handler — "no resolved call
+sites"). `gf` jumps to any origin's real code; `<C-]>` pivots the cockpit to
+its function; `q` gives the window back to the dependency tree.
+
+Powered by extractor-side classification: call arguments (`argv`) and `return`
+values are classified (literal / param / local / call / field / …), calls carry
+their resolved target, and function nodes carry their parameter lists (implicit
+`self` included, so method-call argv positions line up).
+
 `:CartographHeat` (from the symbols pane) toggles a **hub/heat overlay**: each
 symbol is annotated with fan-in / fan-out and a role — `hub` (many callers,
 load-bearing), `coordinator` (calls many), `leaf`, `api` (exported, no static

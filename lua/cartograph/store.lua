@@ -41,6 +41,16 @@ function M.ingest(data)
         table.sort(list, function (a, b) return a.order < b.order end)
     end
 
+    -- call-inventory index for data tracing: calls whose target resolved to a
+    -- workspace function, keyed by that function's node id
+    M.calls_to = {}
+    for _, c in ipairs(M.data.calls or {}) do
+        if c.to then
+            M.calls_to[c.to] = M.calls_to[c.to] or {}
+            table.insert(M.calls_to[c.to], c)
+        end
+    end
+
     -- edge indexes for the dependency tree (symbol-level `ref` edges)
     M.uses   = {} -- id -> { to_id, ... }   (functions this one references)
     M.usedby = {} -- id -> { from_id, ... } (functions that reference this one)
