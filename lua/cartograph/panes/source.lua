@@ -46,18 +46,22 @@ local function buf_row(node, file_line)
     return HEADER_ROWS + (file_line - start)
 end
 
--- Smart scroll: keep buffer row `row0` visible in `win`. No motion while it's
--- on-screen; once off-screen, center it — centering naturally tops out at the
--- buffer start, so early lines keep the header in view instead of leaving
--- blank space above.
+-- Smart scroll: move the display window's cursor to the target row and let
+-- vim's own topline logic do the rest — it scrolls minimally for nearby
+-- targets, centers only on far jumps, and honours the user's scrolloff /
+-- smoothscroll. (The windows get a small local scrolloff in attach(), so an
+-- off-screen target lands with a margin, not flush against the edge.)
 local function ensure_visible(win, row0)
     if not (win and vim.api.nvim_win_is_valid(win)) or not row0 then return end
-    local lnum = row0 + 1
-    if lnum >= vim.fn.line('w0', win) and lnum <= vim.fn.line('w$', win) then return end
-    vim.api.nvim_win_call(win, function ()
-        pcall(vim.api.nvim_win_set_cursor, win, { lnum, 0 })
-        vim.cmd('normal! zz')
-    end)
+    pcall(vim.api.nvim_win_set_cursor, win, { row0 + 1, 0 })
+end
+
+-- Margin for hover-highlight jumps. Capped well under half the window height:
+-- scrolloff >= half-height makes vim centre on EVERY move (the 'so=999'
+-- effect), which is exactly the jumpiness this is meant to avoid.
+local function set_margin(win)
+    local h = vim.api.nvim_win_get_height(win)
+    vim.wo[win].scrolloff = math.min(3, math.max(0, math.floor((h - 1) / 4)))
 end
 
 -- A fresh body render must not inherit the window's old scroll position.
@@ -269,10 +273,12 @@ end
 -- Create the BOTTOM view by splitting the source window horizontally.
 function M.attach(win)
     M.win_top = win
+    set_margin(win)
     local h = vim.api.nvim_win_get_height(win)
     vim.api.nvim_set_current_win(win)
     vim.cmd('belowright split')
     M.win_bot = vim.api.nvim_get_current_win()
+    set_margin(M.win_bot)
 
     local b = vim.api.nvim_create_buf(false, true)
     vim.bo[b].bufhidden = 'wipe'
