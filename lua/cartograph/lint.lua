@@ -117,8 +117,90 @@ local function listener_findings(store)
     return out
 end
 
+-- Which class does a function belong to? 'BnwForce:clean_landing' -> 'BnwForce'
+local function class_of(name)
+    return name and name:match('^(.-)[:%.][%w_]+$')
+end
+
+-- Swallowed types: every `inferred` call IS a type swallowed somewhere — the
+-- receiver's class got laundered to `unknown` (usually through an untyped
+-- container) and the call only resolved by unique method name. Point the
+-- finding at the ROOT CAUSE when possible: if the receiver's def line calls a
+-- resolved function of the same class (a getter), one `---@return CLASS` there
+-- fixes every caller at once; otherwise offer `---@type CLASS` on the local.
+local function swallowed_findings(store)
+    local calls = store.data.calls
+    if not calls or #calls == 0 then return {} end
+
+    -- vm-resolved calls by file:line, to find the getter behind a def site
+    local resolved_at = {}
+    for _, c in ipairs(calls) do
+        if c.to and not c.inferred then
+            local k = c.file .. ':' .. c.line
+            resolved_at[k] = resolved_at[k] or {}
+            table.insert(resolved_at[k], c)
+        end
+    end
+
+    local sites = {}
+    for _, c in ipairs(calls) do
+        local tn = c.inferred and c.to and store.node(c.to)
+        local class = tn and class_of(tn.name)
+        if class then
+            local recv = c.method and c.argv and c.argv[1]
+            local file, line, fix, label
+            if recv and recv.k == 'local' and recv.l then
+                file, line = c.file, recv.l
+                for _, g in ipairs(resolved_at[c.file .. ':' .. recv.l] or {}) do
+                    local gn = store.node(g.to)
+                    if gn and class_of(gn.name) == class then
+                        file, line = gn.file, gn.range.start.line
+                        fix   = { file = store.data.root .. '/' .. file, line = line,
+                                  text = '---@return ' .. class }
+                        label = ('---@return %s on %s'):format(class, gn.name)
+                        break
+                    end
+                end
+                if not fix then
+                    fix   = { file = store.data.root .. '/' .. file, line = line,
+                              text = '---@type ' .. class }
+                    label = '---@type ' .. class
+                end
+            else
+                file, line = c.file, c.line -- receiver isn't a simple local: no fix offered
+            end
+            local key = ('%s:%d:%s'):format(file, line, class)
+            local s = sites[key]
+            if not s then
+                s = { class = class, file = file, line = line, fix = fix, label = label,
+                      methods = {}, n = 0 }
+                sites[key] = s
+            end
+            s.methods[tn.name:match('[:%.]([%w_]+)$') or tn.name] = true
+            s.n = s.n + 1
+        end
+    end
+
+    local out = {}
+    for _, s in pairs(sites) do
+        local ms = {}
+        for m in pairs(s.methods) do ms[#ms + 1] = m end
+        table.sort(ms)
+        local shown = table.concat(ms, ', ', 1, math.min(#ms, 4))
+        if #ms > 4 then shown = shown .. (' +%d more'):format(#ms - 4) end
+        out[#out + 1] = {
+            file = store.data.root .. '/' .. s.file, line = s.line + 1,
+            message = ('%s type is swallowed — %d call(s) to %s resolve by name only%s'):format(
+                s.class, s.n, shown, s.label and (' — quick fix: ' .. s.label) or ''),
+            fix = s.fix,
+        }
+    end
+    return out
+end
+
 M.rules = {
     { name = 'listener-audit', severity = 'warn', run = listener_findings },
+    { name = 'swallowed-type', severity = 'info', run = swallowed_findings },
     {
         name = 'dead-function', severity = 'warn',
         run = function (store)

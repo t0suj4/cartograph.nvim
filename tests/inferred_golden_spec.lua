@@ -41,4 +41,11 @@ test('inferred: unique method name links, ambiguous and reads do not', function 
 
     -- vm-resolved edge (Thing.get via local) is NOT flagged
     ok(not store.edge_inferred[fire .. '\31' .. ids['Thing.get']], 'vm edge unflagged')
+
+    -- and the swallowed-type lint points at the ROOT CAUSE: the getter
+    local lint = require 'cartograph.lint'
+    local f = lint.run(store, { only = { ['swallowed-type'] = true } })
+    eq(1, #f)
+    eq('---@return Thing', f[1].fix.text)
+    eq(store.node(ids['Thing.get']).range.start.line + 1, f[1].line)
 end)

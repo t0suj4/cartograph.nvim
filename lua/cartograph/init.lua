@@ -75,6 +75,7 @@ function M.open(dump_path)
     end
 
     -- graph-aware lint -> quickfix
+    local SEV = { warn = 'W', info = 'I' }
     pcall(vim.api.nvim_del_user_command, 'CartographLint')
     vim.api.nvim_create_user_command('CartographLint', function ()
         local findings = require('cartograph.lint').run(store)
@@ -82,12 +83,33 @@ function M.open(dump_path)
         local qf = {}
         for _, f in ipairs(findings) do
             qf[#qf + 1] = { filename = f.file, lnum = f.line, col = 1,
-                type = f.severity == 'warn' and 'W' or 'E',
-                text = ('[%s] %s'):format(f.rule, f.message) }
+                type = SEV[f.severity] or 'E',
+                text = ('[%s] %s'):format(f.rule, f.message),
+                user_data = f.fix }
         end
         vim.fn.setqflist({}, ' ', { title = 'cartograph lint', items = qf })
         vim.cmd('copen')
     end, { desc = 'cartograph: graph-aware lint (dead code, redundant requires, call cycles) -> quickfix' })
+
+    -- apply the quick fix (an annotation line) of the CURRENT quickfix entry
+    pcall(vim.api.nvim_del_user_command, 'CartographLintFix')
+    vim.api.nvim_create_user_command('CartographLintFix', function ()
+        local qf = vim.fn.getqflist({ idx = 0, items = 1 })
+        local it = qf.items[qf.idx]
+        local fix = it and it.user_data
+        if type(fix) ~= 'table' or not fix.text then
+            return vim.notify('cartograph: no quick fix on this finding', vim.log.levels.WARN)
+        end
+        -- insert above the target line, via the buffer so open edits are respected
+        local buf = vim.fn.bufadd(fix.file)
+        vim.fn.bufload(buf)
+        local target = vim.api.nvim_buf_get_lines(buf, fix.line, fix.line + 1, false)[1] or ''
+        local indent = target:match('^%s*') or ''
+        vim.api.nvim_buf_set_lines(buf, fix.line, fix.line, false, { indent .. fix.text })
+        vim.api.nvim_buf_call(buf, function () vim.cmd('silent noautocmd write') end)
+        vim.notify(('cartograph: inserted `%s` at %s:%d — regenerate the graph to re-check'):format(
+            fix.text, vim.fn.fnamemodify(fix.file, ':t'), fix.line + 1), vim.log.levels.INFO)
+    end, { desc = 'cartograph: apply the annotation quick fix of the current quickfix entry' })
 
     -- focus the first real symbol so source/tree aren't blank
     vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })

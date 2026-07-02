@@ -147,6 +147,12 @@ checks luacheck can't:
   none, so the require does nothing.
 - **call-cycle** — mutual recursion / cyclic call clusters (plain self-recursion
   is not flagged). Structural, and a load-order signal.
+- **swallowed-type** — every `~` (name-inferred) call betrays a receiver whose
+  class was laundered to `unknown`, usually through an untyped container.
+  Findings point at the **root cause**: when the receiver comes from a getter
+  of the same class, one finding says `---@return CLASS` *on the getter* —
+  fixing every caller at once (on a real mod: 32 name-only calls → one
+  finding). `:CartographLintFix` on the quickfix entry inserts the annotation.
 - **listener-audit** — for a wiretap-style paired API (`register_listener` /
   `subscribe` / `unsubscribe`, keyed by a listener-name argument): flags
   subscribe/unsubscribe to an unregistered name (a runtime error), a listener
