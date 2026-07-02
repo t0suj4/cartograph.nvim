@@ -26,8 +26,9 @@ A cockpit of independent panes over a shared state store:
 - **source** — the real code at the focused location (def, or a call site),
   splittable to compare the two
 - **dependencies** — the hovered symbol's uses / used-by tree
-- **minimap** — its 1-hop neighborhood, cyclable (`<Tab>`) through a few
-  perspectives including **data flow**: the statement-level local def-use *inside*
+- **minimap** — its 1-hop neighborhood, cyclable (`<Tab>`) between two
+  perspectives: a **graph** sketch (used-by / focus / uses) and **data flow**:
+  the statement-level local def-use *inside*
   the focused function (a zoom below the symbol layer), with an **untangle lens** —
   statements are grouped by independent concern and scored for how interleaved
   those concerns are (`tangle`). Cycling to `flow` turns on the lens, which
@@ -114,7 +115,13 @@ Structural smells, not proofs — dynamically-invoked functions (event handlers,
 test cases run by a harness) can still read as "no caller". Rules live in
 `lint.lua` and are pure/testable.
 
-## Ledger reconstruction
+## Offline: history archaeology
+
+Two tools that run *outside* the live cockpit — they read git history rather
+than the current buffer, and produce reports rather than driving panes. They
+share the cockpit's graph extractor (one dump per commit, cached by sha).
+
+### Ledger reconstruction
 
 The inverse of the ImpactEngine: instead of predicting a move's edits, recover
 what a series of edits *did* to the structure. `reconstruct.run{repo, from, to}`
@@ -128,6 +135,16 @@ embeds a line number and shifts as code moves). It sees *structural* change
 only: commits that transform code *inside* a function (hoist to upvalue, reorder
 args, closure→iterator) show up as `internal` — a real, deliberate limit of the
 named-symbol graph.
+
+### Temporal coupling
+
+`couplingmine.run{repo, from, to}` attributes each commit's changed lines to the
+functions whose ranges they fell in (at *that* commit), then accumulates
+co-occurrence across the range. The output is **change coupling**: functions
+that keep changing together even when no static reference edge links them —
+hidden coupling the symbol graph alone can't see. Validated on the LuaLS
+`script/vm` history, where it surfaced compiler↔sign/generic-resolution coupling
+that is architecturally real but statically invisible.
 
 ## Tests
 
