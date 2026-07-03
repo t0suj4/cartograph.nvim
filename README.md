@@ -192,6 +192,28 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
    store; a *layout* is a composition of panes. Layouts are meant to be
    swappable/customizable.
 
+### Browsing the state machine
+
+`:CartographStates` opens the FSM as an altitude: states as rows (each with
+its **reachability cone** size — how many functions can run while the machine
+is there), a state descending into its outgoing transitions (`→ finalize ⇒
+finalizing`, followable with `l`) and its **active entry points** — the
+listeners subscribed in that state and the FSM callbacks its transitions can
+fire — each descending into the code.
+
+The domain semantics live in a ~10-line declarative adapter
+(`setup{ fsm = { events = { var = 'landing_states', path = {'events'} },
+subs = { var = 'state_subs' }, callbacks = { var = 'launch_callbacks' },
+register = 'register_listener' } }`): which data table is the transition
+spec, which maps state → subscriptions, which table holds the callbacks
+(lua-state-machine naming conventions), and the register verb. Everything
+else is generic: the extractor captures **literal data tables** (nested
+strings/numbers, `{ref='name'}` for named indirections like a shared
+ticking spec), names **anonymous functions registered under a string key**
+(`register_listener("handle_x", function() … end)` becomes node
+`handle_x`, with real call-graph edges), and the reachability cone is a
+plain BFS. Unresolvable handlers are honest frontiers, labelled.
+
 ## Lint
 
 `:CartographLint` runs graph-aware, whole-program checks and drops the findings

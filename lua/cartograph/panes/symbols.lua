@@ -42,7 +42,7 @@ local M = {
     files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
-    line_group = {}, line_sep = {},
+    line_group = {}, line_sep = {}, line_state = {},
     trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
@@ -396,6 +396,65 @@ local function render_occs(ctx, key)
     end
 end
 
+-- STATES level: the state machine's states, each with its reachability cone
+-- size. Data + adapter via cartograph.fsm; nil model renders the reason.
+local fsm = require 'cartograph.fsm'
+
+local function fsm_model()
+    if not M._fsm or M._fsm_data ~= store.data then
+        local model, why = fsm.load(store)
+        M._fsm, M._fsm_why, M._fsm_data = model or false, why, store.data
+    end
+    return M._fsm or nil, M._fsm_why
+end
+
+local function render_states(ctx)
+    local model, why = fsm_model()
+    ctx.lines[1] = 'states'
+    ctx.marks[1] = { { 0, -1, 'CartographSection' } }
+    if not model then
+        ctx.lines[2] = '  (' .. (why or 'no state machine') .. ')'
+        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        return
+    end
+    for _, st in ipairs(model.order) do
+        local _, n = fsm.state_cone(store, model, st)
+        ctx.lines[#ctx.lines + 1] = '  ' .. st
+        ctx.vnums[#ctx.lines] = tostring(n)
+        ctx.line_state[#ctx.lines] = st
+    end
+end
+
+-- STATE level: what runs while the FSM is here — outgoing transitions
+-- (descend = follow to the target state) and the active entry points
+-- (descend = into the function; unresolved handlers are honest frontiers).
+local function render_state(ctx, state)
+    local model = fsm_model()
+    if not model then ctx.lines[1] = '(no state machine)'; return end
+    local _, ncone = fsm.state_cone(store, model, state)
+    ctx.lines[1] = ('%s — reachable (%d)'):format(state, ncone)
+    ctx.marks[1] = { { 0, #state, 'CartographTitle' }, { #state, -1, 'CartographDim' } }
+    for _, t in ipairs(fsm.transitions_from(model, state)) do
+        local text = ('  → %s ⇒ %s%s'):format(t.name, t.to, t.from == '*' and ' (from *)' or '')
+        ctx.lines[#ctx.lines + 1] = text
+        ctx.marks[#ctx.lines] = { { 0, 6 + #t.name, 'CartographDim' } }
+        ctx.line_state[#ctx.lines] = t.to
+    end
+    for _, e in ipairs(fsm.entrypoints(store, model, state)) do
+        local icon = e.kind == 'listener' and '↯' or 'ƒ'
+        local text = ('  %s %s%s'):format(icon, e.label, e.fn and '' or '  (unresolved)')
+        ctx.lines[#ctx.lines + 1] = text
+        ctx.marks[#ctx.lines] = e.fn and { { 2, 2 + #icon, 'CartographDim' } }
+            or { { 0, -1, 'CartographDim' } }
+        if e.fn then
+            ctx.line_node[#ctx.lines] = e.fn
+            ctx.node_line[e.fn] = #ctx.lines
+            local n = store.node(e.fn)
+            if n then ctx.vnums[#ctx.lines] = tostring(n.range.start.line + 1) end
+        end
+    end
+end
+
 -- Inside a block: its declarations (the var nodes within the block's range).
 local function render_block(ctx, id)
     local node = store.node(id)
@@ -516,7 +575,7 @@ function M.render()
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
-        line_group = {}, line_sep = {} }
+        line_group = {}, line_sep = {}, line_state = {} }
     local v = M.view
     if v.level == 'files' then
         if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
@@ -526,13 +585,15 @@ function M.render()
     elseif v.level == 'tbl' then render_tbl(ctx, v.tbl)
     elseif v.level == 'callers' then render_callers(ctx, v.callers)
     elseif v.level == 'occs' then render_occs(ctx, v.occs)
+    elseif v.level == 'states' then render_states(ctx)
+    elseif v.level == 'state' then render_state(ctx, v.state)
     else render_fn(ctx, v.fn) end
 
     M.line_node, M.node_line = ctx.line_node, ctx.node_line
     M.line_file, M.file_header, M.line_stmt = ctx.line_file, ctx.file_header, ctx.line_stmt
     M.line_stmtidx, M.line_calls, M.line_site = ctx.line_stmtidx, ctx.line_calls, ctx.line_site
     M.line_callers, M.line_vars = ctx.line_callers, ctx.line_vars
-    M.line_group, M.line_sep = ctx.line_group, ctx.line_sep
+    M.line_group, M.line_sep, M.line_state = ctx.line_group, ctx.line_sep, ctx.line_state
 
     vim.bo[M.buf].modifiable = true
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
@@ -568,13 +629,14 @@ function M.show(level, ctx_val)
         elseif level == 'var' then M.view.var = ctx_val
         elseif level == 'tbl' then M.view.tbl = ctx_val
         elseif level == 'callers' then M.view.callers = ctx_val
-        elseif level == 'occs' then M.view.occs = ctx_val end
+        elseif level == 'occs' then M.view.occs = ctx_val
+        elseif level == 'state' then M.view.state = ctx_val end
     end
     M.render()
     if M.win and vim.api.nvim_win_is_valid(M.win) then
         local first = 1
         for row = 1, vim.api.nvim_buf_line_count(M.buf) do
-            if M.line_node[row] or M.line_stmt[row] or M.line_site[row]
+            if M.line_node[row] or M.line_stmt[row] or M.line_site[row] or M.line_state[row]
                 or (level == 'files' and M.line_file[row]) then
                 first = row
                 break
@@ -714,7 +776,7 @@ function M.attach(win)
                 if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
                 local r = row()
                 if M.view.level == 'file' or M.view.level == 'block'
-                    or M.view.level == 'tbl' then
+                    or M.view.level == 'tbl' or M.view.level == 'state' then
                     -- hover TINTS relationships and PREVIEWS the row in the
                     -- source pane (context takeover, restored on leave); it
                     -- never re-roots the cockpit (pivoting stays a conscious
@@ -756,7 +818,7 @@ function M.attach(win)
     local function view_loc()
         return { level = M.view.level, file = M.view.file, fn = M.view.fn,
             block = M.view.block, var = M.view.var, callers = M.view.callers,
-            tbl = M.view.tbl, occs = M.view.occs,
+            tbl = M.view.tbl, occs = M.view.occs, state = M.view.state,
             files_mode = M.files_mode,
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
@@ -765,7 +827,7 @@ function M.attach(win)
         M.files_mode = loc.files_mode or M.files_mode
         M.view.file, M.view.fn, M.view.block, M.view.var, M.view.callers =
             loc.file, loc.fn, loc.block, loc.var, loc.callers
-        M.view.tbl, M.view.occs = loc.tbl, loc.occs
+        M.view.tbl, M.view.occs, M.view.state = loc.tbl, loc.occs, loc.state
         M.show(loc.level)
         if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
     end
@@ -935,6 +997,16 @@ function M.attach(win)
                 store.set_context(nil)
                 enter('fn', s.fn, s.fn)
             end
+        elseif M.view.level == 'states' then
+            local st = M.line_state[r]
+            if st then enter('state', st) end
+        elseif M.view.level == 'state' then
+            local st = M.line_state[r]
+            if st then return enter('state', st) end
+            local n = store.node(M.line_node[r])
+            if n and STAGEABLE[n.kind] then
+                enter('fn', n.id, n.id)
+            end
         elseif M.view.level == 'tbl' then
             if M.line_callers[r] then
                 return enter('var', M.line_callers[r])
@@ -975,7 +1047,19 @@ function M.attach(win)
             store.set_context(nil)
             return restore_loc(loc)
         end
-        if M.view.level == 'occs' then
+        if M.view.level == 'state' then
+            store.set_context(nil)
+            local st = M.view.state
+            M.show('states')
+            for r = 1, vim.api.nvim_buf_line_count(M.buf) do
+                if M.line_state[r] == st then
+                    pcall(vim.api.nvim_win_set_cursor, win, { r, 2 })
+                    break
+                end
+            end
+        elseif M.view.level == 'states' then
+            M.show('files')
+        elseif M.view.level == 'occs' then
             store.set_context(nil)
             local kind, entity = (M.view.occs or ''):match('^(.-)\31(.-)\31')
             if kind == 'var' then M.show('var', entity)

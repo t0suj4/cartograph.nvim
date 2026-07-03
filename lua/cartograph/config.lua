@@ -42,10 +42,23 @@ M.entrypoints = {
     'main%.lua$',
 }
 
+-- FSM adapter: the ~20 lines of domain semantics a generic Lua analysis
+-- cannot infer — WHICH data table is the transition spec, which maps
+-- state -> subscriptions, which table holds the callbacks, and the register
+-- verb. Everything downstream (entry points, reachability, browsing) is
+-- generic. Defaults fit the bnw scenario; override via setup{ fsm = {...} }.
+M.fsm = {
+    events    = { var = 'landing_states', path = { 'events' } },
+    subs      = { var = 'state_subs' },
+    callbacks = { var = 'launch_callbacks' },
+    register  = 'register_listener',
+}
+
 --- Merge user options (called from cartograph.setup).
 function M.apply(opts)
     for k, v in pairs((opts or {}).keys or {}) do M.keys[k] = v end
     if (opts or {}).entrypoints then M.entrypoints = opts.entrypoints end
+    if (opts or {}).fsm then M.fsm = opts.fsm end
 end
 
 return M

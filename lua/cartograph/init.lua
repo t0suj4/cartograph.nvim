@@ -106,6 +106,12 @@ function M.open(dump_path)
             fix.text, vim.fn.fnamemodify(fix.file, ':t'), fix.line + 1), vim.log.levels.INFO)
     end, { desc = 'cartograph: apply the annotation quick fix of the current quickfix entry' })
 
+    -- browse the state machine (adapter: setup{ fsm = {...} })
+    pcall(vim.api.nvim_del_user_command, 'CartographStates')
+    vim.api.nvim_create_user_command('CartographStates', function ()
+        symbols.show('states')
+    end, { desc = 'cartograph: browse the state machine (states -> entry points -> code)' })
+
     -- open the browser on the first file, and focus its first function
     -- explicitly (hover never focuses — pivots are conscious)
     symbols.show('file', store.files[1])
