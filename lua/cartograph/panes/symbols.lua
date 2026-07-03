@@ -370,17 +370,24 @@ local function render_occs(ctx, key)
             t = line:sub(r.start.char + 1)
         end
         if t == '' then t = line:gsub('^%s+', '') end
-        -- show the MEMBER reached through the reference: a slice containing a
-        -- chain tail-strips (`self.foo` -> `.foo`); a slice that is just the
-        -- base checks what follows it (`self` + `.foo` -> `.foo`); only a
-        -- genuinely standalone ref (`list(self)`) keeps the bare name
-        local tail = t:match('([.:][%w_]+)$')
-        if tail and tail ~= t then
-            t = tail
-        elseif r['end'].line == r.start.line then
-            local mem = line:sub(r['end'].char + 1):match('^%s*([.:])%s*([%w_]+)')
-                and line:sub(r['end'].char + 1):gsub('^%s*([.:])%s*([%w_]+).*$', '%1%2')
-            if mem then t = mem end
+        -- follow the whole access CHAIN through the reference: `local x =
+        -- self.bnw.home.surface` shows (and highlights) as `.bnw.home.surface`;
+        -- a genuinely standalone ref (argument position) keeps the bare name
+        if r['end'].line == r.start.line then
+            local bs, be = line:find('^[%w_]+', r.start.char + 1)
+            if bs then
+                local i, parts = be + 1, {}
+                while true do
+                    local s2, e2, sep, name = line:find('^%s*([.:])%s*([%w_]+)', i)
+                    if not s2 then break end
+                    parts[#parts + 1] = sep .. name
+                    i = e2 + 1
+                end
+                if #parts > 0 then
+                    t = table.concat(parts)
+                    r = { start = r.start, ['end'] = { line = r.start.line, char = i - 1 } }
+                end
+            end
         end
         ctx.lines[#ctx.lines + 1] = '  ' .. t
         ctx.vnums[#ctx.lines] = tostring(r.start.line + 1)
