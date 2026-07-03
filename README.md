@@ -57,8 +57,10 @@ A cockpit of independent panes over a shared state store:
   Inside a function, the `↖ callers (N)` row descends into the **call
   sites**: one row per call, hover shows the caller's code with the call
   highlighted in the source pane, descend enters the caller. **Self
-  references are distinct** in every sites view: external sites sort first,
-  same-class / same-entity sites follow dimmed, the header shows the split
+  references are distinct** in every sites view: external sites first, then
+  an inert `── self ──` separator, then the entity's own sites with the
+  class prefix stripped (`.get`, `:trigger`) — position carries the
+  meaning, so nothing is dimmed. The header shows the split
   (`used by (2 + 140 self)`), and recursion is marked `⟳`. Edges vm-typed resolution
   can't see — a method called on an instance fetched out of a storage table
   (the Factorio pattern) — are recovered by **unique method name** and

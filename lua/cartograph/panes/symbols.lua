@@ -42,7 +42,7 @@ local M = {
     files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
-    line_group = {},
+    line_group = {}, line_sep = {},
     trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
@@ -191,22 +191,32 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
         g.sites[#g.sites + 1] = s
     end
 
+    -- externals, then a chrome-only separator, then the self section — the
+    -- position carries the meaning, so no dimming and no repeated prefix
+    -- (internal names are stripped like the table-members view)
+    local sep_pending = nint > 0 and nint < #sites
     for _, g in ipairs(order) do
+        if g.internal and sep_pending then
+            ctx.lines[#ctx.lines + 1] = '  ── self ' .. string.rep('─', 24)
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+            ctx.line_sep[#ctx.lines] = true
+            sep_pending = false
+        end
+        local disp = (g.sites[1].short or g.name)
         if #g.sites == 1 then
             local st = g.sites[1]
-            local text = '  ' .. st.name .. (st.rec and ' ⟳' or '') .. (st.inferred and ' ~' or '')
+            local text = '  ' .. disp .. (st.rec and ' ⟳' or '') .. (st.inferred and ' ~' or '')
             ctx.lines[#ctx.lines + 1] = text
-            if st.internal then ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
-            elseif st.inferred then ctx.marks[#ctx.lines] = { { #text - 2, -1, 'CartographDim' } } end
+            if st.inferred then ctx.marks[#ctx.lines] = { { #text - 2, -1, 'CartographDim' } } end
             ctx.vnums[#ctx.lines] = tostring(st.line + 1)
             ctx.line_site[#ctx.lines] = st
         else
             -- several sites: the row DESCENDS into the occurrences (no folds —
             -- the browser has altitude, l/h are the only vocabulary)
             local text = ('  %s (%d)%s%s'):format(
-                g.name, #g.sites, g.rec and ' ⟳' or '', g.inferred and ' ~' or '')
+                disp, #g.sites, g.rec and ' ⟳' or '', g.inferred and ' ~' or '')
             ctx.lines[#ctx.lines + 1] = text
-            if g.internal then ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } } end
+            ctx.marks[#ctx.lines] = { { 2 + #disp, -1, 'CartographDim' } }
             ctx.line_group[#ctx.lines] = g
         end
     end
@@ -266,6 +276,7 @@ local function render_var(ctx, id)
             and (fn.name:sub(1, #p1) == p1 or fn.name:sub(1, #p2) == p2) or nil
         for _, r in ipairs(u.at) do
             sites[#sites + 1] = { fn = u.from, name = fn and fn.name or u.from,
+                short = member and fn.name:sub(#(node.name or '') + 1) or nil,
                 file = fn and fn.file, line = r.start.line, range = r,
                 internal = member }
         end
@@ -281,17 +292,22 @@ local function render_callers(ctx, id)
     if not node then ctx.lines[1] = '(gone)'; return end
     local sites = {}
     local cls = class_of(node.name)
+    local selfshort = class_of(node.name) and node.name
+        and node.name:sub(#class_of(node.name) + 1) or nil
     for _, r in ipairs(store.occurrences(id, id) or {}) do -- recursion (self edge)
-        sites[#sites + 1] = { fn = id, name = node.name or id, file = node.file,
-            line = r.start.line, range = r, rec = true, internal = true }
+        sites[#sites + 1] = { fn = id, name = node.name or id, short = selfshort,
+            file = node.file, line = r.start.line, range = r, rec = true, internal = true }
     end
     for _, from in ipairs(store.usedby[id] or {}) do
         local fn = store.node(from)
         local inf = store.edge_inferred[from .. '\31' .. id]
         local rec = from == id or nil
         local internal = rec or (cls ~= nil and class_of(fn and fn.name) == cls) or nil
+        local short = internal and cls and fn and fn.name
+            and fn.name:sub(1, #cls) == cls and fn.name:sub(#cls + 1) or nil
         for _, r in ipairs(store.occurrences(from, id) or {}) do
             sites[#sites + 1] = { fn = from, name = fn and fn.name or from,
+                short = short,
                 file = fn and fn.file, line = r.start.line, range = r, inferred = inf,
                 rec = rec, internal = internal }
         end
@@ -476,7 +492,7 @@ function M.render()
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
-        line_group = {} }
+        line_group = {}, line_sep = {} }
     local v = M.view
     if v.level == 'files' then
         if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
@@ -492,7 +508,7 @@ function M.render()
     M.line_file, M.file_header, M.line_stmt = ctx.line_file, ctx.file_header, ctx.line_stmt
     M.line_stmtidx, M.line_calls, M.line_site = ctx.line_stmtidx, ctx.line_calls, ctx.line_site
     M.line_callers, M.line_vars = ctx.line_callers, ctx.line_vars
-    M.line_group = ctx.line_group
+    M.line_group, M.line_sep = ctx.line_group, ctx.line_sep
 
     vim.bo[M.buf].modifiable = true
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
@@ -696,6 +712,7 @@ function M.attach(win)
                     end
                 elseif M.view.level == 'var' or M.view.level == 'callers'
                     or M.view.level == 'occs' then
+                    if M.line_sep[r] then return end -- chrome: keep the preview
                     -- hover a site -> preview it highlighted; a group row ->
                     -- preview the whole function
                     local s = M.line_site[r]
