@@ -370,7 +370,18 @@ local function render_occs(ctx, key)
             t = line:sub(r.start.char + 1)
         end
         if t == '' then t = line:gsub('^%s+', '') end
-        t = t:match('([.:][%w_]+)$') or t
+        -- show the MEMBER reached through the reference: a slice containing a
+        -- chain tail-strips (`self.foo` -> `.foo`); a slice that is just the
+        -- base checks what follows it (`self` + `.foo` -> `.foo`); only a
+        -- genuinely standalone ref (`list(self)`) keeps the bare name
+        local tail = t:match('([.:][%w_]+)$')
+        if tail and tail ~= t then
+            t = tail
+        elseif r['end'].line == r.start.line then
+            local mem = line:sub(r['end'].char + 1):match('^%s*([.:])%s*([%w_]+)')
+                and line:sub(r['end'].char + 1):gsub('^%s*([.:])%s*([%w_]+).*$', '%1%2')
+            if mem then t = mem end
+        end
         ctx.lines[#ctx.lines + 1] = '  ' .. t
         ctx.vnums[#ctx.lines] = tostring(r.start.line + 1)
         ctx.line_site[#ctx.lines] = { fn = fnid, name = fname, file = fn.file,
