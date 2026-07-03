@@ -226,19 +226,6 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
     end
 end
 
--- Trimmed source line for occurrence rows (per-call cache lives in ctx).
-local function snippet_fn(cache)
-    return function (file, l0)
-        if cache[file] == nil then
-            local okr, all = pcall(vim.fn.readfile, store.data.root .. '/' .. file)
-            cache[file] = okr and all or false
-        end
-        local t = (cache[file] and cache[file][l0 + 1] or ''):gsub('^%s+', '')
-        if #t > 44 then t = t:sub(1, 43) .. '…' end
-        return t
-    end
-end
-
 -- Which class does a name belong to? 'BnwForce:trigger' -> 'BnwForce'
 local function class_of(name)
     return name and name:match('^(.-)[.:][%w_]+$')
@@ -363,9 +350,28 @@ local function render_occs(ctx, key)
     local fname = fn.name or '?'
     ctx.lines[1] = ('%s — sites of %s (%d)'):format(fname, en.name or '?', #ranges)
     ctx.marks[1] = { { 0, #fname, 'CartographTitle' }, { #fname, -1, 'CartographDim' } }
-    local snippet = snippet_fn({})
+    -- each row shows the REFERENCE itself (sliced from its range), tail-
+    -- stripped to the accessed field: `local bar = self.foo` reads `.foo`.
+    -- The full statement is one hover away in the source pane.
+    local cache = {}
+    local function rawline(file, l0)
+        if cache[file] == nil then
+            local okr, all = pcall(vim.fn.readfile, store.data.root .. '/' .. file)
+            cache[file] = okr and all or false
+        end
+        return (cache[file] and cache[file][l0 + 1]) or ''
+    end
     for _, r in ipairs(ranges) do
-        ctx.lines[#ctx.lines + 1] = '  ' .. snippet(fn.file, r.start.line)
+        local line = rawline(fn.file, r.start.line)
+        local t
+        if r['end'].line == r.start.line then
+            t = line:sub(r.start.char + 1, r['end'].char)
+        else
+            t = line:sub(r.start.char + 1)
+        end
+        if t == '' then t = line:gsub('^%s+', '') end
+        t = t:match('([.:][%w_]+)$') or t
+        ctx.lines[#ctx.lines + 1] = '  ' .. t
         ctx.vnums[#ctx.lines] = tostring(r.start.line + 1)
         ctx.line_site[#ctx.lines] = { fn = fnid, name = fname, file = fn.file,
             line = r.start.line, range = r }
@@ -674,6 +680,7 @@ end
 function M.attach(win)
     M.win = win
     vim.wo[win].signcolumn = 'yes:1' -- stable-width gutter for the class markers
+    vim.wo[win].wrap = false         -- rows are rows; long ones clip, not fold
     vim.wo[win].cursorline = true
     local keys = config.keys
     local function row() return vim.api.nvim_win_get_cursor(win)[1] end
