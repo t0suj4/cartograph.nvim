@@ -42,6 +42,8 @@ local M = {
     files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
+    line_group = {},
+    sites_open = {}, -- expanded groups in sites views (keyed by fn id)
     trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
@@ -173,22 +175,61 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
     ctx.lines[1] = ('%s %s — %s (%s)'):format(icon, name, label, counts)
     ctx.marks[1] = { { 0, #icon, 'CartographDim' }, { #icon + 1, #icon + 1 + #name, 'CartographTitle' },
                      { #icon + 1 + #name, -1, 'CartographDim' } }
+
+    -- group per using function: a single site stays one flat row; several
+    -- fold into a subtree (`▸ name (n)`, l toggles) whose children are the
+    -- occurrences, shown as real source-line snippets
+    local groups, order = {}, {}
     for _, s in ipairs(sites) do
-        local text = '  ' .. s.name .. (s.rec and ' ⟳' or '') .. (s.inferred and ' ~' or '')
-        ctx.lines[#ctx.lines + 1] = text
-        if s.internal then
-            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
-        elseif s.inferred then
-            ctx.marks[#ctx.lines] = { { #text - 2, -1, 'CartographDim' } }
+        local g = groups[s.fn]
+        if not g then
+            g = { fn = s.fn, name = s.name, internal = s.internal,
+                  inferred = s.inferred, sites = {} }
+            groups[s.fn] = g
+            order[#order + 1] = g
         end
-        if s.rec then
-            local at = #('  ' .. s.name)
-            local m = ctx.marks[#ctx.lines] or {}
-            m[#m + 1] = { at, at + 4, 'CartographMarker' } -- ' ⟳' (space + 3-byte glyph)
-            ctx.marks[#ctx.lines] = m
+        g.rec = g.rec or s.rec
+        g.sites[#g.sites + 1] = s
+    end
+
+    local srccache = {}
+    local function snippet(file, l0)
+        if srccache[file] == nil then
+            local okr, all = pcall(vim.fn.readfile, store.data.root .. '/' .. file)
+            srccache[file] = okr and all or false
         end
+        local t = (srccache[file] and srccache[file][l0 + 1] or ''):gsub('^%s+', '')
+        if #t > 44 then t = t:sub(1, 43) .. '…' end
+        return t
+    end
+
+    local function site_row(s, indent, text)
+        ctx.lines[#ctx.lines + 1] = indent .. text
+        if s.internal then ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } } end
         ctx.vnums[#ctx.lines] = tostring(s.line + 1)
         ctx.line_site[#ctx.lines] = s
+    end
+    for _, g in ipairs(order) do
+        if #g.sites == 1 then
+            local s = g.sites[1]
+            site_row(s, '  ', s.name .. (s.rec and ' ⟳' or '') .. (s.inferred and ' ~' or ''))
+            if not s.internal and s.inferred then
+                ctx.marks[#ctx.lines] = { { #ctx.lines >= 0 and (#(ctx.lines[#ctx.lines]) - 2) or 0, -1, 'CartographDim' } }
+            end
+        else
+            local open = M.sites_open[g.fn]
+            local text = ('  %s %s (%d)%s%s'):format(open and '▾' or '▸',
+                g.name, #g.sites, g.rec and ' ⟳' or '', g.inferred and ' ~' or '')
+            ctx.lines[#ctx.lines + 1] = text
+            ctx.marks[#ctx.lines] = g.internal and { { 0, -1, 'CartographDim' } }
+                or { { 2, 2 + 3, 'CartographMarker' } }
+            ctx.line_group[#ctx.lines] = g
+            if open then
+                for _, s in ipairs(g.sites) do
+                    site_row(s, '      ', snippet(s.file, s.line))
+                end
+            end
+        end
     end
     if #sites == 0 then
         ctx.lines[2] = '  ' .. empty_note
@@ -411,7 +452,8 @@ function M.render()
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
-        line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {} }
+        line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
+        line_group = {} }
     local v = M.view
     if v.level == 'files' then
         if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
@@ -426,6 +468,7 @@ function M.render()
     M.line_file, M.file_header, M.line_stmt = ctx.line_file, ctx.file_header, ctx.line_stmt
     M.line_stmtidx, M.line_calls, M.line_site = ctx.line_stmtidx, ctx.line_calls, ctx.line_site
     M.line_callers, M.line_vars = ctx.line_callers, ctx.line_vars
+    M.line_group = ctx.line_group
 
     vim.bo[M.buf].modifiable = true
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
@@ -458,9 +501,9 @@ function M.show(level, ctx_val)
         if level == 'file' then M.view.file = ctx_val
         elseif level == 'fn' then M.view.fn = ctx_val
         elseif level == 'block' then M.view.block = ctx_val
-        elseif level == 'var' then M.view.var = ctx_val
+        elseif level == 'var' then M.view.var = ctx_val; M.sites_open = {}
         elseif level == 'tbl' then M.view.tbl = ctx_val
-        elseif level == 'callers' then M.view.callers = ctx_val end
+        elseif level == 'callers' then M.view.callers = ctx_val; M.sites_open = {} end
     end
     M.render()
     if M.win and vim.api.nvim_win_is_valid(M.win) then
@@ -627,10 +670,12 @@ function M.attach(win)
                             { start = { line = l - 1, char = 0 }, ['end'] = { line = l, char = 0 } } } })
                     end
                 elseif M.view.level == 'var' or M.view.level == 'callers' then
-                    -- hover a usage site -> its function in the bottom source
-                    -- view, the read highlighted (same pattern as trace hover)
+                    -- hover a site -> preview it highlighted; a group row ->
+                    -- preview the whole function
                     local s = M.line_site[r]
+                    local g = M.line_group[r]
                     if s then store.set_context({ node = s.fn, ranges = { s.range } })
+                    elseif g then store.set_context({ node = g.fn })
                     else store.set_context(nil) end
                 end
             end, 60)
@@ -803,6 +848,13 @@ function M.attach(win)
                 enter(enter_var(n.id), n.id, n.id)
             end
         elseif M.view.level == 'var' or M.view.level == 'callers' then
+            local g = M.line_group[r]
+            if g then -- fold toggle, cursor stays put
+                M.sites_open[g.fn] = not M.sites_open[g.fn] or nil
+                M.render()
+                pcall(vim.api.nvim_win_set_cursor, win, { r, 2 })
+                return
+            end
             local s = M.line_site[r]
             if s and store.node(s.fn) then
                 store.set_context(nil)
@@ -924,6 +976,7 @@ function M.attach(win)
         local r = row()
         local site = M.line_site[r]
         local n = store.node(M.line_node[r]) or (site and store.node(site.fn))
+            or (M.line_group[r] and store.node(M.line_group[r].fn))
         local file = (site and site.file) or (n and n.file) or M.line_file[r]
             or (M.view.level == 'fn' and store.node(M.view.fn) and store.node(M.view.fn).file)
         if not file then return end
