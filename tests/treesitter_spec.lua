@@ -269,6 +269,15 @@ test('php: functions, qualified methods, requires, hook fan-out', function ()
         if e.xlang and e.from == byname.on_boot.id then fan = fan + 1 end
     end
     eq(2, fan)
+    -- php's crazier dispatch: call_user_func('scale') RESOLVES (the string
+    -- is the mechanism), $op(3) stays a visible dynamic frontier
+    local cuf, dyn
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'call_user_func' then cuf = c end
+        if c.dynamic then dyn = c end
+    end
+    ok(cuf and cuf.to == byname.scale.id, 'call_user_func literal resolved')
+    ok(dyn and dyn.callee == '$op' and not dyn.to, 'variable call visible, unresolved')
 end)
 
 test('frontier: minified bundles are opaque but reachable by text search', function ()

@@ -13,5 +13,8 @@ function on_boot() {
 }
 
 add_action('boot', 'compute');
+call_user_func('scale', 2);
+$op = 'compute';
+$op(3);
 add_action('boot', 'scale');
 add_action('boot', function () { return 1; });

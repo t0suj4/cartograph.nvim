@@ -363,7 +363,11 @@ M.spec = {
             (function_call_expression function: (name) @name) @call
             (member_call_expression name: (name) @name) @call
             (scoped_call_expression name: (name) @name) @call
+            (function_call_expression function: (variable_name) @name) @call
         ]=],
+        -- call_user_func('name', ...) CALLS name: the literal resolves as
+        -- the real callee (the string is the dispatch mechanism, not a ~)
+        indirect_calls = { call_user_func = 1, call_user_func_array = 1 },
         vars = [=[
             (program (expression_statement (assignment_expression
                 left: (variable_name (name) @name) right: (_) @value) @def))
@@ -921,8 +925,10 @@ function M.extract(root, opts)
                     and not (spec.call_skip or {})[node_text(namen, src)] then
                     local full = node_text(namen, src):gsub('%s+', '')
                     -- the inventory names the VERB (lint configs match on it);
-                    -- the full expression text drives resolution
-                    local callee = full:match('([%w_]+)$') or full
+                    -- the full expression text drives resolution. A dynamic
+                    -- callee keeps its sigil: `→ $op` says what it is
+                    local callee = full:find('^%$') and full
+                        or full:match('([%w_]+)$') or full
                     local method = full:find(':') ~= nil
                     local sp = pos_of(calln)
                     local encl = in_function(calln, spec)
@@ -979,9 +985,13 @@ function M.extract(root, opts)
                     local c = { callee = callee, args = args, argv = argv,
                         file = file, line = sp.start.line, method = method,
                         full = full ~= callee and full or nil,
+                        dynamic = full:find('^%$') and true or nil,
                         top = is_top or nil }
                     calls[#calls + 1] = c
+                    local indirect = (spec.indirect_calls or {})[callee]
+                    indirect = indirect and args[indirect + (method and 1 or 0)]
                     pending[#pending + 1] = { call = c, file = file, full = full,
+                        indirect = indirect ~= '' and indirect or nil,
                         at = pos_of(namen), encl = encl and pos_of(encl) }
                 end
             end
@@ -1035,7 +1045,16 @@ function M.extract(root, opts)
         return nil
     end
     for _, p in ipairs(pending) do
-        local target, inferred = resolve(p.full or p.call.callee, p.file)
+        local target, inferred
+        if p.call.dynamic then
+            -- $fn(...): honest frontier — the name is runtime state
+            target = nil
+        elseif p.indirect then
+            target = resolve(p.indirect, p.file)
+            inferred = false -- the literal IS the dispatch mechanism
+        else
+            target, inferred = resolve(p.full or p.call.callee, p.file)
+        end
         if target then
             p.call.to = target.id
             p.call.inferred = inferred or nil
