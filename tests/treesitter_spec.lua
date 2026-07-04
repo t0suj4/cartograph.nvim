@@ -706,3 +706,79 @@ test('sql: embedded queries make tables first-class entities', function ()
     for _, f in ipairs(fs) do blob = blob .. f.message .. '\n' end
     ok(blob:match("table 'items': 2 read%(s%), 1 write%(s%)"), blob)
 end)
+
+test('live refresh: splice, remap, and both directions of relink', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local refresh = require 'cartograph.refresh'
+    -- a disposable two-file project
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/sub', 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text)
+        fd:close()
+    end
+    write('a.lua', [[
+local function alpha(x)
+  return beta(x) + 1
+end
+
+local function calls_new()
+  return brand_new(2)
+end
+]])
+    write('sub/b.lua', [[
+local function beta(y)
+  return y * 2
+end
+]])
+    local data = ts.extract(root)
+    require('cartograph.xlang').link(data, require('cartograph.xlang').effective_bindings(data))
+    store.ingest(data)
+    local function byname(n)
+        for id, node in pairs(store.by_id) do
+            if node.name == n then return id end
+        end
+    end
+    ok(byname('alpha') and byname('beta'), 'both files extracted')
+    ok(vim.tbl_contains(store.uses[byname('alpha')] or {}, byname('beta')),
+        'cross-file edge before')
+    ok(not byname('brand_new'), 'target does not exist yet')
+    store.set_focus(byname('beta'))
+
+    -- edit b.lua: lines shift (id changes) AND brand_new appears
+    write('sub/b.lua', [[
+-- a comment pushing everything down
+local hidden = 1
+
+local function beta(y)
+  return y * 3
+end
+
+local function brand_new(z)
+  return z + hidden
+end
+]])
+    local stats, why = refresh.file('sub/b.lua')
+    ok(stats, tostring(why))
+    -- inbound edge remapped across the id shift
+    local beta2 = byname('beta')
+    ok(beta2 and beta2:match('@3'), 'beta has its new line-shifted id: ' .. tostring(beta2))
+    ok(vim.tbl_contains(store.uses[byname('alpha')] or {}, beta2),
+        'alpha -> beta survived the shift')
+    -- the OTHER direction: a pre-existing call resolves to the NEW function
+    local bn = byname('brand_new')
+    ok(bn, 'new function present')
+    ok(vim.tbl_contains(store.usedby[bn] or {}, byname('calls_new')),
+        'old call into the new function relinked')
+    -- focus survived the remap
+    eq(beta2, store.focused)
+    -- freeze-while-staged
+    store.moveset[byname('alpha')] = true
+    local s2, w2 = refresh.file('sub/b.lua')
+    ok(not s2 and w2:match('frozen'), 'staged changes freeze refresh')
+    store.moveset = {}
+    vim.fn.delete(root, 'rf')
+end)

@@ -238,6 +238,20 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
      honest `~`. A `compile_commands.json`/`compile_flags.txt` gives it
      full cross-file eyes.
 
+### Live refresh
+
+The graph follows saves. Writing a file under the project root
+re-extracts just that file (imports resolved against the whole project),
+splices it into the store, and **relinks in both directions**: node ids
+embed line numbers, so inbound edges survive edits through a
+(kind, name) remap, and calls elsewhere that named a function you just
+created resolve to it. Navigation state — focus, history, trails, the
+browser's exact location — carries across. Staged changes **freeze**
+refresh (a transaction pins the graph it was planned against);
+`:CartographRefresh` forces one file, `:CartographRefresh!` the whole
+project; `setup{ refresh = false }` disables. Dump-based graphs (lua-ls)
+say so instead of silently staling.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:

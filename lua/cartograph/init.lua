@@ -149,6 +149,49 @@ function M.open(dump_path, opts)
             fix.text, vim.fn.fnamemodify(fix.file, ':t'), fix.line + 1), vim.log.levels.INFO)
     end, { desc = 'cartograph: apply the annotation quick fix of the current quickfix entry' })
 
+    -- live refresh: the graph follows saves (tree-sitter graphs only)
+    local grp = vim.api.nvim_create_augroup('cartograph_refresh', { clear = true })
+    vim.api.nvim_create_autocmd('BufWritePost', {
+        group = grp,
+        callback = function (ev)
+            if require('cartograph.config').refresh == false then return end
+            local root = store.data and store.data.root
+            if not root or store.data.provider ~= 'treesitter' then return end
+            local abs = vim.api.nvim_buf_get_name(ev.buf)
+            if abs:sub(1, #root + 1) ~= root .. '/' then return end
+            local rel = abs:sub(#root + 2)
+            vim.defer_fn(function ()
+                local okr, stats, why = pcall(require('cartograph.refresh').file, rel)
+                if okr and stats then
+                    vim.notify(('cartograph: refreshed %s (%d nodes, %d relinked)')
+                        :format(rel, stats.added, stats.relinked), vim.log.levels.INFO)
+                elseif okr and why then
+                    vim.notify('cartograph: refresh skipped — ' .. why, vim.log.levels.WARN)
+                end
+            end, 100)
+        end,
+    })
+    pcall(vim.api.nvim_del_user_command, 'CartographRefresh')
+    vim.api.nvim_create_user_command('CartographRefresh', function (o)
+        local r = require 'cartograph.refresh'
+        local stats, why
+        if o.bang then
+            stats, why = r.all()
+        else
+            local abs = vim.api.nvim_buf_get_name(0)
+            local root = store.data and store.data.root or ''
+            if abs:sub(1, #root + 1) == root .. '/' then
+                stats, why = r.file(abs:sub(#root + 2))
+            else
+                stats, why = r.all()
+            end
+        end
+        vim.notify(stats and ('cartograph: refreshed (' .. vim.inspect(stats):gsub('%s+', ' ') .. ')')
+            or ('cartograph: ' .. tostring(why)),
+            stats and vim.log.levels.INFO or vim.log.levels.WARN)
+    end, { bang = true,
+        desc = 'cartograph: refresh the graph (current file; ! = whole project)' })
+
     -- why did registry discovery (not) find a verb?
     pcall(vim.api.nvim_del_user_command, 'CartographDiscover')
     vim.api.nvim_create_user_command('CartographDiscover', function (o)

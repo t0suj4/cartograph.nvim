@@ -33,6 +33,10 @@ M.pins = nil
 -- callables under string keys are found and linked without configuration
 M.discover = true
 
+-- live refresh: re-extract a saved file and splice it into the graph
+-- (tree-sitter graphs only; frozen while changes are staged)
+M.refresh = true
+
 M.keys = {
     -- navigation
     pivot      = '<CR>',    -- tree/trace: re-root on / expand this entry

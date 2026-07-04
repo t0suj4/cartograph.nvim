@@ -759,7 +759,7 @@ local function list_files(root, subdirs)
     local function in_scope(rel)
         if not subdirs then return true end
         for _, p in ipairs(subdirs) do
-            if rel:sub(1, #p) == p then return true end
+            if rel == p or rel:sub(1, #p + 1) == p .. '/' then return true end
         end
         return false
     end
@@ -799,6 +799,7 @@ function M.extract(root, opts)
     root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
     local files, minified = list_files(root, opts and opts.subdirs)
     local fileset = {}
+    for _, f in ipairs(opts and opts.fileset or files) do fileset[f] = true end
     for _, f in ipairs(files) do fileset[f] = true end
 
     local data = { schema = 1, root = root, provider = 'treesitter',
@@ -1084,8 +1085,10 @@ function M.extract(root, opts)
                     calls[#calls + 1] = c
                     local indirect = (spec.indirect_calls or {})[callee]
                     indirect = indirect and args[indirect + (method and 1 or 0)]
+                    indirect = indirect ~= '' and indirect or nil
+                    c.indirect = indirect
                     pending[#pending + 1] = { call = c, file = file, full = full,
-                        indirect = indirect ~= '' and indirect or nil,
+                        indirect = indirect,
                         at = pos_of(namen), encl = encl and pos_of(encl) }
                 end
             end
@@ -1294,6 +1297,92 @@ function M.extract(root, opts)
     end
     data.no_parser = next(no_parser) and vim.tbl_keys(no_parser) or nil
     return data
+end
+
+--- Re-resolve name-matched links over a (possibly spliced) graph: every
+--- call lacking `to` gets another chance against the CURRENT node set,
+--- and its ref edge is added (deduped against existing edges). Mirrors
+--- extract()'s resolution semantics — same-file non-cbarg priority,
+--- unique-tail fallback, stdlib gates, min-length guard. Used by live
+--- refresh, where a changed file's calls (and other files' calls INTO
+--- the changed file) need relinking.
+function M.relink(data)
+    local exact, tail = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            exact[n.name] = exact[n.name] or {}
+            table.insert(exact[n.name], n)
+            local tl = n.name:match('([%w_]+)$')
+            if tl and tl ~= n.name then
+                tail[tl] = tail[tl] or {}
+                table.insert(tail[tl], n)
+            end
+        end
+    end
+    local refEdge = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end
+    end
+    local function addref(from, to, at, inferred)
+        local k = from .. '\31' .. to
+        local e = refEdge[k]
+        if not e then
+            e = { from = from, to = to, kind = 'ref', at = {},
+                self = (from == to) or nil, inferred = inferred or nil }
+            refEdge[k] = e
+            data.edges[#data.edges + 1] = e
+        end
+        if not inferred then e.inferred = nil end
+        e.at[#e.at + 1] = at
+    end
+    local function resolve(name, file)
+        if #name < 3 then return nil end
+        local _, spec = lang_for(file)
+        local snames = spec and spec.stdlib_names or {}
+        if snames[name] or snames[name:match('([%w_%-]+)$') or ''] then return nil end
+        local cands = exact[name]
+        if cands then
+            local same
+            for _, n in ipairs(cands) do
+                if n.file == file and not n.cbarg then
+                    if same then return nil end
+                    same = n
+                end
+            end
+            if same then return same, false end
+            if #cands == 1 then return cands[1], true end
+            return nil
+        end
+        for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
+            if name:sub(1, #pre) == pre then return nil end
+        end
+        local tl = name:match('([%w_]+)$')
+        local tc = tl and (tail[tl] or exact[tl])
+        if tc and #tc == 1 then return tc[1], true end
+        return nil
+    end
+    local n = 0
+    for _, c in ipairs(data.calls or {}) do
+        if not c.to and not c.dynamic then
+            local target, inferred
+            if c.indirect then
+                target = resolve(c.indirect, c.file)
+                inferred = false
+            else
+                target, inferred = resolve(c.full or c.callee, c.file)
+            end
+            if target then
+                c.to = target.id
+                n = n + 1
+                if c.fn then
+                    addref(c.fn, target.id,
+                        { start = { line = c.line, char = 0 },
+                            ['end'] = { line = c.line, char = 0 } }, inferred)
+                end
+            end
+        end
+    end
+    return n
 end
 
 return M
