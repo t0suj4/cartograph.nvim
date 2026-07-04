@@ -198,16 +198,52 @@ local function swallowed_findings(store)
     return out
 end
 
+-- Manifest load order (WoW .toc, via store.toc): the file list IS the load
+-- order, so a load-time call into a file that loads LATER hits nil — the
+-- classic addon bug. Also surfaces files no manifest path reaches (never
+-- load) and listed files that don't exist.
+local function load_order_findings(store)
+    local t = store.toc
+    if not t then return {} end
+    local out = {}
+    for _, c in ipairs(store.data.calls or {}) do
+        if c.top and c.to then
+            local callee = store.node(c.to)
+            local ci = callee and t.index[callee.file]
+            local fi = t.index[c.file]
+            if ci and fi and ci > fi then
+                out[#out + 1] = { file = store.data.root .. '/' .. c.file, line = c.line + 1,
+                    message = ("load-time call to '%s', but %s loads later (#%d, this file is #%d)%s"):format(
+                        callee.name, callee.file, ci, fi,
+                        c.inferred and ' — name-matched' or '') }
+            end
+        end
+    end
+    for _, f in ipairs(t.unlisted or {}) do
+        out[#out + 1] = { file = store.data.root .. '/' .. f, line = 1,
+            message = ("'%s' is not reachable from %s — it never loads"):format(f, t.toc) }
+    end
+    for _, m in ipairs(t.missing or {}) do
+        out[#out + 1] = { file = store.data.root .. '/' .. t.toc, line = 1,
+            message = ("%s lists '%s' (via %s), which does not exist"):format(t.toc, m.file, m.via) }
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'load-order', severity = 'warn', run = load_order_findings },
     { name = 'listener-audit', severity = 'warn', run = listener_findings },
     { name = 'swallowed-type', severity = 'info', run = swallowed_findings },
     {
         name = 'dead-function', severity = 'warn',
         run = function (store)
             local out = {}
+            -- manifest projects: XML-referenced handlers are engine-dispatched
+            local xmlh = store.toc and store.toc.handlers or {}
             for _, n in ipairs(store.data.nodes) do
                 if (n.kind == 'function' or n.kind == 'method')
                     and not exported(n) and not metamethod(n) and not n.cbarg
+                    and not xmlh[n.name]
                     and #(store.usedby[n.id] or {}) == 0 then
                     out[#out + 1] = { file = store.abspath(n), line = n.range.start.line + 1,
                         message = ("local function '%s' has no callers (possibly dead)"):format(n.name) }

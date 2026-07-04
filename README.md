@@ -219,6 +219,25 @@ ticking spec), names **anonymous functions registered under a string key**
 `handle_x`, with real call-graph edges), and the reachability cone is a
 plain BFS. Unresolvable handlers are honest frontiers, labelled.
 
+### WoW addons: the .toc manifest
+
+When the workspace root holds a `.toc` file, cartograph reads it as what it
+is — the addon's **load-order manifest**. The ordered file list (flattened
+through the XML `<Script>`/`<Include>` chains, backslashes and case
+differences resolved) becomes the project structure:
+
+- the files view shows each file's **load position**; `<Tab>`'s tree is the
+  load order itself (XML includes indented), closed by a
+  `── never loaded ──` section for Lua files no manifest path reaches;
+- classification is exact: listed files are quiet, unlisted files are
+  genuine orphans — they never load (on a shipped addon this found two
+  localization files missing from the manifest);
+- **load-order lint**: a load-time call into a file that loads *later* hits
+  nil — the classic addon bug — plus listed-but-missing files;
+- XML handler references (`function="X"` attributes, inline
+  `<OnClick>Foo()</OnClick>` bodies) are engine entry points, exempted from
+  dead-function.
+
 ## Lint
 
 `:CartographLint` runs graph-aware, whole-program checks and drops the findings

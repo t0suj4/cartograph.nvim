@@ -1,0 +1,9 @@
+## Interface: 30300
+## Title: Mini
+## SavedVariables: MiniDB
+## Dependencies: SomeLib
+
+# a comment line, not a file
+core.lua
+ui.xml
+ghost.lua

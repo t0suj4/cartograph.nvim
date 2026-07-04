@@ -93,6 +93,29 @@ end
 local function render_files(ctx)
     for _, file in ipairs(store.files) do
         file_row(ctx, file, 0)
+        if store.toc then -- manifest project: show each file's load position
+            local i = store.toc.index[file]
+            ctx.vnums[#ctx.lines] = i and tostring(i) or ''
+        end
+    end
+end
+
+-- Manifest projects: <Tab>'s tree is the LOAD ORDER (the .toc top to
+-- bottom, XML includes indented), because that IS the load structure —
+-- there are no requires. Unlisted files close the view: they never load.
+local function render_files_load(ctx)
+    local t = store.toc
+    ctx.lines[1] = ('load order — %s'):format(t.toc)
+    ctx.marks[1] = { { 0, -1, 'CartographSection' } }
+    for i, e in ipairs(t.entries) do
+        file_row(ctx, e.file, e.depth)
+        ctx.vnums[#ctx.lines] = tostring(i)
+    end
+    if #(t.unlisted or {}) > 0 then
+        ctx.lines[#ctx.lines + 1] = '── never loaded ──'
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.line_sep[#ctx.lines] = true
+        for _, f in ipairs(t.unlisted) do file_row(ctx, f, 0) end
     end
 end
 
@@ -718,7 +741,11 @@ function M.render()
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {} }
     local v = M.view
     if v.level == 'files' then
-        if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
+        if M.files_mode == 'tree' then
+            if store.toc then render_files_load(ctx) else render_files_tree(ctx) end
+        else
+            render_files(ctx)
+        end
     elseif v.level == 'file' then render_file(ctx, v.file)
     elseif v.level == 'block' then render_block(ctx, v.block)
     elseif v.level == 'var' then render_var(ctx, v.var)

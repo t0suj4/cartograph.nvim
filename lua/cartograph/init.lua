@@ -28,6 +28,8 @@ function M.open(dump_path)
     local plan    = require 'cartograph.panes.plan'
 
     store.load(vim.fn.expand(dump_path))
+    -- manifest projects (WoW .toc): exact load order for the browser + linter
+    require('cartograph.toc').attach(store)
 
     -- ONE hardcoded layout for now: the browser on the left, the source split
     -- taking the rest (the browser's descend covers uses/callers now, so the

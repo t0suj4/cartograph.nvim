@@ -23,6 +23,7 @@ end
 ---@param data table
 function M.ingest(data)
     M.data    = data
+    M.toc     = nil -- load-order manifest; cartograph.toc.attach() sets it
     M._nav_back, M._nav_fwd = {}, {}
     M.by_id   = {}
     M.by_file = {}
@@ -108,6 +109,11 @@ function M.is_entrypoint(file)
 end
 
 function M.classify(file)
+    -- a manifest project (WoW .toc) has exact load knowledge: listed files
+    -- ARE loaded (quiet), everything else genuinely never loads
+    if M.toc then
+        return M.toc.index[file] and 'used' or 'orphan'
+    end
     -- entry first: an unimported file matching an entry-point pattern is a
     -- runtime-loaded root, and that's its salient fact even when its globals
     -- are also referenced cross-file (control.lua defines AND exports).

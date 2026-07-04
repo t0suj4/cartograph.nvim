@@ -1,0 +1,12 @@
+<Ui>
+    <!-- <Script file="widgets\gone.lua"/> commented out -->
+    <Script file="widgets\late.lua"/>
+    <Frame name="MiniFrame">
+        <Scripts>
+            <OnClick function="OnMiniClick"/>
+            <OnLoad>
+                InlineBoot()
+            </OnLoad>
+        </Scripts>
+    </Frame>
+</Ui>
