@@ -315,6 +315,21 @@ both), and — where sibling addons have extracted dumps to testify — a
 loads first, so it works or nils by alphabet. Honest scope: no sibling
 dump, no claim.
 
+### Greenspun detection
+
+Per Greenspun's tenth rule, every sufficiently complicated codebase
+contains an ad-hoc implementation of half of Common Lisp — and those
+halves are the navigation obstacles. cartograph **discovers** them: a
+verb called repeatedly with a string key and a callable is an ad-hoc
+symbol table (`add_action`, `register_listener`, `RegisterMessageCallback`
+— all found from call shape alone, no configuration); verbs whose literal
+keys overlap a registry's keys are its dispatch side, and discovered
+pairs are linked automatically like any xlang binding
+(`setup{ discover = false }` disables). Literal data tables mapping to
+functions are surfaced as funcall tables, `eval`/`load`/`dlsym` as the
+interpreter itself — all in the `greenspun` lint rule, counted and
+jumpable.
+
 ## Lint
 
 `:CartographLint` runs graph-aware, whole-program checks and drops the findings

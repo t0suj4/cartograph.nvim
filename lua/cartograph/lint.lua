@@ -290,7 +290,34 @@ local function dynamic_findings(store)
     return out
 end
 
+-- Greenspun's tenth rule, surfaced: the ad-hoc lisp halves a codebase grew.
+local function greenspun_findings(store)
+    local g = require 'cartograph.greenspun'
+    local out = {}
+    local _, registries = g.registries(store.data)
+    for _, r in ipairs(registries) do
+        local via = #r.imports > 0
+            and (' — dispatched via ' .. table.concat(r.imports, ', '))
+            or ' — no dispatch verb found (dead registry, or dispatched dynamically)'
+        out[#out + 1] = { file = store.data.root, line = 1,
+            message = ("ad-hoc registry: '%s' interns %d keys over %d sites (e.g. %q)%s")
+                :format(r.verb, r.keys, r.sites, r.example or '?', via) }
+    end
+    for _, t in ipairs(g.dispatch_tables(store.data)) do
+        out[#out + 1] = { file = store.data.root .. '/' .. t.var.file,
+            line = t.var.range.start.line + 1,
+            message = ("ad-hoc funcall table: '%s' maps %d of %d entries to functions")
+                :format(t.var.name, t.fns, t.entries) }
+    end
+    for _, c in ipairs(g.evals(store.data)) do
+        out[#out + 1] = { file = store.data.root .. '/' .. c.file, line = c.line + 1,
+            message = ("the interpreter itself: %s()"):format(c.callee) }
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'greenspun', severity = 'info', run = greenspun_findings },
     { name = 'dynamic-dispatch', severity = 'info', run = dynamic_findings },
     { name = 'load-order', severity = 'warn', run = load_order_findings },
     { name = 'listener-audit', severity = 'warn', run = listener_findings },

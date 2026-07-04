@@ -29,6 +29,10 @@ M.unparsed = true
 --   setup{ pins = { { file = 'src/hooks.php', line = 88, to = 'my_handler' } } }
 M.pins = nil
 
+-- registry auto-discovery (Greenspun detection): verbs that register
+-- callables under string keys are found and linked without configuration
+M.discover = true
+
 M.keys = {
     -- navigation
     pivot      = '<CR>',    -- tree/trace: re-root on / expand this entry

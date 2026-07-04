@@ -407,3 +407,42 @@ test('local dispatch trace: branchy defs flatten to pinnable literals', function
     require('cartograph.config').pins = nil
     tp.close()
 end)
+
+test('greenspun: the wiretap registry is discovered, not configured', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local g = require 'cartograph.greenspun'
+    local xl = require 'cartograph.xlang'
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/listener')
+    local bindings, report = g.registries(data)
+    eq(1, #bindings)
+    eq('register_listener', bindings[1].export.verb)
+    eq(1, bindings[1].export.name)
+    eq({ 'subscribe' }, bindings[1].import.verb)
+    eq(2, bindings[1].import.name) -- the listener name is subscribe's 2nd arg
+    ok(report[1] and report[1].keys == 3, 'three interned keys reported')
+    -- linking with ONLY the discovery: the fixture's handlers are inline
+    -- closures, so they are honest frontiers — counted, not invented
+    local stats = xl.link(data, bindings)
+    eq(0, stats.exports)
+    ok(stats.unresolved >= 3, 'inline closures stay unresolved: ' .. stats.unresolved)
+end)
+
+test('greenspun: funcall tables and evals are surfaced', function ()
+    local g = require 'cartograph.greenspun'
+    local data = { schema = 1, root = '/x', edges = {}, calls = {
+        { callee = 'loadstring', args = { '' }, argv = {}, file = 'a.lua', line = 3 },
+    }, nodes = {
+        { id = 'f1', name = 'on_tick', kind = 'function', file = 'a.lua', order = 1,
+          range = { start = { line = 0, char = 0 }, ['end'] = { line = 1, char = 0 } } },
+        { id = 'f2', name = 'on_build', kind = 'function', file = 'a.lua', order = 4,
+          range = { start = { line = 4, char = 0 }, ['end'] = { line = 5, char = 0 } } },
+        { id = 'v1', name = 'handlers', kind = 'var', file = 'a.lua', order = 8,
+          range = { start = { line = 8, char = 0 }, ['end'] = { line = 9, char = 0 } },
+          data = { tick = { ref = 'on_tick' }, build = 'on_build', misc = 42 } },
+    } }
+    local tables = g.dispatch_tables(data)
+    eq(1, #tables)
+    eq('handlers', tables[1].var.name)
+    eq(2, tables[1].fns)
+    eq(1, #g.evals(data))
+end)
