@@ -1,9 +1,13 @@
--- Live refresh: the graph follows saves. One file is re-extracted (with
--- the full project fileset, so its imports resolve), spliced into the
--- store's data, and the whole graph is relinked — calls INTO the changed
--- file re-resolve through a (kind, name) remap, since node ids embed line
--- numbers and any edit shifts them. Navigation state survives: history,
--- trails and the browser location are carried across the re-ingest.
+-- Live refresh: the graph follows saves. Changed files are re-extracted
+-- (with the full project fileset, so their imports resolve), spliced into
+-- the data, and the whole graph is relinked — calls INTO changed files
+-- re-resolve through a refs-based remap, since node ids embed line numbers
+-- and any edit shifts them. Navigation state survives: history, trails and
+-- the browser location are carried across the re-ingest.
+--
+-- splice() is the PURE batch core, shared by the BufWritePost single-file
+-- path and the incremental open cache (cartograph.cache): one mini-extract
+-- covering every changed file, one remap, one relink.
 --
 -- Freeze-while-staged: a pending moveset pins the graph — refreshing under
 -- a staged transaction would invalidate what the user is about to apply.
@@ -24,56 +28,75 @@ local function callee_ctx(calls)
     return function (n) return by_fn[n.id] end
 end
 
---- Refresh one file (store-relative path). Returns stats or nil, reason.
-function M.file(rel)
-    local store = require 'cartograph.store'
-    local data = store.data
-    if not data or data.provider ~= 'treesitter' then
-        return nil, 'not a live graph (dump-based — regenerate the dump instead)'
-    end
-    if next(store.moveset or {}) then
-        return nil, 'staged changes pending — refresh is frozen until applied or cleared'
-    end
+--- PURE batch splice over `data`: re-extract `rels` (changed or new
+--- files), drop `deleted`, remap what survives, relink once.
+--- Landings in refreshed unparsed files are evicted (cache, not state);
+--- sql:: entities are always dropped for the caller's re-attach.
+--- Returns stats { removed, added, remapped, relinked, remap, removed_ids }.
+function M.splice(data, rels, deleted)
     local ts = require 'cartograph.providers.treesitter'
+    local relset, del = {}, {}
+    for _, f in ipairs(rels or {}) do relset[f] = true end
+    for _, f in ipairs(deleted or {}) do del[f] = true end
 
-    -- re-extract just this file, resolving imports against the whole project
-    local fileset = {}
-    for _, f in ipairs(store.files) do fileset[#fileset + 1] = f end
-    if not vim.tbl_contains(fileset, rel) then fileset[#fileset + 1] = rel end
-    local mini = ts.extract(data.root, { subdirs = { rel }, fileset = fileset })
+    -- fileset = surviving project files + the refreshed ones, so imports
+    -- resolve project-wide inside the mini extraction
+    local fileset, seenf = {}, {}
+    local function addf(f)
+        if f and not seenf[f] then seenf[f] = true; fileset[#fileset + 1] = f end
+    end
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'module' and not del[n.file] then addf(n.file) end
+    end
+    for _, f in ipairs(rels or {}) do addf(f) end
 
-    -- old nodes of this file (synthetic sql:: entities are re-derived below)
-    local removed, old_nodes = {}, {}
+    local mini = (rels and #rels > 0)
+        and ts.extract(data.root, { subdirs = rels, fileset = fileset })
+        or { nodes = {}, edges = {}, calls = {}, stamps = {} }
+
+    -- removed = sql entities (re-derived by the caller) + every node of a
+    -- refreshed or deleted file. Refreshed files drop their landings too:
+    -- landings are content-keyed cache and this file's content changed.
+    local removed, old_by_file = {}, {}
     for _, n in ipairs(data.nodes) do
         if n.id:sub(1, 5) == 'sql::' then
             removed[n.id] = true
-        elseif n.file == rel and not n.unparsed then
+        elseif relset[n.file] or del[n.file] then
             removed[n.id] = true
-            old_nodes[#old_nodes + 1] = n
+            if relset[n.file] and not n.unparsed then
+                old_by_file[n.file] = old_by_file[n.file] or {}
+                table.insert(old_by_file[n.file], n)
+            end
         end
     end
+
     -- remap old ids -> new ids through the reference layer: witnesses
     -- disambiguate reordered same-named siblings; renames are NOT followed
     -- here (relink rebuilds those edges by the new name honestly)
     local old_callees = callee_ctx(data.calls)
     local mini_ctx = { callees = callee_ctx(mini.calls) }
     local remap = {}
-    for _, n in ipairs(old_nodes) do
-        local sibs = {}
-        for _, x in ipairs(old_nodes) do
-            if x.kind == n.kind and x.name == n.name then sibs[#sibs + 1] = x end
-        end
-        local ref = refs.of(n, sibs, old_callees(n))
-        local newid, note = refs.resolve(ref, mini.nodes, mini_ctx)
-        if newid and newid ~= n.id
-            and not (note and note:match('^renamed')) then
-            remap[n.id] = newid
+    for _, olds in pairs(old_by_file) do
+        for _, n in ipairs(olds) do
+            local sibs = {}
+            for _, x in ipairs(olds) do
+                if x.kind == n.kind and x.name == n.name then sibs[#sibs + 1] = x end
+            end
+            local ref = refs.of(n, sibs, old_callees(n))
+            local newid, note = refs.resolve(ref, mini.nodes, mini_ctx)
+            -- same-id resolutions map to themselves: an inbound edge to a
+            -- node whose id survived the edit must be KEPT, not dropped
+            -- (relink rebuilds ref edges but not use edges)
+            if newid and not (note and note:match('^renamed')) then
+                remap[n.id] = newid
+            end
         end
     end
 
-    local stats = { removed = 0, added = #mini.nodes, remapped = 0 }
+    local stats = { removed = 0, added = #mini.nodes, remapped = 0,
+        remap = remap, removed_ids = removed }
 
-    -- nodes: drop this file's (and sql entities), append the fresh ones
+    -- nodes: drop the removed, append the fresh
     local nodes = {}
     for _, n in ipairs(data.nodes) do
         if removed[n.id] then
@@ -85,8 +108,8 @@ function M.file(rel)
     for _, n in ipairs(mini.nodes) do nodes[#nodes + 1] = n end
     data.nodes = nodes
 
-    -- edges: this file's outgoing come fresh (mini + relink); inbound edges
-    -- remap by signature or drop (relink gives their calls another chance)
+    -- edges: refreshed files' outgoing come fresh (mini + relink); inbound
+    -- edges remap by signature or drop (relink gives their calls another chance)
     local edges = {}
     for _, e in ipairs(data.edges) do
         if removed[e.from] then
@@ -105,11 +128,11 @@ function M.file(rel)
     for _, e in ipairs(mini.edges) do edges[#edges + 1] = e end
     data.edges = edges
 
-    -- calls: replace this file's; other files' resolved targets remap or
-    -- reopen (to = nil -> relink retries against the new node set)
+    -- calls: replace the refreshed files'; other files' resolved targets
+    -- remap or reopen (to = nil -> relink retries against the new node set)
     local calls = {}
     for _, c in ipairs(data.calls or {}) do
-        if c.file ~= rel then
+        if not (relset[c.file] or del[c.file]) then
             if c.to and removed[c.to] then c.to = remap[c.to] end
             if c.fn and removed[c.fn] then c.fn = remap[c.fn] end
             calls[#calls + 1] = c
@@ -118,14 +141,43 @@ function M.file(rel)
     for _, c in ipairs(mini.calls or {}) do calls[#calls + 1] = c end
     data.calls = calls
 
-    -- the refreshed file's stamp rides along (staleness marker resets)
-    if mini.stamps then
-        data.stamps = data.stamps or {}
-        for f, s in pairs(mini.stamps) do data.stamps[f] = s end
+    -- stamps follow the content they key
+    data.stamps = data.stamps or {}
+    for f, s in pairs(mini.stamps or {}) do data.stamps[f] = s end
+    for f in pairs(del) do data.stamps[f] = nil end
+
+    -- the unparsed roster: survivors + the mini's, deleted gone
+    local un, seenu = {}, {}
+    for _, f in ipairs(data.unparsed or {}) do
+        if not relset[f] and not del[f] and not seenu[f] then
+            seenu[f] = true; un[#un + 1] = f
+        end
+    end
+    for _, f in ipairs(mini.unparsed or {}) do
+        if not seenu[f] then seenu[f] = true; un[#un + 1] = f end
+    end
+    table.sort(un)
+    data.unparsed = #un > 0 and un or nil
+
+    stats.relinked = ts.relink(data)
+    return stats
+end
+
+--- Refresh one file (store-relative path). Returns stats or nil, reason.
+function M.file(rel)
+    local store = require 'cartograph.store'
+    local data = store.data
+    if not data or data.provider ~= 'treesitter' then
+        return nil, 'not a live graph (dump-based — regenerate the dump instead)'
+    end
+    if next(store.moveset or {}) then
+        return nil, 'staged changes pending — refresh is frozen until applied or cleared'
     end
 
-    -- global relink + the post-passes (all idempotent over existing edges)
-    stats.relinked = ts.relink(data)
+    local stats = M.splice(data, { rel }, nil)
+    local removed, remap = stats.removed_ids, stats.remap
+
+    -- post-passes (all idempotent over existing edges)
     local xl = require 'cartograph.xlang'
     xl.link(data, xl.effective_bindings(data))
     require('cartograph.sql').attach(data)
@@ -175,6 +227,7 @@ function M.all()
     end
     local ts = require 'cartograph.providers.treesitter'
     local fresh = ts.extract(data.root)
+    require('cartograph.cache').save(fresh)
     local xl = require 'cartograph.xlang'
     xl.link(fresh, xl.effective_bindings(fresh))
     require('cartograph.sql').attach(fresh)

@@ -37,6 +37,11 @@ M.discover = true
 -- (tree-sitter graphs only; frozen while changes are staged)
 M.refresh = true
 
+-- incremental open: persist the raw graph per project root; the next
+-- open re-extracts only files whose stamps changed and relinks. false =
+-- always extract cold.
+M.cache = true
+
 -- MCP graph sources: open 'mcp://name' to pull a neutral-schema graph
 -- from the named server's tool (default tool name: 'graph')
 --   setup{ mcp = { game = { cmd = { 'my-mcp-server' }, tool = 'graph' } } }

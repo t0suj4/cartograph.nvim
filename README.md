@@ -371,6 +371,19 @@ interpolation idioms resolve — `{$wpdb->posts}` names `posts`,
 queries over 23 tables (`posts`: 67 reads, 13 writes); on Magento: 92
 tables. Interpolated names beyond those idioms stay honest misses.
 
+### Incremental open
+
+Extraction is a pure function of file contents and node ids are
+deterministic — so an unchanged file's entire contribution to the
+graph, including edges between two unchanged files, is still valid
+tomorrow. The raw graph is cached per project root; the next
+`:Cartograph` stats every file stamp, re-extracts only the diff,
+remaps and relinks. Wordpress: 47s cold, **1.5s warm** (2,096 files
+unchanged), ~6s with one file edited. Post-passes (xlang, SQL, clangd
+oracle) re-run on every open — oracle verdicts are session-live by
+design. Subtree slices (`subdirs`) bypass the cache; `setup{ cache =
+false }` opts out.
+
 ### The live oracle
 
 The running system is the top rung of the epistemics ladder.

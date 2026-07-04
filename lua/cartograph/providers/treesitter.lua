@@ -790,6 +790,8 @@ local function list_files(root, subdirs)
     table.sort(minified)
     return out, minified
 end
+-- the cache diffs the tree with the same walk/exclusion rules extraction uses
+function M.list_files(root, subdirs) return list_files(root, subdirs) end
 
 --- Extract a neutral-schema graph from a directory tree. Any file whose
 --- extension has a spec (and an available parser) participates.

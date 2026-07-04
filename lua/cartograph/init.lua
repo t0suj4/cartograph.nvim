@@ -50,7 +50,20 @@ function M.open(dump_path, opts)
         require('cartograph.sql').attach(data)
         store.ingest(data)
     elseif vim.fn.isdirectory(target) == 1 then
-        local data = require('cartograph.providers.treesitter').extract(target, opts)
+        -- incremental open: unchanged files come from the cache, only the
+        -- diff re-extracts. Subtree slices bypass it (a slice would poison
+        -- the full-tree entry).
+        local data, note
+        if not (opts and opts.subdirs) then
+            data, note = require('cartograph.cache').open(target)
+            if note then vim.notify('cartograph: ' .. note, vim.log.levels.INFO) end
+        end
+        if not data then
+            data = require('cartograph.providers.treesitter').extract(target, opts)
+            if not (opts and opts.subdirs) then
+                require('cartograph.cache').save(data)
+            end
+        end
         -- C/C++ roots get clangd resolution when available (config.clangd)
         local has_c = false
         for _, n in ipairs(data.nodes) do

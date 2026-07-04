@@ -876,6 +876,60 @@ end
     vim.fn.delete(root, 'rf')
 end)
 
+test('incremental cache: warm open re-extracts only the diff', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local cache = require 'cartograph.cache'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/sub', 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text)
+        fd:close()
+    end
+    write('a.lua', 'local function alpha(x)\n  return beta(x)\nend\n')
+    write('sub/b.lua', 'local function beta(y)\n  return y * 2\nend\n')
+    write('extra.lua', 'local function gamma()\n  return 1\nend\n')
+    cache.save(ts.extract(root))
+
+    -- untouched tree: pure warm open, no extraction
+    local warm, note = cache.open(root)
+    ok(warm, 'cache hit')
+    ok(note:match('unchanged'), tostring(note))
+
+    -- edit one file, delete another; only the diff re-extracts
+    write('sub/b.lua', 'local function beta(y)\n  return y * 3\nend\n'
+        .. '\nlocal function brand_new(z)\n  return z\nend\n')
+    vim.fn.delete(root .. '/extra.lua')
+    local warm2, note2 = cache.open(root)
+    ok(note2:match('1 re%-extracted, 1 deleted'), tostring(note2))
+    local byname = {}
+    for _, n in ipairs(warm2.nodes) do byname[n.name] = n end
+    ok(byname.brand_new, 'edited file re-extracted')
+    ok(byname.gamma == nil, 'deleted file gone from the graph')
+    ok(warm2.stamps['extra.lua'] == nil, 'and from the stamps')
+    -- the cross-file edge survived the splice
+    local edge
+    for _, e in ipairs(warm2.edges) do
+        if e.kind == 'ref' and e.from == byname.alpha.id
+            and e.to == byname.beta.id then edge = true end
+    end
+    ok(edge, 'alpha -> beta intact after warm open')
+
+    -- the update was saved back: a third open is fully warm again
+    local warm3, note3 = cache.open(root)
+    ok(note3:match('unchanged'), tostring(note3))
+    local has_new = false
+    for _, n in ipairs(warm3.nodes) do
+        if n.name == 'brand_new' then has_new = true end
+    end
+    ok(has_new, 'updated graph persisted')
+
+    vim.fn.delete((cache.path(root)))
+    vim.fn.delete(root, 'rf')
+end)
+
 test('refs: witness, ordinal, drift, rename, ambiguity', function ()
     local refs = require 'cartograph.refs'
     local function fn(id, name, order, stmts, params)
