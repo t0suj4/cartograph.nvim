@@ -178,6 +178,36 @@ function M.frontier_find(name)
     return hits
 end
 
+-- ── the reference layer: durable, id-free node references ───────────────────
+
+local function callee_names(id)
+    local out = {}
+    for _, c in ipairs(M.calls_by_fn[id] or {}) do out[#out + 1] = c.callee end
+    return out
+end
+
+--- The durable reference for a node: what pins, plans and journals hold
+--- instead of a raw (line-embedding, session-lived) id.
+function M.ref_of(id)
+    local n = M.node(id)
+    if not n then return nil end
+    local sibs = {}
+    for _, x in ipairs(M.by_file[n.file] or {}) do
+        if x.kind == n.kind and x.name == n.name then sibs[#sibs + 1] = x end
+    end
+    return require('cartograph.refs').of(n, sibs, callee_names(id))
+end
+
+--- Resolve a durable reference against the CURRENT graph. Returns
+--- (id, note?) — note carries drift/rename/ordinal caveats — or
+--- (nil, why) for missing/ambiguous.
+function M.resolve_ref(ref)
+    return require('cartograph.refs').resolve(ref, M.by_file[ref.file] or {}, {
+        callees = function (n) return callee_names(n.id) end,
+        all = M.by_file[ref.file],
+    })
+end
+
 --- Register a ref edge created after ingest (pins), mirroring the
 --- indexing ingest does.
 function M.add_edge(e)

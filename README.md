@@ -238,6 +238,22 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
      honest `~`. A `compile_commands.json`/`compile_flags.txt` gives it
      full cross-file eyes.
 
+### The reference layer
+
+Node ids embed line numbers and never leave the session. Anything
+durable — pins, staged plans, journals — holds a **ref** instead:
+`{ file, kind, name, ordinal?, witness? }`, resolved at use time via
+`store.resolve_ref`. The witness is the clone detector's hash reused as
+identity evidence (df shape + params + callees): insensitive to renames
+and moves, sensitive to behavior. Resolution policy, edit by edit —
+edits elsewhere survive; body edits survive with a drift note (a
+transaction's stale-plan check); renames recover by witness *with a
+note*, offered never assumed; reordered same-named siblings are
+disambiguated by witness (true clones fall to the ordinal, with the
+caveat stated); deletion is `missing`, which is the truth. Refs are
+provider-portable — a ref minted on a tree-sitter graph resolves
+against a lua-ls dump of the same tree.
+
 ### Live refresh
 
 The graph follows saves. Writing a file under the project root

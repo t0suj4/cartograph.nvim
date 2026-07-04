@@ -782,3 +782,108 @@ end
     store.moveset = {}
     vim.fn.delete(root, 'rf')
 end)
+
+test('refs: witness, ordinal, drift, rename, ambiguity', function ()
+    local refs = require 'cartograph.refs'
+    local function fn(id, name, order, stmts, params)
+        return { id = id, name = name, kind = 'function', file = 'a.lua',
+            order = order, params = params or { 'x' },
+            range = { start = { line = order, char = 0 }, ['end'] = { line = order + 2, char = 0 } },
+            df = { inputs = {}, stmts = stmts } }
+    end
+    local s1 = { { l = 1, def = { 't' }, use = { 'x' }, dep = {} } }
+    local s2 = { { l = 1, def = { 't' }, use = { 'x' }, dep = {} },
+        { l = 2, def = {}, use = { 't' }, dep = { { from = 1, var = 't' } } } }
+    local a = fn('a.lua::twin@10', 'twin', 10, s1)
+    local b = fn('a.lua::twin@20', 'twin', 20, s2)
+    local ctx = { callees = function () return nil end }
+    -- distinct witnesses disambiguate same-named twins even after reorder
+    local ra = refs.of(a, { a, b })
+    local a2 = fn('a.lua::twin@30', 'twin', 30, s1) -- moved below b
+    local id, note = refs.resolve(ra, { b, a2 }, ctx)
+    eq('a.lua::twin@30', id)
+    eq(nil, note)
+    -- identical witnesses (true clones): ordinal speaks, with its caveat
+    local c1 = fn('a.lua::dup@5', 'dup', 5, s1)
+    local c2 = fn('a.lua::dup@15', 'dup', 15, s1)
+    local rc = refs.of(c2, { c1, c2 })
+    eq(2, rc.ordinal)
+    id, note = refs.resolve(rc, { c1, c2 }, ctx)
+    eq('a.lua::dup@15', id)
+    ok(note:match('ordinal'), note)
+    -- body edit: resolves with a drift note
+    local a3 = fn('a.lua::twin@10', 'twin', 10, s2)
+    id, note = refs.resolve(refs.of(a, { a }), { a3 }, ctx)
+    eq('a.lua::twin@10', id)
+    ok(note:match('drifted'), note)
+    -- rename: recovered by witness, offered not assumed
+    local renamed = fn('a.lua::fresh@10', 'fresh', 10, s1)
+    id, note = refs.resolve(refs.of(a, { a }), { renamed },
+        { callees = ctx.callees, all = { renamed } })
+    eq('a.lua::fresh@10', id)
+    ok(note:match("renamed%? now 'fresh'"), note)
+    -- deletion is the truth
+    id, note = refs.resolve(refs.of(a, { a }), {}, ctx)
+    eq(nil, id)
+    eq('missing', note)
+end)
+
+test('refs: refresh follows reordered twins by witness, not position', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local refresh = require 'cartograph.refresh'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text)
+        fd:close()
+    end
+    -- two same-named siblings with DIFFERENT bodies (lua: legal, shadowing)
+    write('twins.lua', [[
+local function pick(a)
+  return small(a)
+end
+
+local function pick(a)
+  local t = a + 1
+  local u = big(t)
+  return u
+end
+]])
+    write('caller.lua', [[
+local function drive(v)
+  return pick(v)
+end
+]])
+    local data = ts.extract(root)
+    store.ingest(data)
+    -- find the SECOND pick (3 statements) and point at it
+    local second
+    for id, n in pairs(store.by_id) do
+        if n.name == 'pick' and n.df and #n.df.stmts == 3 then second = id end
+    end
+    ok(second, 'the bigger twin found')
+    local ref = store.ref_of(second)
+    eq(2, ref.ordinal)
+    -- swap the twins: the bigger one now comes FIRST
+    write('twins.lua', [[
+local function pick(a)
+  local t = a + 1
+  local u = big(t)
+  return u
+end
+
+local function pick(a)
+  return small(a)
+end
+]])
+    assert(refresh.file('twins.lua'))
+    local id, note = store.resolve_ref(ref)
+    ok(id, tostring(note))
+    local n = store.node(id)
+    eq(3, #n.df.stmts) -- still the bigger twin, now at the top
+    ok(id:match('@0') or id:match('@1'), 'it moved to the front: ' .. id)
+    vim.fn.delete(root, 'rf')
+end)

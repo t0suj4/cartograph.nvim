@@ -10,7 +10,19 @@
 
 local M = {}
 
-local function sig_of(n) return n.kind .. '\31' .. (n.name or '') end
+local refs = require 'cartograph.refs'
+
+-- callee-name lookup over a raw calls list (pre-ingest, no store indexes)
+local function callee_ctx(calls)
+    local by_fn = {}
+    for _, c in ipairs(calls or {}) do
+        if c.fn then
+            by_fn[c.fn] = by_fn[c.fn] or {}
+            table.insert(by_fn[c.fn], c.callee)
+        end
+    end
+    return function (n) return by_fn[n.id] end
+end
 
 --- Refresh one file (store-relative path). Returns stats or nil, reason.
 function M.file(rel)
@@ -31,21 +43,32 @@ function M.file(rel)
     local mini = ts.extract(data.root, { subdirs = { rel }, fileset = fileset })
 
     -- old nodes of this file (synthetic sql:: entities are re-derived below)
-    local removed, old_sig = {}, {}
+    local removed, old_nodes = {}, {}
     for _, n in ipairs(data.nodes) do
         if n.id:sub(1, 5) == 'sql::' then
             removed[n.id] = true
         elseif n.file == rel and not n.unparsed then
             removed[n.id] = true
-            local k = sig_of(n)
-            old_sig[k] = old_sig[k] == nil and n.id or false -- unique or poisoned
+            old_nodes[#old_nodes + 1] = n
         end
     end
-    -- remap old ids -> new ids by unique (kind, name)
+    -- remap old ids -> new ids through the reference layer: witnesses
+    -- disambiguate reordered same-named siblings; renames are NOT followed
+    -- here (relink rebuilds those edges by the new name honestly)
+    local old_callees = callee_ctx(data.calls)
+    local mini_ctx = { callees = callee_ctx(mini.calls) }
     local remap = {}
-    for _, n in ipairs(mini.nodes) do
-        local old = old_sig[sig_of(n)]
-        if old and old ~= n.id then remap[old] = n.id end
+    for _, n in ipairs(old_nodes) do
+        local sibs = {}
+        for _, x in ipairs(old_nodes) do
+            if x.kind == n.kind and x.name == n.name then sibs[#sibs + 1] = x end
+        end
+        local ref = refs.of(n, sibs, old_callees(n))
+        local newid, note = refs.resolve(ref, mini.nodes, mini_ctx)
+        if newid and newid ~= n.id
+            and not (note and note:match('^renamed')) then
+            remap[n.id] = newid
+        end
     end
 
     local stats = { removed = 0, added = #mini.nodes, remapped = 0 }
