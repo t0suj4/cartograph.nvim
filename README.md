@@ -345,6 +345,19 @@ every gate's numbers — site count, per-position literal coverage,
 callable classification, and the key-overlap arithmetic against each
 discovered export. A misspelled verb gets pointed at the real one.
 
+Discovery has two tiers. The default is cheap and runs on every open;
+`:CartographDiscover!` buys the **deep tier**: undecided callable
+arguments are checked against the call's own source (array callables —
+`[$obj, 'method']`, `array($o, 'm')` — and inline closures pass the
+gate, and the handlers resolve through the same shapes), and
+concatenated keys become **prefix families** (`'save_' . $type` covers
+every `save_*` key), which lets the audit lift its blanket dynamic
+suppression and flag only genuinely uncovered keys. The bang applies
+what it finds beyond the bindings in force — links, live — and restores
+your exact location; the explainer's rejection lines tell you when the
+button would change the verdict
+(`… — would PASS with deep heuristics (:CartographDiscover!)`).
+
 ## Lint
 
 `:CartographLint` runs graph-aware, whole-program checks and drops the findings

@@ -47,6 +47,32 @@ local function logical_arg(c, i)
     return c.args and c.args[i + (c.method and 1 or 0)]
 end
 
+--- The call's own source text, bounded by its paren balance — scanning
+--- past the statement picks up the next definition as a phantom.
+function M.call_text(root, c, lines)
+    if not lines then
+        local fd = io.open(root .. '/' .. c.file, 'r')
+        if not fd then return '' end
+        lines = vim.split(fd:read('a'), '\n', { plain = true })
+        fd:close()
+    end
+    local text, depth, opened = '', 0, false
+    for l = c.line + 1, math.min(c.line + 12, #lines) do
+        local chunk = lines[l]
+        text = text .. chunk .. '\n'
+        for ch in chunk:gmatch('[()]') do
+            if ch == '(' then
+                depth = depth + 1
+                opened = true
+            else
+                depth = depth - 1
+            end
+        end
+        if opened and depth <= 0 then break end
+    end
+    return text
+end
+
 --- Resolve the handler of an export call: a resolved function argv first,
 --- then a textual scan of the call's source for a qualified/plain function
 --- name (the &Class::Method inside base::BindRepeating spans lines).
@@ -73,28 +99,13 @@ local function find_handler(c, root, exact, export)
             return exact[a.name][1].id
         end
     end
-    local fd = io.open(root .. '/' .. c.file, 'r')
-    if not fd then return nil end
-    local lines = vim.split(fd:read('a'), '\n', { plain = true })
-    fd:close()
-    -- take exactly the CALL's text: accumulate lines until the paren that
-    -- opened it closes (scanning past the statement would pick up the next
-    -- definition as a phantom handler)
-    local text, depth, opened = '', 0, false
-    for l = c.line + 1, math.min(c.line + 12, #lines) do
-        local chunk = lines[l]
-        text = text .. chunk .. '\n'
-        for ch in chunk:gmatch('[()]') do
-            if ch == '(' then
-                depth = depth + 1
-                opened = true
-            else
-                depth = depth - 1
-            end
-        end
-        if opened and depth <= 0 then break end
-    end
-    for _, pat in ipairs({ '&([%w_]+::[%w_]+)', '([%w_]+::[%w_]+)', '&([%w_]+)' }) do
+    local text = M.call_text(root, c)
+    -- array callables ([$obj, 'method'] / array($obj, 'method')) name the
+    -- METHOD; qualified and &-references name the function
+    for _, pat in ipairs({ '&([%w_]+::[%w_]+)', '([%w_]+::[%w_]+)',
+        [=[%[[^%]]-,%s*['"]([%w_]+)['"]%s*%]]=],
+        [=[array%s*%([^%)]-,%s*['"]([%w_]+)['"]]=],
+        '&([%w_]+)' }) do
         for name in text:gmatch(pat) do
             local hit = exact[name]
             if hit and #hit == 1 then return hit[1].id end
@@ -130,12 +141,21 @@ end
 function M.link(data, bindings)
     bindings = bindings or require('cartograph.config').bindings
         or M.default_bindings
-    local exact = {}
+    local exact, tails = {}, {}
     for _, n in ipairs(data.nodes) do
         if n.kind == 'function' or n.kind == 'method' then
             exact[n.name] = exact[n.name] or {}
             table.insert(exact[n.name], n)
+            local tail = n.name:match('([%w_]+)$')
+            if tail and tail ~= n.name then
+                tails[tail] = tails[tail] or {}
+                table.insert(tails[tail], n)
+            end
         end
+    end
+    -- a unique tail resolves too (Worker::work findable as 'work')
+    for tail, list in pairs(tails) do
+        if #list == 1 and not exact[tail] then exact[tail] = list end
     end
     local refEdge = {}
     for _, e in ipairs(data.edges) do

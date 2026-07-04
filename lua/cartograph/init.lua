@@ -146,8 +146,40 @@ function M.open(dump_path, opts)
     -- why did registry discovery (not) find a verb?
     pcall(vim.api.nvim_del_user_command, 'CartographDiscover')
     vim.api.nvim_create_user_command('CartographDiscover', function (o)
-        local lines = require('cartograph.greenspun').explain(
-            store.data, o.args ~= '' and o.args or nil)
+        local g = require 'cartograph.greenspun'
+        local xl = require 'cartograph.xlang'
+        local deep = o.bang and { deep = true } or nil
+        local lines = g.explain(store.data, o.args ~= '' and o.args or nil, deep)
+        -- the bang is the BUTTON: apply what deep discovery found beyond
+        -- the bindings already in force, then restore the exact location
+        if o.bang and o.args == '' then
+            local have = {}
+            for _, b in ipairs(xl.effective_bindings(store.data)) do
+                for _, v in ipairs(type(b.export.verb) == 'table'
+                    and b.export.verb or { b.export.verb }) do
+                    have[v] = true
+                end
+            end
+            local fresh = {}
+            for _, b in ipairs(g.registries(store.data, { deep = true })) do
+                if not have[b.export.verb] then fresh[#fresh + 1] = b end
+            end
+            if #fresh > 0 then
+                local loc = store.loc_provider and store.loc_provider.get()
+                local stats = xl.link(store.data, fresh)
+                store.ingest(store.data)
+                require('cartograph.toc').attach(store)
+                if loc and store.loc_provider then store.loc_provider.set(loc) end
+                local names = {}
+                for _, b in ipairs(fresh) do names[#names + 1] = b.export.verb end
+                lines[#lines + 1] = ''
+                lines[#lines + 1] = ('APPLIED %d deep binding(s): %s — %d handler(s) resolved, %d site(s) linked')
+                    :format(#fresh, table.concat(names, ', '), stats.exports, stats.links)
+            else
+                lines[#lines + 1] = ''
+                lines[#lines + 1] = 'deep discovery found nothing beyond the bindings already in force'
+            end
+        end
         vim.cmd('botright new')
         local buf = vim.api.nvim_get_current_buf()
         vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile
@@ -157,8 +189,8 @@ function M.open(dump_path, opts)
         vim.api.nvim_win_set_height(0, math.min(#lines + 1, 15))
         vim.keymap.set('n', require('cartograph.config').keys.close,
             '<cmd>close<cr>', { buffer = buf })
-    end, { nargs = '?',
-        desc = 'cartograph: explain registry discovery (why a verb was/was not detected)' })
+    end, { nargs = '?', bang = true,
+        desc = 'cartograph: explain registry discovery; ! runs the deep tier and applies it' })
 
     -- browse the state machine (adapter: setup{ fsm = {...} })
     pcall(vim.api.nvim_del_user_command, 'CartographStates')

@@ -92,6 +92,47 @@ local function key_positions(calls)
     return best, all
 end
 
+-- deep tier: read the call's own source for callable SHAPES the argv
+-- classifier can't see (array callables, inline closures). Expensive --
+-- one file read per undecided site -- hence button, not default.
+local CALLABLE_PATS = {
+    [=[%[[^%]]-,%s*['"][%w_]+['"]%s*%]]=],
+    [=[array%s*%([^%)]-,%s*['"][%w_]+['"]]=],
+    '&[%w_:]+',
+    'function%s*%(',
+    '=>',
+}
+local function read_lines(root, file, cache)
+    if cache[file] == nil then
+        local fd = io.open(root .. '/' .. file, 'r')
+        if fd then
+            cache[file] = vim.split(fd:read('a'), '\n', { plain = true })
+            fd:close()
+        else
+            cache[file] = false
+        end
+    end
+    return cache[file]
+end
+local function deep_callable(root, c, cache)
+    local lines = read_lines(root, c.file, cache)
+    if not lines then return false end
+    local text = require('cartograph.xlang').call_text(root, c, lines)
+    for _, pat in ipairs(CALLABLE_PATS) do
+        if text:find(pat) then return true end
+    end
+    return false
+end
+
+-- deep tier: a non-literal key built by concatenation yields a PREFIX
+-- family ('save_' . $type covers every key starting save_)
+local function deep_prefix(root, c, cache)
+    local lines = read_lines(root, c.file, cache)
+    if not lines then return nil end
+    local text = require('cartograph.xlang').call_text(root, c, lines)
+    return text:match([=[['"]([%w_%-]+)['"]%s*[%.%+]]=])
+end
+
 local function keys_at(calls, pos)
     local keys = {}
     for _, c in ipairs(calls) do
@@ -120,23 +161,31 @@ function M.registries(data, opts)
         if #calls >= min_sites then
             local kpos = key_positions(calls)
             if kpos then
-                local callable, fnpos = 0, nil
+                local callable, fnpos, deep_hits = 0, nil, 0
+                local cache = opts and opts.deep and (opts._cache or {}) or nil
                 for _, c in ipairs(calls) do
+                    local hit = false
                     for i, a in ipairs(c.argv or {}) do
                         local li = i - (c.method and 1 or 0)
                         if li >= 1 and li ~= kpos
                             and (a.k == 'func'
                                 or (a.k == 'lit' and known[a.v])
                                 or (a.k == 'local' and known[a.name])) then
-                            callable = callable + 1
+                            hit = true
                             fnpos = fnpos or li
                             break
                         end
                     end
+                    if not hit and cache and deep_callable(data.root, c, cache) then
+                        hit = true
+                        deep_hits = deep_hits + 1
+                    end
+                    if hit then callable = callable + 1 end
                 end
                 if callable >= math.max(min_sites, #calls * 0.5) then
                     exports[verb] = { verb = verb, name = kpos, fn = fnpos,
-                        sites = #calls, keys = keys_at(calls, kpos) }
+                        sites = #calls, keys = keys_at(calls, kpos),
+                        deep = deep_hits > 0 and deep_hits or nil }
                 end
             end
         end
@@ -177,7 +226,7 @@ function M.registries(data, opts)
             bindings[#bindings + 1] = {
                 export = { verb = verb, name = ex.name, fn = ex.fn },
                 import = { verb = iverbs, name = imports[1].name },
-                discovered = true,
+                discovered = true, deep = ex.deep,
             }
             report[#report + 1] = { kind = 'registry', verb = verb,
                 imports = iverbs, sites = ex.sites, keys = nkeys,
@@ -251,8 +300,18 @@ function M.explain(data, verb, opts)
             local ks = {}
             for k, n in pairs(by_k) do ks[#ks + 1] = ('%s ×%d'):format(k, n) end
             table.sort(ks)
-            return ('rejected as export: callables at %d/%d sites, %d needed — other args classify as %s')
+            local msg = ('rejected as export: callables at %d/%d sites, %d needed — other args classify as %s')
                 :format(callable, #calls, need, table.concat(ks, ', '))
+            if not (opts and opts.deep) then
+                local cache, deep_ok = {}, 0
+                for _, c in ipairs(calls) do
+                    if deep_callable(data.root, c, cache) then deep_ok = deep_ok + 1 end
+                end
+                if callable + deep_ok >= need then
+                    msg = msg .. ' — would PASS with deep heuristics (:CartographDiscover!)'
+                end
+            end
+            return msg
         end
         if exports[v] then
             return ('EXPORT (key = arg %d, %d sites)'):format(kpos, #calls)
@@ -389,8 +448,9 @@ end
 --- a dispatched key never registered, a registered key never dispatched —
 --- and when an unmatched key sits within edit distance of a real one,
 --- the finding names the probable typo. Returns lint-shaped findings.
-function M.audit(data, bindings)
+function M.audit(data, bindings, opts)
     local out = {}
+    local cache = opts and opts.deep and {} or nil
     local function verbs_of(v)
         return type(v) == 'table' and v or { v }
     end
@@ -400,7 +460,7 @@ function M.audit(data, bindings)
             for _, v in ipairs(verbs_of(b.export.verb)) do evs[v] = true end
             for _, v in ipairs(verbs_of(b.import.verb or {})) do ivs[v] = true end
             local reg, reg_site, disp, disp_site = {}, {}, {}, {}
-            local reg_dyn, disp_dyn = false, false
+            local reg_dyn, disp_dyn, prefixes = false, false, {}
             for _, c in ipairs(data.calls or {}) do
                 local shift = c.method and 1 or 0
                 if evs[c.callee] or (c.full and evs[c.full]) then
@@ -417,9 +477,22 @@ function M.audit(data, bindings)
                         disp[k] = true
                         disp_site[k] = disp_site[k] or c
                     else
-                        disp_dyn = true
+                        -- deep: a concatenated key is a PREFIX FAMILY, which
+                        -- keeps the dead-key check alive for uncovered keys
+                        local pfx = cache and deep_prefix(data.root, c, cache)
+                        if pfx then
+                            prefixes[#prefixes + 1] = pfx
+                        else
+                            disp_dyn = true
+                        end
                     end
                 end
+            end
+            local function prefix_covered(k)
+                for _, pf in ipairs(prefixes) do
+                    if k:sub(1, #pf) == pf then return true end
+                end
+                return false
             end
             if next(reg) then
                 local miss_d, miss_r = 0, 0
@@ -438,7 +511,7 @@ function M.audit(data, bindings)
                 end
                 if not disp_dyn then
                     for k in pairs(reg) do
-                        if not disp[k] then
+                        if not disp[k] and not prefix_covered(k) then
                             miss_r = miss_r + 1
                             local near = nearest(k, disp)
                             if near then
@@ -458,7 +531,9 @@ function M.audit(data, bindings)
                         message = ("registry '%s': %d key(s) dispatched but never registered, %d registered but never dispatched%s%s")
                             :format(vname, miss_d, miss_r,
                                 reg_dyn and ' (dynamic registrations exist)' or '',
-                                disp_dyn and ' (dynamic dispatch exists — dead-key check suppressed)' or '') }
+                                disp_dyn and ' (dynamic dispatch exists — dead-key check suppressed)'
+                                    or (#prefixes > 0 and (' (%d prefix famil%s honored)')
+                                        :format(#prefixes, #prefixes == 1 and 'y' or 'ies') or '')) }
                 end
             end
         end
