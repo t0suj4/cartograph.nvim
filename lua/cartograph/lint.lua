@@ -348,9 +348,9 @@ local function mirror_findings(store)
     end
     for _, m in ipairs(mirrors) do
         local parts = {}
-        for _, label in ipairs(m.members) do
-            if m.extras[label] then
-                parts[#parts + 1] = ('%s adds: %s'):format(label, short(m.extras[label]))
+        for x, label in ipairs(m.members) do
+            if m.extras[x] then
+                parts[#parts + 1] = ('%s adds: %s'):format(label, short(m.extras[x]))
             end
         end
         local msg

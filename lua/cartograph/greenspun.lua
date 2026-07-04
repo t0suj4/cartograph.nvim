@@ -597,14 +597,17 @@ local PAIR_PREFIXES = {
 
 local function release_names(v)
     local out, seen = {}, {}
-    local function add(x)
+    local function add(x, weak)
         if not seen[x] then
             seen[x] = true
             out[#out + 1] = x
+            if weak then out[x] = true end -- un-/de- morphology is WEAK:
+            -- 'unsafe' is not the release of 'safe' — these pairs must
+            -- confirm by shared keys
         end
     end
-    add('un' .. v)
-    add('de' .. v)
+    add('un' .. v, true)
+    add('de' .. v, true)
     for _, pp in ipairs(PAIR_PREFIXES) do
         local a, b = pp[1], pp[2]
         if v == a then
@@ -653,8 +656,12 @@ function M.verb_pairs(data, opts)
                             end
                         end
                         -- both sides literal but ZERO overlap: unrelated
-                        -- verbs that happen to rhyme — refuse
-                        if not (rposs and #rposs > 0 and not rkey) then
+                        -- verbs that happen to rhyme — refuse. Weak (un-/de-)
+                        -- morphology refuses without POSITIVE key overlap.
+                        local names = release_names(v)
+                        local weak = names[r] == true
+                        if not (rposs and #rposs > 0 and not rkey)
+                            and not (weak and not rkey) then
                             out[#out + 1] = { acquire = { verb = v, key = akey },
                                 release = { verb = r, key = rkey },
                                 shared = shared,
@@ -887,16 +894,24 @@ function M.mirrors(data, opts)
             end
             local ncore = 0
             for _ in pairs(core) do ncore = ncore + 1 end
-            local labels, extras = {}, {}
-            for _, m in ipairs(members) do
+            -- labels + per-member extras, BY INDEX (same-named vars in
+            -- different files would collide as table keys)
+            local labels, extras, seen_l = {}, {}, {}
+            for x, m in ipairs(members) do
                 local sd = sets[m]
-                labels[#labels + 1] = sd.label
+                local label = sd.label
+                if seen_l[label] then
+                    label = ('%s@%s:%d'):format(label,
+                        sd.node.file:match('[^/]+$'), sd.node.range.start.line + 1)
+                end
+                seen_l[sd.label] = true
+                labels[x] = label
                 local ex = {}
                 for k in pairs(sd.set) do
                     if not core[k] then ex[#ex + 1] = k end
                 end
                 table.sort(ex)
-                if #ex > 0 then extras[sd.label] = ex end
+                extras[x] = #ex > 0 and ex or nil
             end
             out[#out + 1] = { members = labels, core = ncore,
                 extras = extras, node = sets[members[1]].node }
@@ -922,7 +937,8 @@ function M.clones(data, opts)
     local groups = {}
     for _, n in ipairs(data.nodes) do
         if (n.kind == 'function' or n.kind == 'method') and n.df
-            and #n.df.stmts >= min_stmts then
+            and #n.df.stmts >= min_stmts
+            and not n.name:match('^[%u_%d]+$') then -- TEST/BENCHMARK macros
             local sig = { tostring(#(n.params or {})) }
             for _, st in ipairs(n.df.stmts) do
                 local deps = {}
