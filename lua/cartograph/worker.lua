@@ -12,6 +12,7 @@ fd:close()
 
 for _, p in ipairs(job.rtp or {}) do vim.opt.rtp:append(p) end
 local ts = require 'cartograph.providers.treesitter'
+local codec = require 'cartograph.cache' -- binary encode/decode
 
 local out
 if job.phase == 'parse' then
@@ -19,8 +20,8 @@ if job.phase == 'parse' then
         files = job.files, fileset = job.fileset, skip_idpass = true,
     })
 elseif job.phase == 'ids' then
-    local ifd = assert(io.open(job.index_file, 'r'))
-    local index = vim.json.decode(ifd:read('a'))
+    local ifd = assert(io.open(job.index_file, 'rb'))
+    local index = codec.decode(ifd:read('a'))
     ifd:close()
     out = ts.id_pass(job.root, job.files, {
         fn_unique = index.fn_unique,
@@ -31,6 +32,6 @@ else
     error('worker: unknown phase ' .. tostring(job.phase))
 end
 
-local ofd = assert(io.open(job.out, 'w'))
-ofd:write(vim.json.encode(out))
+local ofd = assert(io.open(job.out, 'wb'))
+ofd:write(codec.encode(out))
 ofd:close()

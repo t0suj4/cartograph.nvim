@@ -105,11 +105,10 @@ local function spawn(job, cb)
         vim.schedule(function ()
             local chunk
             if res.code == 0 then
-                local cfd = io.open(job.out, 'r')
+                local cfd = io.open(job.out, 'rb')
                 if cfd then
-                    local ok, d = pcall(vim.json.decode, cfd:read('a'))
+                    chunk = require('cartograph.cache').decode(cfd:read('a'))
                     cfd:close()
-                    if ok then chunk = d end
                 end
             end
             vim.fn.delete(jf)
@@ -268,9 +267,9 @@ function M.extract(root, o)
     local function phase2()
         s.phase = 2
         local L = ts.lookups(acc.nodes)
-        local idxf = vim.fn.tempname() .. '.index.json'
-        local fd = assert(io.open(idxf, 'w'))
-        fd:write(vim.json.encode(L))
+        local idxf = vim.fn.tempname() .. '.index.bin'
+        local fd = assert(io.open(idxf, 'wb'))
+        fd:write(require('cartograph.cache').encode(L))
         fd:close()
 
         -- fn_ranges are consumed here, split evenly across the id-pass

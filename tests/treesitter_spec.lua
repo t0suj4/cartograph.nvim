@@ -997,7 +997,7 @@ test('mention index: globals reconcile in UNCHANGED files, both ways', function 
     ok(not edge_alpha_shiny(warm2),
         'ambiguity retracted the inferred use edge')
 
-    vim.fn.delete((cache.path(root)))
+    cache.wipe(root)
     vim.fn.delete(root, 'rf')
 end)
 
@@ -1070,7 +1070,7 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     require('cartograph.config').cache_max_diff = nil
     ok(w4 == nil and n4:match('cold extract'), tostring(n4))
 
-    vim.fn.delete((cache.path(root)))
+    cache.wipe(root)
     vim.fn.delete(root, 'rf')
 end)
 

@@ -15,14 +15,56 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 2 -- v2: data.names (per-file identifier mention index)
+M.VERSION = 3 -- v3: binary codec (was JSON); v2: data.names
 
---- Cache file for a project root (root normalized like extract does).
+-- The codec is the cache's speed floor: everything else is O(diff), but
+-- encode/decode touch the WHOLE graph. string.buffer (LuaJIT) is
+-- near-memcpy; vim.mpack is the fallback. Either way binary-safe (the
+-- \31-packed name index rides untouched) and faithful to Lua tables —
+-- no vim.NIL artifacts. A file written by one codec and read by a
+-- build with the other simply misses (decode fails -> cold extract).
+local has_sb, sb = pcall(require, 'string.buffer')
+
+function M.encode(t)
+    return has_sb and sb.encode(t) or vim.mpack.encode(t)
+end
+
+function M.decode(s)
+    if has_sb then
+        local ok, v = pcall(sb.decode, s)
+        if ok then return v end
+    end
+    local ok, v = pcall(vim.mpack.decode, s)
+    if ok then return v end
+    return nil
+end
+
+--- Cache files for a project root (root normalized like extract does):
+--- the graph BLOB and a tiny stamps SIDECAR. The sidecar exists so the
+--- warm/cold decision never has to decode the blob it might discard —
+--- diffing needs only stamps, and stamps are a few KB.
 function M.path(root)
     local dir = vim.fn.stdpath('cache') .. '/cartograph'
     vim.fn.mkdir(dir, 'p')
     root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
-    return dir .. '/' .. root:gsub('[/\\:]', '%%') .. '.json', root
+    local base = dir .. '/' .. root:gsub('[/\\:]', '%%')
+    return base .. '.bin', root, base .. '.meta'
+end
+
+--- Remove a root's cache entirely (both files).
+function M.wipe(root)
+    local blob, _, meta = M.path(root)
+    vim.fn.delete(blob)
+    vim.fn.delete(meta)
+end
+
+local function read_decoded(file)
+    local fd = io.open(file, 'rb')
+    if not fd then return nil end
+    local txt = fd:read('a')
+    fd:close()
+    local t = M.decode(txt)
+    return (type(t) == 'table' and t.version == M.VERSION) and t or nil
 end
 
 --- Load a cached graph for `root`. nil on miss, version skew, or shape
@@ -30,15 +72,8 @@ end
 function M.load(root)
     if require('cartograph.config').cache == false then return nil end
     local file, nroot = M.path(root)
-    local fd = io.open(file, 'r')
-    if not fd then return nil end
-    local txt = fd:read('a')
-    fd:close()
-    local ok, wrap = pcall(vim.json.decode, txt)
-    if not ok or type(wrap) ~= 'table' or wrap.version ~= M.VERSION then
-        return nil
-    end
-    local data = wrap.data
+    local wrap = read_decoded(file)
+    local data = wrap and wrap.data
     if not (type(data) == 'table' and data.root == nroot
         and data.provider == 'treesitter' and data.stamps
         and type(data.nodes) == 'table') then
@@ -71,14 +106,20 @@ function M.save(data)
     local out = {}
     for k, v in pairs(data) do out[k] = v end
     out.nodes, out.edges = nodes, edges
-    local file = M.path(data.root)
-    local fd = io.open(file, 'w')
+    local file, _, metafile = M.path(data.root)
+    local fd = io.open(file, 'wb')
     if not fd then
         return vim.notify('cartograph: cannot write cache ' .. file,
             vim.log.levels.WARN)
     end
-    fd:write(vim.json.encode({ version = M.VERSION, data = out }))
+    fd:write(M.encode({ version = M.VERSION, data = out }))
     fd:close()
+    local mfd = io.open(metafile, 'wb')
+    if mfd then
+        mfd:write(M.encode({ version = M.VERSION, root = data.root,
+            stamps = data.stamps, unparsed = data.unparsed }))
+        mfd:close()
+    end
 end
 
 --- Diff a cached graph against the tree as it is NOW. Returns
@@ -116,23 +157,24 @@ end
 --- The incremental open: cached graph brought up to date, or nil (cold).
 --- Returns (data, note) — note says what happened, honestly.
 function M.open(root)
-    local data = M.load(root)
-    if not data then return nil end
-    local changed, deleted = M.diff(data)
-    if #changed == 0 and #deleted == 0 then
-        return data, ('warm open — %d files unchanged'):format(
-            vim.tbl_count(data.stamps))
-    end
+    if require('cartograph.config').cache == false then return nil end
+    -- diff from the SIDECAR: the warm/cold decision costs a few KB, not
+    -- a blob decode it might immediately discard
+    local _, nroot, metafile = M.path(root)
+    local meta = read_decoded(metafile)
+    if not (meta and meta.root == nroot and meta.stamps) then return nil end
+    local changed, deleted = M.diff(meta)
+
     -- a warm open must never lose to a cold one: the splice re-extracts
     -- changed files SEQUENTIALLY and blocks the UI, while the cold path
     -- is parallel and streams. Past the break-even (≈ total/workers,
-    -- since cold divides the whole tree by the worker count), step
-    -- aside — the caller's cold path is strictly better UX.
+    -- since cold divides the whole tree by the worker count), step aside
+    -- WITHOUT ever decoding the blob — the caller's cold path is
+    -- strictly better UX. Only when cold would actually BE parallel:
+    -- on a small or parallel-disabled project, cold is sequential over
+    -- the whole tree and the warm splice always wins.
     local cfg = require 'cartograph.config'
-    local total = vim.tbl_count(data.stamps)
-    -- ...but only when cold would actually BE parallel: on a small or
-    -- parallel-disabled project, cold is sequential over the whole tree
-    -- and the warm splice always wins
+    local total = vim.tbl_count(meta.stamps)
     local would_parallel = cfg.parallel ~= false
         and total >= (cfg.parallel_threshold or 300)
     local limit = cfg.cache_max_diff or math.max(32,
@@ -141,6 +183,13 @@ function M.open(root)
     if (would_parallel or cfg.cache_max_diff) and #changed > limit then
         return nil, ('%d files changed (warm limit %d) — cold extract'
             .. ' is faster, going parallel'):format(#changed, limit)
+    end
+
+    -- committed to warm: NOW pay the blob decode
+    local data = M.load(root)
+    if not data then return nil end
+    if #changed == 0 and #deleted == 0 then
+        return data, ('warm open — %d files unchanged'):format(total)
     end
     require('cartograph.refresh').splice(data, changed, deleted)
     M.save(data)
