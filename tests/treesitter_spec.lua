@@ -334,6 +334,57 @@ test('frontier: minified bundles are opaque but reachable by text search', funct
     eq(nil, data2.unparsed)
 end)
 
+test('frontier: landings are content-keyed cache — regeneration evicts them', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'javascript') then
+        skip 'no javascript parser'
+    end
+    -- bundles get regenerated in place, so work on a copy of the fixture
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    for _, f in ipairs({ 'app.js', 'lib.min.js' }) do
+        vim.fn.writefile(
+            vim.fn.readfile(vim.fn.getcwd() .. '/tests/fixtures/frontier/' .. f),
+            root .. '/' .. f)
+    end
+    store.ingest(ts.extract(root))
+    local hits = store.frontier_find('myfun')
+    eq(1, #hits)
+    eq(0, hits[1].line)
+    -- the landing, as the browser's descend would create it
+    local id = ('%s::myfun@%d'):format(hits[1].file, hits[1].line)
+    store.add_node({ id = id, name = 'myfun', kind = 'function',
+        unparsed = true, file = hits[1].file, order = hits[1].line,
+        range = { start = { line = hits[1].line, char = hits[1].char },
+            ['end'] = { line = hits[1].line, char = hits[1].char + 5 } } })
+    ok(store.by_id[id], 'landing registered')
+
+    -- the bundle is regenerated OUTSIDE nvim (no autocmd): content shifts
+    local old = table.concat(vim.fn.readfile(root .. '/lib.min.js'), '\n')
+    local fd = assert(io.open(root .. '/lib.min.js', 'w'))
+    fd:write('// regenerated banner\n' .. old .. '\n')
+    fd:close()
+    local hits2 = store.frontier_find('myfun')
+    eq(1, #hits2)
+    eq(1, hits2[1].line) -- shifted down by the banner
+    ok(not store.by_id[id], 'stale landing evicted with its file content')
+
+    -- touched but byte-identical (build ran, output unchanged): kept
+    local id2 = ('%s::myfun@%d'):format(hits2[1].file, hits2[1].line)
+    store.add_node({ id = id2, name = 'myfun', kind = 'function',
+        unparsed = true, file = hits2[1].file, order = hits2[1].line,
+        range = { start = { line = hits2[1].line, char = hits2[1].char },
+            ['end'] = { line = hits2[1].line, char = hits2[1].char + 5 } } })
+    local same = table.concat(vim.fn.readfile(root .. '/lib.min.js'), '\n')
+    fd = assert(io.open(root .. '/lib.min.js', 'w'))
+    fd:write(same .. '\n')
+    fd:close()
+    store.frontier_find('myfun')
+    ok(store.by_id[id2], 'unchanged rewrite keeps the landing')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('trace-to-pin: dispatch trace lists caller literals; pin makes the edge', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

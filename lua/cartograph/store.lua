@@ -32,6 +32,12 @@ function M.ingest(data)
     -- staged ids belong to the previous graph; init.open refuses to swap
     -- graphs while staged, so anything left here is a ghost — drop it
     if next(M.moveset or {}) then M.clear_stage() end
+    -- REENTRANCY CONTRACT: sync waits (LSP oracle, future apply) pump the
+    -- event loop, so a deferred refresh can re-ingest mid-operation. Any
+    -- operation spanning a wait captures M.generation before and compares
+    -- after: readers re-read on mismatch, writers ABORT loudly. (The MCP
+    -- wire waits fast-only and is exempt — timers can't fire there.)
+    M.generation = (M.generation or 0) + 1
     M.by_id   = {}
     M.by_file = {}
     M.files   = {}
@@ -150,11 +156,67 @@ function M.classify(file)
 end
 
 -- ── unparsed frontiers (minified bundles) ────────────────────────────────────
--- Their content isn't in the graph; a name is found by LAZY text search, on
--- demand, cached per file. add_node registers the synthetic landing node so
--- panes treat it like any other.
+-- Their content isn't in the graph; a name is found by LAZY text search on
+-- demand. add_node registers the synthetic landing node so panes treat it
+-- like any other. Landings are CACHE, not state: a landing is a memoized
+-- text-search hit, keyed by the content of the unparsed file it points
+-- into. Bundles are usually regenerated OUTSIDE nvim (no autocmd ever
+-- fires), so every use revalidates: mtime+size as the fast gate, a content
+-- hash as the truth. Changed content evicts the file's landings; the next
+-- search re-derives them against the new bytes. Any future synthetic-node
+-- type should inherit this rule: derived-on-demand nodes invalidate with
+-- the content they were derived from.
 
 M._frontier_cache = {}
+
+local function djb2(s)
+    local h = 5381
+    for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
+    return h
+end
+
+--- Drop one unparsed file's landing nodes (cached hits into old bytes).
+function M.frontier_evict(file)
+    local keep = {}
+    for _, n in ipairs(M.data.nodes) do
+        if n.file == file and n.unparsed and n.kind ~= 'module' then
+            M.by_id[n.id] = nil
+        else
+            keep[#keep + 1] = n
+        end
+    end
+    M.data.nodes = keep
+    local byf = {}
+    for _, n in ipairs(M.by_file[file] or {}) do
+        if M.by_id[n.id] then byf[#byf + 1] = n end
+    end
+    M.by_file[file] = byf
+end
+
+-- validated read of an unparsed file's text (false = unreadable)
+local function frontier_text(file)
+    local path = M.data.root .. '/' .. file
+    local e = M._frontier_cache[file]
+    local st = vim.uv.fs_stat(path)
+    local stamp = st
+        and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
+        or 'gone'
+    if e and e.stamp == stamp then return e.text end
+    local fd = io.open(path, 'r')
+    local text = fd and fd:read('a') or false
+    if fd then fd:close() end
+    local hash = text and djb2(text) or nil
+    if e then
+        if e.hash == hash then
+            -- touched but unchanged: refresh the stamp, keep the landings
+            e.stamp, e.text = stamp, text
+            return text
+        end
+        M.frontier_evict(file)
+    end
+    M._frontier_cache[file] = { text = text, stamp = stamp, hash = hash }
+    return text
+end
 
 --- Find `name` in the unparsed files. Returns { {file, line, char}, ... }.
 function M.frontier_find(name)
@@ -163,13 +225,7 @@ function M.frontier_find(name)
     for _, file in ipairs(M.files) do
         local mod = M.by_id[file]
         if mod and mod.unparsed then
-            local text = M._frontier_cache[file]
-            if text == nil then
-                local fd = io.open(M.data.root .. '/' .. file, 'r')
-                text = fd and fd:read('a') or false
-                if fd then fd:close() end
-                M._frontier_cache[file] = text
-            end
+            local text = frontier_text(file)
             if text then
                 local s = text:find('%f[%w_]' .. name:gsub('([^%w])', '%%%1') .. '%f[^%w_]')
                 if s then

@@ -118,9 +118,12 @@ test('ingest invalidates the live sample and any stale move-set', function ()
     graph({ mod('a.lua', false), fn('a.lua', 'f') })
     store.live = { states = { inactive = 1 }, tick = 42 }
     store.stage('a.lua::f')
+    local gen = store.generation
     graph({ mod('b.lua', false), fn('b.lua', 'g') })
     ok(store.live == nil, 'live sample cleared')
     eq(0, #store.staged_ids())
+    -- the reentrancy contract's witness: every ingest bumps the generation
+    eq(gen + 1, store.generation)
 end)
 
 test('back()/forward() skip history entries whose node is gone', function ()

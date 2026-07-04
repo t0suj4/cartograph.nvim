@@ -85,9 +85,13 @@ function Client:request(method, params, timeout)
         params = params }) then
         return nil, 'server is gone'
     end
+    -- fast_only: process I/O callbacks (our pipe reads are pure Lua and
+    -- fast-context-safe) but NOT timers — the deferred BufWritePost
+    -- refresh can never re-ingest the store inside an MCP wait, so this
+    -- wire is reentrancy-free by construction
     vim.wait(timeout or 15000, function ()
         return self.pending[id] ~= nil or not self.alive
-    end, 10)
+    end, 10, true)
     local msg = self.pending[id]
     self.pending[id] = nil
     if not msg then
