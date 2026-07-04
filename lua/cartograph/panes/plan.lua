@@ -12,6 +12,9 @@ local ns = vim.api.nvim_create_namespace('cartograph_plan_hl')
 local M = {}
 
 local function set_lines(buf, lines)
+    for j, l in ipairs(lines) do
+        if l:find('[\n\r]') then lines[j] = l:gsub('[\n\r]+', ' \u{B6} ') end
+    end
     vim.bo[buf].modifiable = true
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].modifiable = false

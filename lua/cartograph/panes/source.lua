@@ -33,6 +33,10 @@ local function body_lines(node)
 end
 
 local function set_lines(buf, lines)
+    -- header lines carry node names from arbitrary source text
+    for i, l in ipairs(lines) do
+        if l:find('[\n\r]') then lines[i] = l:gsub('[\n\r]+', ' \u{B6} ') end
+    end
     vim.bo[buf].modifiable = true
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].modifiable = false

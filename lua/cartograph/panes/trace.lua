@@ -72,6 +72,9 @@ local function render()
     end
 
     vim.bo[M.buf].modifiable = true
+    for j, l in ipairs(lines) do
+        if l:find('[\n\r]') then lines[j] = l:gsub('[\n\r]+', ' \u{B6} ') end
+    end
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, lines)
     vim.bo[M.buf].modifiable = false
     vim.api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)

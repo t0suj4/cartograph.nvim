@@ -737,6 +737,10 @@ function M.render()
     M.line_group, M.line_sep, M.line_state = ctx.line_group, ctx.line_sep, ctx.line_state
     M.line_trans, M.line_lit = ctx.line_trans, ctx.line_lit
 
+    -- names come from arbitrary source text; a row must stay one row
+    for i, l in ipairs(ctx.lines) do
+        if l:find('[\n\r]') then ctx.lines[i] = l:gsub('[\n\r]+', ' ¶ ') end
+    end
     vim.bo[M.buf].modifiable = true
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
     vim.bo[M.buf].modifiable = false
