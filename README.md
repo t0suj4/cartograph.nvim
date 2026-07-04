@@ -378,11 +378,14 @@ deterministic — so an unchanged file's entire contribution to the
 graph, including edges between two unchanged files, is still valid
 tomorrow. The raw graph is cached per project root; the next
 `:Cartograph` stats every file stamp, re-extracts only the diff,
-remaps and relinks. The cache is a binary blob (LuaJIT string.buffer,
-mpack fallback) plus a tiny stamps sidecar, so the warm/cold decision
-costs a few KB — a big diff steps aside to the parallel cold path
-without ever decoding the blob it would discard. Wordpress: 47s cold,
-**0.7s warm** (2,096 files unchanged), ~5s with one file edited. Post-passes (xlang, SQL, clangd
+remaps and relinks. The cache is SHARDED PER FILE (binary: LuaJIT
+string.buffer, mpack fallback) under a manifest that doubles as the
+stamps sidecar — the warm/cold decision costs a few KB, and a save
+rewrites only the shards a change actually dirtied (the splice reports
+every file whose contribution it touched: remaps, relinks,
+reconciliation — verified disk == memory in tests). Wordpress: 47s
+cold, **0.8s warm** (2,096 files unchanged), ~3.4s with one file edited
+(25 shards rewritten, 2,071 untouched). Post-passes (xlang, SQL, clangd
 oracle) re-run on every open — oracle verdicts are session-live by
 design. Subtree slices (`subdirs`) bypass the cache; `setup{ cache =
 false }` opts out.

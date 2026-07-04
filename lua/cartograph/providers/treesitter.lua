@@ -924,7 +924,7 @@ end
 --- Fold a standalone id-pass result into a graph: ref pairs dedup into
 --- existing edges (like addref), cbarg marks apply. Shared by refresh
 --- and the parallel driver.
-function M.merge_idpass(data, out)
+function M.merge_idpass(data, out, touched)
     local refEdge = {}
     for _, e in ipairs(data.edges) do
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end
@@ -941,9 +941,15 @@ function M.merge_idpass(data, out)
             if k then refEdge[k] = e end
             data.edges[#data.edges + 1] = e
         end
+        if touched then
+            touched[e.from:match('^(.-)::') or e.from] = true
+        end
     end
     for _, id in ipairs(out.cbarg or {}) do
-        if byid[id] then byid[id].cbarg = true end
+        if byid[id] then
+            byid[id].cbarg = true
+            if touched then touched[byid[id].file] = true end
+        end
     end
     if out.names then
         data.names = data.names or {}
@@ -1489,7 +1495,7 @@ end
 --- unique-tail fallback, stdlib gates, min-length guard. Used by live
 --- refresh, where a changed file's calls (and other files' calls INTO
 --- the changed file) need relinking.
-function M.relink(data)
+function M.relink(data, touched)
     local exact, tail = {}, {}
     for _, n in ipairs(data.nodes) do
         if n.kind == 'function' or n.kind == 'method' then
@@ -1564,6 +1570,7 @@ function M.relink(data)
                 c.to = target.id
                 if c.dynamic then c.dynamic = nil end -- pinned by the trace
                 n = n + 1
+                if touched then touched[c.file] = true end
                 if c.fn then
                     addref(c.fn, target.id, c.at
                         or { start = { line = c.line, char = 0 },
@@ -1579,6 +1586,7 @@ function M.relink(data)
                 local t2 = resolve(a.name, c.file)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method') then
                     a.k, a.to, a.up = 'func', t2.id, true
+                    if touched then touched[c.file] = true end
                     if c.fn then
                         addref(c.fn, t2.id,
                             { start = { line = c.line, char = 0 },

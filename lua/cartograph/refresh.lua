@@ -16,6 +16,10 @@ local M = {}
 
 local refs = require 'cartograph.refs'
 
+local function file_of(id)
+    return id:match('^(.-)::') or id
+end
+
 -- callee-name lookup over a raw calls list (pre-ingest, no store indexes)
 local function callee_ctx(calls)
     local by_fn = {}
@@ -115,6 +119,13 @@ function M.splice(data, rels, deleted)
 
     local stats = { removed = 0, added = #mini.nodes, remapped = 0,
         remap = remap, removed_ids = removed }
+    -- dirty = every file whose PERSISTED contribution this splice
+    -- changes: the refreshed files themselves, plus any file whose
+    -- edges/calls get remapped, reopened, relinked or reconciled. The
+    -- cache trusts this account for O(diff) saves — every mutation
+    -- below must report here.
+    local dirty = {}
+    for _, f in ipairs(rels or {}) do dirty[f] = true end
 
     -- nodes: drop the removed, append the fresh
     local nodes = {}
@@ -135,7 +146,8 @@ function M.splice(data, rels, deleted)
         if removed[e.from] then
             -- fresh outgoing replaces it
         elseif removed[e.to] then
-            local to2 = remap[e.to]
+            dirty[file_of(e.from)] = true -- remapped or dropped: either way
+            local to2 = remap[e.to]       -- this from-file's shard changed
             if to2 then
                 e.to = to2
                 stats.remapped = stats.remapped + 1
@@ -153,8 +165,14 @@ function M.splice(data, rels, deleted)
     local calls = {}
     for _, c in ipairs(data.calls or {}) do
         if not (relset[c.file] or del[c.file]) then
-            if c.to and removed[c.to] then c.to = remap[c.to] end
-            if c.fn and removed[c.fn] then c.fn = remap[c.fn] end
+            if c.to and removed[c.to] then
+                c.to = remap[c.to]
+                dirty[c.file] = true
+            end
+            if c.fn and removed[c.fn] then
+                c.fn = remap[c.fn]
+                dirty[c.file] = true
+            end
             calls[#calls + 1] = c
         end
     end
@@ -231,6 +249,7 @@ function M.splice(data, rels, deleted)
     -- use edges and inferred ref pairs, reopen calls sharing a killed
     -- pair (relink re-adds those at full fidelity via c.at)
     if next(candidates) then
+        for f in pairs(candidates) do dirty[f] = true end
         local cand_fns = {}
         for _, n in ipairs(data.nodes) do
             if candidates[n.file]
@@ -260,7 +279,7 @@ function M.splice(data, rels, deleted)
         end
     end
 
-    stats.relinked = ts.relink(data)
+    stats.relinked = ts.relink(data, dirty)
 
     -- the id pass at GLOBAL scope, over the refreshed files AND the
     -- reconciliation candidates (their fn extents come straight from the
@@ -290,9 +309,14 @@ function M.splice(data, rels, deleted)
     if #idfiles > 0 then
         local L = ts.lookups(data.nodes)
         L.fn_ranges = franges
-        ts.merge_idpass(data, ts.id_pass(data.root, idfiles, L))
+        ts.merge_idpass(data, ts.id_pass(data.root, idfiles, L), dirty)
     end
     stats.reconciled = vim.tbl_count(candidates)
+    stats.dirty = {}
+    for f in pairs(dirty) do
+        if not del[f] then stats.dirty[#stats.dirty + 1] = f end
+    end
+    table.sort(stats.dirty)
     return stats
 end
 

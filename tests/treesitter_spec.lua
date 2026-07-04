@@ -989,6 +989,10 @@ test('mention index: globals reconcile in UNCHANGED files, both ways', function 
         .. '  return y\nend\n')
     local warm = cache.open(root)
     ok(edge_alpha_shiny(warm), 'inbound use edge appeared in unchanged file')
+    -- the reconciliation's dirty accounting persisted a.lua's new edge:
+    -- a fresh load must see it too
+    ok(edge_alpha_shiny(cache.load(root)),
+        'reconciled edge survived the O(diff) save')
 
     -- 1 -> 2: a second definition makes the name ambiguous; the edge
     -- that only uniqueness justified must disappear
@@ -1051,6 +1055,22 @@ test('incremental cache: warm open re-extracts only the diff', function ()
             and e.to == byname.beta.id then edge = true end
     end
     ok(edge, 'alpha -> beta intact after warm open')
+    -- O(diff) save honesty: the shards on disk must reproduce the
+    -- in-memory graph exactly (dirty accounting missed nothing)
+    local function graph_keys(d)
+        local ids, eks, cks = {}, {}, {}
+        for _, n in ipairs(d.nodes) do ids[#ids + 1] = n.id end
+        for _, e in ipairs(d.edges) do
+            eks[#eks + 1] = e.kind .. '|' .. e.from .. '|' .. e.to
+        end
+        for _, c in ipairs(d.calls) do
+            cks[#cks + 1] = ('%s|%d|%s|%s'):format(c.file, c.line,
+                c.callee, tostring(c.to))
+        end
+        table.sort(ids); table.sort(eks); table.sort(cks)
+        return { ids = ids, edges = eks, calls = cks, names = d.names }
+    end
+    eq(graph_keys(warm2), graph_keys(cache.load(root)))
 
     -- the update was saved back: a third open is fully warm again
     local warm3, note3 = cache.open(root)
