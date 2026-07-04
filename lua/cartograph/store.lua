@@ -15,7 +15,25 @@ function M.load(path)
     local f = assert(io.open(path, 'r'), 'cartograph: cannot open ' .. path)
     local txt = f:read('a')
     f:close()
-    return M.ingest(vim.json.decode(txt))
+    local data = vim.json.decode(txt)
+    -- a dump carries no file stamps; record disk state AT LOAD. Drift
+    -- between dump generation and now is undetectable (the photograph's
+    -- honest limitation); drift after load is caught by stale().
+    if not data.stamps and data.root then
+        data.stamps = {}
+        local seen = {}
+        for _, n in ipairs(data.nodes or {}) do
+            if n.file and not seen[n.file] then
+                seen[n.file] = true
+                local st = vim.uv.fs_stat(data.root .. '/' .. n.file)
+                if st then
+                    data.stamps[n.file] = ('%d:%d:%d')
+                        :format(st.mtime.sec, st.mtime.nsec, st.size)
+                end
+            end
+        end
+    end
+    return M.ingest(data)
 end
 
 --- Build all indexes from a decoded graph (schema #1). Split out from load() so
@@ -478,5 +496,17 @@ end
 
 function M.node(id) return id and M.by_id[id] or nil end
 function M.abspath(node) return M.data.root .. '/' .. node.file end
+
+--- Has a parsed file changed on disk since its graph was made?
+--- true/false when a stamp exists; nil = unknown (no stamp — MCP graphs,
+--- frontier files, which validate through their own machinery).
+function M.stale(file)
+    local s = M.data and M.data.stamps and M.data.stamps[file]
+    if not s then return nil end
+    local st = vim.uv.fs_stat(M.data.root .. '/' .. file)
+    local now = st and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
+        or 'gone'
+    return now ~= s
+end
 
 return M

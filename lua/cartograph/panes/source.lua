@@ -25,7 +25,12 @@ local function body_lines(node)
     if not ok then return { ('── %s   %s  (unreadable)'):format(node.name or '?', node.file) } end
     local s = node.range.start.line + 1     -- schema line is 0-based
     local e = node.range['end'].line + 1
-    local body = { ('── %s   %s:%d-%d'):format(node.name or '?', node.file, s, e), '' }
+    -- external edits (git checkout, codegen) never fire BufWritePost: the
+    -- range below may not line up with the fresh bytes — say so
+    local stale = store.stale(node.file)
+        and '   ≠ changed on disk — :CartographRefresh' or ''
+    local body = { ('── %s   %s:%d-%d%s'):format(node.name or '?', node.file,
+        s, e, stale), '' }
     for i = math.max(1, s), math.min(#all, e) do
         body[#body + 1] = all[i]
     end

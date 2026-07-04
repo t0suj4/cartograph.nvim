@@ -420,6 +420,21 @@ test('trace-to-pin: dispatch trace lists caller literals; pin makes the edge', f
     eq(1, #(require('cartograph.config').pins or {}))
     ok(vim.tbl_contains(store.usedby[byname.scale.id] or {},
         byname.dispatch_param.id), 'edge indexed live')
+    -- the durable shape holds NO line numbers: refs discipline
+    local pin = require('cartograph.config').pins[1]
+    eq(nil, pin.line)
+    eq('dispatch_param', pin.fn)
+    eq('$cb', pin.callee)
+    -- and it re-attaches on a FRESH extraction (a restart, a refresh):
+    -- the anchor is (file, fn, callee), immune to line shifts
+    local data2 = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
+    xl.link(data2)
+    local call2
+    for _, c in ipairs(data2.calls) do
+        if c.callee == '$cb' then call2 = c end
+    end
+    ok(call2 and call2.to and call2.to:match('::scale@'),
+        'durable pin re-attached across re-extraction')
     require('cartograph.config').pins = nil
     tp.close()
 end)
@@ -823,8 +838,11 @@ local function brand_new(z)
   return z + hidden
 end
 ]])
+    -- external edit visible as staleness BEFORE refresh, gone after
+    ok(store.stale('sub/b.lua') == true, 'external edit detected as stale')
     local stats, why = refresh.file('sub/b.lua')
     ok(stats, tostring(why))
+    eq(false, store.stale('sub/b.lua'))
     -- inbound edge remapped across the id shift
     local beta2 = byname('beta')
     ok(beta2 and beta2:match('@3'), 'beta has its new line-shifted id: ' .. tostring(beta2))
@@ -972,6 +990,7 @@ test('mcp provider: a server tool that returns the schema is a provider', functi
     cfg.mcp = nil
     ok(data, tostring(err))
     eq('mcp-fixture', data.provider)
+    ok(type(data.fetched_at) == 'number', 'sample stamped with fetch time')
     store.ingest(data)
     local tick
     for id, n in pairs(store.by_id) do

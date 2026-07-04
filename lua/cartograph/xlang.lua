@@ -195,21 +195,59 @@ function M.link(data, bindings)
     end
 
     local stats = { links = 0, exports = 0, unresolved = 0, pinned = 0 }
-    -- human declarations outrank everything: a pin names the target of one
-    -- dynamic call site the analysis cannot see
+    -- human declarations outrank everything: a pin names the target of a
+    -- dynamic call site the analysis cannot see. Durable pins anchor by
+    -- (file, enclosing fn NAME, callee text) — the refs discipline, no
+    -- line numbers, so they survive edits. { file, line, to } is the
+    -- legacy shape. A pin that attaches to nothing complains loudly:
+    -- a silently-inert declaration is worse than none.
     for _, pin in ipairs(require('cartograph.config').pins or {}) do
         local target = exact[pin.to]
         target = target and #target == 1 and target[1]
+        local hit = 0
         if target then
+            local fnids -- ids of the pin's enclosing function, by name
+            if pin.fn then
+                fnids = {}
+                for _, n in ipairs(data.nodes) do
+                    if n.file == pin.file and n.name == pin.fn
+                        and (n.kind == 'function' or n.kind == 'method') then
+                        fnids[n.id] = true
+                    end
+                end
+            end
             for _, c in ipairs(data.calls or {}) do
-                if c.file == pin.file and c.line == pin.line - 1 then
+                local match
+                if pin.callee then
+                    match = c.file == pin.file and c.callee == pin.callee
+                        and (fnids and (c.fn and fnids[c.fn] or false)
+                            or (not fnids and not c.fn)) -- fn-less = top level
+                else -- legacy line anchor
+                    match = c.file == pin.file and c.line == pin.line - 1
+                end
+                if match then
                     c.to = target.id
                     c.dynamic = nil
                     if c.fn then addref(c.fn, target.id,
                         key_range(c, pin.to)) end
+                    hit = hit + 1
                     stats.pinned = stats.pinned + 1
                 end
             end
+        end
+        if hit == 0 then
+            vim.notify(('cartograph: pin -> %s did not attach: %s'):format(
+                tostring(pin.to),
+                not target
+                    and ('no unique function named %q in the graph')
+                        :format(tostring(pin.to))
+                    or pin.callee
+                    and ('no call of %s%s in %s'):format(pin.callee,
+                        pin.fn and (' inside ' .. pin.fn) or ' at top level',
+                        pin.file)
+                    or ('%s:%d moved? re-pin from the trace')
+                        :format(pin.file, pin.line or 0)),
+                vim.log.levels.WARN)
         end
     end
     for _, b in ipairs(bindings) do

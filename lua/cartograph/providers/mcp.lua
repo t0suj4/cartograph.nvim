@@ -30,6 +30,9 @@ function M.extract(name)
     data.provider = data.provider or ('mcp:' .. name)
     data.root = data.root or vim.fn.getcwd()
     data.edges = data.edges or {}
+    -- a graph fetched from a running system is a SAMPLE — stamp when it
+    -- was true, like the live oracle's tick (a server-sent stamp wins)
+    data.fetched_at = data.fetched_at or os.time()
     return data
 end
 

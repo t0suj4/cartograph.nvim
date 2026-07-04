@@ -802,9 +802,12 @@ function M.extract(root, opts)
     for _, f in ipairs(opts and opts.fileset or files) do fileset[f] = true end
     for _, f in ipairs(files) do fileset[f] = true end
 
+    -- stamps: what each parsed file's truth is keyed to (mtime+size — a
+    -- display-honesty gate for edits that arrive OUTSIDE nvim, not an
+    -- eviction key, so no content hash needed). store.stale() compares.
     local data = { schema = 1, root = root, provider = 'treesitter',
         capabilities = { calls = true, litdata = true, df = 'lite' },
-        nodes = {}, edges = {}, calls = {} }
+        nodes = {}, edges = {}, calls = {}, stamps = {} }
     local nodes, edges, calls = data.nodes, data.edges, data.calls
     local no_parser = {}
 
@@ -835,6 +838,12 @@ function M.extract(root, opts)
         end
         local tree = parser:parse()[1]
         local tsroot = tree:root()
+
+        local st = vim.uv.fs_stat(root .. '/' .. file)
+        if st then
+            data.stamps[file] = ('%d:%d:%d')
+                :format(st.mtime.sec, st.mtime.nsec, st.size)
+        end
 
         nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
             range = pos_of(tsroot), order = -1 }

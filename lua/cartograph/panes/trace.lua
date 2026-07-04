@@ -278,7 +278,11 @@ function M.pin(name)
     end
     local cfg = require('cartograph.config')
     cfg.pins = cfg.pins or {}
-    cfg.pins[#cfg.pins + 1] = { file = c.file, line = c.line + 1, to = name }
+    -- durable anchor = (file, enclosing fn NAME, callee text) — the refs
+    -- discipline: a line number dies on the first edit above the site
+    local encl = c.fn and store.node(c.fn)
+    cfg.pins[#cfg.pins + 1] =
+        { file = c.file, fn = encl and encl.name, callee = c.callee, to = name }
     -- apply surgically: the call resolves, the edge exists, views know
     for _, call in ipairs(store.data.calls or {}) do
         if call.file == c.file and call.line == c.line
@@ -294,9 +298,12 @@ function M.pin(name)
                 ['end'] = { line = c.line, char = 0 } } } })
     end
     require('cartograph.panes.symbols').render()
+    local anchor = encl
+        and ("fn = '%s', callee = '%s'"):format(encl.name, c.callee)
+        or ("callee = '%s'"):format(c.callee)
     vim.notify(("cartograph: pinned %s:%d -> %s — make it durable with:\n"
-        .. "  setup{ pins = { { file = '%s', line = %d, to = '%s' } } }")
-        :format(c.file, c.line + 1, name, c.file, c.line + 1, name),
+        .. "  setup{ pins = { { file = '%s', %s, to = '%s' } } }")
+        :format(c.file, c.line + 1, name, c.file, anchor, name),
         vim.log.levels.INFO)
 end
 

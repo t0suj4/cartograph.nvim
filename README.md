@@ -135,8 +135,12 @@ with literal assignments flattened to their values — `$h = 'compute'`
 in one branch and `'scale'` in another surface as two candidates. `p` on a literal pins it — the call resolves, the edge
 lands in the graph live (the callers view updates immediately), and the
 notification carries the `setup{ pins = … }` snippet that makes it
-durable. Ambiguous names refuse; non-literal origins stay frontiers you
-can keep expanding.
+durable. A durable pin anchors by `{ file, fn, callee }` — the enclosing
+function's *name* and the callee text, never a line number — so it
+survives edits and re-attaches on every re-extraction; a pin that no
+longer matches anything warns instead of going silently inert.
+Ambiguous names refuse; non-literal origins stay frontiers you can keep
+expanding.
 
 ### Tracing a parameter
 

@@ -118,6 +118,12 @@ function M.file(rel)
     for _, c in ipairs(mini.calls or {}) do calls[#calls + 1] = c end
     data.calls = calls
 
+    -- the refreshed file's stamp rides along (staleness marker resets)
+    if mini.stamps then
+        data.stamps = data.stamps or {}
+        for f, s in pairs(mini.stamps) do data.stamps[f] = s end
+    end
+
     -- global relink + the post-passes (all idempotent over existing edges)
     stats.relinked = ts.relink(data)
     local xl = require 'cartograph.xlang'

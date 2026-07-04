@@ -98,6 +98,13 @@ local function file_row(ctx, file, depth, dim)
 end
 
 local function render_files(ctx)
+    -- sampled graphs (MCP) say when they were true; disk graphs don't age
+    if store.data and store.data.fetched_at then
+        ctx.lines[1] = ('%s — fetched %s'):format(
+            store.data.provider or 'sample',
+            os.date('%H:%M:%S', store.data.fetched_at))
+        ctx.marks[1] = { { 0, -1, 'CartographSection' } }
+    end
     for _, file in ipairs(store.files) do
         file_row(ctx, file, 0)
         if store.toc then -- manifest project: show each file's load position
