@@ -96,6 +96,19 @@ function M.open(dump_path, opts)
                 vim.notify(('cartograph: linked %d cross-language call sites')
                     :format(x.links), vim.log.levels.INFO)
             end
+            -- a configured database: its tables join the graph and the
+            -- code's SQL entities link to them (session post-pass)
+            local dbl, dberr = require('cartograph.dblink').attach(data)
+            if dbl then
+                vim.notify(('cartograph: db link — %d matched, %d missing,'
+                    .. ' %d unused%s'):format(dbl.matched, #dbl.missing,
+                    #dbl.unused,
+                    dbl.prefix and (" (prefix '%s')"):format(dbl.prefix) or ''),
+                    vim.log.levels.INFO)
+            elseif dberr then
+                vim.notify('cartograph: db link failed — ' .. dberr,
+                    vim.log.levels.WARN)
+            end
             store.ingest(data)
         end
 

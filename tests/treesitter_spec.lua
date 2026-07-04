@@ -1318,6 +1318,58 @@ test('transport substrate: DB tables cache, warm opens re-scan only the diff', f
     vim.fn.delete(log)
 end)
 
+test('dblink: code SQL entities meet database tables, prefix-aware', function ()
+    local dbl = require 'cartograph.dblink'
+    eq('wp_', dbl.prefix_of({ 'wp_posts', 'wp_users', 'wp_options' }))
+    eq(nil, dbl.prefix_of({ 'wp_posts', 'app_users', 'plain' }))
+
+    local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
+    local function tbl(name)
+        local file = 'tables/public.' .. name
+        return { id = file, name = file, kind = 'module', file = file,
+                range = R0, order = -1 },
+            { id = file .. '::table:' .. name .. '@0', name = name,
+                kind = 'var', file = file, range = R0, order = 0 }
+    end
+    local um, uv = tbl('wp_posts')
+    local om, ov = tbl('wp_dead')
+    local db = { nodes = { um, uv, om, ov }, edges = {
+        { from = ov.id, to = uv.id, kind = 'use', at = { R0 } } } }
+    local data = { root = '/x', nodes = {
+        { id = 'sql::table:posts', name = 'table posts', kind = 'var',
+            sql = true, file = 'a.php', range = R0, order = 1 },
+        { id = 'sql::table:wp_posts', name = 'table wp_posts', kind = 'var',
+            sql = true, file = 'b.php', range = R0, order = 1 },
+        { id = 'sql::table:ghosts', name = 'table ghosts', kind = 'var',
+            sql = true, file = 'c.php', range = R0, order = 1 },
+    }, edges = {}, calls = {} }
+
+    local out = dbl.link(data, db)
+    eq('wp_', out.prefix)
+    -- posts matched via prefix, wp_posts exactly; ghosts is missing;
+    -- wp_dead is unused (its FK inbound does not count as a query)
+    eq(2, out.matched)
+    eq(1, #out.missing)
+    eq('ghosts', out.missing[1].name)
+    eq({ 'wp_dead' }, out.unused)
+    local links = 0
+    for _, e in ipairs(data.edges) do
+        if e.db and e.kind == 'use' and e.from:find('^sql::') then
+            links = links + 1
+            ok(e.to == uv.id, 'links land on the real table')
+        end
+    end
+    eq(2, links)
+
+    -- idempotent: re-linking replaces the previous attachment
+    dbl.link(data, db)
+    local dbnodes = 0
+    for _, n in ipairs(data.nodes) do
+        if n.db then dbnodes = dbnodes + 1 end
+    end
+    eq(4, dbnodes)
+end)
+
 test('postgres recipe: catalog rows become the neutral schema', function ()
     local rec = require 'cartograph.recipes.postgres'
     -- a canned postgres-mcp: python-repr envelope around json, dispatched

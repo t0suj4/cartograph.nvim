@@ -53,6 +53,10 @@ M.parallel = true
 M.parallel_threshold = 300
 M.workers = nil
 
+-- cross-link code's SQL entities to a live database's tables:
+-- { source = '<mcp name>', prefix = 'wp_'? } (prefix auto-detects)
+M.db = nil
+
 -- MCP graph sources: open 'mcp://name' to pull a neutral-schema graph
 -- from the named server's tool (default tool name: 'graph')
 --   setup{ mcp = { game = { cmd = { 'my-mcp-server' }, tool = 'graph' } } }

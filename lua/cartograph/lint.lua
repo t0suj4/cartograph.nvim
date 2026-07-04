@@ -456,6 +456,35 @@ end
 
 M.rules = {
     { name = 'sql', severity = 'info', run = sql_findings },
+    {
+        -- the code<->database audit (needs setup{ db = ... }): tables the
+        -- code queries but the database lacks are typos or missing
+        -- migrations; tables the database holds but nothing queries are
+        -- dead weight. The wiretap shape, at the schema boundary.
+        name = 'db-audit', severity = 'warn',
+        run = function (store)
+            local d = store.data.dblink
+            if not d then return {} end
+            local out = {}
+            for _, m in ipairs(d.missing) do
+                local n = store.node('sql::table:' .. m.name)
+                out[#out + 1] = {
+                    file = n and (store.data.root .. '/' .. n.file) or '',
+                    line = n and n.range.start.line + 1 or 1,
+                    message = ("table '%s' is queried in code but %s")
+                        :format(m.name, m.why
+                            and ('ambiguous in the database (' .. m.why .. ')')
+                            or 'absent from the database'),
+                }
+            end
+            for _, t in ipairs(d.unused) do
+                out[#out + 1] = { file = '', line = 1, severity = 'info',
+                    message = ("table '%s' exists in the database but no"
+                        .. " code queries it"):format(t) }
+            end
+            return out
+        end,
+    },
     { name = 'layering', severity = 'info', run = layering_findings },
     { name = 'clone', severity = 'info', run = clone_findings },
     { name = 'access-point', severity = 'info', run = access_point_findings },

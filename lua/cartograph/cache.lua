@@ -111,10 +111,13 @@ end
 
 -- bucket a graph into per-file shard tables (nil want = all files)
 local function build_shards(data, want)
-    -- synthetic ids: never persisted (their edges either)
+    -- synthetic ids: never persisted (their edges either) — sql entities
+    -- and db-linked tables re-derive as post-passes, landings re-search
     local synth = {}
     for _, n in ipairs(data.nodes) do
-        if n.id:sub(1, 5) == 'sql::' or n.unparsed then synth[n.id] = true end
+        if n.id:sub(1, 5) == 'sql::' or n.unparsed or n.db then
+            synth[n.id] = true
+        end
     end
     local shards = {}
     for f in pairs(want) do
