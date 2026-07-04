@@ -133,6 +133,25 @@ local function deep_prefix(root, c, cache)
     return text:match([=[['"]([%w_%-]+)['"]%s*[%.%+]]=])
 end
 
+-- registry keys look like NAMES: short, no format directives or control
+-- chars, at most two spaces. Test titles ('handles multibyte characters
+-- in a macro') and format strings are string+callable SHAPED but intern
+-- prose, not symbols.
+local function name_like(k)
+    if #k < 2 or #k > 48 or k:find('[%c%%]') then return false end
+    local _, spaces = k:gsub(' ', '')
+    return spaces <= 2
+end
+
+local function name_like_ratio(keys)
+    local ok, total = 0, 0
+    for k in pairs(keys) do
+        total = total + 1
+        if name_like(k) then ok = ok + 1 end
+    end
+    return total > 0 and ok / total or 0
+end
+
 local function keys_at(calls, pos)
     local keys = {}
     for _, c in ipairs(calls) do
@@ -183,9 +202,12 @@ function M.registries(data, opts)
                     if hit then callable = callable + 1 end
                 end
                 if callable >= math.max(min_sites, #calls * 0.5) then
-                    exports[verb] = { verb = verb, name = kpos, fn = fnpos,
-                        sites = #calls, keys = keys_at(calls, kpos),
-                        deep = deep_hits > 0 and deep_hits or nil }
+                    local keys = keys_at(calls, kpos)
+                    if name_like_ratio(keys) >= 0.6 then
+                        exports[verb] = { verb = verb, name = kpos, fn = fnpos,
+                            sites = #calls, keys = keys,
+                            deep = deep_hits > 0 and deep_hits or nil }
+                    end
                 end
             end
         end
@@ -316,6 +338,11 @@ function M.explain(data, verb, opts)
         end
         if exports[v] then
             return ('EXPORT (key = arg %d, %d sites)'):format(kpos, #calls)
+        end
+        local ratio = name_like_ratio(keys_at(calls, kpos))
+        if ratio < 0.6 then
+            return ('rejected: keys are prose, not names (%d%% name-like — test titles / format strings?)')
+                :format(math.floor(ratio * 100))
         end
         return ('export-shaped but unreported (key = arg %d, callables %d/%d)')
             :format(kpos, callable, #calls)
