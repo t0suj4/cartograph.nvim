@@ -887,3 +887,28 @@ end
     ok(id:match('@0') or id:match('@1'), 'it moved to the front: ' .. id)
     vim.fn.delete(root, 'rf')
 end)
+
+test('mcp provider: a server tool that returns the schema is a provider', function ()
+    if vim.fn.executable('luajit') == 0 then skip 'no luajit' end
+    local cfg = require 'cartograph.config'
+    cfg.mcp = { world = { cmd = { 'luajit',
+        vim.fn.getcwd() .. '/tests/fixtures/mcp/server.lua' } } }
+    local data, err = require('cartograph.providers.mcp').extract('world')
+    cfg.mcp = nil
+    ok(data, tostring(err))
+    eq('mcp-fixture', data.provider)
+    store.ingest(data)
+    local tick
+    for id, n in pairs(store.by_id) do
+        if n.name == 'tick' then tick = id end
+    end
+    ok(tick, 'nodes arrived over the wire')
+    ok(vim.tbl_contains(store.uses[tick] or {}, 'world::spawn@0'),
+        'edges too — the graph is browsable')
+    -- and a bad tool name is an honest error, not a hang
+    cfg.mcp = { world = { cmd = { 'luajit',
+        vim.fn.getcwd() .. '/tests/fixtures/mcp/server.lua' }, tool = 'nope' } }
+    local d2, e2 = require('cartograph.providers.mcp').extract('world')
+    cfg.mcp = nil
+    ok(not d2 and e2:match('no such tool'), tostring(e2))
+end)

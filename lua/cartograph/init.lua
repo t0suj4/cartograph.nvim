@@ -31,7 +31,17 @@ function M.open(dump_path, opts)
     -- a DIRECTORY opens through the tree-sitter provider (any language with
     -- a parser); a file is a pre-extracted dump (the lua-ls CLI's output)
     local target = vim.fn.expand(dump_path)
-    if vim.fn.isdirectory(target) == 1 then
+    local mcp_name = target:match('^mcp://(.+)$')
+    if mcp_name then
+        local data, err = require('cartograph.providers.mcp').extract(mcp_name)
+        if not data then
+            error('cartograph: mcp://' .. mcp_name .. ' — ' .. tostring(err), 0)
+        end
+        require('cartograph.xlang').link(data,
+            require('cartograph.xlang').effective_bindings(data))
+        require('cartograph.sql').attach(data)
+        store.ingest(data)
+    elseif vim.fn.isdirectory(target) == 1 then
         local data = require('cartograph.providers.treesitter').extract(target, opts)
         -- C/C++ roots get clangd resolution when available (config.clangd)
         local has_c = false

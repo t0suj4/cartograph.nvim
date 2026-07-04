@@ -201,7 +201,14 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
 ## Architecture (three seams)
 
 1. **GraphProvider** — supplies `nodes{id,name,kind,file,range,order}` and
-   `edges{from,to,kind}`. Two providers exist:
+   `edges{from,to,kind}`. Three providers exist:
+   - **MCP** (`:Cartograph mcp://name`): any MCP server tool that returns
+     the neutral schema is a provider — a database introspector, a
+     running game, a debugger, a remote index. Configure under
+     `setup{ mcp = { name = { cmd = {...}, tool = 'graph' } } }`; the
+     client is a ~150-line stdio JSON-RPC speaker built on uv, and the
+     same client serves future **oracles** (live systems answering
+     enrichment questions, the clangd pattern over a different wire).
    - **lua-ls CLI** (the reference): vm-typed resolution, full `df`
      data-flow, effects — the deep option for Lua. Extract once, open the
      dump.

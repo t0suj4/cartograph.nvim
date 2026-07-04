@@ -37,6 +37,11 @@ M.discover = true
 -- (tree-sitter graphs only; frozen while changes are staged)
 M.refresh = true
 
+-- MCP graph sources: open 'mcp://name' to pull a neutral-schema graph
+-- from the named server's tool (default tool name: 'graph')
+--   setup{ mcp = { game = { cmd = { 'my-mcp-server' }, tool = 'graph' } } }
+M.mcp = nil
+
 M.keys = {
     -- navigation
     pivot      = '<CR>',    -- tree/trace: re-root on / expand this entry
