@@ -90,6 +90,83 @@ M.spec = {
             return hit
         end,
     },
+    haskell = {
+        exts = { 'hs' },
+        functions = [=[
+            (function name: (variable) @name) @def
+            (bind name: (variable) @name) @def
+        ]=],
+        -- application is a nested spine; the innermost apply holds the head
+        calls = [=[ (apply function: (variable) @name) @call ]=],
+        vars = nil,
+        params_field = 'patterns',
+        body_field = nil, -- df comes from the custom hook below
+        fn_types = { ['function'] = true, bind = true },
+        id_query = '(variable) @id',
+        -- where-clause binds are a function's INTERIOR (df rows), not nodes:
+        -- indexing `e`/`go`/`args` by name would link every pattern variable
+        toplevel_only = true,
+        merge_equations = true, -- step 0 = ...; step x = ... is ONE function
+        cbarg_within = { instance_declarations = true }, -- typeclass dispatch
+        block_container = 'declarations',
+        block_skip = { signature = true, pragma = true },
+        is_method = function () return false end,
+        entry_names = { main = true },
+        import_query = [=[ (import module: (module) @path) ]=],
+        resolve_import = function (mod, files)
+            -- source roots differ (compiler/, libraries/x/src/) and the
+            -- extraction root may sit INSIDE the module hierarchy: match
+            -- path suffixes in either direction, unique-or-refuse
+            local suffix, hit = mod:gsub('%.', '/') .. '.hs', nil
+            for f in pairs(files) do
+                local m = f == suffix
+                    or f:sub(-#suffix - 1) == '/' .. suffix
+                    or suffix:sub(-#f - 1) == '/' .. f
+                if m then
+                    if hit then return nil end
+                    hit = f
+                end
+            end
+            return hit
+        end,
+        -- df-lite from the equation body + where clause: each where-bind is
+        -- a "statement" (def = its name), the match expression leads
+        dataflow = function (def, spec, src)
+            local stmts = {}
+            local function names(n, out, seen)
+                if n:type() == 'variable' then
+                    local t = vim.treesitter.get_node_text(n, src)
+                    if not seen[t] then seen[t] = true out[#out + 1] = t end
+                    return
+                end
+                for c in n:iter_children() do
+                    if c:named() then names(c, out, seen) end
+                end
+            end
+            local m = def:field('match')[1]
+            if m then
+                local use = {}
+                names(m, use, {})
+                stmts[#stmts + 1] = { l = m:range() + 1, def = {}, use = use, dep = {} }
+            end
+            local lb = def:field('binds')[1]
+            if lb then
+                for d in lb:iter_children() do
+                    if d:named() and (d:type() == 'bind' or d:type() == 'function') then
+                        local namen = d:field('name')[1]
+                        local use = {}
+                        names(d, use, {})
+                        stmts[#stmts + 1] = { l = d:range() + 1,
+                            def = namen and { vim.treesitter.get_node_text(namen, src) } or {},
+                            use = use, dep = {} }
+                    end
+                end
+            end
+            if #stmts == 0 then return nil end
+            table.sort(stmts, function (a, b) return a.l < b.l end)
+            return { inputs = {}, stmts = stmts }
+        end,
+    },
     python = {
         exts = { 'py' },
         functions = [[ (function_definition name: (identifier) @name) @def ]],
@@ -141,11 +218,13 @@ local function parse_query(lang, q)
     return ok and query or nil
 end
 
-local function in_function(n)
+local DEFAULT_FN_TYPES = { function_definition = true, function_declaration = true }
+
+local function in_function(n, spec)
+    local types = spec and spec.fn_types or DEFAULT_FN_TYPES
     local p = n:parent()
     while p do
-        local t = p:type()
-        if t == 'function_definition' or t == 'function_declaration' then return p end
+        if types[p:type()] then return p end
         p = p:parent()
     end
     return nil
@@ -278,7 +357,7 @@ local function fn_params(def, spec, src, method)
     local out = method and { 'self' } or {}
     if ps then
         for c in ps:iter_children() do
-            if c:type() == 'identifier' then
+            if c:type() == 'identifier' or c:type() == 'variable' then
                 out[#out + 1] = node_text(c, src)
             elseif c:named() then -- c parameter_declaration / defaulted params
                 for id in c:iter_children() do
@@ -353,6 +432,7 @@ function M.extract(root)
     -- per-name def indexes for the resolution pass
     local exact, tail = {}, {} -- name -> {fn node,...}; last segment -> {...}
     local varsByName = {}      -- name -> {var node,...}
+    local lastFn = {}          -- file -> last emitted fn node (equation merging)
     local fnRanges = {}        -- file -> { {s=line, e=line, id=id}, ... }
     local pending = {}         -- unresolved references, matched after all files
 
@@ -391,7 +471,8 @@ function M.extract(root)
                     local n = cap_node(ns)
                     if cap == 'def' then defn = n elseif cap == 'name' then namen = n end
                 end
-                if defn and namen then
+                if defn and namen and not (spec.toplevel_only
+                    and in_function(defn, spec)) then
                     local name = node_text(namen, src):gsub('%s+', '')
                     local sp = pos_of(defn)
                     local method = spec.is_method(name, defn)
@@ -399,12 +480,31 @@ function M.extract(root)
                     local params = fn_params(defn, spec, src, method and lang == 'lua')
                     local isfield = spec.field_fn_cbarg
                         and namen:parent() and namen:parent():type() == 'field'
+                    if spec.cbarg_within and not isfield then
+                        local a = defn:parent()
+                        while a do
+                            if spec.cbarg_within[a:type()] then isfield = true break end
+                            a = a:parent()
+                        end
+                    end
+                    -- multi-equation definitions (haskell) are ONE function:
+                    -- fold this equation into the previous node
+                    local prev = spec.merge_equations and lastFn[file]
+                    if prev and prev.name == name then
+                        prev.range['end'] = sp['end']
+                        for _, r in ipairs(fnRanges[file] or {}) do
+                            if r.id == prev.id then r.e = sp['end'].line break end
+                        end
+                        fnDefs[defn] = true
+                        goto fn_done
+                    end
                     nodes[#nodes + 1] = { id = id, name = name,
                         kind = method and 'method' or 'function', file = file,
                         range = sp, order = sp.start.line, params = params,
                         cbarg = isfield or nil,
                         entry = (spec.entry_names or {})[name] or nil,
-                        df = dataflow(defn, spec, src, params) }
+                        df = (spec.dataflow or dataflow)(defn, spec, src, params) }
+                    lastFn[file] = nodes[#nodes]
                     fnDefs[defn] = true
                     -- the outermost query pattern may match a nested def too;
                     -- ranges keep the innermost containing fn for attribution
@@ -417,6 +517,7 @@ function M.extract(root)
                         tail[tl] = tail[tl] or {}
                         table.insert(tail[tl], nodes[#nodes])
                     end
+                    ::fn_done::
                 end
             end
         end
@@ -433,7 +534,7 @@ function M.extract(root)
                     elseif cap == 'name' then namen = n
                     elseif cap == 'value' then valn = n end
                 end
-                if defn and namen and not in_function(defn) then
+                if defn and namen and not in_function(defn, spec) then
                     local name = node_text(namen, src)
                     local sp = pos_of(defn)
                     local id = ('%s::var:%s@%d'):format(file, name, sp.start.line)
@@ -451,6 +552,12 @@ function M.extract(root)
         -- blocks: runs of top-level statements that aren't function defs
         do
             local lines = vim.split(src, '\n', { plain = true })
+            local container = tsroot
+            if spec.block_container then
+                for c in tsroot:iter_children() do
+                    if c:type() == spec.block_container then container = c break end
+                end
+            end
             local run = nil
             local function flush()
                 if run then
@@ -461,8 +568,9 @@ function M.extract(root)
                     run = nil
                 end
             end
-            for stmt in tsroot:iter_children() do
-                if stmt:named() and stmt:type() ~= 'comment' then
+            for stmt in container:iter_children() do
+                if stmt:named() and stmt:type() ~= 'comment'
+                    and not (spec.block_skip or {})[stmt:type()] then
                     if fnDefs[stmt]
                         or (stmt:child(0) and fnDefs[stmt:child(0)]) then
                         flush()
@@ -512,7 +620,7 @@ function M.extract(root)
                     local callee = full:match('([%w_]+)$') or full
                     local method = full:find(':') ~= nil
                     local sp = pos_of(calln)
-                    local encl = in_function(calln)
+                    local encl = in_function(calln, spec)
                     local args, argv = {}, {}
                     if method then
                         args[1] = ''
@@ -585,11 +693,17 @@ function M.extract(root)
         e.at[#e.at + 1] = at
     end
     local function resolve(name, file)
+        -- 1-2 char names are shadow-bait (pattern vars, loop counters):
+        -- name-matching them is noise-dominated in every language
+        if #name < 3 then return nil end
         local cands = exact[name]
         if cands then
+            -- same-file priority is a FILE-SCOPE assumption (lua locals, C
+            -- statics); dynamically-dispatched defs (instance methods) don't
+            -- get it — they link only when globally unique
             local same
             for _, n in ipairs(cands) do
-                if n.file == file then
+                if n.file == file and not n.cbarg then
                     if same then return nil end -- ambiguous within the file
                     same = n
                 end
@@ -633,14 +747,14 @@ function M.extract(root)
     -- values). A top-level function reference marks the target dynamically
     -- dispatched (cbarg): a dispatch-table entry is not dead code.
     for _, file in ipairs(files) do
-        local lang, _ = lang_for(file)
+        local lang, spec = lang_for(file)
         local fd = io.open(root .. '/' .. file, 'r')
         local src = fd and fd:read('a')
         if fd then fd:close() end
         local okp, parser = pcall(vim.treesitter.get_string_parser, src or '', lang)
         if src and okp and fnRanges[file] then
             local tsroot = parser:parse()[1]:root()
-            local q = parse_query(lang, '(identifier) @id')
+            local q = parse_query(lang, spec.id_query or '(identifier) @id')
             local useEdge = {}
             if q then
                 for _, n in q:iter_captures(tsroot, src, 0, -1) do
@@ -648,9 +762,9 @@ function M.extract(root)
                     local parent = n:parent()
                     local pt = parent and parent:type() or ''
                     local callee_pos = (pt == 'call_expression' or pt == 'function_call'
-                            or pt == 'call')
+                            or pt == 'call' or pt == 'apply')
                         and (parent:field('function')[1] == n or parent:field('name')[1] == n)
-                    if not callee_pos then
+                    if not callee_pos and #name >= 3 then
                         local fns = exact[name]
                         if fns and #fns == 1 then
                             local t = fns[1]

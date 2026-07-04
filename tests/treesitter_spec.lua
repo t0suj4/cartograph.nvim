@@ -81,3 +81,39 @@ test('treesitter: lua blocks, litdata and require edges', function ()
     ok(blocks >= 1, 'blocks emitted')
     ok(vars >= 3, 'vars emitted (' .. vars .. ')')
 end)
+
+test('treesitter: haskell — equations merge, where stays interior, imports', function ()
+    -- the parser lives in nvim-treesitter's dir; tests run with bare rtp
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'haskell') then
+        skip 'no haskell parser'
+    end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/hsproj')
+    store.ingest(data)
+    local byname, count = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'function' then
+            byname[n.name] = n
+            count[n.name] = (count[n.name] or 0) + 1
+        end
+    end
+    -- two equations, ONE node spanning both
+    eq(1, count.double)
+    ok(byname.double.range['end'].line > byname.double.range.start.line,
+        'range extends over the second equation')
+    -- the where-bind `go` is interior, not a node
+    ok(not byname.go, 'where binds are not top-level nodes')
+    -- but it IS a df row of run
+    ok(byname.run.df and #byname.run.df.stmts == 2, 'match + where bind rows')
+    ok(byname.main.entry, 'main is an entry point')
+    -- cross-file call through the where clause: run -> double (~)
+    local hit
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname.run.id and e.to == byname.double.id then
+            hit = e
+        end
+    end
+    ok(hit and hit.inferred, 'run -> double, name-matched')
+    eq({ 'Util.hs' }, store.imports_out['Main.hs'])
+end)
