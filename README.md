@@ -202,6 +202,31 @@ The **plan** bar updates live — staged symbols, call sites to rewrite, require
 to add, and hazards. Nothing is written yet: the plan *describes* the move
 (preview-then-apply is the next step, and `p` will become the commit).
 
+### The first transaction: clone-merge
+
+`:CartographMerge` on a function finds its **witness twins** — same
+data-flow shape, params and callee set, the identity the reference
+layer already trusts — and stages a merge: delete the copies, rewrite
+their call sites to the survivor's name. The plan bar shows exactly
+what will happen (removals with line ranges, rewrite count, hazards:
+data-referenced clones, non-bare call forms, cross-file visibility);
+**nothing is written** until `:CartographApply` survives verification:
+
+- the graph generation must match the plan's (nothing re-ingested);
+- survivor and clones must still resolve by **ref, witness-clean** — a
+  transaction never follows drift silently;
+- every touched file's stamp must match plan time (CAS), with no dirty
+  buffers.
+
+Any failure refuses with its reason and costs a re-plan, never a
+corrupted write. The apply itself is journaled — full before-content
+per file, `pending → write → applied` (a crash leaves evidence, not
+mystery) — and the touched files splice back through the same refresh
+every save uses. `:CartographUndo` restores **byte-exact**, refusing if
+files moved on since; `:CartographTxnClear` abandons a staged plan.
+The journal (`state dir`, human-readable JSON) is the substrate every
+future verb — move, extract-module, remote edits — reuses.
+
 ### The working set
 
 Mark what you're working on; dive freely; come back. In the symbols list:

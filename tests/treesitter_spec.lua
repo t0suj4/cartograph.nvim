@@ -1135,6 +1135,134 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local refresh = require 'cartograph.refresh'
+    local journal = require 'cartograph.journal'
+    local cm = require 'cartograph.clonemerge'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/sub', 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text)
+        fd:close()
+    end
+    local function readf(rel)
+        local fd = assert(io.open(root .. '/' .. rel, 'r'))
+        local t = fd:read('a')
+        fd:close()
+        return t
+    end
+    local A = table.concat({
+        'local function greet(x)',
+        '  local y = x + 1',
+        '  return y * 2',
+        'end',
+        '',
+        'local function salute(x)',
+        '  local y = x + 1',
+        '  return y * 2',
+        'end',
+        '',
+        'local function caller_a()',
+        '  return salute(3)',
+        'end',
+        '' }, '\n')
+    local B = table.concat({
+        'local function caller_b()',
+        '  return salute(5)',
+        'end',
+        '' }, '\n')
+    write('a.lua', A)
+    write('sub/b.lua', B)
+    store.ingest(ts.extract(root))
+    root = store.data.root
+    journal.wipe(root)
+    local function byname(nm)
+        for id, n in pairs(store.by_id) do
+            if n.name == nm then return id end
+        end
+    end
+
+    -- the plan: salute is greet's witness twin; both callers rewrite;
+    -- the cross-file one is a visibility hazard
+    local plan, why = cm.plan(store, byname('greet'))
+    ok(plan, tostring(why))
+    eq(1, #plan.removed)
+    eq('salute', plan.removed[1].name)
+    eq(2, #plan.rewrites)
+    eq(1, #plan.hazards)
+    ok(plan.hazards[1]:match('sub/b.lua'), plan.hazards[1])
+
+    -- staged transaction freezes refresh
+    store.set_txn(plan)
+    local s, w = refresh.file('a.lua')
+    ok(not s and w:match('frozen'), tostring(w))
+
+    -- CAS: the file moved since planning -> apply REFUSES
+    local fd = assert(io.open(root .. '/a.lua', 'a'))
+    fd:write('-- touched\n')
+    fd:close()
+    local e1, w1 = cm.apply(store, plan)
+    ok(not e1 and w1:match('changed on disk'), tostring(w1))
+
+    -- restore, re-plan (fresh stamps), apply for real
+    write('a.lua', A)
+    store.set_txn(nil)
+    plan = assert(cm.plan(store, byname('greet')))
+    store.set_txn(plan)
+    local entry, aerr = cm.apply(store, plan)
+    ok(entry, tostring(aerr))
+    eq('applied', entry.status)
+    ok(store.txn == nil, 'apply cleared the staged txn')
+
+    -- the files, byte-exact
+    local expectedA = table.concat({
+        'local function greet(x)',
+        '  local y = x + 1',
+        '  return y * 2',
+        'end',
+        '',
+        'local function caller_a()',
+        '  return greet(3)',
+        'end',
+        '' }, '\n')
+    eq(expectedA, readf('a.lua'))
+    eq((B:gsub('salute', 'greet')), readf('sub/b.lua'))
+
+    -- the graph followed through refresh
+    ok(not byname('salute'), 'the clone is gone from the graph')
+    ok(vim.tbl_contains(store.usedby[byname('greet')] or {}, byname('caller_a')),
+        'caller_a rewired')
+    ok(vim.tbl_contains(store.usedby[byname('greet')] or {}, byname('caller_b')),
+        'caller_b rewired (cross-file)')
+
+    -- undo refuses when a touched file drifted after the apply
+    fd = assert(io.open(root .. '/sub/b.lua', 'a'))
+    fd:write('-- drift\n')
+    fd:close()
+    local r1, rw1 = journal.rollback(root)
+    ok(not r1 and rw1:match('changed since the apply'), tostring(rw1))
+
+    -- restore the post-apply state, then roll back byte-exact
+    write('sub/b.lua', (B:gsub('salute', 'greet')))
+    local r2, rw2 = journal.rollback(root)
+    ok(r2, tostring(rw2))
+    eq(A, readf('a.lua'))
+    eq(B, readf('sub/b.lua'))
+    refresh.files({ 'a.lua', 'sub/b.lua' })
+    ok(byname('salute'), 'the clone is back after undo')
+
+    -- and the journal knows there is nothing left
+    local r3, rw3 = journal.rollback(root)
+    ok(not r3 and rw3:match('nothing applied'), tostring(rw3))
+
+    journal.wipe(root)
+    vim.fn.delete(root, 'rf')
+end)
+
 test('refs: witness, ordinal, drift, rename, ambiguity', function ()
     local refs = require 'cartograph.refs'
     local function fn(id, name, order, stmts, params)

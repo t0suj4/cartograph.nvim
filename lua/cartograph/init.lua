@@ -31,9 +31,9 @@ function M.open(dump_path, opts)
     -- same rule as refresh: a staged move-set pins the graph. Swapping
     -- graphs under it would strand the plan on dead ids — refuse until
     -- applied or cleared, never discard staged intent silently.
-    if store.data and next(store.moveset or {}) then
-        error('cartograph: staged changes pending — apply or clear the'
-            .. ' move-set before opening another graph', 0)
+    if store.data and (next(store.moveset or {}) or store.txn) then
+        error('cartograph: staged changes pending — apply or clear them'
+            .. ' before opening another graph', 0)
     end
 
     -- a DIRECTORY opens through the tree-sitter provider (any language with
@@ -335,6 +335,66 @@ function M.open(dump_path, opts)
 
     -- the live oracle: the running system vs the static model
     pcall(vim.api.nvim_del_user_command, 'CartographLive')
+    -- ── the first transaction: clone-merge ─────────────────────────────
+    pcall(vim.api.nvim_del_user_command, 'CartographMerge')
+    vim.api.nvim_create_user_command('CartographMerge', function ()
+        local st = require 'cartograph.store'
+        if st.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first',
+                vim.log.levels.WARN)
+        end
+        local id = st.focused
+        local cm = require 'cartograph.clonemerge'
+        local txn, why = cm.plan(st, id)
+        if not txn then
+            return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)
+        end
+        st.set_txn(txn)
+        vim.notify(('cartograph: merge staged — %d clone(s) into %s,'
+            .. ' %d rewrite(s), %d hazard(s). Review the plan bar, then'
+            .. ' :CartographApply'):format(#txn.removed, txn.survivor.name,
+            #txn.rewrites, #txn.hazards), vim.log.levels.INFO)
+    end, { desc = 'cartograph: merge the focused function\'s clones into it' })
+    pcall(vim.api.nvim_del_user_command, 'CartographApply')
+    vim.api.nvim_create_user_command('CartographApply', function ()
+        local st = require 'cartograph.store'
+        if not st.txn then
+            return vim.notify('cartograph: nothing staged', vim.log.levels.WARN)
+        end
+        local entry, why = require('cartograph.clonemerge').apply(st, st.txn)
+        if not entry then
+            return vim.notify('cartograph: apply REFUSED — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        vim.notify(('cartograph: applied %s (journal %s) —'
+            .. ' :CartographUndo restores'):format(entry.verb, entry.id),
+            vim.log.levels.INFO)
+    end, { desc = 'cartograph: apply the staged transaction' })
+    pcall(vim.api.nvim_del_user_command, 'CartographTxnClear')
+    vim.api.nvim_create_user_command('CartographTxnClear', function ()
+        require('cartograph.store').set_txn(nil)
+        vim.notify('cartograph: transaction cleared (nothing was written)',
+            vim.log.levels.INFO)
+    end, { desc = 'cartograph: abandon the staged transaction' })
+    pcall(vim.api.nvim_del_user_command, 'CartographUndo')
+    vim.api.nvim_create_user_command('CartographUndo', function ()
+        local st = require 'cartograph.store'
+        if not (st.data and st.data.root) then return end
+        local entry, why = require('cartograph.journal').rollback(st.data.root)
+        if not entry then
+            return vim.notify('cartograph: undo — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        local touched = {}
+        for rel in pairs(entry.files) do touched[#touched + 1] = rel end
+        table.sort(touched)
+        require('cartograph.refresh').files(touched)
+        vim.cmd('silent! checktime')
+        vim.notify(('cartograph: rolled back %s (%s) — files restored'
+            .. ' byte-exact'):format(entry.verb, entry.id), vim.log.levels.INFO)
+    end, { desc = 'cartograph: roll back the last applied transaction' })
+
     vim.api.nvim_create_user_command('CartographLive', function ()
         local lines, why = require('cartograph.live').check(store)
         if not lines then

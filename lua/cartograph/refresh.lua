@@ -344,6 +344,12 @@ end
 
 --- Refresh one file (store-relative path). Returns stats or nil, reason.
 function M.file(rel)
+    return M.files({ rel })
+end
+
+--- Refresh a batch of files (one splice, one relink) — the post-apply
+--- path for transactions, and the single-file save path with one rel.
+function M.files(rels)
     local store = require 'cartograph.store'
     local data = store.data
     if not data or data.provider ~= 'treesitter' then
@@ -353,11 +359,11 @@ function M.file(rel)
         return nil, 'extraction in progress — refresh again when it completes'
             .. ' (the stale marker will say if this file needs it)'
     end
-    if next(store.moveset or {}) then
+    if next(store.moveset or {}) or store.txn then
         return nil, 'staged changes pending — refresh is frozen until applied or cleared'
     end
 
-    local stats, why = M.splice(data, { rel }, nil)
+    local stats, why = M.splice(data, rels, nil)
     if not stats then return nil, why end
     local removed, remap = stats.removed_ids, stats.remap
 
@@ -414,7 +420,7 @@ function M.all()
     if not data or data.provider ~= 'treesitter' then
         return nil, 'not a live graph'
     end
-    if next(store.moveset or {}) then
+    if next(store.moveset or {}) or store.txn then
         return nil, 'staged changes pending — refresh is frozen'
     end
     local ts = require 'cartograph.providers.treesitter'

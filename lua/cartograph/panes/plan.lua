@@ -33,6 +33,30 @@ function M.render()
     local dest = store.dest
     local lines, marks = {}, {}
 
+    -- a staged TRANSACTION owns the bar: this preview IS the plan, and
+    -- nothing is written until :CartographApply survives verification
+    if store.txn then
+        local t = store.txn
+        lines[#lines + 1] = hl(marks, #lines,
+            ('MERGE  %d clone(s) → %s    :CartographApply · :CartographTxnClear')
+                :format(#t.removed, t.survivor.name), 'Title')
+        for _, r in ipairs(t.removed) do
+            lines[#lines + 1] = ('  - %s   %s:%d-%d'):format(r.name, r.file,
+                r.lines.s + 1, r.lines.e + 1)
+        end
+        lines[#lines + 1] = ('  rewrites %d call site(s); touches %d file(s)')
+            :format(#t.rewrites, #t.touched)
+        for _, h in ipairs(t.hazards) do
+            lines[#lines + 1] = hl(marks, #lines, '  ⚠ ' .. h, 'DiagnosticWarn')
+        end
+        set_lines(M.buf, lines)
+        for _, mk in ipairs(marks) do
+            pcall(vim.api.nvim_buf_set_extmark, M.buf, ns, mk.row, 0,
+                { end_row = mk.row + 1, hl_group = mk.hl })
+        end
+        return
+    end
+
     if #ids == 0 then
         set_lines(M.buf, {
             'PLAN  —  nothing staged',

@@ -633,6 +633,14 @@ M._plan_subs = {}
 function M.on_plan(fn) table.insert(M._plan_subs, fn) end
 local function fire_plan() for _, fn in ipairs(M._plan_subs) do pcall(fn) end end
 
+--- The staged TRANSACTION (clone-merge etc.): at most one, freezes
+--- refresh and graph swaps like the move-set does. nil clears.
+M.txn = nil
+function M.set_txn(plan)
+    M.txn = plan
+    fire_plan()
+end
+
 --- Stage `id` for moving (idempotent). Cut-into-the-move-set.
 function M.stage(id)
     if not id or M.moveset[id] then return end
