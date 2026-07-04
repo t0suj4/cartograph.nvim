@@ -37,6 +37,10 @@ M.discover = true
 -- (tree-sitter graphs only; frozen while changes are staged)
 M.refresh = true
 
+-- extra directory NAMES to exclude from extraction (vendored deps the
+-- defaults don't know: setup{ exclude = { 'warpc', 'go_templates' } })
+M.exclude = {}
+
 -- incremental open: persist the raw graph per project root; the next
 -- open re-extracts only files whose stamps changed and relinks. false =
 -- always extract cold. cache_max_diff: above this many changed files a

@@ -1165,6 +1165,42 @@ test('python: class-qualified methods, stdlib gate, decorator cbarg', function (
     end
 end)
 
+test('go: receiver-qualified methods, package scope, init entry, caps', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('go') then skip 'no go parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/goproj')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    ok(byname['Store.Total'] and byname['Store.Total'].kind == 'method',
+        'receiver-qualified method')
+    ok(byname.main.entry, 'main is entry')
+    ok(byname.init.entry, 'init is runtime-invoked')
+    -- capitalization is exportedness
+    ok(byname.NewStore.exported, 'capitalized fn exported')
+    ok(not byname.report.exported, 'lowercase fn not exported')
+    -- main -> NewStore (module-path import + selector call), -> Total,
+    -- -> report (bare, same package)
+    local hits = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname.main.id then
+            hits[(store.node(e.to) or {}).name] = true
+        end
+    end
+    ok(hits.NewStore, 'main -> store.NewStore')
+    ok(hits['Store.Total'], 'main -> Total')
+    ok(hits.report, 'main -> report (package-scoped bare call)')
+    -- import resolves through the module-path suffix
+    ok(vim.tbl_contains(store.imports_out['main.go'] or {}, 'store/store.go'),
+        'module-path import resolved')
+    -- dead: only lonely (init's callee register has a caller)
+    local dead = require('cartograph.lint').run(store,
+        { only = { ['dead-function'] = true } })
+    eq(1, #dead)
+    ok(dead[1].message:match('lonely'), dead[1].message)
+end)
+
 test('rust: impl-qualified methods, crate scope, trait/test cbarg, pub', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

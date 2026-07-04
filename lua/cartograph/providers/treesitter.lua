@@ -433,6 +433,87 @@ M.spec = {
             end
         end,
     },
+    go = {
+        exts = { 'go' },
+        functions = [=[
+            (function_declaration name: (identifier) @name) @def
+            (method_declaration name: (field_identifier) @name) @def
+        ]=],
+        calls = [=[
+            (call_expression function: (identifier) @name) @call
+            (call_expression function: (selector_expression) @name) @call
+        ]=],
+        vars = [=[
+            (source_file (var_declaration (var_spec
+                name: (identifier) @name value: (_) @value) @def))
+            (source_file (const_declaration (const_spec
+                name: (identifier) @name value: (_) @value) @def))
+        ]=],
+        params_field = 'parameters',
+        body_field = 'body',
+        is_method = function (_, def)
+            return def:type() == 'method_declaration'
+        end,
+        -- methods carry their receiver type: Site.render
+        qualify = function (name, defn, src)
+            if defn:type() ~= 'method_declaration' then return name end
+            local recv = defn:field('receiver')[1]
+            if recv then
+                local t = vim.treesitter.get_node_text(recv, src)
+                    :match('%*?([%w_]+)%s*%)')
+                    or vim.treesitter.get_node_text(recv, src)
+                        :match('%*?([%w_]+)')
+                if t then return t .. '.' .. name end
+            end
+            return name
+        end,
+        -- func main + func init: runtime-invoked, never dead
+        entry_names = { main = true, init = true },
+        -- the PACKAGE (directory) is Go's bare-name boundary
+        scope = function (file, _)
+            return file:match('^(.*)/[^/]*$') or ''
+        end,
+        -- capitalized = exported: no in-repo caller says nothing
+        exported_def = function (defn, src)
+            local nm = defn:field('name')[1]
+            nm = nm and vim.treesitter.get_node_text(nm, src) or ''
+            return nm:match('^%u') ~= nil
+        end,
+        -- Go identifiers are mostly locals/fields; fn-as-value flows
+        -- through call args (argv upgrade), like rust
+        id_fn_refs = false,
+        stdlib_names = { append = true, len = true, cap = true, make = true,
+            new = true, copy = true, delete = true, panic = true,
+            recover = true, print = true, println = true, close = true,
+            Error = true, String = true, Len = true, Less = true,
+            Swap = true, Read = true, Write = true, Close = true,
+            New = true, Get = true, Set = true, Do = true, Run = true,
+            Add = true, Wait = true, Done = true, Lock = true,
+            Unlock = true, Sprintf = true, Errorf = true, Printf = true },
+        stdlib_prefixes = { 'fmt.', 'strings.', 'strconv.', 'os.', 'io.',
+            'errors.', 'bytes.', 'time.', 'sync.', 'context.', 'filepath.',
+            'path.', 'sort.', 'math.', 'net.', 'http.', 'url.', 'regexp.',
+            'reflect.', 'json.', 'bufio.', 'log.', 'slices.', 'maps.',
+            'atomic.', 'rand.', 'unicode.', 'utf8.', 'hex.', 'base64.',
+            'sha256.', 'exec.', 'testing.', 'assert.', 'require.' },
+        import_query = [=[ (import_spec path: (interpreted_string_literal) @path) ]=],
+        resolve_import = function (path, files, _)
+            -- module-path imports: find the suffix that exists in-repo,
+            -- resolving to the package dir's eponymous or first-known file
+            path = path:gsub('"', '')
+            local segs = {}
+            for seg in path:gmatch('[^/]+') do segs[#segs + 1] = seg end
+            for i = 1, #segs do
+                local dir = table.concat(segs, '/', i)
+                local last = segs[#segs]
+                for _, cand in ipairs({ dir .. '/' .. last .. '.go',
+                    dir .. '/doc.go', dir .. '/' .. last .. 's.go' }) do
+                    if files[cand] then return cand end
+                end
+            end
+            return nil
+        end,
+    },
     rust = {
         exts = { 'rs' },
         functions = [[
@@ -1003,7 +1084,13 @@ local function list_files(root, subdirs)
             if name:sub(1, 1) ~= '.' then
                 local r = rel == '' and name or (rel .. '/' .. name)
                 if t == 'directory' then
-                    if not EXCLUDE_DIRS[name:lower()] then rec(r) end
+                    local ex = EXCLUDE_DIRS[name:lower()]
+                    if not ex then
+                        for _, x in ipairs(require('cartograph.config').exclude or {}) do
+                            if name == x then ex = true break end
+                        end
+                    end
+                    if not ex then rec(r) end
                 elseif lang_for(r) and want(r) then
                     out[#out + 1] = r
                 end
@@ -1617,16 +1704,21 @@ function M.extract(root, opts)
             -- crates: bare names cannot legally cross); dotted callees
             -- are method syntax and never match free functions
             local sc = scope_of(file)
-            local dot = spec and spec.dot_calls_are_methods
-                and name:find('%.', 1) ~= nil
-            -- dotted calls are METHOD dispatch: cross-crate deps make the
-            -- receiver's crate unknowable, so uniqueness is GLOBAL over
-            -- methods; bare identifiers cannot cross a crate boundary at
-            -- all, so their uniqueness is scope-local
+            -- QUALIFIED references (pkg.Fn, x.method) are how code legally
+            -- crosses a scope boundary, so they match globally — rust
+            -- additionally knows x.f() is method dispatch; bare
+            -- identifiers never cross, so their uniqueness is scope-local
+            local dotted = name:find('.', 1, true) ~= nil
             local pick
             for _, n in ipairs(cands) do
-                if (dot and n.kind == 'method')
-                    or (not dot and (sc == nil or scope_of(n.file) == sc)) then
+                local fits
+                if dotted then
+                    fits = not (spec and spec.dot_calls_are_methods)
+                        or n.kind == 'method'
+                else
+                    fits = sc == nil or scope_of(n.file) == sc
+                end
+                if fits then
                     if pick then pick = nil break end
                     pick = n
                 end
@@ -1641,12 +1733,18 @@ function M.extract(root, opts)
         local tc = tl and (tail[tl] or exact[tl])
         if tc then
             local sc = scope_of(file)
-            local dot = spec and spec.dot_calls_are_methods
-                and name:find('%.', 1) ~= nil
+            local dotted = name:find('.', 1, true) ~= nil
+                or name:find('::', 1, true) ~= nil
             local pick
             for _, n in ipairs(tc) do
-                if (dot and n.kind == 'method')
-                    or (not dot and (sc == nil or scope_of(n.file) == sc)) then
+                local fits
+                if dotted then
+                    fits = not (spec and spec.dot_calls_are_methods)
+                        or n.kind == 'method'
+                else
+                    fits = sc == nil or scope_of(n.file) == sc
+                end
+                if fits then
                     if pick then pick = nil break end
                     pick = n
                 end
@@ -1871,16 +1969,21 @@ function M.relink(data, touched)
             -- crates: bare names cannot legally cross); dotted callees
             -- are method syntax and never match free functions
             local sc = scope_of(file)
-            local dot = spec and spec.dot_calls_are_methods
-                and name:find('%.', 1) ~= nil
-            -- dotted calls are METHOD dispatch: cross-crate deps make the
-            -- receiver's crate unknowable, so uniqueness is GLOBAL over
-            -- methods; bare identifiers cannot cross a crate boundary at
-            -- all, so their uniqueness is scope-local
+            -- QUALIFIED references (pkg.Fn, x.method) are how code legally
+            -- crosses a scope boundary, so they match globally — rust
+            -- additionally knows x.f() is method dispatch; bare
+            -- identifiers never cross, so their uniqueness is scope-local
+            local dotted = name:find('.', 1, true) ~= nil
             local pick
             for _, n in ipairs(cands) do
-                if (dot and n.kind == 'method')
-                    or (not dot and (sc == nil or scope_of(n.file) == sc)) then
+                local fits
+                if dotted then
+                    fits = not (spec and spec.dot_calls_are_methods)
+                        or n.kind == 'method'
+                else
+                    fits = sc == nil or scope_of(n.file) == sc
+                end
+                if fits then
                     if pick then pick = nil break end
                     pick = n
                 end
@@ -1895,12 +1998,18 @@ function M.relink(data, touched)
         local tc = tl and (tail[tl] or exact[tl])
         if tc then
             local sc = scope_of(file)
-            local dot = spec and spec.dot_calls_are_methods
-                and name:find('%.', 1) ~= nil
+            local dotted = name:find('.', 1, true) ~= nil
+                or name:find('::', 1, true) ~= nil
             local pick
             for _, n in ipairs(tc) do
-                if (dot and n.kind == 'method')
-                    or (not dot and (sc == nil or scope_of(n.file) == sc)) then
+                local fits
+                if dotted then
+                    fits = not (spec and spec.dot_calls_are_methods)
+                        or n.kind == 'method'
+                else
+                    fits = sc == nil or scope_of(n.file) == sc
+                end
+                if fits then
                     if pick then pick = nil break end
                     pick = n
                 end
