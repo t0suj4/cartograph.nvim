@@ -408,6 +408,14 @@ local function fsm_model()
     return M._fsm or nil, M._fsm_why
 end
 
+--- The states altitude is ANCHORED in the source: it hangs below the spec
+--- var (the events table). Descending on that var enters 'states'; ascending
+--- from 'states' lands back on it.
+function M.fsm_anchor()
+    local model = fsm_model()
+    return model and model.events_var or nil
+end
+
 -- Hover anchor for FSM rows: state and transition names live in DATA, not in
 -- a node of their own, so the source preview shows the spec table with every
 -- line quoting the hovered name highlighted (the "code" of a state is its
@@ -889,6 +897,13 @@ function M.attach(win)
             M.show(level, ctxval)
         end
     end
+    -- a var row descends into its members/sites — except the FSM spec var,
+    -- which descends into the state machine it declares (the states anchor)
+    local function descend_var(n)
+        local anchor = M.fsm_anchor()
+        if anchor and anchor.id == n.id then return enter('states', nil, n.id) end
+        enter(enter_var(n.id), n.id, n.id)
+    end
     store.loc_provider = {
         get = function ()
             local l = view_loc()
@@ -1008,7 +1023,7 @@ function M.attach(win)
         elseif M.view.level == 'block' then
             local n = store.node(M.line_node[r])
             if n and n.kind == 'var' then
-                enter(enter_var(n.id), n.id, n.id)
+                descend_var(n)
             end
         elseif M.view.level == 'var' or M.view.level == 'callers' then
             local g = M.line_group[r]
@@ -1046,7 +1061,7 @@ function M.attach(win)
             if n and STAGEABLE[n.kind] then
                 enter('fn', n.id, n.id)
             elseif n and n.kind == 'var' then
-                enter(enter_var(n.id), n.id, n.id)
+                descend_var(n)
             end
         elseif M.view.level == 'fn' then
             if M.line_callers[r] then
@@ -1089,7 +1104,29 @@ function M.attach(win)
                 end
             end
         elseif M.view.level == 'states' then
-            M.show('files')
+            -- the states altitude hangs below the spec var: surface into its
+            -- block with the cursor on it (files is the no-model fallback)
+            store.set_context(nil)
+            local v = M.fsm_anchor()
+            local blk
+            if v then
+                for _, n in ipairs(store.by_file[v.file] or {}) do
+                    if n.kind == 'block' and n.range.start.line <= v.range.start.line
+                        and n.range['end'].line >= v.range['end'].line then
+                        blk = n
+                        break
+                    end
+                end
+            end
+            if blk then
+                M.show('block', blk.id)
+                local r = M.node_line[v.id]
+                if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
+            elseif v then
+                M.show('file', v.file)
+            else
+                M.show('files')
+            end
         elseif M.view.level == 'occs' then
             store.set_context(nil)
             local kind, entity = (M.view.occs or ''):match('^(.-)\31(.-)\31')

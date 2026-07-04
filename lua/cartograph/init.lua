@@ -109,6 +109,10 @@ function M.open(dump_path)
     -- browse the state machine (adapter: setup{ fsm = {...} })
     pcall(vim.api.nvim_del_user_command, 'CartographStates')
     vim.api.nvim_create_user_command('CartographStates', function ()
+        -- pivot to the spec var first: <C-o> returns here, and the source
+        -- pane anchors on the spec while browsing states
+        local v = symbols.fsm_anchor()
+        if v then store.pivot(v.id) end
         symbols.show('states')
     end, { desc = 'cartograph: browse the state machine (states -> entry points -> code)' })
 
