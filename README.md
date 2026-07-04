@@ -355,6 +355,18 @@ different objects' `lock('x')`/`unlock('x')` cross-link), and a
 released-key warning without a typo suggestion only fires when the
 acquire side is fully literal.
 
+The rest of the detector family, all self-configuring: **vtables** —
+C/C++ initializer arrays carry litdata, so `struct cmd cmds[] = { {
+"build", cmd_build } }` browses in the lit altitude and reports as a
+funcall table; **FSM autodetect** — any `{name, from, to}` list opens
+with `:CartographStates`, no adapter config; **access points**
+(`access-point`) — a trivial function everyone calls is marked as
+plumbing, in the lint and in its fn-altitude header; **clones**
+(`clone`) — functions with identical data-flow shape and callee sets,
+names normalized away (on pkgit this found `remove_tree` duplicated
+verbatim across two files); **layering** (`layering`) — imports running
+against a directory pair's dominant direction, each stray named.
+
 When discovery *doesn't* find a registry you know is there,
 `:CartographDiscover` explains why: with no argument, one verdict line
 per candidate verb (`EXPORT (key = arg 1, 3 sites)` /

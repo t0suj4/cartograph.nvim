@@ -927,6 +927,42 @@ function M.clones(data, opts)
     return out
 end
 
+--- Layering: when imports between two top-level directories flow
+--- overwhelmingly one way, the stragglers running against the current
+--- are layering violations. Returns { {dom_from, dom_to, dom, against,
+--- edges = {against-edges}}, ... }.
+function M.layering(data, opts)
+    local max_ratio = opts and opts.max_ratio or 0.25
+    local function dir_of(f) return f:match('^([^/]+)/') or '.' end
+    local mat, samples = {}, {}
+    for _, e in ipairs(data.edges or {}) do
+        if e.kind == 'import' then
+            local a, b = dir_of(e.from), dir_of(e.to)
+            if a ~= b then
+                local k = a .. '\31' .. b
+                mat[k] = (mat[k] or 0) + 1
+                samples[k] = samples[k] or {}
+                if #samples[k] < 6 then table.insert(samples[k], e) end
+            end
+        end
+    end
+    local out = {}
+    for k, n in pairs(mat) do
+        local a, b = k:match('^(.-)\31(.*)$')
+        local rk = b .. '\31' .. a
+        local m = mat[rk] or 0
+        -- visit each unordered pair once, from the dominant side
+        if m < n or (m == n and a < b) then
+            if m > 0 and m <= n * max_ratio then
+                out[#out + 1] = { dom_from = a, dom_to = b, dom = n,
+                    against = m, edges = samples[rk] }
+            end
+        end
+    end
+    table.sort(out, function (x, y) return x.dom > y.dom end)
+    return out
+end
+
 --- eval and friends: the interpreter itself.
 function M.evals(data)
     local out = {}

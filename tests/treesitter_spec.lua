@@ -631,3 +631,26 @@ test('clones: same shape, same callees, different names', function ()
         'the twins found: ' .. fs[1].message)
     ok(not fs[1].message:match('gamma'), 'the different one excluded')
 end)
+
+test('layering: imports against the dominant direction are named', function ()
+    local nodes, edges = {}, {}
+    local function mod(f)
+        nodes[#nodes + 1] = { id = f, name = f, kind = 'module', file = f, order = -1,
+            range = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } } }
+    end
+    for _, f in ipairs({ 'ui/a.lua', 'ui/b.lua', 'ui/c.lua', 'ui/d.lua', 'ui/e.lua',
+        'core/x.lua', 'core/y.lua' }) do mod(f) end
+    for _, p in ipairs({ { 'ui/a.lua', 'core/x.lua' }, { 'ui/b.lua', 'core/x.lua' },
+        { 'ui/c.lua', 'core/y.lua' }, { 'ui/d.lua', 'core/y.lua' },
+        { 'ui/e.lua', 'core/x.lua' } }) do
+        edges[#edges + 1] = { from = p[1], to = p[2], kind = 'import' }
+    end
+    edges[#edges + 1] = { from = 'core/y.lua', to = 'ui/a.lua', kind = 'import' }
+    store.ingest({ schema = 1, root = '/x', nodes = nodes, edges = edges })
+    local fs = lint.run(store, { only = { ['layering'] = true } })
+    local blob = ''
+    for _, f in ipairs(fs) do blob = blob .. f.severity .. ':' .. f.message .. '\n' end
+    ok(blob:match("ui %-> core dominates %(5 imports%)"), blob)
+    ok(blob:match("'core/y%.lua' %-> 'ui/a%.lua' runs against it"), 'the stray named')
+    ok(blob:match('5 with the current, 1 against'), 'summary')
+end)

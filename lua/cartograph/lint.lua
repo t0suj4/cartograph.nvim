@@ -410,7 +410,25 @@ local function clone_findings(store)
     return out
 end
 
+-- Layering: imports running against a pair's dominant direction.
+local function layering_findings(store)
+    local out = {}
+    for _, v in ipairs(require('cartograph.greenspun').layering(store.data)) do
+        for _, e in ipairs(v.edges or {}) do
+            out[#out + 1] = { severity = 'warn',
+                file = store.data.root .. '/' .. e.from, line = 1,
+                message = ("layering: %s -> %s dominates (%d imports); '%s' -> '%s' runs against it")
+                    :format(v.dom_from, v.dom_to, v.dom, e.from, e.to) }
+        end
+        out[#out + 1] = { file = store.data.root, line = 1,
+            message = ("layer pair %s/%s: %d with the current, %d against")
+                :format(v.dom_from, v.dom_to, v.dom, v.against) }
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'layering', severity = 'info', run = layering_findings },
     { name = 'clone', severity = 'info', run = clone_findings },
     { name = 'access-point', severity = 'info', run = access_point_findings },
     { name = 'registry-audit', severity = 'warn', run = registry_audit_findings },
