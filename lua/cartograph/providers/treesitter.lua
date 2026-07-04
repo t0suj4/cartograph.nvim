@@ -433,6 +433,179 @@ M.spec = {
             end
         end,
     },
+    rust = {
+        exts = { 'rs' },
+        functions = [[
+            (function_item name: (identifier) @name) @def
+            (macro_definition name: (identifier) @name) @def
+        ]],
+        calls = [[
+            (call_expression function: (identifier) @name) @call
+            (call_expression function: (field_expression) @name) @call
+            (call_expression function: (scoped_identifier) @name) @call
+            (macro_invocation macro: (identifier) @name) @call
+        ]],
+        vars = [[
+            (const_item name: (identifier) @name value: (_) @value) @def
+            (static_item name: (identifier) @name value: (_) @value) @def
+        ]],
+        params_field = 'parameters',
+        body_field = 'body',
+        -- fns inside impl/trait blocks are methods, carrying their type:
+        -- Config::new — which also keeps every type's `new` distinct
+        is_method = function (_, def)
+            local p = def:parent()
+            while p do
+                local t = p:type()
+                if t == 'impl_item' or t == 'trait_item' then return true end
+                p = p:parent()
+            end
+            return false
+        end,
+        qualify = function (name, defn, src)
+            local p = defn:parent()
+            while p do
+                local t = p:type()
+                if t == 'impl_item' or t == 'trait_item' then
+                    local ty = p:field('type')[1] or p:field('name')[1]
+                    -- generics (Foo<T>) reduce to the base type name
+                    if ty then
+                        local txt = vim.treesitter.get_node_text(ty, src)
+                            :match('^([%w_]+)')
+                        if txt then return txt .. '::' .. name end
+                    end
+                    return name
+                end
+                p = p:parent()
+            end
+            return name
+        end,
+        entry_names = { main = true },
+        -- impl/trait/mod wrap real content; type declarations are data
+        block_skip = { impl_item = true, trait_item = true, mod_item = true,
+            foreign_mod_item = true },
+        -- `impl Trait for Type` methods are called through the trait —
+        -- trait objects, generics — invisibly to a name graph: registered
+        -- by construction, never dead (the @receiver lesson, rust edition)
+        cbarg_def = function (defn, src)
+            -- #[test]/#[bench]/#[no_mangle]: invoked by harness or linker
+            local sib = defn:prev_named_sibling()
+            while sib and sib:type() == 'attribute_item' do
+                local t = vim.treesitter.get_node_text(sib, src)
+                if t:find('test') or t:find('no_mangle')
+                    or t:find('bench') then
+                    return true
+                end
+                sib = sib:prev_named_sibling()
+            end
+            local p = defn:parent()
+            while p do
+                if p:type() == 'impl_item' then
+                    return p:field('trait')[1] ~= nil
+                end
+                p = p:parent()
+            end
+            return false
+        end,
+        -- pub fns are a library crate's exported surface: no in-repo
+        -- caller says nothing about their liveness
+        exported_def = function (defn, _)
+            for c in defn:iter_children() do
+                if c:type() == 'visibility_modifier' then return true end
+            end
+            return false
+        end,
+        -- rust identifiers are mostly LOCALS (`let args = ...` shadows any
+        -- fn named args); bare-fn-as-value flows through call arguments
+        -- (the argv upgrade), so the id-pass mention branch is noise here
+        id_fn_refs = false,
+        -- x.foo() is METHOD syntax: it can never reach a free function,
+        -- so dotted callees only ever match method defs
+        dot_calls_are_methods = true,
+        -- the CRATE is the name-resolution boundary: a bare identifier in
+        -- one crate can never legally reach another crate's private fn,
+        -- so workspace-unique is tested within the crate, never across
+        scope = function (file, files)
+            local dir = file:match('^(.*)/[^/]*$') or ''
+            while dir ~= '' do
+                if files[dir .. '/lib.rs'] or files[dir .. '/main.rs'] then
+                    return dir
+                end
+                dir = dir:match('^(.*)/[^/]*$') or ''
+            end
+            return ''
+        end,
+        -- iterator/Option/Result vocabulary and ubiquitous trait methods:
+        -- a project def with one of these names must not absorb the
+        -- language's own calls
+        stdlib_names = { clone = true, unwrap = true, expect = true,
+            into = true, from = true, to_string = true, as_str = true,
+            as_ref = true, as_bytes = true, iter = true, into_iter = true,
+            next = true, len = true, push = true, pop = true, insert = true,
+            get = true, map = true, and_then = true, unwrap_or = true,
+            unwrap_or_else = true, collect = true, to_owned = true,
+            borrow = true, lock = true, read = true, write = true,
+            send = true, recv = true, join = true, spawn = true,
+            contains = true, starts_with = true, ends_with = true,
+            split = true, trim = true, parse = true, is_empty = true,
+            is_some = true, is_none = true, ok = true, err = true,
+            default = true, new = true, fmt = true, eq = true, cmp = true,
+            hash = true, drop = true, deref = true, extend = true,
+            -- std macros (captured as calls by the macro_invocation query)
+            format = true, print = true, println = true, eprintln = true,
+            vec = true, panic = true, assert = true, assert_eq = true,
+            assert_ne = true, debug_assert = true, matches = true,
+            todo = true, unimplemented = true, unreachable = true,
+            include_str = true, concat = true, env = true, cfg = true },
+        stdlib_prefixes = { 'std::', 'core::', 'alloc::', 'String::',
+            'Vec::', 'Box::', 'Arc::', 'Rc::', 'Option::', 'Result::',
+            'Path::', 'PathBuf::', 'HashMap::', 'HashSet::', 'BTreeMap::' },
+        import_query = [[ (use_declaration argument: (_) @path) ]],
+        resolve_import = function (path, files, from)
+            -- crate::a::b -> <src root>/a/b.rs | a/b/mod.rs | a.rs (the
+            -- last segment may be an item, not a module); super/self are
+            -- relative; a foreign first segment is another crate: honest nil
+            path = path:gsub('%s', ''):gsub('{.*$', ''):gsub('%*$', '')
+            local segs = {}
+            for s in path:gmatch('[%w_]+') do segs[#segs + 1] = s end
+            if #segs == 0 then return nil end
+            local dir = from:match('^(.*)/[^/]*$') or ''
+            local base
+            if segs[1] == 'crate' then
+                -- the crate root: nearest ancestor holding lib.rs/main.rs
+                local d = dir
+                while d ~= '' do
+                    if files[d .. '/lib.rs'] or files[d .. '/main.rs'] then
+                        base = d
+                        break
+                    end
+                    d = d:match('^(.*)/[^/]*$') or ''
+                end
+                table.remove(segs, 1)
+            elseif segs[1] == 'super' then
+                base = dir:match('^(.*)/[^/]*$') or ''
+                table.remove(segs, 1)
+            elseif segs[1] == 'self' then
+                base = dir
+                table.remove(segs, 1)
+            else
+                return nil
+            end
+            if not base or #segs == 0 then return nil end
+            for last = #segs, math.max(#segs - 1, 1), -1 do
+                local p = base
+                for i = 1, last do p = p .. '/' .. segs[i] end
+                if files[p .. '.rs'] then return p .. '.rs' end
+                if files[p .. '/mod.rs'] then return p .. '/mod.rs' end
+            end
+            -- a single-segment item lives in the base module itself
+            for _, cand in ipairs({ base .. '/lib.rs', base .. '/main.rs',
+                base .. '/mod.rs', base .. '.rs' }) do
+                if files[cand] then return cand end
+            end
+            return nil
+        end,
+    },
     python = {
         exts = { 'py' },
         functions = [[ (function_definition name: (identifier) @name) @def ]],
@@ -901,8 +1074,13 @@ local function id_pass(root, files, L)
                             -- sexp grammars have no fields: the head IS the callee
                             or (pt == 'list' and parent:named_child(0) == n)
                         if not callee_pos and #name >= 3
+                            and spec.id_fn_refs ~= false
                             and not (spec.stdlib_names or {})[name] then
                             local u = L.fn_unique[name]
+                            if u and L.scopes
+                                and L.scopes[u.file] ~= L.scopes[file] then
+                                u = nil -- unique, but across a boundary
+                            end
                             if u then
                                 local line = select(1, n:range())
                                 if not (u.file == file and line == u.line) then
@@ -921,7 +1099,11 @@ local function id_pass(root, files, L)
                             for _, v in ipairs(cands) do
                                 if v.file == file then var = v break end
                             end
-                            if not var and #cands == 1 then var = cands[1] end
+                            if not var and #cands == 1
+                            and not (L.scopes and L.scopes[cands[1].file]
+                                ~= L.scopes[file]) then
+                            var = cands[1]
+                        end
                             local line = select(1, n:range())
                             if var and not (var.file == file and line == var.line) then
                                 local from = fn_at(line)
@@ -970,7 +1152,21 @@ function M.lookups(nodes)
                 { id = n.id, file = n.file, line = n.range.start.line })
         end
     end
-    return { fn_unique = fn_unique, var_named = var_named }
+    -- scope map: languages with a resolution boundary (rust crates) get
+    -- their id-pass matches confined to it
+    local fileset, scopes, any = {}, {}, false
+    for _, n in ipairs(nodes) do
+        if n.kind == 'module' then fileset[n.file] = true end
+    end
+    for f in pairs(fileset) do
+        local _, sp = lang_for(f)
+        if sp and sp.scope then
+            scopes[f] = sp.scope(f, fileset)
+            any = true
+        end
+    end
+    return { fn_unique = fn_unique, var_named = var_named,
+        scopes = any and scopes or nil }
 end
 
 --- Fold a standalone id-pass result into a graph: ref pairs dedup into
@@ -1018,6 +1214,7 @@ function M.id_pass(root, files, lookups)
         fn_unique = lookups.fn_unique,
         var_named = lookups.var_named,
         fn_ranges = lookups.fn_ranges,
+        scopes = lookups.scopes,
         add_names = function (f, s) out.names[f] = s end,
         addref = function (from, to, at, inferred)
             local k = from .. '\31' .. to
@@ -1154,6 +1351,8 @@ function M.extract(root, opts)
                         kind = method and 'method' or 'function', file = file,
                         range = sp, order = sp.start.line, params = params,
                         cbarg = isfield or nil,
+                        exported = (spec.exported_def
+                            and spec.exported_def(defn, src)) or nil,
                         entry = (spec.entry_names or {})[name] or nil,
                         df = (spec.dataflow or dataflow)(defn, spec, src, params) }
                     lastFn[file] = nodes[#nodes]
@@ -1369,6 +1568,14 @@ function M.extract(root, opts)
     end
 
     -- ── resolution pass: name-matched, ambiguity refuses to link ─────────────
+    local scope_cache = {}
+    local function scope_of(f)
+        if scope_cache[f] == nil then
+            local _, sp = lang_for(f)
+            scope_cache[f] = sp and sp.scope and sp.scope(f, fileset) or false
+        end
+        return scope_cache[f] or nil
+    end
     local refEdge = {}
     local function addref(from, to, at, inferred)
         local k = from .. '\31' .. to
@@ -1388,8 +1595,12 @@ function M.extract(root, opts)
         if #name < 3 then return nil end
         local _, spec = lang_for(file)
         local snames = spec and spec.stdlib_names or {}
-        if snames[name] or snames[name:match('([%w_%-]+)$') or ''] then return nil end
+        if snames[name] then return nil end
         local cands = exact[name]
+        -- the stdlib TAIL gate guards the fallbacks below; an exact match
+        -- on a fully-qualified name (Engine::new) clears first
+        if not cands
+            and snames[name:match('([%w_%-]+)$') or ''] then return nil end
         if cands then
             -- same-file priority is a FILE-SCOPE assumption (lua locals, C
             -- statics); dynamically-dispatched defs (instance methods) don't
@@ -1402,7 +1613,25 @@ function M.extract(root, opts)
                 end
             end
             if same then return same, false end
-            if #cands == 1 then return cands[1], true end
+            -- workspace-unique, but never across a scope boundary (rust
+            -- crates: bare names cannot legally cross); dotted callees
+            -- are method syntax and never match free functions
+            local sc = scope_of(file)
+            local dot = spec and spec.dot_calls_are_methods
+                and name:find('%.', 1) ~= nil
+            -- dotted calls are METHOD dispatch: cross-crate deps make the
+            -- receiver's crate unknowable, so uniqueness is GLOBAL over
+            -- methods; bare identifiers cannot cross a crate boundary at
+            -- all, so their uniqueness is scope-local
+            local pick
+            for _, n in ipairs(cands) do
+                if (dot and n.kind == 'method')
+                    or (not dot and (sc == nil or scope_of(n.file) == sc)) then
+                    if pick then pick = nil break end
+                    pick = n
+                end
+            end
+            if pick then return pick, true end
             return nil
         end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
@@ -1410,7 +1639,20 @@ function M.extract(root, opts)
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
-        if tc and #tc == 1 then return tc[1], true end
+        if tc then
+            local sc = scope_of(file)
+            local dot = spec and spec.dot_calls_are_methods
+                and name:find('%.', 1) ~= nil
+            local pick
+            for _, n in ipairs(tc) do
+                if (dot and n.kind == 'method')
+                    or (not dot and (sc == nil or scope_of(n.file) == sc)) then
+                    if pick then pick = nil break end
+                    pick = n
+                end
+            end
+            if pick then return pick, true end
+        end
         return nil
     end
     -- single-assignment literal flow: `$fn = 'compute'; $fn(3)` resolves —
@@ -1519,10 +1761,19 @@ function M.extract(root, opts)
             var_named[name] = list
         end
         data.names = {}
+        local seq_scopes, seq_any = {}, false
+        for f in pairs(fileset) do
+            local _, sp = lang_for(f)
+            if sp and sp.scope then
+                seq_scopes[f] = sp.scope(f, fileset)
+                seq_any = true
+            end
+        end
         id_pass(root, files, {
             fn_unique = fn_unique,
             var_named = var_named,
             fn_ranges = fnRanges,
+            scopes = seq_any and seq_scopes or nil,
             addref = addref,
             adduse = function (e) edges[#edges + 1] = e end,
             mark_cbarg = function (u) u.node.cbarg = true end,
@@ -1557,6 +1808,18 @@ end
 --- refresh, where a changed file's calls (and other files' calls INTO
 --- the changed file) need relinking.
 function M.relink(data, touched)
+    local relset = {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'module' then relset[n.file] = true end
+    end
+    local scope_cache = {}
+    local function scope_of(f)
+        if scope_cache[f] == nil then
+            local _, sp = lang_for(f)
+            scope_cache[f] = sp and sp.scope and sp.scope(f, relset) or false
+        end
+        return scope_cache[f] or nil
+    end
     local exact, tail = {}, {}
     for _, n in ipairs(data.nodes) do
         if n.kind == 'function' or n.kind == 'method' then
@@ -1589,8 +1852,12 @@ function M.relink(data, touched)
         if #name < 3 then return nil end
         local _, spec = lang_for(file)
         local snames = spec and spec.stdlib_names or {}
-        if snames[name] or snames[name:match('([%w_%-]+)$') or ''] then return nil end
+        if snames[name] then return nil end
         local cands = exact[name]
+        -- the stdlib TAIL gate guards the fallbacks below; an exact match
+        -- on a fully-qualified name (Engine::new) clears first
+        if not cands
+            and snames[name:match('([%w_%-]+)$') or ''] then return nil end
         if cands then
             local same
             for _, n in ipairs(cands) do
@@ -1600,7 +1867,25 @@ function M.relink(data, touched)
                 end
             end
             if same then return same, false end
-            if #cands == 1 then return cands[1], true end
+            -- workspace-unique, but never across a scope boundary (rust
+            -- crates: bare names cannot legally cross); dotted callees
+            -- are method syntax and never match free functions
+            local sc = scope_of(file)
+            local dot = spec and spec.dot_calls_are_methods
+                and name:find('%.', 1) ~= nil
+            -- dotted calls are METHOD dispatch: cross-crate deps make the
+            -- receiver's crate unknowable, so uniqueness is GLOBAL over
+            -- methods; bare identifiers cannot cross a crate boundary at
+            -- all, so their uniqueness is scope-local
+            local pick
+            for _, n in ipairs(cands) do
+                if (dot and n.kind == 'method')
+                    or (not dot and (sc == nil or scope_of(n.file) == sc)) then
+                    if pick then pick = nil break end
+                    pick = n
+                end
+            end
+            if pick then return pick, true end
             return nil
         end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
@@ -1608,7 +1893,20 @@ function M.relink(data, touched)
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
-        if tc and #tc == 1 then return tc[1], true end
+        if tc then
+            local sc = scope_of(file)
+            local dot = spec and spec.dot_calls_are_methods
+                and name:find('%.', 1) ~= nil
+            local pick
+            for _, n in ipairs(tc) do
+                if (dot and n.kind == 'method')
+                    or (not dot and (sc == nil or scope_of(n.file) == sc)) then
+                    if pick then pick = nil break end
+                    pick = n
+                end
+            end
+            if pick then return pick, true end
+        end
         return nil
     end
     local n = 0

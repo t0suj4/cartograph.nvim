@@ -1165,6 +1165,41 @@ test('python: class-qualified methods, stdlib gate, decorator cbarg', function (
     end
 end)
 
+test('rust: impl-qualified methods, crate scope, trait/test cbarg, pub', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('rust') then skip 'no rust parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/rustproj')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    -- impl methods carry their type; Engine::new resolves from boot
+    ok(byname['Engine::new'] and byname['Engine::new'].kind == 'method',
+        'impl-qualified method')
+    ok(byname.boot and byname.boot.exported, 'pub fn marked exported')
+    ok(not byname.helper.exported, 'private fn not exported')
+    local hits = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname.boot.id then
+            hits[(store.node(e.to) or {}).name] = true
+        end
+    end
+    ok(hits['Engine::new'], 'boot -> Engine::new (scoped_identifier call)')
+    ok(hits['Engine::speed'], 'boot -> Engine::speed (dotted method call)')
+    ok(hits.helper, 'boot -> helper (bare call, same crate)')
+    -- Display impl is trait-registered; #[test] is harness-invoked
+    ok(byname['Engine::fmt'].cbarg, 'trait impl method marked dispatched')
+    ok(byname.spins.cbarg, '#[test] fn marked harness-invoked')
+    -- use crate::helper resolves to the file
+    ok(vim.tbl_contains(store.imports_out['src/engine.rs'] or {}, 'src/lib.rs'),
+        'crate:: import resolved')
+    -- dead-function: only the genuinely lonely one
+    local dead = require('cartograph.lint').run(store,
+        { only = { ['dead-function'] = true } })
+    eq(1, #dead)
+    ok(dead[1].message:match('lonely'), dead[1].message)
+end)
+
 test('django loop: routes are entities, templates link, audit fires', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
