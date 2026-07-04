@@ -336,6 +336,18 @@ sits one slip from a real one, the finding names it:
 `'on_tikc' is dispatched but never registered — did you mean 'on_tick'?`
 (transpositions count as one slip; they are THE registry typo).
 
+Two more halves are found the same way. **Ad-hoc RAII**
+(`pair-audit`): acquire/release verb pairs detected by name morphology
+(`unX`, `remove_X`, `open`/`close`) and confirmed by shared keys — then
+the imbalance audit runs itself: keys released but never acquired get a
+typo suggestion, keys acquired but never released are leak-prone
+(suppressed when the release side is dynamic). **Schema mirrors**
+(`schema-mirror`): literal data tables sharing a vocabulary — keys,
+values, or a list column — are mirrors of one schema, and the finding
+names their divergence, the change-one-forget-the-other bug class (on a
+real mod this surfaced two FSM states missing from the validation
+table's vocabulary).
+
 When discovery *doesn't* find a registry you know is there,
 `:CartographDiscover` explains why: with no argument, one verdict line
 per candidate verb (`EXPORT (key = arg 1, 3 sites)` /

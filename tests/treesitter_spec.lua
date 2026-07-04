@@ -540,3 +540,30 @@ test('deep tier: the fallback for graphs without argv kinds', function ()
     for _, f in ipairs(fs) do blob2 = blob2 .. f.message .. '\n' end
     ok(blob2:match('1 registered but never dispatched'), 'zeta still flagged: ' .. blob2)
 end)
+
+test('pair-audit: ad-hoc RAII discovered, imbalances named', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    store.ingest(ts.extract(vim.fn.getcwd() .. '/tests/fixtures/raii'))
+    local fs = lint.run(store, { only = { ['pair-audit'] = true } })
+    local blob = ''
+    for _, f in ipairs(fs) do blob = blob .. f.severity .. ':' .. f.message .. '\n' end
+    ok(blob:match("releases a key never acquired — did you mean 'cache'%?"),
+        'transposition suggested: ' .. blob)
+    ok(blob:match("acquire_lock%('tmp'%) is never release_lockd"), 'leak named')
+    ok(not blob:match("open_file%('log'%) is never"), 'dynamic release suppresses leaks')
+    ok(blob:match('release keys dynamic'), 'suppression stated')
+    -- morphology dedup: exactly one pair per verb couple
+    local n = 0
+    for _ in blob:gmatch('ad%-hoc RAII: acquire_lock/release_lock') do n = n + 1 end
+    eq(1, n)
+end)
+
+test('schema-mirror: shared vocabularies report their divergence', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    store.ingest(ts.extract(vim.fn.getcwd() .. '/tests/fixtures/raii'))
+    local fs = lint.run(store, { only = { ['schema-mirror'] = true } })
+    eq(1, #fs)
+    ok(fs[1].message:match('states %(keys%) ~ labels %(keys%)'), fs[1].message)
+    ok(fs[1].message:match('retry'), 'left divergence named')
+    ok(fs[1].message:match('abort'), 'right divergence named')
+end)

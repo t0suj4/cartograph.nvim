@@ -325,8 +325,47 @@ local function registry_audit_findings(store)
         xl.effective_bindings(store.data))
 end
 
+-- discovered acquire/release pairs get the imbalance audit; discovered
+-- vocabulary mirrors get the drift report
+local function pair_audit_findings(store)
+    local g = require 'cartograph.greenspun'
+    return g.pair_audit(store.data, g.verb_pairs(store.data))
+end
+
+local function mirror_findings(store)
+    local g = require 'cartograph.greenspun'
+    local mirrors, note = g.mirrors(store.data)
+    local out = {}
+    if note then
+        out[#out + 1] = { file = store.data.root, line = 1, message = note }
+    end
+    local function short(list)
+        local t = {}
+        for i = 1, math.min(#list, 4) do t[#t + 1] = list[i] end
+        local txt = table.concat(t, ', ')
+        if #list > 4 then txt = txt .. (' +%d more'):format(#list - 4) end
+        return txt
+    end
+    for _, m in ipairs(mirrors) do
+        local parts = {}
+        if #m.only_a > 0 then
+            parts[#parts + 1] = ('%s also has: %s'):format(m.a, short(m.only_a))
+        end
+        if #m.only_b > 0 then
+            parts[#parts + 1] = ('%s also has: %s'):format(m.b, short(m.only_b))
+        end
+        out[#out + 1] = { file = store.data.root .. '/' .. m.node.file,
+            line = m.node.range.start.line + 1,
+            message = ('schema mirror (%d shared): %s ~ %s — %s')
+                :format(m.shared, m.a, m.b, table.concat(parts, '; ')) }
+    end
+    return out
+end
+
 M.rules = {
     { name = 'registry-audit', severity = 'warn', run = registry_audit_findings },
+    { name = 'pair-audit', severity = 'warn', run = pair_audit_findings },
+    { name = 'schema-mirror', severity = 'info', run = mirror_findings },
     { name = 'greenspun', severity = 'info', run = greenspun_findings },
     { name = 'dynamic-dispatch', severity = 'info', run = dynamic_findings },
     { name = 'load-order', severity = 'warn', run = load_order_findings },

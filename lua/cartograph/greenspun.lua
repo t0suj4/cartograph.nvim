@@ -551,6 +551,257 @@ function M.audit(data, bindings, opts)
     return out
 end
 
+-- ── paired verbs: ad-hoc RAII ────────────────────────────────────────────────
+-- acquire/release pairs found by NAME MORPHOLOGY (unX, removeX, close/open)
+-- and confirmed by shared keys where both sides carry literals. The audit
+-- that needed listener_config now configures itself.
+
+local PAIR_PREFIXES = {
+    { 'add', 'remove' }, { 'add', 'delete' }, { 'register', 'unregister' },
+    { 'register', 'deregister' }, { 'open', 'close' }, { 'start', 'stop' },
+    { 'begin', 'end' }, { 'create', 'destroy' }, { 'push', 'pop' },
+    { 'acquire', 'release' }, { 'lock', 'unlock' }, { 'attach', 'detach' },
+    { 'bind', 'unbind' }, { 'connect', 'disconnect' }, { 'enable', 'disable' },
+    { 'show', 'hide' }, { 'alloc', 'free' }, { 'ref', 'unref' },
+    { 'retain', 'release' }, { 'subscribe', 'unsubscribe' },
+}
+
+local function release_names(v)
+    local out, seen = {}, {}
+    local function add(x)
+        if not seen[x] then
+            seen[x] = true
+            out[#out + 1] = x
+        end
+    end
+    add('un' .. v)
+    add('de' .. v)
+    for _, pp in ipairs(PAIR_PREFIXES) do
+        local a, b = pp[1], pp[2]
+        if v == a then
+            add(b)
+        elseif v:sub(1, #a + 1) == a .. '_' then
+            add(b .. v:sub(#a + 1))
+        elseif #v > #a and v:sub(1, #a) == a
+            and v:sub(#a + 1, #a + 1):match('%u') then
+            add(b .. v:sub(#a + 1)) -- addFoo -> removeFoo
+        end
+    end
+    return out
+end
+
+--- Acquire/release verb pairs. Each entry:
+--- { acquire = { verb, key }, release = { verb, key? }, shared? }
+--- release.key nil = the release side has no literal keys (dynamic).
+function M.verb_pairs(data, opts)
+    local min_sites = opts and opts.min_sites or 2
+    local by_verb = {}
+    for _, c in ipairs(data.calls or {}) do
+        if not c.dynamic then
+            by_verb[c.callee] = by_verb[c.callee] or {}
+            table.insert(by_verb[c.callee], c)
+        end
+    end
+    local out = {}
+    for v, calls in pairs(by_verb) do
+        if #calls >= min_sites then
+            for _, r in ipairs(release_names(v)) do
+                local rc = by_verb[r]
+                if rc then
+                    local akey = key_positions(calls)
+                    if akey then
+                        local _, rposs = key_positions(rc)
+                        -- release key = the position sharing most keys
+                        local rkey, shared
+                        local akeys = keys_at(calls, akey)
+                        for _, pos in ipairs(rposs or {}) do
+                            local sh = 0
+                            for k in pairs(keys_at(rc, pos)) do
+                                if akeys[k] then sh = sh + 1 end
+                            end
+                            if sh > 0 and (not shared or sh > shared) then
+                                rkey, shared = pos, sh
+                            end
+                        end
+                        -- both sides literal but ZERO overlap: unrelated
+                        -- verbs that happen to rhyme — refuse
+                        if not (rposs and #rposs > 0 and not rkey) then
+                            out[#out + 1] = { acquire = { verb = v, key = akey },
+                                release = { verb = r, key = rkey },
+                                shared = shared,
+                                sites = #calls + #rc }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+--- The imbalance audit over discovered pairs: released-but-never-acquired
+--- (typos get a suggestion), acquired-but-never-released (leak-prone;
+--- suppressed when the release side is dynamic).
+function M.pair_audit(data, vpairs)
+    local out = {}
+    for _, pr in ipairs(vpairs or {}) do
+        local acq, rel, acq_site = {}, {}, {}
+        local acq_dyn, rel_dyn = false, false
+        for _, c in ipairs(data.calls or {}) do
+            local shift = c.method and 1 or 0
+            if c.callee == pr.acquire.verb then
+                local k = (c.args or {})[pr.acquire.key + shift]
+                if k and k ~= '' then
+                    acq[k] = true
+                    acq_site[k] = acq_site[k] or c
+                else
+                    acq_dyn = true
+                end
+            elseif c.callee == pr.release.verb then
+                if pr.release.key then
+                    local k = (c.args or {})[pr.release.key + shift]
+                    if k and k ~= '' then
+                        rel[k] = true
+                        -- released but never acquired: typo or dead release
+                        if not acq[k] then
+                            local near = nearest(k, acq)
+                            out[#out + 1] = { severity = 'warn',
+                                file = data.root .. '/' .. c.file, line = c.line + 1,
+                                message = ("%s('%s') releases a key never acquired%s")
+                                    :format(pr.release.verb, k,
+                                        near and (" — did you mean '" .. near .. "'?") or '') }
+                        end
+                    else
+                        rel_dyn = true
+                    end
+                else
+                    rel_dyn = true
+                end
+            end
+        end
+        if not rel_dyn then
+            for k in pairs(acq) do
+                if not rel[k] then
+                    local c = acq_site[k]
+                    out[#out + 1] = { severity = 'warn',
+                        file = data.root .. '/' .. c.file, line = c.line + 1,
+                        message = ("%s('%s') is never %sd — leak-prone")
+                            :format(pr.acquire.verb, k, pr.release.verb) }
+                end
+            end
+        end
+        out[#out + 1] = { severity = 'info', file = data.root, line = 1,
+            message = ("ad-hoc RAII: %s/%s%s"):format(pr.acquire.verb,
+                pr.release.verb,
+                rel_dyn and ' (release keys dynamic — leak check suppressed)' or '') }
+    end
+    return out
+end
+
+-- ── schema mirrors: parallel vocabularies in literal data ────────────────────
+-- Tables that share a key/value vocabulary are MIRRORS of one schema; the
+-- divergence between them is the change-one-forget-the-other bug class.
+
+local function string_sets(node, val, path, out, depth)
+    if depth > 4 or type(val) ~= 'table' then return end
+    local keys, strs, nk, ns = {}, {}, 0, 0
+    for k, v in pairs(val) do
+        if type(k) == 'string' then
+            keys[k] = true
+            nk = nk + 1
+        end
+        if type(v) == 'string' then
+            strs[v] = true
+            ns = ns + 1
+        end
+    end
+    local label = node.name .. path
+    if nk >= 3 then
+        out[#out + 1] = { label = label .. ' (keys)', set = keys, node = node }
+    end
+    if ns >= 3 then
+        out[#out + 1] = { label = label .. ' (values)', set = strs, node = node }
+    end
+    -- columns: a LIST of tables sharing a field yields that field's value set
+    local nlist, cols = 0, {}
+    for _, v in ipairs(val) do
+        if type(v) == 'table' and not v.ref and not v.expr then
+            nlist = nlist + 1
+            for f, fv in pairs(v) do
+                if type(f) == 'string' then
+                    cols[f] = cols[f] or {}
+                    if type(fv) == 'string' then
+                        cols[f][fv] = true
+                    elseif type(fv) == 'table' then
+                        for _, x in ipairs(fv) do
+                            if type(x) == 'string' then cols[f][x] = true end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if nlist >= 3 then
+        for f, set in pairs(cols) do
+            local n = 0
+            for _ in pairs(set) do n = n + 1 end
+            if n >= 3 then
+                out[#out + 1] = { label = ('%s%s[].%s'):format(node.name, path, f),
+                    set = set, node = node }
+            end
+        end
+    end
+    for k, v in pairs(val) do
+        if type(v) == 'table' and type(k) == 'string' then
+            string_sets(node, v, path .. '.' .. k, out, depth + 1)
+        end
+    end
+end
+
+--- Divergent mirrors between literal data tables. Returns
+--- { {a, b, shared, only_a, only_b, node}, ... } (node = a's var).
+function M.mirrors(data, opts)
+    local min_shared = opts and opts.min_shared or 4
+    local sets = {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'var' and type(n.data) == 'table' then
+            string_sets(n, n.data, '', sets, 0)
+        end
+    end
+    if #sets > 400 then -- no silent caps: say what was skipped
+        return {}, ('%d vocabularies found — pairwise comparison skipped (cap 400)'):format(#sets)
+    end
+    local out = {}
+    for i = 1, #sets do
+        for j = i + 1, #sets do
+            local a, b = sets[i], sets[j]
+            if a.node.id ~= b.node.id then
+                local inter, na, nb = 0, 0, 0
+                for k in pairs(a.set) do
+                    na = na + 1
+                    if b.set[k] then inter = inter + 1 end
+                end
+                for _ in pairs(b.set) do nb = nb + 1 end
+                if inter >= min_shared and inter / math.min(na, nb) >= 0.6
+                    and (na > inter or nb > inter) then
+                    local oa, ob = {}, {}
+                    for k in pairs(a.set) do
+                        if not b.set[k] then oa[#oa + 1] = k end
+                    end
+                    for k in pairs(b.set) do
+                        if not a.set[k] then ob[#ob + 1] = k end
+                    end
+                    table.sort(oa)
+                    table.sort(ob)
+                    out[#out + 1] = { a = a.label, b = b.label, shared = inter,
+                        only_a = oa, only_b = ob, node = a.node }
+                end
+            end
+        end
+    end
+    return out
+end
+
 --- eval and friends: the interpreter itself.
 function M.evals(data)
     local out = {}
