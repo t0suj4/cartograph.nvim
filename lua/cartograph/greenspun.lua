@@ -203,7 +203,10 @@ function M.registries(data, opts)
                 end
                 if callable >= math.max(min_sites, #calls * 0.5) then
                     local keys = keys_at(calls, kpos)
-                    if name_like_ratio(keys) >= 0.6 then
+                    local nkeys = 0
+                    for _ in pairs(keys) do nkeys = nkeys + 1 end
+                    -- a registry with one key is not a registry
+                    if nkeys >= 2 and name_like_ratio(keys) >= 0.6 then
                         exports[verb] = { verb = verb, name = kpos, fn = fnpos,
                             sites = #calls, keys = keys,
                             deep = deep_hits > 0 and deep_hits or nil }
@@ -952,13 +955,15 @@ function M.clones(data, opts)
             table.sort(cs)
             sig[#sig + 1] = table.concat(cs, ',')
             local key = table.concat(sig, ';')
-            groups[key] = groups[key] or {}
+            groups[key] = groups[key] or { callees = #cs > 0 }
             table.insert(groups[key], n)
         end
     end
     local out = {}
     for _, g in pairs(groups) do
-        if #g >= 2 then
+        -- shared CALLEES are the real clone signal; a callee-less shape
+        -- match is coincidence unless the shape is substantial
+        if #g >= 2 and (g.callees or #g[1].df.stmts >= 5) then
             table.sort(g, function (a, b)
                 if a.file ~= b.file then return a.file < b.file end
                 return a.order < b.order
