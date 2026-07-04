@@ -949,6 +949,56 @@ test('parallel extraction: identical graph to sequential', function ()
         return t
     end
     eq(ckeys(seq.calls), ckeys(got.calls))
+    -- the mention index is part of the contract too (sorted packing
+    -- makes worker-borne and inline-collected sets byte-identical)
+    eq(seq.names, got.names)
+end)
+
+test('mention index: globals reconcile in UNCHANGED files, both ways', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local cache = require 'cartograph.cache'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/sub', 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text)
+        fd:close()
+    end
+    -- alpha MENTIONS shiny; nothing defines it yet
+    write('a.lua', 'local function alpha(x)\n  return x + #shiny\nend\n')
+    write('sub/b.lua', 'local function beta(y)\n  return y\nend\n')
+    cache.save(ts.extract(root))
+    local function edge_alpha_shiny(data)
+        local alpha, shiny = nil, {}
+        for _, n in ipairs(data.nodes) do
+            if n.name == 'alpha' then alpha = n end
+            if n.name == 'shiny' then shiny[n.id] = true end
+        end
+        for _, e in ipairs(data.edges) do
+            if e.kind == 'use' and alpha and e.from == alpha.id
+                and shiny[e.to] then return true end
+        end
+        return false
+    end
+
+    -- 0 -> 1: an EDIT ELSEWHERE creates the global; alpha's file is
+    -- untouched, yet its inbound use edge must appear
+    write('sub/b.lua', 'local shiny = {}\n\nlocal function beta(y)\n'
+        .. '  return y\nend\n')
+    local warm = cache.open(root)
+    ok(edge_alpha_shiny(warm), 'inbound use edge appeared in unchanged file')
+
+    -- 1 -> 2: a second definition makes the name ambiguous; the edge
+    -- that only uniqueness justified must disappear
+    write('c.lua', 'local shiny = 1\n')
+    local warm2 = cache.open(root)
+    ok(not edge_alpha_shiny(warm2),
+        'ambiguity retracted the inferred use edge')
+
+    vim.fn.delete((cache.path(root)))
+    vim.fn.delete(root, 'rf')
 end)
 
 test('incremental cache: warm open re-extracts only the diff', function ()

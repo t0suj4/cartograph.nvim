@@ -15,7 +15,7 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 1
+M.VERSION = 2 -- v2: data.names (per-file identifier mention index)
 
 --- Cache file for a project root (root normalized like extract does).
 function M.path(root)

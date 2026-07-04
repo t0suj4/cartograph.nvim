@@ -497,6 +497,19 @@ end
 function M.node(id) return id and M.by_id[id] or nil end
 function M.abspath(node) return M.data.root .. '/' .. node.file end
 
+--- Files whose identifier mention-index contains `name` (the id pass
+--- records each file's identifier set). Empty when the graph predates
+--- the index or the file's language opted out (spec.name_index = false).
+function M.mentioning(name)
+    local out = {}
+    local needle = '\31' .. name .. '\31'
+    for f, s in pairs((M.data and M.data.names) or {}) do
+        if s:find(needle, 1, true) then out[#out + 1] = f end
+    end
+    table.sort(out)
+    return out
+end
+
 --- Has a parsed file changed on disk since its graph was made?
 --- true/false when a stamp exists; nil = unknown (no stamp — MCP graphs,
 --- frontier files, which validate through their own machinery).

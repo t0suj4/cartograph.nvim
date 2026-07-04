@@ -803,7 +803,14 @@ function M.list_files(root, subdirs) return list_files(root, subdirs) end
 -- L = { fn_unique = name -> {id,file,line,node?} (globally unique fns),
 --       var_named = name -> { {id,file,line}, ... } (top-level vars),
 --       fn_ranges = file -> { {s,e,id}, ... },
---       addref(from,to,at,inferred), adduse(edge), mark_cbarg(entry) }
+--       addref(from,to,at,inferred), adduse(edge), mark_cbarg(entry),
+--       add_names(file, packed)? — per-file identifier NAME SET (the
+--       mention index: \31-separated, sorted; ≥3 chars, stdlib excluded),
+--       recorded while we're iterating every identifier anyway. This is
+--       what lets a later splice answer "which files mention this
+--       global?" without a corpus scan. Gated per language:
+--       spec.name_index = false opts a language out (when bare-identifier
+--       mention does not imply potential global use). }
 local function id_pass(root, files, L)
     for _, file in ipairs(files) do
         local lang, spec = lang_for(file)
@@ -814,6 +821,8 @@ local function id_pass(root, files, L)
             if fd then fd:close() end
             local okp, parser = pcall(vim.treesitter.get_string_parser, src or '', lang)
             if src and okp then
+                local nameset = (L.add_names and spec.name_index ~= false)
+                    and {} or nil
                 local function fn_at(line)
                     local best
                     for _, r in ipairs(ranges) do
@@ -828,6 +837,10 @@ local function id_pass(root, files, L)
                 if q then
                     for _, n in q:iter_captures(tsroot, src, 0, -1) do
                         local name = node_text(n, src)
+                        if nameset and #name >= 3
+                            and not (spec.stdlib_names or {})[name] then
+                            nameset[name] = true
+                        end
                         local parent = n:parent()
                         local pt = parent and parent:type() or ''
                         local callee_pos = (pt == 'call_expression' or pt == 'function_call'
@@ -873,6 +886,11 @@ local function id_pass(root, files, L)
                             end
                         end
                     end
+                end
+                if nameset and next(nameset) then
+                    local ns = vim.tbl_keys(nameset)
+                    table.sort(ns) -- deterministic pack (worker == inline)
+                    L.add_names(file, '\31' .. table.concat(ns, '\31') .. '\31')
                 end
             end
         end
@@ -927,17 +945,22 @@ function M.merge_idpass(data, out)
     for _, id in ipairs(out.cbarg or {}) do
         if byid[id] then byid[id].cbarg = true end
     end
+    if out.names then
+        data.names = data.names or {}
+        for f, s in pairs(out.names) do data.names[f] = s end
+    end
 end
 
 --- Standalone id pass over `files` with global lookups (parallel phase
 --- 2, run inside a worker). Returns { edges = {...}, cbarg = {id, ...} }.
 function M.id_pass(root, files, lookups)
-    local out = { edges = {}, cbarg = {} }
+    local out = { edges = {}, cbarg = {}, names = {} }
     local refEdge, seen_cb = {}, {}
     id_pass(root, files, {
         fn_unique = lookups.fn_unique,
         var_named = lookups.var_named,
         fn_ranges = lookups.fn_ranges,
+        add_names = function (f, s) out.names[f] = s end,
         addref = function (from, to, at, inferred)
             local k = from .. '\31' .. to
             local e = refEdge[k]
@@ -1428,6 +1451,7 @@ function M.extract(root, opts)
             end
             var_named[name] = list
         end
+        data.names = {}
         id_pass(root, files, {
             fn_unique = fn_unique,
             var_named = var_named,
@@ -1435,6 +1459,7 @@ function M.extract(root, opts)
             addref = addref,
             adduse = function (e) edges[#edges + 1] = e end,
             mark_cbarg = function (u) u.node.cbarg = true end,
+            add_names = function (f, s) data.names[f] = s end,
         })
     else
         -- the parallel driver needs each slice's function extents to run

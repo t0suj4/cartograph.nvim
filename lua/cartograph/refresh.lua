@@ -63,15 +63,30 @@ function M.splice(data, rels, deleted)
     -- refreshed or deleted file. Refreshed files drop their landings too:
     -- landings are content-keyed cache and this file's content changed.
     local removed, old_by_file = {}, {}
+    -- name deltas: what this splice takes away / brings in, per class —
+    -- the input to global-uniqueness reconciliation below
+    local rm_fn, rm_var, ad_fn, ad_var = {}, {}, {}, {}
     for _, n in ipairs(data.nodes) do
         if n.id:sub(1, 5) == 'sql::' then
             removed[n.id] = true
         elseif relset[n.file] or del[n.file] then
             removed[n.id] = true
+            if n.kind == 'function' or n.kind == 'method' then
+                rm_fn[n.name] = (rm_fn[n.name] or 0) + 1
+            elseif n.kind == 'var' then
+                rm_var[n.name] = (rm_var[n.name] or 0) + 1
+            end
             if relset[n.file] and not n.unparsed then
                 old_by_file[n.file] = old_by_file[n.file] or {}
                 table.insert(old_by_file[n.file], n)
             end
+        end
+    end
+    for _, n in ipairs(mini.nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            ad_fn[n.name] = (ad_fn[n.name] or 0) + 1
+        elseif n.kind == 'var' then
+            ad_var[n.name] = (ad_var[n.name] or 0) + 1
         end
     end
 
@@ -164,24 +179,120 @@ function M.splice(data, rels, deleted)
     table.sort(un)
     data.unparsed = #un > 0 and un or nil
 
-    stats.relinked = ts.relink(data)
+    -- the mention index follows the files it describes (the id pass
+    -- below re-records the refreshed files')
+    data.names = data.names or {}
+    for f in pairs(del) do data.names[f] = nil end
+    for _, f in ipairs(rels or {}) do data.names[f] = nil end
 
-    -- the refreshed files' id pass, at GLOBAL scope: use edges into other
-    -- files' vars, dispatch refs to unique fns anywhere, cbarg marks.
-    -- (Inbound the other way — some OTHER file referencing a var this
-    -- refresh just created — would need the id pass over every file;
-    -- those edges appear on the next full extract. Known limit.)
-    if rels and #rels > 0 and mini.fn_ranges then
-        local live = {}
-        for _, f in ipairs(rels) do
-            if mini.fn_ranges[f] then live[#live + 1] = f end
-        end
-        if #live > 0 then
-            local L = ts.lookups(data.nodes)
-            L.fn_ranges = mini.fn_ranges
-            ts.merge_idpass(data, ts.id_pass(data.root, live, L))
+    -- ── global-uniqueness reconciliation ─────────────────────────────
+    -- A touched name is RECONCILE-WORTHY when this splice flipped its
+    -- uniqueness (0↔1 or 1↔2, either class): a new global's inbound uses
+    -- must APPEAR in unchanged files; a name made ambiguous must lose
+    -- the inferred links only its former uniqueness justified. The
+    -- mention index says which files can possibly care; only those get
+    -- their id-pass artifacts re-derived.
+    local fn_after, var_after = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            fn_after[n.name] = (fn_after[n.name] or 0) + 1
+        elseif n.kind == 'var' and not n.sql then
+            var_after[n.name] = (var_after[n.name] or 0) + 1
         end
     end
+    local worthy = {}
+    local function judge(after_counts, rm, ad)
+        local names = {}
+        for nme in pairs(rm) do names[nme] = true end
+        for nme in pairs(ad) do names[nme] = true end
+        for nme in pairs(names) do
+            if #nme >= 3 then
+                local after = after_counts[nme] or 0
+                local before = after - (ad[nme] or 0) + (rm[nme] or 0)
+                if (before == 1) ~= (after == 1) then worthy[nme] = true end
+            end
+        end
+    end
+    judge(fn_after, rm_fn, ad_fn)
+    judge(var_after, rm_var, ad_var)
+    local candidates = {}
+    if next(worthy) then
+        for f, s in pairs(data.names) do
+            for nme in pairs(worthy) do
+                if s:find('\31' .. nme .. '\31', 1, true) then
+                    candidates[f] = true
+                    break
+                end
+            end
+        end
+    end
+
+    -- candidates' id-pass artifacts are re-derived wholesale: drop their
+    -- use edges and inferred ref pairs, reopen calls sharing a killed
+    -- pair (relink re-adds those at full fidelity via c.at)
+    if next(candidates) then
+        local cand_fns = {}
+        for _, n in ipairs(data.nodes) do
+            if candidates[n.file]
+                and (n.kind == 'function' or n.kind == 'method') then
+                cand_fns[n.id] = true
+            end
+        end
+        local killpair, edges2 = {}, {}
+        for _, e in ipairs(data.edges) do
+            local drop = false
+            if cand_fns[e.from] then
+                if e.kind == 'use' then
+                    drop = true
+                elseif e.kind == 'ref' and e.inferred then
+                    drop = true
+                    killpair[e.from .. '\31' .. e.to] = true
+                end
+            end
+            if not drop then edges2[#edges2 + 1] = e end
+        end
+        data.edges = edges2
+        for _, c in ipairs(data.calls or {}) do
+            if c.to and c.fn and killpair[c.fn .. '\31' .. c.to] then
+                c.to = nil
+                c.inferred = nil
+            end
+        end
+    end
+
+    stats.relinked = ts.relink(data)
+
+    -- the id pass at GLOBAL scope, over the refreshed files AND the
+    -- reconciliation candidates (their fn extents come straight from the
+    -- current nodes — no re-parse of anything but these files)
+    local idfiles, franges = {}, {}
+    for _, f in ipairs(rels or {}) do
+        if mini.fn_ranges and mini.fn_ranges[f] then
+            idfiles[#idfiles + 1] = f
+            franges[f] = mini.fn_ranges[f]
+        end
+    end
+    for f in pairs(candidates) do franges[f] = {} end
+    for _, n in ipairs(data.nodes) do
+        if candidates[n.file]
+            and (n.kind == 'function' or n.kind == 'method') then
+            table.insert(franges[n.file], { s = n.range.start.line,
+                e = n.range['end'].line, id = n.id })
+        end
+    end
+    for f in pairs(candidates) do
+        if #franges[f] > 0 then -- fn-less files match sequential's skip
+            idfiles[#idfiles + 1] = f
+        else
+            franges[f] = nil
+        end
+    end
+    if #idfiles > 0 then
+        local L = ts.lookups(data.nodes)
+        L.fn_ranges = franges
+        ts.merge_idpass(data, ts.id_pass(data.root, idfiles, L))
+    end
+    stats.reconciled = vim.tbl_count(candidates)
     return stats
 end
 

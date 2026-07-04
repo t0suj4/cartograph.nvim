@@ -384,6 +384,15 @@ oracle) re-run on every open — oracle verdicts are session-live by
 design. Subtree slices (`subdirs`) bypass the cache; `setup{ cache =
 false }` opts out.
 
+Globals reconcile exactly, in both directions: the id pass records each
+file's identifier **mention index** (it iterates every identifier
+anyway), so when an edit flips a global name's uniqueness — a new
+global appears, or a second definition makes one ambiguous — only the
+files that actually mention that name get their links re-derived, at
+global scope. Cost scales with churn, not corpus size. Per-language
+opt-out: `name_index = false` in a language spec, for languages where a
+bare identifier mention does not imply potential global use.
+
 ### Parallel cold open
 
 The first open of a big tree doesn't block: above ~300 files the
