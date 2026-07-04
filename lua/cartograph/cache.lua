@@ -94,35 +94,13 @@ local function read_manifest(root)
     return nil, dir
 end
 
---- Persist a raw graph. `dirty` (list of rels) limits the write to those
---- files' shards — the caller owes an HONEST account of every file whose
---- contribution changed (splice reports one); nil writes everything.
---- `deleted` removes shards. Post-pass artifacts (sql:: entities,
---- frontier landings) are stripped — they re-derive; unparsed bundle
---- modules live in the manifest and are synthesized at load.
-function M.save(data, dirty, deleted)
-    if require('cartograph.config').cache == false then return end
-    if not (data and data.provider == 'treesitter' and data.stamps) then
-        return
-    end
-    local dir = M.path(data.root)
-    vim.fn.mkdir(dir, 'p')
-
-    local want = {}
-    if dirty then
-        for _, f in ipairs(dirty) do
-            if data.stamps[f] then want[f] = true end
-        end
-    else
-        for f in pairs(data.stamps) do want[f] = true end
-    end
-
+-- bucket a graph into per-file shard tables (nil want = all files)
+local function build_shards(data, want)
     -- synthetic ids: never persisted (their edges either)
     local synth = {}
     for _, n in ipairs(data.nodes) do
         if n.id:sub(1, 5) == 'sql::' or n.unparsed then synth[n.id] = true end
     end
-
     local shards = {}
     for f in pairs(want) do
         shards[f] = { nodes = {}, edges = {}, calls = {},
@@ -143,34 +121,141 @@ function M.save(data, dirty, deleted)
         local s = shards[c.file]
         if s then s.calls[#s.calls + 1] = c end
     end
-    for f, s in pairs(shards) do
+    return shards
+end
+
+local function manifest_of(data)
+    return { version = M.VERSION, root = data.root, schema = data.schema,
+        stamps = data.stamps, unparsed = data.unparsed,
+        capabilities = data.capabilities, no_parser = data.no_parser }
+end
+
+--- Sweep shard files the manifest no longer references. Deletion is a
+--- TOMBSTONE BY OMISSION: load() reads only manifest-referenced shards,
+--- so garbage is inert — reclaiming it is never on the hot path.
+--- Deferred by default; { sync = true } runs now and returns the count.
+M._gc_pending = {}
+function M.gc(root, opts)
+    local function sweep()
+        M._gc_pending[root] = nil
+        local m, dir = read_manifest(root)
+        if not m then return 0 end
+        local keep = { ['manifest.bin'] = true }
+        for f in pairs(m.stamps) do keep[fkey(f)] = true end
+        local removed = 0
+        local it = vim.uv.fs_scandir(dir)
+        while it do
+            local name = vim.uv.fs_scandir_next(it)
+            if not name then break end
+            if not keep[name] then
+                vim.fn.delete(dir .. '/' .. name)
+                removed = removed + 1
+            end
+        end
+        return removed
+    end
+    if opts and opts.sync then return sweep() end
+    if M._gc_pending[root] then return end
+    M._gc_pending[root] = true
+    vim.defer_fn(sweep, 2000)
+end
+
+--- Persist a raw graph, synchronously. `dirty` (list of rels) limits the
+--- write to those files' shards — the caller owes an HONEST account of
+--- every file whose contribution changed (splice reports one); nil
+--- writes everything. Deletions need no unlink: the manifest omits them
+--- (tombstone), gc reclaims the files later. Post-pass artifacts (sql::
+--- entities, frontier landings) are stripped — they re-derive; unparsed
+--- bundle modules live in the manifest and are synthesized at load.
+function M.save(data, dirty)
+    if require('cartograph.config').cache == false then return end
+    if not (data and data.provider == 'treesitter' and data.stamps) then
+        return
+    end
+    local dir = M.path(data.root)
+    vim.fn.mkdir(dir, 'p')
+    M._bg_cancel(data.root) -- a sync save supersedes an in-flight one
+
+    local want = {}
+    if dirty then
+        for _, f in ipairs(dirty) do
+            if data.stamps[f] then want[f] = true end
+        end
+    else
+        for f in pairs(data.stamps) do want[f] = true end
+    end
+    for f, s in pairs(build_shards(data, want)) do
         if not write_encoded(dir .. '/' .. fkey(f), s) then
             return vim.notify('cartograph: cannot write cache shard for ' .. f,
                 vim.log.levels.WARN)
         end
     end
-    for _, f in ipairs(deleted or {}) do
-        vim.fn.delete(dir .. '/' .. fkey(f))
+    -- manifest LAST: the commit point (any skew re-splices at next diff)
+    write_encoded(dir .. '/manifest.bin', manifest_of(data))
+    M.gc(data.root)
+end
+
+-- Background full save: ENCODE NOW (immutable strings — post-passes may
+-- mutate the live graph the moment we return, encoded bytes can't lie),
+-- write on a timer, manifest last. Cancelling (a newer save for the same
+-- root) simply never writes the manifest: the old one stands, and any
+-- shard file already overwritten re-splices at the next diff — the
+-- commit-point discipline makes partial background work harmless.
+M._bg = {}
+function M._bg_cancel(root)
+    local t = M._bg[root]
+    if t then
+        M._bg[root] = nil
+        pcall(function () t:stop(); t:close() end)
     end
-    if not dirty then
-        -- full save: sweep shards of files no longer in the graph
-        local keep = { ['manifest.bin'] = true }
-        for f in pairs(data.stamps) do keep[fkey(f)] = true end
-        local it = vim.uv.fs_scandir(dir)
-        while it do
-            local name = vim.uv.fs_scandir_next(it)
-            if not name then break end
-            if not keep[name] then vim.fn.delete(dir .. '/' .. name) end
+end
+
+function M.saving(root)
+    local _, nroot = M.path(root)
+    return M._bg[nroot] ~= nil
+end
+
+function M.save_bg(data)
+    if require('cartograph.config').cache == false then return end
+    if not (data and data.provider == 'treesitter' and data.stamps) then
+        return
+    end
+    local dir = M.path(data.root)
+    vim.fn.mkdir(dir, 'p')
+    M._bg_cancel(data.root)
+
+    local want = {}
+    for f in pairs(data.stamps) do want[f] = true end
+    local jobs = {}
+    for f, s in pairs(build_shards(data, want)) do
+        jobs[#jobs + 1] = { file = dir .. '/' .. fkey(f), bytes = M.encode(s) }
+    end
+    local mbytes = M.encode(manifest_of(data))
+
+    local i, root = 1, data.root
+    local timer = vim.uv.new_timer()
+    M._bg[root] = timer
+    timer:start(0, 15, vim.schedule_wrap(function ()
+        if M._bg[root] ~= timer then return end -- superseded
+        local stop = math.min(i + 255, #jobs)
+        while i <= stop do
+            local fd = io.open(jobs[i].file, 'wb')
+            if fd then
+                fd:write(jobs[i].bytes)
+                fd:close()
+            end
+            i = i + 1
         end
-    end
-    -- manifest LAST: the commit point (a crash above leaves the old
-    -- manifest pointing at old-or-new shards, both decodable; version
-    -- and per-open validation turn any real skew into a cold miss)
-    write_encoded(dir .. '/manifest.bin', {
-        version = M.VERSION, root = data.root, schema = data.schema,
-        stamps = data.stamps, unparsed = data.unparsed,
-        capabilities = data.capabilities, no_parser = data.no_parser,
-    })
+        if i > #jobs then
+            local fd = io.open(dir .. '/manifest.bin', 'wb')
+            if fd then
+                fd:write(mbytes)
+                fd:close()
+            end
+            M._bg_cancel(root)
+            M.gc(root)
+        end
+    end))
 end
 
 --- Load a cached graph for `root`: manifest + every shard, concatenated
@@ -277,7 +362,8 @@ function M.open(root)
     end
     local stats = require('cartograph.refresh').splice(data, changed, deleted)
     -- O(diff) persist: exactly the shards the splice reports dirty
-    M.save(data, stats.dirty, deleted)
+    -- (deleted files are tombstoned by manifest omission; gc reclaims)
+    M.save(data, stats.dirty)
     return data, ('warm open — %d re-extracted, %d deleted, %d shards'
         .. ' rewritten, rest untouched')
         :format(#changed, #deleted, #(stats.dirty or {}))

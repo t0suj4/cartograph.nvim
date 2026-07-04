@@ -388,7 +388,7 @@ function M.all()
     end
     local ts = require 'cartograph.providers.treesitter'
     local fresh = ts.extract(data.root)
-    require('cartograph.cache').save(fresh)
+    require('cartograph.cache').save_bg(fresh)
     local xl = require 'cartograph.xlang'
     xl.link(fresh, xl.effective_bindings(fresh))
     require('cartograph.sql').attach(fresh)

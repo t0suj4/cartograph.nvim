@@ -1071,6 +1071,22 @@ test('incremental cache: warm open re-extracts only the diff', function ()
         return { ids = ids, edges = eks, calls = cks, names = d.names }
     end
     eq(graph_keys(warm2), graph_keys(cache.load(root)))
+    -- deletion was a TOMBSTONE: the manifest omits extra.lua (load above
+    -- already proved gamma is gone) but its shard file still exists —
+    -- reclaiming is gc's job, off the hot path
+    local dir = cache.path(root)
+    local gshard = dir .. '/' .. ('extra.lua'):gsub('[/\\:]', '%%') .. '.bin'
+    ok(vim.uv.fs_stat(gshard) ~= nil, 'tombstoned shard still on disk')
+    ok(cache.gc(root, { sync = true }) >= 1, 'gc reclaimed it')
+    ok(vim.uv.fs_stat(gshard) == nil, 'shard gone after gc')
+    eq(graph_keys(warm2), graph_keys(cache.load(root)))
+
+    -- background save: same bytes, written off the hot path
+    cache.wipe(root)
+    cache.save_bg(warm2)
+    vim.wait(10000, function () return not cache.saving(root) end, 10)
+    ok(not cache.saving(root), 'background save completed')
+    eq(graph_keys(warm2), graph_keys(cache.load(root)))
 
     -- the update was saved back: a third open is fully warm again
     local warm3, note3 = cache.open(root)

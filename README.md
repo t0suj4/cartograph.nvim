@@ -385,7 +385,13 @@ rewrites only the shards a change actually dirtied (the splice reports
 every file whose contribution it touched: remaps, relinks,
 reconciliation — verified disk == memory in tests). Wordpress: 47s
 cold, **0.8s warm** (2,096 files unchanged), ~3.4s with one file edited
-(25 shards rewritten, 2,071 untouched). Post-passes (xlang, SQL, clangd
+(25 shards rewritten, 2,071 untouched). Deletion is a tombstone —
+omission from the manifest — so nothing is unlinked on the hot path; a
+background gc reclaims unreferenced shards later. Full saves (cold
+open) encode synchronously (immutable bytes, safe against post-pass
+mutation) and write in the background, manifest last as the commit
+point: a cancelled or crashed save leaves the old manifest standing and
+any skew simply re-splices at the next diff. Post-passes (xlang, SQL, clangd
 oracle) re-run on every open — oracle verdicts are session-live by
 design. Subtree slices (`subdirs`) bypass the cache; `setup{ cache =
 false }` opts out.

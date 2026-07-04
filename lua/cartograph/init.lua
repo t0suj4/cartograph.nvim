@@ -154,7 +154,7 @@ function M.open(dump_path, opts)
                         end
                     end,
                     on_done = function (acc)
-                        require('cartograph.cache').save(acc)
+                        require('cartograph.cache').save_bg(acc)
                         local back, fwd = store._nav_back, store._nav_fwd
                         local loc = store.loc_provider and store.loc_provider.get()
                         finish(acc)
@@ -170,7 +170,7 @@ function M.open(dump_path, opts)
             else
                 data = ts.extract(target, opts)
                 if not (opts and opts.subdirs) then
-                    require('cartograph.cache').save(data)
+                    require('cartograph.cache').save_bg(data)
                 end
                 finish(data)
             end
