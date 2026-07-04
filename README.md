@@ -367,6 +367,21 @@ interpolation idioms resolve — `{$wpdb->posts}` names `posts`,
 queries over 23 tables (`posts`: 67 reads, 13 writes); on Magento: 92
 tables. Interpolated names beyond those idioms stay honest misses.
 
+### The live oracle
+
+The running system is the top rung of the epistemics ladder.
+`:CartographLive` queries it over MCP — which listeners are *actually*
+subscribed, which FSM state each force *actually* occupies — and diffs
+runtime against the static model: **missing** (the occupied state
+demands it, the game lacks it), **leaked** (live, but no occupied state
+explains it — the subscription-leak bug class the wiretap discipline
+exists to prevent), **unknown** (live, absent from the graph). The
+states view marks occupied states with `◉ live`. Queries are config
+(`setup{ live = … }`), defaulting to the wiretap/bnw shapes; permanent
+load-time subscriptions form the baseline. On its first run against a
+running game it reported six flight-state handlers still subscribed in
+`inactive`.
+
 ### Greenspun detection
 
 Per Greenspun's tenth rule, every sufficiently complicated codebase

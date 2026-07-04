@@ -202,6 +202,26 @@ function M.open(dump_path, opts)
     end, { bang = true,
         desc = 'cartograph: refresh the graph (current file; ! = whole project)' })
 
+    -- the live oracle: the running system vs the static model
+    pcall(vim.api.nvim_del_user_command, 'CartographLive')
+    vim.api.nvim_create_user_command('CartographLive', function ()
+        local lines, why = require('cartograph.live').check(store)
+        if not lines then
+            return vim.notify('cartograph: live check failed — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        symbols.render() -- the states view gains its ◉ markers
+        vim.cmd('botright new')
+        local buf = vim.api.nvim_get_current_buf()
+        vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile
+            = 'nofile', 'wipe', false
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        vim.bo[buf].modifiable = false
+        vim.api.nvim_win_set_height(0, math.min(#lines + 1, 15))
+        vim.keymap.set('n', require('cartograph.config').keys.close,
+            '<cmd>close<cr>', { buffer = buf })
+    end, { desc = 'cartograph: check the RUNNING system against the static model (MCP oracle)' })
+
     -- why did registry discovery (not) find a verb?
     pcall(vim.api.nvim_del_user_command, 'CartographDiscover')
     vim.api.nvim_create_user_command('CartographDiscover', function (o)

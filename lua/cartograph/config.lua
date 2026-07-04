@@ -42,6 +42,11 @@ M.refresh = true
 --   setup{ mcp = { game = { cmd = { 'my-mcp-server' }, tool = 'graph' } } }
 M.mcp = nil
 
+-- the live oracle (:CartographLive): queries a running system over MCP
+-- and diffs it against the static model. Defaults fit wiretap/bnw; see
+-- cartograph/live.lua for the query hooks.
+M.live = nil
+
 M.keys = {
     -- navigation
     pivot      = '<CR>',    -- tree/trace: re-root on / expand this entry

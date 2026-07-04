@@ -912,3 +912,25 @@ test('mcp provider: a server tool that returns the schema is a provider', functi
     cfg.mcp = nil
     ok(not d2 and e2:match('no such tool'), tostring(e2))
 end)
+
+test('live oracle: the diff classifies missing, leaked and unknown', function ()
+    local live = require 'cartograph.live'
+    store.ingest({ schema = 1, root = '/x', nodes = {}, edges = {}, calls = {
+        -- a permanent, load-time subscription
+        { callee = 'subscribe', method = true, top = true, file = 'c.lua', line = 1,
+          args = { '', 'ev', 'always_on' }, argv = {} },
+    } })
+    local model = {
+        subs = { flying = { { listener = 'handle_flight' },
+            { listener = 'handle_wind' } } },
+        bindings = { handle_flight = {}, handle_wind = {}, handle_ground = {} },
+    }
+    local d = live.diff(store, model, {
+        states = { player = 'flying' },
+        subscriptions = { 'handle_flight', 'handle_ground', 'mystery', 'always_on' },
+    })
+    eq({ 'handle_wind' }, d.missing)   -- flying demands it; game lacks it
+    eq({ 'handle_ground' }, d.extra)   -- known listener, no occupied state
+    eq({ 'mystery' }, d.unknown)       -- graph blind spot
+    -- always_on is neither leaked nor missing: the permanent baseline
+end)

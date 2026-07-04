@@ -592,7 +592,12 @@ local function render_states(ctx)
     end
     for _, st in ipairs(model.order) do
         local _, n = fsm.state_cone(store, model, st)
+        local liveN = store.live and store.live.states and store.live.states[st]
         ctx.lines[#ctx.lines + 1] = '  ' .. st
+            .. (liveN and ('   ◉ live' .. (liveN > 1 and ' ×' .. liveN or '')) or '')
+        if liveN then
+            ctx.marks[#ctx.lines] = { { 2 + #st, -1, 'CartographMarker' } }
+        end
         ctx.vnums[#ctx.lines] = tostring(n)
         ctx.line_state[#ctx.lines] = st
     end
