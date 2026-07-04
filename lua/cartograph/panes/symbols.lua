@@ -1159,6 +1159,9 @@ function M.attach(win)
                             .open(node.id, pi, word, c)
                     end
                 end
+                -- a local: same trace, rooted at its defining statements
+                return require('cartograph.panes.trace')
+                    .open_local(node.id, word, c.line, c)
             end
         end
         -- 2. a parameter: where does it come from? (the origin trace)

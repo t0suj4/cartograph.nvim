@@ -88,8 +88,27 @@ function M.expand(store, origin)
     end
 
     if k == 'def' then
-        -- a def statement: trace each local it read (its data-flow parents)
-        if not v.use or #v.use == 0 then return nil, 'reads no locals — literal or external' end
+        -- a def statement: trace each local it read (its data-flow parents).
+        -- Reading nothing usually means a LITERAL assignment: extract it
+        -- from the source line — it is the answer, and pinnable.
+        if not v.use or #v.use == 0 then
+            local fn = store.node(origin.fn)
+            local lit
+            if fn and origin.site then
+                local fd = io.open(store.data.root .. '/' .. fn.file, 'r')
+                if fd then
+                    local lines = vim.split(fd:read('a'), '\n', { plain = true })
+                    fd:close()
+                    local line = lines[origin.site.line + 1] or ''
+                    lit = line:match([=[=%s*['"]([%w_:%.%-\\]+)['"]]=])
+                end
+            end
+            if lit then
+                return { { v = { k = 'lit', v = lit }, fn = origin.fn,
+                    site = origin.site } }
+            end
+            return nil, 'reads no locals — literal or external'
+        end
         local fn = store.node(origin.fn)
         local params = (fn and fn.params) or {}
         local kids = {}
@@ -143,6 +162,42 @@ function M.expand(store, origin)
     local r = REASON[k]
     if r == false then return nil end -- terminal: nothing further, and that's the answer
     return nil, r or 'unrecognized value kind'
+end
+
+--- Origins of LOCAL `name` in `fn_id` at `line0`: its defining statements,
+--- flattened one level where a def is just a literal assignment — those
+--- literals ARE the candidates. The dispatch-trace entry for non-params.
+function M.origins_local(store, fn_id, name, line0)
+    local root = { v = { k = 'local', name = name },
+        fn = fn_id, site = { file = (store.node(fn_id) or {}).file, line = line0 } }
+    local defs, note = M.expand(store, root)
+    if not defs then return {}, note end
+    -- flatten defs that assign a LITERAL to the traced name on their line
+    -- (`$h = 'scale'` even inside a one-line branch): the literal is the
+    -- candidate. Anything else stays a def row and expands as usual.
+    local fn = store.node(fn_id)
+    local lines
+    if fn then
+        local fd = io.open(store.data.root .. '/' .. fn.file, 'r')
+        if fd then
+            lines = vim.split(fd:read('a'), '\n', { plain = true })
+            fd:close()
+        end
+    end
+    local out = {}
+    for _, d in ipairs(defs) do
+        local lit
+        if d.v.k == 'def' and lines and d.site then
+            local line = lines[d.site.line + 1] or ''
+            lit = line:match('%$?' .. name .. [=[%s*=%s*['"]([%w_:%.%-\\]+)['"]]=])
+        end
+        if lit then
+            out[#out + 1] = { v = { k = 'lit', v = lit }, fn = fn_id, site = d.site }
+        else
+            out[#out + 1] = d
+        end
+    end
+    return out
 end
 
 -- short display name for a function id

@@ -372,3 +372,38 @@ test('trace-to-pin: dispatch trace lists caller literals; pin makes the edge', f
     require('cartograph.config').pins = nil
     tp.close()
 end)
+
+test('local dispatch trace: branchy defs flatten to pinnable literals', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'php') then
+        skip 'no php parser'
+    end
+    local tp = require 'cartograph.panes.trace'
+    local trace = require 'cartograph.trace'
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    local branchy
+    for _, c in ipairs(data.calls) do
+        if c.callee == '$h' then branchy = c end
+    end
+    ok(branchy and branchy.dynamic, 'branchy call is a frontier')
+    -- the local's two literal defs surface as candidates
+    local origins = trace.origins_local(store, byname.dispatch_branchy.id, 'h', branchy.line)
+    local lits = {}
+    for _, o in ipairs(origins) do
+        if o.v.k == 'lit' then lits[#lits + 1] = o.v.v end
+    end
+    table.sort(lits)
+    eq({ 'compute', 'scale' }, lits)
+    -- and the pane pin works from the local entry too
+    tp.open_local(byname.dispatch_branchy.id, 'h', branchy.line, branchy)
+    tp.pin('compute')
+    ok(branchy.to == byname.compute.id, 'pinned through the local trace')
+    ok(vim.tbl_contains(store.usedby[byname.compute.id] or {},
+        byname.dispatch_branchy.id), 'edge indexed')
+    require('cartograph.config').pins = nil
+    tp.close()
+end)

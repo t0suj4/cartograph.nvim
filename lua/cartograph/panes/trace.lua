@@ -232,6 +232,31 @@ function M.open(fn_id, i, pname, dispatch)
     hover(M.win) -- show the first origin's context immediately
 end
 
+--- Open the dispatch/origin trace for LOCAL `name` used at `line0` in
+--- `fn_id`. Same pane, different root: the local's defining statements
+--- (literal defs flattened to their pinnable values).
+function M.open_local(fn_id, name, line0, dispatch)
+    local node = store.node(fn_id)
+    if not node then return end
+    M.dispatch = dispatch
+    M.fname, M.pidx, M.pname = node.name or '?', nil, name or '?'
+    local origins, note = trace.origins_local(store, fn_id, name, line0)
+    M.rows, M.note = {}, note
+    for _, o in ipairs(origins) do M.rows[#M.rows + 1] = { origin = o, depth = 0 } end
+    if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then create() end
+    if not (M.win and vim.api.nvim_win_is_valid(M.win)) then
+        vim.cmd('botright vsplit')
+        M.win = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_width(M.win, 44)
+    end
+    vim.api.nvim_win_set_buf(M.win, M.buf)
+    vim.api.nvim_set_current_win(M.win)
+    vim.wo[M.win].cursorline = true
+    render()
+    pcall(vim.api.nvim_win_set_cursor, M.win, { HEADER + 1, 0 })
+    hover(M.win)
+end
+
 --- Pin `name` as the target of the dispatch call this trace was opened
 --- for: runtime config entry, real edge, descend target — and a snippet to
 --- make it durable.

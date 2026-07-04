@@ -128,9 +128,11 @@ All standard vim idioms — no new keys to learn:
 
 ### Dynamic dispatch: trace to pin
 
-`l` on a dynamic callee (`→ $callback`) that is a **parameter** opens the
-dispatch trace: one row per caller, and the literals they pass are the
-candidate targets. `p` on a literal pins it — the call resolves, the edge
+`l` on a dynamic callee (`→ $callback`) opens the dispatch trace. For a
+**parameter**, rows are the callers and the literals they pass are the
+candidate targets; for a **local**, rows are its defining statements,
+with literal assignments flattened to their values — `$h = 'compute'`
+in one branch and `'scale'` in another surface as two candidates. `p` on a literal pins it — the call resolves, the edge
 lands in the graph live (the callers view updates immediately), and the
 notification carries the `setup{ pins = … }` snippet that makes it
 durable. Ambiguous names refuse; non-literal origins stay frontiers you
