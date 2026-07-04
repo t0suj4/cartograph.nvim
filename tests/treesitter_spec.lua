@@ -963,8 +963,9 @@ test('incremental cache: warm open re-extracts only the diff', function ()
         fd:write(text)
         fd:close()
     end
-    write('a.lua', 'local function alpha(x)\n  return beta(x)\nend\n')
-    write('sub/b.lua', 'local function beta(y)\n  return y * 2\nend\n')
+    write('a.lua', 'local registry = {}\n\nlocal function alpha(x)\n'
+        .. '  return beta(x)\nend\n')
+    write('sub/b.lua', 'local function beta(y)\n  return y * 2 + #registry\nend\n')
     write('extra.lua', 'local function gamma()\n  return 1\nend\n')
     cache.save(ts.extract(root))
 
@@ -974,7 +975,7 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     ok(note:match('unchanged'), tostring(note))
 
     -- edit one file, delete another; only the diff re-extracts
-    write('sub/b.lua', 'local function beta(y)\n  return y * 3\nend\n'
+    write('sub/b.lua', 'local function beta(y)\n  return y * 3 + #registry\nend\n'
         .. '\nlocal function brand_new(z)\n  return z\nend\n')
     vim.fn.delete(root .. '/extra.lua')
     local warm2, note2 = cache.open(root)
@@ -982,6 +983,15 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     local byname = {}
     for _, n in ipairs(warm2.nodes) do byname[n.name] = n end
     ok(byname.brand_new, 'edited file re-extracted')
+    -- GLOBAL reconciliation: the refreshed file reads a var defined in
+    -- ANOTHER file — its use edge must survive the splice (the id pass
+    -- re-runs at global scope, not against the mini's one-file index)
+    local use
+    for _, e in ipairs(warm2.edges) do
+        if e.kind == 'use' and e.from == byname.beta.id
+            and e.to == byname.registry.id then use = true end
+    end
+    ok(use, 'cross-file global use edge survived the warm open')
     ok(byname.gamma == nil, 'deleted file gone from the graph')
     ok(warm2.stamps['extra.lua'] == nil, 'and from the stamps')
     -- the cross-file edge survived the splice

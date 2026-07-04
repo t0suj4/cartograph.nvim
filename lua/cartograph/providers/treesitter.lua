@@ -879,6 +879,56 @@ local function id_pass(root, files, L)
     end
 end
 
+--- Global name lookups for the standalone id pass, from a full node set.
+--- Used by the parallel driver (phase 2) and refresh (changed files).
+function M.lookups(nodes)
+    local count = {}
+    for _, n in ipairs(nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            count[n.name] = (count[n.name] or 0) + 1
+        end
+    end
+    local fn_unique, var_named = {}, {}
+    for _, n in ipairs(nodes) do
+        if (n.kind == 'function' or n.kind == 'method')
+            and count[n.name] == 1 then
+            fn_unique[n.name] = { id = n.id, file = n.file,
+                line = n.range.start.line }
+        elseif n.kind == 'var' and not n.sql then
+            var_named[n.name] = var_named[n.name] or {}
+            table.insert(var_named[n.name],
+                { id = n.id, file = n.file, line = n.range.start.line })
+        end
+    end
+    return { fn_unique = fn_unique, var_named = var_named }
+end
+
+--- Fold a standalone id-pass result into a graph: ref pairs dedup into
+--- existing edges (like addref), cbarg marks apply. Shared by refresh
+--- and the parallel driver.
+function M.merge_idpass(data, out)
+    local refEdge = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end
+    end
+    local byid = {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(out.edges or {}) do
+        local k = e.kind == 'ref' and (e.from .. '\31' .. e.to)
+        local ex = k and refEdge[k]
+        if ex then
+            for _, at in ipairs(e.at or {}) do ex.at[#ex.at + 1] = at end
+            if not e.inferred then ex.inferred = nil end
+        else
+            if k then refEdge[k] = e end
+            data.edges[#data.edges + 1] = e
+        end
+    end
+    for _, id in ipairs(out.cbarg or {}) do
+        if byid[id] then byid[id].cbarg = true end
+    end
+end
+
 --- Standalone id pass over `files` with global lookups (parallel phase
 --- 2, run inside a worker). Returns { edges = {...}, cbarg = {id, ...} }.
 function M.id_pass(root, files, lookups)

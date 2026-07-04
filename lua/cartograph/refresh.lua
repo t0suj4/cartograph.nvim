@@ -50,8 +50,13 @@ function M.splice(data, rels, deleted)
     end
     for _, f in ipairs(rels or {}) do addf(f) end
 
+    -- the id pass is SKIPPED in the mini extraction and re-run below
+    -- against GLOBAL lookups: a mini's own index sees one file's names,
+    -- and "unique across the workspace" decided against it would silently
+    -- drop the refreshed file's reads of other files' globals
     local mini = (rels and #rels > 0)
-        and ts.extract(data.root, { subdirs = rels, fileset = fileset })
+        and ts.extract(data.root, { subdirs = rels, fileset = fileset,
+            skip_idpass = true })
         or { nodes = {}, edges = {}, calls = {}, stamps = {} }
 
     -- removed = sql entities (re-derived by the caller) + every node of a
@@ -160,6 +165,23 @@ function M.splice(data, rels, deleted)
     data.unparsed = #un > 0 and un or nil
 
     stats.relinked = ts.relink(data)
+
+    -- the refreshed files' id pass, at GLOBAL scope: use edges into other
+    -- files' vars, dispatch refs to unique fns anywhere, cbarg marks.
+    -- (Inbound the other way — some OTHER file referencing a var this
+    -- refresh just created — would need the id pass over every file;
+    -- those edges appear on the next full extract. Known limit.)
+    if rels and #rels > 0 and mini.fn_ranges then
+        local live = {}
+        for _, f in ipairs(rels) do
+            if mini.fn_ranges[f] then live[#live + 1] = f end
+        end
+        if #live > 0 then
+            local L = ts.lookups(data.nodes)
+            L.fn_ranges = mini.fn_ranges
+            ts.merge_idpass(data, ts.id_pass(data.root, live, L))
+        end
+    end
     return stats
 end
 

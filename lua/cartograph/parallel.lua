@@ -267,27 +267,10 @@ function M.extract(root, o)
 
     local function phase2()
         s.phase = 2
-        local count = {}
-        for _, n in ipairs(acc.nodes) do
-            if n.kind == 'function' or n.kind == 'method' then
-                count[n.name] = (count[n.name] or 0) + 1
-            end
-        end
-        local fn_unique, var_named = {}, {}
-        for _, n in ipairs(acc.nodes) do
-            if (n.kind == 'function' or n.kind == 'method')
-                and count[n.name] == 1 then
-                fn_unique[n.name] = { id = n.id, file = n.file,
-                    line = n.range.start.line }
-            elseif n.kind == 'var' then
-                var_named[n.name] = var_named[n.name] or {}
-                table.insert(var_named[n.name],
-                    { id = n.id, file = n.file, line = n.range.start.line })
-            end
-        end
+        local L = ts.lookups(acc.nodes)
         local idxf = vim.fn.tempname() .. '.index.json'
         local fd = assert(io.open(idxf, 'w'))
-        fd:write(vim.json.encode({ fn_unique = fn_unique, var_named = var_named }))
+        fd:write(vim.json.encode(L))
         fd:close()
 
         -- fn_ranges are consumed here, split evenly across the id-pass
@@ -297,12 +280,6 @@ function M.extract(root, o)
         for i, f in ipairs(files) do
             table.insert(groups[(i % nw) + 1], f)
         end
-        local byid = {}
-        for _, n in ipairs(acc.nodes) do byid[n.id] = n end
-        local refEdge = {}
-        for _, e in ipairs(acc.edges) do
-            if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end
-        end
         local done = 0
         for _, g in ipairs(groups) do
             local fr = {}
@@ -311,22 +288,7 @@ function M.extract(root, o)
                 index_file = idxf, fn_ranges = fr }, function (chunk, res)
                 done = done + 1
                 if chunk then
-                    for _, e in ipairs(chunk.edges or {}) do
-                        local k = e.kind == 'ref' and (e.from .. '\31' .. e.to)
-                        local ex = k and refEdge[k]
-                        if ex then -- fold into the existing pair, like addref
-                            for _, at in ipairs(e.at or {}) do
-                                ex.at[#ex.at + 1] = at
-                            end
-                            if not e.inferred then ex.inferred = nil end
-                        else
-                            if k then refEdge[k] = e end
-                            acc.edges[#acc.edges + 1] = e
-                        end
-                    end
-                    for _, id in ipairs(chunk.cbarg or {}) do
-                        if byid[id] then byid[id].cbarg = true end
-                    end
+                    ts.merge_idpass(acc, chunk)
                 elseif o.on_note then
                     o.on_note(('id-pass group failed (%d) — use edges for '
                         .. '%d files missing; :CartographRefresh! rebuilds')
