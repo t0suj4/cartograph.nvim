@@ -168,7 +168,7 @@ function M.registries(data, opts)
                     for i, a in ipairs(c.argv or {}) do
                         local li = i - (c.method and 1 or 0)
                         if li >= 1 and li ~= kpos
-                            and (a.k == 'func'
+                            and (a.k == 'func' or a.k == 'callable'
                                 or (a.k == 'lit' and known[a.v])
                                 or (a.k == 'local' and known[a.name])) then
                             hit = true
@@ -285,7 +285,8 @@ function M.explain(data, verb, opts)
             for i, a in ipairs(c.argv or {}) do
                 local li = i - (c.method and 1 or 0)
                 if li >= 1 and li ~= kpos then
-                    if a.k == 'func' or (a.k == 'lit' and known[a.v])
+                    if a.k == 'func' or a.k == 'callable'
+                        or (a.k == 'lit' and known[a.v])
                         or (a.k == 'local' and known[a.name]) then
                         hit = true
                     elseif not hit then
@@ -477,9 +478,18 @@ function M.audit(data, bindings, opts)
                         disp[k] = true
                         disp_site[k] = disp_site[k] or c
                     else
-                        -- deep: a concatenated key is a PREFIX FAMILY, which
-                        -- keeps the dead-key check alive for uncovered keys
-                        local pfx = cache and deep_prefix(data.root, c, cache)
+                        -- a concatenated key is a PREFIX FAMILY, which keeps
+                        -- the dead-key check alive for uncovered keys. The
+                        -- provider classifies it at parse time; the deep
+                        -- file scan is only a fallback for graphs without
+                        -- argv kinds (lua-ls dumps)
+                        local pfx
+                        local a = (c.argv or {})[(b.import.name or 1) + shift]
+                        if a and a.k == 'concat' and a.prefix then
+                            pfx = a.prefix
+                        elseif cache then
+                            pfx = deep_prefix(data.root, c, cache)
+                        end
                         if pfx then
                             prefixes[#prefixes + 1] = pfx
                         else

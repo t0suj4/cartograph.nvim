@@ -483,7 +483,7 @@ test('discovery explain: every gate has a verdict with numbers', function ()
     ok(blob:match('register_listener %(3 calls%)'), 'near verb suggested: ' .. blob)
 end)
 
-test('deep discovery: array callables pass the gate; prefixes un-suppress', function ()
+test('parse-time callables: the cheap tier handles arrays and prefixes', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.get_string_parser, '', 'php') then
@@ -492,33 +492,51 @@ test('deep discovery: array callables pass the gate; prefixes un-suppress', func
     local g = require 'cartograph.greenspun'
     local xl = require 'cartograph.xlang'
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
-    -- cheap: rejected (all handlers are array callables = expr)
+    -- array callables are classified at PARSE TIME: no button needed
+    local cheap = {}
+    for _, b in ipairs(g.registries(data)) do cheap[b.export.verb] = b end
+    ok(cheap.register_thing, 'cheap tier accepts the array-callable registry')
+    eq({ 'fire_thing' }, cheap.register_thing.import.verb)
+    local stats = xl.link(data, { cheap.register_thing })
+    eq(5, stats.exports) -- every handler resolves through [$obj, 'method']
+    -- prefix families come from argv kinds too: cheap audit flags only zeta
+    local fs = g.audit(data, { cheap.register_thing })
+    local blob = ''
+    for _, f in ipairs(fs) do blob = blob .. f.message .. '\n' end
+    ok(blob:match('1 registered but never dispatched'), 'only zeta uncovered: ' .. blob)
+    ok(blob:match('prefix famil'), 'family honored without deep')
+end)
+
+test('deep tier: the fallback for graphs without argv kinds', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'php') then
+        skip 'no php parser'
+    end
+    local g = require 'cartograph.greenspun'
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
+    -- simulate an older provider: strip the parse-time kinds
+    for _, c in ipairs(data.calls) do
+        for _, a in ipairs(c.argv or {}) do
+            if a.k == 'callable' or a.k == 'concat' then
+                a.k, a.name, a.prefix = 'expr', nil, nil
+            end
+        end
+    end
     local cheap = {}
     for _, b in ipairs(g.registries(data)) do cheap[b.export.verb] = true end
-    ok(not cheap.register_thing, 'cheap tier rejects the array-callable registry')
-    -- and the explainer says the button would fix it
+    ok(not cheap.register_thing, 'kind-less graph: cheap rejects')
     local blob = table.concat(g.explain(data, 'register_thing'), '\n')
-    ok(blob:match('would PASS with deep heuristics'), 'deep hint shown: ' .. blob)
-    -- deep: accepted, paired, and the handlers RESOLVE through the array shape
-    local deepb = {}
+    ok(blob:match('would PASS with deep heuristics'), 'button advertised: ' .. blob)
+    local deep = {}
     for _, b in ipairs(g.registries(data, { deep = true })) do
-        deepb[b.export.verb] = b
+        deep[b.export.verb] = b
     end
-    ok(deepb.register_thing and deepb.register_thing.deep, 'deep tier accepts')
-    eq({ 'fire_thing' }, deepb.register_thing.import.verb)
-    local stats = xl.link(data, { deepb.register_thing })
-    eq(5, stats.exports) -- all five handlers resolved via [$obj,'method']
-    -- audit: the prefix family keeps the dead-key check alive — zeta is
-    -- flagged, save_post/save_page are covered by 'save_'
-    local fs = g.audit(data, { deepb.register_thing }, { deep = true })
+    ok(deep.register_thing and deep.register_thing.deep,
+        'deep source scan recovers the registry')
+    -- and the deep audit recovers the prefix family from source
+    local fs = g.audit(data, { deep.register_thing }, { deep = true })
     local blob2 = ''
     for _, f in ipairs(fs) do blob2 = blob2 .. f.message .. '\n' end
-    ok(blob2:match('1 registered but never dispatched'), 'only zeta uncovered: ' .. blob2)
-    ok(blob2:match('prefix famil'), 'prefix families honored')
-    -- without deep, the same audit is blanket-suppressed (concat = dynamic)
-    local fs2 = g.audit(data, { deepb.register_thing })
-    local blob3 = ''
-    for _, f in ipairs(fs2) do blob3 = blob3 .. f.message .. '\n' end
-    ok(not blob3:match('registered but never dispatched')
-        or blob3:match('0 registered'), 'cheap audit stays suppressed')
+    ok(blob2:match('1 registered but never dispatched'), 'zeta still flagged: ' .. blob2)
 end)

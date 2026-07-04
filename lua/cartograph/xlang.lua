@@ -82,6 +82,7 @@ local function find_handler(c, root, exact, export)
         if a then
             if a.k == 'func' and a.to then return a.to end
             local name = a.k == 'lit' and a.v or a.k == 'local' and a.name
+                or a.k == 'callable' and a.name
             if name and exact[name] and #exact[name] == 1 then
                 return exact[name][1].id
             end
@@ -94,7 +95,7 @@ local function find_handler(c, root, exact, export)
         if a.k == 'func' and a.to then return a.to end
     end
     for _, a in ipairs(c.argv or {}) do
-        if a.k == 'local' and a.name and exact[a.name]
+        if (a.k == 'local' or a.k == 'callable') and a.name and exact[a.name]
             and #exact[a.name] == 1 then
             return exact[a.name][1].id
         end

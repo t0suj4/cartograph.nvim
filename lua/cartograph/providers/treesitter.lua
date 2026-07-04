@@ -574,6 +574,47 @@ local function litval(n, src, spec, depth)
     return nil
 end
 
+-- a callable ARGUMENT shape, classified at parse time (they are free
+-- here; recovering them later means re-reading source):
+--   [obj, 'method'] / array($o, 'm')  -> the string names the method
+--   &Class::method (possibly inside a Bind-style wrapper call)
+local function callable_arg(a, src)
+    local t = a:type()
+    if t == 'array_creation_expression' or t == 'array' then
+        local els = {}
+        for el in a:iter_children() do
+            if el:named() and el:type() ~= 'comment' then
+                if el:type() == 'array_element_initializer' then
+                    el = el:named_child(0) or el
+                end
+                els[#els + 1] = el
+            end
+        end
+        local last = els[#els]
+        if #els >= 2 and last and last:type():find('string') then
+            return node_text(last, src):gsub('^["\']', ''):gsub('["\']$', '')
+        end
+        return nil
+    end
+    if t == 'pointer_expression' or t == 'call_expression' then
+        local found
+        local function hunt(n, depth)
+            if found or depth > 4 then return end
+            if n:type() == 'qualified_identifier'
+                and n:parent() and n:parent():type() == 'pointer_expression' then
+                found = node_text(n, src)
+                return
+            end
+            for c in n:iter_children() do
+                if c:named() then hunt(c, depth + 1) end
+            end
+        end
+        hunt(a, 0)
+        return found
+    end
+    return nil
+end
+
 -- df-lite: the body's top-level statements with def/use NAME lists and
 -- def->use dependencies. Approximate (no scoping) but structurally the same
 -- contract as the lua-ls df, so the fn altitude and extract engine work.
@@ -980,9 +1021,25 @@ function M.extract(root, opts)
                             elseif t == 'function_definition' or t == 'lambda' then
                                 args[#args + 1] = ''
                                 argv[#argv + 1] = { k = 'func' }
-                            else
+                            elseif t == 'variable_name' then -- php $var
                                 args[#args + 1] = ''
-                                argv[#argv + 1] = { k = 'expr' }
+                                argv[#argv + 1] = { k = 'local',
+                                    name = node_text(a, src):gsub('^%$', ''),
+                                    l = select(1, a:range()) }
+                            elseif t == 'binary_expression'
+                                and a:field('left')[1]
+                                and a:field('left')[1]:type():find('string') then
+                                -- 'prefix_' . x — the key is a PREFIX FAMILY
+                                local pre = node_text(a:field('left')[1], src)
+                                    :gsub('^["\']', ''):gsub('["\']$', '')
+                                args[#args + 1] = ''
+                                argv[#argv + 1] = { k = 'concat', prefix = pre }
+                            else
+                                local cname = callable_arg(a, src)
+                                args[#args + 1] = ''
+                                argv[#argv + 1] = cname
+                                    and { k = 'callable', name = cname }
+                                    or { k = 'expr' }
                             end
                         end
                     end
