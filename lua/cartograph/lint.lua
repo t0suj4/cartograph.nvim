@@ -369,7 +369,32 @@ local function mirror_findings(store)
     return out
 end
 
+-- Access points: a trivial function everyone calls (getWorld, get,
+-- instance) is a NAMESPACE, not a hotspot — mark it so views and readers
+-- treat its fan-in as plumbing. Marks node.access as a side effect.
+local function access_point_findings(store)
+    local out = {}
+    for _, n in ipairs(store.data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') then
+            local callers = #(store.usedby[n.id] or {})
+            local stmts = n.df and #n.df.stmts or 0
+            local gettish = n.name:match('[Gg]et[%u_]?') or n.name:match('instance')
+                or n.name:match('current')
+            if callers >= 15 and stmts > 0
+                and (stmts <= 2 or (gettish and stmts <= 4)) then
+                n.access = true
+                out[#out + 1] = { file = store.abspath(n),
+                    line = n.range.start.line + 1,
+                    message = ("access point: '%s' — %d callers, %d statement(s); its fan-in is plumbing, not coupling")
+                        :format(n.name, callers, stmts) }
+            end
+        end
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'access-point', severity = 'info', run = access_point_findings },
     { name = 'registry-audit', severity = 'warn', run = registry_audit_findings },
     { name = 'pair-audit', severity = 'warn', run = pair_audit_findings },
     { name = 'schema-mirror', severity = 'info', run = mirror_findings },

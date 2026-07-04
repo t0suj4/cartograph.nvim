@@ -656,8 +656,14 @@ local function render_fn(ctx, id)
     local node = store.node(id)
     if not node then ctx.lines[1] = '(gone)'; return end
     local pre = ICON[node.kind] or 'ƒ'
-    ctx.lines[1] = ('%s %s'):format(pre, node.name or '?')
-    ctx.marks[1] = { { 0, #pre, 'CartographDim' }, { #pre, -1, 'CartographTitle' } }
+    ctx.lines[1] = ('%s %s%s'):format(pre, node.name or '?',
+        node.access and '   (access point)' or '')
+    ctx.marks[1] = { { 0, #pre, 'CartographDim' },
+        { #pre, #pre + 1 + #(node.name or '?'), 'CartographTitle' } }
+    if node.access then
+        ctx.marks[1][#ctx.marks[1] + 1] =
+            { #pre + 1 + #(node.name or '?'), -1, 'CartographDim' }
+    end
     -- who calls this function — descend on the row to see the call sites
     local ncall = 0
     for _, from in ipairs(store.usedby[id] or {}) do

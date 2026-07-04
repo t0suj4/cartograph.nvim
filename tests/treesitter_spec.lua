@@ -594,3 +594,30 @@ test('fsm autodetect: a {name,from,to} list needs no configuration', function ()
     local model = assert(fsm.load(store, cfg))
     eq('idle,run,dead', table.concat(model.order, ','))
 end)
+
+test('access points: trivial high-fanin functions are plumbing', function ()
+    local nodes = {
+        { id = 'g', name = 'get_thing', kind = 'function', file = 'a.lua', order = 1,
+          range = { start = { line = 0, char = 0 }, ['end'] = { line = 2, char = 0 } },
+          df = { inputs = {}, stmts = { { l = 2, def = {}, use = {}, dep = {} } } } },
+        { id = 'big', name = 'get_other', kind = 'function', file = 'a.lua', order = 9,
+          range = { start = { line = 9, char = 0 }, ['end'] = { line = 30, char = 0 } },
+          df = { inputs = {}, stmts = { { l = 10, def = {}, use = {}, dep = {} },
+              { l = 11, def = {}, use = {}, dep = {} }, { l = 12, def = {}, use = {}, dep = {} },
+              { l = 13, def = {}, use = {}, dep = {} }, { l = 14, def = {}, use = {}, dep = {} } } } },
+    }
+    local edges = {}
+    for i = 1, 16 do
+        nodes[#nodes + 1] = { id = 'c' .. i, name = 'caller' .. i, kind = 'function',
+            file = 'b.lua', order = i * 10,
+            range = { start = { line = i * 10, char = 0 }, ['end'] = { line = i * 10 + 1, char = 0 } } }
+        edges[#edges + 1] = { from = 'c' .. i, to = 'g', kind = 'ref', at = {} }
+        edges[#edges + 1] = { from = 'c' .. i, to = 'big', kind = 'ref', at = {} }
+    end
+    store.ingest({ schema = 1, root = '/x', nodes = nodes, edges = edges })
+    local fs = lint.run(store, { only = { ['access-point'] = true } })
+    eq(1, #fs)
+    ok(fs[1].message:match("'get_thing'"), fs[1].message)
+    ok(store.node('g').access, 'node marked')
+    ok(not store.node('big').access, 'a 5-statement getter is not plumbing')
+end)
