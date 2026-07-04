@@ -645,8 +645,9 @@ end
 function M.pair_audit(data, vpairs)
     local out = {}
     for _, pr in ipairs(vpairs or {}) do
-        local acq, rel, acq_site = {}, {}, {}
+        local acq, rel, acq_site, rel_sites = {}, {}, {}, {}
         local acq_dyn, rel_dyn = false, false
+        local found = #out
         for _, c in ipairs(data.calls or {}) do
             local shift = c.method and 1 or 0
             if c.callee == pr.acquire.verb then
@@ -662,20 +663,28 @@ function M.pair_audit(data, vpairs)
                     local k = (c.args or {})[pr.release.key + shift]
                     if k and k ~= '' then
                         rel[k] = true
-                        -- released but never acquired: typo or dead release
-                        if not acq[k] then
-                            local near = nearest(k, acq)
-                            out[#out + 1] = { severity = 'warn',
-                                file = data.root .. '/' .. c.file, line = c.line + 1,
-                                message = ("%s('%s') releases a key never acquired%s")
-                                    :format(pr.release.verb, k,
-                                        near and (" — did you mean '" .. near .. "'?") or '') }
-                        end
+                        rel_sites[k] = rel_sites[k] or c
                     else
                         rel_dyn = true
                     end
                 else
                     rel_dyn = true
+                end
+            end
+        end
+        -- released but never acquired: with a near-miss it is a typo
+        -- (strong evidence, dynamic acquires or not); without one it is
+        -- only a finding when the acquire side is fully literal
+        for k in pairs(rel) do
+            if not acq[k] then
+                local near = nearest(k, acq)
+                if near or not acq_dyn then
+                    local c = rel_sites[k]
+                    out[#out + 1] = { severity = 'warn',
+                        file = data.root .. '/' .. c.file, line = c.line + 1,
+                        message = ("%s('%s') releases a key never acquired%s")
+                            :format(pr.release.verb, k,
+                                near and (" — did you mean '" .. near .. "'?") or '') }
                 end
             end
         end
@@ -690,10 +699,14 @@ function M.pair_audit(data, vpairs)
                 end
             end
         end
-        out[#out + 1] = { severity = 'info', file = data.root, line = 1,
-            message = ("ad-hoc RAII: %s/%s%s"):format(pr.acquire.verb,
-                pr.release.verb,
-                rel_dyn and ' (release keys dynamic — leak check suppressed)' or '') }
+        -- the inventory line only when there is something to say: findings,
+        -- or literal acquires whose leak check had to stand down
+        if #out > found or (rel_dyn and next(acq)) then
+            out[#out + 1] = { severity = 'info', file = data.root, line = 1,
+                message = ("ad-hoc RAII: %s/%s%s"):format(pr.acquire.verb,
+                    pr.release.verb,
+                    rel_dyn and ' (release keys dynamic — leak check suppressed)' or '') }
+        end
     end
     return out
 end
@@ -758,8 +771,13 @@ local function string_sets(node, val, path, out, depth)
     end
 end
 
---- Divergent mirrors between literal data tables. Returns
---- { {a, b, shared, only_a, only_b, node}, ... } (node = a's var).
+--- Divergent mirrors between literal data tables, clustered into
+--- vocabulary FAMILIES (N tables sharing one vocabulary is one finding,
+--- not N² pairs). Candidate pairs come from an inverted index — only
+--- sets that actually share a member are compared, so scale costs what
+--- the sharing costs, not |sets|². Returns
+--- { {members = {label...}, core = n, extras = {label -> {strings}},
+---    node}, ... }, note?
 function M.mirrors(data, opts)
     local min_shared = opts and opts.min_shared or 4
     local sets = {}
@@ -768,38 +786,96 @@ function M.mirrors(data, opts)
             string_sets(n, n.data, '', sets, 0)
         end
     end
-    if #sets > 400 then -- no silent caps: say what was skipped
-        return {}, ('%d vocabularies found — pairwise comparison skipped (cap 400)'):format(#sets)
+    -- inverted index: member -> set indices. Ubiquitous members (a string
+    -- in more than 25 vocabularies) are stopwords — stated, not silent.
+    local index, stop = {}, 0
+    for i, sd in ipairs(sets) do
+        for k in pairs(sd.set) do
+            index[k] = index[k] or {}
+            table.insert(index[k], i)
+        end
     end
-    local out = {}
-    for i = 1, #sets do
-        for j = i + 1, #sets do
-            local a, b = sets[i], sets[j]
-            if a.node.id ~= b.node.id then
-                local inter, na, nb = 0, 0, 0
-                for k in pairs(a.set) do
-                    na = na + 1
-                    if b.set[k] then inter = inter + 1 end
-                end
-                for _ in pairs(b.set) do nb = nb + 1 end
-                if inter >= min_shared and inter / math.min(na, nb) >= 0.6
-                    and (na > inter or nb > inter) then
-                    local oa, ob = {}, {}
-                    for k in pairs(a.set) do
-                        if not b.set[k] then oa[#oa + 1] = k end
-                    end
-                    for k in pairs(b.set) do
-                        if not a.set[k] then ob[#ob + 1] = k end
-                    end
-                    table.sort(oa)
-                    table.sort(ob)
-                    out[#out + 1] = { a = a.label, b = b.label, shared = inter,
-                        only_a = oa, only_b = ob, node = a.node }
+    local shared_count = {}
+    for k, list in pairs(index) do
+        if #list > 25 then
+            stop = stop + 1
+        elseif #list > 1 then
+            for x = 1, #list do
+                for y = x + 1, #list do
+                    local key = list[x] .. '\31' .. list[y]
+                    shared_count[key] = (shared_count[key] or 0) + 1
                 end
             end
         end
     end
-    return out
+    -- qualifying pairs -> union-find into families
+    local parent = {}
+    local function find(i)
+        parent[i] = parent[i] or i
+        if parent[i] ~= i then parent[i] = find(parent[i]) end
+        return parent[i]
+    end
+    local qualified = false
+    for key, inter in pairs(shared_count) do
+        if inter >= min_shared then
+            local i, j = key:match('^(%d+)\31(%d+)$')
+            i, j = tonumber(i), tonumber(j)
+            local a, b = sets[i], sets[j]
+            if a.node.id ~= b.node.id then
+                local na, nb = 0, 0
+                for _ in pairs(a.set) do na = na + 1 end
+                for _ in pairs(b.set) do nb = nb + 1 end
+                if inter / math.min(na, nb) >= 0.6
+                    and (na > inter or nb > inter) then
+                    parent[find(i)] = find(j)
+                    qualified = true
+                end
+            end
+        end
+    end
+    if not qualified then
+        return {}, stop > 0
+            and ('%d ubiquitous member string(s) skipped'):format(stop) or nil
+    end
+    local families = {}
+    for i in pairs(parent) do
+        local r = find(i)
+        families[r] = families[r] or {}
+        table.insert(families[r], i)
+    end
+    local out = {}
+    for _, members in pairs(families) do
+        if #members >= 2 then
+            table.sort(members)
+            -- the family CORE is the intersection of all member sets;
+            -- each member's extras are its divergence from the core
+            local core = {}
+            for k in pairs(sets[members[1]].set) do core[k] = true end
+            for m = 2, #members do
+                for k in pairs(core) do
+                    if not sets[members[m]].set[k] then core[k] = nil end
+                end
+            end
+            local ncore = 0
+            for _ in pairs(core) do ncore = ncore + 1 end
+            local labels, extras = {}, {}
+            for _, m in ipairs(members) do
+                local sd = sets[m]
+                labels[#labels + 1] = sd.label
+                local ex = {}
+                for k in pairs(sd.set) do
+                    if not core[k] then ex[#ex + 1] = k end
+                end
+                table.sort(ex)
+                if #ex > 0 then extras[sd.label] = ex end
+            end
+            out[#out + 1] = { members = labels, core = ncore,
+                extras = extras, node = sets[members[1]].node }
+        end
+    end
+    table.sort(out, function (a, b) return a.core > b.core end)
+    return out, stop > 0
+        and ('%d ubiquitous member string(s) skipped'):format(stop) or nil
 end
 
 --- eval and friends: the interpreter itself.

@@ -348,16 +348,23 @@ local function mirror_findings(store)
     end
     for _, m in ipairs(mirrors) do
         local parts = {}
-        if #m.only_a > 0 then
-            parts[#parts + 1] = ('%s also has: %s'):format(m.a, short(m.only_a))
+        for _, label in ipairs(m.members) do
+            if m.extras[label] then
+                parts[#parts + 1] = ('%s adds: %s'):format(label, short(m.extras[label]))
+            end
         end
-        if #m.only_b > 0 then
-            parts[#parts + 1] = ('%s also has: %s'):format(m.b, short(m.only_b))
+        local msg
+        if m.core >= 2 then
+            msg = ('vocabulary family (%d core): %s — %s')
+                :format(m.core, table.concat(m.members, ' ~ '),
+                    #parts > 0 and table.concat(parts, '; ') or 'perfect mirror')
+        else
+            -- pairwise-linked but no common core: a CHAIN, not a mirror
+            msg = ('vocabulary chain (pairwise overlaps, no common core): %s')
+                :format(table.concat(m.members, ' ~ '))
         end
         out[#out + 1] = { file = store.data.root .. '/' .. m.node.file,
-            line = m.node.range.start.line + 1,
-            message = ('schema mirror (%d shared): %s ~ %s — %s')
-                :format(m.shared, m.a, m.b, table.concat(parts, '; ')) }
+            line = m.node.range.start.line + 1, message = msg }
     end
     return out
 end

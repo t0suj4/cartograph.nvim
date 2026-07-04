@@ -343,10 +343,17 @@ the imbalance audit runs itself: keys released but never acquired get a
 typo suggestion, keys acquired but never released are leak-prone
 (suppressed when the release side is dynamic). **Schema mirrors**
 (`schema-mirror`): literal data tables sharing a vocabulary — keys,
-values, or a list column — are mirrors of one schema, and the finding
-names their divergence, the change-one-forget-the-other bug class (on a
-real mod this surfaced two FSM states missing from the validation
-table's vocabulary).
+values, or a list column — are mirrors of one schema, clustered into
+**families** (four tables sharing the state names is one finding naming
+each member's divergence from the common core, not six pairwise
+reports; pairwise-linked sets with no common core are labelled chains).
+Candidates come from an inverted index over member strings, so the
+comparison scales with actual sharing, not vocabulary count. On a real
+mod this surfaced two FSM states missing from the validation table's
+vocabulary. Scope notes, honestly: pairing is receiver-blind (two
+different objects' `lock('x')`/`unlock('x')` cross-link), and a
+released-key warning without a typo suggestion only fires when the
+acquire side is fully literal.
 
 When discovery *doesn't* find a registry you know is there,
 `:CartographDiscover` explains why: with no argument, one verdict line
