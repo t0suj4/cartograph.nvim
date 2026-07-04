@@ -20,9 +20,11 @@ end
 local function graph()
     store.ingest({ schema = 1, root = '/x',
         nodes = {
-            node('v1', 'spec', 'var', 1, 1, { events = {
-                { name = 'go',   from = 'ready', to = 'run' },
-                { name = 'stop', from = '*',     to = 'ready' },
+            node('v1', 'spec', 'var', 1, 1, { initial = 'boot', events = {
+                { name = 'go',    from = 'ready', to = 'run' },
+                { name = 'stop',  from = '*',     to = 'ready' },
+                -- lua-state-machine allows an ARRAY of source states
+                { name = 'start', from = { 'boot', 'idle' }, to = 'ready' },
             } }),
             node('v2', 'subs', 'var', 2, 2, {
                 -- one bare {ref} entry (the shared spec idiom) + one direct
@@ -55,8 +57,19 @@ end
 test('fsm: model loads states and transitions from the data', function ()
     graph()
     local model = assert(fsm.load(store, CFG))
-    eq('ready,run', table.concat(model.order, ','))
-    eq(2, #model.transitions)
+    -- `boot` comes from initial= and the array from; `idle` only from the array
+    eq('boot,ready,run,idle', table.concat(model.order, ','))
+    eq('boot', model.initial)
+    eq(3, #model.transitions)
+end)
+
+test('fsm: array froms match in transitions_from', function ()
+    graph()
+    local model = assert(fsm.load(store, CFG))
+    local names = {}
+    for _, t in ipairs(fsm.transitions_from(model, 'boot')) do names[#names + 1] = t.name end
+    table.sort(names)
+    eq('start,stop', table.concat(names, ',')) -- start (array) + stop (from *)
 end)
 
 test('fsm: subscriptions resolve through {ref} indirection', function ()

@@ -435,7 +435,8 @@ local function render_state(ctx, state)
     ctx.lines[1] = ('%s — reachable (%d)'):format(state, ncone)
     ctx.marks[1] = { { 0, #state, 'CartographTitle' }, { #state, -1, 'CartographDim' } }
     for _, t in ipairs(fsm.transitions_from(model, state)) do
-        local text = ('  → %s ⇒ %s%s'):format(t.name, t.to, t.from == '*' and ' (from *)' or '')
+        local text = ('  → %s ⇒ %s%s'):format(t.name, t.to,
+            vim.tbl_contains(t.from, '*') and ' (from *)' or '')
         ctx.lines[#ctx.lines + 1] = text
         ctx.marks[#ctx.lines] = { { 0, 6 + #t.name, 'CartographDim' } }
         ctx.line_state[#ctx.lines] = t.to

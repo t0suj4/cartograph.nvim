@@ -87,8 +87,9 @@ function M.load(store, cfg)
     end
     local ev = var_by_name(store, cfg.events.var)
     if not ev then return nil, ('no data table %q in the graph'):format(cfg.events.var) end
-    local events = ev.data
+    local events, container = ev.data, ev.data
     for _, seg in ipairs(cfg.events.path or {}) do
+        container = events
         events = type(events) == 'table' and events[seg] or nil
     end
     if type(events) ~= 'table' then return nil, 'transitions not found in the spec data' end
@@ -101,11 +102,19 @@ function M.load(store, cfg)
             model.order[#model.order + 1] = s
         end
     end
+    -- lua-state-machine names the starting state next to the events list; it
+    -- may appear nowhere else as a `to`, so seed the order with it
+    if type(container) == 'table' and type(container.initial) == 'string' then
+        addstate(container.initial)
+        model.initial = container.initial
+    end
     for _, t in ipairs(events) do
         if type(t) == 'table' and t.name then
+            -- `from` is a state name, an array of them, or '*'
+            local from = type(t.from) == 'table' and t.from or { t.from }
             model.transitions[#model.transitions + 1] =
-                { name = t.name, from = t.from, to = t.to }
-            addstate(t.from)
+                { name = t.name, from = from, to = t.to }
+            for _, f in ipairs(from) do addstate(f) end
             addstate(t.to)
         end
     end
@@ -143,7 +152,9 @@ end
 function M.transitions_from(model, state)
     local out = {}
     for _, t in ipairs(model.transitions) do
-        if t.from == state or t.from == '*' then out[#out + 1] = t end
+        for _, f in ipairs(t.from) do
+            if f == state or f == '*' then out[#out + 1] = t; break end
+        end
     end
     return out
 end
