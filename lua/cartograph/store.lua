@@ -24,6 +24,7 @@ end
 function M.ingest(data)
     M.data    = data
     M.toc     = nil -- load-order manifest; cartograph.toc.attach() sets it
+    M._frontier_cache = {}
     M._nav_back, M._nav_fwd = {}, {}
     M.by_id   = {}
     M.by_file = {}
@@ -109,6 +110,9 @@ function M.is_entrypoint(file)
 end
 
 function M.classify(file)
+    -- unparsed frontiers are deliberately opaque, not orphaned
+    local mod = M.by_id[file]
+    if mod and mod.unparsed then return 'used' end
     -- a manifest project (WoW .toc) has exact load knowledge: listed files
     -- ARE loaded (quiet), everything else genuinely never loads
     if M.toc then
@@ -137,6 +141,51 @@ function M.classify(file)
     local mod = M.by_id[file]
     if mod and mod.effects then return 'sideeffect' end
     return 'deadimport'
+end
+
+-- ── unparsed frontiers (minified bundles) ────────────────────────────────────
+-- Their content isn't in the graph; a name is found by LAZY text search, on
+-- demand, cached per file. add_node registers the synthetic landing node so
+-- panes treat it like any other.
+
+M._frontier_cache = {}
+
+--- Find `name` in the unparsed files. Returns { {file, line, char}, ... }.
+function M.frontier_find(name)
+    local hits = {}
+    if not name or #name < 2 then return hits end
+    for _, file in ipairs(M.files) do
+        local mod = M.by_id[file]
+        if mod and mod.unparsed then
+            local text = M._frontier_cache[file]
+            if text == nil then
+                local fd = io.open(M.data.root .. '/' .. file, 'r')
+                text = fd and fd:read('a') or false
+                if fd then fd:close() end
+                M._frontier_cache[file] = text
+            end
+            if text then
+                local s = text:find('%f[%w_]' .. name:gsub('([^%w])', '%%%1') .. '%f[^%w_]')
+                if s then
+                    local before = text:sub(1, s - 1)
+                    local _, nl = before:gsub('\n', '')
+                    local col = s - (before:find('\n[^\n]*$') or 0) - 1
+                    hits[#hits + 1] = { file = file, line = nl, char = col }
+                end
+            end
+        end
+    end
+    return hits
+end
+
+--- Register a node created after ingest (frontier landings).
+function M.add_node(n)
+    if M.by_id[n.id] then return n end
+    table.insert(M.data.nodes, n)
+    M.by_id[n.id] = n
+    M.by_file[n.file] = M.by_file[n.file] or {}
+    table.insert(M.by_file[n.file], n)
+    return n
 end
 
 ---@param fn fun(id: string)

@@ -270,3 +270,33 @@ test('php: functions, qualified methods, requires, hook fan-out', function ()
     end
     eq(2, fan)
 end)
+
+test('frontier: minified bundles are opaque but reachable by text search', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'javascript') then
+        skip 'no javascript parser'
+    end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/frontier')
+    eq({ 'lib.min.js' }, data.unparsed)
+    store.ingest(data)
+    ok(store.by_id['lib.min.js'] and store.by_id['lib.min.js'].unparsed,
+        'frontier module node present')
+    eq('used', store.classify('lib.min.js'))
+    -- no parsed content leaked out of the bundle
+    for _, n in ipairs(data.nodes) do
+        ok(not (n.file == 'lib.min.js' and n.kind == 'function'),
+            'no function nodes from the bundle')
+    end
+    -- lazy landing: the name resolves to its position in the bundle
+    local hits = store.frontier_find('myfun')
+    eq(1, #hits)
+    eq('lib.min.js', hits[1].file)
+    eq(0, hits[1].line)
+    ok(hits[1].char > 40, 'char lands inside the one-liner')
+    -- the option: unparsed = false makes bundles invisible
+    require('cartograph.config').unparsed = false
+    local data2 = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/frontier')
+    require('cartograph.config').unparsed = true
+    eq(nil, data2.unparsed)
+end)

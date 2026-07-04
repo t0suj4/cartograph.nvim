@@ -19,6 +19,11 @@ M.clangd_bin = nil
 -- import = { verb, name = argN } | { any_call = true } }.
 M.bindings = nil
 
+-- minified bundles (*.min.js): true = keep them as opaque frontier modules
+-- (visible in the files view; descending an unresolved call reaches into
+-- them by text search); false = invisible, as if they don't exist
+M.unparsed = true
+
 M.keys = {
     -- navigation
     pivot      = '<CR>',    -- tree/trace: re-root on / expand this entry

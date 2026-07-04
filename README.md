@@ -203,9 +203,14 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
      fn altitude, the lit altitude and the graph lints all work. Specs ship
      for **Lua, C, C++, Haskell, Scheme, PHP, JavaScript/TypeScript,
      Python** — a new language is one spec table (queries + a few hooks).
-     Bundles and dependency trees (`node_modules/`, `vendor/`, `dist/`,
-     `*.min.js`) are excluded by default — built artifacts poison
-     navigation. Dispatch stays honest per idiom:
+     Dependency trees (`node_modules/`, `vendor/`, `dist/`) are excluded
+     by default — built artifacts poison navigation. Minified bundles
+     (`*.min.js`) become **opaque frontiers** instead: visible in the
+     files view as `lib.min.js (unparsed)`, contributing no parsed nodes,
+     but reachable — descending an unresolved call whose name lives in a
+     bundle lands inside it by lazy text search, at the definition
+     (`ƒ myfun … (unparsed source — landed by text search)`).
+     `setup{ unparsed = false }` makes them invisible entirely. Dispatch stays honest per idiom:
      C dispatch-table references, C++ methods, Haskell instance methods
      and Lua registry fields are dynamically dispatched (not dead);
      `main` is an entry point; stdlib vocabularies (`string.format`,

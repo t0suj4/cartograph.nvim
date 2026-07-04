@@ -82,6 +82,13 @@ end
 
 local function file_row(ctx, file, depth, dim)
     local indent = string.rep('  ', depth or 0)
+    local mod = store.by_id and store.by_id[file]
+    if mod and mod.unparsed then
+        ctx.lines[#ctx.lines + 1] = ('%s%s  (unparsed)'):format(indent, file)
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.line_file[#ctx.lines] = file
+        return
+    end
     ctx.lines[#ctx.lines + 1] = ('%s%s  (%d)%s'):format(indent, file, #shown_defs(file), dim and ' …' or '')
     ctx.marks[#ctx.lines] = dim and { { 0, -1, 'CartographDim' } }
         or { { #indent, #indent + #file, 'CartographSection' }, { #indent + #file, -1, 'CartographDim' } }
@@ -656,7 +663,9 @@ local function render_fn(ctx, id)
     ctx.line_callers[2] = id
     local df = node.df
     if not df then
-        ctx.lines[3] = '  (no data-flow info)'
+        ctx.lines[3] = node.unparsed
+            and '  (unparsed source — landed by text search)'
+            or '  (no data-flow info)'
         ctx.marks[3] = { { 0, -1, 'CartographDim' } }
         return
     end
@@ -1048,6 +1057,24 @@ function M.attach(win)
             M.show(level, ctxval)
         end
     end
+    -- an unresolved name may live in an UNPARSED bundle (*.min.js): find
+    -- it by text search, register a synthetic landing node, descend into it
+    local function frontier_jump(name)
+        local hits = store.frontier_find(name)
+        if #hits == 0 then return false end
+        local h = hits[1]
+        local id = ('%s::%s@%d'):format(h.file, name, h.line)
+        store.add_node({ id = id, name = name, kind = 'function',
+            unparsed = true, file = h.file, order = h.line,
+            range = { start = { line = h.line, char = h.char },
+                ['end'] = { line = h.line, char = h.char + #name } } })
+        if #hits > 1 then
+            vim.notify(('cartograph: %q also found in %d more unparsed files')
+                :format(name, #hits - 1), vim.log.levels.INFO)
+        end
+        enter('fn', id, id)
+        return true
+    end
     -- a var row descends into its members/sites — except the FSM spec var,
     -- which descends into the state machine it declares (the states anchor)
     local function descend_var(n)
@@ -1111,10 +1138,16 @@ function M.attach(win)
         local col  = vim.api.nvim_win_get_cursor(win)[2]
         local text = vim.api.nvim_buf_get_lines(M.buf, r - 1, r, false)[1] or ''
         local word = word_at(text, col)
-        -- 1. a callee named under the cursor: follow the call
+        -- 1. a callee named under the cursor: follow the call — into an
+        -- UNPARSED bundle by text search when the graph has no target
         for _, c in ipairs(M.line_calls[r] or {}) do
             if c.callee == word and c.to and store.node(c.to) then
                 return enter('fn', c.to, c.to)
+            end
+        end
+        for _, c in ipairs(M.line_calls[r] or {}) do
+            if c.callee == word and not c.to and frontier_jump(word) then
+                return
             end
         end
         -- 2. a parameter: where does it come from? (the origin trace)

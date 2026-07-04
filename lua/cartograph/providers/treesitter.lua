@@ -676,14 +676,20 @@ local EXCLUDE_DIRS = { node_modules = true, vendor = true, dist = true,
     build = true, cache = true, minified = true }
 
 local function list_files(root, subdirs)
-    local out = {}
-    local function want(rel)
-        if rel:match('%.min%.js$') then return false end -- bundles, always
+    local out, minified = {}, {}
+    local function in_scope(rel)
         if not subdirs then return true end
         for _, p in ipairs(subdirs) do
             if rel:sub(1, #p) == p then return true end
         end
         return false
+    end
+    local function want(rel)
+        if rel:match('%.min%.js$') then -- bundles: opaque frontiers, not source
+            if in_scope(rel) then minified[#minified + 1] = rel end
+            return false
+        end
+        return in_scope(rel)
     end
     local function rec(rel)
         local it = vim.uv.fs_scandir(rel == '' and root or (root .. '/' .. rel))
@@ -702,7 +708,8 @@ local function list_files(root, subdirs)
     end
     rec('')
     table.sort(out)
-    return out
+    table.sort(minified)
+    return out, minified
 end
 
 --- Extract a neutral-schema graph from a directory tree. Any file whose
@@ -711,7 +718,7 @@ end
 ---@return table data  the schema-1 graph (ready for store.ingest)
 function M.extract(root, opts)
     root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
-    local files = list_files(root, opts and opts.subdirs)
+    local files, minified = list_files(root, opts and opts.subdirs)
     local fileset = {}
     for _, f in ipairs(files) do fileset[f] = true end
 
@@ -1120,6 +1127,17 @@ function M.extract(root, opts)
         end
     end
 
+    -- minified bundles as OPAQUE frontiers: visible modules, no parsed
+    -- content — descend reaches into them by lazy text search (store)
+    local okc, cfg = pcall(require, 'cartograph.config')
+    if #minified > 0 and not (okc and cfg.unparsed == false) then
+        data.unparsed = minified
+        for _, f in ipairs(minified) do
+            nodes[#nodes + 1] = { id = f, name = f, kind = 'module', file = f,
+                unparsed = true, order = -1,
+                range = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } } }
+        end
+    end
     data.no_parser = next(no_parser) and vim.tbl_keys(no_parser) or nil
     return data
 end
