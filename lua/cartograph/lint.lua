@@ -227,6 +227,42 @@ local function load_order_findings(store)
         out[#out + 1] = { file = store.data.root .. '/' .. t.toc, line = 1,
             message = ("%s lists '%s' (via %s), which does not exist"):format(t.toc, m.file, m.via) }
     end
+
+    -- cross-addon: the surrounding addons folder is itself ordered by
+    -- ## Dependencies. Hard failures first, then the order hazard: a
+    -- load-time call into an UNDECLARED sibling — the client guarantees
+    -- nothing about who loads first, so it works or nils by alphabet.
+    local fol, me = t.folder, t.folder and t.folder.addons[(t.self or ''):lower()]
+    if me then
+        local tocline = { file = store.data.root .. '/' .. t.toc, line = 1 }
+        for _, dep in ipairs(me.req) do
+            if not fol.addons[dep:lower()] then
+                out[#out + 1] = { file = tocline.file, line = 1,
+                    message = ("requires addon '%s', which is not installed — this addon will NOT load"):format(dep) }
+            end
+        end
+        for _, cy in ipairs(fol.cycles or {}) do
+            if cy.addon == me.name or cy.dep == me.name then
+                out[#out + 1] = { file = tocline.file, line = 1,
+                    message = ("dependency cycle: '%s' <-> '%s' — the client disables both"):format(cy.addon, cy.dep) }
+            end
+        end
+        local sib = require('cartograph.toc').sibling_defs(t)
+        if next(sib) then
+            local declared = {}
+            for _, d in ipairs(me.req) do declared[d:lower()] = true end
+            for _, d in ipairs(me.opt) do declared[d:lower()] = true end
+            local own = {}
+            for _, n in ipairs(store.data.nodes) do own[n.name or ''] = true end
+            for _, c in ipairs(store.data.calls or {}) do
+                local who = c.top and not c.to and not own[c.callee] and sib[c.callee]
+                if who and not declared[who:lower()] then
+                    out[#out + 1] = { file = store.data.root .. '/' .. c.file, line = c.line + 1,
+                        message = ("load-time call to '%s', defined by addon '%s' — undeclared dependency: load order is not guaranteed"):format(c.callee, who) }
+                end
+            end
+        end
+    end
     return out
 end
 

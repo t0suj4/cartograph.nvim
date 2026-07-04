@@ -54,6 +54,54 @@ test('toc: loads the fixture manifest in order, case/backslash-proof', function 
     eq('ghost.lua', model.missing[1].file)
 end)
 
+local ADDONS = vim.fn.getcwd() .. '/tests/fixtures/addons'
+
+test('toc: folder model — client load order, missing deps, cycles, LoD', function ()
+    local fol = assert(toc.folder(ADDONS))
+    -- alphabetical with dependency promotion: CycB (CycA's dep) is
+    -- promoted before it; Demand (LoadOnDemand) never loads at startup
+    eq({ 'AlphaBar', 'BaseLib', 'CycB', 'CycA' }, fol.order)
+    ok(not fol.addons.demand.pos, 'LoadOnDemand addon not in the startup order')
+    eq({ { addon = 'AlphaBar', dep = 'Ghost' } }, fol.missing)
+    eq(1, #fol.cycles)
+    local cy = fol.cycles[1]
+    ok((cy.addon == 'CycA' and cy.dep == 'CycB')
+        or (cy.addon == 'CycB' and cy.dep == 'CycA'), 'cycle pair found')
+end)
+
+test('toc: cross-addon lint — missing dep, cycle, undeclared sibling call', function ()
+    -- synthetic store for AlphaBar: one load-time call to BaseRegister,
+    -- which the sibling dump (BaseLib/.luals-graph.json) defines
+    store.ingest({ schema = 1, root = ADDONS .. '/AlphaBar',
+        nodes = { { id = 'main.lua::AlphaBar_OnLoad@3', name = 'AlphaBar_OnLoad',
+            kind = 'function', file = 'main.lua', order = 3,
+            range = { start = { line = 3, char = 0 }, ['end'] = { line = 5, char = 3 } } } },
+        edges = {},
+        calls = { { callee = 'BaseRegister', args = { 'alphabar' },
+            argv = { { k = 'lit', v = 'alphabar' } },
+            file = 'main.lua', line = 1, method = false, top = true } } })
+    assert(toc.attach(store))
+    ok(store.toc.folder and store.toc.self == 'AlphaBar', 'folder model attached')
+
+    local blob = ''
+    for _, f in ipairs(lint.run(store, { only = { ['load-order'] = true } })) do
+        blob = blob .. f.message .. '\n'
+    end
+    ok(blob:match("requires addon 'Ghost'"), 'missing required dep: ' .. blob)
+    ok(blob:match("load%-time call to 'BaseRegister', defined by addon 'BaseLib'"),
+        'undeclared sibling dependency caught')
+    ok(not blob:match('cycle'), "AlphaBar isn't part of the cycle")
+
+    -- the cycle shows up for the addons IN it
+    store.ingest({ schema = 1, root = ADDONS .. '/CycA', nodes = {}, edges = {} })
+    toc.attach(store)
+    blob = ''
+    for _, f in ipairs(lint.run(store, { only = { ['load-order'] = true } })) do
+        blob = blob .. f.message .. '\n'
+    end
+    ok(blob:match('dependency cycle'), 'cycle reported for a member: ' .. blob)
+end)
+
 test('toc: end-to-end — load-order lint and classification', function ()
     local BIN = vim.fn.expand '~/.local/lib/lua-language-server/bin/lua-language-server'
     if vim.fn.executable(BIN) == 0 then skip 'graph CLI not installed' end

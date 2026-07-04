@@ -238,6 +238,17 @@ differences resolved) becomes the project structure:
   `<OnClick>Foo()</OnClick>` bodies) are engine entry points, exempted from
   dead-function.
 
+**Cross-addon ordering.** When the addon sits in an AddOns folder, the
+folder is modelled too: every sibling manifest's `## Dependencies` /
+`## OptionalDeps` builds the client's real load order (alphabetical with
+dependencies promoted, LoadOnDemand addons held back). The lint then knows
+things one addon can't: a **required dependency that isn't installed**
+(the addon will not load), a **dependency cycle** (the client disables
+both), and — where sibling addons have extracted dumps to testify — a
+**load-time call into an undeclared sibling**: nothing guarantees who
+loads first, so it works or nils by alphabet. Honest scope: no sibling
+dump, no claim.
+
 ## Lint
 
 `:CartographLint` runs graph-aware, whole-program checks and drops the findings

@@ -1,0 +1,5 @@
+## Interface: 30300
+## Title: AlphaBar
+## Dependencies: Ghost
+
+main.lua

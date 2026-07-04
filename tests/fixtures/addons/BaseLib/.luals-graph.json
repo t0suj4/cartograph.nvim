@@ -1,0 +1,1 @@
+{"schema":1,"root":"tests/fixtures/addons/BaseLib","nodes":[{"id":"base.lua::BaseRegister@0","name":"BaseRegister","kind":"function","file":"base.lua","range":{"start":{"line":0,"char":0},"end":{"line":2,"char":3}},"order":0}],"edges":[]}

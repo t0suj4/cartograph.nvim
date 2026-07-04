@@ -127,14 +127,167 @@ function M.load(root)
     return model
 end
 
+-- ── cross-addon: the addons FOLDER is itself an ordered world ────────────────
+-- `## Dependencies` / `## RequiredDeps` name sibling addons that must load
+-- first; `## OptionalDeps` order-before-if-present. The client loads addons
+-- alphabetically with dependencies promoted (a DFS); a missing required dep
+-- disables the addon, a dependency cycle disables both.
+
+local function split_names(v)
+    local out = {}
+    for name in (v or ''):gmatch('[^,]+') do
+        name = name:match('^%s*(.-)%s*$')
+        if name ~= '' then out[#out + 1] = name end
+    end
+    return out
+end
+
+--- Required and optional dependency lists from toc directives (both
+--- `Dependencies` and `RequiredDeps` spellings occur in the wild).
+function M.deps(directives)
+    local req, opt = {}, {}
+    for k, v in pairs(directives or {}) do
+        local lk = k:lower()
+        if lk == 'dependencies' or lk == 'requireddeps' then
+            for _, n in ipairs(split_names(v)) do req[#req + 1] = n end
+        elseif lk == 'optionaldeps' then
+            for _, n in ipairs(split_names(v)) do opt[#opt + 1] = n end
+        end
+    end
+    return req, opt
+end
+
+--- Model a whole addons folder: every subdirectory with a manifest.
+--- Returns { addons = {[lowername] = {dir,name,title,req,opt,lod,pos}},
+--- order = {names in client load order}, missing = {{addon,dep}},
+--- cycles = {{addon,dep}} } or nil if the folder holds no addons.
+function M.folder(root)
+    root = root:gsub('/+$', '')
+    local addons, names = {}, {}
+    local it = vim.uv.fs_scandir(root)
+    while it do
+        local name, t = vim.uv.fs_scandir_next(it)
+        if not name then break end
+        if t == 'directory' then
+            local tocname, text = name, nil
+            local f = io.open(('%s/%s/%s.toc'):format(root, name, name), 'r')
+            if not f then -- manifest named differently from the folder
+                local sub = vim.uv.fs_scandir(root .. '/' .. name)
+                while sub do
+                    local n2, t2 = vim.uv.fs_scandir_next(sub)
+                    if not n2 then break end
+                    if t2 == 'file' and n2:lower():match('%.toc$') then
+                        f = io.open(('%s/%s/%s'):format(root, name, n2), 'r')
+                        tocname = n2:gsub('%.[Tt][Oo][Cc]$', '')
+                        break
+                    end
+                end
+            end
+            if f then
+                text = f:read('a')
+                f:close()
+                local p = M.parse_toc(text)
+                local req, opt = M.deps(p.directives)
+                local a = { dir = name, name = tocname,
+                    title = p.directives.Title, req = req, opt = opt,
+                    lod = p.directives.LoadOnDemand == '1' }
+                addons[tocname:lower()] = a
+                if name:lower() ~= tocname:lower() then addons[name:lower()] = a end
+                names[#names + 1] = tocname
+            end
+        end
+    end
+    if #names == 0 then return nil end
+    table.sort(names, function (x, y) return x:lower() < y:lower() end)
+
+    local order, state, cycles, missing, mseen = {}, {}, {}, {}, {}
+    local function visit(low, fromname)
+        local a = addons[low]
+        if not a then return end
+        if state[a] == 'done' then return end
+        if state[a] == 'visiting' then
+            cycles[#cycles + 1] = { addon = fromname, dep = a.name }
+            return
+        end
+        state[a] = 'visiting'
+        for _, dep in ipairs(a.req) do
+            if not addons[dep:lower()] then
+                local k = a.name .. '\31' .. dep
+                if not mseen[k] then
+                    mseen[k] = true
+                    missing[#missing + 1] = { addon = a.name, dep = dep }
+                end
+            else
+                visit(dep:lower(), a.name)
+            end
+        end
+        for _, dep in ipairs(a.opt) do
+            if addons[dep:lower()] then visit(dep:lower(), a.name) end
+        end
+        state[a] = 'done'
+        a.pos = #order + 1
+        order[#order + 1] = a.name
+    end
+    for _, n in ipairs(names) do
+        local a = addons[n:lower()]
+        -- LoadOnDemand addons load only when something pulls them in
+        if not a.lod then visit(n:lower()) end
+    end
+    return { addons = addons, order = order, missing = missing, cycles = cycles }
+end
+
+--- Global function names defined by SIBLING addons — honest scope: only
+--- siblings with an extracted dump (.luals-graph.json) can testify.
+--- Returns { [global fn name] = addon name }, cached on the model.
+function M.sibling_defs(model)
+    if model._sibdefs then return model._sibdefs end
+    local out, seen = {}, {}
+    if model.folder and model.parent then
+        for _, a in pairs(model.folder.addons) do
+            if not seen[a] and a.dir:lower() ~= (model.self or ''):lower() then
+                seen[a] = true
+                local f = io.open(('%s/%s/.luals-graph.json'):format(model.parent, a.dir), 'r')
+                if f then
+                    local okj, data = pcall(vim.json.decode, f:read('a'))
+                    f:close()
+                    if okj and type(data) == 'table' then
+                        for _, n in ipairs(data.nodes or {}) do
+                            if n.kind == 'function' and n.name
+                                and not n.name:find('[.:]') then
+                                out[n.name] = out[n.name] or a.name
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    model._sibdefs = out
+    return out
+end
+
 --- Attach the model to a store (store.toc): adds `unlisted` — lua files the
---- graph saw that no manifest path reaches, i.e. files that never load.
+--- graph saw that no manifest path reaches, i.e. files that never load —
+--- and, when the addon sits in an addons folder, the cross-addon model
+--- (model.folder / model.parent / model.self).
 function M.attach(store)
-    local model, why = M.load(store.data.root)
+    local root = store.data.root:gsub('/+$', '')
+    local model, why = M.load(root)
     if model then
         model.unlisted = {}
         for _, f in ipairs(store.files) do
             if not model.index[f] then model.unlisted[#model.unlisted + 1] = f end
+        end
+        local parent = root:match('^(.*)/[^/]+$')
+        local selfdir = root:match('([^/]+)$')
+        local fol = parent and M.folder(parent)
+        -- cross-addon knowledge only if there ARE siblings with manifests
+        local others = false
+        for _, a in pairs(fol and fol.addons or {}) do
+            if a.dir:lower() ~= selfdir:lower() then others = true break end
+        end
+        if fol and fol.addons[selfdir:lower()] and others then
+            model.folder, model.parent, model.self = fol, parent, selfdir
         end
     end
     store.toc = model
