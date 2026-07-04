@@ -313,6 +313,46 @@ M.spec = {
             return hit
         end,
     },
+    javascript = {
+        exts = { 'js', 'mjs', 'cjs' },
+        functions = [=[
+            (function_declaration name: (identifier) @name) @def
+            (method_definition name: (property_identifier) @name) @def
+            (variable_declarator name: (identifier) @name value: (arrow_function) @def)
+            (variable_declarator name: (identifier) @name value: (function_expression) @def)
+            (pair key: (property_identifier) @name value: (arrow_function) @def)
+            (pair key: (property_identifier) @name value: (function_expression) @def)
+        ]=],
+        calls = [=[
+            (call_expression function: (identifier) @name) @call
+            (call_expression function: (member_expression) @name) @call
+        ]=],
+        vars = [=[
+            (program (lexical_declaration
+                (variable_declarator name: (identifier) @name value: (_) @value) @def))
+            (program (variable_declaration
+                (variable_declarator name: (identifier) @name value: (_) @value) @def))
+        ]=],
+        params_field = 'parameters',
+        body_field = 'body',
+        fn_types = { function_declaration = true, method_definition = true,
+            arrow_function = true, function_expression = true },
+        is_method = function (_, def) return def:type() == 'method_definition' end,
+        stdlib_prefixes = { 'console.', 'JSON.', 'Object.', 'Array.', 'Math.',
+            'Promise.', 'window.', 'document.', 'chrome.' },
+        litdata_types = { object = true, array = true },
+        import_query = [=[ (import_statement source: (string) @path) ]=],
+        resolve_import = function (path, files, from)
+            path = path:gsub('^["\']', ''):gsub('["\']$', '')
+            local dir = from:match('^(.*)/[^/]*$')
+            local cand = path:gsub('^%./', '')
+            cand = dir and (dir .. '/' .. cand) or cand
+            for _, c in ipairs({ cand, cand .. '.js', cand .. '.ts',
+                (cand:gsub('%.js$', '.ts')) }) do
+                if files[c] then return c end
+            end
+        end,
+    },
     python = {
         exts = { 'py' },
         functions = [[ (function_definition name: (identifier) @name) @def ]],
@@ -342,6 +382,10 @@ M.spec = {
         litdata_types = { dictionary = true, list = true },
     },
 }
+
+-- typescript is the javascript spec under another parser
+M.spec.typescript = vim.tbl_extend('force', {}, M.spec.javascript)
+M.spec.typescript.exts = { 'ts' }
 
 local LIT_DEPTH, LIT_ITEMS, NAME_CAP = 6, 64, 48
 
@@ -477,8 +521,8 @@ local function dataflow(def, spec, src, params)
                     end
                     return
                 end
-                if t == 'init_declarator' then
-                    local d = n:field('declarator')[1]
+                if t == 'init_declarator' or t == 'variable_declarator' then
+                    local d = n:field('declarator')[1] or n:field('name')[1]
                     for c in n:iter_children() do
                         if c:named() then walk(c, c == d) end
                     end
@@ -550,8 +594,15 @@ local function lang_for(file)
     end
 end
 
-local function list_files(root)
+local function list_files(root, subdirs)
     local out = {}
+    local function want(rel)
+        if not subdirs then return true end
+        for _, p in ipairs(subdirs) do
+            if rel:sub(1, #p) == p then return true end
+        end
+        return false
+    end
     local function rec(rel)
         local it = vim.uv.fs_scandir(rel == '' and root or (root .. '/' .. rel))
         while it do
@@ -561,7 +612,7 @@ local function list_files(root)
                 local r = rel == '' and name or (rel .. '/' .. name)
                 if t == 'directory' then
                     rec(r)
-                elseif lang_for(r) then
+                elseif lang_for(r) and want(r) then
                     out[#out + 1] = r
                 end
             end
@@ -576,9 +627,9 @@ end
 --- extension has a spec (and an available parser) participates.
 ---@param root string
 ---@return table data  the schema-1 graph (ready for store.ingest)
-function M.extract(root)
+function M.extract(root, opts)
     root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
-    local files = list_files(root)
+    local files = list_files(root, opts and opts.subdirs)
     local fileset = {}
     for _, f in ipairs(files) do fileset[f] = true end
 
@@ -834,6 +885,7 @@ function M.extract(root)
                     end
                     local c = { callee = callee, args = args, argv = argv,
                         file = file, line = sp.start.line, method = method,
+                        full = full ~= callee and full or nil,
                         top = is_top or nil }
                     calls[#calls + 1] = c
                     pending[#pending + 1] = { call = c, file = file, full = full,

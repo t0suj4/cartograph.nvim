@@ -200,3 +200,37 @@ test('clangd: resolution oracle proves the C fixture edges', function ()
     eq(0, inf)
     ok(main_helper and not main_helper.inferred, 'main -> helper is proven now')
 end)
+
+test('xlang: string-key dispatch links JS to the C++ handler', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not (pcall(vim.treesitter.get_string_parser, '', 'cpp')
+        and pcall(vim.treesitter.get_string_parser, '', 'javascript')) then
+        skip 'missing parsers'
+    end
+    local xl = require 'cartograph.xlang'
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/xlang')
+    local stats = xl.link(data)
+    eq(1, stats.exports)          -- getThing resolved through BindRepeating
+    eq(1, stats.unresolved)       -- ghostMessage's handler doesn't exist
+    eq(2, stats.links)            -- chrome.send + sendWithPromise
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    local hits = 0
+    for _, e in ipairs(data.edges) do
+        if e.xlang and e.to == byname['ThingHandler::HandleGetThing'].id
+            and (e.from == byname.requestThing.id
+                or e.from == byname.requestPromised.id) then
+            hits = hits + 1
+            ok(#e.at > 0 and e.at[1].start.char > 0, 'site range on the key literal')
+        end
+    end
+    eq(2, hits)
+    -- the send call's statement row now descends into the handler
+    local sent
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'send' and c.args[1] == 'getThing' then sent = c end
+    end
+    ok(sent and sent.to == byname['ThingHandler::HandleGetThing'].id,
+        'call inventory upgraded')
+end)

@@ -21,7 +21,8 @@ end
 --- Open the cockpit on a graph dump (neutral-schema JSON produced by the
 --- provider). ONE hardcoded layout for now: symbols left, source right.
 ---@param dump_path string
-function M.open(dump_path)
+---@param opts { subdirs:string[]? }?  subtree scope for directory extraction
+function M.open(dump_path, opts)
     local store   = require 'cartograph.store'
     local symbols = require 'cartograph.panes.symbols'
     local source  = require 'cartograph.panes.source'
@@ -31,7 +32,7 @@ function M.open(dump_path)
     -- a parser); a file is a pre-extracted dump (the lua-ls CLI's output)
     local target = vim.fn.expand(dump_path)
     if vim.fn.isdirectory(target) == 1 then
-        local data = require('cartograph.providers.treesitter').extract(target)
+        local data = require('cartograph.providers.treesitter').extract(target, opts)
         -- C/C++ roots get clangd resolution when available (config.clangd)
         local has_c = false
         for _, n in ipairs(data.nodes) do
@@ -47,6 +48,13 @@ function M.open(dump_path)
                 vim.notify(('cartograph: clangd proved edges for %d functions')
                     :format(stats.resolved_fns), vim.log.levels.INFO)
             end
+        end
+        -- cross-language boundaries (string-key dispatch) — after clangd,
+        -- so the oracle's edge rebuild can't drop the cross-language links
+        local x = require('cartograph.xlang').link(data)
+        if x.links > 0 then
+            vim.notify(('cartograph: linked %d cross-language call sites')
+                :format(x.links), vim.log.levels.INFO)
         end
         store.ingest(data)
     else

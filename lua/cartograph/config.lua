@@ -13,6 +13,12 @@ local M = {}
 M.clangd = true
 M.clangd_bin = nil
 
+-- cross-language bindings (string-key dispatch boundaries); nil = the
+-- defaults in cartograph/xlang.lua (chromium WebUI, guile gsubr,
+-- lua_register). Add your own: { export = { verb, name = argN },
+-- import = { verb, name = argN } | { any_call = true } }.
+M.bindings = nil
+
 M.keys = {
     -- navigation
     pivot      = '<CR>',    -- tree/trace: re-root on / expand this entry

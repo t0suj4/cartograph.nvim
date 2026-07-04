@@ -217,6 +217,23 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
      dispatch-table reference). Functions clangd can't see keep their
      honest `~`. A `compile_commands.json`/`compile_flags.txt` gives it
      full cross-file eyes.
+
+### Cross-language linking
+
+Engine boundaries dispatch by **string key**, and the key is the edge:
+`chrome.send('getThing')` in TypeScript runs whatever C++ registered
+`RegisterMessageCallback("getThing", …)`; `scm_c_define_gsubr("apply", …)`
+makes a C function callable from Scheme by name. `cartograph.xlang` links
+these as a pure post-pass over any provider's graph: export calls resolve
+their handler (through `base::BindRepeating(&Class::Method, …)` and
+friends, bounded to the call's own extent), and every import site gets a
+real edge — descending a TS proxy method's statement row lands in the C++
+handler, whose callers view lists the TS side back. Ships with bindings
+for chromium WebUI (`chrome.send`/`sendWithPromise`), guile's gsubr and
+`lua_register`; one config entry adds a boundary
+(`setup{ bindings = { { export = { verb = …, name = argN },
+import = { verb = … } | { any_call = true } } } }`). Unresolvable
+handlers stay honest frontiers.
 2. **ImpactEngine** — `(nodeSet, target, op) -> {edits, hazards}`. Move-first,
    Lua-first. Preview the diff before it touches a file — never a silent edit.
 3. **Panes/Store** — panes are independent widgets that subscribe to a shared
