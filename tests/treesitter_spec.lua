@@ -819,6 +819,10 @@ end
     store.set_focus(byname('beta'))
     -- seed nav history: [beta, doomed, alpha] as jump origins, focus beta
     local beta1 = byname('beta')
+    -- and mark beta in the working set: it must FOLLOW the id shift
+    vim.fn.delete(store.ws_file())
+    store.ws_load()
+    store.ws_toggle(beta1)
     store.pivot(byname('doomed'))   -- pushes beta
     store.pivot(byname('alpha'))    -- pushes doomed
     store.pivot(beta1)              -- pushes alpha
@@ -868,6 +872,10 @@ end
     -- the live sample did not survive the re-ingest (evidence about the
     -- OLD graph state)
     ok(store.live == nil, 'live sample invalidated by ingest')
+    -- the working set followed beta through the refs remap
+    ok(store.ws_has(beta2), 'working-set membership survived the refresh')
+    vim.fn.delete(store.ws_file())
+    store.workset = { ids = {}, refs = {}, pending = {} }
     -- freeze-while-staged
     store.moveset[byname('alpha')] = true
     local s2, w2 = refresh.file('sub/b.lua')

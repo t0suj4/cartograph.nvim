@@ -70,7 +70,9 @@ function M.order(files, ctx)
     return sorted
 end
 
--- the editor's actual attention, for M.order
+-- the editor's actual attention, for M.order: current buffer, then the
+-- persisted WORKING SET (declared intent outranks incidentally-open
+-- buffers), then other loaded buffers
 local function attention(root)
     local ctx = { bufs = {} }
     local function rel(buf)
@@ -80,6 +82,9 @@ local function attention(root)
         end
     end
     ctx.current = rel(vim.api.nvim_get_current_buf())
+    for _, f in ipairs(require('cartograph.store').ws_peek(root)) do
+        ctx.bufs[#ctx.bufs + 1] = f
+    end
     for _, b in ipairs(vim.api.nvim_list_bufs()) do
         if vim.api.nvim_buf_is_loaded(b) then
             local r = rel(b)

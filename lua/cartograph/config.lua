@@ -88,6 +88,12 @@ M.keys = {
     cut_visual = 'd',
     paste      = 'p',
     unstage    = 'u',
+    -- working set (symbols pane): mark what you're working on
+    mark       = 'm',       -- toggle the row's symbol in the working set
+    set_view   = 'M',       -- the working-set altitude (cursor on the
+                            -- last-visited member: the way back from a dive)
+    set_next   = ']w',      -- cycle members (conscious pivots: <C-o> undoes)
+    set_prev   = '[w',
 }
 
 -- Entry points: files EXPECTED to have no inbound require (a runtime loads

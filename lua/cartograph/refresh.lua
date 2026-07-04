@@ -392,6 +392,13 @@ function M.file(rel)
     store.ingest(data)
     store._nav_back, store._nav_fwd = back, fwd
     require('cartograph.toc').attach(store)
+    -- the working set re-resolves through its refs (renames followed,
+    -- with notes; unresolved members wait as pending)
+    local ws_notes = store.ws_resolve()
+    if #ws_notes > 0 then
+        vim.notify('cartograph: working set — ' .. table.concat(ws_notes, '; '),
+            vim.log.levels.INFO)
+    end
     if focused and store.node(focused) then store.set_focus(focused) end
     if loc and store.loc_provider then
         pcall(store.loc_provider.set, loc)

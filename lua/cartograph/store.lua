@@ -288,6 +288,137 @@ function M.resolve_ref(ref)
     })
 end
 
+-- ── the working set: what the user is working ON ────────────────────────────
+-- Marked nodes, held as REFS (the durable identity — survives refresh
+-- remaps, follows renames with a note) and persisted per project root in
+-- the STATE dir: user intent, not derived data, so it outlives cache
+-- wipes and sessions. `ids` is the session-resolved view; `pending` are
+-- refs that did not resolve against the current graph (kept, reported,
+-- retried after every splice).
+
+M.workset = { ids = {}, refs = {}, pending = {}, last = nil }
+
+--- The per-root working-set state file (public: tests, cleanup).
+function M.ws_file(root)
+    local dir = vim.fn.stdpath('state') .. '/cartograph'
+    vim.fn.mkdir(dir, 'p')
+    root = (root or (M.data and M.data.root) or ''):gsub('/+$', '')
+    return dir .. '/' .. root:gsub('[/\\:]', '%%') .. '.set.json'
+end
+local function ws_state_file() return M.ws_file(nil) end
+
+--- Peek the persisted working set's FILES without loading it — the
+--- parallel cold open puts them at the head of the extraction queue.
+function M.ws_peek(root)
+    local fd = io.open(M.ws_file(root), 'r')
+    if not fd then return {} end
+    local txt = fd:read('a')
+    fd:close()
+    local ok, saved = pcall(vim.json.decode, txt)
+    local out, seen = {}, {}
+    if ok and type(saved) == 'table' then
+        for _, r in ipairs(saved.refs or {}) do
+            if r.file and not seen[r.file] then
+                seen[r.file] = true
+                out[#out + 1] = r.file
+            end
+        end
+    end
+    return out
+end
+
+local function ws_persist()
+    local fd = io.open(ws_state_file(), 'w')
+    if not fd then return end
+    local refs = {}
+    for _, r in ipairs(M.workset.refs) do refs[#refs + 1] = r end
+    for _, r in ipairs(M.workset.pending) do refs[#refs + 1] = r end
+    fd:write(vim.json.encode({ version = 1, refs = refs }))
+    fd:close()
+end
+
+--- Toggle a node in/out of the working set. Returns membership.
+function M.ws_toggle(id)
+    local n = M.node(id)
+    if not n then return nil end
+    if M.workset.ids[id] then
+        M.workset.ids[id] = nil
+        for i, r in ipairs(M.workset.refs) do
+            if r._id == id then table.remove(M.workset.refs, i) break end
+        end
+    else
+        M.workset.ids[id] = true
+        local ref = M.ref_of(id)
+        ref._id = id -- session pointer; refs are the durable half
+        table.insert(M.workset.refs, ref)
+    end
+    ws_persist()
+    return M.workset.ids[id] == true
+end
+
+function M.ws_has(id) return M.workset.ids[id] == true end
+
+--- Members ordered by (file, source order) — the ]w/[w cycle order.
+function M.ws_list()
+    local out = {}
+    for id in pairs(M.workset.ids) do out[#out + 1] = M.node(id) end
+    table.sort(out, function (a, b)
+        if a.file ~= b.file then return a.file < b.file end
+        return (a.order or 0) < (b.order or 0)
+    end)
+    return out
+end
+
+--- Resolve refs (loaded or pending) against the CURRENT graph. Renames
+--- are followed — the working set is attention, not a transaction — but
+--- each note is surfaced. Returns the notes.
+function M.ws_resolve()
+    local refs = {}
+    for _, r in ipairs(M.workset.refs) do refs[#refs + 1] = r end
+    for _, r in ipairs(M.workset.pending) do refs[#refs + 1] = r end
+    M.workset.ids, M.workset.refs, M.workset.pending = {}, {}, {}
+    local notes = {}
+    for _, ref in ipairs(refs) do
+        ref._id = nil
+        local id, note = M.resolve_ref(ref)
+        if id then
+            if not M.workset.ids[id] then
+                M.workset.ids[id] = true
+                ref._id = id
+                if note and note:match('^renamed') then
+                    -- attention follows the rename; the ref is renewed
+                    ref = M.ref_of(id)
+                    ref._id = id
+                end
+                table.insert(M.workset.refs, ref)
+            end
+            if note then
+                notes[#notes + 1] = ('%s %s: %s'):format(ref.name, ref.file, note)
+            end
+        else
+            table.insert(M.workset.pending, ref)
+            notes[#notes + 1] = ('%s %s: %s'):format(ref.name, ref.file,
+                note or 'missing')
+        end
+    end
+    return notes
+end
+
+--- Load the persisted set for the current root and resolve it.
+function M.ws_load()
+    M.workset = { ids = {}, refs = {}, pending = {}, last = nil }
+    local fd = io.open(ws_state_file(), 'r')
+    if not fd then return {} end
+    local txt = fd:read('a')
+    fd:close()
+    local ok, saved = pcall(vim.json.decode, txt)
+    if not (ok and type(saved) == 'table' and saved.refs) then return {} end
+    M.workset.pending = saved.refs
+    local notes = M.ws_resolve()
+    ws_persist()
+    return notes
+end
+
 --- Register a ref edge created after ingest (pins), mirroring the
 --- indexing ingest does.
 function M.add_edge(e)
@@ -319,6 +450,9 @@ function M.on_focus(fn) table.insert(M._subs, fn) end
 function M.set_focus(id)
     if id == M.focused then return end
     M.focused = id
+    -- the working set remembers the member you were last at, so
+    -- returning from a dive lands where you left off
+    if id and M.workset and M.workset.ids[id] then M.workset.last = id end
     for _, fn in ipairs(M._subs) do pcall(fn, id) end
 end
 

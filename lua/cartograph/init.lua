@@ -186,6 +186,7 @@ function M.open(dump_path, opts)
                             pcall(store.loc_provider.set, loc)
                         end
                         require('cartograph.toc').attach(store)
+                        store.ws_resolve() -- members arrive with their files
                         vim.notify(('cartograph: extraction complete — %d nodes, %d calls')
                             :format(#acc.nodes, #acc.calls), vim.log.levels.INFO)
                     end,
@@ -203,6 +204,14 @@ function M.open(dump_path, opts)
     end
     -- manifest projects (WoW .toc): exact load order for the browser + linter
     require('cartograph.toc').attach(store)
+
+    -- the working set: what the user marked as their current work,
+    -- persisted per root as refs, resolved against this fresh graph
+    local ws_notes = store.ws_load()
+    if #ws_notes > 0 then
+        vim.notify('cartograph: working set — ' .. table.concat(ws_notes, '; '),
+            vim.log.levels.INFO)
+    end
 
     -- ONE hardcoded layout for now: the browser on the left, the source split
     -- taking the rest (the browser's descend covers uses/callers now, so the

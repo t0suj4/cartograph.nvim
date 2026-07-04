@@ -139,3 +139,37 @@ test('back()/forward() skip history entries whose node is gone', function ()
     store.back()
     eq('a.lua::f', store.focused)
 end)
+
+test('working set: toggle, order, persistence, honest pending', function ()
+    graph({ mod('a.lua', false), fn('a.lua', 'f', 5), fn('a.lua', 'g', 1),
+            mod('b.lua', false), fn('b.lua', 'h', 3) })
+    vim.fn.delete(store.ws_file('/x'))
+    store.ws_load()
+    eq(true, store.ws_toggle('a.lua::f'))
+    eq(true, store.ws_toggle('b.lua::h'))
+    ok(store.ws_has('a.lua::f') and store.ws_has('b.lua::h'))
+    -- ordered by (file, source order)
+    local names = {}
+    for _, n in ipairs(store.ws_list()) do names[#names + 1] = n.id end
+    eq({ 'a.lua::f', 'b.lua::h' }, names)
+    -- toggle off removes the ref too
+    eq(false, store.ws_toggle('b.lua::h') == true)
+    eq(1, #store.workset.refs)
+
+    -- persistence: a fresh graph re-resolves by REF, not id
+    graph({ mod('a.lua', false), fn('a.lua', 'f', 5), fn('a.lua', 'g', 1) })
+    store.ws_load()
+    ok(store.ws_has('a.lua::f'), 'membership survived the reload')
+    -- a member whose symbol vanished waits as pending, visibly
+    graph({ mod('a.lua', false), fn('a.lua', 'g', 1) })
+    local notes = store.ws_load()
+    ok(not store.ws_has('a.lua::f'))
+    eq(1, #store.workset.pending)
+    ok(notes[1]:match('missing'), notes[1] or '?')
+    -- and returns when the symbol does
+    graph({ mod('a.lua', false), fn('a.lua', 'f', 5) })
+    store.ws_resolve()
+    ok(store.ws_has('a.lua::f'), 'pending member resolved on return')
+    vim.fn.delete(store.ws_file('/x'))
+    store.workset = { ids = {}, refs = {}, pending = {} }
+end)

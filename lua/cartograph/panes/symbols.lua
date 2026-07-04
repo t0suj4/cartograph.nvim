@@ -97,6 +97,37 @@ local function file_row(ctx, file, depth, dim)
     if sign then ctx.signs[#ctx.signs + 1] = { row = #ctx.lines - 1, sign = sign } end
 end
 
+-- The working-set altitude: what the user marked, grouped by file — the
+-- place to come back to after a code dive (M lands the cursor on the
+-- last-visited member). Unresolved members (renamed away, file gone)
+-- stay visible as honest pending rows.
+local function render_ws(ctx)
+    local list = store.ws_list()
+    ctx.lines[1] = ('working set (%d)'):format(#list)
+    ctx.marks[1] = { { 0, -1, 'CartographSection' } }
+    local lastfile
+    for _, n in ipairs(list) do
+        if n.file ~= lastfile then
+            lastfile = n.file
+            ctx.lines[#ctx.lines + 1] = n.file
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+            ctx.line_file[#ctx.lines] = n.file
+        end
+        ctx.lines[#ctx.lines + 1] = '  ' .. n.name
+        ctx.line_node[#ctx.lines] = n.id
+        ctx.node_line[n.id] = #ctx.lines
+    end
+    if #list == 0 and #(store.workset.pending or {}) == 0 then
+        ctx.lines[#ctx.lines + 1] = "  (empty — 'm' on a symbol marks it)"
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+    end
+    for _, p in ipairs(store.workset.pending or {}) do
+        ctx.lines[#ctx.lines + 1] = ('  ? %s  %s — unresolved')
+            :format(p.name, p.file)
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographFrontier' } }
+    end
+end
+
 local function render_files(ctx)
     -- a streaming open says how far along it is — partial is not complete
     if store.data and store.data.partial then
@@ -794,6 +825,7 @@ function M.render()
     elseif v.level == 'lit' then render_lit(ctx, v.lit)
     elseif v.level == 'states' then render_states(ctx)
     elseif v.level == 'state' then render_state(ctx, v.state)
+    elseif v.level == 'ws' then render_ws(ctx)
     else render_fn(ctx, v.fn) end
 
     M.line_node, M.node_line = ctx.line_node, ctx.node_line
@@ -880,6 +912,28 @@ end
 function M.restage()
     if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
     vim.api.nvim_buf_clear_namespace(M.buf, ns_stage, 0, -1)
+    -- working-set membership: ● on member rows, and on files-level rows
+    -- for files that contain members (staging's ✓ outranks it)
+    if next(store.workset.ids) then
+        local memberfiles = {}
+        for id in pairs(store.workset.ids) do
+            local r = M.node_line[id]
+            if r then
+                vim.api.nvim_buf_set_extmark(M.buf, ns_stage, r - 1, 0,
+                    { sign_text = '● ', sign_hl_group = 'DiagnosticInfo',
+                        priority = 50 })
+            end
+            local n = store.node(id)
+            if n then memberfiles[n.file] = true end
+        end
+        for row, f in pairs(M.line_file) do
+            if memberfiles[f] then
+                vim.api.nvim_buf_set_extmark(M.buf, ns_stage, row - 1, 0,
+                    { sign_text = '● ', sign_hl_group = 'DiagnosticInfo',
+                        priority = 50 })
+            end
+        end
+    end
     for _, id in ipairs(store.staged_ids()) do
         local r = M.node_line[id]
         if r then
@@ -1255,6 +1309,16 @@ function M.attach(win)
             elseif n and n.kind == 'block' then
                 enter('block', n.id, n.id) -- source pane shows the block's span
             end
+        elseif M.view.level == 'ws' then
+            local n = store.node(M.line_node[r])
+            if n then
+                if n.kind == 'block' then enter('block', n.id, n.id)
+                elseif n.kind == 'var' then descend_var(n)
+                elseif STAGEABLE[n.kind] then enter('fn', n.id, n.id) end
+            else
+                local f = M.line_file[r]
+                if f then enter('file', f) end
+            end
         elseif M.view.level == 'block' then
             local n = store.node(M.line_node[r])
             if n and n.kind == 'var' then
@@ -1325,6 +1389,47 @@ function M.attach(win)
             descend_fn_row(r)
         end
     end
+    -- the working set: mark what you're working on; M is the way back
+    -- from a dive; ]w / [w cycle members as conscious pivots
+    local function ws_goto(n)
+        if not n then return end
+        if n.kind == 'block' then enter('block', n.id, n.id)
+        elseif n.kind == 'var' then
+            browser_pivot(n.id)
+            M.show(enter_var(n.id), n.id)
+        else enter('fn', n.id, n.id) end
+    end
+    local function ws_cycle(dir)
+        local list = store.ws_list()
+        if #list == 0 then
+            return vim.notify('cartograph: working set is empty',
+                vim.log.levels.INFO)
+        end
+        local cur, idx = store.workset.last or store.focused, 0
+        for i, n in ipairs(list) do
+            if n.id == cur then idx = i break end
+        end
+        ws_goto(list[((idx - 1 + dir) % #list) + 1])
+    end
+    vim.keymap.set('n', keys.mark, function ()
+        local id = M.line_node[row()]
+        if id and store.node(id) then
+            store.ws_toggle(id)
+            local loc = view_loc()
+            M.render()
+            restore_loc(loc)
+        end
+    end, { buffer = M.buf, desc = 'cartograph: toggle working set' })
+    vim.keymap.set('n', keys.set_view, function ()
+        enter('ws')
+        local r = store.workset.last and M.node_line[store.workset.last]
+        if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
+    end, { buffer = M.buf, desc = 'cartograph: working set view' })
+    vim.keymap.set('n', keys.set_next, function () ws_cycle(1) end,
+        { buffer = M.buf, desc = 'cartograph: next working-set member' })
+    vim.keymap.set('n', keys.set_prev, function () ws_cycle(-1) end,
+        { buffer = M.buf, desc = 'cartograph: previous working-set member' })
+
     vim.keymap.set('n', keys.descend, descend,
         { buffer = M.buf, desc = 'cartograph: descend (into file / into function)' })
     vim.keymap.set('n', keys.pivot, function ()
@@ -1401,6 +1506,9 @@ function M.attach(win)
             -- block with the cursor on it (files is the no-model fallback)
             store.set_context(nil)
             surface_to_var(M.fsm_anchor())
+        elseif M.view.level == 'ws' then
+            store.set_context(nil)
+            M.show('files')
         elseif M.view.level == 'occs' then
             store.set_context(nil)
             local kind, entity = (M.view.occs or ''):match('^(.-)\31(.-)\31')

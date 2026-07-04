@@ -202,6 +202,25 @@ The **plan** bar updates live — staged symbols, call sites to rewrite, require
 to add, and hazards. Nothing is written yet: the plan *describes* the move
 (preview-then-apply is the next step, and `p` will become the commit).
 
+### The working set
+
+Mark what you're working on; dive freely; come back. In the symbols list:
+
+- `m` — toggle the symbol under the cursor in the **working set** (● in
+  the gutter; files containing members carry ● at the files level).
+- `M` — the working-set altitude: your members grouped by file, with the
+  cursor on the **last-visited member** — the way back from a code dive.
+  `l` dives back in, `h` returns the way you came.
+- `]w` / `[w` — cycle through members (conscious pivots: `<C-o>` undoes).
+
+Membership is held as **refs**, not ids: it survives refresh (a member
+follows its function through line shifts, and renames with a note),
+persists per project in the state dir across sessions, and members whose
+symbol vanished stay visible as honest `? pending` rows until they
+return. On a parallel cold open, working-set files jump to the **head of
+the extraction queue** — your declared attention outranks everything but
+the buffer you're in.
+
 ## Architecture (three seams)
 
 1. **GraphProvider** — supplies `nodes{id,name,kind,file,range,order}` and
