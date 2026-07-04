@@ -124,15 +124,30 @@ function M.file(rel)
     xl.link(data, xl.effective_bindings(data))
     require('cartograph.sql').attach(data)
 
-    -- carry navigation across the re-ingest
+    -- carry navigation across the re-ingest: history entries remap like
+    -- everything else; an entry whose node is gone and unmappable is
+    -- pruned (back() also skips dead ids defensively, for paths that
+    -- can't remap — refresh.all, provider swaps)
+    local function carry_stack(stack)
+        local out = {}
+        for _, e in ipairs(stack or {}) do
+            local id = e.id
+            if id and removed[id] then id = remap[id] end
+            if id or not e.id then
+                e.id = id
+                out[#out + 1] = e
+            end
+        end
+        return out
+    end
     if store.focused and removed[store.focused] then
         store.focused = remap[store.focused]
     end
     local focused = store.focused
-    local back, fwd = store._nav_back, store._nav_fwd
+    local back, fwd = carry_stack(store._nav_back), carry_stack(store._nav_fwd)
     local loc = store.loc_provider and store.loc_provider.get()
     store.ingest(data)
-    store._nav_back, store._nav_fwd = back or {}, fwd or {}
+    store._nav_back, store._nav_fwd = back, fwd
     require('cartograph.toc').attach(store)
     if focused and store.node(focused) then store.set_focus(focused) end
     if loc and store.loc_provider then

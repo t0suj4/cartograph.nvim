@@ -113,3 +113,26 @@ test('import edges without an explicit sideeffect flag default to value', functi
           { { from = 'b.lua', to = 'a.lua', kind = 'import' } })
     eq('value', store.classify('a.lua'))
 end)
+
+test('ingest invalidates the live sample and any stale move-set', function ()
+    graph({ mod('a.lua', false), fn('a.lua', 'f') })
+    store.live = { states = { inactive = 1 }, tick = 42 }
+    store.stage('a.lua::f')
+    graph({ mod('b.lua', false), fn('b.lua', 'g') })
+    ok(store.live == nil, 'live sample cleared')
+    eq(0, #store.staged_ids())
+end)
+
+test('back()/forward() skip history entries whose node is gone', function ()
+    graph({ mod('a.lua', false), fn('a.lua', 'f'), fn('a.lua', 'g'), fn('a.lua', 'h') })
+    store.set_focus('a.lua::f')
+    store.pivot('a.lua::g')  -- pushes f
+    store.pivot('a.lua::h')  -- pushes g
+    -- g vanishes (as after a refresh that could not remap it)
+    store.by_id['a.lua::g'] = nil
+    store.back()
+    eq('a.lua::f', store.focused) -- skipped the dead g entry
+    -- and nothing left below f
+    store.back()
+    eq('a.lua::f', store.focused)
+end)

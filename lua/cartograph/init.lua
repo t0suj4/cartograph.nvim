@@ -28,6 +28,14 @@ function M.open(dump_path, opts)
     local source  = require 'cartograph.panes.source'
     local plan    = require 'cartograph.panes.plan'
 
+    -- same rule as refresh: a staged move-set pins the graph. Swapping
+    -- graphs under it would strand the plan on dead ids — refuse until
+    -- applied or cleared, never discard staged intent silently.
+    if store.data and next(store.moveset or {}) then
+        error('cartograph: staged changes pending — apply or clear the'
+            .. ' move-set before opening another graph', 0)
+    end
+
     -- a DIRECTORY opens through the tree-sitter provider (any language with
     -- a parser); a file is a pre-extracted dump (the lua-ls CLI's output)
     local target = vim.fn.expand(dump_path)

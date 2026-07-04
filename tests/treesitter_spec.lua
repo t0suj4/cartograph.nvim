@@ -733,6 +733,10 @@ end
 local function beta(y)
   return y * 2
 end
+
+local function doomed(q)
+  return q
+end
 ]])
     local data = ts.extract(root)
     require('cartograph.xlang').link(data, require('cartograph.xlang').effective_bindings(data))
@@ -747,6 +751,13 @@ end
         'cross-file edge before')
     ok(not byname('brand_new'), 'target does not exist yet')
     store.set_focus(byname('beta'))
+    -- seed nav history: [beta, doomed, alpha] as jump origins, focus beta
+    local beta1 = byname('beta')
+    store.pivot(byname('doomed'))   -- pushes beta
+    store.pivot(byname('alpha'))    -- pushes doomed
+    store.pivot(beta1)              -- pushes alpha
+    -- a live sample, to prove ingest invalidates it
+    store.live = { states = { inactive = 1 }, tick = 1 }
 
     -- edit b.lua: lines shift (id changes) AND brand_new appears
     write('sub/b.lua', [[
@@ -775,6 +786,19 @@ end
         'old call into the new function relinked')
     -- focus survived the remap
     eq(beta2, store.focused)
+    -- history remapped like everything else: beta's entry follows the id
+    -- shift, doomed's (deleted) entry is pruned, alpha's untouched
+    eq(2, #store._nav_back)
+    eq(beta2, store._nav_back[1].id)
+    eq(byname('alpha'), store._nav_back[2].id)
+    -- and back() walks the carried stack cleanly
+    store.back()
+    eq(byname('alpha'), store.focused)
+    store.back()
+    eq(beta2, store.focused)
+    -- the live sample did not survive the re-ingest (evidence about the
+    -- OLD graph state)
+    ok(store.live == nil, 'live sample invalidated by ingest')
     -- freeze-while-staged
     store.moveset[byname('alpha')] = true
     local s2, w2 = refresh.file('sub/b.lua')

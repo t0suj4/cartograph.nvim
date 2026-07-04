@@ -26,6 +26,12 @@ function M.ingest(data)
     M.toc     = nil -- load-order manifest; cartograph.toc.attach() sets it
     M._frontier_cache = {}
     M._nav_back, M._nav_fwd = {}, {}
+    -- a live sample is evidence about (this graph, that moment) — any new
+    -- graph state invalidates it; :CartographLive re-samples in one command
+    M.live = nil
+    -- staged ids belong to the previous graph; init.open refuses to swap
+    -- graphs while staged, so anything left here is a ghost — drop it
+    if next(M.moveset or {}) then M.clear_stage() end
     M.by_id   = {}
     M.by_file = {}
     M.files   = {}
@@ -270,9 +276,20 @@ function M.pivot(id)
     M.set_focus(id)
 end
 
+-- pop entries until one whose node still exists (refresh remaps what it
+-- can; a deleted node's entry is simply gone, like a closed buffer in the
+-- jumplist). id = nil entries are place-only snapshots and stay valid.
+local function pop_live(stack)
+    while true do
+        local e = table.remove(stack)
+        if not e then return nil end
+        if not e.id or M.by_id[e.id] then return e end
+    end
+end
+
 --- <C-o> / <C-t>: return to the location of the previous pivot.
 function M.back()
-    local e = table.remove(M._nav_back)
+    local e = pop_live(M._nav_back)
     if not e then return end
     M._nav_fwd[#M._nav_fwd + 1] = snapshot()
     restore(e)
@@ -280,7 +297,7 @@ end
 
 --- <C-i>: undo a back().
 function M.forward()
-    local e = table.remove(M._nav_fwd)
+    local e = pop_live(M._nav_fwd)
     if not e then return end
     M._nav_back[#M._nav_back + 1] = snapshot()
     restore(e)
