@@ -43,7 +43,8 @@ M.keys = {
     trace      = 'gr',      -- source: trace where the parameter under the cursor comes from
     cycle      = '<Tab>',   -- source: toggle the flow (concern) lens
     cycle_back = '<S-Tab>',
-    close      = 'q',       -- trace: give the window back
+    close      = 'q',
+    pin        = 'p',       -- trace: pin this literal as the dispatch target       -- trace: give the window back
     -- staging (symbols pane)
     cut        = 'dd',
     cut_visual = 'd',

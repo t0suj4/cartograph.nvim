@@ -31,7 +31,7 @@ local MARK = {
 local function render()
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
     local lines, marks, virt = {}, {}, {}
-    local pre = 'origins of '
+    local pre = M.dispatch and 'dispatch of ' or 'origins of '
     lines[1] = ('%s%s   (%s)'):format(pre, M.pname, M.fname)
     marks[1] = { { 0, #pre, 'CartographDim' }, { #pre, #pre + #M.pname, 'CartographTitle' },
                  { #pre + #M.pname, -1, 'CartographDim' } }
@@ -170,6 +170,19 @@ local function create()
         local r = M.rows[cur_row() or -1]
         if r and r.origin.fn then store.pivot(r.origin.fn) end
     end, { buffer = buf, desc = 'cartograph: pivot the cockpit to this origin\'s function' })
+    vim.keymap.set('n', keys.pin, function ()
+        local r = M.rows[cur_row() or -1]
+        if not M.dispatch then
+            return vim.notify('cartograph: not a dispatch trace — nothing to pin',
+                vim.log.levels.WARN)
+        end
+        local v = r and r.origin.v
+        if not (v and v.k == 'lit' and type(v.v) == 'string') then
+            return vim.notify('cartograph: pin a LITERAL origin (the string is the target)',
+                vim.log.levels.WARN)
+        end
+        M.pin(v.v)
+    end, { buffer = buf, desc = 'cartograph: pin this literal as the dispatch target' })
     vim.keymap.set('n', keys.close, M.close, { buffer = buf, desc = 'cartograph: close the trace' })
     vim.keymap.set('n', keys.back,     store.back,    { buffer = buf, desc = 'cartograph: back' })
     vim.keymap.set('n', keys.back_alt, store.back,    { buffer = buf, desc = 'cartograph: back' })
@@ -193,9 +206,12 @@ local function create()
 end
 
 --- Open the trace for parameter `i` (1-based, self included) of function `fn_id`.
-function M.open(fn_id, i, pname)
+--- `dispatch` marks this as a dispatch trace: the call whose dynamic callee
+--- is the traced parameter — literal origins become pinnable targets.
+function M.open(fn_id, i, pname, dispatch)
     local node = store.node(fn_id)
     if not node then return end
+    M.dispatch = dispatch
     M.fname, M.pidx, M.pname = node.name or '?', i, pname or '?'
     local origins, note = trace.origins(store, fn_id, i)
     M.rows, M.note = {}, note
@@ -214,6 +230,49 @@ function M.open(fn_id, i, pname)
     render()
     pcall(vim.api.nvim_win_set_cursor, M.win, { HEADER + 1, 0 })
     hover(M.win) -- show the first origin's context immediately
+end
+
+--- Pin `name` as the target of the dispatch call this trace was opened
+--- for: runtime config entry, real edge, descend target — and a snippet to
+--- make it durable.
+function M.pin(name)
+    local c = M.dispatch
+    local target
+    for _, n in ipairs(store.data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and n.name == name then
+            if target then
+                return vim.notify(('cartograph: %q is ambiguous (%s and %s)')
+                    :format(name, target.file, n.file), vim.log.levels.WARN)
+            end
+            target = n
+        end
+    end
+    if not target then
+        return vim.notify(('cartograph: no function named %q in the graph'):format(name),
+            vim.log.levels.WARN)
+    end
+    local cfg = require('cartograph.config')
+    cfg.pins = cfg.pins or {}
+    cfg.pins[#cfg.pins + 1] = { file = c.file, line = c.line + 1, to = name }
+    -- apply surgically: the call resolves, the edge exists, views know
+    for _, call in ipairs(store.data.calls or {}) do
+        if call.file == c.file and call.line == c.line
+            and call.callee == c.callee then
+            call.to = target.id
+            call.dynamic = nil
+        end
+    end
+    local from = c.fn
+    if from then
+        store.add_edge({ from = from, to = target.id, kind = 'ref', xlang = true,
+            at = { { start = { line = c.line, char = 0 },
+                ['end'] = { line = c.line, char = 0 } } } })
+    end
+    require('cartograph.panes.symbols').render()
+    vim.notify(("cartograph: pinned %s:%d -> %s — make it durable with:\n"
+        .. "  setup{ pins = { { file = '%s', line = %d, to = '%s' } } }")
+        :format(c.file, c.line + 1, name, c.file, c.line + 1, name),
+        vim.log.levels.INFO)
 end
 
 return M

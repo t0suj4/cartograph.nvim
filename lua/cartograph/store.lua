@@ -178,6 +178,20 @@ function M.frontier_find(name)
     return hits
 end
 
+--- Register a ref edge created after ingest (pins), mirroring the
+--- indexing ingest does.
+function M.add_edge(e)
+    table.insert(M.data.edges, e)
+    if e.kind == 'ref' then
+        M.uses[e.from] = M.uses[e.from] or {}
+        table.insert(M.uses[e.from], e.to)
+        M.usedby[e.to] = M.usedby[e.to] or {}
+        table.insert(M.usedby[e.to], e.from)
+        M.occ[e.from .. '\31' .. e.to] = e.at or {}
+    end
+    return e
+end
+
 --- Register a node created after ingest (frontier landings).
 function M.add_node(n)
     if M.by_id[n.id] then return n end

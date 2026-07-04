@@ -126,6 +126,16 @@ All standard vim idioms — no new keys to learn:
   clears the forward memory. Structural ascent (fn → file → files) is the
   fallback for places you *jumped* into (`<C-]>` starts a fresh journey).
 
+### Dynamic dispatch: trace to pin
+
+`l` on a dynamic callee (`→ $callback`) that is a **parameter** opens the
+dispatch trace: one row per caller, and the literals they pass are the
+candidate targets. `p` on a literal pins it — the call resolves, the edge
+lands in the graph live (the callers view updates immediately), and the
+notification carries the `setup{ pins = … }` snippet that makes it
+durable. Ambiguous names refuse; non-literal origins stay frontiers you
+can keep expanding.
+
 ### Tracing a parameter
 
 `gr` on a parameter name in the source pane answers *"where does this value

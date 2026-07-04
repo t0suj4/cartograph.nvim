@@ -29,3 +29,10 @@ function dispatch_branchy($c) {
     if ($c) { $h = 'scale'; }
     return $h(5);
 }
+
+function dispatch_param($cb) {
+    return $cb(6);
+}
+
+dispatch_param('scale');
+dispatch_param('compute');

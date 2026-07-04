@@ -1149,6 +1149,17 @@ function M.attach(win)
             if c.callee == word and not c.to and frontier_jump(word) then
                 return
             end
+            -- a DYNAMIC callee ($fn) that is a parameter: open the dispatch
+            -- trace — the callers' literals are the candidate targets, and
+            -- the pin key turns the chosen one into a real edge
+            if c.dynamic and not c.to and c.callee == '$' .. word then
+                for pi, pname in ipairs(node.params or {}) do
+                    if pname == word then
+                        return require('cartograph.panes.trace')
+                            .open(node.id, pi, word, c)
+                    end
+                end
+            end
         end
         -- 2. a parameter: where does it come from? (the origin trace)
         for pi, p in ipairs(node.params or {}) do

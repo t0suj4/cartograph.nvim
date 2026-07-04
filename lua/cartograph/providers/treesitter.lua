@@ -652,10 +652,16 @@ local function fn_params(def, spec, src, method)
         for c in ps:iter_children() do
             if c:type() == 'identifier' or c:type() == 'variable' then
                 out[#out + 1] = node_text(c, src)
+            elseif c:type() == 'variable_name' then -- php $param
+                out[#out + 1] = node_text(c, src):gsub('^%$', '')
             elseif c:named() then -- c parameter_declaration / defaulted params
                 for id in c:iter_children() do
                     if id:type() == 'identifier' then
                         out[#out + 1] = node_text(id, src)
+                        break
+                    end
+                    if id:type() == 'variable_name' then
+                        out[#out + 1] = node_text(id, src):gsub('^%$', '')
                         break
                     end
                     if id:type() == 'pointer_declarator' then

@@ -333,3 +333,42 @@ test('frontier: minified bundles are opaque but reachable by text search', funct
     require('cartograph.config').unparsed = true
     eq(nil, data2.unparsed)
 end)
+
+test('trace-to-pin: dispatch trace lists caller literals; pin makes the edge', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'php') then
+        skip 'no php parser'
+    end
+    local xl = require 'cartograph.xlang'
+    local tp = require 'cartograph.panes.trace'
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
+    xl.link(data)
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    local dispatch_call
+    for _, c in ipairs(data.calls) do
+        if c.callee == '$cb' then dispatch_call = c end
+    end
+    ok(dispatch_call and dispatch_call.dynamic, 'the $cb call is a frontier')
+    ok(byname.dispatch_param.params and byname.dispatch_param.params[1] == 'cb',
+        'php param extracted')
+    -- the dispatch trace: one row per caller, literals are the candidates
+    tp.open(byname.dispatch_param.id, 1, 'cb', dispatch_call)
+    local lits = {}
+    for _, r in ipairs(tp.rows) do
+        if r.origin.v.k == 'lit' then lits[#lits + 1] = r.origin.v.v end
+    end
+    table.sort(lits)
+    eq({ 'compute', 'scale' }, lits)
+    -- pin one: call resolves, edge exists AND is indexed, config carries it
+    tp.pin('scale')
+    ok(dispatch_call.to == byname.scale.id, 'call resolved by the pin')
+    ok(not dispatch_call.dynamic, 'no longer a frontier')
+    eq(1, #(require('cartograph.config').pins or {}))
+    ok(vim.tbl_contains(store.usedby[byname.scale.id] or {},
+        byname.dispatch_param.id), 'edge indexed live')
+    require('cartograph.config').pins = nil
+    tp.close()
+end)
