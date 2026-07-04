@@ -384,6 +384,20 @@ oracle) re-run on every open — oracle verdicts are session-live by
 design. Subtree slices (`subdirs`) bypass the cache; `setup{ cache =
 false }` opts out.
 
+### Parallel cold open
+
+The first open of a big tree doesn't block: above ~300 files the
+browser opens **immediately** on the file list and worker processes
+parse slices in the background — the graph fills in as chunks land,
+with an honest `extracting… k/n slices (links partial)` header until
+it's complete. The result is **identical to sequential extraction by
+construction**: workers parse, but every cross-file *hypothesis* a
+slice makes is discarded (unique-in-slice is not unique-globally) and
+re-derived by the global relink; the identifier pass runs against
+parent-built global indexes. Wordpress: 47s → **13s** on 8 workers,
+browsable from second 6. `setup{ workers = n, parallel = false,
+parallel_threshold = n }` to tune.
+
 ### The live oracle
 
 The running system is the top rung of the epistemics ladder.

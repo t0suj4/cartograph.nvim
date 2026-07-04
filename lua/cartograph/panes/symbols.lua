@@ -98,6 +98,12 @@ local function file_row(ctx, file, depth, dim)
 end
 
 local function render_files(ctx)
+    -- a streaming open says how far along it is — partial is not complete
+    if store.data and store.data.partial then
+        ctx.lines[1] = ('extracting… %d/%d slices (links partial)')
+            :format(store.data.partial.done, store.data.partial.total)
+        ctx.marks[1] = { { 0, -1, 'CartographFrontier' } }
+    end
     -- sampled graphs (MCP) say when they were true; disk graphs don't age
     if store.data and store.data.fetched_at then
         ctx.lines[1] = ('%s — fetched %s'):format(

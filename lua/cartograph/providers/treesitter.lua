@@ -793,6 +793,124 @@ end
 -- the cache diffs the tree with the same walk/exclusion rules extraction uses
 function M.list_files(root, subdirs) return list_files(root, subdirs) end
 
+-- The id pass: identifier occurrences naming a known top-level var (same
+-- file, or unique across the workspace) or — outside call position — a
+-- unique function (dispatch tables, registry values). A top-level
+-- function reference marks the target dynamically dispatched (cbarg): a
+-- dispatch-table entry is not dead code. Takes SUPPLIED lookups so the
+-- parallel driver can run it in workers against parent-built GLOBAL
+-- indexes: slice-local uniqueness is not global uniqueness.
+-- L = { fn_unique = name -> {id,file,line,node?} (globally unique fns),
+--       var_named = name -> { {id,file,line}, ... } (top-level vars),
+--       fn_ranges = file -> { {s,e,id}, ... },
+--       addref(from,to,at,inferred), adduse(edge), mark_cbarg(entry) }
+local function id_pass(root, files, L)
+    for _, file in ipairs(files) do
+        local lang, spec = lang_for(file)
+        local ranges = L.fn_ranges[file]
+        if ranges then
+            local fd = io.open(root .. '/' .. file, 'r')
+            local src = fd and fd:read('a')
+            if fd then fd:close() end
+            local okp, parser = pcall(vim.treesitter.get_string_parser, src or '', lang)
+            if src and okp then
+                local function fn_at(line)
+                    local best
+                    for _, r in ipairs(ranges) do
+                        if r.s <= line and line <= r.e
+                            and (not best or r.s >= best.s) then best = r end
+                    end
+                    return best and best.id
+                end
+                local tsroot = parser:parse()[1]:root()
+                local q = parse_query(lang, spec.id_query or '(identifier) @id')
+                local useEdge = {}
+                if q then
+                    for _, n in q:iter_captures(tsroot, src, 0, -1) do
+                        local name = node_text(n, src)
+                        local parent = n:parent()
+                        local pt = parent and parent:type() or ''
+                        local callee_pos = (pt == 'call_expression' or pt == 'function_call'
+                                or pt == 'call' or pt == 'apply')
+                            and (parent:field('function')[1] == n or parent:field('name')[1] == n)
+                            -- sexp grammars have no fields: the head IS the callee
+                            or (pt == 'list' and parent:named_child(0) == n)
+                        if not callee_pos and #name >= 3
+                            and not (spec.stdlib_names or {})[name] then
+                            local u = L.fn_unique[name]
+                            if u then
+                                local line = select(1, n:range())
+                                if not (u.file == file and line == u.line) then
+                                    local from = fn_at(line)
+                                    if from then
+                                        L.addref(from, u.id, pos_of(n), true)
+                                    else
+                                        L.mark_cbarg(u) -- referenced from top-level data
+                                    end
+                                end
+                            end
+                        end
+                        local cands = L.var_named[name]
+                        if cands then
+                            local var
+                            for _, v in ipairs(cands) do
+                                if v.file == file then var = v break end
+                            end
+                            if not var and #cands == 1 then var = cands[1] end
+                            local line = select(1, n:range())
+                            if var and not (var.file == file and line == var.line) then
+                                local from = fn_at(line)
+                                if from then
+                                    local k = from .. '\31' .. var.id
+                                    local e = useEdge[k]
+                                    if not e then
+                                        e = { from = from, to = var.id, kind = 'use', at = {} }
+                                        useEdge[k] = e
+                                        L.adduse(e)
+                                    end
+                                    e.at[#e.at + 1] = pos_of(n)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+--- Standalone id pass over `files` with global lookups (parallel phase
+--- 2, run inside a worker). Returns { edges = {...}, cbarg = {id, ...} }.
+function M.id_pass(root, files, lookups)
+    local out = { edges = {}, cbarg = {} }
+    local refEdge, seen_cb = {}, {}
+    id_pass(root, files, {
+        fn_unique = lookups.fn_unique,
+        var_named = lookups.var_named,
+        fn_ranges = lookups.fn_ranges,
+        addref = function (from, to, at, inferred)
+            local k = from .. '\31' .. to
+            local e = refEdge[k]
+            if not e then
+                e = { from = from, to = to, kind = 'ref', at = {},
+                    self = (from == to) or nil, inferred = inferred or nil }
+                refEdge[k] = e
+                out.edges[#out.edges + 1] = e
+            end
+            if not inferred then e.inferred = nil end
+            e.at[#e.at + 1] = at
+        end,
+        adduse = function (e) out.edges[#out.edges + 1] = e end,
+        mark_cbarg = function (u)
+            if not seen_cb[u.id] then
+                seen_cb[u.id] = true
+                out.cbarg[#out.cbarg + 1] = u.id
+            end
+        end,
+    })
+    return out
+end
+
 --- Extract a neutral-schema graph from a directory tree. Any file whose
 --- extension has a spec (and an available parser) participates.
 ---@param root string
@@ -1092,6 +1210,8 @@ function M.extract(root, opts)
                         file = file, line = sp.start.line, method = method,
                         full = full ~= callee and full or nil,
                         dynamic = dynamic,
+                        at = pos_of(namen), -- callee token range: relink
+                        -- rebuilds edges at full fidelity, not line-anchored
                         top = is_top or nil }
                     calls[#calls + 1] = c
                     local indirect = (spec.indirect_calls or {})[callee]
@@ -1185,7 +1305,8 @@ function M.extract(root, opts)
         end
         local line = src_cache[p.file] and src_cache[p.file][defstmt.l] or ''
         local lit = line:match('%$' .. varname .. [=[%s*=%s*['"]([%w_:\]+)['"]]=])
-        return lit and resolve(lit, p.file) or nil
+        if not lit then return nil end
+        return resolve(lit, p.file), lit
     end
 
     for _, p in ipairs(pending) do
@@ -1193,9 +1314,13 @@ function M.extract(root, opts)
         if p.call.dynamic then
             -- $fn(...): frontier — unless single-assignment literal flow
             -- pins the name down within the function
-            target = literal_flow(p)
+            local lit
+            target, lit = literal_flow(p)
+            -- traced carries the LITERAL whenever one was found (truthy as
+            -- before) so relink can re-resolve it — a parallel slice may
+            -- know the literal but not see its target
+            if lit then p.call.traced = lit end
             if target then
-                p.call.traced = true
                 p.call.dynamic = nil -- pinned down: no longer a frontier
             end
         elseif p.indirect then
@@ -1226,73 +1351,38 @@ function M.extract(root, opts)
         end
     end
 
-    -- use edges + function references: identifier occurrences naming a
-    -- known top-level var (same file, or unique across the workspace) or —
-    -- outside call position — a unique function (dispatch tables, registry
-    -- values). A top-level function reference marks the target dynamically
-    -- dispatched (cbarg): a dispatch-table entry is not dead code.
-    for _, file in ipairs(files) do
-        local lang, spec = lang_for(file)
-        local fd = io.open(root .. '/' .. file, 'r')
-        local src = fd and fd:read('a')
-        if fd then fd:close() end
-        local okp, parser = pcall(vim.treesitter.get_string_parser, src or '', lang)
-        if src and okp and fnRanges[file] then
-            local tsroot = parser:parse()[1]:root()
-            local q = parse_query(lang, spec.id_query or '(identifier) @id')
-            local useEdge = {}
-            if q then
-                for _, n in q:iter_captures(tsroot, src, 0, -1) do
-                    local name = node_text(n, src)
-                    local parent = n:parent()
-                    local pt = parent and parent:type() or ''
-                    local callee_pos = (pt == 'call_expression' or pt == 'function_call'
-                            or pt == 'call' or pt == 'apply')
-                        and (parent:field('function')[1] == n or parent:field('name')[1] == n)
-                        -- sexp grammars have no fields: the head IS the callee
-                        or (pt == 'list' and parent:named_child(0) == n)
-                    if not callee_pos and #name >= 3
-                        and not (spec.stdlib_names or {})[name] then
-                        local fns = exact[name]
-                        if fns and #fns == 1 then
-                            local t = fns[1]
-                            local line = select(1, n:range())
-                            if not (t.file == file and line == t.range.start.line) then
-                                local from = fn_at(file, line)
-                                if from then
-                                    addref(from, t.id, pos_of(n), true)
-                                else
-                                    t.cbarg = true -- referenced from top-level data
-                                end
-                            end
-                        end
-                    end
-                    local cands = varsByName[name]
-                    if cands then
-                        local var
-                        for _, v in ipairs(cands) do
-                            if v.file == file then var = v break end
-                        end
-                        if not var and #cands == 1 then var = cands[1] end
-                        local line = select(1, n:range())
-                        if var and not (var.file == file
-                            and line == var.range.start.line) then
-                            local from = fn_at(file, line)
-                            if from then
-                                local k = from .. '\31' .. var.id
-                                local e = useEdge[k]
-                                if not e then
-                                    e = { from = from, to = var.id, kind = 'use', at = {} }
-                                    useEdge[k] = e
-                                    edges[#edges + 1] = e
-                                end
-                                e.at[#e.at + 1] = pos_of(n)
-                            end
-                        end
-                    end
-                end
+    -- use edges + function references (the id pass — factored so parallel
+    -- extraction can run it in workers against PARENT-built global
+    -- lookups; slice-local uniqueness is not global uniqueness)
+    if not (opts and opts.skip_idpass) then
+        local fn_unique = {}
+        for name, fns in pairs(exact) do
+            if #fns == 1 then
+                fn_unique[name] = { id = fns[1].id, file = fns[1].file,
+                    line = fns[1].range.start.line, node = fns[1] }
             end
         end
+        local var_named = {}
+        for name, vars in pairs(varsByName) do
+            local list = {}
+            for _, v in ipairs(vars) do
+                list[#list + 1] = { id = v.id, file = v.file,
+                    line = v.range.start.line }
+            end
+            var_named[name] = list
+        end
+        id_pass(root, files, {
+            fn_unique = fn_unique,
+            var_named = var_named,
+            fn_ranges = fnRanges,
+            addref = addref,
+            adduse = function (e) edges[#edges + 1] = e end,
+            mark_cbarg = function (u) u.node.cbarg = true end,
+        })
+    else
+        -- the parallel driver needs each slice's function extents to run
+        -- the id pass later (fn_at over these files)
+        data.fn_ranges = fnRanges
     end
 
     -- minified bundles as OPAQUE frontiers: visible modules, no parsed
@@ -1374,9 +1464,15 @@ function M.relink(data)
     end
     local n = 0
     for _, c in ipairs(data.calls or {}) do
-        if not c.to and not c.dynamic then
+        -- dynamic calls stay frontiers UNLESS a literal-flow trace already
+        -- named the callee (a parallel slice may know the literal but not
+        -- have seen its target)
+        if not c.to and (not c.dynamic or type(c.traced) == 'string') then
             local target, inferred
-            if c.indirect then
+            if type(c.traced) == 'string' then
+                target = resolve(c.traced, c.file)
+                inferred = false
+            elseif c.indirect then
                 target = resolve(c.indirect, c.file)
                 inferred = false
             else
@@ -1384,11 +1480,28 @@ function M.relink(data)
             end
             if target then
                 c.to = target.id
+                if c.dynamic then c.dynamic = nil end -- pinned by the trace
                 n = n + 1
                 if c.fn then
-                    addref(c.fn, target.id,
-                        { start = { line = c.line, char = 0 },
+                    addref(c.fn, target.id, c.at
+                        or { start = { line = c.line, char = 0 },
                             ['end'] = { line = c.line, char = 0 } }, inferred)
+                end
+            end
+        end
+        -- callback-pattern mirror: an identifier argument naming a unique
+        -- function upgrades to a resolved 'func' arg (extract does this;
+        -- without the mirror a splice or audit loses the upgrade)
+        for _, a in ipairs(c.argv or {}) do
+            if a.k == 'local' and a.name then
+                local t2 = resolve(a.name, c.file)
+                if t2 and (t2.kind == 'function' or t2.kind == 'method') then
+                    a.k, a.to = 'func', t2.id
+                    if c.fn then
+                        addref(c.fn, t2.id,
+                            { start = { line = c.line, char = 0 },
+                                ['end'] = { line = c.line, char = 0 } }, true)
+                    end
                 end
             end
         end

@@ -170,6 +170,10 @@ function M.file(rel)
     if not data or data.provider ~= 'treesitter' then
         return nil, 'not a live graph (dump-based — regenerate the dump instead)'
     end
+    if data.partial then
+        return nil, 'extraction in progress — refresh again when it completes'
+            .. ' (the stale marker will say if this file needs it)'
+    end
     if next(store.moveset or {}) then
         return nil, 'staged changes pending — refresh is frozen until applied or cleared'
     end

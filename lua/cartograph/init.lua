@@ -50,6 +50,45 @@ function M.open(dump_path, opts)
         require('cartograph.sql').attach(data)
         store.ingest(data)
     elseif vim.fn.isdirectory(target) == 1 then
+        local cfg = require 'cartograph.config'
+        -- everything after extraction: clangd oracle, cross-language
+        -- links, SQL entities, ingest (also the parallel path's on_done)
+        local function finish(data)
+            -- C/C++ roots get clangd resolution when available (config.clangd)
+            local has_c = false
+            for _, n in ipairs(data.nodes) do
+                if n.kind == 'module' and n.file:match('%.[ch]p?p?$') then
+                    has_c = true
+                    break
+                end
+            end
+            if has_c and cfg.clangd ~= false then
+                vim.notify('cartograph: resolving call graph with clangd…', vim.log.levels.INFO)
+                local stats = require('cartograph.providers.clangd').enrich(data)
+                if stats then
+                    vim.notify(('cartograph: clangd proved edges for %d functions')
+                        :format(stats.resolved_fns), vim.log.levels.INFO)
+                end
+            end
+            -- cross-language boundaries (string-key dispatch) — after clangd,
+            -- so the oracle's edge rebuild can't drop the cross-language links.
+            -- Registries the project invented for itself are DISCOVERED and
+            -- linked the same way (config.discover = false disables).
+            local x = require('cartograph.xlang').link(data,
+                require('cartograph.xlang').effective_bindings(data))
+            -- string-embedded SQL: tables become entities with usage sites
+            local sq = require('cartograph.sql').attach(data)
+            if sq.tables > 0 then
+                vim.notify(('cartograph: %d SQL tables from %d embedded queries')
+                    :format(sq.tables, sq.queries), vim.log.levels.INFO)
+            end
+            if x.links > 0 then
+                vim.notify(('cartograph: linked %d cross-language call sites')
+                    :format(x.links), vim.log.levels.INFO)
+            end
+            store.ingest(data)
+        end
+
         -- incremental open: unchanged files come from the cache, only the
         -- diff re-extracts. Subtree slices bypass it (a slice would poison
         -- the full-tree entry).
@@ -58,45 +97,84 @@ function M.open(dump_path, opts)
             data, note = require('cartograph.cache').open(target)
             if note then vim.notify('cartograph: ' .. note, vim.log.levels.INFO) end
         end
-        if not data then
-            data = require('cartograph.providers.treesitter').extract(target, opts)
-            if not (opts and opts.subdirs) then
-                require('cartograph.cache').save(data)
+        if data then
+            finish(data)
+        else
+            local ts = require 'cartograph.providers.treesitter'
+            local files = not (opts and opts.subdirs) and cfg.parallel ~= false
+                and ts.list_files(target) or {}
+            if #files >= (cfg.parallel_threshold or 300) then
+                -- streaming cold open: the browser opens NOW on module
+                -- stubs; worker chunks fill the graph in as they land
+                local stub = { schema = 1, root = target, provider = 'treesitter',
+                    partial = { done = 0, total = 0 },
+                    nodes = {}, edges = {}, calls = {}, stamps = {} }
+                local R0 = { start = { line = 0, char = 0 },
+                    ['end'] = { line = 0, char = 0 } }
+                for _, f in ipairs(files) do
+                    stub.nodes[#stub.nodes + 1] = { id = f, name = f,
+                        kind = 'module', file = f, range = R0, order = -1 }
+                end
+                store.ingest(stub)
+                local par = require 'cartograph.parallel'
+                local nw = cfg.workers or par.default_workers()
+                vim.notify(('cartograph: extracting %d files with %d workers…')
+                    :format(#files, nw), vim.log.levels.INFO)
+                par.extract(target, {
+                    workers = nw,
+                    on_note = function (m)
+                        vim.notify('cartograph: ' .. m, vim.log.levels.WARN)
+                    end,
+                    on_chunk = function (k, n, acc)
+                        -- progressive view: arrived files real, rest stubs
+                        local seen = {}
+                        for _, nd in ipairs(acc.nodes) do
+                            if nd.kind == 'module' then seen[nd.file] = true end
+                        end
+                        local view = {}
+                        for key, v in pairs(acc) do view[key] = v end
+                        view.partial = { done = k, total = n }
+                        view.nodes = vim.list_extend({}, acc.nodes)
+                        for _, f in ipairs(files) do
+                            if not seen[f] then
+                                view.nodes[#view.nodes + 1] = { id = f, name = f,
+                                    kind = 'module', file = f, range = R0, order = -1 }
+                            end
+                        end
+                        local back, fwd = store._nav_back, store._nav_fwd
+                        local loc = store.loc_provider and store.loc_provider.get()
+                        local focused = store.focused
+                        store.ingest(view)
+                        store._nav_back, store._nav_fwd = back or {}, fwd or {}
+                        if focused and store.node(focused) then
+                            store.set_focus(focused)
+                        end
+                        if loc and store.loc_provider then
+                            pcall(store.loc_provider.set, loc)
+                        end
+                    end,
+                    on_done = function (acc)
+                        require('cartograph.cache').save(acc)
+                        local back, fwd = store._nav_back, store._nav_fwd
+                        local loc = store.loc_provider and store.loc_provider.get()
+                        finish(acc)
+                        store._nav_back, store._nav_fwd = back or {}, fwd or {}
+                        if loc and store.loc_provider then
+                            pcall(store.loc_provider.set, loc)
+                        end
+                        require('cartograph.toc').attach(store)
+                        vim.notify(('cartograph: extraction complete — %d nodes, %d calls')
+                            :format(#acc.nodes, #acc.calls), vim.log.levels.INFO)
+                    end,
+                })
+            else
+                data = ts.extract(target, opts)
+                if not (opts and opts.subdirs) then
+                    require('cartograph.cache').save(data)
+                end
+                finish(data)
             end
         end
-        -- C/C++ roots get clangd resolution when available (config.clangd)
-        local has_c = false
-        for _, n in ipairs(data.nodes) do
-            if n.kind == 'module' and n.file:match('%.[ch]p?p?$') then
-                has_c = true
-                break
-            end
-        end
-        if has_c and require('cartograph.config').clangd ~= false then
-            vim.notify('cartograph: resolving call graph with clangd…', vim.log.levels.INFO)
-            local stats = require('cartograph.providers.clangd').enrich(data)
-            if stats then
-                vim.notify(('cartograph: clangd proved edges for %d functions')
-                    :format(stats.resolved_fns), vim.log.levels.INFO)
-            end
-        end
-        -- cross-language boundaries (string-key dispatch) — after clangd,
-        -- so the oracle's edge rebuild can't drop the cross-language links.
-        -- Registries the project invented for itself are DISCOVERED and
-        -- linked the same way (config.discover = false disables).
-        local x = require('cartograph.xlang').link(data,
-            require('cartograph.xlang').effective_bindings(data))
-        -- string-embedded SQL: tables become entities with usage sites
-        local sq = require('cartograph.sql').attach(data)
-        if sq.tables > 0 then
-            vim.notify(('cartograph: %d SQL tables from %d embedded queries')
-                :format(sq.tables, sq.queries), vim.log.levels.INFO)
-        end
-        if x.links > 0 then
-            vim.notify(('cartograph: linked %d cross-language call sites')
-                :format(x.links), vim.log.levels.INFO)
-        end
-        store.ingest(data)
     else
         store.load(target)
     end

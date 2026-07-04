@@ -42,6 +42,13 @@ M.refresh = true
 -- always extract cold.
 M.cache = true
 
+-- parallel cold extraction: worker processes parse file slices while the
+-- browser opens immediately and fills in as chunks arrive. Kicks in at
+-- parallel_threshold files; workers defaults to cores-1 (capped at 8).
+M.parallel = true
+M.parallel_threshold = 300
+M.workers = nil
+
 -- MCP graph sources: open 'mcp://name' to pull a neutral-schema graph
 -- from the named server's tool (default tool name: 'graph')
 --   setup{ mcp = { game = { cmd = { 'my-mcp-server' }, tool = 'graph' } } }

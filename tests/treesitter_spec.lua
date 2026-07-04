@@ -876,6 +876,61 @@ end
     vim.fn.delete(root, 'rf')
 end)
 
+test('parallel extraction: identical graph to sequential', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local par = require 'cartograph.parallel'
+    local root = vim.fn.getcwd() .. '/tests/fixtures'
+    local seq = ts.extract(root)
+    local got, notes = nil, {}
+    par.extract(root, {
+        workers = 3,
+        on_note = function (m) notes[#notes + 1] = m end,
+        on_done = function (d) got = d end,
+    })
+    vim.wait(120000, function () return got ~= nil end, 50)
+    ok(got, 'parallel finished (' .. table.concat(notes, '; ') .. ')')
+    eq(0, #notes) -- no failed slices
+
+    -- node identity: same ids, exactly
+    eq(#seq.nodes, #got.nodes)
+    local ids = {}
+    for _, n in ipairs(seq.nodes) do ids[n.id] = true end
+    for _, n in ipairs(got.nodes) do
+        ok(ids[n.id], 'unexpected node ' .. n.id)
+    end
+    -- cbarg marks identical (phase-2 global index at work)
+    local function cbset(nodes)
+        local t = {}
+        for _, n in ipairs(nodes) do if n.cbarg then t[#t + 1] = n.id end end
+        table.sort(t)
+        return t
+    end
+    eq(cbset(seq.nodes), cbset(got.nodes))
+    -- edges: same (kind, from, to) multiset
+    local function ekeys(list)
+        local t = {}
+        for _, e in ipairs(list) do
+            t[#t + 1] = e.kind .. '|' .. e.from .. '|' .. e.to
+        end
+        table.sort(t)
+        return t
+    end
+    eq(ekeys(seq.edges), ekeys(got.edges))
+    -- calls: same resolutions at same sites
+    local function ckeys(list)
+        local t = {}
+        for _, c in ipairs(list) do
+            t[#t + 1] = ('%s|%d|%s|%s|%s'):format(c.file, c.line, c.callee,
+                tostring(c.to), tostring(c.dynamic))
+        end
+        table.sort(t)
+        return t
+    end
+    eq(ckeys(seq.calls), ckeys(got.calls))
+end)
+
 test('incremental cache: warm open re-extracts only the diff', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
