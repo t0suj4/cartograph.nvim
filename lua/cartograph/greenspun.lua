@@ -253,10 +253,14 @@ function M.registries(data, opts)
                 import = { verb = iverbs, name = imports[1].name },
                 discovered = true, deep = ex.deep,
             }
-            report[#report + 1] = { kind = 'registry', verb = verb,
-                imports = iverbs, sites = ex.sites, keys = nkeys,
-                example = next(ex.keys) }
-        elseif ex.sites >= 3 then
+            -- micro-registries still LINK, but the report tier needs
+            -- vocabulary: parametrized helper pairs are not findings
+            if nkeys >= 3 then
+                report[#report + 1] = { kind = 'registry', verb = verb,
+                    imports = iverbs, sites = ex.sites, keys = nkeys,
+                    example = next(ex.keys) }
+            end
+        elseif ex.sites >= 3 and nkeys >= 3 then
             report[#report + 1] = { kind = 'registry', verb = verb,
                 imports = {}, sites = ex.sites, keys = nkeys,
                 example = next(ex.keys) }
@@ -1008,6 +1012,46 @@ function M.layering(data, opts)
         end
     end
     table.sort(out, function (x, y) return x.dom > y.dom end)
+    return out
+end
+
+--- String-keyed FACTORIES: the lookup half of the symbol table — verbs
+--- resolving many distinct literal keys to objects (Mage::getModel,
+--- helper, getTable) with no callable in sight. Not linkable (the target
+--- is data), but the vocabulary is real structure.
+function M.factories(data, opts)
+    local min_sites = opts and opts.min_sites or 30
+    local min_keys = opts and opts.min_keys or 10
+    local by_verb = {}
+    for _, c in ipairs(data.calls or {}) do
+        if not c.dynamic and not c.to then
+            by_verb[c.callee] = by_verb[c.callee] or {}
+            table.insert(by_verb[c.callee], c)
+        end
+    end
+    local out = {}
+    for verb, calls in pairs(by_verb) do
+        if #calls >= min_sites then
+            local kpos = key_positions(calls)
+            if kpos then
+                local keys = keys_at(calls, kpos)
+                -- factory keys are PATHS/IDENTIFIERS, stricter than the
+                -- registry gate: SQL fragments carry operators
+                local n, strict = 0, 0
+                for k in pairs(keys) do
+                    n = n + 1
+                    if name_like(k) and not k:find('[=<>%(%)!?,]') then
+                        strict = strict + 1
+                    end
+                end
+                if n >= min_keys and strict / n >= 0.8 then
+                    out[#out + 1] = { verb = verb, sites = #calls, keys = n,
+                        example = next(keys) }
+                end
+            end
+        end
+    end
+    table.sort(out, function (a, b) return a.sites > b.sites end)
     return out
 end
 

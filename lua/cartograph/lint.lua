@@ -309,6 +309,11 @@ local function greenspun_findings(store)
             message = ("ad-hoc funcall table: '%s' maps %d of %d entries to functions")
                 :format(t.var.name, t.fns, t.entries) }
     end
+    for _, f in ipairs(g.factories(store.data)) do
+        out[#out + 1] = { file = store.data.root, line = 1,
+            message = ("string-keyed factory: '%s' resolves %d distinct keys over %d sites (e.g. %q)")
+                :format(f.verb, f.keys, f.sites, f.example or '?') }
+    end
     for _, c in ipairs(g.evals(store.data)) do
         out[#out + 1] = { file = store.data.root .. '/' .. c.file, line = c.line + 1,
             message = ("the interpreter itself: %s()"):format(c.callee) }

@@ -654,3 +654,22 @@ test('layering: imports against the dominant direction are named', function ()
     ok(blob:match("'core/y%.lua' %-> 'ui/a%.lua' runs against it"), 'the stray named')
     ok(blob:match('5 with the current, 1 against'), 'summary')
 end)
+
+test('factories: many keys, no callables — the lookup half', function ()
+    local g = require 'cartograph.greenspun'
+    local calls = {}
+    for i = 1, 40 do
+        calls[#calls + 1] = { callee = 'getModel',
+            args = { 'mod/key' .. i }, argv = { { k = 'lit', v = 'mod/key' .. i } },
+            file = 'a.php', line = i, method = false }
+    end
+    for i = 1, 40 do -- prose keys must NOT qualify
+        calls[#calls + 1] = { callee = 'translate',
+            args = { 'this is a long prose sentence number ' .. i },
+            argv = {}, file = 'a.php', line = 100 + i, method = false }
+    end
+    local out = g.factories({ nodes = {}, calls = calls, root = '/x' })
+    eq(1, #out)
+    eq('getModel', out[1].verb)
+    eq(40, out[1].keys)
+end)
