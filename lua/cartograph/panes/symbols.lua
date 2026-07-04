@@ -42,7 +42,7 @@ local M = {
     files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
-    line_group = {}, line_sep = {}, line_state = {}, line_trans = {},
+    line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
     trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
@@ -69,6 +69,8 @@ local function hl_setup()
 end
 
 -- ── per-level renderers (fill ctx.lines/marks/vnums/signs + row mappings) ────
+
+local function pesc(s) return (tostring(s):gsub('([^%w])', '%%%1')) end
 
 local function shown_defs(file)
     local defs = {}
@@ -328,6 +330,110 @@ local function render_tbl(ctx, id)
     end
 end
 
+-- Inside a LITERAL data table: entries as rows. Scalars show their value,
+-- nested tables descend deeper, {ref='x'} follows to the referenced var.
+-- key = var id \31 seg \31 seg … (the path into the data).
+local function lit_walk(key)
+    local parts = vim.split(key or '', '\31')
+    local id = table.remove(parts, 1)
+    local node = store.node(id)
+    local val = node and node.data
+    for _, seg in ipairs(parts) do
+        if type(val) ~= 'table' then val = nil break end
+        val = val[seg] ~= nil and val[seg] or val[tonumber(seg)]
+    end
+    return node, val, parts
+end
+
+local function render_lit(ctx, key)
+    local node, val, path = lit_walk(key)
+    if not (node and type(val) == 'table') then ctx.lines[1] = '(gone)'; return end
+    local crumb = (node.name or '?')
+        .. (#path > 0 and ('.' .. table.concat(path, '.')) or '')
+    ctx.lines[1] = ('· %s'):format(crumb)
+    ctx.marks[1] = { { 0, 1, 'CartographDim' }, { 1, -1, 'CartographTitle' } }
+    if #path == 0 then -- usage sites one row away, as in the class-table view
+        local nsites = 0
+        for _, u in ipairs(store.var_usedby[node.id] or {}) do nsites = nsites + #u.at end
+        ctx.lines[2] = ('↖ used by (%d)'):format(nsites)
+        ctx.marks[2] = { { 0, -1, 'CartographSection' } }
+        ctx.line_callers[2] = node.id
+    end
+    -- array part in order, then map keys sorted
+    local keys = {}
+    for i in ipairs(val) do keys[#keys + 1] = i end
+    local arrn = #keys
+    local mapk = {}
+    for k in pairs(val) do
+        if not (type(k) == 'number' and k % 1 == 0 and k >= 1 and k <= arrn) then
+            mapk[#mapk + 1] = k
+        end
+    end
+    table.sort(mapk, function (a, b) return tostring(a) < tostring(b) end)
+    vim.list_extend(keys, mapk)
+    local rows = {}
+    for _, k in ipairs(keys) do
+        local v = val[k]
+        local row
+        if type(v) == 'table' and v.ref then
+            row = { label = ('%s → %s'):format(
+                    type(k) == 'number' and ('[%d]'):format(k) or k, v.ref),
+                entry = { kind = 'ref', ref = v.ref },
+                needle = '%f[%w_]' .. pesc(v.ref) .. '%f[^%w_]' }
+        elseif type(v) == 'table' and v.expr then
+            -- a non-literal element the extractor couldn't take: honest text
+            row = { label = type(k) == 'number' and v.expr
+                    or ('%s = %s'):format(k, v.expr),
+                entry = { kind = 'scalar' },
+                needle = type(k) ~= 'number' and ('%f[%w_]' .. pesc(k) .. '%s*=')
+                    or pesc(v.expr) }
+        elseif type(v) == 'table' then
+            -- name the entry when the data itself does (name= or a string
+            -- element); a contained ref's tail disambiguates duplicates
+            local tag = type(v.name) == 'string' and v.name or nil
+            local reftail
+            for _, el in ipairs(v) do
+                if not tag and type(el) == 'string' then tag = el end
+                if not reftail and type(el) == 'table' and el.ref then
+                    reftail = el.ref:match('[^.]+$')
+                end
+            end
+            local n = 0
+            for _ in pairs(v) do n = n + 1 end
+            row = { label = type(k) == 'number' and (tag or ('[%d]'):format(k))
+                    or tostring(k),
+                reftail = reftail, vnum = tostring(n),
+                entry = { kind = 'tbl',
+                    key = key .. '\31' .. (type(k) == 'number' and tostring(k) or k) },
+                needle = tag and ('["\']' .. pesc(tag) .. '["\']')
+                    or (type(k) ~= 'number' and ('%f[%w_]' .. pesc(k) .. '%s*=') or nil) }
+        else
+            local vt = type(v) == 'string' and ('%q'):format(v) or tostring(v)
+            row = { label = type(k) == 'number' and vt or ('%s = %s'):format(k, vt),
+                entry = { kind = 'scalar' },
+                needle = type(v) == 'string' and ('["\']' .. pesc(v) .. '["\']')
+                    or '%f[%w_]' .. pesc(v) .. '%f[^%w_]' }
+        end
+        rows[#rows + 1] = row
+    end
+    local dup = {}
+    for _, row in ipairs(rows) do dup[row.label] = (dup[row.label] or 0) + 1 end
+    for _, row in ipairs(rows) do
+        row.entry.needle = row.needle
+        local pref = '  · '
+        local label, tail = row.label, ''
+        if dup[label] > 1 and row.reftail then tail = ' · ' .. row.reftail end
+        ctx.lines[#ctx.lines + 1] = pref .. label .. tail
+        local marks = { { 2, #pref - 1, 'CartographDim' } }
+        local eq = label:find(' = ', 1, true) or label:find(' → ', 1, true)
+        if eq then marks[#marks + 1] = { #pref + eq - 1, #pref + #label, 'CartographLit' } end
+        if tail ~= '' then marks[#marks + 1] = { #pref + #label, -1, 'CartographDim' } end
+        ctx.marks[#ctx.lines] = marks
+        if row.vnum then ctx.vnums[#ctx.lines] = row.vnum end
+        ctx.line_lit[#ctx.lines] = row.entry
+    end
+end
+
 -- One function's occurrences of the entity (the sites-view drill-down):
 -- rows are real source lines. key = kind \31 entity id \31 using-fn id.
 local function render_occs(ctx, key)
@@ -416,25 +522,28 @@ function M.fsm_anchor()
     return model and model.events_var or nil
 end
 
--- Hover anchor for FSM rows: state and transition names live in DATA, not in
--- a node of their own, so the source preview shows the spec table with every
--- line quoting the hovered name highlighted (the "code" of a state is its
--- transitions in the spec).
-local function spec_context(name)
-    local model = fsm_model()
-    local v = model and model.events_var
-    if not v then return end
+-- Hover anchor for DATA-borne rows (states, transitions, literal table
+-- entries): they have no node of their own, so their "code" is the table
+-- that declares them. The source pane shows the var with every line
+-- matching the needle highlighted.
+local function var_context(v, needle)
     local lines = vim.fn.readfile(store.abspath(v))
-    local needle = '["\']' .. name:gsub('([^%w])', '%%%1') .. '["\']'
     local ranges = {}
     for l = v.range.start.line, math.min(v.range['end'].line, #lines - 1) do
         local s, e = (lines[l + 1] or ''):find(needle)
         if s then
-            ranges[#ranges + 1] = { start = { line = l, char = s },
-                ['end'] = { line = l, char = e - 1 } }
+            ranges[#ranges + 1] = { start = { line = l, char = s - 1 },
+                ['end'] = { line = l, char = e } }
         end
     end
     store.set_context({ node = v.id, ranges = ranges })
+end
+
+local function spec_context(name)
+    local model = fsm_model()
+    local v = model and model.events_var
+    if not v then return end
+    var_context(v, '["\']' .. pesc(name) .. '["\']')
 end
 
 local function render_states(ctx)
@@ -606,7 +715,7 @@ function M.render()
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
-        line_group = {}, line_sep = {}, line_state = {}, line_trans = {} }
+        line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {} }
     local v = M.view
     if v.level == 'files' then
         if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
@@ -616,6 +725,7 @@ function M.render()
     elseif v.level == 'tbl' then render_tbl(ctx, v.tbl)
     elseif v.level == 'callers' then render_callers(ctx, v.callers)
     elseif v.level == 'occs' then render_occs(ctx, v.occs)
+    elseif v.level == 'lit' then render_lit(ctx, v.lit)
     elseif v.level == 'states' then render_states(ctx)
     elseif v.level == 'state' then render_state(ctx, v.state)
     else render_fn(ctx, v.fn) end
@@ -625,7 +735,7 @@ function M.render()
     M.line_stmtidx, M.line_calls, M.line_site = ctx.line_stmtidx, ctx.line_calls, ctx.line_site
     M.line_callers, M.line_vars = ctx.line_callers, ctx.line_vars
     M.line_group, M.line_sep, M.line_state = ctx.line_group, ctx.line_sep, ctx.line_state
-    M.line_trans = ctx.line_trans
+    M.line_trans, M.line_lit = ctx.line_trans, ctx.line_lit
 
     vim.bo[M.buf].modifiable = true
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
@@ -662,6 +772,7 @@ function M.show(level, ctx_val)
         elseif level == 'tbl' then M.view.tbl = ctx_val
         elseif level == 'callers' then M.view.callers = ctx_val
         elseif level == 'occs' then M.view.occs = ctx_val
+        elseif level == 'lit' then M.view.lit = ctx_val
         elseif level == 'state' then M.view.state = ctx_val end
     end
     M.render()
@@ -669,6 +780,7 @@ function M.show(level, ctx_val)
         local first = 1
         for row = 1, vim.api.nvim_buf_line_count(M.buf) do
             if M.line_node[row] or M.line_stmt[row] or M.line_site[row] or M.line_state[row]
+                or M.line_lit[row]
                 or (level == 'files' and M.line_file[row]) then
                 first = row
                 break
@@ -829,6 +941,11 @@ function M.attach(win)
                     -- a state's "source" is the spec lines that mention it
                     local st = M.line_state[r]
                     if st then spec_context(st) end
+                elseif M.view.level == 'lit' then
+                    -- an entry's "source" is its line in the declaring table
+                    local e = M.line_lit[r]
+                    local v = store.node((M.view.lit or ''):match('^[^\31]*'))
+                    if e and e.needle and v then var_context(v, e.needle) end
                 elseif M.view.level == 'fn' then
                     local l = M.line_stmt[r]
                     local n = store.node(M.view.fn)
@@ -857,7 +974,7 @@ function M.attach(win)
     local function view_loc()
         return { level = M.view.level, file = M.view.file, fn = M.view.fn,
             block = M.view.block, var = M.view.var, callers = M.view.callers,
-            tbl = M.view.tbl, occs = M.view.occs, state = M.view.state,
+            tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
             files_mode = M.files_mode,
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
@@ -867,6 +984,7 @@ function M.attach(win)
         M.view.file, M.view.fn, M.view.block, M.view.var, M.view.callers =
             loc.file, loc.fn, loc.block, loc.var, loc.callers
         M.view.tbl, M.view.occs, M.view.state = loc.tbl, loc.occs, loc.state
+        M.view.lit = loc.lit
         M.show(loc.level)
         if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
     end
@@ -883,6 +1001,8 @@ function M.attach(win)
     -- a var with members is a TABLE: descend shows them; a scalar shows sites
     local function enter_var(id)
         if #table_members(id) > 0 then return 'tbl' end
+        local n = store.node(id)
+        if n and type(n.data) == 'table' then return 'lit' end
         return 'var'
     end
     local function enter(level, ctxval, pivot_id)
@@ -1043,6 +1163,26 @@ function M.attach(win)
                 store.set_context(nil)
                 enter('fn', s.fn, s.fn)
             end
+        elseif M.view.level == 'lit' then
+            if M.line_callers[r] then
+                return enter('var', M.line_callers[r])
+            end
+            local e = M.line_lit[r]
+            if e and e.kind == 'tbl' then
+                enter('lit', e.key)
+            elseif e and e.kind == 'ref' then
+                -- follow the indirection to the referenced var (its own
+                -- literal when it has one, its usage sites otherwise);
+                -- prefer the data-carrying var when names collide
+                local best
+                for _, n in pairs(store.by_id) do
+                    if n.kind == 'var' and n.name == e.ref then
+                        if n.data then best = n break end
+                        best = best or n
+                    end
+                end
+                if best then return descend_var(best) end
+            end
         elseif M.view.level == 'states' then
             local st = M.line_state[r]
             if st then enter('state', st) end
@@ -1093,7 +1233,45 @@ function M.attach(win)
             store.set_context(nil)
             return restore_loc(loc)
         end
-        if M.view.level == 'state' then
+        local function block_of(v)
+            for _, n in ipairs(store.by_file[v.file] or {}) do
+                if n.kind == 'block' and n.range.start.line <= v.range.start.line
+                    and n.range['end'].line >= v.range['end'].line then
+                    return n
+                end
+            end
+        end
+        local function surface_to_var(v)
+            local blk = v and block_of(v)
+            if blk then
+                M.show('block', blk.id)
+                local r = M.node_line[v.id]
+                if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
+            elseif v then
+                M.show('file', v.file)
+            else
+                M.show('files')
+            end
+        end
+        if M.view.level == 'lit' then
+            -- pop one path segment; at the root, surface onto the var itself
+            store.set_context(nil)
+            local parts = vim.split(M.view.lit or '', '\31')
+            if #parts > 1 then
+                local child = table.concat(parts, '\31')
+                table.remove(parts)
+                M.show('lit', table.concat(parts, '\31'))
+                for r = 1, vim.api.nvim_buf_line_count(M.buf) do
+                    local e = M.line_lit[r]
+                    if e and e.key == child then
+                        pcall(vim.api.nvim_win_set_cursor, win, { r, 2 })
+                        break
+                    end
+                end
+            else
+                surface_to_var(store.node(parts[1]))
+            end
+        elseif M.view.level == 'state' then
             store.set_context(nil)
             local st = M.view.state
             M.show('states')
@@ -1107,26 +1285,7 @@ function M.attach(win)
             -- the states altitude hangs below the spec var: surface into its
             -- block with the cursor on it (files is the no-model fallback)
             store.set_context(nil)
-            local v = M.fsm_anchor()
-            local blk
-            if v then
-                for _, n in ipairs(store.by_file[v.file] or {}) do
-                    if n.kind == 'block' and n.range.start.line <= v.range.start.line
-                        and n.range['end'].line >= v.range['end'].line then
-                        blk = n
-                        break
-                    end
-                end
-            end
-            if blk then
-                M.show('block', blk.id)
-                local r = M.node_line[v.id]
-                if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
-            elseif v then
-                M.show('file', v.file)
-            else
-                M.show('files')
-            end
+            surface_to_var(M.fsm_anchor())
         elseif M.view.level == 'occs' then
             store.set_context(nil)
             local kind, entity = (M.view.occs or ''):match('^(.-)\31(.-)\31')

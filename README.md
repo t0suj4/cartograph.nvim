@@ -52,7 +52,12 @@ A cockpit of independent panes over a shared state store:
   resolvable call. A **var** row
   descends into its usage sites (every function that reads it, from the
   extractor's `use` edges) — hovering a site shows the read in the
-  source pane, and descending enters the reading function.
+  source pane, and descending enters the reading function. A var holding a
+  **literal table** descends into the data itself: entries as rows (scalars
+  show their value, nested tables keep descending, a `→ name` reference
+  follows to that var), hover highlighting the entry's line in the
+  declaring table. Non-literal elements (`unpack(...)`, calls, functions)
+  stay visible as honest text rows instead of silently vanishing.
 
   Inside a function, the `↖ callers (N)` row descends into the **call
   sites**: one row per call, hover shows the caller's code with the call
