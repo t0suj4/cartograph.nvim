@@ -673,3 +673,36 @@ test('factories: many keys, no callables — the lookup half', function ()
     eq('getModel', out[1].verb)
     eq(40, out[1].keys)
 end)
+
+test('sql: embedded queries make tables first-class entities', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'php') then
+        skip 'no php parser'
+    end
+    local sql = require 'cartograph.sql'
+    -- the parser itself
+    local q = sql.parse("SELECT a FROM orders o JOIN users u ON u.id = o.uid")
+    eq('read', q.kind)
+    eq({ 'orders', 'users' }, q.tables)
+    ok(not sql.parse('not sql at all'), 'prose refuses')
+    ok(not sql.parse('product_id = :product_id'), 'fragments refuse')
+    -- end to end on the fixture
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
+    local stats = sql.attach(data)
+    eq(2, stats.tables) -- items, settings
+    store.ingest(data)
+    local items = store.node('sql::table:items')
+    ok(items and items.sql, 'table node exists')
+    local users = {}
+    for _, u in ipairs(store.var_usedby[items.id] or {}) do
+        users[store.node(u.from).name] = true
+    end
+    ok(users.load_items and users.save_item and users.report,
+        'all three touchers have use edges')
+    -- the lint footprint
+    local fs = lint.run(store, { only = { sql = true } })
+    local blob = ''
+    for _, f in ipairs(fs) do blob = blob .. f.message .. '\n' end
+    ok(blob:match("table 'items': 2 read%(s%), 1 write%(s%)"), blob)
+end)

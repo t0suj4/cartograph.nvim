@@ -315,6 +315,21 @@ both), and — where sibling addons have extracted dumps to testify — a
 loads first, so it works or nils by alphabet. Honest scope: no sibling
 dump, no claim.
 
+### String-embedded SQL
+
+Query strings carry real structure: the **tables** they touch. Each
+table found in embedded SQL becomes a first-class entity — a var node
+anchored at its first query, with use edges from every function that
+queries it — so "who touches `posts`" is an ordinary sites view, and the
+`sql` lint reports each table's read/write footprint. Parsing is
+case-strict (code SQL capitalizes; an email template's
+`<table cellspacing=…>` corroborates nothing), patterns are chosen per
+verb (`ON DUPLICATE KEY UPDATE col=` donates no tables), and the
+interpolation idioms resolve — `{$wpdb->posts}` names `posts`,
+`{$this->getTable('sales/order')}` names its argument. On WordPress: 311
+queries over 23 tables (`posts`: 67 reads, 13 writes); on Magento: 92
+tables. Interpolated names beyond those idioms stay honest misses.
+
 ### Greenspun detection
 
 Per Greenspun's tenth rule, every sufficiently complicated codebase

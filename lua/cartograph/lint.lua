@@ -432,7 +432,30 @@ local function layering_findings(store)
     return out
 end
 
+-- Embedded SQL: per-table read/write footprint (tables touched from
+-- more than one site — a single query is not a pattern).
+local function sql_findings(store)
+    local scanned = require('cartograph.sql').scan(store.data)
+    local out, names = {}, {}
+    for t in pairs(scanned.tables) do names[#names + 1] = t end
+    table.sort(names)
+    for _, t in ipairs(names) do
+        local e = scanned.tables[t]
+        if #e.sites >= 2 then
+            local first = e.sites[1].call
+            out[#out + 1] = { file = store.data.root .. '/' .. first.file,
+                line = first.line + 1,
+                message = ("table '%s': %d read(s), %d write(s)%s across %d raw SQL sites")
+                    :format(t, e.reads, e.writes,
+                        e.ddl > 0 and (', %d ddl'):format(e.ddl) or '',
+                        #e.sites) }
+        end
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'sql', severity = 'info', run = sql_findings },
     { name = 'layering', severity = 'info', run = layering_findings },
     { name = 'clone', severity = 'info', run = clone_findings },
     { name = 'access-point', severity = 'info', run = access_point_findings },

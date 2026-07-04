@@ -1030,7 +1030,8 @@ function M.extract(root, opts)
                                 a = a:named_child(0) or a
                             end
                             local t = a:type()
-                            if t == 'string' or t == 'string_literal' then
+                            if t == 'string' or t == 'string_literal'
+                                or t == 'encapsed_string' then -- php "..."
                                 local v = node_text(a, src):gsub('^["\']', ''):gsub('["\']$', '')
                                 args[#args + 1] = v
                                 argv[#argv + 1] = { k = 'lit', v = v }

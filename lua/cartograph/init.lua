@@ -55,6 +55,12 @@ function M.open(dump_path, opts)
         -- linked the same way (config.discover = false disables).
         local x = require('cartograph.xlang').link(data,
             require('cartograph.xlang').effective_bindings(data))
+        -- string-embedded SQL: tables become entities with usage sites
+        local sq = require('cartograph.sql').attach(data)
+        if sq.tables > 0 then
+            vim.notify(('cartograph: %d SQL tables from %d embedded queries')
+                :format(sq.tables, sq.queries), vim.log.levels.INFO)
+        end
         if x.links > 0 then
             vim.notify(('cartograph: linked %d cross-language call sites')
                 :format(x.links), vim.log.levels.INFO)
