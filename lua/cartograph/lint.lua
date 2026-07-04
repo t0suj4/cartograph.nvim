@@ -279,7 +279,7 @@ M.rules = {
             for _, n in ipairs(store.data.nodes) do
                 if (n.kind == 'function' or n.kind == 'method')
                     and not exported(n) and not metamethod(n) and not n.cbarg
-                    and not xmlh[n.name]
+                    and not n.entry and not xmlh[n.name]
                     and #(store.usedby[n.id] or {}) == 0 then
                     out[#out + 1] = { file = store.abspath(n), line = n.range.start.line + 1,
                         message = ("local function '%s' has no callers (possibly dead)"):format(n.name) }

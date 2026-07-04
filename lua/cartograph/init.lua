@@ -27,7 +27,14 @@ function M.open(dump_path)
     local source  = require 'cartograph.panes.source'
     local plan    = require 'cartograph.panes.plan'
 
-    store.load(vim.fn.expand(dump_path))
+    -- a DIRECTORY opens through the tree-sitter provider (any language with
+    -- a parser); a file is a pre-extracted dump (the lua-ls CLI's output)
+    local target = vim.fn.expand(dump_path)
+    if vim.fn.isdirectory(target) == 1 then
+        store.ingest(require('cartograph.providers.treesitter').extract(target))
+    else
+        store.load(target)
+    end
     -- manifest projects (WoW .toc): exact load order for the browser + linter
     require('cartograph.toc').attach(store)
 

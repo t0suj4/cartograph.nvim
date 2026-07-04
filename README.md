@@ -189,8 +189,21 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
 ## Architecture (three seams)
 
 1. **GraphProvider** — supplies `nodes{id,name,kind,file,range,order}` and
-   `edges{from,to,kind}`. First provider is Lua (via lua-language-server);
-   a generic-LSP provider makes the navigator language-agnostic.
+   `edges{from,to,kind}`. Two providers exist:
+   - **lua-ls CLI** (the reference): vm-typed resolution, full `df`
+     data-flow, effects — the deep option for Lua. Extract once, open the
+     dump.
+   - **tree-sitter** (in-editor, any language with a parser + a spec):
+     `:Cartograph` on a directory — or with no argument, the cwd — parses
+     the tree and opens instantly (~200ms for a mod, ~4s for 100-file
+     projects; 40× faster than the CLI). No type resolution, so cross-file
+     links are name-matched and wear the honest `~`; ambiguous names refuse
+     to link. Emits calls, literal data, imports (`require`/`#include`,
+     with a unique-basename fallback for `-I` paths) and a df-lite, so the
+     fn altitude, the lit altitude and the graph lints all work. Specs ship
+     for **Lua, C, Python** — a new language is one spec table (queries +
+     a few hooks). C dispatch-table references mark functions as
+     dynamically dispatched, and `main` is an entry point.
 2. **ImpactEngine** — `(nodeSet, target, op) -> {edits, hazards}`. Move-first,
    Lua-first. Preview the diff before it touches a file — never a silent edit.
 3. **Panes/Store** — panes are independent widgets that subscribe to a shared

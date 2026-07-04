@@ -6,5 +6,7 @@ end
 vim.g.loaded_cartograph = true
 
 vim.api.nvim_create_user_command('Cartograph', function (o)
-    require('cartograph').open(o.args)
-end, { nargs = 1, complete = 'file', desc = 'Open the cartograph cockpit on a graph dump' })
+    -- no argument: the current working directory, via the tree-sitter provider
+    require('cartograph').open(o.args ~= '' and o.args or vim.fn.getcwd())
+end, { nargs = '?', complete = 'file',
+    desc = 'Open the cartograph cockpit (graph dump file, or directory via tree-sitter)' })
