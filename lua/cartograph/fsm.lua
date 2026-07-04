@@ -144,6 +144,7 @@ function M.load(store, cfg)
         end
     end
     model.callbacks_var = cfg.callbacks and var_by_name(store, cfg.callbacks.var, true)
+    model.events_var = ev
     model.bindings = bindings
     return model
 end

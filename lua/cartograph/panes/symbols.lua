@@ -42,7 +42,7 @@ local M = {
     files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
-    line_group = {}, line_sep = {}, line_state = {},
+    line_group = {}, line_sep = {}, line_state = {}, line_trans = {},
     trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
@@ -408,6 +408,27 @@ local function fsm_model()
     return M._fsm or nil, M._fsm_why
 end
 
+-- Hover anchor for FSM rows: state and transition names live in DATA, not in
+-- a node of their own, so the source preview shows the spec table with every
+-- line quoting the hovered name highlighted (the "code" of a state is its
+-- transitions in the spec).
+local function spec_context(name)
+    local model = fsm_model()
+    local v = model and model.events_var
+    if not v then return end
+    local lines = vim.fn.readfile(store.abspath(v))
+    local needle = '["\']' .. name:gsub('([^%w])', '%%%1') .. '["\']'
+    local ranges = {}
+    for l = v.range.start.line, math.min(v.range['end'].line, #lines - 1) do
+        local s, e = (lines[l + 1] or ''):find(needle)
+        if s then
+            ranges[#ranges + 1] = { start = { line = l, char = s },
+                ['end'] = { line = l, char = e - 1 } }
+        end
+    end
+    store.set_context({ node = v.id, ranges = ranges })
+end
+
 local function render_states(ctx)
     local model, why = fsm_model()
     ctx.lines[1] = 'states'
@@ -440,6 +461,7 @@ local function render_state(ctx, state)
         ctx.lines[#ctx.lines + 1] = text
         ctx.marks[#ctx.lines] = { { 0, 6 + #t.name, 'CartographDim' } }
         ctx.line_state[#ctx.lines] = t.to
+        ctx.line_trans[#ctx.lines] = t.name
     end
     for _, e in ipairs(fsm.entrypoints(store, model, state)) do
         local icon = e.kind == 'listener' and '↯' or 'ƒ'
@@ -576,7 +598,7 @@ function M.render()
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
-        line_group = {}, line_sep = {}, line_state = {} }
+        line_group = {}, line_sep = {}, line_state = {}, line_trans = {} }
     local v = M.view
     if v.level == 'files' then
         if M.files_mode == 'tree' then render_files_tree(ctx) else render_files(ctx) end
@@ -595,6 +617,7 @@ function M.render()
     M.line_stmtidx, M.line_calls, M.line_site = ctx.line_stmtidx, ctx.line_calls, ctx.line_site
     M.line_callers, M.line_vars = ctx.line_callers, ctx.line_vars
     M.line_group, M.line_sep, M.line_state = ctx.line_group, ctx.line_sep, ctx.line_state
+    M.line_trans = ctx.line_trans
 
     vim.bo[M.buf].modifiable = true
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
@@ -790,7 +813,14 @@ function M.attach(win)
                         else
                             store.set_context(nil)
                         end
+                    elseif M.view.level == 'state' and M.line_trans[r] then
+                        -- a transition's "source" is its line in the spec
+                        spec_context(M.line_trans[r])
                     end
+                elseif M.view.level == 'states' then
+                    -- a state's "source" is the spec lines that mention it
+                    local st = M.line_state[r]
+                    if st then spec_context(st) end
                 elseif M.view.level == 'fn' then
                     local l = M.line_stmt[r]
                     local n = store.node(M.view.fn)
