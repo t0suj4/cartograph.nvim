@@ -201,9 +201,12 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
      to link. Emits calls, literal data, imports (`require`/`#include`,
      with a unique-basename fallback for `-I` paths) and a df-lite, so the
      fn altitude, the lit altitude and the graph lints all work. Specs ship
-     for **Lua, C, Python** — a new language is one spec table (queries +
-     a few hooks). C dispatch-table references mark functions as
-     dynamically dispatched, and `main` is an entry point.
+     for **Lua, C, C++, Haskell, Scheme, Python** — a new language is one
+     spec table (queries + a few hooks). Dispatch stays honest per idiom:
+     C dispatch-table references, C++ methods, Haskell instance methods
+     and Lua registry fields are dynamically dispatched (not dead);
+     `main` is an entry point; stdlib vocabularies (`string.format`,
+     `.size()`, scheme's `apply`) never name-match a project definition.
 2. **ImpactEngine** — `(nodeSet, target, op) -> {edits, hazards}`. Move-first,
    Lua-first. Preview the diff before it touches a file — never a silent edit.
 3. **Panes/Store** — panes are independent widgets that subscribe to a shared

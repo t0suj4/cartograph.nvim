@@ -50,6 +50,10 @@ M.spec = {
             end
         end,
         litdata_types = { table_constructor = true },
+        -- stdlib receivers must not tail-match a project def: string.format
+        -- would otherwise link to the one module that defines M.format
+        stdlib_prefixes = { 'string.', 'table.', 'math.', 'os.', 'io.',
+            'coroutine.', 'debug.', 'bit.', 'jit.', 'ffi.', 'vim.' },
     },
     c = {
         exts = { 'c', 'h' },
@@ -83,6 +87,72 @@ M.spec = {
             local base, hit = path:match('([^/]+)$'), nil
             for f in pairs(files) do
                 if f:match('([^/]+)$') == base then
+                    if hit then return nil end
+                    hit = f
+                end
+            end
+            return hit
+        end,
+    },
+    cpp = {
+        exts = { 'cpp', 'hpp', 'cc', 'hh', 'cxx', 'hxx' },
+        functions = [=[
+            (function_definition
+                declarator: (function_declarator declarator: (_) @name)) @def
+            (function_definition
+                declarator: (pointer_declarator
+                    declarator: (function_declarator declarator: (_) @name))) @def
+            (function_definition
+                declarator: (reference_declarator
+                    (function_declarator declarator: (_) @name))) @def
+        ]=],
+        calls = [=[
+            (call_expression function: (identifier) @name) @call
+            (call_expression function: (field_expression) @name) @call
+            (call_expression function: (qualified_identifier) @name) @call
+        ]=],
+        vars = [=[
+            (declaration declarator: (init_declarator
+                declarator: (identifier) @name value: (_) @value)) @def
+        ]=],
+        params_field = 'parameters',
+        body_field = 'body',
+        -- Engine::go, inline class methods, destructors: all dispatch-ish
+        is_method = function (name, def)
+            if name:find('::') or name:find('~', 1, true) then return true end
+            local p = def:parent()
+            while p do
+                local t = p:type()
+                if t == 'class_specifier' or t == 'struct_specifier' then return true end
+                p = p:parent()
+            end
+            return false
+        end,
+        entry_names = { main = true },
+        -- namespaces/classes wrap real content; they are not "loose statements"
+        block_skip = { namespace_definition = true, class_specifier = true,
+            struct_specifier = true, template_declaration = true,
+            enum_specifier = true, linkage_specification = true },
+        -- STL vocabulary: a project method named `size` must not absorb
+        -- every container .size() in the codebase
+        stdlib_names = { size = true, empty = true, begin = true, ['end'] = true,
+            clear = true, push_back = true, pop_back = true, insert = true,
+            erase = true, find = true, count = true, at = true, data = true,
+            c_str = true, front = true, back = true, reserve = true,
+            resize = true, get = true, reset = true, str = true, swap = true,
+            emplace_back = true, first = true, second = true, length = true,
+            substr = true, append = true, record = true },
+        import_query = [=[ (preproc_include path: (string_literal) @path) ]=],
+        resolve_import = function (path, files, from)
+            path = path:gsub('^"', ''):gsub('"$', '')
+            local dir = from:match('^(.*)/[^/]*$')
+            for _, cand in ipairs({ dir and (dir .. '/' .. path) or path, path }) do
+                if files[cand] then return cand end
+            end
+            -- -I roots: unique path-suffix match (openmw: apps/, components/)
+            local hit
+            for f in pairs(files) do
+                if f:sub(-#path - 1) == '/' .. path then
                     if hit then return nil end
                     hit = f
                 end
@@ -167,6 +237,82 @@ M.spec = {
             return { inputs = {}, stmts = stmts }
         end,
     },
+    scheme = {
+        exts = { 'scm' },
+        functions = [=[
+            ((list . (symbol) @_kw . (list . (symbol) @name)) @def
+                (#eq? @_kw "define"))
+            ((list . (symbol) @_kw . (symbol) @name . (list . (symbol) @_l)) @def
+                (#eq? @_kw "define") (#eq? @_l "lambda"))
+            ((list . (symbol) @_kw . (list . (symbol) @name)) @def
+                (#eq? @_kw "define-public"))
+            ((list . (symbol) @_kw . (symbol) @name . (list . (symbol) @_l)) @def
+                (#eq? @_kw "define-public") (#eq? @_l "lambda"))
+        ]=],
+        -- every list head is application — special forms opt out below
+        calls = [=[ (list . (symbol) @name) @call ]=],
+        vars = [=[
+            ((list . (symbol) @_kw . (symbol) @name . (number) @value) @def
+                (#eq? @_kw "define"))
+            ((list . (symbol) @_kw . (symbol) @name . (string) @value) @def
+                (#eq? @_kw "define"))
+        ]=],
+        body_field = nil,
+        id_query = '(symbol) @id',
+        toplevel_parent = 'program', -- internal defines are a function's interior
+        is_method = function () return false end,
+        entry_names = { main = true },
+        -- the R5RS core + named-let idiom names: guile DEFINES apply/map in
+        -- scheme (self-hosted), but a call to `apply` means the primitive
+        stdlib_names = { apply = true, map = true, error = true, list = true,
+            cons = true, car = true, cdr = true, append = true, filter = true,
+            assoc = true, assq = true, assv = true, member = true, memq = true,
+            length = true, reverse = true, vector = true, string = true,
+            format = true, display = true, write = true, equal = true,
+            loop = true, lp = true, iter = true, recur = true, rec = true,
+            fold = true, reduce = true, cont = true, ['for-each'] = true },
+        call_skip = { define = true, ['define*'] = true, ['define-public'] = true,
+            ['define-syntax'] = true, ['define-module'] = true,
+            ['define-record-type'] = true, lambda = true, ['lambda*'] = true,
+            let = true, ['let*'] = true, letrec = true, ['letrec*'] = true,
+            ['if'] = true, cond = true, case = true, when = true, unless = true,
+            begin = true, ['and'] = true, ['or'] = true, ['else'] = true,
+            ['set!'] = true, quote = true, quasiquote = true, unquote = true,
+            ['do'] = true, delay = true, parameterize = true,
+            ['with-syntax'] = true, ['syntax-rules'] = true, ['syntax-case'] = true,
+            ['use-modules'] = true, export = true, import = true },
+        -- a call runs at load unless its OUTERMOST form is a define
+        is_top = function (calln, src)
+            local n, outer = calln, calln
+            while n:parent() do
+                if n:parent():type() == 'program' then outer = n break end
+                n = n:parent()
+            end
+            if outer == calln then return true end
+            local head = outer:named_child(0)
+            local t = head and vim.treesitter.get_node_text(head, src) or ''
+            return not t:match('^define')
+        end,
+        import_query = [=[
+            ((list . (symbol) @_kw (list) @path) (#eq? @_kw "use-modules"))
+            ((keyword) @_k . (list) @path (#eq? @_k "#:use-module"))
+        ]=],
+        resolve_import = function (mod, files)
+            local parts = {}
+            for w in mod:gmatch('[^%s()]+') do parts[#parts + 1] = w end
+            local suffix, hit = table.concat(parts, '/') .. '.scm', nil
+            for f in pairs(files) do
+                local m = f == suffix
+                    or f:sub(-#suffix - 1) == '/' .. suffix
+                    or suffix:sub(-#f - 1) == '/' .. f
+                if m then
+                    if hit then return nil end
+                    hit = f
+                end
+            end
+            return hit
+        end,
+    },
     python = {
         exts = { 'py' },
         functions = [[ (function_definition name: (identifier) @name) @def ]],
@@ -213,9 +359,22 @@ local function cap_node(ns)
     return ns
 end
 
+local QUERY_ERRORS = {}
 local function parse_query(lang, q)
+    if not q then return nil end -- the spec doesn't define this concept
     local ok, query = pcall(vim.treesitter.query.parse, lang, q)
-    return ok and query or nil
+    if not ok then
+        -- a broken query must be LOUD: silently emitting nothing for a
+        -- whole language looks like an empty project
+        local key = lang .. '\31' .. q:sub(1, 40)
+        if not QUERY_ERRORS[key] then
+            QUERY_ERRORS[key] = true
+            vim.notify(('cartograph/treesitter: %s query failed: %s')
+                :format(lang, tostring(query):match('[^\n]*')), vim.log.levels.WARN)
+        end
+        return nil
+    end
+    return query
 end
 
 local DEFAULT_FN_TYPES = { function_definition = true, function_declaration = true }
@@ -290,7 +449,7 @@ end
 -- def->use dependencies. Approximate (no scoping) but structurally the same
 -- contract as the lua-ls df, so the fn altitude and extract engine work.
 local function dataflow(def, spec, src, params)
-    local body = def:field(spec.body_field)[1]
+    local body = spec.body_field and def:field(spec.body_field)[1]
     if not body then return nil end
     local stmts = {}
     for stmt in body:iter_children() do
@@ -353,7 +512,7 @@ local function dataflow(def, spec, src, params)
 end
 
 local function fn_params(def, spec, src, method)
-    local ps = def:field(spec.params_field)[1]
+    local ps = spec.params_field and def:field(spec.params_field)[1]
     local out = method and { 'self' } or {}
     if ps then
         for c in ps:iter_children() do
@@ -472,7 +631,9 @@ function M.extract(root)
                     if cap == 'def' then defn = n elseif cap == 'name' then namen = n end
                 end
                 if defn and namen and not (spec.toplevel_only
-                    and in_function(defn, spec)) then
+                    and in_function(defn, spec))
+                    and not (spec.toplevel_parent and defn:parent()
+                        and defn:parent():type() ~= spec.toplevel_parent) then
                     local name = node_text(namen, src):gsub('%s+', '')
                     local sp = pos_of(defn)
                     local method = spec.is_method(name, defn)
@@ -534,7 +695,9 @@ function M.extract(root)
                     elseif cap == 'name' then namen = n
                     elseif cap == 'value' then valn = n end
                 end
-                if defn and namen and not in_function(defn, spec) then
+                if defn and namen and not in_function(defn, spec)
+                    and not (spec.toplevel_parent and defn:parent()
+                        and defn:parent():type() ~= spec.toplevel_parent) then
                     local name = node_text(namen, src)
                     local sp = pos_of(defn)
                     local id = ('%s::var:%s@%d'):format(file, name, sp.start.line)
@@ -613,7 +776,8 @@ function M.extract(root)
                     local n = cap_node(ns)
                     if cap == 'call' then calln = n elseif cap == 'name' then namen = n end
                 end
-                if calln and namen then
+                if calln and namen
+                    and not (spec.call_skip or {})[node_text(namen, src)] then
                     local full = node_text(namen, src):gsub('%s+', '')
                     -- the inventory names the VERB (lint configs match on it);
                     -- the full expression text drives resolution
@@ -621,6 +785,8 @@ function M.extract(root)
                     local method = full:find(':') ~= nil
                     local sp = pos_of(calln)
                     local encl = in_function(calln, spec)
+                    local is_top = encl == nil
+                    if spec.is_top then is_top = spec.is_top(calln, src) end
                     local args, argv = {}, {}
                     if method then
                         args[1] = ''
@@ -668,7 +834,7 @@ function M.extract(root)
                     end
                     local c = { callee = callee, args = args, argv = argv,
                         file = file, line = sp.start.line, method = method,
-                        top = encl == nil or nil }
+                        top = is_top or nil }
                     calls[#calls + 1] = c
                     pending[#pending + 1] = { call = c, file = file, full = full,
                         at = pos_of(namen), encl = encl and pos_of(encl) }
@@ -696,6 +862,9 @@ function M.extract(root)
         -- 1-2 char names are shadow-bait (pattern vars, loop counters):
         -- name-matching them is noise-dominated in every language
         if #name < 3 then return nil end
+        local _, spec = lang_for(file)
+        local snames = spec and spec.stdlib_names or {}
+        if snames[name] or snames[name:match('([%w_%-]+)$') or ''] then return nil end
         local cands = exact[name]
         if cands then
             -- same-file priority is a FILE-SCOPE assumption (lua locals, C
@@ -711,6 +880,9 @@ function M.extract(root)
             if same then return same, false end
             if #cands == 1 then return cands[1], true end
             return nil
+        end
+        for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
+            if name:sub(1, #pre) == pre then return nil end
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
@@ -764,7 +936,10 @@ function M.extract(root)
                     local callee_pos = (pt == 'call_expression' or pt == 'function_call'
                             or pt == 'call' or pt == 'apply')
                         and (parent:field('function')[1] == n or parent:field('name')[1] == n)
-                    if not callee_pos and #name >= 3 then
+                        -- sexp grammars have no fields: the head IS the callee
+                        or (pt == 'list' and parent:named_child(0) == n)
+                    if not callee_pos and #name >= 3
+                        and not (spec.stdlib_names or {})[name] then
                         local fns = exact[name]
                         if fns and #fns == 1 then
                             local t = fns[1]

@@ -117,3 +117,63 @@ test('treesitter: haskell — equations merge, where stays interior, imports', f
     ok(hit and hit.inferred, 'run -> double, name-matched')
     eq({ 'Util.hs' }, store.imports_out['Main.hs'])
 end)
+
+test('treesitter: cpp — methods, qualified calls, includes', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'cpp') then
+        skip 'no cpp parser'
+    end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/cppproj')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    ok(byname['Engine::go'] and byname['Engine::go'].kind == 'method', 'qualified method')
+    ok(byname.frames and byname.frames.kind == 'method', 'inline class method')
+    ok(byname.run and byname.run.kind == 'function', 'plain namespace fn')
+    ok(byname.main and byname.main.entry, 'main entry')
+    -- Engine::go calls run (same file, exact) and frames
+    local hits = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname['Engine::go'].id then
+            hits[store.node(e.to).name] = true
+        end
+    end
+    ok(hits.run, 'go -> run')
+    eq({ 'engine.hpp' }, store.imports_out['engine.cpp'])
+    local dead = lint.run(store, { only = { ['dead-function'] = true } })
+    eq(1, #dead)
+    ok(dead[1].message:match('helper_unused'), 'only the unused static is dead')
+end)
+
+test('treesitter: scheme — defines, named-let interior, use-modules', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'scheme') then
+        skip 'no scheme parser'
+    end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/scmproj')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    ok(byname.run and byname.run.kind == 'function', 'define fn')
+    ok(byname.step and byname.step.kind == 'function', 'define fn (util)')
+    ok(byname.limit and byname.limit.kind == 'var' and byname.limit.data == nil
+        or byname.limit, 'scalar define present')
+    ok(not byname.loop, 'named-let loop is not a node')
+    -- run -> step across modules (name-matched)
+    local hit
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname.run.id and e.to == byname.step.id then
+            hit = e
+        end
+    end
+    ok(hit and hit.inferred, 'run -> step')
+    eq({ 'demo/util.scm' }, store.imports_out['demo/main.scm'])
+    -- the top-level (display (run 5)) is a load-time call
+    local top
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'run' and c.top then top = c end
+    end
+    ok(top, 'load-time call flagged')
+end)
