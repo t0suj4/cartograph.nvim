@@ -25,6 +25,11 @@ M.default_bindings = {
     -- lua C API
     { export = { verb = 'lua_register', name = 2 },
       import = { any_call = true } },
+    -- wordpress hooks: handlers register by NAME STRING (or Class::method);
+    -- one hook fans out to many handlers
+    { export = { verb = { 'add_action', 'add_filter' }, name = 1, fn = 2 },
+      import = { verb = { 'do_action', 'do_action_ref_array',
+          'apply_filters', 'apply_filters_ref_array' }, name = 1 } },
 }
 
 local function verb_matches(c, verb)
@@ -45,7 +50,20 @@ end
 --- Resolve the handler of an export call: a resolved function argv first,
 --- then a textual scan of the call's source for a qualified/plain function
 --- name (the &Class::Method inside base::BindRepeating spans lines).
-local function find_handler(c, root, exact)
+local function find_handler(c, root, exact, export)
+    if export.fn then
+        local a = c.argv and c.argv[export.fn + (c.method and 1 or 0)]
+        if a then
+            if a.k == 'func' and a.to then return a.to end
+            local name = a.k == 'lit' and a.v or a.k == 'local' and a.name
+            if name and exact[name] and #exact[name] == 1 then
+                return exact[name][1].id
+            end
+            -- an inline closure or unresolvable callable: don't fall through
+            -- to the textual scan, it would grab neighbouring names
+            if a.k ~= 'expr' then return nil end
+        end
+    end
     for _, a in ipairs(c.argv or {}) do
         if a.k == 'func' and a.to then return a.to end
     end
@@ -142,9 +160,10 @@ function M.link(data, bindings)
             if verb_matches(c, b.export.verb) then
                 local key = logical_arg(c, b.export.name)
                 if key and key ~= '' then
-                    local h = find_handler(c, data.root, exact)
+                    local h = find_handler(c, data.root, exact, b.export)
                     if h then
-                        exports[key] = h
+                        exports[key] = exports[key] or {}
+                        table.insert(exports[key], h)
                         stats.exports = stats.exports + 1
                         -- the registration itself references the handler
                         if c.fn then addref(c.fn, h, key_range(c, key)) end
@@ -156,18 +175,23 @@ function M.link(data, bindings)
         end
         if next(exports) then
             for _, c in ipairs(data.calls or {}) do
+                local hs, key
                 if b.import.verb and verb_matches(c, b.import.verb) then
-                    local key = logical_arg(c, b.import.name or 1)
-                    local h = key and exports[key]
-                    if h then
-                        c.to = c.to or h
-                        if c.fn then addref(c.fn, h, key_range(c, key)) end
-                        stats.links = stats.links + 1
-                    end
+                    key = logical_arg(c, b.import.name or 1)
+                    hs = key and key ~= '' and exports[key]
                 elseif b.import.any_call and not c.to and exports[c.callee] then
-                    local h = exports[c.callee]
-                    c.to = h
-                    if c.fn then addref(c.fn, h, key_range(c, c.callee)) end
+                    key = c.callee
+                    hs = exports[key]
+                end
+                if hs then
+                    -- a single handler is a descend target; a fan-out keeps
+                    -- c.to empty (edges carry it, callers views show sites)
+                    if #hs == 1 then c.to = c.to or hs[1] end
+                    if c.fn then
+                        for _, h in ipairs(hs) do
+                            addref(c.fn, h, key_range(c, key))
+                        end
+                    end
                     stats.links = stats.links + 1
                 end
             end

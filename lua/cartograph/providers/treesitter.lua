@@ -353,6 +353,71 @@ M.spec = {
             end
         end,
     },
+    php = {
+        exts = { 'php' },
+        functions = [=[
+            (function_definition name: (name) @name) @def
+            (method_declaration name: (name) @name) @def
+        ]=],
+        calls = [=[
+            (function_call_expression function: (name) @name) @call
+            (member_call_expression name: (name) @name) @call
+            (scoped_call_expression name: (name) @name) @call
+        ]=],
+        vars = [=[
+            (program (expression_statement (assignment_expression
+                left: (variable_name (name) @name) right: (_) @value) @def))
+            (const_declaration (const_element (name) @name (_) @value) @def)
+        ]=],
+        params_field = 'parameters',
+        body_field = 'body',
+        fn_types = { function_definition = true, method_declaration = true,
+            anonymous_function_creation_expression = true, arrow_function = true },
+        is_method = function (_, def) return def:type() == 'method_declaration' end,
+        -- methods carry their class: Worker::work (ambiguity semantics match cpp)
+        qualify = function (name, defn, src)
+            local p2 = defn:parent()
+            while p2 do
+                local t = p2:type()
+                if t == 'class_declaration' or t == 'interface_declaration'
+                    or t == 'trait_declaration' then
+                    local cn = p2:field('name')[1]
+                    return cn and (vim.treesitter.get_node_text(cn, src) .. '::' .. name)
+                        or name
+                end
+                p2 = p2:parent()
+            end
+            return name
+        end,
+        id_query = '(name) @id',
+        block_skip = { php_tag = true, class_declaration = true,
+            interface_declaration = true, trait_declaration = true },
+        litdata_types = { array_creation_expression = true },
+        import_query = [=[
+            (require_once_expression (string) @path)
+            (require_expression (string) @path)
+            (include_once_expression (string) @path)
+            (include_expression (string) @path)
+            (namespace_use_clause (qualified_name) @path)
+        ]=],
+        resolve_import = function (path, files, from)
+            path = path:gsub('^["\']', ''):gsub('["\']$', '')
+            if path:find('\\') then -- a namespaced class: PSR-ish suffix
+                local suffix, hit = path:gsub('\\', '/') .. '.php', nil
+                for f in pairs(files) do
+                    if f == suffix or f:sub(-#suffix - 1) == '/' .. suffix then
+                        if hit then return nil end
+                        hit = f
+                    end
+                end
+                return hit
+            end
+            local dir = from:match('^(.*)/[^/]*$')
+            for _, cand in ipairs({ dir and (dir .. '/' .. path) or path, path }) do
+                if files[cand] then return cand end
+            end
+        end,
+    },
     python = {
         exts = { 'py' },
         functions = [[ (function_definition name: (identifier) @name) @def ]],
@@ -462,7 +527,20 @@ local function litval(n, src, spec, depth)
                 count = count + 1
                 if count > LIT_ITEMS then break end
                 local it = item:type()
-                if it == 'field' or it == 'pair' then
+                if it == 'array_element_initializer' then
+                    -- php: positional children; 2 = key => value, 1 = element
+                    local kids = {}
+                    for c2 in item:iter_children() do
+                        if c2:named() and c2:type() ~= 'comment' then kids[#kids + 1] = c2 end
+                    end
+                    local v = kids[#kids] and litval(kids[#kids], src, spec, depth + 1)
+                    if #kids >= 2 and v ~= nil then
+                        local k = node_text(kids[1], src):gsub('^["\']', ''):gsub('["\']$', '')
+                        map[k] = v
+                    elseif v ~= nil then
+                        arr[#arr + 1] = v
+                    end
+                elseif it == 'field' or it == 'pair' then
                     local kf = item:field('name')[1] or item:field('key')[1]
                     local vf = item:field('value')[1]
                     local v = vf and litval(vf, src, spec, depth + 1)
@@ -594,9 +672,13 @@ local function lang_for(file)
     end
 end
 
+local EXCLUDE_DIRS = { node_modules = true, vendor = true, dist = true,
+    build = true, cache = true, minified = true }
+
 local function list_files(root, subdirs)
     local out = {}
     local function want(rel)
+        if rel:match('%.min%.js$') then return false end -- bundles, always
         if not subdirs then return true end
         for _, p in ipairs(subdirs) do
             if rel:sub(1, #p) == p then return true end
@@ -611,7 +693,7 @@ local function list_files(root, subdirs)
             if name:sub(1, 1) ~= '.' then
                 local r = rel == '' and name or (rel .. '/' .. name)
                 if t == 'directory' then
-                    rec(r)
+                    if not EXCLUDE_DIRS[name:lower()] then rec(r) end
                 elseif lang_for(r) and want(r) then
                     out[#out + 1] = r
                 end
@@ -686,6 +768,7 @@ function M.extract(root, opts)
                     and not (spec.toplevel_parent and defn:parent()
                         and defn:parent():type() ~= spec.toplevel_parent) then
                     local name = node_text(namen, src):gsub('%s+', '')
+                    if spec.qualify then name = spec.qualify(name, defn, src) end
                     local sp = pos_of(defn)
                     local method = spec.is_method(name, defn)
                     local id = ('%s::%s@%d'):format(file, name, sp.start.line)
@@ -853,6 +936,9 @@ function M.extract(root, opts)
                     end
                     for a in (argsn and argsn.iter_children and argsn:iter_children() or function () end) do
                         if a:named() and a:type() ~= 'comment' then
+                            if a:type() == 'argument' then -- php wraps each arg
+                                a = a:named_child(0) or a
+                            end
                             local t = a:type()
                             if t == 'string' or t == 'string_literal' then
                                 local v = node_text(a, src):gsub('^["\']', ''):gsub('["\']$', '')

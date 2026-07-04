@@ -234,3 +234,39 @@ test('xlang: string-key dispatch links JS to the C++ handler', function ()
     ok(sent and sent.to == byname['ThingHandler::HandleGetThing'].id,
         'call inventory upgraded')
 end)
+
+test('php: functions, qualified methods, requires, hook fan-out', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'php') then
+        skip 'no php parser'
+    end
+    local xl = require 'cartograph.xlang'
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
+    local stats = xl.link(data)
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    ok(byname.compute and byname.compute.kind == 'function', 'plain fn')
+    ok(byname['Worker::work'] and byname['Worker::work'].kind == 'method',
+        'method carries its class')
+    -- cross-file call through the require
+    eq({ 'functions.php' }, store.imports_out['worker.php'])
+    local hit
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname['Worker::work'].id
+            and e.to == byname.compute.id then
+            hit = e
+        end
+    end
+    ok(hit, 'Worker::work -> compute')
+    -- hooks: two named handlers resolved, the closure honestly unresolved,
+    -- and the do_action site fans out to BOTH
+    eq(2, stats.exports)
+    eq(1, stats.unresolved)
+    local fan = 0
+    for _, e in ipairs(data.edges) do
+        if e.xlang and e.from == byname.on_boot.id then fan = fan + 1 end
+    end
+    eq(2, fan)
+end)

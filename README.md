@@ -201,8 +201,11 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
      to link. Emits calls, literal data, imports (`require`/`#include`,
      with a unique-basename fallback for `-I` paths) and a df-lite, so the
      fn altitude, the lit altitude and the graph lints all work. Specs ship
-     for **Lua, C, C++, Haskell, Scheme, Python** — a new language is one
-     spec table (queries + a few hooks). Dispatch stays honest per idiom:
+     for **Lua, C, C++, Haskell, Scheme, PHP, JavaScript/TypeScript,
+     Python** — a new language is one spec table (queries + a few hooks).
+     Bundles and dependency trees (`node_modules/`, `vendor/`, `dist/`,
+     `*.min.js`) are excluded by default — built artifacts poison
+     navigation. Dispatch stays honest per idiom:
      C dispatch-table references, C++ methods, Haskell instance methods
      and Lua registry fields are dynamically dispatched (not dead);
      `main` is an entry point; stdlib vocabularies (`string.format`,
@@ -228,8 +231,11 @@ these as a pure post-pass over any provider's graph: export calls resolve
 their handler (through `base::BindRepeating(&Class::Method, …)` and
 friends, bounded to the call's own extent), and every import site gets a
 real edge — descending a TS proxy method's statement row lands in the C++
-handler, whose callers view lists the TS side back. Ships with bindings
-for chromium WebUI (`chrome.send`/`sendWithPromise`), guile's gsubr and
+handler, whose callers view lists the TS side back. One hook can fan out to
+many handlers (WordPress `add_action`/`do_action`: string-named callables
+resolve, closures stay honest frontiers; a single-handler key becomes a
+descend target). Ships with bindings for chromium WebUI
+(`chrome.send`/`sendWithPromise`), WordPress hooks, guile's gsubr and
 `lua_register`; one config entry adds a boundary
 (`setup{ bindings = { { export = { verb = …, name = argN },
 import = { verb = … } | { any_call = true } } } }`). Unresolvable
