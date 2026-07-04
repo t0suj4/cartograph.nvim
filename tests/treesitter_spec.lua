@@ -1088,6 +1088,23 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     ok(not cache.saving(root), 'background save completed')
     eq(graph_keys(warm2), graph_keys(cache.load(root)))
 
+    -- a corrupted SHARD costs exactly its own file: it re-extracts
+    -- (extraction is pure, so the repair is exact), the rest stays warm
+    local bshard = dir .. '/' .. ('sub/b.lua'):gsub('[/\\:]', '%%') .. '.bin'
+    local bfd = assert(io.open(bshard, 'wb'))
+    bfd:write('not a shard at all')
+    bfd:close()
+    local fixed, fnote = cache.open(root)
+    ok(fixed and fnote:match('1 corrupted shard'), tostring(fnote))
+    eq(graph_keys(warm2), graph_keys(fixed))
+
+    -- a corrupted MANIFEST misses the whole cache — cold, never wrong
+    local mfd = assert(io.open(dir .. '/manifest.bin', 'wb'))
+    mfd:write('garbage')
+    mfd:close()
+    ok(cache.open(root) == nil, 'bad manifest reads as a miss')
+    cache.save(fixed) -- restore for the assertions below
+
     -- the update was saved back: a third open is fully warm again
     local warm3, note3 = cache.open(root)
     ok(note3:match('unchanged'), tostring(note3))

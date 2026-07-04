@@ -127,6 +127,16 @@ function M.splice(data, rels, deleted)
     local dirty = {}
     for _, f in ipairs(rels or {}) do dirty[f] = true end
 
+    -- a reference is GONE when its node was removed — or when its id
+    -- belongs to a refreshed/deleted file whose node never made it into
+    -- this graph at all (a corrupted shard skipped at load): ids are
+    -- file-prefixed, so the file tells us even when the node can't
+    local function gone(id)
+        if removed[id] then return true end
+        local f = file_of(id)
+        return relset[f] or del[f] or false
+    end
+
     -- nodes: drop the removed, append the fresh
     local nodes = {}
     for _, n in ipairs(data.nodes) do
@@ -143,9 +153,9 @@ function M.splice(data, rels, deleted)
     -- edges remap by signature or drop (relink gives their calls another chance)
     local edges = {}
     for _, e in ipairs(data.edges) do
-        if removed[e.from] then
+        if gone(e.from) then
             -- fresh outgoing replaces it
-        elseif removed[e.to] then
+        elseif gone(e.to) then
             dirty[file_of(e.from)] = true -- remapped or dropped: either way
             local to2 = remap[e.to]       -- this from-file's shard changed
             if to2 then
@@ -165,11 +175,11 @@ function M.splice(data, rels, deleted)
     local calls = {}
     for _, c in ipairs(data.calls or {}) do
         if not (relset[c.file] or del[c.file]) then
-            if c.to and removed[c.to] then
+            if c.to and gone(c.to) then
                 c.to = remap[c.to]
                 dirty[c.file] = true
             end
-            if c.fn and removed[c.fn] then
+            if c.fn and gone(c.fn) then
                 c.fn = remap[c.fn]
                 dirty[c.file] = true
             end

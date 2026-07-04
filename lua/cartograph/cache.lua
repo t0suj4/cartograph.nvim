@@ -79,9 +79,18 @@ end
 local function write_encoded(file, t)
     local fd = io.open(file, 'wb')
     if not fd then return false end
-    fd:write(M.encode(t))
+    local bytes = M.encode(t)
+    fd:write(bytes)
     fd:close()
-    return true
+    return #bytes
+end
+
+-- the manifest is the COMMIT POINT: written to a temp file and renamed
+-- into place, so a crash mid-write can only ever leave the old one
+local function write_manifest(dir, m)
+    local tmp = dir .. '/manifest.tmp'
+    if not write_encoded(tmp, m) then return false end
+    return pcall(vim.uv.fs_rename, tmp, dir .. '/manifest.bin')
 end
 
 local function read_manifest(root)
@@ -124,10 +133,11 @@ local function build_shards(data, want)
     return shards
 end
 
-local function manifest_of(data)
+local function manifest_of(data, sizes)
     return { version = M.VERSION, root = data.root, schema = data.schema,
         stamps = data.stamps, unparsed = data.unparsed,
-        capabilities = data.capabilities, no_parser = data.no_parser }
+        capabilities = data.capabilities, no_parser = data.no_parser,
+        sizes = sizes } -- per-shard byte lengths: truncation detector
 end
 
 --- Sweep shard files the manifest no longer references. Deletion is a
@@ -140,7 +150,7 @@ function M.gc(root, opts)
         M._gc_pending[root] = nil
         local m, dir = read_manifest(root)
         if not m then return 0 end
-        local keep = { ['manifest.bin'] = true }
+        local keep = { ['manifest.bin'] = true, ['manifest.tmp'] = true }
         for f in pairs(m.stamps) do keep[fkey(f)] = true end
         local removed = 0
         local it = vim.uv.fs_scandir(dir)
@@ -184,14 +194,22 @@ function M.save(data, dirty)
     else
         for f in pairs(data.stamps) do want[f] = true end
     end
+    -- sizes for untouched shards carry over from the previous manifest
+    local old = dirty and read_manifest(data.root) or nil
+    local sizes = {}
+    for f in pairs(data.stamps) do
+        sizes[f] = old and old.sizes and old.sizes[f] or nil
+    end
     for f, s in pairs(build_shards(data, want)) do
-        if not write_encoded(dir .. '/' .. fkey(f), s) then
+        local n = write_encoded(dir .. '/' .. fkey(f), s)
+        if not n then
             return vim.notify('cartograph: cannot write cache shard for ' .. f,
                 vim.log.levels.WARN)
         end
+        sizes[f] = n
     end
     -- manifest LAST: the commit point (any skew re-splices at next diff)
-    write_encoded(dir .. '/manifest.bin', manifest_of(data))
+    write_manifest(dir, manifest_of(data, sizes))
     M.gc(data.root)
 end
 
@@ -226,11 +244,13 @@ function M.save_bg(data)
 
     local want = {}
     for f in pairs(data.stamps) do want[f] = true end
-    local jobs = {}
+    local jobs, sizes = {}, {}
     for f, s in pairs(build_shards(data, want)) do
-        jobs[#jobs + 1] = { file = dir .. '/' .. fkey(f), bytes = M.encode(s) }
+        local bytes = M.encode(s)
+        jobs[#jobs + 1] = { file = dir .. '/' .. fkey(f), bytes = bytes }
+        sizes[f] = #bytes
     end
-    local mbytes = M.encode(manifest_of(data))
+    local manifest = manifest_of(data, sizes)
 
     local i, root = 1, data.root
     local timer = vim.uv.new_timer()
@@ -247,11 +267,7 @@ function M.save_bg(data)
             i = i + 1
         end
         if i > #jobs then
-            local fd = io.open(dir .. '/manifest.bin', 'wb')
-            if fd then
-                fd:write(mbytes)
-                fd:close()
-            end
+            write_manifest(dir, manifest)
             M._bg_cancel(root)
             M.gc(root)
         end
@@ -259,8 +275,13 @@ function M.save_bg(data)
 end
 
 --- Load a cached graph for `root`: manifest + every shard, concatenated
---- in sorted order (deterministic). nil on any miss, skew or doubt —
---- a miss just means a cold extract, never a wrong graph.
+--- in sorted order (deterministic). A CORRUPTED SHARD (truncated —
+--- caught by the manifest's byte length — undecodable, or misshapen)
+--- costs exactly that file: it is skipped and reported in the `bad`
+--- list, and the caller re-extracts it like any changed file.
+--- Extraction is a pure function of file content, so the repair is
+--- exact. Only a bad MANIFEST misses the whole cache.
+--- Returns (data, bad) or nil.
 function M.load(root)
     if require('cartograph.config').cache == false then return nil end
     local m, dir = read_manifest(root)
@@ -269,16 +290,29 @@ function M.load(root)
         provider = 'treesitter', capabilities = m.capabilities,
         no_parser = m.no_parser, stamps = m.stamps,
         nodes = {}, edges = {}, calls = {}, names = {} }
-    local files = {}
+    local files, bad = {}, {}
     for f in pairs(m.stamps) do files[#files + 1] = f end
     table.sort(files)
     for _, f in ipairs(files) do
-        local s = read_decoded(dir .. '/' .. fkey(f))
-        if not (type(s) == 'table' and s.nodes) then return nil end
-        for _, n in ipairs(s.nodes) do data.nodes[#data.nodes + 1] = n end
-        for _, e in ipairs(s.edges or {}) do data.edges[#data.edges + 1] = e end
-        for _, c in ipairs(s.calls or {}) do data.calls[#data.calls + 1] = c end
-        if s.names then data.names[f] = s.names end
+        local path = dir .. '/' .. fkey(f)
+        local want = m.sizes and m.sizes[f]
+        local st = vim.uv.fs_stat(path)
+        local s = (st and (not want or st.size == want))
+            and read_decoded(path) or nil
+        if type(s) == 'table' and type(s.nodes) == 'table' then
+            for _, n in ipairs(s.nodes) do data.nodes[#data.nodes + 1] = n end
+            for _, e in ipairs(s.edges or {}) do
+                data.edges[#data.edges + 1] = e
+            end
+            for _, c in ipairs(s.calls or {}) do
+                data.calls[#data.calls + 1] = c
+            end
+            if s.names then data.names[f] = s.names end
+        else
+            bad[#bad + 1] = f
+            data.stamps[f] = nil -- its content is NOT represented
+            data.names[f] = nil
+        end
     end
     -- frontier bundles: modules synthesized from the manifest roster
     if m.unparsed and #m.unparsed > 0 then
@@ -290,7 +324,7 @@ function M.load(root)
                     ['end'] = { line = 0, char = 0 } } }
         end
     end
-    return data
+    return data, bad
 end
 
 --- Diff a cached graph against the tree as it is NOW. Returns
@@ -354,9 +388,18 @@ function M.open(root)
             .. ' is faster, going parallel'):format(#changed, limit)
     end
 
-    -- committed to warm: NOW read the shards
-    local data = M.load(root)
+    -- committed to warm: NOW read the shards. Corrupted ones cost
+    -- exactly their own file — they join the changed set and re-extract
+    local data, bad = M.load(root)
     if not data then return nil end
+    if bad and #bad > 0 then
+        local seen = {}
+        for _, f in ipairs(changed) do seen[f] = true end
+        for _, f in ipairs(bad) do
+            if not seen[f] then changed[#changed + 1] = f end
+        end
+        table.sort(changed)
+    end
     if #changed == 0 and #deleted == 0 then
         return data, ('warm open — %d files unchanged'):format(total)
     end
@@ -365,8 +408,10 @@ function M.open(root)
     -- (deleted files are tombstoned by manifest omission; gc reclaims)
     M.save(data, stats.dirty)
     return data, ('warm open — %d re-extracted, %d deleted, %d shards'
-        .. ' rewritten, rest untouched')
-        :format(#changed, #deleted, #(stats.dirty or {}))
+        .. ' rewritten, rest untouched%s')
+        :format(#changed, #deleted, #(stats.dirty or {}),
+            (bad and #bad > 0)
+                and ('; %d corrupted shard(s) repaired'):format(#bad) or '')
 end
 
 return M
