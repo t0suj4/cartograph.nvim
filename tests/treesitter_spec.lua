@@ -567,3 +567,18 @@ test('schema-mirror: shared vocabularies report their divergence', function ()
     ok(fs[1].message:match('retry'), 'left divergence named')
     ok(fs[1].message:match('abort'), 'right divergence named')
 end)
+
+test('vtables: C initializer arrays are browsable funcall tables', function ()
+    if not has_parser('c') then skip 'no c parser' end
+    local g = require 'cartograph.greenspun'
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/cproj')
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    ok(byname.cmds and type(byname.cmds.data) == 'table', 'vtable var carries litdata')
+    local tables = g.dispatch_tables(data)
+    local hit
+    for _, t in ipairs(tables) do
+        if t.var.name == 'cmds' then hit = t end
+    end
+    ok(hit and hit.fns == 2, 'funcall table detected with both handlers')
+end)

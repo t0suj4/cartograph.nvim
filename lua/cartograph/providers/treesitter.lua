@@ -69,8 +69,12 @@ M.spec = {
         vars = [[
             (declaration declarator: (init_declarator
                 declarator: (identifier) @name value: (_) @value)) @def
+            (declaration declarator: (init_declarator
+                declarator: (array_declarator declarator: (identifier) @name)
+                value: (_) @value)) @def
             (declaration declarator: (identifier) @name) @def
         ]],
+        litdata_types = { initializer_list = true },
         params_field = 'parameters',
         body_field = 'body',
         is_method = function () return false end,
@@ -114,9 +118,13 @@ M.spec = {
         vars = [=[
             (declaration declarator: (init_declarator
                 declarator: (identifier) @name value: (_) @value)) @def
+            (declaration declarator: (init_declarator
+                declarator: (array_declarator declarator: (identifier) @name)
+                value: (_) @value)) @def
         ]=],
         params_field = 'parameters',
         body_field = 'body',
+        litdata_types = { initializer_list = true },
         -- Engine::go, inline class methods, destructors: all dispatch-ish
         is_method = function (name, def)
             if name:find('::') or name:find('~', 1, true) then return true end
@@ -534,7 +542,19 @@ local function litval(n, src, spec, depth)
                 count = count + 1
                 if count > LIT_ITEMS then break end
                 local it = item:type()
-                if it == 'array_element_initializer' then
+                if it == 'initializer_pair' then
+                    -- C designated initializer: .field = value
+                    local des = item:field('designator')
+                    local vf = item:field('value')[1]
+                    local v = vf and litval(vf, src, spec, depth + 1)
+                    local k = des and des[1]
+                        and node_text(des[1], src):gsub('^[%.%[]', ''):gsub('%]$', '')
+                    if k and v ~= nil then
+                        map[k] = v
+                    elseif v ~= nil then
+                        arr[#arr + 1] = v
+                    end
+                elseif it == 'array_element_initializer' then
                     -- php: positional children; 2 = key => value, 1 = element
                     local kids = {}
                     for c2 in item:iter_children() do

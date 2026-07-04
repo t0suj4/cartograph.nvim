@@ -434,7 +434,9 @@ function M.dispatch_tables(data)
                 end
             end
             walk(n.data, 0)
-            if fns >= 2 and fns * 2 >= total then
+            -- pair-shaped vtables ({ "name", fn }) run one fn per 2-3
+            -- entries; require a third, not half
+            if fns >= 2 and fns * 3 >= total then
                 out[#out + 1] = { var = n, fns = fns, entries = total }
             end
         end
