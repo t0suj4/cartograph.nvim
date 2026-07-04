@@ -100,7 +100,8 @@ end
 local function render_files(ctx)
     -- a streaming open says how far along it is — partial is not complete
     if store.data and store.data.partial then
-        ctx.lines[1] = ('extracting… %d/%d slices (links partial)')
+        ctx.lines[1] = ('extracting… %d/%d batches (links partial; l on a'
+            .. ' file extracts it now)')
             :format(store.data.partial.done, store.data.partial.total)
         ctx.marks[1] = { { 0, -1, 'CartographFrontier' } }
     end
@@ -1239,7 +1240,14 @@ function M.attach(win)
         local r = row()
         if M.view.level == 'files' then
             local f = M.line_file[r]
-            if f then enter('file', f) end
+            if f then
+                -- streaming open: a file still in the queue extracts NOW —
+                -- the user's attention outranks the queue order
+                if store.data and store.data.partial then
+                    require('cartograph.parallel').demand(f)
+                end
+                enter('file', f)
+            end
         elseif M.view.level == 'file' then
             local n = store.node(M.line_node[r])
             if n and STAGEABLE[n.kind] then

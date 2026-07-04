@@ -917,7 +917,14 @@ end
 ---@return table data  the schema-1 graph (ready for store.ingest)
 function M.extract(root, opts)
     root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
-    local files, minified = list_files(root, opts and opts.subdirs)
+    local files, minified
+    if opts and opts.files then
+        -- explicit work list (parallel batches, demand extraction):
+        -- no tree walk, no bundle synthesis — the caller owns both
+        files, minified = opts.files, {}
+    else
+        files, minified = list_files(root, opts and opts.subdirs)
+    end
     local fileset = {}
     for _, f in ipairs(opts and opts.fileset or files) do fileset[f] = true end
     for _, f in ipairs(files) do fileset[f] = true end
@@ -1343,7 +1350,7 @@ function M.extract(root, opts)
             if a.k == 'local' and a.name then
                 local t2, _ = resolve(a.name, p.file)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method') then
-                    a.k, a.to = 'func', t2.id
+                    a.k, a.to, a.up = 'func', t2.id, true
                     local from = p.call.fn
                     if from then addref(from, t2.id, p.at, true) end
                 end
@@ -1496,7 +1503,7 @@ function M.relink(data)
             if a.k == 'local' and a.name then
                 local t2 = resolve(a.name, c.file)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method') then
-                    a.k, a.to = 'func', t2.id
+                    a.k, a.to, a.up = 'func', t2.id, true
                     if c.fn then
                         addref(c.fn, t2.id,
                             { start = { line = c.line, char = 0 },

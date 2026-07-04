@@ -16,7 +16,7 @@ local ts = require 'cartograph.providers.treesitter'
 local out
 if job.phase == 'parse' then
     out = ts.extract(job.root, {
-        subdirs = job.files, fileset = job.fileset, skip_idpass = true,
+        files = job.files, fileset = job.fileset, skip_idpass = true,
     })
 elseif job.phase == 'ids' then
     local ifd = assert(io.open(job.index_file, 'r'))

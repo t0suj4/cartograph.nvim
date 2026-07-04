@@ -876,6 +876,19 @@ end
     vim.fn.delete(root, 'rf')
 end)
 
+test('parallel priority order: attention first, then recency', function ()
+    local par = require 'cartograph.parallel'
+    local mt = { ['old.lua'] = 100, ['new.lua'] = 900, ['mid.lua'] = 500,
+        ['cur.lua'] = 1, ['buf.lua'] = 2 }
+    local got = par.order(
+        { 'mid.lua', 'old.lua', 'cur.lua', 'new.lua', 'buf.lua' },
+        { current = 'cur.lua', bufs = { 'cur.lua', 'buf.lua' },
+            mtime = function (f) return mt[f] end })
+    -- current buffer beats everything, open buffers beat recency,
+    -- the rest newest-first
+    eq({ 'cur.lua', 'buf.lua', 'new.lua', 'mid.lua', 'old.lua' }, got)
+end)
+
 test('parallel extraction: identical graph to sequential', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
@@ -884,14 +897,21 @@ test('parallel extraction: identical graph to sequential', function ()
     local root = vim.fn.getcwd() .. '/tests/fixtures'
     local seq = ts.extract(root)
     local got, notes = nil, {}
+    local batch = par.BATCH
+    par.BATCH = 8 -- force real queue cycling over the fixture corpus
     par.extract(root, {
         workers = 3,
         on_note = function (m) notes[#notes + 1] = m end,
         on_done = function (d) got = d end,
     })
+    -- demand while the queue is hot: extracts in-process NOW; the queued
+    -- copy must dedup on arrival (the equality below proves it)
+    local demand_f = ts.list_files(root)[1]
+    ok(par.demand(demand_f), 'demand extracted ' .. tostring(demand_f))
     vim.wait(120000, function () return got ~= nil end, 50)
+    par.BATCH = batch
     ok(got, 'parallel finished (' .. table.concat(notes, '; ') .. ')')
-    eq(0, #notes) -- no failed slices
+    eq(0, #notes) -- no failed batches
 
     -- node identity: same ids, exactly
     eq(#seq.nodes, #got.nodes)
