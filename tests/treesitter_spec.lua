@@ -1061,6 +1061,15 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     end
     ok(has_new, 'updated graph persisted')
 
+    -- past the diff limit the cache steps aside: a warm open must never
+    -- lose to the (parallel, streaming) cold path
+    write('a.lua', 'local registry = {}\n\nlocal function alpha(x)\n'
+        .. '  return beta(x) + 1\nend\n')
+    require('cartograph.config').cache_max_diff = 0
+    local w4, n4 = cache.open(root)
+    require('cartograph.config').cache_max_diff = nil
+    ok(w4 == nil and n4:match('cold extract'), tostring(n4))
+
     vim.fn.delete((cache.path(root)))
     vim.fn.delete(root, 'rf')
 end)

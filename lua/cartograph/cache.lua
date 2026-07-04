@@ -123,6 +123,25 @@ function M.open(root)
         return data, ('warm open — %d files unchanged'):format(
             vim.tbl_count(data.stamps))
     end
+    -- a warm open must never lose to a cold one: the splice re-extracts
+    -- changed files SEQUENTIALLY and blocks the UI, while the cold path
+    -- is parallel and streams. Past the break-even (≈ total/workers,
+    -- since cold divides the whole tree by the worker count), step
+    -- aside — the caller's cold path is strictly better UX.
+    local cfg = require 'cartograph.config'
+    local total = vim.tbl_count(data.stamps)
+    -- ...but only when cold would actually BE parallel: on a small or
+    -- parallel-disabled project, cold is sequential over the whole tree
+    -- and the warm splice always wins
+    local would_parallel = cfg.parallel ~= false
+        and total >= (cfg.parallel_threshold or 300)
+    local limit = cfg.cache_max_diff or math.max(32,
+        math.floor(total
+            / require('cartograph.parallel').default_workers()))
+    if (would_parallel or cfg.cache_max_diff) and #changed > limit then
+        return nil, ('%d files changed (warm limit %d) — cold extract'
+            .. ' is faster, going parallel'):format(#changed, limit)
+    end
     require('cartograph.refresh').splice(data, changed, deleted)
     M.save(data)
     return data, ('warm open — %d re-extracted, %d deleted, rest cached')

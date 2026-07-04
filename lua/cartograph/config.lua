@@ -39,8 +39,12 @@ M.refresh = true
 
 -- incremental open: persist the raw graph per project root; the next
 -- open re-extracts only files whose stamps changed and relinks. false =
--- always extract cold.
+-- always extract cold. cache_max_diff: above this many changed files a
+-- warm open steps aside for the parallel cold path (nil = auto,
+-- ≈ total files / workers — the break-even where cold's parallelism
+-- beats warm's sequential splice).
 M.cache = true
+M.cache_max_diff = nil
 
 -- parallel cold extraction: worker processes parse file slices while the
 -- browser opens immediately and fills in as chunks arrive. Kicks in at
