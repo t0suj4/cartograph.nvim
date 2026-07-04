@@ -912,6 +912,42 @@ end
 function M.restage()
     if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
     vim.api.nvim_buf_clear_namespace(M.buf, ns_stage, 0, -1)
+    -- orientation against the index: under the fn title, a ghost line
+    -- says how to get back to (return path: <C-o> count) or reach
+    -- (closest graph route: → descend, ↖ callers) the nearest member
+    if next(store.workset.ids)
+        and (M.view.level == 'fn' or M.view.level == nil) and M.view.fn then
+        local id = M.view.fn
+        local chunks
+        if store.ws_has(id) then
+            chunks = { { ' ● in the index', 'CartographDim' } }
+        else
+            local back = store.ws_back()
+            local route = store.ws_route(id)
+            if back then
+                chunks = { { (' ↩ ● %s is %d×<C-o> back')
+                    :format(back.name, back.steps), 'CartographDim' } }
+            end
+            if route and route.dist > 0 then
+                local parts = {}
+                for i, s in ipairs(route.path) do
+                    if i > 4 then
+                        parts[#parts + 1] = ('…(%d)'):format(route.dist)
+                        break
+                    end
+                    parts[#parts + 1] = s.dir .. s.name
+                end
+                chunks = chunks or {}
+                chunks[#chunks + 1] = { (' %s● %s'):format(
+                    back and '   ' or '', table.concat(parts, ' ')),
+                    'CartographDim' }
+            end
+        end
+        if chunks then
+            vim.api.nvim_buf_set_extmark(M.buf, ns_stage, 0, 0,
+                { virt_lines = { chunks } })
+        end
+    end
     -- working-set membership: ● on member rows, and on files-level rows
     -- for files that contain members (staging's ✓ outranks it)
     if next(store.workset.ids) then

@@ -352,6 +352,7 @@ function M.ws_toggle(id)
         ref._id = id -- session pointer; refs are the durable half
         table.insert(M.workset.refs, ref)
     end
+    M.workset.rev = (M.workset.rev or 0) + 1
     ws_persist()
     return M.workset.ids[id] == true
 end
@@ -377,6 +378,7 @@ function M.ws_resolve()
     for _, r in ipairs(M.workset.refs) do refs[#refs + 1] = r end
     for _, r in ipairs(M.workset.pending) do refs[#refs + 1] = r end
     M.workset.ids, M.workset.refs, M.workset.pending = {}, {}, {}
+    M.workset.rev = (M.workset.rev or 0) + 1
     local notes = {}
     for _, ref in ipairs(refs) do
         ref._id = nil
@@ -417,6 +419,71 @@ function M.ws_load()
     local notes = M.ws_resolve()
     ws_persist()
     return notes
+end
+
+--- Orientation against the index: the shortest graph route from `id`
+--- to the nearest working-set member, expressed as the NAVIGATION the
+--- user would perform ('→' descend into a callee, '↖' up through the
+--- callers view). Multi-source BFS from all members over uses ∪ usedby,
+--- cached per (graph generation, index revision).
+--- Returns { dist, path = { {id, name, dir}, ... } } or nil.
+function M.ws_route(id)
+    if not next(M.workset.ids) then return nil end
+    local key = tostring(M.generation or 0) .. ':' .. tostring(M.workset.rev or 0)
+    local bfs = M._ws_bfs
+    if not bfs or bfs.key ~= key then
+        local dist, step, q, qi = {}, {}, {}, 1
+        for mid in pairs(M.workset.ids) do
+            dist[mid] = 0
+            q[#q + 1] = mid
+        end
+        while q[qi] do
+            local v = q[qi]
+            qi = qi + 1
+            local d = dist[v]
+            for _, x in ipairs(M.usedby[v] or {}) do -- x calls v: x descends
+                if not dist[x] then
+                    dist[x] = d + 1
+                    step[x] = { id = v, dir = '→' }
+                    q[#q + 1] = x
+                end
+            end
+            for _, x in ipairs(M.uses[v] or {}) do -- v calls x: x goes ↖
+                if not dist[x] then
+                    dist[x] = d + 1
+                    step[x] = { id = v, dir = '↖' }
+                    q[#q + 1] = x
+                end
+            end
+        end
+        bfs = { key = key, dist = dist, step = step }
+        M._ws_bfs = bfs
+    end
+    local d = bfs.dist[id]
+    if not d then return nil end
+    local path, cur = {}, id
+    while cur and bfs.dist[cur] > 0 do
+        local s = bfs.step[cur]
+        local n = M.node(s.id)
+        path[#path + 1] = { id = s.id, dir = s.dir,
+            name = (n and n.name or s.id):gsub('[\n\r]+', ' ') }
+        cur = s.id
+    end
+    return { dist = d, path = path }
+end
+
+--- The RETURN path: the nearest indexed object in the jump history and
+--- how many back-steps (<C-o>) lead to it. nil if no member is behind.
+function M.ws_back()
+    for i = #M._nav_back, 1, -1 do
+        local e = M._nav_back[i]
+        if e.id and M.workset.ids[e.id] then
+            local n = M.node(e.id)
+            return { id = e.id, steps = #M._nav_back - i + 1,
+                name = (n and n.name or e.id):gsub('[\n\r]+', ' ') }
+        end
+    end
+    return nil
 end
 
 --- Register a ref edge created after ingest (pins), mirroring the

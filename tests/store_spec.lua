@@ -173,3 +173,35 @@ test('working set: toggle, order, persistence, honest pending', function ()
     vim.fn.delete(store.ws_file('/x'))
     store.workset = { ids = {}, refs = {}, pending = {} }
 end)
+
+test('index orientation: closest route and return path', function ()
+    graph({ mod('m.lua', false), fn('m.lua', 'a'), fn('m.lua', 'b'),
+            fn('m.lua', 'c') },
+          { ref('m.lua::a', 'm.lua::b'), ref('m.lua::b', 'm.lua::c') })
+    vim.fn.delete(store.ws_file('/x'))
+    store.ws_load()
+    -- mark c: from a the route descends a -> b -> c
+    store.ws_toggle('m.lua::c')
+    local r = store.ws_route('m.lua::a')
+    eq(2, r.dist)
+    eq({ '→b', '→c' }, { r.path[1].dir .. r.path[1].name,
+        r.path[2].dir .. r.path[2].name })
+    -- mark a instead: from c the route climbs the callers
+    store.ws_toggle('m.lua::c')
+    store.ws_toggle('m.lua::a')
+    r = store.ws_route('m.lua::c')
+    eq(2, r.dist)
+    eq('↖b', r.path[1].dir .. r.path[1].name)
+    eq('↖a', r.path[2].dir .. r.path[2].name)
+    -- the member itself: dist 0
+    eq(0, store.ws_route('m.lua::a').dist)
+    -- return path: dive a -> b -> c, then ask the way back
+    store.set_focus('m.lua::a')
+    store.pivot('m.lua::b')
+    store.pivot('m.lua::c')
+    local back = store.ws_back()
+    eq('a', back.name)
+    eq(2, back.steps)
+    vim.fn.delete(store.ws_file('/x'))
+    store.workset = { ids = {}, refs = {}, pending = {} }
+end)

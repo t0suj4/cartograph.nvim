@@ -221,6 +221,12 @@ return. On a parallel cold open, working-set files jump to the **head of
 the extraction queue** — your declared attention outranks everything but
 the buffer you're in.
 
+The index also **orients you**: at any function, a ghost line under the
+title says how to get back — `↩ ● beta is 3×<C-o> back` (the return
+path through the jumplist) — and how to get *there* — `● →alpha ↖beta`
+(the closest graph route: `→` descend into that callee, `↖` up through
+callers). Ariadne's thread, in text.
+
 ## Architecture (three seams)
 
 1. **GraphProvider** — supplies `nodes{id,name,kind,file,range,order}` and
