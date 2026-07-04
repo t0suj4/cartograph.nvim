@@ -368,6 +368,9 @@ M.spec = {
         -- call_user_func('name', ...) CALLS name: the literal resolves as
         -- the real callee (the string is the dispatch mechanism, not a ~)
         indirect_calls = { call_user_func = 1, call_user_func_array = 1 },
+        -- a variable in callee position is runtime state ($fn()) — by NODE
+        -- TYPE: jQuery's $() is a plain identifier and must stay a call
+        dynamic_callee_types = { variable_name = true },
         vars = [=[
             (program (expression_statement (assignment_expression
                 left: (variable_name (name) @name) right: (_) @value) @def))
@@ -583,7 +586,7 @@ local function dataflow(def, spec, src, params)
             local defs, uses, seen_d, seen_u = {}, {}, {}, {}
             local function walk(n, defpos)
                 local t = n:type()
-                if t == 'identifier' then
+                if t == 'identifier' or t == 'name' then
                     local name = node_text(n, src)
                     if defpos and not seen_d[name] then
                         seen_d[name] = true
@@ -596,10 +599,11 @@ local function dataflow(def, spec, src, params)
                 end
                 -- definition positions: declaration/assignment left sides
                 if t == 'assignment_statement' or t == 'assignment'
-                    or t == 'assignment_expression' then
+                    or t == 'assignment_expression'
+                    or t == 'augmented_assignment_expression' then
                     local left = n:field('left')[1] or n:child(0)
                     for c in n:iter_children() do
-                        if c:named() then walk(c, c == left or c:type() == 'variable_list') end
+                        if c:named() then walk(c, c == left) end
                     end
                     return
                 end
@@ -611,7 +615,11 @@ local function dataflow(def, spec, src, params)
                     return
                 end
                 for c in n:iter_children() do
-                    if c:named() then walk(c, defpos and t == 'variable_list') end
+                    if c:named() then
+                        -- def position survives transparent wrappers only
+                        walk(c, defpos and (t == 'variable_list'
+                            or t == 'variable_name'))
+                    end
                 end
             end
             walk(stmt, false)
@@ -927,7 +935,9 @@ function M.extract(root, opts)
                     -- the inventory names the VERB (lint configs match on it);
                     -- the full expression text drives resolution. A dynamic
                     -- callee keeps its sigil: `→ $op` says what it is
-                    local callee = full:find('^%$') and full
+                    local dynamic = spec.dynamic_callee_types
+                        and spec.dynamic_callee_types[namen:type()] or nil
+                    local callee = dynamic and full
                         or full:match('([%w_]+)$') or full
                     local method = full:find(':') ~= nil
                     local sp = pos_of(calln)
@@ -985,7 +995,7 @@ function M.extract(root, opts)
                     local c = { callee = callee, args = args, argv = argv,
                         file = file, line = sp.start.line, method = method,
                         full = full ~= callee and full or nil,
-                        dynamic = full:find('^%$') and true or nil,
+                        dynamic = dynamic,
                         top = is_top or nil }
                     calls[#calls + 1] = c
                     local indirect = (spec.indirect_calls or {})[callee]
@@ -1044,11 +1054,52 @@ function M.extract(root, opts)
         if tc and #tc == 1 then return tc[1], true end
         return nil
     end
+    -- single-assignment literal flow: `$fn = 'compute'; $fn(3)` resolves —
+    -- but ONLY when the variable has exactly one def in the function (two
+    -- defs mean a branch chose, and we will not pick sides)
+    local src_cache = {}
+    local node_index = {}
+    for _, n in ipairs(nodes) do node_index[n.id] = n end
+    local function literal_flow(p)
+        local fnid = fn_at(p.file, p.at.start.line)
+        local fnode
+        for _, r in ipairs(fnRanges[p.file] or {}) do
+            if r.id == fnid then fnode = r end
+        end
+        local varname = p.full:match('^%$([%w_]+)$')
+        if not (varname and fnid) then return nil end
+        local df = node_index[fnid] and node_index[fnid].df
+        if not df then return nil end
+        local defstmt, ndefs = nil, 0
+        for _, st in ipairs(df.stmts) do
+            for _, d in ipairs(st.def) do
+                if d == varname then
+                    ndefs = ndefs + 1
+                    defstmt = st
+                end
+            end
+        end
+        if ndefs ~= 1 or not defstmt then return nil end
+        if src_cache[p.file] == nil then
+            local fd = io.open(root .. '/' .. p.file, 'r')
+            src_cache[p.file] = fd and vim.split(fd:read('a'), '\n', { plain = true }) or false
+            if fd then fd:close() end
+        end
+        local line = src_cache[p.file] and src_cache[p.file][defstmt.l] or ''
+        local lit = line:match('%$' .. varname .. [=[%s*=%s*['"]([%w_:\]+)['"]]=])
+        return lit and resolve(lit, p.file) or nil
+    end
+
     for _, p in ipairs(pending) do
         local target, inferred
         if p.call.dynamic then
-            -- $fn(...): honest frontier — the name is runtime state
-            target = nil
+            -- $fn(...): frontier — unless single-assignment literal flow
+            -- pins the name down within the function
+            target = literal_flow(p)
+            if target then
+                p.call.traced = true
+                p.call.dynamic = nil -- pinned down: no longer a frontier
+            end
         elseif p.indirect then
             target = resolve(p.indirect, p.file)
             inferred = false -- the literal IS the dispatch mechanism

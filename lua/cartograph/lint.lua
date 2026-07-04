@@ -266,7 +266,32 @@ local function load_order_findings(store)
     return out
 end
 
+-- The dynamic-dispatch frontier, surfaced: one finding per file with the
+-- count of call sites whose callee is runtime state ($fn(), unresolved
+-- call_user_func). The graph knows what it can't see; so should you.
+local function dynamic_findings(store)
+    local per, order = {}, {}
+    for _, c in ipairs(store.data.calls or {}) do
+        if (c.dynamic or ((c.callee == 'call_user_func'
+            or c.callee == 'call_user_func_array') and not c.to)) then
+            if not per[c.file] then
+                per[c.file] = { n = 0, line = c.line }
+                order[#order + 1] = c.file
+            end
+            per[c.file].n = per[c.file].n + 1
+            per[c.file].line = math.min(per[c.file].line, c.line)
+        end
+    end
+    local out = {}
+    for _, f in ipairs(order) do
+        out[#out + 1] = { file = store.data.root .. '/' .. f, line = per[f].line + 1,
+            message = ("%d dynamic dispatch site(s) — callees are runtime state; pin known targets via setup{ pins = ... }"):format(per[f].n) }
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'dynamic-dispatch', severity = 'info', run = dynamic_findings },
     { name = 'load-order', severity = 'warn', run = load_order_findings },
     { name = 'listener-audit', severity = 'warn', run = listener_findings },
     { name = 'swallowed-type', severity = 'info', run = swallowed_findings },

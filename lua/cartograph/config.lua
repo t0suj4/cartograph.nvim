@@ -24,6 +24,11 @@ M.bindings = nil
 -- them by text search); false = invisible, as if they don't exist
 M.unparsed = true
 
+-- human dispatch declarations: pins name the target of a dynamic call
+-- site the analysis can't resolve. 1-based lines, target by function name.
+--   setup{ pins = { { file = 'src/hooks.php', line = 88, to = 'my_handler' } } }
+M.pins = nil
+
 M.keys = {
     -- navigation
     pivot      = '<CR>',    -- tree/trace: re-root on / expand this entry

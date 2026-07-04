@@ -153,7 +153,24 @@ function M.link(data, bindings)
             ['end'] = { line = c.line, char = 0 } }
     end
 
-    local stats = { links = 0, exports = 0, unresolved = 0 }
+    local stats = { links = 0, exports = 0, unresolved = 0, pinned = 0 }
+    -- human declarations outrank everything: a pin names the target of one
+    -- dynamic call site the analysis cannot see
+    for _, pin in ipairs(require('cartograph.config').pins or {}) do
+        local target = exact[pin.to]
+        target = target and #target == 1 and target[1]
+        if target then
+            for _, c in ipairs(data.calls or {}) do
+                if c.file == pin.file and c.line == pin.line - 1 then
+                    c.to = target.id
+                    c.dynamic = nil
+                    if c.fn then addref(c.fn, target.id,
+                        key_range(c, pin.to)) end
+                    stats.pinned = stats.pinned + 1
+                end
+            end
+        end
+    end
     for _, b in ipairs(bindings) do
         local exports = {}
         for _, c in ipairs(data.calls or {}) do

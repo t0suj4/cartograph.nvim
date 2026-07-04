@@ -274,10 +274,34 @@ test('php: functions, qualified methods, requires, hook fan-out', function ()
     local cuf, dyn
     for _, c in ipairs(data.calls) do
         if c.callee == 'call_user_func' then cuf = c end
-        if c.dynamic then dyn = c end
+        if c.dynamic and c.callee == '$op' then dyn = c end
     end
     ok(cuf and cuf.to == byname.scale.id, 'call_user_func literal resolved')
     ok(dyn and dyn.callee == '$op' and not dyn.to, 'variable call visible, unresolved')
+    -- single-assignment literal flow resolves; a branchy one refuses
+    local stat, branchy
+    for _, c in ipairs(data.calls) do
+        if c.callee == '$handler' then stat = c end
+        if c.callee == '$h' then branchy = c end
+    end
+    ok(stat and stat.to == byname.scale.id and stat.traced,
+        'single-assignment $handler traced to scale')
+    ok(branchy and not branchy.to and branchy.dynamic,
+        'two defs -> refuses to pick sides')
+    -- a human pin outranks the analysis
+    require('cartograph.config').pins = {
+        { file = 'functions.php', line = branchy.line + 1, to = 'compute' },
+    }
+    local data2 = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
+    local st2 = xl.link(data2)
+    require('cartograph.config').pins = nil
+    eq(1, st2.pinned)
+    local byname2, pinned = {}, nil
+    for _, n in ipairs(data2.nodes) do byname2[n.name] = n end
+    for _, c in ipairs(data2.calls) do
+        if c.callee == '$h' then pinned = c end
+    end
+    ok(pinned and pinned.to == byname2.compute.id, 'pin names the target')
 end)
 
 test('frontier: minified bundles are opaque but reachable by text search', function ()
