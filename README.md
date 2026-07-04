@@ -376,11 +376,16 @@ runtime against the static model: **missing** (the occupied state
 demands it, the game lacks it), **leaked** (live, but no occupied state
 explains it — the subscription-leak bug class the wiretap discipline
 exists to prevent), **unknown** (live, absent from the graph). The
-states view marks occupied states with `◉ live`. Queries are config
-(`setup{ live = … }`), defaulting to the wiretap/bnw shapes; permanent
-load-time subscriptions form the baseline. On its first run against a
-running game it reported six flight-state handlers still subscribed in
-`inactive`.
+states view marks occupied states with `◉ live`. The whole picture is
+taken as **one atomic snapshot query** stamped with the game tick — a
+live system moves between calls, so separate reads can tear, and a
+sample is evidence about a moment, not an invariant (contrast a paused
+debugger, which stops the world at a causal point and can answer *who*
+subscribed, not just *that* it is). The query is config
+(`setup{ live = { snapshot = … } }`), defaulting to the wiretap/bnw
+shapes; permanent load-time subscriptions form the baseline. On its
+first run against a running game it reported six flight-state handlers
+still subscribed in `inactive`.
 
 ### Greenspun detection
 

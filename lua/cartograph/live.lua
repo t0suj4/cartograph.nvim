@@ -15,11 +15,17 @@ local M = {}
 M.defaults = {
     server = 'factorio',
     tool = 'run_lua',
-    -- names currently attached through the wiretap: subscribed_events is
-    -- an array of spec triples {event, name, count}; the name is the
-    -- spec's string element
-    subscriptions = [[
-local out = {}
+    -- ONE query, ONE tick: a live system moves between calls, so reading
+    -- subscriptions and states separately can tear (a transition in the
+    -- gap fabricates leaks). A single chunk executes atomically within a
+    -- tick; the tick stamps WHEN the answer was true — a live sample is
+    -- evidence about a moment, not an invariant.
+    --
+    -- Shapes: subscribed_events is an array of spec triples {event, name,
+    -- count} (the name is the spec's string element); landing.state is
+    -- the lua-state-machine object whose .current is the state name.
+    snapshot = [[
+local subs = {}
 for _, spec in pairs(storage.subscribed_events or {}) do
     if type(spec) == 'table' then
         local name = spec.name
@@ -28,22 +34,19 @@ for _, spec in pairs(storage.subscribed_events or {}) do
                 if type(el) == 'string' then name = el break end
             end
         end
-        if name then out[#out + 1] = name end
+        if name then subs[#subs + 1] = name end
     end
 end
-rcon.print(helpers.table_to_json(out))
-]],
-    -- the FSM state each force occupies right now (landing.state is the
-    -- lua-state-machine object; .current is the state name)
-    states = [[
-local out = {}
+local states = {}
 for name, f in pairs(storage.forces or {}) do
     if type(f) == 'table' and f.landing and f.landing.state then
         local st = f.landing.state
-        out[name] = type(st) == 'table' and st.current or st
+        states[name] = type(st) == 'table' and st.current or st
     end
 end
-rcon.print(helpers.table_to_json(out))
+rcon.print(helpers.table_to_json({
+    tick = game.tick, subscriptions = subs, states = states,
+}))
 ]],
 }
 
@@ -95,7 +98,8 @@ function M.diff(store, model, live)
     return out
 end
 
---- Fetch the live picture over MCP. Returns live or nil, why.
+--- Fetch the live picture over MCP — one atomic snapshot query.
+--- Returns { tick?, subscriptions, states } or nil, why.
 function M.fetch(cfg)
     local servers = require('cartograph.config').mcp or {}
     local scfg = servers[cfg.server]
@@ -104,14 +108,18 @@ function M.fetch(cfg)
     end
     local client, err = require('cartograph.mcp').connect(scfg)
     if not client then return nil, err end
-    local subs, w1 = client:call(cfg.tool, { code = cfg.subscriptions }, 20000)
-    local states, w2 = client:call(cfg.tool, { code = cfg.states }, 20000)
+    local snap, why = client:call(cfg.tool, { code = cfg.snapshot }, 20000)
     client:close()
-    if type(subs) ~= 'table' then
-        return nil, 'subscriptions query failed: ' .. tostring(w1)
+    if type(snap) ~= 'table' then
+        return nil, 'snapshot query failed: ' .. tostring(why)
     end
-    if type(states) ~= 'table' then states = {} end
-    return { subscriptions = subs, states = states }
+    -- empty JSON arrays/objects both decode to {}; normalize
+    return {
+        tick = tonumber(snap.tick),
+        subscriptions = type(snap.subscriptions) == 'table'
+            and snap.subscriptions or {},
+        states = type(snap.states) == 'table' and snap.states or {},
+    }
 end
 
 --- The check: fetch, diff, publish (store.live drives the states-view
@@ -130,10 +138,12 @@ function M.check(store)
     for force, st in pairs(live.states) do
         occupied[st] = (occupied[st] or 0) + 1
     end
-    store.live = { states = occupied, subscriptions = live.subscriptions }
+    store.live = { states = occupied, subscriptions = live.subscriptions,
+        tick = live.tick }
 
-    local lines = { ('live check — %d subscription(s), %d force(s)')
-        :format(#live.subscriptions, vim.tbl_count(live.states)) }
+    local lines = { ('live check%s — %d subscription(s), %d force(s)')
+        :format(live.tick and (' @ tick ' .. live.tick) or '',
+            #live.subscriptions, vim.tbl_count(live.states)) }
     for force, st in pairs(live.states) do
         lines[#lines + 1] = ('  force %s ⇒ %s'):format(force, st)
     end
@@ -149,7 +159,8 @@ function M.check(store)
     section('LEAKED (live, but no occupied state explains it):', d.extra, '⚠')
     section('UNKNOWN (live, absent from the graph):', d.unknown, '?')
     if #d.missing + #d.extra + #d.unknown == 0 then
-        lines[#lines + 1] = 'runtime agrees with the model ✓'
+        -- a sample proves the moment, not the invariant
+        lines[#lines + 1] = 'runtime agrees with the model ✓ (at this tick)'
     end
     return lines, nil, d
 end
