@@ -207,6 +207,16 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
      and Lua registry fields are dynamically dispatched (not dead);
      `main` is an entry point; stdlib vocabularies (`string.format`,
      `.size()`, scheme's `apply`) never name-match a project definition.
+   - **clangd oracle** (C/C++, automatic when a `clangd` binary exists;
+     `setup{ clangd = false }` disables): the tree-sitter skeleton stays,
+     but a headless clangd session answers `callHierarchy/incomingCalls`
+     per function and REBUILDS those ref edges as semantically proven —
+     upgrading correct `~` hypotheses and refuting wrong ones (on pkgit:
+     87 name-matched edges → 0, one false dead-function cleared, one
+     false survivor exposed — a local variable had been mistaken for a
+     dispatch-table reference). Functions clangd can't see keep their
+     honest `~`. A `compile_commands.json`/`compile_flags.txt` gives it
+     full cross-file eyes.
 2. **ImpactEngine** — `(nodeSet, target, op) -> {edits, hazards}`. Move-first,
    Lua-first. Preview the diff before it touches a file — never a silent edit.
 3. **Panes/Store** — panes are independent widgets that subscribe to a shared

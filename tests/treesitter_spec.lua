@@ -177,3 +177,26 @@ test('treesitter: scheme — defines, named-let interior, use-modules', function
     end
     ok(top, 'load-time call flagged')
 end)
+
+test('clangd: resolution oracle proves the C fixture edges', function ()
+    if not has_parser('c') then skip 'no c parser' end
+    local cd = require 'cartograph.providers.clangd'
+    local data = require('cartograph.providers.treesitter')
+        .extract(vim.fn.getcwd() .. '/tests/fixtures/cproj')
+    local stats, why = cd.enrich(data, { timeout = 8000 })
+    if not stats then skip('no clangd: ' .. tostring(why)) end
+    ok(stats.resolved_fns >= 3, 'answered for the fixture fns')
+    local inf, main_helper = 0, nil
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' then
+            if e.inferred then inf = inf + 1 end
+            if e.from == byname.main.id and e.to == byname.helper.id then
+                main_helper = e
+            end
+        end
+    end
+    eq(0, inf)
+    ok(main_helper and not main_helper.inferred, 'main -> helper is proven now')
+end)

@@ -7,6 +7,12 @@
 
 local M = {}
 
+-- clangd resolution for C/C++ directory opens: tree-sitter builds the
+-- skeleton, a headless clangd session proves the call edges. `false`
+-- disables; clangd_bin overrides binary discovery (PATH, ~/.local/bin).
+M.clangd = true
+M.clangd_bin = nil
+
 M.keys = {
     -- navigation
     pivot      = '<CR>',    -- tree/trace: re-root on / expand this entry

@@ -31,7 +31,24 @@ function M.open(dump_path)
     -- a parser); a file is a pre-extracted dump (the lua-ls CLI's output)
     local target = vim.fn.expand(dump_path)
     if vim.fn.isdirectory(target) == 1 then
-        store.ingest(require('cartograph.providers.treesitter').extract(target))
+        local data = require('cartograph.providers.treesitter').extract(target)
+        -- C/C++ roots get clangd resolution when available (config.clangd)
+        local has_c = false
+        for _, n in ipairs(data.nodes) do
+            if n.kind == 'module' and n.file:match('%.[ch]p?p?$') then
+                has_c = true
+                break
+            end
+        end
+        if has_c and require('cartograph.config').clangd ~= false then
+            vim.notify('cartograph: resolving call graph with clangd…', vim.log.levels.INFO)
+            local stats = require('cartograph.providers.clangd').enrich(data)
+            if stats then
+                vim.notify(('cartograph: clangd proved edges for %d functions')
+                    :format(stats.resolved_fns), vim.log.levels.INFO)
+            end
+        end
+        store.ingest(data)
     else
         store.load(target)
     end
