@@ -1258,6 +1258,66 @@ test('mcp provider: a server tool that returns the schema is a provider', functi
     ok(not d2 and e2:match('no such tool'), tostring(e2))
 end)
 
+test('transport substrate: DB tables cache, warm opens re-scan only the diff', function ()
+    if vim.fn.executable('luajit') == 0 then skip 'no luajit' end
+    local cache = require 'cartograph.cache'
+    local cfgm = require 'cartograph.config'
+    local db = vim.fn.tempname()
+    local log = db .. '.log'
+    local function write_db(lines)
+        local fd = assert(io.open(db, 'w'))
+        fd:write(table.concat(lines, '\n') .. '\n')
+        fd:close()
+    end
+    local function log_calls()
+        if vim.fn.filereadable(log) == 0 then return '' end
+        return table.concat(vim.fn.readfile(log), ' ')
+    end
+    write_db({ 'users v1 id,name,email', 'orders v1 id,total' })
+    cfgm.mcp = { pg = { cmd = { 'luajit',
+        vim.fn.getcwd() .. '/tests/fixtures/mcp/pgserver.lua', db } } }
+    cache.wipe('mcp://pg')
+
+    -- cold: full introspection; the server stamps its tables, so the
+    -- scan is SUBSTRATE and persists
+    local mcp = require 'cartograph.providers.mcp'
+    local data = mcp.extract('pg')
+    ok(data and data.stamps and data.stamps['tables/users'] == 'v1',
+        'server stamped its tables')
+    cache.save(data)
+
+    -- warm, unchanged: ONE stamps call, zero rescans
+    vim.fn.delete(log)
+    local warm, note = cache.open('mcp://pg')
+    ok(warm and note and note:match('unchanged'), tostring(note))
+    eq('stamps', log_calls())
+
+    -- alter one table's definition: only IT re-introspects
+    write_db({ 'users v2 id,name,email,age', 'orders v1 id,total' })
+    vim.fn.delete(log)
+    local warm2, note2 = cache.open('mcp://pg')
+    ok(warm2 and note2:match('1 re%-extracted'), tostring(note2))
+    ok(log_calls():match('graph:only=1'), 'sliced re-scan: ' .. log_calls())
+    local users
+    for _, n in ipairs(warm2.nodes) do
+        if n.name == 'users' and n.kind == 'var' then users = n end
+    end
+    ok(users and vim.inspect(users.data):find('age'), 'new column arrived')
+    eq('v2', warm2.stamps['tables/users'])
+    eq('v1', warm2.stamps['tables/orders'])
+
+    -- drop a table: tombstoned like any deletion
+    write_db({ 'users v2 id,name,email,age' })
+    local warm3, note3 = cache.open('mcp://pg')
+    ok(warm3 and note3:match('1 deleted'), tostring(note3))
+    eq(nil, warm3.stamps['tables/orders'])
+
+    cfgm.mcp = nil
+    cache.wipe('mcp://pg')
+    vim.fn.delete(db)
+    vim.fn.delete(log)
+end)
+
 test('live oracle: the diff classifies missing, leaked and unknown', function ()
     local live = require 'cartograph.live'
     store.ingest({ schema = 1, root = '/x', nodes = {}, edges = {}, calls = {

@@ -516,6 +516,9 @@ end
 function M.stale(file)
     local s = M.data and M.data.stamps and M.data.stamps[file]
     if not s then return nil end
+    -- non-filesystem substrates (mcp://…) validate through their own
+    -- transport at open time; a stat against their keys means nothing
+    if (M.data.root or ''):match('^%w+://') then return nil end
     local st = vim.uv.fs_stat(M.data.root .. '/' .. file)
     local now = st and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
         or 'gone'

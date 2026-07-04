@@ -39,6 +39,13 @@ end
 --- Returns stats { removed, added, remapped, relinked, remap, removed_ids }.
 function M.splice(data, rels, deleted)
     local ts = require 'cartograph.providers.treesitter'
+    -- the SOURCE does the re-extraction: the filesystem provider parses
+    -- files, an MCP substrate re-fetches the changed keys from its
+    -- server. Everything after the mini is source-agnostic.
+    local p = require('cartograph.source').provider(data)
+    if rels and #rels > 0 and not (p and p.refresh_slice) then
+        return nil, 'this source cannot re-extract slices — re-open cold'
+    end
     local relset, del = {}, {}
     for _, f in ipairs(rels or {}) do relset[f] = true end
     for _, f in ipairs(deleted or {}) do del[f] = true end
@@ -59,9 +66,11 @@ function M.splice(data, rels, deleted)
     -- and "unique across the workspace" decided against it would silently
     -- drop the refreshed file's reads of other files' globals
     local mini = (rels and #rels > 0)
-        and ts.extract(data.root, { subdirs = rels, fileset = fileset,
-            skip_idpass = true })
+        and p.refresh_slice(data, rels, fileset)
         or { nodes = {}, edges = {}, calls = {}, stamps = {} }
+    if not mini then
+        return nil, 'source re-extraction failed'
+    end
 
     -- removed = sql entities (re-derived by the caller) + every node of a
     -- refreshed or deleted file. Refreshed files drop their landings too:
@@ -219,7 +228,10 @@ function M.splice(data, rels, deleted)
     -- must APPEAR in unchanged files; a name made ambiguous must lose
     -- the inferred links only its former uniqueness justified. The
     -- mention index says which files can possibly care; only those get
-    -- their id-pass artifacts re-derived.
+    -- their id-pass artifacts re-derived. Sources without an id pass
+    -- (non-parsed substrates: a DB introspector) have none of these
+    -- artifacts to reconcile — skip to relink.
+    local can_idpass = p and p.idpass
     local fn_after, var_after = {}, {}
     for _, n in ipairs(data.nodes) do
         if n.kind == 'function' or n.kind == 'method' then
@@ -244,7 +256,7 @@ function M.splice(data, rels, deleted)
     judge(fn_after, rm_fn, ad_fn)
     judge(var_after, rm_var, ad_var)
     local candidates = {}
-    if next(worthy) then
+    if can_idpass and next(worthy) then
         for f, s in pairs(data.names) do
             for nme in pairs(worthy) do
                 if s:find('\31' .. nme .. '\31', 1, true) then
@@ -316,7 +328,7 @@ function M.splice(data, rels, deleted)
             franges[f] = nil
         end
     end
-    if #idfiles > 0 then
+    if can_idpass and #idfiles > 0 then
         local L = ts.lookups(data.nodes)
         L.fn_ranges = franges
         ts.merge_idpass(data, ts.id_pass(data.root, idfiles, L), dirty)
@@ -345,7 +357,8 @@ function M.file(rel)
         return nil, 'staged changes pending — refresh is frozen until applied or cleared'
     end
 
-    local stats = M.splice(data, { rel }, nil)
+    local stats, why = M.splice(data, { rel }, nil)
+    if not stats then return nil, why end
     local removed, remap = stats.removed_ids, stats.remap
 
     -- post-passes (all idempotent over existing edges)

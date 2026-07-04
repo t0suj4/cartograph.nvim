@@ -41,9 +41,19 @@ function M.open(dump_path, opts)
     local target = vim.fn.expand(dump_path)
     local mcp_name = target:match('^mcp://(.+)$')
     if mcp_name then
-        local data, err = require('cartograph.providers.mcp').extract(mcp_name)
+        -- a server that STAMPS its keys is substrate: its scan caches and
+        -- warm opens re-fetch only changed keys (one cheap stamps call).
+        -- A stampless server is a sample: honest re-fetch per open.
+        local cachem = require 'cartograph.cache'
+        local data, note = cachem.open(target)
+        if note then vim.notify('cartograph: ' .. note, vim.log.levels.INFO) end
         if not data then
-            error('cartograph: mcp://' .. mcp_name .. ' — ' .. tostring(err), 0)
+            local err
+            data, err = require('cartograph.providers.mcp').extract(mcp_name)
+            if not data then
+                error('cartograph: mcp://' .. mcp_name .. ' — ' .. tostring(err), 0)
+            end
+            cachem.save(data) -- persists iff the server supplied stamps
         end
         require('cartograph.xlang').link(data,
             require('cartograph.xlang').effective_bindings(data))

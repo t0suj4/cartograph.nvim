@@ -19,7 +19,8 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 4 -- v4: per-file shards; v3: binary codec; v2: data.names
+M.VERSION = 5 -- v5: any stamped source (manifest carries provider);
+              -- v4: per-file shards; v3: binary codec; v2: data.names
 
 -- The codec is the cache's speed floor. string.buffer (LuaJIT) is
 -- near-memcpy; vim.mpack is the fallback. Either way binary-safe (the
@@ -47,7 +48,12 @@ end
 function M.path(root)
     local base = vim.fn.stdpath('cache') .. '/cartograph'
     vim.fn.mkdir(base, 'p')
-    root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
+    if root:match('^%w+://') then
+        -- URI roots (mcp://pg) are stable identities, not paths
+        root = root:gsub('/+$', '')
+    else
+        root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
+    end
     return base .. '/' .. root:gsub('[/\\:]', '%%') .. '.d', root
 end
 
@@ -135,6 +141,7 @@ end
 
 local function manifest_of(data, sizes)
     return { version = M.VERSION, root = data.root, schema = data.schema,
+        provider = data.provider, -- which source: dispatch key for diff/refresh
         stamps = data.stamps, unparsed = data.unparsed,
         capabilities = data.capabilities, no_parser = data.no_parser,
         sizes = sizes } -- per-shard byte lengths: truncation detector
@@ -179,9 +186,9 @@ end
 --- bundle modules live in the manifest and are synthesized at load.
 function M.save(data, dirty)
     if require('cartograph.config').cache == false then return end
-    if not (data and data.provider == 'treesitter' and data.stamps) then
-        return
-    end
+    -- persistable <=> stamps: the source supplied wire-free validity
+    -- keys, whatever it is. Samples (no stamps) never persist.
+    if not (data and data.provider and data.stamps) then return end
     local dir = M.path(data.root)
     vim.fn.mkdir(dir, 'p')
     M._bg_cancel(data.root) -- a sync save supersedes an in-flight one
@@ -235,9 +242,7 @@ end
 
 function M.save_bg(data)
     if require('cartograph.config').cache == false then return end
-    if not (data and data.provider == 'treesitter' and data.stamps) then
-        return
-    end
+    if not (data and data.provider and data.stamps) then return end
     local dir = M.path(data.root)
     vim.fn.mkdir(dir, 'p')
     M._bg_cancel(data.root)
@@ -287,7 +292,7 @@ function M.load(root)
     local m, dir = read_manifest(root)
     if not m then return nil end
     local data = { schema = m.schema or 1, root = m.root,
-        provider = 'treesitter', capabilities = m.capabilities,
+        provider = m.provider or 'treesitter', capabilities = m.capabilities,
         no_parser = m.no_parser, stamps = m.stamps,
         nodes = {}, edges = {}, calls = {}, names = {} }
     local files, bad = {}, {}
@@ -327,65 +332,42 @@ function M.load(root)
     return data, bad
 end
 
---- Diff a cached graph against the tree as it is NOW. Returns
---- (changed, deleted): changed covers edits AND new files (no stamp);
---- an unparsed bundle counts only when it appears or vanishes — content
---- churn inside it is the frontier machinery's job.
-function M.diff(data)
-    local ts = require 'cartograph.providers.treesitter'
-    local files, minified = ts.list_files(data.root)
-    local changed, deleted, on_disk = {}, {}, {}
-    for _, f in ipairs(files) do
-        on_disk[f] = true
-        local st = vim.uv.fs_stat(data.root .. '/' .. f)
-        local now = st
-            and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
-        if data.stamps[f] ~= now then changed[#changed + 1] = f end
-    end
-    local un = {}
-    for _, f in ipairs(data.unparsed or {}) do un[f] = true end
-    for _, f in ipairs(minified) do
-        on_disk[f] = true
-        if not un[f] then changed[#changed + 1] = f end
-    end
-    for f in pairs(data.stamps) do
-        if not on_disk[f] then deleted[#deleted + 1] = f end
-    end
-    for f in pairs(un) do
-        if not on_disk[f] then deleted[#deleted + 1] = f end
-    end
-    table.sort(changed)
-    table.sort(deleted)
-    return changed, deleted
-end
-
 --- The incremental open: cached graph brought up to date, or nil (cold).
 --- Returns (data, note) — note says what happened, honestly.
 function M.open(root)
     if require('cartograph.config').cache == false then return nil end
-    -- diff from the MANIFEST: the warm/cold decision costs a few KB,
-    -- not a shard sweep it might immediately discard
+    -- diff from the MANIFEST: the warm/cold decision costs a few KB (or
+    -- one cheap stamps round-trip), not a shard sweep it might discard
     local m = read_manifest(root)
     if not m then return nil end
-    local changed, deleted = M.diff(m)
+    local src = require 'cartograph.source'
+    local p = src.provider(m)
+    -- warm-openable <=> the source can diff and re-extract slices
+    if not (p and p.diff and p.refresh_slice) then return nil end
+    local changed, deleted = p.diff(m)
+    if not changed then
+        return nil, 'diff unavailable (' .. tostring(deleted) .. ') — cold'
+    end
 
     -- a warm open must never lose to a cold one: the splice re-extracts
     -- changed files SEQUENTIALLY and blocks the UI, while the cold path
     -- is parallel and streams. Past the break-even (≈ total/workers,
     -- since cold divides the whole tree by the worker count), step aside
-    -- WITHOUT reading a single shard. Only when cold would actually BE
-    -- parallel: on a small or parallel-disabled project, cold is
-    -- sequential over the whole tree and the warm splice always wins.
+    -- WITHOUT reading a single shard. Only where cold IS parallel — the
+    -- filesystem source above the threshold; other sources have no
+    -- parallel path, so warm always wins for them.
     local cfg = require 'cartograph.config'
     local total = vim.tbl_count(m.stamps)
-    local would_parallel = cfg.parallel ~= false
-        and total >= (cfg.parallel_threshold or 300)
-    local limit = cfg.cache_max_diff or math.max(32,
-        math.floor(total
-            / require('cartograph.parallel').default_workers()))
-    if (would_parallel or cfg.cache_max_diff) and #changed > limit then
-        return nil, ('%d files changed (warm limit %d) — cold extract'
-            .. ' is faster, going parallel'):format(#changed, limit)
+    if m.provider == 'treesitter' or not m.provider then
+        local would_parallel = cfg.parallel ~= false
+            and total >= (cfg.parallel_threshold or 300)
+        local limit = cfg.cache_max_diff or math.max(32,
+            math.floor(total
+                / require('cartograph.parallel').default_workers()))
+        if (would_parallel or cfg.cache_max_diff) and #changed > limit then
+            return nil, ('%d files changed (warm limit %d) — cold extract'
+                .. ' is faster, going parallel'):format(#changed, limit)
+        end
     end
 
     -- committed to warm: NOW read the shards. Corrupted ones cost

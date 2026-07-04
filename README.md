@@ -213,6 +213,14 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
      client is a ~150-line stdio JSON-RPC speaker built on uv, and the
      same client serves future **oracles** (live systems answering
      enrichment questions, the clangd pattern over a different wire).
+     A server that **stamps** its keys (e.g. a Postgres introspector
+     fingerprinting each table's definition) is *substrate*: its scan
+     caches like a source tree — table ⇔ shard — and a warm open makes
+     one cheap `stamps` call, re-fetching only keys whose fingerprint
+     changed. A server that can't stamp gives an honestly-dated sample,
+     re-fetched per open. What a source *can do* is the dispatch surface
+     (`lua/cartograph/source.lua`): persistable ⇔ stamps, warm-openable
+     ⇔ diff + slice re-fetch, reconcilable ⇔ id-pass + names.
    - **lua-ls CLI** (the reference): vm-typed resolution, full `df`
      data-flow, effects — the deep option for Lua. Extract once, open the
      dump.
