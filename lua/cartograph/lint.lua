@@ -393,7 +393,25 @@ local function access_point_findings(store)
     return out
 end
 
+-- Clone candidates: same data-flow shape, same callees — the dedup list.
+local function clone_findings(store)
+    local out = {}
+    for _, g in ipairs(require('cartograph.greenspun').clones(store.data)) do
+        local names = {}
+        for _, n in ipairs(g) do
+            names[#names + 1] = ('%s (%s:%d)'):format(
+                n.name, n.file, n.range.start.line + 1)
+        end
+        out[#out + 1] = { file = store.abspath(g[1]),
+            line = g[1].range.start.line + 1,
+            message = ('possible clones (%d statements, same shape and callees): %s')
+                :format(#g[1].df.stmts, table.concat(names, ' ~ ')) }
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'clone', severity = 'info', run = clone_findings },
     { name = 'access-point', severity = 'info', run = access_point_findings },
     { name = 'registry-audit', severity = 'warn', run = registry_audit_findings },
     { name = 'pair-audit', severity = 'warn', run = pair_audit_findings },

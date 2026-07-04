@@ -621,3 +621,13 @@ test('access points: trivial high-fanin functions are plumbing', function ()
     ok(store.node('g').access, 'node marked')
     ok(not store.node('big').access, 'a 5-statement getter is not plumbing')
 end)
+
+test('clones: same shape, same callees, different names', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    store.ingest(ts.extract(vim.fn.getcwd() .. '/tests/fixtures/raii'))
+    local fs = lint.run(store, { only = { ['clone'] = true } })
+    eq(1, #fs)
+    ok(fs[1].message:match('alpha') and fs[1].message:match('beta'),
+        'the twins found: ' .. fs[1].message)
+    ok(not fs[1].message:match('gamma'), 'the different one excluded')
+end)

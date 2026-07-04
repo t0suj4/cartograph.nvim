@@ -20,3 +20,20 @@ local flow = {
     { name = 'die', from = '*', to = 'dead' },
   },
 }
+
+local function alpha(x)
+  local t = x + 1
+  local u = helper(t)
+  return u
+end
+
+local function beta(y)
+  local s = y + 1
+  local v = helper(s)
+  return v
+end
+
+local function gamma(z)
+  local a = z * 2
+  return a
+end

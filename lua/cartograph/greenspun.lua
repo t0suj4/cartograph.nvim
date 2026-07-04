@@ -880,6 +880,53 @@ function M.mirrors(data, opts)
         and ('%d ubiquitous member string(s) skipped'):format(stop) or nil
 end
 
+--- Clone candidates: functions whose data-flow SHAPE and callee set are
+--- identical (names normalized away). Exact-shape only — near-misses are
+--- a later tier. Returns groups of >= 2 nodes.
+function M.clones(data, opts)
+    local min_stmts = opts and opts.min_stmts or 3
+    local callees = {}
+    for _, c in ipairs(data.calls or {}) do
+        if c.fn then
+            callees[c.fn] = callees[c.fn] or {}
+            table.insert(callees[c.fn], c.callee)
+        end
+    end
+    local groups = {}
+    for _, n in ipairs(data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and n.df
+            and #n.df.stmts >= min_stmts then
+            local sig = { tostring(#(n.params or {})) }
+            for _, st in ipairs(n.df.stmts) do
+                local deps = {}
+                for _, d in ipairs(st.dep or {}) do deps[#deps + 1] = d.from end
+                table.sort(deps)
+                sig[#sig + 1] = ('%d/%d/%s'):format(
+                    #(st.def or {}), #(st.use or {}), table.concat(deps, ','))
+            end
+            local cs = {}
+            for _, x in ipairs(callees[n.id] or {}) do cs[#cs + 1] = x end
+            table.sort(cs)
+            sig[#sig + 1] = table.concat(cs, ',')
+            local key = table.concat(sig, ';')
+            groups[key] = groups[key] or {}
+            table.insert(groups[key], n)
+        end
+    end
+    local out = {}
+    for _, g in pairs(groups) do
+        if #g >= 2 then
+            table.sort(g, function (a, b)
+                if a.file ~= b.file then return a.file < b.file end
+                return a.order < b.order
+            end)
+            out[#out + 1] = g
+        end
+    end
+    table.sort(out, function (a, b) return #a[1].df.stmts > #b[1].df.stmts end)
+    return out
+end
+
 --- eval and friends: the interpreter itself.
 function M.evals(data)
     local out = {}
