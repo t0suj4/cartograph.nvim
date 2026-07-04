@@ -190,6 +190,123 @@ function M.dispatch_tables(data)
     return out
 end
 
+-- bounded Damerau-Levenshtein: transposition counts 1 — 'on_tikc' is one
+-- slip from 'on_tick', and that slip is THE registry typo
+local function editdist(a, b, cap)
+    if math.abs(#a - #b) > cap then return cap + 1 end
+    local prev2, prev = nil, {}
+    for j = 0, #b do prev[j] = j end
+    for i = 1, #a do
+        local cur = { [0] = i }
+        for j = 1, #b do
+            local cost = a:sub(i, i) == b:sub(j, j) and 0 or 1
+            cur[j] = math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if prev2 and i > 1 and j > 1
+                and a:sub(i, i) == b:sub(j - 1, j - 1)
+                and a:sub(i - 1, i - 1) == b:sub(j, j) then
+                cur[j] = math.min(cur[j], prev2[j - 2] + 1)
+            end
+        end
+        prev2, prev = prev, cur
+    end
+    return prev[#b]
+end
+
+local function nearest(key, set)
+    local cap = #key >= 5 and 2 or 1
+    local best, bestd
+    for k in pairs(set) do
+        if k ~= key then
+            local d = editdist(key, k, cap)
+            if d <= cap and (not bestd or d < bestd) then best, bestd = k, d end
+        end
+    end
+    return best
+end
+
+--- The registry consistency audit, auto-configured from the bindings in
+--- force (hand-written and discovered alike). Two directions, both
+--- suppressed when the respective side has dynamic (non-literal) keys:
+--- a dispatched key never registered, a registered key never dispatched —
+--- and when an unmatched key sits within edit distance of a real one,
+--- the finding names the probable typo. Returns lint-shaped findings.
+function M.audit(data, bindings)
+    local out = {}
+    local function verbs_of(v)
+        return type(v) == 'table' and v or { v }
+    end
+    for _, b in ipairs(bindings or {}) do
+        if b.import and (b.import.verb or b.import.any_call) then
+            local evs, ivs = {}, {}
+            for _, v in ipairs(verbs_of(b.export.verb)) do evs[v] = true end
+            for _, v in ipairs(verbs_of(b.import.verb or {})) do ivs[v] = true end
+            local reg, reg_site, disp, disp_site = {}, {}, {}, {}
+            local reg_dyn, disp_dyn = false, false
+            for _, c in ipairs(data.calls or {}) do
+                local shift = c.method and 1 or 0
+                if evs[c.callee] or (c.full and evs[c.full]) then
+                    local k = (c.args or {})[(b.export.name or 1) + shift]
+                    if k and k ~= '' then
+                        reg[k] = true
+                        reg_site[k] = reg_site[k] or c
+                    else
+                        reg_dyn = true
+                    end
+                elseif ivs[c.callee] or (c.full and ivs[c.full]) then
+                    local k = (c.args or {})[(b.import.name or 1) + shift]
+                    if k and k ~= '' then
+                        disp[k] = true
+                        disp_site[k] = disp_site[k] or c
+                    else
+                        disp_dyn = true
+                    end
+                end
+            end
+            if next(reg) then
+                local miss_d, miss_r = 0, 0
+                for k in pairs(disp) do
+                    if not reg[k] then
+                        miss_d = miss_d + 1
+                        local near = nearest(k, reg)
+                        if near then
+                            local c = disp_site[k]
+                            out[#out + 1] = { severity = 'warn',
+                                file = data.root .. '/' .. c.file, line = c.line + 1,
+                                message = ("'%s' is dispatched but never registered — did you mean '%s'?")
+                                    :format(k, near) }
+                        end
+                    end
+                end
+                if not disp_dyn then
+                    for k in pairs(reg) do
+                        if not disp[k] then
+                            miss_r = miss_r + 1
+                            local near = nearest(k, disp)
+                            if near then
+                                local c = reg_site[k]
+                                out[#out + 1] = { severity = 'warn',
+                                    file = data.root .. '/' .. c.file, line = c.line + 1,
+                                    message = ("'%s' is registered but never dispatched — did you mean '%s'?")
+                                        :format(k, near) }
+                            end
+                        end
+                    end
+                end
+                if miss_d + miss_r > 0 then
+                    local vname = verbs_of(b.export.verb)[1]
+                    out[#out + 1] = { severity = 'info',
+                        file = data.root, line = 1,
+                        message = ("registry '%s': %d key(s) dispatched but never registered, %d registered but never dispatched%s%s")
+                            :format(vname, miss_d, miss_r,
+                                reg_dyn and ' (dynamic registrations exist)' or '',
+                                disp_dyn and ' (dynamic dispatch exists — dead-key check suppressed)' or '') }
+                end
+            end
+        end
+    end
+    return out
+end
+
 --- eval and friends: the interpreter itself.
 function M.evals(data)
     local out = {}

@@ -328,7 +328,13 @@ pairs are linked automatically like any xlang binding
 (`setup{ discover = false }` disables). Literal data tables mapping to
 functions are surfaced as funcall tables, `eval`/`load`/`dlsym` as the
 interpreter itself — all in the `greenspun` lint rule, counted and
-jumpable.
+jumpable. And once a registry is known, it gets the **consistency
+audit** for free (`registry-audit`): keys dispatched but never
+registered, keys registered but never dispatched — each direction
+suppressed when its side has dynamic keys — and when an unmatched key
+sits one slip from a real one, the finding names it:
+`'on_tikc' is dispatched but never registered — did you mean 'on_tick'?`
+(transpositions count as one slip; they are THE registry typo).
 
 ## Lint
 

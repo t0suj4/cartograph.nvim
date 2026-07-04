@@ -53,23 +53,8 @@ function M.open(dump_path, opts)
         -- so the oracle's edge rebuild can't drop the cross-language links.
         -- Registries the project invented for itself are DISCOVERED and
         -- linked the same way (config.discover = false disables).
-        local cfg = require('cartograph.config')
-        local bindings = vim.list_extend({},
-            cfg.bindings or require('cartograph.xlang').default_bindings)
-        if cfg.discover ~= false then
-            local disc = require('cartograph.greenspun').registries(data)
-            local have = {}
-            for _, b in ipairs(bindings) do
-                for _, v in ipairs(type(b.export.verb) == 'table'
-                    and b.export.verb or { b.export.verb }) do
-                    have[v] = true
-                end
-            end
-            for _, b in ipairs(disc) do
-                if not have[b.export.verb] then bindings[#bindings + 1] = b end
-            end
-        end
-        local x = require('cartograph.xlang').link(data, bindings)
+        local x = require('cartograph.xlang').link(data,
+            require('cartograph.xlang').effective_bindings(data))
         if x.links > 0 then
             vim.notify(('cartograph: linked %d cross-language call sites')
                 :format(x.links), vim.log.levels.INFO)

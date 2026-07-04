@@ -316,7 +316,17 @@ local function greenspun_findings(store)
     return out
 end
 
+-- The registry consistency audit, auto-configured: every binding in force
+-- (hand-written or discovered) gets the wiretap treatment — typo'd keys
+-- named with their probable intent.
+local function registry_audit_findings(store)
+    local xl = require 'cartograph.xlang'
+    return require('cartograph.greenspun').audit(store.data,
+        xl.effective_bindings(store.data))
+end
+
 M.rules = {
+    { name = 'registry-audit', severity = 'warn', run = registry_audit_findings },
     { name = 'greenspun', severity = 'info', run = greenspun_findings },
     { name = 'dynamic-dispatch', severity = 'info', run = dynamic_findings },
     { name = 'load-order', severity = 'warn', run = load_order_findings },
@@ -386,7 +396,7 @@ function M.run(store, opts)
     for _, rule in ipairs(M.rules) do
         if not only or only[rule.name] then
             for _, f in ipairs(rule.run(store)) do
-                f.rule, f.severity = rule.name, rule.severity
+                f.rule, f.severity = rule.name, f.severity or rule.severity
                 findings[#findings + 1] = f
             end
         end

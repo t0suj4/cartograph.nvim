@@ -103,6 +103,26 @@ local function find_handler(c, root, exact, export)
     return nil
 end
 
+--- The bindings actually in force for a graph: config (or defaults) plus
+--- discovered registries (config.discover), deduped by export verb.
+function M.effective_bindings(data)
+    local cfg = require('cartograph.config')
+    local bindings = vim.list_extend({}, cfg.bindings or M.default_bindings)
+    if cfg.discover ~= false then
+        local have = {}
+        for _, b in ipairs(bindings) do
+            for _, v in ipairs(type(b.export.verb) == 'table'
+                and b.export.verb or { b.export.verb }) do
+                have[v] = true
+            end
+        end
+        for _, b in ipairs(require('cartograph.greenspun').registries(data)) do
+            if not have[b.export.verb] then bindings[#bindings + 1] = b end
+        end
+    end
+    return bindings
+end
+
 --- Link a graph's cross-language boundaries in place.
 ---@param data table  neutral-schema graph (mutated)
 ---@param bindings table?  defaults to config.bindings or M.default_bindings

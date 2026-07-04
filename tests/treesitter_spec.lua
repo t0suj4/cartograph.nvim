@@ -446,3 +446,20 @@ test('greenspun: funcall tables and evals are surfaced', function ()
     eq(2, tables[1].fns)
     eq(1, #g.evals(data))
 end)
+
+test('registry-audit: auto-configured, names the typo', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    store.ingest(ts.extract(vim.fn.getcwd() .. '/tests/fixtures/listener'))
+    local fs = lint.run(store, { only = { ['registry-audit'] = true } })
+    local blob, sev = '', {}
+    for _, f in ipairs(fs) do
+        blob = blob .. f.severity .. ':' .. f.message .. '\n'
+        sev[f.severity] = (sev[f.severity] or 0) + 1
+    end
+    ok(blob:match("'on_tikc' is dispatched but never registered — did you mean 'on_tick'%?"),
+        'typo named with suggestion: ' .. blob)
+    ok(blob:match("1 key%(s%) dispatched but never registered, 2 registered"),
+        'summary counts both directions')
+    eq(1, sev.warn)  -- the typo
+    eq(1, sev.info)  -- the summary
+end)
