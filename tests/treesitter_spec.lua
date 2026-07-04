@@ -1318,6 +1318,46 @@ test('transport substrate: DB tables cache, warm opens re-scan only the diff', f
     vim.fn.delete(log)
 end)
 
+test('postgres recipe: catalog rows become the neutral schema', function ()
+    local rec = require 'cartograph.recipes.postgres'
+    -- a canned postgres-mcp: python-repr envelope around json, dispatched
+    -- by query shape (the same envelope the real server produces)
+    local queries = {}
+    local function sql(q)
+        queries[#queries + 1] = q
+        if q:find('json_object_agg') then
+            return [==[[{'j': '{ "tables/public.users" : "aaa", "tables/public.orders" : "bbb" }'}]]==]
+        elseif q:find('FOREIGN KEY') then
+            return [==[[{'j': '[{"s":"public","n":"orders","fs":"public","fn":"users"}]'}]]==]
+        else
+            return [==[[{'j': '[{"s":"public","n":"orders","cols":[{"c":"id","t":"integer"}]},{"s":"public","n":"users","cols":[{"c":"id","t":"integer"},{"c":"name","t":"text"}]}]'}]]==]
+        end
+    end
+    local data, err = rec.extract(sql)
+    ok(data, tostring(err))
+    eq('aaa', data.stamps['tables/public.users'])
+    local byname = {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'var' then byname[n.name] = n end
+    end
+    ok(byname.users and byname.orders, 'table entities')
+    eq(2, #byname.users.data) -- columns as litdata
+    eq('name text', byname.users.data[2].v)
+    -- the FK is the database's own dependency edge
+    eq(1, #data.edges)
+    ok(data.edges[1].from:find('orders') and data.edges[1].to:find('users'),
+        'orders -> users use edge')
+    -- incremental slice: the filter reaches every catalog query
+    queries = {}
+    rec.extract(sql, { only = { 'tables/public.users' } })
+    for _, q in ipairs(queries) do
+        ok(q:find("IN ('tables/public.users')", 1, true), 'filtered: ' .. q:sub(1, 60))
+    end
+    -- stamps alone, for the warm-open diff
+    local st = rec.stamps(sql)
+    eq('bbb', st['tables/public.orders'])
+end)
+
 test('live oracle: the diff classifies missing, leaked and unknown', function ()
     local live = require 'cartograph.live'
     store.ingest({ schema = 1, root = '/x', nodes = {}, edges = {}, calls = {

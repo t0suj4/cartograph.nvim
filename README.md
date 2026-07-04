@@ -221,6 +221,21 @@ to add, and hazards. Nothing is written yet: the plan *describes* the move
      re-fetched per open. What a source *can do* is the dispatch surface
      (`lua/cartograph/source.lua`): persistable ⇔ stamps, warm-openable
      ⇔ diff + slice re-fetch, reconcilable ⇔ id-pass + names.
+     **Recipes** adapt servers that only speak generic SQL — no
+     cartograph-specific tool needed. Validated against a real Postgres
+     through [postgres-mcp](https://github.com/crystaldba/postgres-mcp)
+     in restricted (read-only) mode:
+     ```lua
+     setup{ mcp = { pg = {
+       cmd = { 'postgres-mcp', '--access-mode=restricted',
+               'postgresql://user:pass@localhost/db' },
+       recipe = 'postgres',
+     } } }        -- then :Cartograph mcp://pg
+     ```
+     Tables become entities (columns as literal data, `l` descends),
+     foreign keys become edges, definition fingerprints make the scan
+     cacheable: `ALTER TABLE` one table and the next open re-introspects
+     that table alone.
    - **lua-ls CLI** (the reference): vm-typed resolution, full `df`
      data-flow, effects — the deep option for Lua. Extract once, open the
      dump.

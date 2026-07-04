@@ -19,6 +19,14 @@ local M = {}
 ---@param name string  the key under config.mcp
 ---@param opts { only:string[]? }?  restrict to these keys (incremental)
 ---@return table? data, string? err
+-- a `sql(query) -> raw, err` closure over a generic SQL tool, for recipes
+local function sql_fn(client, cfg)
+    return function (query)
+        return client:call(cfg.sql_tool or 'execute_sql',
+            { sql = query }, cfg.timeout or 30000)
+    end
+end
+
 function M.extract(name, opts)
     local cfg = (require('cartograph.config').mcp or {})[name]
     if not cfg then
@@ -28,11 +36,20 @@ function M.extract(name, opts)
     local mcp = require 'cartograph.mcp'
     local client, err = mcp.connect(cfg)
     if not client then return nil, err end
-    local args = cfg.args
-    if opts and opts.only then
-        args = vim.tbl_extend('force', args or {}, { only = opts.only })
+    local data, why
+    if cfg.recipe then
+        -- RECIPE: the server speaks generic SQL (or similar); cartograph
+        -- builds the neutral graph itself — postgres-mcp needs no
+        -- cartograph-specific tool at all
+        local rec = require('cartograph.recipes.' .. cfg.recipe)
+        data, why = rec.extract(sql_fn(client, cfg), opts)
+    else
+        local args = cfg.args
+        if opts and opts.only then
+            args = vim.tbl_extend('force', args or {}, { only = opts.only })
+        end
+        data, why = client:call(cfg.tool or 'graph', args, cfg.timeout)
     end
-    local data, why = client:call(cfg.tool or 'graph', args, cfg.timeout)
     client:close()
     if not data then return nil, why end
     if type(data) ~= 'table' or type(data.nodes) ~= 'table' then
@@ -65,7 +82,13 @@ function M.diff(meta)
     end
     local client, err = require('cartograph.mcp').connect(cfg)
     if not client then return nil, err end
-    local now, why = client:call(cfg.stamps_tool or 'stamps', cfg.args, cfg.timeout)
+    local now, why
+    if cfg.recipe then
+        now, why = require('cartograph.recipes.' .. cfg.recipe)
+            .stamps(sql_fn(client, cfg))
+    else
+        now, why = client:call(cfg.stamps_tool or 'stamps', cfg.args, cfg.timeout)
+    end
     client:close()
     if type(now) ~= 'table' then
         return nil, 'stamps query failed: ' .. tostring(why)
