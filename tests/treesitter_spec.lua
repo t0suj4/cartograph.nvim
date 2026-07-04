@@ -582,3 +582,15 @@ test('vtables: C initializer arrays are browsable funcall tables', function ()
     end
     ok(hit and hit.fns == 2, 'funcall table detected with both handlers')
 end)
+
+test('fsm autodetect: a {name,from,to} list needs no configuration', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local fsm = require 'cartograph.fsm'
+    store.ingest(ts.extract(vim.fn.getcwd() .. '/tests/fixtures/raii'))
+    local cfg = fsm.detect(store)
+    ok(cfg and cfg.detected, 'spec detected')
+    eq('flow', cfg.events.var)
+    eq({ 'transitions' }, cfg.events.path)
+    local model = assert(fsm.load(store, cfg))
+    eq('idle,run,dead', table.concat(model.order, ','))
+end)

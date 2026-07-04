@@ -79,6 +79,42 @@ function M.callbacks(store, model)
     return out
 end
 
+--- Autodetect an FSM spec: a litdata var holding (at depth <= 2) a list
+--- of >= 2 tables each shaped {name, from, to}. Returns a cfg for M.load,
+--- or nil.
+function M.detect(store)
+    local function is_translist(t)
+        if type(t) ~= 'table' or #t < 2 then return false end
+        local hits = 0
+        for _, e in ipairs(t) do
+            if type(e) == 'table' and e.name and e.from and e.to then
+                hits = hits + 1
+            end
+        end
+        return hits >= 2 and hits >= #t * 0.6
+    end
+    local function scan(t, path, depth)
+        if depth > 2 or type(t) ~= 'table' then return nil end
+        if is_translist(t) then return path end
+        for k, v in pairs(t) do
+            if type(k) == 'string' and type(v) == 'table' then
+                local sub = scan(v, vim.list_extend(vim.list_extend({}, path), { k }), depth + 1)
+                if sub then return sub end
+            end
+        end
+        return nil
+    end
+    for _, n in pairs(store.by_id) do
+        if n.kind == 'var' and type(n.data) == 'table' then
+            local path = scan(n.data, {}, 0)
+            if path then
+                return { events = { var = n.name, path = path }, detected = true }
+            end
+        end
+    end
+    return nil
+end
+
 --- Build the state model from the adapter config. Returns model or nil, reason.
 function M.load(store, cfg)
     cfg = cfg or require('cartograph.config').fsm

@@ -539,6 +539,11 @@ local fsm = require 'cartograph.fsm'
 local function fsm_model()
     if not M._fsm or M._fsm_data ~= store.data then
         local model, why = fsm.load(store)
+        if not model then
+            -- no configured spec: shape-detect one (any {name,from,to} list)
+            local cfg = fsm.detect(store)
+            if cfg then model, why = fsm.load(store, cfg) end
+        end
         M._fsm, M._fsm_why, M._fsm_data = model or false, why, store.data
     end
     return M._fsm or nil, M._fsm_why
