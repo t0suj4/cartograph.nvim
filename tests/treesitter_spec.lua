@@ -1135,6 +1135,36 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+test('python: class-qualified methods, stdlib gate, decorator cbarg', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('python') then skip 'no python parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/pyproj')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    -- methods carry their class
+    ok(byname['Basket.all'] and byname['Basket.all'].kind == 'method',
+        'qualified method name')
+    ok(byname['Basket.add_line'], 'qualified method name (2)')
+    -- the stdlib gate: report's basket.all() must NOT absorb into
+    -- Basket.all (the django-oscar lesson: .all() is ORM vocabulary)
+    for _, c in ipairs(data.calls) do
+        if c.fn == byname.report.id and c.callee:find('all') then
+            ok(c.to == nil, '.all() left unresolved, not absorbed: '
+                .. tostring(c.to))
+        end
+    end
+    -- a called decorator registers its function: not dead
+    ok(byname.track_view and byname.track_view.cbarg,
+        '@receiver(...) marks the fn dynamically dispatched')
+    local dead = require('cartograph.lint').run(store,
+        { only = { ['dead-function'] = true } })
+    for _, f in ipairs(dead) do
+        ok(not f.message:find('track_view'), 'receiver not dead-listed')
+    end
+end)
+
 test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

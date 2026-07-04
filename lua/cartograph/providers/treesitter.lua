@@ -451,8 +451,60 @@ M.spec = {
             end
             return false
         end,
-        import_query = [[ (import_statement name: (dotted_name) @path)
-                          (import_from_statement module_name: (dotted_name) @path) ]],
+        -- methods carry their class (Product.save): without this, the ONE
+        -- project method named `all`/`create` reads as globally unique and
+        -- absorbs every ORM `.all()`/`.create()` in the codebase
+        qualify = function (name, defn, src)
+            local p = defn:parent()
+            while p do
+                if p:type() == 'class_definition' then
+                    local cn = p:field('name')[1]
+                    return cn and (vim.treesitter.get_node_text(cn, src)
+                        .. '.' .. name) or name
+                end
+                p = p:parent()
+            end
+            return name
+        end,
+        -- a function whose decorator is a CALL (@receiver(signal),
+        -- @register.filter(...)) is passed INTO something: registered,
+        -- framework-dispatched, not dead. Plain decorators (@property,
+        -- @staticmethod) wrap without registering — they don't count.
+        cbarg_def = function (defn, _)
+            local p = defn:parent()
+            if p and p:type() == 'decorated_definition' then
+                for c in p:iter_children() do
+                    if c:type() == 'decorator' then
+                        local inner = c:named_child(0)
+                        if inner and inner:type() == 'call' then return true end
+                    end
+                end
+            end
+            return false
+        end,
+        -- python/Django vocabulary: stdlib builtins, dunder protocol, dict/
+        -- list/str methods, ORM queryset verbs — a project def with one of
+        -- these names must never absorb the language's own calls
+        stdlib_names = { get = true, all = true, filter = true, exclude = true,
+            create = true, save = true, delete = true, count = true,
+            first = true, last = true, exists = true, update = true,
+            values = true, values_list = true, url = true, data = true,
+            items = true, keys = true, append = true, extend = true,
+            insert = true, remove = true, pop = true, sort = true,
+            format = true, join = true, split = true, strip = true,
+            replace = true, startswith = true, endswith = true,
+            lower = true, upper = true, encode = true, decode = true,
+            read = true, write = true, close = true, open = true,
+            len = true, print = true, range = true, isinstance = true,
+            super = true, getattr = true, setattr = true, hasattr = true,
+            type = true, str = true, int = true, float = true, bool = true,
+            list = true, dict = true, set = true, tuple = true, next = true,
+            iter = true, sorted = true, reversed = true, enumerate = true,
+            zip = true, map = true, sum = true, min = true, max = true,
+            abs = true, repr = true, hash = true, copy = true, add = true,
+            -- logging/messages vocabulary (logger.info, messages.success)
+            debug = true, info = true, warning = true, error = true,
+            critical = true, exception = true, success = true },
         resolve_import = function (mod, files)
             local slashed = mod:gsub('%.', '/')
             for _, cand in ipairs({ slashed .. '.py', slashed .. '/__init__.py' }) do
@@ -1084,6 +1136,9 @@ function M.extract(root, opts)
                             a = a:parent()
                         end
                     end
+                    if spec.cbarg_def and not isfield then
+                        isfield = spec.cbarg_def(defn, src) or false
+                    end
                     -- multi-equation definitions (haskell) are ONE function:
                     -- fold this equation into the previous node
                     local prev = spec.merge_equations and lastFn[file]
@@ -1431,7 +1486,13 @@ function M.extract(root, opts)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method') then
                     a.k, a.to, a.up = 'func', t2.id, true
                     local from = p.call.fn
-                    if from then addref(from, t2.id, p.at, true) end
+                    if from then
+                        addref(from, t2.id, p.at, true)
+                    else
+                        -- passed as data at load time (RunPython(forward),
+                        -- operations lists): registered, not dead
+                        t2.cbarg = true
+                    end
                 end
             end
         end
@@ -1591,6 +1652,9 @@ function M.relink(data, touched)
                         addref(c.fn, t2.id,
                             { start = { line = c.line, char = 0 },
                                 ['end'] = { line = c.line, char = 0 } }, true)
+                    else
+                        t2.cbarg = true -- load-time data reference (mirror)
+                        if touched then touched[t2.file] = true end
                     end
                 end
             end

@@ -131,6 +131,14 @@ end
 local function swallowed_findings(store)
     local calls = store.data.calls
     if not calls or #calls == 0 then return {} end
+    -- the FIX this rule offers is a lua-ls annotation (---@return /
+    -- ---@type): on other languages every name-matched call would fire
+    -- it with no repair to offer — noise, not findings
+    local any_lua = false
+    for _, f in ipairs(store.files) do
+        if f:match('%.lua$') then any_lua = true break end
+    end
+    if not any_lua then return {} end
 
     -- vm-resolved calls by file:line, to find the getter behind a def site
     local resolved_at = {}
