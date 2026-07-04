@@ -463,3 +463,22 @@ test('registry-audit: auto-configured, names the typo', function ()
     eq(1, sev.warn)  -- the typo
     eq(1, sev.info)  -- the summary
 end)
+
+test('discovery explain: every gate has a verdict with numbers', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local g = require 'cartograph.greenspun'
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/listener')
+    -- summary: export and import verdicts, one line each
+    local blob = table.concat(g.explain(data), '\n')
+    ok(blob:match("register_listener%s+EXPORT %(key = arg 1, 3 sites%)"), 'export verdict')
+    ok(blob:match("subscribe%s+IMPORT of 'register_listener'"), 'import verdict')
+    -- detail: gates with numbers, pairing shown
+    blob = table.concat(g.explain(data, 'register_listener'), '\n')
+    ok(blob:match('sites: 3 %(2 required%) ✓'), 'site gate')
+    ok(blob:match('key position: arg 1'), 'key gate')
+    ok(blob:match('PAIRED imports: subscribe'), 'pairing shown')
+    -- a misspelled verb gets pointed at the real one
+    blob = table.concat(g.explain(data, 'register_listner'), '\n')
+    ok(blob:match('no calls with this callee name'), 'absence stated')
+    ok(blob:match('register_listener %(3 calls%)'), 'near verb suggested: ' .. blob)
+end)

@@ -36,6 +36,40 @@ local function fn_names(data)
     return names
 end
 
+-- bounded Damerau-Levenshtein: transposition counts 1 — 'on_tikc' is one
+-- slip from 'on_tick', and that slip is THE registry typo
+local function editdist(a, b, cap)
+    if math.abs(#a - #b) > cap then return cap + 1 end
+    local prev2, prev = nil, {}
+    for j = 0, #b do prev[j] = j end
+    for i = 1, #a do
+        local cur = { [0] = i }
+        for j = 1, #b do
+            local cost = a:sub(i, i) == b:sub(j, j) and 0 or 1
+            cur[j] = math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if prev2 and i > 1 and j > 1
+                and a:sub(i, i) == b:sub(j - 1, j - 1)
+                and a:sub(i - 1, i - 1) == b:sub(j, j) then
+                cur[j] = math.min(cur[j], prev2[j - 2] + 1)
+            end
+        end
+        prev2, prev = prev, cur
+    end
+    return prev[#b]
+end
+
+local function nearest(key, set)
+    local cap = #key >= 5 and 2 or 1
+    local best, bestd
+    for k in pairs(set) do
+        if k ~= key then
+            local d = editdist(key, k, cap)
+            if d <= cap and (not bestd or d < bestd) then best, bestd = k, d end
+        end
+    end
+    return best
+end
+
 -- logical arg positions where most sites carry a nonempty literal;
 -- first return = the most-covered one, second = all candidates
 local function key_positions(calls)
@@ -157,6 +191,164 @@ function M.registries(data, opts)
     return bindings, report
 end
 
+--- Why did discovery (not) find a registry? Re-runs the analysis with
+--- every gate's verdict spelled out, numbers included. verb = nil gives
+--- the one-line verdict for every candidate. Returns display lines.
+function M.explain(data, verb, opts)
+    local min_sites = opts and opts.min_sites or 2
+    local known = fn_names(data)
+    local by_verb = {}
+    for _, c in ipairs(data.calls or {}) do
+        if not c.dynamic then
+            by_verb[c.callee] = by_verb[c.callee] or {}
+            table.insert(by_verb[c.callee], c)
+        end
+    end
+    local exports, import_of = {}, {}
+    local bindings = M.registries(data, opts)
+    do
+        local _, report = M.registries(data, opts)
+        for _, b in ipairs(bindings) do
+            exports[b.export.verb] = b
+            for _, iv in ipairs(b.import.verb or {}) do
+                import_of[iv] = b.export.verb
+            end
+        end
+        for _, r in ipairs(report) do exports[r.verb] = exports[r.verb] or true end
+    end
+
+    local function verdict(v)
+        local calls = by_verb[v]
+        if not calls then return nil end
+        if import_of[v] then
+            return ("IMPORT of '%s' (%d sites)"):format(import_of[v], #calls)
+        end
+        if #calls < min_sites then
+            return ('rejected: %d site(s), %d required'):format(#calls, min_sites)
+        end
+        local kpos, positions = key_positions(calls)
+        if not kpos then
+            return 'rejected: no argument position is a literal at 60% of sites'
+        end
+        local callable, by_k = 0, {}
+        for _, c in ipairs(calls) do
+            local hit
+            for i, a in ipairs(c.argv or {}) do
+                local li = i - (c.method and 1 or 0)
+                if li >= 1 and li ~= kpos then
+                    if a.k == 'func' or (a.k == 'lit' and known[a.v])
+                        or (a.k == 'local' and known[a.name]) then
+                        hit = true
+                    elseif not hit then
+                        by_k[a.k] = (by_k[a.k] or 0) + 1
+                    end
+                end
+            end
+            if hit then callable = callable + 1 end
+        end
+        local need = math.max(min_sites, math.ceil(#calls * 0.5))
+        if callable < need then
+            local ks = {}
+            for k, n in pairs(by_k) do ks[#ks + 1] = ('%s ×%d'):format(k, n) end
+            table.sort(ks)
+            return ('rejected as export: callables at %d/%d sites, %d needed — other args classify as %s')
+                :format(callable, #calls, need, table.concat(ks, ', '))
+        end
+        if exports[v] then
+            return ('EXPORT (key = arg %d, %d sites)'):format(kpos, #calls)
+        end
+        return ('export-shaped but unreported (key = arg %d, callables %d/%d)')
+            :format(kpos, callable, #calls)
+    end
+
+    local lines = {}
+    if not verb then
+        local names = {}
+        for v, calls in pairs(by_verb) do
+            if #calls >= min_sites then names[#names + 1] = v end
+        end
+        table.sort(names, function (a, b) return #by_verb[a] > #by_verb[b] end)
+        lines[#lines + 1] = ('discovery verdicts (%d candidate verbs, %d+ sites each)')
+            :format(#names, min_sites)
+        for _, v in ipairs(names) do
+            lines[#lines + 1] = ('  %-28s %s'):format(v, verdict(v) or '?')
+        end
+        return lines
+    end
+
+    local calls = by_verb[verb]
+    lines[#lines + 1] = ("discovery: '%s'"):format(verb)
+    if not calls then
+        lines[#lines + 1] = '  no calls with this callee name'
+        local similar, names = {}, {}
+        for v in pairs(by_verb) do names[v] = true end
+        local near = nearest(verb, names)
+        if near then similar[#similar + 1] = ('%s (%d calls)'):format(near, #by_verb[near]) end
+        for v, cs in pairs(by_verb) do
+            if v ~= near and (v:lower():find(verb:lower(), 1, true)
+                or verb:lower():find(v:lower(), 1, true)) then
+                similar[#similar + 1] = ('%s (%d calls)'):format(v, #cs)
+            end
+        end
+        if #similar > 0 then
+            lines[#lines + 1] = '  similar callees seen: ' .. table.concat(similar, ', ')
+        end
+        lines[#lines + 1] = '  note: the inventory names the TAIL (chrome.send -> send)'
+        return lines
+    end
+    lines[#lines + 1] = ('  sites: %d (%d required) %s')
+        :format(#calls, min_sites, #calls >= min_sites and '✓' or '✗')
+    local kpos, positions = key_positions(calls)
+    if kpos then
+        for _, pos in ipairs(positions) do
+            local n = 0
+            for _ in pairs(keys_at(calls, pos)) do n = n + 1 end
+            lines[#lines + 1] = ('  key position: arg %d — %d distinct literal key(s)%s')
+                :format(pos, n, pos == kpos and ' ✓ (chosen)' or '')
+        end
+    else
+        lines[#lines + 1] = '  key position: none — no argument is a literal at 60% of sites ✗'
+        return lines
+    end
+    lines[#lines + 1] = '  ' .. (verdict(verb) or '?')
+    if exports[verb] and type(exports[verb]) == 'table' then
+        local b = exports[verb]
+        lines[#lines + 1] = ('  PAIRED imports: %s')
+            :format(table.concat(b.import.verb, ', '))
+    end
+    -- import pairing attempts against every export (not itself)
+    lines[#lines + 1] = '  as an import candidate:'
+    local any = false
+    for _, b in ipairs(bindings) do
+      if b.export.verb ~= verb then
+        local ex_keys = keys_at(by_verb[b.export.verb] or {}, b.export.name)
+        local best, bestshared, besttotal
+        for _, pos in ipairs(positions) do
+            local shared, total = 0, 0
+            for k in pairs(keys_at(calls, pos)) do
+                total = total + 1
+                if ex_keys[k] then shared = shared + 1 end
+            end
+            if total > 0 and (not bestshared or shared > bestshared) then
+                best, bestshared, besttotal = pos, shared, total
+            end
+        end
+        if best then
+            any = true
+            local okp = bestshared >= 1 and bestshared / besttotal >= 0.5
+            lines[#lines + 1] = ('    vs %-24s arg %d shares %d/%d keys (%d%%) %s')
+                :format(b.export.verb, best, bestshared, besttotal,
+                    besttotal > 0 and math.floor(bestshared / besttotal * 100) or 0,
+                    okp and '✓' or '✗ (need ≥50% and ≥1)')
+        end
+      end
+    end
+    if not any then
+        lines[#lines + 1] = '    (no discovered exports to pair against)'
+    end
+    return lines
+end
+
 --- Literal data tables whose values name functions: funcall tables.
 function M.dispatch_tables(data)
     local known = fn_names(data)
@@ -190,39 +382,6 @@ function M.dispatch_tables(data)
     return out
 end
 
--- bounded Damerau-Levenshtein: transposition counts 1 — 'on_tikc' is one
--- slip from 'on_tick', and that slip is THE registry typo
-local function editdist(a, b, cap)
-    if math.abs(#a - #b) > cap then return cap + 1 end
-    local prev2, prev = nil, {}
-    for j = 0, #b do prev[j] = j end
-    for i = 1, #a do
-        local cur = { [0] = i }
-        for j = 1, #b do
-            local cost = a:sub(i, i) == b:sub(j, j) and 0 or 1
-            cur[j] = math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
-            if prev2 and i > 1 and j > 1
-                and a:sub(i, i) == b:sub(j - 1, j - 1)
-                and a:sub(i - 1, i - 1) == b:sub(j, j) then
-                cur[j] = math.min(cur[j], prev2[j - 2] + 1)
-            end
-        end
-        prev2, prev = prev, cur
-    end
-    return prev[#b]
-end
-
-local function nearest(key, set)
-    local cap = #key >= 5 and 2 or 1
-    local best, bestd
-    for k in pairs(set) do
-        if k ~= key then
-            local d = editdist(key, k, cap)
-            if d <= cap and (not bestd or d < bestd) then best, bestd = k, d end
-        end
-    end
-    return best
-end
 
 --- The registry consistency audit, auto-configured from the bindings in
 --- force (hand-written and discovered alike). Two directions, both

@@ -336,6 +336,15 @@ sits one slip from a real one, the finding names it:
 `'on_tikc' is dispatched but never registered — did you mean 'on_tick'?`
 (transpositions count as one slip; they are THE registry typo).
 
+When discovery *doesn't* find a registry you know is there,
+`:CartographDiscover` explains why: with no argument, one verdict line
+per candidate verb (`EXPORT (key = arg 1, 3 sites)` /
+`IMPORT of 'register_listener'` / `rejected as export: callables at
+0/2 sites, 2 needed — other args classify as lit ×2`); with a verb,
+every gate's numbers — site count, per-position literal coverage,
+callable classification, and the key-overlap arithmetic against each
+discovered export. A misspelled verb gets pointed at the real one.
+
 ## Lint
 
 `:CartographLint` runs graph-aware, whole-program checks and drops the findings

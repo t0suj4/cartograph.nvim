@@ -143,6 +143,23 @@ function M.open(dump_path, opts)
             fix.text, vim.fn.fnamemodify(fix.file, ':t'), fix.line + 1), vim.log.levels.INFO)
     end, { desc = 'cartograph: apply the annotation quick fix of the current quickfix entry' })
 
+    -- why did registry discovery (not) find a verb?
+    pcall(vim.api.nvim_del_user_command, 'CartographDiscover')
+    vim.api.nvim_create_user_command('CartographDiscover', function (o)
+        local lines = require('cartograph.greenspun').explain(
+            store.data, o.args ~= '' and o.args or nil)
+        vim.cmd('botright new')
+        local buf = vim.api.nvim_get_current_buf()
+        vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile
+            = 'nofile', 'wipe', false
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        vim.bo[buf].modifiable = false
+        vim.api.nvim_win_set_height(0, math.min(#lines + 1, 15))
+        vim.keymap.set('n', require('cartograph.config').keys.close,
+            '<cmd>close<cr>', { buffer = buf })
+    end, { nargs = '?',
+        desc = 'cartograph: explain registry discovery (why a verb was/was not detected)' })
+
     -- browse the state machine (adapter: setup{ fsm = {...} })
     pcall(vim.api.nvim_del_user_command, 'CartographStates')
     vim.api.nvim_create_user_command('CartographStates', function ()
