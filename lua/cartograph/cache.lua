@@ -115,7 +115,7 @@ local function build_shards(data, want)
     -- and db-linked tables re-derive as post-passes, landings re-search
     local synth = {}
     for _, n in ipairs(data.nodes) do
-        if n.id:sub(1, 5) == 'sql::' or n.unparsed or n.db then
+        if n.id:sub(1, 5) == 'sql::' or n.unparsed or n.db or n.dj then
             synth[n.id] = true
         end
     end

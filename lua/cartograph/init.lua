@@ -96,6 +96,15 @@ function M.open(dump_path, opts)
                 vim.notify(('cartograph: linked %d cross-language call sites')
                     :format(x.links), vim.log.levels.INFO)
             end
+            -- Django URL loop: routes as entities, templates linked in
+            local dj = require('cartograph.django').attach(data)
+            if dj and dj.routes > 0 then
+                vim.notify(('cartograph: django — %d routes, %d templates,'
+                    .. ' %d links; %d unregistered, %d unused, %d duplicate')
+                    :format(dj.routes, dj.templates, dj.links,
+                        #dj.unregistered, #dj.unused, #dj.duplicate),
+                    vim.log.levels.INFO)
+            end
             -- a configured database: its tables join the graph and the
             -- code's SQL entities link to them (session post-pass)
             local dbl, dberr = require('cartograph.dblink').attach(data)

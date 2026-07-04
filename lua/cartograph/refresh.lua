@@ -372,6 +372,7 @@ function M.files(rels)
     xl.link(data, xl.effective_bindings(data))
     require('cartograph.sql').attach(data)
     require('cartograph.dblink').attach(data) -- session-cached db schema
+    require('cartograph.django').attach(data)  -- routes/templates re-derive
 
     -- carry navigation across the re-ingest: history entries remap like
     -- everything else; an entry whose node is gone and unmappable is

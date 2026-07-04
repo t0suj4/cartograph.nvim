@@ -1165,6 +1165,34 @@ test('python: class-qualified methods, stdlib gate, decorator cbarg', function (
     end
 end)
 
+test('django loop: routes are entities, templates link, audit fires', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('python') then skip 'no python parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/djproj')
+    local dj = require('cartograph.django').attach(data)
+    store.ingest(data)
+    -- namespaced entities; same-file same-name = ONE route (overloads)
+    eq(3, dj.routes)
+    ok(store.node('route::shop:index') and store.node('route::shop:basket'),
+        'route entities present')
+    eq(0, #dj.duplicate)
+    -- template joined the graph and linked; reverse() linked from code
+    eq(1, dj.templates)
+    local namers = store.var_usedby['route::shop:index'] or {}
+    eq(2, #namers) -- the template AND redirect_home's reverse()
+    -- the audit: ghost named but never registered; dead route unused
+    eq(1, #dj.unregistered)
+    eq('shop:ghost', dj.unregistered[1].name)
+    eq({ 'shop:never-named' }, dj.unused)
+    local findings = require('cartograph.lint').run(store,
+        { only = { ['route-audit'] = true } })
+    local blob = ''
+    for _, f in ipairs(findings) do blob = blob .. f.message .. '\n' end
+    ok(blob:match("'shop:ghost' is named here but never registered"), blob)
+    ok(blob:match("'shop:never%-named' is registered but nothing names"), blob)
+end)
+
 test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

@@ -493,6 +493,37 @@ M.rules = {
             return out
         end,
     },
+    {
+        -- the wiretap audit at the URL boundary: a {% url %} or reverse()
+        -- naming an unregistered route is a render-time error waiting; a
+        -- registered route nothing names is dead surface; a cross-file
+        -- name collision resolves silently in Django and loudly here
+        name = 'route-audit', severity = 'warn',
+        run = function (store)
+            local d = store.data.django
+            if not d then return {} end
+            local out = {}
+            for _, u in ipairs(d.unregistered) do
+                out[#out + 1] = { file = store.data.root .. '/' .. u.file,
+                    line = u.line + 1,
+                    message = ("route '%s' is named here but never"
+                        .. ' registered (renders as NoReverseMatch)')
+                        :format(u.name) }
+            end
+            for _, name in ipairs(d.duplicate) do
+                out[#out + 1] = { file = '', line = 1,
+                    message = ("route name %s is registered in more than"
+                        .. ' one place — the resolver picks one silently')
+                        :format(name) }
+            end
+            for _, name in ipairs(d.unused) do
+                out[#out + 1] = { file = '', line = 1, severity = 'info',
+                    message = ("route '%s' is registered but nothing names"
+                        .. ' it (dead surface?)'):format(name) }
+            end
+            return out
+        end,
+    },
     { name = 'layering', severity = 'info', run = layering_findings },
     { name = 'clone', severity = 'info', run = clone_findings },
     { name = 'access-point', severity = 'info', run = access_point_findings },
