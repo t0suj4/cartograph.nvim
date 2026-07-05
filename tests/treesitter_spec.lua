@@ -129,7 +129,8 @@ test('treesitter: cpp — methods, qualified calls, includes', function ()
     local byname = {}
     for _, n in ipairs(data.nodes) do byname[n.name] = n end
     ok(byname['Engine::go'] and byname['Engine::go'].kind == 'method', 'qualified method')
-    ok(byname.frames and byname.frames.kind == 'method', 'inline class method')
+    ok(byname['Engine::frames'] and byname['Engine::frames'].kind == 'method',
+        'inline class method, class-qualified')
     ok(byname.run and byname.run.kind == 'function', 'plain namespace fn')
     ok(byname.main and byname.main.entry, 'main entry')
     -- Engine::go calls run (same file, exact) and frames

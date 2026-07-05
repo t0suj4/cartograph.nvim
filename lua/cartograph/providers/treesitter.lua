@@ -125,6 +125,27 @@ M.spec = {
         params_field = 'parameters',
         body_field = 'body',
         litdata_types = { initializer_list = true },
+        -- x.f() and x->f() are member dispatch: never a free function
+        dot_calls_are_methods = true,
+        -- ctor member-initializers (count(count)) parse as calls; skip
+        call_skip_within = { field_initializer_list = true,
+            field_initializer = true },
+        -- inline class/struct methods carry their class (Unit::GetTarget);
+        -- out-of-class definitions already capture the qualified text
+        qualify = function (name, defn, src)
+            if name:find('::', 1, true) then return name end
+            local p = defn:parent()
+            while p do
+                local t = p:type()
+                if t == 'class_specifier' or t == 'struct_specifier' then
+                    local cn = p:field('name')[1]
+                    return cn and (vim.treesitter.get_node_text(cn, src)
+                        .. '::' .. name) or name
+                end
+                p = p:parent()
+            end
+            return name
+        end,
         -- Engine::go, inline class methods, destructors: all dispatch-ish
         is_method = function (name, def)
             if name:find('::') or name:find('~', 1, true) then return true end
@@ -149,7 +170,8 @@ M.spec = {
             c_str = true, front = true, back = true, reserve = true,
             resize = true, get = true, reset = true, str = true, swap = true,
             emplace_back = true, first = true, second = true, length = true,
-            substr = true, append = true, record = true },
+            substr = true, append = true, record = true, type = true,
+            value = true, key = true, name = true, id = true },
         import_query = [=[ (preproc_include path: (string_literal) @path) ]=],
         resolve_import = function (path, files, from)
             path = path:gsub('^"', ''):gsub('"$', '')
@@ -1258,7 +1280,9 @@ local function lang_for(file)
 end
 
 local EXCLUDE_DIRS = { node_modules = true, vendor = true, dist = true,
-    build = true, cache = true, minified = true }
+    build = true, cache = true, minified = true,
+    -- vendored-source conventions (hugo's deps/, azerothcore's deps/)
+    deps = true, third_party = true, thirdparty = true, external = true }
 
 local function list_files(root, subdirs)
     local out, minified = {}, {}
@@ -1759,6 +1783,19 @@ function M.extract(root, opts)
                     local n = cap_node(ns)
                     if cap == 'call' then calln = n elseif cap == 'name' then namen = n end
                 end
+                -- context skip: constructs that merely LOOK like calls
+                -- (C++ constructor member-initializers: count(count))
+                if calln and spec.call_skip_within then
+                    local a, hops = calln:parent(), 0
+                    while a and hops < 3 do
+                        if spec.call_skip_within[a:type()] then
+                            calln = nil
+                            break
+                        end
+                        a = a:parent()
+                        hops = hops + 1
+                    end
+                end
                 if calln and namen
                     and not (spec.call_skip or {})[node_text(namen, src)] then
                     local full = node_text(namen, src):gsub('%s+', '')
@@ -1916,6 +1953,7 @@ function M.extract(root, opts)
             -- additionally knows x.f() is method dispatch; bare
             -- identifiers never cross, so their uniqueness is scope-local
             local dotted = name:find('.', 1, true) ~= nil
+                or name:find('->', 1, true) ~= nil
             local pick
             for _, n in ipairs(cands) do
                 local fits
@@ -1945,6 +1983,7 @@ function M.extract(root, opts)
         if tc then
             local sc = scope_of(file)
             local dotted = name:find('.', 1, true) ~= nil
+                or name:find('->', 1, true) ~= nil
                 or name:find('::', 1, true) ~= nil
             local pick
             for _, n in ipairs(tc) do
@@ -2190,6 +2229,7 @@ function M.relink(data, touched)
             -- additionally knows x.f() is method dispatch; bare
             -- identifiers never cross, so their uniqueness is scope-local
             local dotted = name:find('.', 1, true) ~= nil
+                or name:find('->', 1, true) ~= nil
             local pick
             for _, n in ipairs(cands) do
                 local fits
@@ -2219,6 +2259,7 @@ function M.relink(data, touched)
         if tc then
             local sc = scope_of(file)
             local dotted = name:find('.', 1, true) ~= nil
+                or name:find('->', 1, true) ~= nil
                 or name:find('::', 1, true) ~= nil
             local pick
             for _, n in ipairs(tc) do
