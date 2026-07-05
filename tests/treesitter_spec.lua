@@ -1369,6 +1369,98 @@ test('django loop: routes are entities, templates link, audit fires', function (
     ok(blob:match("'shop:never%-named' is registered but nothing names"), blob)
 end)
 
+test('symfony loop: yaml routes are entities, twig + code link, audit fires', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('php') then skip 'no php parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/sfproj')
+    local sf = require('cartograph.symfony').attach(data)
+    store.ingest(data)
+    -- leaf routes (a top-level key with a path) across config/routes.yaml
+    -- AND config/routes/*.yaml become entities
+    eq(6, sf.routes)
+    ok(store.node('sfroute::blog_index') and store.node('sfroute::blog_show')
+        and store.node('sfroute::blog_archive'), 'route entities present')
+    eq(0, #sf.duplicate)
+    -- controller links: our controllers wire (BlogController::index/__invoke,
+    -- HomeController::home); the framework TemplateController is external
+    eq(5, sf.controllers)
+    eq(1, sf.external)
+    -- the controller's ALIBI: BlogController::index is named by its route
+    local idx
+    for id, n in pairs(store.by_id) do
+        if n.name == 'BlogController::index' then idx = id end
+    end
+    ok(idx and #(store.var_usedby[idx] or {}) == 1,
+        'controller method is kept alive by its route')
+    -- invokable controller resolves to __invoke
+    local inv
+    for id, n in pairs(store.by_id) do
+        if n.name == 'BlogController::__invoke' then inv = id end
+    end
+    ok(inv and #(store.var_usedby[inv] or {}) == 1, 'invokable route -> __invoke')
+    -- naming: twig path('blog_index') AND code generateUrl('blog_index')
+    eq(2, #(store.var_usedby['sfroute::blog_index'] or {}))
+    -- twig joined the graph; {% extends/include %} resolved to real files
+    eq(4, sf.templates)
+    local tmpl_edge = false
+    for _, e in ipairs(data.edges) do
+        if e.sf and e.from == 'templates/blog/index.html.twig'
+            and e.to == 'templates/base.html.twig' then tmpl_edge = true end
+    end
+    ok(tmpl_edge, "{% extends 'base.html.twig' %} resolves to the file")
+    -- the audit: ghost named in twig but never registered; dead routes unused
+    eq(1, #sf.unregistered)
+    eq('ghost_route', sf.unregistered[1].name)
+    ok(vim.tbl_contains(sf.unused, 'orphan_route'), 'unreferenced route is dead surface')
+    local findings = require('cartograph.lint').run(store,
+        { only = { ['route-audit'] = true } })
+    local blob = ''
+    for _, f in ipairs(findings) do blob = blob .. f.message .. '\n' end
+    ok(blob:match("'ghost_route' is named here but never registered"), blob)
+    ok(blob:match('RouteNotFoundException'), 'symfony runtime symptom named')
+    ok(blob:match("'orphan_route' is registered but nothing names"), blob)
+end)
+
+test('symfony: resource imports make discovery partial — no false unregistered', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/config/routes', 'p')
+    vim.fn.mkdir(root .. '/templates', 'p')
+    local function put(rel, body)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(body); fd:close()
+    end
+    -- one leaf route AND a resource import (the sylius pattern): the import
+    -- pulls in routes we cannot enumerate, so discovery is PARTIAL
+    put('config/routes.yaml', table.concat({
+        'home:',
+        '    path: /',
+        'admin:',
+        '    resource: "@SomeBundle/Resources/config/routing.yml"',
+        '    prefix: /admin', '' }, '\n'))
+    -- a twig naming a route only the unseen import could define
+    put('templates/page.html.twig',
+        '<a href="{{ path(\'admin_generated_index\') }}">x</a>\n')
+    local data = ts.extract(root)
+    local sf = require('cartograph.symfony').attach(data)
+    ok(sf.partial, 'a resource import marks discovery partial')
+    ok(sf.imports >= 1, 'the import is counted')
+    eq(1, sf.routes) -- only the leaf `home` becomes an entity
+    -- the would-be-unregistered ref is DISCLOSED as a count, never a warning
+    eq(0, #sf.unregistered)
+    ok(sf.unmatched >= 1, 'unmatched refs are disclosed as a count, not flagged')
+    store.ingest(data)
+    local findings = require('cartograph.lint').run(store,
+        { only = { ['route-audit'] = true } })
+    for _, f in ipairs(findings) do
+        ok(not f.message:match('admin_generated_index'),
+            'partial discovery does not cry wolf over generated routes')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

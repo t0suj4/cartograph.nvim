@@ -501,26 +501,35 @@ M.rules = {
         -- name collision resolves silently in Django and loudly here
         name = 'route-audit', severity = 'warn',
         run = function (store)
-            local d = store.data.django
-            if not d then return {} end
             local out = {}
-            for _, u in ipairs(d.unregistered) do
-                out[#out + 1] = { file = store.data.root .. '/' .. u.file,
-                    line = u.line + 1,
-                    message = ("route '%s' is named here but never"
-                        .. ' registered (renders as NoReverseMatch)')
-                        :format(u.name) }
-            end
-            for _, name in ipairs(d.duplicate) do
-                out[#out + 1] = { file = '', line = 1,
-                    message = ("route name %s is registered in more than"
-                        .. ' one place — the resolver picks one silently')
-                        :format(name) }
-            end
-            for _, name in ipairs(d.unused) do
-                out[#out + 1] = { file = '', line = 1, severity = 'info',
-                    message = ("route '%s' is registered but nothing names"
-                        .. ' it (dead surface?)'):format(name) }
+            -- django and symfony feed the same URL-boundary audit; the only
+            -- difference is the runtime symptom named for each ecosystem
+            local sources = {
+                { d = store.data.django, sym = 'NoReverseMatch' },
+                { d = store.data.symfony, sym = 'RouteNotFoundException' },
+            }
+            for _, s in ipairs(sources) do
+                local d = s.d
+                if d then
+                    for _, u in ipairs(d.unregistered) do
+                        out[#out + 1] = { file = store.data.root .. '/' .. u.file,
+                            line = u.line + 1,
+                            message = ("route '%s' is named here but never"
+                                .. ' registered (renders as %s)')
+                                :format(u.name, s.sym) }
+                    end
+                    for _, name in ipairs(d.duplicate) do
+                        out[#out + 1] = { file = '', line = 1,
+                            message = ("route name %s is registered in more than"
+                                .. ' one place — the router picks one silently')
+                                :format(name) }
+                    end
+                    for _, name in ipairs(d.unused) do
+                        out[#out + 1] = { file = '', line = 1, severity = 'info',
+                            message = ("route '%s' is registered but nothing names"
+                                .. ' it (dead surface?)'):format(name) }
+                    end
+                end
             end
             return out
         end,

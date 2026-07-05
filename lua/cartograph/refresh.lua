@@ -373,6 +373,7 @@ function M.files(rels)
     require('cartograph.sql').attach(data)
     require('cartograph.dblink').attach(data) -- session-cached db schema
     require('cartograph.django').attach(data)  -- routes/templates re-derive
+    require('cartograph.symfony').attach(data)  -- yaml routes + twig re-derive
 
     -- carry navigation across the re-ingest: history entries remap like
     -- everything else; an entry whose node is gone and unmappable is

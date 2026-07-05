@@ -1,0 +1,21 @@
+blog_index:
+    path: /blog
+    controller: App\Controller\BlogController::index
+
+blog_home:
+    path: /
+    controller: App\Controller\HomeController::home
+
+blog_show:
+    path: /blog/{id}
+    controller: App\Controller\BlogController
+
+static_page:
+    path: /about
+    controller: Symfony\Bundle\FrameworkBundle\Controller\TemplateController
+    defaults:
+        template: about.html.twig
+
+orphan_route:
+    path: /orphan
+    controller: App\Controller\BlogController::orphan

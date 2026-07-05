@@ -1,0 +1,3 @@
+blog_archive:
+    path: /blog/archive
+    controller: App\Controller\BlogController::archive

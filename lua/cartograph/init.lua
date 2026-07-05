@@ -130,6 +130,20 @@ function M.open(dump_path, opts)
                         #dj.unregistered, #dj.unused, #dj.duplicate),
                     vim.log.levels.INFO)
             end
+            -- Symfony URL loop: yaml routes as entities, twig + code linked
+            local sf = require('cartograph.symfony').attach(data)
+            if sf and sf.routes > 0 then
+                local audit = sf.partial
+                    and (('%d refs unmatched (discovery PARTIAL: %d resource'
+                        .. ' imports/generators unseen)'):format(
+                        sf.unmatched, sf.imports))
+                    or (('%d unregistered, %d unused, %d duplicate'):format(
+                        #sf.unregistered, #sf.unused, #sf.duplicate))
+                vim.notify(('cartograph: symfony — %d routes (%d wired,'
+                    .. ' %d external), %d templates, %d links; %s'):format(
+                        sf.routes, sf.controllers, sf.external, sf.templates,
+                        sf.links, audit), vim.log.levels.INFO)
+            end
             -- a configured database: its tables join the graph and the
             -- code's SQL entities link to them (session post-pass)
             local dbl, dberr = require('cartograph.dblink').attach(data)
