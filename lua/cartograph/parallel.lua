@@ -142,6 +142,12 @@ local function merge_chunk(s, chunk)
     for _, c in ipairs(chunk.calls or {}) do
         if not seen[c.file] then acc.calls[#acc.calls + 1] = c end
     end
+    -- OO extends pairs (for transitive parent::m resolution in relink):
+    -- deduped by defining file, same as the rest of the slice's data
+    acc.extends = acc.extends or {}
+    for _, x in ipairs(chunk.extends or {}) do
+        if not seen[x.file] then acc.extends[#acc.extends + 1] = x end
+    end
     local new = {}
     for f, v in pairs(chunk.stamps or {}) do
         if not seen[f] then acc.stamps[f] = v end

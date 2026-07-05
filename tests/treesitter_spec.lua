@@ -1879,6 +1879,32 @@ test('php: attributes register, $this->/self:: resolve in-class', function ()
     ok(hits['ProductController::buildBody'], '$this-> resolves in-class')
     ok(not hits['ProductController::buildBody'].inferred, 'exact, not ~')
     ok(hits['ProductController::statCount'], 'self:: resolves in-class')
+    -- parent::m() resolves to the SUPERCLASS named by `extends`, not a
+    -- tail-match across every class's method. Base_Handler is the parent;
+    -- parent::boot() (from goAction) and parent::__construct() (from the
+    -- ctor) both land on Base_Handler's methods — cross-file, via base_clause
+    ok(hits['Base_Handler::boot'], 'parent::boot resolves to the superclass')
+    -- transitive: Base_Handler only INHERITS rootMethod (defined on its own
+    -- parent Base_Root). parent::rootMethod() from ProductController walks
+    -- the extends chain Base_Handler -> Base_Root to the nearest definer
+    ok(hits['Base_Root::rootMethod'],
+        'parent::m walks the extends chain to the ancestor that defines m')
+    ok(hits['Base_Root::rootMethod'].inferred, 'transitive resolution is ~')
+    local ctorhits = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref'
+            and e.from == byname['ProductController::__construct'].id then
+            ctorhits[(store.node(e.to) or {}).name] = true
+        end
+    end
+    ok(ctorhits['Base_Handler::__construct'],
+        'parent::__construct resolves to the superclass ctor, not refused')
+    -- and it does NOT tail-refuse across unrelated __construct defs
+    for _, c in ipairs(data.calls) do
+        if c.callee == '__construct' and c.file == 'controller.php' then
+            ok(not (c.refused and c.refused.cands), 'parent::__construct not refused')
+        end
+    end
     -- PSR-4 prefix remap: use App\Service\Renderer lives at lib/Renderer.php
     -- (progressively shorter namespace suffixes, unique-only)
     ok(vim.tbl_contains(store.imports_out['controller.php'] or {},
@@ -1899,6 +1925,84 @@ test('php: attributes register, $this->/self:: resolve in-class', function ()
     for _, c in ipairs(data.calls) do
         ok(c.to ~= (torn or {}).id, 'torn def absorbs nothing')
     end
+end)
+
+test('php: malformed files survive — cyclic/self/orphan parent:: never hang or mislink', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('php') then skip 'no php parser' end
+    -- extraction must COMPLETE over a dir of pathological files: cyclic and
+    -- self-referential inheritance, parent:: with no superclass, a truncated
+    -- class, syntactic garbage, an empty file, a bare <?php. A hang (a
+    -- runaway superclass walk) fails via the runner timeout; a throw fails here.
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/badphp')
+    ok(type(data.nodes) == 'table' and type(data.calls) == 'table'
+        and type(data.edges) == 'table', 'graph is well-formed over bad files')
+    local by = {}
+    for _, c in ipairs(data.calls) do by[c.callee] = c end
+    -- cyclic (Cyc_A <-> Cyc_B) and self-extension (Self_Loop): the walk's
+    -- visited-set breaks the loop, so these parent:: calls resolve to
+    -- NOTHING — never, ever, to a wrong def picked mid-cycle
+    for _, name in ipairs({ 'ghost', 'phantom', 'nope' }) do
+        ok(by[name], 'call present: ' .. name)
+        ok(not by[name].to, name .. ' did not mislink through an inheritance cycle')
+    end
+    -- parent:: with no base_clause (a plain class; a trait whose parent is
+    -- the using class): declined, left unresolved, no crash
+    for _, name in ipairs({ 'missing', 'whoKnows' }) do
+        ok(by[name] and not by[name].to, name .. ' (no superclass) stays unresolved')
+    end
+    -- the truncated class tears the parse: its def is torn, absorbs nothing
+    local torn
+    for _, n in ipairs(data.nodes) do if n.torn then torn = n end end
+    ok(torn, 'truncated file yields a torn def')
+    for _, c in ipairs(data.calls) do
+        ok(c.to ~= (torn or {}).id, 'torn def absorbs no calls')
+    end
+end)
+
+test('php: transitive parent:: walk is bounded — a deep chain does not run away', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('php') then skip 'no php parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    -- deepMethod/shallowMethod each have a DECOY definer, so the plain tail
+    -- match is ambiguous and refuses — forcing the transitive walk to run
+    -- (a unique tail would resolve in the main pass, never exercising it).
+    local lines = { '<?php',
+        'class Decoy1 { public function deepMethod(): int { return -1; } }',
+        'class Decoy2 { public function shallowMethod(): int { return -1; } }',
+        -- a chain FAR deeper than the step limit: C0 defines deepMethod,
+        -- the bottom class calls parent::deepMethod. The definer sits >32
+        -- hops up, so the bounded walk must NOT reach it.
+        'class C0 { public function deepMethod(): int { return 0; } }' }
+    local N = 45
+    for k = 1, N - 1 do
+        lines[#lines + 1] = ('class C%d extends C%d {}'):format(k, k - 1)
+    end
+    lines[#lines + 1] = ('class C%d extends C%d { public function trigger(): int { return parent::deepMethod(); } }')
+        :format(N, N - 1)
+    -- a SHALLOW chain (two hops, within the limit) proves the walk still
+    -- resolves when the definer is actually reachable
+    lines[#lines + 1] = 'class S0 { public function shallowMethod(): int { return 0; } }'
+    lines[#lines + 1] = 'class S1 extends S0 {}'
+    lines[#lines + 1] = 'class S2 extends S1 { public function go(): int { return parent::shallowMethod(); } }'
+    local fd = io.open(root .. '/deep.php', 'w')
+    fd:write(table.concat(lines, '\n'))
+    fd:close()
+
+    local data = ts.extract(root)
+    local by = {}
+    for _, c in ipairs(data.calls) do by[c.callee] = c end
+    -- deep: definer beyond the step limit -> unresolved (the bound holds)
+    ok(by['deepMethod'], 'deep call present')
+    ok(not by['deepMethod'].to, 'deep chain past the step limit is not resolved')
+    ok(by['deepMethod'].refused, 'deep chain stays an honest refusal')
+    -- shallow: definer two hops up, through an inheriting middle -> resolved
+    ok(by['shallowMethod'] and by['shallowMethod'].to,
+        'shallow chain within the limit resolves transitively')
+    vim.fn.delete(root, 'rf')
 end)
 
 test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()

@@ -6,10 +6,16 @@ use App\Service\Renderer;
 
 class ProductController extends Base_Handler
 {
+    public function __construct()
+    {
+        parent::__construct();
+    }
+
     #[Route('/products', name: 'product_index')]
     public function goAction(): int
     {
-        return $this->buildBody() + self::statCount();
+        return $this->buildBody() + self::statCount() + parent::boot()
+            + parent::rootMethod();
     }
 
     #[\Override]

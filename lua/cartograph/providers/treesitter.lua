@@ -627,33 +627,74 @@ M.spec = {
             return false
         end,
         -- $this->m() / self::m() / static::m(): the receiver IS the
-        -- enclosing class — resolve as Class::m before any tail guess
+        -- enclosing class — resolve as Class::m before any tail guess.
+        -- parent::m() is the receiver's SUPERCLASS — read the enclosing
+        -- class's `extends` (base_clause) and resolve as Parent::m. This
+        -- is the single largest refusal bucket in every OO php tree: every
+        -- class has a __construct, so a bare parent::__construct tail-
+        -- matches ALL of them (2313 candidates in magento) and refuses.
         qualify_call = function (calln, name, src)
             if name:find(':', 1, true) then return nil end
-            local t, recv = calln:type(), nil
+            local t, kind = calln:type(), nil
             if t == 'member_call_expression' then
                 local o = calln:field('object')[1]
-                recv = o and o:type() == 'variable_name'
-                    and vim.treesitter.get_node_text(o, src) == '$this'
+                if o and o:type() == 'variable_name'
+                    and vim.treesitter.get_node_text(o, src) == '$this' then
+                    kind = 'self'
+                end
             elseif t == 'scoped_call_expression' then
                 local s = calln:field('scope')[1]
-                recv = s and s:type() == 'relative_scope'
-                    and vim.treesitter.get_node_text(s, src) ~= 'parent'
+                if s and s:type() == 'relative_scope' then
+                    kind = vim.treesitter.get_node_text(s, src) == 'parent'
+                        and 'parent' or 'self'
+                end
             end
-            if not recv then return nil end
+            if not kind then return nil end
             local p2 = calln:parent()
             while p2 do
                 local tt = p2:type()
                 if tt == 'class_declaration' or tt == 'trait_declaration'
                     or tt == 'interface_declaration' then
-                    local cn = p2:field('name')[1]
-                    return cn and (vim.treesitter.get_node_text(cn, src)
-                        .. '::' .. name) or nil
+                    if kind == 'self' then
+                        local cn = p2:field('name')[1]
+                        return cn and (vim.treesitter.get_node_text(cn, src)
+                            .. '::' .. name) or nil
+                    end
+                    -- parent::m — resolve to the superclass named by the
+                    -- enclosing class's base_clause. A trait has no
+                    -- base_clause (its parent is the using class, unknown
+                    -- here) → decline and stay a refusal. When the direct
+                    -- parent only INHERITS m (no exact Parent::m def), the
+                    -- name falls through to the tail path unchanged — no
+                    -- worse than today, honest about the chain we can't walk.
+                    for c in p2:iter_children() do
+                        if c:type() == 'base_clause' then
+                            for pc in c:iter_children() do
+                                local pt = pc:type()
+                                if pt == 'name' or pt == 'qualified_name' then
+                                    -- def keys use the bare class name; take
+                                    -- the last namespace segment (\App\Foo→Foo;
+                                    -- PSR-0 Mage_Core_X has no '\' → stays whole)
+                                    local ptxt = vim.treesitter.get_node_text(pc, src)
+                                    return (ptxt:match('[^\\]+$') or ptxt)
+                                        .. '::' .. name
+                                end
+                            end
+                        end
+                    end
+                    return nil
                 end
                 p2 = p2:parent()
             end
         end,
         id_query = '(name) @id',
+        -- OO extends: child class -> superclass name (bare last segment,
+        -- the same key form defs use). Feeds transitive parent::m resolution.
+        super_query = [=[
+            (class_declaration
+                name: (name) @child
+                (base_clause [(name) (qualified_name)] @parent))
+        ]=],
         block_skip = { php_tag = true, class_declaration = true,
             interface_declaration = true, trait_declaration = true },
         litdata_types = { array_creation_expression = true },
@@ -1564,6 +1605,71 @@ local function elang_for(file)
     return lang, spec
 end
 
+-- Transitive superclass resolution. `parent::m()` where the DIRECT parent
+-- only INHERITS m (no exact `Parent::m` def) tail-refuses across every
+-- class's m; walk the `extends` chain (data.extends: bare child->parent
+-- names) to the nearest ancestor that actually DEFINES m. Sound for single
+-- inheritance (php/java): if nothing between the two overrides m, the
+-- inherited m IS that ancestor's. Runs as an enrichment over the fully
+-- built graph, not the hot resolve loop, and is BOUNDED by a step limit +
+-- cycle guard so a deep or malformed hierarchy can never walk away.
+local SUPER_STEP_LIMIT = 32
+local function build_super(extends)
+    local super = {}
+    for _, e in ipairs(extends or {}) do
+        local prev = super[e.child]
+        if prev == nil then super[e.child] = e.parent
+        elseif prev ~= e.parent then super[e.child] = false end -- name collision
+    end
+    return super
+end
+-- Upgrade still-refused `Head::method` calls in place (addref + inferred);
+-- returns how many resolved. `exact` and `addref` come from whichever pass
+-- calls this (extract or relink) so it reads the CURRENT full node set.
+local function resolve_super(calls, extends, exact, addref)
+    if not (extends and extends[1]) then return 0 end
+    local super = build_super(extends)
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        if not c.to and c.refused and c.refused.cands and c.full then
+            local head, method = c.full:match('^([%w_]+)::([%w_]+)$')
+            if head and super[head] then
+                local clang = elang_for(c.file)
+                local seen, cur, target = { [head] = true }, head, nil
+                for _ = 1, SUPER_STEP_LIMIT do
+                    local par = super[cur]
+                    if not par or seen[par] then break end -- top of chain / cycle
+                    seen[par] = true
+                    local cands = exact[par .. '::' .. method]
+                    if cands then
+                        local fit, dup = nil, false
+                        for _, node in ipairs(cands) do
+                            if elang_for(node.file) == clang then
+                                if fit then dup = true else fit = node end
+                            end
+                        end
+                        if dup then break end -- ambiguous where defined: refuse
+                        if fit then target = fit; break end
+                    end
+                    cur = par
+                end
+                if target then
+                    c.to = target.id
+                    c.inferred = true
+                    c.refused = nil
+                    if c.fn then
+                        addref(c.fn, target.id, c.at
+                            or { start = { line = c.line, char = 0 },
+                                ['end'] = { line = c.line, char = 0 } }, true)
+                    end
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return n
+end
+
 -- leading lines that BELONG to a def — comments, decorators,
 -- attributes, annotations: what must travel with its text when an
 -- edit verb moves it. Keyed by effective language.
@@ -2178,6 +2284,31 @@ function M.extract(root, opts)
             end
         end
 
+        -- OO extends pairs (child class -> superclass, bare names): feeds
+        -- transitive parent::m resolution once the full graph is built
+        if spec.super_query then
+            q = parse_query(lang, spec.super_query)
+            if q then
+                for _, match in q:iter_matches(tsroot, src, 0, -1) do
+                    local child, parent
+                    for cid, ns in pairs(match) do
+                        local cap = q.captures[cid]
+                        if cap == 'child' then
+                            child = node_text(cap_node(ns), src)
+                        elseif cap == 'parent' then
+                            local t = node_text(cap_node(ns), src)
+                            parent = t:match('[^\\]+$') or t
+                        end
+                    end
+                    if child and parent then
+                        data.extends = data.extends or {}
+                        data.extends[#data.extends + 1] =
+                            { child = child, parent = parent, file = file }
+                    end
+                end
+            end
+        end
+
     end
 
     -- calls: inventory + reference sites (resolved after all files).
@@ -2653,6 +2784,11 @@ function M.extract(root, opts)
         end
     end
 
+    -- transitive parent::m — for the refusals the direct-parent qualify
+    -- couldn't settle (parent only inherits m), walk the extends chain to
+    -- the nearest ancestor that defines it. Bounded; over the full graph.
+    resolve_super(calls, data.extends, exact, addref)
+
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
     -- lookups; slice-local uniqueness is not global uniqueness)
@@ -2925,6 +3061,10 @@ function M.relink(data, touched)
             end
         end
     end
+    -- transitive parent::m over the full (merged/spliced) graph — mirrors
+    -- extract's enrichment so the parallel and refresh paths resolve the
+    -- same superclass chains the sequential path does
+    n = n + resolve_super(data.calls, data.extends, exact, addref)
     return n
 end
 
