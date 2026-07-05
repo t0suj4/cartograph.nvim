@@ -315,6 +315,13 @@ function M.register()
     end, { nargs = '?', bang = true,
         desc = 'cartograph: explain registry discovery; ! runs the deep tier and applies it' })
 
+    -- ── which project shape was detected, and what it changed ──────
+    cmd('CartographShapes', function ()
+        local st = require 'cartograph.store'
+        local root = (st.data and st.data.root) or vim.fn.getcwd()
+        scratch(require('cartograph.shapes').explain(root))
+    end, { desc = 'cartograph: explain project-shape detection for this root' })
+
     -- ── browse the state machine ────────────────────────────────────
     cmd('CartographStates', function ()
         local store = live() if not store then return end

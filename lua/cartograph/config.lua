@@ -124,11 +124,26 @@ M.entrypoints = {
 -- See examples/factorio.lua for a filled-in adapter.
 M.fsm = nil
 
---- Merge user options (called from cartograph.setup).
+-- project-shape detection (see cartograph/shapes.lua): marker files at
+-- the root preset INERT analysis hints — entry points, excludes —
+-- never runtime dialing. false disables; :CartographShapes explains.
+M.shapes = true
+
+-- which keys the USER set via setup{} — shape presets never override
+-- an explicit choice (shapes.lua consults this)
+M.user_set = {}
+
+--- Merge user options (called from cartograph.setup). `keys` merges
+--- per-binding; every other field replaces its default.
 function M.apply(opts)
-    for k, v in pairs((opts or {}).keys or {}) do M.keys[k] = v end
-    if (opts or {}).entrypoints then M.entrypoints = opts.entrypoints end
-    if (opts or {}).fsm then M.fsm = opts.fsm end
+    for k, v in pairs(opts or {}) do
+        if k == 'keys' then
+            for kk, vv in pairs(v) do M.keys[kk] = vv end
+        elseif k ~= 'apply' and k ~= 'user_set' then
+            M[k] = v
+        end
+        M.user_set[k] = true
+    end
 end
 
 return M

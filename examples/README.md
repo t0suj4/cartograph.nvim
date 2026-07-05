@@ -1,10 +1,11 @@
 # Example project configs
 
-Cartograph's defaults are deliberately generic: they assume nothing about
-your framework, your state machine, or your runtime. Everything
-project-specific — lifecycle entry points, FSM adapters, live-oracle
-queries, database links — is a few lines of `setup{}`, and these files
-show complete, working shapes to copy from.
+Cartograph's defaults are deliberately generic. The INERT
+project-specific parts — entry-point patterns, excludes — are detected
+automatically from marker files (the shape registry, `:CartographShapes`
+explains). What detection deliberately never does is wire a runtime:
+FSM adapters, live-oracle queries and database links are yours to
+declare, and these files show complete, working shapes to copy from.
 
 Each file is a self-contained `setup{}` call with commentary. Take the
 blocks you need; nothing here is loaded automatically.

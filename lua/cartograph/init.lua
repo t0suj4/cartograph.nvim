@@ -61,6 +61,13 @@ function M.open(dump_path, opts)
         store.ingest(data)
     elseif vim.fn.isdirectory(target) == 1 then
         local cfg = require 'cartograph.config'
+        -- project shapes: markers at the root preset inert analysis
+        -- hints (entry points, excludes) before extraction sees them
+        for _, s in ipairs(require('cartograph.shapes').apply(target)) do
+            vim.notify(('cartograph: %s detected (%s) — presets applied;'
+                .. ' :CartographShapes explains'):format(s.name, s.evidence),
+                vim.log.levels.INFO)
+        end
         -- everything after extraction: clangd oracle, cross-language
         -- links, SQL entities, ingest (also the parallel path's on_done)
         local function finish(data)

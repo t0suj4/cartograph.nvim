@@ -75,6 +75,7 @@ All commands exist at startup; those that need an open graph say so.
   :CartographLintFix          apply the current quickfix entry's annotation
   :CartographDiscover[!] [verb]
                               explain registry auto-discovery (! deep tier)
+  :CartographShapes           explain project-shape detection for this root
   :CartographStates           browse the configured/detected state machine
   :CartographLive             diff the RUNNING system (MCP) vs the graph
 
@@ -151,8 +152,19 @@ setup() is optional; every field has a default. Highlights: >
     }
 <
 See lua/cartograph/config.lua — each field is documented where it lives.
+
+PROJECT SHAPES: marker files at the root (info.json + control.lua,
+manage.py, package.json, wp-settings.php, …) preset what they honestly
+imply — entry-point patterns, excludes; the node manifest's main/bin are
+read as entry points. Presets are INERT analysis hints only: a shape
+never wires runtime dialing (mcp/live/db), never overrides a key you set
+in setup{}, and one root's presets are stripped before the next root's
+open. `setup{ shapes = false }` disables; :CartographShapes explains
+what matched and what it changed.
+
 Complete per-project wirings (a Factorio mod with the live oracle, a
-WordPress tree with the database link) live in examples/.
+WordPress tree with the database link) live in examples/ — that is where
+the non-inert configuration belongs.
 
 ==============================================================================
 8. PROVIDERS                                             *cartograph-providers*
