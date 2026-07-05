@@ -144,6 +144,15 @@ function M.open(dump_path, opts)
                         sf.routes, sf.controllers, sf.external, sf.templates,
                         sf.links, audit), vim.log.levels.INFO)
             end
+            -- Ansible notify↔handler loop + include graph
+            local an = require('cartograph.ansible').attach(data)
+            if an and (an.handlers > 0 or an.includes > 0) then
+                vim.notify(('cartograph: ansible — %d handlers, %d notifies'
+                    .. ' (%d linked, %d no-op, %d dynamic), %d includes;'
+                    .. ' %d dead handlers, %d broken includes'):format(
+                        an.handlers, an.notifies, an.links, #an.noop, an.dynamic,
+                        an.includes, #an.dead, #an.broken), vim.log.levels.INFO)
+            end
             -- a configured database: its tables join the graph and the
             -- code's SQL entities link to them (session post-pass)
             local dbl, dberr = require('cartograph.dblink').attach(data)

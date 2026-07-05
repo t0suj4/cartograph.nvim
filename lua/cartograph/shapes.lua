@@ -93,6 +93,23 @@ M.registry = {
         config = { entrypoints = { '^public/index%.php$' } },
     },
     {
+        name = 'ansible',
+        detect = function (root)
+            if has(root, 'ansible.cfg') then return 'ansible.cfg' end
+            if has(root, 'tasks/main.yml') and has(root, 'meta/main.yml') then
+                return 'tasks/main.yml + meta/main.yml (role layout)'
+            end
+            if has(root, 'site.yml') and has(root, 'tasks') then
+                return 'site.yml + tasks/'
+            end
+        end,
+        -- playbooks and role mains are the entry points (no importer);
+        -- vendored galaxy roles live under collections/ (already excluded)
+        config = { entrypoints = {
+            '^site%.ya?ml$', 'tasks/main%.ya?ml$', 'playbook.*%.ya?ml$',
+        } },
+    },
+    {
         name = 'node-package',
         detect = function (root)
             if has(root, 'package.json') then return 'package.json' end

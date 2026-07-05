@@ -1461,6 +1461,50 @@ test('symfony: resource imports make discovery partial — no false unregistered
     vim.fn.delete(root, 'rf')
 end)
 
+test('ansible loop: handlers are entities, notify links, no-op audit fires', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('yaml') then skip 'no yaml parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/ansproj')
+    local a = require('cartograph.ansible').attach(data)
+    store.ingest(data)
+    eq(5, a.handlers)
+    eq(6, a.links)
+    eq(2, a.dynamic) -- "{{ handler_var }}" and "Remount {{ mount_point }}"
+    -- a handler reachable ONLY by a templated notify's static prefix
+    -- ("Remount {{ mp }}" -> listen "Remount /tmp") is NOT dead: honest
+    -- analysis can't rule out the runtime trigger
+    ok(not vim.tbl_contains(a.dead, 'remount tmp'),
+        'a dynamic-prefix listener is not called dead')
+    -- handlers are entities; notify is their ALIBI (who triggers them)
+    ok(store.node('handler::restart sshd'), 'handler entity present')
+    -- reload firewall: notify-two + anchored + aliased (anchor/alias resolved)
+    eq(3, #(store.var_usedby['handler::reload firewall'] or {}))
+    -- rotate logs is reached by its `listen:` topic, not its name
+    eq(1, #(store.var_usedby['handler::rotate logs'] or {}))
+    -- the killer audit: a typo'd notify names no handler = a silent no-op
+    eq(1, #a.noop)
+    eq('restart ssh', a.noop[1].name)
+    eq({ 'never notified' }, a.dead)
+    ok(vim.tbl_contains(vim.tbl_map(function (b) return b.target end, a.broken),
+        'does_not_exist.yml'), 'missing include is flagged broken')
+    -- include_tasks resolves to the real file (an import edge)
+    local inc = false
+    for _, e in ipairs(data.edges) do
+        if e.an and e.kind == 'import' and e.from == 'tasks/main.yml'
+            and e.to == 'tasks/sub.yml' then inc = true end
+    end
+    ok(inc, 'include_tasks resolves to the file')
+    -- the lint surfaces the no-op and the broken include
+    local findings = require('cartograph.lint').run(store,
+        { only = { ['ansible-audit'] = true } })
+    local blob = ''
+    for _, f in ipairs(findings) do blob = blob .. f.message .. '\n' end
+    ok(blob:match("notify 'restart ssh' names no handler"), blob)
+    ok(blob:match("SILENT no%-op"), 'the no-op symptom is named')
+    ok(blob:match("include target 'does_not_exist.yml' does not exist"), blob)
+end)
+
 test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

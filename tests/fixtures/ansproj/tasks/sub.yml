@@ -1,0 +1,4 @@
+---
+- name: sub task
+  ansible.builtin.debug:
+    msg: included

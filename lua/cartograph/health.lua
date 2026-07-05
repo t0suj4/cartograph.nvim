@@ -58,6 +58,14 @@ function M.check()
         h.info('string.buffer unavailable — shard cache falls back to vim.mpack')
     end
 
+    -- the yaml parser powers the Ansible adapter (notify↔handler + includes)
+    if pcall(vim.treesitter.get_string_parser, '', 'yaml') then
+        h.ok('yaml parser present (Ansible notify/handler + include graph works)')
+    else
+        h.info('yaml parser missing — Ansible analysis is skipped'
+            .. ' (:TSInstall yaml to enable)')
+    end
+
     -- optional oracles
     local clangd = vim.fn.executable('clangd') == 1
         or vim.fn.executable(vim.fn.expand('~/.local/bin/clangd')) == 1

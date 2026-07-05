@@ -1,0 +1,51 @@
+---
+- name: notify one handler
+  ansible.builtin.set_fact:
+    x: 1
+  notify: restart sshd
+
+- name: notify two handlers
+  ansible.builtin.command: whoami
+  notify:
+    - reload firewall
+    - restart sshd
+
+- name: notify via a listen topic
+  ansible.builtin.copy:
+    src: a
+    dest: b
+  notify: logs changed
+
+- name: typo notify is a silent no-op
+  ansible.builtin.command: "true"
+  notify: restart ssh
+
+- name: dynamic notify cannot be checked statically
+  ansible.builtin.command: "true"
+  notify: "{{ handler_var }}"
+
+- name: templated notify with a static prefix
+  ansible.builtin.set_fact:
+    mount_point: /tmp
+  notify: "Remount {{ mount_point }}"
+
+- name: anchored notify
+  notify: &grp
+    - reload firewall
+  ansible.builtin.set_fact:
+    y: 2
+
+- name: aliased notify reuses the anchor
+  notify: *grp
+  ansible.builtin.set_fact:
+    z: 3
+
+- name: include a task file
+  ansible.builtin.include_tasks: sub.yml
+
+- name: import a missing task file
+  ansible.builtin.import_tasks: does_not_exist.yml
+
+- name: include an external role
+  ansible.builtin.include_role:
+    name: common

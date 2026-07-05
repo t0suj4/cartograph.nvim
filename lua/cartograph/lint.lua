@@ -534,6 +534,35 @@ M.rules = {
             return out
         end,
     },
+    {
+        -- Ansible's URL-boundary equivalent: a notify naming no handler is a
+        -- SILENT no-op (the handler never runs, no error); a handler nothing
+        -- notifies is dead; an include pointing at a missing file breaks at
+        -- runtime. The notify no-op is the classic footgun (a typo'd name).
+        name = 'ansible-audit', severity = 'warn',
+        run = function (store)
+            local a = store.data.ansible
+            if not a then return {} end
+            local out = {}
+            for _, u in ipairs(a.noop) do
+                out[#out + 1] = { file = store.data.root .. '/' .. u.file,
+                    line = u.line + 1,
+                    message = ("notify '%s' names no handler — a SILENT no-op"
+                        .. ' (the handler never runs)'):format(u.name) }
+            end
+            for _, b in ipairs(a.broken) do
+                out[#out + 1] = { file = store.data.root .. '/' .. b.file,
+                    line = b.line + 1,
+                    message = ("include target '%s' does not exist"):format(b.target) }
+            end
+            for _, name in ipairs(a.dead) do
+                out[#out + 1] = { file = '', line = 1, severity = 'info',
+                    message = ("handler '%s' is defined but nothing notifies"
+                        .. ' it (dead?)'):format(name) }
+            end
+            return out
+        end,
+    },
     { name = 'layering', severity = 'info', run = layering_findings },
     { name = 'clone', severity = 'info', run = clone_findings },
     { name = 'access-point', severity = 'info', run = access_point_findings },

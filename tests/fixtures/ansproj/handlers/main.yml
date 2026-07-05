@@ -1,0 +1,20 @@
+---
+- name: restart sshd
+  ansible.builtin.service:
+    name: sshd
+    state: restarted
+
+- name: reload firewall
+  ansible.builtin.command: firewall-cmd --reload
+
+- name: rotate logs
+  ansible.builtin.command: logrotate -f /etc/logrotate.conf
+  listen: "logs changed"
+
+- name: never notified
+  ansible.builtin.debug:
+    msg: dead handler
+
+- name: remount tmp
+  ansible.builtin.command: mount -o remount /tmp
+  listen: "Remount /tmp"
