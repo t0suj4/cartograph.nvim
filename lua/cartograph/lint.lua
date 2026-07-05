@@ -600,6 +600,7 @@ M.rules = {
             local xmlh = store.toc and store.toc.handlers or {}
             for _, n in ipairs(store.data.nodes) do
                 if (n.kind == 'function' or n.kind == 'method')
+                    and not n.decl -- a prototype is a declaration, not dead code
                     and not exported(n) and not metamethod(n) and not n.cbarg
                     and not n.entry and not xmlh[n.name]
                     and #(store.usedby[n.id] or {}) == 0 then

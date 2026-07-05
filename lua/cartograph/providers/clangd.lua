@@ -58,7 +58,7 @@ function M.enrich(data, opts)
     -- fn nodes per file, and a range index for attributing callers
     local by_file, fn_nodes = {}, {}
     for _, n in ipairs(data.nodes) do
-        if n.kind == 'function' or n.kind == 'method' then
+        if (n.kind == 'function' or n.kind == 'method') and not n.decl then
             by_file[n.file] = by_file[n.file] or {}
             table.insert(by_file[n.file], n)
             fn_nodes[#fn_nodes + 1] = n
@@ -197,7 +197,7 @@ function M.enrich_async(data, opts, on_done)
 
     local by_file, fn_nodes = {}, {}
     for _, n in ipairs(data.nodes) do
-        if n.kind == 'function' or n.kind == 'method' then
+        if (n.kind == 'function' or n.kind == 'method') and not n.decl then
             by_file[n.file] = by_file[n.file] or {}
             table.insert(by_file[n.file], n)
             fn_nodes[#fn_nodes + 1] = n

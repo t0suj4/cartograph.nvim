@@ -19,7 +19,10 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 12 -- v12: scheme define/lambda signature is not a call (no
+M.VERSION = 13 -- v13: C/C++ header interface extracted — prototypes (decl),
+              -- macros (fn-like callable + object consts), struct/union/enum/
+              -- typedef (var, ctype); a header browses as its interface;
+              -- v12: scheme define/lambda signature is not a call (no
               -- more bogus fn-is-its-own-caller self-edges);
               -- v11: lua top-level GLOBAL assignments are var nodes too
               -- (X = ...), not just `local` — flat globals modules now

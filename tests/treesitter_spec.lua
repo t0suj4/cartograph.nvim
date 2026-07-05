@@ -32,7 +32,11 @@ test('treesitter: C project — nodes, calls, includes, df-lite', function ()
     store.ingest(data)
 
     local byname = {}
-    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    -- a header prototype and the .c definition share a name; the definition
+    -- (not the decl) is the one this test means
+    for _, n in ipairs(data.nodes) do
+        if not byname[n.name] or byname[n.name].decl then byname[n.name] = n end
+    end
     ok(byname.helper and byname.helper.kind == 'function', 'helper found')
     ok(byname.main and byname.main.entry, 'main is an entry point')
     ok(byname.dispatched and byname.dispatched.cbarg,
@@ -64,6 +68,45 @@ test('treesitter: C project — nodes, calls, includes, df-lite', function ()
     local dead = lint.run(store, { only = { ['dead-function'] = true } })
     eq(1, #dead)
     ok(dead[1].message:match('unused_static'), 'only unused_static is dead')
+end)
+
+test('c headers: prototypes, macros and types make the interface browsable', function ()
+    if not has_parser('c') then skip 'no c parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/hdrproj')
+    store.ingest(data)
+    local hdr = {}
+    for _, n in ipairs(data.nodes) do
+        if n.file == 'api.h' then hdr[n.name] = n end
+    end
+    -- the prototype: a function node, marked decl, kept OUT of resolution
+    ok(hdr.api_compute and hdr.api_compute.kind == 'function'
+        and hdr.api_compute.decl, 'prototype is a decl function node')
+    -- a function-like macro IS a callable node; object-like + types are vars
+    ok(hdr.API_SQUARE and hdr.API_SQUARE.kind == 'function'
+        and hdr.API_SQUARE.macro, 'function-like macro is callable')
+    ok(hdr.API_VERSION and hdr.API_VERSION.kind == 'var'
+        and hdr.API_VERSION.ctype == 'macro', 'object macro is a const var')
+    ok(hdr.point and hdr.point.ctype == 'struct', 'struct type')
+    ok(hdr.color and hdr.color.ctype == 'enum', 'enum type')
+    ok(hdr.Point and hdr.Point.ctype == 'typedef', 'typedef type')
+    -- the prototype does NOT compete: main -> api_compute resolves to the .c
+    -- DEFINITION (decl=nil), not the header declaration
+    local def, call
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'api_compute' and n.file == 'api.c' then def = n end
+    end
+    ok(def and not def.decl, 'the definition is in api.c')
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.to == def.id then call = e end
+    end
+    ok(call, 'a call resolves to the definition, not the prototype')
+    ok(hdr.api_compute.id ~= def.id, 'decl and def are distinct nodes')
+    -- the fn-like macro is a real call target: API_SQUARE(n) links to it
+    local mref
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.to == hdr.API_SQUARE.id then mref = e end
+    end
+    ok(mref, 'API_SQUARE(n) resolves to the macro')
 end)
 
 test('treesitter: lua blocks, litdata and require edges', function ()
@@ -203,7 +246,9 @@ test('clangd: resolution oracle proves the C fixture edges', function ()
     ok(stats.resolved_fns >= 3, 'answered for the fixture fns')
     local inf, main_helper = 0, nil
     local byname = {}
-    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    for _, n in ipairs(data.nodes) do
+        if not byname[n.name] or byname[n.name].decl then byname[n.name] = n end
+    end
     for _, e in ipairs(data.edges) do
         if e.kind == 'ref' then
             if e.inferred then inf = inf + 1 end
@@ -230,7 +275,9 @@ test('clangd async: same proof, without blocking the caller', function ()
     if not stats then skip('no clangd: ' .. tostring(why)) end
     ok(stats.resolved_fns >= 3, 'answered async for the fixture fns')
     local byname = {}
-    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    for _, n in ipairs(data.nodes) do
+        if not byname[n.name] or byname[n.name].decl then byname[n.name] = n end
+    end
     local main_helper
     for _, e in ipairs(data.edges) do
         if e.kind == 'ref' and e.from == byname.main.id

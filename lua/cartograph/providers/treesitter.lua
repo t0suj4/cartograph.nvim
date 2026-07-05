@@ -210,6 +210,24 @@ M.spec = {
             (declaration declarator: (identifier) @name) @def
         ]],
         litdata_types = { initializer_list = true },
+        -- a header's INTERFACE: prototypes (decl), macros (fn-like + object),
+        -- and types (struct/union/enum/typedef). Browsing a .h now shows what
+        -- it declares, not one opaque #ifndef block.
+        interface = [[
+            (declaration declarator:
+                (function_declarator declarator: (identifier) @proto)) @def
+            (declaration declarator: (pointer_declarator declarator:
+                (function_declarator declarator: (identifier) @proto))) @def
+            (preproc_function_def name: (identifier) @macrofn) @def
+            (preproc_def name: (identifier) @macro) @def
+            (struct_specifier name: (type_identifier) @struct
+                body: (field_declaration_list)) @def
+            (union_specifier name: (type_identifier) @struct
+                body: (field_declaration_list)) @def
+            (enum_specifier name: (type_identifier) @enum
+                body: (enumerator_list)) @def
+            (type_definition declarator: (type_identifier) @typedef) @def
+        ]],
         params_field = 'parameters',
         body_field = 'body',
         is_method = function () return false end,
@@ -256,6 +274,24 @@ M.spec = {
             (declaration declarator: (init_declarator
                 declarator: (array_declarator declarator: (identifier) @name)
                 value: (_) @value)) @def
+        ]=],
+        -- the header interface, as in C, plus C++ class/struct definitions
+        interface = [=[
+            (declaration declarator:
+                (function_declarator declarator: (_) @proto)) @def
+            (declaration declarator: (pointer_declarator declarator:
+                (function_declarator declarator: (_) @proto))) @def
+            (preproc_function_def name: (identifier) @macrofn) @def
+            (preproc_def name: (identifier) @macro) @def
+            (struct_specifier name: (type_identifier) @struct
+                body: (field_declaration_list)) @def
+            (union_specifier name: (type_identifier) @struct
+                body: (field_declaration_list)) @def
+            (class_specifier name: (type_identifier) @struct
+                body: (field_declaration_list)) @def
+            (enum_specifier name: (type_identifier) @enum
+                body: (enumerator_list)) @def
+            (type_definition declarator: (type_identifier) @typedef) @def
         ]=],
         params_field = 'parameters',
         body_field = 'body',
@@ -1957,7 +1993,8 @@ end
 function M.lookups(nodes, root)
     local count = {}
     for _, n in ipairs(nodes) do
-        if (n.kind == 'function' or n.kind == 'method') and not n.torn then
+        if (n.kind == 'function' or n.kind == 'method') and not n.torn
+            and not n.decl then -- a prototype declaration is not a call target
             count[n.name] = (count[n.name] or 0) + 1
         end
     end
@@ -1965,10 +2002,11 @@ function M.lookups(nodes, root)
     for _, n in ipairs(nodes) do
         if n.torn then -- beyond a parse error: never name-matched
         elseif (n.kind == 'function' or n.kind == 'method')
-            and count[n.name] == 1 then
+            and not n.decl and count[n.name] == 1 then
             fn_unique[n.name] = { id = n.id, file = n.file,
                 line = n.range.start.line }
-        elseif n.kind == 'var' and not n.sql then
+        elseif n.kind == 'var' and not n.sql and not n.ctype then
+            -- interface types/macros (ctype) are browse-only, not use targets
             var_named[n.name] = var_named[n.name] or {}
             table.insert(var_named[n.name],
                 { id = n.id, file = n.file, line = n.range.start.line })
@@ -2247,6 +2285,53 @@ function M.extract(root, opts)
                         if not torn then
                             varsByName[name] = varsByName[name] or {}
                             table.insert(varsByName[name], nodes[#nodes])
+                        end
+                    end
+                end
+            end
+        end
+
+        -- header/interface elements (C/C++): prototypes, macros and types,
+        -- so a header shows what it EXPOSES instead of one #ifndef block. A
+        -- prototype is a DECLARATION, not a definition — it stays OUT of the
+        -- resolution indexes (the .c definition is the real call target) and
+        -- is marked decl. A function-like macro IS a call target and indexes.
+        if spec.interface then
+            local iq = parse_query(lang, spec.interface)
+            if iq then
+                for _, match in iq:iter_matches(tsroot, src, 0, -1) do
+                    local defn, namen, cat
+                    for cid, ns in pairs(match) do
+                        local cap = iq.captures[cid]
+                        if cap == 'def' then defn = cap_node(ns)
+                        else namen, cat = cap_node(ns), cap end
+                    end
+                    if defn and namen then
+                        local name = node_text(namen, src):gsub('%s+', '')
+                        local sp = pos_of(defn)
+                        local torn = errow and sp.start.line >= errow or nil
+                        if cat == 'proto' or cat == 'macrofn' then
+                            local node = { name = name, kind = 'function',
+                                id = ('%s::%s@%d'):format(file, name, sp.start.line),
+                                file = file, range = sp, order = sp.start.line,
+                                torn = torn, decl = cat == 'proto' or nil,
+                                macro = cat == 'macrofn' or nil }
+                            nodes[#nodes + 1] = node
+                            -- prototypes never index; a fn-like macro resolves
+                            if not torn and cat == 'macrofn' then
+                                exact[name] = exact[name] or {}
+                                table.insert(exact[name], node)
+                                local tl = name:match('([%w_]+)$')
+                                if tl and tl ~= name then
+                                    tail[tl] = tail[tl] or {}
+                                    table.insert(tail[tl], node)
+                                end
+                            end
+                        else -- struct / union / enum / typedef / object macro
+                            nodes[#nodes + 1] = { name = name, kind = 'var',
+                                id = ('%s::type:%s@%d'):format(file, name, sp.start.line),
+                                file = file, range = sp, order = sp.start.line,
+                                torn = torn, ctype = cat }
                         end
                     end
                 end
@@ -2909,7 +2994,8 @@ function M.relink(data, touched)
     end
     local exact, tail = {}, {}
     for _, n in ipairs(data.nodes) do
-        if (n.kind == 'function' or n.kind == 'method') and not n.torn then
+        if (n.kind == 'function' or n.kind == 'method') and not n.torn
+            and not n.decl then -- a prototype declaration is not a call target
             exact[n.name] = exact[n.name] or {}
             table.insert(exact[n.name], n)
             local tl = n.name:match('([%w_]+)$')
