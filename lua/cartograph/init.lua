@@ -213,15 +213,92 @@ function M.open(dump_path, opts)
             end
         end
 
+        -- streaming shared by the cold (parallel) and warm (cached) opens:
+        -- both show module stubs at once and fill the real graph in as it
+        -- arrives, so neither blocks the editor. R0 is the stub's zero range.
+        local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
+        -- re-ingest `acc` as a progressive VIEW: arrived files real, the rest
+        -- still stubs, without losing the user's place mid-stream.
+        local function progressive(acc, files, done, total)
+            local seen = {}
+            for _, nd in ipairs(acc.nodes) do
+                if nd.kind == 'module' then seen[nd.file] = true end
+            end
+            local view = {}
+            for key, v in pairs(acc) do view[key] = v end
+            view.partial = { done = done, total = total }
+            view.nodes = vim.list_extend({}, acc.nodes)
+            for _, f in ipairs(files) do
+                if not seen[f] then
+                    view.nodes[#view.nodes + 1] = { id = f, name = f,
+                        kind = 'module', file = f, range = R0, order = -1 }
+                end
+            end
+            local back, fwd = store._nav_back, store._nav_fwd
+            local loc = store.loc_provider and store.loc_provider.get()
+            local focused = store.focused
+            store.ingest(view)
+            store._nav_back, store._nav_fwd = back or {}, fwd or {}
+            if focused and store.node(focused) then store.set_focus(focused) end
+            if loc and store.loc_provider then pcall(store.loc_provider.set, loc) end
+        end
+        -- run `fn` (a full re-ingest) without losing nav history / cursor
+        local function preserve(fn)
+            local back, fwd = store._nav_back, store._nav_fwd
+            local loc = store.loc_provider and store.loc_provider.get()
+            local focused = store.focused
+            fn()
+            store._nav_back, store._nav_fwd = back or {}, fwd or {}
+            if focused and store.node(focused) then store.set_focus(focused) end
+            if loc and store.loc_provider then pcall(store.loc_provider.set, loc) end
+        end
+        -- stub the browser on a file roster (the streamed opens' first paint)
+        local function stub_ingest(files)
+            local stub = { schema = 1, root = target, provider = 'treesitter',
+                partial = { done = 0, total = #files },
+                nodes = {}, edges = {}, calls = {}, stamps = {} }
+            for _, f in ipairs(files) do
+                stub.nodes[#stub.nodes + 1] = { id = f, name = f,
+                    kind = 'module', file = f, range = R0, order = -1 }
+            end
+            store.ingest(stub)
+        end
+
         -- incremental open: unchanged files come from the cache, only the
-        -- diff re-extracts. Subtree slices bypass it (a slice would poison
-        -- the full-tree entry).
-        local data, note
+        -- diff re-extracts. A large cached corpus STREAMS (open_async: stub
+        -- now, shards decode in the background) so it never blocks; a small
+        -- one loads synchronously (no flicker). Subtree slices bypass the
+        -- cache entirely (a slice would poison the full-tree entry).
+        local data, note, warm_async
         if not (opts and opts.subdirs) then
-            data, note = require('cartograph.cache').open(target)
+            local cache = require 'cartograph.cache'
+            if cache.warm_streamable(target) then
+                -- a large cached corpus streams like the cold path: browser
+                -- opens NOW on stubs, shards decode in the background, the
+                -- splice brings it up to date, then finish() swaps it in.
+                local roster
+                local started, why = cache.open_async(target, {
+                    on_stub = function (files) roster = files stub_ingest(files) end,
+                    on_chunk = function (acc, done, total)
+                        progressive(acc, roster, done, total)
+                    end,
+                    on_done = function (acc, n)
+                        if n then vim.notify('cartograph: ' .. n, vim.log.levels.INFO) end
+                        preserve(function () finish(acc) end)
+                        require('cartograph.toc').attach(store)
+                        store.ws_resolve()
+                    end,
+                })
+                warm_async = started
+                note = (not started) and why or nil
+            else
+                data, note = cache.open(target)
+            end
             if note then vim.notify('cartograph: ' .. note, vim.log.levels.INFO) end
         end
-        if data then
+        if warm_async then
+            -- streaming in the background; the layout below opens on the stub
+        elseif data then
             finish(data)
         else
             local ts = require 'cartograph.providers.treesitter'
@@ -230,16 +307,7 @@ function M.open(dump_path, opts)
             if #files >= (cfg.parallel_threshold or 300) then
                 -- streaming cold open: the browser opens NOW on module
                 -- stubs; worker chunks fill the graph in as they land
-                local stub = { schema = 1, root = target, provider = 'treesitter',
-                    partial = { done = 0, total = 0 },
-                    nodes = {}, edges = {}, calls = {}, stamps = {} }
-                local R0 = { start = { line = 0, char = 0 },
-                    ['end'] = { line = 0, char = 0 } }
-                for _, f in ipairs(files) do
-                    stub.nodes[#stub.nodes + 1] = { id = f, name = f,
-                        kind = 'module', file = f, range = R0, order = -1 }
-                end
-                store.ingest(stub)
+                stub_ingest(files)
                 local par = require 'cartograph.parallel'
                 local nw = cfg.workers or par.default_workers()
                 vim.notify(('cartograph: extracting %d files with %d workers…')
@@ -250,42 +318,11 @@ function M.open(dump_path, opts)
                         vim.notify('cartograph: ' .. m, vim.log.levels.WARN)
                     end,
                     on_chunk = function (k, n, acc)
-                        -- progressive view: arrived files real, rest stubs
-                        local seen = {}
-                        for _, nd in ipairs(acc.nodes) do
-                            if nd.kind == 'module' then seen[nd.file] = true end
-                        end
-                        local view = {}
-                        for key, v in pairs(acc) do view[key] = v end
-                        view.partial = { done = k, total = n }
-                        view.nodes = vim.list_extend({}, acc.nodes)
-                        for _, f in ipairs(files) do
-                            if not seen[f] then
-                                view.nodes[#view.nodes + 1] = { id = f, name = f,
-                                    kind = 'module', file = f, range = R0, order = -1 }
-                            end
-                        end
-                        local back, fwd = store._nav_back, store._nav_fwd
-                        local loc = store.loc_provider and store.loc_provider.get()
-                        local focused = store.focused
-                        store.ingest(view)
-                        store._nav_back, store._nav_fwd = back or {}, fwd or {}
-                        if focused and store.node(focused) then
-                            store.set_focus(focused)
-                        end
-                        if loc and store.loc_provider then
-                            pcall(store.loc_provider.set, loc)
-                        end
+                        progressive(acc, files, k, n)
                     end,
                     on_done = function (acc)
                         require('cartograph.cache').save_bg(acc)
-                        local back, fwd = store._nav_back, store._nav_fwd
-                        local loc = store.loc_provider and store.loc_provider.get()
-                        finish(acc)
-                        store._nav_back, store._nav_fwd = back or {}, fwd or {}
-                        if loc and store.loc_provider then
-                            pcall(store.loc_provider.set, loc)
-                        end
+                        preserve(function () finish(acc) end)
                         require('cartograph.toc').attach(store)
                         store.ws_resolve() -- members arrive with their files
                         vim.notify(('cartograph: extraction complete — %d nodes, %d calls')

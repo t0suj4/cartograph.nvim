@@ -1338,6 +1338,75 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+test('async cache: load_async / open_async match the blocking path exactly', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local cache = require 'cartograph.cache'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/sub', 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close()
+    end
+    -- cross-file edges + a global use, so the shards carry real structure
+    write('a.lua', 'local registry = {}\n\nlocal function alpha(x)\n  return beta(x) + #registry\nend\n')
+    write('sub/b.lua', 'local function beta(y)\n  return y * 2\nend\n')
+    write('c.lua', 'local function gamma()\n  return 1\nend\n')
+    cache.save(ts.extract(root))
+
+    local function graph_keys(d)
+        local ids, eks, cks = {}, {}, {}
+        for _, n in ipairs(d.nodes) do ids[#ids + 1] = n.id end
+        for _, e in ipairs(d.edges) do eks[#eks + 1] = e.kind .. '|' .. e.from .. '|' .. e.to end
+        for _, c in ipairs(d.calls) do
+            cks[#cks + 1] = ('%s|%d|%s|%s'):format(c.file, c.line, c.callee, tostring(c.to))
+        end
+        table.sort(ids); table.sort(eks); table.sort(cks)
+        return { ids = ids, edges = eks, calls = cks, names = d.names }
+    end
+
+    -- load_async == load (deterministic sorted concat, just spread over ticks)
+    local sync = cache.load(root)
+    local async, chunks
+    local roster = cache.load_async(root, function () chunks = (chunks or 0) + 1 end,
+        function (d) async = d end)
+    ok(type(roster) == 'table' and #roster == 3, 'roster returned synchronously')
+    ok(vim.wait(5000, function () return async ~= nil end, 20), 'load_async completed')
+    eq(graph_keys(sync), graph_keys(async))
+
+    -- open_async == open: same graph, same note shape. Small corpus, but the
+    -- streamed path is size-independent — force it directly.
+    local stubbed, done, onote
+    local started = cache.open_async(root, {
+        on_stub = function (files) stubbed = #files end,
+        on_chunk = function () end,
+        on_done = function (d, n) done = d; onote = n end,
+    })
+    ok(started == true, 'open_async committed to warm')
+    ok(stubbed == 3, 'on_stub fired synchronously with the roster')
+    ok(vim.wait(5000, function () return done ~= nil end, 20), 'open_async completed')
+    ok(onote:match('unchanged'), tostring(onote))
+    eq(graph_keys(cache.load(root)), graph_keys(done))
+
+    -- a changed file streams through open_async too: the splice runs on
+    -- completion, same as the sync open
+    write('sub/b.lua', 'local function beta(y)\n  return y * 3\nend\n\nlocal function nu(z)\n  return z\nend\n')
+    local done2, onote2
+    cache.open_async(root, {
+        on_stub = function () end, on_chunk = function () end,
+        on_done = function (d, n) done2 = d; onote2 = n end,
+    })
+    ok(vim.wait(5000, function () return done2 ~= nil end, 20), 'streamed warm w/ diff completed')
+    ok(onote2:match('1 re%-extracted'), tostring(onote2))
+    local hasnu = false
+    for _, n in ipairs(done2.nodes) do if n.name == 'nu' then hasnu = true end end
+    ok(hasnu, 'streamed splice re-extracted the changed file')
+    eq(graph_keys(done2), graph_keys(cache.load(root)))
+
+    cache.wipe(root)
+    vim.fn.delete(root, 'rf')
+end)
+
 test('python: class-qualified methods, stdlib gate, decorator cbarg', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

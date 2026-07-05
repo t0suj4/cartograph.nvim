@@ -296,6 +296,46 @@ function M.save_bg(data)
     end))
 end
 
+-- the empty shell a load fills: manifest metadata, no graph body yet
+local function empty_data(m)
+    return { schema = m.schema or 1, root = m.root,
+        provider = m.provider or 'treesitter', capabilities = m.capabilities,
+        no_parser = m.no_parser, stamps = m.stamps,
+        nodes = {}, edges = {}, calls = {}, names = {} }
+end
+
+-- read one shard iff intact (present, untruncated per the manifest length,
+-- decodable, shaped) — else nil, which the caller treats as a changed file
+local function read_shard(dir, f, m)
+    local path = dir .. '/' .. fkey(f)
+    local want = m.sizes and m.sizes[f]
+    local st = vim.uv.fs_stat(path)
+    if not (st and (not want or st.size == want)) then return nil end
+    local s = read_decoded(path)
+    if type(s) == 'table' and type(s.nodes) == 'table' then return s end
+    return nil
+end
+
+-- concat one shard's contribution into the growing graph
+local function absorb(data, f, s)
+    for _, n in ipairs(s.nodes) do data.nodes[#data.nodes + 1] = n end
+    for _, e in ipairs(s.edges or {}) do data.edges[#data.edges + 1] = e end
+    for _, c in ipairs(s.calls or {}) do data.calls[#data.calls + 1] = c end
+    if s.names then data.names[f] = s.names end
+end
+
+-- frontier bundles: modules synthesized from the manifest roster
+local function synth_unparsed(data, m)
+    if not (m.unparsed and #m.unparsed > 0) then return end
+    data.unparsed = m.unparsed
+    for _, f in ipairs(m.unparsed) do
+        data.nodes[#data.nodes + 1] = { id = f, name = f, kind = 'module',
+            file = f, unparsed = true, order = -1,
+            range = { start = { line = 0, char = 0 },
+                ['end'] = { line = 0, char = 0 } } }
+    end
+end
+
 --- Load a cached graph for `root`: manifest + every shard, concatenated
 --- in sorted order (deterministic). A CORRUPTED SHARD (truncated —
 --- caught by the manifest's byte length — undecodable, or misshapen)
@@ -308,53 +348,74 @@ function M.load(root)
     if require('cartograph.config').cache == false then return nil end
     local m, dir = read_manifest(root)
     if not m then return nil end
-    local data = { schema = m.schema or 1, root = m.root,
-        provider = m.provider or 'treesitter', capabilities = m.capabilities,
-        no_parser = m.no_parser, stamps = m.stamps,
-        nodes = {}, edges = {}, calls = {}, names = {} }
+    local data = empty_data(m)
     local files, bad = {}, {}
     for f in pairs(m.stamps) do files[#files + 1] = f end
     table.sort(files)
     for _, f in ipairs(files) do
-        local path = dir .. '/' .. fkey(f)
-        local want = m.sizes and m.sizes[f]
-        local st = vim.uv.fs_stat(path)
-        local s = (st and (not want or st.size == want))
-            and read_decoded(path) or nil
-        if type(s) == 'table' and type(s.nodes) == 'table' then
-            for _, n in ipairs(s.nodes) do data.nodes[#data.nodes + 1] = n end
-            for _, e in ipairs(s.edges or {}) do
-                data.edges[#data.edges + 1] = e
-            end
-            for _, c in ipairs(s.calls or {}) do
-                data.calls[#data.calls + 1] = c
-            end
-            if s.names then data.names[f] = s.names end
+        local s = read_shard(dir, f, m)
+        if s then
+            absorb(data, f, s)
         else
             bad[#bad + 1] = f
             data.stamps[f] = nil -- its content is NOT represented
             data.names[f] = nil
         end
     end
-    -- frontier bundles: modules synthesized from the manifest roster
-    if m.unparsed and #m.unparsed > 0 then
-        data.unparsed = m.unparsed
-        for _, f in ipairs(m.unparsed) do
-            data.nodes[#data.nodes + 1] = { id = f, name = f, kind = 'module',
-                file = f, unparsed = true, order = -1,
-                range = { start = { line = 0, char = 0 },
-                    ['end'] = { line = 0, char = 0 } } }
-        end
-    end
+    synth_unparsed(data, m)
     return data, bad
 end
 
---- The incremental open: cached graph brought up to date, or nil (cold).
---- Returns (data, note) — note says what happened, honestly.
-function M.open(root)
+--- Load asynchronously: the manifest read is sync (a few KB), but the shards
+--- DECODE IN BACKGROUND CHUNKS on a timer, so a big corpus never blocks the
+--- editor the way a whole-cache read would. Returns the file roster
+--- synchronously (so the caller can stub the browser at once) or nil if there
+--- is no manifest. on_chunk(data, done, total) fires as shards land (data
+--- grows in place); on_done(data, bad) fires once at the end. Deterministic:
+--- same sorted concat as M.load, just spread across ticks.
+function M.load_async(root, on_chunk, on_done)
     if require('cartograph.config').cache == false then return nil end
-    -- diff from the MANIFEST: the warm/cold decision costs a few KB (or
-    -- one cheap stamps round-trip), not a shard sweep it might discard
+    local m, dir = read_manifest(root)
+    if not m then return nil end
+    local data = empty_data(m)
+    local files, bad = {}, {}
+    for f in pairs(m.stamps) do files[#files + 1] = f end
+    table.sort(files)
+    local i = 0
+    local timer = vim.uv.new_timer()
+    timer:start(0, 12, vim.schedule_wrap(function ()
+        local stop = math.min(i + 256, #files)
+        while i < stop do
+            i = i + 1
+            local f = files[i]
+            local s = read_shard(dir, f, m)
+            if s then
+                absorb(data, f, s)
+            else
+                bad[#bad + 1] = f
+                data.stamps[f] = nil
+                data.names[f] = nil
+            end
+        end
+        if i >= #files then
+            timer:stop() timer:close()
+            synth_unparsed(data, m)
+            on_done(data, bad)
+        elseif on_chunk then
+            on_chunk(data, i, #files)
+        end
+    end))
+    return files
+end
+
+-- The warm/cold decision, from the MANIFEST alone (a few KB — no shard
+-- reads). Returns (m, changed, deleted) when a warm open is worth it, or
+-- (nil, note). A warm open must never lose to a cold one: the splice
+-- re-extracts changed files SEQUENTIALLY, while cold is parallel and streams,
+-- so past the break-even (≈ total/workers) we step aside WITHOUT reading a
+-- shard. note is nil for "no cache" (silent cold) and a string for a
+-- deliberate step-aside (diff unavailable / too many changed).
+local function warm_decision(root)
     local m = read_manifest(root)
     if not m then return nil end
     local src = require 'cartograph.source'
@@ -365,14 +426,6 @@ function M.open(root)
     if not changed then
         return nil, 'diff unavailable (' .. tostring(deleted) .. ') — cold'
     end
-
-    -- a warm open must never lose to a cold one: the splice re-extracts
-    -- changed files SEQUENTIALLY and blocks the UI, while the cold path
-    -- is parallel and streams. Past the break-even (≈ total/workers,
-    -- since cold divides the whole tree by the worker count), step aside
-    -- WITHOUT reading a single shard. Only where cold IS parallel — the
-    -- filesystem source above the threshold; other sources have no
-    -- parallel path, so warm always wins for them.
     local cfg = require 'cartograph.config'
     local total = vim.tbl_count(m.stamps)
     if m.provider == 'treesitter' or not m.provider then
@@ -386,11 +439,14 @@ function M.open(root)
                 .. ' is faster, going parallel'):format(#changed, limit)
         end
     end
+    return m, changed, deleted
+end
 
-    -- committed to warm: NOW read the shards. Corrupted ones cost
-    -- exactly their own file — they join the changed set and re-extract
-    local data, bad = M.load(root)
-    if not data then return nil end
+-- Bring a freshly-loaded warm graph up to date: fold corrupted shards into
+-- the changed set, splice the diff, persist exactly the dirtied shards
+-- (deleted files tombstoned by manifest omission; gc reclaims). Returns the
+-- honest note. Shared by the sync and streamed opens.
+local function finalize_warm(data, bad, changed, deleted, total, tag)
     if bad and #bad > 0 then
         local seen = {}
         for _, f in ipairs(changed) do seen[f] = true end
@@ -400,17 +456,66 @@ function M.open(root)
         table.sort(changed)
     end
     if #changed == 0 and #deleted == 0 then
-        return data, ('warm open — %d files unchanged'):format(total)
+        return ('%s — %d files unchanged'):format(tag, total)
     end
     local stats = require('cartograph.refresh').splice(data, changed, deleted)
-    -- O(diff) persist: exactly the shards the splice reports dirty
-    -- (deleted files are tombstoned by manifest omission; gc reclaims)
     M.save(data, stats.dirty)
-    return data, ('warm open — %d re-extracted, %d deleted, %d shards'
-        .. ' rewritten, rest untouched%s')
-        :format(#changed, #deleted, #(stats.dirty or {}),
-            (bad and #bad > 0)
-                and ('; %d corrupted shard(s) repaired'):format(#bad) or '')
+    return ('%s — %d re-extracted, %d deleted, %d shards rewritten, rest'
+        .. ' untouched%s'):format(tag, #changed, #deleted, #(stats.dirty or {}),
+        (bad and #bad > 0)
+            and ('; %d corrupted shard(s) repaired'):format(#bad) or '')
+end
+
+--- The incremental open: cached graph brought up to date, or nil (cold).
+--- Returns (data, note) — note says what happened, honestly. This is the
+--- BLOCKING path: it reads and decodes every shard before returning. For a
+--- large corpus prefer M.open_async (init picks per warm_streamable).
+function M.open(root)
+    if require('cartograph.config').cache == false then return nil end
+    local m, changed, deleted = warm_decision(root)
+    if not m then return nil, changed end -- changed carries the note (or nil)
+    -- committed to warm: NOW read the shards. Corrupted ones cost exactly
+    -- their own file — they join the changed set and re-extract.
+    local data, bad = M.load(root)
+    if not data then return nil end
+    local note = finalize_warm(data, bad, changed, deleted,
+        vim.tbl_count(m.stamps), 'warm open')
+    return data, note
+end
+
+--- Would a warm open of `root` be big enough to stream? True iff there is a
+--- manifest, its source is treesitter (the only source with a parallel cold
+--- path to mirror), and the roster clears the parallel threshold. A cheap
+--- manifest read — the caller uses it to choose M.open (sync) vs open_async.
+function M.warm_streamable(root)
+    if require('cartograph.config').cache == false then return false end
+    local cfg = require 'cartograph.config'
+    if cfg.parallel == false then return false end
+    local m = read_manifest(root)
+    if not m then return false end
+    if not (m.provider == 'treesitter' or not m.provider) then return false end
+    return vim.tbl_count(m.stamps) >= (cfg.parallel_threshold or 300)
+end
+
+--- The incremental open, STREAMED: identical result to M.open, but the shards
+--- decode in background chunks so the editor never blocks. The warm/cold
+--- decision is made synchronously from the manifest; on a warm commit the
+--- caller's cb.on_stub(files) fires at once (browser opens on module stubs),
+--- cb.on_chunk(data, done, total) as shards land, and cb.on_done(data, note)
+--- when the splice has brought it up to date. Returns true when it went warm
+--- (async in flight), or (false, note) when the caller should go cold.
+function M.open_async(root, cb)
+    if require('cartograph.config').cache == false then return false end
+    local m, changed, deleted = warm_decision(root)
+    if not m then return false, changed end
+    local total = vim.tbl_count(m.stamps)
+    local files = M.load_async(root, cb.on_chunk, function (data, bad)
+        cb.on_done(data, finalize_warm(data, bad, changed, deleted, total,
+            'warm open (streamed)'))
+    end)
+    if not files then return false end
+    if cb.on_stub then cb.on_stub(files) end
+    return true
 end
 
 return M
