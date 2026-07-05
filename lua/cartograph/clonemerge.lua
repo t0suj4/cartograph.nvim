@@ -18,18 +18,8 @@
 
 local M = {}
 
-local function read_file(root, rel)
-    local fd = io.open(root .. '/' .. rel, 'r')
-    if not fd then return nil end
-    local text = fd:read('a')
-    fd:close()
-    return text
-end
-
-local function disk_stamp(root, rel)
-    local st = vim.uv.fs_stat(root .. '/' .. rel)
-    return st and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
-end
+local txn = require 'cartograph.txn'
+local read_file, disk_stamp = txn.read_file, txn.disk_stamp
 
 --- Witness twins of `id`: same kind, equal behavior witness, elsewhere
 --- in the graph. The clone detector's identity, reused as the merge's.
@@ -182,65 +172,27 @@ local function edit_file(text, dels, reps)
 end
 
 --- Apply a plan. Every verification failure REFUSES with its reason.
+--- The ladder and the journaled write loop live in cartograph.txn —
+--- this verb contributes its refs, its edits, its one extra rung.
 function M.apply(store, plan)
-    local root = store.data.root
-    -- 1. one transaction at a time; a live graph to splice back into
+    -- one transaction at a time: a staged move-set means the user
+    -- intends a different verb
     if next(store.moveset or {}) then
         return nil, 'a move-set is staged — apply or clear it first'
     end
-    if store.data.partial then
-        return nil, 'extraction in progress'
-    end
-    -- 2. the graph must be the one the plan was computed against
-    if store.generation ~= plan.generation then
-        return nil, ('the graph changed since planning (gen %d -> %d) —'
-            .. ' re-run :CartographMerge'):format(plan.generation, store.generation)
-    end
-    -- 3. late-bound refs: survivor and every twin must still resolve,
-    --    witness-clean (a transaction never follows drift silently)
-    local function must_resolve(spec, what)
-        local rid, note = store.resolve_ref(spec.ref)
-        if not rid or rid ~= spec.id or note then
-            return ('%s %s: %s'):format(what, spec.name,
-                note or 'no longer resolves')
-        end
-    end
-    local bad = must_resolve(plan.survivor, 'survivor')
-    if bad then return nil, bad end
+    local refspecs = { { id = plan.survivor.id, name = plan.survivor.name,
+        ref = plan.survivor.ref, what = 'survivor' } }
     for _, r in ipairs(plan.removed) do
-        bad = must_resolve(r, 'clone')
-        if bad then return nil, bad end
+        refspecs[#refspecs + 1] = { id = r.id, name = r.name,
+            ref = r.ref, what = 'clone' }
     end
-    -- 4. files: unchanged since planning (CAS), and no dirty buffers
-    for _, rel in ipairs(plan.touched) do
-        if disk_stamp(root, rel) ~= plan.stamps[rel] then
-            return nil, rel .. ' changed on disk since planning — re-plan'
-        end
-        for _, b in ipairs(vim.api.nvim_list_bufs()) do
-            if vim.api.nvim_buf_is_loaded(b)
-                and vim.api.nvim_buf_get_name(b) == root .. '/' .. rel
-                and vim.bo[b].modified then
-                return nil, rel .. ' has unsaved buffer changes — save or discard'
-            end
-        end
-    end
-    -- 5. journal FIRST: before-content on record before any byte moves
-    local before = {}
-    for _, rel in ipairs(plan.touched) do
-        local t = read_file(root, rel)
-        if not t then return nil, 'cannot read ' .. rel end
-        before[rel] = t
-    end
-    local journal = require 'cartograph.journal'
-    local entry, jerr = journal.begin(root, plan.verb, {
+    local bad = txn.verify(store, plan, refspecs)
+    if bad then return nil, bad end
+    return txn.execute(store, plan, {
         survivor = plan.survivor.ref, survivor_name = plan.survivor.name,
         removed = vim.tbl_map(function (r) return r.ref end, plan.removed),
         rewrites = #plan.rewrites,
-    }, before)
-    if not entry then return nil, jerr end
-    -- 6. the writes
-    local after = {}
-    for _, rel in ipairs(plan.touched) do
+    }, function (rel, before)
         local dels, reps = {}, {}
         for _, r in ipairs(plan.removed) do
             if r.file == rel then dels[#dels + 1] = r.lines end
@@ -248,21 +200,8 @@ function M.apply(store, plan)
         for _, r in ipairs(plan.rewrites) do
             if r.file == rel then reps[#reps + 1] = r end
         end
-        after[rel] = edit_file(before[rel], dels, reps)
-        local fd = io.open(root .. '/' .. rel, 'w')
-        if not fd then
-            journal.abort(root, entry, 'cannot write ' .. rel)
-            return nil, 'cannot write ' .. rel .. ' (journal has before-content)'
-        end
-        fd:write(after[rel])
-        fd:close()
-    end
-    journal.commit(root, entry, after)
-    -- 7. the graph follows: clear the txn, splice the touched files
-    store.set_txn(nil)
-    require('cartograph.refresh').files(plan.touched)
-    vim.cmd('silent! checktime')
-    return entry
+        return edit_file(before, dels, reps)
+    end)
 end
 
 return M

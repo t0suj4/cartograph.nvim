@@ -1893,3 +1893,129 @@ test('php: attributes register, $this->/self:: resolve in-class', function ()
         ok(c.to ~= (torn or {}).id, 'torn def absorbs nothing')
     end
 end)
+
+test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local refresh = require 'cartograph.refresh'
+    local journal = require 'cartograph.journal'
+    local mv = require 'cartograph.moveapply'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text)
+        fd:close()
+    end
+    local function readf(rel)
+        local fd = assert(io.open(root .. '/' .. rel, 'r'))
+        local t = fd:read('a')
+        fd:close()
+        return t
+    end
+    local A = table.concat({
+        'local function traveler(x)',
+        '  return x + 7',
+        'end',
+        '',
+        'local function stays()',
+        '  return traveler(2)',
+        'end',
+        '' }, '\n')
+    local B = table.concat({
+        'local M = {}',
+        '',
+        'function M.existing()',
+        '  return 1',
+        'end',
+        '',
+        'return M',
+        '' }, '\n')
+    write('a.lua', A)
+    write('b.lua', B)
+    store.ingest(ts.extract(root))
+    root = store.data.root
+    journal.wipe(root)
+    local function byname(nm)
+        for id, n in pairs(store.by_id) do
+            if n.name == nm then return id end
+        end
+    end
+
+    -- refusals: nothing staged; then no destination
+    local p0, w0 = mv.plan(store)
+    ok(not p0 and w0:match('nothing staged'), tostring(w0))
+    store.stage(byname('traveler'))
+    p0, w0 = mv.plan(store)
+    ok(not p0 and w0:match('no destination'), tostring(w0))
+    -- dest == home refuses
+    store.set_dest('a.lua')
+    p0, w0 = mv.plan(store)
+    ok(not p0 and w0:match('already lives'), tostring(w0))
+
+    store.set_dest('b.lua')
+    local plan, why = mv.plan(store)
+    ok(plan, tostring(why))
+    eq(1, #plan.moves)
+    eq('traveler', plan.moves[1].name)
+    eq(6, plan.dest_at) -- 0-based index of `return M`
+    -- the stays() call site is disclosed, not rewritten
+    local disclosed
+    for _, h in ipairs(plan.hazards) do
+        if h:match('call site') and h:match('a.lua') then disclosed = true end
+    end
+    ok(disclosed, table.concat(plan.hazards, ' | '))
+
+    -- verb rung: the move-set changed after planning -> refuse
+    store.set_txn(plan)
+    store.stage(byname('stays'))
+    local e0, we0 = mv.apply(store, plan)
+    ok(not e0 and we0:match('changed since planning'), tostring(we0))
+    store.unstage(byname('stays'))
+
+    -- apply for real
+    local entry, aerr = mv.apply(store, plan)
+    ok(entry, tostring(aerr))
+    eq('applied', entry.status)
+    ok(store.txn == nil, 'apply cleared the staged txn')
+    eq(0, #store.staged_ids()) -- the move-set was consumed
+
+    local expectedA = table.concat({
+        'local function stays()',
+        '  return traveler(2)',
+        'end',
+        '' }, '\n')
+    local expectedB = table.concat({
+        'local M = {}',
+        '',
+        'function M.existing()',
+        '  return 1',
+        'end',
+        '',
+        'local function traveler(x)',
+        '  return x + 7',
+        'end',
+        '',
+        'return M',
+        '' }, '\n')
+    eq(expectedA, readf('a.lua'))
+    eq(expectedB, readf('b.lua'))
+
+    -- the graph followed: traveler now lives in b.lua, caller relinked
+    local t2 = store.node(byname('traveler'))
+    eq('b.lua', t2 and t2.file)
+    ok(vim.tbl_contains(store.usedby[byname('traveler')] or {}, byname('stays')),
+        'stays still linked cross-file')
+
+    -- byte-exact undo
+    local r, rw = journal.rollback(root)
+    ok(r, tostring(rw))
+    eq(A, readf('a.lua'))
+    eq(B, readf('b.lua'))
+    refresh.files({ 'a.lua', 'b.lua' })
+    eq('a.lua', (store.node(byname('traveler')) or {}).file)
+
+    journal.wipe(root)
+    vim.fn.delete(root, 'rf')
+end)

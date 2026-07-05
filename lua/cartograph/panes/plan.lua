@@ -37,15 +37,27 @@ function M.render()
     -- nothing is written until :CartographApply survives verification
     if store.txn then
         local t = store.txn
-        lines[#lines + 1] = hl(marks, #lines,
-            ('MERGE  %d clone(s) → %s    :CartographApply · :CartographTxnClear')
-                :format(#t.removed, t.survivor.name), 'Title')
-        for _, r in ipairs(t.removed) do
-            lines[#lines + 1] = ('  - %s   %s:%d-%d'):format(r.name, r.file,
-                r.lines.s + 1, r.lines.e + 1)
+        if t.verb == 'move' then
+            lines[#lines + 1] = hl(marks, #lines,
+                ('MOVE  %d symbol(s) → %s    :CartographApply · :CartographTxnClear')
+                    :format(#t.moves, t.dest), 'Title')
+            for _, m in ipairs(t.moves) do
+                lines[#lines + 1] = ('  %s   %s:%d-%d'):format(m.name, m.file,
+                    m.lines.s + 1, m.lines.e + 1)
+            end
+            lines[#lines + 1] = ('  lands at %s:%d; touches %d file(s)')
+                :format(t.dest, t.dest_at + 1, #t.touched)
+        else
+            lines[#lines + 1] = hl(marks, #lines,
+                ('MERGE  %d clone(s) → %s    :CartographApply · :CartographTxnClear')
+                    :format(#t.removed, t.survivor.name), 'Title')
+            for _, r in ipairs(t.removed) do
+                lines[#lines + 1] = ('  - %s   %s:%d-%d'):format(r.name, r.file,
+                    r.lines.s + 1, r.lines.e + 1)
+            end
+            lines[#lines + 1] = ('  rewrites %d call site(s); touches %d file(s)')
+                :format(#t.rewrites, #t.touched)
         end
-        lines[#lines + 1] = ('  rewrites %d call site(s); touches %d file(s)')
-            :format(#t.rewrites, #t.touched)
         for _, h in ipairs(t.hazards) do
             lines[#lines + 1] = hl(marks, #lines, '  ⚠ ' .. h, 'DiagnosticWarn')
         end

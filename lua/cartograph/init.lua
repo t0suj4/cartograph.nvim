@@ -365,13 +365,34 @@ function M.open(dump_path, opts)
             .. ' :CartographApply'):format(#txn.removed, txn.survivor.name,
             #txn.rewrites, #txn.hazards), vim.log.levels.INFO)
     end, { desc = 'cartograph: merge the focused function\'s clones into it' })
+    -- the second transaction: the staged move-set becomes edits
+    pcall(vim.api.nvim_del_user_command, 'CartographMove')
+    vim.api.nvim_create_user_command('CartographMove', function ()
+        local st = require 'cartograph.store'
+        if st.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first',
+                vim.log.levels.WARN)
+        end
+        local mv = require 'cartograph.moveapply'
+        local txn, why = mv.plan(st)
+        if not txn then
+            return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)
+        end
+        st.set_txn(txn)
+        vim.notify(('cartograph: move staged — %d symbol(s) → %s,'
+            .. ' %d hazard(s). Review the plan bar, then :CartographApply')
+            :format(#txn.moves, txn.dest, #txn.hazards), vim.log.levels.INFO)
+    end, { desc = 'cartograph: turn the staged move-set into a transaction' })
     pcall(vim.api.nvim_del_user_command, 'CartographApply')
     vim.api.nvim_create_user_command('CartographApply', function ()
         local st = require 'cartograph.store'
         if not st.txn then
             return vim.notify('cartograph: nothing staged', vim.log.levels.WARN)
         end
-        local entry, why = require('cartograph.clonemerge').apply(st, st.txn)
+        local verb = st.txn.verb == 'move' and 'cartograph.moveapply'
+            or 'cartograph.clonemerge'
+        local entry, why = require(verb).apply(st, st.txn)
         if not entry then
             return vim.notify('cartograph: apply REFUSED — ' .. tostring(why),
                 vim.log.levels.WARN)
