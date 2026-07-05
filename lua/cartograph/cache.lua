@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 13 -- v13: C/C++ header interface extracted — prototypes (decl),
+M.VERSION = 14 -- v14: C/C++ #include <angled> paths resolve too (was quoted-
+              -- only) — a project's own headers reached via -Iinclude now
+              -- link, so the include tree populates (external system headers
+              -- resolve to nothing, as before);
+              -- v13: C/C++ header interface extracted — prototypes (decl),
               -- macros (fn-like callable + object consts), struct/union/enum/
               -- typedef (var, ctype); a header browses as its interface;
               -- v12: scheme define/lambda signature is not a call (no

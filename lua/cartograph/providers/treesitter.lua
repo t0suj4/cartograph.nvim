@@ -232,9 +232,13 @@ M.spec = {
         body_field = 'body',
         is_method = function () return false end,
         entry_names = { main = true },
-        import_query = [[ (preproc_include path: (string_literal) @path) ]],
+        -- both forms: "quoted" (relative) AND <angled>. Angle-bracket
+        -- includes are conventionally -I lookups — most are external system
+        -- headers (no project file → no edge), but a project's own headers
+        -- pulled in via -Iinclude are angled too, and those DO resolve.
+        import_query = [[ (preproc_include path: [(string_literal) (system_lib_string)] @path) ]],
         resolve_import = function (path, files, from)
-            path = path:gsub('^"', ''):gsub('"$', '')
+            path = path:gsub('^[<"]', ''):gsub('[>"]$', '')
             local dir = from:match('^(.*)/[^/]*$')
             for _, cand in ipairs({ dir and (dir .. '/' .. path) or path, path }) do
                 if files[cand] then return cand end
@@ -343,9 +347,11 @@ M.spec = {
             emplace_back = true, first = true, second = true, length = true,
             substr = true, append = true, record = true, type = true,
             value = true, key = true, name = true, id = true },
-        import_query = [=[ (preproc_include path: (string_literal) @path) ]=],
+        -- both "quoted" and <angled> (see the C spec): a project's own
+        -- headers reached through -Iinclude are angle-bracketed too
+        import_query = [=[ (preproc_include path: [(string_literal) (system_lib_string)] @path) ]=],
         resolve_import = function (path, files, from)
-            path = path:gsub('^"', ''):gsub('"$', '')
+            path = path:gsub('^[<"]', ''):gsub('[>"]$', '')
             local dir = from:match('^(.*)/[^/]*$')
             for _, cand in ipairs({ dir and (dir .. '/' .. path) or path, path }) do
                 if files[cand] then return cand end

@@ -107,6 +107,16 @@ test('c headers: prototypes, macros and types make the interface browsable', fun
         if e.kind == 'ref' and e.to == hdr.API_SQUARE.id then mref = e end
     end
     ok(mref, 'API_SQUARE(n) resolves to the macro')
+    -- includes make the file's dependencies navigable. Both forms resolve:
+    -- "api.h" (quoted) and <util.h> (a project header reached via -I). The
+    -- external <stdlib.h> has no project file, so it stays an unlinked leaf.
+    local out = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'import' and e.from == 'api.c' then out[e.to] = true end
+    end
+    ok(out['api.h'], 'quoted #include "api.h" is an import edge')
+    ok(out['util.h'], 'angle-bracket #include <util.h> resolves to the project header')
+    ok(not out['stdlib.h'], 'external <stdlib.h> resolves to nothing (no edge)')
 end)
 
 test('treesitter: lua blocks, litdata and require edges', function ()
