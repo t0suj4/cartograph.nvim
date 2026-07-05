@@ -1,10 +1,51 @@
 # cartograph.nvim
 
-> A dependency/definition **cockpit** for Neovim — navigate a codebase's symbol
-> graph, and stage multi-file **function moves** that respect references and
-> load order.
+> Maps you can edit. A keyboard-driven Smalltalk-style browser over your
+> codebase's symbol graph — plus **transactions**: merge clones, move
+> functions, extract modules, previewed as diffs, applied through a journal,
+> undone byte-exact.
 
-**Status:** early / experimental. Design in flux.
+**Status:** working and tested (166-test suite, validated on corpora from
+WordPress to GitLab); APIs may still shift.
+
+## Install
+
+```lua
+-- lazy.nvim
+{
+  't0suj4/cartograph.nvim',
+  dependencies = { 'nvim-treesitter/nvim-treesitter' }, -- parsers + injections
+}
+```
+
+No `setup()` required — every command exists at startup and nothing loads
+until one runs. Optional configuration:
+
+```lua
+require('cartograph').setup {
+  keys = { descend = '<Right>' },  -- every binding is remappable
+}
+```
+
+## Quickstart
+
+```
+:Cartograph              " open the cockpit on the current directory
+```
+
+`l`/`h` zoom in/out (files → file → function → statements), `<CR>` pivots,
+`<C-]>` jumps to the callee under the cursor, `<C-o>` goes back. To move a
+function: `dd` cuts it, `p` on a file row sets the destination, then
+`:CartographMove` → `:CartographDiff` → `:CartographApply` →
+(`:CartographUndo` if you change your mind).
+
+`:h cartograph` for everything else; `:checkhealth cartograph` to verify
+the wiring (parsers, injections, cache codec, optional oracles).
+
+Twelve languages (lua, c, cpp, python, js, ts, php, ruby, java, go, rust,
+haskell, scheme) plus vue/svelte single-file components. Everything
+cross-file is name-matched and marked `~` unless an oracle proved it;
+ambiguity refuses to link rather than guess.
 
 ## Why
 

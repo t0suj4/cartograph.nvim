@@ -2295,3 +2295,37 @@ test('move wiring: import line written, call sites requalified', function ()
     journal.wipe(root)
     vim.fn.delete(root, 'rf')
 end)
+
+test('plugin startup: commands exist, nothing heavy loads', function ()
+    -- a CHILD nvim proves the plugin/ contract: source only the plugin
+    -- file, and every command must exist while no cockpit module has
+    -- been required yet
+    local repo = vim.fn.getcwd()
+    local script = vim.fn.tempname() .. '.lua'
+    local fd = assert(io.open(script, 'w'))
+    fd:write(([[
+vim.opt.rtp:prepend('%s')
+vim.cmd('runtime! plugin/cartograph.lua')
+local cmds = { 'Cartograph', 'CartographMove', 'CartographApply',
+    'CartographUndo', 'CartographRedo', 'CartographJournal',
+    'CartographDiff', 'CartographMerge', 'CartographExtractModule',
+    'CartographLint', 'CartographRefresh' }
+for _, c in ipairs(cmds) do
+    assert(vim.fn.exists(':' .. c) == 2, c .. ' missing')
+end
+for _, m in ipairs({ 'cartograph', 'cartograph.store',
+    'cartograph.providers.treesitter' }) do
+    assert(package.loaded[m] == nil, m .. ' loaded at startup')
+end
+-- a graph-needing command answers with a message, not an error
+local ok = pcall(vim.cmd, 'CartographUndo')
+assert(ok, 'command errored without a graph')
+print('plugin-smoke-ok')
+]]):format(repo))
+    fd:close()
+    local out = vim.system({ 'nvim', '--headless', '-u', 'NONE', '-l', script })
+        :wait()
+    vim.fn.delete(script)
+    ok(out.code == 0 and (out.stdout .. out.stderr):match('plugin%-smoke%-ok'),
+        'child nvim: ' .. tostring(out.stdout) .. tostring(out.stderr))
+end)
