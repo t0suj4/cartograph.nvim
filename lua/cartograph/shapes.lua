@@ -15,6 +15,17 @@ local function has(root, rel)
     return vim.uv.fs_stat(root .. '/' .. rel) ~= nil
 end
 
+-- any file matching `*.<ext>` at the root (for variable-named markers like
+-- <pkg>.cabal); returns the filename or nil
+local function has_ext(root, ext)
+    local it = vim.uv.fs_scandir(root)
+    while it do
+        local name, ty = vim.uv.fs_scandir_next(it)
+        if not name then break end
+        if ty ~= 'directory' and name:match('%.' .. ext .. '$') then return name end
+    end
+end
+
 -- Each entry: name, detect(root) -> evidence string | nil, and either
 -- a static `config` or `configure(root)` for presets that read files.
 M.registry = {
@@ -108,6 +119,55 @@ M.registry = {
         config = { entrypoints = {
             '^site%.ya?ml$', 'tasks/main%.ya?ml$', 'playbook.*%.ya?ml$',
         } },
+    },
+    {
+        -- an Ansible COLLECTION (galaxy.yml) — a different layout from a
+        -- role: plugins/, roles/, playbooks/. The role at ~/git/*-CIS is a
+        -- role; ~/git/community.general is a collection the role shape misses.
+        name = 'ansible-collection',
+        detect = function (root)
+            if has(root, 'galaxy.yml') and (has(root, 'plugins')
+                or has(root, 'roles')) then
+                return 'galaxy.yml + plugins/roles'
+            end
+        end,
+        -- playbooks, role task mains, and plugin modules are entry points
+        -- (loaded by Ansible, no in-repo importer)
+        config = { entrypoints = {
+            '^playbooks/.*%.ya?ml$', 'tasks/main%.ya?ml$',
+            '^plugins/modules/.*%.py$',
+        } },
+    },
+    {
+        -- a Python PACKAGE (pyproject.toml / setup.py) — the non-django
+        -- python case. Excludes venv/__pycache__ (NOT dot-prefixed, so not
+        -- auto-skipped); .venv/.tox already are.
+        name = 'python-package',
+        detect = function (root)
+            if has(root, 'pyproject.toml') then return 'pyproject.toml' end
+            if has(root, 'setup.py') then return 'setup.py' end
+        end,
+        config = {
+            entrypoints = { '^setup%.py$', '__main__%.py$', 'conftest%.py$' },
+            exclude = { 'venv', '__pycache__' },
+        },
+    },
+    {
+        -- a Haskell project (stack.yaml / cabal.project / <pkg>.cabal, or
+        -- GHC's hadrian build). Excludes dist-newstyle and hadrian's _build
+        -- (both non-dotted); .stack-work is already skipped.
+        name = 'haskell',
+        detect = function (root)
+            if has(root, 'stack.yaml') then return 'stack.yaml' end
+            if has(root, 'cabal.project') then return 'cabal.project' end
+            if has(root, 'hadrian') then return 'hadrian/ (GHC build)' end
+            local cabal = has_ext(root, 'cabal')
+            if cabal then return cabal end
+        end,
+        config = {
+            entrypoints = { 'Main%.hs$', '^Setup%.hs$' },
+            exclude = { 'dist-newstyle', '_build' },
+        },
     },
     {
         name = 'node-package',

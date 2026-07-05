@@ -70,6 +70,39 @@ test('shapes: explicit setup{} wins over detection', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+test('shapes: ansible collection, python package, haskell', function ()
+    -- an Ansible COLLECTION (galaxy.yml + plugins/) — distinct from a role
+    local coll = mkroot({ ['galaxy.yml'] = 'namespace: x',
+        ['plugins/modules/foo.py'] = '' })
+    eq({ 'ansible-collection' }, names(shapes.apply(coll)))
+    ok(vim.tbl_contains(cfg.entrypoints, '^plugins/modules/.*%.py$'),
+        'plugin modules are entry points')
+    vim.fn.delete(coll, 'rf')
+
+    -- a Python package excludes the NON-dotted venv/__pycache__ (.venv is
+    -- already skipped by the dotfile rule)
+    local py = mkroot({ ['pyproject.toml'] = '', ['setup.py'] = '' })
+    shapes.apply(py)
+    ok(vim.tbl_contains(cfg.exclude or {}, 'venv'), 'venv excluded')
+    ok(vim.tbl_contains(cfg.exclude or {}, '__pycache__'), '__pycache__ excluded')
+    ok(vim.tbl_contains(cfg.entrypoints, '^setup%.py$'), 'setup.py entry')
+    vim.fn.delete(py, 'rf')
+
+    -- Haskell via a <pkg>.cabal marker; dist-newstyle excluded
+    local hs = mkroot({ ['acme.cabal'] = '', ['app/Main.hs'] = '' })
+    eq({ 'haskell' }, names(shapes.apply(hs)))
+    ok(vim.tbl_contains(cfg.exclude or {}, 'dist-newstyle'), 'dist-newstyle excluded')
+    ok(vim.tbl_contains(cfg.entrypoints, 'Main%.hs$'), 'Main.hs entry')
+    vim.fn.delete(hs, 'rf')
+
+    -- GHC's hadrian layout (no root .cabal) also reads as haskell
+    local ghc = mkroot({ ['hadrian/Build.hs'] = '', ['ghc/Main.hs'] = '' })
+    eq({ 'haskell' }, names(shapes.apply(ghc)))
+    vim.fn.delete(ghc, 'rf')
+
+    shapes.apply(vim.fn.tempname()) -- a markerless root: strip all presets
+end)
+
 test('shapes: the explainer shows hits, misses and overrides', function ()
     local root = mkroot({ ['manage.py'] = '' })
     local blob = table.concat(shapes.explain(root), '\n')
