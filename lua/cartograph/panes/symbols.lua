@@ -814,6 +814,14 @@ local function render_fn(ctx, id)
         ctx.lines[#ctx.lines + 1] = '◆ registered (annotation / dispatch field)'
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
     end
+    -- the epistemic ladder for THIS fn's outgoing calls: how much of
+    -- what it does is proven vs guessed vs unseeable, at a glance
+    local lad = require('cartograph.ladder').tally(store, id)
+    if lad.total > 0 then
+        ctx.lines[#ctx.lines + 1] = 'ladder: '
+            .. require('cartograph.ladder').summary(lad)
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+    end
     local df = node.df
     if not df then
         ctx.lines[3] = node.unparsed

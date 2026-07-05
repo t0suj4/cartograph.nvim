@@ -174,7 +174,9 @@ function M.enrich(data, opts)
             if not e then
                 e = { from = c.fn, to = c.to, kind = 'ref', at = {},
                     self = (c.fn == c.to) or nil,
-                    inferred = c.inferred }
+                    inferred = c.inferred,
+                    -- the oracle spoke: this edge is PROVEN, not guessed
+                    proven = not c.inferred or nil }
                 by_pair[k] = e
                 kept[#kept + 1] = e
             end

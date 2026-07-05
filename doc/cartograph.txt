@@ -76,6 +76,9 @@ All commands exist at startup; those that need an open graph say so.
   :CartographDiscover[!] [verb]
                               explain registry auto-discovery (! deep tier)
   :CartographShapes           explain project-shape detection for this root
+  :CartographLadder           the call graph's epistemic distribution
+                              (proven / linked / ~ / dynamic / refused /
+                              frontier) + the heaviest refusals to resolve
   :CartographStates           browse the configured/detected state machine
   :CartographLive             diff the RUNNING system (MCP) vs the graph
 

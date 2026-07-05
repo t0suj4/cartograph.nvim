@@ -2425,3 +2425,25 @@ test('registration edges: a dispatch table is a descendable alibi', function ()
     end
     for m in pairs(dead) do ok(not m:match('handle_start'), m) end
 end)
+
+test('ladder: the epistemic distribution and refusal ranking', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local ladder = require 'cartograph.ladder'
+    -- luaoracle: user.lua's go() calls a.pick — a refused (ambiguous) call
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/luaoracle')
+    store.ingest(data)
+    local t = ladder.tally(store)
+    ok(t.total > 0, 'calls counted')
+    ok(t.refused >= 1, 'the ambiguous a.pick is on the refused rung')
+    -- every call sits on exactly one rung (the total is the partition)
+    local sum = 0
+    for _, r in ipairs(ladder.RUNGS) do sum = sum + t[r] end
+    eq(t.total, sum)
+    -- the report ranks the refusal as a resolvable fork
+    local blob = table.concat(ladder.report(store), '\n')
+    ok(blob:match('refused'), blob)
+    ok(blob:match('heaviest refusals'), 'forks surfaced')
+    ok(blob:match('pick'), 'the ambiguous callee named')
+end)

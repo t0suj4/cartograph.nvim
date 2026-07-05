@@ -315,6 +315,12 @@ function M.register()
     end, { nargs = '?', bang = true,
         desc = 'cartograph: explain registry discovery; ! runs the deep tier and applies it' })
 
+    -- ── the epistemic ladder: how much of the graph is trustworthy ──
+    cmd('CartographLadder', function ()
+        local store = live() if not store then return end
+        scratch(require('cartograph.ladder').report(store))
+    end, { desc = 'cartograph: the call graph\'s epistemic distribution + heaviest refusals' })
+
     -- ── which project shape was detected, and what it changed ──────
     cmd('CartographShapes', function ()
         local st = require 'cartograph.store'

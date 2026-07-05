@@ -161,7 +161,7 @@ function M.enrich(data, opts)
             local e = by_from[f.from]
             if not e then
                 e = { from = f.from, to = to, kind = 'ref', at = {},
-                    self = (f.from == to) or nil }
+                    self = (f.from == to) or nil, proven = true }
                 by_from[f.from] = e
                 kept[#kept + 1] = e
                 edges_added = edges_added + 1
