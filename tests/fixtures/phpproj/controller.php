@@ -4,7 +4,7 @@ namespace App\Controller;
 
 use App\Service\Renderer;
 
-class ProductController
+class ProductController extends Base_Handler
 {
     #[Route('/products', name: 'product_index')]
     public function goAction(): int

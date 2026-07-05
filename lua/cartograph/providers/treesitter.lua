@@ -536,15 +536,22 @@ M.spec = {
             (include_once_expression (string) @path)
             (include_expression (string) @path)
             (namespace_use_clause (qualified_name) @path)
+            (base_clause (name) @path)
+            (base_clause (qualified_name) @path)
+            (class_interface_clause (name) @path)
+            (class_interface_clause (qualified_name) @path)
         ]=],
         resolve_import = function (path, files, from)
             path = path:gsub('^["\']', ''):gsub('["\']$', '')
-            if path:find('\\') then
-                -- a namespaced class. PSR-4 roots REMAP prefixes (composer:
-                -- BitBag\OpenMarketplace\ -> src/), so the namespace path
-                -- need not mirror the file path from its root — try
-                -- progressively SHORTER suffixes, longest first; a match
-                -- counts only while unique, ambiguity refuses, as ever
+            -- a namespaced class (use App\X, extends \App\X) or a PSR-0
+            -- underscore class (extends Mage_Core_Model_Abstract): both
+            -- name a file by convention. PSR-4 roots REMAP prefixes
+            -- (composer: BitBag\OpenMarketplace\ -> src/), so try
+            -- progressively SHORTER suffixes, longest first; a match
+            -- counts only while unique, ambiguity refuses, as ever
+            local sep = path:find('\\') and '\\'
+                or (path:match('^%u[%w]*_[%w_]+$') and '_')
+            if sep then
                 local idx = PHP_BASENAMES[files]
                 if not idx then
                     idx = {}
@@ -556,7 +563,7 @@ M.spec = {
                     PHP_BASENAMES[files] = idx
                 end
                 local segs = {}
-                for s in path:gmatch('[^\\]+') do segs[#segs + 1] = s end
+                for s in path:gmatch('[^' .. sep .. ']+') do segs[#segs + 1] = s end
                 local cands = idx[segs[#segs] .. '.php']
                 if not cands then return nil end
                 for i = 1, #segs do
@@ -1638,13 +1645,14 @@ end
 function M.lookups(nodes, root)
     local count = {}
     for _, n in ipairs(nodes) do
-        if n.kind == 'function' or n.kind == 'method' then
+        if (n.kind == 'function' or n.kind == 'method') and not n.torn then
             count[n.name] = (count[n.name] or 0) + 1
         end
     end
     local fn_unique, var_named = {}, {}
     for _, n in ipairs(nodes) do
-        if (n.kind == 'function' or n.kind == 'method')
+        if n.torn then -- beyond a parse error: never name-matched
+        elseif (n.kind == 'function' or n.kind == 'method')
             and count[n.name] == 1 then
             fn_unique[n.name] = { id = n.id, file = n.file,
                 line = n.range.start.line }
@@ -1795,6 +1803,25 @@ function M.extract(root, opts)
     -- a time, so container files (vue/svelte SFCs) can run it once per
     -- script region while plain files run it on their single root
     local function extract_defs(file, lang, spec, src, tsroot)
+        -- a def extracted from BEYOND a parse error has escaped its
+        -- context (magento's php5 `$s{0}` truncates the class; the
+        -- methods after it float unqualified and absorb tails). Torn
+        -- defs stay visible — jumpable nodes — but are never indexed
+        -- for name matching: refuse, don't absorb
+        local errow
+        if tsroot:has_error() then
+            local function rec(n)
+                if n:type() == 'ERROR' then return (n:range()) end
+                if not n:has_error() then return nil end
+                local best
+                for c in n:iter_children() do
+                    local r = rec(c)
+                    if r and (not best or r < best) then best = r end
+                end
+                return best
+            end
+            errow = rec(tsroot)
+        end
         -- functions
         local q = parse_query(lang, spec.functions)
         local fnDefs = {} -- def node -> true (for block grouping)
@@ -1846,11 +1873,13 @@ function M.extract(root, opts)
                         fnDefs[defn] = true
                         goto fn_done
                     end
+                    local torn = errow and sp.start.line >= errow or nil
                     nodes[#nodes + 1] = { id = id, name = name,
                         kind = method and 'method' or 'function', file = file,
                         range = sp, order = sp.start.line, params = params,
                         cbarg = isfield or nil,
                         exported = exp,
+                        torn = torn,
                         entry = (spec.entry_names or {})[name] or nil,
                         df = (spec.dataflow or dataflow)(defn, spec, src, params) }
                     lastFn[file] = nodes[#nodes]
@@ -1859,12 +1888,14 @@ function M.extract(root, opts)
                     -- ranges keep the innermost containing fn for attribution
                     fnRanges[file] = fnRanges[file] or {}
                     table.insert(fnRanges[file], { s = sp.start.line, e = sp['end'].line, id = id })
-                    exact[name] = exact[name] or {}
-                    table.insert(exact[name], nodes[#nodes])
-                    local tl = name:match('([%w_]+)$')
-                    if tl and tl ~= name then
-                        tail[tl] = tail[tl] or {}
-                        table.insert(tail[tl], nodes[#nodes])
+                    if not torn then
+                        exact[name] = exact[name] or {}
+                        table.insert(exact[name], nodes[#nodes])
+                        local tl = name:match('([%w_]+)$')
+                        if tl and tl ~= name then
+                            tail[tl] = tail[tl] or {}
+                            table.insert(tail[tl], nodes[#nodes])
+                        end
                     end
                     ::fn_done::
                 end
@@ -1891,11 +1922,15 @@ function M.extract(root, opts)
                     local id = ('%s::var:%s@%d'):format(file, name, sp.start.line)
                     local d = valn and (spec.litdata_types or {})[valn:type()]
                         and litval(valn, src, spec, 0) or nil
+                    local torn = errow and sp.start.line >= errow or nil
                     nodes[#nodes + 1] = { id = id, name = name, kind = 'var',
                         file = file, range = sp, order = sp.start.line,
+                        torn = torn,
                         data = type(d) == 'table' and d or nil }
-                    varsByName[name] = varsByName[name] or {}
-                    table.insert(varsByName[name], nodes[#nodes])
+                    if not torn then
+                        varsByName[name] = varsByName[name] or {}
+                        table.insert(varsByName[name], nodes[#nodes])
+                    end
                 end
             end
         end
@@ -2492,7 +2527,7 @@ function M.relink(data, touched)
     end
     local exact, tail = {}, {}
     for _, n in ipairs(data.nodes) do
-        if n.kind == 'function' or n.kind == 'method' then
+        if (n.kind == 'function' or n.kind == 'method') and not n.torn then
             exact[n.name] = exact[n.name] or {}
             table.insert(exact[n.name], n)
             local tl = n.name:match('([%w_]+)$')

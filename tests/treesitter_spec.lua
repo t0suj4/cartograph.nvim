@@ -1876,7 +1876,20 @@ test('php: attributes register, $this->/self:: resolve in-class', function ()
     -- (progressively shorter namespace suffixes, unique-only)
     ok(vim.tbl_contains(store.imports_out['controller.php'] or {},
         'lib/Renderer.php'), 'PSR-4 remapped use resolves')
+    -- extends names a file too: PSR-0 underscores (magento's dialect)
+    ok(vim.tbl_contains(store.imports_out['controller.php'] or {},
+        'Base/Handler.php'), 'extends Base_Handler imports PSR-0')
     -- custom loader: require_api('functions.php') includes by basename
     ok(vim.tbl_contains(store.imports_out['loader_page.php'] or {},
         'functions.php'), 'loader-shaped verb includes')
+    -- legacy syntax ($s{0}) tears the parse: defs beyond the ERROR stay
+    -- visible but never absorb name matches (magento's Layout.php lesson)
+    local torn
+    for _, n in ipairs(data.nodes) do
+        if n.name:find('orphanMethod') then torn = n end
+    end
+    ok(torn and torn.torn, 'def beyond parse error is torn')
+    for _, c in ipairs(data.calls) do
+        ok(c.to ~= (torn or {}).id, 'torn def absorbs nothing')
+    end
 end)

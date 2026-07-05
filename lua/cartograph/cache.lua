@@ -19,7 +19,9 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 6 -- v6: containers (vue/svelte) + js/ts one resolution family;
+M.VERSION = 7 -- v7: php oo/loaders/torn defs (receiver-aware calls,
+              -- PSR-4 suffixes, error-gated indexing);
+              -- v6: containers (vue/svelte) + js/ts one resolution family;
               -- v5: any stamped source (manifest carries provider);
               -- v4: per-file shards; v3: binary codec; v2: data.names
 
