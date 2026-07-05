@@ -1876,4 +1876,7 @@ test('php: attributes register, $this->/self:: resolve in-class', function ()
     -- (progressively shorter namespace suffixes, unique-only)
     ok(vim.tbl_contains(store.imports_out['controller.php'] or {},
         'lib/Renderer.php'), 'PSR-4 remapped use resolves')
+    -- custom loader: require_api('functions.php') includes by basename
+    ok(vim.tbl_contains(store.imports_out['loader_page.php'] or {},
+        'functions.php'), 'loader-shaped verb includes')
 end)

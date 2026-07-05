@@ -575,7 +575,41 @@ M.spec = {
             for _, cand in ipairs({ dir and (dir .. '/' .. path) or path, path }) do
                 if files[cand] then return cand end
             end
+            -- a bare filename (custom loaders pass 'bug_api.php', the
+            -- loader supplies the directory): unique basename decides
+            if not path:find('/') then
+                local idx = PHP_BASENAMES[files]
+                if not idx then
+                    idx = {}
+                    for f in pairs(files) do
+                        local b = f:match('([^/]+)$')
+                        local l = idx[b]
+                        if l then l[#l + 1] = f else idx[b] = { f } end
+                    end
+                    PHP_BASENAMES[files] = idx
+                end
+                local cands = idx[path]
+                if cands and #cands == 1 then return cands[1] end
+            end
         end,
+        -- CUSTOM loaders (mantis's require_api('bug_api.php')): a verb
+        -- named like a loader whose literal argument is a php file
+        -- includes that file — name-matched, so the edge carries ~
+        import_call_like = function (name, arg)
+            return arg:sub(-4) == '.php'
+                and (name:match('^require_') or name:match('^include_')
+                    or name:match('^load_')) ~= nil
+        end,
+        stdlib_names = { isset = true, unset = true, empty = true,
+            count = true, define = true, defined = true, sprintf = true,
+            printf = true, implode = true, explode = true, in_array = true,
+            array_merge = true, array_map = true, array_filter = true,
+            array_keys = true, array_values = true, str_replace = true,
+            strlen = true, substr = true, strpos = true, trim = true,
+            intval = true, strval = true, is_array = true, is_null = true,
+            is_string = true, is_int = true, is_numeric = true,
+            trigger_error = true, function_exists = true,
+            class_exists = true },
     },
     ruby = {
         exts = { 'rb' },
@@ -2037,6 +2071,17 @@ function M.extract(root, opts)
                             edges[#edges + 1] = { from = file, to = target, kind = 'import',
                                 sideeffect = (ptt == 'chunk' or ptt == 'block'
                                     or ptt:find('expression_statement')) and true or nil }
+                        end
+                    end
+                    -- custom loader verbs (mantis require_api): the spec
+                    -- recognizes loader-SHAPED names with a source-file
+                    -- literal; the edge is name-matched, so it carries ~
+                    if spec.import_call_like and args[1] and args[1] ~= ''
+                        and spec.import_call_like(full, args[1]) then
+                        local target = spec.resolve_import(args[1], fileset, file)
+                        if target and target ~= file then
+                            edges[#edges + 1] = { from = file, to = target,
+                                kind = 'import', inferred = true }
                         end
                     end
                     local c = { callee = callee, args = args, argv = argv,
