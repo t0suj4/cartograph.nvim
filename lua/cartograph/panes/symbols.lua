@@ -1181,6 +1181,9 @@ function M.attach(win)
     vim.wo[win].cursorline = true
     local keys = config.keys
     local function row() return vim.api.nvim_win_get_cursor(win)[1] end
+    -- forward-declared: the CursorMoved handler (below) fires the deferred
+    -- ascend resync, but the helper itself is defined later in attach
+    local sync_focus_to_view
 
     -- debounced: focus (or statement highlight) follows where the cursor SETTLES
     local gen = 0
@@ -1192,6 +1195,16 @@ function M.attach(win)
             vim.defer_fn(function ()
                 if g ~= gen or not vim.api.nvim_win_is_valid(win) then return end
                 local r = row()
+                -- deferred ascent resync: while still on the landing row this
+                -- is the ascent's own cursor placement (or no move yet) — keep
+                -- the peeked source untouched. The first move OFF it commits
+                -- the pane to the view we ascended to, then falls through to
+                -- the normal per-row hover below.
+                if M._resync then
+                    if r == M._resync.row then return end
+                    M._resync = nil
+                    sync_focus_to_view()
+                end
                 if M.view.level == 'file' or M.view.level == 'block'
                     or M.view.level == 'tbl' or M.view.level == 'state' then
                     -- hover TINTS relationships and PREVIEWS the row in the
@@ -1263,6 +1276,40 @@ function M.attach(win)
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
     end
+    -- keep the source pane in step with the browser: after a move lands on a
+    -- node-anchored view, focus that node so the def pane shows it instead of
+    -- staying stranded on wherever a descent last focused. The _own_pivot
+    -- guard stops the focus subscriber from clearing the h/l trails or
+    -- re-showing the view we just set to it.
+    function sync_focus_to_view()
+        local id = (M.view.level == 'fn' and M.view.fn)
+            or (M.view.level == 'block' and M.view.block)
+            or (M.view.level == 'tbl' and M.view.tbl)
+            or (M.view.level == 'var' and M.view.var)
+        if id and store.node(id) and id ~= store.focused then
+            M._own_pivot = true
+            store.set_focus(id)
+            M._own_pivot = false
+        end
+    end
+    -- called after an ASCENT lands (h). By default DEFER the sync: leave the
+    -- source pane showing the body we came from (a cheap "peek up") and arm a
+    -- resync for the first cursor move off the landing row — that j/k commits
+    -- the pane to the view we ascended to. config.sync_on_ascend = true syncs
+    -- at once instead. Reads the current cursor row, so call it AFTER the
+    -- landing cursor is placed.
+    local function arm_or_sync()
+        if config.sync_on_ascend then
+            M._resync = nil
+            sync_focus_to_view()
+        else
+            local row = (M.win and vim.api.nvim_win_is_valid(M.win))
+                and vim.api.nvim_win_get_cursor(M.win)[1] or 1
+            M._resync = { row = row }
+        end
+    end
+    -- apply a saved location to the view + cursor. PURE: focus is the caller's
+    -- to set (a descent already focused its target; an ascent defers).
     local function restore_loc(loc)
         M.files_mode = loc.files_mode or M.files_mode
         M.view.file, M.view.fn, M.view.block, M.view.var, M.view.callers =
@@ -1277,6 +1324,7 @@ function M.attach(win)
     local function push_trail() M.trail[#M.trail + 1] = view_loc() end
     -- browser-initiated pivots must not clear the trail (see on_focus)
     local function browser_pivot(id)
+        M._resync = nil -- a conscious descent/pivot cancels a pending peek
         M._own_pivot = true
         store.pivot(id)
         M._own_pivot = false
@@ -1339,11 +1387,17 @@ function M.attach(win)
             M.trail = loc.trail and vim.list_extend({}, loc.trail) or {}
             M.fwd_trail = loc.fwd_trail and vim.list_extend({}, loc.fwd_trail) or {}
             restore_loc(loc)
+            -- jumplist restore (<C-o>/<C-t>) lands you deliberately: the def
+            -- pane follows at once, no peek/defer
+            sync_focus_to_view()
         end,
     }
 
     store.on_focus(function (id)
         local n = store.node(id)
+        -- an external focus jump cancels a pending ascend-peek: the def pane is
+        -- moving to `id` regardless (our own deferred resync sets _own_pivot)
+        if not M._own_pivot then M._resync = nil end
         -- conscious pivots re-scope the browser to where they landed; an
         -- EXTERNAL pivot (source <C-]>) starts a fresh journey, so the trail
         -- clears — h ascends structurally from there
@@ -1644,7 +1698,8 @@ function M.attach(win)
             local loc = table.remove(M.trail)
             store.set_highlight(nil)
             store.set_context(nil)
-            return restore_loc(loc)
+            restore_loc(loc)
+            return arm_or_sync() -- defer the def-pane resync to the next move
         end
         local function block_of(v)
             for _, n in ipairs(store.by_file[v.file] or {}) do
@@ -1749,6 +1804,10 @@ function M.attach(win)
                 end
             end
         end
+        -- a structural ascent that landed on a node-anchored view (callers ->
+        -- fn, var -> block, …) re-syncs the def pane to that node too — at
+        -- once or on the next move, per config.sync_on_ascend
+        arm_or_sync()
     end, { buffer = M.buf, desc = 'cartograph: ascend (to file / to file tree)' })
 
     -- <Tab> at the files level: flat list <-> include tree (who requires whom).

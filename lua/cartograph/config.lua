@@ -68,6 +68,13 @@ M.parallel = true
 M.parallel_threshold = 300
 M.workers = nil
 
+-- ascending (h) in the symbols pane: does the source pane follow the view
+-- you land on IMMEDIATELY, or keep showing where you were until you MOVE?
+-- Default false — h is a cheap "peek up" that keeps the descended body on
+-- screen; the first j/k commits the source pane to the view you ascended to.
+-- true = re-sync the instant you ascend.
+M.sync_on_ascend = false
+
 -- cross-link code's SQL entities to a live database's tables:
 -- { source = '<mcp name>', prefix = 'wp_'? } (prefix auto-detects)
 M.db = nil

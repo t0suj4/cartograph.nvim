@@ -78,6 +78,117 @@ test('nav: ingest resets the history', function ()
     eq('b', store.focused) -- unchanged: nothing to go back to
 end)
 
+test('nav: ascending back to a function view re-focuses it (source follows)', function ()
+    -- descend focuses a callee; ascending back must re-sync the focused node to
+    -- the view it lands on, or the source pane stays stranded on the callee and
+    -- walking the caller's rows no longer refreshes it.
+    local symbols = require 'cartograph.panes.symbols'
+    graph({ node('caller', 'M.caller', 'm.lua', 6, 8),
+        node('helper', 'M.helper', 'm.lua', 2, 4) },
+        { { from = 'caller', to = 'helper', kind = 'ref',
+            at = { { start = { line = 7, char = 9 }, ['end'] = { line = 7, char = 17 } } } } })
+
+    -- wire both panes to real windows (attach installs the loc_provider + the
+    -- focus-sync this test exercises)
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create())
+    source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create())
+    symbols.attach(wsym)
+
+    symbols.show('file', 'm.lua')
+    store.pivot('caller'); symbols.show('fn', 'caller')
+    store.pivot('helper'); symbols.show('fn', 'helper')
+    eq('M.helper', source.cur and source.cur.name) -- descent shows the callee
+
+    -- ascend back to the caller's fn view via the loc provider (the path the
+    -- h-key's restore_loc drives)
+    store.loc_provider.set({ level = 'fn', fn = 'caller', row = 1 })
+    eq('caller', store.focused)                    -- focus re-synced to the view
+    eq('M.caller', source.cur and source.cur.name) -- and the source pane followed
+
+    store.loc_provider = nil
+    vim.cmd('tabclose')
+end)
+
+test('nav: ascend defers the source resync until the next move (peek up)', function ()
+    local symbols = require 'cartograph.panes.symbols'
+    local config  = require 'cartograph.config'
+    config.sync_on_ascend = false
+    graph({ node('caller', 'M.caller', 'm.lua', 6, 9),
+        node('helper', 'M.helper', 'm.lua', 2, 4) },
+        { { from = 'caller', to = 'helper', kind = 'ref',
+            at = { { start = { line = 7, char = 9 }, ['end'] = { line = 7, char = 17 } } } } })
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+
+    -- stand at fn-caller, then descend into helper (records the trail entry)
+    store.pivot('caller'); symbols.show('fn', 'caller')
+    store.pivot('helper'); symbols.show('fn', 'helper')
+    symbols.trail = { { level = 'fn', fn = 'caller', row = 1 } } -- as descend recorded
+    eq('M.helper', source.cur and source.cur.name)
+
+    -- ascend (h) via the real mapping callback (feedkeys is flaky headless)
+    local cb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == config.keys.ascend then cb = m.callback end
+    end
+    ok(cb, 'ascend mapping present')
+    cb()
+    -- the peek: view is back at the caller, but the def pane still shows the
+    -- callee, and a resync is armed for the next move
+    eq('caller', symbols.view.fn)
+    eq('M.helper', source.cur and source.cur.name)
+    ok(symbols.view and symbols._resync ~= nil, 'resync armed, not yet fired')
+
+    -- move off the landing row -> the def pane commits to the caller
+    pcall(vim.api.nvim_win_set_cursor, wsym, { 2, 0 })
+    vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
+    vim.wait(150)
+    eq('caller', store.focused)
+    eq('M.caller', source.cur and source.cur.name)
+    ok(symbols._resync == nil, 'resync consumed')
+
+    vim.cmd('tabclose')
+end)
+
+test('nav: sync_on_ascend = true resyncs the source pane immediately', function ()
+    local symbols = require 'cartograph.panes.symbols'
+    local config  = require 'cartograph.config'
+    config.sync_on_ascend = true
+    graph({ node('caller', 'M.caller', 'm.lua', 6, 9),
+        node('helper', 'M.helper', 'm.lua', 2, 4) },
+        { { from = 'caller', to = 'helper', kind = 'ref' } })
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+
+    store.pivot('caller'); symbols.show('fn', 'caller')
+    store.pivot('helper'); symbols.show('fn', 'helper')
+    symbols.trail = { { level = 'fn', fn = 'caller', row = 1 } }
+    local cb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == config.keys.ascend then cb = m.callback end
+    end
+    cb()
+    eq('caller', store.focused)                    -- no peek: synced at once
+    eq('M.caller', source.cur and source.cur.name)
+    ok(symbols._resync == nil, 'no deferred resync armed')
+
+    config.sync_on_ascend = false -- restore the default for later tests
+    vim.cmd('tabclose')
+end)
+
 -- ── <C-]> jump resolution ───────────────────────────────────────────────────
 
 local function occ(l, c1, c2)
