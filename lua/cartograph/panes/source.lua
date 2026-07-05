@@ -22,26 +22,49 @@ local M = { cur = nil, ctx = nil }
 -- with its leading DOC COMMENT (the block right above the signature), so the
 -- shown range starts above node.range.start; buf_row maps against this.
 M._shown_start = {}
+-- node id -> 0-based last shown file line (a top-level var widens to its block)
+M._shown_end = {}
+
+-- The smallest `block` node (a run of top-level statements) that encloses a
+-- file-scope `var`, or nil. A lone top-level statement reads as an isolated
+-- fragment; shown inside its block it has the surrounding code for context.
+local function enclosing_block(node)
+    if node.kind ~= 'var' then return nil end
+    local blk
+    for _, n in ipairs(store.by_file[node.file] or {}) do
+        if n.kind == 'block'
+            and n.range.start.line <= node.range.start.line
+            and n.range['end'].line >= node.range['end'].line
+            and (not blk or (n.range['end'].line - n.range.start.line)
+                < (blk.range['end'].line - blk.range.start.line)) then
+            blk = n
+        end
+    end
+    return blk
+end
 
 -- Lines for a node's body: a hard-context header + the real source range.
 local function body_lines(node)
     if not node then return { '(nothing)' } end
     local ok, all = pcall(vim.fn.readfile, store.abspath(node))
     if not ok then return { ('── %s   %s  (unreadable)'):format(node.name or '?', node.file) } end
-    local s = node.range.start.line + 1     -- schema line is 0-based
-    local e = node.range['end'].line + 1
+    -- a top-level statement widens to the code block it belongs to
+    local shown = enclosing_block(node) or node
+    local s = shown.range.start.line + 1     -- schema line is 0-based
+    local e = shown.range['end'].line + 1
     -- show the def WITH its leading doc comment: walk up over the block that
     -- adheres to it (the same per-language patterns + file-header decline the
     -- edit verbs use), so focusing a symbol shows what it's FOR, not just its
     -- signature. Python-style docstrings live inside [s,e] and already show.
-    local ds = node.range.start.line -- 0-based first shown line
+    local ds = shown.range.start.line -- 0-based first shown line
     local pats = require('cartograph.providers.treesitter').attach_pats(node.file)
     if #pats > 0 then
         local up, header = require('cartograph.txn').attach_above(
-            all, node.range.start.line, pats)
+            all, shown.range.start.line, pats)
         if not header then ds = up end
     end
     M._shown_start[node.id] = ds
+    M._shown_end[node.id] = shown.range['end'].line
     -- external edits (git checkout, codegen) never fire BufWritePost: the
     -- range below may not line up with the fresh bytes — say so
     local stale = store.stale(node.file)
@@ -70,7 +93,8 @@ local function buf_row(node, file_line)
     -- map against the first SHOWN line (doc comment included), not the def's
     -- signature line — otherwise highlights/jumps are off by the doc height
     local start = M._shown_start[node.id] or node.range.start.line
-    if file_line < start or file_line > node.range['end'].line then return nil end
+    local last = M._shown_end[node.id] or node.range['end'].line
+    if file_line < start or file_line > last then return nil end
     return HEADER_ROWS + (file_line - start)
 end
 

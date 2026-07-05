@@ -133,6 +133,24 @@ test('treesitter: lua blocks, litdata and require edges', function ()
     end
     ok(blocks >= 1, 'blocks emitted')
     ok(vars >= 3, 'vars emitted (' .. vars .. ')')
+    -- blocks are BOUNDED runs: a run flushes at every function def, so no
+    -- block may span across one. (A node-identity bug once merged every file
+    -- into one giant block, which read as isolated statements when browsed.)
+    local blks, fns = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'block' then blks[#blks + 1] = n
+        elseif n.kind == 'function' then fns[#fns + 1] = n end
+    end
+    ok(#blks >= 3, 'the interleaved fixture yields several blocks (' .. #blks .. ')')
+    for _, b in ipairs(blks) do
+        for _, f in ipairs(fns) do
+            ok(not (b.range.start.line <= f.range.start.line
+                and b.range['end'].line >= f.range['end'].line),
+                ('block L%d-%d must not swallow fn %s L%d'):format(
+                    b.range.start.line + 1, b.range['end'].line + 1, f.name,
+                    f.range.start.line + 1))
+        end
+    end
 end)
 
 test('treesitter: haskell — equations merge, where stays interior, imports', function ()
@@ -3008,6 +3026,39 @@ test('source: a def renders with its leading doc comment, file header declined',
     ok(body:match('a second doc line'), 'the whole contiguous doc block shows')
     ok(not body:match('LICENSE header'), 'the file-header block is declined')
     ok(body:match('local function greet'), 'the def itself is still shown')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('source: a top-level statement widens to its enclosing block', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/c.lua', 'w'))
+    fd:write(table.concat({
+        'local WIDTH = 80',   -- 1: a run of three top-level statements
+        'local HEIGHT = 24',  -- 2
+        'local names = {}',   -- 3
+        '',                   -- 4
+        'local function area()', -- 5
+        '  return WIDTH * HEIGHT',
+        'end', '' }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    store.ingest(data)
+    local height
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'HEIGHT' and n.kind == 'var' then height = n end
+    end
+    ok(height, 'HEIGHT is a top-level var')
+    -- focusing HEIGHT alone would show one isolated line; instead it renders
+    -- the whole block run (WIDTH, HEIGHT, names), not the following function
+    local body = table.concat(require('cartograph.panes.source')._body_lines(height), '\n')
+    ok(body:match('WIDTH = 80'), 'the sibling above shows for context')
+    ok(body:match('HEIGHT = 24'), 'the focused statement shows')
+    ok(body:match('names = {}'), 'the sibling below shows')
+    ok(not body:match('function area'), 'the block stops before the next function')
     vim.fn.delete(root, 'rf')
 end)
 

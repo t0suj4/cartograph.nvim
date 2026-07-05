@@ -2180,7 +2180,12 @@ function M.extract(root, opts)
         end
         -- functions
         local q = parse_query(lang, spec.functions)
-        local fnDefs = {} -- def node -> true (for block grouping)
+        -- start line of every fn/method def, for block flushing. Keyed by
+        -- LINE, not node: the defs come from iter_matches but the block loop
+        -- walks iter_children, and TSNode identity does not survive across
+        -- traversals (== is a metamethod, table keys are raw) — a node-keyed
+        -- set never hits, so every file collapsed into one giant block.
+        local fnDefLines = {}
         if q then
             for _, match in q:iter_matches(tsroot, src, 0, -1) do
                 local defn, namen
@@ -2226,7 +2231,7 @@ function M.extract(root, opts)
                         for _, r in ipairs(fnRanges[file] or {}) do
                             if r.id == prev.id then r.e = sp['end'].line break end
                         end
-                        fnDefs[defn] = true
+                        fnDefLines[sp.start.line] = true
                         goto fn_done
                     end
                     local torn = errow and sp.start.line >= errow or nil
@@ -2239,7 +2244,7 @@ function M.extract(root, opts)
                         entry = (spec.entry_names or {})[name] or nil,
                         df = (spec.dataflow or dataflow)(defn, spec, src, params) }
                     lastFn[file] = nodes[#nodes]
-                    fnDefs[defn] = true
+                    fnDefLines[sp.start.line] = true
                     -- the outermost query pattern may match a nested def too;
                     -- ranges keep the innermost containing fn for attribution
                     fnRanges[file] = fnRanges[file] or {}
@@ -2366,17 +2371,17 @@ function M.extract(root, opts)
             for stmt in container:iter_children() do
                 if stmt:named() and stmt:type() ~= 'comment'
                     and not (spec.block_skip or {})[stmt:type()] then
-                    if fnDefs[stmt]
-                        or (stmt:child(0) and fnDefs[stmt:child(0)]) then
+                    local p = pos_of(stmt)
+                    -- a top-level fn def statement starts on the def's line
+                    -- (`function f()`, and `f = function()` share the line);
+                    -- it ends the current run rather than joining it
+                    if fnDefLines[p.start.line] then
                         flush()
+                    elseif not run then
+                        run = { s = p, e = p,
+                            name = (lines[p.start.line + 1] or ''):match('^%s*(.-)%s*$'):sub(1, NAME_CAP) }
                     else
-                        local p = pos_of(stmt)
-                        if not run then
-                            run = { s = p, e = p,
-                                name = (lines[p.start.line + 1] or ''):match('^%s*(.-)%s*$'):sub(1, NAME_CAP) }
-                        else
-                            run.e = p
-                        end
+                        run.e = p
                     end
                 end
             end

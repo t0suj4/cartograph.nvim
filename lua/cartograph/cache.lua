@@ -19,7 +19,10 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 14 -- v14: C/C++ #include <angled> paths resolve too (was quoted-
+M.VERSION = 15 -- v15: top-level statement blocks are bounded runs again —
+              -- fnDefLines flushing (node identity did not survive iter_matches
+              -- vs iter_children, so every file was one giant block);
+              -- v14: C/C++ #include <angled> paths resolve too (was quoted-
               -- only) — a project's own headers reached via -Iinclude now
               -- link, so the include tree populates (external system headers
               -- resolve to nothing, as before);
