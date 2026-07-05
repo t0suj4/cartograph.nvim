@@ -103,6 +103,34 @@ test('shapes: ansible collection, python package, haskell', function ()
     shapes.apply(vim.fn.tempname()) -- a markerless root: strip all presets
 end)
 
+test('shapes: rust, go, jvm build dirs and entry points', function ()
+    -- Rust excludes target/ (huge build dir, not globally excluded); crate
+    -- roots match unanchored (ripgrep's crates/core/main.rs isn't under src/)
+    local rs = mkroot({ ['Cargo.toml'] = '', ['crates/core/main.rs'] = '' })
+    eq({ 'rust' }, names(shapes.apply(rs)))
+    ok(vim.tbl_contains(cfg.exclude or {}, 'target'), 'rust target excluded')
+    ok(vim.tbl_contains(cfg.entrypoints, 'main%.rs$'), 'crate main entry')
+    vim.fn.delete(rs, 'rf')
+
+    -- Go: package-main files are entry points (vendor already excluded)
+    local go = mkroot({ ['go.mod'] = 'module x', ['main.go'] = '' })
+    eq({ 'go' }, names(shapes.apply(go)))
+    ok(vim.tbl_contains(cfg.entrypoints, 'main%.go$'), 'go main entry')
+    vim.fn.delete(go, 'rf')
+
+    -- Maven excludes target/; Gradle also detects (build/ already global)
+    local mvn = mkroot({ ['pom.xml'] = '' })
+    eq({ 'jvm' }, names(shapes.apply(mvn)))
+    ok(vim.tbl_contains(cfg.exclude or {}, 'target'), 'maven target excluded')
+    ok(vim.tbl_contains(cfg.entrypoints, 'Application%.java$'), 'spring entry')
+    vim.fn.delete(mvn, 'rf')
+    local gr = mkroot({ ['build.gradle'] = '' })
+    eq({ 'jvm' }, names(shapes.apply(gr)))
+    vim.fn.delete(gr, 'rf')
+
+    shapes.apply(vim.fn.tempname()) -- strip presets
+end)
+
 test('shapes: the explainer shows hits, misses and overrides', function ()
     local root = mkroot({ ['manage.py'] = '' })
     local blob = table.concat(shapes.explain(root), '\n')

@@ -170,6 +170,49 @@ M.registry = {
         },
     },
     {
+        -- a Rust crate / workspace (Cargo.toml). Excludes target/ (build
+        -- output — huge, NOT globally excluded). Entry points are crate
+        -- roots, bins, build scripts, benches/examples (unanchored so
+        -- workspace members like crates/foo/src/main.rs match too).
+        name = 'rust',
+        detect = function (root)
+            if has(root, 'Cargo.toml') then return 'Cargo.toml' end
+        end,
+        -- crate roots matched unanchored: workspace members AND non-standard
+        -- path overrides (ripgrep's crates/core/main.rs isn't under src/)
+        config = {
+            entrypoints = { 'main%.rs$', 'lib%.rs$', 'src/bin/.*%.rs$',
+                '^build%.rs$', 'benches/.*%.rs$', 'examples/.*%.rs$' },
+            exclude = { 'target' },
+        },
+    },
+    {
+        -- a Go module (go.mod). vendor/ is already excluded; the value here
+        -- is the entry points — package-main files (main.go, cmd/*/main.go).
+        name = 'go',
+        detect = function (root)
+            if has(root, 'go.mod') then return 'go.mod' end
+        end,
+        config = { entrypoints = { 'main%.go$' } },
+    },
+    {
+        -- a JVM build (Maven pom.xml / Gradle build.gradle[.kts]). Maven's
+        -- target/ is not globally excluded (Gradle's build/ and .gradle
+        -- already are). Java entry classes are conventionally *Application
+        -- or *Main; the entry is a method, so filename is only a heuristic.
+        name = 'jvm',
+        detect = function (root)
+            if has(root, 'pom.xml') then return 'pom.xml (Maven)' end
+            if has(root, 'build.gradle') or has(root, 'build.gradle.kts') then
+                return 'build.gradle (Gradle)'
+            end
+        end,
+        config = {
+            entrypoints = { 'Application%.java$', 'Main%.java$' },
+            exclude = { 'target' },
+        },
+    },
+    {
         name = 'node-package',
         detect = function (root)
             if has(root, 'package.json') then return 'package.json' end
