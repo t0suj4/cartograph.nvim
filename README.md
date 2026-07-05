@@ -5,8 +5,10 @@
 > functions, extract modules, previewed as diffs, applied through a journal,
 > undone byte-exact.
 
-**Status:** working and tested (166-test suite, validated on corpora from
-WordPress to GitLab); APIs may still shift.
+**Status:** experimental. Working and tested (166-test suite, validated on
+corpora from WordPress to GitLab), but the design is still moving — commands,
+keys and APIs may change without notice. The edit verbs are journaled with
+byte-exact undo, so mistakes are recoverable; still, treat it accordingly.
 
 ## Install
 

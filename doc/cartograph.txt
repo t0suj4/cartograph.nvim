@@ -29,6 +29,9 @@ php, ruby, java, go, rust, haskell, scheme) plus vue/svelte single-file
 components. Everything cross-file is name-matched and marked `~` unless an
 oracle proved it; ambiguity refuses to link rather than guess.
 
+Status: EXPERIMENTAL. Tested and journaled (edits undo byte-exact), but
+commands, keys and APIs may change without notice.
+
 ==============================================================================
 2. QUICKSTART                                           *cartograph-quickstart*
 
