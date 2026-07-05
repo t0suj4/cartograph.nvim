@@ -380,6 +380,54 @@ local function render_callers(ctx, id)
         '(no callers found — entry point, or dynamically dispatched)')
 end
 
+-- A REFUSAL as a place: an unresolved call kept the rule that refused
+-- it and the candidates it refused between. The browser makes that a
+-- fork in the road — the candidates as jumpable rows, the reasoning
+-- named — instead of a dead end. `p` pins the candidate under the
+-- cursor (a target-qualified pin: this ambiguous call, THIS def).
+local REFUSAL_WHY = {
+    ambiguous = 'more than one candidate fits — the tool will not pick',
+    blocked   = 'candidates exist but none in scope (or another language)',
+    samefile  = 'defined more than once in this file',
+    vocab     = 'a stdlib / framework name — never linked to a project def',
+}
+local function render_refused(ctx, call)
+    if not call then ctx.lines[1] = '(refusal gone — regenerate)'; return end
+    local ref = call.refused or {}
+    local pre = '⚠'
+    ctx.lines[1] = ('%s %s — refused'):format(pre, call.callee or '?')
+    ctx.marks[1] = { { 0, #pre, 'CartographFrontier' },
+        { #pre, #pre + 1 + #(call.callee or '?'), 'CartographTitle' },
+        { #pre + 1 + #(call.callee or '?'), -1, 'CartographDim' } }
+    ctx.lines[2] = '  ' .. (REFUSAL_WHY[ref.rule] or 'not resolvable')
+    ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+    local cands = ref.cands or {}
+    if #cands == 0 then
+        ctx.lines[3] = '  (no candidates recorded)'
+        ctx.marks[3] = { { 0, -1, 'CartographDim' } }
+        return
+    end
+    ctx.lines[3] = ('candidates (%d%s):'):format(ref.n or #cands,
+        (ref.n and ref.n > #cands) and (', showing ' .. #cands) or '')
+    ctx.marks[3] = { { 0, -1, 'CartographSection' } }
+    for _, cid in ipairs(cands) do
+        local n = store.node(cid)
+        if n then
+            local file = n.file or '?'
+            ctx.lines[#ctx.lines + 1] = ('  %s'):format(n.name or cid)
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographTitle' } }
+            ctx.line_node[#ctx.lines] = cid
+            ctx.node_line[cid] = #ctx.lines
+            -- the file, dim, right-aligned (the sites-view idiom)
+            ctx.line_file[#ctx.lines] = file
+        end
+    end
+    ctx.lines[#ctx.lines + 1] = ''
+    ctx.lines[#ctx.lines + 1] = '  p pins the candidate under the cursor'
+    ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+    ctx.line_sep[#ctx.lines] = true
+end
+
 -- Inside a TABLE var: its members (methods, fields, callback functions),
 -- with the usage-sites view one row away.
 local function render_tbl(ctx, id)
@@ -779,7 +827,14 @@ local function render_fn(ctx, id)
         if cs then
             local names, seen = {}, {}
             for _, c in ipairs(cs) do
-                if not seen[c.callee] then seen[c.callee] = true; names[#names + 1] = c.callee end
+                if not seen[c.callee] then
+                    seen[c.callee] = true
+                    -- a refused callee is a fork: mark it so, and descend
+                    -- opens the candidates (see descend_fn_row)
+                    local refused = not c.to and c.refused
+                        and c.refused.cands and #c.refused.cands > 0
+                    names[#names + 1] = (refused and '?' or '') .. c.callee
+                end
             end
             if dim_from == nil then dim_from = #text end
             text = text .. '   → ' .. table.concat(names, ' ')
@@ -821,6 +876,7 @@ function M.render()
     elseif v.level == 'var' then render_var(ctx, v.var)
     elseif v.level == 'tbl' then render_tbl(ctx, v.tbl)
     elseif v.level == 'callers' then render_callers(ctx, v.callers)
+    elseif v.level == 'refused' then render_refused(ctx, M._refused_call)
     elseif v.level == 'occs' then render_occs(ctx, v.occs)
     elseif v.level == 'lit' then render_lit(ctx, v.lit)
     elseif v.level == 'states' then render_states(ctx)
@@ -873,6 +929,7 @@ function M.show(level, ctx_val)
         elseif level == 'var' then M.view.var = ctx_val
         elseif level == 'tbl' then M.view.tbl = ctx_val
         elseif level == 'callers' then M.view.callers = ctx_val
+        elseif level == 'refused' then M.view.refused = ctx_val
         elseif level == 'occs' then M.view.occs = ctx_val
         elseif level == 'lit' then M.view.lit = ctx_val
         elseif level == 'state' then M.view.state = ctx_val end
@@ -1131,10 +1188,21 @@ function M.attach(win)
     -- location history: each pivot snapshots the browser's place, so <C-o>
     -- restores WHERE you were (level, file, cursor row), not just what was
     -- focused
+    -- re-find the call a refused-level key names (the call object is
+    -- transient; the key survives in location history)
+    local function refused_call_of(key)
+        local fnid, line, callee = (key or ''):match('^(.-)\31(%d+)\31(.*)$')
+        if not fnid then return nil end
+        line = tonumber(line)
+        for _, c in ipairs(store.calls_by_fn[fnid] or {}) do
+            if c.line == line and c.callee == callee and c.refused then return c end
+        end
+    end
     local function view_loc()
         return { level = M.view.level, file = M.view.file, fn = M.view.fn,
             block = M.view.block, var = M.view.var, callers = M.view.callers,
             tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
+            refused = M.view.refused,
             files_mode = M.files_mode,
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
@@ -1144,7 +1212,8 @@ function M.attach(win)
         M.view.file, M.view.fn, M.view.block, M.view.var, M.view.callers =
             loc.file, loc.fn, loc.block, loc.var, loc.callers
         M.view.tbl, M.view.occs, M.view.state = loc.tbl, loc.occs, loc.state
-        M.view.lit = loc.lit
+        M.view.lit, M.view.refused = loc.lit, loc.refused
+        if loc.level == 'refused' then M._refused_call = refused_call_of(loc.refused) end
         M.show(loc.level)
         if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
     end
@@ -1266,6 +1335,14 @@ function M.attach(win)
             end
         end
         for _, c in ipairs(M.line_calls[r] or {}) do
+            -- a refused callee is a FORK, not a dead end: descend into the
+            -- refusal — the candidates it refused between, and the rule
+            if c.callee == word and not c.to and c.refused
+                and c.refused.cands and #c.refused.cands > 0 then
+                M._refused_call = c
+                return enter('refused',
+                    ('%s\31%d\31%s'):format(c.fn or '', c.line, c.callee))
+            end
             if c.callee == word and not c.to and frontier_jump(word) then
                 return
             end
@@ -1377,6 +1454,13 @@ function M.attach(win)
             if s and store.node(s.fn) then
                 store.set_context(nil)
                 enter('fn', s.fn, s.fn)
+            end
+        elseif M.view.level == 'refused' then
+            -- a candidate row: jump into that def (a real fork taken)
+            local cid = M.line_node[r]
+            if cid and store.node(cid) then
+                store.set_context(nil)
+                enter('fn', cid, cid)
             end
         elseif M.view.level == 'lit' then
             if M.line_callers[r] then
@@ -1560,6 +1644,12 @@ function M.attach(win)
             store.set_context(nil)
             M.show('fn', M.view.callers)
             pcall(vim.api.nvim_win_set_cursor, win, { 2, 0 })
+        elseif M.view.level == 'refused' then
+            -- the refusal hangs below its enclosing fn: surface there
+            store.set_context(nil)
+            local fnid = (M.view.refused or ''):match('^(.-)\31')
+            if fnid and store.node(fnid) then M.show('fn', fnid)
+            else M.show('files') end
         elseif M.view.level == 'fn' or M.view.level == 'block'
             or M.view.level == 'tbl' then
             store.set_highlight(nil)
@@ -1616,9 +1706,37 @@ function M.attach(win)
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
     end, { buffer = M.buf, desc = 'cartograph: cut (stage) the selected functions' })
     vim.keymap.set('n', keys.paste, function ()
+        -- in a refusal, `p` PINS the candidate under the cursor: this
+        -- ambiguous call, resolved to THIS def, durably (a target-
+        -- qualified pin — the name alone is ambiguous by definition)
+        if M.view.level == 'refused' and M._refused_call then
+            local cid = M.line_node[row()]
+            local target = cid and store.node(cid)
+            local c = M._refused_call
+            if not target then return end
+            c.to, c.inferred, c.refused = cid, nil, nil
+            if c.fn then
+                store.add_edge({ from = c.fn, to = cid, kind = 'ref',
+                    at = { c.at or { start = { line = c.line, char = 0 },
+                        ['end'] = { line = c.line, char = 0 } } } })
+            end
+            local cfg = require('cartograph.config')
+            cfg.pins = cfg.pins or {}
+            local encl = c.fn and store.node(c.fn)
+            cfg.pins[#cfg.pins + 1] = { file = c.file, fn = encl and encl.name,
+                callee = c.callee, to = target.name, to_file = target.file }
+            local anchor = encl and ("fn = '%s', callee = '%s'")
+                :format(encl.name, c.callee) or ("callee = '%s'"):format(c.callee)
+            vim.notify(("cartograph: pinned %s -> %s (%s) — durable with:\n"
+                .. "  setup{ pins = { { file = '%s', %s, to = '%s', to_file = '%s' } } }")
+                :format(c.callee, target.name, target.file, c.file, anchor,
+                    target.name, target.file), vim.log.levels.INFO)
+            if c.fn and store.node(c.fn) then enter('fn', c.fn, c.fn) end
+            return
+        end
         local file = M.line_file[row()]
         if file then store.set_dest(file) end
-    end, { buffer = M.buf, desc = 'cartograph: paste — set move destination to this file' })
+    end, { buffer = M.buf, desc = 'cartograph: paste — set move destination / pin refusal candidate' })
     vim.keymap.set('n', keys.unstage, function ()
         store.unstage_last()
     end, { buffer = M.buf, desc = 'cartograph: unstage the last cut function' })

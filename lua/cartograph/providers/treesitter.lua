@@ -22,6 +22,18 @@ local M = {}
 -- fileset (weak keys: dies with the fileset, workers build their own)
 local PHP_BASENAMES = setmetatable({}, { __mode = 'k' })
 
+-- a REFUSAL is a place: when resolution declines to pick, the call
+-- keeps the rule that refused and (capped, sorted — worker == inline)
+-- the candidates it refused between, so the browser can descend into
+-- the fork instead of a dead end
+local function refusal(rule, list)
+    if not list or #list == 0 then return { rule = rule } end
+    local ids = {}
+    for i = 1, math.min(#list, 8) do ids[i] = list[i].id end
+    table.sort(ids)
+    return { rule = rule, cands = ids, n = #list }
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -2445,18 +2457,25 @@ function M.extract(root, opts)
         -- the stdlib TAIL gate guards the fallbacks below; an exact match
         -- on a fully-qualified name (Engine::new) clears first
         if not cands
-            and snames[name:match('([%w_%-]+)$') or ''] then return nil end
+            and snames[name:match('([%w_%-]+)$') or ''] then
+            return nil, nil, { rule = 'vocab' }
+        end
         if cands then
             -- same-file priority is a FILE-SCOPE assumption (lua locals, C
             -- statics); dynamically-dispatched defs (instance methods) don't
             -- get it — they link only when globally unique
-            local same
+            local same, samedup
             for _, n in ipairs(cands) do
                 if n.file == file and not n.cbarg then
-                    if same then return nil end -- ambiguous within the file
-                    same = n
+                    if same then -- ambiguous within the file: refuse
+                        samedup = samedup or { same }
+                        samedup[#samedup + 1] = n
+                    else
+                        same = n
+                    end
                 end
             end
+            if samedup then return nil, nil, refusal('samefile', samedup) end
             if same then return same, false end
             -- workspace-unique, but never across a scope boundary (rust
             -- crates: bare names cannot legally cross); dotted callees
@@ -2468,7 +2487,7 @@ function M.extract(root, opts)
             -- identifiers never cross, so their uniqueness is scope-local
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
-            local pick
+            local fitset = {}
             for _, n in ipairs(cands) do
                 local fits
                 if dotted then
@@ -2481,13 +2500,12 @@ function M.extract(root, opts)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
-                if fits then
-                    if pick then pick = nil break end
-                    pick = n
-                end
+                if fits then fitset[#fitset + 1] = n end
             end
-            if pick then return pick, true end
-            return nil
+            if #fitset == 1 then return fitset[1], true end
+            -- the refusal is a PLACE: who was refused, and by which rule
+            return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
+                #fitset > 0 and fitset or cands)
         end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
             if name:sub(1, #pre) == pre then return nil end
@@ -2499,7 +2517,7 @@ function M.extract(root, opts)
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
                 or name:find('::', 1, true) ~= nil
-            local pick
+            local fitset = {}
             for _, n in ipairs(tc) do
                 local fits
                 if dotted then
@@ -2512,12 +2530,11 @@ function M.extract(root, opts)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
-                if fits then
-                    if pick then pick = nil break end
-                    pick = n
-                end
+                if fits then fitset[#fitset + 1] = n end
             end
-            if pick then return pick, true end
+            if #fitset == 1 then return fitset[1], true end
+            return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
+                #fitset > 0 and fitset or tc)
         end
         return nil
     end
@@ -2559,7 +2576,7 @@ function M.extract(root, opts)
     end
 
     for _, p in ipairs(pending) do
-        local target, inferred
+        local target, inferred, refused
         if p.call.dynamic then
             -- $fn(...): frontier — unless single-assignment literal flow
             -- pins the name down within the function
@@ -2576,7 +2593,7 @@ function M.extract(root, opts)
             target = resolve(p.indirect, p.file)
             inferred = false -- the literal IS the dispatch mechanism
         else
-            target, inferred = resolve(p.full or p.call.callee, p.file)
+            target, inferred, refused = resolve(p.full or p.call.callee, p.file)
         end
         if target then
             p.call.to = target.id
@@ -2586,6 +2603,7 @@ function M.extract(root, opts)
             if from then addref(from, target.id, p.at, inferred) end
         else
             p.call.fn = fn_at(p.file, p.at.start.line)
+            p.call.refused = refused
         end
         -- callback pattern: an identifier argument naming a unique function
         for _, a in ipairs(p.call.argv) do
@@ -2732,15 +2750,22 @@ function M.relink(data, touched)
         -- the stdlib TAIL gate guards the fallbacks below; an exact match
         -- on a fully-qualified name (Engine::new) clears first
         if not cands
-            and snames[name:match('([%w_%-]+)$') or ''] then return nil end
+            and snames[name:match('([%w_%-]+)$') or ''] then
+            return nil, nil, { rule = 'vocab' }
+        end
         if cands then
-            local same
+            local same, samedup
             for _, n in ipairs(cands) do
                 if n.file == file and not n.cbarg then
-                    if same then return nil end
-                    same = n
+                    if same then -- ambiguous within the file: refuse
+                        samedup = samedup or { same }
+                        samedup[#samedup + 1] = n
+                    else
+                        same = n
+                    end
                 end
             end
+            if samedup then return nil, nil, refusal('samefile', samedup) end
             if same then return same, false end
             -- workspace-unique, but never across a scope boundary (rust
             -- crates: bare names cannot legally cross); dotted callees
@@ -2752,7 +2777,7 @@ function M.relink(data, touched)
             -- identifiers never cross, so their uniqueness is scope-local
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
-            local pick
+            local fitset = {}
             for _, n in ipairs(cands) do
                 local fits
                 if dotted then
@@ -2765,13 +2790,12 @@ function M.relink(data, touched)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
-                if fits then
-                    if pick then pick = nil break end
-                    pick = n
-                end
+                if fits then fitset[#fitset + 1] = n end
             end
-            if pick then return pick, true end
-            return nil
+            if #fitset == 1 then return fitset[1], true end
+            -- the refusal is a PLACE: who was refused, and by which rule
+            return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
+                #fitset > 0 and fitset or cands)
         end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
             if name:sub(1, #pre) == pre then return nil end
@@ -2783,7 +2807,7 @@ function M.relink(data, touched)
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
                 or name:find('::', 1, true) ~= nil
-            local pick
+            local fitset = {}
             for _, n in ipairs(tc) do
                 local fits
                 if dotted then
@@ -2796,12 +2820,11 @@ function M.relink(data, touched)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
-                if fits then
-                    if pick then pick = nil break end
-                    pick = n
-                end
+                if fits then fitset[#fitset + 1] = n end
             end
-            if pick then return pick, true end
+            if #fitset == 1 then return fitset[1], true end
+            return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
+                #fitset > 0 and fitset or tc)
         end
         return nil
     end
@@ -2811,7 +2834,7 @@ function M.relink(data, touched)
         -- named the callee (a parallel slice may know the literal but not
         -- have seen its target)
         if not c.to and (not c.dynamic or type(c.traced) == 'string') then
-            local target, inferred
+            local target, inferred, refused
             if type(c.traced) == 'string' then
                 target = resolve(c.traced, c.file)
                 inferred = false
@@ -2819,13 +2842,14 @@ function M.relink(data, touched)
                 target = resolve(c.indirect, c.file)
                 inferred = false
             else
-                target, inferred = resolve(c.full or c.callee, c.file)
+                target, inferred, refused = resolve(c.full or c.callee, c.file)
             end
             if target then
                 c.to = target.id
                 -- the ~ mark is part of the resolution, not decoration:
                 -- a relinked call must carry the same honesty as extract's
                 c.inferred = inferred or nil
+                c.refused = nil
                 if c.dynamic then c.dynamic = nil end -- pinned by the trace
                 n = n + 1
                 if touched then touched[c.file] = true end
@@ -2834,6 +2858,10 @@ function M.relink(data, touched)
                         or { start = { line = c.line, char = 0 },
                             ['end'] = { line = c.line, char = 0 } }, inferred)
                 end
+            else
+                -- the refusal recomputed against the CURRENT global
+                -- node set (a worker's slice-local refusal is stale)
+                c.refused = refused
             end
         end
         -- callback-pattern mirror: an identifier argument naming a unique

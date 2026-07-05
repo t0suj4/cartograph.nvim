@@ -955,8 +955,12 @@ test('parallel extraction: identical graph to sequential', function ()
     local function ckeys(list)
         local t = {}
         for _, c in ipairs(list) do
-            t[#t + 1] = ('%s|%d|%s|%s|%s|%s'):format(c.file, c.line, c.callee,
-                tostring(c.to), tostring(c.dynamic), tostring(c.inferred))
+            -- the refusal is part of the contract too: a slice-local
+            -- refusal must be re-derived to the global one by relink
+            local ref = c.refused
+                and (c.refused.rule .. ':' .. tostring(c.refused.n)) or '-'
+            t[#t + 1] = ('%s|%d|%s|%s|%s|%s|%s'):format(c.file, c.line, c.callee,
+                tostring(c.to), tostring(c.dynamic), tostring(c.inferred), ref)
         end
         table.sort(t)
         return t
@@ -2368,4 +2372,27 @@ test('luals oracle: references settle what names refuse', function ()
     -- lua-ls knows the require binding: the call links to ALPHA's pick
     ok(site.to and site.to:match('^alpha%.lua'), tostring(site.to))
     ok(not site.inferred, 'oracle answers are solid, not ~')
+end)
+
+test('refusals are places: an ambiguous call keeps its candidates', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- alpha.lua and beta.lua both define M.pick; user.lua calls a.pick(3)
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/luaoracle')
+    local site
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'pick' and c.file == 'user.lua' then site = c end
+    end
+    ok(site, 'call site found')
+    eq(nil, site.to) -- name-matching refuses
+    ok(site.refused, 'the refusal is recorded')
+    eq('ambiguous', site.refused.rule)
+    eq(2, site.refused.n)
+    eq(2, #site.refused.cands)
+    -- the candidates are real, jumpable defs (both M.pick)
+    for _, cid in ipairs(site.refused.cands) do
+        local n = store.ingest(data) or store.node(cid)
+        ok(store.node(cid) and store.node(cid).name == 'M.pick', tostring(cid))
+    end
 end)

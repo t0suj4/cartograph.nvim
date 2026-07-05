@@ -203,7 +203,17 @@ function M.link(data, bindings)
     -- a silently-inert declaration is worse than none.
     for _, pin in ipairs(require('cartograph.config').pins or {}) do
         local target = exact[pin.to]
-        target = target and #target == 1 and target[1]
+        if target and #target > 1 and pin.to_file then
+            -- a target-qualified pin (from a refusal): the name is
+            -- ambiguous by construction, so the file disambiguates
+            local one
+            for _, t in ipairs(target) do
+                if t.file == pin.to_file then one = one and false or t end
+            end
+            target = one or nil
+        else
+            target = target and #target == 1 and target[1]
+        end
         local hit = 0
         if target then
             local fnids -- ids of the pin's enclosing function, by name
