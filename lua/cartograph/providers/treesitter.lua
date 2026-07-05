@@ -348,6 +348,34 @@ M.spec = {
         is_method = function (_, def) return def:type() == 'method_definition' end,
         stdlib_prefixes = { 'console.', 'JSON.', 'Object.', 'Array.', 'Math.',
             'Promise.', 'window.', 'document.', 'chrome.' },
+        -- the WORKSPACE PACKAGE (nearest package.json ancestor) scopes
+        -- bare names: monorepo packages import across, never leak across
+        scope = function (file, _, root)
+            if not root then return '' end
+            local dir = file:match('^(.*)/[^/]*$') or ''
+            while dir ~= '' do
+                if vim.uv.fs_stat(root .. '/' .. dir .. '/package.json') then
+                    return dir
+                end
+                dir = dir:match('^(.*)/[^/]*$') or ''
+            end
+            return ''
+        end,
+        -- dom/framework vocabulary
+        stdlib_names = { getAttribute = true, setAttribute = true,
+            addEventListener = true, removeEventListener = true,
+            querySelector = true, querySelectorAll = true,
+            createElement = true, appendChild = true, dispatch = true,
+            subscribe = true, push = true, pop = true, shift = true,
+            slice = true, splice = true, join = true, split = true,
+            filter = true, map = true, forEach = true, reduce = true,
+            find = true, includes = true, indexOf = true, replace = true,
+            trim = true, toString = true, concat = true, keys = true,
+            values = true, entries = true, assign = true, freeze = true,
+            stringify = true, parse = true, emit = true, on = true,
+            off = true, once = true, get = true, set = true, has = true,
+            add = true, delete = true, clear = true, next = true,
+            ['$emit'] = true, ['$on'] = true, ['$nextTick'] = true },
         litdata_types = { object = true, array = true },
         import_query = [=[ (import_statement source: (string) @path) ]=],
         resolve_import = function (path, files, from)
@@ -1392,7 +1420,7 @@ end
 
 --- Global name lookups for the standalone id pass, from a full node set.
 --- Used by the parallel driver (phase 2) and refresh (changed files).
-function M.lookups(nodes)
+function M.lookups(nodes, root)
     local count = {}
     for _, n in ipairs(nodes) do
         if n.kind == 'function' or n.kind == 'method' then
@@ -1420,7 +1448,7 @@ function M.lookups(nodes)
     for f in pairs(fileset) do
         local _, sp = lang_for(f)
         if sp and sp.scope then
-            scopes[f] = sp.scope(f, fileset)
+            scopes[f] = sp.scope(f, fileset, root)
             any = true
         end
     end
@@ -1837,7 +1865,8 @@ function M.extract(root, opts)
     local function scope_of(f)
         if scope_cache[f] == nil then
             local _, sp = lang_for(f)
-            scope_cache[f] = sp and sp.scope and sp.scope(f, fileset) or false
+            scope_cache[f] = sp and sp.scope
+                and sp.scope(f, fileset, root) or false
         end
         return scope_cache[f] or nil
     end
@@ -2049,7 +2078,7 @@ function M.extract(root, opts)
         for f in pairs(fileset) do
             local _, sp = lang_for(f)
             if sp and sp.scope then
-                seq_scopes[f] = sp.scope(f, fileset)
+                seq_scopes[f] = sp.scope(f, fileset, root)
                 seq_any = true
             end
         end
@@ -2100,7 +2129,8 @@ function M.relink(data, touched)
     local function scope_of(f)
         if scope_cache[f] == nil then
             local _, sp = lang_for(f)
-            scope_cache[f] = sp and sp.scope and sp.scope(f, relset) or false
+            scope_cache[f] = sp and sp.scope
+                and sp.scope(f, relset, data.root) or false
         end
         return scope_cache[f] or nil
     end

@@ -1165,6 +1165,36 @@ test('python: class-qualified methods, stdlib gate, decorator cbarg', function (
     end
 end)
 
+test('monorepo: the workspace package scopes js bare names', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/monoproj')
+    store.ingest(data)
+    local byid = {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    local a_norm = 'packages/alpha/src/index.js::normalize@0'
+    local b_norm = 'packages/beta/src/index.js::normalize@0'
+    ok(byid[a_norm] and byid[b_norm], 'both normalize defs present')
+    -- runAlpha's normalize binds to ALPHA's (same file beats everything);
+    -- the cross-package twin gains nothing from alpha
+    local runA = 'packages/alpha/src/index.js::runAlpha@4'
+    local hits = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == runA then hits[e.to] = true end
+    end
+    ok(hits[a_norm], 'runAlpha -> alpha normalize')
+    ok(not hits[b_norm], 'beta normalize untouched from alpha')
+    -- publishPkg is unique WORKSPACE-wide but lives in beta: alpha's bare
+    -- call must NOT cross the package boundary (import linking is not
+    -- name matching)
+    ok(not hits['packages/beta/src/index.js::publishPkg@4'],
+        'bare name does not cross packages')
+    local pub_callers = store.usedby['packages/beta/src/index.js::publishPkg@4']
+    ok(pub_callers == nil or #pub_callers == 1,
+        'publishPkg callers stay in beta')
+end)
+
 test('ruby: qualified defs, file-scoped bare calls, honest frontiers', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

@@ -329,7 +329,7 @@ function M.splice(data, rels, deleted)
         end
     end
     if can_idpass and #idfiles > 0 then
-        local L = ts.lookups(data.nodes)
+        local L = ts.lookups(data.nodes, data.root)
         L.fn_ranges = franges
         ts.merge_idpass(data, ts.id_pass(data.root, idfiles, L), dirty)
     end

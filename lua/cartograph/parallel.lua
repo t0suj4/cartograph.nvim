@@ -271,7 +271,7 @@ function M.extract(root, o)
 
     local function phase2()
         s.phase = 2
-        local L = ts.lookups(acc.nodes)
+        local L = ts.lookups(acc.nodes, root)
         local idxf = vim.fn.tempname() .. '.index.bin'
         local fd = assert(io.open(idxf, 'wb'))
         fd:write(require('cartograph.cache').encode(L))
