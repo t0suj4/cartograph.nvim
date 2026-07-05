@@ -2699,6 +2699,36 @@ print('plugin-smoke-ok')
         'child nvim: ' .. tostring(out.stdout) .. tostring(out.stderr))
 end)
 
+test('lua: top-level GLOBAL assignments are vars (a flat globals module)', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- a module that is a flat list of GLOBAL assignments (X = ...), not
+    -- `local` — bnw's globals.lua. These must extract as var nodes so the
+    -- block-descend view lists them (before: 0 vars -> "no declarations").
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/globals.lua', 'w'))
+    fd:write(table.concat({
+        'MOD_NAME = "x"',
+        'local loc = 1',        -- a local: captured once, not doubled
+        'VERSION = "1.0"',
+        'pos, bb = a.p, a.b',   -- multi-assign: two vars, cross-product deduped
+        '' }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local count = {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'var' then count[n.name] = (count[n.name] or 0) + 1 end
+    end
+    ok(count['MOD_NAME'], 'a bare global is a var')
+    ok(count['VERSION'], 'globals interleaved with other statements too')
+    ok(count['loc'], 'a local is still a var')
+    eq(1, count['MOD_NAME'])            -- global captured once (no double)
+    eq(1, count['pos']); eq(1, count['bb']) -- multi-assign deduped
+    vim.fn.delete(root, 'rf')
+end)
+
 test('lua effects: load-time side effects on module nodes', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

@@ -53,6 +53,10 @@ M.spec = {
                 (assignment_statement
                     (variable_list name: (identifier) @name)
                     (expression_list value: (_) @value))) @def
+            (chunk
+                (assignment_statement
+                    (variable_list name: (identifier) @name)
+                    (expression_list value: (_) @value)) @def)
         ]],
         params_field = 'parameters',
         body_field = 'body',
@@ -2200,6 +2204,9 @@ function M.extract(root, opts)
         -- top-level vars (+ litdata)
         q = parse_query(lang, spec.vars)
         if q then
+            -- a multi-assignment (`a, b = 1, 2`) cross-products name×value in
+            -- the query, so dedup by the (name,line) id it produces
+            local seen_var = {}
             for _, match in q:iter_matches(tsroot, src, 0, -1) do
                 local defn, namen, valn
                 for id, ns in pairs(match) do
@@ -2215,16 +2222,19 @@ function M.extract(root, opts)
                     local name = node_text(namen, src)
                     local sp = pos_of(defn)
                     local id = ('%s::var:%s@%d'):format(file, name, sp.start.line)
-                    local d = valn and (spec.litdata_types or {})[valn:type()]
-                        and litval(valn, src, spec, 0) or nil
-                    local torn = errow and sp.start.line >= errow or nil
-                    nodes[#nodes + 1] = { id = id, name = name, kind = 'var',
-                        file = file, range = sp, order = sp.start.line,
-                        torn = torn,
-                        data = type(d) == 'table' and d or nil }
-                    if not torn then
-                        varsByName[name] = varsByName[name] or {}
-                        table.insert(varsByName[name], nodes[#nodes])
+                    if not seen_var[id] then
+                        seen_var[id] = true
+                        local d = valn and (spec.litdata_types or {})[valn:type()]
+                            and litval(valn, src, spec, 0) or nil
+                        local torn = errow and sp.start.line >= errow or nil
+                        nodes[#nodes + 1] = { id = id, name = name, kind = 'var',
+                            file = file, range = sp, order = sp.start.line,
+                            torn = torn,
+                            data = type(d) == 'table' and d or nil }
+                        if not torn then
+                            varsByName[name] = varsByName[name] or {}
+                            table.insert(varsByName[name], nodes[#nodes])
+                        end
                     end
                 end
             end

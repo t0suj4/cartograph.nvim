@@ -19,7 +19,10 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 10 -- v10: refused calls carry their refusal (rule+candidates);
+M.VERSION = 11 -- v11: lua top-level GLOBAL assignments are var nodes too
+              -- (X = ...), not just `local` — flat globals modules now
+              -- populate; multi-assign deduped;
+              -- v10: refused calls carry their refusal (rule+candidates);
               -- v9: lua module nodes carry load-time effects;
               -- v8: import edges carry their local binding (bind);
               -- v7: php oo/loaders/torn defs (receiver-aware calls,
