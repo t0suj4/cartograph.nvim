@@ -170,6 +170,20 @@ test('treesitter: scheme — defines, named-let interior, use-modules', function
         end
     end
     ok(hit and hit.inferred, 'run -> step')
+    -- the define/lambda SIGNATURE `(run n)` / `(step x)` is not a call: a fn
+    -- must not become its own (bogus) caller, and no self-edge is emitted
+    for _, c in ipairs(data.calls) do
+        ok(not (c.callee == 'run' and c.fn == byname.run.id),
+            'run does not call itself via its signature')
+        ok(not (c.callee == 'step' and c.fn == byname.step.id),
+            'step does not call itself via its signature')
+    end
+    for _, e in ipairs(data.edges) do
+        ok(not (e.kind == 'ref' and e.self and e.from == byname.run.id),
+            'no bogus self-edge from the signature')
+    end
+    eq(0, #(store.usedby[byname.run.id] or {}))    -- no function-callers
+    eq(1, #(store.usedby[byname.step.id] or {}))   -- exactly run
     eq({ 'demo/util.scm' }, store.imports_out['demo/main.scm'])
     -- the top-level (display (run 5)) is a load-time call
     local top

@@ -446,6 +446,19 @@ M.spec = {
             ['do'] = true, delay = true, parameterize = true,
             ['with-syntax'] = true, ['syntax-rules'] = true, ['syntax-case'] = true,
             ['use-modules'] = true, export = true, import = true },
+        -- the signature/param list of a define/lambda is NOT an application:
+        -- `(define (f x) …)` / `(lambda (x) …)` — the `(f x)` / `(x)` is the
+        -- form's SECOND element, and treating it as a call made every fn its
+        -- own (bogus) caller. Real calls are the body forms (3rd+ elements).
+        skip_call = function (calln, src)
+            local p = calln:parent()
+            if not (p and p:type() == 'list') then return false end
+            local head = p:named_child(0)
+            if not (head and head:type() == 'symbol') then return false end
+            local kw = vim.treesitter.get_node_text(head, src)
+            local sig = kw == 'lambda' or kw == 'lambda*' or kw:match('^define')
+            return sig and calln == p:named_child(1) or false
+        end,
         -- a call runs at load unless its OUTERMOST form is a define
         is_top = function (calln, src)
             local n, outer = calln, calln
@@ -2347,6 +2360,12 @@ function M.extract(root, opts)
                         a = a:parent()
                         hops = hops + 1
                     end
+                end
+                -- positional skip: a list that only LOOKS like an application
+                -- because of the syntax (scheme: a define/lambda's parameter
+                -- list `(f x)` is not a call to f — it was the self-caller bug)
+                if calln and spec.skip_call and spec.skip_call(calln, src) then
+                    calln = nil
                 end
                 if calln and namen
                     and not (spec.call_skip or {})[node_text(namen, src)] then

@@ -19,7 +19,9 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 11 -- v11: lua top-level GLOBAL assignments are var nodes too
+M.VERSION = 12 -- v12: scheme define/lambda signature is not a call (no
+              -- more bogus fn-is-its-own-caller self-edges);
+              -- v11: lua top-level GLOBAL assignments are var nodes too
               -- (X = ...), not just `local` — flat globals modules now
               -- populate; multi-assign deduped;
               -- v10: refused calls carry their refusal (rule+candidates);
