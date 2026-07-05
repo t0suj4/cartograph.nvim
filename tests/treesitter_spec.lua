@@ -2723,6 +2723,35 @@ print('plugin-smoke-ok')
         'child nvim: ' .. tostring(out.stdout) .. tostring(out.stderr))
 end)
 
+test('source: a def renders with its leading doc comment, file header declined', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.lua', 'w'))
+    fd:write(table.concat({
+        '-- LICENSE header — belongs to the file, not the def',
+        '',
+        '-- greet doubles its input.',
+        '-- (a second doc line)',
+        'local function greet(x)',
+        '  return x * 2',
+        'end', '' }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    store.ingest(data)
+    local greet
+    for _, n in ipairs(data.nodes) do if n.name == 'greet' then greet = n end end
+    ok(greet, 'greet extracted')
+    local body = table.concat(require('cartograph.panes.source')._body_lines(greet), '\n')
+    ok(body:match('greet doubles its input'), 'the def shows with its doc comment')
+    ok(body:match('a second doc line'), 'the whole contiguous doc block shows')
+    ok(not body:match('LICENSE header'), 'the file-header block is declined')
+    ok(body:match('local function greet'), 'the def itself is still shown')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('lua: top-level GLOBAL assignments are vars (a flat globals module)', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

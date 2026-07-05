@@ -18,6 +18,11 @@ local ns_concern = vim.api.nvim_create_namespace('cartograph_source_concern')
 
 local M = { cur = nil, ctx = nil }
 
+-- node id -> 0-based first shown file line. A def's body is shown together
+-- with its leading DOC COMMENT (the block right above the signature), so the
+-- shown range starts above node.range.start; buf_row maps against this.
+M._shown_start = {}
+
 -- Lines for a node's body: a hard-context header + the real source range.
 local function body_lines(node)
     if not node then return { '(nothing)' } end
@@ -25,13 +30,25 @@ local function body_lines(node)
     if not ok then return { ('── %s   %s  (unreadable)'):format(node.name or '?', node.file) } end
     local s = node.range.start.line + 1     -- schema line is 0-based
     local e = node.range['end'].line + 1
+    -- show the def WITH its leading doc comment: walk up over the block that
+    -- adheres to it (the same per-language patterns + file-header decline the
+    -- edit verbs use), so focusing a symbol shows what it's FOR, not just its
+    -- signature. Python-style docstrings live inside [s,e] and already show.
+    local ds = node.range.start.line -- 0-based first shown line
+    local pats = require('cartograph.providers.treesitter').attach_pats(node.file)
+    if #pats > 0 then
+        local up, header = require('cartograph.txn').attach_above(
+            all, node.range.start.line, pats)
+        if not header then ds = up end
+    end
+    M._shown_start[node.id] = ds
     -- external edits (git checkout, codegen) never fire BufWritePost: the
     -- range below may not line up with the fresh bytes — say so
     local stale = store.stale(node.file)
         and '   ≠ changed on disk — :CartographRefresh' or ''
     local body = { ('── %s   %s:%d-%d%s'):format(node.name or '?', node.file,
         s, e, stale), '' }
-    for i = math.max(1, s), math.min(#all, e) do
+    for i = math.max(1, ds + 1), math.min(#all, e) do -- ds 0-based -> 1-based
         body[#body + 1] = all[i]
     end
     return body
@@ -50,7 +67,9 @@ end
 
 -- Map a 0-based file line to a 0-based buffer row (or nil if outside the body).
 local function buf_row(node, file_line)
-    local start = node.range.start.line
+    -- map against the first SHOWN line (doc comment included), not the def's
+    -- signature line — otherwise highlights/jumps are off by the doc height
+    local start = M._shown_start[node.id] or node.range.start.line
     if file_line < start or file_line > node.range['end'].line then return nil end
     return HEADER_ROWS + (file_line - start)
 end
@@ -336,5 +355,9 @@ function M.context(ctx)
         if r then ensure_visible(M.win_top, buf_row(M.ctx, r.start.line)) end
     end
 end
+
+-- test seam: the def's rendered body lines (doc-comment included), without a
+-- window. Also populates M._shown_start[node.id].
+M._body_lines = body_lines
 
 return M
