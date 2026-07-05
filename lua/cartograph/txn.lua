@@ -44,6 +44,49 @@ function M.attach_above(lines, s, pats)
     return s, false
 end
 
+--- Apply deletions, token replacements and line insertions to one
+--- file's text, bottom-up so earlier line numbers stay valid.
+--- dels = {{s, e}} (0-based inclusive; one trailing blank swallowed),
+--- reps = {{at, to}} (at = token range), ins = {{after, lines}}
+--- (0-based; after = -1 inserts at the very top).
+function M.edit_file(text, dels, reps, ins)
+    local lines = vim.split(text, '\n', { plain = true })
+    local edits = {}
+    for _, r in ipairs(reps or {}) do
+        edits[#edits + 1] = { line = r.at.start.line, ord = 2, rep = r }
+    end
+    for _, d in ipairs(dels or {}) do
+        edits[#edits + 1] = { line = d.s, ord = 1, del = d }
+    end
+    for _, i in ipairs(ins or {}) do
+        edits[#edits + 1] = { line = i.after, ord = 3, ins = i }
+    end
+    table.sort(edits, function (a, b)
+        if a.line ~= b.line then return a.line > b.line end
+        return a.ord > b.ord
+    end)
+    for _, e in ipairs(edits) do
+        if e.rep then
+            local l = lines[e.line + 1]
+            lines[e.line + 1] = l:sub(1, e.rep.at.start.char)
+                .. e.rep.to .. l:sub(e.rep.at['end'].char + 1)
+        elseif e.ins then
+            for i = #e.ins.lines, 1, -1 do
+                table.insert(lines, e.ins.after + 2, e.ins.lines[i])
+            end
+        else
+            local last = e.del.e
+            -- swallow one trailing blank line, so deletions don't
+            -- leave double blanks behind
+            if lines[last + 2] == '' then last = last + 1 end
+            for _ = e.del.s, last do
+                table.remove(lines, e.del.s + 1)
+            end
+        end
+    end
+    return table.concat(lines, '\n')
+end
+
 --- Dry-run a plan: the same before-content read and edit callback the
 --- apply uses, but nothing written. Returns (before_map, after_map).
 function M.dryrun(store, plan, edit_of)

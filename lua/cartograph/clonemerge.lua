@@ -156,34 +156,8 @@ function M.plan(store, id)
     return plan
 end
 
--- apply the edits of one file, bottom-up so line numbers stay valid
-local function edit_file(text, dels, reps)
-    local lines = vim.split(text, '\n', { plain = true })
-    local edits = {}
-    for _, r in ipairs(reps) do
-        edits[#edits + 1] = { line = r.at.start.line, rep = r }
-    end
-    for _, d in ipairs(dels) do
-        edits[#edits + 1] = { line = d.s, del = d }
-    end
-    table.sort(edits, function (a, b) return a.line > b.line end)
-    for _, e in ipairs(edits) do
-        if e.rep then
-            local l = lines[e.line + 1]
-            lines[e.line + 1] = l:sub(1, e.rep.at.start.char)
-                .. e.rep.to .. l:sub(e.rep.at['end'].char + 1)
-        else
-            local last = e.del.e
-            -- swallow one trailing blank line, so deletions don't leave
-            -- double blanks behind
-            if lines[last + 2] == '' then last = last + 1 end
-            for _ = e.del.s, last do
-                table.remove(lines, e.del.s + 1)
-            end
-        end
-    end
-    return table.concat(lines, '\n')
-end
+-- one file's edits, bottom-up: the shared implementation in txn
+local edit_file = txn.edit_file
 
 --- Apply a plan. Every verification failure REFUSES with its reason.
 --- The ladder and the journaled write loop live in cartograph.txn —

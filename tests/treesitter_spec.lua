@@ -937,11 +937,13 @@ test('parallel extraction: identical graph to sequential', function ()
         return t
     end
     eq(cbset(seq.nodes), cbset(got.nodes))
-    -- edges: same (kind, from, to) multiset
+    -- edges: same (kind, from, to, bind) multiset — the import binding
+    -- feeds requalification, so workers must carry it too
     local function ekeys(list)
         local t = {}
         for _, e in ipairs(list) do
             t[#t + 1] = e.kind .. '|' .. e.from .. '|' .. e.to
+                .. '|' .. tostring(e.bind)
         end
         table.sort(t)
         return t
@@ -2176,5 +2178,120 @@ test('adhesion declines file headers: the license stays', function ()
     end
     ok(hz, table.concat(plan.hazards, ' | '))
     store.clear_stage()
+    vim.fn.delete(root, 'rf')
+end)
+
+test('move wiring: import line written, call sites requalified', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local journal = require 'cartograph.journal'
+    local mv = require 'cartograph.moveapply'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text)
+        fd:close()
+    end
+    local function readf(rel)
+        local fd = assert(io.open(root .. '/' .. rel, 'r'))
+        local t = fd:read('a')
+        fd:close()
+        return t
+    end
+    local A = table.concat({
+        'local M = {}',
+        '',
+        'function M.foo(x)',
+        '  return x + 10',
+        'end',
+        '',
+        'function M.bar()',
+        '  return 1',
+        'end',
+        '',
+        'return M',
+        '' }, '\n')
+    local B = table.concat({
+        'local M = {}',
+        '',
+        'return M',
+        '' }, '\n')
+    local C = table.concat({
+        "local a = require 'mod_a'",
+        '',
+        'local function go()',
+        '  return a.foo(2) + a.bar()',
+        'end',
+        '' }, '\n')
+    write('mod_a.lua', A)
+    write('mod_b.lua', B)
+    write('c.lua', C)
+    store.ingest(ts.extract(root))
+    root = store.data.root
+    journal.wipe(root)
+    local function byname(nm)
+        for id, n in pairs(store.by_id) do
+            if n.name == nm then return id end
+        end
+    end
+
+    store.stage(byname('M.foo'))
+    store.set_dest('mod_b.lua')
+    local plan, why = mv.plan(store)
+    ok(plan, tostring(why))
+    -- the WRITE pair: one requalification + one new import line
+    eq(1, #plan.rewrites)
+    eq('mod_b.foo', plan.rewrites[1].to)
+    eq(1, #plan.imports_add)
+    eq('c.lua', plan.imports_add[1].file)
+    eq("local mod_b = require 'mod_b'", plan.imports_add[1].text)
+    eq(0, plan.imports_add[1].after) -- after the existing require
+    -- no 'should import' hazard for c.lua: it is being WRITTEN
+    for _, h in ipairs(plan.hazards) do
+        ok(not h:match('c.lua should import'), h)
+        ok(not h:match('call site.*c.lua'), h)
+    end
+
+    store.set_txn(plan)
+    local entry, aerr = mv.apply(store, plan)
+    ok(entry, tostring(aerr))
+
+    eq(table.concat({
+        'local M = {}',
+        '',
+        'function M.bar()',
+        '  return 1',
+        'end',
+        '',
+        'return M',
+        '' }, '\n'), readf('mod_a.lua'))
+    eq(table.concat({
+        'local M = {}',
+        '',
+        'function M.foo(x)',
+        '  return x + 10',
+        'end',
+        '',
+        'return M',
+        '' }, '\n'), readf('mod_b.lua'))
+    eq(table.concat({
+        "local a = require 'mod_a'",
+        "local mod_b = require 'mod_b'",
+        '',
+        'local function go()',
+        '  return mod_b.foo(2) + a.bar()',
+        'end',
+        '' }, '\n'), readf('c.lua'))
+
+    -- byte-exact undo across all three files
+    local r, rw = journal.rollback(root)
+    ok(r, tostring(rw))
+    eq(A, readf('mod_a.lua'))
+    eq(B, readf('mod_b.lua'))
+    eq(C, readf('c.lua'))
+
+    journal.wipe(root)
     vim.fn.delete(root, 'rf')
 end)

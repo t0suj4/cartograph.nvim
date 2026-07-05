@@ -53,6 +53,47 @@ M.spec = {
                 if files[cand] then return cand end
             end
         end,
+        -- which LOCAL names this import: `local util = require 'x'`
+        -- binds util (positional in multi-assignments; nil when unclear)
+        import_bind = function (calln, src)
+            local el = calln:parent()
+            if not el or el:type() ~= 'expression_list' then return nil end
+            local as = el:parent()
+            if not as or as:type() ~= 'assignment_statement' then return nil end
+            local vl
+            for c in as:iter_children() do
+                if c:type() == 'variable_list' then vl = c break end
+            end
+            if not vl then return nil end
+            local vi, i = 0, 0
+            for c in el:iter_children() do
+                if c:named() then
+                    i = i + 1
+                    if c:equal(calln) then vi = i end
+                end
+            end
+            i = 0
+            for c in vl:iter_children() do
+                if c:named() then
+                    i = i + 1
+                    if i == vi then
+                        local n = vim.treesitter.get_node_text(c, src)
+                        return n:match('^[%w_]+$') and n or nil
+                    end
+                end
+            end
+        end,
+        -- what a NEW import of `dest` looks like here, and the alias it
+        -- introduces — the write side of the wiring the verbs disclose
+        import_line = function (dest)
+            local mod = dest:gsub('%.lua$', ''):gsub('/init$', ''):gsub('/', '.')
+            local alias = dest:match('([%w_]+)%.lua$')
+            if alias == 'init' then alias = dest:match('([%w_]+)/init%.lua$') end
+            if not alias then return nil end
+            return ('local %s = require \'%s\''):format(alias, mod), alias
+        end,
+        -- lines that ARE imports (placement: a new one goes after the last)
+        import_pats = { '^local%s+[%w_,%s]-=%s*require%f[%W]', '^require%f[%W]' },
         litdata_types = { table_constructor = true },
         -- stdlib receivers must not tail-match a project def: string.format
         -- would otherwise link to the one module that defines M.format
@@ -1471,6 +1512,20 @@ function M.file_header(file)
     return {}
 end
 
+-- the import line a file would use to reach `dest`, and its alias —
+-- nil when this language's wiring is not mechanically writable
+function M.import_line(from_file, dest)
+    local _, spec = elang_for(from_file)
+    if not (spec and spec.import_line) then return nil end
+    return spec.import_line(dest)
+end
+
+-- patterns matching this file's import lines (new-import placement)
+function M.import_pats(file)
+    local _, spec = elang_for(file)
+    return spec and spec.import_pats or nil
+end
+
 -- parse a container file and return its host-language trees in
 -- DETERMINISTIC position order (the LanguageTree child table has no
 -- stable iteration order; worker output must equal inline output).
@@ -2130,7 +2185,10 @@ function M.extract(root, opts)
                             end
                         end
                     end
-                    -- an import call also emits the module edge
+                    -- an import call also emits the module edge — with
+                    -- the LOCAL it binds, when the spec can read it
+                    -- (requalification needs to know which name means
+                    -- which module)
                     if spec.import_call and full == spec.import_call then
                         local target = args[1] and args[1] ~= ''
                             and spec.resolve_import(args[1], fileset, file)
@@ -2138,6 +2196,8 @@ function M.extract(root, opts)
                             local pt = calln:parent()
                             local ptt = pt and pt:type() or ''
                             edges[#edges + 1] = { from = file, to = target, kind = 'import',
+                                bind = spec.import_bind
+                                    and spec.import_bind(calln, src) or nil,
                                 sideeffect = (ptt == 'chunk' or ptt == 'block'
                                     or ptt:find('expression_statement')) and true or nil }
                         end

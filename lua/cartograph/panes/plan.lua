@@ -48,6 +48,11 @@ function M.render()
             end
             lines[#lines + 1] = ('  lands at %s:%d; touches %d file(s)')
                 :format(t.dest, t.dest_at + 1, #t.touched)
+            if (t.rewrites and #t.rewrites > 0)
+                or (t.imports_add and #t.imports_add > 0) then
+                lines[#lines + 1] = ('  writes %d requalification(s) + %d import line(s)')
+                    :format(#(t.rewrites or {}), #(t.imports_add or {}))
+            end
         else
             lines[#lines + 1] = hl(marks, #lines,
                 ('MERGE  %d clone(s) → %s    :CartographDiff · :CartographApply · :CartographTxnClear')
