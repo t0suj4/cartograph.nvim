@@ -193,7 +193,13 @@ function M.audit(data)
     end
     local edges = {}
     for _, e in ipairs(data.edges) do
-        if not (e.kind == 'ref' and kill[e.from .. '\31' .. e.to]) then
+        -- 'reg' edges present at audit are phase-1 argv-upgrade
+        -- hypotheses (load-time callback passed as data): slice-local,
+        -- so drop them — relink re-derives against the global set, and
+        -- the id-pass (phase 2) mints the data-reference registrations
+        if e.kind == 'reg' then
+            -- dropped
+        elseif not (e.kind == 'ref' and kill[e.from .. '\31' .. e.to]) then
             edges[#edges + 1] = e
         end
     end

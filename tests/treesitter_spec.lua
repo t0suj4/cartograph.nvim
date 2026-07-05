@@ -2396,3 +2396,32 @@ test('refusals are places: an ambiguous call keeps its candidates', function ()
         ok(store.node(cid) and store.node(cid).name == 'M.pick', tostring(cid))
     end
 end)
+
+test('registration edges: a dispatch table is a descendable alibi', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/registry')
+    store.ingest(data)
+    local function byname(nm)
+        for id, n in pairs(store.by_id) do if n.name == nm then return id end end
+    end
+    local hs = byname('handle_start')
+    ok(hs, 'handler found')
+    -- kept alive: reg edge from the module, and the cbarg flag
+    ok(store.node(hs).cbarg, 'flagged registered (not dead)')
+    ok(store.reg_by[hs] and #store.reg_by[hs] > 0, 'registered-by recorded')
+    eq('mod.lua', store.reg_by[hs][1].from)
+    -- the reverse alibi: the module registers both handlers
+    local roster = store.registers['mod.lua'] or {}
+    eq(2, #roster)
+    -- and no phantom CALL edge (a registration is not a call)
+    eq(nil, store.usedby[hs])
+    -- the dead-function lint spares it (registered = alibi)
+    local dead = {}
+    for _, f in ipairs(require('cartograph.lint').run(store,
+        { only = { ['dead-function'] = true } })) do
+        dead[f.message] = true
+    end
+    for m in pairs(dead) do ok(not m:match('handle_start'), m) end
+end)

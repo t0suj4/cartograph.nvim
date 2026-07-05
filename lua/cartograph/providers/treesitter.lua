@@ -1739,7 +1739,7 @@ local function id_pass(root, files, L)
                 local troots = container_trees(parser, clang)
                     or { { root = parser:parse()[1]:root(), spec = spec,
                         lang = lang } }
-                local useEdge = {}
+                local useEdge, regEdge = {}, {}
                 for _, tr in ipairs(troots) do
                 local q = parse_query(tr.lang, tr.spec.id_query or '(identifier) @id')
                 if q then
@@ -1771,7 +1771,21 @@ local function id_pass(root, files, L)
                                     if from then
                                         L.addref(from, u.id, pos_of(n), true)
                                     else
-                                        L.mark_cbarg(u) -- referenced from top-level data
+                                        -- referenced from top-level DATA (a
+                                        -- dispatch table / registry): the fn
+                                        -- is kept alive, and the reference is
+                                        -- a REGISTRATION edge from this module
+                                        -- — an alibi you can descend into
+                                        L.mark_cbarg(u)
+                                        local rk = file .. '\31' .. u.id
+                                        local e = regEdge[rk]
+                                        if not e then
+                                            e = { from = file, to = u.id,
+                                                kind = 'reg', at = {} }
+                                            regEdge[rk] = e
+                                            L.adduse(e)
+                                        end
+                                        e.at[#e.at + 1] = pos_of(n)
                                     end
                                 end
                             end
@@ -2446,6 +2460,19 @@ function M.extract(root, opts)
         if not inferred then e.inferred = nil end
         e.at[#e.at + 1] = at
     end
+    -- a REGISTRATION edge: fn passed as data at load time (a callback
+    -- list, an operations table) is kept alive by its module — an alibi
+    local regEdge = {}
+    local function addreg(from, to, at)
+        local k = from .. '\31' .. to
+        local e = regEdge[k]
+        if not e then
+            e = { from = from, to = to, kind = 'reg', at = {} }
+            regEdge[k] = e
+            edges[#edges + 1] = e
+        end
+        if at then e.at[#e.at + 1] = at end
+    end
     local function resolve(name, file)
         -- 1-2 char names are shadow-bait (pattern vars, loop counters):
         -- name-matching them is noise-dominated in every language
@@ -2616,8 +2643,10 @@ function M.extract(root, opts)
                         addref(from, t2.id, p.at, true)
                     else
                         -- passed as data at load time (RunPython(forward),
-                        -- operations lists): registered, not dead
+                        -- operations lists): registered, not dead — and the
+                        -- module is the registrant (a descendable alibi)
                         t2.cbarg = true
+                        addreg(p.file, t2.id, p.at)
                     end
                 end
             end
@@ -2725,9 +2754,10 @@ function M.relink(data, touched)
             end
         end
     end
-    local refEdge = {}
+    local refEdge, regEdge = {}, {}
     for _, e in ipairs(data.edges) do
-        if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end
+        if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e
+        elseif e.kind == 'reg' then regEdge[e.from .. '\31' .. e.to] = e end
     end
     local function addref(from, to, at, inferred)
         local k = from .. '\31' .. to
@@ -2740,6 +2770,13 @@ function M.relink(data, touched)
         end
         if not inferred then e.inferred = nil end
         e.at[#e.at + 1] = at
+    end
+    local function addreg(from, to, at)
+        local k = from .. '\31' .. to
+        if regEdge[k] then return end -- already registered from this module
+        local e = { from = from, to = to, kind = 'reg', at = at and { at } or {} }
+        regEdge[k] = e
+        data.edges[#data.edges + 1] = e
     end
     local function resolve(name, file)
         if #name < 3 then return nil end
@@ -2879,6 +2916,9 @@ function M.relink(data, touched)
                                 ['end'] = { line = c.line, char = 0 } }, true)
                     else
                         t2.cbarg = true -- load-time data reference (mirror)
+                        addreg(c.file, t2.id,
+                            { start = { line = c.line, char = 0 },
+                                ['end'] = { line = c.line, char = 0 } })
                         if touched then touched[t2.file] = true end
                     end
                 end

@@ -130,7 +130,13 @@ HAZARDS: disclosed with counts, yours to finish.
            text search
   torn     a def extracted from beyond a parse error: visible, jumpable,
            never name-matched (it escaped its context)
-  refusal  ambiguity never picks a side — two candidates = no link
+  refusal  ambiguity never picks a side — two candidates = no link. A
+           refusal is a PLACE: descend an unresolved call to see the
+           candidates it refused between and the rule (see below)
+  alibi    why a function is not dead: a caller, a REGISTRATION (a
+           dispatch table / load-time data / annotation — the fn view's
+           "◆ registered by" descends into it), an entry point, or a
+           visibility promise. No alibi ⇒ possibly dead
 
 ==============================================================================
 7. CONFIGURATION                                            *cartograph-config*

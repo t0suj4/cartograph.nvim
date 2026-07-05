@@ -428,6 +428,37 @@ local function render_refused(ctx, call)
     ctx.line_sep[#ctx.lines] = true
 end
 
+-- The registrants of a function: who keeps it alive without calling it
+-- (a dispatch table, a load-time callback list). Each row is the
+-- registering module at the reference site — descend enters the file
+-- there, gf opens it.
+local function render_regfor(ctx, id)
+    local node = store.node(id)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    local regs = store.reg_by and store.reg_by[id] or {}
+    local pre = ICON[node.kind] or 'ƒ'
+    ctx.lines[1] = ('%s %s — registered by (%d)'):format(pre, node.name or '?', #regs)
+    ctx.marks[1] = { { 0, #pre, 'CartographDim' },
+        { #pre, #pre + 1 + #(node.name or '?'), 'CartographTitle' },
+        { #pre + 1 + #(node.name or '?'), -1, 'CartographDim' } }
+    for _, r in ipairs(regs) do
+        local at = r.at and r.at[1]
+        local line = at and at.start.line
+        local label = line and ('%s:%d'):format(r.from, line + 1) or r.from
+        ctx.lines[#ctx.lines + 1] = '  ' .. label
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographTitle' } }
+        ctx.line_file[#ctx.lines] = r.from
+        if line then
+            ctx.line_site[#ctx.lines] = { fn = r.from, file = r.from,
+                line = line, range = at }
+        end
+    end
+    if #regs == 0 then
+        ctx.lines[2] = '  (none)'
+        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+    end
+end
+
 -- Inside a TABLE var: its members (methods, fields, callback functions),
 -- with the usage-sites view one row away.
 local function render_tbl(ctx, id)
@@ -770,6 +801,19 @@ local function render_fn(ctx, id)
     ctx.lines[2] = ('↖ callers (%d)'):format(ncall)
     ctx.marks[2] = { { 0, -1, 'CartographSection' } }
     ctx.line_callers[2] = id
+    -- the other half of the alibi: registrations (kept alive by a
+    -- dispatch table / load-time data, not a call). Descend to see them.
+    local regs = store.reg_by and store.reg_by[id]
+    if regs and #regs > 0 then
+        ctx.lines[#ctx.lines + 1] = ('◆ registered by (%d)'):format(#regs)
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
+        ctx.line_regfor[#ctx.lines] = id
+    elseif node.cbarg then
+        -- registered, but by an annotation/attribute/decorator ON the
+        -- def itself — no site to descend into; state the alibi plainly
+        ctx.lines[#ctx.lines + 1] = '◆ registered (annotation / dispatch field)'
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+    end
     local df = node.df
     if not df then
         ctx.lines[3] = node.unparsed
@@ -863,7 +907,8 @@ function M.render()
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
-        line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {} }
+        line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
+        line_regfor = {} }
     local v = M.view
     if v.level == 'files' then
         if M.files_mode == 'tree' then
@@ -877,6 +922,7 @@ function M.render()
     elseif v.level == 'tbl' then render_tbl(ctx, v.tbl)
     elseif v.level == 'callers' then render_callers(ctx, v.callers)
     elseif v.level == 'refused' then render_refused(ctx, M._refused_call)
+    elseif v.level == 'regfor' then render_regfor(ctx, v.regfor)
     elseif v.level == 'occs' then render_occs(ctx, v.occs)
     elseif v.level == 'lit' then render_lit(ctx, v.lit)
     elseif v.level == 'states' then render_states(ctx)
@@ -890,6 +936,7 @@ function M.render()
     M.line_callers, M.line_vars = ctx.line_callers, ctx.line_vars
     M.line_group, M.line_sep, M.line_state = ctx.line_group, ctx.line_sep, ctx.line_state
     M.line_trans, M.line_lit = ctx.line_trans, ctx.line_lit
+    M.line_regfor = ctx.line_regfor
 
     -- names come from arbitrary source text; a row must stay one row
     for i, l in ipairs(ctx.lines) do
@@ -930,6 +977,7 @@ function M.show(level, ctx_val)
         elseif level == 'tbl' then M.view.tbl = ctx_val
         elseif level == 'callers' then M.view.callers = ctx_val
         elseif level == 'refused' then M.view.refused = ctx_val
+        elseif level == 'regfor' then M.view.regfor = ctx_val
         elseif level == 'occs' then M.view.occs = ctx_val
         elseif level == 'lit' then M.view.lit = ctx_val
         elseif level == 'state' then M.view.state = ctx_val end
@@ -1202,7 +1250,7 @@ function M.attach(win)
         return { level = M.view.level, file = M.view.file, fn = M.view.fn,
             block = M.view.block, var = M.view.var, callers = M.view.callers,
             tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
-            refused = M.view.refused,
+            refused = M.view.refused, regfor = M.view.regfor,
             files_mode = M.files_mode,
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
@@ -1213,6 +1261,7 @@ function M.attach(win)
             loc.file, loc.fn, loc.block, loc.var, loc.callers
         M.view.tbl, M.view.occs, M.view.state = loc.tbl, loc.occs, loc.state
         M.view.lit, M.view.refused = loc.lit, loc.refused
+        M.view.regfor = loc.regfor
         if loc.level == 'refused' then M._refused_call = refused_call_of(loc.refused) end
         M.show(loc.level)
         if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
@@ -1506,7 +1555,14 @@ function M.attach(win)
             if M.line_callers[r] then
                 return enter('callers', M.line_callers[r])
             end
+            if M.line_regfor[r] then
+                return enter('regfor', M.line_regfor[r], nil)
+            end
             descend_fn_row(r)
+        elseif M.view.level == 'regfor' then
+            -- a registrant row: open its module at the reference site
+            local f = M.line_file[r]
+            if f then store.set_context(nil); enter('file', f) end
         end
     end
     -- the working set: mark what you're working on; M is the way back
@@ -1649,6 +1705,11 @@ function M.attach(win)
             store.set_context(nil)
             local fnid = (M.view.refused or ''):match('^(.-)\31')
             if fnid and store.node(fnid) then M.show('fn', fnid)
+            else M.show('files') end
+        elseif M.view.level == 'regfor' then
+            -- registrations hang below the registered fn: surface there
+            store.set_context(nil)
+            if store.node(M.view.regfor) then M.show('fn', M.view.regfor)
             else M.show('files') end
         elseif M.view.level == 'fn' or M.view.level == 'block'
             or M.view.level == 'tbl' then

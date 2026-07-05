@@ -96,6 +96,8 @@ function M.ingest(data)
     M.var_uses   = {} -- fn node id  -> { {to=var id,  at=ranges}, ... }
     M.imports_in  = {} -- file -> { {from=file, sideeffect=bool}, ... }  inbound requires
     M.imports_out = {} -- file -> { file, ... }  outbound requires (include tree)
+    M.reg_by = {} -- fn id -> { {from=registrant, at=ranges}, ... } registrations
+    M.registers = {} -- registrant id -> { fn id, ... } what it keeps alive
     for _, e in ipairs(M.data.edges or {}) do
         if e.kind == 'ref' then
             -- self edges (recursion) carry occurrences only: they must not
@@ -116,6 +118,14 @@ function M.ingest(data)
             table.insert(M.var_usedby[e.to], { from = e.from, at = e.at or {} })
             M.var_uses[e.from] = M.var_uses[e.from] or {}
             table.insert(M.var_uses[e.from], { to = e.to, at = e.at or {} })
+        elseif e.kind == 'reg' then
+            -- a registration: the fn is kept alive by `from` (a module,
+            -- dispatch table). The alibi both ways — a fn's registrants,
+            -- a registrant's roster.
+            M.reg_by[e.to] = M.reg_by[e.to] or {}
+            table.insert(M.reg_by[e.to], { from = e.from, at = e.at or {} })
+            M.registers[e.from] = M.registers[e.from] or {}
+            table.insert(M.registers[e.from], e.to)
         end
     end
     return M.data
