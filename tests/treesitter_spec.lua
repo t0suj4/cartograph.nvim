@@ -1503,6 +1503,20 @@ test('ansible loop: handlers are entities, notify links, no-op audit fires', fun
     ok(blob:match("notify 'restart ssh' names no handler"), blob)
     ok(blob:match("SILENT no%-op"), 'the no-op symptom is named')
     ok(blob:match("include target 'does_not_exist.yml' does not exist"), blob)
+    -- variable graph: declared defaults become entities, references link,
+    -- a default named nowhere is dead config (no undefined-var audit — vars
+    -- come from inventory/facts/extra-vars, so absence proves nothing)
+    eq(3, a.vars)
+    ok(store.node('ansvar::ansproj_enabled'), 'declared default is an entity')
+    ok(#(store.var_usedby['ansvar::ansproj_message'] or {}) >= 1,
+        '{{ ansproj_message }} links to its declaration')
+    eq({ 'ansproj_unused_flag' }, a.unused_vars)
+    local vfindings = require('cartograph.lint').run(store,
+        { only = { ['ansible-vars'] = true } })
+    local vblob = ''
+    for _, f in ipairs(vfindings) do vblob = vblob .. f.message .. '\n' end
+    ok(vblob:match("'ansproj_unused_flag' is declared but referenced nowhere"),
+        vblob)
 end)
 
 test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()

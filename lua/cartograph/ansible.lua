@@ -91,6 +91,20 @@ local function top_sequence(tree)
     return seq_of(n)
 end
 
+-- the top-level mapping of a document (defaults/main.yml, vars/main.yml)
+local function top_mapping(tree)
+    local n = tree
+    for _, want in ipairs({ 'document', 'block_node' }) do
+        local nx
+        for c in n:iter_children() do
+            if c:type() == want then nx = c; break end
+        end
+        n = nx
+        if not n then return nil end
+    end
+    return map_of(n)
+end
+
 -- (key_string, value_node) of a block_mapping_pair
 local function pair_kv(pair, src)
     local k = pair:named_child(0)
@@ -104,6 +118,22 @@ end
 
 local INCLUDE_TASKS = { include_tasks = true, import_tasks = true }
 local INCLUDE_ROLE = { include_role = true, import_role = true }
+
+-- Ansible resolves include_tasks against the ROLE's tasks/ dir, whatever
+-- role subdir the including file lives in (a handler can include a task
+-- file). The role root is the path before the first standard role subdir.
+local ROLE_SUBDIR = { tasks = true, handlers = true, defaults = true,
+    vars = true, meta = true, files = true, templates = true }
+local function role_tasks_dir(rel)
+    local parts = {}
+    for s in rel:gmatch('[^/]+') do
+        if ROLE_SUBDIR[s] then
+            return (#parts > 0 and table.concat(parts, '/') .. '/' or '') .. 'tasks'
+        end
+        parts[#parts + 1] = s
+    end
+    return nil -- not inside a role (a playbook): no tasks/ fallback
+end
 
 function M.attach(data)
     -- strip a previous attachment (idempotent under refresh)
@@ -123,15 +153,16 @@ function M.attach(data)
     end
 
     local stats = { handlers = 0, notifies = 0, links = 0, includes = 0,
-        noop = {}, dead = {}, broken = {}, dynamic = 0 }
+        noop = {}, dead = {}, broken = {}, dynamic = 0,
+        vars = 0, var_links = 0, unused_vars = {} }
     if not pcall(vim.treesitter.get_string_parser, '', 'yaml') then
         data.ansible = nil
         return stats -- no yaml parser: skip, health reports it
     end
     local root = data.root
 
-    -- ── scan the tree for yaml files (skip vendored/molecule/hidden) ────
-    local files = {}
+    -- ── scan the tree for yaml files + jinja templates (skip vendored) ──
+    local files, j2files = {}, {}
     local function scan(rel)
         local dirp = rel == '' and root or (root .. '/' .. rel)
         local it = vim.uv.fs_scandir(dirp)
@@ -145,6 +176,8 @@ function M.attach(data)
                         and name ~= '.git' and name ~= 'collections' then scan(r) end
                 elseif name:match('%.ya?ml$') then
                     files[#files + 1] = r
+                elseif name:match('%.j2$') then
+                    j2files[#j2files + 1] = r
                 end
             end
         end
@@ -311,13 +344,11 @@ function M.attach(data)
     local function resolve_include(target, from_rel)
         if target:find('{{', 1, true) then return nil, true end -- dynamic
         local dir = from_rel:match('^(.*)/[^/]*$') or ''
-        -- the role's tasks/ dir (Ansible's include_tasks fallback): the path
-        -- up to the `tasks` SEGMENT, at root (^tasks/) or nested (…/tasks/)
-        local troot = from_rel:match('^(.-/tasks)/') or from_rel:match('^(tasks)/')
+        local tdir = role_tasks_dir(from_rel) -- Ansible's role tasks/ fallback
         for _, cand in ipairs({
             (dir ~= '' and dir .. '/' .. target or target),
             target,
-            troot and (troot .. '/' .. target) or nil,
+            tdir and (tdir .. '/' .. target) or nil,
         }) do
             if cand and fileset[cand] then return cand end
         end
@@ -411,6 +442,78 @@ function M.attach(data)
         visit(pf.tree)
     end
 
+    -- ── variable graph: declared defaults/vars, references, dead config ──
+    -- Ansible vars come from many EXTERNAL sources (inventory, facts,
+    -- extra-vars, the loop `item`), so there is no honest "undefined
+    -- variable" audit. What IS honest: the role's DECLARED vars (defaults/
+    -- and vars/) become entities, references link to them, and a declared
+    -- var whose name appears NOWHERE else in the role (yaml or jinja) is
+    -- dead config. The unused check counts whole-word occurrences, so it
+    -- biases toward "used" — it never calls a referenced var dead.
+    local var_node, var_defcount = {}, {}
+    local function declare_vars(rel)
+        local pf = parsed[rel]
+        local top = pf and top_mapping(pf.tree)
+        if not top then return end
+        for p in top:iter_children() do
+            if p:type() == 'block_mapping_pair' then
+                local name = pair_kv(p, pf.src)
+                if name and name:match('^[%a_][%w_]*$') then
+                    var_defcount[name] = (var_defcount[name] or 0) + 1
+                    if not var_node[name] then
+                        local line = select(1, p:range())
+                        local node = { id = 'ansvar::' .. name, name = name,
+                            kind = 'var', an = true, file = rel, order = line,
+                            range = { start = { line = line, char = 0 },
+                                ['end'] = { line = line, char = 0 } } }
+                        data.nodes[#data.nodes + 1] = node
+                        var_node[name] = node
+                        stats.vars = stats.vars + 1
+                    end
+                end
+            end
+        end
+    end
+    for _, rel in ipairs(files) do
+        if rel:find('defaults/', 1, true) or rel:find('vars/', 1, true) then
+            declare_vars(rel)
+        end
+    end
+    if next(var_node) then
+        local count, texts = {}, {}
+        local function tally(text)
+            for id in text:gmatch('[%a_][%w_]*') do
+                count[id] = (count[id] or 0) + 1
+            end
+        end
+        for rel, pf in pairs(parsed) do texts[rel] = pf.src; tally(pf.src) end
+        for _, rel in ipairs(j2files) do
+            local fd = io.open(root .. '/' .. rel, 'r')
+            if fd then local t = fd:read('a'); fd:close(); texts[rel] = t; tally(t) end
+        end
+        -- reference edges (best-effort nav): a file naming a declared var,
+        -- other than that var's own declaration file, uses it
+        for rel, text in pairs(texts) do
+            local seen = {}
+            for id in text:gmatch('[%a_][%w_]*') do
+                local vn = var_node[id]
+                if vn and not seen[id] and vn.file ~= rel then
+                    seen[id] = true
+                    data.edges[#data.edges + 1] = { from = ensure_file(rel).id,
+                        to = vn.id, kind = 'use', an = true, at = {} }
+                    stats.var_links = stats.var_links + 1
+                end
+            end
+        end
+        -- dead config: a declared var seen only at its own declaration
+        for name in pairs(var_node) do
+            if (count[name] or 0) <= (var_defcount[name] or 1) then
+                stats.unused_vars[#stats.unused_vars + 1] = name
+            end
+        end
+        table.sort(stats.unused_vars)
+    end
+
     -- a handler key starting with a dynamic-notify prefix is plausibly
     -- triggered at runtime (`Remount {{ mp }}` → the `Remount /tmp` listeners):
     -- honest analysis cannot call it dead
@@ -432,7 +535,8 @@ function M.attach(data)
     table.sort(stats.dead)
     table.sort(stats.noop, function (a, b) return a.name < b.name end)
 
-    if stats.handlers == 0 and stats.includes == 0 and stats.notifies == 0 then
+    if stats.handlers == 0 and stats.includes == 0 and stats.notifies == 0
+        and stats.vars == 0 then
         data.ansible = nil -- not an ansible tree
         return stats
     end

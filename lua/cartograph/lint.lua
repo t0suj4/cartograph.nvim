@@ -563,6 +563,24 @@ M.rules = {
             return out
         end,
     },
+    {
+        -- dead config: a role variable declared in defaults/ or vars/ whose
+        -- name appears nowhere else in the role (tasks, handlers, jinja). A
+        -- soft signal — a var could still be read via hostvars/lookup — so
+        -- INFO, but on a large role it surfaces accumulated cruft.
+        name = 'ansible-vars', severity = 'info',
+        run = function (store)
+            local a = store.data.ansible
+            if not a then return {} end
+            local out = {}
+            for _, name in ipairs(a.unused_vars or {}) do
+                out[#out + 1] = { file = '', line = 1, severity = 'info',
+                    message = ("role variable '%s' is declared but referenced"
+                        .. ' nowhere in the role (dead config?)'):format(name) }
+            end
+            return out
+        end,
+    },
     { name = 'layering', severity = 'info', run = layering_findings },
     { name = 'clone', severity = 'info', run = clone_findings },
     { name = 'access-point', severity = 'info', run = access_point_findings },

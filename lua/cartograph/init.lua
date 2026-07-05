@@ -148,10 +148,12 @@ function M.open(dump_path, opts)
             local an = require('cartograph.ansible').attach(data)
             if an and (an.handlers > 0 or an.includes > 0) then
                 vim.notify(('cartograph: ansible — %d handlers, %d notifies'
-                    .. ' (%d linked, %d no-op, %d dynamic), %d includes;'
-                    .. ' %d dead handlers, %d broken includes'):format(
+                    .. ' (%d linked, %d no-op, %d dynamic), %d includes,'
+                    .. ' %d vars (%d links, %d unused); %d dead handlers,'
+                    .. ' %d broken includes'):format(
                         an.handlers, an.notifies, an.links, #an.noop, an.dynamic,
-                        an.includes, #an.dead, #an.broken), vim.log.levels.INFO)
+                        an.includes, an.vars, an.var_links, #an.unused_vars,
+                        #an.dead, #an.broken), vim.log.levels.INFO)
             end
             -- a configured database: its tables join the graph and the
             -- code's SQL entities link to them (session post-pass)

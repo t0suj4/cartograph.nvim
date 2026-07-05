@@ -49,3 +49,8 @@
 - name: include an external role
   ansible.builtin.include_role:
     name: common
+
+- name: use declared role variables
+  when: ansproj_enabled
+  ansible.builtin.debug:
+    msg: "{{ ansproj_message }}"
