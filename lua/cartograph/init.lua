@@ -140,53 +140,76 @@ function M.open(dump_path, opts)
             end
             store.ingest(data)
 
-            -- deferred LSP oracles: expensive, I/O-bound resolution that must
-            -- NOT block the open. The graph is already live with name-matched
-            -- (~) edges; each oracle runs async and hot-swaps its proven edges
-            -- in when it finishes. Adding an oracle is an entry here, not a new
-            -- code path — the async machinery lives in cartograph.oracle.
-            local ORACLES = {
-                { name = 'clangd', cfg = 'clangd', ext = '%.[ch]p?p?$',
-                    mod = 'cartograph.providers.clangd',
-                    report = function (s) return ('cartograph: clangd proved'
-                        .. ' edges for %d functions'):format(s.resolved_fns) end },
-                { name = 'lua-ls', cfg = 'luals', ext = '%.lua$',
-                    mod = 'cartograph.providers.luals',
-                    report = function (s) return ('cartograph: lua-ls settled'
-                        .. ' %d/%d defs (%d upgraded, %d refuted)'):format(
-                        s.answered, s.asked, s.upgraded, s.cleared) end },
-            }
-            for _, o in ipairs(ORACLES) do
-                local applies = cfg[o.cfg] ~= false
-                if applies then
-                    applies = false
-                    for _, n in ipairs(data.nodes) do
-                        if n.kind == 'module' and n.file:match(o.ext) then
-                            applies = true; break
-                        end
-                    end
-                end
-                if applies then
-                    vim.notify(('cartograph: resolving with %s in the'
-                        .. ' background…'):format(o.name), vim.log.levels.INFO)
-                    require(o.mod).enrich_async(data, {}, function (stats, why)
-                        -- splice only if this is still the same live graph
-                        -- (a re-open / refresh supersedes it; hotswap itself
-                        -- no-ops while a txn / move-set is staged)
-                        if store.data ~= data then return end
+            -- lua-ls resolves the WHOLE lua graph in the background (small
+            -- enough) and hot-swaps its proven edges in when done.
+            local has_lua = false
+            for _, n in ipairs(data.nodes) do
+                if n.kind == 'module' and n.file:match('%.lua$') then has_lua = true; break end
+            end
+            if has_lua and cfg.luals ~= false then
+                vim.notify('cartograph: resolving with lua-ls in the background…',
+                    vim.log.levels.INFO)
+                require('cartograph.providers.luals').enrich_async(data, {},
+                    function (stats, why)
+                        if store.data ~= data then return end -- graph moved on
                         if not stats then
-                            if why and not (why:find('binary')
-                                or why:find('no functions') or why:find('nothing')) then
-                                vim.notify(('cartograph: %s skipped — %s (graph'
-                                    .. ' stays ~)'):format(o.name, why),
-                                    vim.log.levels.WARN)
+                            if why and not (why:find('binary') or why:find('nothing')) then
+                                vim.notify('cartograph: lua-ls skipped — ' .. why
+                                    .. ' (graph stays ~)', vim.log.levels.WARN)
                             end
                             return
                         end
                         require('cartograph.refresh').hotswap()
-                        vim.notify(o.report(stats), vim.log.levels.INFO)
+                        vim.notify(('cartograph: lua-ls settled %d/%d defs (%d'
+                            .. ' upgraded, %d refuted)'):format(stats.answered,
+                            stats.asked, stats.upgraded, stats.cleared),
+                            vim.log.levels.INFO)
                     end)
+            end
+            -- clangd is DEMAND-driven: C/C++ projects (openmw: 28k functions)
+            -- are too large to resolve whole, so a PERSISTENT session resolves
+            -- the FOCUSED function's callers on navigation (see the on_focus
+            -- hook at module load, which drives cartograph.providers.clangd).
+            local has_c = false
+            for _, n in ipairs(data.nodes) do
+                if n.kind == 'module' and n.file:match('%.[ch]p?p?$') then has_c = true; break end
+            end
+            if has_c and cfg.clangd ~= false then
+                local clangd = require 'cartograph.providers.clangd'
+                if not clangd.compile_dir(data.root) then
+                    vim.notify('cartograph: clangd has no compile_commands.json —'
+                        .. ' resolution is degraded. Run :CartographCompileCommands'
+                        .. ' to generate it (or set setup{ clangd_compile_commands = ... })',
+                        vim.log.levels.WARN)
                 end
+                local sess, serr = clangd.start_session(data)
+                if sess then
+                    -- subscribe ONCE: focusing a C/C++ function resolves its
+                    -- callers against the live session and splices the proven
+                    -- set in (uses the CURRENT session, so re-opens are fine)
+                    if not M._clangd_hooked then
+                        M._clangd_hooked = true
+                        store.on_focus(function (id)
+                            local cg = require 'cartograph.providers.clangd'
+                            if not cg.session then return end
+                            local n = store.node(id)
+                            if n and (n.kind == 'function' or n.kind == 'method')
+                                and not n.decl then
+                                cg.resolve_focused(n, function (edges)
+                                    store.set_callers(n.id, edges)
+                                    store.redraw()
+                                end)
+                            end
+                        end)
+                    end
+                    vim.notify('cartograph: clangd ready — the C/C++ call graph'
+                        .. ' resolves as you focus functions', vim.log.levels.INFO)
+                elseif serr then
+                    vim.notify('cartograph: clangd — ' .. serr, vim.log.levels.WARN)
+                end
+            else
+                -- opening a non-C graph: shut down any lingering clangd session
+                require('cartograph.providers.clangd').stop_session()
             end
         end
 

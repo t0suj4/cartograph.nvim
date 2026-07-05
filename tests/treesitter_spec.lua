@@ -287,6 +287,115 @@ test('clangd async: same proof, without blocking the caller', function ()
         'main -> helper proven via the async path')
 end)
 
+test('clangd demand session: focus resolves a function\'s callers, proven', function ()
+    if not has_parser('c') then skip 'no c parser' end
+    local clangd = require 'cartograph.providers.clangd'
+    local bin_ok = vim.fn.executable('clangd') == 1
+        or vim.fn.executable(vim.fn.expand('~/.local/bin/clangd')) == 1
+    if not bin_ok then skip 'no clangd' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('util.h', 'int helper(int a);\n')
+    put('util.c', '#include "util.h"\nint helper(int a) { return a + 1; }\n')
+    put('main.c', '#include "util.h"\nint main(void) { return helper(2); }\n')
+    -- compile_commands gives clangd real include/define eyes
+    put('compile_commands.json', ('[{"directory":%q,"file":%q,"command":"cc -c'
+        .. ' main.c"},{"directory":%q,"file":%q,"command":"cc -c util.c"}]')
+        :format(root, root .. '/main.c', root, root .. '/util.c'))
+    local data = ts.extract(root)
+    store.ingest(data)
+    ok(clangd.compile_dir(root), 'compile_commands.json discovered')
+    local helper
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'helper' and n.file == 'util.c' then helper = n end
+    end
+    ok(clangd.start_session(data), 'demand session started')
+    local got
+    -- resolve ON DEMAND (as focusing would), instead of the whole graph
+    clangd.resolve_focused(helper, function (edges) got = edges end)
+    ok(vim.wait(20000, function () return got ~= nil end, 100), 'demand resolution returned')
+    if got then
+        store.set_callers(helper.id, got) -- the splice the on_focus hook does
+        local names = {}
+        for _, f in ipairs(store.usedby[helper.id] or {}) do
+            names[#names + 1] = (store.node(f) or {}).name
+        end
+        ok(vim.tbl_contains(names, 'main'), 'main resolved as caller: ' .. vim.inspect(names))
+        local proven = false
+        for _, e in ipairs(data.edges) do
+            if e.kind == 'ref' and e.to == helper.id and e.proven then proven = true end
+        end
+        ok(proven, 'the spliced caller edge is proven, not ~')
+    end
+    clangd.stop_session()
+    vim.fn.delete(root, 'rf')
+end)
+
+test('compile_plan: detects the build system and its configure command', function ()
+    local clangd = require 'cartograph.providers.clangd'
+    local function fresh(files)
+        local root = vim.fn.tempname()
+        vim.fn.mkdir(root, 'p')
+        for f, t in pairs(files) do
+            local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+        end
+        return root
+    end
+
+    -- cmake: configure-only, exports the db into <root>/build
+    local c = fresh({ ['CMakeLists.txt'] = 'project(x)\n' })
+    local p = clangd.compile_plan(c)
+    ok(p and p.tool == 'cmake', 'CMakeLists.txt → cmake')
+    ok(p.dir == c .. '/build', 'db lands in build/')
+    ok(vim.tbl_contains(p.argv, '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'), 'export flag present')
+    ok(not p.builds, 'cmake configure does not build')
+    vim.fn.delete(c, 'rf')
+
+    -- meson: configure-only too
+    local m = fresh({ ['meson.build'] = "project('x','c')\n" })
+    p = clangd.compile_plan(m)
+    ok(p and p.tool == 'meson', 'meson.build → meson')
+    ok(not p.builds, 'meson setup does not build')
+    vim.fn.delete(m, 'rf')
+
+    -- plain make: no configure step → bear wraps a full build (opt-in)
+    local k = fresh({ ['Makefile'] = "all:\n\tcc -c x.c\n" })
+    p = clangd.compile_plan(k)
+    ok(p and p.tool == 'bear' and p.builds, 'Makefile → bear (a full build, opt-in)')
+    ok(not p.cmdline:find('configure'), 'an existing Makefile needs no bootstrap')
+    vim.fn.delete(k, 'rf')
+
+    -- fresh automake clone (Makefile.am/configure.ac, no configure/Makefile yet):
+    -- bootstrap autogen → configure BEFORE bear -- make
+    local a = fresh({ ['configure.ac'] = 'AC_INIT([x],[1])\n',
+        ['Makefile.am'] = 'bin_PROGRAMS = x\n', ['autogen.sh'] = 'autoreconf -i\n' })
+    p = clangd.compile_plan(a)
+    ok(p and p.tool == 'bear', 'automake → bear')
+    ok(p.cmdline:find('autogen') and p.cmdline:find('configure') and p.cmdline:find('bear'),
+        'bootstrap chained: ' .. p.cmdline)
+    vim.fn.delete(a, 'rf')
+
+    -- configure.ac but no autogen.sh → autoreconf -i does the bootstrap
+    local a2 = fresh({ ['configure.ac'] = 'AC_INIT([x],[1])\n', ['Makefile.am'] = 'bin_PROGRAMS = x\n' })
+    p = clangd.compile_plan(a2)
+    ok(p.cmdline:find('autoreconf'), 'no autogen.sh → autoreconf -i: ' .. p.cmdline)
+    vim.fn.delete(a2, 'rf')
+
+    -- an override build dir is honored (resolved relative to root)
+    local c2 = fresh({ ['CMakeLists.txt'] = 'project(x)\n' })
+    p = clangd.compile_plan(c2, 'out/cc')
+    ok(p.dir == c2 .. '/out/cc', 'relative builddir resolved under root')
+    vim.fn.delete(c2, 'rf')
+
+    -- nothing recognizable → nil (caller degrades gracefully)
+    local n = fresh({ ['readme.md'] = '# x\n' })
+    ok(clangd.compile_plan(n) == nil, 'no build system → nil')
+    vim.fn.delete(n, 'rf')
+end)
+
 test('xlang: string-key dispatch links JS to the C++ handler', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

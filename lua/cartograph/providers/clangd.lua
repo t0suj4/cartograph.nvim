@@ -23,6 +23,104 @@ local function find_bin()
     end
 end
 
+-- the directory holding compile_commands.json — clangd's cross-file eyes
+-- (include paths, defines, -std). Explicit config wins; else the project
+-- root and the usual CMake build dirs. Returns the DIR (for
+-- --compile-commands-dir) or nil, in which case clangd degrades to
+-- open-file resolution and the caller says so.
+function M.compile_dir(root)
+    local function has(dir) return dir and vim.uv.fs_stat(dir .. '/compile_commands.json') ~= nil end
+    local cfg = require('cartograph.config').clangd_compile_commands
+    if cfg then
+        cfg = vim.fn.expand(cfg)
+        if cfg:match('compile_commands%.json$') then cfg = cfg:match('^(.*)/[^/]*$') end
+        if has(cfg) then return cfg end
+    end
+    if has(root) then return root end
+    -- scan the root for a build-ish dir that carries one
+    local it = vim.uv.fs_scandir(root)
+    while it do
+        local name, ty = vim.uv.fs_scandir_next(it)
+        if not name then break end
+        if ty == 'directory' and (name:match('^build') or name:match('^cmake%-build')
+            or name:match('^out')) and has(root .. '/' .. name) then
+            return root .. '/' .. name
+        end
+    end
+end
+
+-- What would generate a compile_commands.json here? Detect the build system
+-- and return { tool, argv, dir, need, builds? } or nil. cmake/meson can emit
+-- the db from a CONFIGURE alone (fast, no compile); plain make/autotools have
+-- no such step, so we fall back to `bear -- make`, which wraps a FULL build
+-- and is opt-in (builds=true). `dir` is where the json lands.
+function M.compile_plan(root, builddir)
+    local dir = builddir
+        and (builddir:match('^/') and builddir or root .. '/' .. builddir)
+        or root .. '/build'
+    local function exists(f) return vim.uv.fs_stat(root .. '/' .. f) ~= nil end
+    if exists('CMakeLists.txt') then
+        return { tool = 'cmake', dir = dir, need = 'cmake', argv = {
+            'cmake', '-S', root, '-B', dir, '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON' } }
+    elseif exists('meson.build') then
+        local argv = { 'meson', 'setup', dir, root }
+        -- meson refuses a populated builddir unless told to reconfigure
+        if vim.uv.fs_stat(dir) then table.insert(argv, 3, '--reconfigure') end
+        return { tool = 'meson', dir = dir, need = 'meson', argv = argv }
+    elseif exists('configure.ac') or exists('configure.in') or exists('configure')
+        or exists('Makefile') or exists('makefile') or exists('GNUmakefile') then
+        -- autotools / plain make: no configure step emits a db, so `bear`
+        -- intercepts the compiler during a full build. A fresh autotools clone
+        -- has only Makefile.am/configure.ac, so bootstrap what's missing first
+        -- (autogen/autoreconf → ./configure) before bear -- make.
+        local has_make = exists('Makefile') or exists('makefile') or exists('GNUmakefile')
+        local steps = {}
+        if not has_make then
+            if not exists('configure') then
+                steps[#steps + 1] = exists('autogen.sh') and 'sh autogen.sh' or 'autoreconf -i'
+            end
+            steps[#steps + 1] = './configure'
+        end
+        steps[#steps + 1] = 'bear -- make'
+        local cmdline = table.concat(steps, ' && ')
+        return { tool = 'bear', dir = root, need = 'bear', builds = true,
+            cmdline = cmdline, argv = { 'sh', '-c', cmdline } }
+    end
+end
+
+--- Run a compile_plan async (never blocks). on_done(ok, output) fires on the
+--- main loop; on success plan.dir holds compile_commands.json.
+---@param root string
+---@param plan table  from M.compile_plan
+---@param on_done fun(ok:boolean, output:string)
+function M.run_compile_plan(root, plan, on_done)
+    local out = {}
+    local function sink(_, d) for _, l in ipairs(d) do if l ~= '' then out[#out + 1] = l end end end
+    local function tail() return table.concat(vim.list_slice(out, math.max(1, #out - 25)), '\n') end
+    local jid = vim.fn.jobstart(plan.argv, {
+        cwd = root, on_stdout = sink, on_stderr = sink,
+        on_exit = function (_, code)
+            local made = vim.uv.fs_stat(plan.dir .. '/compile_commands.json') ~= nil
+            if code == 0 and made then
+                on_done(true, plan.dir)
+            else
+                on_done(false, ('%s exited %d%s'):format(plan.tool, code,
+                    #out > 0 and ('\n' .. tail()) or
+                    (made and '' or ' but no compile_commands.json appeared')))
+            end
+        end,
+    })
+    if jid <= 0 then vim.schedule(function () on_done(false, 'failed to launch ' .. plan.tool) end) end
+end
+
+-- the clangd command, pointed at compile_commands.json when we found one
+local function clangd_cmd(bin, root)
+    local cmd = { bin, '--background-index', '--log=error' }
+    local dir = M.compile_dir(root)
+    if dir then cmd[#cmd + 1] = '--compile-commands-dir=' .. dir end
+    return cmd
+end
+
 local function lang_id(file)
     local e = file:match('%.([%w]+)$') or ''
     return (e == 'c' or e == 'h') and 'c' or 'cpp'
@@ -79,7 +177,7 @@ function M.enrich(data, opts)
     local indexing, index_done = false, false
     local client_id = vim.lsp.start({
         name = 'cartograph-clangd',
-        cmd = { bin, '--background-index', '--log=error' },
+        cmd = clangd_cmd(bin, root),
         root_dir = root,
         handlers = {
             ['$/progress'] = function (_, p)
@@ -221,7 +319,7 @@ function M.enrich_async(data, opts, on_done)
 
     require('cartograph.oracle').run({
         name = 'cartograph-clangd',
-        cmd = { bin, '--background-index', '--log=error' },
+        cmd = clangd_cmd(bin, root),
         root = root,
         files = files,
         lang_id = lang_id,
@@ -307,6 +405,109 @@ function M.enrich_async(data, opts, on_done)
         init_timeout = opts.init_timeout or 8000,
         deadline = opts.deadline or 90000,
     }, on_done)
+end
+
+-- ── demand-driven session ────────────────────────────────────────────────
+-- For projects too large to resolve whole (openmw: 28k functions), a
+-- PERSISTENT clangd resolves the FOCUSED function's callers on navigation and
+-- splices them in — you pay only for what you look at. One session per open
+-- C/C++ graph; the background index answers cross-file callers without opening
+-- every file (only the focused file is didOpen'd).
+M.session = nil
+
+--- Start a session for `data` (stops any previous). Returns the session or nil.
+function M.start_session(data, opts)
+    opts = opts or {}
+    M.stop_session()
+    local bin = opts.bin or find_bin()
+    if not bin then return nil, 'no clangd binary' end
+    local root = data.root
+    local by_file, by_id = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and not n.decl then
+            by_file[n.file] = by_file[n.file] or {}
+            table.insert(by_file[n.file], n)
+            by_id[n.id] = n
+        end
+    end
+    local sess = { root = root, by_file = by_file, by_id = by_id,
+        opened = {}, resolved = {}, pending = {}, texts = {} }
+    local client_id = vim.lsp.start({
+        name = 'cartograph-clangd-demand',
+        cmd = clangd_cmd(bin, root),
+        root_dir = root,
+        on_init = function (c) sess.client = c end,
+    }, { attach = false })
+    if not client_id then return nil, 'clangd failed to start' end
+    sess.client = sess.client or vim.lsp.get_client_by_id(client_id)
+    M.session = sess
+    return sess
+end
+
+local function sess_node_at(sess, file, line)
+    local best
+    for _, n in ipairs(sess.by_file[file] or {}) do
+        if n.range.start.line <= line and line <= n.range['end'].line
+            and (not best or n.range.start.line >= best.range.start.line) then best = n end
+    end
+    return best
+end
+
+--- Resolve the callers of node `n` (a function/method) on demand; calls
+--- on_edges({ {from=id, at=ranges}, ... }) with the proven callers. Cached so
+--- a re-focus is free; a query that can't be sent yet (server still starting)
+--- leaves the node unresolved so the next focus retries.
+function M.resolve_focused(n, on_edges)
+    local sess = M.session
+    if not (sess and sess.client and n and sess.by_id[n.id]) then return end
+    if sess.resolved[n.id] or sess.pending[n.id] then return end
+    sess.pending[n.id] = true
+    local root = sess.root
+    if not sess.opened[n.file] then
+        local fd = io.open(root .. '/' .. n.file, 'r')
+        if not fd then sess.pending[n.id] = nil; return end
+        sess.texts[n.file] = fd:read('a'); fd:close()
+        sess.client:notify('textDocument/didOpen', { textDocument = {
+            uri = vim.uri_from_fname(root .. '/' .. n.file),
+            languageId = lang_id(n.file), version = 0, text = sess.texts[n.file] } })
+        sess.opened[n.file] = true
+    end
+    local lines = vim.split(sess.texts[n.file] or '', '\n', { plain = true })
+    local uri = vim.uri_from_fname(root .. '/' .. n.file)
+    local function fail() sess.pending[n.id] = nil end -- retry on next focus
+    local ok = sess.client:request('textDocument/prepareCallHierarchy',
+        { textDocument = { uri = uri }, position = name_pos(n, lines) },
+        function (_, result)
+            local item = result and result[1]
+            if not item then sess.pending[n.id] = nil; sess.resolved[n.id] = true; return end
+            local ok2 = sess.client:request('callHierarchy/incomingCalls',
+                { item = item }, function (_, calls)
+                    sess.pending[n.id] = nil
+                    sess.resolved[n.id] = true
+                    local edges = {}
+                    for _, inc in ipairs(calls or {}) do
+                        local ffile = vim.uri_to_fname(inc.from.uri):sub(#root + 2)
+                        local from = sess_node_at(sess, ffile, inc.from.selectionRange.start.line)
+                        if from then
+                            local at = {}
+                            for _, r in ipairs(inc.fromRanges or {}) do
+                                at[#at + 1] = { start = { line = r.start.line, char = r.start.character },
+                                    ['end'] = { line = r['end'].line, char = r['end'].character } }
+                            end
+                            edges[#edges + 1] = { from = from.id, at = at }
+                        end
+                    end
+                    if #edges > 0 and on_edges then on_edges(edges) end
+                end)
+            if not ok2 then fail() end
+        end)
+    if not ok then fail() end
+end
+
+function M.stop_session()
+    local sess = M.session
+    if sess and sess.client then pcall(function () sess.client:stop() end) end
+    M.session = nil
 end
 
 --- Full extraction: tree-sitter skeleton + clangd resolution.

@@ -12,6 +12,10 @@ local M = {}
 -- disables; clangd_bin overrides binary discovery (PATH, ~/.local/bin).
 M.clangd = true
 M.clangd_bin = nil
+-- where compile_commands.json lives (a dir or the file). nil = auto-discover
+-- (project root, then build*/cmake-build*/out* dirs). Without it clangd has
+-- no include paths/defines and degrades to open-file resolution.
+M.clangd_compile_commands = nil
 
 -- STOCK lua-language-server as the lua oracle: references per ~-marked
 -- def, intersected with known call sites — upgrades what it can prove,

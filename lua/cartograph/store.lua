@@ -510,6 +510,37 @@ function M.add_edge(e)
     return e
 end
 
+--- Replace the ref-edges INTO `to` with a PROVEN caller set — the clangd
+--- demand oracle resolving one function's callers. Drops the name-matched (~)
+--- ref edges into `to` (preserving cross-language xlang refs), adds the proven
+--- ones, and keeps usedby/uses/occ consistent (self-edges excluded from
+--- usedby, as at ingest). callers = { {from=id, at=ranges}, ... }.
+function M.set_callers(to, callers)
+    local keep, survivors = {}, {}
+    for _, e in ipairs(M.data.edges) do
+        if e.kind == 'ref' and e.to == to and not e.xlang then
+            local u = M.uses[e.from]
+            if u then for i = #u, 1, -1 do if u[i] == to then table.remove(u, i) end end end
+            M.occ[e.from .. '\31' .. to] = nil
+        else
+            keep[#keep + 1] = e
+            if e.kind == 'ref' and e.to == to and e.from ~= to then
+                survivors[#survivors + 1] = e.from -- an xlang caller, kept
+            end
+        end
+    end
+    M.data.edges = keep
+    M.usedby[to] = survivors
+    for _, c in ipairs(callers) do
+        M.data.edges[#M.data.edges + 1] = { from = c.from, to = to, kind = 'ref',
+            proven = true, at = c.at, self = (c.from == to) or nil }
+        M.uses[c.from] = M.uses[c.from] or {}
+        table.insert(M.uses[c.from], to)
+        if c.from ~= to then table.insert(M.usedby[to], c.from) end
+        M.occ[c.from .. '\31' .. to] = c.at or {}
+    end
+end
+
 --- Register a node created after ingest (frontier landings).
 function M.add_node(n)
     if M.by_id[n.id] then return n end
@@ -592,6 +623,15 @@ end
 -- reference sites for this uses-edge" and the source pane draws them, without
 -- changing the rooted node. This drives the TOP source view (highlights the call
 -- site inside the focused function, for a `uses` edge).
+-- redraw channel: "the graph changed under the current view, re-render it"
+-- (a background oracle splicing edges into the focused node, say). Panes
+-- subscribe and re-render their CURRENT view; no focus change, no re-ingest.
+M._redraw_subs = {}
+function M.on_redraw(fn) table.insert(M._redraw_subs, fn) end
+function M.redraw()
+    for _, fn in ipairs(M._redraw_subs) do pcall(fn) end
+end
+
 M._hl_subs = {}
 ---@param fn fun(hl: {file:string, ranges:table}?)
 function M.on_highlight(fn) table.insert(M._hl_subs, fn) end

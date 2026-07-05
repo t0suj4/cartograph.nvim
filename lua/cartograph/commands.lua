@@ -328,6 +328,60 @@ function M.register()
         scratch(require('cartograph.shapes').explain(root))
     end, { desc = 'cartograph: explain project-shape detection for this root' })
 
+    -- ── generate compile_commands.json for clangd ──────────────────
+    cmd('CartographCompileCommands', function (o)
+        local clangd = require 'cartograph.providers.clangd'
+        local store = require 'cartograph.store'
+        local root = (store.data and store.data.root) or vim.fn.getcwd()
+        local plan = clangd.compile_plan(root, o.args ~= '' and o.args or nil)
+        if not plan then
+            return vim.notify('cartograph: no recognized build system at ' .. root
+                .. ' — need CMakeLists.txt or meson.build (plain make: run `bear -- make` yourself)',
+                vim.log.levels.WARN)
+        end
+        if vim.fn.executable(plan.need) ~= 1 then
+            return vim.notify(('cartograph: %s not found — install it (e.g. pkgit -if %s), then retry')
+                :format(plan.need, plan.need), vim.log.levels.WARN)
+        end
+        local shown = plan.cmdline or table.concat(plan.argv, ' ')
+        if plan.builds and not o.bang then
+            return vim.notify(('cartograph: this runs a FULL build via `%s` (slow, writes objects). '
+                .. 'Re-run as :CartographCompileCommands! to proceed.'):format(shown),
+                vim.log.levels.WARN)
+        end
+        vim.notify('cartograph: generating compile_commands.json — ' .. shown .. ' …',
+            vim.log.levels.INFO)
+        clangd.run_compile_plan(root, plan, function (okr, output)
+            if not okr then
+                scratch(vim.split('cartograph: compile_commands generation FAILED\n\n' .. output,
+                    '\n', { plain = true }))
+                return
+            end
+            vim.notify('cartograph: compile_commands.json ready at ' .. output
+                .. '/ — clangd now has cross-file eyes', vim.log.levels.INFO)
+            -- restart the demand session so the open C/C++ graph resolves against
+            -- the new db, and re-resolve whatever is focused right now
+            if store.data then
+                local has_c = false
+                for _, n in ipairs(store.data.nodes) do
+                    if n.kind == 'module' and n.file:match('%.[ch]p?p?$') then has_c = true break end
+                end
+                if has_c then
+                    clangd.start_session(store.data)
+                    local n = store.focused and store.node(store.focused)
+                    if n and (n.kind == 'function' or n.kind == 'method') and not n.decl then
+                        clangd.resolve_focused(n, function (edges)
+                            store.set_callers(n.id, edges) store.redraw()
+                        end)
+                    end
+                    vim.notify('cartograph: clangd session restarted — focus a function to resolve it',
+                        vim.log.levels.INFO)
+                end
+            end
+        end)
+    end, { nargs = '?', bang = true, complete = 'dir',
+        desc = 'cartograph: generate compile_commands.json (cmake/meson configure; ! allows a full bear build)' })
+
     -- ── browse the state machine ────────────────────────────────────
     cmd('CartographStates', function ()
         local store = live() if not store then return end

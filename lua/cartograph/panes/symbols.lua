@@ -1363,6 +1363,15 @@ function M.attach(win)
         M.paint(id)
     end)
 
+    -- a background splice (clangd resolving the focused fn's callers) changed
+    -- the graph under the current view — re-render it in place
+    store.on_redraw(function ()
+        if M.win and vim.api.nvim_win_is_valid(M.win)
+            and vim.api.nvim_win_get_buf(M.win) == M.buf then
+            pcall(M.render)
+        end
+    end)
+
     -- zoom: l / <CR> descend, h ascends — sideways is free in a linear list,
     -- so it becomes altitude. Below the fn level, descend keeps going INTO
     -- the graph: it acts on the name under the cursor (callee -> that
