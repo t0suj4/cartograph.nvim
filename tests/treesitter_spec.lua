@@ -947,12 +947,14 @@ test('parallel extraction: identical graph to sequential', function ()
         return t
     end
     eq(ekeys(seq.edges), ekeys(got.edges))
-    -- calls: same resolutions at same sites
+    -- calls: same resolutions at same sites; inferred is part of the
+    -- contract too (the parallel path must not lose the ~ mark — relink
+    -- once dropped it)
     local function ckeys(list)
         local t = {}
         for _, c in ipairs(list) do
-            t[#t + 1] = ('%s|%d|%s|%s|%s'):format(c.file, c.line, c.callee,
-                tostring(c.to), tostring(c.dynamic))
+            t[#t + 1] = ('%s|%d|%s|%s|%s|%s'):format(c.file, c.line, c.callee,
+                tostring(c.to), tostring(c.dynamic), tostring(c.inferred))
         end
         table.sort(t)
         return t
@@ -1845,4 +1847,33 @@ test('sfc containers: script regions, template calls, handler cbarg', function (
             and n.name == 'template' then tpl = n end
     end
     ok(tpl, 'template block node')
+end)
+
+test('php: attributes register, $this->/self:: resolve in-class', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('php') then skip 'no php parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/phpproj')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    -- #[Route('/products', ...)] has arguments: registered, not dead;
+    -- the bare #[\Override] marker registers nothing
+    ok(byname['ProductController::goAction'].cbarg, 'attribute with args = cbarg')
+    ok(not byname['ProductController::buildBody'].cbarg, 'marker attribute is not')
+    -- $this->buildBody() and self::statCount() carry the enclosing class:
+    -- exact same-class matches, not tail guesses
+    local hits = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname['ProductController::goAction'].id then
+            hits[(store.node(e.to) or {}).name] = e
+        end
+    end
+    ok(hits['ProductController::buildBody'], '$this-> resolves in-class')
+    ok(not hits['ProductController::buildBody'].inferred, 'exact, not ~')
+    ok(hits['ProductController::statCount'], 'self:: resolves in-class')
+    -- PSR-4 prefix remap: use App\Service\Renderer lives at lib/Renderer.php
+    -- (progressively shorter namespace suffixes, unique-only)
+    ok(vim.tbl_contains(store.imports_out['controller.php'] or {},
+        'lib/Renderer.php'), 'PSR-4 remapped use resolves')
 end)

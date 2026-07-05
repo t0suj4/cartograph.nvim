@@ -18,6 +18,10 @@ local M = {}
 -- protocol (@def/@name for functions and vars, @call/@name for calls), and
 -- small hooks where grammars genuinely differ.
 
+-- php PSR-4 suffix imports: basename -> {files} index, memoized per
+-- fileset (weak keys: dies with the fileset, workers build their own)
+local PHP_BASENAMES = setmetatable({}, { __mode = 'k' })
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -482,6 +486,46 @@ M.spec = {
             end
             return name
         end,
+        -- an ATTRIBUTE with arguments registers the method with a
+        -- framework (#[Route('/x')]) — the java annotation-with-args
+        -- lesson; bare markers (#[\Override]) don't register anything
+        cbarg_def = function (defn, src)
+            for c in defn:iter_children() do
+                if c:type() == 'attribute_list'
+                    and vim.treesitter.get_node_text(c, src)
+                        :find('(', 1, true) then
+                    return true
+                end
+            end
+            return false
+        end,
+        -- $this->m() / self::m() / static::m(): the receiver IS the
+        -- enclosing class — resolve as Class::m before any tail guess
+        qualify_call = function (calln, name, src)
+            if name:find(':', 1, true) then return nil end
+            local t, recv = calln:type(), nil
+            if t == 'member_call_expression' then
+                local o = calln:field('object')[1]
+                recv = o and o:type() == 'variable_name'
+                    and vim.treesitter.get_node_text(o, src) == '$this'
+            elseif t == 'scoped_call_expression' then
+                local s = calln:field('scope')[1]
+                recv = s and s:type() == 'relative_scope'
+                    and vim.treesitter.get_node_text(s, src) ~= 'parent'
+            end
+            if not recv then return nil end
+            local p2 = calln:parent()
+            while p2 do
+                local tt = p2:type()
+                if tt == 'class_declaration' or tt == 'trait_declaration'
+                    or tt == 'interface_declaration' then
+                    local cn = p2:field('name')[1]
+                    return cn and (vim.treesitter.get_node_text(cn, src)
+                        .. '::' .. name) or nil
+                end
+                p2 = p2:parent()
+            end
+        end,
         id_query = '(name) @id',
         block_skip = { php_tag = true, class_declaration = true,
             interface_declaration = true, trait_declaration = true },
@@ -495,15 +539,37 @@ M.spec = {
         ]=],
         resolve_import = function (path, files, from)
             path = path:gsub('^["\']', ''):gsub('["\']$', '')
-            if path:find('\\') then -- a namespaced class: PSR-ish suffix
-                local suffix, hit = path:gsub('\\', '/') .. '.php', nil
-                for f in pairs(files) do
-                    if f == suffix or f:sub(-#suffix - 1) == '/' .. suffix then
-                        if hit then return nil end
-                        hit = f
+            if path:find('\\') then
+                -- a namespaced class. PSR-4 roots REMAP prefixes (composer:
+                -- BitBag\OpenMarketplace\ -> src/), so the namespace path
+                -- need not mirror the file path from its root — try
+                -- progressively SHORTER suffixes, longest first; a match
+                -- counts only while unique, ambiguity refuses, as ever
+                local idx = PHP_BASENAMES[files]
+                if not idx then
+                    idx = {}
+                    for f in pairs(files) do
+                        local b = f:match('([^/]+)$')
+                        local l = idx[b]
+                        if l then l[#l + 1] = f else idx[b] = { f } end
                     end
+                    PHP_BASENAMES[files] = idx
                 end
-                return hit
+                local segs = {}
+                for s in path:gmatch('[^\\]+') do segs[#segs + 1] = s end
+                local cands = idx[segs[#segs] .. '.php']
+                if not cands then return nil end
+                for i = 1, #segs do
+                    local suffix, hit = table.concat(segs, '/', i) .. '.php', nil
+                    for _, f in ipairs(cands) do
+                        if f == suffix or f:sub(-#suffix - 1) == '/' .. suffix then
+                            if hit then return nil end -- ambiguous: refuse
+                            hit = f
+                        end
+                    end
+                    if hit then return hit end
+                end
+                return nil
             end
             local dir = from:match('^(.*)/[^/]*$')
             for _, cand in ipairs({ dir and (dir .. '/' .. path) or path, path }) do
@@ -1886,6 +1952,17 @@ function M.extract(root, opts)
                 if calln and namen
                     and not (spec.call_skip or {})[node_text(namen, src)] then
                     local full = node_text(namen, src):gsub('%s+', '')
+                    -- method-ness reads the SOURCE text: a receiver-aware
+                    -- rewrite below must not shift the implicit-self arg
+                    local method = full:find(':') ~= nil
+                    -- receiver-aware qualification: a $this->/self:: call
+                    -- names a method of the ENCLOSING class, so the spec
+                    -- may rewrite the resolution key to Class::name —
+                    -- exact match beats every tail fallback; inheritance
+                    -- still falls through to tails
+                    if spec.qualify_call then
+                        full = spec.qualify_call(calln, full, src) or full
+                    end
                     -- the inventory names the VERB (lint configs match on it);
                     -- the full expression text drives resolution. A dynamic
                     -- callee keeps its sigil: `→ $op` says what it is
@@ -1893,7 +1970,6 @@ function M.extract(root, opts)
                         and spec.dynamic_callee_types[namen:type()] or nil
                     local callee = dynamic and full
                         or full:match('([%w_]+)$') or full
-                    local method = full:find(':') ~= nil
                     local sp = pos_of(calln)
                     local encl = in_function(calln, spec)
                     local is_top = encl == nil
@@ -2497,6 +2573,9 @@ function M.relink(data, touched)
             end
             if target then
                 c.to = target.id
+                -- the ~ mark is part of the resolution, not decoration:
+                -- a relinked call must carry the same honesty as extract's
+                c.inferred = inferred or nil
                 if c.dynamic then c.dynamic = nil end -- pinned by the trace
                 n = n + 1
                 if touched then touched[c.file] = true end
