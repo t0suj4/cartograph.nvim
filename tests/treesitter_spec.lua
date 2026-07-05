@@ -1165,6 +1165,43 @@ test('python: class-qualified methods, stdlib gate, decorator cbarg', function (
     end
 end)
 
+test('java: class-qualified, annotation cbarg, public exported', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('java') then skip 'no java parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/javaproj')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    ok(byname['PetController.listPets'], 'class-qualified method')
+    -- @GetMapping("/pets") registers the handler: cbarg, not dead
+    ok(byname['PetController.listPets'].cbarg, 'annotation with args = registered')
+    ok(not byname['PetController.render'].cbarg, 'plain method not cbarg')
+    ok(byname['VisitService.count'].exported, 'public = exported')
+    ok(not byname['PetController.render'].exported, 'private not exported')
+    -- listPets -> render (same class) and -> VisitService.count (dotted)
+    local hits = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname['PetController.listPets'].id then
+            hits[(store.node(e.to) or {}).name] = true
+        end
+    end
+    ok(hits['PetController.render'], 'listPets -> render')
+    ok(hits['VisitService.count'], 'listPets -> count (cross-class dotted)')
+    -- constructor call: new VisitService() -> VisitService.VisitService
+    ok(byname['VisitService.VisitService'] == nil
+        or byname['VisitService.VisitService'].kind == 'method', 'ctor shape ok')
+    -- import resolves through the maven-layout suffix
+    ok(vim.tbl_contains(
+        store.imports_out['src/main/java/app/PetController.java'] or {},
+        'src/main/java/app/VisitService.java'), 'import resolved')
+    -- dead: only the genuinely dead private method
+    local dead = require('cartograph.lint').run(store,
+        { only = { ['dead-function'] = true } })
+    eq(1, #dead)
+    ok(dead[1].message:match('neverCalled'), dead[1].message)
+end)
+
 test('go: receiver-qualified methods, package scope, init entry, caps', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

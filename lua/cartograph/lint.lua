@@ -11,8 +11,8 @@
 local M = {}
 
 local function exported(n)
-    return n.exported == true or n.kind == 'method'
-        or (n.name and n.name:find('%.') ~= nil)
+    if n.exported ~= nil then return n.exported end -- provider's verdict
+    return n.kind == 'method' or (n.name and n.name:find('%.') ~= nil)
 end
 
 -- metamethods (__index, __call, __newindex, …) are invoked via the metatable,

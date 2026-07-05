@@ -433,6 +433,95 @@ M.spec = {
             end
         end,
     },
+    java = {
+        exts = { 'java' },
+        functions = [=[
+            (method_declaration name: (identifier) @name) @def
+            (constructor_declaration name: (identifier) @name) @def
+        ]=],
+        calls = [=[
+            (method_invocation name: (identifier) @name) @call
+            (object_creation_expression type: (type_identifier) @name) @call
+        ]=],
+        vars = [=[
+            (field_declaration declarator: (variable_declarator
+                name: (identifier) @name value: (_) @value)) @def
+        ]=],
+        params_field = 'parameters',
+        body_field = 'body',
+        is_method = function () return true end,
+        -- methods carry their class: OwnerController.processFindForm
+        qualify = function (name, defn, src)
+            local p = defn:parent()
+            while p do
+                local t = p:type()
+                if t == 'class_declaration' or t == 'interface_declaration'
+                    or t == 'enum_declaration' or t == 'record_declaration' then
+                    local cn = p:field('name')[1]
+                    return cn and (vim.treesitter.get_node_text(cn, src)
+                        .. '.' .. name) or name
+                end
+                p = p:parent()
+            end
+            return name
+        end,
+        entry_names = { main = true },
+        -- an ANNOTATION WITH ARGUMENTS passes the method into a framework
+        -- (@RequestMapping("/x"), @Scheduled(...)): registered, not dead —
+        -- marker annotations (@Override) wrap without registering
+        cbarg_def = function (defn, _)
+            local mods = defn:child(0)
+            if mods and mods:type() == 'modifiers' then
+                for c in mods:iter_children() do
+                    if c:type() == 'annotation' then return true end
+                end
+            end
+            return false
+        end,
+        exported_def = function (defn, src)
+            local mods = defn:child(0)
+            if mods and mods:type() == 'modifiers' then
+                return vim.treesitter.get_node_text(mods, src)
+                    :find('public') ~= nil
+            end
+            return false
+        end,
+        -- the package (directory) scopes bare calls; qualified crosses
+        scope = function (file, _)
+            return file:match('^(.*)/[^/]*$') or ''
+        end,
+        id_fn_refs = false,
+        stdlib_names = { get = true, set = true, add = true, size = true,
+            isEmpty = true, toString = true, equals = true, hashCode = true,
+            valueOf = true, of = true, build = true, builder = true,
+            stream = true, collect = true, map = true, filter = true,
+            forEach = true, format = true, println = true, append = true,
+            put = true, remove = true, contains = true, length = true,
+            charAt = true, substring = true, split = true, trim = true,
+            parse = true, close = true, run = true, apply = true,
+            accept = true, test = true, compare = true, next = true,
+            iterator = true, getName = true, getId = true, getValue = true,
+            setValue = true, orElse = true, orElseThrow = true },
+        stdlib_prefixes = { 'System.', 'String.', 'Objects.', 'List.',
+            'Map.', 'Set.', 'Collections.', 'Arrays.', 'Optional.',
+            'Stream.', 'Integer.', 'Long.', 'Math.', 'Files.', 'Paths.' },
+        import_query = [=[ (import_declaration (scoped_identifier) @path) ]=],
+        resolve_import = function (path, files, _)
+            -- com.example.pkg.Class -> the in-repo suffix .../pkg/Class.java
+            local segs = {}
+            for seg in path:gmatch('[%w_]+') do segs[#segs + 1] = seg end
+            for i = 1, #segs do
+                local cand = table.concat(segs, '/', i) .. '.java'
+                if files[cand] then return cand end
+                -- maven layout: the suffix sits under some src root the
+                -- rel path includes; try the common prefix
+                for _, pre in ipairs({ 'src/main/java/', 'src/test/java/' }) do
+                    if files[pre .. cand] then return pre .. cand end
+                end
+            end
+            return nil
+        end,
+    },
     go = {
         exts = { 'go' },
         functions = [=[
@@ -1411,6 +1500,13 @@ function M.extract(root, opts)
                     local method = spec.is_method(name, defn)
                     local id = ('%s::%s@%d'):format(file, name, sp.start.line)
                     local params = fn_params(defn, spec, src, method and lang == 'lua')
+                    -- tri-state visibility: true/false = the provider's
+                    -- verdict (lint trusts it over kind heuristics);
+                    -- nil = this language has no visibility concept
+                    local exp
+                    if spec.exported_def then
+                        exp = spec.exported_def(defn, src) == true
+                    end
                     local isfield = spec.field_fn_cbarg
                         and namen:parent() and namen:parent():type() == 'field'
                     if spec.cbarg_within and not isfield then
@@ -1438,8 +1534,7 @@ function M.extract(root, opts)
                         kind = method and 'method' or 'function', file = file,
                         range = sp, order = sp.start.line, params = params,
                         cbarg = isfield or nil,
-                        exported = (spec.exported_def
-                            and spec.exported_def(defn, src)) or nil,
+                        exported = exp,
                         entry = (spec.entry_names or {})[name] or nil,
                         df = (spec.dataflow or dataflow)(defn, spec, src, params) }
                     lastFn[file] = nodes[#nodes]
