@@ -824,10 +824,18 @@ local function render_fn(ctx, id)
     end
     local df = node.df
     if not df then
-        ctx.lines[3] = node.unparsed
-            and '  (unparsed source — landed by text search)'
-            or '  (no data-flow info)'
-        ctx.marks[3] = { { 0, -1, 'CartographDim' } }
+        if node.unparsed then
+            ctx.lines[3] = '  (unparsed source — landed by text search)'
+            ctx.marks[3] = { { 0, -1, 'CartographDim' } }
+        else
+            -- no statement-level dataflow (e.g. scheme): descend into the
+            -- body's nested forms, derived on demand from the source
+            ctx.lines[3] = '▸ body (nested forms)'
+            ctx.marks[3] = { { 0, -1, 'CartographSection' } }
+            local r = node.range
+            ctx.line_body[3] = ('%s\31%d\31%d\31%d\31%d'):format(id,
+                r.start.line, r.start.char, r['end'].line, r['end'].char)
+        end
         return
     end
     ctx.lines[3] = ('inputs: %s'):format(#df.inputs > 0 and table.concat(df.inputs, ', ') or '(none)')
@@ -910,13 +918,70 @@ local function render_fn(ctx, id)
     end
 end
 
+-- Inside a compound statement / form: its immediate nested forms, one level
+-- down (an if's branches, a nested scheme call's arguments). Derived ON DEMAND
+-- from the source (treesitter.forms) — nothing is stored in the graph. A form
+-- that has its OWN nested forms (▸) descends deeper; a leaf call descends into
+-- the callee. key = fnid \31 sr \31 sc \31 er \31 ec (er<0 = position mode).
+local function render_body(ctx, key)
+    local fnid, srs, scs, ers, ecs =
+        (key or ''):match('^(.-)\31(%-?%d+)\31(%-?%d+)\31(%-?%d+)\31(%-?%d+)$')
+    local node = fnid and store.node(fnid)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    local sr, sc, er, ec = tonumber(srs), tonumber(scs), tonumber(ers), tonumber(ecs)
+    ctx.lines[1] = ('≡ %s'):format(node.name or '?')
+    ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
+    local ts = require 'cartograph.providers.treesitter'
+    local file = store.abspath(node)
+    local forms = (er and er >= 0) and ts.forms(file, sr, sc, er, ec)
+        or ts.forms(file, sr, sc)
+    if #forms == 0 then
+        ctx.lines[2] = '  (no nested forms)'
+        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        return
+    end
+    local calls = store.calls_by_fn[fnid] or {}
+    -- the earliest call whose head token lies within a form = the form's call
+    local function primary(f)
+        local best
+        for _, c in ipairs(calls) do
+            local at = c.at and c.at.start
+            if at and (at.line > f.sr or (at.line == f.sr and at.char >= f.sc))
+                and (at.line < f.er or (at.line == f.er and at.char < f.ec)) then
+                if not best or at.line < best.at.start.line
+                    or (at.line == best.at.start.line and at.char < best.at.start.char) then
+                    best = c
+                end
+            end
+        end
+        return best
+    end
+    for _, f in ipairs(forms) do
+        ctx.lines[#ctx.lines + 1] = (f.branch and '  ▸ ' or '    ') .. f.text
+        ctx.vnums[#ctx.lines] = tostring(f.sr + 1)
+        ctx.line_stmt[#ctx.lines] = f.sr + 1 -- source preview/highlight anchor
+        if f.branch then
+            ctx.line_body[#ctx.lines] =
+                ('%s\31%d\31%d\31%d\31%d'):format(fnid, f.sr, f.sc, f.er, f.ec)
+            ctx.marks[#ctx.lines] = { { 0, 4, 'CartographSection' } }
+        else
+            local c = primary(f)
+            if c then
+                ctx.line_calls[#ctx.lines] = { c }
+                ctx.marks[#ctx.lines] = { { 0, -1,
+                    c.to and 'CartographTitle' or 'CartographDim' } }
+            end
+        end
+    end
+end
+
 function M.render()
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
-        line_regfor = {} }
+        line_regfor = {}, line_body = {} }
     local v = M.view
     if v.level == 'files' then
         if M.files_mode == 'tree' then
@@ -935,6 +1000,7 @@ function M.render()
     elseif v.level == 'lit' then render_lit(ctx, v.lit)
     elseif v.level == 'states' then render_states(ctx)
     elseif v.level == 'state' then render_state(ctx, v.state)
+    elseif v.level == 'body' then render_body(ctx, v.body)
     elseif v.level == 'ws' then render_ws(ctx)
     else render_fn(ctx, v.fn) end
 
@@ -944,7 +1010,7 @@ function M.render()
     M.line_callers, M.line_vars = ctx.line_callers, ctx.line_vars
     M.line_group, M.line_sep, M.line_state = ctx.line_group, ctx.line_sep, ctx.line_state
     M.line_trans, M.line_lit = ctx.line_trans, ctx.line_lit
-    M.line_regfor = ctx.line_regfor
+    M.line_regfor, M.line_body = ctx.line_regfor, ctx.line_body
 
     -- names come from arbitrary source text; a row must stay one row
     for i, l in ipairs(ctx.lines) do
@@ -988,6 +1054,7 @@ function M.show(level, ctx_val)
         elseif level == 'regfor' then M.view.regfor = ctx_val
         elseif level == 'occs' then M.view.occs = ctx_val
         elseif level == 'lit' then M.view.lit = ctx_val
+        elseif level == 'body' then M.view.body = ctx_val
         elseif level == 'state' then M.view.state = ctx_val end
     end
     M.render()
@@ -995,7 +1062,7 @@ function M.show(level, ctx_val)
         local first = 1
         for row = 1, vim.api.nvim_buf_line_count(M.buf) do
             if M.line_node[row] or M.line_stmt[row] or M.line_site[row] or M.line_state[row]
-                or M.line_lit[row]
+                or M.line_lit[row] or M.line_body[row]
                 or (level == 'files' and M.line_file[row]) then
                 first = row
                 break
@@ -1232,9 +1299,11 @@ function M.attach(win)
                     local e = M.line_lit[r]
                     local v = store.node((M.view.lit or ''):match('^[^\31]*'))
                     if e and e.needle and v then var_context(v, e.needle) end
-                elseif M.view.level == 'fn' then
+                elseif M.view.level == 'fn' or M.view.level == 'body' then
                     local l = M.line_stmt[r]
-                    local n = store.node(M.view.fn)
+                    local fnid = M.view.level == 'fn' and M.view.fn
+                        or (M.view.body or ''):match('^(.-)\31')
+                    local n = fnid and store.node(fnid)
                     if l and n then
                         store.set_highlight({ file = n.file, ranges = {
                             { start = { line = l - 1, char = 0 }, ['end'] = { line = l, char = 0 } } } })
@@ -1242,12 +1311,19 @@ function M.attach(win)
                 elseif M.view.level == 'var' or M.view.level == 'callers'
                     or M.view.level == 'occs' then
                     if M.line_sep[r] then return end -- chrome: keep the preview
-                    -- hover a site -> preview it highlighted; a group row ->
-                    -- preview the whole function
+                    -- hover a site -> preview it highlighted; a group row (a
+                    -- function that uses the entity several times) -> preview
+                    -- that function with EVERY occurrence highlighted at once
                     local s = M.line_site[r]
                     local g = M.line_group[r]
                     if s then store.set_context({ node = s.fn, ranges = { s.range } })
-                    elseif g then store.set_context({ node = g.fn })
+                    elseif g then
+                        local ranges = {}
+                        for _, st in ipairs(g.sites or {}) do
+                            if st.range then ranges[#ranges + 1] = st.range end
+                        end
+                        store.set_context({ node = g.fn,
+                            ranges = #ranges > 0 and ranges or nil })
                     else store.set_context(nil) end
                 end
             end, 60)
@@ -1270,11 +1346,20 @@ function M.attach(win)
     local function view_loc()
         return { level = M.view.level, file = M.view.file, fn = M.view.fn,
             block = M.view.block, var = M.view.var, callers = M.view.callers,
+            body = M.view.body,
             tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
             refused = M.view.refused, regfor = M.view.regfor,
             files_mode = M.files_mode,
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
+    end
+    -- the node a view is anchored on (whose def the source pane should show)
+    local function view_anchor()
+        return (M.view.level == 'fn' and M.view.fn)
+            or (M.view.level == 'body' and (M.view.body or ''):match('^(.-)\31'))
+            or (M.view.level == 'block' and M.view.block)
+            or (M.view.level == 'tbl' and M.view.tbl)
+            or (M.view.level == 'var' and M.view.var)
     end
     -- keep the source pane in step with the browser: after a move lands on a
     -- node-anchored view, focus that node so the def pane shows it instead of
@@ -1282,24 +1367,23 @@ function M.attach(win)
     -- guard stops the focus subscriber from clearing the h/l trails or
     -- re-showing the view we just set to it.
     function sync_focus_to_view()
-        local id = (M.view.level == 'fn' and M.view.fn)
-            or (M.view.level == 'block' and M.view.block)
-            or (M.view.level == 'tbl' and M.view.tbl)
-            or (M.view.level == 'var' and M.view.var)
+        local id = view_anchor()
         if id and store.node(id) and id ~= store.focused then
             M._own_pivot = true
             store.set_focus(id)
             M._own_pivot = false
         end
     end
-    -- called after an ASCENT lands (h). By default DEFER the sync: leave the
-    -- source pane showing the body we came from (a cheap "peek up") and arm a
-    -- resync for the first cursor move off the landing row — that j/k commits
-    -- the pane to the view we ascended to. config.sync_on_ascend = true syncs
-    -- at once instead. Reads the current cursor row, so call it AFTER the
-    -- landing cursor is placed.
+    -- called after an ASCENT lands (h). The peek (deferred sync) only earns its
+    -- keep when the ascent swaps the def pane to a DIFFERENT location — backing
+    -- out of a descended callee, where keeping the callee on screen helps.
+    -- SAME location -> sync at once: a block/body ascent never leaves its own
+    -- function, and landing already on the focused node changes nothing. So
+    -- deferral is the exception, not the rule.
     local function arm_or_sync()
-        if config.sync_on_ascend then
+        local same_location = M.view.level == 'body'
+            or view_anchor() == store.focused
+        if config.sync_on_ascend or same_location then
             M._resync = nil
             sync_focus_to_view()
         else
@@ -1316,7 +1400,7 @@ function M.attach(win)
             loc.file, loc.fn, loc.block, loc.var, loc.callers
         M.view.tbl, M.view.occs, M.view.state = loc.tbl, loc.occs, loc.state
         M.view.lit, M.view.refused = loc.lit, loc.refused
-        M.view.regfor = loc.regfor
+        M.view.regfor, M.view.body = loc.regfor, loc.body
         if loc.level == 'refused' then M._refused_call = refused_call_of(loc.refused) end
         M.show(loc.level)
         if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
@@ -1444,6 +1528,17 @@ function M.attach(win)
     local function descend_fn_row(r)
         local node = store.node(M.view.fn)
         if not node then return end
+        -- 0. a COMPOUND statement (if/for/while/nested form) opens its BLOCK.
+        -- Its row is a flattened def/use/callee summary where names aren't at
+        -- their source positions, so a word under the cursor would descend
+        -- into whatever callee it happens to spell (bnw: the first `if` landed
+        -- in launch_platform_info). Reveal the structure instead.
+        local sl = M.line_stmt[r]
+        if sl and #require('cartograph.providers.treesitter')
+            .forms(store.abspath(node), sl - 1) > 0 then
+            return enter('body',
+                ('%s\31%d\31%d\31%d\31%d'):format(node.id, sl - 1, 0, -1, -1))
+        end
         local col  = vim.api.nvim_win_get_cursor(win)[2]
         local text = vim.api.nvim_buf_get_lines(M.buf, r - 1, r, false)[1] or ''
         local word = word_at(text, col)
@@ -1629,7 +1724,24 @@ function M.attach(win)
             if M.line_regfor[r] then
                 return enter('regfor', M.line_regfor[r], nil)
             end
+            if M.line_body[r] then return enter('body', M.line_body[r]) end
             descend_fn_row(r)
+        elseif M.view.level == 'body' then
+            -- a ▸ form opens its own nested forms; a leaf call enters its callee
+            if M.line_body[r] then return enter('body', M.line_body[r]) end
+            for _, c in ipairs(M.line_calls[r] or {}) do
+                if c.to and store.node(c.to) then
+                    store.set_context(nil); return enter('fn', c.to, c.to)
+                end
+            end
+            for _, c in ipairs(M.line_calls[r] or {}) do
+                if not c.to and c.refused and c.refused.cands
+                    and #c.refused.cands > 0 then
+                    M._refused_call = c
+                    return enter('refused',
+                        ('%s\31%d\31%s'):format(c.fn or '', c.line, c.callee))
+                end
+            end
         elseif M.view.level == 'regfor' then
             -- a registrant row: open its module at the reference site
             local f = M.line_file[r]
@@ -1782,6 +1894,12 @@ function M.attach(win)
             -- registrations hang below the registered fn: surface there
             store.set_context(nil)
             if store.node(M.view.regfor) then M.show('fn', M.view.regfor)
+            else M.show('files') end
+        elseif M.view.level == 'body' then
+            -- a body descent hangs below its function: surface back to it
+            store.set_context(nil); store.set_highlight(nil)
+            local fnid = (M.view.body or ''):match('^(.-)\31')
+            if fnid and store.node(fnid) then M.show('fn', fnid)
             else M.show('files') end
         elseif M.view.level == 'fn' or M.view.level == 'block'
             or M.view.level == 'tbl' then

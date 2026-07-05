@@ -189,6 +189,111 @@ test('nav: sync_on_ascend = true resyncs the source pane immediately', function 
     vim.cmd('tabclose')
 end)
 
+test('nav: descend a compound statement into its inner forms (body view)', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\nfunction M.f(x)\n  if x then\n    M.g(x)\n    M.h(x)\n  end\nend\n'
+        .. 'function M.g(x) return x end\nfunction M.h(x) return x end\nreturn M\n')
+    fd:close()
+    local data = ts.extract(root)
+    store.ingest(data)
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+
+    local f
+    for _, n in ipairs(data.nodes) do if n.name == 'M.f' then f = n end end
+    store.pivot(f.id); symbols.show('fn', f.id)
+
+    -- the fn view collapses the whole `if` onto one statement row; descend it
+    local cb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.descend then cb = m.callback end
+    end
+    -- land on the (only) statement row, cursor ON a callee name in its
+    -- flattened summary (bnw regression: that word must NOT be followed —
+    -- the compound statement opens its block regardless of the word)
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_stmt[r] then
+            local text = vim.api.nvim_buf_get_lines(symbols.buf, r - 1, r, false)[1]
+            local col = text:find('%f[%w]g%f[%W]') -- a callee token in the row
+            pcall(vim.api.nvim_win_set_cursor, wsym, { r, (col or 5) - 1 })
+            break
+        end
+    end
+    cb()
+    eq('body', symbols.view.level) -- opened the block, did NOT dive into `g`
+    -- the inner calls are now their own rows (callees resolve by tail name)
+    local seen = {}
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local cs = symbols.line_calls[r]
+        if cs and cs[1] then seen[cs[1].callee] = true end
+    end
+    ok(seen['g'] and seen['h'], 'the if-body calls became descendable rows')
+
+    -- descend a leaf call row -> into that function
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local cs = symbols.line_calls[r]
+        if cs and cs[1] and cs[1].callee == 'g' and cs[1].to then
+            pcall(vim.api.nvim_win_set_cursor, wsym, { r, 0 }); cb(); break
+        end
+    end
+    eq('fn', symbols.view.level)
+    eq('M.g', store.node(symbols.view.fn).name)
+
+    -- ascend back into the block: a block ascent stays in the SAME location,
+    -- so it re-syncs the def pane IMMEDIATELY — no peek (which used to strand
+    -- the pane on the callee while browsing the block)
+    local acb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.ascend then acb = m.callback end
+    end
+    acb()
+    eq('body', symbols.view.level)
+    eq('M.f', store.node(store.focused).name) -- focus back to the block's fn at once
+    ok(symbols._resync == nil, 'no deferred peek armed for a block ascent')
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('nav: hovering a caller with several call sites highlights them all', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    -- caller calls helper TWICE (two occurrence ranges on one ref edge)
+    graph({ node('helper', 'helper', 'm.lua', 1, 3), node('caller', 'caller', 'm.lua', 5, 10) },
+        { { from = 'caller', to = 'helper', kind = 'ref', at = {
+            { start = { line = 6, char = 4 }, ['end'] = { line = 6, char = 10 } },
+            { start = { line = 8, char = 4 }, ['end'] = { line = 8, char = 10 } } } } })
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+
+    symbols.show('callers', 'helper')
+    local gr
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_group[r] then gr = r end
+    end
+    ok(gr, 'the caller folds into a group row (2 sites)')
+    vim.api.nvim_set_current_win(wsym)
+    pcall(vim.api.nvim_win_set_cursor, wsym, { gr, 2 })
+    vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
+    vim.wait(150)
+    eq(2, #(store.context and store.context.ranges or {})) -- every occurrence
+    eq('caller', store.node(store.context.node).name)
+
+    vim.cmd('tabclose')
+end)
+
 -- ── <C-]> jump resolution ───────────────────────────────────────────────────
 
 local function occ(l, c1, c2)

@@ -1777,6 +1777,133 @@ function M.import_pats(file)
     return spec and spec.import_pats or nil
 end
 
+-- ── body-descent (browser) ────────────────────────────────────────────────
+-- The block/scope nodes whose named children ARE statements (imperative
+-- langs), and the clause wrappers a block hides behind (else/elif/case…).
+-- Used to walk ONE level of nesting into a compound statement.
+local SUBSTMT_BLOCKS = {
+    block = true, compound_statement = true, statement_block = true,
+    suite = true, do_block = true, declaration_list = true,
+    field_declaration_list = true, class_body = true, switch_body = true,
+}
+local SUBSTMT_CLAUSES = {
+    else_statement = true, elseif_statement = true, else_clause = true,
+    elif_clause = true, elseif_clause = true, catch_clause = true,
+    finally_clause = true, ['then'] = true, do_statement = true,
+    case_statement = true, switch_case = true, when_entry = true,
+}
+-- lisp: nesting is child LIST forms, not blocks
+local LISP_LANGS = { scheme = true, commonlisp = true, clojure = true, fennel = true, janet = true }
+-- top-of-file containers whose named children are statements (position mode)
+local ROOT_TYPES = { chunk = true, program = true, source_file = true,
+    translation_unit = true, module = true, block = true, ['end'] = true }
+
+-- immediate sub-forms of `node`: nested statements (through block/clause
+-- wrappers) for imperative langs; child list forms for lisp (the head symbol
+-- and, for a def/lambda, the signature list are not sub-forms).
+local function child_forms(node, lisp)
+    local out = {}
+    if lisp then
+        -- every child list is a nested form (the caller drops the signature
+        -- list of a def/lambda); bare symbols/atoms are leaves, not forms
+        for c in node:iter_children() do
+            if c:named() and c:type() == 'list' then out[#out + 1] = c end
+        end
+        return out
+    end
+    local function scan(n)
+        for c in n:iter_children() do
+            if c:named() and c:type() ~= 'comment' then
+                local t = c:type()
+                if SUBSTMT_BLOCKS[t] then
+                    for g in c:iter_children() do
+                        if g:named() and g:type() ~= 'comment' then out[#out + 1] = g end
+                    end
+                elseif SUBSTMT_CLAUSES[t] then
+                    scan(c)
+                end
+            end
+        end
+    end
+    scan(node)
+    return out
+end
+
+--- Immediate sub-forms of a form in `file`, for the browser's block descent.
+--- Two modes:
+---   * EXACT node — pass the full range (sr,sc,er,ec) of a known node (a
+---     function's body, or a sub-form returned by a previous call).
+---   * POSITION — pass only (sr,sc): the enclosing STATEMENT at that point
+---     (walking up but stopping before its block), e.g. a df row's line.
+--- Returns a list of { sr, sc, er, ec (0-based, ec exclusive), text, branch },
+--- branch = true when that sub-form has its own sub-forms (descend again).
+--- Recomputed on demand — nothing is cached in the graph.
+function M.forms(file, sr, sc, er, ec)
+    local lang, spec = elang_for(file)
+    if not (lang and spec) then return {} end
+    local fd = io.open(file, 'r')
+    if not fd then return {} end
+    local src = fd:read('a'); fd:close()
+    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    if not ok then return {} end
+    local tree = parser:parse()[1]
+    if not tree then return {} end
+    local root = tree:root()
+    local lisp = LISP_LANGS[lang] or false
+
+    local n
+    if er then
+        -- exact node spanning the given range (ec exclusive -> inclusive probe)
+        n = root:named_descendant_for_range(sr, sc, er, math.max(sc, ec - 1))
+    else
+        -- position mode: the statement that STARTS on row `sr` — the child of
+        -- a block/root that begins there (indentation-agnostic; col ignored)
+        local function find_stmt(node)
+            local container = SUBSTMT_BLOCKS[node:type()] or ROOT_TYPES[node:type()]
+            for c in node:iter_children() do
+                if c:named() and c:type() ~= 'comment' then
+                    local csr, _, cer = c:range()
+                    if container and csr == sr then return c end
+                    if sr >= csr and sr <= cer then
+                        local f = find_stmt(c)
+                        if f then return f end
+                    end
+                end
+            end
+        end
+        n = find_stmt(root)
+    end
+    if not n then return {} end
+
+    -- a lisp def/lambda/let: the first list child is the signature/bindings,
+    -- not a body form
+    local drop_first_list = false
+    if lisp then
+        local head = n:named_child(0)
+        if head and head:type() == 'symbol' then
+            local h = node_text(head, src)
+            if h:match('^define') or h:match('^lambda') or h:match('^let')
+                or h == 'named-lambda' then
+                drop_first_list = true
+            end
+        end
+    end
+
+    local subs = child_forms(n, lisp)
+    if lisp and drop_first_list and subs[1] then table.remove(subs, 1) end
+
+    local out = {}
+    for _, s in ipairs(subs) do
+        local ssr, ssc, ser, sec = s:range()
+        -- the form's OWN text (first line), so several forms sharing a source
+        -- line read distinctly; whitespace collapsed, truncated
+        local text = node_text(s, src):gsub('%s+', ' '):gsub('^%s*', ''):sub(1, 80)
+        out[#out + 1] = { sr = ssr, sc = ssc, er = ser, ec = sec, text = text,
+            branch = #child_forms(s, lisp) > 0 }
+    end
+    return out
+end
+
 -- parse a container file and return its host-language trees in
 -- DETERMINISTIC position order (the LanguageTree child table has no
 -- stable iteration order; worker output must equal inline output).

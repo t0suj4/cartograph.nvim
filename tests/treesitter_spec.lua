@@ -153,6 +153,45 @@ test('treesitter: lua blocks, litdata and require edges', function ()
     end
 end)
 
+test('forms: one level of nested statements / forms, on demand', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    -- lua: the if_statement's then/else bodies are its sub-forms (position mode)
+    put('m.lua', 'function f(x)\n  if x then\n    g(x)\n    h(x)\n  else\n    k()\n  end\nend\n')
+    local subs = ts.forms(root .. '/m.lua', 1) -- row 1 (0-based) = the `if`
+    local texts = {}
+    for _, s in ipairs(subs) do texts[#texts + 1] = s.text end
+    eq({ 'g(x)', 'h(x)', 'k()' }, texts)
+    ok(not subs[1].branch, 'a bare call is a leaf, not a branch')
+
+    -- a nested if is itself a branch (descendable again)
+    put('n.lua', 'function f(x)\n  if x then\n    if y then\n      g()\n    end\n  end\nend\n')
+    local s2 = ts.forms(root .. '/n.lua', 1)
+    eq(1, #s2)
+    ok(s2[1].branch, 'the nested if is a branch')
+    eq({ 'g()' }, (function () local t = {}
+        for _, s in ipairs(ts.forms(root .. '/n.lua', s2[1].sr, s2[1].sc, s2[1].er, s2[1].ec)) do
+            t[#t + 1] = s.text end return t end)())
+
+    if has_parser('scheme') then
+        -- scheme: a define's body is its forms (minus the signature list);
+        -- a call form's arguments that are themselves lists are sub-forms
+        put('a.scm', '(define (f x)\n  (when (> x 0)\n    (bar x)\n    (baz x)))\n')
+        local def = ts.forms(root .. '/a.scm', 0, 0, 3, 20) -- exact: the define
+        eq(1, #def)                       -- just the (when ...) body form
+        ok(def[1].branch, 'the when-form is descendable')
+        local body = ts.forms(root .. '/a.scm', def[1].sr, def[1].sc, def[1].er, def[1].ec)
+        local names = {}
+        for _, s in ipairs(body) do names[#names + 1] = s.text end
+        eq({ '(> x 0)', '(bar x)', '(baz x)' }, names)
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('treesitter: haskell — equations merge, where stays interior, imports', function ()
     -- the parser lives in nvim-treesitter's dir; tests run with bare rtp
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
