@@ -1864,6 +1864,16 @@ test('mcp provider: a server tool that returns the schema is a provider', functi
     ok(not d2 and e2:match('no such tool'), tostring(e2))
 end)
 
+test('mcp hygiene: a failed spawn errors cleanly and leaks no client', function ()
+    local mcp = require 'cartograph.mcp'
+    -- a nonexistent binary: spawn fails, the pipes we made are closed, and
+    -- connect returns an honest error instead of a half-open client
+    local c, err = mcp.connect({ cmd = { '/nonexistent/cartograph-mcp-xyz' } })
+    ok(not c, 'no client from a failed spawn')
+    ok(err and err:match('spawn failed'), tostring(err))
+    ok(next(mcp._live) == nil, 'a failed connect registers no live client')
+end)
+
 test('transport substrate: DB tables cache, warm opens re-scan only the diff', function ()
     if vim.fn.executable('luajit') == 0 then skip 'no luajit' end
     local cache = require 'cartograph.cache'

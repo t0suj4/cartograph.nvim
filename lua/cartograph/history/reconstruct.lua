@@ -13,7 +13,9 @@ local ledger = require 'cartograph.history.ledger'
 local M = {}
 
 local function sh(cmd)
-    local r = vim.system(cmd, { text = true }):wait()
+    -- bounded: :wait(timeout) kills the process on expiry and returns a
+    -- non-zero code, so a hung git can never block nvim indefinitely
+    local r = vim.system(cmd, { text = true }):wait(30000)
     if r.code ~= 0 then
         error(('command failed (%d): %s\n%s'):format(r.code, table.concat(cmd, ' '), r.stderr or ''))
     end

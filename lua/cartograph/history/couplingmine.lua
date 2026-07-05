@@ -9,7 +9,10 @@ local reconstruct = require 'cartograph.history.reconstruct'
 local M = {}
 
 local function sh(cmd)
-    local r = vim.system(cmd, { text = true }):wait()
+    -- bounded (kills on expiry); a failed or timed-out git degrades to an
+    -- empty result rather than blocking or erroring the coupling analysis
+    local r = vim.system(cmd, { text = true }):wait(30000)
+    if r.code ~= 0 then return '' end
     return r.stdout or ''
 end
 

@@ -10,6 +10,22 @@ local M = {}
 local Client = {}
 Client.__index = Client
 
+-- live clients, so nvim quitting never orphans a spawned MCP server
+-- (libuv does NOT kill children when the parent exits). Registered on a
+-- successful connect, cleared on close.
+M._live = {}
+local leave_hook = false
+local function ensure_leave_hook()
+    if leave_hook then return end
+    leave_hook = true
+    vim.api.nvim_create_autocmd('VimLeavePre', {
+        desc = 'cartograph: close live MCP servers',
+        callback = function ()
+            for c in pairs(M._live) do pcall(function () c:close() end) end
+        end,
+    })
+end
+
 --- Spawn and initialize an MCP server. opts = { cmd = {argv...}, env? }.
 --- Returns client or nil, err.
 function M.connect(opts)
@@ -33,9 +49,13 @@ function M.connect(opts)
         self.alive = false
     end)
     if not handle then
+        -- spawn failed: the pipes we already created must be closed
+        for _, p in ipairs({ stdin, stdout, stderr }) do
+            pcall(function () p:close() end)
+        end
         return nil, ('spawn failed: %s (%s)'):format(tostring(spawn_err), path)
     end
-    self.handle, self.stdin = handle, stdin
+    self.handle, self.stdin, self.stdout, self.stderr = handle, stdin, stdout, stderr
     self.alive = true
     stdout:read_start(function (err, chunk)
         if err or not chunk then return end
@@ -64,6 +84,8 @@ function M.connect(opts)
     end
     self.server = init.serverInfo
     self:notify('notifications/initialized', vim.empty_dict())
+    ensure_leave_hook()
+    M._live[self] = true
     return self
 end
 
@@ -127,9 +149,14 @@ end
 
 function Client:close()
     self.alive = false
+    M._live[self] = nil
     if self.handle and not self.handle:is_closing() then
-        pcall(function () self.stdin:close() end)
         pcall(function () self.handle:kill('sigterm') end)
+        pcall(function () self.handle:close() end)
+    end
+    -- close every pipe (not just stdin): each is a libuv handle to free
+    for _, p in ipairs({ self.stdin, self.stdout, self.stderr }) do
+        if p and not p:is_closing() then pcall(function () p:close() end) end
     end
 end
 
