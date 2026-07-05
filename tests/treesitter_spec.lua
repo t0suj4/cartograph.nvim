@@ -1389,6 +1389,7 @@ test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
         '  return y * 2',
         'end',
         '',
+        '-- twin docs: adhesion removes this line with the clone',
         'local function salute(x)',
         '  local y = x + 1',
         '  return y * 2',
@@ -2015,6 +2016,103 @@ test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
     eq(B, readf('b.lua'))
     refresh.files({ 'a.lua', 'b.lua' })
     eq('a.lua', (store.node(byname('traveler')) or {}).file)
+
+    journal.wipe(root)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-module: new file, header, adhesion, undo deletes', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local refresh = require 'cartograph.refresh'
+    local journal = require 'cartograph.journal'
+    local mv = require 'cartograph.moveapply'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text)
+        fd:close()
+    end
+    local function readf(rel)
+        local fd = io.open(root .. '/' .. rel, 'r')
+        if not fd then return nil end
+        local t = fd:read('a')
+        fd:close()
+        return t
+    end
+    local A = table.concat({
+        'local function anchor()',
+        '  return 1',
+        'end',
+        '',
+        '-- doc line: travels with the def',
+        '-- second doc line',
+        'local function nomad(x)',
+        '  return x * 3',
+        'end',
+        '',
+        'local function keeper()',
+        '  return nomad(4)',
+        'end',
+        '' }, '\n')
+    write('a.lua', A)
+    store.ingest(ts.extract(root))
+    root = store.data.root
+    journal.wipe(root)
+    local function byname(nm)
+        for id, n in pairs(store.by_id) do
+            if n.name == nm then return id end
+        end
+    end
+
+    store.stage(byname('nomad'))
+    -- refusals: existing file is a MOVE; escape attempts refused
+    local p0, w0 = mv.plan_extract(store, 'a.lua')
+    ok(not p0 and w0:match('already exists'), tostring(w0))
+    p0, w0 = mv.plan_extract(store, '../evil.lua')
+    ok(not p0 and w0:match('inside the project root'), tostring(w0))
+    p0, w0 = mv.plan_extract(store, 'util.nope')
+    ok(not p0 and w0:match('no language spec'), tostring(w0))
+
+    local plan, why = mv.plan_extract(store, 'sub/util.lua')
+    ok(plan, tostring(why))
+    -- adhesion: the two doc lines ride along (range grew upward)
+    eq(4, plan.moves[1].lines.s)
+    store.set_txn(plan)
+    local entry, aerr = mv.apply(store, plan)
+    ok(entry, tostring(aerr))
+    eq('applied', entry.status)
+    eq(0, #store.staged_ids())
+
+    local expectedA = table.concat({
+        'local function anchor()',
+        '  return 1',
+        'end',
+        '',
+        'local function keeper()',
+        '  return nomad(4)',
+        'end',
+        '' }, '\n')
+    local expectedU = table.concat({
+        '-- doc line: travels with the def',
+        '-- second doc line',
+        'local function nomad(x)',
+        '  return x * 3',
+        'end',
+        '' }, '\n')
+    eq(expectedA, readf('a.lua'))
+    eq(expectedU, readf('sub/util.lua'))
+
+    -- the graph followed: nomad lives in the NEW file
+    eq('sub/util.lua', (store.node(byname('nomad')) or {}).file)
+
+    -- undo DELETES the created file, restores the source byte-exact
+    local r, rw = journal.rollback(root)
+    ok(r, tostring(rw))
+    eq(A, readf('a.lua'))
+    eq(nil, readf('sub/util.lua'))
 
     journal.wipe(root)
     vim.fn.delete(root, 'rf')

@@ -37,10 +37,11 @@ function M.render()
     -- nothing is written until :CartographApply survives verification
     if store.txn then
         local t = store.txn
-        if t.verb == 'move' then
+        if t.moves then
             lines[#lines + 1] = hl(marks, #lines,
-                ('MOVE  %d symbol(s) → %s    :CartographApply · :CartographTxnClear')
-                    :format(#t.moves, t.dest), 'Title')
+                ('%s  %d symbol(s) → %s%s    :CartographApply · :CartographTxnClear')
+                    :format(t.creates and 'EXTRACT' or 'MOVE', #t.moves,
+                        t.dest, t.creates and ' (new file)' or ''), 'Title')
             for _, m in ipairs(t.moves) do
                 lines[#lines + 1] = ('  %s   %s:%d-%d'):format(m.name, m.file,
                     m.lines.s + 1, m.lines.e + 1)

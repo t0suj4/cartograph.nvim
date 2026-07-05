@@ -1437,6 +1437,40 @@ local function elang_for(file)
     return lang, spec
 end
 
+-- leading lines that BELONG to a def — comments, decorators,
+-- attributes, annotations: what must travel with its text when an
+-- edit verb moves it. Keyed by effective language.
+local ATTACH = {
+    lua = { '^%s*%-%-' },
+    haskell = { '^%s*%-%-' },
+    scheme = { '^%s*;' },
+    c = { '^%s*//', '^%s*/%*', '^%s*%*' },
+    cpp = { '^%s*//', '^%s*/%*', '^%s*%*' },
+    javascript = { '^%s*//', '^%s*/%*', '^%s*%*', '^%s*@' },
+    php = { '^%s*//', '^%s*#', '^%s*/%*', '^%s*%*' },
+    ruby = { '^%s*#' },
+    java = { '^%s*//', '^%s*/%*', '^%s*%*', '^%s*@' },
+    go = { '^%s*//' },
+    rust = { '^%s*//', '^%s*/%*', '^%s*%*', '^%s*#%[' },
+    python = { '^%s*#', '^%s*@' },
+}
+
+function M.attach_pats(file)
+    local lang = elang_for(file)
+    return lang and ATTACH[lang] or {}
+end
+
+-- the effective language, for verbs that need a hazard decision
+function M.lang_of(file)
+    return (elang_for(file))
+end
+
+-- a NEW file's obligatory first lines (extract-module creates files)
+function M.file_header(file)
+    if elang_for(file) == 'php' then return { '<?php', '' } end
+    return {}
+end
+
 -- parse a container file and return its host-language trees in
 -- DETERMINISTIC position order (the LanguageTree child table has no
 -- stable iteration order; worker output must equal inline output).

@@ -29,24 +29,22 @@ local function insert_point(lines)
     return last -- 0-based slot just after the last nonblank
 end
 
---- Build the plan from the staged move-set + destination. Everything
---- the apply verifies rides along: refs, stamps, the generation, the
---- insertion point (pinned by the dest stamp).
-function M.plan(store)
-    local ids = store.staged_ids()
-    if #ids == 0 then
-        return nil, 'nothing staged — dd cuts a function into the move-set'
-    end
-    local dest = store.dest
-    if not dest then
-        return nil, 'no destination — p on a file row sets it'
-    end
+-- the shared plan core: collect the staged symbols (kind gate, comment
+-- adhesion, cbarg disclosure), fold in the ImpactEngine's findings as
+-- disclosure hazards, stamp the touched set. Both verbs (move,
+-- extract-module) build on it.
+local function collect(store, ids, dest, plan)
     local txn = require 'cartograph.txn'
     local root = store.data.root
-    local plan = {
-        verb = 'move', generation = store.generation, dest = dest,
-        moves = {}, hazards = {}, stamps = {}, touched = {},
-    }
+    local okp, ts = pcall(require, 'cartograph.providers.treesitter')
+    local lines_cache = {}
+    local function file_lines(rel)
+        if lines_cache[rel] == nil then
+            local t = txn.read_file(root, rel)
+            lines_cache[rel] = t and vim.split(t, '\n', { plain = true }) or false
+        end
+        return lines_cache[rel]
+    end
     local touched = { [dest] = true }
     for _, id in ipairs(ids) do
         local n = store.node(id)
@@ -58,8 +56,15 @@ function M.plan(store)
         if n.file == dest then
             return nil, n.name .. ' already lives in ' .. dest
         end
+        -- comment adhesion: the doc lines directly above travel too
+        local s = n.range.start.line
+        local ls = file_lines(n.file)
+        if ls then
+            s = txn.attach_above(ls, s,
+                okp and ts.attach_pats(n.file) or {})
+        end
         plan.moves[#plan.moves + 1] = { id = id, name = n.name, file = n.file,
-            lines = { s = n.range.start.line, e = n.range['end'].line },
+            lines = { s = s, e = n.range['end'].line },
             ref = store.ref_of(id) }
         touched[n.file] = true
         if n.cbarg then
@@ -87,15 +92,72 @@ function M.plan(store)
     for _, f in ipairs(imp.dest_requires) do
         plan.hazards[#plan.hazards + 1] = dest .. ' should import ' .. f
     end
-    local dtext = txn.read_file(root, dest)
-    if not dtext then return nil, 'cannot read ' .. dest end
-    plan.dest_at = insert_point(vim.split(dtext, '\n', { plain = true }))
     for f in pairs(touched) do
         plan.touched[#plan.touched + 1] = f
         plan.stamps[f] = txn.disk_stamp(root, f)
     end
     table.sort(plan.touched)
     return plan
+end
+
+--- Build the MOVE plan from the staged move-set + destination.
+--- Everything the apply verifies rides along: refs, stamps, the
+--- generation, the insertion point (pinned by the dest stamp).
+function M.plan(store)
+    local ids = store.staged_ids()
+    if #ids == 0 then
+        return nil, 'nothing staged — dd cuts a function into the move-set'
+    end
+    local dest = store.dest
+    if not dest then
+        return nil, 'no destination — p on a file row sets it'
+    end
+    local txn = require 'cartograph.txn'
+    local dtext = txn.read_file(store.data.root, dest)
+    if not dtext then return nil, 'cannot read ' .. dest end
+    local plan = {
+        verb = 'move', generation = store.generation, dest = dest,
+        moves = {}, hazards = {}, stamps = {}, touched = {},
+        dest_at = insert_point(vim.split(dtext, '\n', { plain = true })),
+    }
+    return collect(store, ids, dest, plan)
+end
+
+--- Build the EXTRACT-MODULE plan: the staged move-set leaves for a
+--- file that does not exist yet. The destination is created from a
+--- language header plus the moved text; its undo is deletion.
+function M.plan_extract(store, relpath)
+    local ids = store.staged_ids()
+    if #ids == 0 then
+        return nil, 'nothing staged — dd cuts a function into the move-set'
+    end
+    relpath = (relpath or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if relpath == '' then
+        return nil, 'usage: :CartographExtractModule <new-file-path>'
+    end
+    if relpath:match('^/') or relpath:match('%.%.') then
+        return nil, 'the new file must be a plain path inside the project root'
+    end
+    local txn = require 'cartograph.txn'
+    if txn.disk_stamp(store.data.root, relpath) then
+        return nil, relpath .. ' already exists — that is a MOVE (:CartographMove)'
+    end
+    local okp, ts = pcall(require, 'cartograph.providers.treesitter')
+    if okp and not ts.lang_of(relpath) then
+        return nil, ('no language spec for %s — the graph could never'
+            .. ' see the new file'):format(relpath)
+    end
+    local plan = {
+        verb = 'extract-module', generation = store.generation,
+        dest = relpath, creates = { [relpath] = true }, dest_at = 0,
+        header = okp and ts.file_header(relpath) or {},
+        moves = {}, hazards = {}, stamps = {}, touched = {},
+    }
+    if okp and ts.lang_of(relpath) == 'go' then
+        plan.hazards[#plan.hazards + 1] = relpath
+            .. ' will need its package clause — cartograph wrote none'
+    end
+    return collect(store, ids, relpath, plan)
 end
 
 --- Apply: the shared ladder plus one verb-specific rung — the LIVE
@@ -129,6 +191,21 @@ function M.apply(store, plan)
         moves = vim.tbl_map(function (m) return m.ref end, plan.moves),
         dest = plan.dest,
     }, function (rel, before, all)
+        if plan.creates and plan.creates[rel] then
+            -- a NEW file: language header + the moved text, from the
+            -- same before-bytes the journal holds
+            local out = {}
+            vim.list_extend(out, plan.header or {})
+            for mi, m in ipairs(plan.moves) do
+                if mi > 1 then out[#out + 1] = '' end
+                local src = vim.split(all[m.file], '\n', { plain = true })
+                for i = m.lines.s + 1, m.lines.e + 1 do
+                    out[#out + 1] = src[i]
+                end
+            end
+            out[#out + 1] = ''
+            return table.concat(out, '\n')
+        end
         local lines = vim.split(before, '\n', { plain = true })
         if rel == plan.dest then
             -- the moved blocks, lifted from each source's BEFORE content

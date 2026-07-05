@@ -384,14 +384,33 @@ function M.open(dump_path, opts)
             .. ' %d hazard(s). Review the plan bar, then :CartographApply')
             :format(#txn.moves, txn.dest, #txn.hazards), vim.log.levels.INFO)
     end, { desc = 'cartograph: turn the staged move-set into a transaction' })
+    pcall(vim.api.nvim_del_user_command, 'CartographExtractModule')
+    vim.api.nvim_create_user_command('CartographExtractModule', function (o)
+        local st = require 'cartograph.store'
+        if st.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first',
+                vim.log.levels.WARN)
+        end
+        local mv = require 'cartograph.moveapply'
+        local txn, why = mv.plan_extract(st, o.args)
+        if not txn then
+            return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)
+        end
+        st.set_txn(txn)
+        vim.notify(('cartograph: extract staged — %d symbol(s) → NEW %s,'
+            .. ' %d hazard(s). Review the plan bar, then :CartographApply')
+            :format(#txn.moves, txn.dest, #txn.hazards), vim.log.levels.INFO)
+    end, { nargs = 1, complete = 'file',
+        desc = 'cartograph: extract the staged move-set into a new file' })
     pcall(vim.api.nvim_del_user_command, 'CartographApply')
     vim.api.nvim_create_user_command('CartographApply', function ()
         local st = require 'cartograph.store'
         if not st.txn then
             return vim.notify('cartograph: nothing staged', vim.log.levels.WARN)
         end
-        local verb = st.txn.verb == 'move' and 'cartograph.moveapply'
-            or 'cartograph.clonemerge'
+        local verb = (st.txn.verb == 'move' or st.txn.verb == 'extract-module')
+            and 'cartograph.moveapply' or 'cartograph.clonemerge'
         local entry, why = require(verb).apply(st, st.txn)
         if not entry then
             return vim.notify('cartograph: apply REFUSED — ' .. tostring(why),

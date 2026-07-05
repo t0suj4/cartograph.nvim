@@ -20,6 +20,23 @@ function M.disk_stamp(root, rel)
     return st and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
 end
 
+--- Comment adhesion: walk UP from a def's first line over lines that
+--- belong to it (comments, decorators, attributes — per-language
+--- patterns from the provider); blank lines and code stop the walk.
+--- `s` and the return value are 0-based line indexes.
+function M.attach_above(lines, s, pats)
+    while s > 0 do
+        local l = lines[s] or ''
+        local hit
+        for _, p in ipairs(pats) do
+            if l:match(p) then hit = true break end
+        end
+        if not hit then break end
+        s = s - 1
+    end
+    return s
+end
+
 --- The refusal ladder's common rungs: a live graph, the same
 --- generation the plan was computed against, every ref still resolving
 --- to its id witness-clean, file stamps unmoved (CAS), no dirty
@@ -63,7 +80,14 @@ function M.execute(store, plan, desc, edit_of)
     local before = {}
     for _, rel in ipairs(plan.touched) do
         local t = M.read_file(root, rel)
-        if not t then return nil, 'cannot read ' .. rel end
+        if not t then
+            -- a file the plan CREATES has no before; anything else
+            -- unreadable refuses (the stamp rung caught most of these)
+            if not (plan.creates and plan.creates[rel]) then
+                return nil, 'cannot read ' .. rel
+            end
+            t = false
+        end
         before[rel] = t
     end
     local journal = require 'cartograph.journal'
@@ -72,6 +96,8 @@ function M.execute(store, plan, desc, edit_of)
     local after = {}
     for _, rel in ipairs(plan.touched) do
         after[rel] = edit_of(rel, before[rel], before)
+        local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$')
+        if dir then vim.fn.mkdir(dir, 'p') end
         local fd = io.open(root .. '/' .. rel, 'w')
         if not fd then
             journal.abort(root, entry, 'cannot write ' .. rel)

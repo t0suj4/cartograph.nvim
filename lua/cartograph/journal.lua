@@ -45,8 +45,10 @@ local function write_entry(root, e)
 end
 
 --- Open a transaction: records the verb, the plan description (refs,
---- never ids) and each touched file's full before-content. Returns the
---- entry (status 'pending') or nil, why.
+--- never ids) and each touched file's full before-content. A value of
+--- `false` means the file did NOT exist before (a create) — its undo
+--- is deletion, never an empty husk. Returns the entry (status
+--- 'pending') or nil, why.
 function M.begin(root, verb, plan, files)
     local e = {
         version = 1,
@@ -57,7 +59,11 @@ function M.begin(root, verb, plan, files)
         files = {},
     }
     for rel, before in pairs(files) do
-        e.files[rel] = { before = before, before_hash = hash(before) }
+        if before == false then
+            e.files[rel] = { absent = true }
+        else
+            e.files[rel] = { before = before, before_hash = hash(before) }
+        end
     end
     if not write_entry(root, e) then
         return nil, 'cannot write journal entry'
@@ -138,12 +144,17 @@ function M.rollback(root)
             .. ' would clobber newer edits'):format(table.concat(drifted, ', '))
     end
     for rel, f in pairs(e.files) do
-        local fd = io.open(root .. '/' .. rel, 'w')
-        if not fd then
-            return nil, 'cannot write ' .. rel
+        if f.absent then
+            -- the apply CREATED this file: undo removes it
+            vim.fn.delete(root .. '/' .. rel)
+        else
+            local fd = io.open(root .. '/' .. rel, 'w')
+            if not fd then
+                return nil, 'cannot write ' .. rel
+            end
+            fd:write(f.before)
+            fd:close()
         end
-        fd:write(f.before)
-        fd:close()
     end
     e.status = 'rolled_back'
     write_entry(root, e)
