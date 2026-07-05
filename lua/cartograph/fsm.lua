@@ -30,7 +30,7 @@ end
 --- call = the registration call }. Handlers passed as named locals resolve;
 --- inline functions are honest nils.
 function M.bindings(store, cfg)
-    local verb = cfg.register or 'register_listener'
+    local verb = (cfg or {}).register or 'register_listener'
     local out = {}
     for _, c in ipairs(store.data.calls or {}) do
         if c.callee == verb then

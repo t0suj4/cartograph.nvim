@@ -42,7 +42,10 @@ function: `dd` cuts it, `p` on a file row sets the destination, then
 (`:CartographUndo` if you change your mind).
 
 `:h cartograph` for everything else; `:checkhealth cartograph` to verify
-the wiring (parsers, injections, cache codec, optional oracles).
+the wiring (parsers, injections, cache codec, optional oracles). Project-
+specific adapters — framework entry points, FSM browsing, the live oracle,
+database links — are plain `setup{}` blocks; [`examples/`](examples/) has
+complete wirings to copy from.
 
 Twelve languages (lua, c, cpp, python, js, ts, php, ruby, java, go, rust,
 haskell, scheme) plus vue/svelte single-file components. Everything

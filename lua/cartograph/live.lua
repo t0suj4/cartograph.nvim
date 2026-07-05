@@ -7,48 +7,15 @@
 -- leak from an earlier state — the exact bug class wiretap's ordering
 -- discipline exists to prevent.
 --
--- Queries are config (setup{ live = ... }), defaulting to the wiretap/bnw
--- shapes, like every adapter here.
+-- Queries are ENTIRELY project config (setup{ live = { server, tool,
+-- snapshot } }): what to ask a running system and how to read the
+-- answer is that system's shape. examples/factorio.lua shows a full
+-- wiring. One design rule the snapshot must honor: ONE query, ONE
+-- moment — reading subscriptions and states separately can tear (a
+-- transition in the gap fabricates leaks); return everything from a
+-- single atomic call, stamped with when it was true.
 
 local M = {}
-
-M.defaults = {
-    server = 'factorio',
-    tool = 'run_lua',
-    -- ONE query, ONE tick: a live system moves between calls, so reading
-    -- subscriptions and states separately can tear (a transition in the
-    -- gap fabricates leaks). A single chunk executes atomically within a
-    -- tick; the tick stamps WHEN the answer was true — a live sample is
-    -- evidence about a moment, not an invariant.
-    --
-    -- Shapes: subscribed_events is an array of spec triples {event, name,
-    -- count} (the name is the spec's string element); landing.state is
-    -- the lua-state-machine object whose .current is the state name.
-    snapshot = [[
-local subs = {}
-for _, spec in pairs(storage.subscribed_events or {}) do
-    if type(spec) == 'table' then
-        local name = spec.name
-        if not name then
-            for _, el in pairs(spec) do
-                if type(el) == 'string' then name = el break end
-            end
-        end
-        if name then subs[#subs + 1] = name end
-    end
-end
-local states = {}
-for name, f in pairs(storage.forces or {}) do
-    if type(f) == 'table' and f.landing and f.landing.state then
-        local st = f.landing.state
-        states[name] = type(st) == 'table' and st.current or st
-    end
-end
-rcon.print(helpers.table_to_json({
-    tick = game.tick, subscriptions = subs, states = states,
-}))
-]],
-}
 
 --- Pure: diff the live picture against the static model.
 --- live = { subscriptions = {name...}, states = {force -> state} }
@@ -125,8 +92,12 @@ end
 --- The check: fetch, diff, publish (store.live drives the states-view
 --- markers), and return report lines.
 function M.check(store)
-    local cfg = vim.tbl_deep_extend('force', M.defaults,
-        require('cartograph.config').live or {})
+    local cfg = require('cartograph.config').live
+    if not (cfg and cfg.server and cfg.snapshot) then
+        return nil, 'no live oracle configured — setup{ live = { server,'
+            .. ' tool, snapshot } }; see examples/factorio.lua'
+    end
+    cfg = vim.tbl_deep_extend('force', { tool = 'run_lua' }, cfg)
     local live, why = M.fetch(cfg)
     if not live then return nil, why end
     local fsm = require 'cartograph.fsm'

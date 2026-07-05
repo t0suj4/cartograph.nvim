@@ -30,10 +30,15 @@ test('classify: orphan when nothing imports or references it', function ()
 end)
 
 test('classify: entry when unimported but a configured entry point', function ()
+    -- entry points are project config (defaults are generic mains only)
+    local cfg = require 'cartograph.config'
+    local saved = cfg.entrypoints
+    cfg.entrypoints = { 'control%.lua$' }
     graph({ mod('control.lua', false), fn('control.lua', 'f'),
             mod('scen/control.lua', false), fn('scen/control.lua', 'g') })
     eq('entry', store.classify('control.lua'))
     eq('entry', store.classify('scen/control.lua')) -- pattern matches the basename
+    cfg.entrypoints = saved
 end)
 
 test('classify: an imported entry point is just a normal module', function ()

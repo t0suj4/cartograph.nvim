@@ -73,9 +73,10 @@ M.db = nil
 --   setup{ mcp = { game = { cmd = { 'my-mcp-server' }, tool = 'graph' } } }
 M.mcp = nil
 
--- the live oracle (:CartographLive): queries a running system over MCP
--- and diffs it against the static model. Defaults fit wiretap/bnw; see
--- cartograph/live.lua for the query hooks.
+-- the live oracle (:CartographLive): queries a RUNNING system over MCP
+-- and diffs it against the static model. Entirely project config — what
+-- to ask and how to read the answer is your system's shape, so there is
+-- no default. See examples/factorio.lua for a complete wiring.
 M.live = nil
 
 M.keys = {
@@ -110,27 +111,18 @@ M.keys = {
 -- Entry points: files EXPECTED to have no inbound require (a runtime loads
 -- them directly). They classify as 'entry' (▶) instead of 'orphan' (○ — the
 -- warning), and sort first among the include tree's roots. Lua patterns,
--- matched against the workspace-relative path; defaults cover the Factorio
--- lifecycle plus the common generic mains. Override the whole list via
--- setup{ entrypoints = {...} }.
+-- matched against the workspace-relative path. Framework lifecycles are
+-- project config — see examples/ (factorio.lua lists the mod lifecycle).
 M.entrypoints = {
-    'control%.lua$', 'data%.lua$', 'settings%.lua$',
-    'data%-updates%.lua$', 'data%-final%-fixes%.lua$',
-    'settings%-updates%.lua$', 'settings%-final%-fixes%.lua$',
-    'main%.lua$',
+    'main%.[%w]+$',
 }
 
--- FSM adapter: the ~20 lines of domain semantics a generic Lua analysis
+-- FSM adapter: the ~20 lines of domain semantics a generic analysis
 -- cannot infer — WHICH data table is the transition spec, which maps
--- state -> subscriptions, which table holds the callbacks, and the register
--- verb. Everything downstream (entry points, reachability, browsing) is
--- generic. Defaults fit the bnw scenario; override via setup{ fsm = {...} }.
-M.fsm = {
-    events    = { var = 'landing_states', path = { 'events' } },
-    subs      = { var = 'state_subs' },
-    callbacks = { var = 'launch_callbacks' },
-    register  = 'register_listener',
-}
+-- state -> subscriptions, which table holds the callbacks, and the
+-- register verb. nil = shape autodetection only ({name,from,to} tables).
+-- See examples/factorio.lua for a filled-in adapter.
+M.fsm = nil
 
 --- Merge user options (called from cartograph.setup).
 function M.apply(opts)

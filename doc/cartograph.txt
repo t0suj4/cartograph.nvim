@@ -151,6 +151,8 @@ setup() is optional; every field has a default. Highlights: >
     }
 <
 See lua/cartograph/config.lua — each field is documented where it lives.
+Complete per-project wirings (a Factorio mod with the live oracle, a
+WordPress tree with the database link) live in examples/.
 
 ==============================================================================
 8. PROVIDERS                                             *cartograph-providers*
