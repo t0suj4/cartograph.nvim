@@ -101,6 +101,8 @@ M.keys = {
     ascend     = 'h',       -- symbols: zoom out (function -> file -> file tree);
     descend    = 'l',       -- symbols: zoom in — h/l are free in a linear list
                             -- (<CR> also descends, like the tree's pivot)
+    down       = 'j',       -- symbols: next row; at a block's last row it steps
+    up         = 'k',       -- OUT to the parent (and k mirrors upward)
     trace      = 'gr',      -- source: trace where the parameter under the cursor comes from
     cycle      = '<Tab>',   -- source: toggle the flow (concern) lens
     cycle_back = '<S-Tab>',

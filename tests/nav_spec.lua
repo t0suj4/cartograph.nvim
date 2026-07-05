@@ -294,6 +294,144 @@ test('nav: hovering a caller with several call sites highlights them all', funct
     vim.cmd('tabclose')
 end)
 
+test('nav: j/k step out of a block (sticky two-press) and back in', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local keys = require('cartograph.config').keys
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\nfunction M.f(x)\n  if x then\n    M.g(x)\n    M.h(x)\n  end\n  M.after()\nend\n'
+        .. 'function M.g(x) return x end\nfunction M.h(x) return x end\nfunction M.after() return 1 end\nreturn M\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    local f; for _, n in ipairs(data.nodes) do if n.name == 'M.f' then f = n end end
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    local K = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do K[m.lhs] = m.callback end
+    local function press(k) vim.api.nvim_set_current_win(wsym); K[k]() end
+
+    store.pivot(f.id); symbols.show('fn', f.id)
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_stmt[r] == 3 then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) end
+    end
+    press(keys.descend); eq('body', symbols.view.level)
+    press(keys.down)                          -- move to the last form
+    press(keys.down)                          -- j at the edge: step OUT
+    eq('fn', symbols.view.level)              -- landed in the parent function
+    ok(symbols._stepout ~= nil, 'step-out is provisional (remembered)')
+
+    press(keys.up)                            -- opposite key: back INTO the block
+    eq('body', symbols.view.level)
+    ok(symbols._stepout == nil, 'return cleared the memory')
+
+    press(keys.down)                          -- step out again
+    ok(symbols._stepout ~= nil, 'provisional again')
+    press(keys.ascend)                        -- h while provisional: also returns in
+    eq('body', symbols.view.level)
+    ok(symbols._stepout == nil, 'h consumed the provisional step-out')
+
+    press(keys.down)                          -- step out once more
+    press(keys.down)                          -- SAME key again: commit
+    eq('fn', symbols.view.level)
+    ok(symbols._stepout == nil, 'the second j committed to the parent')
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('nav: stepping down from a block at the function edge is a no-op', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local keys = require('cartograph.config').keys
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- the if is the LAST (only) statement: there is nowhere below to go
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\nfunction M.f(x)\n  if x then\n    M.g(x)\n  end\nend\n'
+        .. 'function M.g(x) return x end\nreturn M\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    local f; for _, n in ipairs(data.nodes) do if n.name == 'M.f' then f = n end end
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    local K = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do K[m.lhs] = m.callback end
+
+    store.pivot(f.id); symbols.show('fn', f.id)
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_stmt[r] == 3 then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) end
+    end
+    vim.api.nvim_set_current_win(wsym)
+    K[keys.descend]()
+    eq('body', symbols.view.level)
+    local before = vim.api.nvim_win_get_cursor(wsym)[1]
+    K[keys.down]() -- nowhere below without leaving the function -> no-op
+    eq('body', symbols.view.level)
+    eq(before, vim.api.nvim_win_get_cursor(wsym)[1]) -- stayed put
+    ok(symbols._stepout == nil, 'no provisional step-out was armed')
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('nav: h after a block step-out returns through the caller list it came from', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local keys = require('cartograph.config').keys
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- C calls X inside an if; C has a statement after the if (so j lands)
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\nfunction M.C(x)\n  if x then\n    M.X()\n  end\n  M.after()\nend\n'
+        .. 'function M.X() end\nfunction M.after() end\nreturn M\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    local X; for _, n in ipairs(data.nodes) do if n.name == 'M.X' then X = n end end
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    local K = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do K[m.lhs] = m.callback end
+    local function press(k) vim.api.nvim_set_current_win(wsym); K[k]() end
+
+    store.pivot(X.id); symbols.show('callers', X.id)
+    eq('callers', symbols.view.level)
+    -- descend the caller (M.C) into its function, then into the if block
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_site[r] or symbols.line_group[r] then
+            vim.api.nvim_win_set_cursor(wsym, { r, 2 }) break
+        end
+    end
+    press(keys.descend); eq('fn', symbols.view.level)
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local t = vim.api.nvim_buf_get_lines(symbols.buf, r - 1, r, false)[1]
+        if symbols.line_stmt[r] and t:match('X') then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) break end
+    end
+    press(keys.descend); eq('body', symbols.view.level)
+
+    press(keys.down)  -- j: step out to the function
+    press(keys.down)  -- j: commit to the function
+    eq('fn', symbols.view.level)
+    -- h must retrace: function -> the caller list (not back into the block)
+    press(keys.ascend); eq('callers', symbols.view.level)
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ── <C-]> jump resolution ───────────────────────────────────────────────────
 
 local function occ(l, c1, c2)

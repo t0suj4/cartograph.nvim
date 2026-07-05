@@ -1248,9 +1248,10 @@ function M.attach(win)
     vim.wo[win].cursorline = true
     local keys = config.keys
     local function row() return vim.api.nvim_win_get_cursor(win)[1] end
-    -- forward-declared: the CursorMoved handler (below) fires the deferred
-    -- ascend resync, but the helper itself is defined later in attach
+    -- forward-declared: the CursorMoved handler + the ascend key fire these,
+    -- but the helpers themselves are defined later in attach
     local sync_focus_to_view
+    local return_into_block -- undo a pending block step-out (h / the opposite key)
 
     -- debounced: focus (or statement highlight) follows where the cursor SETTLES
     local gen = 0
@@ -1408,7 +1409,7 @@ function M.attach(win)
     local function push_trail() M.trail[#M.trail + 1] = view_loc() end
     -- browser-initiated pivots must not clear the trail (see on_focus)
     local function browser_pivot(id)
-        M._resync = nil -- a conscious descent/pivot cancels a pending peek
+        M._resync, M._stepout = nil, nil -- a conscious pivot cancels pending state
         M._own_pivot = true
         store.pivot(id)
         M._own_pivot = false
@@ -1424,6 +1425,7 @@ function M.attach(win)
         return 'var'
     end
     local function enter(level, ctxval, pivot_id)
+        M._stepout = nil -- a conscious descent abandons any pending step-out
         push_trail()
         if pivot_id then browser_pivot(pivot_id) end
         local top = M.fwd_trail[#M.fwd_trail]
@@ -1481,7 +1483,7 @@ function M.attach(win)
         local n = store.node(id)
         -- an external focus jump cancels a pending ascend-peek: the def pane is
         -- moving to `id` regardless (our own deferred resync sets _own_pivot)
-        if not M._own_pivot then M._resync = nil end
+        if not M._own_pivot then M._resync, M._stepout = nil, nil end
         -- conscious pivots re-scope the browser to where they landed; an
         -- EXTERNAL pivot (source <C-]>) starts a fresh journey, so the trail
         -- clears — h ascends structurally from there
@@ -1801,6 +1803,8 @@ function M.attach(win)
     -- ascending lands the cursor ON what we came from (the file-manager rule),
     -- not on the first row of the wider view
     vim.keymap.set('n', keys.ascend, function ()
+        -- a pending block step-out is provisional: h returns INTO the block
+        if M._stepout then return return_into_block() end
         if #M.trail == 0 and M.view.level == 'files' then return end
         -- remember exactly where we left, so l can return there (row and all)
         M.fwd_trail[#M.fwd_trail + 1] = view_loc()
@@ -1927,6 +1931,110 @@ function M.attach(win)
         -- once or on the next move, per config.sync_on_ascend
         arm_or_sync()
     end, { buffer = M.buf, desc = 'cartograph: ascend (to file / to file tree)' })
+
+    -- j/k as a depth-first walk of the form tree. Inside a block they move
+    -- among its forms; at the FIRST/LAST form they STEP OUT to the parent —
+    -- j lands on the node after the block, k on the node before it. If that
+    -- parent has no such sibling, the step-out CHAINS further up automatically
+    -- until it finds one, but NEVER leaves the function; if there is nowhere to
+    -- go in that direction (a block at the very edge of the function), it is a
+    -- no-op — you stay where you started. A landing is a sticky two-press: the
+    -- ORIGINAL block is remembered and h ascends back INTO it, the opposite key
+    -- returns there, and the same key again commits (drops it from the ascend
+    -- history). Elsewhere j/k are plain motions.
+    local function content_rows()
+        local rows = {}
+        for r = 1, vim.api.nvim_buf_line_count(M.buf) do
+            if M.line_stmt[r] then rows[#rows + 1] = r end
+        end
+        return rows
+    end
+    -- the nearest content row in `dir` from `here` (first below / last above)
+    local function sibling_in(rows, here, dir)
+        local t
+        for _, rr in ipairs(rows) do
+            if dir == 1 then if rr > here then return rr end
+            elseif rr < here then t = rr end
+        end
+        return t
+    end
+    local function step_out(dir)
+        local start_loc = view_loc()
+        local start_trail = vim.deepcopy(M.trail)
+        local function noop()
+            M.trail = start_trail
+            restore_loc(start_loc) -- back where we started; nothing moved
+        end
+        store.set_context(nil); store.set_highlight(nil)
+        local work = vim.deepcopy(M.trail)
+        while true do
+            local loc = table.remove(work)
+            -- stay inside the function: never surface past the fn into the file
+            if not loc or loc.level == 'file' or loc.level == 'files' then
+                return noop()
+            end
+            M.trail = vim.deepcopy(work)
+            restore_loc(loc) -- a parent view, cursor on the child's row
+            local target = sibling_in(content_rows(), loc.row, dir)
+            if target then
+                pcall(vim.api.nvim_win_set_cursor, M.win, { target, 2 })
+                local parent_trail = vim.deepcopy(work)
+                -- provisional: h ascends back INTO the ORIGINAL block. Copy —
+                -- pushing onto M.trail must NOT mutate the saved parent_trail
+                M.trail = vim.deepcopy(parent_trail)
+                M.trail[#M.trail + 1] = start_loc
+                M._stepout = { dir = dir, block_loc = start_loc,
+                    block_trail = start_trail, parent_trail = parent_trail }
+                return sync_focus_to_view() -- same function -> def pane follows
+            end
+            if loc.level == 'fn' then return noop() end -- fn top, nowhere to go
+            -- else: this parent has no sibling either — chain further up
+        end
+    end
+    -- restore the remembered block at the spot we stepped out from, with its
+    -- original ascend history (h and the opposite key both undo this way)
+    function return_into_block()
+        local so = M._stepout
+        if not so then return end
+        M._stepout = nil
+        M.trail = vim.deepcopy(so.block_trail)
+        store.set_context(nil); store.set_highlight(nil)
+        restore_loc(so.block_loc)
+        sync_focus_to_view()
+    end
+    local function step(dir)
+        if M.view.level ~= 'body' and not M._stepout then
+            return vim.cmd('normal! ' .. vim.v.count1 .. (dir == 1 and 'j' or 'k'))
+        end
+        if M._stepout then
+            if dir == -M._stepout.dir then
+                return return_into_block() -- opposite key: back to the block
+            end
+            -- same key: commit — the ascend history is now the parent's depth
+            M.trail = vim.deepcopy(M._stepout.parent_trail)
+            M._stepout = nil
+        end
+        local rows, cur = content_rows(), row()
+        if #rows == 0 then
+            return vim.cmd('normal! ' .. (dir == 1 and 'j' or 'k'))
+        end
+        local idx
+        for i, rr in ipairs(rows) do if rr == cur then idx = i end end
+        if not idx then -- on a chrome row: snap into the list, don't step out
+            return pcall(vim.api.nvim_win_set_cursor, M.win,
+                { rows[dir == 1 and 1 or #rows], 2 })
+        end
+        local nxt = rows[idx + dir]
+        if nxt then
+            pcall(vim.api.nvim_win_set_cursor, M.win, { nxt, 2 })
+        elseif M.view.level == 'body' then
+            step_out(dir) -- at the block edge: cross out to the parent
+        end
+    end
+    vim.keymap.set('n', keys.down, function () step(1) end,
+        { buffer = M.buf, desc = 'cartograph: next row (steps out at a block edge)' })
+    vim.keymap.set('n', keys.up, function () step(-1) end,
+        { buffer = M.buf, desc = 'cartograph: previous row (steps out at a block edge)' })
 
     -- <Tab> at the files level: flat list <-> include tree (who requires whom).
     -- Note this shadows <C-i>-forward here (terminals conflate Tab/C-i), the
