@@ -433,6 +433,89 @@ M.spec = {
             end
         end,
     },
+    ruby = {
+        exts = { 'rb' },
+        functions = [=[
+            (method name: (_) @name) @def
+            (singleton_method name: (_) @name) @def
+        ]=],
+        calls = [=[
+            (call method: (identifier) @name) @call
+            (call method: (constant) @name) @call
+        ]=],
+        vars = [=[
+            (program (assignment
+                left: (constant) @name right: (_) @value) @def)
+        ]=],
+        params_field = 'parameters',
+        body_field = 'body',
+        is_method = function (_, def)
+            if def:type() == 'singleton_method' then return true end
+            local p = def:parent()
+            while p do
+                local t = p:type()
+                if t == 'class' or t == 'module'
+                    or t == 'singleton_class' then return true end
+                p = p:parent()
+            end
+            return false
+        end,
+        -- Owner#full_name (instance) / Owner.find_by_city (singleton)
+        qualify = function (name, defn, src)
+            local sep = defn:type() == 'singleton_method' and '.' or '#'
+            local p = defn:parent()
+            while p do
+                local t = p:type()
+                if t == 'class' or t == 'module' then
+                    local cn = p:field('name')[1]
+                    return cn and (vim.treesitter.get_node_text(cn, src)
+                        .. sep .. name) or name
+                end
+                p = p:parent()
+            end
+            return name
+        end,
+        -- classes/modules wrap the real content
+        block_skip = { class = true, module = true, singleton_class = true },
+        -- bare calls dispatch on self, and inheritance/mixins make the
+        -- target unknowable beyond the file: ruby's scope IS the file —
+        -- bare names never link cross-file. Honesty over reach: most
+        -- ruby calls SHOULD stay unresolved frontiers.
+        scope = function (file, _)
+            return file
+        end,
+        id_fn_refs = false,
+        -- ruby/rails vocabulary: Object protocol, Enumerable, ActiveRecord
+        -- query/persistence verbs — never absorbed by a project def
+        stdlib_names = { new = true, save = true, update = true,
+            destroy = true, find = true, where = true, all = true,
+            first = true, last = true, count = true, create = true,
+            name = true, id = true, to_s = true, to_a = true, to_h = true,
+            each = true, map = true, select = true, reject = true,
+            include = true, present = true, blank = true, empty = true,
+            length = true, size = true, push = true, params = true,
+            render = true, call = true, run = true, perform = true,
+            process = true, build = true, valid = true, inspect = true,
+            hash = true, dup = true, freeze = true, fetch = true,
+            dig = true, merge = true, join = true, split = true,
+            strip = true, gsub = true, sub = true, match = true,
+            scan = true, upcase = true, downcase = true, key = true,
+            keys = true, values = true, sort = true, uniq = true,
+            flatten = true, compact = true, reduce = true, inject = true,
+            title = true, body = true, value = true, type = true,
+            status = true, message = true, errors = true, user = true },
+        import_call = 'require_relative',
+        resolve_import = function (mod, files, from)
+            local dir = from and from:match('^(.*)/[^/]*$') or ''
+            local rel = (dir ~= '' and dir .. '/' or '') .. mod .. '.rb'
+            -- normalize ../ segments
+            while rel:find('/[^/]+/%.%./') do
+                rel = rel:gsub('/[^/]+/%.%./', '/', 1)
+            end
+            rel = rel:gsub('^%./', '')
+            if files[rel] then return rel end
+        end,
+    },
     java = {
         exts = { 'java' },
         functions = [=[
@@ -1775,7 +1858,7 @@ function M.extract(root, opts)
         -- 1-2 char names are shadow-bait (pattern vars, loop counters):
         -- name-matching them is noise-dominated in every language
         if #name < 3 then return nil end
-        local _, spec = lang_for(file)
+        local clang, spec = lang_for(file)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil end
         local cands = exact[name]
@@ -1813,6 +1896,10 @@ function M.extract(root, opts)
                 else
                     fits = sc == nil or scope_of(n.file) == sc
                 end
+                -- a name never crosses LANGUAGES: that is xlang's job,
+                -- explicit and string-keyed — js .replace() must not
+                -- tail-match a ruby #replace
+                if fits and lang_for(n.file) ~= clang then fits = false end
                 if fits then
                     if pick then pick = nil break end
                     pick = n
@@ -1839,6 +1926,10 @@ function M.extract(root, opts)
                 else
                     fits = sc == nil or scope_of(n.file) == sc
                 end
+                -- a name never crosses LANGUAGES: that is xlang's job,
+                -- explicit and string-keyed — js .replace() must not
+                -- tail-match a ruby #replace
+                if fits and lang_for(n.file) ~= clang then fits = false end
                 if fits then
                     if pick then pick = nil break end
                     pick = n
@@ -2043,7 +2134,7 @@ function M.relink(data, touched)
     end
     local function resolve(name, file)
         if #name < 3 then return nil end
-        local _, spec = lang_for(file)
+        local clang, spec = lang_for(file)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil end
         local cands = exact[name]
@@ -2078,6 +2169,10 @@ function M.relink(data, touched)
                 else
                     fits = sc == nil or scope_of(n.file) == sc
                 end
+                -- a name never crosses LANGUAGES: that is xlang's job,
+                -- explicit and string-keyed — js .replace() must not
+                -- tail-match a ruby #replace
+                if fits and lang_for(n.file) ~= clang then fits = false end
                 if fits then
                     if pick then pick = nil break end
                     pick = n
@@ -2104,6 +2199,10 @@ function M.relink(data, touched)
                 else
                     fits = sc == nil or scope_of(n.file) == sc
                 end
+                -- a name never crosses LANGUAGES: that is xlang's job,
+                -- explicit and string-keyed — js .replace() must not
+                -- tail-match a ruby #replace
+                if fits and lang_for(n.file) ~= clang then fits = false end
                 if fits then
                     if pick then pick = nil break end
                     pick = n

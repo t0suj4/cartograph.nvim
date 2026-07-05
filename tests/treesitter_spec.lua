@@ -1165,6 +1165,35 @@ test('python: class-qualified methods, stdlib gate, decorator cbarg', function (
     end
 end)
 
+test('ruby: qualified defs, file-scoped bare calls, honest frontiers', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('ruby') then skip 'no ruby parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/rubyproj')
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    -- instance vs singleton qualification
+    ok(byname['Owner#full_name'], 'instance method: Owner#full_name')
+    ok(byname['Owner.find_by_city'], 'singleton method: Owner.find_by_city')
+    ok(byname.helper and byname.helper.kind == 'function', 'top-level def')
+    -- same-file bare call links (self dispatch within the file)
+    local hits = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname['Owner#full_name'].id then
+            hits[(store.node(e.to) or {}).name] = true
+        end
+    end
+    ok(hits['Owner#build_name'], 'full_name -> build_name (same file)')
+    ok(hits['Owner#first_part'], 'full_name -> first_part')
+    -- build_name exists in BOTH files: cross-file bare stays a frontier
+    -- (Visits#build_name gains no callers from owner.rb)
+    eq(nil, store.usedby[byname['Visits#build_name'].id])
+    -- require_relative resolves
+    ok(vim.tbl_contains(store.imports_out['owner.rb'] or {}, 'visits.rb'),
+        'require_relative resolved')
+end)
+
 test('java: class-qualified, annotation cbarg, public exported', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
