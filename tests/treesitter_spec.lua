@@ -2005,6 +2005,117 @@ test('php: transitive parent:: walk is bounded — a deep chain does not run awa
     vim.fn.delete(root, 'rf')
 end)
 
+test('every language survives malformed files — no crash, no hang, torn containment', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    -- Per language: a CLEAN file with a `survivor` def, plus sibling files
+    -- that are broken (truncated mid-def), pure garbage, and empty. Contract:
+    -- extraction never throws or hangs, the graph stays well-formed, the good
+    -- def still extracts beside its bad neighbors (one broken file must not
+    -- nuke the project), and no call ever resolves INTO a torn def.
+    local L = {
+        { lang = 'lua', ext = 'lua',
+          good = 'local function survivor() return 1 end', bad = 'local function wreck(' },
+        { lang = 'c', ext = 'c',
+          good = 'int survivor(void) { return 1; }', bad = 'int wreck(' },
+        { lang = 'cpp', ext = 'cpp',
+          good = 'int survivor() { return 1; }', bad = 'class Wreck { void wreck(' },
+        { lang = 'javascript', ext = 'js',
+          good = 'function survivor() { return 1; }', bad = 'function wreck(' },
+        { lang = 'typescript', ext = 'ts',
+          good = 'function survivor(): number { return 1; }', bad = 'class Wreck { wreck(x:' },
+        { lang = 'python', ext = 'py',
+          good = 'def survivor():\n    return 1', bad = 'def wreck(' },
+        { lang = 'ruby', ext = 'rb',
+          good = 'def survivor\n  1\nend', bad = 'def wreck(' },
+        { lang = 'java', ext = 'java',
+          good = 'class Ok { int survivor() { return 1; } }', bad = 'class Wreck { void wreck(' },
+        { lang = 'go', ext = 'go',
+          good = 'package p\nfunc survivor() int { return 1 }', bad = 'package q\nfunc wreck(' },
+        { lang = 'rust', ext = 'rs',
+          good = 'fn survivor() -> i32 { 1 }', bad = 'fn wreck(' },
+        { lang = 'haskell', ext = 'hs',
+          good = 'survivor :: Int\nsurvivor = 1', bad = 'wreck x =' },
+        { lang = 'scheme', ext = 'scm',
+          good = '(define (survivor) 1)', bad = '(define (wreck' },
+    }
+    local garbage = '~!@#$%^&*()_+ }{ ][ <> ?? garbage 123 \\ zzz'
+    local tested = 0
+    for _, c in ipairs(L) do
+        if has_parser(c.lang) then
+            tested = tested + 1
+            local dir = vim.fn.tempname()
+            vim.fn.mkdir(dir, 'p')
+            local function put(name, body)
+                local fd = io.open(dir .. '/' .. name, 'w')
+                fd:write(body); fd:close()
+            end
+            put('good.' .. c.ext, c.good)
+            put('bad.' .. c.ext, c.bad)
+            put('garbage.' .. c.ext, garbage)
+            put('empty.' .. c.ext, '')
+            local okx, data = pcall(ts.extract, dir)
+            ok(okx, c.lang .. ': extract did not throw — ' .. tostring(data))
+            if okx then
+                ok(type(data.nodes) == 'table' and type(data.calls) == 'table'
+                    and type(data.edges) == 'table', c.lang .. ': well-formed graph')
+                local found, torn = false, {}
+                for _, n in ipairs(data.nodes) do
+                    if n.name and n.name:find('survivor') then found = true end
+                    if n.torn then torn[n.id] = true end
+                end
+                ok(found, c.lang .. ': the clean def extracts beside bad files')
+                local mislink = false
+                for _, call in ipairs(data.calls) do
+                    if call.to and torn[call.to] then mislink = true end
+                end
+                ok(not mislink, c.lang .. ': no call resolves into a torn def')
+            end
+            vim.fn.delete(dir, 'rf')
+        end
+    end
+    ok(tested > 0, 'at least one language parser was available to test')
+end)
+
+test('containers survive malformed SFCs — the script region still yields defs', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    -- a truncated template/markup expression must degrade to an empty region,
+    -- not crash — the valid <script> def still extracts
+    local C = {
+        { lang = 'vue', ext = 'vue', good =
+            '<script>\nfunction survivor() { return 1 }\n</script>\n'
+            .. '<template>\n  <div @click="broken(\n</template>\n' },
+        { lang = 'svelte', ext = 'svelte', good =
+            '<script>\nfunction survivor() { return 1 }\n</script>\n'
+            .. '<div on:click={broken(\n' },
+    }
+    local tested = 0
+    for _, c in ipairs(C) do
+        if has_parser(c.lang) then
+            tested = tested + 1
+            local dir = vim.fn.tempname()
+            vim.fn.mkdir(dir, 'p')
+            local fd = io.open(dir .. '/comp.' .. c.ext, 'w')
+            fd:write(c.good); fd:close()
+            local ef = io.open(dir .. '/empty.' .. c.ext, 'w')
+            ef:write(''); ef:close()
+            local okx, data = pcall(ts.extract, dir)
+            ok(okx, c.lang .. ': malformed SFC did not throw — ' .. tostring(data))
+            if okx then
+                local found = false
+                for _, n in ipairs(data.nodes) do
+                    if n.name and n.name:find('survivor') then found = true end
+                end
+                ok(found, c.lang .. ': script region def extracts despite broken markup')
+            end
+            vim.fn.delete(dir, 'rf')
+        end
+    end
+    if tested == 0 then skip 'no vue/svelte parser' end
+end)
+
 test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
