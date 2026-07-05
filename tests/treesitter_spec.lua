@@ -1793,3 +1793,56 @@ test('live oracle: the diff classifies missing, leaked and unknown', function ()
     eq({ 'mystery' }, d.unknown)       -- graph blind spot
     -- always_on is neither leaked nor missing: the permanent baseline
 end)
+
+test('sfc containers: script regions, template calls, handler cbarg', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not (has_parser('vue') and has_parser('svelte')) then
+        skip 'no vue/svelte parser'
+    end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/sfcproj')
+    store.ingest(data)
+    local byname, byid = {}, {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n byid[n.id] = n end
+    -- containers are modules; script fns land at ABSOLUTE rows
+    ok(byid['App.vue'], 'vue module node')
+    ok(byid['Board.svelte'], 'svelte module node')
+    ok(byname.save and byname.save.file == 'App.vue', 'script fn extracted')
+    eq(13, byname.save.range.start.line)
+    -- @click="save(total)" is a real call: linked, file-level
+    local linked
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'save' and c.file == 'App.vue'
+            and c.to == byname.save.id then linked = c end
+    end
+    ok(linked, 'template call resolves to the script fn')
+    ok(linked and not linked.fn, 'template call has no enclosing fn')
+    -- bare handlers (@click="onCopy", onclick={bump}): registered, not dead
+    ok(byname.onCopy and byname.onCopy.cbarg, 'vue bare handler cbarg')
+    ok(byname.bump and byname.bump.cbarg, 'svelte handler cbarg')
+    -- imports: component -> component, and SFC script -> plain ts
+    ok(vim.tbl_contains(store.imports_out['App.vue'] or {}, 'Widget.vue'),
+        'vue -> vue import')
+    ok(vim.tbl_contains(store.imports_out['App.vue'] or {}, 'util.ts'),
+        'vue -> ts import')
+    -- bundler alias: '@/lib/leaf' walks ancestors to src/lib/leaf.ts
+    ok(vim.tbl_contains(store.imports_out['src/deep/Leaf.vue'] or {},
+        'src/lib/leaf.ts'), 'alias import resolved')
+    -- helperFn called from BOTH containers' scripts: js/ts/vue/svelte
+    -- resolve as ONE family
+    local callers = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.to == byname.helperFn.id then
+            callers[(byid[e.from] or {}).name] = true
+        end
+    end
+    ok(callers.save, 'vue(ts) script -> .ts fn')
+    ok(callers.bump, 'svelte(js) script -> .ts fn')
+    -- the template is a visible block row
+    local tpl
+    for _, n in ipairs(data.nodes) do
+        if n.file == 'App.vue' and n.kind == 'block'
+            and n.name == 'template' then tpl = n end
+    end
+    ok(tpl, 'template block node')
+end)

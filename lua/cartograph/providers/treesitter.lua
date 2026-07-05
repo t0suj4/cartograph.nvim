@@ -397,18 +397,46 @@ M.spec = {
             stringify = true, parse = true, emit = true, on = true,
             off = true, once = true, get = true, set = true, has = true,
             add = true, delete = true, clear = true, next = true,
+            startsWith = true, endsWith = true, some = true, every = true,
+            sort = true, reverse = true, flat = true, substring = true,
+            toLowerCase = true, toUpperCase = true, padStart = true,
+            charAt = true,
             ['$emit'] = true, ['$on'] = true, ['$nextTick'] = true },
         litdata_types = { object = true, array = true },
         import_query = [=[ (import_statement source: (string) @path) ]=],
         resolve_import = function (path, files, from)
             path = path:gsub('^["\']', ''):gsub('["\']$', '')
-            local dir = from:match('^(.*)/[^/]*$')
-            local cand = path:gsub('^%./', '')
-            cand = dir and (dir .. '/' .. cand) or cand
-            for _, c in ipairs({ cand, cand .. '.js', cand .. '.ts',
-                (cand:gsub('%.js$', '.ts')) }) do
-                if files[c] then return c end
+            local function norm(p) -- ./ and ../ segments
+                local parts = {}
+                for seg in p:gmatch('[^/]+') do
+                    if seg == '..' then parts[#parts] = nil
+                    elseif seg ~= '.' then parts[#parts + 1] = seg end
+                end
+                return table.concat(parts, '/')
             end
+            local function try(cand)
+                cand = norm(cand)
+                for _, c in ipairs({ cand, cand .. '.js', cand .. '.ts',
+                    (cand:gsub('%.js$', '.ts')),
+                    cand .. '/index.js', cand .. '/index.ts' }) do
+                    if files[c] then return c end
+                end
+            end
+            local dir = from:match('^(.*)/[^/]*$')
+            if path:match('^[@~]/') then
+                -- bundler alias ('@/x', '~/x'): the package's src/ (vite)
+                -- or the app root itself (nuxt). The package.json isn't in
+                -- the fileset, so walk ancestors and let existence decide
+                local x = path:sub(3)
+                local anc = dir
+                while anc do
+                    local hit = try(anc .. '/src/' .. x) or try(anc .. '/' .. x)
+                    if hit then return hit end
+                    anc = anc:match('^(.*)/[^/]*$')
+                end
+                return try('src/' .. x) or try(x)
+            end
+            return try(dir and (dir .. '/' .. path) or path)
         end,
     },
     php = {
@@ -1279,6 +1307,62 @@ local function lang_for(file)
     end
 end
 
+-- container files: one FILE, several language regions (vue/svelte SFCs).
+-- The container grammar's injection queries yield host-language trees at
+-- ABSOLUTE positions, so extraction runs the host spec over each region
+-- with no offset arithmetic anywhere.
+local CONTAINERS = { vue = 'vue', svelte = 'svelte' }
+
+local function container_for(file)
+    local ext = file:match('%.([%w]+)$')
+    return ext and CONTAINERS[ext] or nil
+end
+
+-- effective language: what governs a file's RESOLUTION semantics (the
+-- never-cross-languages gate, stdlib vocabulary, scope hook). Containers
+-- resolve as their host; typescript IS the javascript spec under another
+-- parser — so js/ts/vue/svelte collapse to ONE family, the way TS
+-- legally imports JS (allowJs) and SFC scripts import both.
+local function elang_for(file)
+    if container_for(file) then return 'javascript', M.spec.javascript end
+    local lang, spec = lang_for(file)
+    if lang == 'typescript' then return 'javascript', M.spec.javascript end
+    return lang, spec
+end
+
+-- parse a container file and return its host-language trees in
+-- DETERMINISTIC position order (the LanguageTree child table has no
+-- stable iteration order; worker output must equal inline output).
+-- nil for plain files, so callers can fall back to the single root.
+local function container_trees(parser, clang)
+    if not clang then return nil end
+    -- injection queries may use nvim-treesitter's CUSTOM directives
+    -- (svelte: set-lang-from-mimetype! for lang="ts" attributes). Workers
+    -- have the plugin on their rtp but never load it — register the
+    -- directives before the first injected parse. Idempotent.
+    pcall(require, 'nvim-treesitter.query_predicates')
+    local out = {}
+    -- a failed injection parse degrades to an EMPTY region list (module
+    -- skeleton, honest frontier), never to misreading the container tree
+    -- as host code
+    if not pcall(parser.parse, parser, true) then return out end
+    parser:for_each_tree(function (tree, ltree)
+        local hl = ltree:lang()
+        if hl ~= clang and M.spec[hl] then
+            local rt = tree:root()
+            local sr, sc, er = rt:range()
+            out[#out + 1] = { root = rt, lang = hl, spec = M.spec[hl],
+                s = sr, c = sc, e = er }
+        end
+    end)
+    table.sort(out, function (a, b)
+        if a.s ~= b.s then return a.s < b.s end
+        if a.c ~= b.c then return a.c < b.c end
+        return a.e > b.e
+    end)
+    return out
+end
+
 local EXCLUDE_DIRS = { node_modules = true, vendor = true, dist = true,
     build = true, cache = true, minified = true,
     -- vendored-source conventions (hugo's deps/, azerothcore's deps/)
@@ -1315,7 +1399,7 @@ local function list_files(root, subdirs)
                         end
                     end
                     if not ex then rec(r) end
-                elseif lang_for(r) and want(r) then
+                elseif (lang_for(r) or container_for(r)) and want(r) then
                     out[#out + 1] = r
                 end
             end
@@ -1350,12 +1434,15 @@ function M.list_files(root, subdirs) return list_files(root, subdirs) end
 local function id_pass(root, files, L)
     for _, file in ipairs(files) do
         local lang, spec = lang_for(file)
+        local clang = container_for(file)
+        if clang then lang, spec = 'javascript', M.spec.javascript end
         local ranges = L.fn_ranges[file]
         if ranges then
             local fd = io.open(root .. '/' .. file, 'r')
             local src = fd and fd:read('a')
             if fd then fd:close() end
-            local okp, parser = pcall(vim.treesitter.get_string_parser, src or '', lang)
+            local okp, parser = pcall(vim.treesitter.get_string_parser,
+                src or '', clang or lang)
             if src and okp then
                 local nameset = (L.add_names and spec.name_index ~= false)
                     and {} or nil
@@ -1367,14 +1454,17 @@ local function id_pass(root, files, L)
                     end
                     return best and best.id
                 end
-                local tsroot = parser:parse()[1]:root()
-                local q = parse_query(lang, spec.id_query or '(identifier) @id')
+                local troots = container_trees(parser, clang)
+                    or { { root = parser:parse()[1]:root(), spec = spec,
+                        lang = lang } }
                 local useEdge = {}
+                for _, tr in ipairs(troots) do
+                local q = parse_query(tr.lang, tr.spec.id_query or '(identifier) @id')
                 if q then
-                    for _, n in q:iter_captures(tsroot, src, 0, -1) do
+                    for _, n in q:iter_captures(tr.root, src, 0, -1) do
                         local name = node_text(n, src)
                         if nameset and #name >= 3
-                            and not (spec.stdlib_names or {})[name] then
+                            and not (tr.spec.stdlib_names or {})[name] then
                             nameset[name] = true
                         end
                         local parent = n:parent()
@@ -1385,8 +1475,8 @@ local function id_pass(root, files, L)
                             -- sexp grammars have no fields: the head IS the callee
                             or (pt == 'list' and parent:named_child(0) == n)
                         if not callee_pos and #name >= 3
-                            and spec.id_fn_refs ~= false
-                            and not (spec.stdlib_names or {})[name] then
+                            and tr.spec.id_fn_refs ~= false
+                            and not (tr.spec.stdlib_names or {})[name] then
                             local u = L.fn_unique[name]
                             if u and L.scopes
                                 and L.scopes[u.file] ~= L.scopes[file] then
@@ -1432,6 +1522,7 @@ local function id_pass(root, files, L)
                         end
                     end
                 end
+                end
                 if nameset and next(nameset) then
                     local ns = vim.tbl_keys(nameset)
                     table.sort(ns) -- deterministic pack (worker == inline)
@@ -1470,7 +1561,7 @@ function M.lookups(nodes, root)
         if n.kind == 'module' then fileset[n.file] = true end
     end
     for f in pairs(fileset) do
-        local _, sp = lang_for(f)
+        local _, sp = elang_for(f)
         if sp and sp.scope then
             scopes[f] = sp.scope(f, fileset, root)
             any = true
@@ -1592,28 +1683,18 @@ function M.extract(root, opts)
         return best and best.id
     end
 
-    for _, file in ipairs(files) do
-        local lang, spec = lang_for(file)
-        local fd = io.open(root .. '/' .. file, 'r')
-        local src = fd and fd:read('a')
-        if fd then fd:close() end
-        local okp, parser = pcall(vim.treesitter.get_string_parser, src or '', lang)
-        if not src or not okp then
-            no_parser[lang] = true
-            goto next_file
-        end
-        local tree = parser:parse()[1]
-        local tsroot = tree:root()
-
+    local function stamp(file)
         local st = vim.uv.fs_stat(root .. '/' .. file)
         if st then
             data.stamps[file] = ('%d:%d:%d')
                 :format(st.mtime.sec, st.mtime.nsec, st.size)
         end
+    end
 
-        nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
-            range = pos_of(tsroot), order = -1 }
-
+    -- defs: functions, top-level vars, blocks, imports — one TREE at
+    -- a time, so container files (vue/svelte SFCs) can run it once per
+    -- script region while plain files run it on their single root
+    local function extract_defs(file, lang, spec, src, tsroot)
         -- functions
         local q = parse_query(lang, spec.functions)
         local fnDefs = {} -- def node -> true (for block grouping)
@@ -1773,8 +1854,14 @@ function M.extract(root, opts)
             end
         end
 
+    end
+
+    -- calls: inventory + reference sites (resolved after all files).
+    -- Containers also run this over TEMPLATE EXPRESSION trees — an
+    -- @click="save(item)" is a real call_expression at absolute rows
+    local function extract_calls(file, lang, spec, src, tsroot)
         -- calls (inventory + reference sites, resolved after all files)
-        q = parse_query(lang, spec.calls)
+        local q = parse_query(lang, spec.calls)
         if q then
             for _, match in q:iter_matches(tsroot, src, 0, -1) do
                 local calln, namen
@@ -1894,6 +1981,107 @@ function M.extract(root, opts)
                 end
             end
         end
+    end
+
+    local cunparsed = {}
+
+    -- container SFCs: the injection queries hand back host-language
+    -- trees at absolute positions — script regions get the full pass,
+    -- template expression trees the call pass (the id pass walks both
+    -- later). Missing grammar → an opaque frontier module, like *.min.js.
+    local function extract_container(file, clang, src)
+        local okp, parser = pcall(vim.treesitter.get_string_parser, src, clang)
+        if not okp then
+            no_parser[clang] = true
+            nodes[#nodes + 1] = { id = file, name = file, kind = 'module',
+                file = file, unparsed = true, order = -1,
+                range = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } } }
+            cunparsed[#cunparsed + 1] = file
+            return
+        end
+        local regions = container_trees(parser, clang) or {}
+        local croot = parser:trees()[1]:root()
+        stamp(file)
+        nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
+            range = pos_of(croot), order = -1 }
+        -- which regions are <script>? (the rest are template expressions)
+        local scripts = {}
+        local cq = parse_query(clang, '(script_element (raw_text) @s)')
+        if cq then
+            for _, n in cq:iter_captures(croot, src, 0, -1) do
+                local s, _, e = n:range()
+                scripts[#scripts + 1] = { s = s, e = e }
+            end
+        end
+        for _, r in ipairs(regions) do
+            local script = false
+            for _, x in ipairs(scripts) do
+                if r.s >= x.s and r.s <= x.e then script = true break end
+            end
+            if script then extract_defs(file, r.lang, r.spec, src, r.root) end
+            extract_calls(file, r.lang, r.spec, src, r.root)
+        end
+        -- the template as ONE visible block row (a jump target): its
+        -- extent is the top-level markup that isn't script/style
+        local tps, tpe
+        for c in croot:iter_children() do
+            local t = c:type()
+            if c:named() and t ~= 'script_element' and t ~= 'style_element'
+                and t ~= 'comment' then
+                local s, _, e = c:range()
+                if not tps or s < tps then tps = s end
+                if not tpe or e > tpe then tpe = e end
+            end
+        end
+        if tps then
+            nodes[#nodes + 1] = { id = ('%s::template@%d'):format(file, tps),
+                name = 'template', kind = 'block', file = file, order = tps,
+                range = { start = { line = tps, char = 0 },
+                    ['end'] = { line = tpe, char = 0 } } }
+        end
+    end
+
+    for _, file in ipairs(files) do
+        local fd = io.open(root .. '/' .. file, 'r')
+        local src = fd and fd:read('a')
+        if fd then fd:close() end
+        if not src then goto next_file end
+        local clang = container_for(file)
+        if clang then
+            extract_container(file, clang, src)
+            goto next_file
+        end
+        do
+            local lang, spec = lang_for(file)
+            -- vendored bundles that dodge the *.min.js name (nocodb's
+            -- swagger-ui-bundle.js): a line no human wrote means BUNDLE —
+            -- content decides what the filename doesn't say. Opaque
+            -- frontier, same as *.min.js
+            if lang == 'javascript' or lang == 'typescript' then
+                for line in src:sub(1, 32768):gmatch('[^\n]+') do
+                    if #line > 5000 then
+                        stamp(file)
+                        nodes[#nodes + 1] = { id = file, name = file,
+                            kind = 'module', file = file, unparsed = true,
+                            order = -1, range = { start = { line = 0, char = 0 },
+                                ['end'] = { line = 0, char = 0 } } }
+                        cunparsed[#cunparsed + 1] = file
+                        goto next_file
+                    end
+                end
+            end
+            local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+            if not okp then
+                no_parser[lang] = true
+                goto next_file
+            end
+            local tsroot = parser:parse()[1]:root()
+            stamp(file)
+            nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
+                range = pos_of(tsroot), order = -1 }
+            extract_defs(file, lang, spec, src, tsroot)
+            extract_calls(file, lang, spec, src, tsroot)
+        end
         ::next_file::
     end
 
@@ -1901,7 +2089,7 @@ function M.extract(root, opts)
     local scope_cache = {}
     local function scope_of(f)
         if scope_cache[f] == nil then
-            local _, sp = lang_for(f)
+            local _, sp = elang_for(f)
             scope_cache[f] = sp and sp.scope
                 and sp.scope(f, fileset, root) or false
         end
@@ -1924,7 +2112,7 @@ function M.extract(root, opts)
         -- 1-2 char names are shadow-bait (pattern vars, loop counters):
         -- name-matching them is noise-dominated in every language
         if #name < 3 then return nil end
-        local clang, spec = lang_for(file)
+        local clang, spec = elang_for(file)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil end
         local cands = exact[name]
@@ -1966,7 +2154,7 @@ function M.extract(root, opts)
                 -- a name never crosses LANGUAGES: that is xlang's job,
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
-                if fits and lang_for(n.file) ~= clang then fits = false end
+                if fits and elang_for(n.file) ~= clang then fits = false end
                 if fits then
                     if pick then pick = nil break end
                     pick = n
@@ -1997,7 +2185,7 @@ function M.extract(root, opts)
                 -- a name never crosses LANGUAGES: that is xlang's job,
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
-                if fits and lang_for(n.file) ~= clang then fits = false end
+                if fits and elang_for(n.file) ~= clang then fits = false end
                 if fits then
                     if pick then pick = nil break end
                     pick = n
@@ -2115,7 +2303,7 @@ function M.extract(root, opts)
         data.names = {}
         local seq_scopes, seq_any = {}, false
         for f in pairs(fileset) do
-            local _, sp = lang_for(f)
+            local _, sp = elang_for(f)
             if sp and sp.scope then
                 seq_scopes[f] = sp.scope(f, fileset, root)
                 seq_any = true
@@ -2148,6 +2336,14 @@ function M.extract(root, opts)
                 range = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } } }
         end
     end
+    -- container files whose grammar is missing already have their frontier
+    -- module node; the list feeds the same lazy text-search descend
+    if #cunparsed > 0 then
+        data.unparsed = data.unparsed or {}
+        for _, f in ipairs(cunparsed) do
+            table.insert(data.unparsed, f)
+        end
+    end
     data.no_parser = next(no_parser) and vim.tbl_keys(no_parser) or nil
     return data
 end
@@ -2167,7 +2363,7 @@ function M.relink(data, touched)
     local scope_cache = {}
     local function scope_of(f)
         if scope_cache[f] == nil then
-            local _, sp = lang_for(f)
+            local _, sp = elang_for(f)
             scope_cache[f] = sp and sp.scope
                 and sp.scope(f, relset, data.root) or false
         end
@@ -2203,7 +2399,7 @@ function M.relink(data, touched)
     end
     local function resolve(name, file)
         if #name < 3 then return nil end
-        local clang, spec = lang_for(file)
+        local clang, spec = elang_for(file)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil end
         local cands = exact[name]
@@ -2242,7 +2438,7 @@ function M.relink(data, touched)
                 -- a name never crosses LANGUAGES: that is xlang's job,
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
-                if fits and lang_for(n.file) ~= clang then fits = false end
+                if fits and elang_for(n.file) ~= clang then fits = false end
                 if fits then
                     if pick then pick = nil break end
                     pick = n
@@ -2273,7 +2469,7 @@ function M.relink(data, touched)
                 -- a name never crosses LANGUAGES: that is xlang's job,
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
-                if fits and lang_for(n.file) ~= clang then fits = false end
+                if fits and elang_for(n.file) ~= clang then fits = false end
                 if fits then
                     if pick then pick = nil break end
                     pick = n

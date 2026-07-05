@@ -26,6 +26,9 @@ elseif job.phase == 'ids' then
     out = ts.id_pass(job.root, job.files, {
         fn_unique = index.fn_unique,
         var_named = index.var_named,
+        scopes = index.scopes, -- confinement is global state too: without
+        -- it a worker links bare names across scope boundaries the
+        -- sequential path refuses
         fn_ranges = job.fn_ranges,
     })
 else
