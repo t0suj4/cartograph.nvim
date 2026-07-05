@@ -56,17 +56,24 @@ local function collect(store, ids, dest, plan)
         if n.file == dest then
             return nil, n.name .. ' already lives in ' .. dest
         end
-        -- comment adhesion: the doc lines directly above travel too
-        local s = n.range.start.line
+        -- comment adhesion: the doc lines directly above travel too —
+        -- unless the block touches the top of the file (a license /
+        -- file header belongs to the FILE; disclosed, left behind)
+        local s, header = n.range.start.line, false
         local ls = file_lines(n.file)
         if ls then
-            s = txn.attach_above(ls, s,
+            s, header = txn.attach_above(ls, s,
                 okp and ts.attach_pats(n.file) or {})
         end
         plan.moves[#plan.moves + 1] = { id = id, name = n.name, file = n.file,
             lines = { s = s, e = n.range['end'].line },
             ref = store.ref_of(id) }
         touched[n.file] = true
+        if header then
+            plan.hazards[#plan.hazards + 1] = ('the comment block above %s'
+                .. ' touches the top of %s (file header) — left behind')
+                :format(n.name, n.file)
+        end
         if n.cbarg then
             plan.hazards[#plan.hazards + 1] = ('%s is referenced from data'
                 .. ' (dispatch table / registry) — those references are NOT'
@@ -190,7 +197,19 @@ function M.apply(store, plan)
     return txn.execute(store, plan, {
         moves = vim.tbl_map(function (m) return m.ref end, plan.moves),
         dest = plan.dest,
-    }, function (rel, before, all)
+    }, M.edits_for(plan))
+end
+
+--- What :CartographApply would write, nothing written: the dry-run
+--- feeding the pre-apply diff.
+function M.preview(store, plan)
+    local txn = require 'cartograph.txn'
+    return txn.dryrun(store, plan, M.edits_for(plan))
+end
+
+--- The verb's edit callback — shared verbatim by apply and preview.
+function M.edits_for(plan)
+    return function (rel, before, all)
         if plan.creates and plan.creates[rel] then
             -- a NEW file: language header + the moved text, from the
             -- same before-bytes the journal holds
@@ -245,7 +264,7 @@ function M.apply(store, plan)
             end
         end
         return table.concat(lines, '\n')
-    end)
+    end
 end
 
 return M

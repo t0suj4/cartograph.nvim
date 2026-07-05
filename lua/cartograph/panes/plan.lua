@@ -39,7 +39,7 @@ function M.render()
         local t = store.txn
         if t.moves then
             lines[#lines + 1] = hl(marks, #lines,
-                ('%s  %d symbol(s) → %s%s    :CartographApply · :CartographTxnClear')
+                ('%s  %d symbol(s) → %s%s    :CartographDiff · :CartographApply · :CartographTxnClear')
                     :format(t.creates and 'EXTRACT' or 'MOVE', #t.moves,
                         t.dest, t.creates and ' (new file)' or ''), 'Title')
             for _, m in ipairs(t.moves) do
@@ -50,7 +50,7 @@ function M.render()
                 :format(t.dest, t.dest_at + 1, #t.touched)
         else
             lines[#lines + 1] = hl(marks, #lines,
-                ('MERGE  %d clone(s) → %s    :CartographApply · :CartographTxnClear')
+                ('MERGE  %d clone(s) → %s    :CartographDiff · :CartographApply · :CartographTxnClear')
                     :format(#t.removed, t.survivor.name), 'Title')
             for _, r in ipairs(t.removed) do
                 lines[#lines + 1] = ('  - %s   %s:%d-%d'):format(r.name, r.file,

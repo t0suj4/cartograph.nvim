@@ -2081,6 +2081,9 @@ test('extract-module: new file, header, adhesion, undo deletes', function ()
     -- adhesion: the two doc lines ride along (range grew upward)
     eq(4, plan.moves[1].lines.s)
     store.set_txn(plan)
+    -- the pre-apply diff IS the apply: preview must equal what lands
+    local pb, pa = mv.preview(store, plan)
+    ok(pb and pb['sub/util.lua'] == false, 'preview sees the create')
     local entry, aerr = mv.apply(store, plan)
     ok(entry, tostring(aerr))
     eq('applied', entry.status)
@@ -2104,6 +2107,9 @@ test('extract-module: new file, header, adhesion, undo deletes', function ()
         '' }, '\n')
     eq(expectedA, readf('a.lua'))
     eq(expectedU, readf('sub/util.lua'))
+    -- the preview promised exactly these bytes
+    eq(expectedA, pa['a.lua'])
+    eq(expectedU, pa['sub/util.lua'])
 
     -- the graph followed: nomad lives in the NEW file
     eq('sub/util.lua', (store.node(byname('nomad')) or {}).file)
@@ -2114,6 +2120,61 @@ test('extract-module: new file, header, adhesion, undo deletes', function ()
     eq(A, readf('a.lua'))
     eq(nil, readf('sub/util.lua'))
 
+    -- changed your mind about changing your mind: redo re-applies
+    local rd, rdw = journal.redo(root)
+    ok(rd, tostring(rdw))
+    eq(expectedA, readf('a.lua'))
+    eq(expectedU, readf('sub/util.lua'))
+    -- and redo refuses once the before-state drifted
+    local r2 = assert(journal.rollback(root))
+    eq('rolled_back', r2.status)
+    write('a.lua', A .. '-- drifted\n')
+    local rd2, rdw2 = journal.redo(root)
+    ok(not rd2 and rdw2:match('changed since the undo'), tostring(rdw2))
+    write('a.lua', A)
+    ok(journal.redo(root), 'redo after restoring')
+    assert(journal.rollback(root))
+
     journal.wipe(root)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('adhesion declines file headers: the license stays', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local mv = require 'cartograph.moveapply'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function write(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text)
+        fd:close()
+    end
+    -- the def sits DIRECTLY under the license block: no blank line
+    write('lic.lua', table.concat({
+        '-- Copyright (c) 2026 Somebody',
+        '-- SPDX-License-Identifier: MIT',
+        'local function first(x)',
+        '  return x',
+        'end',
+        '' }, '\n'))
+    write('dest.lua', 'local d = 1\n')
+    store.ingest(ts.extract(root))
+    store.stage((function ()
+        for id, n in pairs(store.by_id) do
+            if n.name == 'first' then return id end
+        end
+    end)())
+    store.set_dest('dest.lua')
+    local plan = assert(mv.plan(store))
+    -- the block touches line 1: it is the FILE's, not the def's
+    eq(2, plan.moves[1].lines.s)
+    local hz
+    for _, h in ipairs(plan.hazards) do
+        if h:match('file header') then hz = true end
+    end
+    ok(hz, table.concat(plan.hazards, ' | '))
+    store.clear_stage()
     vim.fn.delete(root, 'rf')
 end)

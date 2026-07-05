@@ -23,8 +23,12 @@ end
 --- Comment adhesion: walk UP from a def's first line over lines that
 --- belong to it (comments, decorators, attributes — per-language
 --- patterns from the provider); blank lines and code stop the walk.
---- `s` and the return value are 0-based line indexes.
+--- A block that reaches the TOP of the file belongs to the FILE, not
+--- the def (license notices, file docblocks) — adhesion declines and
+--- says so. `s` and the returned index are 0-based; the second return
+--- is true when a top-of-file block was left behind.
 function M.attach_above(lines, s, pats)
+    local orig = s
     while s > 0 do
         local l = lines[s] or ''
         local hit
@@ -34,7 +38,50 @@ function M.attach_above(lines, s, pats)
         if not hit then break end
         s = s - 1
     end
-    return s
+    if s == 0 and orig > 0 then
+        return orig, true -- the block touches line 1: a file header
+    end
+    return s, false
+end
+
+--- Dry-run a plan: the same before-content read and edit callback the
+--- apply uses, but nothing written. Returns (before_map, after_map).
+function M.dryrun(store, plan, edit_of)
+    local root = store.data.root
+    local before = {}
+    for _, rel in ipairs(plan.touched) do
+        local t = M.read_file(root, rel)
+        if not t then
+            if not (plan.creates and plan.creates[rel]) then
+                return nil, nil, 'cannot read ' .. rel
+            end
+            t = false
+        end
+        before[rel] = t
+    end
+    local after = {}
+    for _, rel in ipairs(plan.touched) do
+        after[rel] = edit_of(rel, before[rel], before)
+    end
+    return before, after
+end
+
+--- A unified diff over (before, after) maps — what :CartographApply
+--- would write, shown before it writes.
+function M.difftext(before, after, order)
+    local out = {}
+    for _, rel in ipairs(order) do
+        local b = before[rel]
+        local a = after[rel] or ''
+        out[#out + 1] = '--- ' .. (b == false and '/dev/null' or 'a/' .. rel)
+        out[#out + 1] = '+++ b/' .. rel
+        local d = vim.diff(b == false and '' or b, a,
+            { result_type = 'unified', ctxlen = 3 })
+        for _, l in ipairs(vim.split(d or '', '\n', { plain = true })) do
+            if l ~= '' then out[#out + 1] = l end
+        end
+    end
+    return out
 end
 
 --- The refusal ladder's common rungs: a live graph, the same

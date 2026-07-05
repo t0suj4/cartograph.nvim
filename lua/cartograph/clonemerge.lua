@@ -76,12 +76,19 @@ function M.plan(store, id)
     end
 
     for _, t in ipairs(twins) do
-        -- comment adhesion: the doc lines above a removed twin go too
-        local s = t.range.start.line
+        -- comment adhesion: the doc lines above a removed twin go too —
+        -- unless the block touches the top of the file (a header stays)
+        local s, header = t.range.start.line, false
         local tls = file_lines(t.file)
         if tls then
             local okp, ts = pcall(require, 'cartograph.providers.treesitter')
-            s = txn.attach_above(tls, s, okp and ts.attach_pats(t.file) or {})
+            s, header = txn.attach_above(tls, s,
+                okp and ts.attach_pats(t.file) or {})
+        end
+        if header then
+            plan.hazards[#plan.hazards + 1] = ('the comment block above %s'
+                .. ' touches the top of %s (file header) — left behind')
+                :format(t.name, t.file)
         end
         plan.removed[#plan.removed + 1] = {
             id = t.id, name = t.name, file = t.file,
@@ -199,7 +206,18 @@ function M.apply(store, plan)
         survivor = plan.survivor.ref, survivor_name = plan.survivor.name,
         removed = vim.tbl_map(function (r) return r.ref end, plan.removed),
         rewrites = #plan.rewrites,
-    }, function (rel, before)
+    }, M.edits_for(plan))
+end
+
+--- What :CartographApply would write, nothing written: the dry-run
+--- feeding the pre-apply diff.
+function M.preview(store, plan)
+    return txn.dryrun(store, plan, M.edits_for(plan))
+end
+
+--- The verb's edit callback — shared verbatim by apply and preview.
+function M.edits_for(plan)
+    return function (rel, before)
         local dels, reps = {}, {}
         for _, r in ipairs(plan.removed) do
             if r.file == rel then dels[#dels + 1] = r.lines end
@@ -208,7 +226,7 @@ function M.apply(store, plan)
             if r.file == rel then reps[#reps + 1] = r end
         end
         return edit_file(before, dels, reps)
-    end)
+    end
 end
 
 return M

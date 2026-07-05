@@ -403,6 +403,93 @@ function M.open(dump_path, opts)
             :format(#txn.moves, txn.dest, #txn.hazards), vim.log.levels.INFO)
     end, { nargs = 1, complete = 'file',
         desc = 'cartograph: extract the staged move-set into a new file' })
+    -- changing your mind, both directions: the diff BEFORE the write,
+    -- the journal browser AFTER it, redo when the undo was the mistake
+    local function txn_scratch(lines, ft)
+        vim.cmd('botright new')
+        local buf = vim.api.nvim_get_current_buf()
+        vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile
+            = 'nofile', 'wipe', false
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        vim.bo[buf].modifiable = false
+        if ft then vim.bo[buf].filetype = ft end
+        vim.api.nvim_win_set_height(0, math.min(#lines + 1, 20))
+        vim.keymap.set('n', require('cartograph.config').keys.close,
+            '<cmd>close<cr>', { buffer = buf })
+        return buf
+    end
+    local function txn_module()
+        local st = require 'cartograph.store'
+        return (st.txn.verb == 'move' or st.txn.verb == 'extract-module')
+            and 'cartograph.moveapply' or 'cartograph.clonemerge'
+    end
+    pcall(vim.api.nvim_del_user_command, 'CartographDiff')
+    vim.api.nvim_create_user_command('CartographDiff', function ()
+        local st = require 'cartograph.store'
+        if not st.txn then
+            return vim.notify('cartograph: nothing staged', vim.log.levels.WARN)
+        end
+        local before, after, why = require(txn_module()).preview(st, st.txn)
+        if not before then
+            return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)
+        end
+        txn_scratch(require('cartograph.txn')
+            .difftext(before, after, st.txn.touched), 'diff')
+    end, { desc = 'cartograph: the exact diff the staged transaction would write' })
+    pcall(vim.api.nvim_del_user_command, 'CartographRedo')
+    vim.api.nvim_create_user_command('CartographRedo', function ()
+        local st = require 'cartograph.store'
+        if not (st.data and st.data.root) then return end
+        local entry, why = require('cartograph.journal').redo(st.data.root)
+        if not entry then
+            return vim.notify('cartograph: redo — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        local touched = {}
+        for rel in pairs(entry.files) do touched[#touched + 1] = rel end
+        require('cartograph.refresh').files(touched)
+        vim.cmd('silent! checktime')
+        vim.notify(('cartograph: redid %s (%s) — :CartographUndo reverses'
+            .. ' again'):format(entry.verb, entry.id), vim.log.levels.INFO)
+    end, { desc = 'cartograph: re-apply the most recently undone transaction' })
+    pcall(vim.api.nvim_del_user_command, 'CartographJournal')
+    vim.api.nvim_create_user_command('CartographJournal', function ()
+        local st = require 'cartograph.store'
+        if not (st.data and st.data.root) then return end
+        local entries = require('cartograph.journal').list(st.data.root)
+        local lines, at = {}, {}
+        for _, e in ipairs(entries) do
+            local files = {}
+            for rel in pairs(e.files) do files[#files + 1] = rel end
+            table.sort(files)
+            lines[#lines + 1] = ('%s  %-11s %-14s %s'):format(
+                os.date('%Y-%m-%d %H:%M', e.ts or 0), e.status, e.verb,
+                table.concat(files, ', '))
+            at[#lines] = e
+        end
+        if #lines == 0 then lines[1] = 'journal: empty' end
+        lines[#lines + 1] = ''
+        lines[#lines + 1] = '<CR> = the entry\'s diff'
+            .. '  ·  :CartographUndo / :CartographRedo walk the stack'
+        local buf = txn_scratch(lines)
+        vim.keymap.set('n', '<CR>', function ()
+            local e = at[vim.api.nvim_win_get_cursor(0)[1]]
+            if not e then return end
+            local before, after, order = {}, {}, {}
+            for rel, f in pairs(e.files) do
+                if not f.after then
+                    return vim.notify('cartograph: ' .. e.id
+                        .. ' predates diff records', vim.log.levels.WARN)
+                end
+                order[#order + 1] = rel
+                before[rel] = f.absent and false or f.before
+                after[rel] = f.after
+            end
+            table.sort(order)
+            txn_scratch(require('cartograph.txn')
+                .difftext(before, after, order), 'diff')
+        end, { buffer = buf })
+    end, { desc = 'cartograph: browse the transaction journal' })
     pcall(vim.api.nvim_del_user_command, 'CartographApply')
     vim.api.nvim_create_user_command('CartographApply', function ()
         local st = require 'cartograph.store'

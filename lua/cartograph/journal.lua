@@ -71,10 +71,13 @@ function M.begin(root, verb, plan, files)
     return e
 end
 
---- Flip an entry to 'applied', recording what each file became.
+--- Flip an entry to 'applied', recording what each file became — the
+--- full text, not just the hash, so an undone entry can be REDONE
+--- (changing your mind is symmetric).
 function M.commit(root, e, after)
     e.status = 'applied'
     for rel, text in pairs(after) do
+        e.files[rel].after = text
         e.files[rel].after_hash = hash(text)
     end
     return write_entry(root, e)
@@ -159,6 +162,52 @@ function M.rollback(root)
     e.status = 'rolled_back'
     write_entry(root, e)
     return e
+end
+
+--- Redo the most recently undone entry. Undo/redo form a stack over
+--- the id-ordered entries: applied entries are the prefix, rolled-back
+--- the suffix — redo re-applies the LOWEST rolled-back entry above
+--- every applied one. Every touched file must still contain exactly
+--- the entry's before-content (or be absent, for creates); drift
+--- refuses. Returns (entry, nil) or (nil, why).
+function M.redo(root)
+    local top_applied, cand
+    for _, e in ipairs(M.list(root)) do -- newest first
+        if e.status == 'applied' and not top_applied then top_applied = e end
+        if e.status == 'rolled_back'
+            and (not top_applied or e.id > top_applied.id) then
+            cand = e -- keep walking: the OLDEST such entry wins
+        end
+    end
+    if not cand then return nil, 'nothing rolled back to redo' end
+    local drifted = {}
+    for rel, f in pairs(cand.files) do
+        local fd = io.open(root .. '/' .. rel, 'r')
+        local now = fd and fd:read('a')
+        if fd then fd:close() end
+        local clean = f.absent and now == nil
+            or (not f.absent and now ~= nil and hash(now) == f.before_hash)
+        if not clean then drifted[#drifted + 1] = rel end
+        if not f.after then
+            return nil, cand.id .. ' predates redo support (no after-content)'
+        end
+    end
+    if #drifted > 0 then
+        return nil, ('refused: %s changed since the undo — redoing would'
+            .. ' clobber newer edits'):format(table.concat(drifted, ', '))
+    end
+    for rel, f in pairs(cand.files) do
+        local path = root .. '/' .. rel
+        local dir = path:match('^(.*)/[^/]*$')
+        if dir then vim.fn.mkdir(dir, 'p') end
+        local fd = io.open(path, 'w')
+        if not fd then return nil, 'cannot write ' .. rel end
+        fd:write(f.after)
+        fd:close()
+    end
+    cand.status = 'applied'
+    write_entry(root, cand)
+    return cand
 end
 
 --- Remove a root's journal entirely (tests, spring cleaning).
