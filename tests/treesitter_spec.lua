@@ -202,6 +202,30 @@ test('clangd: resolution oracle proves the C fixture edges', function ()
     ok(main_helper and not main_helper.inferred, 'main -> helper is proven now')
 end)
 
+test('clangd async: same proof, without blocking the caller', function ()
+    if not has_parser('c') then skip 'no c parser' end
+    local cd = require 'cartograph.providers.clangd'
+    local data = require('cartograph.providers.treesitter')
+        .extract(vim.fn.getcwd() .. '/tests/fixtures/cproj')
+    local done, stats, why = false, nil, nil
+    cd.enrich_async(data, {}, function (s, w) stats, why, done = s, w, true end)
+    -- the call returns immediately — the callback is always scheduled, never
+    -- run inline (that IS the non-blocking contract)
+    ok(not done, 'enrich_async does not resolve synchronously')
+    ok(vim.wait(20000, function () return done end, 50), 'on_done eventually fires')
+    if not stats then skip('no clangd: ' .. tostring(why)) end
+    ok(stats.resolved_fns >= 3, 'answered async for the fixture fns')
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    local main_helper
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.from == byname.main.id
+            and e.to == byname.helper.id then main_helper = e end
+    end
+    ok(main_helper and main_helper.proven and not main_helper.inferred,
+        'main -> helper proven via the async path')
+end)
+
 test('xlang: string-key dispatch links JS to the C++ handler', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
@@ -2767,6 +2791,29 @@ test('luals oracle: references settle what names refuse', function ()
     -- lua-ls knows the require binding: the call links to ALPHA's pick
     ok(site.to and site.to:match('^alpha%.lua'), tostring(site.to))
     ok(not site.inferred, 'oracle answers are solid, not ~')
+end)
+
+test('luals async: settles the same, without blocking the caller', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local bin_ok = vim.fn.executable('lua-language-server') == 1
+        or vim.fn.executable(vim.fn.expand(
+            '~/.local/lib/lua-language-server/bin/lua-language-server')) == 1
+    if not bin_ok then skip 'no lua-language-server' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/luaoracle')
+    local site
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'pick' and c.file == 'user.lua' then site = c end
+    end
+    local done, stats = false, nil
+    require('cartograph.providers.luals').enrich_async(data, {},
+        function (s) stats = s; done = true end)
+    ok(not done, 'enrich_async does not resolve synchronously')
+    ok(vim.wait(90000, function () return done end, 50), 'on_done eventually fires')
+    ok(stats, 'answered')
+    ok(site.to and site.to:match('^alpha%.lua') and not site.inferred,
+        'async oracle settles a.pick to alpha, solid')
 end)
 
 test('refusals are places: an ambiguous call keeps its candidates', function ()

@@ -71,42 +71,12 @@ function M.open(dump_path, opts)
         -- everything after extraction: clangd oracle, cross-language
         -- links, SQL entities, ingest (also the parallel path's on_done)
         local function finish(data)
-            -- C/C++ roots get clangd resolution when available (config.clangd)
-            local has_c = false
-            for _, n in ipairs(data.nodes) do
-                if n.kind == 'module' and n.file:match('%.[ch]p?p?$') then
-                    has_c = true
-                    break
-                end
-            end
-            if has_c and cfg.clangd ~= false then
-                vim.notify('cartograph: resolving call graph with clangd…', vim.log.levels.INFO)
-                local stats = require('cartograph.providers.clangd').enrich(data)
-                if stats then
-                    vim.notify(('cartograph: clangd proved edges for %d functions')
-                        :format(stats.resolved_fns), vim.log.levels.INFO)
-                end
-            end
-            -- lua roots get STOCK lua-ls as the oracle (config.luals):
-            -- references per candidate def, intersected with call sites
-            local has_lua = false
-            for _, n in ipairs(data.nodes) do
-                if n.kind == 'module' and n.file:match('%.lua$') then
-                    has_lua = true
-                    break
-                end
-            end
-            if has_lua and cfg.luals ~= false then
-                local stats = require('cartograph.providers.luals').enrich(data)
-                if stats then
-                    vim.notify(('cartograph: lua-ls settled %d/%d defs'
-                        .. ' (%d upgraded, %d refuted)'):format(stats.answered,
-                        stats.asked, stats.upgraded, stats.cleared),
-                        vim.log.levels.INFO)
-                end
-            end
-            -- cross-language boundaries (string-key dispatch) — after clangd,
-            -- so the oracle's edge rebuild can't drop the cross-language links.
+            -- LSP oracles (clangd for C/C++, lua-ls for lua) are EXPENSIVE and
+            -- I/O-bound, so they run in the BACKGROUND after ingest — the graph
+            -- opens immediately with name-matched (~) edges and each oracle
+            -- hot-swaps its proven edges in when it finishes (see below ingest).
+            -- cross-language boundaries (string-key dispatch) run here, BEFORE
+            -- the oracles — their edge rebuild preserves xlang refs (e.xlang).
             -- Registries the project invented for itself are DISCOVERED and
             -- linked the same way (config.discover = false disables).
             local x = require('cartograph.xlang').link(data,
@@ -169,6 +139,55 @@ function M.open(dump_path, opts)
                     vim.log.levels.WARN)
             end
             store.ingest(data)
+
+            -- deferred LSP oracles: expensive, I/O-bound resolution that must
+            -- NOT block the open. The graph is already live with name-matched
+            -- (~) edges; each oracle runs async and hot-swaps its proven edges
+            -- in when it finishes. Adding an oracle is an entry here, not a new
+            -- code path — the async machinery lives in cartograph.oracle.
+            local ORACLES = {
+                { name = 'clangd', cfg = 'clangd', ext = '%.[ch]p?p?$',
+                    mod = 'cartograph.providers.clangd',
+                    report = function (s) return ('cartograph: clangd proved'
+                        .. ' edges for %d functions'):format(s.resolved_fns) end },
+                { name = 'lua-ls', cfg = 'luals', ext = '%.lua$',
+                    mod = 'cartograph.providers.luals',
+                    report = function (s) return ('cartograph: lua-ls settled'
+                        .. ' %d/%d defs (%d upgraded, %d refuted)'):format(
+                        s.answered, s.asked, s.upgraded, s.cleared) end },
+            }
+            for _, o in ipairs(ORACLES) do
+                local applies = cfg[o.cfg] ~= false
+                if applies then
+                    applies = false
+                    for _, n in ipairs(data.nodes) do
+                        if n.kind == 'module' and n.file:match(o.ext) then
+                            applies = true; break
+                        end
+                    end
+                end
+                if applies then
+                    vim.notify(('cartograph: resolving with %s in the'
+                        .. ' background…'):format(o.name), vim.log.levels.INFO)
+                    require(o.mod).enrich_async(data, {}, function (stats, why)
+                        -- splice only if this is still the same live graph
+                        -- (a re-open / refresh supersedes it; hotswap itself
+                        -- no-ops while a txn / move-set is staged)
+                        if store.data ~= data then return end
+                        if not stats then
+                            if why and not (why:find('binary')
+                                or why:find('no functions') or why:find('nothing')) then
+                                vim.notify(('cartograph: %s skipped — %s (graph'
+                                    .. ' stays ~)'):format(o.name, why),
+                                    vim.log.levels.WARN)
+                            end
+                            return
+                        end
+                        require('cartograph.refresh').hotswap()
+                        vim.notify(o.report(stats), vim.log.levels.INFO)
+                    end)
+                end
+            end
         end
 
         -- incremental open: unchanged files come from the cache, only the

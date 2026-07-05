@@ -177,6 +177,138 @@ function M.enrich(data, opts)
         indexing_seen = indexing, index_done = index_done }
 end
 
+--- Async enrichment — same result as M.enrich, but NEVER blocks the editor.
+--- The graph is meant to be already ingested with name-matched (~) edges;
+--- clangd's init/index waits become timers and the per-function callHierarchy
+--- queries run as bounded-concurrency async requests, so nvim stays live the
+--- whole time. on_done(stats|nil, why?) fires on the main loop when finished
+--- (its job is to splice the now-proven edges back in and redraw).
+---@param data table  the neutral-schema graph (edges mutated on completion)
+---@param opts { bin:string?, index_wait:number?, concurrency:number? }?
+---@param on_done fun(stats:table?, why:string?)
+function M.enrich_async(data, opts, on_done)
+    opts = opts or {}
+    local function done(stats, why)
+        if on_done then vim.schedule(function () on_done(stats, why) end) end
+    end
+    local bin = opts.bin or find_bin()
+    if not bin then return done(nil, 'no clangd binary (config.clangd_bin / PATH)') end
+    local root = data.root
+
+    local by_file, fn_nodes = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            by_file[n.file] = by_file[n.file] or {}
+            table.insert(by_file[n.file], n)
+            fn_nodes[#fn_nodes + 1] = n
+        end
+    end
+    if #fn_nodes == 0 then return done(nil, 'no functions to resolve') end
+    local function node_at(file, line)
+        local best
+        for _, n in ipairs(by_file[file] or {}) do
+            if n.range.start.line <= line and line <= n.range['end'].line
+                and (not best or n.range.start.line >= best.range.start.line) then
+                best = n
+            end
+        end
+        return best
+    end
+
+    local files = {}
+    for f in pairs(by_file) do files[#files + 1] = f end
+    local answered = {}
+
+    require('cartograph.oracle').run({
+        name = 'cartograph-clangd',
+        cmd = { bin, '--background-index', '--log=error' },
+        root = root,
+        files = files,
+        lang_id = lang_id,
+        items = fn_nodes,
+        concurrency = opts.concurrency or 32,
+        index_token = 'backgroundIndex',
+        -- callHierarchy wants the index; wait for it (or "no indexer showed
+        -- up", or the cap) as a NON-blocking poll before firing requests
+        settle = function (ses, proceed)
+            local t0 = vim.uv.now()
+            local timer = vim.uv.new_timer()
+            timer:start(120, 120, vim.schedule_wrap(function ()
+                local el = vim.uv.now() - t0
+                if ses.index_done or (not ses.indexing and el > 3000)
+                    or el > (opts.index_wait or 20000) then
+                    timer:stop(); timer:close(); proceed()
+                end
+            end))
+        end,
+        query = function (ses, n, step)
+            local lines = vim.split(ses.texts[n.file] or '', '\n', { plain = true })
+            local uri = vim.uri_from_fname(root .. '/' .. n.file)
+            local ok = ses.client:request('textDocument/prepareCallHierarchy',
+                { textDocument = { uri = uri }, position = name_pos(n, lines) },
+                function (_, result)
+                    local item = result and result[1]
+                    if not item then return step() end
+                    local ok2 = ses.client:request('callHierarchy/incomingCalls',
+                        { item = item }, function (_, calls)
+                            if calls then
+                                answered[n.id] = {}
+                                for _, inc in ipairs(calls) do
+                                    local ffile = vim.uri_to_fname(inc.from.uri):sub(#root + 2)
+                                    local from = node_at(ffile, inc.from.selectionRange.start.line)
+                                    if from then
+                                        local at = {}
+                                        for _, r in ipairs(inc.fromRanges or {}) do
+                                            at[#at + 1] = { start = { line = r.start.line,
+                                                    char = r.start.character },
+                                                ['end'] = { line = r['end'].line,
+                                                    char = r['end'].character } }
+                                        end
+                                        table.insert(answered[n.id], { from = from.id, at = at })
+                                    end
+                                end
+                            end
+                            step()
+                        end)
+                    if not ok2 then step() end
+                end)
+            if not ok then step() end
+        end,
+        finalize = function (ses)
+            local edges_added, upgraded, kept = 0, {}, {}
+            for _, e in ipairs(data.edges) do
+                -- preserve cross-language (xlang) refs even into answered fns:
+                -- clangd can't see them, and async runs AFTER xlang has linked
+                if not (e.kind == 'ref' and answered[e.to] and not e.xlang) then
+                    kept[#kept + 1] = e
+                end
+            end
+            for to, froms in pairs(answered) do
+                local by_from = {}
+                for _, f in ipairs(froms) do
+                    local e = by_from[f.from]
+                    if not e then
+                        e = { from = f.from, to = to, kind = 'ref', at = {},
+                            self = (f.from == to) or nil, proven = true }
+                        by_from[f.from] = e
+                        kept[#kept + 1] = e
+                        edges_added = edges_added + 1
+                    end
+                    vim.list_extend(e.at, f.at)
+                end
+                upgraded[#upgraded + 1] = to
+            end
+            data.edges = kept
+            data.capabilities = data.capabilities or {}
+            data.capabilities.resolution = 'clangd'
+            return { resolved_fns = #upgraded, edges = edges_added,
+                indexing_seen = ses.indexing, index_done = ses.index_done }
+        end,
+        init_timeout = opts.init_timeout or 8000,
+        deadline = opts.deadline or 90000,
+    }, on_done)
+end
+
 --- Full extraction: tree-sitter skeleton + clangd resolution.
 function M.extract(root, opts)
     local ts = require('cartograph.providers.treesitter')

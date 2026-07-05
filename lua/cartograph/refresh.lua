@@ -441,4 +441,22 @@ function M.all()
     return { nodes = #fresh.nodes }
 end
 
+--- Hot-swap the CURRENT graph after an in-place EDGE mutation — a background
+--- oracle (clangd/luals) upgrading ~ hypotheses to proven. Re-ingest the live
+--- data carrying navigation, focus and the browser location, then redraw.
+--- Nodes are unchanged (only edges), so every id stays valid. A no-op while a
+--- transaction or move-set is staged (the graph must not shift underfoot).
+function M.hotswap()
+    local store = require 'cartograph.store'
+    if not store.data or next(store.moveset or {}) or store.txn then return end
+    local back, fwd = store._nav_back, store._nav_fwd
+    local focused = store.focused
+    local loc = store.loc_provider and store.loc_provider.get()
+    store.ingest(store.data)
+    store._nav_back, store._nav_fwd = back or {}, fwd or {}
+    if focused and store.node(focused) then store.set_focus(focused) end
+    require('cartograph.toc').attach(store)
+    if loc and store.loc_provider then pcall(store.loc_provider.set, loc) end
+end
+
 return M

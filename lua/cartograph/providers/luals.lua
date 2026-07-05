@@ -192,4 +192,143 @@ function M.enrich(data, opts)
         upgraded = upgraded, cleared = cleared }
 end
 
+--- Async enrichment — same result as M.enrich, but never blocks (lua-ls's
+--- workspace load, which made the first request wait up to a minute, is just
+--- a slow async response now). Runs on the shared oracle substrate. Calls
+--- on_done(stats|nil, why?) on the main loop; its job is to splice + redraw.
+function M.enrich_async(data, opts, on_done)
+    opts = opts or {}
+    local bin = opts.bin or find_bin()
+    if not bin then
+        if on_done then vim.schedule(function ()
+            on_done(nil, 'no lua-language-server binary (config.luals_bin / PATH)')
+        end) end
+        return
+    end
+    local root = data.root
+
+    local inferred_in, want_tail = {}, {}
+    for _, c in ipairs(data.calls or {}) do
+        if c.file:match('%.lua$') and not c.dynamic then
+            if c.to and c.inferred then inferred_in[c.to] = true
+            elseif not c.to then want_tail[c.callee] = true end
+        end
+    end
+    local cands, lua_files = {}, {}
+    for _, n in ipairs(data.nodes) do
+        if n.file:match('%.lua$') then
+            lua_files[n.file] = true
+            if (n.kind == 'function' or n.kind == 'method') and not n.torn
+                and (inferred_in[n.id]
+                    or want_tail[n.name:match('([%w_]+)$') or n.name]) then
+                cands[#cands + 1] = n
+            end
+        end
+    end
+    if #cands == 0 then
+        if on_done then vim.schedule(function ()
+            on_done(nil, 'nothing for the oracle to settle')
+        end) end
+        return
+    end
+    local sites = {} -- file\31line -> { call, ... } (the phantom-caller guard)
+    for _, c in ipairs(data.calls or {}) do
+        if c.at and c.file:match('%.lua$') then
+            local k = c.file .. '\31' .. c.at.start.line
+            sites[k] = sites[k] or {}
+            table.insert(sites[k], c)
+        end
+    end
+    local files = {}
+    for f in pairs(lua_files) do files[#files + 1] = f end
+    local matched, answered = {}, {}
+
+    require('cartograph.oracle').run({
+        name = 'cartograph-luals',
+        cmd = { bin },
+        root = root,
+        settings = { Lua = { diagnostics = { enable = false },
+            telemetry = { enable = false } } },
+        files = files,
+        lang_id = function () return 'lua' end,
+        items = cands,
+        concurrency = opts.concurrency or 32,
+        -- no settle: lua-ls queues the requests until the workspace loads,
+        -- then answers — async, so the wait costs nothing (the deadline caps it)
+        query = function (ses, n, step)
+            local lines = vim.split(ses.texts[n.file] or '', '\n', { plain = true })
+            local ok = ses.client:request('textDocument/references', {
+                textDocument = { uri = vim.uri_from_fname(root .. '/' .. n.file) },
+                position = name_pos(n, lines),
+                context = { includeDeclaration = false },
+            }, function (_, result)
+                if result then
+                    answered[n.id] = true
+                    for _, loc in ipairs(result) do
+                        local ffile = vim.uri_to_fname(loc.uri):sub(#root + 2)
+                        local line = loc.range.start.line
+                        local ch = loc.range.start.character
+                        for _, c in ipairs(sites[ffile .. '\31' .. line] or {}) do
+                            if ch >= c.at.start.char and ch < c.at['end'].char then
+                                matched[c] = matched[c] or {}
+                                table.insert(matched[c], n.id)
+                            end
+                        end
+                    end
+                end
+                step()
+            end)
+            if not ok then step() end
+        end,
+        finalize = function ()
+            local upgraded, cleared = 0, 0
+            for c, defs in pairs(matched) do
+                if #defs == 1 then
+                    if c.to ~= defs[1] or c.inferred then upgraded = upgraded + 1 end
+                    c.to = defs[1]
+                    c.inferred = nil
+                end
+            end
+            for _, c in ipairs(data.calls or {}) do
+                if c.to and c.inferred and answered[c.to] and not matched[c] then
+                    c.to = nil
+                    c.inferred = nil
+                    cleared = cleared + 1
+                end
+            end
+            local kept = {}
+            for _, e in ipairs(data.edges) do
+                -- preserve cross-language (xlang) refs: async runs AFTER xlang
+                if not (e.kind == 'ref' and answered[e.to] and not e.xlang) then
+                    kept[#kept + 1] = e
+                end
+            end
+            local by_pair = {}
+            for _, c in ipairs(data.calls or {}) do
+                if c.to and answered[c.to] and c.fn then
+                    local k = c.fn .. '\31' .. c.to
+                    local e = by_pair[k]
+                    if not e then
+                        e = { from = c.fn, to = c.to, kind = 'ref', at = {},
+                            self = (c.fn == c.to) or nil, inferred = c.inferred,
+                            proven = not c.inferred or nil }
+                        by_pair[k] = e
+                        kept[#kept + 1] = e
+                    end
+                    if c.at then e.at[#e.at + 1] = c.at end
+                    if not c.inferred then e.inferred = nil end
+                end
+            end
+            data.edges = kept
+            data.capabilities = data.capabilities or {}
+            data.capabilities.resolution = data.capabilities.resolution
+                and (data.capabilities.resolution .. '+luals') or 'luals'
+            return { asked = #cands, answered = vim.tbl_count(answered),
+                upgraded = upgraded, cleared = cleared }
+        end,
+        init_timeout = opts.init_timeout or 8000,
+        deadline = opts.deadline or 90000, -- lua-ls workspace-load headroom
+    }, on_done)
+end
+
 return M
