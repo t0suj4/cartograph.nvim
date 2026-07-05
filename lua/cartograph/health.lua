@@ -66,6 +66,14 @@ function M.check()
     else
         h.info('clangd not found — C/C++ stays name-matched (~); optional')
     end
+    local luals = vim.fn.executable('lua-language-server') == 1
+        or vim.fn.executable(vim.fn.expand(
+            '~/.local/lib/lua-language-server/bin/lua-language-server')) == 1
+    if luals then
+        h.ok('lua-language-server found (stock; lua ~ edges can be settled by references)')
+    else
+        h.info('lua-language-server not found — lua stays name-matched (~); optional')
+    end
     if vim.fn.executable('git') == 1 then
         h.ok('git found (cartograph.history available)')
     else

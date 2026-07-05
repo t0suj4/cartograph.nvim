@@ -13,6 +13,13 @@ local M = {}
 M.clangd = true
 M.clangd_bin = nil
 
+-- STOCK lua-language-server as the lua oracle: references per ~-marked
+-- def, intersected with known call sites — upgrades what it can prove,
+-- refutes wrong guesses, leaves the rest ~. `false` disables;
+-- luals_bin overrides binary discovery.
+M.luals = true
+M.luals_bin = nil
+
 -- cross-language bindings (string-key dispatch boundaries); nil = the
 -- defaults in cartograph/xlang.lua (chromium WebUI, guile gsubr,
 -- lua_register). Add your own: { export = { verb, name = argN },

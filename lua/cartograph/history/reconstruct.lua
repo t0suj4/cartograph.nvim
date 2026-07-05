@@ -1,6 +1,7 @@
 -- Driver for ledger reconstruction (orchestration, not pure). Walks a git commit
--- range, extracts the symbol graph at each commit (in a throwaway worktree, via
--- the --graph CLI), and feeds the snapshot sequence to ledger.reconstruct.
+-- range, extracts the symbol graph at each commit (in a throwaway worktree,
+-- in-process via the tree-sitter provider — the lua-ls --graph CLI this used
+-- to shell out to is retired), and feeds the sequence to ledger.reconstruct.
 --
 -- Extracted graphs are cached by commit sha, so re-runs (and resuming an
 -- interrupted run) are cheap. This layer needs git + the extractor on disk and
@@ -34,11 +35,10 @@ end
 
 --- Reconstruct the ledger for `repo` across the range `from`..`to` (inclusive of
 --- `from` as the baseline snapshot).
----@param opts { repo:string, from:string, to:string, bin:string?, cache:string?, progress:boolean? }
+---@param opts { repo:string, from:string, to:string, cache:string?, progress:boolean? }
 ---@return { steps:table, lines:string[] }
 function M.run(opts)
     local repo  = assert(opts.repo, 'reconstruct: repo required')
-    local bin   = opts.bin or vim.fn.expand '~/.local/lib/lua-language-server/bin/lua-language-server'
     local cache = opts.cache or (vim.fn.stdpath('cache') .. '/cartograph-ledger')
     vim.fn.mkdir(cache, 'p')
 
@@ -57,7 +57,7 @@ function M.run(opts)
         labels[i] = (sh { 'git', '-C', repo, 'log', '-1', '--format=%s', rev }):gsub('%s+$', '')
     end
 
-    local graphs = M.extract_graphs(repo, revs, { cache = cache, bin = bin, progress = opts.progress })
+    local graphs = M.extract_graphs(repo, revs, { cache = cache, progress = opts.progress })
     local steps = ledger.reconstruct(graphs, labels)
     return { steps = steps, lines = ledger.render(steps) }
 end
@@ -66,11 +66,10 @@ end
 --- Shared by the ledger and the coupling miner. Returns a graph per rev (parallel).
 ---@param repo string
 ---@param revs string[]
----@param opts { cache:string?, bin:string?, progress:boolean? }
+---@param opts { cache:string?, progress:boolean?, subdir:string? }
 ---@return table[] graphs
 function M.extract_graphs(repo, revs, opts)
     opts = opts or {}
-    local bin   = opts.bin or vim.fn.expand '~/.local/lib/lua-language-server/bin/lua-language-server'
     local cache = opts.cache or (vim.fn.stdpath('cache') .. '/cartograph-ledger')
     vim.fn.mkdir(cache, 'p')
     local wt = cache .. '/wt'
@@ -79,19 +78,24 @@ function M.extract_graphs(repo, revs, opts)
     local okrun, err = pcall(function ()
         for i, rev in ipairs(revs) do
             local json = cache .. '/' .. rev .. '.json'
-            if not read_json(json) then
+            local g = read_json(json)
+            if not g then
                 sh { 'git', '-C', wt, 'checkout', '-q', '--detach', rev }
                 -- scope extraction to a subdir when given (faster, focused); node
                 -- files are then relative to that subdir — the caller reconciles.
                 local graphdir = opts.subdir and (wt .. '/' .. opts.subdir) or wt
-                -- timeout so a lua-ls that hangs on shutdown (it can) cannot wedge
-                -- the whole run; that commit just yields no graph.
-                vim.system({ bin, '--graph=' .. graphdir, '--graphout=' .. cache .. '/' .. rev,
-                    '--logpath=' .. cache .. '/' .. rev .. '.log' },
-                    { text = true, timeout = opts.timeout or 90000 }):wait()
+                -- tolerate a failed extraction (broken commit): empty, skipped
+                local okx, data = pcall(
+                    require('cartograph.providers.treesitter').extract, graphdir)
+                g = okx and { nodes = data.nodes, edges = data.edges }
+                    or { nodes = {}, edges = {} }
+                local f = io.open(json, 'w')
+                if f then
+                    f:write(vim.json.encode(g))
+                    f:close()
+                end
             end
-            -- tolerate a missing graph (timeout/parse failure): empty, skipped.
-            graphs[i] = read_json(json) or { nodes = {}, edges = {} }
+            graphs[i] = g
             if opts.progress then io.write(('\r  extracted %d/%d'):format(i, #revs)); io.flush() end
         end
     end)

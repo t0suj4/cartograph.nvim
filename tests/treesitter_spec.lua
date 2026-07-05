@@ -2329,3 +2329,43 @@ print('plugin-smoke-ok')
     ok(out.code == 0 and (out.stdout .. out.stderr):match('plugin%-smoke%-ok'),
         'child nvim: ' .. tostring(out.stdout) .. tostring(out.stderr))
 end)
+
+test('lua effects: load-time side effects on module nodes', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/effects')
+    local eff = {}
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'module' then eff[n.file] = n.effects or false end
+    end
+    eq(true, eff['barecall.lua'])      -- bare print() at load time
+    eq(true, eff['global_assign.lua']) -- assigns a global
+    eq(true, eff['global_field.lua'])  -- function table.x() mutates a global root
+    eq(false, eff['pure.lua'])         -- locals only
+    eq(false, eff['value_require.lua']) -- value-bound require stays pure
+end)
+
+test('luals oracle: references settle what names refuse', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local luals = require 'cartograph.providers.luals'
+    local bin_ok = vim.fn.executable('lua-language-server') == 1
+        or vim.fn.executable(vim.fn.expand(
+            '~/.local/lib/lua-language-server/bin/lua-language-server')) == 1
+    if not bin_ok then skip 'no lua-language-server' end
+    local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/luaoracle')
+    -- two defs named pick: the name graph REFUSES the a.pick(3) call
+    local site
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'pick' and c.file == 'user.lua' then site = c end
+    end
+    ok(site, 'call site found')
+    eq(nil, site.to)
+    local stats, why = luals.enrich(data)
+    ok(stats, tostring(why))
+    -- lua-ls knows the require binding: the call links to ALPHA's pick
+    ok(site.to and site.to:match('^alpha%.lua'), tostring(site.to))
+    ok(not site.inferred, 'oracle answers are solid, not ~')
+end)

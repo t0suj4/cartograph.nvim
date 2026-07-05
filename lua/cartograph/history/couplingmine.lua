@@ -36,7 +36,7 @@ local function changed_lines(repo, rev)
 end
 
 --- Mine change coupling for `repo` across `from`..`to`.
----@param opts { repo:string, from:string, to:string, cache:string?, bin:string?, progress:boolean? }
+---@param opts { repo:string, from:string, to:string, cache:string?, progress:boolean? }
 ---@return { coupling:table, commits:integer }
 function M.run(opts)
     local repo = assert(opts.repo, 'couplingmine: repo required')

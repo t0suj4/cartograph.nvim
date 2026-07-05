@@ -99,6 +99,80 @@ M.spec = {
         -- would otherwise link to the one module that defines M.format
         stdlib_prefixes = { 'string.', 'table.', 'math.', 'os.', 'io.',
             'coroutine.', 'debug.', 'bit.', 'jit.', 'ffi.', 'vim.' },
+        -- load-time side effects (ported from the retired lua-ls --graph
+        -- CLI): assigning a global, mutating a global-rooted table
+        -- (function table.x() included), or a bare call at the top
+        -- level. Feeds sideeffect-vs-deadimport classification and the
+        -- move verbs' load-order hazard.
+        module_effects = function (root, src)
+            local locals = {}
+            local function collect_names(vl)
+                for v in vl:iter_children() do
+                    if v:named() then
+                        local n = vim.treesitter.get_node_text(v, src)
+                        locals[n:match('^[%w_]+') or n] = true
+                    end
+                end
+            end
+            for stmt in root:iter_children() do
+                local t = stmt:type()
+                if t == 'variable_declaration' then
+                    for c in stmt:iter_children() do
+                        if c:type() == 'assignment_statement' then
+                            for vl in c:iter_children() do
+                                if vl:type() == 'variable_list' then
+                                    collect_names(vl)
+                                end
+                            end
+                        end
+                    end
+                elseif t == 'function_declaration' then
+                    local islocal = false
+                    for c in stmt:iter_children() do
+                        if c:type() == 'local' then islocal = true end
+                    end
+                    if islocal then
+                        local nm = stmt:field('name')[1]
+                        if nm then
+                            locals[vim.treesitter.get_node_text(nm, src)] = true
+                        end
+                    end
+                end
+            end
+            for stmt in root:iter_children() do
+                local t = stmt:type()
+                if t == 'function_call' then
+                    return true -- a bare call runs at load time
+                elseif t == 'assignment_statement' then
+                    for vl in stmt:iter_children() do
+                        if vl:type() == 'variable_list' then
+                            for v in vl:iter_children() do
+                                if v:named() then
+                                    local rootname = vim.treesitter
+                                        .get_node_text(v, src):match('^[%w_]+')
+                                    if rootname and not locals[rootname] then
+                                        return true -- global(-rooted) write
+                                    end
+                                end
+                            end
+                        end
+                    end
+                elseif t == 'function_declaration' then
+                    local islocal = false
+                    for c in stmt:iter_children() do
+                        if c:type() == 'local' then islocal = true end
+                    end
+                    if not islocal then
+                        local nm = stmt:field('name')[1]
+                        local rootname = nm and vim.treesitter
+                            .get_node_text(nm, src):match('^[%w_]+')
+                        if rootname and not locals[rootname] then
+                            return true -- global fn / global-rooted method
+                        end
+                    end
+                end
+            end
+        end,
     },
     c = {
         exts = { 'c', 'h' },
@@ -2328,7 +2402,9 @@ function M.extract(root, opts)
             local tsroot = parser:parse()[1]:root()
             stamp(file)
             nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
-                range = pos_of(tsroot), order = -1 }
+                range = pos_of(tsroot), order = -1,
+                effects = spec.module_effects
+                    and spec.module_effects(tsroot, src) or nil }
             extract_defs(file, lang, spec, src, tsroot)
             extract_calls(file, lang, spec, src, tsroot)
         end

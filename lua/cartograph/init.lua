@@ -80,6 +80,24 @@ function M.open(dump_path, opts)
                         :format(stats.resolved_fns), vim.log.levels.INFO)
                 end
             end
+            -- lua roots get STOCK lua-ls as the oracle (config.luals):
+            -- references per candidate def, intersected with call sites
+            local has_lua = false
+            for _, n in ipairs(data.nodes) do
+                if n.kind == 'module' and n.file:match('%.lua$') then
+                    has_lua = true
+                    break
+                end
+            end
+            if has_lua and cfg.luals ~= false then
+                local stats = require('cartograph.providers.luals').enrich(data)
+                if stats then
+                    vim.notify(('cartograph: lua-ls settled %d/%d defs'
+                        .. ' (%d upgraded, %d refuted)'):format(stats.answered,
+                        stats.asked, stats.upgraded, stats.cleared),
+                        vim.log.levels.INFO)
+                end
+            end
             -- cross-language boundaries (string-key dispatch) — after clangd,
             -- so the oracle's edge rebuild can't drop the cross-language links.
             -- Registries the project invented for itself are DISCOVERED and

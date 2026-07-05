@@ -19,7 +19,8 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 8 -- v8: import edges carry their local binding (bind);
+M.VERSION = 9 -- v9: lua module nodes carry load-time effects;
+              -- v8: import edges carry their local binding (bind);
               -- v7: php oo/loaders/torn defs (receiver-aware calls,
               -- PSR-4 suffixes, error-gated indexing);
               -- v6: containers (vue/svelte) + js/ts one resolution family;
