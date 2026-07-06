@@ -35,6 +35,7 @@ local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
 local ns_stage = vim.api.nvim_create_namespace('cartograph_symbols_stage')
 local ns_heat  = vim.api.nvim_create_namespace('cartograph_symbols_heat')
 local ns_ui    = vim.api.nvim_create_namespace('cartograph_symbols_ui')
+local ns_cone  = vim.api.nvim_create_namespace('cartograph_symbols_cone')
 
 -- File-usage markers, shown in the gutter on file rows.
 --   ○ orphan (no inbound)   ⚠ unused import (pure module)   ↻ side-effect
@@ -1294,7 +1295,34 @@ function M.render()
     M.restage()
     M.render_heat()
     M.paint(store.focused)
+    M.paint_cone() -- glow rows on the active reachability cone
     M.emit_view() -- the visible list changed; surfaces track it (deduped)
+end
+
+--- Glow the rows on the active cone: ◆ on the anchor, ● on every reachable
+--- node (and, at files level, on files that contain one). eol dots, NOT line
+--- backgrounds — the cone must not fight the hover relationship tints.
+function M.paint_cone()
+    if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
+    vim.api.nvim_buf_clear_namespace(M.buf, ns_cone, 0, -1)
+    if not store.cone then return end
+    local function dot(row, glyph, hl)
+        pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_cone, row - 1, 0,
+            { virt_text = { { glyph, hl } }, virt_text_pos = 'eol' })
+    end
+    for row, id in pairs(M.line_node or {}) do
+        if id == store.cone.id then
+            dot(row, '◆', 'CartographConeAnchor')
+        elseif store.in_cone(id) then
+            dot(row, '●', 'CartographCone')
+        end
+    end
+    local cf = store.cone_files()
+    if cf then
+        for row, file in pairs(M.line_file or {}) do
+            if cf[file] then dot(row, '●', 'CartographCone') end
+        end
+    end
 end
 
 --- What the view SHOWS, for the projection surface ([[textplates]]): the node
@@ -2155,6 +2183,24 @@ function M.attach(win)
         { buffer = M.buf, desc = 'cartograph: next working-set member' })
     vim.keymap.set('n', keys.set_prev, function () ws_cycle(-1) end,
         { buffer = M.buf, desc = 'cartograph: previous working-set member' })
+    local function cone(dir)
+        local id = M.line_node[row()]
+        local n = store.node(id)
+        if not n then return vim.notify('cartograph: no symbol on this row', vim.log.levels.INFO) end
+        local count = store.set_cone(id, dir)
+        M.paint_cone() -- glow now (no re-render; the cursor stays put)
+        if count == 0 and not store.cone then
+            vim.notify('cartograph: cone cleared', vim.log.levels.INFO)
+        else
+            vim.notify(('cartograph: cone — %s %s (%d node%s) · follow the glow with %s')
+                :format(dir == 'in' and 'what reaches' or 'what', n.name,
+                    count, count == 1 and '' or 's', keys.descend), vim.log.levels.INFO)
+        end
+    end
+    vim.keymap.set('n', keys.cone_in, function () cone('in') end,
+        { buffer = M.buf, desc = 'cartograph: cone — ancestors (what reaches this)' })
+    vim.keymap.set('n', keys.cone_out, function () cone('out') end,
+        { buffer = M.buf, desc = 'cartograph: cone — descendants (what this reaches)' })
 
     vim.keymap.set('n', keys.descend, descend,
         { buffer = M.buf, desc = 'cartograph: descend (into file / into function)' })

@@ -41,6 +41,8 @@ function M.ui()
     link('CartographLit',      'String')     -- literal values (trace answers)
     link('CartographMarker',   'Special')    -- expand/collapse markers
     link('CartographFrontier', 'WarningMsg') -- the ⊘ frontier marker
+    link('CartographCone',       'Special')  -- ● a node inside the active cone
+    link('CartographConeAnchor', 'Todo')     -- ◆ the cone's anchor node
 end
 
 return M

@@ -131,6 +131,12 @@ M.keys = {
                             -- last-visited member: the way back from a dive)
     set_next   = ']w',      -- cycle members (conscious pivots: <C-o> undoes)
     set_prev   = '[w',
+    -- reachability cone (symbols pane): mark a node, glow the path to/from it.
+    -- PROVISIONAL keys — leader-namespaced until the vim-idiom sweep, which
+    -- maps these onto the search-highlight family (cone_in -> '#' ancestors,
+    -- cone_out -> '*' descendants; clears like :noh). Re-press to toggle off.
+    cone_in    = '<leader>c', -- ancestors: what REACHES this ("the path toward it")
+    cone_out   = '<leader>C', -- descendants: what this REACHES (blast radius)
 }
 
 -- Entry points: files EXPECTED to have no inbound require (a runtime loads

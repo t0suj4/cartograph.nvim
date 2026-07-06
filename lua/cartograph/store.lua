@@ -97,6 +97,7 @@ local function reset_indexes()
     M.by_id, M.by_file, M.files = {}, {}, {}
     M.calls_to, M.calls_by_fn = {}, {}
     M.uses, M.usedby, M.occ, M.edge_inferred = {}, {}, {}, {}
+    M.cone, M._cone_set, M._cone_files = nil, nil, nil -- ids churn on re-ingest
     M.var_usedby, M.var_uses = {}, {}
     M.imports_in, M.imports_out = {}, {}
     M.reg_by, M.registers = {}, {}
@@ -687,6 +688,49 @@ function M.on_redraw(fn)
 end
 function M.redraw()
     for _, fn in ipairs(M._redraw_subs) do pcall(fn) end
+end
+
+-- ── reachability cone (mark-a-node, follow-the-glow navigation) ─────────────
+-- One transient anchored cone at a time: { id, dir }. dir 'in' = ancestors
+-- (who reaches it — "the path toward it"), 'out' = descendants (what it
+-- reaches — its blast radius). Toggling the same id+dir clears it; a new
+-- anchor re-cones. Cleared on re-ingest (ids churn). NOT the working set —
+-- that's a persistent bag; this is a throwaway highlight over the graph.
+M.cone = nil
+
+--- Toggle the cone on `id` in `dir` ('in'|'out'). Pure state — the caller
+--- repaints (the glow is eol dots, not a re-render). Returns the reachable
+--- count (0 when toggled off), so the caller can report it.
+function M.set_cone(id, dir)
+    if not (id and M.by_id[id]) then return 0 end
+    if M.cone and M.cone.id == id and M.cone.dir == dir then
+        M.cone, M._cone_set, M._cone_files = nil, nil, nil
+        return 0
+    end
+    M.cone = { id = id, dir = dir }
+    local adj = dir == 'in' and M.usedby or M.uses
+    M._cone_set = require('cartograph.cone').reachable(id, adj)
+    M._cone_files = nil -- lazily derived
+    local n = 0; for _ in pairs(M._cone_set) do n = n + 1 end
+    return n
+end
+
+--- Is `id` inside the active cone (excludes the anchor itself)?
+function M.in_cone(id) return M._cone_set ~= nil and M._cone_set[id] == true end
+
+--- Files containing at least one cone member (for the files-level glow),
+--- derived once per cone and cached.
+function M.cone_files()
+    if not M._cone_set then return nil end
+    if not M._cone_files then
+        local f = {}
+        for id in pairs(M._cone_set) do
+            local n = M.by_id[id]
+            if n and n.file then f[n.file] = true end
+        end
+        M._cone_files = f
+    end
+    return M._cone_files
 end
 
 M._hl_subs = {}
