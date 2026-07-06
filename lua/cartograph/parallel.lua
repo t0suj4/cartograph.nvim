@@ -23,8 +23,10 @@
 
 local M = {}
 
-M.BATCH = 48 -- files per worker batch: small enough to reorder, big
-             -- enough to amortize process startup
+M.BATCH = 48 -- nominal batch size — still the heuristic for how many workers
+             -- to spawn; the actual per-slice size is adaptive (MIN..MAX,
+             -- ramped from MIN for fast first paint — see M.extract)
+M.MIN_BATCH, M.MAX_BATCH = 8, 96
 
 local function plugin_root()
     local src = debug.getinfo(1, 'S').source:sub(2)
@@ -260,16 +262,10 @@ function M.extract(root, o)
     end
     local rtp = worker_rtp()
 
-    -- the queue: priority-ordered files in small batches
+    -- the queue: priority-ordered files, handed out in ADAPTIVELY-sized slices
+    -- (see next_slice/adapt below) — no pre-slicing, so the size can react to
+    -- measured worker turnaround.
     local ordered = M.order(files, attention(root, abs))
-    local batches = {}
-    for i = 1, #ordered, M.BATCH do
-        local b = {}
-        for j = i, math.min(i + M.BATCH - 1, #ordered) do
-            b[#b + 1] = ordered[j]
-        end
-        batches[#batches + 1] = b
-    end
 
     local acc = { schema = 1, root = root, provider = o.provider or 'treesitter',
         roots = o.roots,
@@ -277,8 +273,7 @@ function M.extract(root, o)
         nodes = {}, edges = {}, calls = {}, stamps = {}, fn_ranges = {},
         _no_parser = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
-        on_chunk = o.on_chunk, done = 0, total = #batches, phase = 1,
-        next = 1 }
+        on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1 }
     M._session = s
 
     -- Adaptive coalescing of the streaming re-ingest. Worker chunks merge
@@ -378,33 +373,59 @@ function M.extract(root, o)
         ts.relink(acc)
         phase2()
     end
-    -- work-pulling: each worker takes the next batch off the queue when
-    -- it finishes (priority order preserved; demand dedups on arrival)
+    -- Adaptive batch size: start SMALL so the first worker returns quickly
+    -- (fast first paint), then grow toward a turnaround sweet spot to amortize
+    -- the ~150ms per-process startup, and cap each slice at an even share of
+    -- what's left so no lane idles while another chews a big tail batch.
+    local cursor, inflight, cur = 1, 0, M.MIN_BATCH
+    local function next_slice()
+        if cursor > #ordered then return nil end
+        local remaining = #ordered - cursor + 1
+        local cap = math.max(1, math.ceil(remaining / nw)) -- keep every lane fed
+        local n = math.min(cur, cap, remaining)
+        local b = {}
+        for j = cursor, cursor + n - 1 do b[#b + 1] = ordered[j] end
+        cursor = cursor + n
+        return b
+    end
+    local function adapt(dt_ms)
+        -- keep worker turnaround in a responsive throughput window: too fast =>
+        -- startup dominated the slice, grow; too slow => coarse, shrink
+        if dt_ms < 250 then cur = math.min(M.MAX_BATCH, cur * 2)
+        elseif dt_ms > 600 then cur = math.max(M.MIN_BATCH, math.floor(cur / 2)) end
+    end
+    -- work-pulling: each lane takes the next adaptive slice when it finishes
+    -- (priority order preserved; demand dedups on arrival)
     local function pull()
-        local i = s.next
-        if i > #batches then return false end
-        s.next = i + 1
-        spawn({ phase = 'parse', root = root, files = batches[i],
+        local b = next_slice()
+        if not b then return false end
+        inflight = inflight + 1
+        local t0 = vim.uv.hrtime()
+        spawn({ phase = 'parse', root = root, files = b,
             fileset = files, rtp = rtp, roots = o.roots }, function (chunk, res)
+            inflight = inflight - 1
             if chunk then
                 merge_chunk(s, chunk)
             else
-                failed[#failed + 1] = batches[i]
+                failed[#failed + 1] = b
                 if o.on_note then
                     o.on_note(('batch failed (exit %d) — re-extracting %d '
-                        .. 'files in-process'):format(res.code, #batches[i]))
+                        .. 'files in-process'):format(res.code, #b))
                 end
             end
-            s.done = s.done + 1
+            s.done = s.done + #b
+            adapt((vim.uv.hrtime() - t0) / 1e6)
             dirty = true
             schedule_progressive() -- coalesced; not a re-ingest per batch
-            if not pull() and s.done == s.total then
+            -- keep this lane busy; phase 1 ends when the queue is drained
+            -- and nothing is still in flight
+            if not pull() and cursor > #ordered and inflight == 0 then
                 finish_phase1()
             end
         end)
         return true
     end
-    for _ = 1, math.min(nw, #batches) do pull() end
+    for _ = 1, nw do if not pull() then break end end
 end
 
 return M
