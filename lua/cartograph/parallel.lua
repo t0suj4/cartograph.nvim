@@ -72,8 +72,10 @@ end
 
 -- the editor's actual attention, for M.order: current buffer, then the
 -- persisted WORKING SET (declared intent outranks incidentally-open
--- buffers), then other loaded buffers
-local function attention(root)
+-- buffers), then other loaded buffers. A multi-root corpus (self://,
+-- abs given) has no single root to match buffers against, so ordering
+-- falls to mtime + name; `abs` resolves the labelled keys for mtime.
+local function attention(root, abs)
     local ctx = { bufs = {} }
     local function rel(buf)
         local name = vim.api.nvim_buf_get_name(buf)
@@ -81,18 +83,20 @@ local function attention(root)
             return name:sub(#root + 2)
         end
     end
-    ctx.current = rel(vim.api.nvim_get_current_buf())
-    for _, f in ipairs(require('cartograph.store').ws_peek(root)) do
-        ctx.bufs[#ctx.bufs + 1] = f
-    end
-    for _, b in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_loaded(b) then
-            local r = rel(b)
-            if r then ctx.bufs[#ctx.bufs + 1] = r end
+    if not abs then
+        ctx.current = rel(vim.api.nvim_get_current_buf())
+        for _, f in ipairs(require('cartograph.store').ws_peek(root)) do
+            ctx.bufs[#ctx.bufs + 1] = f
+        end
+        for _, b in ipairs(vim.api.nvim_list_bufs()) do
+            if vim.api.nvim_buf_is_loaded(b) then
+                local r = rel(b)
+                if r then ctx.bufs[#ctx.bufs + 1] = r end
+            end
         end
     end
     ctx.mtime = function (f)
-        local st = vim.uv.fs_stat(root .. '/' .. f)
+        local st = vim.uv.fs_stat(abs and abs(f) or (root .. '/' .. f))
         return st and st.mtime.sec or 0
     end
     return ctx
@@ -221,7 +225,7 @@ function M.demand(file)
     if not (s and s.phase == 1) or s.arrived[file] then return false end
     local ts = require 'cartograph.providers.treesitter'
     local chunk = ts.extract(s.root,
-        { files = { file }, fileset = s.fileset, skip_idpass = true })
+        { files = { file }, fileset = s.fileset, skip_idpass = true, abs = s.abs })
     merge_chunk(s, chunk)
     s.arrived[file] = true -- even if unreadable: don't retry per descend
     if s.on_chunk then s.on_chunk(s.done, s.total, s.acc) end
@@ -232,19 +236,32 @@ end
 --- on_note(msg)?, on_done(data) }. Asynchronous: returns immediately,
 --- on_done fires on the main loop with the finished graph.
 function M.extract(root, o)
-    root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
     local ts = require 'cartograph.providers.treesitter'
-    local files, minified = ts.list_files(root)
+    -- a multi-root corpus (self://loaded) supplies its OWN roster + a
+    -- label→dir map; `abs` resolves the labelled keys. A plain directory
+    -- root walks itself as before.
+    local files, minified, abs
+    if o.roots then
+        files, minified = o.files, {}
+        local roots = o.roots
+        abs = function (file)
+            local label, rest = file:match('^([^/]+)/(.*)$')
+            return (roots[label] or '') .. '/' .. (rest or file)
+        end
+    else
+        root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
+        files, minified = ts.list_files(root)
+    end
     local nw = math.min(o.workers or M.default_workers(),
         math.max(1, math.ceil(#files / M.BATCH)))
     if nw < 2 then
-        o.on_done(ts.extract(root))
+        o.on_done(ts.extract(root, { files = files, abs = abs }))
         return
     end
     local rtp = worker_rtp()
 
     -- the queue: priority-ordered files in small batches
-    local ordered = M.order(files, attention(root))
+    local ordered = M.order(files, attention(root, abs))
     local batches = {}
     for i = 1, #ordered, M.BATCH do
         local b = {}
@@ -254,11 +271,12 @@ function M.extract(root, o)
         batches[#batches + 1] = b
     end
 
-    local acc = { schema = 1, root = root, provider = 'treesitter',
+    local acc = { schema = 1, root = root, provider = o.provider or 'treesitter',
+        roots = o.roots,
         capabilities = { calls = true, litdata = true, df = 'lite' },
         nodes = {}, edges = {}, calls = {}, stamps = {}, fn_ranges = {},
         _no_parser = {} }
-    local s = { root = root, fileset = files, acc = acc, arrived = {},
+    local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
         on_chunk = o.on_chunk, done = 0, total = #batches, phase = 1,
         next = 1 }
     M._session = s
@@ -301,7 +319,8 @@ function M.extract(root, o)
             local fr = {}
             for _, f in ipairs(g) do fr[f] = acc.fn_ranges[f] end
             spawn({ phase = 'ids', root = root, files = g, rtp = rtp,
-                index_file = idxf, fn_ranges = fr }, function (chunk, res)
+                roots = o.roots, index_file = idxf, fn_ranges = fr },
+                function (chunk, res)
                 done = done + 1
                 if chunk then
                     ts.merge_idpass(acc, chunk)
@@ -322,7 +341,7 @@ function M.extract(root, o)
     local function finish_phase1()
         for _, fb in ipairs(failed) do -- sequential fallback, honest
             merge_chunk(s, ts.extract(root, { files = fb,
-                fileset = files, skip_idpass = true }))
+                fileset = files, skip_idpass = true, abs = abs }))
         end
         M.audit(acc)
         ts.relink(acc)
@@ -335,7 +354,7 @@ function M.extract(root, o)
         if i > #batches then return false end
         s.next = i + 1
         spawn({ phase = 'parse', root = root, files = batches[i],
-            fileset = files, rtp = rtp }, function (chunk, res)
+            fileset = files, rtp = rtp, roots = o.roots }, function (chunk, res)
             if chunk then
                 merge_chunk(s, chunk)
             else

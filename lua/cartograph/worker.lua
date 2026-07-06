@@ -14,10 +14,22 @@ for _, p in ipairs(job.rtp or {}) do vim.opt.rtp:append(p) end
 local ts = require 'cartograph.providers.treesitter'
 local codec = require 'cartograph.cache' -- binary encode/decode
 
+-- a multi-root corpus (self://loaded) ships a label→dir map: file keys
+-- are plugin-labelled, so resolution against disk goes through this.
+local abs
+if job.roots then
+    local roots = job.roots
+    abs = function (file)
+        local label, rest = file:match('^([^/]+)/(.*)$')
+        return (roots[label] or '') .. '/' .. (rest or file)
+    end
+end
+
 local out
 if job.phase == 'parse' then
     out = ts.extract(job.root, {
         files = job.files, fileset = job.fileset, skip_idpass = true,
+        abs = abs,
     })
 elseif job.phase == 'ids' then
     local ifd = assert(io.open(job.index_file, 'rb'))
@@ -30,7 +42,7 @@ elseif job.phase == 'ids' then
         -- it a worker links bare names across scope boundaries the
         -- sequential path refuses
         fn_ranges = job.fn_ranges,
-    })
+    }, abs)
 else
     error('worker: unknown phase ' .. tostring(job.phase))
 end

@@ -223,7 +223,7 @@ end
 
 -- validated read of an unparsed file's text (false = unreadable)
 local function frontier_text(file)
-    local path = M.data.root .. '/' .. file
+    local path = M.abs(file)
     local e = M._frontier_cache[file]
     local st = vim.uv.fs_stat(path)
     local stamp = st
@@ -740,7 +740,21 @@ function M.clear_stage()
 end
 
 function M.node(id) return id and M.by_id[id] or nil end
-function M.abspath(node) return M.data.root .. '/' .. node.file end
+--- Resolve a graph file key to a real path. A multi-root corpus (self://
+--- loaded) carries a `roots` map: the key's first segment is a plugin
+--- label (telescope.nvim/lua/…) that names the real directory. A plain
+--- single-root graph just joins the key onto the root.
+function M.abs(file)
+    local roots = M.data and M.data.roots
+    if roots then
+        local label, rest = file:match('^([^/]+)/(.*)$')
+        local base = label and roots[label]
+        if base then return base .. '/' .. rest end
+    end
+    return M.data.root .. '/' .. file
+end
+
+function M.abspath(node) return M.abs(node.file) end
 
 --- Files whose identifier mention-index contains `name` (the id pass
 --- records each file's identifier set). Empty when the graph predates

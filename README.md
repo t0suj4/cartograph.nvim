@@ -381,6 +381,23 @@ callers). Ariadne's thread, in text.
      and Lua registry fields are dynamically dispatched (not dead);
      `main` is an entry point; stdlib vocabularies (`string.format`,
      `.size()`, scheme's `apply`) never name-match a project definition.
+   - **self** (`:Cartograph self://loaded`): the RUNNING nvim as a graph.
+     `nvim_list_runtime_paths()` is the loaded-plugin roster — a plugin
+     joins the runtimepath exactly when it loads, so this is
+     manager-agnostic (lazy, packer, native `packadd` all qualify) — and
+     every loaded root (your config, each loaded plugin, cartograph itself)
+     is unioned into ONE corpus under a synthetic `self://loaded` root, so
+     a `require` from your config into a plugin, or one plugin into
+     another, resolves in a single graph. Streams like the cold path
+     (~5s for a whole ~30-plugin session, 4k+ files, 18 languages, on 8
+     workers). A session-scoped **sample** — not cached, since the next
+     launch may load a different set. `$VIMRUNTIME` is held back as a lazy
+     node (huge, rarely what you're exploring; present so edges into it
+     resolve, extracted only when descended). A **self oracle** — the live
+     process answering what IS (which requires resolved to which file,
+     which code actually ran this session, what a dispatch table really
+     holds) the way clangd/lua-ls answer for on-disk projects, but
+     in-process — is planned on top of this base graph.
    - **clangd oracle** (C/C++, automatic when a `clangd` binary exists;
      `setup{ clangd = false }` disables): the tree-sitter skeleton stays,
      but a headless clangd session answers `callHierarchy/incomingCalls`

@@ -2083,14 +2083,15 @@ function M.list_files(root, subdirs) return list_files(root, subdirs) end
 --       global?" without a corpus scan. Gated per language:
 --       spec.name_index = false opts a language out (when bare-identifier
 --       mention does not imply potential global use). }
-local function id_pass(root, files, L)
+local function id_pass(root, files, L, abs)
+    abs = abs or function (f) return root .. '/' .. f end
     for _, file in ipairs(files) do
         local lang, spec = lang_for(file)
         local clang = container_for(file)
         if clang then lang, spec = 'javascript', M.spec.javascript end
         local ranges = L.fn_ranges[file]
         if ranges then
-            local fd = io.open(root .. '/' .. file, 'r')
+            local fd = io.open(abs(file), 'r')
             local src = fd and fd:read('a')
             if fd then fd:close() end
             local okp, parser = pcall(vim.treesitter.get_string_parser,
@@ -2278,7 +2279,7 @@ end
 
 --- Standalone id pass over `files` with global lookups (parallel phase
 --- 2, run inside a worker). Returns { edges = {...}, cbarg = {id, ...} }.
-function M.id_pass(root, files, lookups)
+function M.id_pass(root, files, lookups, abs)
     local out = { edges = {}, cbarg = {}, names = {} }
     local refEdge, seen_cb = {}, {}
     id_pass(root, files, {
@@ -2306,7 +2307,7 @@ function M.id_pass(root, files, lookups)
                 out.cbarg[#out.cbarg + 1] = u.id
             end
         end,
-    })
+    }, abs)
     return out
 end
 
@@ -2315,7 +2316,14 @@ end
 ---@param root string
 ---@return table data  the schema-1 graph (ready for store.ingest)
 function M.extract(root, opts)
-    root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
+    -- a URI root (self://loaded — the running instance's multi-root corpus)
+    -- keeps off the filesystem's path rules: its files are plugin-labelled
+    -- keys (telescope.nvim/lua/…) that resolve to real directories through
+    -- opts.abs. A plain directory root joins as before.
+    if not root:match('^%w+://') then
+        root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
+    end
+    local abs = (opts and opts.abs) or function (f) return root .. '/' .. f end
     local files, minified
     if opts and opts.files then
         -- explicit work list (parallel batches, demand extraction):
@@ -2353,7 +2361,7 @@ function M.extract(root, opts)
     end
 
     local function stamp(file)
-        local st = vim.uv.fs_stat(root .. '/' .. file)
+        local st = vim.uv.fs_stat(abs(file))
         if st then
             data.stamps[file] = ('%d:%d:%d')
                 :format(st.mtime.sec, st.mtime.nsec, st.size)
@@ -2853,7 +2861,7 @@ function M.extract(root, opts)
     end
 
     for _, file in ipairs(files) do
-        local fd = io.open(root .. '/' .. file, 'r')
+        local fd = io.open(abs(file), 'r')
         local src = fd and fd:read('a')
         if fd then fd:close() end
         if not src then goto next_file end
@@ -3053,7 +3061,7 @@ function M.extract(root, opts)
         end
         if ndefs ~= 1 or not defstmt then return nil end
         if src_cache[p.file] == nil then
-            local fd = io.open(root .. '/' .. p.file, 'r')
+            local fd = io.open(abs(p.file), 'r')
             src_cache[p.file] = fd and vim.split(fd:read('a'), '\n', { plain = true }) or false
             if fd then fd:close() end
         end
@@ -3157,7 +3165,7 @@ function M.extract(root, opts)
             adduse = function (e) edges[#edges + 1] = e end,
             mark_cbarg = function (u) u.node.cbarg = true end,
             add_names = function (f, s) data.names[f] = s end,
-        })
+        }, abs)
     else
         -- the parallel driver needs each slice's function extents to run
         -- the id pass later (fn_at over these files)

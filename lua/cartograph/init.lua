@@ -40,6 +40,61 @@ function M.open(dump_path, opts)
     -- a parser); a file is a pre-extracted dump (the lua-ls CLI's output)
     local target = vim.fn.expand(dump_path)
     local mcp_name = target:match('^mcp://(.+)$')
+    local self_which = target:match('^self://(.+)$')
+
+    -- streaming shared by the cold (parallel), warm (cached) and self://
+    -- opens: all show module stubs at once and fill the real graph in as
+    -- it arrives, so none blocks the editor. R0 is the stub's zero range.
+    local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
+    -- re-ingest `acc` as a progressive VIEW: arrived files real, the rest
+    -- still stubs, without losing the user's place mid-stream.
+    local function progressive(acc, files, done, total)
+        local seen = {}
+        for _, nd in ipairs(acc.nodes) do
+            if nd.kind == 'module' then seen[nd.file] = true end
+        end
+        local view = {}
+        for key, v in pairs(acc) do view[key] = v end
+        view.partial = { done = done, total = total }
+        view.nodes = vim.list_extend({}, acc.nodes)
+        for _, f in ipairs(files) do
+            if not seen[f] then
+                view.nodes[#view.nodes + 1] = { id = f, name = f,
+                    kind = 'module', file = f, range = R0, order = -1 }
+            end
+        end
+        local back, fwd = store._nav_back, store._nav_fwd
+        local loc = store.loc_provider and store.loc_provider.get()
+        local focused = store.focused
+        store.ingest(view)
+        store._nav_back, store._nav_fwd = back or {}, fwd or {}
+        if focused and store.node(focused) then store.set_focus(focused) end
+        if loc and store.loc_provider then pcall(store.loc_provider.set, loc) end
+    end
+    -- run `fn` (a full re-ingest) without losing nav history / cursor
+    local function preserve(fn)
+        local back, fwd = store._nav_back, store._nav_fwd
+        local loc = store.loc_provider and store.loc_provider.get()
+        local focused = store.focused
+        fn()
+        store._nav_back, store._nav_fwd = back or {}, fwd or {}
+        if focused and store.node(focused) then store.set_focus(focused) end
+        if loc and store.loc_provider then pcall(store.loc_provider.set, loc) end
+    end
+    -- stub the browser on a file roster (the streamed opens' first paint).
+    -- `roots` (self://) rides along so abspath resolves labelled keys even
+    -- while the modules are still stubs.
+    local function stub_ingest(files, roots, provider)
+        local stub = { schema = 1, root = target, provider = provider or 'treesitter',
+            roots = roots, partial = { done = 0, total = #files },
+            nodes = {}, edges = {}, calls = {}, stamps = {} }
+        for _, f in ipairs(files) do
+            stub.nodes[#stub.nodes + 1] = { id = f, name = f,
+                kind = 'module', file = f, range = R0, order = -1 }
+        end
+        store.ingest(stub)
+    end
+
     if mcp_name then
         -- a server that STAMPS its keys is substrate: its scan caches and
         -- warm opens re-fetch only changed keys (one cheap stamps call).
@@ -59,6 +114,41 @@ function M.open(dump_path, opts)
             require('cartograph.xlang').effective_bindings(data))
         require('cartograph.sql').attach(data)
         store.ingest(data)
+    elseif self_which then
+        -- the RUNNING instance as a graph: nvim_list_runtime_paths() is the
+        -- loaded-plugin roster (manager-agnostic — a plugin joins rtp exactly
+        -- when it loads), unioned under self://loaded so a require from your
+        -- config into a plugin (or plugin→plugin) resolves in one graph. A
+        -- session-scoped SAMPLE — not cached, the next launch may load a
+        -- different set — streamed like the cold path so it never blocks.
+        local selfp = require 'cartograph.providers.self'
+        local roster, why = selfp.roster()
+        if not roster then
+            error('cartograph: self://' .. self_which .. ' — ' .. tostring(why), 0)
+        end
+        stub_ingest(roster.files, roster.roots, 'self')
+        local par = require 'cartograph.parallel'
+        local cfg = require 'cartograph.config'
+        local nw = cfg.workers or par.default_workers()
+        vim.notify(('cartograph: self — %d loaded roots, extracting %d files'
+            .. ' with %d workers…'):format(vim.tbl_count(roster.roots),
+            #roster.files, nw), vim.log.levels.INFO)
+        par.extract(roster.root, {
+            workers = nw, roots = roster.roots, files = roster.files,
+            provider = 'self',
+            on_note = function (m)
+                vim.notify('cartograph: ' .. m, vim.log.levels.WARN)
+            end,
+            on_chunk = function (done, total, acc)
+                progressive(acc, roster.files, done, total)
+            end,
+            on_done = function (acc)
+                acc.vimruntime = roster.vimruntime ~= '' and roster.vimruntime or nil
+                preserve(function () store.ingest(acc) end)
+                vim.notify(('cartograph: self ready — %d nodes, %d calls')
+                    :format(#acc.nodes, #acc.calls), vim.log.levels.INFO)
+            end,
+        })
     elseif vim.fn.isdirectory(target) == 1 then
         local cfg = require 'cartograph.config'
         -- project shapes: markers at the root preset inert analysis
@@ -211,57 +301,6 @@ function M.open(dump_path, opts)
                 -- opening a non-C graph: shut down any lingering clangd session
                 require('cartograph.providers.clangd').stop_session()
             end
-        end
-
-        -- streaming shared by the cold (parallel) and warm (cached) opens:
-        -- both show module stubs at once and fill the real graph in as it
-        -- arrives, so neither blocks the editor. R0 is the stub's zero range.
-        local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
-        -- re-ingest `acc` as a progressive VIEW: arrived files real, the rest
-        -- still stubs, without losing the user's place mid-stream.
-        local function progressive(acc, files, done, total)
-            local seen = {}
-            for _, nd in ipairs(acc.nodes) do
-                if nd.kind == 'module' then seen[nd.file] = true end
-            end
-            local view = {}
-            for key, v in pairs(acc) do view[key] = v end
-            view.partial = { done = done, total = total }
-            view.nodes = vim.list_extend({}, acc.nodes)
-            for _, f in ipairs(files) do
-                if not seen[f] then
-                    view.nodes[#view.nodes + 1] = { id = f, name = f,
-                        kind = 'module', file = f, range = R0, order = -1 }
-                end
-            end
-            local back, fwd = store._nav_back, store._nav_fwd
-            local loc = store.loc_provider and store.loc_provider.get()
-            local focused = store.focused
-            store.ingest(view)
-            store._nav_back, store._nav_fwd = back or {}, fwd or {}
-            if focused and store.node(focused) then store.set_focus(focused) end
-            if loc and store.loc_provider then pcall(store.loc_provider.set, loc) end
-        end
-        -- run `fn` (a full re-ingest) without losing nav history / cursor
-        local function preserve(fn)
-            local back, fwd = store._nav_back, store._nav_fwd
-            local loc = store.loc_provider and store.loc_provider.get()
-            local focused = store.focused
-            fn()
-            store._nav_back, store._nav_fwd = back or {}, fwd or {}
-            if focused and store.node(focused) then store.set_focus(focused) end
-            if loc and store.loc_provider then pcall(store.loc_provider.set, loc) end
-        end
-        -- stub the browser on a file roster (the streamed opens' first paint)
-        local function stub_ingest(files)
-            local stub = { schema = 1, root = target, provider = 'treesitter',
-                partial = { done = 0, total = #files },
-                nodes = {}, edges = {}, calls = {}, stamps = {} }
-            for _, f in ipairs(files) do
-                stub.nodes[#stub.nodes + 1] = { id = f, name = f,
-                    kind = 'module', file = f, range = R0, order = -1 }
-            end
-            store.ingest(stub)
         end
 
         -- incremental open: unchanged files come from the cache, only the
