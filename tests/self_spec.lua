@@ -99,6 +99,30 @@ test('self oracle: loaded-vs-not — required modules mark ran, the rest do not'
     vim.fn.delete(dir, 'rf')
 end)
 
+test('parallel: summarize gives nearest-rank percentiles', function ()
+    local par = require 'cartograph.parallel'
+    eq(0, par.summarize({}).n)
+    local list = {}
+    for i = 1, 100 do list[i] = i end -- 1..100, shuffled order doesn't matter
+    local s = par.summarize(list)
+    eq(100, s.n)
+    eq(50, s.p50)   -- nearest-rank: ceil(0.50*100)=50 -> value 50
+    eq(90, s.p90)
+    eq(95, s.p95)
+    eq(99, s.p99)
+    eq(100, s.max)
+    ok(math.abs(s.mean - 50.5) < 0.001, 'mean is 50.5')
+    -- percentiles expose a tail the mean hides: 90 tiny + 10 huge stalls
+    local tail = {}
+    for i = 1, 90 do tail[i] = 1 end
+    for i = 91, 100 do tail[i] = 1000 end
+    local t = par.summarize(tail)
+    eq(1, t.p90)      -- the bulk is tiny (mean would read ~101, misleading)
+    eq(1000, t.p95)   -- but the 10% tail of big stalls is caught
+    eq(1000, t.p99)
+    eq(1000, t.max)
+end)
+
 test('self: finalize (the open path) attaches the lazy node + resolves requires', function ()
     if not has_parser('lua') then skip 'no lua parser' end
     local ts    = require 'cartograph.providers.treesitter'

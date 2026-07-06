@@ -46,6 +46,22 @@ function M.default_workers()
     return math.max(2, math.min(8, n - 1))
 end
 
+--- Percentile summary of a list of durations (ms). Nearest-rank percentiles —
+--- P99 is the stall you feel at the tail, not an average that hides it. Pure;
+--- exposed for tests. Returns { n, mean, p50, p90, p95, p99, max }.
+function M.summarize(list)
+    local n = #list
+    if n == 0 then return { n = 0 } end
+    local s = {}
+    for i, v in ipairs(list) do s[i] = v end
+    table.sort(s)
+    local sum = 0
+    for _, v in ipairs(s) do sum = sum + v end
+    local function pct(p) return s[math.max(1, math.ceil(p / 100 * n))] end
+    return { n = n, mean = sum / n, p50 = pct(50), p90 = pct(90),
+        p95 = pct(95), p99 = pct(99), max = s[n] }
+end
+
 --- Pure priority order: current buffer first, then other open buffers
 --- (in ctx order), then by modification time, newest first. ctx =
 --- { current?, bufs = {rel,...}, mtime = fn(rel) -> secs }.
@@ -276,6 +292,14 @@ function M.extract(root, o)
         on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1 }
     M._session = s
 
+    -- responsiveness telemetry: every synchronous main-loop block during the
+    -- streaming open (a chunk merge, a progressive re-ingest) is recorded, so
+    -- smoothness is a NUMBER (P90/P95/P99), not a vibe. Reported at completion
+    -- when setup{ profile = true }; always stashed on acc._stalls for tools.
+    local okc0, cfg0 = pcall(require, 'cartograph.config')
+    local profiling = okc0 and cfg0.profile == true
+    local stalls = {}
+
     -- Adaptive coalescing of the streaming re-ingest. Worker chunks merge
     -- cheaply as they arrive (an append); the PROGRESSIVE re-ingest is the
     -- main-loop cost — O(nodes), 100ms+ on a big graph — so instead of running
@@ -303,6 +327,7 @@ function M.extract(root, o)
         local t0 = vim.uv.hrtime()
         o.on_chunk(s.done, s.total, acc)
         ingest_ms = (vim.uv.hrtime() - t0) / 1e6
+        stalls[#stalls + 1] = ingest_ms
     end
     function schedule_progressive(quick)
         if pending or not o.on_chunk then return end
@@ -342,6 +367,13 @@ function M.extract(root, o)
         acc._no_parser = nil
         acc.fn_ranges = nil
         if s.keywatch then pcall(vim.on_key, nil, s.keywatch) end -- stop listening
+        M._last_stalls = M.summarize(stalls) -- on the module, not acc (cache)
+        if profiling and M._last_stalls.n > 0 then
+            local p = M._last_stalls
+            vim.notify(('cartograph: streaming stalls (ms) — n=%d p50=%.0f'
+                .. ' p90=%.0f p95=%.0f p99=%.0f max=%.0f')
+                :format(p.n, p.p50, p.p90, p.p95, p.p99, p.max), vim.log.levels.INFO)
+        end
         M._session = nil
         o.on_done(acc)
     end
@@ -424,6 +456,7 @@ function M.extract(root, o)
         local t0 = vim.uv.hrtime()
         spawn({ phase = 'parse', root = root, files = b,
             fileset = files, rtp = rtp, roots = o.roots }, function (chunk, res)
+            local cb0 = vim.uv.hrtime()
             inflight = inflight - 1
             if chunk then
                 merge_chunk(s, chunk)
@@ -438,6 +471,7 @@ function M.extract(root, o)
             adapt((vim.uv.hrtime() - t0) / 1e6)
             dirty = true
             schedule_progressive() -- coalesced; not a re-ingest per batch
+            stalls[#stalls + 1] = (vim.uv.hrtime() - cb0) / 1e6 -- this block's cost
             -- keep this lane busy; phase 1 ends when the queue is drained
             -- and nothing is still in flight
             if not pull() and cursor > #ordered and inflight == 0 then

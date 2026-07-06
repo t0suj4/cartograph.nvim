@@ -67,6 +67,10 @@ M.cache_max_diff = nil
 M.parallel = true
 M.parallel_threshold = 300
 M.workers = nil
+-- profile the streaming open: report P50/P90/P95/P99 of the main-loop stalls
+-- (chunk merges + progressive re-ingests) at completion. The summary is always
+-- stashed on `require('cartograph.parallel')._last_stalls`; this surfaces it.
+M.profile = false
 
 -- ascending (h) in the symbols pane: does the source pane follow the view
 -- you land on IMMEDIATELY, or keep showing where you were until you MOVE?
