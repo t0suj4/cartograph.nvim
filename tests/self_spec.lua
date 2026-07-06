@@ -99,6 +99,44 @@ test('self oracle: loaded-vs-not — required modules mark ran, the rest do not'
     vim.fn.delete(dir, 'rf')
 end)
 
+test('self oracle: resolve-requires — the loader builds the import graph', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local ts     = require 'cartograph.providers.treesitter'
+    local oracle = require 'cartograph.self_oracle'
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir .. '/lua', 'p')
+    local function put(f, t)
+        local fd = assert(io.open(dir .. '/lua/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('lib.lua', 'return { n = 1 }\n')
+    put('app.lua', "local L = require('lib')\nreturn L.n\n")
+    vim.opt.rtp:append(dir)
+    require('app') -- loads app, which requires lib
+
+    local roots = { plug = dir }
+    local data = ts.extract('self://loaded', { files =
+        { 'plug/lua/app.lua', 'plug/lua/lib.lua' },
+        abs = function (f)
+            local l, r = f:match('^([^/]+)/(.*)$'); return roots[l] .. '/' .. r
+        end })
+    data.provider, data.root, data.roots = 'self', 'self://loaded', roots
+
+    -- the labelled keys defeat path-matching: no import edge app -> lib yet
+    local function edge()
+        for _, e in ipairs(data.edges) do
+            if e.kind == 'import' and e.from == 'plug/lua/app.lua'
+                and e.to == 'plug/lua/lib.lua' then return e end
+        end
+    end
+    ok(not edge(), 'path-match cannot resolve the require (labelled keys)')
+
+    local r = oracle.resolve_requires(data)
+    ok(r.added >= 1, 'the loader resolved the missing require')
+    local e = edge()
+    ok(e and e.proven, 'a PROVEN import edge app -> lib was added')
+
+    vim.fn.delete(dir, 'rf')
+end)
+
 -- invoke the callback of a buffer-local mapping by its lhs
 local function press(buf, lhs)
     for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do

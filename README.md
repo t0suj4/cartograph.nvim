@@ -406,9 +406,13 @@ callers). Ariadne's thread, in text.
      never cached). The oracle also marks the files view: `⚡` on every file
      that actually **ran this session** (a required module or sourced
      script) — the unmarked rest of a loaded plugin's tree is
-     present-but-never-loaded, the honest "dead this session" signal. Still
-     ahead: a runtime-vs-declared registration check (keymaps / autocmds /
-     commands).
+     present-but-never-loaded, the honest "dead this session" signal. And it
+     **builds the import graph**: the static path-match can't resolve a
+     `require` in a self graph (its file keys are plugin-labelled), but the
+     loader knows exactly which file each module is — so every
+     `require(<literal>)` the loader resolved becomes a PROVEN import edge
+     (19 → 85 on cartograph's own tree). Still ahead: a runtime-vs-declared
+     registration check (keymaps / autocmds / commands).
    - **clangd oracle** (C/C++, automatic when a `clangd` binary exists;
      `setup{ clangd = false }` disables): the tree-sitter skeleton stays,
      but a headless clangd session answers `callHierarchy/incomingCalls`

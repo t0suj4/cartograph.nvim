@@ -150,10 +150,13 @@ function M.open(dump_path, opts)
                 if acc.vimruntime then
                     acc.nodes[#acc.nodes + 1] = selfp.lazy_node(acc.vimruntime)
                 end
+                -- the loader knows what every require resolved to; the static
+                -- path-match can't (labelled keys), so build the import graph
+                local req = selfp.resolve_requires(acc)
                 preserve(function () store.ingest(acc) end)
-                vim.notify(('cartograph: self ready — %d nodes, %d calls'
-                    .. ' (+$VIMRUNTIME lazy — l to load)')
-                    :format(#acc.nodes, #acc.calls), vim.log.levels.INFO)
+                vim.notify(('cartograph: self ready — %d nodes, %d calls,'
+                    .. ' %d requires resolved (+$VIMRUNTIME lazy — l to load)')
+                    :format(#acc.nodes, #acc.calls, req.added), vim.log.levels.INFO)
             end,
         })
     elseif vim.fn.isdirectory(target) == 1 then

@@ -130,8 +130,9 @@ function M.load_runtime(store, node)
     for f, s in pairs(sub.stamps or {}) do data.stamps[f] = s end
     data.vimruntime = nil -- consumed
     data._live_index, data._loaded_files = nil, nil -- invalidate oracle caches
-    -- re-resolve unresolved refs against the now-present runtime (require 'vim.*')
+    -- re-resolve refs + requires against the now-present runtime (require 'vim.*')
     ts.relink(data)
+    require('cartograph.self_oracle').resolve_requires(data)
     return data, #sub.nodes
 end
 

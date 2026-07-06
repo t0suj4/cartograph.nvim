@@ -142,6 +142,40 @@ function M.resolve_fn(fn, data, hint)
         at = ('%s:%d'):format(key, line1 or 0) }
 end
 
+--- Resolve `require` edges the way the LIVE loader did. In a self graph the
+--- static path-match can't resolve requires (its file keys are plugin-labelled
+--- — telescope.nvim/lua/… — so `require 'telescope.finders'` finds nothing),
+--- but package.loaded knows exactly which file each module is. For every
+--- `require(<literal>)` call whose module the loader resolved to a file in the
+--- corpus, add a PROVEN import edge the path-match missed. Mutates `data.edges`;
+--- returns { added }. The caller re-ingests (rebuilds imports_in/out).
+function M.resolve_requires(data)
+    local mod2key = {}
+    for abs, modname in pairs(M.loaded_index(data)) do
+        local key = key_for_abs(abs, data)
+        if key then mod2key[modname] = key end
+    end
+    local have = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'import' then have[e.from .. '\31' .. e.to] = true end
+    end
+    local added = 0
+    for _, c in ipairs(data.calls or {}) do
+        if c.callee == 'require' and c.file and c.args
+            and type(c.args[1]) == 'string' and c.args[1] ~= '' then
+            local key = mod2key[c.args[1]]
+            if key and key ~= c.file and not have[c.file .. '\31' .. key] then
+                data.edges[#data.edges + 1] = { from = c.file, to = key,
+                    kind = 'import', proven = true, mod = c.args[1],
+                    at = c.at }
+                have[c.file .. '\31' .. key] = true
+                added = added + 1
+            end
+        end
+    end
+    return { added = added }
+end
+
 --- Snapshot a live Lua value into the render tree litval produces (scalars
 --- raw, tables nested, functions as { ref, id, live_fn }, the rest as honest
 --- { expr }). `hint` names the key this value sits under (fn disambiguation).
