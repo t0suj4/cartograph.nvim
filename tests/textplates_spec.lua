@@ -18,9 +18,16 @@ test('encode: lowercase folds to the uppercase glyphs', function ()
     eq(tp.encode('CARTOGRAPH'), tp.encode('cartograph'))
 end)
 
-test('encode: space is the blank plate (variation 1)', function ()
+test('encode: space maps to V_SPACE (variation 1 — an absent plate)', function ()
     eq({ 1 }, tp.encode(' '))
     eq(tp.V_SPACE, tp.char_to_variation(' '))
+end)
+
+test('layout: a space is a GAP (no plate), and later letters keep their column', function ()
+    local plates = tp.layout({ 'A B' }, { anchor = { x = 0, y = 0 }, dx = 3, material = 'gold' })
+    eq(2, #plates) -- only A and B; the space in between places nothing
+    eq({ x = 0, y = 0, v = 3, mat = 'gold', row = 1, col = 1 }, plates[1]) -- A
+    eq({ x = 6, y = 0, v = 4, mat = 'gold', row = 1, col = 3 }, plates[2]) -- B, still at col 3
 end)
 
 test('encode: digits map to 29..38', function ()

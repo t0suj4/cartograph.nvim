@@ -114,12 +114,18 @@ function M.layout(labels, opts)
         local vs = M.encode(label)
         local n = math.min(#vs, o.max_cols)
         for col = 1, n do
-            plates[#plates + 1] = {
-                x = o.anchor.x + (col - 1) * o.dx,
-                y = o.anchor.y + (row - 1) * o.dy,
-                v = vs[col], mat = mat,
-                row = row, col = col,
-            }
+            -- a space is an ABSENT plate (a gap in the world), not the blank
+            -- plate — so skip it, but keep advancing the column so the letters
+            -- after it stay in place. reconcile then reclaims any plate a cell
+            -- vacated by becoming a space.
+            if vs[col] ~= M.V_SPACE then
+                plates[#plates + 1] = {
+                    x = o.anchor.x + (col - 1) * o.dx,
+                    y = o.anchor.y + (row - 1) * o.dy,
+                    v = vs[col], mat = mat,
+                    row = row, col = col,
+                }
+            end
         end
     end
     return plates
