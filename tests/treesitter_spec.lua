@@ -1385,6 +1385,34 @@ test('async cache: load_async / open_async match the blocking path exactly', fun
     vim.fn.delete(root, 'rf')
 end)
 
+test('async cache: a multi-tick load closes once (no double-close race)', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local cache = require 'cartograph.cache'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- >256 files, so load_async spans multiple 256-shard ticks — the case where
+    -- schedule_wrap queued extra callbacks and the done branch double-closed the
+    -- timer (handle already closing) + fired on_done twice
+    for i = 1, 260 do
+        local fd = assert(io.open(('%s/m%03d.lua'):format(root, i), 'w'))
+        fd:write(('local M = {}\nfunction M.f%d() return %d end\nreturn M\n'):format(i, i))
+        fd:close()
+    end
+    cache.save(ts.extract(root))
+
+    local dones, chunks = 0, 0
+    local roster = cache.load_async(root, function () chunks = chunks + 1 end,
+        function () dones = dones + 1 end)
+    ok(type(roster) == 'table' and #roster == 260, 'roster of 260 returned')
+    ok(vim.wait(6000, function () return dones > 0 end, 20), 'load_async completed')
+    vim.wait(300) -- let any stray queued callbacks fire; the latch must drop them
+    eq(1, dones)  -- exactly once, despite spanning multiple ticks
+    ok(chunks >= 1, 'streamed across ticks (on_chunk fired)')
+    cache.wipe(root)
+    vim.fn.delete(root, 'rf')
+end)
+
 test('python: class-qualified methods, stdlib gate, decorator cbarg', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

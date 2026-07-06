@@ -391,9 +391,14 @@ function M.load_async(root, on_chunk, on_done)
     local files, bad = {}, {}
     for f in pairs(m.stamps) do files[#files + 1] = f end
     table.sort(files)
-    local i = 0
+    local i, finished = 0, false
     local timer = vim.uv.new_timer()
+    -- a 256-shard tick can outlast the 12ms interval on a big cache, so libuv
+    -- fires again and schedule_wrap QUEUES extra callbacks. Once we reach the
+    -- end and close, those queued callbacks must NOT re-enter (double close +
+    -- double on_done) — the `finished` latch drops them.
     timer:start(0, 12, vim.schedule_wrap(function ()
+        if finished then return end
         local stop = math.min(i + 256, #files)
         while i < stop do
             i = i + 1
@@ -408,7 +413,8 @@ function M.load_async(root, on_chunk, on_done)
             end
         end
         if i >= #files then
-            timer:stop() timer:close()
+            finished = true
+            if not timer:is_closing() then timer:stop(); timer:close() end
             synth_unparsed(data, m)
             on_done(data, bad)
         elseif on_chunk then
