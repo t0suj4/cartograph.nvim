@@ -98,6 +98,7 @@ local function reset_indexes()
     M.calls_to, M.calls_by_fn = {}, {}
     M.uses, M.usedby, M.occ, M.edge_inferred = {}, {}, {}, {}
     M.cone, M._cone_set, M._cone_files = nil, nil, nil -- ids churn on re-ingest
+    M._territory = nil
     M.var_usedby, M.var_uses = {}, {}
     M.imports_in, M.imports_out = {}, {}
     M.reg_by, M.registers = {}, {}
@@ -717,6 +718,60 @@ end
 
 --- Is `id` inside the active cone (excludes the anchor itself)?
 function M.in_cone(id) return M._cone_set ~= nil and M._cone_set[id] == true end
+
+-- ── territorial decomposition (which entry points reach each node) ──────────
+M._territory = nil
+
+--- The territory partition, computed on demand and cached (cleared on
+--- re-ingest). Roots = declared entry points (n.entry) if any exist, else the
+--- call graph's APPARENT sources (function nodes with no callers) — tagged via
+--- `.declared`. nil until a graph is open.
+function M.territory()
+    if M._territory then return M._territory end
+    if not M.data then return nil end
+    local roots, declared = {}, false
+    for _, n in ipairs(M.data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and n.entry then
+            roots[#roots + 1] = n.id; declared = true
+        end
+    end
+    if #roots == 0 then -- fall back to apparent sources (no callers)
+        for _, n in ipairs(M.data.nodes) do
+            if (n.kind == 'function' or n.kind == 'method')
+                and not (M.usedby[n.id] and #M.usedby[n.id] > 0) then
+                roots[#roots + 1] = n.id
+            end
+        end
+    end
+    local t = require('cartograph.territory').compute(roots, M.uses, M.usedby)
+    t.declared = declared
+    M._territory = t
+    return t
+end
+
+--- Per-file territory class (union of the file's nodes' entry-sets), for the
+--- files-level overlay. file -> { class, entry?, n }.
+function M.territory_files()
+    local t = M.territory(); if not t then return nil end
+    if t._files then return t._files end
+    local acc = {}
+    for _, node in ipairs(M.data.nodes) do
+        local info = t.node[node.id]
+        if info and node.file then
+            local s = acc[node.file]; if not s then s = {}; acc[node.file] = s end
+            for e in pairs(info.entries) do s[e] = true end
+        end
+    end
+    local files = {}
+    for file, set in pairs(acc) do
+        local n, only = 0, nil
+        for e in pairs(set) do n = n + 1; only = e end
+        files[file] = { class = (n == 1 and 'territory') or (n == t.k and 'core') or 'commons',
+            entry = n == 1 and only or nil, n = n }
+    end
+    t._files = files
+    return files
+end
 
 --- Files containing at least one cone member (for the files-level glow),
 --- derived once per cone and cached.

@@ -43,6 +43,11 @@ function M.ui()
     link('CartographFrontier', 'WarningMsg') -- the ⊘ frontier marker
     link('CartographCone',       'Special')  -- ● a node inside the active cone
     link('CartographConeAnchor', 'Todo')     -- ◆ the cone's anchor node
+    -- territory overlay: per-entry territories reuse the CONCERN hues; these
+    -- three name the shared regions and the seams between them.
+    link('CartographCommons', 'WarningMsg')  -- ● reached by several entries
+    link('CartographCore',    'Comment')     -- ● reached by every entry (dim: it's everywhere)
+    link('CartographBorder',  'Todo')        -- ◆ a seam: feature meets shared code
 end
 
 return M

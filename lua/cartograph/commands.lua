@@ -501,6 +501,23 @@ function M.register()
     end, { nargs = '?', complete = 'file',
         desc = 'cartograph: paint the current buffer (or a file) into Factorio as biter corpses' })
 
+    -- ── territory overlay: partition the graph by which entries reach each node
+    cmd('CartographTerritory', function ()
+        local store = live() if not store then return end
+        local on = require('cartograph.panes.symbols').toggle_territory()
+        if not on then
+            return vim.notify('cartograph: territory overlay off', vim.log.levels.INFO)
+        end
+        local t = store.territory()
+        if not t then return vim.notify('cartograph: no graph', vim.log.levels.WARN) end
+        local s = require('cartograph.territory').summary(t)
+        local terr_n = 0; for _ in pairs(s.territories) do terr_n = terr_n + 1 end
+        vim.notify(('cartograph: territory — %d root%s (%s) · %d territor%s · %d commons · %d core · %d border%s')
+            :format(t.k, t.k == 1 and '' or 's', t.declared and 'declared' or 'apparent',
+                terr_n, terr_n == 1 and 'y' or 'ies', s.commons, s.core,
+                s.borders, s.borders == 1 and '' or 's'), vim.log.levels.INFO)
+    end, { desc = 'cartograph: territory overlay — partition the graph by which entry points reach each node' })
+
     -- ── the LIVE web canvas: draw in a browser, project as corpses ──────
     cmd('CartographCanvas', function ()
         if canvas then

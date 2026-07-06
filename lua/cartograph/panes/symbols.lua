@@ -36,6 +36,7 @@ local ns_stage = vim.api.nvim_create_namespace('cartograph_symbols_stage')
 local ns_heat  = vim.api.nvim_create_namespace('cartograph_symbols_heat')
 local ns_ui    = vim.api.nvim_create_namespace('cartograph_symbols_ui')
 local ns_cone  = vim.api.nvim_create_namespace('cartograph_symbols_cone')
+local ns_terr  = vim.api.nvim_create_namespace('cartograph_symbols_territory')
 
 -- File-usage markers, shown in the gutter on file rows.
 --   ○ orphan (no inbound)   ⚠ unused import (pure module)   ↻ side-effect
@@ -1296,7 +1297,53 @@ function M.render()
     M.render_heat()
     M.paint(store.focused)
     M.paint_cone() -- glow rows on the active reachability cone
+    M.paint_territory() -- the territorial map, when toggled on
     M.emit_view() -- the visible list changed; surfaces track it (deduped)
+end
+
+M._territory_on = false
+
+--- Toggle the territory overlay; returns the new on/off state.
+function M.toggle_territory()
+    M._territory_on = not M._territory_on
+    M.paint_territory()
+    return M._territory_on
+end
+
+--- Paint the territorial map: per-entry territories in the CONCERN hues, ●
+--- commons / core in their own groups, ◆ on borders (the seams). eol dots,
+--- like the cone — never line-bg. Node rows and, at files level, file rows.
+function M.paint_territory()
+    if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
+    vim.api.nvim_buf_clear_namespace(M.buf, ns_terr, 0, -1)
+    if not M._territory_on then return end
+    local t = store.territory(); if not t then return end
+    local hl = require 'cartograph.hl'
+    local function dot(r, glyph, group)
+        pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_terr, r - 1, 0,
+            { virt_text = { { glyph, group } }, virt_text_pos = 'eol' })
+    end
+    local function terr_hue(entry) return hl.concern((t.entry_index[entry] or 1) - 1) end
+    for row, id in pairs(M.line_node or {}) do
+        local info = t.node[id]
+        if info then
+            if info.border then dot(row, '◆', 'CartographBorder')
+            elseif info.class == 'core' then dot(row, '●', 'CartographCore')
+            elseif info.class == 'commons' then dot(row, '●', 'CartographCommons')
+            else dot(row, '●', terr_hue(info.entry)) end
+        end
+    end
+    local ft = store.territory_files()
+    if ft then
+        for row, file in pairs(M.line_file or {}) do
+            local fi = ft[file]
+            if fi then
+                if fi.class == 'core' then dot(row, '●', 'CartographCore')
+                elseif fi.class == 'commons' then dot(row, '●', 'CartographCommons')
+                else dot(row, '●', terr_hue(fi.entry)) end
+            end
+        end
+    end
 end
 
 --- Glow the rows on the active cone: ◆ on the anchor, ● on every reachable
