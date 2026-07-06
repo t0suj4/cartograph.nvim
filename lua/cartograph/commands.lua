@@ -518,6 +518,55 @@ function M.register()
                 s.borders, s.borders == 1 and '' or 's'), vim.log.levels.INFO)
     end, { desc = 'cartograph: territory overlay — partition the graph by which entry points reach each node' })
 
+    -- ── detect the tree structures (spines) hiding in the graph ─────
+    cmd('CartographSpines', function ()
+        local store = live() if not store then return end
+        local t = store.territory()
+        if not t then return vim.notify('cartograph: no graph', vim.log.levels.WARN) end
+        local spines = require 'cartograph.spines'
+        local doms = spines.dominator_analysis(t.entries, store.uses)
+        -- distinct entry-set regions
+        local seen, regions = {}, {}
+        for _, info in pairs(t.node) do
+            local ids = {}
+            for e in pairs(info.entries) do ids[#ids + 1] = e end
+            table.sort(ids)
+            local key = table.concat(ids, '\31')
+            if not seen[key] then
+                seen[key] = true
+                regions[#regions + 1] = { set = info.entries, n = info.n }
+            end
+        end
+        local rf = spines.region_forest(regions)
+
+        local lines = { 'cartograph: spines', '',
+            ('CALL-DOMINATOR SPINES  (%d root%s, %s) — depth = longest must-pass chain')
+            :format(t.k, t.k == 1 and '' or 's', t.declared and 'declared' or 'apparent'),
+            ('  %-34s %5s %5s  %s'):format('root', 'nodes', 'depth', 'shape') }
+        local tally = {}
+        for i, d in ipairs(doms) do
+            tally[d.shape] = (tally[d.shape] or 0) + 1
+            if i <= 25 and d.size > 1 then
+                local n = store.node(d.root)
+                lines[#lines + 1] = ('  %-34s %5d %5d  %s'):format(
+                    ((n and n.name) or d.root):sub(1, 34), d.size, d.depth, d.shape)
+            end
+        end
+        lines[#lines + 1] = ('  — %d spine · %d bushy · %d shallow · %d trivial'):format(
+            tally.spine or 0, tally.bushy or 0, tally.shallow or 0, tally.trivial or 0)
+        lines[#lines + 1] = ''
+        lines[#lines + 1] = 'REGION POSET  (subsystem nesting from entry-sets)'
+        if rf.skipped then
+            lines[#lines + 1] = ('  %d regions — too many to forest-test'):format(rf.regions)
+        elseif rf.forest then
+            lines[#lines + 1] = ('  %d regions · forest? YES — a clean subsystem tree'):format(rf.regions)
+        else
+            lines[#lines + 1] = ('  %d regions · forest? NO · %d multi-parent (layering seams)')
+                :format(rf.regions, rf.multiparent)
+        end
+        scratch(lines)
+    end, { desc = 'cartograph: detect the tree structures (call-dominator + subsystem) hiding in the graph' })
+
     -- ── the LIVE web canvas: draw in a browser, project as corpses ──────
     cmd('CartographCanvas', function ()
         if canvas then
