@@ -22,25 +22,25 @@ local M = { cur = nil, ctx = nil }
 -- with its leading DOC COMMENT (the block right above the signature), so the
 -- shown range starts above node.range.start; buf_row maps against this.
 M._shown_start = {}
--- node id -> 0-based last shown file line (a top-level var widens to its block)
+-- node id -> 0-based last shown file line (a top-level var widens to its region)
 M._shown_end = {}
 
--- The smallest `block` node (a run of top-level statements) that encloses a
+-- The smallest `region` node (a run of top-level statements) that encloses a
 -- file-scope `var`, or nil. A lone top-level statement reads as an isolated
--- fragment; shown inside its block it has the surrounding code for context.
-local function enclosing_block(node)
+-- fragment; shown inside its region it has the surrounding code for context.
+local function enclosing_region(node)
     if node.kind ~= 'var' then return nil end
-    local blk
+    local reg
     for _, n in ipairs(store.by_file[node.file] or {}) do
-        if n.kind == 'block'
+        if n.kind == 'region'
             and n.range.start.line <= node.range.start.line
             and n.range['end'].line >= node.range['end'].line
-            and (not blk or (n.range['end'].line - n.range.start.line)
-                < (blk.range['end'].line - blk.range.start.line)) then
-            blk = n
+            and (not reg or (n.range['end'].line - n.range.start.line)
+                < (reg.range['end'].line - reg.range.start.line)) then
+            reg = n
         end
     end
-    return blk
+    return reg
 end
 
 -- Lines for a node's body: a hard-context header + the real source range.
@@ -48,8 +48,8 @@ local function body_lines(node)
     if not node then return { '(nothing)' } end
     local ok, all = pcall(vim.fn.readfile, store.abspath(node))
     if not ok then return { ('── %s   %s  (unreadable)'):format(node.name or '?', node.file) } end
-    -- a top-level statement widens to the code block it belongs to
-    local shown = enclosing_block(node) or node
+    -- a top-level statement widens to the region it belongs to
+    local shown = enclosing_region(node) or node
     local s = shown.range.start.line + 1     -- schema line is 0-based
     local e = shown.range['end'].line + 1
     -- show the def WITH its leading doc comment: walk up over the block that

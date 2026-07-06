@@ -19,7 +19,10 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 15 -- v15: top-level statement blocks are bounded runs again —
+M.VERSION = 16 -- v16: the top-level-statement node kind is `region` (was
+              -- `block`; id `file::region@line`) — `block` now names the
+              -- browser view you descend a compound statement into;
+              -- v15: top-level statement blocks are bounded runs again —
               -- fnDefLines flushing (node identity did not survive iter_matches
               -- vs iter_children, so every file was one giant block);
               -- v14: C/C++ #include <angled> paths resolve too (was quoted-

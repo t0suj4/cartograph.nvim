@@ -19,6 +19,9 @@ test('blocks: statement runs roll up, functions break them', function ()
     }, ' '))
     store.load(out .. '.json')
 
+    -- the legacy lua-ls --graph CLI predates the block->region rename and
+    -- still emits kind='block'; the live extractor (kind='region') is covered
+    -- by treesitter_spec. This golden test pins the deprecated CLI as-is.
     local blocks, vars = {}, {}
     for _, n in ipairs(store.by_file['mod.lua'] or {}) do
         if n.kind == 'block' then blocks[#blocks + 1] = n end

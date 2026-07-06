@@ -189,7 +189,7 @@ test('nav: sync_on_ascend = true resyncs the source pane immediately', function 
     vim.cmd('tabclose')
 end)
 
-test('nav: descend a compound statement into its inner forms (body view)', function ()
+test('nav: descend a compound statement into its inner forms (block view)', function ()
     if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
     local symbols = require 'cartograph.panes.symbols'
     local ts = require 'cartograph.providers.treesitter'
@@ -228,7 +228,7 @@ test('nav: descend a compound statement into its inner forms (body view)', funct
         end
     end
     cb()
-    eq('body', symbols.view.level) -- opened the block, did NOT dive into `g`
+    eq('block', symbols.view.level) -- opened the block, did NOT dive into `g`
     -- the inner calls are now their own rows (callees resolve by tail name)
     local seen = {}
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
@@ -255,7 +255,7 @@ test('nav: descend a compound statement into its inner forms (body view)', funct
         if m.lhs == require('cartograph.config').keys.ascend then acb = m.callback end
     end
     acb()
-    eq('body', symbols.view.level)
+    eq('block', symbols.view.level)
     eq('M.f', store.node(store.focused).name) -- focus back to the block's fn at once
     ok(symbols._resync == nil, 'no deferred peek armed for a block ascent')
 
@@ -320,20 +320,20 @@ test('nav: j/k step out of a block (sticky two-press) and back in', function ()
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
         if symbols.line_stmt[r] == 3 then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) end
     end
-    press(keys.descend); eq('body', symbols.view.level)
+    press(keys.descend); eq('block', symbols.view.level)
     press(keys.down)                          -- move to the last form
     press(keys.down)                          -- j at the edge: step OUT
     eq('fn', symbols.view.level)              -- landed in the parent function
     ok(symbols._stepout ~= nil, 'step-out is provisional (remembered)')
 
     press(keys.up)                            -- opposite key: back INTO the block
-    eq('body', symbols.view.level)
+    eq('block', symbols.view.level)
     ok(symbols._stepout == nil, 'return cleared the memory')
 
     press(keys.down)                          -- step out again
     ok(symbols._stepout ~= nil, 'provisional again')
     press(keys.ascend)                        -- h while provisional: also returns in
-    eq('body', symbols.view.level)
+    eq('block', symbols.view.level)
     ok(symbols._stepout == nil, 'h consumed the provisional step-out')
 
     press(keys.down)                          -- step out once more
@@ -373,10 +373,10 @@ test('nav: stepping down from a block at the function edge is a no-op', function
     end
     vim.api.nvim_set_current_win(wsym)
     K[keys.descend]()
-    eq('body', symbols.view.level)
+    eq('block', symbols.view.level)
     local before = vim.api.nvim_win_get_cursor(wsym)[1]
     K[keys.down]() -- nowhere below without leaving the function -> no-op
-    eq('body', symbols.view.level)
+    eq('block', symbols.view.level)
     eq(before, vim.api.nvim_win_get_cursor(wsym)[1]) -- stayed put
     ok(symbols._stepout == nil, 'no provisional step-out was armed')
 
@@ -420,7 +420,7 @@ test('nav: h after a block step-out returns through the caller list it came from
         local t = vim.api.nvim_buf_get_lines(symbols.buf, r - 1, r, false)[1]
         if symbols.line_stmt[r] and t:match('X') then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) break end
     end
-    press(keys.descend); eq('body', symbols.view.level)
+    press(keys.descend); eq('block', symbols.view.level)
 
     press(keys.down)  -- j: step out to the function
     press(keys.down)  -- j: commit to the function

@@ -125,7 +125,7 @@ test('treesitter: lua blocks, litdata and require edges', function ()
     store.ingest(data)
     local blocks, vars, lit = 0, 0, nil
     for _, n in ipairs(data.nodes) do
-        if n.kind == 'block' then blocks = blocks + 1 end
+        if n.kind == 'region' then blocks = blocks + 1 end
         if n.kind == 'var' then
             vars = vars + 1
             if type(n.data) == 'table' then lit = n end
@@ -133,12 +133,12 @@ test('treesitter: lua blocks, litdata and require edges', function ()
     end
     ok(blocks >= 1, 'blocks emitted')
     ok(vars >= 3, 'vars emitted (' .. vars .. ')')
-    -- blocks are BOUNDED runs: a run flushes at every function def, so no
+    -- regions are BOUNDED runs: a run flushes at every function def, so no
     -- block may span across one. (A node-identity bug once merged every file
-    -- into one giant block, which read as isolated statements when browsed.)
+    -- into one giant region, which read as isolated statements when browsed.)
     local blks, fns = {}, {}
     for _, n in ipairs(data.nodes) do
-        if n.kind == 'block' then blks[#blks + 1] = n
+        if n.kind == 'region' then blks[#blks + 1] = n
         elseif n.kind == 'function' then fns[#fns + 1] = n end
     end
     ok(#blks >= 3, 'the interleaved fixture yields several blocks (' .. #blks .. ')')
@@ -2340,7 +2340,7 @@ test('sfc containers: script regions, template calls, handler cbarg', function (
     -- the template is a visible block row
     local tpl
     for _, n in ipairs(data.nodes) do
-        if n.file == 'App.vue' and n.kind == 'block'
+        if n.file == 'App.vue' and n.kind == 'region'
             and n.name == 'template' then tpl = n end
     end
     ok(tpl, 'template block node')

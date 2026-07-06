@@ -64,6 +64,45 @@ The guiding principle: **the unit of attention is one node and its edges, and
 navigation is re-rooting.** Never the whole graph (a hairball at any real
 scale), never a context-free list.
 
+## Terminology
+
+Three layers, one vocabulary.
+
+**The graph** — the data:
+- **node** — a symbol. Kinds: `function`, `method`, `var`, `module`, `region`
+  (a run of top-level statements between function definitions, shown `≡`).
+- **edge** — a directed relationship between nodes: `ref` (call / reference),
+  `import` (require / include), `use` (variable read), `reg` (registration by
+  a dispatch table or annotation).
+- **call** — a call-site record; becomes a `ref` edge once resolved (or stays
+  a *refusal* when the name is ambiguous).
+- **occurrence** — one *site* of an edge (a source range); an edge can have
+  several.
+
+**Views** — what the **browser** (the symbols pane) shows, one **altitude** at
+a time; `l`/`h` change altitude:
+`files → file → fn → block`, plus side-views `region` (a region's
+declarations), `callers` / `used-by` / `sites`, `table`, `refused`,
+`registrations`, `states`, `working set`.
+- **block** — the view you descend a compound statement (`if`/`for`, a nested
+  lisp call) or a function body into; derived on demand from the source.
+- **form** — one nested statement or call, a row in a block view (not a graph
+  node).
+
+**Navigation**:
+- **focus** — the node the cockpit is rooted on (shown in the source pane),
+  set by a **pivot** (`<CR>`, or `l` where descending enters something).
+- **context** — the transient hover preview that takes over the source pane,
+  restored when you move off. *The view follows the eye; focus follows intent.*
+- **descend** (`l`) / **ascend** (`h`) change altitude; **step** (`j`/`k`)
+  moves within a view and **steps out** at a block edge.
+- **peek** — after an ascend the source pane lingers on where you were until
+  you move (deferred re-sync); immediate for same-location moves.
+- **trail** — the `h`/`l` structural path (return the way you came), distinct
+  from the **jumplist** (`<C-o>`/`<C-i>`, which records pivots).
+- **cockpit** — the whole tab: the **browser**, the **source pane**, the
+  **plan bar**, the **trace pane**.
+
 ## Shape
 
 A cockpit of independent panes over a shared state store:
@@ -72,8 +111,8 @@ A cockpit of independent panes over a shared state store:
   ascends — sideways is free in a linear list, so it becomes altitude.
   Top level is the **file tree** (one row per file, with usage-classification
   gutter signs). Inside a file, runs of top-level statements between function
-  definitions roll up into **blocks** (`≡`, named by their first source line
-  — a constants preamble reads as one row); a block descends into its
+  definitions roll up into **regions** (`≡`, named by their first source line
+  — a constants preamble reads as one row); a region descends into its
   declarations. `<Tab>` toggles the top level between the flat list and the
   **include tree** — files nested under whoever requires them, roots being
   the entry points nothing requires; a file already shown appears dim with
@@ -88,14 +127,19 @@ A cockpit of independent panes over a shared state store:
   data flow), where hovering a row highlights the real line in the source
   pane. At the file level the cursor row is the focus, and staging lives here.
 
-  Below the fn level, descend keeps going **into the graph**, acting on the
-  name under the cursor: statement rows name their calls (`→ callee`) and
-  the module vars / globals they read (`· var`), so `l` on a callee follows
-  the call into that function (recorded in the jumplist — `<C-o>` walks
-  back), and on a var it opens that var's usage sites; on a **parameter**
-  it opens the origin trace; on a **local** it jumps to the defining
-  statement; with no name targeted it follows the statement's only
-  resolvable call. A **var** row
+  Below the fn level, descend keeps going **into the graph**. A **compound
+  statement** (an `if`/`for`/`while`, a nested lisp call) descends into the
+  **block** view — its immediate **forms**, one level down, derived on demand
+  from the source; a `▸` form descends deeper, a leaf call descends into the
+  callee. `j`/`k` walk this tree depth-first: within a block they move among
+  its forms, and at the first/last form they **step out** to the parent
+  (chaining up until there's somewhere to go, never leaving the function).
+  Otherwise `l` acts on the name under the cursor — statement rows name their
+  calls (`→ callee`) and the module vars / globals they read (`· var`), so `l`
+  on a callee follows the call into that function (recorded in the jumplist —
+  `<C-o>` walks back), on a var opens that var's usage sites, on a
+  **parameter** opens the origin trace, on a **local** jumps to the defining
+  statement. A **var** row
   descends into its usage sites (every function that reads it, from the
   extractor's `use` edges) — hovering a site shows the read in the
   source pane, and descending enters the reading function. A var holding a
@@ -145,13 +189,13 @@ All standard vim idioms — no new keys to learn:
 
 - `<C-]>` — **in the source pane**, jump to the definition of the call under
   the cursor (resolved from the graph's recorded call sites, with a
-  word-match fallback). In the tree pane it pivots like `<CR>`.
+  word-match fallback). In the browser it pivots like `<CR>`.
 - `<C-o>` / `<C-t>` — go **back** to where the last pivot happened; `<C-i>`
   goes forward again. Vim-jumplist semantics: deliberate pivots record,
   scrolling the symbol list doesn't. (`<C-i>` is bound only where `<Tab>`
   isn't the lens toggle, since most terminals can't tell them apart.)
 - `gf` — **leave the cockpit**: open the real file at the corresponding line
-  (in a reused tab), from the source, symbols, or tree pane.
+  (in a reused tab), from the source, symbols, or plan pane.
 - **The view follows the eye; focus follows intent.** In the browser,
   moving the cursor *tints* relationships (dependencies green, dependents
   amber) and *previews* the row in the source pane (a temporary takeover,

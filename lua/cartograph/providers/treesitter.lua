@@ -2311,7 +2311,7 @@ function M.extract(root, opts)
         -- LINE, not node: the defs come from iter_matches but the block loop
         -- walks iter_children, and TSNode identity does not survive across
         -- traversals (== is a metamethod, table keys are raw) — a node-keyed
-        -- set never hits, so every file collapsed into one giant block.
+        -- set never hits, so every file collapsed into one giant region.
         local fnDefLines = {}
         if q then
             for _, match in q:iter_matches(tsroot, src, 0, -1) do
@@ -2476,7 +2476,7 @@ function M.extract(root, opts)
             end
         end
 
-        -- blocks: runs of top-level statements that aren't function defs
+        -- regions: runs of top-level statements that aren't function defs
         do
             local lines = vim.split(src, '\n', { plain = true })
             local container = tsroot
@@ -2488,8 +2488,8 @@ function M.extract(root, opts)
             local run = nil
             local function flush()
                 if run then
-                    local id = ('%s::block@%d'):format(file, run.s.start.line)
-                    nodes[#nodes + 1] = { id = id, name = run.name, kind = 'block',
+                    local id = ('%s::region@%d'):format(file, run.s.start.line)
+                    nodes[#nodes + 1] = { id = id, name = run.name, kind = 'region',
                         file = file, order = run.s.start.line,
                         range = { start = run.s.start, ['end'] = run.e['end'] } }
                     run = nil
@@ -2768,7 +2768,7 @@ function M.extract(root, opts)
         end
         if tps then
             nodes[#nodes + 1] = { id = ('%s::template@%d'):format(file, tps),
-                name = 'template', kind = 'block', file = file, order = tps,
+                name = 'template', kind = 'region', file = file, order = tps,
                 range = { start = { line = tps, char = 0 },
                     ['end'] = { line = tpe, char = 0 } } }
         end
