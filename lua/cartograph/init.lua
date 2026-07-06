@@ -147,12 +147,18 @@ function M.open(dump_path, opts)
         -- everything after extraction: clangd oracle, cross-language
         -- links, SQL entities, ingest (also the parallel path's on_done)
         local function finish(data)
-            -- LSP oracles (clangd for C/C++, lua-ls for lua) are EXPENSIVE and
-            -- I/O-bound, so they run in the BACKGROUND after ingest — the graph
-            -- opens immediately with name-matched (~) edges and each oracle
-            -- hot-swaps its proven edges in when it finishes (see below ingest).
-            -- cross-language boundaries (string-key dispatch) run here, BEFORE
-            -- the oracles — their edge rebuild preserves xlang refs (e.xlang).
+            -- Open the graph NOW with tree-sitter's name-matched (~) edges. The
+            -- ENRICHMENT below — cross-language DISCOVERY + link (seconds on a
+            -- big graph, e.g. openmw), the framework loops, then the LSP
+            -- oracles — is deferred off the open's critical path and runs in
+            -- the first idle gap (idle_defer), so it can never freeze the open
+            -- or a keystroke. It re-ingests to fold its edges in. This is why
+            -- the open feels instant even when the linking is expensive.
+            store.ingest(data)
+          local function enrich()
+            if store.data ~= data then return end -- graph moved on
+            -- cross-language boundaries (string-key dispatch) run BEFORE the
+            -- oracles — their edge rebuild preserves xlang refs (e.xlang).
             -- Registries the project invented for itself are DISCOVERED and
             -- linked the same way (config.discover = false disables).
             local x = require('cartograph.xlang').link(data,
@@ -214,7 +220,8 @@ function M.open(dump_path, opts)
                 vim.notify('cartograph: db link failed — ' .. dberr,
                     vim.log.levels.WARN)
             end
-            store.ingest(data)
+            -- fold the enrichment edges in (deferred: preserve the user's place)
+            preserve(function () store.ingest(data) end)
 
             -- lua-ls resolves the WHOLE lua graph in the background (small
             -- enough) and hot-swaps its proven edges in when done.
@@ -287,6 +294,25 @@ function M.open(dump_path, opts)
                 -- opening a non-C graph: shut down any lingering clangd session
                 require('cartograph.providers.clangd').stop_session()
             end
+          end
+          -- run enrich once the user has been briefly idle (so the expensive
+          -- discovery/link never lands on a keystroke), but never wait forever
+          local last_input, waited = 0, 0
+          local okk, kid = pcall(vim.on_key, function () last_input = vim.uv.hrtime() end)
+          local function pump()
+              if store.data ~= data then
+                  if okk then pcall(vim.on_key, nil, kid) end
+                  return -- graph moved on; drop the enrichment + key watch
+              end
+              if (vim.uv.hrtime() - last_input) / 1e6 >= 150 or waited >= 4000 then
+                  if okk then pcall(vim.on_key, nil, kid) end
+                  enrich()
+              else
+                  waited = waited + 120
+                  vim.defer_fn(pump, 120)
+              end
+          end
+          vim.defer_fn(pump, 80)
         end
 
         -- incremental open: unchanged files come from the cache, only the
