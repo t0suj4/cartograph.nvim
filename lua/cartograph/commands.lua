@@ -458,6 +458,45 @@ function M.register()
             (s.drift or 0) > 0 and (', ⚠ %d cell(s) adrift'):format(s.drift) or ', in sync'),
             (s.drift or 0) > 0 and vim.log.levels.WARN or vim.log.levels.INFO)
     end, { desc = 'cartograph: the live Factorio projection\'s honesty state (synced / stale / drift)' })
+
+    -- ── the dead-biter brush: paint a raster into Factorio as corpses ───
+    cmd('CartographBrush', function (o)
+        local tp = require 'cartograph.textplates'
+        local brush = require 'cartograph.brush'
+        local client, io = tp.connect() -- reuse the factorio MCP transport
+        if not client then
+            return vim.notify('cartograph: ' .. tostring(io), vim.log.levels.WARN)
+        end
+        -- input: a file argument, else the current buffer's lines (draw in nvim)
+        local lines
+        if o.args ~= '' then
+            local okr, r = pcall(vim.fn.readfile, vim.fn.expand(o.args))
+            if not okr then
+                pcall(function () client:close() end)
+                return vim.notify('cartograph: cannot read ' .. o.args, vim.log.levels.WARN)
+            end
+            lines = r
+        else
+            lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+        end
+        local cfg = require('cartograph.config').factorio or {}
+        local opts = vim.tbl_extend('force', { surface = cfg.surface, anchor = cfg.anchor },
+            cfg.brush or {})
+        local ok, delta = pcall(brush.project, io, lines, opts)
+        pcall(function () client:close() end)
+        if not ok then
+            return vim.notify('cartograph: brush failed — ' .. tostring(delta), vim.log.levels.WARN)
+        end
+        local msg = ('cartograph: brushed — %d corpse(s) placed, %d cleared')
+            :format(#delta.create, #delta.destroy)
+        local level = vim.log.levels.INFO
+        if delta.verified == false then
+            msg = msg .. (' — ⚠ %d cell(s) did not land'):format(brush.delta_count(delta.drift))
+            level = vim.log.levels.WARN
+        end
+        vim.notify(msg .. ' (corpses decay — re-run to refresh)', level)
+    end, { nargs = '?', complete = 'file',
+        desc = 'cartograph: paint the current buffer (or a file) into Factorio as biter corpses' })
 end
 
 return M
