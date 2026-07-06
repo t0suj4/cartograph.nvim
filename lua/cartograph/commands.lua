@@ -9,6 +9,9 @@
 
 local M = {}
 
+-- the running dead-biter web canvas (server + live MCP client), if any
+local canvas = nil
+
 -- the graph-needing guard: a command that acts on the open cockpit
 -- answers helpfully when there is none
 local function live()
@@ -497,6 +500,61 @@ function M.register()
         vim.notify(msg .. ' (corpses decay — re-run to refresh)', level)
     end, { nargs = '?', complete = 'file',
         desc = 'cartograph: paint the current buffer (or a file) into Factorio as biter corpses' })
+
+    -- ── the LIVE web canvas: draw in a browser, project as corpses ──────
+    cmd('CartographCanvas', function ()
+        if canvas then
+            return vim.notify('cartograph: canvas already running at http://' .. canvas.url
+                .. ' (:CartographCanvasStop to end)', vim.log.levels.INFO)
+        end
+        local tp = require 'cartograph.textplates'
+        local brush = require 'cartograph.brush'
+        local web = require 'cartograph.webserver'
+        local client, io = tp.connect() -- one live MCP connection for the session
+        if not client then
+            return vim.notify('cartograph: ' .. tostring(io), vim.log.levels.WARN)
+        end
+        local cfg = require('cartograph.config').factorio or {}
+        local bopts = vim.tbl_extend('force', { surface = cfg.surface, anchor = cfg.anchor },
+            cfg.brush or {})
+        -- debounce: a drag POSTs a burst; project only the latest grid
+        local st = { grid = nil, gen = 0 }
+        local function schedule()
+            st.gen = st.gen + 1
+            local mine = st.gen
+            vim.defer_fn(function ()
+                if not canvas or mine ~= st.gen or not client.alive or not st.grid then return end
+                pcall(brush.project, io, st.grid, bopts)
+            end, cfg.debounce or 200)
+        end
+        local srv, err = web.serve({ port = cfg.port or 8778, handler = function (req)
+            if req.method == 'GET' and req.path == '/' then
+                return 200, 'text/html', web.canvas_html()
+            elseif req.method == 'POST' and req.path == '/paint' then
+                st.grid = req.body; schedule()
+                return 200, 'text/plain', 'ok'
+            end
+            return 404, 'text/plain', 'not found'
+        end })
+        if not srv then
+            pcall(function () client:close() end)
+            return vim.notify('cartograph: ' .. tostring(err), vim.log.levels.WARN)
+        end
+        canvas = { srv = srv, client = client, url = srv.host .. ':' .. srv.port }
+        vim.notify('cartograph: dead-biter canvas live → open http://' .. canvas.url
+            .. ' and draw. :CartographCanvasStop to end', vim.log.levels.INFO)
+    end, { desc = 'cartograph: serve a browser canvas that paints into Factorio as biter corpses' })
+
+    cmd('CartographCanvasStop', function ()
+        if not canvas then
+            return vim.notify('cartograph: no canvas running', vim.log.levels.INFO)
+        end
+        pcall(canvas.srv.close)
+        pcall(function () canvas.client:close() end)
+        canvas = nil
+        vim.notify('cartograph: canvas stopped (the corpses stay — they decay on their own)',
+            vim.log.levels.INFO)
+    end, { desc = 'cartograph: stop the live web canvas' })
 end
 
 return M
