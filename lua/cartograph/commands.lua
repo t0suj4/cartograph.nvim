@@ -402,6 +402,39 @@ function M.register()
         if v then store.pivot(v.id) end
         symbols.show('states')
     end, { desc = 'cartograph: browse the state machine (states -> entry points -> code)' })
+
+    -- ── project the browser view into a Factorio world ──────────────
+    cmd('CartographProject', function (o)
+        local store = live() if not store then return end
+        local tp = require 'cartograph.textplates'
+        if o.bang then -- live: reproject on every navigation until stopped
+            local L, why = tp.attach()
+            if not L then
+                return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)
+            end
+            return vim.notify('cartograph: live projection ON — the world tracks the view.'
+                .. ' :CartographProjectStop to detach', vim.log.levels.INFO)
+        end
+        local client, io = tp.connect()
+        if not client then
+            return vim.notify('cartograph: ' .. tostring(io), vim.log.levels.WARN)
+        end
+        local labels = require('cartograph.panes.symbols').visible_labels(
+            (require('cartograph.config').factorio or {}).max_rows)
+        local ok, delta = pcall(tp.project, io, labels, require('cartograph.config').factorio)
+        pcall(function () client:close() end)
+        if not ok then
+            return vim.notify('cartograph: projection failed — ' .. tostring(delta), vim.log.levels.WARN)
+        end
+        vim.notify(('cartograph: projected %d row(s) — %d built, %d re-lettered, %d removed')
+            :format(#labels, #delta.create, #delta.revary, #delta.destroy), vim.log.levels.INFO)
+    end, { bang = true,
+        desc = 'cartograph: project the current view into Factorio (! = live, reproject on navigation)' })
+
+    cmd('CartographProjectStop', function ()
+        require('cartograph.textplates').detach()
+        vim.notify('cartograph: live projection detached', vim.log.levels.INFO)
+    end, { desc = 'cartograph: stop the live Factorio projection' })
 end
 
 return M

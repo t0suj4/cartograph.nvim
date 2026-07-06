@@ -44,6 +44,16 @@ M.pins = nil
 -- callables under string keys are found and linked without configuration
 M.discover = true
 
+-- factorio PROJECTION surface (cartograph.textplates): write the browser
+-- view into a running Factorio world as text plates via an MCP server that
+-- exposes a `run_lua` tool (FactoMCP). `cmd` spawns the server; `env` is
+-- optional (omit to inherit nvim's, so exported RCON_* reach the child).
+-- anchor/material/surface tune the projection; :CartographProject drives it,
+-- :CartographProject! re-projects live on navigation. nil = not configured.
+--   setup{ factorio = { cmd = { 'python', '/path/FactoMCP/server.py' },
+--     surface = 'nauvis', anchor = { x = 300, y = -300 }, material = 'gold' } }
+M.factorio = nil
+
 -- live refresh: re-extract a saved file and splice it into the graph
 -- (tree-sitter graphs only; frozen while changes are staged)
 M.refresh = true

@@ -1296,6 +1296,26 @@ function M.render()
     M.paint(store.focused)
 end
 
+--- The node names currently on screen, in row order — what the view SHOWS.
+--- The projection surface ([[textplates]]) renders exactly this list, so the
+--- world tracks whatever the browser is looking at. Module/file names project
+--- as their basename (STORE, not lua/cartograph/store.lua); `limit` caps rows.
+function M.visible_labels(limit)
+    local rows, out = {}, {}
+    for row in pairs(M.line_node or {}) do rows[#rows + 1] = row end
+    table.sort(rows)
+    for _, row in ipairs(rows) do
+        local n = store.node(M.line_node[row])
+        if n and n.name then
+            local label = n.name
+            if n.kind == 'module' then label = label:match('[^/]+$') or label end
+            out[#out + 1] = label
+            if limit and #out >= limit then break end
+        end
+    end
+    return out
+end
+
 --- Switch level (re-rendering) and land the cursor on the first useful row.
 function M.show(level, ctx_val)
     M.view.level = level

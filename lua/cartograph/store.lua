@@ -675,7 +675,16 @@ end
 -- (a background oracle splicing edges into the focused node, say). Panes
 -- subscribe and re-render their CURRENT view; no focus change, no re-ingest.
 M._redraw_subs = {}
-function M.on_redraw(fn) table.insert(M._redraw_subs, fn) end
+--- Subscribe to redraws (fired on every navigation/re-render). Returns an
+--- unsubscribe function, like M.facts — a live projection detaches with it.
+function M.on_redraw(fn)
+    table.insert(M._redraw_subs, fn)
+    return function ()
+        for i, f in ipairs(M._redraw_subs) do
+            if f == fn then table.remove(M._redraw_subs, i); return end
+        end
+    end
+end
 function M.redraw()
     for _, fn in ipairs(M._redraw_subs) do pcall(fn) end
 end

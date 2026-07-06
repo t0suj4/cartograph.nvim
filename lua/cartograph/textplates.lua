@@ -69,6 +69,7 @@ local DEFAULTS = {
     size = 'large', material = 'gold',
     dx = 3, dy = 3, -- large plates are 2x2; 3-tile pitch leaves a gap
     max_cols = 40,  -- truncate over-long names so rows stay legible
+    max_rows = 32,  -- cap rows so a big view never blankets the world
 }
 
 --- Merge caller opts over the defaults (shallow — the anchor is replaced
@@ -95,6 +96,7 @@ function M.layout(labels, opts)
     local o = withdefaults(opts)
     local plates = {}
     for row, label in ipairs(labels) do
+        if o.max_rows and row > o.max_rows then break end
         local vs = M.encode(label)
         local n = math.min(#vs, o.max_cols)
         for col = 1, n do
@@ -154,18 +156,15 @@ end
 -- (already JSON-decoded by the caller). Kept deliberately small; all the
 -- logic above is pure.
 
---- Bounding box (in tiles) covering a set of plates, padded by one tile.
-function M.bbox(plates, opts)
+--- The CANVAS the projection owns: the full rectangle any row/col could
+--- occupy (anchor + max_cols×max_rows), padded by a tile. The read must
+--- cover this, not just the current desired bbox — otherwise SHRINKING the
+--- list orphans the vacated rows (they fall outside a tight bbox and never
+--- get destroyed). Nothing outside the canvas is ever touched.
+function M.canvas_bbox(opts)
     local o = withdefaults(opts)
-    if #plates == 0 then
-        return { { o.anchor.x - 1, o.anchor.y - 1 }, { o.anchor.x + 1, o.anchor.y + 1 } }
-    end
-    local minx, miny, maxx, maxy = math.huge, math.huge, -math.huge, -math.huge
-    for _, p in ipairs(plates) do
-        minx, maxx = math.min(minx, p.x), math.max(maxx, p.x)
-        miny, maxy = math.min(miny, p.y), math.max(maxy, p.y)
-    end
-    return { { minx - 1, miny - 1 }, { maxx + 2, maxy + 2 } }
+    return { { o.anchor.x - 1, o.anchor.y - 1 },
+        { o.anchor.x + o.max_cols * o.dx + 1, o.anchor.y + o.max_rows * o.dy + 1 } }
 end
 
 --- Lua that reports current plates in `area` as a JSON list of {x,y,v,u}.
@@ -208,13 +207,102 @@ function M.project(io, labels, opts)
     local o = withdefaults(opts)
     local name = M.entity_name(o)
     local desired = M.layout(labels, o)
-    local area = M.bbox(desired, o)
+    -- read the whole owned canvas so a shrunk list reclaims vacated rows
+    local area = M.canvas_bbox(o)
     local current = io(M.read_lua(area, name, o.surface or 'nauvis')) or {}
     local delta = M.reconcile(desired, current)
     if not M.is_noop(delta) then
         io(M.apply_lua(delta, name, o.surface or 'nauvis'))
     end
     return delta
+end
+
+-- ── live wire (optional; requires cartograph.mcp + a factorio MCP server) ────
+-- Everything above is pure. This section is the only part that touches the
+-- transport: it turns a cartograph MCP client's `run_lua` tool into the
+-- `io(lua) -> decoded` the pure core expects, and keeps ONE connection alive
+-- while re-projecting the browser view on every navigation.
+
+--- Wrap an MCP client's run_lua tool as an io(lua) -> decoded. FactoMCP
+--- returns the rcon output inside a { result = "<text|json>" } envelope
+--- (cartograph's client:call has already JSON-decoded the tool text), so a
+--- read needs a second decode; an apply's "ok" is returned as-is.
+function M.mcp_io(client, cfg)
+    local tool = (cfg and cfg.tool) or 'run_lua'
+    local timeout = (cfg and cfg.timeout) or 30000
+    return function (lua)
+        local r, err = client:call(tool, { code = lua }, timeout)
+        if r == nil then error('cartograph.textplates: run_lua failed — ' .. tostring(err)) end
+        local out = r
+        if type(r) == 'table' and r.result ~= nil then out = r.result end
+        if type(out) == 'string' then
+            local ok, dec = pcall(vim.json.decode, out)
+            if ok then return dec end
+        end
+        return out
+    end
+end
+
+--- Connect to the configured factorio MCP server. cfg defaults to
+--- config.factorio ({ cmd = {...}, env?, surface?, anchor?, material? }).
+--- Returns (client, io) or (nil, err).
+function M.connect(cfg)
+    cfg = cfg or require('cartograph.config').factorio
+    if type(cfg) ~= 'table' or not cfg.cmd then
+        return nil, 'no factorio MCP server configured — setup{ factorio = { cmd = {...} } }'
+    end
+    local client, err = require('cartograph.mcp').connect(cfg)
+    if not client then return nil, err end
+    return client, M.mcp_io(client, cfg)
+end
+
+-- the one live projector (a single connection reused across navigations)
+M._live = nil
+
+--- Detach the live projector: unsubscribe from redraws and close the wire.
+function M.detach()
+    local L = M._live
+    if not L then return end
+    M._live = nil
+    if L.unsub then pcall(L.unsub) end
+    if L.client then pcall(function () L.client:close() end) end
+end
+
+--- Start (or restart) the live projection: connect once, project the current
+--- view, and re-project a MINIMAL delta on every navigation (debounced).
+--- `opts` merges over config.factorio (anchor/material/surface/debounce/limit).
+--- Returns (state, nil) or (nil, err).
+function M.attach(opts)
+    M.detach()
+    local cfg = require('cartograph.config').factorio or {}
+    local proj = vim.tbl_extend('force', {}, cfg, opts or {})
+    local client, io = M.connect(proj)
+    if not client then return nil, io end
+
+    local store = require 'cartograph.store'
+    local L = { client = client, io = io, opts = proj, gen = 0 }
+    M._live = L
+
+    local function fire()
+        if M._live ~= L or not client.alive then return end
+        local labels = require('cartograph.panes.symbols').visible_labels(proj.max_rows)
+        local ok, err = pcall(M.project, io, labels, proj)
+        if not ok then
+            vim.notify('cartograph: projection failed — ' .. tostring(err), vim.log.levels.WARN)
+            M.detach()
+        end
+    end
+
+    -- debounce: navigation fires redraw on every j/k; coalesce the bursts
+    L.unsub = store.on_redraw(function ()
+        L.gen = L.gen + 1
+        local mine = L.gen
+        vim.defer_fn(function () if M._live == L and mine == L.gen then fire() end end,
+            proj.debounce or 250)
+    end)
+
+    fire() -- initial paint
+    return L
 end
 
 return M

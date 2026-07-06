@@ -132,6 +132,77 @@ test('project: first paint reads the world then writes creates', function ()
     ok(calls[1]:find('nauvis'), 'surface is threaded to the wire')
 end)
 
+-- ── the live wire: mcp_io envelope + project over a fake MCP client ─────────
+
+-- a fake cartograph.mcp client: records tool calls, returns the FactoMCP
+-- envelope { result = <text> } for run_lua (reads carry canned world JSON)
+local function fake_client(world_json)
+    return {
+        alive = true, calls = {},
+        call = function (self, tool, args)
+            self.calls[#self.calls + 1] = { tool = tool, code = args.code }
+            if args.code:find('find_entities_filtered') and not args.code:find('create_entity') then
+                return { result = world_json or '[]' } -- a read
+            end
+            return { result = 'ok' }                    -- an apply
+        end,
+    }
+end
+
+test('mcp_io: unwraps FactoMCP { result = "<json>" } and decodes it', function ()
+    local c = fake_client('[{"x":0,"y":0,"v":5,"u":7}]')
+    local io = tp.mcp_io(c)
+    local got = io('… find_entities_filtered … graphics_variation …')
+    eq({ { x = 0, y = 0, v = 5, u = 7 } }, got)
+end)
+
+test('mcp_io: a non-JSON result (apply "ok") comes back as-is', function ()
+    local c = fake_client()
+    eq('ok', tp.mcp_io(c)('s.create_entity{...}'))
+end)
+
+test('project: drives end-to-end through mcp_io over a fake client', function ()
+    local c = fake_client('[]') -- empty world -> everything is a create
+    local io = tp.mcp_io(c)
+    local d = tp.project(io, { 'AB' }, { anchor = { x = 0, y = 0 } })
+    eq(2, #d.create)
+    eq('run_lua', c.calls[1].tool)         -- reached the tool
+    ok(c.calls[1].code:find('find_entities_filtered'), 'first call reads')
+    ok(c.calls[2].code:find('create_entity'), 'second call writes')
+end)
+
+test('canvas_bbox: spans the full max_cols×max_rows the projection owns', function ()
+    local b = tp.canvas_bbox({ anchor = { x = 0, y = 0 }, dx = 3, dy = 3, max_cols = 40, max_rows = 32 })
+    ok(b[2][1] >= 40 * 3, 'width spans max_cols')
+    ok(b[2][2] >= 32 * 3, 'height spans max_rows')
+end)
+
+test('project: reads the whole canvas so a shrunk list reclaims far rows', function ()
+    -- regression: reading only the tight desired bbox orphaned rows that the
+    -- new (shorter) list vacated — they fell outside the read and survived.
+    local read
+    local io = function (lua)
+        if lua:find('find_entities_filtered') and not lua:find('create_entity') then
+            read = lua; return {}
+        end
+        return 'ok'
+    end
+    tp.project(io, { 'A' }, { anchor = { x = 0, y = 0 }, max_rows = 32, dy = 3 })
+    -- canvas bottom = 0 + 32*3 + 1 = 97; a desired-bbox read (1 row) would stop near 3
+    ok(read and read:find('97'), 'the read extends to the bottom of the canvas')
+end)
+
+test('connect: errors clearly when no factorio server is configured', function ()
+    local client, err = tp.connect({}) -- no cmd
+    eq(nil, client)
+    ok(err:find('no factorio MCP server'), 'names the missing config')
+end)
+
+test('layout: max_rows caps how many rows reach the world', function ()
+    local plates = tp.layout({ 'A', 'B', 'C', 'D' }, { anchor = { x = 0, y = 0 }, max_rows = 2 })
+    eq(2, #plates) -- only A and B (one plate each)
+end)
+
 test('project: a steady world skips the apply call entirely', function ()
     local want = tp.layout({ 'AB' }, { anchor = { x = 0, y = 0 } })
     local world = {}
