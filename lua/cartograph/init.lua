@@ -295,24 +295,13 @@ function M.open(dump_path, opts)
                 require('cartograph.providers.clangd').stop_session()
             end
           end
-          -- run enrich once the user has been briefly idle (so the expensive
-          -- discovery/link never lands on a keystroke), but never wait forever
-          local last_input, waited = 0, 0
-          local okk, kid = pcall(vim.on_key, function () last_input = vim.uv.hrtime() end)
-          local function pump()
-              if store.data ~= data then
-                  if okk then pcall(vim.on_key, nil, kid) end
-                  return -- graph moved on; drop the enrichment + key watch
-              end
-              if (vim.uv.hrtime() - last_input) / 1e6 >= 150 or waited >= 4000 then
-                  if okk then pcall(vim.on_key, nil, kid) end
-                  enrich()
-              else
-                  waited = waited + 120
-                  vim.defer_fn(pump, 120)
-              end
-          end
-          vim.defer_fn(pump, 80)
+          -- Chunk the enrichment across event-loop ticks so it never freezes:
+          -- the coop.tick() calls inside greenspun.registries / xlang.link
+          -- yield when a slice runs long, and coop.run resumes between ticks,
+          -- yielding to input. Abort if the graph is swapped out from under us.
+          require('cartograph.coop').run(enrich, {
+              abort = function () return store.data ~= data end,
+          })
         end
 
         -- incremental open: unchanged files come from the cache, only the

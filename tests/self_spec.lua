@@ -159,6 +159,26 @@ test('store: incremental ingest_step == a full ingest of the same graph', functi
     eq(full, snap())
 end)
 
+test('coop: run chunks a computation to completion; tick is main-thread-safe', function ()
+    local coop = require 'cartograph.coop'
+    coop.tick() -- on the main thread this must be a harmless no-op
+
+    local sum, done = 0, false
+    coop.run(function ()
+        for _ = 1, 200000 do sum = sum + 1; coop.tick() end
+    end, { on_done = function () done = true end })
+    eq(0, sum) -- deferred: nothing has run yet
+    ok(vim.wait(4000, function () return done end, 5), 'coop.run reached on_done')
+    eq(200000, sum) -- ran to completion across slices
+
+    -- abort before the first slice runs nothing
+    local ran = 0
+    coop.run(function () for _ = 1, 1e9 do ran = ran + 1; coop.tick() end end,
+        { abort = function () return true end })
+    vim.wait(150)
+    eq(0, ran)
+end)
+
 test('parallel: slice shapes by byte budget, not count', function ()
     local par = require 'cartograph.parallel'
     local ordered = { 'a', 'b', 'c', 'd', 'e' }

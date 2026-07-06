@@ -166,17 +166,20 @@ end
 function M.registries(data, opts)
     local min_sites = opts and opts.min_sites or 2
     local known = fn_names(data)
-    local by_verb = {}
-    for _, c in ipairs(data.calls or {}) do
+    local coop = require 'cartograph.coop' -- tick() chunks this off the main
+    local by_verb = {}                     -- loop when run under coop.run; else no-op
+    for i, c in ipairs(data.calls or {}) do
         if not c.dynamic then
             by_verb[c.callee] = by_verb[c.callee] or {}
             table.insert(by_verb[c.callee], c)
         end
+        if i % 8192 == 0 then coop.tick() end
     end
 
     -- exports: literal key + a callable argument somewhere
     local exports = {}
     for verb, calls in pairs(by_verb) do
+        coop.tick()
         if #calls >= min_sites then
             local kpos = key_positions(calls)
             if kpos then
@@ -220,8 +223,10 @@ function M.registries(data, opts)
     -- carrying the callables — that would be the registry again)
     local bindings, report = {}, {}
     for verb, ex in pairs(exports) do
+        coop.tick()
         local imports = {}
         for iverb, calls in pairs(by_verb) do
+            coop.tick()
             if iverb ~= verb and not exports[iverb] and #calls >= min_sites then
                 local _, positions = key_positions(calls)
                 local bestpos, bestshared, besttotal

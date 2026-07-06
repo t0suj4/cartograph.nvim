@@ -142,6 +142,7 @@ end
 function M.link(data, bindings)
     bindings = bindings or require('cartograph.config').bindings
         or M.default_bindings
+    local coop = require 'cartograph.coop' -- tick() yields under coop.run; else no-op
     local exact, tails = {}, {}
     for _, n in ipairs(data.nodes) do
         if n.kind == 'function' or n.kind == 'method' then
@@ -261,8 +262,10 @@ function M.link(data, bindings)
         end
     end
     for _, b in ipairs(bindings) do
+        coop.tick()
         local exports = {}
-        for _, c in ipairs(data.calls or {}) do
+        for ci, c in ipairs(data.calls or {}) do
+            if ci % 8192 == 0 then coop.tick() end
             if verb_matches(c, b.export.verb) then
                 local key = logical_arg(c, b.export.name)
                 if key and key ~= '' then
@@ -280,7 +283,8 @@ function M.link(data, bindings)
             end
         end
         if next(exports) then
-            for _, c in ipairs(data.calls or {}) do
+            for ci, c in ipairs(data.calls or {}) do
+                if ci % 8192 == 0 then coop.tick() end
                 local hs, key
                 if b.import.verb and verb_matches(c, b.import.verb) then
                     key = logical_arg(c, b.import.name or 1)
