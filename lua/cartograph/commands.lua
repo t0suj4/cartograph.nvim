@@ -567,6 +567,16 @@ function M.register()
         scratch(lines)
     end, { desc = 'cartograph: detect the tree structures (call-dominator + subsystem) hiding in the graph' })
 
+    -- ── the workspace: ad-hoc Lua against the graph (Smalltalk doit) ─
+    cmd('CartographEval', function (o)
+        require('cartograph.workspace').run(o.args)
+    end, { nargs = '+',
+        desc = 'cartograph: evaluate Lua against the graph (store/spines/territory/… in scope)' })
+
+    cmd('CartographWorkspace', function ()
+        require('cartograph.workspace').open()
+    end, { desc = 'cartograph: open the workspace — ad-hoc Lua against the loaded graph (a returned node list is browsable)' })
+
     -- ── the LIVE web canvas: draw in a browser, project as corpses ──────
     cmd('CartographCanvas', function ()
         if canvas then
