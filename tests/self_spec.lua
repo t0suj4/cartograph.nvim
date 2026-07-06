@@ -99,6 +99,24 @@ test('self oracle: loaded-vs-not — required modules mark ran, the rest do not'
     vim.fn.delete(dir, 'rf')
 end)
 
+test('parallel: slice shapes by byte budget, not count', function ()
+    local par = require 'cartograph.parallel'
+    local ordered = { 'a', 'b', 'c', 'd', 'e' }
+    local size = { a = 3000, b = 3000, c = 3000, d = 100, e = 100 }
+    -- budget 8000: a+b+c = 9000 ≥ 8000 → 3 files (equal WORK, not count)
+    local s1, nxt1 = par.slice(ordered, size, 1, 8000, 100)
+    eq({ 'a', 'b', 'c' }, s1); eq(4, nxt1)
+    -- the tiny tail never reaches budget → runs to the end
+    local s2, nxt2 = par.slice(ordered, size, nxt1, 8000, 100)
+    eq({ 'd', 'e' }, s2); eq(6, nxt2)
+    -- a lone oversized file is its own slice (≥ budget after one)
+    eq({ 'x' }, (par.slice({ 'x' }, { x = 999999 }, 1, 8000, 100)))
+    -- COUNT_CAP bounds a run of many tiny files (keeps priority granularity)
+    local many, msz = {}, {}
+    for i = 1, 50 do many[i] = 'f' .. i; msz['f' .. i] = 10 end
+    eq(8, #(par.slice(many, msz, 1, 100000, 8)))
+end)
+
 test('parallel: summarize gives nearest-rank percentiles', function ()
     local par = require 'cartograph.parallel'
     eq(0, par.summarize({}).n)

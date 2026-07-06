@@ -23,10 +23,13 @@
 
 local M = {}
 
-M.BATCH = 48 -- nominal batch size — still the heuristic for how many workers
-             -- to spawn; the actual per-slice size is adaptive (MIN..MAX,
-             -- ramped from MIN for fast first paint — see M.extract)
-M.MIN_BATCH, M.MAX_BATCH = 8, 96
+M.BATCH = 48 -- nominal — still the heuristic for how many workers to spawn
+-- Slices are shaped by PARSE COST (≈ file bytes), not count: a loaded session's
+-- files span thousands-fold in size, so equal-count slices are wildly unequal
+-- work. The byte budget ramps MIN..MAX (from MIN for fast first paint — see
+-- M.extract); COUNT_CAP bounds a slice of many tiny files so priority order and
+-- first-paint granularity are kept.
+M.MIN_BYTES, M.MAX_BYTES, M.COUNT_CAP = 8 * 1024, 256 * 1024, 128
 
 local function plugin_root()
     local src = debug.getinfo(1, 'S').source:sub(2)
@@ -44,6 +47,22 @@ end
 function M.default_workers()
     local n = (vim.uv.available_parallelism and vim.uv.available_parallelism()) or 4
     return math.max(2, math.min(8, n - 1))
+end
+
+--- Carve the next slice from `ordered` starting at `from`: consecutive files
+--- (priority order preserved) until the cumulative parse-cost proxy (bytes)
+--- reaches `budget` or the count hits `cap` — so each slice is ~equal WORK, not
+--- equal count. Always ≥1 file, so a lone oversized file is its own slice.
+--- Returns (slice, next_from). Pure; exposed for tests.
+function M.slice(ordered, size, from, budget, cap)
+    local b, bytes, i = {}, 0, from
+    while i <= #ordered and #b < cap do
+        b[#b + 1] = ordered[i]
+        bytes = bytes + (size[ordered[i]] or 0)
+        i = i + 1
+        if bytes >= budget then break end
+    end
+    return b, i
 end
 
 --- Percentile summary of a list of durations (ms). Nearest-rank percentiles —
@@ -426,26 +445,31 @@ function M.extract(root, o)
         ts.relink(acc)
         phase2()
     end
-    -- Adaptive batch size: start SMALL so the first worker returns quickly
-    -- (fast first paint), then grow toward a turnaround sweet spot to amortize
-    -- the ~150ms per-process startup, and cap each slice at an even share of
-    -- what's left so no lane idles while another chews a big tail batch.
-    local cursor, inflight, cur = 1, 0, M.MIN_BATCH
+    -- parse cost ≈ file size; one cheap stat pass so slices can be shaped by
+    -- WORK, not count (sizes span thousands-fold across a loaded session)
+    local size = {}
+    for _, f in ipairs(ordered) do
+        local st = vim.uv.fs_stat(abs and abs(f) or (root .. '/' .. f))
+        size[f] = st and st.size or 0
+    end
+    -- Adaptive slice size: start with a SMALL byte budget so the first worker
+    -- returns quickly (fast first paint), grow it toward a turnaround sweet
+    -- spot to amortize the ~150ms per-process startup, and cap the COUNT at an
+    -- even share of what's left so no lane idles while another chews the tail.
+    local cursor, inflight, budget = 1, 0, M.MIN_BYTES
     local function next_slice()
         if cursor > #ordered then return nil end
         local remaining = #ordered - cursor + 1
-        local cap = math.max(1, math.ceil(remaining / nw)) -- keep every lane fed
-        local n = math.min(cur, cap, remaining)
-        local b = {}
-        for j = cursor, cursor + n - 1 do b[#b + 1] = ordered[j] end
-        cursor = cursor + n
+        local cap = math.min(M.COUNT_CAP, math.max(1, math.ceil(remaining / nw)))
+        local b, nxt = M.slice(ordered, size, cursor, budget, cap)
+        cursor = nxt
         return b
     end
     local function adapt(dt_ms)
         -- keep worker turnaround in a responsive throughput window: too fast =>
-        -- startup dominated the slice, grow; too slow => coarse, shrink
-        if dt_ms < 250 then cur = math.min(M.MAX_BATCH, cur * 2)
-        elseif dt_ms > 600 then cur = math.max(M.MIN_BATCH, math.floor(cur / 2)) end
+        -- startup dominated the slice, grow the budget; too slow => shrink
+        if dt_ms < 250 then budget = math.min(M.MAX_BYTES, budget * 2)
+        elseif dt_ms > 600 then budget = math.max(M.MIN_BYTES, math.floor(budget / 2)) end
     end
     -- work-pulling: each lane takes the next adaptive slice when it finishes
     -- (priority order preserved; demand dedups on arrival)
