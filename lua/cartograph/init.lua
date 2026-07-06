@@ -144,8 +144,15 @@ function M.open(dump_path, opts)
             end,
             on_done = function (acc)
                 acc.vimruntime = roster.vimruntime ~= '' and roster.vimruntime or nil
+                -- $VIMRUNTIME rides as a lazy node: present so edges into it
+                -- land somewhere, extracted only when descended (it's big and
+                -- rarely the thing you're exploring)
+                if acc.vimruntime then
+                    acc.nodes[#acc.nodes + 1] = selfp.lazy_node(acc.vimruntime)
+                end
                 preserve(function () store.ingest(acc) end)
-                vim.notify(('cartograph: self ready — %d nodes, %d calls')
+                vim.notify(('cartograph: self ready — %d nodes, %d calls'
+                    .. ' (+$VIMRUNTIME lazy — l to load)')
                     :format(#acc.nodes, #acc.calls), vim.log.levels.INFO)
             end,
         })

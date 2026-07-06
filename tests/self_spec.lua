@@ -181,3 +181,53 @@ test('self oracle: the live lens shows the runtime table, refs resolve to defs',
     vim.cmd('tabclose')
     vim.fn.delete(dir, 'rf')
 end)
+
+test('self oracle: the lazy $VIMRUNTIME node extracts + splices on descend', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local ts      = require 'cartograph.providers.treesitter'
+    local store   = require 'cartograph.store'
+    local source  = require 'cartograph.panes.source'
+    local symbols = require 'cartograph.panes.symbols'
+    local cfg     = require 'cartograph.config'
+    local selfp   = require 'cartograph.providers.self'
+
+    -- a small stand-in for $VIMRUNTIME (keeps the test fast + deterministic)
+    local vr = vim.fn.tempname(); vim.fn.mkdir(vr .. '/lua/vim', 'p')
+    local fd = assert(io.open(vr .. '/lua/vim/foo.lua', 'w'))
+    fd:write('local V = {}\nfunction V.bar () end\nreturn V\n'); fd:close()
+
+    local data = { schema = 1, provider = 'self', root = 'self://loaded',
+        roots = {}, nodes = { selfp.lazy_node(vr) }, edges = {}, calls = {},
+        stamps = {} }
+    store.ingest(data)
+
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+
+    symbols.show('files')
+    local function blines() return vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false) end
+    local lrow
+    for r, l in ipairs(blines()) do if l:match('%$VIMRUNTIME') then lrow = r end end
+    ok(lrow, 'the lazy $VIMRUNTIME node shows in the files view')
+
+    pcall(vim.api.nvim_win_set_cursor, wsym, { lrow, 0 })
+    press(symbols.buf, cfg.keys.descend) -- extract + splice
+
+    ok(not (store.by_id and store.by_id['$VIMRUNTIME']),
+        'the lazy placeholder is gone after loading')
+    eq(vr, store.data.roots['VIMRUNTIME'], 'the VIMRUNTIME root is registered')
+    local hasfoo = false
+    for _, f in ipairs(store.files) do
+        if f == 'VIMRUNTIME/lua/vim/foo.lua' then hasfoo = true end
+    end
+    ok(hasfoo, 'the runtime tree is spliced in under the VIMRUNTIME label')
+    eq(vr .. '/lua/vim/foo.lua', store.abs('VIMRUNTIME/lua/vim/foo.lua'),
+        'spliced files resolve to disk through the new root')
+
+    vim.cmd('tabclose')
+    vim.fn.delete(vr, 'rf')
+end)

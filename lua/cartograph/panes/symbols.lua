@@ -118,6 +118,13 @@ end
 local function file_row(ctx, file, depth, dim)
     local indent = string.rep('  ', depth or 0)
     local mod = store.by_id and store.by_id[file]
+    if mod and mod.lazy then
+        ctx.lines[#ctx.lines + 1] = ('%s%s  (lazy — l loads it)'):format(indent, file)
+        ctx.marks[#ctx.lines] = { { #indent, #indent + #file, 'CartographFrontier' },
+            { #indent + #file, -1, 'CartographDim' } }
+        ctx.line_file[#ctx.lines] = file
+        return
+    end
     if mod and mod.unparsed then
         ctx.lines[#ctx.lines + 1] = ('%s%s  (unparsed)'):format(indent, file)
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
@@ -1836,6 +1843,22 @@ function M.attach(win)
             store.set_context(nil); enter('fn', n.id, n.id)
         end
     end
+    -- descend the lazy $VIMRUNTIME node: extract + splice its tree, re-ingest
+    local function load_runtime(node)
+        vim.notify('cartograph: extracting $VIMRUNTIME…', vim.log.levels.INFO)
+        local ok, data, added =
+            pcall(require('cartograph.providers.self').load_runtime, store, node)
+        if not ok then
+            return vim.notify('cartograph: ' .. tostring(data), vim.log.levels.ERROR)
+        end
+        if not data then
+            return vim.notify('cartograph: ' .. tostring(added), vim.log.levels.WARN)
+        end
+        store.ingest(data)
+        M.show('files')
+        vim.notify(('cartograph: $VIMRUNTIME loaded — %d nodes spliced in')
+            :format(added), vim.log.levels.INFO)
+    end
     local function descend()
         local r = row()
         -- detail lens: an arg/cond row descends into that element's forms (the
@@ -1852,6 +1875,10 @@ function M.attach(win)
         if M.view.level == 'files' then
             local f = M.line_file[r]
             if f then
+                -- the lazy $VIMRUNTIME node: descending it extracts the
+                -- runtime tree NOW and splices it into the graph
+                local mod = store.by_id and store.by_id[f]
+                if mod and mod.lazy then return load_runtime(mod) end
                 -- streaming open: a file still in the queue extracts NOW —
                 -- the user's attention outranks the queue order
                 if store.data and store.data.partial then
