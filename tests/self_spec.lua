@@ -249,6 +249,72 @@ test('self oracle: the live lens shows the runtime table, refs resolve to defs',
     vim.fn.delete(dir, 'rf')
 end)
 
+test('self oracle: descending a live closure shows its captured upvalues', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local ts      = require 'cartograph.providers.treesitter'
+    local store   = require 'cartograph.store'
+    local source  = require 'cartograph.panes.source'
+    local symbols = require 'cartograph.panes.symbols'
+    local cfg     = require 'cartograph.config'
+    local oracle  = require 'cartograph.self_oracle'
+
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir .. '/lua', 'p')
+    local fd = assert(io.open(dir .. '/lua/capmod.lua', 'w'))
+    fd:write('local M = {}\n'
+        .. "local state = { mode = 'idle' }\n"
+        .. 'local function log () end\n'
+        .. 'function M.make ()\n'
+        .. "  return function () state.mode = 'run'; log() end\n"
+        .. 'end\n'
+        .. 'M.handler = M.make()\n'
+        .. 'return M\n')
+    fd:close()
+    vim.opt.rtp:append(dir); require('capmod')
+
+    local roots = { plug = dir }
+    local data = ts.extract('self://loaded', { files = { 'plug/lua/capmod.lua' },
+        abs = function (f)
+            local l, r = f:match('^([^/]+)/(.*)$'); return roots[l] .. '/' .. r
+        end })
+    data.provider, data.root, data.roots = 'self', 'self://loaded', roots
+    store.ingest(data)
+
+    -- engine: the closure entry carries its fn + upvalue count; upvalues() reads them
+    local modnode
+    for _, n in ipairs(data.nodes) do if n.kind == 'module' then modnode = n end end
+    local tree = oracle.live_value(modnode, data)
+    ok(tree.handler and tree.handler.live_fn and tree.handler.fn,
+        'M.handler is a live function entry with its fn value')
+    ok(tree.handler.up and tree.handler.up >= 1, 'it reports captured upvalues')
+    local ups = oracle.upvalues(tree.handler.fn, data)
+    ok(ups.state, 'captured table `state` is exposed')
+    ok(ups.log and ups.log.live_fn, 'captured function `log` resolves as a live fn')
+
+    -- browser: descend the closure -> the upvalue view (state + log)
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+
+    symbols.show('file', 'plug/lua/capmod.lua')
+    press(symbols.buf, cfg.keys.cycle) -- -> live lens
+    local function blines() return vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false) end
+    local hrow
+    for r, l in ipairs(blines()) do if l:match('handler%s*→') and l:match('⇡') then hrow = r end end
+    ok(hrow, 'the closure row shows an upvalue marker (⇡)')
+    pcall(vim.api.nvim_win_set_cursor, wsym, { hrow, 2 })
+    press(symbols.buf, cfg.keys.descend) -- -> upvalue view
+    eq('live', symbols.view.level)
+    local ut = table.concat(blines(), '\n')
+    ok(ut:match('↑ upvalues'), 'the upvalue view is shown')
+    ok(ut:match('state') and ut:match('log'), 'both captured names appear')
+
+    vim.cmd('tabclose')
+    vim.fn.delete(dir, 'rf')
+end)
+
 test('self oracle: the lazy $VIMRUNTIME node extracts + splices on descend', function ()
     if not has_parser('lua') then skip 'no lua parser' end
     local ts      = require 'cartograph.providers.treesitter'

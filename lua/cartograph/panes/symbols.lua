@@ -73,6 +73,9 @@ local function cur_lens()
     return set and (M.view.lens or set[1])
 end
 
+-- a live key segment meaning "the upvalues of the function reached here"
+local UPSENT = '\30ups'
+
 -- the module node id for a file (the live lens's root); modules index by file
 local function module_id(file)
     for _, n in ipairs(store.by_file[file] or {}) do
@@ -574,12 +577,28 @@ local function live_walk(key)
     local parts = vim.split(key or '', '\31')
     local id = table.remove(parts, 1)
     local node = store.node(id)
-    local val = live_tree(id)
-    for _, seg in ipairs(parts) do
-        if type(val) ~= 'table' then val = nil break end
-        val = val[seg] ~= nil and val[seg] or val[tonumber(seg)]
+    local function step(v, seg)
+        if type(v) ~= 'table' then return nil end
+        return v[seg] ~= nil and v[seg] or v[tonumber(seg)]
     end
-    return node, val, parts
+    -- an UPSENT segment switches from walking the value tree to walking a
+    -- function's upvalue tree, built on demand from the fn reached so far
+    local upi
+    for i, p in ipairs(parts) do if p == UPSENT then upi = i; break end end
+    local val = live_tree(id)
+    if not upi then
+        for _, seg in ipairs(parts) do
+            val = step(val, seg); if val == nil then break end
+        end
+        return node, val, parts, nil
+    end
+    for i = 1, upi - 1 do val = step(val, parts[i]); if val == nil then break end end
+    local fnentry = (type(val) == 'table' and val.fn) and val or nil
+    if not fnentry then return node, nil, parts, nil end
+    local upt = require('cartograph.self_oracle').upvalues(fnentry.fn, store.data)
+    for i = upi + 1, #parts do upt = step(upt, parts[i]); if upt == nil then break end end
+    -- return the fn entry only at its upvalue ROOT, so render can offer its def
+    return node, upt, parts, (upi == #parts) and fnentry or nil
 end
 
 -- Emit the rows for a data table `val` (litval or live-snapshot shape); shared
@@ -604,9 +623,16 @@ local function render_data(ctx, val, key, live)
         local v = val[k]
         local row
         if type(v) == 'table' and v.ref then
-            row = { label = ('%s → %s'):format(
-                    type(k) == 'number' and ('[%d]'):format(k) or k, v.ref),
-                entry = { kind = 'ref', ref = v.ref, id = v.id },
+            local lbl = ('%s → %s'):format(
+                type(k) == 'number' and ('[%d]'):format(k) or k, v.ref)
+            local entry = { kind = 'ref', ref = v.ref, id = v.id }
+            -- a live closure with captured state: descending shows its upvalues
+            if live and v.up then
+                entry.upkey = key .. '\31'
+                    .. (type(k) == 'number' and tostring(k) or k) .. '\31' .. UPSENT
+                lbl = lbl .. ('  ⇡%d'):format(v.up)
+            end
+            row = { label = lbl, entry = entry,
                 needle = '%f[%w_]' .. pesc(v.ref) .. '%f[^%w_]' }
         elseif type(v) == 'table' and v.expr then
             -- a non-literal element the extractor couldn't take: honest text
@@ -685,26 +711,37 @@ end
 -- sourced from the live process — a module's concrete exports, a dispatch
 -- table's actual contents, every function resolved to the def it dispatches to.
 local function render_live(ctx, key)
-    local node, val, path = live_walk(key)
+    local node, val, path, fnentry = live_walk(key)
     if not node then ctx.lines[1] = '(gone)'; return end
+    local upmode = (key or ''):find(UPSENT, 1, true) ~= nil
+    -- drop the UPSENT sentinel from the displayed crumb
+    local disp = {}
+    for _, p in ipairs(path) do if p ~= UPSENT then disp[#disp + 1] = p end end
     local crumb = (node.name or '?')
-        .. (#path > 0 and ('.' .. table.concat(path, '.')) or '')
+        .. (#disp > 0 and ('.' .. table.concat(disp, '.')) or '')
     if val == nil then
         ctx.lines[1] = ('⚡ %s'):format(crumb)
-        ctx.lines[2] = '   no runtime value — not loaded this session,'
-        ctx.lines[3] = '   or a value the process does not expose (a local)'
-        ctx.marks[1] = { { 0, -1, 'CartographDim' } }
-        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
-        ctx.marks[3] = { { 0, -1, 'CartographDim' } }
+        ctx.lines[2] = upmode and '   (this closure captured nothing / is gone)'
+            or '   no runtime value — not loaded this session,'
+        ctx.lines[3] = upmode and '' or
+            '   or a value the process does not expose (a local)'
+        for i = 1, 3 do ctx.marks[i] = { { 0, -1, 'CartographDim' } } end
         return
     end
-    ctx.lines[1] = ('⚡ %s   live @ now'):format(crumb)
+    local tag = upmode and '↑ upvalues' or 'live @ now'
+    ctx.lines[1] = ('⚡ %s   %s'):format(crumb, tag)
     ctx.marks[1] = { { 0, 4 + #crumb, 'CartographTitle' },
         { 4 + #crumb, -1, 'CartographDim' } }
+    -- at a closure's upvalue root, offer its def (focus the concrete fn)
+    if fnentry and fnentry.id and store.node(fnentry.id) then
+        ctx.lines[#ctx.lines + 1] = ('→ %s'):format(fnentry.ref or 'definition')
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
+        ctx.line_node[#ctx.lines] = fnentry.id
+    end
     if type(val) ~= 'table' then
-        ctx.lines[2] = '  · '
+        ctx.lines[#ctx.lines + 1] = '  · '
             .. (type(val) == 'string' and ('%q'):format(val) or tostring(val))
-        ctx.marks[2] = { { 4, -1, 'CartographLit' } }
+        ctx.marks[#ctx.lines] = { { 4, -1, 'CartographLit' } }
         return
     end
     render_data(ctx, val, key, true)
@@ -1835,8 +1872,13 @@ function M.attach(win)
     local function descend_live_row(r)
         local e = M.line_lit[r]
         if e and e.kind == 'tbl' then return enter('live', e.key) end
-        if e and e.kind == 'ref' and e.id and store.node(e.id) then
-            store.set_context(nil); return enter('fn', e.id, e.id)
+        if e and e.kind == 'ref' then
+            -- a closure with captured state: descend into its upvalues;
+            -- a plain fn ref focuses the def it dispatches to
+            if e.upkey then return enter('live', e.upkey) end
+            if e.id and store.node(e.id) then
+                store.set_context(nil); return enter('fn', e.id, e.id)
+            end
         end
         local n = store.node(M.line_node[r])
         if n and STAGEABLE[n.kind] then

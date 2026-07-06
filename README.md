@@ -402,7 +402,11 @@ callers). Ariadne's thread, in text.
      holds right now* — the assembled export table, a dispatch table's
      actual entries — and resolves every runtime function value back to the
      def it dispatches to (via `debug.getinfo`), closing a `⊘` frontier the
-     source left dynamic. A live read is stamped `live @ now` (a sample,
+     source left dynamic. Descending a live **closure** (`⇡N`) shows its
+     **upvalues** (`debug.getupvalue`) — the state it captured, which is real
+     coupling that's invisible to require/call analysis because it's *closed
+     over*, not called; captured functions resolve to their defs, captured
+     tables are walkable. A live read is stamped `live @ now` (a sample,
      never cached). The oracle also marks the files view: `⚡` on every file
      that actually **ran this session** (a required module or sourced
      script) — the unmarked rest of a loaded plugin's tree is

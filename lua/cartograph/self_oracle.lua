@@ -185,11 +185,12 @@ function M.to_data(val, data, hint, depth, seen)
     if t == 'string' or t == 'number' or t == 'boolean' then return val end
     if t == 'function' then
         local r = M.resolve_fn(val, data, hint)
-        if r then
-            return { ref = r.name, id = r.id, live_fn = true, at = r.at,
-                external = r.external }
-        end
-        return { expr = 'function' }
+        local nups = (debug.getinfo(val, 'u') or {}).nups or 0
+        -- keep the raw fn + upvalue count so the live lens can descend into
+        -- its captured state on demand (NOT expanded here — one level only)
+        return { ref = r and r.name or 'ƒ (anonymous)', id = r and r.id,
+            live_fn = true, at = r and r.at, external = r and r.external,
+            fn = val, up = nups > 0 and nups or nil }
     end
     if t == 'table' then
         if seen[val] then return { expr = '<cycle>' } end
@@ -210,6 +211,24 @@ function M.to_data(val, data, hint, depth, seen)
         return out
     end
     return { expr = '<' .. t .. '>' } -- userdata, thread
+end
+
+--- A function's upvalues (captured closure state) as a render tree, keyed by
+--- name. Captured coupling static analysis can't see — it's closed over, not
+--- required/called. One level: captured functions stay leaf refs (to_data
+--- doesn't recurse them), captured tables are snapshotted (cycle/depth-guarded),
+--- so this can't recurse infinitely even on a self-referential closure.
+function M.upvalues(fn, data)
+    local out = {}
+    if type(fn) ~= 'function' then return out end
+    local i = 1
+    while true do
+        local name, val = debug.getupvalue(fn, i)
+        if not name then break end
+        if name ~= '' then out[name] = M.to_data(val, data, name) end
+        i = i + 1
+    end
+    return out
 end
 
 --- The raw live value backing a node, plus a display name for it. Only what
