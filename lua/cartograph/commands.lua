@@ -427,8 +427,14 @@ function M.register()
         if not ok then
             return vim.notify('cartograph: projection failed — ' .. tostring(delta), vim.log.levels.WARN)
         end
-        vim.notify(('cartograph: projected %d row(s) — %d built, %d re-lettered, %d removed')
-            :format(#labels, #delta.create, #delta.revary, #delta.destroy), vim.log.levels.INFO)
+        local msg = ('cartograph: projected %d row(s) — %d built, %d re-lettered, %d removed')
+            :format(#view.labels, #delta.create, #delta.revary, #delta.destroy)
+        local level = vim.log.levels.INFO
+        if delta.verified == false then -- read-back caught writes that didn't land
+            msg = msg .. (' — ⚠ %d cell(s) did not land'):format(tp.delta_count(delta.drift))
+            level = vim.log.levels.WARN
+        end
+        vim.notify(msg, level)
     end, { bang = true,
         desc = 'cartograph: project the current view into Factorio (! = live, reproject on navigation)' })
 
@@ -436,6 +442,22 @@ function M.register()
         require('cartograph.textplates').detach()
         vim.notify('cartograph: live projection detached', vim.log.levels.INFO)
     end, { desc = 'cartograph: stop the live Factorio projection' })
+
+    cmd('CartographProjectStatus', function ()
+        local s = require('cartograph.textplates').status()
+        if not s.live then
+            return vim.notify('cartograph: no live projection (:CartographProject! starts one)',
+                vim.log.levels.INFO)
+        end
+        local when = s.last_sync and os.date('%H:%M:%S', s.last_sync) or 'never'
+        if not s.connected then
+            return vim.notify('cartograph: projection STALE — wire lost; world frozen as of '
+                .. when, vim.log.levels.WARN)
+        end
+        vim.notify(('cartograph: projection live — last synced %s%s'):format(when,
+            (s.drift or 0) > 0 and (', ⚠ %d cell(s) adrift'):format(s.drift) or ', in sync'),
+            (s.drift or 0) > 0 and vim.log.levels.WARN or vim.log.levels.INFO)
+    end, { desc = 'cartograph: the live Factorio projection\'s honesty state (synced / stale / drift)' })
 end
 
 return M

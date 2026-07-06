@@ -250,7 +250,23 @@ function M.project(io, labels, opts)
     if not M.is_noop(delta) then
         io(M.apply_lua(delta, o.size, surface))
     end
+    -- read-back verify (uniform-honesty invariant): re-observe and confirm the
+    -- world now matches desired. The residual is DRIFT — writes that didn't
+    -- land (blocked cell, ungenerated chunk, a plate a human moved). A blind
+    -- write that trusts "ok" would hide it. Set opts.verify=false to skip the
+    -- extra read on a hot path.
+    if o.verify ~= false then
+        local after = M.is_noop(delta) and current
+            or (io(M.read_lua(area, o.size, surface)) or {})
+        delta.drift = M.reconcile(desired, after)
+        delta.verified = M.is_noop(delta.drift)
+    end
     return delta
+end
+
+--- How many cells a delta (or a drift) touches.
+function M.delta_count(d)
+    return #d.create + #d.revary + #d.destroy
 end
 
 -- ── live wire (optional; requires cartograph.mcp + a factorio MCP server) ────
@@ -295,6 +311,23 @@ end
 -- the one live projector (a single connection reused across navigations)
 M._live = nil
 
+--- The live projection's honesty state: whether it is connected, when the
+--- world was last confirmed to match the view (a wall-clock SAMPLE stamp —
+--- the standing plates are only true as of then), and the last drift. nil
+--- fields until the first sync. `stale` = attached but the wire is gone, so
+--- the world is frozen at `last_sync` and no longer tracks the view.
+function M.status()
+    local L = M._live
+    if not L then return { live = false } end
+    local alive = L.client and L.client.alive or false
+    return {
+        live = true, connected = alive, stale = not alive,
+        last_sync = L.last_sync, -- os.time() of the last verified projection
+        verified = L.last and L.last.verified,
+        drift = L.last and L.last.drift and M.delta_count(L.last.drift) or 0,
+    }
+end
+
 --- Detach the live projector: unsubscribe from both channels, close the wire.
 function M.detach()
     local L = M._live
@@ -322,13 +355,29 @@ function M.attach(opts)
     M._live = L
 
     local function fire()
-        if M._live ~= L or not client.alive then return end
+        if M._live ~= L then return end
+        if not client.alive then
+            -- the wire is gone: the standing plates are now STALE (frozen at
+            -- the last sync). Say so — don't pretend the world still tracks.
+            local when = L.last_sync and os.date('%H:%M:%S', L.last_sync) or 'never'
+            vim.notify('cartograph: factorio projection STALE — connection lost; '
+                .. 'the world is frozen as of ' .. when
+                .. '. :CartographProject! to reconnect', vim.log.levels.WARN)
+            M.detach()
+            return
+        end
         local view = require('cartograph.panes.symbols').projection(proj.max_rows)
         local o = vim.tbl_extend('force', proj, { selected = view.selected })
-        local ok, err = pcall(M.project, io, view.labels, o)
+        local ok, delta = pcall(M.project, io, view.labels, o)
         if not ok then
-            vim.notify('cartograph: projection failed — ' .. tostring(err), vim.log.levels.WARN)
+            vim.notify('cartograph: projection failed — ' .. tostring(delta), vim.log.levels.WARN)
             M.detach()
+            return
+        end
+        L.last, L.last_sync = delta, os.time()
+        if delta.verified == false then
+            vim.notify(('cartograph: projection drift — %d cell(s) did not land')
+                :format(M.delta_count(delta.drift)), vim.log.levels.WARN)
         end
     end
 

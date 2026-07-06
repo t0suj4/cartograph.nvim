@@ -179,9 +179,11 @@ test('project: first paint reads the world then writes creates', function ()
     end
     local d = tp.project(io, { 'AB' }, { anchor = { x = 0, y = 0 }, surface = 'nauvis' })
     eq(2, #d.create)
-    eq(2, #calls)                       -- one read, one apply
+    eq(3, #calls)                       -- read, apply, read-back verify
     ok(calls[1]:find('find_entities_filtered'), 'first call observes the world')
     ok(calls[2]:find('create_entity'), 'second call writes the delta')
+    ok(calls[3]:find('find_entities_filtered') and not calls[3]:find('create_entity'),
+        'third call re-observes to verify')
     ok(calls[1]:find('nauvis'), 'surface is threaded to the wire')
 end)
 
@@ -243,6 +245,67 @@ test('project: reads the whole canvas so a shrunk list reclaims far rows', funct
     tp.project(io, { 'A' }, { anchor = { x = 0, y = 0 }, max_rows = 32, dy = 3 })
     -- canvas bottom = 0 + 32*3 + 1 = 97; a desired-bbox read (1 row) would stop near 3
     ok(read and read:find('97'), 'the read extends to the bottom of the canvas')
+end)
+
+-- ── read-back verify: the uniform-honesty rung ──────────────────────────────
+
+-- a scripted io: returns read_responses[n] for the nth read; 'ok' for applies
+local function scripted_io(read_responses)
+    local n = 0
+    return function (lua)
+        if lua:find('find_entities_filtered') and not lua:find('create_entity') then
+            n = n + 1; return read_responses[n] or {}
+        end
+        return 'ok'
+    end
+end
+
+test('project: read-back verify confirms the world matched (verified=true)', function ()
+    -- read1: empty (all created); read2: the desired world is now present
+    local after = { { x = 0, y = 0, v = 3, u = 1, mat = 'gold' } }
+    local io = scripted_io({ {}, after })
+    local d = tp.project(io, { 'A' }, { anchor = { x = 0, y = 0 }, material = 'gold' })
+    eq(1, #d.create)
+    eq(true, d.verified)
+    ok(tp.is_noop(d.drift), 'no residual drift when the write landed')
+end)
+
+test('project: read-back verify reports DRIFT when a write did not land', function ()
+    -- read1: empty (so we try to create A); read2: STILL empty (create failed)
+    local io = scripted_io({ {}, {} })
+    local d = tp.project(io, { 'A' }, { anchor = { x = 0, y = 0 } })
+    eq(1, #d.create)
+    eq(false, d.verified)
+    eq(1, #d.drift.create)       -- the cell that should exist but doesn't
+    eq(1, tp.delta_count(d.drift))
+end)
+
+test('project: a no-op is verified without a second read', function ()
+    -- world already matches -> reconcile is noop; verify reuses the first read
+    local world = { { x = 0, y = 0, v = 3, u = 1, mat = 'gold' } }
+    local reads = 0
+    local io = function (lua)
+        if lua:find('find_entities_filtered') and not lua:find('create_entity') then
+            reads = reads + 1; return world
+        end
+        return 'ok'
+    end
+    local d = tp.project(io, { 'A' }, { anchor = { x = 0, y = 0 }, material = 'gold' })
+    ok(tp.is_noop(d), 'nothing to write')
+    eq(true, d.verified)
+    eq(1, reads) -- no extra verify read for a no-op
+end)
+
+test('project: verify=false skips the read-back entirely', function ()
+    local io = scripted_io({ {}, {} })
+    local d = tp.project(io, { 'A' }, { anchor = { x = 0, y = 0 }, verify = false })
+    eq(nil, d.verified)
+    eq(nil, d.drift)
+end)
+
+test('status: reports not-live when nothing is attached', function ()
+    tp.detach() -- ensure clean
+    eq(false, tp.status().live)
 end)
 
 test('connect: errors clearly when no factorio server is configured', function ()
