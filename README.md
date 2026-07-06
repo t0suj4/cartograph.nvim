@@ -406,8 +406,12 @@ callers). Ariadne's thread, in text.
      **upvalues** (`debug.getupvalue`) — the state it captured, which is real
      coupling that's invisible to require/call analysis because it's *closed
      over*, not called; captured functions resolve to their defs, captured
-     tables are walkable. A live read is stamped `live @ now` (a sample,
-     never cached). The oracle also marks the files view: `⚡` on every file
+     tables are walkable. And a live table's **metatable `__index`**
+     (`getmetatable`) is surfaced as `↑ __index` — so a value's methods and
+     its inheritance chain resolve through the metatable the source can't
+     follow (the ubiquitous `M.__index = M` self-idiom is collapsed, not
+     recursed). A live read is stamped `live @ now` (a sample, never
+     cached). The oracle also marks the files view: `⚡` on every file
      that actually **ran this session** (a required module or sourced
      script) — the unmarked rest of a loaded plugin's tree is
      present-but-never-loaded, the honest "dead this session" signal. And it

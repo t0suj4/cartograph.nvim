@@ -166,6 +166,42 @@ test('self oracle: registrations — declared commands/keymaps vs live', functio
     pcall(vim.keymap.del, 'n', 'gzptest')
 end)
 
+test('self oracle: metatable __index exposes + resolves OOP methods', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local ts     = require 'cartograph.providers.treesitter'
+    local oracle = require 'cartograph.self_oracle'
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir .. '/lua', 'p')
+    local fd = assert(io.open(dir .. '/lua/metamod.lua', 'w'))
+    fd:write('local Base = {}\n'
+        .. 'Base.__index = Base\n'
+        .. "function Base:greet () return 'hi' end\n"
+        .. 'function Base.new () return setmetatable({ x = 1 }, Base) end\n'
+        .. 'local M = { obj = Base.new() }\n'
+        .. 'return M\n')
+    fd:close()
+    vim.opt.rtp:append(dir); require('metamod')
+
+    local roots = { plug = dir }
+    local data = ts.extract('self://loaded', { files = { 'plug/lua/metamod.lua' },
+        abs = function (f)
+            local l, r = f:match('^([^/]+)/(.*)$'); return roots[l] .. '/' .. r
+        end })
+    data.provider, data.root, data.roots = 'self', 'self://loaded', roots
+    require('cartograph.store').data = data
+
+    local modnode
+    for _, n in ipairs(data.nodes) do if n.kind == 'module' then modnode = n end end
+    local tree = oracle.live_value(modnode, data)
+    local mi = tree.obj and tree.obj['↑ __index']
+    ok(type(mi) == 'table', 'the instance exposes its class through __index')
+    ok(mi.greet and mi.greet.live_fn, 'a class method is present as a live fn')
+    ok(mi.greet.id, 'the method resolves to its def node (dispatch closed)')
+    -- the M.__index = M self idiom does NOT recurse forever
+    ok(mi['↑ __index'] == nil, 'a self-indexed class does not re-add __index')
+
+    vim.fn.delete(dir, 'rf')
+end)
+
 -- invoke the callback of a buffer-local mapping by its lhs
 local function press(buf, lhs)
     for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do

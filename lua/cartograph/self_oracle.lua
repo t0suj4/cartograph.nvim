@@ -207,6 +207,22 @@ function M.to_data(val, data, hint, depth, seen)
                 n = n + 1
             end
         end
+        -- metatable: the OOP dispatch the source can't follow. __index (the
+        -- class/prototype) makes an instance's methods + its inheritance chain
+        -- reachable; __call makes a callable "table" honest. Skip the ubiquitous
+        -- M.__index = M self idiom (its methods are already the table's fields).
+        -- rawget avoids triggering the metatable; the cycle guard bounds chains.
+        local mt = getmetatable(val)
+        if type(mt) == 'table' then
+            local idx = rawget(mt, '__index')
+            if (type(idx) == 'table' and idx ~= val) or type(idx) == 'function' then
+                out['↑ __index'] = M.to_data(idx, data, '__index', depth + 1, seen)
+            end
+            local call = rawget(mt, '__call')
+            if type(call) == 'function' then
+                out['↑ __call'] = M.to_data(call, data, '__call', depth + 1, seen)
+            end
+        end
         seen[val] = nil
         return out
     end
