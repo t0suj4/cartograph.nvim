@@ -92,7 +92,7 @@ M.live = nil
 
 M.keys = {
     -- navigation
-    pivot      = '<CR>',    -- tree/trace: re-root on / expand this entry
+    pivot      = '<CR>',    -- re-root on / expand this entry (like descend)
     jump       = '<C-]>',   -- source: go to the callee under the cursor (tags idiom)
     back       = '<C-o>',   -- jumplist back
     back_alt   = '<C-t>',   -- also back (tag-pop idiom; works where <C-o> may be taken)
@@ -103,11 +103,9 @@ M.keys = {
                             -- (<CR> also descends, like the tree's pivot)
     down       = 'j',       -- symbols: next row; at a block's last row it steps
     up         = 'k',       -- OUT to the parent (and k mirrors upward)
-    trace      = 'gr',      -- source: trace where the parameter under the cursor comes from
-    cycle      = '<Tab>',   -- source: toggle the flow (concern) lens
+    cycle      = '<Tab>',   -- symbols: cycle the altitude's lens / files view mode
     cycle_back = '<S-Tab>',
     close      = 'q',
-    pin        = 'p',       -- trace: pin this literal as the dispatch target       -- trace: give the window back
     -- staging (symbols pane)
     cut        = 'dd',
     cut_visual = 'd',

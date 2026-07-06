@@ -21,6 +21,15 @@ local SHOW_L2   = { ['function'] = true, method = true, region = true }
 local STAGEABLE = { ['function'] = true, method = true }
 local ICON      = { ['function'] = 'ƒ', method = ':', var = '·', region = '≡' }
 
+-- lenses per altitude: <Tab>/<S-Tab> cycle these. `statements` is each
+-- altitude's normal view; `detail` surfaces the code's fine-grained
+-- descendable elements (arguments, conditions, var/field reads).
+local LENS_SETS = {
+    fn     = { 'statements', 'detail' },
+    block  = { 'statements', 'detail' },
+    region = { 'statements', 'detail' },
+}
+
 local ns       = vim.api.nvim_create_namespace('cartograph_symbols_dep')
 local ns_class = vim.api.nvim_create_namespace('cartograph_symbols_class')
 local ns_stage = vim.api.nvim_create_namespace('cartograph_symbols_stage')
@@ -43,9 +52,16 @@ local M = {
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
     line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
+    line_detail = {},
     trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
+
+-- the active lens at the current altitude (defaults to the first available)
+local function cur_lens()
+    local set = LENS_SETS[M.view.level]
+    return set and (M.view.lens or set[1])
+end
 
 -- Relationship tints: dependencies (things the focus uses) in green, dependents
 -- (things that use the focus) in amber; depth-1 saturated, depth-2 muted. Each
@@ -975,15 +991,108 @@ local function render_block(ctx, key)
     end
 end
 
+-- The DETAIL lens (the fn/block/region altitudes' second lens): the code's
+-- fine-grained descendable elements, indented under each statement — a call's
+-- arguments and a conditional's condition (from treesitter.detail, `l` descends
+-- into the element's forms), plus the module vars/fields the statement reads
+-- (from the data flow; `l` opens the var's usage sites). Derived on demand.
+local function detail_scope() -- -> node, sr, sc, er, ec, df, fnid
+    local lvl = M.view.level
+    if lvl == 'fn' then
+        local n = store.node(M.view.fn); if not n then return end
+        local r = n.range
+        return n, r.start.line, r.start.char, r['end'].line, r['end'].char, n.df, M.view.fn
+    elseif lvl == 'block' then
+        local fnid, sr, sc, er, ec =
+            (M.view.block or ''):match('^(.-)\31(%-?%d+)\31(%-?%d+)\31(%-?%d+)\31(%-?%d+)$')
+        local n = fnid and store.node(fnid); if not n then return end
+        er, ec = tonumber(er), tonumber(ec)
+        return n, tonumber(sr), tonumber(sc), (er and er >= 0 and er or nil),
+            (ec and ec >= 0 and ec or nil), nil, fnid
+    elseif lvl == 'region' then
+        local n = store.node(M.view.region); if not n then return end
+        local r = n.range
+        return n, r.start.line, r.start.char, r['end'].line, r['end'].char, nil, nil
+    end
+end
+local function render_detail(ctx)
+    local n, sr, sc, er, ec, df, fnid = detail_scope()
+    if not n then ctx.lines[1] = '(gone)'; return end
+    ctx.lines[1] = ('≡ %s'):format(n.name or '?')
+    ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
+    local ts = require 'cartograph.providers.treesitter'
+    local stmts = ts.detail(store.abspath(n), sr, sc, er, ec)
+    if #stmts == 0 then
+        ctx.lines[2] = '  (no detail here)'; ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        return
+    end
+    -- module vars a statement reads, by statement start line (descendable) —
+    -- from the fn's use edges (fn altitude only). A name the function DEFINES
+    -- (a param or a local) shadows any module var of that name: the read is
+    -- the local, so a name-matched use edge to the module var is a false
+    -- positive — skip it, or descending it would open a global's usages.
+    local vars_by_line, locals = {}, {}
+    if fnid then
+        local fnode = store.node(fnid)
+        for _, p in ipairs(fnode and fnode.params or {}) do locals[p] = true end
+        if df then
+            for _, s in ipairs(df.stmts) do
+                for _, d in ipairs(s.def or {}) do locals[d] = true end
+            end
+        end
+        for _, u in ipairs(store.var_uses[fnid] or {}) do
+            local vn = store.node(u.to)
+            if vn and not locals[vn.name] then
+                for _, r in ipairs(u.at or {}) do
+                    vars_by_line[r.start.line] = vars_by_line[r.start.line] or {}
+                    vars_by_line[r.start.line][u.to] = true
+                end
+            end
+        end
+    end
+    for _, st in ipairs(stmts) do
+        ctx.lines[#ctx.lines + 1] = '  ' .. st.text
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.line_stmt[#ctx.lines] = st.sr + 1
+        for _, it in ipairs(st.items) do
+            local icon = it.kind == 'cond' and '? ' or '· '
+            ctx.lines[#ctx.lines + 1] = '      ' .. icon .. it.text
+            ctx.line_stmt[#ctx.lines] = it.sr + 1
+            ctx.line_detail[#ctx.lines] = { kind = it.kind,
+                key = ('%s\31%d\31%d\31%d\31%d'):format(fnid or n.id, it.sr, it.sc, it.er, it.ec) }
+        end
+        -- module vars/fields this statement reads (fn altitude): descend -> uses
+        local seen = {}
+        for line, vs in pairs(vars_by_line) do
+            if line >= st.sr and line <= st.er then
+                for vid in pairs(vs) do
+                    if not seen[vid] then
+                        seen[vid] = true
+                        local vn = store.node(vid)
+                        if vn then
+                            ctx.lines[#ctx.lines + 1] = '      → ' .. (vn.name or vid)
+                            ctx.marks[#ctx.lines] = { { 0, 8, 'CartographDim' } }
+                            ctx.line_stmt[#ctx.lines] = st.sr + 1 -- anchor to its statement
+                            ctx.line_detail[#ctx.lines] = { kind = 'var', id = vid }
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 function M.render()
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
-        line_regfor = {}, line_block = {} }
+        line_regfor = {}, line_block = {}, line_detail = {} }
     local v = M.view
-    if v.level == 'files' then
+    if LENS_SETS[v.level] and cur_lens() == 'detail' then
+        render_detail(ctx)
+    elseif v.level == 'files' then
         if M.files_mode == 'tree' then
             if store.toc then render_files_load(ctx) else render_files_tree(ctx) end
         else
@@ -1011,6 +1120,7 @@ function M.render()
     M.line_group, M.line_sep, M.line_state = ctx.line_group, ctx.line_sep, ctx.line_state
     M.line_trans, M.line_lit = ctx.line_trans, ctx.line_lit
     M.line_regfor, M.line_block = ctx.line_regfor, ctx.line_block
+    M.line_detail = ctx.line_detail
 
     -- names come from arbitrary source text; a row must stay one row
     for i, l in ipairs(ctx.lines) do
@@ -1044,6 +1154,8 @@ end
 function M.show(level, ctx_val)
     M.view.level = level
     if ctx_val ~= nil then
+        M.view.lens = nil  -- a fresh navigation starts at the altitude's default lens
+        M._ghost = nil  -- fresh position: no ghosted lens node
         if level == 'file' then M.view.file = ctx_val
         elseif level == 'fn' then M.view.fn = ctx_val
         elseif level == 'region' then M.view.region = ctx_val
@@ -1347,7 +1459,7 @@ function M.attach(win)
     local function view_loc()
         return { level = M.view.level, file = M.view.file, fn = M.view.fn,
             region = M.view.region, var = M.view.var, callers = M.view.callers,
-            block = M.view.block,
+            block = M.view.block, lens = M.view.lens, -- lens rides the trail
             tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
             refused = M.view.refused, regfor = M.view.regfor,
             files_mode = M.files_mode,
@@ -1402,6 +1514,8 @@ function M.attach(win)
         M.view.tbl, M.view.occs, M.view.state = loc.tbl, loc.occs, loc.state
         M.view.lit, M.view.refused = loc.lit, loc.refused
         M.view.regfor, M.view.block = loc.regfor, loc.block
+        M.view.lens = loc.lens -- the lens rides the trail
+        M._ghost = nil  -- fresh position: no ghosted lens node
         if loc.level == 'refused' then M._refused_call = refused_call_of(loc.refused) end
         M.show(loc.level)
         if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
@@ -1409,7 +1523,7 @@ function M.attach(win)
     local function push_trail() M.trail[#M.trail + 1] = view_loc() end
     -- browser-initiated pivots must not clear the trail (see on_focus)
     local function browser_pivot(id)
-        M._resync, M._stepout = nil, nil -- a conscious pivot cancels pending state
+        M._resync, M._stepout, M._ghost = nil, nil, nil -- a pivot cancels pending state
         M._own_pivot = true
         store.pivot(id)
         M._own_pivot = false
@@ -1425,7 +1539,7 @@ function M.attach(win)
         return 'var'
     end
     local function enter(level, ctxval, pivot_id)
-        M._stepout = nil -- a conscious descent abandons any pending step-out
+        M._stepout, M._ghost = nil, nil -- a descent abandons pending step-out / ghost
         push_trail()
         if pivot_id then browser_pivot(pivot_id) end
         local top = M.fwd_trail[#M.fwd_trail]
@@ -1465,6 +1579,7 @@ function M.attach(win)
     store.loc_provider = {
         get = function ()
             local l = view_loc()
+            l.lens = nil -- the lens rides the trail only, not the jumplist
             l.trail = vim.list_extend({}, M.trail)
             l.fwd_trail = vim.list_extend({}, M.fwd_trail)
             return l
@@ -1563,28 +1678,11 @@ function M.attach(win)
             if c.callee == word and not c.to and frontier_jump(word) then
                 return
             end
-            -- a DYNAMIC callee ($fn) that is a parameter: open the dispatch
-            -- trace — the callers' literals are the candidate targets, and
-            -- the pin key turns the chosen one into a real edge
-            if c.dynamic and not c.to and c.callee == '$' .. word then
-                for pi, pname in ipairs(node.params or {}) do
-                    if pname == word then
-                        return require('cartograph.panes.trace')
-                            .open(node.id, pi, word, c)
-                    end
-                end
-                -- a local: same trace, rooted at its defining statements
-                return require('cartograph.panes.trace')
-                    .open_local(node.id, word, c.line, c)
-            end
         end
-        -- 2. a parameter: where does it come from? (the origin trace)
-        for pi, p in ipairs(node.params or {}) do
-            if p == word then
-                return require('cartograph.panes.trace').open(node.id, pi, p)
-            end
-        end
-        -- 3. a local: jump to its defining statement (latest before this row)
+        -- (a parameter's origin / a dynamic callee's dispatch trace lived here
+        -- via the retired trace pane; the sources axis will re-home them —
+        -- see the cartograph-trace-axes design)
+        -- a local: jump to its defining statement (latest before this row)
         local i, df = M.line_stmtidx[r], node.df
         if word and i and df then
             local best
@@ -1622,6 +1720,17 @@ function M.attach(win)
     end
     local function descend()
         local r = row()
+        -- detail lens: an arg/cond row descends into that element's forms (the
+        -- block lens); a var row opens the var's usage sites
+        local d = M.line_detail[r]
+        if d then
+            if d.kind == 'var' and store.node(d.id) then
+                return enter('var', d.id, d.id)
+            elseif d.key then
+                return enter('block', d.key)
+            end
+            return
+        end
         if M.view.level == 'files' then
             local f = M.line_file[r]
             if f then
@@ -2003,6 +2112,7 @@ function M.attach(win)
         sync_focus_to_view()
     end
     local function step(dir)
+        M._ghost = nil -- a manual move abandons a ghosted lens node
         if M.view.level ~= 'block' and not M._stepout then
             return vim.cmd('normal! ' .. vim.v.count1 .. (dir == 1 and 'j' or 'k'))
         end
@@ -2036,21 +2146,84 @@ function M.attach(win)
     vim.keymap.set('n', keys.up, function () step(-1) end,
         { buffer = M.buf, desc = 'cartograph: previous row (steps out at a block edge)' })
 
-    -- <Tab> at the files level: flat list <-> include tree (who requires whom).
-    -- Note this shadows <C-i>-forward here (terminals conflate Tab/C-i), the
-    -- same trade the source pane makes for the lens.
-    vim.keymap.set('n', keys.cycle, function ()
-        if M.view.level ~= 'files' then return end
-        local under = M.line_file[row()]
-        M.files_mode = M.files_mode == 'tree' and 'flat' or 'tree'
-        M.show('files')
+    -- <Tab>/<S-Tab> cycle the current altitude's MODE: at the files level, flat
+    -- list <-> include tree; at fn/block/region, the lens (statements <-> detail).
+    -- (Shadows <C-i>-forward here — terminals conflate Tab/C-i.)
+    -- what identifies a row across a lens switch: its source line + a stable tag
+    local function row_tag(r)
+        local d = M.line_detail[r]
+        if d then return d.key or (d.id and 'var\31' .. d.id) or d.kind end
+        return M.line_node[r]
+    end
+    local function row_desc(r)
+        return { line = M.line_stmt[r], tag = row_tag(r) }
+    end
+    -- place the cursor for `desc` and report how well it matched:
+    --   'exact' the node itself is a row here (a tagged item; or, for a bare
+    --           statement, its row on the same line — the node lives in this lens)
+    --   'ghost' the node is gone; land on its closest parent (the statement on
+    --           its line) — a GHOST anchor
+    --   'near'  not even the line is here; land on the nearest row above
+    local function land_on(desc)
+        if not desc then return nil end
+        local exact, ghost, near
         for r = 1, vim.api.nvim_buf_line_count(M.buf) do
-            if M.line_file[r] == under then
-                pcall(vim.api.nvim_win_set_cursor, win, { r, 0 })
-                break
+            local rl, rt = M.line_stmt[r], row_tag(r)
+            if desc.tag then
+                -- match tag AND line: the same var read in two statements shares
+                -- a tag, so the line disambiguates which occurrence
+                if rt == desc.tag and rl == desc.line then exact = r; break end
+                if desc.line and rl == desc.line and not rt then ghost = ghost or r end
+            elseif desc.line and rl == desc.line and not rt then
+                exact = r; break -- a bare statement IS its same-line row
             end
+            if desc.line and rl and rl <= desc.line
+                and (not near or rl > (M.line_stmt[near] or -1)) then near = r end
         end
-    end, { buffer = M.buf, desc = 'cartograph: toggle file view (flat / include tree)' })
+        local target = exact or ghost or near
+        if target then pcall(vim.api.nvim_win_set_cursor, win, { target, 2 }) end
+        return exact and 'exact' or (ghost and 'ghost') or (near and 'near') or nil
+    end
+    -- Cycling FOLLOWS the current position across lenses: the node under the
+    -- cursor is carried to its row in the new lens. If it has no row there (an
+    -- arg/cond/var vanishing in `statements`), it becomes a GHOST anchored to
+    -- its enclosing statement and is remembered in M._ghost, so cycling back to
+    -- the lens it lives in restores it exactly.
+    local function cycle_lens(step)
+        local set = LENS_SETS[M.view.level]
+        if not set then return end
+        local from = cur_lens()
+        -- carry the ghosted origin if we're mid-ghost, else the row we're on
+        local anchor = M._ghost or { lens = from, desc = row_desc(row()) }
+        local i = 1
+        for k, name in ipairs(set) do if name == from then i = k end end
+        M.view.lens = set[((i - 1 + step) % #set) + 1]
+        M.render() -- re-render at the same altitude; keep our place, don't jump to row 1
+        local kind = land_on(anchor.desc)
+        -- exact => the node lives here, no ghost; ghost/near => still displaced,
+        -- so remember the origin to restore it when we cycle back
+        if kind == 'ghost' or kind == 'near' then M._ghost = anchor else M._ghost = nil end
+        vim.api.nvim_exec_autocmds('CursorMoved', { buffer = M.buf })
+    end
+    local function cycle(step)
+        if M.view.level == 'files' then
+            local under = M.line_file[row()]
+            M.files_mode = M.files_mode == 'tree' and 'flat' or 'tree'
+            M.show('files')
+            for r = 1, vim.api.nvim_buf_line_count(M.buf) do
+                if M.line_file[r] == under then
+                    pcall(vim.api.nvim_win_set_cursor, win, { r, 0 })
+                    break
+                end
+            end
+        else
+            cycle_lens(step)
+        end
+    end
+    vim.keymap.set('n', keys.cycle, function () cycle(1) end,
+        { buffer = M.buf, desc = 'cartograph: cycle the altitude mode / lens' })
+    vim.keymap.set('n', keys.cycle_back, function () cycle(-1) end,
+        { buffer = M.buf, desc = 'cartograph: cycle the altitude mode / lens (reverse)' })
 
     -- staging as cut & paste: dd cuts a function into the move-set, visual d
     -- cuts a selection, p pastes at the file under the cursor (= destination),

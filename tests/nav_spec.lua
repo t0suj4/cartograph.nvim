@@ -432,6 +432,116 @@ test('nav: h after a block step-out returns through the caller list it came from
     vim.fn.delete(root, 'rf')
 end)
 
+test('nav: the detail lens shows args/conditions/reads and rides the trail', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local keys = require('cartograph.config').keys
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\nlocal cfg = {}\nfunction M.f(x)\n  local y = M.g(x, cfg.width)\n'
+        .. '  if x > 0 then\n    M.h(y)\n  end\nend\n'
+        .. 'function M.g(a, b) return a end\nfunction M.h(z) return z end\nreturn M\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    local f; for _, n in ipairs(data.nodes) do if n.name == 'M.f' then f = n end end
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    local K = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do K[m.lhs] = m.callback end
+    local function press(k) vim.api.nvim_set_current_win(wsym); K[k]() end
+
+    store.pivot(f.id); symbols.show('fn', f.id)
+    press(keys.cycle) -- statements -> detail
+    eq('detail', symbols.view.lens)
+    local kinds = {}
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local d = symbols.line_detail[r]
+        if d then kinds[d.kind] = true end
+    end
+    ok(kinds.arg and kinds.cond and kinds.var, 'detail rows: arguments, condition, var read')
+
+    -- the → var rows are MODULE reads only: a param/local the fn shadows (x, y)
+    -- must NOT appear (else descending it would open a global's usages)
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local d = symbols.line_detail[r]
+        if d and d.kind == 'var' then
+            local nm = store.node(d.id) and store.node(d.id).name
+            ok(nm ~= 'x' and nm ~= 'y', 'a shadowed local is not shown as a module var (' .. tostring(nm) .. ')')
+        end
+    end
+
+    -- descend an argument -> the block lens on that element (lens reset to default)
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_detail[r] and symbols.line_detail[r].kind == 'arg' then
+            vim.api.nvim_win_set_cursor(wsym, { r, 2 }); break
+        end
+    end
+    press(keys.descend)
+    eq('block', symbols.view.level)
+    ok(symbols.view.lens == nil, 'the descended view starts at its default lens')
+
+    -- ascend -> the detail lens is restored from the trail
+    press(keys.ascend)
+    eq('fn', symbols.view.level)
+    eq('detail', symbols.view.lens)
+
+    -- the <C-o> jumplist snapshot does NOT carry the lens (trail only)
+    ok(store.loc_provider.get().lens == nil, 'the jumplist snapshot omits the lens')
+
+    -- position survives a lens switch: on an arg row, cycling to statements
+    -- ghost-anchors to the arg's enclosing statement, and cycling BACK restores
+    -- the exact arg row
+    local argrow
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_detail[r] and symbols.line_detail[r].kind == 'arg' then argrow = r end
+    end
+    vim.api.nvim_win_set_cursor(wsym, { argrow, 2 })
+    local argline = symbols.line_stmt[argrow]
+    press(keys.cycle) -- detail -> statements: the arg is gone, ghost to its statement
+    eq('statements', symbols.view.lens or 'statements')
+    eq(argline, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]]) -- same statement line
+    press(keys.cycle) -- back to detail: the arg row is restored exactly
+    local back = vim.api.nvim_win_get_cursor(wsym)[1]
+    ok(symbols.line_detail[back] and symbols.line_detail[back].kind == 'arg',
+        'cycling back restored the arg row')
+
+    -- cycling FOLLOWS the current position, not a stale one: move to the LAST
+    -- detail row, cycle to statements -> it lands on THAT statement's line
+    -- (regression: a stale per-lens memory jumped back to an earlier row)
+    local last = vim.api.nvim_buf_line_count(symbols.buf)
+    vim.api.nvim_win_set_cursor(wsym, { last, 2 })
+    local lastline = symbols.line_stmt[last]
+    press(keys.cycle) -- detail -> statements
+    eq(lastline, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]])
+    press(keys.cycle) -- back to detail
+
+    -- a var read in two statements (M here) shares a tag; the round-trip must
+    -- restore the OCCURRENCE we were on, not the first with that tag
+    local vrows = {}
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local d = symbols.line_detail[r]
+        if d and d.kind == 'var' then vrows[#vrows + 1] = r end
+    end
+    if #vrows >= 2 then
+        local later = vrows[#vrows] -- a later occurrence (different statement line)
+        local lline = symbols.line_stmt[later]
+        vim.api.nvim_win_set_cursor(wsym, { later, 2 })
+        press(keys.cycle); press(keys.cycle) -- statements and back
+        local b = vim.api.nvim_win_get_cursor(wsym)[1]
+        ok(symbols.line_detail[b] and symbols.line_detail[b].kind == 'var'
+            and symbols.line_stmt[b] == lline,
+            'the round-trip restored the var occurrence we were on, not a namesake')
+    end
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ── <C-]> jump resolution ───────────────────────────────────────────────────
 
 local function occ(l, c1, c2)

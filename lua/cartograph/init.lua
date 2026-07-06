@@ -352,9 +352,8 @@ function M.open(dump_path, opts)
     end
 
     -- ONE hardcoded layout for now: the browser on the left, the source split
-    -- taking the rest (the browser's descend covers uses/callers now, so the
-    -- code gets the width; the trace pane opens its own split on demand), and
-    -- a full-width plan bar along the bottom.
+    -- taking the rest (the browser's descend covers uses/callers), and a
+    -- full-width plan bar along the bottom.
     vim.cmd('tabnew')
     local w_symbols = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(w_symbols, symbols.create())

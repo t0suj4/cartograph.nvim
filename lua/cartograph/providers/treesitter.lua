@@ -1904,6 +1904,84 @@ function M.forms(file, sr, sc, er, ec)
     return out
 end
 
+-- argument-list containers and conditional statements, for the detail lens
+local ARG_LISTS = { arguments = true, argument_list = true }
+local COND_TYPES = { if_statement = true, elseif_statement = true,
+    while_statement = true, repeat_statement = true, switch_statement = true,
+    ['for_statement'] = true, for_in_statement = true, when = true }
+
+-- a statement's DETAIL items: for a conditional, its condition; otherwise the
+-- arguments of any calls it makes (not descending into nested blocks — those
+-- belong to the block lens). Each item is { kind='cond'|'arg', sr,sc,er,ec, text }.
+local function detail_items(stmt, src)
+    local items = {}
+    local function mk(kind, n)
+        local a, b, c, d = n:range()
+        items[#items + 1] = { kind = kind, sr = a, sc = b, er = c, ec = d,
+            text = node_text(n, src):gsub('%s+', ' '):gsub('^%s*', ''):sub(1, 80) }
+    end
+    if COND_TYPES[stmt:type()] then
+        local cond = stmt:field('condition')[1]
+        if not cond then
+            for c in stmt:iter_children() do
+                if c:named() and c:type() ~= 'comment'
+                    and not SUBSTMT_BLOCKS[c:type()] then cond = c break end
+            end
+        end
+        if cond then mk('cond', cond) end
+        return items -- the body is the block lens's concern, not the detail's
+    end
+    local function walk(n)
+        for c in n:iter_children() do
+            if c:named() and c:type() ~= 'comment' and not SUBSTMT_BLOCKS[c:type()] then
+                if ARG_LISTS[c:type()] then
+                    for a in c:iter_children() do
+                        if a:named() and a:type() ~= 'comment' then mk('arg', a) end
+                    end
+                else
+                    walk(c)
+                end
+            end
+        end
+    end
+    walk(stmt)
+    return items
+end
+
+--- The detail-lens rows for a code range: each top-level statement with its
+--- detail items (a conditional's condition; a call's arguments). Same on-demand
+--- parse as M.forms; returns { {sr,sc,er,ec,text, items={...}}, ... }.
+function M.detail(file, sr, sc, er, ec)
+    local lang, spec = elang_for(file)
+    if not (lang and spec) then return {} end
+    local fd = io.open(file, 'r'); if not fd then return {} end
+    local src = fd:read('a'); fd:close()
+    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    if not ok then return {} end
+    local tree = parser:parse()[1]; if not tree then return {} end
+    local root = tree:root()
+    local lisp = LISP_LANGS[lang] or false
+    local n = root:named_descendant_for_range(sr, sc, er or sr, er and math.max(sc, ec - 1) or sc)
+    if not n then return {} end
+    if not er then
+        while n:parent() do
+            local pr, pc = n:parent():start()
+            if pr == sr and pc == sc and not SUBSTMT_BLOCKS[n:parent():type()] then
+                n = n:parent()
+            else break end
+        end
+    end
+    local stmts = child_forms(n, lisp)
+    local out = {}
+    for _, s in ipairs(stmts) do
+        local a, b, c, d = s:range()
+        out[#out + 1] = { sr = a, sc = b, er = c, ec = d,
+            text = node_text(s, src):gsub('%s+', ' '):gsub('^%s*', ''):sub(1, 80),
+            items = detail_items(s, src) }
+    end
+    return out
+end
+
 -- parse a container file and return its host-language trees in
 -- DETERMINISTIC position order (the LanguageTree child table has no
 -- stable iteration order; worker output must equal inline output).

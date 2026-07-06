@@ -8,13 +8,11 @@
 -- reference actually happens, without leaving the focused node.
 
 local store    = require 'cartograph.store'
-local untangle = require 'cartograph.untangle'
 local extract  = require 'cartograph.extract'
 local hl       = require 'cartograph.hl'
 
 local HEADER_ROWS = 2 -- header line + blank before the code body
 local ns = vim.api.nvim_create_namespace('cartograph_source_hl')
-local ns_concern = vim.api.nvim_create_namespace('cartograph_source_concern')
 
 local M = { cur = nil, ctx = nil }
 
@@ -139,34 +137,6 @@ local function apply_hl(buf, node, ranges)
     end
 end
 
--- Untangle lens: colour the TOP body's lines by concern (the untangle
--- partition of the focused function). Each statement colours the line range
--- from its line up to the next statement's, so concerns read as bands over the
--- real code. Active while the 'concerns' lens is on (<Tab> here toggles it);
--- the tangle metrics ride the header line as virtual text.
-local function apply_concerns(node)
-    if not vim.api.nvim_buf_is_valid(M.buf) then return end
-    vim.api.nvim_buf_clear_namespace(M.buf, ns_concern, 0, -1)
-    if store.lens ~= 'concerns' or not node or not node.df then return end
-    local a = untangle.analyze(node.df)
-    pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_concern, 0, 0, {
-        virt_text = { { ('concerns %d · tangle %d · span %d'):format(a.ncomp, a.tangle, a.maxspan),
-            'CartographDim' } },
-        virt_text_pos = 'eol',
-    })
-    local stmts, endLine = node.df.stmts, node.range['end'].line + 1 -- 1-based
-    for i, s in ipairs(stmts) do
-        local last = (stmts[i + 1] and stmts[i + 1].l - 1) or endLine
-        local group = hl.concern(a.comp[i])
-        for fl = s.l, last do
-            local row = buf_row(node, fl - 1) -- buf_row takes 0-based file line
-            if row then
-                pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_concern, row, 0,
-                    { line_hl_group = group })
-            end
-        end
-    end
-end
 
 -- Resolve a <C-]> jump target under the cursor: prefer the recorded occurrence
 -- range at (file_line, col); fall back to matching the cursor word against the
@@ -228,31 +198,8 @@ local function bind_nav(buf, which)
     end, { buffer = buf, desc = 'cartograph: jump to the definition under the cursor' })
     vim.keymap.set('n', keys.open_file, function () goto_real(vim.api.nvim_get_current_win(), which()) end,
         { buffer = buf, desc = 'cartograph: open the real file here' })
-    -- trace where the parameter under the cursor comes from ("references"
-    -- flavoured — the places that feed this value)
-    vim.keymap.set('n', keys.trace, function ()
-        local node = which()
-        if not node then return end
-        local cword = vim.fn.expand '<cword>'
-        for i, p in ipairs(node.params or {}) do
-            if p == cword then
-                return require('cartograph.panes.trace').open(node.id, i, p)
-            end
-        end
-        vim.notify(('cartograph: %q is not a parameter of %s'):format(cword, node.name or '?'),
-            vim.log.levels.INFO)
-    end, { buffer = buf, desc = 'cartograph: trace where this parameter comes from' })
-end
-
--- The flow lens lives in the code pane, where the concern colours land on the
--- real code: <Tab> toggles it without leaving the source you're reading.
-local function bind_cycle(buf)
-    local keys = require('cartograph.config').keys
-    local function toggle()
-        store.set_lens(store.lens ~= 'concerns' and 'concerns' or nil)
-    end
-    vim.keymap.set('n', keys.cycle, toggle, { buffer = buf, desc = 'cartograph: toggle the flow (concern) lens' })
-    vim.keymap.set('n', keys.cycle_back, toggle, { buffer = buf, desc = 'cartograph: toggle the flow (concern) lens' })
+    -- (parameter-origin tracing lived here via the retired trace pane; the
+    -- sources axis will re-home it — see the cartograph-trace-axes design)
 end
 
 -- Extract the selected TOP-pane lines into a new local function. `line1`/`line2`
@@ -279,7 +226,6 @@ function M.extract(line1, line2, name)
         if not prompt then vim.fn.confirm('(press Enter)', '&Ok', 1) end
         set_lines(M.buf, body_lines(M.cur))
         scroll_top(M.win_top)
-        apply_concerns(M.cur)
         return choice == 1
     end
     if not plan.ok then
@@ -322,8 +268,6 @@ function M.create()
     store.on_focus(function (id) M.render(id) end)
     store.on_highlight(function (hlv) M.highlight(hlv) end)
     store.on_context(function (ctx) M.context(ctx) end)
-    store.on_lens(function () apply_concerns(M.cur) end)
-    bind_cycle(buf)
     bind_nav(buf, function () return M.ctx or M.cur end)
     return buf
 end
@@ -340,7 +284,6 @@ function M.render(id)
     M.cur, M.ctx = node, nil
     set_lines(M.buf, body_lines(node))
     scroll_top(M.win_top) -- a fresh body starts at its header
-    apply_concerns(node)  -- repaint concern bands if the lens is on
 end
 
 ---@param hl {file:string, ranges:table}?
@@ -366,12 +309,10 @@ function M.context(ctx)
         if prev then -- restore the focused body only if a context was showing
             set_lines(M.buf, body_lines(M.cur))
             scroll_top(M.win_top)
-            apply_concerns(M.cur)
         end
         return
     end
     set_lines(M.buf, body_lines(M.ctx))
-    vim.api.nvim_buf_clear_namespace(M.buf, ns_concern, 0, -1)
     scroll_top(M.win_top)
     if ctx.ranges then
         apply_hl(M.buf, M.ctx, ctx.ranges)

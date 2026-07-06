@@ -88,6 +88,9 @@ declarations), `callers` / `used-by` / `sites`, `table`, `refused`,
   lisp call) or a function body into; derived on demand from the source.
 - **form** — one nested statement or call, a row in a block view (not a graph
   node).
+- **lens** — a way of reading the current altitude's rows, cycled with
+  `<Tab>`/`<S-Tab>`. fn/block/region offer `statements` (default) and `detail`
+  (arguments, conditions, var/field reads). The lens rides the trail.
 
 **Navigation**:
 - **focus** — the node the cockpit is rooted on (shown in the source pane),
@@ -101,7 +104,7 @@ declarations), `callers` / `used-by` / `sites`, `table`, `refused`,
 - **trail** — the `h`/`l` structural path (return the way you came), distinct
   from the **jumplist** (`<C-o>`/`<C-i>`, which records pivots).
 - **cockpit** — the whole tab: the **browser**, the **source pane**, the
-  **plan bar**, the **trace pane**.
+  **plan bar**.
 
 ## Shape
 
@@ -166,11 +169,15 @@ A cockpit of independent panes over a shared state store:
   trace origin **temporarily takes over the pane** (the site's function,
   its line highlighted, auto-scrolled) and the focused body returns when
   the hover clears. One window, two moments.
-`<Tab>` in the code pane toggles the **flow lens**: statements are grouped by
-independent concern (from the statement-level local def-use) and the source
-lines are **coloured by concern**, with the tangle metrics on the header line.
-Comprehension only — locals, not control/aliasing, so it reveals tangle and
-makes no safety/reorder claim.
+
+**Lenses.** `<Tab>`/`<S-Tab>` cycle the current altitude's **lens** — the way
+its rows are read. At the files altitude that's the flat list vs the include
+tree. At fn/block/region the lenses are `statements` (the default view) and
+`detail`: the code's fine-grained descendable elements, indented under each
+statement — a call's **arguments** and a conditional's **condition** (`l`
+descends into that element's forms), and the **module vars/fields** the
+statement reads (`l` opens the var's usage sites). The lens rides the `h`/`l`
+trail (ascend restores the lens you had), but not the `<C-o>` jumplist.
 
 ### Configuration
 
@@ -192,8 +199,8 @@ All standard vim idioms — no new keys to learn:
   word-match fallback). In the browser it pivots like `<CR>`.
 - `<C-o>` / `<C-t>` — go **back** to where the last pivot happened; `<C-i>`
   goes forward again. Vim-jumplist semantics: deliberate pivots record,
-  scrolling the symbol list doesn't. (`<C-i>` is bound only where `<Tab>`
-  isn't the lens toggle, since most terminals can't tell them apart.)
+  scrolling the symbol list doesn't. (`<C-i>` is unbound in the browser, since
+  `<Tab>` cycles the lens there and most terminals can't tell them apart.)
 - `gf` — **leave the cockpit**: open the real file at the corresponding line
   (in a reused tab), from the source, symbols, or plan pane.
 - **The view follows the eye; focus follows intent.** In the browser,
@@ -216,44 +223,17 @@ All standard vim idioms — no new keys to learn:
   clears the forward memory. Structural ascent (fn → file → files) is the
   fallback for places you *jumped* into (`<C-]>` starts a fresh journey).
 
-### Dynamic dispatch: trace to pin
+### Tracing (planned)
 
-`l` on a dynamic callee (`→ $callback`) opens the dispatch trace. For a
-**parameter**, rows are the callers and the literals they pass are the
-candidate targets; for a **local**, rows are its defining statements,
-with literal assignments flattened to their values — `$h = 'compute'`
-in one branch and `'scale'` in another surface as two candidates. `p` on a literal pins it — the call resolves, the edge
-lands in the graph live (the callers view updates immediately), and the
-notification carries the `setup{ pins = … }` snippet that makes it
-durable. A durable pin anchors by `{ file, fn, callee }` — the enclosing
-function's *name* and the callee text, never a line number — so it
-survives edits and re-attaches on every re-extraction; a pin that no
-longer matches anything warns instead of going silently inert.
-Ambiguous names refuse; non-literal origins stay frontiers you can keep
-expanding.
-
-### Tracing a parameter
-
-`gr` on a parameter name in the source pane answers *"where does this value
-come from?"* — an origin tree with one row per call site, showing what each
-site passes: a literal (the answer), another function's parameter, a local, a
-call result, a field. `<CR>` expands a row **incrementally**: a param origin
-climbs to *its* callers, a call origin traces through the target's `return`
-statements, a local origin steps to its defining statements and the locals
-*they* read. You steer the fan-out; nothing explodes eagerly.
-
-Frontiers are honest and labelled instead of silently dropped: a table field
-(writes can alias from anywhere), a global, varargs, a computed expression, a
-dynamically-dispatched function (e.g. an event handler — "no resolved call
-sites"). Hovering a row shows the origin's code in the **source pane**
-with the origin line highlighted (the same pattern as hovering the dependency
-tree); `gf` jumps to its real file; `<C-]>` pivots the cockpit to its
-function; the trace opens in its own right-hand split, and `q` closes it.
-
-Powered by extractor-side classification: call arguments (`argv`) and `return`
-values are classified (literal / param / local / call / field / …), calls carry
-their resolved target, and function nodes carry their parameter lists (implicit
-`self` included, so method-call argv positions line up).
+Variable tracing — *where does this value come from, and where does it flow?* —
+is being re-homed into the browser as two on-demand **axes**: `sources`
+(backward: assignments, params ← callers' args, callees' returns) and `sinks`
+(forward: reads, args passed onward, returns), with the path you walk kept in a
+walkable, filterable history. The extractor-side origin engine
+(`cartograph.trace`: argument/return classification, recursive `origins` /
+`origins_local`) is in place and covered by `trace_spec`; the earlier separate
+trace *pane* has been retired in favour of the axis model. (Refusal pinning —
+`p` on a candidate in the refused view — is unaffected.)
 
 `:CartographHeat` (from the symbols pane) toggles a **hub/heat overlay**: each
 symbol is annotated with fan-in / fan-out and a role — `hub` (many callers,

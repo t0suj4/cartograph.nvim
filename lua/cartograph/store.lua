@@ -658,20 +658,6 @@ function M.occurrences(from_id, to_id)
     return M.occ[(from_id or '') .. '\31' .. (to_id or '')]
 end
 
--- lens channel: an active overlay that other panes render (e.g. 'concerns' =
--- colour the source by untangle concern). Set by whichever pane owns the toggle
--- (the source pane's <Tab>); read by the source pane.
-M.lens = nil
-M._lens_subs = {}
----@param fn fun(lens: string?)
-function M.on_lens(fn) table.insert(M._lens_subs, fn) end
----@param lens string?
-function M.set_lens(lens)
-    if lens == M.lens then return end
-    M.lens = lens
-    for _, fn in ipairs(M._lens_subs) do pcall(fn, lens) end
-end
-
 -- staging channel: the move-set (symbols marked to move) and destination file.
 -- This is what the plan bar reads; marks live in the symbol list. A separate
 -- channel from focus/highlight because staging persists as you navigate.
