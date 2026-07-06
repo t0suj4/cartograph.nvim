@@ -106,6 +106,7 @@ function M.ingest(data)
     M.data    = data
     M.toc     = nil -- load-order manifest; cartograph.toc.attach() sets it
     M._frontier_cache = {}
+    M._content_cache = {}
     M._nav_back, M._nav_fwd = {}, {}
     -- a live sample is evidence about (this graph, that moment) — any new
     -- graph state invalidates it; :CartographLive re-samples in one command
@@ -802,6 +803,26 @@ function M.abs(file)
 end
 
 function M.abspath(node) return M.abs(node.file) end
+
+--- A node's file content, as lines — the ONE seam every DISPLAY read goes
+--- through, so content acquisition is a single point a transport can later plug
+--- into (disk now; a fetch/stream over the wire eventually). This is the
+--- synchronous, pull-once case of the planned store.facts observable: it
+--- resolves NOW when the bytes are local. Cached by mtime+size (re-reads free;
+--- a save re-reads via the changed stamp), nil when unreadable.
+function M.content(node)
+    if not (node and node.file) then return nil end
+    local file = node.file
+    local path = M.abs(file)
+    local st = vim.uv.fs_stat(path)
+    local stamp = st and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size) or 'gone'
+    local e = M._content_cache[file]
+    if e and e.stamp == stamp then return e.lines or nil end
+    local lines = false
+    if st then local ok, r = pcall(vim.fn.readfile, path); lines = ok and r or false end
+    M._content_cache[file] = { stamp = stamp, lines = lines }
+    return lines or nil
+end
 
 --- Files whose identifier mention-index contains `name` (the id pass
 --- records each file's identifier set). Empty when the graph predates

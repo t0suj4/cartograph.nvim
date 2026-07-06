@@ -159,6 +159,24 @@ test('store: incremental ingest_step == a full ingest of the same graph', functi
     eq(full, snap())
 end)
 
+test('store.content: cached lines, nil unreadable, re-reads on change', function ()
+    local store = require 'cartograph.store'
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir, 'p')
+    local fd = assert(io.open(dir .. '/m.lua', 'w')); fd:write('line1\nline2\n'); fd:close()
+    store.ingest({ schema = 1, root = dir, nodes = { { id = 'm.lua::f@0',
+        name = 'f', kind = 'function', file = 'm.lua', order = 0,
+        range = { start = { line = 0, char = 0 }, ['end'] = { line = 1, char = 0 } } } },
+        edges = {}, calls = {} })
+    local n = store.node('m.lua::f@0')
+    eq({ 'line1', 'line2' }, store.content(n))          -- reads the file's lines
+    eq({ 'line1', 'line2' }, store.content(n))          -- cache hit, same result
+    eq(nil, store.content({ id = 'x', file = 'nope.lua' })) -- unreadable → nil
+    -- a size change flips the stamp → re-read (no mtime-tick dependence)
+    local fd2 = assert(io.open(dir .. '/m.lua', 'w')); fd2:write('a\nb\nc\n'); fd2:close()
+    eq({ 'a', 'b', 'c' }, store.content(n))
+    vim.fn.delete(dir, 'rf')
+end)
+
 test('coop: run chunks a computation to completion; tick is main-thread-safe', function ()
     local coop = require 'cartograph.coop'
     coop.tick() -- on the main thread this must be a harmless no-op

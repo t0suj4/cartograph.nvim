@@ -44,8 +44,8 @@ end
 -- Lines for a node's body: a hard-context header + the real source range.
 local function body_lines(node)
     if not node then return { '(nothing)' } end
-    local ok, all = pcall(vim.fn.readfile, store.abspath(node))
-    if not ok then return { ('── %s   %s  (unreadable)'):format(node.name or '?', node.file) } end
+    local all = store.content(node)
+    if not all then return { ('── %s   %s  (unreadable)'):format(node.name or '?', node.file) } end
     -- a top-level statement widens to the region it belongs to
     local shown = enclosing_region(node) or node
     local s = shown.range.start.line + 1     -- schema line is 0-based
@@ -214,8 +214,8 @@ function M.extract(line1, line2, name)
     local file_first = fn_start + (line1 - (HEADER_ROWS + 1))
     local file_last  = fn_start + (line2 - (HEADER_ROWS + 1))
 
-    local ok, all = pcall(vim.fn.readfile, store.abspath(node))
-    if not ok then return vim.notify('cartograph: cannot read ' .. node.file, vim.log.levels.ERROR) end
+    local all = store.content(node)
+    if not all then return vim.notify('cartograph: cannot read ' .. node.file, vim.log.levels.ERROR) end
 
     local plan = extract.plan { df = node.df, sel = { first = file_first, last = file_last },
         fn_start = fn_start, body_end = body_end, file_lines = all, name = name }
