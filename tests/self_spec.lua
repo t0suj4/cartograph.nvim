@@ -71,6 +71,34 @@ test('self: multi-root corpus — labelled keys resolve, refs cross roots', func
     vim.fn.delete(dirA, 'rf'); vim.fn.delete(dirB, 'rf')
 end)
 
+test('self oracle: loaded-vs-not — required modules mark ran, the rest do not', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local ts     = require 'cartograph.providers.treesitter'
+    local oracle = require 'cartograph.self_oracle'
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir .. '/lua', 'p')
+    local function put(f, t)
+        local fd = assert(io.open(dir .. '/lua/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('ranmod.lua', 'return { touched = true }\n')
+    put('deadmod.lua', 'return {}\n') -- present in the tree, never required
+    vim.opt.rtp:append(dir)
+    require('ranmod') -- only this one runs
+
+    local roots = { plug = dir }
+    local files = { 'plug/lua/ranmod.lua', 'plug/lua/deadmod.lua' }
+    local data = ts.extract('self://loaded', { files = files,
+        abs = function (f)
+            local l, r = f:match('^([^/]+)/(.*)$'); return roots[l] .. '/' .. r
+        end })
+    data.provider, data.root, data.roots = 'self', 'self://loaded', roots
+
+    local ran = oracle.loaded_files(data)
+    ok(ran['plug/lua/ranmod.lua'], 'the required module is marked as run')
+    ok(not ran['plug/lua/deadmod.lua'], 'the never-required file is not marked')
+
+    vim.fn.delete(dir, 'rf')
+end)
+
 -- invoke the callback of a buffer-local mapping by its lhs
 local function press(buf, lhs)
     for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do

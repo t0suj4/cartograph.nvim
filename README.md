@@ -403,8 +403,12 @@ callers). Ariadne's thread, in text.
      actual entries — and resolves every runtime function value back to the
      def it dispatches to (via `debug.getinfo`), closing a `⊘` frontier the
      source left dynamic. A live read is stamped `live @ now` (a sample,
-     never cached). Still ahead: a loaded-vs-not diff and a runtime-vs-
-     declared registration check (keymaps / autocmds / commands).
+     never cached). The oracle also marks the files view: `⚡` on every file
+     that actually **ran this session** (a required module or sourced
+     script) — the unmarked rest of a loaded plugin's tree is
+     present-but-never-loaded, the honest "dead this session" signal. Still
+     ahead: a runtime-vs-declared registration check (keymaps / autocmds /
+     commands).
    - **clangd oracle** (C/C++, automatic when a `clangd` binary exists;
      `setup{ clangd = false }` disables): the tree-sitter skeleton stays,
      but a headless clangd session answers `callHierarchy/incomingCalls`

@@ -71,6 +71,29 @@ function M.loaded_index(data)
     return idx
 end
 
+--- The set of graph file keys that this instance actually RAN this session —
+--- required Lua modules (loaded_index) plus sourced scripts (getscriptinfo,
+--- which also catches .vim files and plugin/ scripts). Everything else in a
+--- loaded plugin's tree is present-but-never-loaded: the honest "dead this
+--- session" signal. Cached on `data` (a sample).
+function M.loaded_files(data)
+    if data and data._loaded_files then return data._loaded_files end
+    local out = {}
+    for abs in pairs(M.loaded_index(data)) do
+        local key = key_for_abs(abs, data)
+        if key then out[key] = true end
+    end
+    for _, s in ipairs(vim.fn.getscriptinfo()) do
+        if type(s.name) == 'string' and s.name ~= '' then
+            local abs = (vim.fn.fnamemodify(s.name, ':p')):gsub('/+$', '')
+            local key = key_for_abs(abs, data)
+            if key then out[key] = true end
+        end
+    end
+    if data then data._loaded_files = out end
+    return out
+end
+
 --- The definition site of a live function, as "abs:line" (1-based), or nil.
 function M.fn_loc(fn)
     local info = debug.getinfo(fn, 'S')

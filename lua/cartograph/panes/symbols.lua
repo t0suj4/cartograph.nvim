@@ -124,9 +124,19 @@ local function file_row(ctx, file, depth, dim)
         ctx.line_file[#ctx.lines] = file
         return
     end
-    ctx.lines[#ctx.lines + 1] = ('%s%s  (%d)%s'):format(indent, file, #shown_defs(file), dim and ' …' or '')
+    -- self graph: ⚡ marks a file that actually RAN this session (a required
+    -- module or sourced script); the unmarked rest is present-but-never-loaded
+    local ran = store.data and store.data.provider == 'self'
+        and require('cartograph.self_oracle').loaded_files(store.data)[file]
+    ctx.lines[#ctx.lines + 1] = ('%s%s  (%d)%s%s'):format(indent, file,
+        #shown_defs(file), dim and ' …' or '', ran and '  ⚡' or '')
     ctx.marks[#ctx.lines] = dim and { { 0, -1, 'CartographDim' } }
         or { { #indent, #indent + #file, 'CartographSection' }, { #indent + #file, -1, 'CartographDim' } }
+    if ran then
+        local b = #(('%s%s  (%d)%s'):format(indent, file, #shown_defs(file),
+            dim and ' …' or ''))
+        table.insert(ctx.marks[#ctx.lines], { b, -1, 'DiagnosticOk' })
+    end
     ctx.line_file[#ctx.lines] = file
     local sign = SIGN[store.classify(file)]
     if sign then ctx.signs[#ctx.signs + 1] = { row = #ctx.lines - 1, sign = sign } end
@@ -173,9 +183,15 @@ local function render_files(ctx)
     end
     -- sampled graphs (MCP) say when they were true; disk graphs don't age
     if store.data and store.data.fetched_at then
-        ctx.lines[1] = ('%s — fetched %s'):format(
+        local extra = ''
+        if store.data.provider == 'self' then
+            local ran = require('cartograph.self_oracle').loaded_files(store.data)
+            local n = 0; for _ in pairs(ran) do n = n + 1 end
+            extra = (' — %d/%d files ran this session (⚡)'):format(n, #store.files)
+        end
+        ctx.lines[1] = ('%s — fetched %s%s'):format(
             store.data.provider or 'sample',
-            os.date('%H:%M:%S', store.data.fetched_at))
+            os.date('%H:%M:%S', store.data.fetched_at), extra)
         ctx.marks[1] = { { 0, -1, 'CartographSection' } }
     end
     for _, file in ipairs(store.files) do
