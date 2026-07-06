@@ -391,15 +391,31 @@ function M.load_async(root, on_chunk, on_done)
     local files, bad = {}, {}
     for f in pairs(m.stamps) do files[#files + 1] = f end
     table.sort(files)
-    local i, finished = 0, false
+    local i, finished, per = 0, false, 64
+    -- yield the decode out of active-typing windows (a keystroke is human
+    -- input — vim.on_key never fires for our own edits), bounded by MAX_HOLD so
+    -- we never stall; the per-tick shard count adapts to keep each block small.
+    local QUIET_MS, MAX_HOLD, TARGET = 80, 1200, 8
+    local last_input, hold_start = 0, nil
+    local okk, kid = pcall(vim.on_key, function () last_input = vim.uv.hrtime() end)
     local timer = vim.uv.new_timer()
-    -- a 256-shard tick can outlast the 12ms interval on a big cache, so libuv
-    -- fires again and schedule_wrap QUEUES extra callbacks. Once we reach the
-    -- end and close, those queued callbacks must NOT re-enter (double close +
-    -- double on_done) — the `finished` latch drops them.
+    -- a shard tick can outlast the 12ms interval on a big cache, so libuv fires
+    -- again and schedule_wrap QUEUES extra callbacks. Once we reach the end and
+    -- close, those queued callbacks must NOT re-enter (double close + double
+    -- on_done) — the `finished` latch drops them.
     timer:start(0, 12, vim.schedule_wrap(function ()
         if finished then return end
-        local stop = math.min(i + 256, #files)
+        -- a key landed within QUIET_MS and we haven't held too long: skip this
+        -- decode tick, keep the editor instant; the repeating timer retries
+        local since = (vim.uv.hrtime() - last_input) / 1e6
+        local held = hold_start and ((vim.uv.hrtime() - hold_start) / 1e6) or 0
+        if i < #files and since < QUIET_MS and held < MAX_HOLD then
+            hold_start = hold_start or vim.uv.hrtime()
+            return
+        end
+        hold_start = nil
+        local t0 = vim.uv.hrtime()
+        local stop = math.min(i + per, #files)
         while i < stop do
             i = i + 1
             local f = files[i]
@@ -412,9 +428,14 @@ function M.load_async(root, on_chunk, on_done)
                 data.names[f] = nil
             end
         end
+        -- keep each decode block near TARGET ms so it can't hitch a keystroke
+        local ms = (vim.uv.hrtime() - t0) / 1e6
+        if ms > TARGET * 1.5 then per = math.max(16, math.floor(per / 2))
+        elseif ms < TARGET / 2 then per = math.min(512, per * 2) end
         if i >= #files then
             finished = true
             if not timer:is_closing() then timer:stop(); timer:close() end
+            if okk then pcall(vim.on_key, nil, kid) end
             synth_unparsed(data, m)
             on_done(data, bad)
         elseif on_chunk then
