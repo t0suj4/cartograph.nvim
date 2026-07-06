@@ -43,34 +43,10 @@ function M.open(dump_path, opts)
     local self_which = target:match('^self://(.+)$')
 
     -- streaming shared by the cold (parallel), warm (cached) and self://
-    -- opens: all show module stubs at once and fill the real graph in as
-    -- it arrives, so none blocks the editor. R0 is the stub's zero range.
+    -- opens: all show module stubs at once and fill the real graph in as it
+    -- arrives (incrementally, via store.begin_stream/ingest_step), so none
+    -- blocks the editor. R0 is the stub's zero range.
     local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
-    -- re-ingest `acc` as a progressive VIEW: arrived files real, the rest
-    -- still stubs, without losing the user's place mid-stream.
-    local function progressive(acc, files, done, total)
-        local seen = {}
-        for _, nd in ipairs(acc.nodes) do
-            if nd.kind == 'module' then seen[nd.file] = true end
-        end
-        local view = {}
-        for key, v in pairs(acc) do view[key] = v end
-        view.partial = { done = done, total = total }
-        view.nodes = vim.list_extend({}, acc.nodes)
-        for _, f in ipairs(files) do
-            if not seen[f] then
-                view.nodes[#view.nodes + 1] = { id = f, name = f,
-                    kind = 'module', file = f, range = R0, order = -1 }
-            end
-        end
-        local back, fwd = store._nav_back, store._nav_fwd
-        local loc = store.loc_provider and store.loc_provider.get()
-        local focused = store.focused
-        store.ingest(view)
-        store._nav_back, store._nav_fwd = back or {}, fwd or {}
-        if focused and store.node(focused) then store.set_focus(focused) end
-        if loc and store.loc_provider then pcall(store.loc_provider.set, loc) end
-    end
     -- run `fn` (a full re-ingest) without losing nav history / cursor
     local function preserve(fn)
         local back, fwd = store._nav_back, store._nav_fwd
@@ -325,13 +301,19 @@ function M.open(dump_path, opts)
                 -- a large cached corpus streams like the cold path: browser
                 -- opens NOW on stubs, shards decode in the background, the
                 -- splice brings it up to date, then finish() swaps it in.
-                local roster
+                local began = false
                 local started, why = cache.open_async(target, {
-                    on_stub = function (files) roster = files stub_ingest(files) end,
+                    on_stub = function (files) stub_ingest(files) end,
+                    -- incremental: fold each decoded shard-chunk's delta into
+                    -- the indexes (O(delta)) instead of a full O(graph)
+                    -- re-ingest per chunk — the same fix the cold path got
                     on_chunk = function (acc, done, total)
-                        progressive(acc, roster, done, total)
+                        if not began then store.begin_stream(acc); began = true end
+                        acc.partial = { done = done, total = total }
+                        store.ingest_step(acc)
                     end,
                     on_done = function (acc, n)
+                        acc.partial = nil -- streaming done; finish() is authoritative
                         if n then vim.notify('cartograph: ' .. n, vim.log.levels.INFO) end
                         preserve(function () finish(acc) end)
                         require('cartograph.toc').attach(store)
