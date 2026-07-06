@@ -99,6 +99,66 @@ test('self oracle: loaded-vs-not — required modules mark ran, the rest do not'
     vim.fn.delete(dir, 'rf')
 end)
 
+test('store: incremental ingest_step == a full ingest of the same graph', function ()
+    local store = require 'cartograph.store'
+    local R = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
+    local function n(id, name, kind, file, order)
+        return { id = id, name = name, kind = kind, file = file, order = order, range = R }
+    end
+    local nodes = {
+        n('a.lua', 'a.lua', 'module', 'a.lua', -1),
+        n('a.lua::f@1', 'f', 'function', 'a.lua', 1),
+        n('a.lua::g@2', 'g', 'function', 'a.lua', 2),
+        n('b.lua', 'b.lua', 'module', 'b.lua', -1),
+        n('b.lua::h@1', 'h', 'function', 'b.lua', 1),
+        n('b.lua::v@3', 'v', 'var', 'b.lua', 3),
+    }
+    local edges = {
+        { from = 'a.lua::f@1', to = 'b.lua::h@1', kind = 'ref', at = {} },
+        { from = 'a.lua', to = 'b.lua', kind = 'import' },
+        { from = 'a.lua::g@2', to = 'b.lua::v@3', kind = 'use', at = {} },
+        { from = 'b.lua', to = 'a.lua::f@1', kind = 'reg', at = {} },
+    }
+    local calls = {
+        { fn = 'a.lua::f@1', to = 'b.lua::h@1', callee = 'h' },
+        { fn = 'a.lua::g@2', callee = 'unknown' },
+    }
+    -- a comparable, identity-independent snapshot of the derived indexes
+    local function keyset(t) local k = {} for x in pairs(t) do k[#k + 1] = tostring(x) end table.sort(k) return k end
+    local function idlist(list) local o = {} for _, x in ipairs(list) do o[#o + 1] = x.id or x.from or x.to or x end table.sort(o) return o end
+    local function snap()
+        local by_file = {}
+        for f, l in pairs(store.by_file) do by_file[f] = idlist(l) end
+        local function fanout(idx) local o = {} for k, l in pairs(idx) do o[k] = idlist(l) end return o end
+        return {
+            files = vim.deepcopy(store.files), by_id = keyset(store.by_id),
+            by_file = by_file, uses = fanout(store.uses), usedby = fanout(store.usedby),
+            occ = keyset(store.occ), imports_in = fanout(store.imports_in),
+            imports_out = fanout(store.imports_out), var_usedby = fanout(store.var_usedby),
+            calls_by_fn = fanout(store.calls_by_fn), calls_to = fanout(store.calls_to),
+            reg_by = fanout(store.reg_by), registers = fanout(store.registers),
+        }
+    end
+
+    -- full ingest
+    store.ingest({ schema = 1, root = '/x', nodes = nodes, edges = edges, calls = calls })
+    local full = snap()
+
+    -- incremental: empty base, then two steps that grow one accumulator
+    local acc = { schema = 1, root = '/x', nodes = {}, edges = {}, calls = {} }
+    store.ingest(acc)         -- reset to empty base
+    store.begin_stream(acc)
+    local function add(ns, es, cs)
+        for _, x in ipairs(ns) do acc.nodes[#acc.nodes + 1] = x end
+        for _, x in ipairs(es) do acc.edges[#acc.edges + 1] = x end
+        for _, x in ipairs(cs) do acc.calls[#acc.calls + 1] = x end
+        store.ingest_step(acc)
+    end
+    add({ nodes[1], nodes[2], nodes[3] }, { edges[1] }, { calls[1] })
+    add({ nodes[4], nodes[5], nodes[6] }, { edges[2], edges[3], edges[4] }, { calls[2] })
+    eq(full, snap())
+end)
+
 test('parallel: slice shapes by byte budget, not count', function ()
     local par = require 'cartograph.parallel'
     local ordered = { 'a', 'b', 'c', 'd', 'e' }

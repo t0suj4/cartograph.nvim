@@ -139,10 +139,15 @@ function M.open(dump_path, opts)
             on_note = function (m)
                 vim.notify('cartograph: ' .. m, vim.log.levels.WARN)
             end,
+            -- incremental streaming: repoint the store at acc, then fold in
+            -- each chunk's delta (O(delta), not a full O(graph) re-ingest)
+            on_start = function (acc) store.begin_stream(acc) end,
             on_chunk = function (done, total, acc)
-                progressive(acc, roster.files, done, total)
+                acc.partial = { done = done, total = total }
+                store.ingest_step(acc)
             end,
             on_done = function (acc)
+                acc.partial = nil -- extraction complete: no longer streaming
                 acc.vimruntime = roster.vimruntime ~= '' and roster.vimruntime or nil
                 -- attach the lazy $VIMRUNTIME node (present so edges into it
                 -- land somewhere; extracted only when descended) and resolve
@@ -361,10 +366,15 @@ function M.open(dump_path, opts)
                     on_note = function (m)
                         vim.notify('cartograph: ' .. m, vim.log.levels.WARN)
                     end,
+                    -- incremental streaming: fold each chunk's delta into the
+                    -- indexes (O(delta)) instead of a full re-ingest per chunk
+                    on_start = function (acc) store.begin_stream(acc) end,
                     on_chunk = function (k, n, acc)
-                        progressive(acc, files, k, n)
+                        acc.partial = { done = k, total = n }
+                        store.ingest_step(acc)
                     end,
                     on_done = function (acc)
+                        acc.partial = nil -- extraction complete
                         require('cartograph.cache').save_bg(acc)
                         preserve(function () finish(acc) end)
                         require('cartograph.toc').attach(store)

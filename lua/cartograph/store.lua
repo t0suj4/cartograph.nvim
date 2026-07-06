@@ -39,6 +39,69 @@ end
 --- Build all indexes from a decoded graph (schema #1). Split out from load() so
 --- it can be driven directly from in-memory graphs (tests, non-file providers).
 ---@param data table
+-- Per-item index builders, shared by the full ingest and the incremental
+-- streaming step (M.ingest_step) so the two produce identical indexes by
+-- construction — the step is just these applied to the delta on top of what's
+-- already built. by_id overwrites (a real module node replaces its stub);
+-- by_file/calls/edges append.
+local function idx_node(n)
+    M.by_id[n.id] = n
+    if n.kind ~= 'module' then
+        M.by_file[n.file] = M.by_file[n.file] or {}
+        table.insert(M.by_file[n.file], n)
+    end
+end
+local function idx_call(c)
+    if c.to then
+        M.calls_to[c.to] = M.calls_to[c.to] or {}
+        table.insert(M.calls_to[c.to], c)
+    end
+    if c.fn then
+        M.calls_by_fn[c.fn] = M.calls_by_fn[c.fn] or {}
+        table.insert(M.calls_by_fn[c.fn], c)
+    end
+end
+local function idx_edge(e)
+    if e.kind == 'ref' then
+        -- self edges (recursion) carry occurrences only: they must not
+        -- inflate usedby/uses (dead-function lint, heat, tints)
+        if e.from ~= e.to then
+            M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
+            M.usedby[e.to]   = M.usedby[e.to]   or {}; table.insert(M.usedby[e.to], e.from)
+        end
+        M.occ[e.from .. '\31' .. e.to] = e.at
+        if e.inferred then M.edge_inferred[e.from .. '\31' .. e.to] = true end
+    elseif e.kind == 'import' then
+        M.imports_in[e.to] = M.imports_in[e.to] or {}
+        table.insert(M.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
+        M.imports_out[e.from] = M.imports_out[e.from] or {}
+        table.insert(M.imports_out[e.from], e.to)
+    elseif e.kind == 'use' then
+        M.var_usedby[e.to] = M.var_usedby[e.to] or {}
+        table.insert(M.var_usedby[e.to], { from = e.from, at = e.at or {} })
+        M.var_uses[e.from] = M.var_uses[e.from] or {}
+        table.insert(M.var_uses[e.from], { to = e.to, at = e.at or {} })
+    elseif e.kind == 'reg' then
+        -- a registration: the fn is kept alive by `from` (a module,
+        -- dispatch table). The alibi both ways — a fn's registrants,
+        -- a registrant's roster.
+        M.reg_by[e.to] = M.reg_by[e.to] or {}
+        table.insert(M.reg_by[e.to], { from = e.from, at = e.at or {} })
+        M.registers[e.from] = M.registers[e.from] or {}
+        table.insert(M.registers[e.from], e.to)
+    end
+end
+
+-- reset every derived index to empty (full ingest starts here)
+local function reset_indexes()
+    M.by_id, M.by_file, M.files = {}, {}, {}
+    M.calls_to, M.calls_by_fn = {}, {}
+    M.uses, M.usedby, M.occ, M.edge_inferred = {}, {}, {}, {}
+    M.var_usedby, M.var_uses = {}, {}
+    M.imports_in, M.imports_out = {}, {}
+    M.reg_by, M.registers = {}, {}
+end
+
 function M.ingest(data)
     M.data    = data
     M.toc     = nil -- load-order manifest; cartograph.toc.attach() sets it
@@ -56,78 +119,62 @@ function M.ingest(data)
     -- after: readers re-read on mismatch, writers ABORT loudly. (The MCP
     -- wire waits fast-only and is exempt — timers can't fire there.)
     M.generation = (M.generation or 0) + 1
-    M.by_id   = {}
-    M.by_file = {}
-    M.files   = {}
+    reset_indexes()
     local seen = {}
     for _, n in ipairs(M.data.nodes) do
-        M.by_id[n.id] = n
-        if n.kind ~= 'module' then
-            M.by_file[n.file] = M.by_file[n.file] or {}
-            table.insert(M.by_file[n.file], n)
-        end
+        idx_node(n)
         if not seen[n.file] then seen[n.file] = true; table.insert(M.files, n.file) end
     end
     table.sort(M.files)
+    M._fileset = seen -- files already in M.files (an incremental step extends it)
     for _, list in pairs(M.by_file) do
         table.sort(list, function (a, b) return a.order < b.order end)
     end
+    for _, c in ipairs(M.data.calls or {}) do idx_call(c) end
+    for _, e in ipairs(M.data.edges or {}) do idx_edge(e) end
+    -- baseline for a subsequent incremental step (see M.ingest_step)
+    M._ing = { n = #M.data.nodes, c = #(M.data.calls or {}), e = #(M.data.edges or {}) }
+    return M.data
+end
 
-    -- call-inventory indexes: by resolved target (data tracing) and by
-    -- enclosing function (the browser's per-statement callee targets)
-    M.calls_to, M.calls_by_fn = {}, {}
-    for _, c in ipairs(M.data.calls or {}) do
-        if c.to then
-            M.calls_to[c.to] = M.calls_to[c.to] or {}
-            table.insert(M.calls_to[c.to], c)
-        end
-        if c.fn then
-            M.calls_by_fn[c.fn] = M.calls_by_fn[c.fn] or {}
-            table.insert(M.calls_by_fn[c.fn], c)
+--- Repoint the store at a growing accumulator for INCREMENTAL streaming. The
+--- (stub) full ingest already built the base indexes + the complete file list;
+--- this just marks the baseline so ingest_step folds in only what arrives
+--- after. M.files is NOT reset — steps never shrink the roster.
+function M.begin_stream(acc)
+    M.data = acc
+    M._ing = { n = 0, c = 0, e = 0 }
+    M._fileset = {}
+    for _, f in ipairs(M.files) do M._fileset[f] = true end
+end
+
+--- Fold newly-arrived nodes/edges/calls into the live indexes — O(delta), not
+--- a full O(graph) rebuild every update. Identical per-item logic to M.ingest,
+--- so the indexes match a full ingest of the same accumulator; the final
+--- on_done still does one authoritative full ingest. Does NOT bump generation
+--- or reset nav (same graph, growing).
+function M.ingest_step(acc)
+    M.data = acc
+    local ing = M._ing or { n = 0, c = 0, e = 0 }
+    M._fileset = M._fileset or {}
+    local dirty, newfiles = {}, false
+    for i = ing.n + 1, #acc.nodes do
+        local n = acc.nodes[i]
+        idx_node(n)
+        if n.kind ~= 'module' then dirty[n.file] = true end
+        if not M._fileset[n.file] then -- a file not in the roster yet: add it
+            M._fileset[n.file] = true
+            M.files[#M.files + 1] = n.file
+            newfiles = true
         end
     end
-
-    -- edge indexes for the dependency tree (symbol-level `ref` edges)
-    M.uses   = {} -- id -> { to_id, ... }   (functions this one references)
-    M.usedby = {} -- id -> { from_id, ... } (functions that reference this one)
-    M.occ    = {} -- "from\31to" -> { {start,end}, ... }  reference sites in `from`
-    M.edge_inferred = {} -- "from\31to" -> true (resolved by unique name, not vm)
-    M.var_usedby = {} -- var node id -> { {from=fn id, at=ranges}, ... }
-    M.var_uses   = {} -- fn node id  -> { {to=var id,  at=ranges}, ... }
-    M.imports_in  = {} -- file -> { {from=file, sideeffect=bool}, ... }  inbound requires
-    M.imports_out = {} -- file -> { file, ... }  outbound requires (include tree)
-    M.reg_by = {} -- fn id -> { {from=registrant, at=ranges}, ... } registrations
-    M.registers = {} -- registrant id -> { fn id, ... } what it keeps alive
-    for _, e in ipairs(M.data.edges or {}) do
-        if e.kind == 'ref' then
-            -- self edges (recursion) carry occurrences only: they must not
-            -- inflate usedby/uses (dead-function lint, heat, tints)
-            if e.from ~= e.to then
-                M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
-                M.usedby[e.to]   = M.usedby[e.to]   or {}; table.insert(M.usedby[e.to], e.from)
-            end
-            M.occ[e.from .. '\31' .. e.to] = e.at
-            if e.inferred then M.edge_inferred[e.from .. '\31' .. e.to] = true end
-        elseif e.kind == 'import' then
-            M.imports_in[e.to] = M.imports_in[e.to] or {}
-            table.insert(M.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
-            M.imports_out[e.from] = M.imports_out[e.from] or {}
-            table.insert(M.imports_out[e.from], e.to)
-        elseif e.kind == 'use' then
-            M.var_usedby[e.to] = M.var_usedby[e.to] or {}
-            table.insert(M.var_usedby[e.to], { from = e.from, at = e.at or {} })
-            M.var_uses[e.from] = M.var_uses[e.from] or {}
-            table.insert(M.var_uses[e.from], { to = e.to, at = e.at or {} })
-        elseif e.kind == 'reg' then
-            -- a registration: the fn is kept alive by `from` (a module,
-            -- dispatch table). The alibi both ways — a fn's registrants,
-            -- a registrant's roster.
-            M.reg_by[e.to] = M.reg_by[e.to] or {}
-            table.insert(M.reg_by[e.to], { from = e.from, at = e.at or {} })
-            M.registers[e.from] = M.registers[e.from] or {}
-            table.insert(M.registers[e.from], e.to)
-        end
+    if newfiles then table.sort(M.files) end
+    for f in pairs(dirty) do
+        table.sort(M.by_file[f], function (a, b) return a.order < b.order end)
     end
+    for i = (ing.c or 0) + 1, #(acc.calls or {}) do idx_call(acc.calls[i]) end
+    for i = (ing.e or 0) + 1, #(acc.edges or {}) do idx_edge(acc.edges[i]) end
+    M._ing = { n = #acc.nodes, c = #(acc.calls or {}), e = #(acc.edges or {}) }
     return M.data
 end
 

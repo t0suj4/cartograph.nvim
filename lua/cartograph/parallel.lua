@@ -504,6 +504,9 @@ function M.extract(root, o)
         end)
         return true
     end
+    -- let the caller repoint at `acc` for incremental streaming (ingest_step)
+    -- before the first chunk lands
+    if o.on_start then o.on_start(acc) end
     for _ = 1, nw do if not pull() then break end end
 end
 
