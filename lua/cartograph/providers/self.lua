@@ -99,6 +99,17 @@ function M.lazy_node(vr)
         range = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } } }
 end
 
+--- Finalize a freshly-extracted self corpus before ingest: attach the lazy
+--- $VIMRUNTIME node (if any) and resolve requires the path-match missed. One
+--- place the open path calls, so the "provider vs oracle module" mixup can't
+--- recur (this module requires the oracle correctly). Returns { added }.
+function M.finalize(acc)
+    if type(acc.vimruntime) == 'string' and acc.vimruntime ~= '' then
+        acc.nodes[#acc.nodes + 1] = M.lazy_node(acc.vimruntime)
+    end
+    return require('cartograph.self_oracle').resolve_requires(acc)
+end
+
 --- Descended the lazy $VIMRUNTIME node: extract its tree NOW (small — ~170
 --- files, so synchronous), splice it into the live graph under a VIMRUNTIME
 --- label, drop the placeholder, and relink so requires into `vim.*` resolve

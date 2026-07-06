@@ -99,6 +99,38 @@ test('self oracle: loaded-vs-not — required modules mark ran, the rest do not'
     vim.fn.delete(dir, 'rf')
 end)
 
+test('self: finalize (the open path) attaches the lazy node + resolves requires', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local ts    = require 'cartograph.providers.treesitter'
+    local selfp = require 'cartograph.providers.self'
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir .. '/lua', 'p')
+    local function put(f, t)
+        local fd = assert(io.open(dir .. '/lua/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('libf.lua', 'return {}\n')
+    put('appf.lua', "local L = require('libf')\nreturn L\n")
+    vim.opt.rtp:append(dir); require('appf')
+
+    local roots = { plug = dir }
+    local acc = ts.extract('self://loaded', { files =
+        { 'plug/lua/appf.lua', 'plug/lua/libf.lua' },
+        abs = function (f)
+            local l, r = f:match('^([^/]+)/(.*)$'); return roots[l] .. '/' .. r
+        end })
+    acc.provider, acc.root, acc.roots = 'self', 'self://loaded', roots
+    acc.vimruntime = dir -- stand-in; just exercises lazy_node attachment
+
+    -- this is the exact call init's async on_done makes — guards the
+    -- provider-vs-oracle module mixup that slipped past unit tests twice
+    local req = selfp.finalize(acc)
+    ok(req and req.added >= 1, 'requires resolved through the open path')
+    local hasLazy = false
+    for _, n in ipairs(acc.nodes) do if n.lazy then hasLazy = true end end
+    ok(hasLazy, 'the lazy $VIMRUNTIME node was attached')
+
+    vim.fn.delete(dir, 'rf')
+end)
+
 test('self oracle: resolve-requires — the loader builds the import graph', function ()
     if not has_parser('lua') then skip 'no lua parser' end
     local ts     = require 'cartograph.providers.treesitter'
