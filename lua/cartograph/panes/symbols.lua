@@ -1294,6 +1294,7 @@ function M.render()
     M.restage()
     M.render_heat()
     M.paint(store.focused)
+    M.emit_view() -- the visible list changed; surfaces track it (deduped)
 end
 
 --- What the view SHOWS, for the projection surface ([[textplates]]): the node
@@ -1324,6 +1325,41 @@ end
 --- Just the labels (the projection without the selection). Kept for callers
 --- that don't care which row is current.
 function M.visible_labels(limit) return M.projection(limit).labels end
+
+-- ── the view observable ─────────────────────────────────────────────────────
+-- THE seam a SURFACE subscribes to (the factorio projection, a web canvas, a
+-- 2D map): the view is observable. Instead of a surface polling
+-- store.on_redraw + store.on_context and recomputing every time, the pane
+-- emits { labels, selected, level } whenever the view actually changes —
+-- DEDUPED, so a redraw or cursor move that doesn't change the projection stays
+-- quiet. Fired from render() (altitude/list changed) and the cursor handler
+-- (selection changed). See [[cartograph-over-the-wire]] "the view is observable".
+M._view_subs = {}
+M._last_viewkey = nil
+
+--- Subscribe to view changes. fn receives { labels, selected, level }.
+--- Returns an unsubscribe function (like store.on_redraw / store.facts).
+function M.on_view(fn)
+    table.insert(M._view_subs, fn)
+    return function ()
+        for i, f in ipairs(M._view_subs) do
+            if f == fn then table.remove(M._view_subs, i); return end
+        end
+    end
+end
+
+--- Emit the current view to subscribers iff it changed since the last emit.
+--- Cheap no-op when nothing is subscribed. Capped so a huge list (a
+--- thousand-file view) bounds the payload/key; surfaces cap further.
+function M.emit_view()
+    if #M._view_subs == 0 then return end
+    local p = M.projection(256)
+    p.level = M.view and M.view.level or nil
+    local key = tostring(p.selected) .. '\0' .. table.concat(p.labels, '\n')
+    if key == M._last_viewkey then return end
+    M._last_viewkey = key
+    for _, fn in ipairs(M._view_subs) do pcall(fn, p) end
+end
 
 --- Switch level (re-rendering) and land the cursor on the first useful row.
 function M.show(level, ctx_val)
@@ -1561,6 +1597,7 @@ function M.attach(win)
                     M._resync = nil
                     sync_focus_to_view()
                 end
+                M.emit_view() -- the selected row may have changed (deduped)
                 if M.view.level == 'file' or M.view.level == 'region'
                     or M.view.level == 'tbl' or M.view.level == 'state' then
                     -- hover TINTS relationships and PREVIEWS the row in the

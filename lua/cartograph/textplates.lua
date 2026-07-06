@@ -337,12 +337,40 @@ function M.detach()
     if L.client then pcall(function () L.client:close() end) end
 end
 
---- Start (or restart) the live projection: connect once, project the current
---- view, and re-project a MINIMAL delta whenever the view changes (navigation)
---- OR the cursor moves to a new row (hover) — so the world tracks both WHAT
---- is in view and WHERE you are (the selected row in the highlight material).
---- `opts` merges over config.factorio (anchor/material/highlight/surface/
---- debounce/max_rows). Returns (state, nil) or (nil, err).
+--- Project one view payload ({ labels, selected }) into the world for the
+--- given live state L. Handles the stale-wire case and records the sync.
+local function project_view(M, L, view)
+    if M._live ~= L then return end
+    if not L.client.alive then
+        -- the wire is gone: the standing plates are now STALE (frozen at the
+        -- last sync). Say so — don't pretend the world still tracks the view.
+        local when = L.last_sync and os.date('%H:%M:%S', L.last_sync) or 'never'
+        vim.notify('cartograph: factorio projection STALE — connection lost; the world '
+            .. 'is frozen as of ' .. when .. '. :CartographProject! to reconnect',
+            vim.log.levels.WARN)
+        M.detach()
+        return
+    end
+    local o = vim.tbl_extend('force', L.opts, { selected = view.selected })
+    local ok, delta = pcall(M.project, L.io, view.labels, o)
+    if not ok then
+        vim.notify('cartograph: projection failed — ' .. tostring(delta), vim.log.levels.WARN)
+        M.detach()
+        return
+    end
+    L.last, L.last_sync = delta, os.time()
+    if delta.verified == false then
+        vim.notify(('cartograph: projection drift — %d cell(s) did not land')
+            :format(M.delta_count(delta.drift)), vim.log.levels.WARN)
+    end
+end
+
+--- Start (or restart) the live projection: connect once and re-project a
+--- MINIMAL delta whenever the browser VIEW changes — the list OR the selected
+--- (cursor) row — so the world tracks both WHAT is in view and WHERE you are.
+--- Subscribes to the pane's view-observable (symbols.on_view), which is
+--- deduped, rather than polling store internals. `opts` merges over
+--- config.factorio. Returns (state, nil) or (nil, err).
 function M.attach(opts)
     M.detach()
     local cfg = require('cartograph.config').factorio or {}
@@ -350,47 +378,21 @@ function M.attach(opts)
     local client, io = M.connect(proj)
     if not client then return nil, io end
 
-    local store = require 'cartograph.store'
+    local symbols = require 'cartograph.panes.symbols'
     local L = { client = client, io = io, opts = proj, gen = 0 }
     M._live = L
 
-    local function fire()
-        if M._live ~= L then return end
-        if not client.alive then
-            -- the wire is gone: the standing plates are now STALE (frozen at
-            -- the last sync). Say so — don't pretend the world still tracks.
-            local when = L.last_sync and os.date('%H:%M:%S', L.last_sync) or 'never'
-            vim.notify('cartograph: factorio projection STALE — connection lost; '
-                .. 'the world is frozen as of ' .. when
-                .. '. :CartographProject! to reconnect', vim.log.levels.WARN)
-            M.detach()
-            return
-        end
-        local view = require('cartograph.panes.symbols').projection(proj.max_rows)
-        local o = vim.tbl_extend('force', proj, { selected = view.selected })
-        local ok, delta = pcall(M.project, io, view.labels, o)
-        if not ok then
-            vim.notify('cartograph: projection failed — ' .. tostring(delta), vim.log.levels.WARN)
-            M.detach()
-            return
-        end
-        L.last, L.last_sync = delta, os.time()
-        if delta.verified == false then
-            vim.notify(('cartograph: projection drift — %d cell(s) did not land')
-                :format(M.delta_count(delta.drift)), vim.log.levels.WARN)
-        end
-    end
-
-    -- debounce: navigation + hover fire in bursts; coalesce them
-    local function schedule()
+    -- debounce: a held j/k emits a burst of view changes; project the last
+    local function schedule(view)
         L.gen = L.gen + 1
         local mine = L.gen
-        vim.defer_fn(function () if M._live == L and mine == L.gen then fire() end end,
-            proj.debounce or 250)
+        vim.defer_fn(function ()
+            if M._live == L and mine == L.gen then project_view(M, L, view) end
+        end, proj.debounce or 250)
     end
-    L.unsubs = { store.on_redraw(schedule), store.on_context(schedule) }
+    L.unsubs = { symbols.on_view(schedule) }
 
-    fire() -- initial paint
+    project_view(M, L, symbols.projection(proj.max_rows)) -- initial paint
     return L
 end
 
