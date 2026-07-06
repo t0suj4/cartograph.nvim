@@ -281,6 +281,37 @@ function M.extract(root, o)
         next = 1 }
     M._session = s
 
+    -- Adaptive coalescing of the streaming re-ingest. Worker chunks merge
+    -- cheaply as they arrive (an append); the PROGRESSIVE re-ingest is the
+    -- main-loop cost — O(nodes), 100ms+ on a big graph — so instead of running
+    -- it on every batch it fires on a timer whose interval tracks its OWN last
+    -- measured duration: re-ingest is held to ~a quarter of wall-clock, so the
+    -- editor stays responsive. Early (few nodes, cheap) → frequent, smooth
+    -- streaming; late (many nodes, dear) → the interval auto-widens. A demand
+    -- extract (user descended a queued file) still refreshes immediately.
+    local COAL_MIN, COAL_MAX, COAL_FRAC = 40, 500, 0.25
+    local ingest_ms, pending, dirty = 0, false, false
+    local schedule_progressive
+    local function run_progressive()
+        if s.phase ~= 1 or not dirty or not o.on_chunk then return end
+        dirty = false
+        local t0 = vim.uv.hrtime()
+        o.on_chunk(s.done, s.total, acc)
+        ingest_ms = (vim.uv.hrtime() - t0) / 1e6
+    end
+    function schedule_progressive()
+        if pending or not o.on_chunk then return end
+        pending = true
+        local interval = math.max(COAL_MIN,
+            math.min(COAL_MAX, ingest_ms / COAL_FRAC))
+        vim.defer_fn(function ()
+            pending = false
+            run_progressive()
+            if dirty then schedule_progressive() end -- more arrived; keep cadence
+        end, math.floor(interval))
+    end
+    s.schedule = schedule_progressive
+
     local function finalize()
         local okc, cfg = pcall(require, 'cartograph.config')
         if #minified > 0 and not (okc and cfg.unparsed == false) then
@@ -365,7 +396,8 @@ function M.extract(root, o)
                 end
             end
             s.done = s.done + 1
-            if o.on_chunk then o.on_chunk(s.done, s.total, acc) end
+            dirty = true
+            schedule_progressive() -- coalesced; not a re-ingest per batch
             if not pull() and s.done == s.total then
                 finish_phase1()
             end
