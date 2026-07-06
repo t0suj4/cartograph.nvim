@@ -57,10 +57,29 @@ local M = {
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
 
+-- the lenses offered at an altitude. The `file` altitude gains a `live` lens
+-- ONLY under the self provider — the running instance can answer what a
+-- module actually exports at runtime, which no on-disk graph can.
+local function lens_set(level)
+    if level == 'file' and store.data and store.data.provider == 'self' then
+        return { 'members', 'live' }
+    end
+    return LENS_SETS[level]
+end
+
 -- the active lens at the current altitude (defaults to the first available)
 local function cur_lens()
-    local set = LENS_SETS[M.view.level]
+    local set = lens_set(M.view.level)
     return set and (M.view.lens or set[1])
+end
+
+-- the module node id for a file (the live lens's root); modules index by file
+local function module_id(file)
+    for _, n in ipairs(store.by_file[file] or {}) do
+        if n.kind == 'module' then return n.id end
+    end
+    local n = store.node(file)
+    return n and n.id
 end
 
 -- Relationship tints: dependencies (things the focus uses) in green, dependents
@@ -515,20 +534,36 @@ local function lit_walk(key)
     return node, val, parts
 end
 
-local function render_lit(ctx, key)
-    local node, val, path = lit_walk(key)
-    if not (node and type(val) == 'table') then ctx.lines[1] = '(gone)'; return end
-    local crumb = (node.name or '?')
-        .. (#path > 0 and ('.' .. table.concat(path, '.')) or '')
-    ctx.lines[1] = ('· %s'):format(crumb)
-    ctx.marks[1] = { { 0, 1, 'CartographDim' }, { 1, -1, 'CartographTitle' } }
-    if #path == 0 then -- usage sites one row away, as in the class-table view
-        local nsites = 0
-        for _, u in ipairs(store.var_usedby[node.id] or {}) do nsites = nsites + #u.at end
-        ctx.lines[2] = ('↖ used by (%d)'):format(nsites)
-        ctx.marks[2] = { { 0, -1, 'CartographSection' } }
-        ctx.line_callers[2] = node.id
+-- the live-value tree for a node id, snapshotted from the running process
+-- (a SAMPLE — cached for this view, rebuilt on demand, never persisted).
+local function live_tree(id)
+    M._live = M._live or {}
+    if M._live[id] == nil then
+        local n = store.node(id)
+        local tree = n and require('cartograph.self_oracle').live_value(n, store.data)
+        M._live[id] = tree or false
     end
+    return M._live[id] or nil
+end
+
+-- walk key = id \31 seg \31 seg … into the live tree (mirrors lit_walk)
+local function live_walk(key)
+    local parts = vim.split(key or '', '\31')
+    local id = table.remove(parts, 1)
+    local node = store.node(id)
+    local val = live_tree(id)
+    for _, seg in ipairs(parts) do
+        if type(val) ~= 'table' then val = nil break end
+        val = val[seg] ~= nil and val[seg] or val[tonumber(seg)]
+    end
+    return node, val, parts
+end
+
+-- Emit the rows for a data table `val` (litval or live-snapshot shape); shared
+-- by the lit (static literal) and live (runtime) altitudes. `key` is the path
+-- prefix for descendable sub-tables; `live` marks function refs navigable to
+-- their resolved def node (v.id).
+local function render_data(ctx, val, key, live)
     -- array part in order, then map keys sorted
     local keys = {}
     for i in ipairs(val) do keys[#keys + 1] = i end
@@ -548,7 +583,7 @@ local function render_lit(ctx, key)
         if type(v) == 'table' and v.ref then
             row = { label = ('%s → %s'):format(
                     type(k) == 'number' and ('[%d]'):format(k) or k, v.ref),
-                entry = { kind = 'ref', ref = v.ref },
+                entry = { kind = 'ref', ref = v.ref, id = v.id },
                 needle = '%f[%w_]' .. pesc(v.ref) .. '%f[^%w_]' }
         elseif type(v) == 'table' and v.expr then
             -- a non-literal element the extractor couldn't take: honest text
@@ -601,7 +636,55 @@ local function render_lit(ctx, key)
         ctx.marks[#ctx.lines] = marks
         if row.vnum then ctx.vnums[#ctx.lines] = row.vnum end
         ctx.line_lit[#ctx.lines] = row.entry
+        -- a live function ref resolves to its def node: wire hover + focus
+        if live and row.entry.id then ctx.line_node[#ctx.lines] = row.entry.id end
     end
+end
+
+local function render_lit(ctx, key)
+    local node, val, path = lit_walk(key)
+    if not (node and type(val) == 'table') then ctx.lines[1] = '(gone)'; return end
+    local crumb = (node.name or '?')
+        .. (#path > 0 and ('.' .. table.concat(path, '.')) or '')
+    ctx.lines[1] = ('· %s'):format(crumb)
+    ctx.marks[1] = { { 0, 1, 'CartographDim' }, { 1, -1, 'CartographTitle' } }
+    if #path == 0 then -- usage sites one row away, as in the class-table view
+        local nsites = 0
+        for _, u in ipairs(store.var_usedby[node.id] or {}) do nsites = nsites + #u.at end
+        ctx.lines[2] = ('↖ used by (%d)'):format(nsites)
+        ctx.marks[2] = { { 0, -1, 'CartographSection' } }
+        ctx.line_callers[2] = node.id
+    end
+    render_data(ctx, val, key, false)
+end
+
+-- The self oracle's runtime value of a node, rendered like a literal table but
+-- sourced from the live process — a module's concrete exports, a dispatch
+-- table's actual contents, every function resolved to the def it dispatches to.
+local function render_live(ctx, key)
+    local node, val, path = live_walk(key)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    local crumb = (node.name or '?')
+        .. (#path > 0 and ('.' .. table.concat(path, '.')) or '')
+    if val == nil then
+        ctx.lines[1] = ('⚡ %s'):format(crumb)
+        ctx.lines[2] = '   no runtime value — not loaded this session,'
+        ctx.lines[3] = '   or a value the process does not expose (a local)'
+        ctx.marks[1] = { { 0, -1, 'CartographDim' } }
+        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        ctx.marks[3] = { { 0, -1, 'CartographDim' } }
+        return
+    end
+    ctx.lines[1] = ('⚡ %s   live @ now'):format(crumb)
+    ctx.marks[1] = { { 0, 4 + #crumb, 'CartographTitle' },
+        { 4 + #crumb, -1, 'CartographDim' } }
+    if type(val) ~= 'table' then
+        ctx.lines[2] = '  · '
+            .. (type(val) == 'string' and ('%q'):format(val) or tostring(val))
+        ctx.marks[2] = { { 4, -1, 'CartographLit' } }
+        return
+    end
+    render_data(ctx, val, key, true)
 end
 
 -- One function's occurrences of the entity (the sites-view drill-down):
@@ -1098,7 +1181,10 @@ function M.render()
         else
             render_files(ctx)
         end
-    elseif v.level == 'file' then render_file(ctx, v.file)
+    elseif v.level == 'file' then
+        if cur_lens() == 'live' then render_live(ctx, module_id(v.file))
+        else render_file(ctx, v.file) end
+    elseif v.level == 'live' then render_live(ctx, v.live)
     elseif v.level == 'region' then render_region(ctx, v.region)
     elseif v.level == 'var' then render_var(ctx, v.var)
     elseif v.level == 'tbl' then render_tbl(ctx, v.tbl)
@@ -1166,6 +1252,7 @@ function M.show(level, ctx_val)
         elseif level == 'regfor' then M.view.regfor = ctx_val
         elseif level == 'occs' then M.view.occs = ctx_val
         elseif level == 'lit' then M.view.lit = ctx_val
+        elseif level == 'live' then M.view.live = ctx_val
         elseif level == 'block' then M.view.block = ctx_val
         elseif level == 'state' then M.view.state = ctx_val end
     end
@@ -1460,6 +1547,7 @@ function M.attach(win)
         return { level = M.view.level, file = M.view.file, fn = M.view.fn,
             region = M.view.region, var = M.view.var, callers = M.view.callers,
             block = M.view.block, lens = M.view.lens, -- lens rides the trail
+            live = M.view.live,
             tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
             refused = M.view.refused, regfor = M.view.regfor,
             files_mode = M.files_mode,
@@ -1514,6 +1602,7 @@ function M.attach(win)
         M.view.tbl, M.view.occs, M.view.state = loc.tbl, loc.occs, loc.state
         M.view.lit, M.view.refused = loc.lit, loc.refused
         M.view.regfor, M.view.block = loc.regfor, loc.block
+        M.view.live = loc.live
         M.view.lens = loc.lens -- the lens rides the trail
         M._ghost = nil  -- fresh position: no ghosted lens node
         if loc.level == 'refused' then M._refused_call = refused_call_of(loc.refused) end
@@ -1718,6 +1807,19 @@ function M.attach(win)
             enter('fn', sole.to, sole.to)
         end
     end
+    -- a row in a live-value view: a sub-table descends deeper (the live
+    -- altitude), a resolved function ref focuses the def it dispatches to.
+    local function descend_live_row(r)
+        local e = M.line_lit[r]
+        if e and e.kind == 'tbl' then return enter('live', e.key) end
+        if e and e.kind == 'ref' and e.id and store.node(e.id) then
+            store.set_context(nil); return enter('fn', e.id, e.id)
+        end
+        local n = store.node(M.line_node[r])
+        if n and STAGEABLE[n.kind] then
+            store.set_context(nil); enter('fn', n.id, n.id)
+        end
+    end
     local function descend()
         local r = row()
         -- detail lens: an arg/cond row descends into that element's forms (the
@@ -1742,12 +1844,15 @@ function M.attach(win)
                 enter('file', f)
             end
         elseif M.view.level == 'file' then
+            if cur_lens() == 'live' then return descend_live_row(r) end
             local n = store.node(M.line_node[r])
             if n and STAGEABLE[n.kind] then
                 enter('fn', n.id, n.id)
             elseif n and n.kind == 'region' then
                 enter('region', n.id, n.id) -- source pane shows the block's span
             end
+        elseif M.view.level == 'live' then
+            return descend_live_row(r)
         elseif M.view.level == 'ws' then
             local n = store.node(M.line_node[r])
             if n then
@@ -2190,7 +2295,7 @@ function M.attach(win)
     -- its enclosing statement and is remembered in M._ghost, so cycling back to
     -- the lens it lives in restores it exactly.
     local function cycle_lens(step)
-        local set = LENS_SETS[M.view.level]
+        local set = lens_set(M.view.level)
         if not set then return end
         local from = cur_lens()
         -- carry the ghosted origin if we're mid-ghost, else the row we're on

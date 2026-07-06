@@ -393,11 +393,18 @@ callers). Ariadne's thread, in text.
      workers). A session-scoped **sample** — not cached, since the next
      launch may load a different set. `$VIMRUNTIME` is held back as a lazy
      node (huge, rarely what you're exploring; present so edges into it
-     resolve, extracted only when descended). A **self oracle** — the live
-     process answering what IS (which requires resolved to which file,
-     which code actually ran this session, what a dispatch table really
-     holds) the way clangd/lua-ls answer for on-disk projects, but
-     in-process — is planned on top of this base graph.
+     resolve, extracted only when descended). On top of this base graph a
+     **self oracle** — the live process answering what IS, the way
+     clangd/lua-ls answer for on-disk projects, but in-process — adds a
+     **`live` lens** at the file altitude (`<Tab>`): where the static graph
+     shows what a module's source *declares* (a `local M = {} … return M`
+     reads as an EMPTY table), the live lens shows what it *concretely
+     holds right now* — the assembled export table, a dispatch table's
+     actual entries — and resolves every runtime function value back to the
+     def it dispatches to (via `debug.getinfo`), closing a `⊘` frontier the
+     source left dynamic. A live read is stamped `live @ now` (a sample,
+     never cached). Still ahead: a loaded-vs-not diff and a runtime-vs-
+     declared registration check (keymaps / autocmds / commands).
    - **clangd oracle** (C/C++, automatic when a `clangd` binary exists;
      `setup{ clangd = false }` disables): the tree-sitter skeleton stays,
      but a headless clangd session answers `callHierarchy/incomingCalls`
