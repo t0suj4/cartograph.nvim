@@ -177,6 +177,56 @@ test('store.content: cached lines, nil unreadable, re-reads on change', function
     vim.fn.delete(dir, 'rf')
 end)
 
+test('store.facts: content producer emits a synchronous content fact', function ()
+    local store = require 'cartograph.store'
+    local dir = vim.fn.tempname(); vim.fn.mkdir(dir, 'p')
+    local fd = assert(io.open(dir .. '/m.lua', 'w')); fd:write('x = 1\n'); fd:close()
+    store.ingest({ schema = 1, root = dir, provider = 'treesitter',
+        nodes = { { id = 'm.lua::f@0', name = 'f', kind = 'function', file = 'm.lua',
+            order = 0, range = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } } } },
+        edges = {}, calls = {} })
+    local got = {}
+    local unsub = store.facts(store.node('m.lua::f@0'), function (f) got[#got + 1] = f end)
+    eq(1, #got)                        -- delivered SYNCHRONOUSLY (pull-once-sync)
+    eq('content', got[1].kind)
+    eq('present', got[1].state)
+    eq('text/x-lua', got[1].ctype)
+    eq({ 'x = 1' }, got[1].data)
+    eq('treesitter', got[1].provenance.source)
+    unsub(); unsub()                   -- idempotent
+    vim.fn.delete(dir, 'rf')
+end)
+
+test('store.facts: async producer delivers later; unsubscribe cancels it', function ()
+    local store = require 'cartograph.store'
+    local saved = store._fact_producers
+    store._fact_producers = { {
+        kind = 'test',
+        produce = function (_, emit)
+            emit { kind = 'test', state = 'pending' }
+            local cancelled = false
+            vim.defer_fn(function ()
+                if not cancelled then emit { kind = 'test', state = 'present', data = 42 } end
+            end, 20)
+            return function () cancelled = true end
+        end,
+    } }
+    -- no cancel: pending now, present after a tick
+    local a = {}
+    store.facts({ id = 'n', file = 'x' }, function (f) a[#a + 1] = f.state end)
+    eq({ 'pending' }, a)
+    ok(vim.wait(500, function () return #a == 2 end, 5), 'present arrived async')
+    eq({ 'pending', 'present' }, a)
+    -- cancel immediately: the deferred present is dropped
+    local b = {}
+    local unsub = store.facts({ id = 'n', file = 'x' }, function (f) b[#b + 1] = f.state end)
+    eq({ 'pending' }, b)
+    unsub()
+    vim.wait(80)
+    eq({ 'pending' }, b)               -- present never delivered
+    store._fact_producers = saved
+end)
+
 test('coop: run chunks a computation to completion; tick is main-thread-safe', function ()
     local coop = require 'cartograph.coop'
     coop.tick() -- on the main thread this must be a harmless no-op

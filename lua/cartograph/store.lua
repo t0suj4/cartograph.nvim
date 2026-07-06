@@ -824,6 +824,72 @@ function M.content(node)
     return lines or nil
 end
 
+-- content-type of a file, for the (future) surface router — text goes to an
+-- nvim buffer, markdown/html/… to a browser, etc.
+local CTYPE = {
+    lua = 'text/x-lua', c = 'text/x-c', h = 'text/x-c', cpp = 'text/x-c++',
+    hpp = 'text/x-c++', cc = 'text/x-c++', py = 'text/x-python',
+    js = 'text/javascript', ts = 'text/typescript', rb = 'text/x-ruby',
+    php = 'text/x-php', hs = 'text/x-haskell', scm = 'text/x-scheme',
+    go = 'text/x-go', rs = 'text/x-rust', java = 'text/x-java',
+    md = 'text/markdown', html = 'text/html', json = 'application/json',
+}
+local function content_type(file)
+    local ext = file and file:match('%.([%w]+)$')
+    return (ext and CTYPE[ext:lower()]) or 'text/plain'
+end
+
+-- ── the facts observable ─────────────────────────────────────────────────────
+-- store.facts(node, on_fact) is the ONE seam a context surface subscribes to.
+-- A FACT is { kind, ctype?, data, state, provenance } where state ∈ present |
+-- pending | failed | stale. Producers emit facts about a node — content now,
+-- later live value / callers / runtime / etc. — SYNCHRONOUSLY when the answer is
+-- local (the pull-once-synchronous case) or later on the main loop when a
+-- transport has to fetch. pull-once = a producer that emits then stops; push =
+-- one that keeps emitting; cancellation = unsubscribe. One primitive, all cases.
+M._fact_producers = {}
+
+--- Register a fact producer: { kind, produce = fn(node, emit) -> cancel? }.
+--- `produce` calls emit(fact) zero or more times and may return a cancel fn.
+function M.register_fact(p) M._fact_producers[#M._fact_producers + 1] = p end
+
+--- Observe a node's facts. on_fact(fact) fires per fact as it arrives/updates
+--- (inline for synchronous producers; later on the main loop for async ones).
+--- Returns an unsubscribe fn (idempotent) — which IS cancellation: after it, no
+--- producer can emit (a late async emit is dropped), so navigate-away cancels
+--- in-flight work for free.
+function M.facts(node, on_fact)
+    if not (node and on_fact) then return function () end end
+    local cancels, dead = {}, false
+    local function emit(fact) if not dead then on_fact(fact) end end
+    for _, p in ipairs(M._fact_producers) do
+        local ok, cancel = pcall(p.produce, node, emit)
+        if ok and type(cancel) == 'function' then cancels[#cancels + 1] = cancel end
+    end
+    return function ()
+        if dead then return end
+        dead = true
+        for _, c in ipairs(cancels) do pcall(c) end
+    end
+end
+
+-- the content producer: synchronous, disk-backed — the pull-once-sync case
+M.register_fact {
+    kind = 'content',
+    produce = function (node, emit)
+        if not (node and node.file) then return end
+        local lines = M.content(node)
+        emit {
+            kind = 'content',
+            ctype = content_type(node.file),
+            state = lines and 'present' or 'failed',
+            data = lines or nil,
+            provenance = { source = (M.data and M.data.provider) or 'disk',
+                fresh = true },
+        }
+    end,
+}
+
 --- Files whose identifier mention-index contains `name` (the id pass
 --- records each file's identifier set). Empty when the graph predates
 --- the index or the file's language opted out (spec.name_index = false).
