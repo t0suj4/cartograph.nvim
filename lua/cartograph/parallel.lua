@@ -285,7 +285,17 @@ function M.extract(root, o)
     -- streaming; late (many nodes, dear) → the interval auto-widens. A demand
     -- extract (user descended a queued file) still refreshes immediately.
     local COAL_MIN, COAL_MAX, COAL_FRAC = 40, 500, 0.25
+    -- yield to the user: hold the re-ingest for QUIET_MS after any keystroke so
+    -- their input stays instant, but never starve the stream past MAX_HOLD
+    local QUIET_MS, MAX_HOLD = 80, 1200
     local ingest_ms, pending, dirty = 0, false, false
+    local last_input, hold_start = 0, nil
+    -- a keystroke is HUMAN input — vim.on_key fires for typed/fed keys, not for
+    -- our own programmatic buffer edits — so it's a clean "user is busy" signal
+    if o.on_chunk then
+        local okk, id = pcall(vim.on_key, function () last_input = vim.uv.hrtime() end)
+        s.keywatch = okk and id or nil
+    end
     local schedule_progressive
     local function run_progressive()
         if s.phase ~= 1 or not dirty or not o.on_chunk then return end
@@ -294,15 +304,25 @@ function M.extract(root, o)
         o.on_chunk(s.done, s.total, acc)
         ingest_ms = (vim.uv.hrtime() - t0) / 1e6
     end
-    function schedule_progressive()
+    function schedule_progressive(quick)
         if pending or not o.on_chunk then return end
         pending = true
-        local interval = math.max(COAL_MIN,
-            math.min(COAL_MAX, ingest_ms / COAL_FRAC))
+        local interval = quick and QUIET_MS
+            or math.max(COAL_MIN, math.min(COAL_MAX, ingest_ms / COAL_FRAC))
         vim.defer_fn(function ()
             pending = false
-            run_progressive()
-            if dirty then schedule_progressive() end -- more arrived; keep cadence
+            local since_key = (vim.uv.hrtime() - last_input) / 1e6
+            local held = hold_start and ((vim.uv.hrtime() - hold_start) / 1e6) or 0
+            -- a key landed within QUIET_MS and we haven't held too long: defer
+            -- the (main-loop-blocking) re-ingest, re-check soon (quick)
+            local holding = dirty and since_key < QUIET_MS and held < MAX_HOLD
+            if holding then
+                hold_start = hold_start or vim.uv.hrtime()
+            else
+                hold_start = nil
+                run_progressive()
+            end
+            if dirty then schedule_progressive(holding) end
         end, math.floor(interval))
     end
     s.schedule = schedule_progressive
@@ -321,6 +341,7 @@ function M.extract(root, o)
         acc.no_parser = next(acc._no_parser) and vim.tbl_keys(acc._no_parser) or nil
         acc._no_parser = nil
         acc.fn_ranges = nil
+        if s.keywatch then pcall(vim.on_key, nil, s.keywatch) end -- stop listening
         M._session = nil
         o.on_done(acc)
     end
