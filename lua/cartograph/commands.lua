@@ -419,9 +419,10 @@ function M.register()
         if not client then
             return vim.notify('cartograph: ' .. tostring(io), vim.log.levels.WARN)
         end
-        local labels = require('cartograph.panes.symbols').visible_labels(
-            (require('cartograph.config').factorio or {}).max_rows)
-        local ok, delta = pcall(tp.project, io, labels, require('cartograph.config').factorio)
+        local cfg = require('cartograph.config').factorio or {}
+        local view = require('cartograph.panes.symbols').projection(cfg.max_rows)
+        local opts = vim.tbl_extend('force', cfg, { selected = view.selected })
+        local ok, delta = pcall(tp.project, io, view.labels, opts)
         pcall(function () client:close() end)
         if not ok then
             return vim.notify('cartograph: projection failed — ' .. tostring(delta), vim.log.levels.WARN)

@@ -43,11 +43,20 @@ end)
 -- ── layout ──────────────────────────────────────────────────────────────────
 
 test('layout: one row per label, one plate per char, at the pitch', function ()
-    local plates = tp.layout({ 'AB', 'C' }, { anchor = { x = 0, y = 0 }, dx = 3, dy = 3 })
+    local plates = tp.layout({ 'AB', 'C' }, { anchor = { x = 0, y = 0 }, dx = 3, dy = 3, material = 'gold' })
     eq(3, #plates)
-    eq({ x = 0, y = 0, v = 3, row = 1, col = 1 }, plates[1]) -- A
-    eq({ x = 3, y = 0, v = 4, row = 1, col = 2 }, plates[2]) -- B
-    eq({ x = 0, y = 3, v = 5, row = 2, col = 1 }, plates[3]) -- C (row 2)
+    eq({ x = 0, y = 0, v = 3, mat = 'gold', row = 1, col = 1 }, plates[1]) -- A
+    eq({ x = 3, y = 0, v = 4, mat = 'gold', row = 1, col = 2 }, plates[2]) -- B
+    eq({ x = 0, y = 3, v = 5, mat = 'gold', row = 2, col = 1 }, plates[3]) -- C (row 2)
+end)
+
+test('layout: the selected row renders in the highlight material', function ()
+    local plates = tp.layout({ 'AB', 'CD' },
+        { anchor = { x = 0, y = 0 }, material = 'gold', highlight = 'uranium', selected = 2 })
+    eq('gold', plates[1].mat)    -- row 1, not selected
+    eq('gold', plates[2].mat)
+    eq('uranium', plates[3].mat) -- row 2, selected -> highlight
+    eq('uranium', plates[4].mat)
 end)
 
 test('layout: over-long labels truncate to max_cols', function ()
@@ -89,6 +98,43 @@ test('reconcile: a changed glyph is a revary in place (keeps unit_number)', func
     eq(0, #d.create)
     eq(0, #d.destroy)
     eq({ { x = 0, y = 0, v = 6, u = 42 } }, d.revary)
+end)
+
+test('reconcile: a material change is a replace (destroy + create, not revary)', function ()
+    -- same glyph+cell, but the row became the highlight: gold -> uranium.
+    -- material is a different entity, so it can't revary in place.
+    local want = { { x = 0, y = 0, v = 5, mat = 'uranium' } }
+    local world = { { x = 0, y = 0, v = 5, u = 9, mat = 'gold' } }
+    local d = tp.reconcile(want, world)
+    eq(0, #d.revary)
+    eq({ { x = 0, y = 0, u = 9 } }, d.destroy)
+    eq({ { x = 0, y = 0, v = 5, mat = 'uranium' } }, d.create)
+end)
+
+test('reconcile: same material + same glyph stays a no-op', function ()
+    local want = { { x = 0, y = 0, v = 5, mat = 'gold' } }
+    local world = { { x = 0, y = 0, v = 5, u = 9, mat = 'gold' } }
+    ok(tp.is_noop(tp.reconcile(want, world)), 'no material/glyph change writes nothing')
+end)
+
+test('project: moving the highlight re-materials only that row', function ()
+    -- world: two gold rows; new view selects row 2 -> uranium
+    local world = {
+        { x = 0, y = 0, v = 3, u = 1, mat = 'gold' }, -- A row 1
+        { x = 0, y = 3, v = 4, u = 2, mat = 'gold' }, -- B row 2
+    }
+    local applied
+    local io = function (lua)
+        if lua:find('find_entities_filtered') and not lua:find('create_entity') then return world end
+        applied = lua; return 'ok'
+    end
+    local d = tp.project(io, { 'A', 'B' },
+        { anchor = { x = 0, y = 0 }, material = 'gold', highlight = 'uranium', selected = 2 })
+    eq(0, #d.revary)                      -- row 1 unchanged
+    eq(1, #d.destroy)                     -- the old gold B
+    eq(1, #d.create)                      -- the new uranium B
+    eq('uranium', d.create[1].mat)
+    ok(applied:find('textplate%-large%-uranium'), 'the create builds a uranium plate')
 end)
 
 test('reconcile: a dropped cell is a destroy by unit_number', function ()

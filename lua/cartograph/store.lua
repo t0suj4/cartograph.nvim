@@ -703,7 +703,16 @@ end
 -- entry it's the caller's body, and `ranges` are the call site(s) inside it.
 M._ctx_subs = {}
 ---@param fn fun(ctx: {node:string, ranges:table?}?)
-function M.on_context(fn) table.insert(M._ctx_subs, fn) end
+--- Subscribe to context (hover) changes. Returns an unsubscribe function,
+--- like M.on_redraw / M.facts — a live projection follows the cursor with it.
+function M.on_context(fn)
+    table.insert(M._ctx_subs, fn)
+    return function ()
+        for i, f in ipairs(M._ctx_subs) do
+            if f == fn then table.remove(M._ctx_subs, i); return end
+        end
+    end
+end
 ---@param ctx {node:string, ranges:table?}?
 function M.set_context(ctx)
     M.context = ctx

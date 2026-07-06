@@ -1296,25 +1296,34 @@ function M.render()
     M.paint(store.focused)
 end
 
---- The node names currently on screen, in row order — what the view SHOWS.
---- The projection surface ([[textplates]]) renders exactly this list, so the
---- world tracks whatever the browser is looking at. Module/file names project
---- as their basename (STORE, not lua/cartograph/store.lua); `limit` caps rows.
-function M.visible_labels(limit)
-    local rows, out = {}, {}
+--- What the view SHOWS, for the projection surface ([[textplates]]): the node
+--- names currently on screen in row order, plus which one the cursor is on.
+--- The world renders exactly this list (so it tracks what the browser looks
+--- at), with the selected row in a highlight material. Module/file names
+--- project as their basename (STORE, not lua/cartograph/store.lua); `limit`
+--- caps rows. Returns { labels = {...}, selected = index|nil }.
+function M.projection(limit)
+    local rows, labels, selected = {}, {}, nil
     for row in pairs(M.line_node or {}) do rows[#rows + 1] = row end
     table.sort(rows)
+    local cursor = M.win and vim.api.nvim_win_is_valid(M.win)
+        and vim.api.nvim_win_get_cursor(M.win)[1] or nil
     for _, row in ipairs(rows) do
         local n = store.node(M.line_node[row])
         if n and n.name then
             local label = n.name
             if n.kind == 'module' then label = label:match('[^/]+$') or label end
-            out[#out + 1] = label
-            if limit and #out >= limit then break end
+            labels[#labels + 1] = label
+            if cursor and row == cursor then selected = #labels end
+            if limit and #labels >= limit then break end
         end
     end
-    return out
+    return { labels = labels, selected = selected }
 end
+
+--- Just the labels (the projection without the selection). Kept for callers
+--- that don't care which row is current.
+function M.visible_labels(limit) return M.projection(limit).labels end
 
 --- Switch level (re-rendering) and land the cursor on the first useful row.
 function M.show(level, ctx_val)
