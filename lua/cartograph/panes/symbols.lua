@@ -1401,6 +1401,44 @@ end
 --- that don't care which row is current.
 function M.visible_labels(limit) return M.projection(limit).labels end
 
+--- The node id under the cursor in the browser window, or nil. Lets commands
+--- act on the current row (the working-set / cone ops are command-invocable so
+--- they need no default key — see [[cartograph-terminology]], graph-ops rule).
+function M.cursor_id()
+    if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return nil end
+    return M.line_node and M.line_node[vim.api.nvim_win_get_cursor(M.win)[1]] or nil
+end
+
+--- Toggle the cursor row in the working set (:CartographMark; the `mark` key
+--- calls this when the user binds one).
+function M.ws_toggle_cursor()
+    local id = M.cursor_id()
+    if not (id and store.node(id)) then
+        return vim.notify('cartograph: no symbol on this row', vim.log.levels.INFO)
+    end
+    store.ws_toggle(id)
+    local loc = store.loc_provider and store.loc_provider.get()
+    M.render()
+    if loc and store.loc_provider then store.loc_provider.set(loc) end
+end
+
+--- Toggle a reachability cone on the cursor node (:CartographCone in|out).
+function M.cone_cursor(dir)
+    local id = M.cursor_id()
+    local n = id and store.node(id)
+    if not n then return vim.notify('cartograph: no symbol on this row', vim.log.levels.INFO) end
+    local count = store.set_cone(id, dir)
+    M.paint_cone()
+    if count == 0 and not store.cone then
+        vim.notify('cartograph: cone cleared', vim.log.levels.INFO)
+    else
+        local go = require('cartograph.config').keys.descend or 'l'
+        vim.notify(('cartograph: cone — %s %s (%d node%s) · follow the glow with %s')
+            :format(dir == 'in' and 'what reaches' or 'what', n.name,
+                count, count == 1 and '' or 's', go), vim.log.levels.INFO)
+    end
+end
+
 -- ── the view observable ─────────────────────────────────────────────────────
 -- THE seam a SURFACE subscribes to (the factorio projection, a web canvas, a
 -- 2D map): the view is observable. Instead of a surface polling
@@ -2212,42 +2250,54 @@ function M.attach(win)
         end
         ws_goto(list[((idx - 1 + dir) % #list) + 1])
     end
-    vim.keymap.set('n', keys.mark, function ()
-        local id = M.line_node[row()]
-        if id and store.node(id) then
-            store.ws_toggle(id)
-            local loc = view_loc()
-            M.render()
-            restore_loc(loc)
-        end
-    end, { buffer = M.buf, desc = 'cartograph: toggle working set' })
-    vim.keymap.set('n', keys.set_view, function ()
-        enter('ws')
-        local r = store.workset.last and M.node_line[store.workset.last]
-        if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
-    end, { buffer = M.buf, desc = 'cartograph: working set view' })
-    vim.keymap.set('n', keys.set_next, function () ws_cycle(1) end,
-        { buffer = M.buf, desc = 'cartograph: next working-set member' })
-    vim.keymap.set('n', keys.set_prev, function () ws_cycle(-1) end,
-        { buffer = M.buf, desc = 'cartograph: previous working-set member' })
-    local function cone(dir)
-        local id = M.line_node[row()]
-        local n = store.node(id)
-        if not n then return vim.notify('cartograph: no symbol on this row', vim.log.levels.INFO) end
-        local count = store.set_cone(id, dir)
-        M.paint_cone() -- glow now (no re-render; the cursor stays put)
-        if count == 0 and not store.cone then
-            vim.notify('cartograph: cone cleared', vim.log.levels.INFO)
-        else
-            vim.notify(('cartograph: cone — %s %s (%d node%s) · follow the glow with %s')
-                :format(dir == 'in' and 'what reaches' or 'what', n.name,
-                    count, count == 1 and '' or 's', keys.descend), vim.log.levels.INFO)
-        end
+    -- node MARKS (vim-mark idiom, node-keyed): m{a-z} sets, `{a-z} jumps.
+    if keys.set_mark then
+        vim.keymap.set('n', keys.set_mark, function ()
+            local ch = vim.fn.getcharstr()
+            local id = M.line_node[row()]
+            if id and ch:match('^%a$') then
+                store.set_mark(ch, id)
+                vim.notify('cartograph: mark ' .. ch .. ' → '
+                    .. ((store.node(id) or {}).name or id), vim.log.levels.INFO)
+            end
+        end, { buffer = M.buf, desc = 'cartograph: set a node mark (m{a-z})' })
     end
-    vim.keymap.set('n', keys.cone_in, function () cone('in') end,
-        { buffer = M.buf, desc = 'cartograph: cone — ancestors (what reaches this)' })
-    vim.keymap.set('n', keys.cone_out, function () cone('out') end,
-        { buffer = M.buf, desc = 'cartograph: cone — descendants (what this reaches)' })
+    if keys.goto_mark then
+        vim.keymap.set('n', keys.goto_mark, function ()
+            local id = store.get_mark(vim.fn.getcharstr())
+            if id then store.pivot(id) -- records the jumplist / focus history
+            else vim.notify('cartograph: no such mark', vim.log.levels.WARN) end
+        end, { buffer = M.buf, desc = 'cartograph: jump to a node mark (`{a-z})' })
+    end
+    -- working set + cones: graph-ops with no vim idiom — UNBOUND by default
+    -- (commands + your own leader keys). See [[cartograph-terminology]].
+    if keys.mark then
+        vim.keymap.set('n', keys.mark, M.ws_toggle_cursor,
+            { buffer = M.buf, desc = 'cartograph: toggle working set' })
+    end
+    if keys.set_view then
+        vim.keymap.set('n', keys.set_view, function ()
+            enter('ws')
+            local r = store.workset.last and M.node_line[store.workset.last]
+            if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
+        end, { buffer = M.buf, desc = 'cartograph: working set view' })
+    end
+    if keys.set_next then
+        vim.keymap.set('n', keys.set_next, function () ws_cycle(1) end,
+            { buffer = M.buf, desc = 'cartograph: next working-set member' })
+    end
+    if keys.set_prev then
+        vim.keymap.set('n', keys.set_prev, function () ws_cycle(-1) end,
+            { buffer = M.buf, desc = 'cartograph: previous working-set member' })
+    end
+    if keys.cone_in then
+        vim.keymap.set('n', keys.cone_in, function () M.cone_cursor('in') end,
+            { buffer = M.buf, desc = 'cartograph: cone — ancestors' })
+    end
+    if keys.cone_out then
+        vim.keymap.set('n', keys.cone_out, function () M.cone_cursor('out') end,
+            { buffer = M.buf, desc = 'cartograph: cone — descendants' })
+    end
 
     vim.keymap.set('n', keys.descend, descend,
         { buffer = M.buf, desc = 'cartograph: descend (into file / into function)' })

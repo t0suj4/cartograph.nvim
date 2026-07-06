@@ -567,6 +567,23 @@ function M.register()
         scratch(lines)
     end, { desc = 'cartograph: detect the tree structures (call-dominator + subsystem) hiding in the graph' })
 
+    -- ── graph-ops with no vim idiom: commands, bind your own leader keys
+    cmd('CartographMark', function ()
+        local store = live() if not store then return end
+        require('cartograph.panes.symbols').ws_toggle_cursor()
+    end, { desc = 'cartograph: toggle the cursor row in the working set' })
+
+    cmd('CartographWorkingSet', function ()
+        local store = live() if not store then return end
+        require('cartograph.panes.symbols').show('ws')
+    end, { desc = 'cartograph: open the working-set view' })
+
+    cmd('CartographCone', function (o)
+        local store = live() if not store then return end
+        require('cartograph.panes.symbols').cone_cursor(o.args == 'out' and 'out' or 'in')
+    end, { nargs = '?', complete = function () return { 'in', 'out' } end,
+        desc = 'cartograph: reachability cone on the cursor node (in = ancestors, out = descendants)' })
+
     -- ── the workspace: ad-hoc Lua against the graph (Smalltalk doit) ─
     cmd('CartographEval', function (o)
         require('cartograph.workspace').run(o.args)

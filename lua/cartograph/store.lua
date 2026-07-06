@@ -99,6 +99,7 @@ local function reset_indexes()
     M.uses, M.usedby, M.occ, M.edge_inferred = {}, {}, {}, {}
     M.cone, M._cone_set, M._cone_files = nil, nil, nil -- ids churn on re-ingest
     M._territory = nil
+    M.marks = {} -- node marks (char -> id); ids churn, so reset with the graph
     M.var_usedby, M.var_uses = {}, {}
     M.imports_in, M.imports_out = {}, {}
     M.reg_by, M.registers = {}, {}
@@ -718,6 +719,16 @@ end
 
 --- Is `id` inside the active cone (excludes the anchor itself)?
 function M.in_cone(id) return M._cone_set ~= nil and M._cone_set[id] == true end
+
+-- ── node marks (vim-mark idiom, keyed by node not line) ────────────────────
+M.marks = {}
+--- Remember `id` under mark `ch` (m{a-z}).
+function M.set_mark(ch, id) M.marks[ch] = id end
+--- The node id marked `ch`, if it still exists (`{a-z} jumps to it).
+function M.get_mark(ch)
+    local id = M.marks[ch]
+    return (id and M.by_id[id]) and id or nil
+end
 
 -- ── territorial decomposition (which entry points reach each node) ──────────
 M._territory = nil

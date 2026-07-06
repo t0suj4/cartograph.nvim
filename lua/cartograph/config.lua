@@ -125,18 +125,25 @@ M.keys = {
     cut_visual = 'd',
     paste      = 'p',
     unstage    = 'u',
-    -- working set (symbols pane): mark what you're working on
-    mark       = 'm',       -- toggle the row's symbol in the working set
-    set_view   = 'M',       -- the working-set altitude (cursor on the
-                            -- last-visited member: the way back from a dive)
-    set_next   = ']w',      -- cycle members (conscious pivots: <C-o> undoes)
-    set_prev   = '[w',
-    -- reachability cone (symbols pane): mark a node, glow the path to/from it.
-    -- PROVISIONAL keys — leader-namespaced until the vim-idiom sweep, which
-    -- maps these onto the search-highlight family (cone_in -> '#' ancestors,
-    -- cone_out -> '*' descendants; clears like :noh). Re-press to toggle off.
-    cone_in    = '<leader>c', -- ancestors: what REACHES this ("the path toward it")
-    cone_out   = '<leader>C', -- descendants: what this REACHES (blast radius)
+    -- node MARKS (symbols pane): the ONE working-set-adjacent thing that IS a
+    -- vim idiom — `m{a-z}` remembers the node under the cursor, `` `{a-z} ``
+    -- jumps (pivots) to it and records the jumplist, exactly like vim marks
+    -- but keyed by NODE, not line. Meaning matches vim, so it keeps the key.
+    set_mark   = 'm',
+    goto_mark  = '`',
+    -- GRAPH OPERATIONS with NO vim idiom (a reachability cone, a curated
+    -- working-set bag) do NOT squat on a vim key. They ship as COMMANDS
+    -- (:CartographMark / :CartographWorkingSet / :CartographCone) and are
+    -- UNBOUND by default so we never clobber vim (`m` marks, `M` middle-of-
+    -- screen). Bind your own leader keys — e.g.:
+    --   setup{ keys = { mark = ',m', set_view = ',M', set_next = ']w',
+    --     set_prev = '[w', cone_in = ',c', cone_out = ',C' } }
+    mark       = false,     -- toggle the cursor row in the working set
+    set_view   = false,     -- the working-set altitude
+    set_next   = false,     -- cycle working-set members
+    set_prev   = false,
+    cone_in    = false,     -- cone: ancestors (what REACHES this)
+    cone_out   = false,     -- cone: descendants (what this REACHES)
 }
 
 -- Entry points: files EXPECTED to have no inbound require (a runtime loads
