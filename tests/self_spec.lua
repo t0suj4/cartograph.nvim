@@ -137,6 +137,35 @@ test('self oracle: resolve-requires — the loader builds the import graph', fun
     vim.fn.delete(dir, 'rf')
 end)
 
+test('self oracle: registrations — declared commands/keymaps vs live', function ()
+    local oracle = require 'cartograph.self_oracle'
+    vim.api.nvim_create_user_command('FooRegTest', function () end, {})
+    vim.keymap.set('n', 'gzptest', '<nop>')
+    local mk = function (name, arg1, arg2)
+        return { full = 'vim.api.' .. name, callee = name,
+            args = { arg1, arg2 or '' }, file = 'x.lua' }
+    end
+    local data = { calls = {
+        mk('nvim_create_user_command', 'FooRegTest'),
+        mk('nvim_create_user_command', 'BarMissingTest'),
+        { full = 'vim.keymap.set', callee = 'keymap.set',
+            args = { 'n', 'gzptest' }, file = 'x.lua' },
+        { full = 'vim.keymap.set', callee = 'keymap.set',
+            args = { 'n', 'gzqmissing' }, file = 'x.lua' },
+    } }
+    local lines, diff = oracle.registrations(data)
+    ok(type(lines) == 'table' and #lines > 0, 'produces a report')
+    eq(1, diff.commands.ok)                          -- FooRegTest is live
+    eq(1, #diff.commands.missing)
+    eq('BarMissingTest', diff.commands.missing[1].name)
+    eq(1, diff.keymaps.ok)                            -- gzptest is mapped
+    eq(1, #diff.keymaps.missing)                      -- gzqmissing is not
+    eq('gzqmissing', diff.keymaps.missing[1].lhs)
+
+    vim.api.nvim_del_user_command('FooRegTest')
+    pcall(vim.keymap.del, 'n', 'gzptest')
+end)
+
 -- invoke the callback of a buffer-local mapping by its lhs
 local function press(buf, lhs)
     for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do

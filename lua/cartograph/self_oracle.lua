@@ -247,6 +247,80 @@ function M.live_value(node, data)
     return M.to_data(val, data), name
 end
 
+--- normalize a keymap lhs for comparison: expand leader, resolve termcodes
+--- (so a declared `<leader>x` / `<CR>` matches what nvim_get_keymap reports).
+local function norm_lhs(lhs)
+    local ml = vim.g.mapleader or '\\'
+    local mll = vim.g.maplocalleader or '\\'
+    lhs = lhs:gsub('<[lL]eader>', ml):gsub('<[lL]ocal[lL]eader>', mll)
+    local ok, out = pcall(vim.api.nvim_replace_termcodes, lhs, true, true, true)
+    return ok and out or lhs
+end
+
+--- Registrations: what the source DECLARES (user commands, keymaps — the
+--- literal ones; dynamic names computed at register time are invisible, and
+--- honestly skipped) vs what this instance ACTUALLY registered. Returns report
+--- lines + a structured diff. `missing` = declared but not live (its module
+--- never ran, or a guard fired) — the actionable finding.
+function M.registrations(data)
+    local cmds, maps = {}, {}
+    for _, c in ipairs(data.calls or {}) do
+        local n = c.full or c.callee or ''
+        local a = c.args or {}
+        if n:find('nvim_create_user_command', 1, true)
+            and type(a[1]) == 'string' and a[1] ~= '' then
+            cmds[a[1]] = cmds[a[1]] or c.file
+        elseif n:find('keymap.set', 1, true)
+            and type(a[2]) == 'string' and a[2] ~= '' then
+            local mode = (type(a[1]) == 'string' and a[1] ~= '') and a[1] or 'n'
+            maps[mode .. '\31' .. norm_lhs(a[2])] = { lhs = a[2], mode = mode, file = c.file }
+        end
+    end
+    local live_cmd = vim.api.nvim_get_commands({})
+    local c_ok, c_miss = 0, {}
+    for name, file in pairs(cmds) do
+        if live_cmd[name] then c_ok = c_ok + 1
+        else c_miss[#c_miss + 1] = { name = name, file = file } end
+    end
+    local live_map = {}
+    local function ensure(mode)
+        if live_map[mode] then return end
+        local s = {}
+        for _, m in ipairs(vim.api.nvim_get_keymap(mode)) do
+            local ok, k = pcall(vim.api.nvim_replace_termcodes, m.lhs, true, true, true)
+            s[ok and k or m.lhs] = true
+        end
+        live_map[mode] = s
+    end
+    local m_ok, m_miss = 0, {}
+    for key, d in pairs(maps) do
+        ensure(d.mode)
+        if live_map[d.mode][key:match('\31(.*)$')] then m_ok = m_ok + 1
+        else m_miss[#m_miss + 1] = d end
+    end
+    table.sort(c_miss, function (a, b) return a.name < b.name end)
+    table.sort(m_miss, function (a, b) return a.lhs < b.lhs end)
+
+    local lines = { ('registrations — declared (literal) vs live @ %s')
+        :format(os.date('%H:%M:%S')) }
+    lines[#lines + 1] = ('user commands: %d declared, %d registered ✓, %d missing')
+        :format(c_ok + #c_miss, c_ok, #c_miss)
+    for _, m in ipairs(c_miss) do
+        lines[#lines + 1] = ('  ✗ :%s   %s'):format(m.name, m.file)
+    end
+    lines[#lines + 1] = ('keymaps: %d declared (literal), %d in the global table ✓,'
+        .. ' %d not global'):format(m_ok + #m_miss, m_ok, #m_miss)
+    for _, d in ipairs(m_miss) do
+        lines[#lines + 1] = ('  ? %s %s   %s'):format(d.mode, d.lhs, d.file)
+    end
+    lines[#lines + 1] = '(✗ = declared but not registered now — its module never ran,'
+    lines[#lines + 1] = ' or a guard fired. ? keymaps may be buffer-local or dynamic —'
+    lines[#lines + 1] = ' the global table can\'t see those. Dynamic (computed) names are'
+    lines[#lines + 1] = ' not checked at all.)'
+    return lines, { commands = { ok = c_ok, missing = c_miss },
+        keymaps = { ok = m_ok, missing = m_miss } }
+end
+
 --- Cheap gate: does this node have a live value worth offering? (Avoids
 --- building the full tree just to decide whether to show the lens.)
 function M.observable(node, data)

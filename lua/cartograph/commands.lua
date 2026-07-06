@@ -274,6 +274,16 @@ function M.register()
         scratch(lines)
     end, { desc = 'cartograph: check the RUNNING system against the static model (MCP oracle)' })
 
+    -- ── the self oracle: declared vs actually-registered ────────────
+    cmd('CartographSelf', function ()
+        local store = live() if not store then return end
+        if store.data.provider ~= 'self' then
+            return vim.notify('cartograph: :CartographSelf needs a self:// graph'
+                .. ' — open :Cartograph self://loaded', vim.log.levels.WARN)
+        end
+        scratch(require('cartograph.self_oracle').registrations(store.data))
+    end, { desc = 'cartograph: declared vs live registrations (self:// oracle)' })
+
     -- ── why did registry discovery (not) find a verb? ───────────────
     cmd('CartographDiscover', function (o)
         local store = live() if not store then return end

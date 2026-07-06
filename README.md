@@ -411,8 +411,11 @@ callers). Ariadne's thread, in text.
      `require` in a self graph (its file keys are plugin-labelled), but the
      loader knows exactly which file each module is — so every
      `require(<literal>)` the loader resolved becomes a PROVEN import edge
-     (19 → 85 on cartograph's own tree). Still ahead: a runtime-vs-declared
-     registration check (keymaps / autocmds / commands).
+     (19 → 85 on cartograph's own tree). And `:CartographSelf` reports
+     **declared-vs-registered**: the user commands and keymaps the source
+     spells out (literal names — dynamic ones honestly skipped) diffed
+     against what this instance actually registered, flagging a command
+     declared but missing now (its module never ran, or a guard fired).
    - **clangd oracle** (C/C++, automatic when a `clangd` binary exists;
      `setup{ clangd = false }` disables): the tree-sitter skeleton stays,
      but a headless clangd session answers `callHierarchy/incomingCalls`
