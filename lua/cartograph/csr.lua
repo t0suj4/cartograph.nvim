@@ -32,6 +32,7 @@ function M.interner()
             return i
         end,
         name = function (i) return list[i + 1] end,
+        get = function (key) return map[key] end, -- non-mutating: id or nil
         count = function () return n end,
         list = list,
     }
