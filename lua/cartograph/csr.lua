@@ -4,9 +4,13 @@
 --   * ffi     — LuaJIT uint32 arrays (fastest; nvim always has it)
 --   * string  — packed little-endian bytes (any Lua 5.1+, immutable, and the
 --               SERIALIZATION-NATIVE form: the bytes ARE the on-disk/wire bytes)
--- Build is an O(n+m) counting sort. Measured (see the design memo): ~5× smaller,
--- ~2× faster to query, ~37× faster to build than the table-of-arrays it
--- replaces; the string backend matches ffi on size at ~13% slower query.
+-- Build is an O(n+m) counting sort. Measured (see the design memo): 6.3–6.7
+-- B/edge (exact; string==ffi), 3.7–5.4× smaller than the table-of-arrays it
+-- replaces (widening with repo size / memory pressure), ~37× faster to build.
+-- Neighbor access, two poles (benchmarked): FAST `span`+`at` (~1.05× raw cdata,
+-- no alloc) for traversals; CONVENIENCE `neighbors()` (allocates, ~11×) for
+-- one-offs. (The callback `each` was dropped — slower than span, less handy
+-- than neighbors.)
 -- This is the "u32 backend behind an accessor" first step — pure, zero consumer
 -- commitment; everything (fold columns, sharding, merge) layers on it.
 
@@ -60,16 +64,18 @@ CSR.__index = CSR
 -- out-degree of `node` (0-based)
 function CSR:degree(node) return self._go(node + 1) - self._go(node) end
 
--- call fn(neighbor) for each out-neighbor of `node` — allocation-free hot path
-function CSR:each(node, fn)
-    local gn = self._gn
-    for j = self._go(node), self._go(node + 1) - 1 do fn(gn(j)) end
-end
+-- FAST PATH: the [lo, hi) bounds of `node`'s neighbor slice in the flat array;
+-- read values through the `at` FIELD-closure (not a method → no dispatch):
+--   local lo, hi = g:span(n); for j = lo, hi - 1 do use(g.at(j)) end
+-- Measured ~1.05× raw cdata, backend-agnostic, zero allocation. Use in
+-- traversals/reducers. (`g.at` is set per-object in freeze/unpack.)
+function CSR:span(node) return self._go(node), self._go(node + 1) end
 
--- materialized neighbor list (convenience; allocates a table)
+-- CONVENIENCE: a materialized neighbor list. ALLOCATES a table per call
+-- (~11× the span fast path, measured) — for one-off queries, NEVER hot loops.
 function CSR:neighbors(node)
-    local t, k, gn = {}, 0, self._gn
-    for j = self._go(node), self._go(node + 1) - 1 do k = k + 1; t[k] = gn(j) end
+    local t, k, at = {}, 0, self.at
+    for j = self._go(node), self._go(node + 1) - 1 do k = k + 1; t[k] = at(j) end
     return t
 end
 
@@ -82,7 +88,7 @@ function CSR:pack()
     if self.backend == 'string' then return self._off_s, self._nbr_s end
     local off, nbr = {}, {}
     for i = 0, self.n do off[i] = self._go(i) end
-    for j = 0, self.m - 1 do nbr[j] = self._gn(j) end
+    for j = 0, self.m - 1 do nbr[j] = self.at(j) end
     return pack_u32(off, self.n + 1), pack_u32(nbr, self.m)
 end
 
@@ -96,11 +102,11 @@ local function freeze(off, nbr, n, m, backend)
         for j = 0, m - 1 do b[j] = nbr[j] end
         self._off, self._nbr = o, b -- keep cdata alive
         self._go = function (i) return o[i] end
-        self._gn = function (j) return b[j] end
+        self.at = function (j) return b[j] end
     elseif backend == 'string' then
         local os, bs = pack_u32(off, n + 1), pack_u32(nbr, m)
         self._off_s, self._nbr_s = os, bs
-        self._go, self._gn = string_getter(os), string_getter(bs)
+        self._go, self.at = string_getter(os), string_getter(bs)
     else
         error('csr: unknown backend ' .. tostring(backend))
     end
@@ -139,7 +145,7 @@ end
 function M.unpack(off_bytes, nbr_bytes, n, m)
     local self = setmetatable({ n = n, m = m, backend = 'string' }, CSR)
     self._off_s, self._nbr_s = off_bytes, nbr_bytes
-    self._go, self._gn = string_getter(off_bytes), string_getter(nbr_bytes)
+    self._go, self.at = string_getter(off_bytes), string_getter(nbr_bytes)
     return self
 end
 

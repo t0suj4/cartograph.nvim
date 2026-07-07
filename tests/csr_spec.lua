@@ -23,12 +23,16 @@ test('csr: degree and neighbors', function ()
     eq(0, #g:neighbors(3))
 end)
 
-test('csr: each is complete and allocation-free', function ()
+test('csr: span + at is the fast neighbor path', function ()
     local g = sample()
-    local sum, count = 0, 0
-    g:each(0, function (v) sum = sum + v; count = count + 1 end)
-    eq(2, count)
-    eq(3, sum) -- 1 + 2
+    local lo, hi = g:span(0)
+    eq(2, hi - lo)          -- degree of node 0
+    eq(g:degree(0), hi - lo)
+    local sum = 0
+    for j = lo, hi - 1 do sum = sum + g.at(j) end
+    eq(3, sum)              -- 1 + 2
+    local a, b = g:span(3)  -- isolated node: empty span
+    eq(a, b)
 end)
 
 test('csr: bytes = (n+1 + m) * 4', function ()
