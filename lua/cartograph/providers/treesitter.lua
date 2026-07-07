@@ -34,6 +34,106 @@ local function refusal(rule, list)
     return { rule = rule, cands = ids, n = #list }
 end
 
+-- Java receiver typing. Unlike php's `$var` (untyped), Java DECLARES the type
+-- of every receiver lexically, so a call's receiver often resolves to a
+-- concrete class by a bounded lexical lookup — no flow analysis, no server.
+-- The base name of a type node: `List<Pet>` -> List, `a.b.Foo` -> Foo.
+local function java_base_type(tnode, src)
+    if not tnode then return nil end
+    local t = tnode:type()
+    if t == 'type_identifier' then
+        return vim.treesitter.get_node_text(tnode, src)
+    elseif t == 'generic_type' then
+        local first = tnode:child(0) -- the erased base precedes type_arguments
+        if first and first:type() == 'type_identifier' then
+            return vim.treesitter.get_node_text(first, src)
+        end
+    elseif t == 'scoped_type_identifier' then
+        return vim.treesitter.get_node_text(tnode, src):match('([%w_]+)%s*$')
+    end
+    return nil
+end
+
+-- JDK types whose methods are stdlib vocabulary, not project defs: a
+-- receiver of this type must NOT be qualified (Optional::get would tail-match
+-- a project get()). Best-effort — the common collection/util/lang surface.
+local JAVA_JDK_TYPES = {}
+for _, t in ipairs({ 'String', 'StringBuilder', 'StringBuffer', 'CharSequence',
+    'Object', 'Class', 'Integer', 'Long', 'Double', 'Float', 'Boolean', 'Byte',
+    'Short', 'Character', 'Number', 'Math', 'System', 'Thread', 'Optional',
+    'List', 'ArrayList', 'LinkedList', 'Map', 'HashMap', 'TreeMap',
+    'LinkedHashMap', 'Set', 'HashSet', 'TreeSet', 'LinkedHashSet', 'Collection',
+    'Collections', 'Arrays', 'Iterator', 'Iterable', 'Stream', 'Queue',
+    'Deque', 'Stack', 'File', 'Path', 'Paths', 'Files', 'Date', 'Calendar',
+    'LocalDate', 'LocalDateTime', 'Instant', 'Duration', 'BigDecimal',
+    'BigInteger', 'Pattern', 'Matcher', 'Objects', 'Comparator' }) do
+    JAVA_JDK_TYPES[t] = true
+end
+
+-- the enclosing class/interface/enum/record: its name + declaration node
+local function java_enclosing_class(node, src)
+    local p = node:parent()
+    while p do
+        local t = p:type()
+        if t == 'class_declaration' or t == 'interface_declaration'
+            or t == 'enum_declaration' or t == 'record_declaration' then
+            local cn = p:field('name')[1]
+            return cn and vim.treesitter.get_node_text(cn, src) or nil, p
+        end
+        p = p:parent()
+    end
+end
+
+-- the declared type name of a simple variable `ident` visible at `from`:
+-- scan enclosing scopes outward — a block's preceding local declarations and
+-- the enclosing method's params (inner shadows outer), then class fields.
+-- `fields_only` restricts to class fields (for a `this.field` receiver).
+local function java_var_type(ident, from, src, fields_only)
+    local fromrow = select(1, from:range())
+    local function match_declarator(container, tnode)
+        for c in container:iter_children() do
+            if c:type() == 'variable_declarator' then
+                local nm = c:field('name')[1]
+                if nm and vim.treesitter.get_node_text(nm, src) == ident then
+                    return java_base_type(tnode, src)
+                end
+            end
+        end
+    end
+    local n = from:parent()
+    while n do
+        local t = n:type()
+        if not fields_only and (t == 'block' or t == 'constructor_body') then
+            for c in n:iter_children() do
+                if c:type() == 'local_variable_declaration'
+                    and select(1, c:range()) <= fromrow then
+                    local hit = match_declarator(c, c:field('type')[1])
+                    if hit then return hit end
+                end
+            end
+        elseif not fields_only and (t == 'method_declaration'
+            or t == 'constructor_declaration' or t == 'lambda_expression') then
+            local ps = n:field('parameters')[1]
+            for c in (ps and ps:iter_children() or function () end) do
+                if c:type() == 'formal_parameter' or c:type() == 'spread_parameter' then
+                    local nm = c:field('name')[1]
+                    if nm and vim.treesitter.get_node_text(nm, src) == ident then
+                        return java_base_type(c:field('type')[1], src)
+                    end
+                end
+            end
+        elseif t == 'class_body' or t == 'enum_body' then
+            for c in n:iter_children() do
+                if c:type() == 'field_declaration' then
+                    local hit = match_declarator(c, c:field('type')[1])
+                    if hit then return hit end
+                end
+            end
+        end
+        n = n:parent()
+    end
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -945,21 +1045,61 @@ M.spec = {
         params_field = 'parameters',
         body_field = 'body',
         is_method = function () return true end,
-        -- methods carry their class: OwnerController.processFindForm
+        -- methods carry their class, `::` like php (and Java's own method-ref
+        -- syntax): OwnerController::processFindForm
         qualify = function (name, defn, src)
-            local p = defn:parent()
-            while p do
-                local t = p:type()
-                if t == 'class_declaration' or t == 'interface_declaration'
-                    or t == 'enum_declaration' or t == 'record_declaration' then
-                    local cn = p:field('name')[1]
-                    return cn and (vim.treesitter.get_node_text(cn, src)
-                        .. '.' .. name) or name
-                end
-                p = p:parent()
-            end
-            return name
+            local cls = java_enclosing_class(defn, src)
+            return cls and (cls .. '::' .. name) or name
         end,
+        -- receiver-aware qualification: Java declares receiver types, so a
+        -- call's target class is often recoverable lexically. this.m()/bare
+        -- m() dispatch on the enclosing class; super.m() on its superclass;
+        -- x.m()/this.f.m() on x's/the field's DECLARED type. Rewriting to
+        -- Class::m turns the largest refusal bucket (getters/setters shared
+        -- across many model classes) into exact or inheritance-walked links.
+        qualify_call = function (calln, name, src)
+            if calln:type() ~= 'method_invocation' then return nil end
+            local obj = calln:field('object')[1]
+            local cls
+            if not obj then -- implicit this
+                cls = java_enclosing_class(calln, src)
+            else
+                local ot = obj:type()
+                if ot == 'this' then
+                    cls = java_enclosing_class(calln, src)
+                elseif ot == 'super' then
+                    local _, cnode = java_enclosing_class(calln, src)
+                    local sup = cnode and cnode:field('superclass')[1]
+                    for c in (sup and sup:iter_children() or function () end) do
+                        if c:type() == 'type_identifier' then
+                            cls = vim.treesitter.get_node_text(c, src)
+                            break
+                        end
+                    end
+                elseif ot == 'identifier' then
+                    cls = java_var_type(
+                        vim.treesitter.get_node_text(obj, src), calln, src)
+                elseif ot == 'field_access' then
+                    local fo, ff = obj:field('object')[1], obj:field('field')[1]
+                    if fo and fo:type() == 'this' and ff then
+                        cls = java_var_type(
+                            vim.treesitter.get_node_text(ff, src), calln, src, true)
+                    end
+                end
+            end
+            -- a JDK-typed receiver dispatches into the stdlib, not a project
+            -- def: leave it bare for the stdlib_names/prefix gate to skip
+            if cls and JAVA_JDK_TYPES[cls] then return nil end
+            return cls and (cls .. '::' .. name) or nil
+        end,
+        -- single-inheritance chain (superclass only — interfaces would poison
+        -- the one-parent-per-class model resolve_super relies on): feeds
+        -- transitive super.m()/inherited this.m() resolution once built
+        super_query = [=[
+            (class_declaration
+                name: (identifier) @child
+                superclass: (superclass (type_identifier) @parent))
+        ]=],
         entry_names = { main = true },
         -- an ANNOTATION WITH ARGUMENTS passes the method into a framework
         -- (@RequestMapping("/x"), @Scheduled(...)): registered, not dead —
@@ -2981,8 +3121,11 @@ function M.extract(root, opts)
             -- crosses a scope boundary, so they match globally — rust
             -- additionally knows x.f() is method dispatch; bare
             -- identifiers never cross, so their uniqueness is scope-local
+            -- (`::` is a qualified receiver too — Class::m explicitly names
+            -- the class and crosses packages, same as the tail path below)
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
+                or name:find('::', 1, true) ~= nil
             local fitset = {}
             for _, n in ipairs(cands) do
                 local fits
@@ -3287,8 +3430,11 @@ function M.relink(data, touched)
             -- crosses a scope boundary, so they match globally — rust
             -- additionally knows x.f() is method dispatch; bare
             -- identifiers never cross, so their uniqueness is scope-local
+            -- (`::` is a qualified receiver too — Class::m explicitly names
+            -- the class and crosses packages, same as the tail path below)
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
+                or name:find('::', 1, true) ~= nil
             local fitset = {}
             for _, n in ipairs(cands) do
                 local fits

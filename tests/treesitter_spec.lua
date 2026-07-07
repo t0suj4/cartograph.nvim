@@ -1510,28 +1510,49 @@ test('java: class-qualified, annotation cbarg, public exported', function ()
     store.ingest(data)
     local byname = {}
     for _, n in ipairs(data.nodes) do byname[n.name] = n end
-    ok(byname['PetController.listPets'], 'class-qualified method')
+    -- methods qualify with `::` (php-style, also Java's own method-ref syntax)
+    ok(byname['PetController::listPets'], 'class-qualified method')
     -- @GetMapping("/pets") registers the handler: cbarg, not dead
-    ok(byname['PetController.listPets'].cbarg, 'annotation with args = registered')
-    ok(not byname['PetController.render'].cbarg, 'plain method not cbarg')
-    ok(byname['VisitService.count'].exported, 'public = exported')
-    ok(not byname['PetController.render'].exported, 'private not exported')
-    -- listPets -> render (same class) and -> VisitService.count (dotted)
-    local hits = {}
-    for _, e in ipairs(data.edges) do
-        if e.kind == 'ref' and e.from == byname['PetController.listPets'].id then
-            hits[(store.node(e.to) or {}).name] = true
+    ok(byname['PetController::listPets'].cbarg, 'annotation with args = registered')
+    ok(not byname['PetController::render'].cbarg, 'plain method not cbarg')
+    ok(byname['VisitService::count'].exported, 'public = exported')
+    ok(not byname['PetController::render'].exported, 'private not exported')
+    local function refs_of(nm)
+        local hits = {}
+        for _, e in ipairs(data.edges) do
+            if e.kind == 'ref' and e.from == byname[nm].id then
+                hits[(store.node(e.to) or {}).name] = true
+            end
         end
+        return hits
     end
-    ok(hits['PetController.render'], 'listPets -> render')
-    ok(hits['VisitService.count'], 'listPets -> count (cross-class dotted)')
-    -- constructor call: new VisitService() -> VisitService.VisitService
-    ok(byname['VisitService.VisitService'] == nil
-        or byname['VisitService.VisitService'].kind == 'method', 'ctor shape ok')
+    -- render() bare -> implicit this -> PetController::render (same class);
+    -- visits.count() -> field typed VisitService -> VisitService::count
+    local lp = refs_of('PetController::listPets')
+    ok(lp['PetController::render'], 'listPets -> render (implicit this)')
+    ok(lp['VisitService::count'], 'listPets -> count (typed field receiver)')
+    -- constructor call: new VisitService() -> VisitService::VisitService
+    ok(byname['VisitService::VisitService'] == nil
+        or byname['VisitService::VisitService'].kind == 'method', 'ctor shape ok')
     -- import resolves through the maven-layout suffix
     ok(vim.tbl_contains(
         store.imports_out['src/main/java/app/PetController.java'] or {},
         'src/main/java/app/VisitService.java'), 'import resolved')
+
+    -- INHERITANCE: super_query populates the extends chain, and refused
+    -- Class::m calls walk it to the defining ancestor.
+    local lbl = refs_of('Owner::label')
+    -- this.fullName() -> inherited from Person (this->Owner->Person)
+    ok(lbl['Person::fullName'], 'this.fullName -> Person::fullName (inherited)')
+    -- super.describe() -> resolved two hops up (Person->BaseEntity)
+    ok(lbl['BaseEntity::describe'], 'super.describe -> BaseEntity::describe (2 hops)')
+
+    -- TYPED RECEIVER crossing a package: owner (param typed Owner) resolves
+    -- to Owner's methods in app.model from app.owner — the `::` scope fix.
+    local show = refs_of('OwnerController::show')
+    ok(show['Owner::addPet'], 'owner.addPet -> Owner::addPet (cross-package)')
+    ok(show['Owner::label'], 'owner.label -> Owner::label (cross-package)')
+
     -- dead: only the genuinely dead private method
     local dead = require('cartograph.lint').run(store,
         { only = { ['dead-function'] = true } })
