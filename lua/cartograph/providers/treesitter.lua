@@ -84,51 +84,79 @@ local function java_enclosing_class(node, src)
     end
 end
 
--- the declared type name of a simple variable `ident` visible at `from`:
--- scan enclosing scopes outward — a block's preceding local declarations and
--- the enclosing method's params (inner shadows outer), then class fields.
--- `fields_only` restricts to class fields (for a `this.field` receiver).
-local function java_var_type(ident, from, src, fields_only)
-    local fromrow = select(1, from:range())
-    local function match_declarator(container, tnode)
-        for c in container:iter_children() do
-            if c:type() == 'variable_declarator' then
+-- MEMOIZED per-scope symbol tables. Profiling showed java_var_type's per-call
+-- AST re-walk (re-scanning each enclosing scope's declarations for every method
+-- call) was ~35% of extraction; this builds each scope's declaration table ONCE
+-- (keyed by node:id, unique within a tree) and turns the per-call scan into an
+-- O(1) lookup. Cache is per-file: cleared when `src` changes.
+local jvt_cache, jvt_src = {}, nil
+local function jvt_scope_sym(node, src)
+    if src ~= jvt_src then jvt_cache = {}; jvt_src = src end
+    local id = node:id()
+    local cached = jvt_cache[id]
+    if cached then return cached end
+    local t, map = node:type(), {}
+    if t == 'block' or t == 'constructor_body' then
+        for c in node:iter_children() do -- locals: name -> {ty, row} (position-checked)
+            if c:type() == 'local_variable_declaration' then
+                local ty, row = java_base_type(c:field('type')[1], src), select(1, c:range())
+                for d in c:iter_children() do
+                    if d:type() == 'variable_declarator' then
+                        local nm = d:field('name')[1]
+                        if nm then map[vim.treesitter.get_node_text(nm, src)] = { ty = ty, row = row } end
+                    end
+                end
+            end
+        end
+    elseif t == 'method_declaration' or t == 'constructor_declaration'
+        or t == 'lambda_expression' then
+        local ps = node:field('parameters')[1] -- params: name -> {ty}
+        for c in (ps and ps:iter_children() or function () end) do
+            if c:type() == 'formal_parameter' or c:type() == 'spread_parameter' then
                 local nm = c:field('name')[1]
-                if nm and vim.treesitter.get_node_text(nm, src) == ident then
-                    return java_base_type(tnode, src)
+                if nm then map[vim.treesitter.get_node_text(nm, src)] = { ty = java_base_type(c:field('type')[1], src) } end
+            end
+        end
+    elseif t == 'class_body' or t == 'enum_body' then
+        for c in node:iter_children() do -- fields: name -> {ty}
+            if c:type() == 'field_declaration' then
+                local ty = java_base_type(c:field('type')[1], src)
+                for d in c:iter_children() do
+                    if d:type() == 'variable_declarator' then
+                        local nm = d:field('name')[1]
+                        if nm then map[vim.treesitter.get_node_text(nm, src)] = { ty = ty } end
+                    end
                 end
             end
         end
     end
+    jvt_cache[id] = map
+    return map
+end
+
+-- the declared type name of a simple variable `ident` visible at `from`:
+-- walk enclosing scopes outward (inner shadows outer); each scope's declaration
+-- table is memoized (jvt_scope_sym). Block locals are position-checked (decl
+-- before use). `fields_only` restricts to class fields (a `this.field` receiver).
+local function java_var_type(ident, from, src, fields_only)
+    local fromrow = select(1, from:range())
     local n = from:parent()
     while n do
         local t = n:type()
         if not fields_only and (t == 'block' or t == 'constructor_body') then
-            for c in n:iter_children() do
-                if c:type() == 'local_variable_declaration'
-                    and select(1, c:range()) <= fromrow then
-                    local hit = match_declarator(c, c:field('type')[1])
-                    if hit then return hit end
-                end
-            end
+            -- a local whose type didn't resolve (e.g. a scoped-generic base
+            -- java_base_type can't name) is NOT a final answer: keep walking
+            -- outward on nil so a field shadowed by such a local still resolves.
+            local e = jvt_scope_sym(n, src)[ident]
+            if e and e.ty ~= nil and e.row <= fromrow then return e.ty end
         elseif not fields_only and (t == 'method_declaration'
             or t == 'constructor_declaration' or t == 'lambda_expression') then
-            local ps = n:field('parameters')[1]
-            for c in (ps and ps:iter_children() or function () end) do
-                if c:type() == 'formal_parameter' or c:type() == 'spread_parameter' then
-                    local nm = c:field('name')[1]
-                    if nm and vim.treesitter.get_node_text(nm, src) == ident then
-                        return java_base_type(c:field('type')[1], src)
-                    end
-                end
-            end
+            -- a matched param terminates the walk even when untyped
+            local e = jvt_scope_sym(n, src)[ident]
+            if e then return e.ty end
         elseif t == 'class_body' or t == 'enum_body' then
-            for c in n:iter_children() do
-                if c:type() == 'field_declaration' then
-                    local hit = match_declarator(c, c:field('type')[1])
-                    if hit then return hit end
-                end
-            end
+            local e = jvt_scope_sym(n, src)[ident]
+            if e and e.ty ~= nil then return e.ty end
         end
         n = n:parent()
     end
