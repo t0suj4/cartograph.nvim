@@ -13,6 +13,19 @@
 
 local M = {}
 
+-- Node text, hot-path fast form. vim.treesitter.get_node_text allocates two
+-- throwaway tables (opts, metadata) on EVERY call before doing this same
+-- byte-slice; over a big corpus that is millions of dead tables feeding the
+-- GC. We only ever pass a string source and never metadata, so the slice is
+-- byte-for-byte identical (multiline included) without the allocation.
+local function node_text(n, src)
+    return src:sub(select(3, n:start()) + 1, select(3, n:end_()))
+end
+
+-- shared empty iterator: the `... or function () end` fallback used to allocate
+-- a fresh closure on every nil-children branch in hot loops
+local function NOOP() end
+
 -- ── per-language specs ───────────────────────────────────────────────────────
 -- Each spec: file extensions, tree-sitter queries with a shared capture
 -- protocol (@def/@name for functions and vars, @call/@name for calls), and
@@ -42,14 +55,14 @@ local function java_base_type(tnode, src)
     if not tnode then return nil end
     local t = tnode:type()
     if t == 'type_identifier' then
-        return vim.treesitter.get_node_text(tnode, src)
+        return node_text(tnode, src)
     elseif t == 'generic_type' then
         local first = tnode:child(0) -- the erased base precedes type_arguments
         if first and first:type() == 'type_identifier' then
-            return vim.treesitter.get_node_text(first, src)
+            return node_text(first, src)
         end
     elseif t == 'scoped_type_identifier' then
-        return vim.treesitter.get_node_text(tnode, src):match('([%w_]+)%s*$')
+        return node_text(tnode, src):match('([%w_]+)%s*$')
     end
     return nil
 end
@@ -78,7 +91,7 @@ local function java_enclosing_class(node, src)
         if t == 'class_declaration' or t == 'interface_declaration'
             or t == 'enum_declaration' or t == 'record_declaration' then
             local cn = p:field('name')[1]
-            return cn and vim.treesitter.get_node_text(cn, src) or nil, p
+            return cn and node_text(cn, src) or nil, p
         end
         p = p:parent()
     end
@@ -103,7 +116,7 @@ local function jvt_scope_sym(node, src)
                 for d in c:iter_children() do
                     if d:type() == 'variable_declarator' then
                         local nm = d:field('name')[1]
-                        if nm then map[vim.treesitter.get_node_text(nm, src)] = { ty = ty, row = row } end
+                        if nm then map[node_text(nm, src)] = { ty = ty, row = row } end
                     end
                 end
             end
@@ -111,10 +124,10 @@ local function jvt_scope_sym(node, src)
     elseif t == 'method_declaration' or t == 'constructor_declaration'
         or t == 'lambda_expression' then
         local ps = node:field('parameters')[1] -- params: name -> {ty}
-        for c in (ps and ps:iter_children() or function () end) do
+        for c in (ps and ps:iter_children() or NOOP) do
             if c:type() == 'formal_parameter' or c:type() == 'spread_parameter' then
                 local nm = c:field('name')[1]
-                if nm then map[vim.treesitter.get_node_text(nm, src)] = { ty = java_base_type(c:field('type')[1], src) } end
+                if nm then map[node_text(nm, src)] = { ty = java_base_type(c:field('type')[1], src) } end
             end
         end
     elseif t == 'class_body' or t == 'enum_body' then
@@ -124,7 +137,7 @@ local function jvt_scope_sym(node, src)
                 for d in c:iter_children() do
                     if d:type() == 'variable_declarator' then
                         local nm = d:field('name')[1]
-                        if nm then map[vim.treesitter.get_node_text(nm, src)] = { ty = ty } end
+                        if nm then map[node_text(nm, src)] = { ty = ty } end
                     end
                 end
             end
@@ -221,7 +234,7 @@ M.spec = {
                 if c:named() then
                     i = i + 1
                     if i == vi then
-                        local n = vim.treesitter.get_node_text(c, src)
+                        local n = node_text(c, src)
                         return n:match('^[%w_]+$') and n or nil
                     end
                 end
@@ -253,7 +266,7 @@ M.spec = {
             local function collect_names(vl)
                 for v in vl:iter_children() do
                     if v:named() then
-                        local n = vim.treesitter.get_node_text(v, src)
+                        local n = node_text(v, src)
                         locals[n:match('^[%w_]+') or n] = true
                     end
                 end
@@ -278,7 +291,7 @@ M.spec = {
                     if islocal then
                         local nm = stmt:field('name')[1]
                         if nm then
-                            locals[vim.treesitter.get_node_text(nm, src)] = true
+                            locals[node_text(nm, src)] = true
                         end
                     end
                 end
@@ -442,7 +455,7 @@ M.spec = {
                 local t = p:type()
                 if t == 'class_specifier' or t == 'struct_specifier' then
                     local cn = p:field('name')[1]
-                    return cn and (vim.treesitter.get_node_text(cn, src)
+                    return cn and (node_text(cn, src)
                         .. '::' .. name) or name
                 end
                 p = p:parent()
@@ -540,7 +553,7 @@ M.spec = {
             local stmts = {}
             local function names(n, out, seen)
                 if n:type() == 'variable' then
-                    local t = vim.treesitter.get_node_text(n, src)
+                    local t = node_text(n, src)
                     if not seen[t] then seen[t] = true out[#out + 1] = t end
                     return
                 end
@@ -562,7 +575,7 @@ M.spec = {
                         local use = {}
                         names(d, use, {})
                         stmts[#stmts + 1] = { l = d:range() + 1,
-                            def = namen and { vim.treesitter.get_node_text(namen, src) } or {},
+                            def = namen and { node_text(namen, src) } or {},
                             use = use, dep = {} }
                     end
                 end
@@ -625,7 +638,7 @@ M.spec = {
             if not (p and p:type() == 'list') then return false end
             local head = p:named_child(0)
             if not (head and head:type() == 'symbol') then return false end
-            local kw = vim.treesitter.get_node_text(head, src)
+            local kw = node_text(head, src)
             local sig = kw == 'lambda' or kw == 'lambda*' or kw:match('^define')
             return sig and calln == p:named_child(1) or false
         end,
@@ -638,7 +651,7 @@ M.spec = {
             end
             if outer == calln then return true end
             local head = outer:named_child(0)
-            local t = head and vim.treesitter.get_node_text(head, src) or ''
+            local t = head and node_text(head, src) or ''
             return not t:match('^define')
         end,
         import_query = [=[
@@ -793,7 +806,7 @@ M.spec = {
                 if t == 'class_declaration' or t == 'interface_declaration'
                     or t == 'trait_declaration' then
                     local cn = p2:field('name')[1]
-                    return cn and (vim.treesitter.get_node_text(cn, src) .. '::' .. name)
+                    return cn and (node_text(cn, src) .. '::' .. name)
                         or name
                 end
                 p2 = p2:parent()
@@ -806,7 +819,7 @@ M.spec = {
         cbarg_def = function (defn, src)
             for c in defn:iter_children() do
                 if c:type() == 'attribute_list'
-                    and vim.treesitter.get_node_text(c, src)
+                    and node_text(c, src)
                         :find('(', 1, true) then
                     return true
                 end
@@ -826,13 +839,13 @@ M.spec = {
             if t == 'member_call_expression' then
                 local o = calln:field('object')[1]
                 if o and o:type() == 'variable_name'
-                    and vim.treesitter.get_node_text(o, src) == '$this' then
+                    and node_text(o, src) == '$this' then
                     kind = 'self'
                 end
             elseif t == 'scoped_call_expression' then
                 local s = calln:field('scope')[1]
                 if s and s:type() == 'relative_scope' then
-                    kind = vim.treesitter.get_node_text(s, src) == 'parent'
+                    kind = node_text(s, src) == 'parent'
                         and 'parent' or 'self'
                 end
             end
@@ -844,7 +857,7 @@ M.spec = {
                     or tt == 'interface_declaration' then
                     if kind == 'self' then
                         local cn = p2:field('name')[1]
-                        return cn and (vim.treesitter.get_node_text(cn, src)
+                        return cn and (node_text(cn, src)
                             .. '::' .. name) or nil
                     end
                     -- parent::m — resolve to the superclass named by the
@@ -862,7 +875,7 @@ M.spec = {
                                     -- def keys use the bare class name; take
                                     -- the last namespace segment (\App\Foo→Foo;
                                     -- PSR-0 Mage_Core_X has no '\' → stays whole)
-                                    local ptxt = vim.treesitter.get_node_text(pc, src)
+                                    local ptxt = node_text(pc, src)
                                     return (ptxt:match('[^\\]+$') or ptxt)
                                         .. '::' .. name
                                 end
@@ -1008,7 +1021,7 @@ M.spec = {
                 local t = p:type()
                 if t == 'class' or t == 'module' then
                     local cn = p:field('name')[1]
-                    return cn and (vim.treesitter.get_node_text(cn, src)
+                    return cn and (node_text(cn, src)
                         .. sep .. name) or name
                 end
                 p = p:parent()
@@ -1098,20 +1111,20 @@ M.spec = {
                 elseif ot == 'super' then
                     local _, cnode = java_enclosing_class(calln, src)
                     local sup = cnode and cnode:field('superclass')[1]
-                    for c in (sup and sup:iter_children() or function () end) do
+                    for c in (sup and sup:iter_children() or NOOP) do
                         if c:type() == 'type_identifier' then
-                            cls = vim.treesitter.get_node_text(c, src)
+                            cls = node_text(c, src)
                             break
                         end
                     end
                 elseif ot == 'identifier' then
                     cls = java_var_type(
-                        vim.treesitter.get_node_text(obj, src), calln, src)
+                        node_text(obj, src), calln, src)
                 elseif ot == 'field_access' then
                     local fo, ff = obj:field('object')[1], obj:field('field')[1]
                     if fo and fo:type() == 'this' and ff then
                         cls = java_var_type(
-                            vim.treesitter.get_node_text(ff, src), calln, src, true)
+                            node_text(ff, src), calln, src, true)
                     end
                 end
             end
@@ -1144,7 +1157,7 @@ M.spec = {
         exported_def = function (defn, src)
             local mods = defn:child(0)
             if mods and mods:type() == 'modifiers' then
-                return vim.treesitter.get_node_text(mods, src)
+                return node_text(mods, src)
                     :find('public') ~= nil
             end
             return false
@@ -1211,9 +1224,9 @@ M.spec = {
             if defn:type() ~= 'method_declaration' then return name end
             local recv = defn:field('receiver')[1]
             if recv then
-                local t = vim.treesitter.get_node_text(recv, src)
+                local t = node_text(recv, src)
                     :match('%*?([%w_]+)%s*%)')
-                    or vim.treesitter.get_node_text(recv, src)
+                    or node_text(recv, src)
                         :match('%*?([%w_]+)')
                 if t then return t .. '.' .. name end
             end
@@ -1228,7 +1241,7 @@ M.spec = {
         -- capitalized = exported: no in-repo caller says nothing
         exported_def = function (defn, src)
             local nm = defn:field('name')[1]
-            nm = nm and vim.treesitter.get_node_text(nm, src) or ''
+            nm = nm and node_text(nm, src) or ''
             return nm:match('^%u') ~= nil
         end,
         -- Go identifiers are mostly locals/fields; fn-as-value flows
@@ -1303,7 +1316,7 @@ M.spec = {
                     local ty = p:field('type')[1] or p:field('name')[1]
                     -- generics (Foo<T>) reduce to the base type name
                     if ty then
-                        local txt = vim.treesitter.get_node_text(ty, src)
+                        local txt = node_text(ty, src)
                             :match('^([%w_]+)')
                         if txt then return txt .. '::' .. name end
                     end
@@ -1324,7 +1337,7 @@ M.spec = {
             -- #[test]/#[bench]/#[no_mangle]: invoked by harness or linker
             local sib = defn:prev_named_sibling()
             while sib and sib:type() == 'attribute_item' do
-                local t = vim.treesitter.get_node_text(sib, src)
+                local t = node_text(sib, src)
                 if t:find('test') or t:find('no_mangle')
                     or t:find('bench') then
                     return true
@@ -1465,7 +1478,7 @@ M.spec = {
             while p do
                 if p:type() == 'class_definition' then
                     local cn = p:field('name')[1]
-                    return cn and (vim.treesitter.get_node_text(cn, src)
+                    return cn and (node_text(cn, src)
                         .. '.' .. name) or name
                 end
                 p = p:parent()
@@ -1529,7 +1542,6 @@ local LIT_DEPTH, LIT_ITEMS, NAME_CAP = 6, 64, 48
 
 -- ── helpers ──────────────────────────────────────────────────────────────────
 
-local function node_text(n, src) return vim.treesitter.get_node_text(n, src) end
 
 local function pos_of(n)
     local sr, sc, er, ec = n:range()
@@ -2882,7 +2894,7 @@ function M.extract(root, opts)
                         argv[#argv + 1] = v ~= '' and { k = 'lit', v = v } or { k = 'expr' }
                         argsn = nil
                     end
-                    for a in (argsn and argsn.iter_children and argsn:iter_children() or function () end) do
+                    for a in (argsn and argsn.iter_children and argsn:iter_children() or NOOP) do
                         if a:named() and a:type() ~= 'comment' then
                             if a:type() == 'argument' then -- php wraps each arg
                                 a = a:named_child(0) or a
