@@ -137,11 +137,11 @@ test('trace: shadow disambiguation — a shadowed local traces its OWN defs', fu
     local inner = trace.origins_local(store, pick, 'mode', 4)
     eq(1, #inner)
     eq(2, inner[1].site.line) -- 0-based row of the do-stmt
-    -- OUTER use (0-based line 6): the simple outer def is kept; the
-    -- compound stays too — df's statement granularity cannot separate a
-    -- compound that CONTAINS a shadow-decl from one assigning the outer
-    -- binder (the documented phase-1 residue; phase 2's binder tags own it)
+    -- OUTER use (0-based line 6): with phase 2's binder tags (node-precise
+    -- at harvest) the compound holding only the INNER decl is pruned too —
+    -- the phase-1 residue closes; exactly the outer def remains
     local outer = trace.origins_local(store, pick, 'mode', 6)
-    eq(2, #outer)
+    eq(1, #outer)
+    eq(1, outer[1].site.line) -- the `local mode = "outer"` row
     vim.fn.delete(root, 'rf')
 end)

@@ -257,13 +257,17 @@ local LUA_SCOPES = {
     for_statement        = { kind = 'local', harvest = lua_forvars },
 }
 
--- one model per file being extracted; reset in extract_calls (per-tree
--- lifetime — node ids cannot alias across trees)
-local jvt_sm, jvt_src = nil, nil
-local function jvt_model(src)
-    if not jvt_sm or jvt_src ~= src then
-        jvt_sm = require('cartograph.scope').model(src, JAVA_SCOPES)
-        jvt_src = src
+-- ONE scope model per parse tree, shared by extract_defs (df binder tags)
+-- and extract_calls (receiver typing) — keyed by TREE IDENTITY (the same
+-- tsroot userdata flows to both passes), so per-tree lifetime is
+-- structural: node ids cannot alias across trees, and the two-models-per-
+-- file redundancy is gone. nil when the language has no scope spec.
+local jvt_sm, jvt_root = nil, nil
+local function tree_model(tsroot, src, spec)
+    if jvt_root ~= tsroot then
+        jvt_root = tsroot
+        jvt_sm = spec.scopes
+            and require('cartograph.scope').model(src, spec.scopes) or nil
     end
     return jvt_sm
 end
@@ -284,7 +288,8 @@ end
 -- is typed only by its initializer's return (the return-type rounds settle
 -- it — precise beats the walk-out guess, so defer preempts the hedge).
 local function java_var_type(ident, from, src, fields_only)
-    local chain, k = jvt_model(src).resolve(ident, from, fields_only and 'field' or nil)
+    if not jvt_sm then return end
+    local chain, k = jvt_sm.resolve(ident, from, fields_only and 'field' or nil)
     local skipped -- the nearest untyped binder walked past (the witness)
     for i = 1, k do
         local b = chain[i]
@@ -1864,6 +1869,10 @@ local function dataflow(def, spec, src, params)
     local body = spec.body_field and def:field(spec.body_field)[1]
     if not body then return nil end
     local stmts = {}
+    -- def-site nodes per name, kept only while this fn is processed: names
+    -- with SEVERAL defs (or shadowing a param) get BINDER TAGS below —
+    -- scope-model phase 2, closing df's shadow conflation for its readers
+    local defsites = jvt_sm and {} or nil
     for _, stmt in inext, body, -1 do
         if stmt:named() and stmt:type() ~= 'comment' then
             local defs, uses, seen_d, seen_u = {}, {}, {}, {}
@@ -1874,6 +1883,11 @@ local function dataflow(def, spec, src, params)
                     if defpos and not seen_d[name] then
                         seen_d[name] = true
                         defs[#defs + 1] = name
+                        if defsites then
+                            local ds = defsites[name]
+                            if not ds then ds = {}; defsites[name] = ds end
+                            ds[#ds + 1] = { si = #stmts + 1, di = #defs, n = n }
+                        end
                     elseif not defpos and not seen_u[name] and not seen_d[name] then
                         seen_u[name] = true
                         uses[#uses + 1] = name
@@ -1910,6 +1924,26 @@ local function dataflow(def, spec, src, params)
         end
     end
     if #stmts == 0 then return nil end
+    -- binder tags (scope-model phase 2): only names that CAN be shadow-
+    -- ambiguous — several def sites, or a def shadowing a param — resolve
+    -- through the shared model; the tag is the binder's 0-based decl row
+    -- (-1 = param/field binder, -2 = free/global write), durable and
+    -- comparable with binder_at's answer at trace time. s.defr is sparse,
+    -- aligned with s.def indices; untagged names keep name semantics.
+    if defsites then
+        local isparam = {}
+        for _, p in ipairs(params or {}) do isparam[p] = true end
+        for name, ds in pairs(defsites) do
+            if #ds > 1 or isparam[name] then
+                for _, site in ipairs(ds) do
+                    local chain, k = jvt_sm.resolve(name, site.n)
+                    local s = stmts[site.si]
+                    s.defr = s.defr or {}
+                    s.defr[site.di] = k > 0 and (chain[1].row or -1) or -2
+                end
+            end
+        end
+    end
     -- dependencies + free inputs
     local defined, inputs, inset = {}, {}, {}
     for _, p in ipairs(params or {}) do defined[p] = 0 end
@@ -2864,6 +2898,7 @@ function M.extract(root, opts)
     -- a time, so container files (vue/svelte SFCs) can run it once per
     -- script region while plain files run it on their single root
     local function extract_defs(file, lang, spec, src, tsroot)
+        tree_model(tsroot, src, spec) -- df binder tags read the shared model
         -- a def extracted from BEYOND a parse error has escaped its
         -- context (magento's php5 `$s{0}` truncates the class; the
         -- methods after it float unqualified and absorb tails). Torn
@@ -3142,11 +3177,7 @@ function M.extract(root, opts)
     -- Containers also run this over TEMPLATE EXPRESSION trees — an
     -- @click="save(item)" is a real call_expression at absolute rows
     local function extract_calls(file, lang, spec, src, tsroot)
-        -- drop the receiver-typing scope model unconditionally: its guard is
-        -- src VALUE-equality, but node:id() is only unique within one tree —
-        -- two byte-identical files whose first tree got collected could
-        -- otherwise alias ids into a stale model
-        jvt_sm, jvt_src = nil, nil
+        tree_model(tsroot, src, spec) -- shared with extract_defs (same tree)
         -- calls (inventory + reference sites, resolved after all files)
         local q = parse_query(lang, spec.calls)
         if q then

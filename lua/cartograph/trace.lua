@@ -61,18 +61,26 @@ local function local_defs(store, fn, name, line0)
     local use_b = line0 and ts.binder_at(abs, fn.file, name, line0) or nil
     local before, all = {}, {}
     for i, s in ipairs(df.stmts) do
-        for _, d in ipairs(s.def) do
+        for di, d in ipairs(s.def) do
             if d == name then
                 local keep = true
                 if use_b then
-                    local db = ts.binder_at(abs, fn.file, name, s.l - 1)
-                    if db ~= use_b then
-                        -- containment: the binder's own decl lives inside
-                        -- this (compound) statement's row span
-                        local nxt = df.stmts[i + 1]
-                        local declrow1 = use_b.row and use_b.row + 1
-                        keep = declrow1 ~= nil and declrow1 >= s.l
-                            and (nxt == nil or declrow1 < nxt.l)
+                    local tag = s.defr and s.defr[di]
+                    if tag then
+                        -- phase 2: the def entry carries its binder's decl
+                        -- row — node-precise at harvest, so the compound-
+                        -- statement residue is gone
+                        keep = tag == (use_b.row or -1)
+                    else
+                        local db = ts.binder_at(abs, fn.file, name, s.l - 1)
+                        if db ~= use_b then
+                            -- containment: the binder's own decl lives
+                            -- inside this (compound) statement's row span
+                            local nxt = df.stmts[i + 1]
+                            local declrow1 = use_b.row and use_b.row + 1
+                            keep = declrow1 ~= nil and declrow1 >= s.l
+                                and (nxt == nil or declrow1 < nxt.l)
+                        end
                     end
                 end
                 if keep then

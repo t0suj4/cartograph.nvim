@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 18 -- v18: order-independent resolution — cbarg marks move to a
+M.VERSION = 19 -- v19: df def entries carry sparse BINDER TAGS (s.defr —
+              -- decl-row of the resolved binder) for shadow-ambiguous
+              -- names (scope-model phase 2); a v18 cache lacks them and
+              -- trace would silently fall back to name matching;
+              -- v18: order-independent resolution — cbarg marks move to a
               -- pre-scan (same-file tiers no longer depend on call order;
               -- ~10 server edges gain confidence) and settled chains keep
               -- their rt provenance (calls carry rt after resolution);

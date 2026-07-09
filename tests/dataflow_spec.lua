@@ -50,3 +50,44 @@ test('extractor: statement-level def-use (df) for a clean local chain', function
     for _, d in ipairs(ret.dep) do depvars[d.var] = true end
     ok(depvars.c, 'return depends on c')
 end)
+
+test('df: shadow-ambiguous defs carry binder tags (scope-model phase 2)', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then
+        skip 'no lua parser'
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local function pick(flag)',    -- binders: flag (param)
+        '    local mode = "outer"',     -- outer mode, decl row 1 (0-based)
+        '    do',
+        '        local mode = "inner"', -- inner mode, decl row 3
+        '    end',
+        '    local flag = true',        -- shadows the PARAM (1 def + param)
+        '    return mode, flag',
+        'end',
+        'return { pick = pick }',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local df
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'pick' then df = n.df end
+    end
+    ok(df, 'pick has df')
+    -- collect tags by (name, stmt row): mode has TWO defs -> both tagged
+    -- with their binders' decl rows; flag shadows a param -> tagged too
+    local tags = {}
+    for _, s in ipairs(df.stmts) do
+        for di, d in ipairs(s.def) do
+            if s.defr and s.defr[di] ~= nil then
+                tags[#tags + 1] = d .. '@' .. s.l .. '=' .. s.defr[di]
+            end
+        end
+    end
+    table.sort(tags)
+    eq({ 'flag@6=5', 'mode@2=1', 'mode@3=3' }, tags)
+end)
