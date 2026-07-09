@@ -147,6 +147,80 @@ local JAVA_SCOPES = {
     enum_body               = { kind = 'field', harvest = jvt_fields },
 }
 
+-- Lua scope spec (untyped language: binders carry no ty — position and
+-- kind are the value). `kind = 'module'` on chunk: a top-level local IS the
+-- module-level entity (the id pass pins it to THIS file); inner kinds mean
+-- the mention names a local, not any module var.
+local function lua_locals(node, src, out) -- chunk/block statement locals
+    for stmt in node:iter_children() do
+        local t = stmt:type()
+        if t == 'variable_declaration' then
+            -- `local a, b = 1, 2` wraps an assignment_statement; a bare
+            -- `local a` holds the variable_list directly
+            local row = select(1, stmt:range())
+            for a in stmt:iter_children() do
+                local vl = a:type() == 'variable_list' and a or nil
+                if not vl and a:type() == 'assignment_statement' then
+                    for c in a:iter_children() do
+                        if c:type() == 'variable_list' then vl = c break end
+                    end
+                end
+                for v in (vl and vl:iter_children() or NOOP) do
+                    if v:type() == 'identifier' then
+                        out[node_text(v, src)] = { row = row }
+                    end
+                end
+            end
+        elseif t == 'function_declaration' then
+            local islocal = false
+            for c in stmt:iter_children() do
+                if c:type() == 'local' then islocal = true break end
+            end
+            if islocal then
+                local nm = stmt:field('name')[1]
+                if nm and nm:type() == 'identifier' then
+                    out[node_text(nm, src)] = { row = select(1, stmt:range()) }
+                end
+            end
+        end
+    end
+end
+local function lua_params(node, src, out)
+    local ps = node:field('parameters')[1]
+    for c in (ps and ps:iter_children() or NOOP) do
+        if c:type() == 'identifier' then out[node_text(c, src)] = {} end
+    end
+end
+local function lua_forvars(node, src, out)
+    local row = select(1, node:range())
+    for cl in node:iter_children() do
+        local t = cl:type()
+        if t == 'for_numeric_clause' then
+            local v = cl:named_child(0) -- ONLY the loop var; bounds are exprs
+            if v and v:type() == 'identifier' then
+                out[node_text(v, src)] = { row = row }
+            end
+        elseif t == 'for_generic_clause' then
+            for c in cl:iter_children() do
+                if c:type() == 'variable_list' then -- the vars, not the iterator
+                    for v in c:iter_children() do
+                        if v:type() == 'identifier' then
+                            out[node_text(v, src)] = { row = row }
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+local LUA_SCOPES = {
+    chunk                = { kind = 'module', harvest = lua_locals },
+    block                = { kind = 'local', harvest = lua_locals },
+    function_declaration = { kind = 'param', harvest = lua_params },
+    function_definition  = { kind = 'param', harvest = lua_params },
+    for_statement        = { kind = 'local', harvest = lua_forvars },
+}
+
 -- one model per file being extracted; reset in extract_calls (per-tree
 -- lifetime — node ids cannot alias across trees)
 local jvt_sm, jvt_src = nil, nil
@@ -186,6 +260,7 @@ end
 M.spec = {
     lua = {
         exts = { 'lua' },
+        scopes = LUA_SCOPES, -- lexical-first id pass (scope-model step 3)
         functions = [[
             (function_declaration name: (_) @name) @def
             (assignment_statement
@@ -1104,6 +1179,7 @@ M.spec = {
         -- x.m()/this.f.m() on x's/the field's DECLARED type. Rewriting to
         -- Class::m turns the largest refusal bucket (getters/setters shared
         -- across many model classes) into exact or inheritance-walked links.
+        scopes = JAVA_SCOPES, -- lexical-first id pass (scope-model step 3)
         qualify_call = function (calln, name, src)
             if calln:type() ~= 'method_invocation' then return nil end
             local obj = calln:field('object')[1]
@@ -2300,10 +2376,21 @@ local function id_pass(root, files, L, abs)
                         lang = lang } }
                 local useEdge, regEdge = {}, {}
                 for _, tr in ipairs(troots) do
+                -- lexical-first (scope-model step 3): where the language has
+                -- a scope spec, A BOUND NAME NEVER CROSSES THE FILE BOUNDARY
+                -- — same-file matches survive (an inner binder may itself BE
+                -- a graph node: a lua nested `local function`, a chunk-level
+                -- module var), but the cross-file unique fallback is exactly
+                -- the false-positive channel (a local `force` matching some
+                -- other file's fn/var). Free identifiers escalate as before.
+                -- Resolved LAZILY, only when a lookup actually hits.
+                local sm = tr.spec.scopes
+                    and require('cartograph.scope').model(src, tr.spec.scopes) or nil
                 local q = parse_query(tr.lang, tr.spec.id_query or '(identifier) @id')
                 if q then
                     for _, n in q:iter_captures(tr.root, src, 0, -1) do
                         local name = node_text(n, src)
+                        local bound -- nil = not yet resolved; true/false = lexically bound here
                         if nameset and #name >= 3
                             and not (tr.spec.stdlib_names or {})[name] then
                             nameset[name] = true
@@ -2322,6 +2409,13 @@ local function id_pass(root, files, L, abs)
                             if u and L.scopes
                                 and L.scopes[u.file] ~= L.scopes[file] then
                                 u = nil -- unique, but across a boundary
+                            end
+                            if u and sm and u.file ~= file then
+                                if bound == nil then
+                                    local _, k = sm.resolve(name, n)
+                                    bound = k > 0
+                                end
+                                if bound then u = nil end
                             end
                             if u then
                                 local line = select(1, n:range())
@@ -2356,10 +2450,20 @@ local function id_pass(root, files, L, abs)
                                 if v.file == file then var = v break end
                             end
                             if not var and #cands == 1
-                            and not (L.scopes and L.scopes[cands[1].file]
-                                ~= L.scopes[file]) then
-                            var = cands[1]
-                        end
+                                and not (L.scopes and L.scopes[cands[1].file]
+                                    ~= L.scopes[file]) then
+                                -- the cross-file unique fallback only for
+                                -- FREE names: bound never crosses the file
+                                if sm then
+                                    if bound == nil then
+                                        local _, k = sm.resolve(name, n)
+                                        bound = k > 0
+                                    end
+                                    if not bound then var = cands[1] end
+                                else
+                                    var = cands[1]
+                                end
+                            end
                             local line = select(1, n:range())
                             if var and not (var.file == file and line == var.line) then
                                 local from = fn_at(line)

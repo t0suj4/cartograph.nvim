@@ -153,6 +153,53 @@ test('treesitter: lua blocks, litdata and require edges', function ()
     end
 end)
 
+test('id pass: lexical-first — bound mentions do not name-match globals', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('a.lua', table.concat({
+        'local config = { x = 1 }',
+        'local function apply()',
+        '    return config.x', -- module-bound: the SAME-FILE use edge stays
+        'end',
+        'local function helper()',
+        '    return 1',
+        'end',
+        'return { apply = apply, helper = helper, config = config }',
+    }, '\n'))
+    put('b.lua', table.concat({
+        'local function work()',
+        '    local config = { y = 2 }',
+        '    return config.y', -- inner-bound: NOT a.lua\'s config
+        'end',
+        'local function take(helper)',
+        '    return helper', -- param-bound: NOT a.lua\'s helper
+        'end',
+        'local function free()',
+        '    return helper', -- FREE: still name-matches a.lua\'s unique fn
+        'end',
+        'return { work = work, take = take, free = free }',
+    }, '\n'))
+    local data = ts.extract(root)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = n end
+    local function edge(kind, fromname, toname)
+        for _, e in ipairs(data.edges) do
+            if e.kind == kind and byname[fromname] and byname[toname]
+                and e.from == byname[fromname].id and e.to == byname[toname].id then
+                return e
+            end
+        end
+    end
+    ok(edge('use', 'apply', 'config'), 'module-bound mention keeps its use edge')
+    ok(not edge('use', 'work', 'config'), 'inner local must not use-match a module var')
+    ok(not edge('ref', 'take', 'helper'), 'a param must not ref-match a unique fn')
+    ok(edge('ref', 'free', 'helper'), 'a free mention still name-matches')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('forms: one level of nested statements / forms, on demand', function ()
     if not has_parser('lua') then skip 'no lua parser' end
     local ts = require 'cartograph.providers.treesitter'
