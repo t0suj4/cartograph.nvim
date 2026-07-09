@@ -10,6 +10,9 @@
 -- -19% on libs (J: 16.5%->2.2%). This is OUR process — tune freely.
 pcall(function () require('jit.opt').start('maxtrace=4000', 'maxmcode=8192') end)
 
+local T0 = vim.uv.hrtime() -- whole-process work time (spawn cost is the
+-- parent's dt minus this; the split says pipe-vs-process economics)
+
 local jobfile = _G.arg and _G.arg[1]
 assert(jobfile, 'worker: no job file')
 local fd = assert(io.open(jobfile, 'r'))
@@ -51,6 +54,25 @@ elseif job.phase == 'ids' then
     }, abs)
 else
     error('worker: unknown phase ' .. tostring(job.phase))
+end
+
+-- self-reported footprint, riding the chunk (the parent strips + collects):
+-- peak RSS is THE number for sizing a worker onto a small remote box (the
+-- push-the-indexer-to-the-data deployment) — the map phase is the part
+-- that leaves home, so its envelope must be known, not guessed
+do
+    local st = io.open('/proc/self/status', 'r')
+    if st then
+        local txt = st:read('a')
+        st:close()
+        out._metrics = {
+            phase = job.phase,
+            files = #(job.files or {}),
+            hwm_kb = tonumber(txt:match('VmHWM:%s*(%d+)')),
+            rss_kb = tonumber(txt:match('VmRSS:%s*(%d+)')),
+            wall_ms = (vim.uv.hrtime() - T0) / 1e6,
+        }
+    end
 end
 
 local ofd = assert(io.open(job.out, 'wb'))

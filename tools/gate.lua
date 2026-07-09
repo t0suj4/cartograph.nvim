@@ -62,6 +62,15 @@ else
     data, stats = bench.extract(name)
 end
 print(bench.fmt(stats) .. (parallel and '  [parallel]' or ''))
+if parallel then
+    local w = require('cartograph.parallel')._last_workers
+    if w and w.n > 0 then
+        print(('workers: n=%d · peak MB p50=%.0f p95=%.0f max=%.0f · work ms'
+            .. ' p50=%.0f max=%.0f · spawn overhead ms p50=%.0f')
+            :format(w.n, w.hwm_mb.p50 or 0, w.hwm_mb.p95 or 0, w.hwm_mb.max or 0,
+                w.wall_ms.p50 or 0, w.wall_ms.max or 0, w.spawn_ms.p50 or 0))
+    end
+end
 if data.ret_resolved then
     print(('return-type rounds: %d calls settled in %d round(s)')
         :format(data.ret_resolved, data.ret_rounds))

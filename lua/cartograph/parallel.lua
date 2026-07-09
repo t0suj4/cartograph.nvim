@@ -169,6 +169,17 @@ local function file_of(id)
     return id:match('^(.-)::') or id
 end
 
+-- pull a worker's self-reported footprint off its chunk (metrics are
+-- telemetry, never graph data) and record it with the parent-measured
+-- turnaround, so spawn overhead = dt - wall is a number per slice
+local function take_metrics(s, chunk, dt_ms)
+    local m = chunk and chunk._metrics
+    if not m then return end
+    chunk._metrics = nil
+    m.dt_ms = dt_ms
+    s.wmetrics[#s.wmetrics + 1] = m
+end
+
 -- fold a phase-1 chunk into the session, skipping files that already
 -- arrived (a demanded file's queued copy lands later and must not
 -- duplicate); marks the chunk's files as arrived
@@ -308,7 +319,8 @@ function M.extract(root, o)
         nodes = {}, edges = {}, calls = {}, stamps = {}, fn_ranges = {},
         _no_parser = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
-        on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1 }
+        on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1,
+        wmetrics = {} }
     M._session = s
 
     -- responsiveness telemetry: every synchronous main-loop block during the
@@ -387,6 +399,28 @@ function M.extract(root, o)
         acc.fn_ranges = nil
         if s.keywatch then pcall(vim.on_key, nil, s.keywatch) end -- stop listening
         M._last_stalls = M.summarize(stalls) -- on the module, not acc (cache)
+        -- worker footprint envelope: peak RSS (per-process high-water),
+        -- in-process work time, and spawn overhead (parent dt - worker wall)
+        -- — the numbers that size a worker onto a small remote box
+        do
+            local hwm, wall, spawnov = {}, {}, {}
+            for _, m in ipairs(s.wmetrics) do
+                if m.hwm_kb then hwm[#hwm + 1] = m.hwm_kb / 1024 end
+                if m.wall_ms then
+                    wall[#wall + 1] = m.wall_ms
+                    if m.dt_ms then spawnov[#spawnov + 1] = m.dt_ms - m.wall_ms end
+                end
+            end
+            M._last_workers = { n = #s.wmetrics, hwm_mb = M.summarize(hwm),
+                wall_ms = M.summarize(wall), spawn_ms = M.summarize(spawnov) }
+        end
+        if profiling and M._last_workers.n > 0 then
+            local w = M._last_workers
+            vim.notify(('cartograph: workers — n=%d peak MB p50=%.0f max=%.0f'
+                .. ' · work ms p50=%.0f · spawn overhead ms p50=%.0f')
+                :format(w.n, w.hwm_mb.p50 or 0, w.hwm_mb.max or 0,
+                    w.wall_ms.p50 or 0, w.spawn_ms.p50 or 0), vim.log.levels.INFO)
+        end
         if profiling and M._last_stalls.n > 0 then
             local p = M._last_stalls
             vim.notify(('cartograph: streaming stalls (ms) — n=%d p50=%.0f'
@@ -416,11 +450,13 @@ function M.extract(root, o)
         for _, g in ipairs(groups) do
             local fr = {}
             for _, f in ipairs(g) do fr[f] = acc.fn_ranges[f] end
+            local g0 = vim.uv.hrtime()
             spawn({ phase = 'ids', root = root, files = g, rtp = rtp,
                 roots = o.roots, index_file = idxf, fn_ranges = fr },
                 function (chunk, res)
                 done = done + 1
                 if chunk then
+                    take_metrics(s, chunk, (vim.uv.hrtime() - g0) / 1e6)
                     ts.merge_idpass(acc, chunk)
                 elseif o.on_note then
                     o.on_note(('id-pass group failed (%d) — use edges for '
@@ -483,6 +519,7 @@ function M.extract(root, o)
             local cb0 = vim.uv.hrtime()
             inflight = inflight - 1
             if chunk then
+                take_metrics(s, chunk, (cb0 - t0) / 1e6)
                 merge_chunk(s, chunk)
             else
                 failed[#failed + 1] = b
