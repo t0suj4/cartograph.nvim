@@ -30,6 +30,80 @@ return {
         expected = { refs = 9290, nodes = 13855 }, -- calibrated @ tool 98a02a1
         notes = 'the small/fast java corpus (943 files, ~10s) — quick iteration',
     },
+    -- ── per-language quick tier (libs-sized: seconds, calibrated, pinned) ──
+    php = {
+        root = HOME .. '/git/mantisbt/core',
+        repo = 'https://github.com/mantisbt/mantisbt',
+        rev = '821ce4ac9dab',
+        expected = { refs = 6376, nodes = 2538 }, -- calibrated @ 098c537
+        lang = 'php',
+        notes = 'php quick tier (150 files); mantis events adapter banked',
+    },
+    sylius = {
+        root = HOME .. '/git/sylius/src',
+        repo = 'https://github.com/sylius/sylius',
+        rev = '9b6799e2b884',
+        expected = { refs = 5595, nodes = 32160 }, -- calibrated @ 098c537
+        lang = 'php',
+        notes = 'php SCALE tier (4636 files) — symfony adapter territory',
+    },
+    cpp = {
+        root = HOME .. '/git/7kaa',
+        repo = 'https://git.code.sf.net/p/skfans/7kaa',
+        rev = '9e5cde1bc1d7',
+        expected = { refs = 8014, nodes = 12097 }, -- calibrated @ 098c537
+        lang = 'cpp',
+        notes = 'cpp quick tier (~325 cpp + 189 h); openmw is DIRTY — never pin it',
+    },
+    scheme = {
+        root = HOME .. '/git/guile/module',
+        repo = 'https://github.com/cky/guile',
+        rev = '89ce9fb31b00',
+        expected = { refs = 3596, nodes = 3288 }, -- calibrated @ 098c537
+        lang = 'scheme',
+        notes = 'scheme quick tier (280 files)',
+    },
+    ruby = {
+        root = HOME .. '/git/rails/activesupport/lib',
+        repo = 'https://github.com/rails/rails',
+        rev = 'ed0f92c5e779',
+        expected = { refs = 904, nodes = 2592 }, -- calibrated @ 098c537
+        lang = 'ruby',
+        notes = 'ruby quick tier (305 files)',
+    },
+    go = {
+        root = HOME .. '/git/hugo',
+        repo = 'https://github.com/gohugoio/hugo',
+        rev = '5a5f4a549522',
+        expected = { refs = 9526, nodes = 11591 }, -- calibrated @ 098c537
+        lang = 'go',
+        notes = 'go quick tier (901 files)',
+    },
+    rust = {
+        root = HOME .. '/git/ripgrep',
+        repo = 'https://github.com/burntsushi/ripgrep',
+        rev = '48b0c795f4fe',
+        expected = { refs = 2449, nodes = 3346 }, -- calibrated @ 098c537
+        lang = 'rust',
+        notes = 'rust quick tier (100 files)',
+    },
+    python = {
+        root = HOME .. '/git/django-oscar/src',
+        repo = 'https://github.com/django-oscar/django-oscar',
+        rev = 'c0608e0d167e',
+        expected = { refs = 1546, nodes = 3824 }, -- calibrated @ 098c537
+        lang = 'python',
+        notes = 'python quick tier (483 files) — the django adapter\'s home turf',
+    },
+    haskell = {
+        root = HOME .. '/git/ghc/libraries/base',
+        repo = 'https://github.com/ghc/ghc',
+        rev = '8585f8cb561e',
+        expected = { refs = 1560, nodes = 2805 }, -- calibrated @ 098c537
+        lang = 'haskell',
+        notes = 'haskell quick tier (515 files); ghc = the Track B reference repo',
+    },
+
     self = {
         root = HOME .. '/git/cartograph.nvim',
         repo = 'git@github.com:t0suj4/cartograph.nvim.git',
