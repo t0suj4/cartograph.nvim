@@ -20,8 +20,12 @@ local M = {}
 local function dirname(f) return (f and f:match('^(.*)/[^/]*$')) or '' end
 
 -- from_extract(data, module_of) → { shards = {mod -> {csr, it, n}},
---   cross = {{from,to}...}, dir = {node_key -> mod} }.
+--   cross = {{from,to}...}, dir = {node_key -> mod}, dropped = <count> }.
 -- module_of(file) → module key; default = the file's containing directory.
+-- EVERY node is homed (a local id in its module's shard), not just ref-edge
+-- endpoints — the shards are the graph, and isolated nodes are part of it.
+-- `dropped` counts ref edges whose endpoint has no node entry: conservation
+-- (edge_count) covers what was KEPT; dropped makes the difference honest.
 function M.from_extract(data, module_of)
     module_of = module_of or dirname
     local nfile = {}
@@ -35,19 +39,27 @@ function M.from_extract(data, module_of)
         return s
     end
 
-    local dir, cross = {}, {}
+    local dir = {}
+    for _, n in ipairs(data.nodes or {}) do -- home the full roster first
+        local mod = modof(n.id)
+        dir[n.id] = mod
+        shard(mod).it.id(n.id)
+    end
+
+    local cross, dropped = {}, 0
     for _, e in ipairs(data.edges or {}) do
-        if e.kind == 'ref' and nfile[e.from] and nfile[e.to] then
-            local ma, mb = modof(e.from), modof(e.to)
-            dir[e.from] = ma; dir[e.to] = mb
-            if ma == mb then
-                local s = shard(ma)
-                s.from[#s.from + 1] = s.it.id(e.from)
-                s.to[#s.to + 1] = s.it.id(e.to)
+        if e.kind == 'ref' then
+            if nfile[e.from] and nfile[e.to] then
+                local ma, mb = dir[e.from], dir[e.to]
+                if ma == mb then
+                    local s = shard(ma)
+                    s.from[#s.from + 1] = s.it.id(e.from)
+                    s.to[#s.to + 1] = s.it.id(e.to)
+                else
+                    cross[#cross + 1] = { from = e.from, to = e.to }
+                end
             else
-                shard(ma).it.id(e.from) -- home the endpoints so each gets a
-                shard(mb).it.id(e.to)   -- local id in its own shard
-                cross[#cross + 1] = { from = e.from, to = e.to }
+                dropped = dropped + 1
             end
         end
     end
@@ -57,7 +69,7 @@ function M.from_extract(data, module_of)
         local n = s.it.count()
         shards[mod] = { csr = csr.build(s.from, s.to, n), it = s.it, n = n }
     end
-    return { shards = shards, cross = cross, dir = dir }
+    return { shards = shards, cross = cross, dir = dir, dropped = dropped }
 end
 
 -- locate a node key → module, local-id (read-only). nil if unknown.

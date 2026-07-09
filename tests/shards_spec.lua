@@ -60,6 +60,24 @@ test('shards: conservation — intra + cross = total ref edges', function ()
     eq(2, shards.edge_count(s)) -- 1 intra + 1 cross (import excluded)
 end)
 
+test('shards: every node is homed; dropped edges are counted', function ()
+    local d2 = {
+        nodes = {
+            { id = 'a/x', file = 'a/x.lua' },
+            { id = 'a/iso', file = 'a/iso.lua' }, -- no edges at all
+        },
+        edges = {
+            { kind = 'ref', from = 'a/x', to = 'ghost' }, -- endpoint not a node
+        },
+    }
+    local s = shards.from_extract(d2)
+    local mod, lid = shards.locate(s, 'a/iso')
+    eq('a', mod)
+    ok(lid ~= nil, 'isolated node has a local id')
+    eq(1, s.dropped)             -- the ghost edge, counted not silent
+    eq(0, shards.edge_count(s))  -- conservation covers what was kept
+end)
+
 test('shards: custom module_of (first path segment)', function ()
     local s = shards.from_extract(data, function (f) return (f:match('^([^/]+)')) end)
     ok(s.shards['a'] and s.shards['b'], 'segment modules')

@@ -125,7 +125,15 @@ function M.build(from, to, n, opts)
     for i = 1, n do off[i] = off[i] + off[i - 1] end -- off[i] = start of node i
     local nbr, cur = {}, {}
     for i = 0, n do cur[i] = off[i] end
-    for k = 1, m do local u = from[k]; nbr[cur[u]] = to[k]; cur[u] = cur[u] + 1 end
+    for k = 1, m do
+        local u, v = from[k], to[k]
+        -- out-of-range `from` fails naturally above; `to` would be stored
+        -- silently and corrupt every later traversal — fail loudly instead
+        if v < 0 or v >= n then
+            error(('csr: edge %d target %d outside [0,%d)'):format(k, v, n))
+        end
+        nbr[cur[u]] = v; cur[u] = cur[u] + 1
+    end
     return freeze(off, nbr, n, m, backend)
 end
 
@@ -142,8 +150,14 @@ function M.from_edges(edges, opts)
     return M.build(from, to, it.count(), opts), it
 end
 
--- load a serialized CSR (string backend) — the cache-read path
+-- load a serialized CSR (string backend) — the cache-read path. Byte lengths
+-- are validated up front: a truncated cache/wire payload must be a loud miss
+-- here, not a nil-arithmetic error on some later read.
 function M.unpack(off_bytes, nbr_bytes, n, m)
+    if #off_bytes ~= (n + 1) * 4 or #nbr_bytes ~= m * 4 then
+        error(('csr: unpack size mismatch (off %d≠%d or nbr %d≠%d bytes)')
+            :format(#off_bytes, (n + 1) * 4, #nbr_bytes, m * 4))
+    end
     local self = setmetatable({ n = n, m = m, backend = 'string' }, CSR)
     self._off_s, self._nbr_s = off_bytes, nbr_bytes
     self._go, self.at = string_getter(off_bytes), string_getter(nbr_bytes)

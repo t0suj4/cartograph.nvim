@@ -82,3 +82,34 @@ test('csr: empty graph is well-formed', function ()
     eq(0, g.m)
     eq(4, g:bytes()) -- off has n+1 = 1 entry
 end)
+
+test('csr: ffi pack() matches string pack byte-for-byte', function ()
+    if not csr.have_ffi then skip 'no ffi' end
+    local of, nf = sample('ffi'):pack()   -- the pack-out branch
+    local os_, ns = sample('string'):pack() -- the no-copy branch
+    eq(os_, of)
+    eq(ns, nf)
+end)
+
+test('csr: span agrees across backends', function ()
+    if not csr.have_ffi then skip 'no ffi' end
+    local gf, gs = sample('ffi'), sample('string')
+    for node = 0, 3 do
+        local a1, b1 = gf:span(node)
+        local a2, b2 = gs:span(node)
+        eq(a1, a2); eq(b1, b2)
+        for j = a1, b1 - 1 do eq(gf.at(j), gs.at(j)) end
+    end
+end)
+
+test('csr: unpack rejects mis-sized bytes', function ()
+    local g = sample('string')
+    local ob, nb = g:pack()
+    ok(not pcall(csr.unpack, ob:sub(1, #ob - 1), nb, g.n, g.m), 'short offsets')
+    ok(not pcall(csr.unpack, ob, nb .. '\0', g.n, g.m), 'long neighbors')
+end)
+
+test('csr: build rejects an out-of-range edge target', function ()
+    ok(not pcall(csr.build, { 0 }, { 4 }, 4), 'to >= n')
+    ok(not pcall(csr.build, { 0 }, { -1 }, 4), 'negative to')
+end)
