@@ -95,13 +95,12 @@ function M.expand(store, origin)
             local fn = store.node(origin.fn)
             local lit
             if fn and origin.site then
-                local fd = io.open(store.data.root .. '/' .. fn.file, 'r')
-                if fd then
-                    local lines = vim.split(fd:read('a'), '\n', { plain = true })
-                    fd:close()
-                    local line = lines[origin.site.line + 1] or ''
-                    lit = line:match([=[=%s*['"]([%w_:%.%-\\]+)['"]]=])
-                end
+                -- store.content: the cached, stale-aware, multi-root-safe
+                -- read seam (a raw root-join here read WRONG paths on
+                -- labelled/self:// graphs — traces lost their answers)
+                local lines = store.content(fn)
+                local line = lines and lines[origin.site.line + 1] or ''
+                lit = line:match([=[=%s*['"]([%w_:%.%-\\]+)['"]]=])
             end
             if lit then
                 return { { v = { k = 'lit', v = lit }, fn = origin.fn,
@@ -176,14 +175,8 @@ function M.origins_local(store, fn_id, name, line0)
     -- (`$h = 'scale'` even inside a one-line branch): the literal is the
     -- candidate. Anything else stays a def row and expands as usual.
     local fn = store.node(fn_id)
-    local lines
-    if fn then
-        local fd = io.open(store.data.root .. '/' .. fn.file, 'r')
-        if fd then
-            lines = vim.split(fd:read('a'), '\n', { plain = true })
-            fd:close()
-        end
-    end
+    -- same seam as expand()'s literal read: cached + multi-root-safe
+    local lines = fn and store.content(fn) or nil
     local out = {}
     for _, d in ipairs(defs) do
         local lit
