@@ -101,3 +101,47 @@ test('trace: unresolvable call target is a frontier with the callee named', func
     eq(nil, kids)
     ok(why and why:match('require'), 'callee named in reason')
 end)
+
+test('trace: shadow disambiguation — a shadowed local traces its OWN defs', function ()
+    -- needs a REAL file: binder resolution parses from disk (scope-model
+    -- phase 1); synthetic-graph tests above exercise the name fallback
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then
+        skip 'no lua parser'
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local function pick(flag)',    -- 1
+        '    local mode = "outer"',     -- 2: outer def
+        '    do',                       -- 3: compound stmt holding the shadow
+        '        local mode = "inner"', -- 4: inner def (df reports row 3)
+        '        use(mode)',            -- 5: INNER use
+        '    end',                      -- 6
+        '    return mode',              -- 7: OUTER use
+        'end',
+        'return { pick = pick }',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local pick
+    for id, n in pairs(store.by_id) do
+        if n.name == 'pick' then pick = id end
+    end
+    ok(pick, 'pick found')
+    -- INNER use (0-based line 4): before phase 1 this trace ALSO returned
+    -- the outer def at line 2 — a false origin from another variable.
+    -- Now: exactly the do-statement (the inner decl's containing stmt).
+    local inner = trace.origins_local(store, pick, 'mode', 4)
+    eq(1, #inner)
+    eq(2, inner[1].site.line) -- 0-based row of the do-stmt
+    -- OUTER use (0-based line 6): the simple outer def is kept; the
+    -- compound stays too — df's statement granularity cannot separate a
+    -- compound that CONTAINS a shadow-decl from one assigning the outer
+    -- binder (the documented phase-1 residue; phase 2's binder tags own it)
+    local outer = trace.origins_local(store, pick, 'mode', 6)
+    eq(2, #outer)
+    vim.fn.delete(root, 'rf')
+end)

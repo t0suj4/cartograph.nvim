@@ -41,15 +41,44 @@ end
 
 -- defs of local `name` in fn's data flow at/before `line` (1-based df lines);
 -- falls back to all defs when none precede the use site.
-local function local_defs(fn, name, line0)
+--
+-- SHADOW DISAMBIGUATION (scope-model phase 1): when the provider can
+-- resolve binders for this file, defs are filtered to the binder VISIBLE
+-- AT THE USE SITE — a shadowed name no longer feeds another variable's
+-- defs into the trace. A def statement is kept when its row resolves to
+-- the same binder (identity), or when it CONTAINS the binder's own
+-- declaration row (df is statement-granular: an inner decl inside a
+-- compound statement reports the compound's row). Known residue: a
+-- compound statement that both contains an inner shadow-decl and assigns
+-- the outer binder stays conflated — that is df's granularity, phase 2's
+-- binder tags own it. No binder info (dump graphs, no scope spec, stale
+-- file) ⇒ exactly the old name-matched behavior.
+local function local_defs(store, fn, name, line0)
     local df = fn and fn.df
     if not df then return {} end
+    local ts = require 'cartograph.providers.treesitter'
+    local abs = store.abs(fn.file)
+    local use_b = line0 and ts.binder_at(abs, fn.file, name, line0) or nil
     local before, all = {}, {}
-    for _, s in ipairs(df.stmts) do
+    for i, s in ipairs(df.stmts) do
         for _, d in ipairs(s.def) do
             if d == name then
-                all[#all + 1] = s
-                if line0 and s.l <= line0 + 1 then before[#before + 1] = s end
+                local keep = true
+                if use_b then
+                    local db = ts.binder_at(abs, fn.file, name, s.l - 1)
+                    if db ~= use_b then
+                        -- containment: the binder's own decl lives inside
+                        -- this (compound) statement's row span
+                        local nxt = df.stmts[i + 1]
+                        local declrow1 = use_b.row and use_b.row + 1
+                        keep = declrow1 ~= nil and declrow1 >= s.l
+                            and (nxt == nil or declrow1 < nxt.l)
+                    end
+                end
+                if keep then
+                    all[#all + 1] = s
+                    if line0 and s.l <= line0 + 1 then before[#before + 1] = s end
+                end
             end
         end
     end
@@ -74,7 +103,7 @@ function M.expand(store, origin)
         -- where the local got its value: its def statement(s) in the data flow
         if not origin.fn then return nil, 'local at top level — no data-flow info' end
         local fn = store.node(origin.fn)
-        local defs = local_defs(fn, v.name, origin.site and origin.site.line)
+        local defs = local_defs(store, fn, v.name, origin.site and origin.site.line)
         if #defs == 0 then return nil, 'no def found in the data flow' end
         local kids = {}
         for _, s in ipairs(defs) do

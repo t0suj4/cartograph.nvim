@@ -46,11 +46,16 @@ function M.model(src, spec)
     --- after chain[1] are what chain[1] shadows). Position-checked binders
     --- declared after the use row are not visible, so not in the chain.
     --- `only` restricts to one binder kind (a `this.field` receiver can only
-    --- be a field). Returns (chain, count); the chain array is REUSED across
-    --- calls — consume it before the next resolve on this model.
-    function sm.resolve(ident, from, only)
-        local fromrow = select(1, from:range())
-        local k, n = 0, from:parent()
+    --- be a field). The walk INCLUDES `from` itself — a no-op for leaf
+    --- entries (call/identifier nodes are never scope types), but a
+    --- position-based entry can land ON a scope node, whose own binders
+    --- must count. `atrow` overrides the visibility row for such entries
+    --- (a block's start row is not the query row). Returns (chain, count);
+    --- the chain array is REUSED across calls — consume it before the next
+    --- resolve on this model.
+    function sm.resolve(ident, from, only, atrow)
+        local fromrow = atrow or select(1, from:range())
+        local k, n = 0, from
         while n do
             local entry = spec[n:type()]
             if entry and (only == nil or entry.kind == only) then
