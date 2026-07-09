@@ -120,6 +120,23 @@ local function shown_defs(file)
     return defs
 end
 
+-- var nodes by name, preferring the data-carrying one when names collide —
+-- rebuilt when the graph's generation moves (ingest/splice/hotswap). The
+-- lit-view ref follow used to scan ALL of by_id per keypress.
+local var_idx, var_gen
+local function var_by_name(name)
+    if var_gen ~= store.generation then
+        var_idx, var_gen = {}, store.generation
+        for _, n in pairs(store.by_id or {}) do
+            if n.kind == 'var' then
+                local cur = var_idx[n.name]
+                if not cur or (n.data and not cur.data) then var_idx[n.name] = n end
+            end
+        end
+    end
+    return var_idx[name]
+end
+
 local function file_row(ctx, file, depth, dim)
     local indent = string.rep('  ', depth or 0)
     local mod = store.by_id and store.by_id[file]
@@ -140,12 +157,13 @@ local function file_row(ctx, file, depth, dim)
     -- module or sourced script); the unmarked rest is present-but-never-loaded
     local ran = store.data and store.data.provider == 'self'
         and require('cartograph.self_oracle').loaded_files(store.data)[file]
+    local ndefs = #shown_defs(file)
     ctx.lines[#ctx.lines + 1] = ('%s%s  (%d)%s%s'):format(indent, file,
-        #shown_defs(file), dim and ' …' or '', ran and '  ⚡' or '')
+        ndefs, dim and ' …' or '', ran and '  ⚡' or '')
     ctx.marks[#ctx.lines] = dim and { { 0, -1, 'CartographDim' } }
         or { { #indent, #indent + #file, 'CartographSection' }, { #indent + #file, -1, 'CartographDim' } }
     if ran then
-        local b = #(('%s%s  (%d)%s'):format(indent, file, #shown_defs(file),
+        local b = #(('%s%s  (%d)%s'):format(indent, file, ndefs,
             dim and ' …' or ''))
         table.insert(ctx.marks[#ctx.lines], { b, -1, 'DiagnosticOk' })
     end
@@ -1397,10 +1415,6 @@ function M.projection(limit)
     return { labels = labels, selected = selected }
 end
 
---- Just the labels (the projection without the selection). Kept for callers
---- that don't care which row is current.
-function M.visible_labels(limit) return M.projection(limit).labels end
-
 --- The node id under the cursor in the browser window, or nil. Lets commands
 --- act on the current row (the working-set / cone ops are command-invocable so
 --- they need no default key — see [[cartograph-terminology]], graph-ops rule).
@@ -1886,10 +1900,11 @@ function M.attach(win)
         if #hits == 0 then return false end
         local h = hits[1]
         local id = ('%s::%s@%d'):format(h.file, name, h.line)
-        store.add_node({ id = id, name = name, kind = 'function',
+        local landed = store.add_node({ id = id, name = name, kind = 'function',
             unparsed = true, file = h.file, order = h.line,
             range = { start = { line = h.line, char = h.char },
                 ['end'] = { line = h.line, char = h.char + #name } } })
+        if not landed then return false end -- streaming: the store refused
         if #hits > 1 then
             vim.notify(('cartograph: %q also found in %d more unparsed files')
                 :format(name, #hits - 1), vim.log.levels.INFO)
@@ -2168,13 +2183,7 @@ function M.attach(win)
                 -- follow the indirection to the referenced var (its own
                 -- literal when it has one, its usage sites otherwise);
                 -- prefer the data-carrying var when names collide
-                local best
-                for _, n in pairs(store.by_id) do
-                    if n.kind == 'var' and n.name == e.ref then
-                        if n.data then best = n break end
-                        best = best or n
-                    end
-                end
+                local best = var_by_name(e.ref)
                 if best then return descend_var(best) end
             end
         elseif M.view.level == 'states' then

@@ -484,6 +484,44 @@ function M.dispatch_tables(data)
 end
 
 
+-- callee/full → sorted call indices, memoized per data table (weak: dies with
+-- the graph). The audits below used to re-sweep ALL calls once per binding /
+-- per pair — O(B×C); pre-filtering through this index visits only the calls
+-- whose callee (or full name) can possibly match, in original call order.
+local CALLEE_IDX = setmetatable({}, { __mode = 'k' })
+local function callee_index(data)
+    local idx = CALLEE_IDX[data]
+    if not idx then
+        idx = {}
+        for i, c in ipairs(data.calls or {}) do
+            if c.callee then
+                local b = idx[c.callee]; if not b then b = {}; idx[c.callee] = b end
+                b[#b + 1] = i
+            end
+            if c.full and c.full ~= c.callee then
+                local b = idx[c.full]; if not b then b = {}; idx[c.full] = b end
+                b[#b + 1] = i
+            end
+        end
+        CALLEE_IDX[data] = idx
+    end
+    return idx
+end
+
+-- iterate the calls whose callee/full is in `names` (a set), in call order —
+-- callers re-check their own match conditions, this is purely a pre-filter
+local function matching_calls(data, names)
+    local idx, seen, order = callee_index(data), {}, {}
+    for name in pairs(names) do
+        for _, i in ipairs(idx[name] or {}) do
+            if not seen[i] then seen[i] = true; order[#order + 1] = i end
+        end
+    end
+    table.sort(order)
+    local calls, j = data.calls or {}, 0
+    return function () j = j + 1; return order[j] and calls[order[j]] end
+end
+
 --- The registry consistency audit, auto-configured from the bindings in
 --- force (hand-written and discovered alike). Two directions, both
 --- suppressed when the respective side has dynamic (non-literal) keys:
@@ -503,7 +541,10 @@ function M.audit(data, bindings, opts)
             for _, v in ipairs(verbs_of(b.import.verb or {})) do ivs[v] = true end
             local reg, reg_site, disp, disp_site = {}, {}, {}, {}
             local reg_dyn, disp_dyn, prefixes = false, false, {}
-            for _, c in ipairs(data.calls or {}) do
+            local names = {}
+            for v in pairs(evs) do names[v] = true end
+            for v in pairs(ivs) do names[v] = true end
+            for c in matching_calls(data, names) do
                 local shift = c.method and 1 or 0
                 if evs[c.callee] or (c.full and evs[c.full]) then
                     local k = (c.args or {})[(b.export.name or 1) + shift]
@@ -696,7 +737,9 @@ function M.pair_audit(data, vpairs)
         local acq, rel, acq_site, rel_sites = {}, {}, {}, {}
         local acq_dyn, rel_dyn = false, false
         local found = #out
-        for _, c in ipairs(data.calls or {}) do
+        local names = { [pr.acquire.verb] = true }
+        if pr.release.verb then names[pr.release.verb] = true end
+        for c in matching_calls(data, names) do
             local shift = c.method and 1 or 0
             if c.callee == pr.acquire.verb then
                 local k = (c.args or {})[pr.acquire.key + shift]
