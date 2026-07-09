@@ -27,7 +27,7 @@ return {
         repo = 'https://github.com/elastic/elasticsearch',
         rev = '4743238408a4',
         lang = 'java',
-        expected = { refs = 10821, nodes = 13855 }, -- calibrated @ step-4 return rounds
+        expected = { refs = 10821, nodes = 13888 }, -- recalibrated @ bash-spec (.sh scripts join)
         notes = 'the small/fast java corpus (943 files, ~10s) — quick iteration',
     },
     -- ── per-language quick tier (libs-sized: seconds, calibrated, pinned) ──
@@ -51,7 +51,7 @@ return {
         root = HOME .. '/git/7kaa',
         repo = 'https://git.code.sf.net/p/skfans/7kaa',
         rev = '9e5cde1bc1d7',
-        expected = { refs = 8014, nodes = 12097 }, -- calibrated @ 098c537
+        expected = { refs = 8016, nodes = 12144 }, -- recalibrated @ bash-spec (.sh scripts join)
         lang = 'cpp',
         notes = 'cpp quick tier (~325 cpp + 189 h); openmw is DIRTY — never pin it',
     },
@@ -75,7 +75,7 @@ return {
         root = HOME .. '/git/hugo',
         repo = 'https://github.com/gohugoio/hugo',
         rev = '5a5f4a549522',
-        expected = { refs = 9526, nodes = 11591 }, -- calibrated @ 098c537
+        expected = { refs = 9526, nodes = 11624 }, -- recalibrated @ bash-spec (.sh scripts join)
         lang = 'go',
         notes = 'go quick tier (901 files)',
     },
@@ -83,7 +83,7 @@ return {
         root = HOME .. '/git/ripgrep',
         repo = 'https://github.com/burntsushi/ripgrep',
         rev = '48b0c795f4fe',
-        expected = { refs = 2449, nodes = 3346 }, -- calibrated @ 098c537
+        expected = { refs = 2455, nodes = 3360 }, -- recalibrated @ bash-spec (.sh scripts join)
         lang = 'rust',
         notes = 'rust quick tier (100 files)',
     },
@@ -102,6 +102,23 @@ return {
         expected = { refs = 1560, nodes = 2805 }, -- calibrated @ 098c537
         lang = 'haskell',
         notes = 'haskell quick tier (515 files); ghc = the Track B reference repo',
+    },
+    bash = {
+        root = HOME .. '/git/testssl.sh',
+        repo = 'https://github.com/testssl/testssl.sh',
+        rev = 'deda4c762768',
+        expected = { refs = 264, nodes = 618 }, -- calibrated @ bash-spec cut
+        lang = 'bash',
+        notes = 'bash quick tier (~20 files, one giant sophisticated script)',
+    },
+    blesh = {
+        root = HOME .. '/git/ble.sh',
+        repo = 'https://github.com/akinomyoga/ble.sh.git',
+        rev = '5d39ebe6db67',
+        expected = { refs = 2985, nodes = 5078 }, -- calibrated @ bash-spec cut
+        lang = 'bash',
+        notes = 'bash SCALE tier (~420 files; a line editor written in bash —'
+            .. ' eval-heavy, the aperture design\'s first real workout)',
     },
 
     self = {

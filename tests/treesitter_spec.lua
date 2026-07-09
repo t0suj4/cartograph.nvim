@@ -3401,3 +3401,67 @@ test('ladder: the epistemic distribution and refusal ranking', function ()
     ok(blob:match('heaviest refusals'), 'forks surfaced')
     ok(blob:match('pick'), 'the ambiguous callee named')
 end)
+
+test('bash: functions, command calls, source imports, vars + df', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('bash') then skip 'no bash parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('main.sh', table.concat({
+        '#!/usr/bin/env bash',
+        'CONF="/etc/app"',
+        'main() {',
+        '    local out',
+        '    out=$(fetch_data "$CONF")',
+        '    render "$out"',
+        '}',
+        'source ./lib.sh',
+        'main "$@"',
+    }, '\n'))
+    put('lib.sh', table.concat({
+        'fetch_data() {',
+        '    curl -s "$1"',
+        '}',
+        'render() {',
+        "    printf '%s\\n' \"$1\"",
+        '}',
+    }, '\n'))
+    local data = ts.extract(root)
+    store.ingest(data)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = byname[n.name] or n end
+    ok(byname.main and byname.fetch_data and byname.render, 'fn nodes')
+    ok(byname.CONF and byname.CONF.kind == 'var', 'top-level var node')
+    local function edge(kind, from, to)
+        for _, e in ipairs(data.edges) do
+            if e.kind == kind and e.from == from and e.to == to then return e end
+        end
+    end
+    ok(edge('import', 'main.sh', 'lib.sh'), 'source resolves to an import edge')
+    ok(edge('ref', byname.main.id, byname.fetch_data.id), 'main -> fetch_data')
+    ok(edge('ref', byname.main.id, byname.render.id), 'main -> render')
+    -- builtins/externals never resolve into the corpus
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'curl' or c.callee == 'printf' then
+            ok(not c.to, c.callee .. ' stays outside the corpus')
+        end
+    end
+    -- module effects: main.sh runs at load (source + main call); lib.sh
+    -- only defines
+    ok(byname['main.sh'].effects, 'main.sh has load-time effects')
+    ok(not byname['lib.sh'].effects, 'lib.sh is pure defs')
+    -- df: main defs `out` (local + assignment) and uses CONF via $CONF
+    local df = byname.main.df
+    ok(df and #df.stmts >= 2, 'df present')
+    local defs, uses = {}, {}
+    for _, s in ipairs(df.stmts) do
+        for _, d in ipairs(s.def) do defs[d] = true end
+        for _, u in ipairs(s.use) do uses[u] = true end
+    end
+    ok(defs.out, 'local/assignment defs out')
+    ok(uses.CONF, '$CONF expansion is a use')
+    vim.fn.delete(root, 'rf')
+end)

@@ -1112,6 +1112,92 @@ M.spec = {
             trigger_error = true, function_exists = true,
             class_exists = true },
     },
+    bash = {
+        exts = { 'sh', 'bash' },
+        functions = [=[
+            (function_definition name: (word) @name) @def
+        ]=],
+        -- every command is application; builtins/coreutils opt out via
+        -- stdlib_names. `local`/`declare`/`export` are declaration_command
+        -- in the grammar, so they never reach here.
+        calls = [=[
+            (command name: (command_name (word) @name)) @call
+        ]=],
+        -- top-level assignments (bash vars are PROCESS-GLOBAL by default —
+        -- which is also why this spec has NO scopes table: name matching
+        -- across files is the semantically honest default, and `local` is
+        -- DYNAMIC scoping our lexical model must not fake; banked design)
+        vars = [=[
+            (program (variable_assignment name: (variable_name) @vname value: (_) @value) @vdef)
+            (program (declaration_command (variable_assignment name: (variable_name) @vname value: (_) @value) @vdef))
+        ]=],
+        litdata_types = { string = true, raw_string = true, array = true,
+            word = true, number = true },
+        body_field = 'body',
+        -- $x expansions carry variable_name; a bare word in argument
+        -- position can NAME a function (trap cleanup EXIT) — both mention
+        -- kinds feed the id pass
+        id_query = '[(word) (variable_name)] @id',
+        df_ids = { variable_name = true },
+        is_method = function () return false end,
+        -- source/. splice a file in at RUN time: resolve like C includes —
+        -- relative to the sourcing file, then the root, then a unique
+        -- basename (ambiguity refuses, as everywhere). Runtime cwd is the
+        -- honest unknowable; this is the conventional layout.
+        import_query = [=[
+            ((command name: (command_name (word) @_kw) argument: (word) @path)
+                (#any-of? @_kw "source" "."))
+        ]=],
+        resolve_import = function (path, files, from)
+            local dir = from:match('^(.*)/[^/]*$')
+            for _, cand in ipairs({ dir and (dir .. '/' .. path) or path,
+                (path:gsub('^%./', '')) }) do
+                if files[cand] then return cand end
+            end
+            local base, hit = path:match('([^/]+)$'), nil
+            for f in pairs(files) do
+                if f:match('([^/]+)$') == base then
+                    if hit then return nil end
+                    hit = f
+                end
+            end
+            return hit
+        end,
+        -- a script IS its top level: any statement that isn't a function
+        -- def / comment runs on load (a top-level assignment writes a
+        -- process-global, which is an effect too)
+        module_effects = function (root)
+            for _, c in inext, root, -1 do
+                local t = c:type()
+                if c:named() and t ~= 'function_definition' and t ~= 'comment' then
+                    return true
+                end
+            end
+            return false
+        end,
+        stdlib_names = (function ()
+            local t = {}
+            for _, n in ipairs({
+                -- builtins
+                'echo', 'printf', 'read', 'cd', 'pwd', 'export', 'unset',
+                'shift', 'exit', 'return', 'source', 'eval', 'exec', 'trap',
+                'set', 'test', 'true', 'false', 'wait', 'kill', 'ulimit',
+                'umask', 'getopts', 'command', 'type', 'hash', 'alias',
+                'break', 'continue', 'let', 'readonly', 'caller', 'shopt',
+                'complete', 'compgen', 'bind', 'builtin', 'enable', 'mapfile',
+                'readarray', 'suspend', 'times', 'disown', 'bg', 'fg', 'jobs',
+                -- ubiquitous externals
+                'ls', 'cat', 'grep', 'egrep', 'fgrep', 'sed', 'awk', 'cut',
+                'tr', 'sort', 'uniq', 'head', 'tail', 'wc', 'find', 'xargs',
+                'rm', 'mv', 'cp', 'mkdir', 'rmdir', 'touch', 'chmod', 'chown',
+                'ln', 'basename', 'dirname', 'date', 'sleep', 'curl', 'wget',
+                'tar', 'gzip', 'git', 'which', 'env', 'id', 'whoami', 'uname',
+                'hostname', 'tee', 'stat', 'du', 'df', 'ps', 'mktemp', 'seq',
+                'expr', 'dig', 'openssl', 'sudo', 'apt', 'yum', 'dnf',
+            }) do t[n] = true end
+            return t
+        end)(),
+    },
     ruby = {
         exts = { 'rb' },
         functions = [=[
@@ -1873,12 +1959,15 @@ local function dataflow(def, spec, src, params)
     -- with SEVERAL defs (or shadowing a param) get BINDER TAGS below —
     -- scope-model phase 2, closing df's shadow conflation for its readers
     local defsites = jvt_sm and {} or nil
+    -- which node types ARE identifiers for def/use purposes: most grammars
+    -- say identifier/name; bash variables are `variable_name` (spec.df_ids)
+    local idt = spec.df_ids
     for _, stmt in inext, body, -1 do
         if stmt:named() and stmt:type() ~= 'comment' then
             local defs, uses, seen_d, seen_u = {}, {}, {}, {}
             local function walk(n, defpos)
                 local t = n:type()
-                if t == 'identifier' or t == 'name' then
+                if t == 'identifier' or t == 'name' or (idt and idt[t]) then
                     local name = node_text(n, src)
                     if defpos and not seen_d[name] then
                         seen_d[name] = true
@@ -1897,10 +1986,20 @@ local function dataflow(def, spec, src, params)
                 -- definition positions: declaration/assignment left sides
                 if t == 'assignment_statement' or t == 'assignment'
                     or t == 'assignment_expression'
-                    or t == 'augmented_assignment_expression' then
-                    local left = n:field('left')[1] or n:child(0)
+                    or t == 'augmented_assignment_expression'
+                    or t == 'variable_assignment' then -- bash x=… (name field)
+                    local left = n:field('left')[1] or n:field('name')[1]
+                        or n:child(0)
                     for _, c in inext, n, -1 do
                         if c:named() then walk(c, c == left) end
+                    end
+                    return
+                end
+                if t == 'declaration_command' then -- bash local/declare/export
+                    for _, c in inext, n, -1 do
+                        -- a bare `local x` defs the variable_name directly;
+                        -- `local x=…` recurses into variable_assignment
+                        if c:named() then walk(c, c:type() == 'variable_name') end
                     end
                     return
                 end
