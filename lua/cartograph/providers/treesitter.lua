@@ -97,81 +97,82 @@ local function java_enclosing_class(node, src)
     end
 end
 
--- MEMOIZED per-scope symbol tables. Profiling showed java_var_type's per-call
--- AST re-walk (re-scanning each enclosing scope's declarations for every method
--- call) was ~35% of extraction; this builds each scope's declaration table ONCE
--- (keyed by node:id, unique within a tree) and turns the per-call scan into an
--- O(1) lookup. Cache is per-file: cleared when `src` changes.
-local jvt_cache, jvt_src = {}, nil
-local function jvt_scope_sym(node, src)
-    if src ~= jvt_src then jvt_cache = {}; jvt_src = src end
-    local id = node:id()
-    local cached = jvt_cache[id]
-    if cached then return cached end
-    local t, map = node:type(), {}
-    if t == 'block' or t == 'constructor_body' then
-        for c in node:iter_children() do -- locals: name -> {ty, row} (position-checked)
-            if c:type() == 'local_variable_declaration' then
-                local ty, row = java_base_type(c:field('type')[1], src), select(1, c:range())
-                for d in c:iter_children() do
-                    if d:type() == 'variable_declarator' then
-                        local nm = d:field('name')[1]
-                        if nm then map[node_text(nm, src)] = { ty = ty, row = row } end
-                    end
-                end
-            end
-        end
-    elseif t == 'method_declaration' or t == 'constructor_declaration'
-        or t == 'lambda_expression' then
-        local ps = node:field('parameters')[1] -- params: name -> {ty}
-        for c in (ps and ps:iter_children() or NOOP) do
-            if c:type() == 'formal_parameter' or c:type() == 'spread_parameter' then
-                local nm = c:field('name')[1]
-                if nm then map[node_text(nm, src)] = { ty = java_base_type(c:field('type')[1], src) } end
-            end
-        end
-    elseif t == 'class_body' or t == 'enum_body' then
-        for c in node:iter_children() do -- fields: name -> {ty}
-            if c:type() == 'field_declaration' then
-                local ty = java_base_type(c:field('type')[1], src)
-                for d in c:iter_children() do
-                    if d:type() == 'variable_declarator' then
-                        local nm = d:field('name')[1]
-                        if nm then map[node_text(nm, src)] = { ty = ty } end
-                    end
+-- Java scope spec for the ScopeModel (cartograph.scope): which node types
+-- open scopes and how to harvest their binders. This IS the old memoized
+-- jvt_scope_sym, expressed as data + three harvesters; the model owns the
+-- lazy per-scope memo (profiling: the per-call AST re-walk this replaces was
+-- ~35% of extraction).
+local function jvt_locals(node, src, out) -- name -> {ty, row} (position-checked)
+    for c in node:iter_children() do
+        if c:type() == 'local_variable_declaration' then
+            local ty, row = java_base_type(c:field('type')[1], src), select(1, c:range())
+            for d in c:iter_children() do
+                if d:type() == 'variable_declarator' then
+                    local nm = d:field('name')[1]
+                    if nm then out[node_text(nm, src)] = { ty = ty, row = row } end
                 end
             end
         end
     end
-    jvt_cache[id] = map
-    return map
+end
+local function jvt_params(node, src, out) -- name -> {ty}
+    local ps = node:field('parameters')[1]
+    for c in (ps and ps:iter_children() or NOOP) do
+        if c:type() == 'formal_parameter' or c:type() == 'spread_parameter' then
+            local nm = c:field('name')[1]
+            if nm then out[node_text(nm, src)] = { ty = java_base_type(c:field('type')[1], src) } end
+        end
+    end
+end
+local function jvt_fields(node, src, out) -- name -> {ty}
+    for c in node:iter_children() do
+        if c:type() == 'field_declaration' then
+            local ty = java_base_type(c:field('type')[1], src)
+            for d in c:iter_children() do
+                if d:type() == 'variable_declarator' then
+                    local nm = d:field('name')[1]
+                    if nm then out[node_text(nm, src)] = { ty = ty } end
+                end
+            end
+        end
+    end
+end
+local JAVA_SCOPES = {
+    block                   = { kind = 'local', harvest = jvt_locals },
+    constructor_body        = { kind = 'local', harvest = jvt_locals },
+    method_declaration      = { kind = 'param', harvest = jvt_params },
+    constructor_declaration = { kind = 'param', harvest = jvt_params },
+    lambda_expression       = { kind = 'param', harvest = jvt_params },
+    class_body              = { kind = 'field', harvest = jvt_fields },
+    enum_body               = { kind = 'field', harvest = jvt_fields },
+}
+
+-- one model per file being extracted; reset in extract_calls (per-tree
+-- lifetime — node ids cannot alias across trees)
+local jvt_sm, jvt_src = nil, nil
+local function jvt_model(src)
+    if not jvt_sm or jvt_src ~= src then
+        jvt_sm = require('cartograph.scope').model(src, JAVA_SCOPES)
+        jvt_src = src
+    end
+    return jvt_sm
 end
 
--- the declared type name of a simple variable `ident` visible at `from`:
--- walk enclosing scopes outward (inner shadows outer); each scope's declaration
--- table is memoized (jvt_scope_sym). Block locals are position-checked (decl
--- before use). `fields_only` restricts to class fields (a `this.field` receiver).
+-- the declared type name of a simple variable `ident` visible at `from`.
+-- MECHANISM: scope.resolve — every visible binder, nearest first (inner
+-- shadows outer; block locals position-checked). POLICY (here, deliberately):
+--   * a param answers unconditionally, even untyped — matching a param ends
+--     the question;
+--   * an untyped local/field (scoped-generic base java_base_type can't name)
+--     is TRANSPARENT — the shadowed outer binder answers. Optimistic: pinned
+--     by the shadowedTally test; the resolve-but-mark change (step 2) flips
+--     exactly this loop, knowingly.
+-- `fields_only` restricts to class fields (a `this.field` receiver).
 local function java_var_type(ident, from, src, fields_only)
-    local fromrow = select(1, from:range())
-    local n = from:parent()
-    while n do
-        local t = n:type()
-        if not fields_only and (t == 'block' or t == 'constructor_body') then
-            -- a local whose type didn't resolve (e.g. a scoped-generic base
-            -- java_base_type can't name) is NOT a final answer: keep walking
-            -- outward on nil so a field shadowed by such a local still resolves.
-            local e = jvt_scope_sym(n, src)[ident]
-            if e and e.ty ~= nil and e.row <= fromrow then return e.ty end
-        elseif not fields_only and (t == 'method_declaration'
-            or t == 'constructor_declaration' or t == 'lambda_expression') then
-            -- a matched param terminates the walk even when untyped
-            local e = jvt_scope_sym(n, src)[ident]
-            if e then return e.ty end
-        elseif t == 'class_body' or t == 'enum_body' then
-            local e = jvt_scope_sym(n, src)[ident]
-            if e and e.ty ~= nil then return e.ty end
-        end
-        n = n:parent()
+    local chain, k = jvt_model(src).resolve(ident, from, fields_only and 'field' or nil)
+    for i = 1, k do
+        local b = chain[i]
+        if b.kind == 'param' or b.ty ~= nil then return b.ty end
     end
 end
 
@@ -2825,11 +2826,11 @@ function M.extract(root, opts)
     -- Containers also run this over TEMPLATE EXPRESSION trees — an
     -- @click="save(item)" is a real call_expression at absolute rows
     local function extract_calls(file, lang, spec, src, tsroot)
-        -- drop the receiver-typing scope memo unconditionally: its guard is
+        -- drop the receiver-typing scope model unconditionally: its guard is
         -- src VALUE-equality, but node:id() is only unique within one tree —
         -- two byte-identical files whose first tree got collected could
-        -- otherwise alias ids into a stale map
-        jvt_cache, jvt_src = {}, nil
+        -- otherwise alias ids into a stale model
+        jvt_sm, jvt_src = nil, nil
         -- calls (inventory + reference sites, resolved after all files)
         local q = parse_query(lang, spec.calls)
         if q then
