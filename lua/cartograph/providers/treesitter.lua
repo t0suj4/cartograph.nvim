@@ -287,7 +287,7 @@ end
 -- binder; defer = { r, c } = the INIT-PROVENANCE call site when the binder
 -- is typed only by its initializer's return (the return-type rounds settle
 -- it — precise beats the walk-out guess, so defer preempts the hedge).
-local function java_var_type(ident, from, src, fields_only)
+local function java_var_type(ident, from, fields_only)
     if not jvt_sm then return end
     local chain, k = jvt_sm.resolve(ident, from, fields_only and 'field' or nil)
     local skipped -- the nearest untyped binder walked past (the witness)
@@ -1252,7 +1252,7 @@ M.spec = {
                     end
                 elseif ot == 'identifier' then
                     local objname = node_text(obj, src)
-                    cls, hedge, defer = java_var_type(objname, calln, src)
+                    cls, hedge, defer = java_var_type(objname, calln)
                     if not cls and not defer and objname:match('^%u') then
                         -- no binder and PascalCase: a STATIC call on the
                         -- class named right here (convention-sound; the
@@ -1278,7 +1278,7 @@ M.spec = {
                     local fo, ff = obj:field('object')[1], obj:field('field')[1]
                     if fo and fo:type() == 'this' and ff then
                         cls, hedge = java_var_type(
-                            node_text(ff, src), calln, src, true)
+                            node_text(ff, src), calln, true)
                     end
                 end
             end
