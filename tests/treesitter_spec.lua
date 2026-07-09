@@ -1219,6 +1219,63 @@ test('parallel extraction: identical graph to sequential', function ()
     eq(seq.names, got.names)
 end)
 
+test('parallel audit: a slice-locally settled return chain re-derives', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('java') then skip 'no java parser' end
+    local par = require 'cartograph.parallel'
+    local gd = require 'cartograph.graphdiff'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    -- the failing slice shape, pinned EXPLICITLY (the spawn path's slices
+    -- depend on mtime ordering — in-process slices make it deterministic).
+    -- The chain call must settle VIA THE ROUNDS inside its slice, which
+    -- requires `tally` to be name-AMBIGUOUS in-slice (B and C both define
+    -- it — else the main loop tail-resolves first and never touches rt):
+    -- rounds settle by exact type, the audit nulls the inferred
+    -- resolution, and relink can only re-derive from the KEPT rt
+    -- provenance (the name is ambiguous globally too — no tail rescue).
+    -- When settle cleared rt, this edge was lost (probe-verified).
+    put('A.java', 'public class A {\n    public B make() { return new B(); }\n'
+        .. '    public int go() { return make().tally(); }\n}\n')
+    put('B.java', 'public class B {\n    public int tally() { return 1; }\n}\n')
+    put('C.java', 'public class C {\n    public int tally() { return 3; }\n}\n')
+    put('D.java', 'public class D {\n    public int other() { return 4; }\n}\n')
+    local seq = ts.extract(root)
+    local fileset = ts.list_files(root)
+    local acc = { schema = 1, root = root, provider = 'treesitter',
+        nodes = {}, edges = {}, calls = {}, stamps = {}, extends = {} }
+    for _, slice in ipairs({ { 'A.java', 'B.java', 'C.java' }, { 'D.java' } }) do
+        local chunk = ts.extract(root, { files = slice, fileset = fileset,
+            skip_idpass = true })
+        for _, n in ipairs(chunk.nodes) do acc.nodes[#acc.nodes + 1] = n end
+        for _, e in ipairs(chunk.edges) do acc.edges[#acc.edges + 1] = e end
+        for _, c in ipairs(chunk.calls or {}) do acc.calls[#acc.calls + 1] = c end
+        for _, x in ipairs(chunk.extends or {}) do
+            acc.extends[#acc.extends + 1] = x
+        end
+    end
+    par.audit(acc)
+    ts.relink(acc)
+    -- the id pass ran in seq but was skipped per-slice; diff CALLS + the
+    -- ref/reg edge multiset the audit+relink own (use edges are phase 2)
+    local function no_use(data)
+        local out = { nodes = data.nodes, calls = data.calls, edges = {} }
+        for _, e in ipairs(data.edges) do
+            if e.kind ~= 'use' and e.kind ~= 'reg' then
+                out.edges[#out.edges + 1] = e
+            end
+        end
+        return out
+    end
+    local d = gd.diff(no_use(seq), no_use(acc))
+    ok(gd.empty(d), 'audited+relinked == sequential per-item: '
+        .. table.concat(gd.report(d, { limit = 5 }), ' | '))
+    vim.fn.delete(root, 'rf')
+end)
+
 test('mention index: globals reconcile in UNCHANGED files, both ways', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 17 -- v17: the scope-model arc changed resolution semantics AND
+M.VERSION = 18 -- v18: order-independent resolution — cbarg marks move to a
+              -- pre-scan (same-file tiers no longer depend on call order;
+              -- ~10 server edges gain confidence) and settled chains keep
+              -- their rt provenance (calls carry rt after resolution);
+              -- v17: the scope-model arc changed resolution semantics AND
               -- shapes — lexical-first id pass (bound names never cross the
               -- file boundary: cached graphs hold since-removed false use
               -- edges), return-type rounds (+15% java ref edges; calls carry

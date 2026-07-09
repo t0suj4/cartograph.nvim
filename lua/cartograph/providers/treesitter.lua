@@ -2099,7 +2099,11 @@ local function resolve_returns(calls, node_index, exact, addref)
                         c.to = fit.id
                         c.inferred = true -- type INFERRED through a summary
                         c.refused = nil
-                        c.rt = nil -- settled
+                        -- c.rt STAYS: a worker settles chains slice-locally,
+                        -- the parallel audit nulls every inferred resolution,
+                        -- and relink must re-derive from the provenance
+                        -- (idempotent — the `not c.to` guard skips settled
+                        -- calls; name-ambiguous chains have no tail rescue)
                         if c.fn then addref(c.fn, fit.id, c.at, true) end
                         n = n + 1
                         progress = true
@@ -3497,6 +3501,27 @@ function M.extract(root, opts)
         return resolve(lit, p.file), lit
     end
 
+    -- cbarg marks are RESOLUTION INPUT (same-file priority skips dispatched
+    -- defs), so they must be COMPLETE BEFORE the pass, not minted during it:
+    -- a mid-pass mint made the tier depend on call order, and a cross-pass
+    -- one (worker pass vs relink pass) made inline and parallel disagree —
+    -- both found by the --parallel parity gate. The pre-scan marks
+    -- module-level identifier args naming a globally-unique fn (the
+    -- name-only core of the upgrade's criterion; the upgrade itself still
+    -- runs in the pass, it just no longer marks).
+    for _, p in ipairs(pending) do
+        if not fn_at(p.file, p.at.start.line) then
+            for _, a in ipairs(p.call.argv) do
+                if a.k == 'local' and a.name then
+                    local cands = exact[a.name]
+                    if cands and #cands == 1 and (cands[1].kind == 'function'
+                        or cands[1].kind == 'method') then
+                        cands[1].cbarg = true
+                    end
+                end
+            end
+        end
+    end
     for _, p in ipairs(pending) do
         local target, inferred, refused
         if p.call.dynamic then
@@ -3543,8 +3568,9 @@ function M.extract(root, opts)
                     else
                         -- passed as data at load time (RunPython(forward),
                         -- operations lists): registered, not dead — and the
-                        -- module is the registrant (a descendable alibi)
-                        t2.cbarg = true
+                        -- module is the registrant (a descendable alibi).
+                        -- The cbarg MARK happened in the pre-scan; minting
+                        -- it here made resolution order-dependent
                         addreg(p.file, t2.id, p.at)
                     end
                 end
@@ -3779,6 +3805,21 @@ function M.relink(data, touched)
         return nil
     end
     local n = 0
+    -- cbarg pre-scan, mirroring extract's: marks are resolution INPUT and
+    -- must be complete before the pass (see extract; --parallel parity)
+    for _, c in ipairs(data.calls or {}) do
+        if not c.fn then
+            for _, a in ipairs(c.argv or {}) do
+                if a.k == 'local' and a.name then
+                    local cands = exact[a.name]
+                    if cands and #cands == 1 and (cands[1].kind == 'function'
+                        or cands[1].kind == 'method') then
+                        cands[1].cbarg = true
+                    end
+                end
+            end
+        end
+    end
     for _, c in ipairs(data.calls or {}) do
         -- dynamic calls stay frontiers UNLESS a literal-flow trace already
         -- named the callee (a parallel slice may know the literal but not
@@ -3830,7 +3871,7 @@ function M.relink(data, touched)
                             { start = { line = c.line, char = 0 },
                                 ['end'] = { line = c.line, char = 0 } }, true)
                     else
-                        t2.cbarg = true -- load-time data reference (mirror)
+                        -- the MARK happened in the pre-scan (see extract)
                         addreg(c.file, t2.id,
                             { start = { line = c.line, char = 0 },
                                 ['end'] = { line = c.line, char = 0 } })
