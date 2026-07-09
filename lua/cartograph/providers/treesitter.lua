@@ -1796,6 +1796,33 @@ local function cap_node(ns)
     return ns
 end
 
+-- The raw-parser rider (fusion Stage C): the extract hot loop parses via
+-- a REUSED raw TSParser per language — LanguageTree construction
+-- (injection scanning, a per-file object graph) measured ~16% of parse
+-- cost, and extraction queries only ever visit the host tree. Containers
+-- keep LanguageTree (injections ARE their content); anything raw can't
+-- serve falls back to it. Trees are immutable: reusing one parser across
+-- files is safe, earlier trees stay valid while referenced.
+local RAW_PARSERS = {} -- lang -> TSParser | false (raw unavailable)
+local function raw_parse(lang, src)
+    local p = RAW_PARSERS[lang]
+    if p == nil then
+        p = false
+        if vim._create_ts_parser then
+            local ok, added = pcall(vim.treesitter.language.add, lang)
+            if ok and added then
+                local okc, np = pcall(vim._create_ts_parser, lang)
+                if okc then p = np end
+            end
+        end
+        RAW_PARSERS[lang] = p
+    end
+    if not p then return nil end
+    local ok, tree = pcall(p.parse, p, nil, src)
+    if ok then return tree end
+    return nil
+end
+
 local QUERY_ERRORS = {}
 local function parse_query(lang, q)
     if not q then return nil end -- the spec doesn't define this concept
@@ -3668,12 +3695,19 @@ function M.extract(root, opts)
                     end
                 end
             end
-            local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
-            if not okp then
-                no_parser[lang] = true
-                goto next_file
+            local tsroot
+            local rawtree = raw_parse(lang, src) -- keep referenced: nodes
+            -- below live only as long as their tree does
+            if rawtree then
+                tsroot = rawtree:root()
+            else
+                local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+                if not okp then
+                    no_parser[lang] = true
+                    goto next_file
+                end
+                tsroot = parser:parse()[1]:root()
             end
-            local tsroot = parser:parse()[1]:root()
             stamp(file)
             nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
                 range = pos_of(tsroot), order = -1,
