@@ -153,6 +153,31 @@ test('treesitter: lua blocks, litdata and require edges', function ()
     end
 end)
 
+test('cache: a warm graph is per-item identical to the extract it cached', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('a.lua', 'local config = { x = 1 }\nlocal function apply()\n'
+        .. '    return config.x\nend\nreturn { apply = apply, config = config }\n')
+    put('b.lua', 'local m = require "a"\nlocal function go()\n'
+        .. '    return m.apply()\nend\nreturn { go = go }\n')
+    local cache = require 'cartograph.cache'
+    local gd = require 'cartograph.graphdiff'
+    cache.wipe(root)
+    local data = ts.extract(root)
+    cache.save(data)
+    local back = cache.load(root)
+    ok(back, 'cache loads')
+    -- the instrument invariant: count parity can hide compensating errors;
+    -- per-item diff cannot. This is what a version-bump miss would break —
+    -- a cached graph must be indistinguishable from a fresh extract.
+    ok(gd.empty(gd.diff(data, back)), 'per-item identical after round-trip')
+    cache.wipe(root)
+    vim.fn.delete(root, 'rf')
+end)
+
 test('id pass: lexical-first — bound mentions do not name-match globals', function ()
     if not has_parser('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')

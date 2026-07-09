@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 16 -- v16: the top-level-statement node kind is `region` (was
+M.VERSION = 17 -- v17: the scope-model arc changed resolution semantics AND
+              -- shapes — lexical-first id pass (bound names never cross the
+              -- file boundary: cached graphs hold since-removed false use
+              -- edges), return-type rounds (+15% java ref edges; calls carry
+              -- rt, defs carry ret), shadow hedges (c.hedge; edges capped ~).
+              -- A v16 cache would warm-open a silently pre-scope-model graph;
+              -- v16: the top-level-statement node kind is `region` (was
               -- `block`; id `file::region@line`) — `block` now names the
               -- browser view you descend a compound statement into;
               -- v15: top-level statement blocks are bounded runs again —
