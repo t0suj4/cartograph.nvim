@@ -29,6 +29,25 @@ bench.bootstrap()
 local gd = require 'cartograph.graphdiff'
 local census = require 'cartograph.census'
 
+-- corpus identity check BEFORE the (possibly one-minute) extract: a pinned
+-- corpus whose checkout moved (or is dirty) can't answer the gate's question
+-- — any diff would be corpus drift misread as extractor drift
+local corpus = bench.corpus(name)
+local now = corpus.git and corpus.git.rev
+if corpus.rev then
+    if not bench.same_rev(corpus.rev, now) then
+        print(('GATE NOT APPLICABLE: corpus %s is pinned @ %s but the checkout'
+            .. ' is @ %s — restore the rev, or recalibrate (--save + update'
+            .. ' tools/corpora.lua)'):format(name, corpus.rev, now or '?'))
+        os.exit(2)
+    end
+    if corpus.git.dirty then
+        print(('GATE NOT APPLICABLE: corpus %s (@ %s) has uncommitted changes')
+            :format(name, now))
+        os.exit(2)
+    end
+end
+
 local data, stats = bench.extract(name)
 print(bench.fmt(stats))
 
@@ -51,15 +70,25 @@ if expected then
 end
 
 if save then
-    local path = snapshot.save(name, data, { corpus = name })
+    local path = snapshot.save(name, data, { corpus = name,
+        corpus_rev = now, corpus_dirty = corpus.git and corpus.git.dirty or nil })
     print('baseline saved: ' .. path)
 else
     local base, meta = snapshot.load(name)
     if not base then
         print(meta .. '  (run with --save on a known-good rev to create it)')
     else
+        print(('vs baseline (tool %s @ %s, corpus @ %s%s):'):format(
+            meta.rev or '?', meta.when or '?', meta.corpus_rev or '?',
+            meta.corpus_dirty and ' DIRTY' or ''))
+        if not bench.same_rev(meta.corpus_rev, now) then
+            -- unpinned corpora reach here (pinned ones bailed above): the
+            -- diff is still shown, but it may be the CORPUS that moved
+            print(('  NOTE: corpus rev drift (baseline @ %s, now @ %s) — diffs'
+                .. ' below may be corpus change, not extractor change')
+                :format(meta.corpus_rev or '?', now or '?'))
+        end
         local d = gd.diff(base, snapshot.slim(data))
-        print(('vs baseline (%s @ %s):'):format(meta.rev or '?', meta.when or '?'))
         for _, l in ipairs(gd.report(d, { limit = 25 })) do print('  ' .. l) end
         failed = failed or not gd.empty(d)
     end

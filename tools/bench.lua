@@ -45,7 +45,23 @@ function M.corpus(name_or_root)
         error(('bench: corpus root missing: %s'):format(c.root))
     end
     c.name = reg[name_or_root] and name_or_root or c.root
+    -- the corpus's ACTUAL identity right now (git works from a subdir root,
+    -- e.g. server/src/main/java inside the elasticsearch repo); nil = not git
+    local rev = vim.fn.systemlist({ 'git', '-C', c.root, 'rev-parse', '--short=12', 'HEAD' })
+    if vim.v.shell_error == 0 and rev[1] then
+        c.git = {
+            rev = rev[1],
+            url = vim.fn.systemlist({ 'git', '-C', c.root, 'remote', 'get-url', 'origin' })[1],
+            dirty = #vim.fn.systemlist({ 'git', '-C', c.root, 'status', '--porcelain' }) > 0,
+        }
+    end
     return c
+end
+
+-- do two revs name the same commit (either may be a short form)?
+function M.same_rev(a, b)
+    if not a or not b then return false end
+    return a:sub(1, #b) == b or b:sub(1, #a) == a
 end
 
 -- peak RSS (VmHWM) from /proc; reset via clear_refs("5") so a measurement
