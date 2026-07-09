@@ -320,12 +320,12 @@ M.spec = {
         vars = [[
             (variable_declaration
                 (assignment_statement
-                    (variable_list name: (identifier) @name)
-                    (expression_list value: (_) @value))) @def
+                    (variable_list name: (identifier) @vname)
+                    (expression_list value: (_) @value))) @vdef
             (chunk
                 (assignment_statement
-                    (variable_list name: (identifier) @name)
-                    (expression_list value: (_) @value)) @def)
+                    (variable_list name: (identifier) @vname)
+                    (expression_list value: (_) @value)) @vdef)
         ]],
         params_field = 'parameters',
         body_field = 'body',
@@ -470,11 +470,11 @@ M.spec = {
                    (call_expression function: (field_expression) @name) @call ]],
         vars = [[
             (declaration declarator: (init_declarator
-                declarator: (identifier) @name value: (_) @value)) @def
+                declarator: (identifier) @vname value: (_) @value)) @vdef
             (declaration declarator: (init_declarator
-                declarator: (array_declarator declarator: (identifier) @name)
-                value: (_) @value)) @def
-            (declaration declarator: (identifier) @name) @def
+                declarator: (array_declarator declarator: (identifier) @vname)
+                value: (_) @value)) @vdef
+            (declaration declarator: (identifier) @vname) @vdef
         ]],
         litdata_types = { initializer_list = true },
         -- a header's INTERFACE: prototypes (decl), macros (fn-like + object),
@@ -541,10 +541,10 @@ M.spec = {
         ]=],
         vars = [=[
             (declaration declarator: (init_declarator
-                declarator: (identifier) @name value: (_) @value)) @def
+                declarator: (identifier) @vname value: (_) @value)) @vdef
             (declaration declarator: (init_declarator
-                declarator: (array_declarator declarator: (identifier) @name)
-                value: (_) @value)) @def
+                declarator: (array_declarator declarator: (identifier) @vname)
+                value: (_) @value)) @vdef
         ]=],
         -- the header interface, as in C, plus C++ class/struct definitions
         interface = [=[
@@ -726,9 +726,9 @@ M.spec = {
         -- every list head is application — special forms opt out below
         calls = [=[ (list . (symbol) @name) @call ]=],
         vars = [=[
-            ((list . (symbol) @_kw . (symbol) @name . (number) @value) @def
+            ((list . (symbol) @_kw . (symbol) @vname . (number) @value) @vdef
                 (#eq? @_kw "define"))
-            ((list . (symbol) @_kw . (symbol) @name . (string) @value) @def
+            ((list . (symbol) @_kw . (symbol) @vname . (string) @value) @vdef
                 (#eq? @_kw "define"))
         ]=],
         body_field = nil,
@@ -816,9 +816,9 @@ M.spec = {
         ]=],
         vars = [=[
             (program (lexical_declaration
-                (variable_declarator name: (identifier) @name value: (_) @value) @def))
+                (variable_declarator name: (identifier) @vname value: (_) @value) @vdef))
             (program (variable_declaration
-                (variable_declarator name: (identifier) @name value: (_) @value) @def))
+                (variable_declarator name: (identifier) @vname value: (_) @value) @vdef))
         ]=],
         params_field = 'parameters',
         body_field = 'body',
@@ -916,8 +916,8 @@ M.spec = {
         dynamic_callee_types = { variable_name = true },
         vars = [=[
             (program (expression_statement (assignment_expression
-                left: (variable_name (name) @name) right: (_) @value) @def))
-            (const_declaration (const_element (name) @name (_) @value) @def)
+                left: (variable_name (name) @vname) right: (_) @value) @vdef))
+            (const_declaration (const_element (name) @vname (_) @value) @vdef)
         ]=],
         params_field = 'parameters',
         body_field = 'body',
@@ -1124,7 +1124,7 @@ M.spec = {
         ]=],
         vars = [=[
             (program (assignment
-                left: (constant) @name right: (_) @value) @def)
+                left: (constant) @vname right: (_) @value) @vdef)
         ]=],
         params_field = 'parameters',
         body_field = 'body',
@@ -1207,7 +1207,7 @@ M.spec = {
         ]=],
         vars = [=[
             (field_declaration declarator: (variable_declarator
-                name: (identifier) @name value: (_) @value)) @def
+                name: (identifier) @vname value: (_) @value)) @vdef
         ]=],
         params_field = 'parameters',
         body_field = 'body',
@@ -1367,9 +1367,9 @@ M.spec = {
         ]=],
         vars = [=[
             (source_file (var_declaration (var_spec
-                name: (identifier) @name value: (_) @value) @def))
+                name: (identifier) @vname value: (_) @value) @vdef))
             (source_file (const_declaration (const_spec
-                name: (identifier) @name value: (_) @value) @def))
+                name: (identifier) @vname value: (_) @value) @vdef))
         ]=],
         params_field = 'parameters',
         body_field = 'body',
@@ -1449,8 +1449,8 @@ M.spec = {
             (macro_invocation macro: (identifier) @name) @call
         ]],
         vars = [[
-            (const_item name: (identifier) @name value: (_) @value) @def
-            (static_item name: (identifier) @name value: (_) @value) @def
+            (const_item name: (identifier) @vname value: (_) @value) @vdef
+            (static_item name: (identifier) @vname value: (_) @value) @vdef
         ]],
         params_field = 'parameters',
         body_field = 'body',
@@ -1615,7 +1615,7 @@ M.spec = {
         calls = [[ (call function: (_) @name) @call ]],
         vars = [[
             (module (expression_statement
-                (assignment left: (identifier) @name right: (_) @value) @def))
+                (assignment left: (identifier) @vname right: (_) @value) @vdef))
         ]],
         params_field = 'parameters',
         body_field = 'body',
@@ -2918,176 +2918,190 @@ function M.extract(root, opts)
             end
             errow = rec(tsroot)
         end
-        -- functions
-        local q = parse_query(lang, spec.functions)
+        -- functions / vars / interface / super: ONE cursor (fusion
+        -- Stage A). Every query cursor walks the WHOLE tree in C, and
+        -- this ran four of them per file; the sections' captures are
+        -- disjoint (@name = function, @vname = var, @child/@parent =
+        -- super, a category capture = interface), so each match of the
+        -- CONCATENATED query self-identifies and dispatches inline.
+        -- Section-relative match order is a subsequence of tree order —
+        -- all the order the sections ever relied on (merge_equations,
+        -- seen_var). Underscore captures (@_kw) are predicate helpers
+        -- and never dispatch.
         -- start line of every fn/method def, for block flushing. Keyed by
-        -- LINE, not node: the defs come from iter_matches but the block loop
-        -- walks iter_children, and TSNode identity does not survive across
-        -- traversals (== is a metamethod, table keys are raw) — a node-keyed
-        -- set never hits, so every file collapsed into one giant region.
+        -- LINE, not node: TSNode identity does not survive across
+        -- traversals (== is a metamethod, table keys are raw).
         local fnDefLines = {}
-        if q then
-            for _, match in q:iter_matches(tsroot, src, 0, -1) do
-                local defn, namen
-                for id, ns in pairs(match) do
-                    local cap = q.captures[id]
-                    local n = cap_node(ns)
-                    if cap == 'def' then defn = n elseif cap == 'name' then namen = n end
+        -- a multi-assignment (`a, b = 1, 2`) cross-products name×value in
+        -- the query, so dedup by the (name,line) id it produces
+        local seen_var = {}
+        local function handle_fn(defn, namen)
+            if defn and namen and not (spec.toplevel_only
+                and in_function(defn, spec))
+                and not (spec.toplevel_parent and defn:parent()
+                    and defn:parent():type() ~= spec.toplevel_parent) then
+                local name = node_text(namen, src):gsub('%s+', '')
+                if spec.qualify then name = spec.qualify(name, defn, src) end
+                local sp = pos_of(defn)
+                local method = spec.is_method(name, defn)
+                local id = ('%s::%s@%d'):format(file, name, sp.start.line)
+                local params = fn_params(defn, spec, src, method and lang == 'lua')
+                -- tri-state visibility: true/false = the provider's
+                -- verdict (lint trusts it over kind heuristics);
+                -- nil = this language has no visibility concept
+                local exp
+                if spec.exported_def then
+                    exp = spec.exported_def(defn, src) == true
                 end
-                if defn and namen and not (spec.toplevel_only
-                    and in_function(defn, spec))
-                    and not (spec.toplevel_parent and defn:parent()
-                        and defn:parent():type() ~= spec.toplevel_parent) then
-                    local name = node_text(namen, src):gsub('%s+', '')
-                    if spec.qualify then name = spec.qualify(name, defn, src) end
-                    local sp = pos_of(defn)
-                    local method = spec.is_method(name, defn)
-                    local id = ('%s::%s@%d'):format(file, name, sp.start.line)
-                    local params = fn_params(defn, spec, src, method and lang == 'lua')
-                    -- tri-state visibility: true/false = the provider's
-                    -- verdict (lint trusts it over kind heuristics);
-                    -- nil = this language has no visibility concept
-                    local exp
-                    if spec.exported_def then
-                        exp = spec.exported_def(defn, src) == true
+                local isfield = spec.field_fn_cbarg
+                    and namen:parent() and namen:parent():type() == 'field'
+                if spec.cbarg_within and not isfield then
+                    local a = defn:parent()
+                    while a do
+                        if spec.cbarg_within[a:type()] then isfield = true break end
+                        a = a:parent()
                     end
-                    local isfield = spec.field_fn_cbarg
-                        and namen:parent() and namen:parent():type() == 'field'
-                    if spec.cbarg_within and not isfield then
-                        local a = defn:parent()
-                        while a do
-                            if spec.cbarg_within[a:type()] then isfield = true break end
-                            a = a:parent()
-                        end
+                end
+                if spec.cbarg_def and not isfield then
+                    isfield = spec.cbarg_def(defn, src) or false
+                end
+                -- multi-equation definitions (haskell) are ONE function:
+                -- fold this equation into the previous node
+                local prev = spec.merge_equations and lastFn[file]
+                if prev and prev.name == name then
+                    prev.range['end'] = sp['end']
+                    for _, r in ipairs(fnRanges[file] or {}) do
+                        if r.id == prev.id then r.e = sp['end'].line break end
                     end
-                    if spec.cbarg_def and not isfield then
-                        isfield = spec.cbarg_def(defn, src) or false
-                    end
-                    -- multi-equation definitions (haskell) are ONE function:
-                    -- fold this equation into the previous node
-                    local prev = spec.merge_equations and lastFn[file]
-                    if prev and prev.name == name then
-                        prev.range['end'] = sp['end']
-                        for _, r in ipairs(fnRanges[file] or {}) do
-                            if r.id == prev.id then r.e = sp['end'].line break end
-                        end
-                        fnDefLines[sp.start.line] = true
-                        goto fn_done
-                    end
-                    local torn = errow and sp.start.line >= errow or nil
-                    nodes[#nodes + 1] = { id = id, name = name,
-                        kind = method and 'method' or 'function', file = file,
-                        range = sp, order = sp.start.line, params = params,
-                        cbarg = isfield or nil,
-                        exported = exp,
-                        torn = torn,
-                        entry = (spec.entry_names or {})[name] or nil,
-                        -- declared return type (base name): the per-function
-                        -- SUMMARY the return-type rounds ride (graph-VM MVP)
-                        ret = spec.def_ret and spec.def_ret(defn, src) or nil,
-                        df = (spec.dataflow or dataflow)(defn, spec, src, params) }
-                    lastFn[file] = nodes[#nodes]
                     fnDefLines[sp.start.line] = true
-                    -- the outermost query pattern may match a nested def too;
-                    -- ranges keep the innermost containing fn for attribution
-                    fnRanges[file] = fnRanges[file] or {}
-                    table.insert(fnRanges[file], { s = sp.start.line, e = sp['end'].line, id = id })
+                    goto fn_done
+                end
+                local torn = errow and sp.start.line >= errow or nil
+                nodes[#nodes + 1] = { id = id, name = name,
+                    kind = method and 'method' or 'function', file = file,
+                    range = sp, order = sp.start.line, params = params,
+                    cbarg = isfield or nil,
+                    exported = exp,
+                    torn = torn,
+                    entry = (spec.entry_names or {})[name] or nil,
+                    -- declared return type (base name): the per-function
+                    -- SUMMARY the return-type rounds ride (graph-VM MVP)
+                    ret = spec.def_ret and spec.def_ret(defn, src) or nil,
+                    df = (spec.dataflow or dataflow)(defn, spec, src, params) }
+                lastFn[file] = nodes[#nodes]
+                fnDefLines[sp.start.line] = true
+                -- the outermost query pattern may match a nested def too;
+                -- ranges keep the innermost containing fn for attribution
+                fnRanges[file] = fnRanges[file] or {}
+                table.insert(fnRanges[file], { s = sp.start.line, e = sp['end'].line, id = id })
+                if not torn then
+                    exact[name] = exact[name] or {}
+                    table.insert(exact[name], nodes[#nodes])
+                    local tl = name:match('([%w_]+)$')
+                    if tl and tl ~= name then
+                        tail[tl] = tail[tl] or {}
+                        table.insert(tail[tl], nodes[#nodes])
+                    end
+                end
+                ::fn_done::
+            end
+        end
+        local function handle_var(defn, namen, valn)
+            if defn and namen and not in_function(defn, spec)
+                and not (spec.toplevel_parent and defn:parent()
+                    and defn:parent():type() ~= spec.toplevel_parent) then
+                local name = node_text(namen, src)
+                local sp = pos_of(defn)
+                local id = ('%s::var:%s@%d'):format(file, name, sp.start.line)
+                if not seen_var[id] then
+                    seen_var[id] = true
+                    local d = valn and (spec.litdata_types or {})[valn:type()]
+                        and litval(valn, src, spec, 0) or nil
+                    local torn = errow and sp.start.line >= errow or nil
+                    nodes[#nodes + 1] = { id = id, name = name, kind = 'var',
+                        file = file, range = sp, order = sp.start.line,
+                        torn = torn,
+                        data = type(d) == 'table' and d or nil }
                     if not torn then
+                        varsByName[name] = varsByName[name] or {}
+                        table.insert(varsByName[name], nodes[#nodes])
+                    end
+                end
+            end
+        end
+        -- header/interface elements (C/C++): prototypes, macros and types.
+        -- A prototype is a DECLARATION (never indexed, marked decl); a
+        -- function-like macro IS a call target and indexes. namen here is
+        -- the CATEGORY capture node; cat its capture name.
+        local function handle_iface(defn, namen, cat)
+            if defn and namen then
+                local name = node_text(namen, src):gsub('%s+', '')
+                local sp = pos_of(defn)
+                local torn = errow and sp.start.line >= errow or nil
+                if cat == 'proto' or cat == 'macrofn' then
+                    local node = { name = name, kind = 'function',
+                        id = ('%s::%s@%d'):format(file, name, sp.start.line),
+                        file = file, range = sp, order = sp.start.line,
+                        torn = torn, decl = cat == 'proto' or nil,
+                        macro = cat == 'macrofn' or nil }
+                    nodes[#nodes + 1] = node
+                    -- prototypes never index; a fn-like macro resolves
+                    if not torn and cat == 'macrofn' then
                         exact[name] = exact[name] or {}
-                        table.insert(exact[name], nodes[#nodes])
+                        table.insert(exact[name], node)
                         local tl = name:match('([%w_]+)$')
                         if tl and tl ~= name then
                             tail[tl] = tail[tl] or {}
-                            table.insert(tail[tl], nodes[#nodes])
+                            table.insert(tail[tl], node)
                         end
                     end
-                    ::fn_done::
+                else -- struct / union / enum / typedef / object macro
+                    nodes[#nodes + 1] = { name = name, kind = 'var',
+                        id = ('%s::type:%s@%d'):format(file, name, sp.start.line),
+                        file = file, range = sp, order = sp.start.line,
+                        torn = torn, ctype = cat }
                 end
             end
         end
-
-        -- top-level vars (+ litdata)
-        q = parse_query(lang, spec.vars)
+        local function handle_super(childn, parentn)
+            local child = node_text(childn, src)
+            local t = node_text(parentn, src)
+            local parent = t:match('[^\\]+$') or t
+            data.extends = data.extends or {}
+            data.extends[#data.extends + 1] =
+                { child = child, parent = parent, file = file }
+        end
+        local combined = spec._defs_query
+        if combined == nil then
+            combined = table.concat({ spec.functions or '', spec.vars or '',
+                spec.interface or '', spec.super_query or '' }, '\n')
+            spec._defs_query = combined
+        end
+        local q = parse_query(lang, combined)
         if q then
-            -- a multi-assignment (`a, b = 1, 2`) cross-products name×value in
-            -- the query, so dedup by the (name,line) id it produces
-            local seen_var = {}
             for _, match in q:iter_matches(tsroot, src, 0, -1) do
-                local defn, namen, valn
+                local defn, namen, vdefn, vnamen, valn
+                local childn, parentn, catn, cat
                 for id, ns in pairs(match) do
-                    local cap = q.captures[id]
+                    local capn = q.captures[id]
                     local n = cap_node(ns)
-                    if cap == 'def' then defn = n
-                    elseif cap == 'name' then namen = n
-                    elseif cap == 'value' then valn = n end
+                    if capn == 'def' then defn = n
+                    elseif capn == 'name' then namen = n
+                    elseif capn == 'vdef' then vdefn = n
+                    elseif capn == 'vname' then vnamen = n
+                    elseif capn == 'value' then valn = n
+                    elseif capn == 'child' then childn = n
+                    elseif capn == 'parent' then parentn = n
+                    elseif capn:sub(1, 1) ~= '_' then catn, cat = n, capn end
                 end
-                if defn and namen and not in_function(defn, spec)
-                    and not (spec.toplevel_parent and defn:parent()
-                        and defn:parent():type() ~= spec.toplevel_parent) then
-                    local name = node_text(namen, src)
-                    local sp = pos_of(defn)
-                    local id = ('%s::var:%s@%d'):format(file, name, sp.start.line)
-                    if not seen_var[id] then
-                        seen_var[id] = true
-                        local d = valn and (spec.litdata_types or {})[valn:type()]
-                            and litval(valn, src, spec, 0) or nil
-                        local torn = errow and sp.start.line >= errow or nil
-                        nodes[#nodes + 1] = { id = id, name = name, kind = 'var',
-                            file = file, range = sp, order = sp.start.line,
-                            torn = torn,
-                            data = type(d) == 'table' and d or nil }
-                        if not torn then
-                            varsByName[name] = varsByName[name] or {}
-                            table.insert(varsByName[name], nodes[#nodes])
-                        end
-                    end
-                end
-            end
-        end
-
-        -- header/interface elements (C/C++): prototypes, macros and types,
-        -- so a header shows what it EXPOSES instead of one #ifndef block. A
-        -- prototype is a DECLARATION, not a definition — it stays OUT of the
-        -- resolution indexes (the .c definition is the real call target) and
-        -- is marked decl. A function-like macro IS a call target and indexes.
-        if spec.interface then
-            local iq = parse_query(lang, spec.interface)
-            if iq then
-                for _, match in iq:iter_matches(tsroot, src, 0, -1) do
-                    local defn, namen, cat
-                    for cid, ns in pairs(match) do
-                        local cap = iq.captures[cid]
-                        if cap == 'def' then defn = cap_node(ns)
-                        else namen, cat = cap_node(ns), cap end
-                    end
-                    if defn and namen then
-                        local name = node_text(namen, src):gsub('%s+', '')
-                        local sp = pos_of(defn)
-                        local torn = errow and sp.start.line >= errow or nil
-                        if cat == 'proto' or cat == 'macrofn' then
-                            local node = { name = name, kind = 'function',
-                                id = ('%s::%s@%d'):format(file, name, sp.start.line),
-                                file = file, range = sp, order = sp.start.line,
-                                torn = torn, decl = cat == 'proto' or nil,
-                                macro = cat == 'macrofn' or nil }
-                            nodes[#nodes + 1] = node
-                            -- prototypes never index; a fn-like macro resolves
-                            if not torn and cat == 'macrofn' then
-                                exact[name] = exact[name] or {}
-                                table.insert(exact[name], node)
-                                local tl = name:match('([%w_]+)$')
-                                if tl and tl ~= name then
-                                    tail[tl] = tail[tl] or {}
-                                    table.insert(tail[tl], node)
-                                end
-                            end
-                        else -- struct / union / enum / typedef / object macro
-                            nodes[#nodes + 1] = { name = name, kind = 'var',
-                                id = ('%s::type:%s@%d'):format(file, name, sp.start.line),
-                                file = file, range = sp, order = sp.start.line,
-                                torn = torn, ctype = cat }
-                        end
-                    end
+                if childn and parentn then
+                    handle_super(childn, parentn)
+                elseif vdefn and vnamen then
+                    handle_var(vdefn, vnamen, valn)
+                elseif defn and catn then
+                    handle_iface(defn, catn, cat)
+                elseif defn and namen then
+                    handle_fn(defn, namen)
                 end
             end
         end
@@ -3146,30 +3160,6 @@ function M.extract(root, opts)
             end
         end
 
-        -- OO extends pairs (child class -> superclass, bare names): feeds
-        -- transitive parent::m resolution once the full graph is built
-        if spec.super_query then
-            q = parse_query(lang, spec.super_query)
-            if q then
-                for _, match in q:iter_matches(tsroot, src, 0, -1) do
-                    local child, parent
-                    for cid, ns in pairs(match) do
-                        local cap = q.captures[cid]
-                        if cap == 'child' then
-                            child = node_text(cap_node(ns), src)
-                        elseif cap == 'parent' then
-                            local t = node_text(cap_node(ns), src)
-                            parent = t:match('[^\\]+$') or t
-                        end
-                    end
-                    if child and parent then
-                        data.extends = data.extends or {}
-                        data.extends[#data.extends + 1] =
-                            { child = child, parent = parent, file = file }
-                    end
-                end
-            end
-        end
 
     end
 
