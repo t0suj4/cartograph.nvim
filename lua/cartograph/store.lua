@@ -44,51 +44,54 @@ end
 -- construction — the step is just these applied to the delta on top of what's
 -- already built. by_id overwrites (a real module node replaces its stub);
 -- by_file/calls/edges append.
-local function idx_node(n)
-    M.by_id[n.id] = n
+-- The builders write into T (= M for the live indexes) so M.audit can derive
+-- a fresh scratch bundle through the SAME code and diff it against the live
+-- tables — the derive logic exists exactly once.
+local function idx_node(T, n)
+    T.by_id[n.id] = n
     if n.kind ~= 'module' then
-        M.by_file[n.file] = M.by_file[n.file] or {}
-        table.insert(M.by_file[n.file], n)
+        T.by_file[n.file] = T.by_file[n.file] or {}
+        table.insert(T.by_file[n.file], n)
     end
 end
-local function idx_call(c)
+local function idx_call(T, c)
     if c.to then
-        M.calls_to[c.to] = M.calls_to[c.to] or {}
-        table.insert(M.calls_to[c.to], c)
+        T.calls_to[c.to] = T.calls_to[c.to] or {}
+        table.insert(T.calls_to[c.to], c)
     end
     if c.fn then
-        M.calls_by_fn[c.fn] = M.calls_by_fn[c.fn] or {}
-        table.insert(M.calls_by_fn[c.fn], c)
+        T.calls_by_fn[c.fn] = T.calls_by_fn[c.fn] or {}
+        table.insert(T.calls_by_fn[c.fn], c)
     end
 end
-local function idx_edge(e)
+local function idx_edge(T, e)
     if e.kind == 'ref' then
         -- self edges (recursion) carry occurrences only: they must not
         -- inflate usedby/uses (dead-function lint, heat, tints)
         if e.from ~= e.to then
-            M.uses[e.from]   = M.uses[e.from]   or {}; table.insert(M.uses[e.from], e.to)
-            M.usedby[e.to]   = M.usedby[e.to]   or {}; table.insert(M.usedby[e.to], e.from)
+            T.uses[e.from]   = T.uses[e.from]   or {}; table.insert(T.uses[e.from], e.to)
+            T.usedby[e.to]   = T.usedby[e.to]   or {}; table.insert(T.usedby[e.to], e.from)
         end
-        M.occ[e.from .. '\31' .. e.to] = e.at
-        if e.inferred then M.edge_inferred[e.from .. '\31' .. e.to] = true end
+        T.occ[e.from .. '\31' .. e.to] = e.at
+        if e.inferred then T.edge_inferred[e.from .. '\31' .. e.to] = true end
     elseif e.kind == 'import' then
-        M.imports_in[e.to] = M.imports_in[e.to] or {}
-        table.insert(M.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
-        M.imports_out[e.from] = M.imports_out[e.from] or {}
-        table.insert(M.imports_out[e.from], e.to)
+        T.imports_in[e.to] = T.imports_in[e.to] or {}
+        table.insert(T.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
+        T.imports_out[e.from] = T.imports_out[e.from] or {}
+        table.insert(T.imports_out[e.from], e.to)
     elseif e.kind == 'use' then
-        M.var_usedby[e.to] = M.var_usedby[e.to] or {}
-        table.insert(M.var_usedby[e.to], { from = e.from, at = e.at or {} })
-        M.var_uses[e.from] = M.var_uses[e.from] or {}
-        table.insert(M.var_uses[e.from], { to = e.to, at = e.at or {} })
+        T.var_usedby[e.to] = T.var_usedby[e.to] or {}
+        table.insert(T.var_usedby[e.to], { from = e.from, at = e.at or {} })
+        T.var_uses[e.from] = T.var_uses[e.from] or {}
+        table.insert(T.var_uses[e.from], { to = e.to, at = e.at or {} })
     elseif e.kind == 'reg' then
         -- a registration: the fn is kept alive by `from` (a module,
         -- dispatch table). The alibi both ways — a fn's registrants,
         -- a registrant's roster.
-        M.reg_by[e.to] = M.reg_by[e.to] or {}
-        table.insert(M.reg_by[e.to], { from = e.from, at = e.at or {} })
-        M.registers[e.from] = M.registers[e.from] or {}
-        table.insert(M.registers[e.from], e.to)
+        T.reg_by[e.to] = T.reg_by[e.to] or {}
+        table.insert(T.reg_by[e.to], { from = e.from, at = e.at or {} })
+        T.registers[e.from] = T.registers[e.from] or {}
+        table.insert(T.registers[e.from], e.to)
     end
 end
 
@@ -126,7 +129,7 @@ function M.ingest(data)
     reset_indexes()
     local seen = {}
     for _, n in ipairs(M.data.nodes) do
-        idx_node(n)
+        idx_node(M, n)
         if not seen[n.file] then seen[n.file] = true; table.insert(M.files, n.file) end
     end
     table.sort(M.files)
@@ -134,8 +137,8 @@ function M.ingest(data)
     for _, list in pairs(M.by_file) do
         table.sort(list, function (a, b) return a.order < b.order end)
     end
-    for _, c in ipairs(M.data.calls or {}) do idx_call(c) end
-    for _, e in ipairs(M.data.edges or {}) do idx_edge(e) end
+    for _, c in ipairs(M.data.calls or {}) do idx_call(M, c) end
+    for _, e in ipairs(M.data.edges or {}) do idx_edge(M, e) end
     -- baseline for a subsequent incremental step (see M.ingest_step)
     M._ing = { n = #M.data.nodes, c = #(M.data.calls or {}), e = #(M.data.edges or {}) }
     return M.data
@@ -164,7 +167,7 @@ function M.ingest_step(acc)
     local dirty, newfiles = {}, false
     for i = ing.n + 1, #acc.nodes do
         local n = acc.nodes[i]
-        idx_node(n)
+        idx_node(M, n)
         if n.kind ~= 'module' then dirty[n.file] = true end
         if not M._fileset[n.file] then -- a file not in the roster yet: add it
             M._fileset[n.file] = true
@@ -176,10 +179,94 @@ function M.ingest_step(acc)
     for f in pairs(dirty) do
         table.sort(M.by_file[f], function (a, b) return a.order < b.order end)
     end
-    for i = (ing.c or 0) + 1, #(acc.calls or {}) do idx_call(acc.calls[i]) end
-    for i = (ing.e or 0) + 1, #(acc.edges or {}) do idx_edge(acc.edges[i]) end
+    for i = (ing.c or 0) + 1, #(acc.calls or {}) do idx_call(M, acc.calls[i]) end
+    for i = (ing.e or 0) + 1, #(acc.edges or {}) do idx_edge(M, acc.edges[i]) end
     M._ing = { n = #acc.nodes, c = #(acc.calls or {}), e = #(acc.edges or {}) }
     return M.data
+end
+
+-- audit comparison: a list reduced to a multiset of canonical keys, so append
+-- order (which in-place writers legitimately change) never false-positives
+local function audit_multiset(list, keyf)
+    local m = {}
+    for _, v in ipairs(list or {}) do
+        local k = keyf and keyf(v) or tostring(v)
+        m[k] = (m[k] or 0) + 1
+    end
+    return m
+end
+local function audit_lists(out, name, live, derived, keyf)
+    local keys = {}
+    for k in pairs(live or {}) do keys[k] = true end
+    for k in pairs(derived or {}) do keys[k] = true end
+    for k in pairs(keys) do
+        local a = audit_multiset((live or {})[k], keyf)
+        local b = audit_multiset((derived or {})[k], keyf)
+        for kk, n in pairs(a) do
+            if b[kk] ~= n then
+                out[#out + 1] = ('%s[%s]: live %dx %s, derived %dx')
+                    :format(name, k, n, kk, b[kk] or 0)
+            end
+        end
+        for kk, n in pairs(b) do
+            if a[kk] == nil then
+                out[#out + 1] = ('%s[%s]: derived %dx %s, live 0x')
+                    :format(name, k, n, kk)
+            end
+        end
+    end
+end
+local function audit_keyset(out, name, live, derived)
+    for k in pairs(live or {}) do
+        if (derived or {})[k] == nil then
+            out[#out + 1] = ('%s: live has %s, a fresh derive does not'):format(name, k)
+        end
+    end
+    for k in pairs(derived or {}) do
+        if (live or {})[k] == nil then
+            out[#out + 1] = ('%s: derive produces %s, live lacks it'):format(name, k)
+        end
+    end
+end
+
+--- Re-derive every index from M.data into a scratch bundle through the SAME
+--- per-item builders and diff against the live tables — the Log/View rule made
+--- executable: any in-place writer that lets a derived View drift from what a
+--- full derive produces shows up as a named divergence. Order-insensitive
+--- (writers may reorder lists); presence and multiplicity are the contract.
+--- Returns a list of divergence strings (empty = clean); nil, why when there
+--- is no graph or a streaming extraction is mid-append.
+function M.audit()
+    if not M.data then return nil, 'no graph' end
+    if M.data.partial then return nil, 'streaming — audit after the stream settles' end
+    local T = { by_id = {}, by_file = {}, calls_to = {}, calls_by_fn = {},
+        uses = {}, usedby = {}, occ = {}, edge_inferred = {},
+        var_usedby = {}, var_uses = {}, imports_in = {}, imports_out = {},
+        reg_by = {}, registers = {} }
+    for _, n in ipairs(M.data.nodes or {}) do idx_node(T, n) end
+    for _, c in ipairs(M.data.calls or {}) do idx_call(T, c) end
+    for _, e in ipairs(M.data.edges or {}) do idx_edge(T, e) end
+    local out = {}
+    audit_keyset(out, 'by_id', M.by_id, T.by_id)
+    audit_keyset(out, 'occ', M.occ, T.occ)
+    audit_keyset(out, 'edge_inferred', M.edge_inferred, T.edge_inferred)
+    local id = function (v) return v.id end
+    audit_lists(out, 'by_file', M.by_file, T.by_file, id)
+    audit_lists(out, 'uses', M.uses, T.uses)
+    audit_lists(out, 'usedby', M.usedby, T.usedby)
+    audit_lists(out, 'imports_out', M.imports_out, T.imports_out)
+    audit_lists(out, 'registers', M.registers, T.registers)
+    local from = function (v) return v.from end
+    audit_lists(out, 'imports_in', M.imports_in, T.imports_in,
+        function (v) return v.from .. (v.sideeffect and '!' or '') end)
+    audit_lists(out, 'var_usedby', M.var_usedby, T.var_usedby, from)
+    audit_lists(out, 'var_uses', M.var_uses, T.var_uses, function (v) return v.to end)
+    audit_lists(out, 'reg_by', M.reg_by, T.reg_by, from)
+    local site = function (c) return (c.file or '?') .. ':' .. tostring(c.line) end
+    audit_lists(out, 'calls_to', M.calls_to, T.calls_to, site)
+    audit_lists(out, 'calls_by_fn', M.calls_by_fn, T.calls_by_fn, site)
+    table.sort(out)
+    return out
 end
 
 --- Classify a file's usage. Crucially separates "loaded for side effects" from
@@ -565,7 +652,7 @@ function M.add_edge(e)
             M.usedby[e.to] = M.usedby[e.to] or {}
             table.insert(M.usedby[e.to], e.from)
         end
-        M.occ[e.from .. '\31' .. e.to] = e.at or {}
+        M.occ[e.from .. '\31' .. e.to] = e.at -- raw, exactly as idx_edge derives it
         if e.inferred then M.edge_inferred[e.from .. '\31' .. e.to] = true end
     end
     return e
@@ -602,7 +689,7 @@ function M.set_callers(to, callers)
             table.insert(M.uses[c.from], to)
             table.insert(M.usedby[to], c.from)
         end
-        M.occ[c.from .. '\31' .. to] = c.at or {}
+        M.occ[c.from .. '\31' .. to] = c.at -- raw, exactly as idx_edge derives it
     end
 end
 
