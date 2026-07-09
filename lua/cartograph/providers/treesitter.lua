@@ -26,6 +26,20 @@ end
 -- a fresh closure on every nil-children branch in hot loops
 local function NOOP() end
 
+-- indexed child iteration, replacing TSNode:iter_children() everywhere:
+-- iter_children allocates a TSTreeCursor userdata + a closure PER CALL —
+-- measured 2.7x slower and ~2x more transient garbage than indexed access,
+-- at every tree shape including an 8000-statement chunk (no O(width^2)
+-- penalty in practice; the per-node allocation dominates). STATELESS
+-- iterator (zero alloc), same sequence as iter_children (ALL children,
+-- anonymous tokens included — existing named()/type() guards filter):
+--   for _, c in inext, node, -1 do ... end
+local function inext(n, i)
+    i = i + 1
+    local c = n:child(i)
+    if c then return i, c end
+end
+
 -- ── per-language specs ───────────────────────────────────────────────────────
 -- Each spec: file extensions, tree-sitter queries with a shared capture
 -- protocol (@def/@name for functions and vars, @call/@name for calls), and
@@ -103,11 +117,11 @@ end
 -- lazy per-scope memo (profiling: the per-call AST re-walk this replaces was
 -- ~35% of extraction).
 local function jvt_locals(node, src, out) -- name -> {ty, row} (position-checked)
-    for c in node:iter_children() do
+    for _, c in inext, node, -1 do
         if c:type() == 'local_variable_declaration' then
             local ty, row = java_base_type(c:field('type')[1], src), select(1, c:range())
             if ty == 'var' then ty = nil end -- `var x = ...`: no declared name
-            for d in c:iter_children() do
+            for _, d in inext, c, -1 do
                 if d:type() == 'variable_declarator' then
                     local nm = d:field('name')[1]
                     if nm then
@@ -139,7 +153,7 @@ local function jvt_locals(node, src, out) -- name -> {ty, row} (position-checked
 end
 local function jvt_params(node, src, out) -- name -> {ty}
     local ps = node:field('parameters')[1]
-    for c in (ps and ps:iter_children() or NOOP) do
+    for _, c in (ps and inext or NOOP), ps, -1 do
         if c:type() == 'formal_parameter' or c:type() == 'spread_parameter' then
             local nm = c:field('name')[1]
             if nm then out[node_text(nm, src)] = { ty = java_base_type(c:field('type')[1], src) } end
@@ -147,10 +161,10 @@ local function jvt_params(node, src, out) -- name -> {ty}
     end
 end
 local function jvt_fields(node, src, out) -- name -> {ty}
-    for c in node:iter_children() do
+    for _, c in inext, node, -1 do
         if c:type() == 'field_declaration' then
             local ty = java_base_type(c:field('type')[1], src)
-            for d in c:iter_children() do
+            for _, d in inext, c, -1 do
                 if d:type() == 'variable_declarator' then
                     local nm = d:field('name')[1]
                     if nm then out[node_text(nm, src)] = { ty = ty } end
@@ -174,20 +188,20 @@ local JAVA_SCOPES = {
 -- module-level entity (the id pass pins it to THIS file); inner kinds mean
 -- the mention names a local, not any module var.
 local function lua_locals(node, src, out) -- chunk/block statement locals
-    for stmt in node:iter_children() do
+    for _, stmt in inext, node, -1 do
         local t = stmt:type()
         if t == 'variable_declaration' then
             -- `local a, b = 1, 2` wraps an assignment_statement; a bare
             -- `local a` holds the variable_list directly
             local row = select(1, stmt:range())
-            for a in stmt:iter_children() do
+            for _, a in inext, stmt, -1 do
                 local vl = a:type() == 'variable_list' and a or nil
                 if not vl and a:type() == 'assignment_statement' then
-                    for c in a:iter_children() do
+                    for _, c in inext, a, -1 do
                         if c:type() == 'variable_list' then vl = c break end
                     end
                 end
-                for v in (vl and vl:iter_children() or NOOP) do
+                for _, v in (vl and inext or NOOP), vl, -1 do
                     if v:type() == 'identifier' then
                         out[node_text(v, src)] = { row = row }
                     end
@@ -195,7 +209,7 @@ local function lua_locals(node, src, out) -- chunk/block statement locals
             end
         elseif t == 'function_declaration' then
             local islocal = false
-            for c in stmt:iter_children() do
+            for _, c in inext, stmt, -1 do
                 if c:type() == 'local' then islocal = true break end
             end
             if islocal then
@@ -209,13 +223,13 @@ local function lua_locals(node, src, out) -- chunk/block statement locals
 end
 local function lua_params(node, src, out)
     local ps = node:field('parameters')[1]
-    for c in (ps and ps:iter_children() or NOOP) do
+    for _, c in (ps and inext or NOOP), ps, -1 do
         if c:type() == 'identifier' then out[node_text(c, src)] = {} end
     end
 end
 local function lua_forvars(node, src, out)
     local row = select(1, node:range())
-    for cl in node:iter_children() do
+    for _, cl in inext, node, -1 do
         local t = cl:type()
         if t == 'for_numeric_clause' then
             local v = cl:named_child(0) -- ONLY the loop var; bounds are exprs
@@ -223,9 +237,9 @@ local function lua_forvars(node, src, out)
                 out[node_text(v, src)] = { row = row }
             end
         elseif t == 'for_generic_clause' then
-            for c in cl:iter_children() do
+            for _, c in inext, cl, -1 do
                 if c:type() == 'variable_list' then -- the vars, not the iterator
-                    for v in c:iter_children() do
+                    for _, v in inext, c, -1 do
                         if v:type() == 'identifier' then
                             out[node_text(v, src)] = { row = row }
                         end
@@ -327,19 +341,19 @@ M.spec = {
             local as = el:parent()
             if not as or as:type() ~= 'assignment_statement' then return nil end
             local vl
-            for c in as:iter_children() do
+            for _, c in inext, as, -1 do
                 if c:type() == 'variable_list' then vl = c break end
             end
             if not vl then return nil end
             local vi, i = 0, 0
-            for c in el:iter_children() do
+            for _, c in inext, el, -1 do
                 if c:named() then
                     i = i + 1
                     if c:equal(calln) then vi = i end
                 end
             end
             i = 0
-            for c in vl:iter_children() do
+            for _, c in inext, vl, -1 do
                 if c:named() then
                     i = i + 1
                     if i == vi then
@@ -373,19 +387,19 @@ M.spec = {
         module_effects = function (root, src)
             local locals = {}
             local function collect_names(vl)
-                for v in vl:iter_children() do
+                for _, v in inext, vl, -1 do
                     if v:named() then
                         local n = node_text(v, src)
                         locals[n:match('^[%w_]+') or n] = true
                     end
                 end
             end
-            for stmt in root:iter_children() do
+            for _, stmt in inext, root, -1 do
                 local t = stmt:type()
                 if t == 'variable_declaration' then
-                    for c in stmt:iter_children() do
+                    for _, c in inext, stmt, -1 do
                         if c:type() == 'assignment_statement' then
-                            for vl in c:iter_children() do
+                            for _, vl in inext, c, -1 do
                                 if vl:type() == 'variable_list' then
                                     collect_names(vl)
                                 end
@@ -394,7 +408,7 @@ M.spec = {
                     end
                 elseif t == 'function_declaration' then
                     local islocal = false
-                    for c in stmt:iter_children() do
+                    for _, c in inext, stmt, -1 do
                         if c:type() == 'local' then islocal = true end
                     end
                     if islocal then
@@ -405,14 +419,14 @@ M.spec = {
                     end
                 end
             end
-            for stmt in root:iter_children() do
+            for _, stmt in inext, root, -1 do
                 local t = stmt:type()
                 if t == 'function_call' then
                     return true -- a bare call runs at load time
                 elseif t == 'assignment_statement' then
-                    for vl in stmt:iter_children() do
+                    for _, vl in inext, stmt, -1 do
                         if vl:type() == 'variable_list' then
-                            for v in vl:iter_children() do
+                            for _, v in inext, vl, -1 do
                                 if v:named() then
                                     local rootname = node_text(v, src):match('^[%w_]+')
                                     if rootname and not locals[rootname] then
@@ -424,7 +438,7 @@ M.spec = {
                     end
                 elseif t == 'function_declaration' then
                     local islocal = false
-                    for c in stmt:iter_children() do
+                    for _, c in inext, stmt, -1 do
                         if c:type() == 'local' then islocal = true end
                     end
                     if not islocal then
@@ -664,7 +678,7 @@ M.spec = {
                     if not seen[t] then seen[t] = true out[#out + 1] = t end
                     return
                 end
-                for c in n:iter_children() do
+                for _, c in inext, n, -1 do
                     if c:named() then names(c, out, seen) end
                 end
             end
@@ -676,7 +690,7 @@ M.spec = {
             end
             local lb = def:field('binds')[1]
             if lb then
-                for d in lb:iter_children() do
+                for _, d in inext, lb, -1 do
                     if d:named() and (d:type() == 'bind' or d:type() == 'function') then
                         local namen = d:field('name')[1]
                         local use = {}
@@ -924,7 +938,7 @@ M.spec = {
         -- framework (#[Route('/x')]) — the java annotation-with-args
         -- lesson; bare markers (#[\Override]) don't register anything
         cbarg_def = function (defn, src)
-            for c in defn:iter_children() do
+            for _, c in inext, defn, -1 do
                 if c:type() == 'attribute_list'
                     and node_text(c, src)
                         :find('(', 1, true) then
@@ -974,9 +988,9 @@ M.spec = {
                     -- parent only INHERITS m (no exact Parent::m def), the
                     -- name falls through to the tail path unchanged — no
                     -- worse than today, honest about the chain we can't walk.
-                    for c in p2:iter_children() do
+                    for _, c in inext, p2, -1 do
                         if c:type() == 'base_clause' then
-                            for pc in c:iter_children() do
+                            for _, pc in inext, c, -1 do
                                 local pt = pc:type()
                                 if pt == 'name' or pt == 'qualified_name' then
                                     -- def keys use the bare class name; take
@@ -1225,7 +1239,7 @@ M.spec = {
                 elseif ot == 'super' then
                     local _, cnode = java_enclosing_class(calln, src)
                     local sup = cnode and cnode:field('superclass')[1]
-                    for c in (sup and sup:iter_children() or NOOP) do
+                    for _, c in (sup and inext or NOOP), sup, -1 do
                         if c:type() == 'type_identifier' then
                             cls = node_text(c, src)
                             break
@@ -1286,7 +1300,7 @@ M.spec = {
         cbarg_def = function (defn, _)
             local mods = defn:child(0)
             if mods and mods:type() == 'modifiers' then
-                for c in mods:iter_children() do
+                for _, c in inext, mods, -1 do
                     if c:type() == 'annotation' then return true end
                 end
             end
@@ -1494,7 +1508,7 @@ M.spec = {
         -- pub fns are a library crate's exported surface: no in-repo
         -- caller says nothing about their liveness
         exported_def = function (defn, _)
-            for c in defn:iter_children() do
+            for _, c in inext, defn, -1 do
                 if c:type() == 'visibility_modifier' then return true end
             end
             return false
@@ -1630,7 +1644,7 @@ M.spec = {
         cbarg_def = function (defn, _)
             local p = defn:parent()
             if p and p:type() == 'decorated_definition' then
-                for c in p:iter_children() do
+                for _, c in inext, p, -1 do
                     if c:type() == 'decorator' then
                         local inner = c:named_child(0)
                         if inner and inner:type() == 'call' then return true end
@@ -1745,7 +1759,7 @@ local function litval(n, src, spec, depth)
     end
     if (spec.litdata_types or {})[t] and depth < LIT_DEPTH then
         local arr, map, count = {}, {}, 0
-        for item in n:iter_children() do
+        for _, item in inext, n, -1 do
             if item:named() and item:type() ~= 'comment' then
                 count = count + 1
                 if count > LIT_ITEMS then break end
@@ -1765,7 +1779,7 @@ local function litval(n, src, spec, depth)
                 elseif it == 'array_element_initializer' then
                     -- php: positional children; 2 = key => value, 1 = element
                     local kids = {}
-                    for c2 in item:iter_children() do
+                    for _, c2 in inext, item, -1 do
                         if c2:named() and c2:type() ~= 'comment' then kids[#kids + 1] = c2 end
                     end
                     local v = kids[#kids] and litval(kids[#kids], src, spec, depth + 1)
@@ -1810,7 +1824,7 @@ local function callable_arg(a, src)
     local t = a:type()
     if t == 'array_creation_expression' or t == 'array' then
         local els = {}
-        for el in a:iter_children() do
+        for _, el in inext, a, -1 do
             if el:named() and el:type() ~= 'comment' then
                 if el:type() == 'array_element_initializer' then
                     el = el:named_child(0) or el
@@ -1833,7 +1847,7 @@ local function callable_arg(a, src)
                 found = node_text(n, src)
                 return
             end
-            for c in n:iter_children() do
+            for _, c in inext, n, -1 do
                 if c:named() then hunt(c, depth + 1) end
             end
         end
@@ -1850,7 +1864,7 @@ local function dataflow(def, spec, src, params)
     local body = spec.body_field and def:field(spec.body_field)[1]
     if not body then return nil end
     local stmts = {}
-    for stmt in body:iter_children() do
+    for _, stmt in inext, body, -1 do
         if stmt:named() and stmt:type() ~= 'comment' then
             local defs, uses, seen_d, seen_u = {}, {}, {}, {}
             local function walk(n, defpos)
@@ -1871,19 +1885,19 @@ local function dataflow(def, spec, src, params)
                     or t == 'assignment_expression'
                     or t == 'augmented_assignment_expression' then
                     local left = n:field('left')[1] or n:child(0)
-                    for c in n:iter_children() do
+                    for _, c in inext, n, -1 do
                         if c:named() then walk(c, c == left) end
                     end
                     return
                 end
                 if t == 'init_declarator' or t == 'variable_declarator' then
                     local d = n:field('declarator')[1] or n:field('name')[1]
-                    for c in n:iter_children() do
+                    for _, c in inext, n, -1 do
                         if c:named() then walk(c, c == d) end
                     end
                     return
                 end
-                for c in n:iter_children() do
+                for _, c in inext, n, -1 do
                     if c:named() then
                         -- def position survives transparent wrappers only
                         walk(c, defpos and (t == 'variable_list'
@@ -1918,13 +1932,13 @@ local function fn_params(def, spec, src, method)
     local ps = spec.params_field and def:field(spec.params_field)[1]
     local out = method and { 'self' } or {}
     if ps then
-        for c in ps:iter_children() do
+        for _, c in inext, ps, -1 do
             if c:type() == 'identifier' or c:type() == 'variable' then
                 out[#out + 1] = node_text(c, src)
             elseif c:type() == 'variable_name' then -- php $param
                 out[#out + 1] = node_text(c, src):gsub('^%$', '')
             elseif c:named() then -- c parameter_declaration / defaulted params
-                for id in c:iter_children() do
+                for _, id in inext, c, -1 do
                     if id:type() == 'identifier' then
                         out[#out + 1] = node_text(id, src)
                         break
@@ -2209,17 +2223,17 @@ local function child_forms(node, lisp)
     if lisp then
         -- every child list is a nested form (the caller drops the signature
         -- list of a def/lambda); bare symbols/atoms are leaves, not forms
-        for c in node:iter_children() do
+        for _, c in inext, node, -1 do
             if c:named() and c:type() == 'list' then out[#out + 1] = c end
         end
         return out
     end
     local function scan(n)
-        for c in n:iter_children() do
+        for _, c in inext, n, -1 do
             if c:named() and c:type() ~= 'comment' then
                 local t = c:type()
                 if SUBSTMT_BLOCKS[t] then
-                    for g in c:iter_children() do
+                    for _, g in inext, c, -1 do
                         if g:named() and g:type() ~= 'comment' then out[#out + 1] = g end
                     end
                 elseif SUBSTMT_CLAUSES[t] then
@@ -2263,7 +2277,7 @@ function M.forms(file, sr, sc, er, ec)
         -- a block/root that begins there (indentation-agnostic; col ignored)
         local function find_stmt(node)
             local container = SUBSTMT_BLOCKS[node:type()] or ROOT_TYPES[node:type()]
-            for c in node:iter_children() do
+            for _, c in inext, node, -1 do
                 if c:named() and c:type() ~= 'comment' then
                     local csr, _, cer = c:range()
                     if container and csr == sr then return c end
@@ -2326,7 +2340,7 @@ local function detail_items(stmt, src)
     if COND_TYPES[stmt:type()] then
         local cond = stmt:field('condition')[1]
         if not cond then
-            for c in stmt:iter_children() do
+            for _, c in inext, stmt, -1 do
                 if c:named() and c:type() ~= 'comment'
                     and not SUBSTMT_BLOCKS[c:type()] then cond = c break end
             end
@@ -2335,10 +2349,10 @@ local function detail_items(stmt, src)
         return items -- the body is the block lens's concern, not the detail's
     end
     local function walk(n)
-        for c in n:iter_children() do
+        for _, c in inext, n, -1 do
             if c:named() and c:type() ~= 'comment' and not SUBSTMT_BLOCKS[c:type()] then
                 if ARG_LISTS[c:type()] then
-                    for a in c:iter_children() do
+                    for _, a in inext, c, -1 do
                         if a:named() and a:type() ~= 'comment' then mk('arg', a) end
                     end
                 else
@@ -2814,7 +2828,7 @@ function M.extract(root, opts)
                 if n:type() == 'ERROR' then return (n:range()) end
                 if not n:has_error() then return nil end
                 local best
-                for c in n:iter_children() do
+                for _, c in inext, n, -1 do
                     local r = rec(c)
                     if r and (not best or r < best) then best = r end
                 end
@@ -3001,7 +3015,7 @@ function M.extract(root, opts)
             local lines = vim.split(src, '\n', { plain = true })
             local container = tsroot
             if spec.block_container then
-                for c in tsroot:iter_children() do
+                for _, c in inext, tsroot, -1 do
                     if c:type() == spec.block_container then container = c break end
                 end
             end
@@ -3015,7 +3029,7 @@ function M.extract(root, opts)
                     run = nil
                 end
             end
-            for stmt in container:iter_children() do
+            for _, stmt in inext, container, -1 do
                 if stmt:named() and stmt:type() ~= 'comment'
                     and not (spec.block_skip or {})[stmt:type()] then
                     local p = pos_of(stmt)
@@ -3155,7 +3169,7 @@ function M.extract(root, opts)
                         argv[#argv + 1] = v ~= '' and { k = 'lit', v = v } or { k = 'expr' }
                         argsn = nil
                     end
-                    for a in (argsn and argsn.iter_children and argsn:iter_children() or NOOP) do
+                    for _, a in (argsn and argsn.child and inext or NOOP), argsn, -1 do
                         if a:named() and a:type() ~= 'comment' then
                             if a:type() == 'argument' then -- php wraps each arg
                                 a = a:named_child(0) or a
@@ -3287,7 +3301,7 @@ function M.extract(root, opts)
         -- the template as ONE visible block row (a jump target): its
         -- extent is the top-level markup that isn't script/style
         local tps, tpe
-        for c in croot:iter_children() do
+        for _, c in inext, croot, -1 do
             local t = c:type()
             if c:named() and t ~= 'script_element' and t ~= 'style_element'
                 and t ~= 'comment' then
