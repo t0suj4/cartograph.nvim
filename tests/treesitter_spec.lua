@@ -1613,6 +1613,16 @@ test('java: class-qualified, annotation cbarg, public exported', function ()
     local sfe = edge_of('PetController::shadowedSameFile', 'Counter::count')
     ok(sfe, 'shadowedSameFile -> Counter::count (same-file walk-out)')
     ok(sfe.inferred, 'hedged qualification caps a same-file match at ~')
+    -- RETURN-TYPE ROUNDS (graph-VM MVP): chained receivers and
+    -- initializer-typed locals resolve through the callee's declared-return
+    -- summary (n.ret), settled after plain resolution
+    local ch = refs_of('PetController::chained')
+    ok(ch['PetController::service'], 'chained -> service (the determining call)')
+    ok(ch['VisitService::count'], 'f().g(): g resolves via f\'s return type')
+    ok(refs_of('PetController::viaVar')['VisitService::count'],
+        'var x = f(); x.m(): init provenance + return round')
+    ok(refs_of('PetController::viaNew')['VisitService::count'],
+        'var x = new T(); x.m(): typed at the declarator')
     -- constructor call: new VisitService() -> VisitService::VisitService
     ok(byname['VisitService::VisitService'] == nil
         or byname['VisitService::VisitService'].kind == 'method', 'ctor shape ok')

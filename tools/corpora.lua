@@ -19,7 +19,7 @@ return {
         repo = 'https://github.com/elastic/elasticsearch',
         rev = '4743238408a4',
         lang = 'java',
-        expected = { refs = 66847, nodes = 87241 }, -- calibrated @ tool 98a02a1
+        expected = { refs = 77109, nodes = 87241 }, -- calibrated @ step-4 return rounds
         notes = 'THE parity gate corpus (5x scale, 4843 files, ~55s extract)',
     },
     libs = {
@@ -27,7 +27,7 @@ return {
         repo = 'https://github.com/elastic/elasticsearch',
         rev = '4743238408a4',
         lang = 'java',
-        expected = { refs = 9290, nodes = 13855 }, -- calibrated @ tool 98a02a1
+        expected = { refs = 10821, nodes = 13855 }, -- calibrated @ step-4 return rounds
         notes = 'the small/fast java corpus (943 files, ~10s) — quick iteration',
     },
     -- ── per-language quick tier (libs-sized: seconds, calibrated, pinned) ──

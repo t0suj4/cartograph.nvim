@@ -50,6 +50,10 @@ end
 
 local data, stats = bench.extract(name)
 print(bench.fmt(stats))
+if data.ret_resolved then
+    print(('return-type rounds: %d calls settled in %d round(s)')
+        :format(data.ret_resolved, data.ret_rounds))
+end
 
 local c = census.take(data)
 local ref = c.edges.ref

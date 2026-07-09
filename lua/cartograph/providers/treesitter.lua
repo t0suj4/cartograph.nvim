@@ -106,10 +106,32 @@ local function jvt_locals(node, src, out) -- name -> {ty, row} (position-checked
     for c in node:iter_children() do
         if c:type() == 'local_variable_declaration' then
             local ty, row = java_base_type(c:field('type')[1], src), select(1, c:range())
+            if ty == 'var' then ty = nil end -- `var x = ...`: no declared name
             for d in c:iter_children() do
                 if d:type() == 'variable_declarator' then
                     local nm = d:field('name')[1]
-                    if nm then out[node_text(nm, src)] = { ty = ty, row = row } end
+                    if nm then
+                        local b = { ty = ty, row = row }
+                        if ty == nil then
+                            -- typed only by the INITIALIZER: `new Foo()`
+                            -- names the type right here; a call's return
+                            -- type is knowable only after resolution, so
+                            -- record the call site as INIT PROVENANCE for
+                            -- the return-type rounds (graph-VM MVP)
+                            local v = d:field('value')[1]
+                            local vt = v and v:type()
+                            if vt == 'object_creation_expression' then
+                                b.ty = java_base_type(v:field('type')[1], src)
+                            elseif vt == 'method_invocation' then
+                                local vn = v:field('name')[1]
+                                if vn then
+                                    local r2, c2 = vn:range()
+                                    b.init = { r = r2, c = c2 }
+                                end
+                            end
+                        end
+                        out[node_text(nm, src)] = b
+                    end
                 end
             end
         end
@@ -243,7 +265,10 @@ end
 --     so it returns a HEDGE alongside: resolve-but-mark, the edge keeps its
 --     recall and gains `~` (scope-model step 2; pinned by shadowedSameFile).
 -- `fields_only` restricts to class fields (a `this.field` receiver).
--- Returns ty, hedge — hedge = { rule, row? } naming the walked-past binder.
+-- Returns ty, hedge, defer — hedge = { rule, row? } naming the walked-past
+-- binder; defer = { r, c } = the INIT-PROVENANCE call site when the binder
+-- is typed only by its initializer's return (the return-type rounds settle
+-- it — precise beats the walk-out guess, so defer preempts the hedge).
 local function java_var_type(ident, from, src, fields_only)
     local chain, k = jvt_model(src).resolve(ident, from, fields_only and 'field' or nil)
     local skipped -- the nearest untyped binder walked past (the witness)
@@ -253,6 +278,7 @@ local function java_var_type(ident, from, src, fields_only)
             return b.ty, (skipped and b.ty ~= nil)
                 and { rule = 'shadow-walkout', row = skipped.row } or nil
         end
+        if b.init then return nil, nil, b.init end
         skipped = skipped or b
     end
 end
@@ -1180,10 +1206,16 @@ M.spec = {
         -- Class::m turns the largest refusal bucket (getters/setters shared
         -- across many model classes) into exact or inheritance-walked links.
         scopes = JAVA_SCOPES, -- lexical-first id pass (scope-model step 3)
+        -- declared return type = the per-method SUMMARY (graph-VM MVP)
+        def_ret = function (defn, src)
+            if defn:type() == 'method_declaration' then
+                return java_base_type(defn:field('type')[1], src)
+            end
+        end,
         qualify_call = function (calln, name, src)
             if calln:type() ~= 'method_invocation' then return nil end
             local obj = calln:field('object')[1]
-            local cls, hedge
+            local cls, hedge, defer
             if not obj then -- implicit this
                 cls = java_enclosing_class(calln, src)
             else
@@ -1200,8 +1232,29 @@ M.spec = {
                         end
                     end
                 elseif ot == 'identifier' then
-                    cls, hedge = java_var_type(
-                        node_text(obj, src), calln, src)
+                    local objname = node_text(obj, src)
+                    cls, hedge, defer = java_var_type(objname, calln, src)
+                    if not cls and not defer and objname:match('^%u') then
+                        -- no binder and PascalCase: a STATIC call on the
+                        -- class named right here (convention-sound; the
+                        -- qualification just exact/tail-matches like any
+                        -- other, so a miss costs nothing). This is what
+                        -- lets `var f = Finder.of(...)` chains settle: the
+                        -- determining static call resolves, its ret flows.
+                        cls = objname
+                    end
+                elseif ot == 'method_invocation' then
+                    -- CHAINED receiver f().g(): g's class is f's return type,
+                    -- knowable only after f resolves — defer to the
+                    -- return-type rounds, recording f's call site
+                    local vn = obj:field('name')[1]
+                    if vn then
+                        local r2, c2 = vn:range()
+                        defer = { r = r2, c = c2 }
+                    end
+                elseif ot == 'object_creation_expression' then
+                    -- new Foo().m(): the type is right here
+                    cls = java_base_type(obj:field('type')[1], src)
                 elseif ot == 'field_access' then
                     local fo, ff = obj:field('object')[1], obj:field('field')[1]
                     if fo and fo:type() == 'this' and ff then
@@ -1215,7 +1268,8 @@ M.spec = {
             if cls and JAVA_JDK_TYPES[cls] then return nil end
             -- the hedge rides the qualification: a hedged qualification makes
             -- the resulting edge INFERRED even where resolution is confident
-            return cls and (cls .. '::' .. name) or nil, cls and hedge or nil
+            return cls and (cls .. '::' .. name) or nil, cls and hedge or nil,
+                (not cls) and defer or nil
         end,
         -- single-inheritance chain (superclass only — interfaces would poison
         -- the one-parent-per-class model resolve_super relies on): feeds
@@ -1993,6 +2047,70 @@ local function resolve_super(calls, extends, exact, addref)
     return n
 end
 
+-- Return-type rounds (the graph-VM MVP — see the graph-vm design memo).
+-- A call whose receiver is ANOTHER call (f().g()) or a local typed only by
+-- its initializer's return (`var x = f(); x.g()`) could not be qualified
+-- lexically; extract recorded the DETERMINING call site on it (c.rt). Once
+-- that call resolves, its target's declared return type (n.ret — the
+-- per-method summary) qualifies this one: Ret::method, exact-matched with
+-- the same language-fit/ambiguity discipline as resolve_super. Chains
+-- settle in ROUNDS — a().b().c() unlocks one link per pass: the
+-- types⇄call-graph mutual fixpoint in its smallest form. Round count is
+-- returned for the measurement protocol. Shared by extract and relink.
+local function resolve_returns(calls, node_index, exact, addref)
+    local callidx = {}
+    for _, c in ipairs(calls or {}) do
+        if c.at and c.at.start then
+            callidx[c.file .. '\31' .. c.at.start.line .. '\31' .. c.at.start.char] = c
+        end
+    end
+    local n, rounds = 0, 0
+    repeat
+        local progress = false
+        rounds = rounds + 1
+        for _, c in ipairs(calls or {}) do
+            if c.rt and not c.to and c.callee then
+                local d = callidx[c.file .. '\31' .. c.rt.r .. '\31' .. c.rt.c]
+                local ret = d and d.to and node_index[d.to] and node_index[d.to].ret
+                if not ret and d and d.refused and d.refused.cands
+                    and d.refused.n and d.refused.n <= #d.refused.cands then
+                    -- overloads refuse the CALL, but when every candidate
+                    -- declares the same return type, the TYPE is unambiguous
+                    -- and the chain continues (untruncated cands only — a
+                    -- capped list can't prove agreement)
+                    local agree
+                    for _, id in ipairs(d.refused.cands) do
+                        local r = node_index[id] and node_index[id].ret
+                        if not r or (agree and r ~= agree) then agree = nil break end
+                        agree = r
+                    end
+                    ret = agree
+                end
+                -- a JDK return type dispatches into the stdlib: no project def
+                if ret and not JAVA_JDK_TYPES[ret] then
+                    local clang = elang_for(c.file)
+                    local fit, dup
+                    for _, node in ipairs(exact[ret .. '::' .. c.callee] or {}) do
+                        if elang_for(node.file) == clang then
+                            if fit then dup = true else fit = node end
+                        end
+                    end
+                    if fit and not dup then
+                        c.to = fit.id
+                        c.inferred = true -- type INFERRED through a summary
+                        c.refused = nil
+                        c.rt = nil -- settled
+                        if c.fn then addref(c.fn, fit.id, c.at, true) end
+                        n = n + 1
+                        progress = true
+                    end
+                end
+            end
+        end
+    until not progress
+    return n, rounds
+end
+
 -- leading lines that BELONG to a def — comments, decorators,
 -- attributes, annotations: what must travel with its text when an
 -- edit verb moves it. Keyed by effective language.
@@ -2747,6 +2865,9 @@ function M.extract(root, opts)
                         exported = exp,
                         torn = torn,
                         entry = (spec.entry_names or {})[name] or nil,
+                        -- declared return type (base name): the per-function
+                        -- SUMMARY the return-type rounds ride (graph-VM MVP)
+                        ret = spec.def_ret and spec.def_ret(defn, src) or nil,
                         df = (spec.dataflow or dataflow)(defn, spec, src, params) }
                     lastFn[file] = nodes[#nodes]
                     fnDefLines[sp.start.line] = true
@@ -2984,10 +3105,10 @@ function M.extract(root, opts)
                     -- may rewrite the resolution key to Class::name —
                     -- exact match beats every tail fallback; inheritance
                     -- still falls through to tails
-                    local qhedge
+                    local qhedge, qdefer
                     if spec.qualify_call then
-                        local q, h = spec.qualify_call(calln, full, src)
-                        full, qhedge = q or full, h
+                        local q, h, d = spec.qualify_call(calln, full, src)
+                        full, qhedge, qdefer = q or full, h, d
                     end
                     -- the inventory names the VERB (lint configs match on it);
                     -- the full expression text drives resolution. A dynamic
@@ -3086,6 +3207,8 @@ function M.extract(root, opts)
                         full = full ~= callee and full or nil,
                         dynamic = dynamic,
                         hedge = qhedge, -- hedged qualification: edge gets ~
+                        rt = qdefer, -- receiver typed by ANOTHER call's
+                        -- return: the return-type rounds settle it
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
                         top = is_top or nil }
@@ -3434,6 +3557,11 @@ function M.extract(root, opts)
     -- the nearest ancestor that defines it. Bounded; over the full graph.
     resolve_super(calls, data.extends, exact, addref)
 
+    -- return-type rounds: settle the receiver-deferred calls (c.rt) now
+    -- that plain + super resolution populated the determining calls
+    local retn, retrounds = resolve_returns(calls, node_index, exact, addref)
+    if retn > 0 then data.ret_resolved, data.ret_rounds = retn, retrounds end
+
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
     -- lookups; slice-local uniqueness is not global uniqueness)
@@ -3716,7 +3844,12 @@ function M.relink(data, touched)
     -- extract's enrichment so the parallel and refresh paths resolve the
     -- same superclass chains the sequential path does
     n = n + resolve_super(data.calls, data.extends, exact, addref)
-    return n
+    -- and the return-type rounds, for the same parity (cross-chunk chains:
+    -- a worker slice may hold the chain but not the determining target)
+    local node_index = {}
+    for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
+    local retn = resolve_returns(data.calls, node_index, exact, addref)
+    return n + retn
 end
 
 return M
