@@ -18,10 +18,14 @@ local bench = dofile(here .. '/bench.lua')
 local snapshot = dofile(here .. '/snapshot.lua')
 
 local name = arg and arg[1]
-local save = false
-for i = 2, #(arg or {}) do if arg[i] == '--save' then save = true end end
+local save, parallel = false, false
+for i = 2, #(arg or {}) do
+    if arg[i] == '--save' then save = true end
+    if arg[i] == '--parallel' then parallel = true end
+end
 if not name then
-    print('usage: nvim --headless -u NONE -l tools/gate.lua <corpus> [--save]')
+    print('usage: nvim --headless -u NONE -l tools/gate.lua <corpus>'
+        .. ' [--save] [--parallel]')
     os.exit(2)
 end
 
@@ -48,8 +52,16 @@ if corpus.rev then
     end
 end
 
-local data, stats = bench.extract(name)
-print(bench.fmt(stats))
+-- --parallel runs the worker pipeline instead of the inline extract; the
+-- baselines are INLINE extracts, so a passing per-item diff is the
+-- "parallel == sequential, at scale" claim itself
+local data, stats
+if parallel then
+    data, stats = bench.extract_parallel(name)
+else
+    data, stats = bench.extract(name)
+end
+print(bench.fmt(stats) .. (parallel and '  [parallel]' or ''))
 if data.ret_resolved then
     print(('return-type rounds: %d calls settled in %d round(s)')
         :format(data.ret_resolved, data.ret_rounds))

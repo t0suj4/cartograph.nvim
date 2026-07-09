@@ -124,6 +124,28 @@ function M.extract(name_or_root, opts)
     return data, stats
 end
 
+--- The parallel pipeline, measured end to end (workers -> merge -> audit ->
+--- relink -> phase-2 id pass). Wall includes worker spawns; peak is the
+--- PARENT process only (workers peak in their own processes — that IS the
+--- streaming pipeline's point).
+function M.extract_parallel(name_or_root, opts)
+    M.bootstrap()
+    local c = M.corpus(name_or_root)
+    local par = require 'cartograph.parallel'
+    local data, stats = M.measure(function ()
+        local done
+        par.extract(c.root, {
+            workers = opts and opts.workers,
+            on_done = function (d) done = d end,
+        })
+        vim.wait(1800000, function () return done ~= nil end, 50)
+        return assert(done, 'parallel extract timed out')
+    end)
+    stats.corpus = c
+    stats.parallel = true
+    return data, stats
+end
+
 function M.fmt(stats)
     local peak = stats.peak
         and ((' peak %.2f GB%s'):format(stats.peak / 1e9,
