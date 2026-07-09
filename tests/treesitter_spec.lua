@@ -180,8 +180,12 @@ test('forms: one level of nested statements / forms, on demand', function ()
     if has_parser('scheme') then
         -- scheme: a define's body is its forms (minus the signature list);
         -- a call form's arguments that are themselves lists are sub-forms
+        -- NB this branch only runs when an earlier spec put the parser dir on
+        -- the rtp (scope_spec does); it was dormant until then, hiding an
+        -- out-of-bounds range here (3,20 — past the define's true end 3,13),
+        -- which made exact-node mode resolve to the program root
         put('a.scm', '(define (f x)\n  (when (> x 0)\n    (bar x)\n    (baz x)))\n')
-        local def = ts.forms(root .. '/a.scm', 0, 0, 3, 20) -- exact: the define
+        local def = ts.forms(root .. '/a.scm', 0, 0, 3, 13) -- exact: the define
         eq(1, #def)                       -- just the (when ...) body form
         ok(def[1].branch, 'the when-form is descendable')
         local body = ts.forms(root .. '/a.scm', def[1].sr, def[1].sc, def[1].er, def[1].ec)
