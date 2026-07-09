@@ -1531,6 +1531,16 @@ test('java: class-qualified, annotation cbarg, public exported', function ()
     local lp = refs_of('PetController::listPets')
     ok(lp['PetController::render'], 'listPets -> render (implicit this)')
     ok(lp['VisitService::count'], 'listPets -> count (typed field receiver)')
+    -- BLOCK-SCOPE receiver: a local typed by its declaration resolves through
+    -- the block symbol table (the memoized jvt block branch)
+    local tl = refs_of('PetController::tally')
+    ok(tl['VisitService::count'], 'tally -> count (typed block local)')
+    -- SHADOW WALK-OUT (the memoization -31 fix): a local whose scoped-generic
+    -- type java_base_type cannot name (Map.Entry<...> -> nil) must NOT
+    -- terminate the walk — the shadowed typed FIELD still resolves. Pins the
+    -- optimistic behavior; a refusal-by-design change flips this knowingly.
+    local sh = refs_of('PetController::shadowedTally')
+    ok(sh['VisitService::count'], 'shadowedTally -> count (nil-type shadow walks out)')
     -- constructor call: new VisitService() -> VisitService::VisitService
     ok(byname['VisitService::VisitService'] == nil
         or byname['VisitService::VisitService'].kind == 'method', 'ctor shape ok')

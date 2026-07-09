@@ -305,8 +305,7 @@ M.spec = {
                         if vl:type() == 'variable_list' then
                             for v in vl:iter_children() do
                                 if v:named() then
-                                    local rootname = vim.treesitter
-                                        .get_node_text(v, src):match('^[%w_]+')
+                                    local rootname = node_text(v, src):match('^[%w_]+')
                                     if rootname and not locals[rootname] then
                                         return true -- global(-rooted) write
                                     end
@@ -321,8 +320,7 @@ M.spec = {
                     end
                     if not islocal then
                         local nm = stmt:field('name')[1]
-                        local rootname = nm and vim.treesitter
-                            .get_node_text(nm, src):match('^[%w_]+')
+                        local rootname = nm and node_text(nm, src):match('^[%w_]+')
                         if rootname and not locals[rootname] then
                             return true -- global fn / global-rooted method
                         end
@@ -2827,6 +2825,11 @@ function M.extract(root, opts)
     -- Containers also run this over TEMPLATE EXPRESSION trees — an
     -- @click="save(item)" is a real call_expression at absolute rows
     local function extract_calls(file, lang, spec, src, tsroot)
+        -- drop the receiver-typing scope memo unconditionally: its guard is
+        -- src VALUE-equality, but node:id() is only unique within one tree —
+        -- two byte-identical files whose first tree got collected could
+        -- otherwise alias ids into a stale map
+        jvt_cache, jvt_src = {}, nil
         -- calls (inventory + reference sites, resolved after all files)
         local q = parse_query(lang, spec.calls)
         if q then
