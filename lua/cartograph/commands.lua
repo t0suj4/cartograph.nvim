@@ -277,6 +277,29 @@ function M.register()
         scratch(lines)
     end, { desc = 'cartograph: check the RUNNING system against the static model (MCP oracle)' })
 
+    -- ── the honesty census: how well is this graph actually resolved ─
+    cmd('CartographCensus', function ()
+        local store = live() if not store then return end
+        scratch(require('cartograph.census').report(store.data))
+    end, { desc = 'cartograph: epistemic census — edge trust tiers + refusals by rule (the analyzer work-list)' })
+
+    -- ── derived-index integrity: the Log/View rule, executable ───────
+    cmd('CartographAudit', function ()
+        local store = live() if not store then return end
+        local out, why = store.audit()
+        if not out then
+            return vim.notify('cartograph: audit skipped — ' .. why,
+                vim.log.levels.WARN)
+        end
+        if #out == 0 then
+            return vim.notify('cartograph: indexes match a fresh derive (clean)',
+                vim.log.levels.INFO)
+        end
+        table.insert(out, 1, ('index drift — %d divergence(s) vs a fresh derive:')
+            :format(#out))
+        scratch(out)
+    end, { desc = 'cartograph: diff live indexes against a fresh derive (catches in-place writer drift)' })
+
     -- ── the self oracle: declared vs actually-registered ────────────
     cmd('CartographSelf', function ()
         local store = live() if not store then return end
