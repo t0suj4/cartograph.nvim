@@ -4,6 +4,12 @@
 -- Phase 'ids':   run the id pass with PARENT-built global lookups
 --                (slice-local uniqueness is not global uniqueness).
 
+-- LuaJIT's default trace budgets (maxtrace=1000, maxmcode=512K) are too
+-- small for the extractor: traces flush and recompile in a churn loop that
+-- profiled at 15-17% of wall. Raising them measured -14% on server /
+-- -19% on libs (J: 16.5%->2.2%). This is OUR process — tune freely.
+pcall(function () require('jit.opt').start('maxtrace=4000', 'maxmcode=8192') end)
+
 local jobfile = _G.arg and _G.arg[1]
 assert(jobfile, 'worker: no job file')
 local fd = assert(io.open(jobfile, 'r'))

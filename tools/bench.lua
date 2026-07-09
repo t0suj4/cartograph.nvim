@@ -25,6 +25,9 @@ function M.bootstrap()
     M._booted = true
     vim.opt.runtimepath:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
     package.path = REPO .. '/lua/?.lua;' .. REPO .. '/lua/?/init.lua;' .. package.path
+    -- the extractor's measured JIT budget (see worker.lua): default trace
+    -- limits churn at 15-17% of wall; this is a bench process — tune freely
+    pcall(function () require('jit.opt').start('maxtrace=4000', 'maxmcode=8192') end)
 end
 
 --- Resolve a corpus by name (tools/corpora.lua) or accept a literal root.

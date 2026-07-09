@@ -2059,17 +2059,28 @@ end
 -- returned for the measurement protocol. Shared by extract and relink.
 local function resolve_returns(calls, node_index, exact, addref)
     local callidx = {}
+    -- the deferred WORKLIST: rounds iterate only the calls still carrying
+    -- unresolved rt provenance, not the whole call array per round (which
+    -- profiled at ~2% of extract on server — 3 rounds x 240k calls)
+    local deferred, dn = {}, 0
     for _, c in ipairs(calls or {}) do
         if c.at and c.at.start then
             callidx[c.file .. '\31' .. c.at.start.line .. '\31' .. c.at.start.char] = c
+        end
+        if c.rt and not c.to and c.callee then
+            dn = dn + 1
+            deferred[dn] = c
         end
     end
     local n, rounds = 0, 0
     repeat
         local progress = false
         rounds = rounds + 1
-        for _, c in ipairs(calls or {}) do
-            if c.rt and not c.to and c.callee then
+        local keep, kn = {}, 0
+        for i = 1, dn do
+            local c = deferred[i]
+            local settled = false
+            do
                 local d = callidx[c.file .. '\31' .. c.rt.r .. '\31' .. c.rt.c]
                 local ret = d and d.to and node_index[d.to] and node_index[d.to].ret
                 if not ret and d and d.refused and d.refused.cands
@@ -2107,11 +2118,17 @@ local function resolve_returns(calls, node_index, exact, addref)
                         if c.fn then addref(c.fn, fit.id, c.at, true) end
                         n = n + 1
                         progress = true
+                        settled = true
                     end
                 end
             end
+            if not settled then
+                kn = kn + 1
+                keep[kn] = c
+            end
         end
-    until not progress
+        deferred, dn = keep, kn
+    until not progress or dn == 0
     return n, rounds
 end
 
