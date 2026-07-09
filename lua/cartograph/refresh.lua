@@ -457,6 +457,7 @@ function M.hotswap()
     if focused and store.node(focused) then store.set_focus(focused) end
     require('cartograph.toc').attach(store)
     if loc and store.loc_provider then pcall(store.loc_provider.set, loc) end
+    store.redraw() -- non-browser subscribers (live projections) see the upgrade too
 end
 
 return M

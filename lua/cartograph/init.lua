@@ -278,7 +278,13 @@ function M.open(dump_path, opts)
                             local n = store.node(id)
                             if n and (n.kind == 'function' or n.kind == 'method')
                                 and not n.decl then
+                                -- the resolve spans a wait: per the store's
+                                -- reentrancy contract, a re-ingest in between
+                                -- remaps ids — drop the stale answer (the next
+                                -- focus re-resolves)
+                                local gen = store.generation
                                 cg.resolve_focused(n, function (edges)
+                                    if store.generation ~= gen then return end
                                     store.set_callers(n.id, edges)
                                     store.redraw()
                                 end)

@@ -198,7 +198,12 @@ function M.execute(store, plan, desc, edit_of)
     end
     journal.commit(root, entry, after)
     store.set_txn(nil)
-    require('cartograph.refresh').files(plan.touched)
+    local ok, why = require('cartograph.refresh').files(plan.touched)
+    if not ok then
+        -- the writes are committed (journal has them); only the graph is stale
+        vim.notify('cartograph: applied, but the graph refresh refused — '
+            .. (why or '?') .. ' (:CartographRefresh when clear)', vim.log.levels.WARN)
+    end
     vim.cmd('silent! checktime')
     return entry
 end

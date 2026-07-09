@@ -383,7 +383,9 @@ function M.register()
                     clangd.start_session(store.data)
                     local n = store.focused and store.node(store.focused)
                     if n and (n.kind == 'function' or n.kind == 'method') and not n.decl then
+                        local gen = store.generation -- see the on_focus hook: stale answers drop
                         clangd.resolve_focused(n, function (edges)
+                            if store.generation ~= gen then return end
                             store.set_callers(n.id, edges) store.redraw()
                         end)
                     end

@@ -25,7 +25,7 @@ function M.load(path)
         for _, n in ipairs(data.nodes or {}) do
             if n.file and not seen[n.file] then
                 seen[n.file] = true
-                local st = vim.uv.fs_stat(data.root .. '/' .. n.file)
+                local st = vim.uv.fs_stat(M.abs_in(data, n.file))
                 if st then
                     data.stamps[n.file] = ('%d:%d:%d')
                         :format(st.mtime.sec, st.mtime.nsec, st.size)
@@ -255,7 +255,10 @@ local function djb2(s)
 end
 
 --- Drop one unparsed file's landing nodes (cached hits into old bytes).
+--- Skipped while streaming (rebuilding data.nodes under the step's prefix
+--- baseline would corrupt it; landings stay one round stale instead).
 function M.frontier_evict(file)
+    if M.data.partial then return end
     local keep = {}
     for _, n in ipairs(M.data.nodes) do
         if n.file == file and n.unparsed and n.kind ~= 'module' then
@@ -548,15 +551,22 @@ function M.ws_back()
 end
 
 --- Register a ref edge created after ingest (pins), mirroring the
---- indexing ingest does.
+--- indexing ingest does (self edges carry occurrences only, as at ingest).
+--- Refuses (nil) while a streaming extraction is appending to the same
+--- arrays — the step's prefix baseline (M._ing) can't survive interleaved
+--- writers.
 function M.add_edge(e)
+    if M.data.partial then return nil end
     table.insert(M.data.edges, e)
     if e.kind == 'ref' then
-        M.uses[e.from] = M.uses[e.from] or {}
-        table.insert(M.uses[e.from], e.to)
-        M.usedby[e.to] = M.usedby[e.to] or {}
-        table.insert(M.usedby[e.to], e.from)
+        if e.from ~= e.to then
+            M.uses[e.from] = M.uses[e.from] or {}
+            table.insert(M.uses[e.from], e.to)
+            M.usedby[e.to] = M.usedby[e.to] or {}
+            table.insert(M.usedby[e.to], e.from)
+        end
         M.occ[e.from .. '\31' .. e.to] = e.at or {}
+        if e.inferred then M.edge_inferred[e.from .. '\31' .. e.to] = true end
     end
     return e
 end
@@ -567,12 +577,14 @@ end
 --- ones, and keeps usedby/uses/occ consistent (self-edges excluded from
 --- usedby, as at ingest). callers = { {from=id, at=ranges}, ... }.
 function M.set_callers(to, callers)
+    if M.data.partial then return end -- streaming append owns the arrays
     local keep, survivors = {}, {}
     for _, e in ipairs(M.data.edges) do
         if e.kind == 'ref' and e.to == to and not e.xlang then
             local u = M.uses[e.from]
             if u then for i = #u, 1, -1 do if u[i] == to then table.remove(u, i) end end end
             M.occ[e.from .. '\31' .. to] = nil
+            M.edge_inferred[e.from .. '\31' .. to] = nil -- the ~ dies with the edge
         else
             keep[#keep + 1] = e
             if e.kind == 'ref' and e.to == to and e.from ~= to then
@@ -585,15 +597,19 @@ function M.set_callers(to, callers)
     for _, c in ipairs(callers) do
         M.data.edges[#M.data.edges + 1] = { from = c.from, to = to, kind = 'ref',
             proven = true, at = c.at, self = (c.from == to) or nil }
-        M.uses[c.from] = M.uses[c.from] or {}
-        table.insert(M.uses[c.from], to)
-        if c.from ~= to then table.insert(M.usedby[to], c.from) end
+        if c.from ~= to then
+            M.uses[c.from] = M.uses[c.from] or {}
+            table.insert(M.uses[c.from], to)
+            table.insert(M.usedby[to], c.from)
+        end
         M.occ[c.from .. '\31' .. to] = c.at or {}
     end
 end
 
---- Register a node created after ingest (frontier landings).
+--- Register a node created after ingest (frontier landings). Refuses (nil)
+--- while a streaming extraction is appending (see add_edge).
 function M.add_node(n)
+    if M.data.partial then return nil end
     if M.by_id[n.id] then return n end
     table.insert(M.data.nodes, n)
     M.by_id[n.id] = n
@@ -920,14 +936,18 @@ function M.node(id) return id and M.by_id[id] or nil end
 --- loaded) carries a `roots` map: the key's first segment is a plugin
 --- label (telescope.nvim/lua/…) that names the real directory. A plain
 --- single-root graph just joins the key onto the root.
-function M.abs(file)
-    local roots = M.data and M.data.roots
+function M.abs(file) return M.abs_in(M.data, file) end
+
+--- Same resolution against an explicit graph (load-time stamping runs before
+--- the graph becomes M.data).
+function M.abs_in(data, file)
+    local roots = data and data.roots
     if roots then
         local label, rest = file:match('^([^/]+)/(.*)$')
         local base = label and roots[label]
         if base then return base .. '/' .. rest end
     end
-    return M.data.root .. '/' .. file
+    return data.root .. '/' .. file
 end
 
 function M.abspath(node) return M.abs(node.file) end
@@ -1040,7 +1060,7 @@ function M.stale(file)
     -- non-filesystem substrates (mcp://…) validate through their own
     -- transport at open time; a stat against their keys means nothing
     if (M.data.root or ''):match('^%w+://') then return nil end
-    local st = vim.uv.fs_stat(M.data.root .. '/' .. file)
+    local st = vim.uv.fs_stat(M.abs(file))
     local now = st and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
         or 'gone'
     return now ~= s
