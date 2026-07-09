@@ -164,15 +164,22 @@ end
 --   * a param answers unconditionally, even untyped — matching a param ends
 --     the question;
 --   * an untyped local/field (scoped-generic base java_base_type can't name)
---     is TRANSPARENT — the shadowed outer binder answers. Optimistic: pinned
---     by the shadowedTally test; the resolve-but-mark change (step 2) flips
---     exactly this loop, knowingly.
+--     is TRANSPARENT — the shadowed outer binder answers, but the answer is
+--     a GUESS (the real receiver is the nearer binder of an unnameable type),
+--     so it returns a HEDGE alongside: resolve-but-mark, the edge keeps its
+--     recall and gains `~` (scope-model step 2; pinned by shadowedSameFile).
 -- `fields_only` restricts to class fields (a `this.field` receiver).
+-- Returns ty, hedge — hedge = { rule, row? } naming the walked-past binder.
 local function java_var_type(ident, from, src, fields_only)
     local chain, k = jvt_model(src).resolve(ident, from, fields_only and 'field' or nil)
+    local skipped -- the nearest untyped binder walked past (the witness)
     for i = 1, k do
         local b = chain[i]
-        if b.kind == 'param' or b.ty ~= nil then return b.ty end
+        if b.kind == 'param' or b.ty ~= nil then
+            return b.ty, (skipped and b.ty ~= nil)
+                and { rule = 'shadow-walkout', row = skipped.row } or nil
+        end
+        skipped = skipped or b
     end
 end
 
@@ -1100,7 +1107,7 @@ M.spec = {
         qualify_call = function (calln, name, src)
             if calln:type() ~= 'method_invocation' then return nil end
             local obj = calln:field('object')[1]
-            local cls
+            local cls, hedge
             if not obj then -- implicit this
                 cls = java_enclosing_class(calln, src)
             else
@@ -1117,12 +1124,12 @@ M.spec = {
                         end
                     end
                 elseif ot == 'identifier' then
-                    cls = java_var_type(
+                    cls, hedge = java_var_type(
                         node_text(obj, src), calln, src)
                 elseif ot == 'field_access' then
                     local fo, ff = obj:field('object')[1], obj:field('field')[1]
                     if fo and fo:type() == 'this' and ff then
-                        cls = java_var_type(
+                        cls, hedge = java_var_type(
                             node_text(ff, src), calln, src, true)
                     end
                 end
@@ -1130,7 +1137,9 @@ M.spec = {
             -- a JDK-typed receiver dispatches into the stdlib, not a project
             -- def: leave it bare for the stdlib_names/prefix gate to skip
             if cls and JAVA_JDK_TYPES[cls] then return nil end
-            return cls and (cls .. '::' .. name) or nil
+            -- the hedge rides the qualification: a hedged qualification makes
+            -- the resulting edge INFERRED even where resolution is confident
+            return cls and (cls .. '::' .. name) or nil, cls and hedge or nil
         end,
         -- single-inheritance chain (superclass only — interfaces would poison
         -- the one-parent-per-class model resolve_super relies on): feeds
@@ -2871,8 +2880,10 @@ function M.extract(root, opts)
                     -- may rewrite the resolution key to Class::name —
                     -- exact match beats every tail fallback; inheritance
                     -- still falls through to tails
+                    local qhedge
                     if spec.qualify_call then
-                        full = spec.qualify_call(calln, full, src) or full
+                        local q, h = spec.qualify_call(calln, full, src)
+                        full, qhedge = q or full, h
                     end
                     -- the inventory names the VERB (lint configs match on it);
                     -- the full expression text drives resolution. A dynamic
@@ -2970,6 +2981,7 @@ function M.extract(root, opts)
                         file = file, line = sp.start.line, method = method,
                         full = full ~= callee and full or nil,
                         dynamic = dynamic,
+                        hedge = qhedge, -- hedged qualification: edge gets ~
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
                         top = is_top or nil }
@@ -3280,10 +3292,14 @@ function M.extract(root, opts)
         end
         if target then
             p.call.to = target.id
-            p.call.inferred = inferred or nil
+            -- a hedged qualification caps the edge at ~ even where the
+            -- name-match itself is confident (same-file): the RECEIVER TYPE
+            -- was a shadow-walkout guess, and the edge must say so
+            local hedged = inferred or p.call.hedge ~= nil
+            p.call.inferred = hedged or nil
             local from = fn_at(p.file, p.at.start.line)
             p.call.fn = from
-            if from then addref(from, target.id, p.at, inferred) end
+            if from then addref(from, target.id, p.at, hedged) end
         else
             p.call.fn = fn_at(p.file, p.at.start.line)
             p.call.refused = refused
@@ -3550,7 +3566,9 @@ function M.relink(data, touched)
                 c.to = target.id
                 -- the ~ mark is part of the resolution, not decoration:
                 -- a relinked call must carry the same honesty as extract's
-                c.inferred = inferred or nil
+                -- (including the hedged-qualification cap, see extract)
+                local hedged = inferred or c.hedge ~= nil
+                c.inferred = hedged or nil
                 c.refused = nil
                 if c.dynamic then c.dynamic = nil end -- pinned by the trace
                 n = n + 1
@@ -3558,7 +3576,7 @@ function M.relink(data, touched)
                 if c.fn then
                     addref(c.fn, target.id, c.at
                         or { start = { line = c.line, char = 0 },
-                            ['end'] = { line = c.line, char = 0 } }, inferred)
+                            ['end'] = { line = c.line, char = 0 } }, hedged)
                 end
             else
                 -- the refusal recomputed against the CURRENT global

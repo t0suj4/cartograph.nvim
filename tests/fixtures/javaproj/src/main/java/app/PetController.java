@@ -27,6 +27,22 @@ public class PetController {
         return visits.count() + 1;
     }
 
+    // same shadow shape, but the field's class lives in THIS file — the
+    // name-match would be same-file CONFIDENT; the hedged qualification
+    // must cap the edge at ~ anyway (resolve-but-mark)
+    public int shadowedSameFile() {
+        Map.Entry<String, Integer> counter = null;
+        return counter.count() + 1;
+    }
+
+    private final Counter counter = new Counter();
+
     private void neverCalled() {
+    }
+}
+
+class Counter {
+    public int count() {
+        return 1;
     }
 }

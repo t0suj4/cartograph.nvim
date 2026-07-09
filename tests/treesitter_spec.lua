@@ -1539,12 +1539,33 @@ test('java: class-qualified, annotation cbarg, public exported', function ()
     -- the block symbol table (the memoized jvt block branch)
     local tl = refs_of('PetController::tally')
     ok(tl['VisitService::count'], 'tally -> count (typed block local)')
-    -- SHADOW WALK-OUT (the memoization -31 fix): a local whose scoped-generic
-    -- type java_base_type cannot name (Map.Entry<...> -> nil) must NOT
-    -- terminate the walk — the shadowed typed FIELD still resolves. Pins the
-    -- optimistic behavior; a refusal-by-design change flips this knowingly.
+    -- SHADOW WALK-OUT, resolve-but-mark (scope-model step 2): a local whose
+    -- scoped-generic type java_base_type cannot name (Map.Entry<...> -> nil)
+    -- must NOT terminate the walk — the shadowed typed FIELD still resolves
+    -- (recall kept), but the qualification was a GUESS, so the call carries a
+    -- hedge and the edge is capped at ~ even where the name-match is
+    -- same-file confident.
     local sh = refs_of('PetController::shadowedTally')
     ok(sh['VisitService::count'], 'shadowedTally -> count (nil-type shadow walks out)')
+    local function call_of(fnname, callee)
+        for _, c in ipairs(data.calls) do
+            if c.fn == byname[fnname].id and c.callee == callee then return c end
+        end
+    end
+    ok(call_of('PetController::shadowedTally', 'count').hedge, 'walk-out call is hedged')
+    eq('shadow-walkout', call_of('PetController::shadowedTally', 'count').hedge.rule)
+    ok(not call_of('PetController::tally', 'count').hedge, 'plain typed local: no hedge')
+    -- the tier flip the hedge exists for: Counter lives in the SAME file, so
+    -- the name-match alone would be confident — the edge must still be ~
+    local function edge_of(fromname, toname)
+        for _, e in ipairs(data.edges) do
+            if e.kind == 'ref' and e.from == byname[fromname].id
+                and e.to == byname[toname].id then return e end
+        end
+    end
+    local sfe = edge_of('PetController::shadowedSameFile', 'Counter::count')
+    ok(sfe, 'shadowedSameFile -> Counter::count (same-file walk-out)')
+    ok(sfe.inferred, 'hedged qualification caps a same-file match at ~')
     -- constructor call: new VisitService() -> VisitService::VisitService
     ok(byname['VisitService::VisitService'] == nil
         or byname['VisitService::VisitService'].kind == 'method', 'ctor shape ok')
