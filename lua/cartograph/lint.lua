@@ -19,27 +19,47 @@ end
 -- never called by name, so "no caller" says nothing about them.
 local function metamethod(n) return n.name and n.name:find('__') ~= nil end
 
--- Tarjan SCC over an adjacency map (id -> {neighbour ids}).
+-- Tarjan SCC over an adjacency map (id -> {neighbour ids}). Iterative — a
+-- deep call chain (2M-line corpora) must not blow the Lua stack; the explicit
+-- work stack replays each frame at its saved neighbour cursor.
 local function sccs(ids, adj)
     local index, low, onstack, stack, counter, comps = {}, {}, {}, {}, 0, {}
-    local function strongconnect(v)
-        index[v], low[v] = counter, counter
+    local function strongconnect(root)
+        local work = { { v = root, i = 1 } }
+        index[root], low[root] = counter, counter
         counter = counter + 1
-        stack[#stack + 1] = v; onstack[v] = true
-        for _, w in ipairs(adj[v] or {}) do
-            if index[w] == nil then
-                strongconnect(w); low[v] = math.min(low[v], low[w])
-            elseif onstack[w] then
-                low[v] = math.min(low[v], index[w])
+        stack[#stack + 1] = root; onstack[root] = true
+        while #work > 0 do
+            local fr = work[#work]
+            local v, nbrs = fr.v, adj[fr.v] or {}
+            local descended = false
+            while fr.i <= #nbrs do
+                local w = nbrs[fr.i]
+                fr.i = fr.i + 1
+                if index[w] == nil then
+                    index[w], low[w] = counter, counter
+                    counter = counter + 1
+                    stack[#stack + 1] = w; onstack[w] = true
+                    work[#work + 1] = { v = w, i = 1 }
+                    descended = true
+                    break
+                elseif onstack[w] then
+                    low[v] = math.min(low[v], index[w])
+                end
             end
-        end
-        if low[v] == index[v] then
-            local comp = {}
-            repeat
-                local w = stack[#stack]; stack[#stack] = nil; onstack[w] = false
-                comp[#comp + 1] = w
-            until w == v
-            comps[#comps + 1] = comp
+            if not descended then
+                if low[v] == index[v] then
+                    local comp = {}
+                    repeat
+                        local w = stack[#stack]; stack[#stack] = nil; onstack[w] = false
+                        comp[#comp + 1] = w
+                    until w == v
+                    comps[#comps + 1] = comp
+                end
+                work[#work] = nil
+                local up = work[#work]
+                if up then low[up.v] = math.min(low[up.v], low[v]) end
+            end
         end
     end
     for _, v in ipairs(ids) do if index[v] == nil then strongconnect(v) end end
@@ -59,7 +79,7 @@ M.listener_config = {
 local function listener_findings(store)
     local cfg, calls = M.listener_config, store.data.calls
     if not calls or #calls == 0 then return {} end
-    local function abs(c) return store.data.root .. '/' .. c.file end
+    local function abs(c) return store.abs(c.file) end
     local function keyname(c, spec)
         local a = c.args[spec.at + (c.method and 1 or 0)]
         return (a and a ~= '') and a or nil
@@ -164,14 +184,14 @@ local function swallowed_findings(store)
                     local gn = store.node(g.to)
                     if gn and class_of(gn.name) == class then
                         file, line = gn.file, gn.range.start.line
-                        fix   = { file = store.data.root .. '/' .. file, line = line,
+                        fix   = { file = store.abs(file), line = line,
                                   text = '---@return ' .. class }
                         label = ('---@return %s on %s'):format(class, gn.name)
                         break
                     end
                 end
                 if not fix then
-                    fix   = { file = store.data.root .. '/' .. file, line = line,
+                    fix   = { file = store.abs(file), line = line,
                               text = '---@type ' .. class }
                     label = '---@type ' .. class
                 end
@@ -198,7 +218,7 @@ local function swallowed_findings(store)
         local shown = table.concat(ms, ', ', 1, math.min(#ms, 4))
         if #ms > 4 then shown = shown .. (' +%d more'):format(#ms - 4) end
         out[#out + 1] = {
-            file = store.data.root .. '/' .. s.file, line = s.line + 1,
+            file = store.abs(s.file), line = s.line + 1,
             message = ('%s type is swallowed — %d call(s) to %s resolve by name only%s'):format(
                 s.class, s.n, shown, s.label and (' — quick fix: ' .. s.label) or ''),
             fix = s.fix,
@@ -221,7 +241,7 @@ local function load_order_findings(store)
             local ci = callee and t.index[callee.file]
             local fi = t.index[c.file]
             if ci and fi and ci > fi then
-                out[#out + 1] = { file = store.data.root .. '/' .. c.file, line = c.line + 1,
+                out[#out + 1] = { file = store.abs(c.file), line = c.line + 1,
                     message = ("load-time call to '%s', but %s loads later (#%d, this file is #%d)%s"):format(
                         callee.name, callee.file, ci, fi,
                         c.inferred and ' — name-matched' or '') }
@@ -229,11 +249,11 @@ local function load_order_findings(store)
         end
     end
     for _, f in ipairs(t.unlisted or {}) do
-        out[#out + 1] = { file = store.data.root .. '/' .. f, line = 1,
+        out[#out + 1] = { file = store.abs(f), line = 1,
             message = ("'%s' is not reachable from %s — it never loads"):format(f, t.toc) }
     end
     for _, m in ipairs(t.missing or {}) do
-        out[#out + 1] = { file = store.data.root .. '/' .. t.toc, line = 1,
+        out[#out + 1] = { file = store.abs(t.toc), line = 1,
             message = ("%s lists '%s' (via %s), which does not exist"):format(t.toc, m.file, m.via) }
     end
 
@@ -243,7 +263,7 @@ local function load_order_findings(store)
     -- nothing about who loads first, so it works or nils by alphabet.
     local fol, me = t.folder, t.folder and t.folder.addons[(t.self or ''):lower()]
     if me then
-        local tocline = { file = store.data.root .. '/' .. t.toc, line = 1 }
+        local tocline = { file = store.abs(t.toc), line = 1 }
         for _, dep in ipairs(me.req) do
             if not fol.addons[dep:lower()] then
                 out[#out + 1] = { file = tocline.file, line = 1,
@@ -266,7 +286,7 @@ local function load_order_findings(store)
             for _, c in ipairs(store.data.calls or {}) do
                 local who = c.top and not c.to and not own[c.callee] and sib[c.callee]
                 if who and not declared[who:lower()] then
-                    out[#out + 1] = { file = store.data.root .. '/' .. c.file, line = c.line + 1,
+                    out[#out + 1] = { file = store.abs(c.file), line = c.line + 1,
                         message = ("load-time call to '%s', defined by addon '%s' — undeclared dependency: load order is not guaranteed"):format(c.callee, who) }
                 end
             end
@@ -293,7 +313,7 @@ local function dynamic_findings(store)
     end
     local out = {}
     for _, f in ipairs(order) do
-        out[#out + 1] = { file = store.data.root .. '/' .. f, line = per[f].line + 1,
+        out[#out + 1] = { file = store.abs(f), line = per[f].line + 1,
             message = ("%d dynamic dispatch site(s) — callees are runtime state; pin known targets via setup{ pins = ... }"):format(per[f].n) }
     end
     return out
@@ -313,7 +333,7 @@ local function greenspun_findings(store)
                 :format(r.verb, r.keys, r.sites, r.example or '?', via) }
     end
     for _, t in ipairs(g.dispatch_tables(store.data)) do
-        out[#out + 1] = { file = store.data.root .. '/' .. t.var.file,
+        out[#out + 1] = { file = store.abs(t.var.file),
             line = t.var.range.start.line + 1,
             message = ("ad-hoc funcall table: '%s' maps %d of %d entries to functions")
                 :format(t.var.name, t.fns, t.entries) }
@@ -324,7 +344,7 @@ local function greenspun_findings(store)
                 :format(f.verb, f.keys, f.sites, f.example or '?') }
     end
     for _, c in ipairs(g.evals(store.data)) do
-        out[#out + 1] = { file = store.data.root .. '/' .. c.file, line = c.line + 1,
+        out[#out + 1] = { file = store.abs(c.file), line = c.line + 1,
             message = ("the interpreter itself: %s()"):format(c.callee) }
     end
     return out
@@ -377,7 +397,7 @@ local function mirror_findings(store)
             msg = ('vocabulary chain (pairwise overlaps, no common core): %s')
                 :format(table.concat(m.members, ' ~ '))
         end
-        out[#out + 1] = { file = store.data.root .. '/' .. m.node.file,
+        out[#out + 1] = { file = store.abs(m.node.file),
             line = m.node.range.start.line + 1, message = msg }
     end
     return out
@@ -430,7 +450,7 @@ local function layering_findings(store)
     for _, v in ipairs(require('cartograph.greenspun').layering(store.data)) do
         for _, e in ipairs(v.edges or {}) do
             out[#out + 1] = { severity = 'warn',
-                file = store.data.root .. '/' .. e.from, line = 1,
+                file = store.abs(e.from), line = 1,
                 message = ("layering: %s -> %s dominates (%d imports); '%s' -> '%s' runs against it")
                     :format(v.dom_from, v.dom_to, v.dom, e.from, e.to) }
         end
@@ -452,7 +472,7 @@ local function sql_findings(store)
         local e = scanned.tables[t]
         if #e.sites >= 2 then
             local first = e.sites[1].call
-            out[#out + 1] = { file = store.data.root .. '/' .. first.file,
+            out[#out + 1] = { file = store.abs(first.file),
                 line = first.line + 1,
                 message = ("table '%s': %d read(s), %d write(s)%s across %d raw SQL sites")
                     :format(t, e.reads, e.writes,
@@ -478,7 +498,7 @@ M.rules = {
             for _, m in ipairs(d.missing) do
                 local n = store.node('sql::table:' .. m.name)
                 out[#out + 1] = {
-                    file = n and (store.data.root .. '/' .. n.file) or '',
+                    file = n and (store.abs(n.file)) or '',
                     line = n and n.range.start.line + 1 or 1,
                     message = ("table '%s' is queried in code but %s")
                         :format(m.name, m.why
@@ -512,7 +532,7 @@ M.rules = {
                 local d = s.d
                 if d then
                     for _, u in ipairs(d.unregistered) do
-                        out[#out + 1] = { file = store.data.root .. '/' .. u.file,
+                        out[#out + 1] = { file = store.abs(u.file),
                             line = u.line + 1,
                             message = ("route '%s' is named here but never"
                                 .. ' registered (renders as %s)')
@@ -545,13 +565,13 @@ M.rules = {
             if not a then return {} end
             local out = {}
             for _, u in ipairs(a.noop) do
-                out[#out + 1] = { file = store.data.root .. '/' .. u.file,
+                out[#out + 1] = { file = store.abs(u.file),
                     line = u.line + 1,
                     message = ("notify '%s' names no handler — a SILENT no-op"
                         .. ' (the handler never runs)'):format(u.name) }
             end
             for _, b in ipairs(a.broken) do
-                out[#out + 1] = { file = store.data.root .. '/' .. b.file,
+                out[#out + 1] = { file = store.abs(b.file),
                     line = b.line + 1,
                     message = ("include target '%s' does not exist"):format(b.target) }
             end
@@ -603,7 +623,9 @@ M.rules = {
                     and not n.decl -- a prototype is a declaration, not dead code
                     and not exported(n) and not metamethod(n) and not n.cbarg
                     and not n.entry and not xmlh[n.name]
-                    and #(store.usedby[n.id] or {}) == 0 then
+                    and #(store.usedby[n.id] or {}) == 0
+                    -- a registration is an alibi: a dispatch table keeps it alive
+                    and #(store.reg_by[n.id] or {}) == 0 then
                     out[#out + 1] = { file = store.abspath(n), line = n.range.start.line + 1,
                         message = ("local function '%s' has no callers (possibly dead)"):format(n.name) }
                 end
@@ -617,7 +639,7 @@ M.rules = {
             local out = {}
             for _, file in ipairs(store.files) do
                 if store.classify(file) == 'deadimport' then
-                    out[#out + 1] = { file = store.data.root .. '/' .. file, line = 1,
+                    out[#out + 1] = { file = store.abs(file), line = 1,
                         message = ("'%s' is required only for effect, but has none — the require is redundant"):format(file) }
                 end
             end
