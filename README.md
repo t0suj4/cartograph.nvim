@@ -782,6 +782,28 @@ with in-memory graphs via `store.ingest`; the extractor's load-time `effects`
 detection is covered by a golden test that runs the real `--graph` CLI over
 `tests/fixtures/effects` (self-skips if the CLI isn't installed).
 
+## Tools (dev bench)
+
+`tools/` is measurement tooling for working ON cartograph — outside the
+plugin's runtime path, never required from `lua/cartograph/`.
+
+```sh
+# extractor-change gate: extract a named corpus, check calibrated counts,
+# per-item diff (graphdiff) against the saved baseline snapshot. Exit 1 on
+# any drift.
+nvim --headless -u NONE -l tools/gate.lua server
+# (re)establish the baseline on a known-good rev
+nvim --headless -u NONE -l tools/gate.lua server --save
+```
+
+`tools/corpora.lua` names the corpora and holds calibrated baselines as data;
+`tools/bench.lua` is the bootstrap + measurement discipline (timed runs, peak
+RSS via `/proc`, median-of-N); `tools/snapshot.lua` saves slim extracts
+(`~/.cache/cartograph-tools/`) so a one-minute extract is paid once per
+version and diffed for free. A slim snapshot is instrument-faithful by
+construction: `graphdiff` and `census` cannot tell it from the original
+(pinned in `tests/snapshot_spec.lua`).
+
 ## License
 
 TBD
