@@ -34,8 +34,10 @@ local function has_control_escape(lines)
     return false
 end
 
---- @param opts { df:table, sel:{first:integer,last:integer}, fn_start:integer, body_end:integer, file_lines:string[], name:string }
+--- @param opts { df:table, sel:{first:integer,last:integer}, fn_start:integer, body_end:integer, file_lines:string[], name:string, resolve_binder:nil|fun(name:string,row0:integer):table? }
 --- fn_start / body_end / sel are 1-based file line numbers. df.stmts[].l are too.
+--- resolve_binder(name, row0) -> binder handle {row?} (0-based decl row; nil
+--- row = param/field) or nil — the shadow-attribution service (binder_at).
 --- @return table plan  { ok, reason?, name, params, returns, new_fn, call, replace, insert_before, hazards }
 function M.plan(opts)
     local df, sel, name = opts.df, opts.sel, opts.name
@@ -97,6 +99,71 @@ function M.plan(opts)
             if d.from >= firstIdx and d.from <= lastIdx then returns_set[d.var] = true end
         end
     end
+
+    -- SHADOW SAFETY (scope-model): df def entries carry binder tags
+    -- (stmt.defr, aligned with stmt.def) when a name resolves to SEVERAL
+    -- binders in this function. For such a name the name-keyed deps above
+    -- can invent a RETURN — the selection defines one binder, the later
+    -- use reads another — which generates junk code (a false `local x =
+    -- f(...)` splitting the variable in two). With opts.resolve_binder
+    -- the post-selection uses are attributed precisely: the return
+    -- survives only when some use's binder matches an in-selection def's
+    -- tag. Without a resolver, or when attribution fails, REFUSE — this
+    -- engine's contract. Params stay name-based deliberately: a read-only
+    -- live-in is a value copy equal to the closure read either way, and
+    -- enclosing params pre-seed the dep map so a param shadow cannot
+    -- reach the returns set.
+    local tagvals = {}
+    for _, s in ipairs(stmts) do
+        if s.defr then
+            for di, d in ipairs(s.def) do
+                if s.defr[di] ~= nil then
+                    tagvals[d] = tagvals[d] or {}
+                    tagvals[d][s.defr[di]] = true
+                end
+            end
+        end
+    end
+    for r in pairs(returns_set) do
+        local n = 0
+        for _ in pairs(tagvals[r] or {}) do n = n + 1 end
+        if n >= 2 then
+            if not opts.resolve_binder then
+                return { ok = false, reason = ('`%s` is shadowed in this function '
+                    .. '(several distinct binders) — the plan cannot attribute its '
+                    .. 'defs and uses by name'):format(r) }
+            end
+            local sel_t = {}
+            for idx = firstIdx, lastIdx do
+                local s = stmts[idx]
+                if s.defr then
+                    for di, d in ipairs(s.def) do
+                        if d == r and s.defr[di] ~= nil then sel_t[s.defr[di]] = true end
+                    end
+                end
+            end
+            local genuine, unknown = false, false
+            for j = lastIdx + 1, #stmts do
+                for _, u in ipairs(stmts[j].use) do
+                    if u == r then
+                        local b = opts.resolve_binder(r, stmts[j].l - 1)
+                        if not b then
+                            unknown = true
+                        elseif sel_t[b.row or -1] then
+                            genuine = true
+                        end
+                    end
+                end
+            end
+            if unknown and not genuine then
+                return { ok = false, reason = ('`%s` is shadowed and a use after '
+                    .. 'the selection could not be attributed to a binder — '
+                    .. 'refusing rather than guess'):format(r) }
+            end
+            if not genuine then returns_set[r] = nil end
+        end
+    end
+
     local params, returns = sorted(params_set), sorted(returns_set)
 
     -- a return that is also a param is a reassignment of an outer local (no

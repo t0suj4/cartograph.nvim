@@ -103,3 +103,73 @@ test('extract: a side-effecting statement extracts with params and no returns', 
     eq('    do_record(n)', p.call[1])
     ok(#p.hazards >= 1, 'non-local-state hazard disclosed')
 end)
+
+-- SHADOW SAFETY (scope-model): `x` has two binders — an inner one whose
+-- do-block is the selection (decl row 2, 0-based) and an outer one after
+-- it (decl row 5). The name-keyed dep invents a return of x.
+--   1 local function f(a)
+--   2     do                  ← selection 2..5
+--   3         local x = a * 2
+--   4         g(x)
+--   5     end
+--   6     local x = a + 1
+--   7     h(x)
+--   8 end
+local S = {
+    'local function f(a)',
+    '    do',
+    '        local x = a * 2',
+    '        g(x)',
+    '    end',
+    '    local x = a + 1',
+    '    h(x)',
+    'end',
+}
+local S_DF = { inputs = { 'a' }, stmts = {
+    { l = 2, def = { 'x' }, use = { 'a' }, dep = {}, defr = { 2 } },
+    { l = 6, def = { 'x' }, use = { 'a' }, dep = {}, defr = { 5 } },
+    { l = 7, def = {}, use = { 'x' }, dep = { dep(1, 'x') } }, -- FALSE dep
+} }
+
+test('extract shadow: without a resolver, a shadowed return REFUSES', function ()
+    local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
+        fn_start = 1, body_end = 7, file_lines = S, name = 'f2' }
+    ok(not p.ok)
+    ok(p.reason:match('shadowed'), p.reason)
+end)
+
+test('extract shadow: the resolver attributes the use and DROPS the false return', function ()
+    local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
+        fn_start = 1, body_end = 7, file_lines = S, name = 'f2',
+        resolve_binder = function (nm, row0)
+            eq('x', nm)
+            eq(6, row0)          -- the h(x) row, 0-based
+            return { row = 5 }   -- the OUTER binder
+        end }
+    ok(p.ok, p.reason)
+    eq({}, p.returns)            -- no junk `local x = f2(...)`
+    eq('    f2()', p.call[1])
+end)
+
+test('extract shadow: a use matching an in-selection binder KEEPS the return', function ()
+    -- select the OUTER decl (line 6); craft the dep to point at it
+    local df2 = { inputs = { 'a' }, stmts = {
+        { l = 2, def = { 'x' }, use = { 'a' }, dep = {}, defr = { 2 } },
+        { l = 6, def = { 'x' }, use = { 'a' }, dep = {}, defr = { 5 } },
+        { l = 7, def = {}, use = { 'x' }, dep = { dep(2, 'x') } },
+    } }
+    local p = extract.plan { df = df2, sel = { first = 6, last = 6 },
+        fn_start = 1, body_end = 7, file_lines = S, name = 'f2',
+        resolve_binder = function () return { row = 5 } end }
+    ok(p.ok, p.reason)
+    eq({ 'x' }, p.returns)
+    eq('    local x = f2()', p.call[1])
+end)
+
+test('extract shadow: unattributable use refuses rather than guess', function ()
+    local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
+        fn_start = 1, body_end = 7, file_lines = S, name = 'f2',
+        resolve_binder = function () return nil end }
+    ok(not p.ok)
+    ok(p.reason:match('could not be attributed'), p.reason)
+end)

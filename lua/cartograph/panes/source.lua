@@ -218,7 +218,13 @@ function M.extract(line1, line2, name)
     if not all then return vim.notify('cartograph: cannot read ' .. node.file, vim.log.levels.ERROR) end
 
     local plan = extract.plan { df = node.df, sel = { first = file_first, last = file_last },
-        fn_start = fn_start, body_end = body_end, file_lines = all, name = name }
+        fn_start = fn_start, body_end = body_end, file_lines = all, name = name,
+        -- shadow safety: lets the plan attribute a shadowed name's uses to
+        -- binders instead of refusing (multi-root-safe via store.abs)
+        resolve_binder = function (nm, row0)
+            return require('cartograph.providers.treesitter')
+                .binder_at(store.abs(node.file), node.file, nm, row0)
+        end }
     local function show_then_restore(lines, prompt)
         set_lines(M.buf, lines)
         scroll_top(M.win_top)
