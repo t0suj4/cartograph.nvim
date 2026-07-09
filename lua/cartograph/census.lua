@@ -16,7 +16,7 @@ function M.take(data)
         edges = { total = 0, by_kind = {},
             ref = { proven = 0, xlang = 0, inferred = 0, matched = 0 } },
         calls = { total = 0, resolved = 0, refused = 0, unresolved = 0,
-            rules = {} },
+            hedged = 0, rules = {} },
     }
     for _, n in ipairs(data.nodes or {}) do
         c.nodes.total = c.nodes.total + 1
@@ -34,6 +34,7 @@ function M.take(data)
     end
     for _, call in ipairs(data.calls or {}) do
         c.calls.total = c.calls.total + 1
+        if call.hedge then c.calls.hedged = c.calls.hedged + 1 end
         if call.to then
             c.calls.resolved = c.calls.resolved + 1
         elseif call.refused then
@@ -83,10 +84,12 @@ function M.report(data)
             :format(ref.proven, pct(ref.proven, reftotal), ref.xlang,
                 ref.inferred, pct(ref.inferred, reftotal),
                 ref.matched, pct(ref.matched, reftotal)),
-        ('calls %d: resolved %d (%s) · refused %d (%s) · outside the corpus %d')
+        ('calls %d: resolved %d (%s) · refused %d (%s) · outside the corpus %d%s')
             :format(c.calls.total, c.calls.resolved,
                 pct(c.calls.resolved, c.calls.total), c.calls.refused,
-                pct(c.calls.refused, c.calls.total), c.calls.unresolved),
+                pct(c.calls.refused, c.calls.total), c.calls.unresolved,
+                c.calls.hedged > 0
+                    and (' · hedged %d'):format(c.calls.hedged) or ''),
     }
     if c.nodes.unparsed > 0 then
         lines[#lines + 1] = ('frontier: %d unparsed landing node(s)')

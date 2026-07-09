@@ -28,6 +28,8 @@ local function data()
             { fn = 'g', callee = 'k', file = 'm.lua', line = 6,
                 refused = { rule = 'dynamic-key' } },
             { fn = 'g', callee = 'print', file = 'm.lua', line = 7 },
+            { fn = 'g', callee = 'q', to = 'g', file = 'm.lua', line = 8,
+                hedge = { rule = 'shadow-walkout' } },
         },
     }
 end
@@ -42,10 +44,11 @@ test('census: counts by kind, tier, and rule', function ()
     eq(1, c.edges.ref.proven)
     eq(1, c.edges.ref.inferred)
     eq(1, c.edges.ref.matched)
-    eq(5, c.calls.total)
-    eq(1, c.calls.resolved)
+    eq(6, c.calls.total)
+    eq(2, c.calls.resolved)
     eq(3, c.calls.refused)
     eq(1, c.calls.unresolved) -- print: outside the corpus, not refused
+    eq(1, c.calls.hedged)
     eq(2, c.calls.rules['ambiguous-name'].n)
     eq(1, c.calls.rules['dynamic-key'].n)
 end)

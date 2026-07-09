@@ -25,9 +25,10 @@ local function ckey(c)
         .. ' ' .. (c.callee or c.full or '?')
 end
 local function coutcome(c)
-    if c.to then return 'to ' .. c.to end
-    if c.refused then return 'refused (' .. (c.refused.rule or '?') .. ')' end
-    return 'unresolved'
+    local hedge = c.hedge and (' hedged:' .. (c.hedge.rule or '?')) or ''
+    if c.to then return 'to ' .. c.to .. hedge end
+    if c.refused then return 'refused (' .. (c.refused.rule or '?') .. ')' .. hedge end
+    return 'unresolved' .. hedge
 end
 
 -- key -> { outcome -> count } for one data table

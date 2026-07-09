@@ -26,6 +26,8 @@ local function fat_data()
                 args = { 'a' }, argv = { { k = 'lit' } } }, -- fat: args/argv dropped
             { fn = 'f', callee = 'h', file = 'm.lua', line = 5,
                 refused = { rule = 'ambiguous', cands = { 'h1', 'h2' }, n = 2 } },
+            { fn = 'f', callee = 'k', to = 'k', file = 'm.lua', line = 6,
+                hedge = { rule = 'shadow-walkout', row = 2 } }, -- row is fat
         },
     }
 end
@@ -41,6 +43,8 @@ test('snapshot: slim round-trip is instrument-faithful', function ()
     local ca, cb = census.take(data), census.take(back)
     eq(ca.edges.ref.inferred, cb.edges.ref.inferred)
     eq(ca.calls.refused, cb.calls.refused)
+    eq(ca.calls.hedged, cb.calls.hedged)
+    eq(1, cb.calls.hedged)
     eq(ca.calls.rules['ambiguous'].n, cb.calls.rules['ambiguous'].n)
     eq(ca.nodes.unparsed, cb.nodes.unparsed)
 end)

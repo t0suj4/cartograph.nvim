@@ -33,6 +33,7 @@ function M.slim(data)
     for i, c in ipairs(data.calls or {}) do
         calls[i] = { file = c.file, line = c.line, callee = c.callee,
             full = c.full, fn = c.fn, to = c.to,
+            hedge = c.hedge and { rule = c.hedge.rule } or nil,
             refused = c.refused and { rule = c.refused.rule, n = c.refused.n } or nil }
     end
     return { schema = data.schema, root = data.root, provider = data.provider,
