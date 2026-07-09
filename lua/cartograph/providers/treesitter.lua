@@ -1843,13 +1843,35 @@ end
 
 local DEFAULT_FN_TYPES = { function_definition = true, function_declaration = true }
 
-local function in_function(n, spec)
+-- `memo` (optional, PER TREE — node ids alias across trees) caches the
+-- answer at every ancestor visited: call sites in the same function stop
+-- one level up instead of re-walking to the root each time.
+local IF_PATH = {} -- scratch: ids visited this walk (single-threaded)
+local function in_function(n, spec, memo)
     local types = spec and spec.fn_types or DEFAULT_FN_TYPES
     local p = n:parent()
+    if not memo then
+        while p do
+            if types[p:type()] then return p end
+            p = p:parent()
+        end
+        return nil
+    end
+    local np = 0
     while p do
-        if types[p:type()] then return p end
+        local id = p:id()
+        local hit = memo[id]
+        if hit == nil and types[p:type()] then hit = p end
+        if hit ~= nil then
+            for i = 1, np do memo[IF_PATH[i]] = hit end
+            memo[id] = hit
+            return hit or nil
+        end
+        np = np + 1
+        IF_PATH[np] = id
         p = p:parent()
     end
+    for i = 1, np do memo[IF_PATH[i]] = false end
     return nil
 end
 
@@ -2149,10 +2171,23 @@ end
 -- resolve as their host; typescript IS the javascript spec under another
 -- parser — so js/ts/vue/svelte collapse to ONE family, the way TS
 -- legally imports JS (allowJs) and SFC scripts import both.
+-- memoized by EXTENSION: elang_for runs once per call site during
+-- resolution (87k on server), and lang_for underneath is a spec-registry
+-- scan. The registry is static (no runtime spec mutation), so the memo
+-- cannot go stale.
+local EXT_ELANG = {} -- ext -> { lang|false, spec|false }
 local function elang_for(file)
-    if container_for(file) then return 'javascript', M.spec.javascript end
-    local lang, spec = lang_for(file)
-    if lang == 'typescript' then return 'javascript', M.spec.javascript end
+    local ext = file:match('%.([%w]+)$') or ''
+    local hit = EXT_ELANG[ext]
+    if hit then return hit[1] or nil, hit[2] or nil end
+    local lang, spec
+    if CONTAINERS[ext] then
+        lang, spec = 'javascript', M.spec.javascript
+    else
+        lang, spec = lang_for(file)
+        if lang == 'typescript' then lang, spec = 'javascript', M.spec.javascript end
+    end
+    EXT_ELANG[ext] = { lang or false, spec or false }
     return lang, spec
 end
 
@@ -3439,6 +3474,7 @@ function M.extract(root, opts)
     -- @click="save(item)" is a real call_expression at absolute rows
     local function extract_calls(file, lang, spec, src, tsroot)
         tree_model(tsroot, src, spec) -- shared with extract_defs (same tree)
+        local ifmemo = {} -- per TREE by construction (dies with this call)
         -- calls (inventory + reference sites, resolved after all files)
         local q = parse_query(lang, spec.calls)
         if q then
@@ -3492,7 +3528,7 @@ function M.extract(root, opts)
                     local callee = dynamic and full
                         or full:match('([%w_]+)$') or full
                     local sp = pos_of(calln)
-                    local encl = in_function(calln, spec)
+                    local encl = in_function(calln, spec, ifmemo)
                     local is_top = encl == nil
                     if spec.is_top then is_top = spec.is_top(calln, src) end
                     local args, argv = {}, {}
