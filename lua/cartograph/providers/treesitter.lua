@@ -646,7 +646,7 @@ M.spec = {
         params_field = 'patterns',
         body_field = nil, -- df comes from the custom hook below
         fn_types = { ['function'] = true, bind = true },
-        id_query = '(variable) @id',
+        mention_types = { variable = true },
         -- where-clause binds are a function's INTERIOR (df rows), not nodes:
         -- indexing `e`/`go`/`args` by name would link every pattern variable
         toplevel_only = true,
@@ -732,7 +732,7 @@ M.spec = {
                 (#eq? @_kw "define"))
         ]=],
         body_field = nil,
-        id_query = '(symbol) @id',
+        mention_types = { symbol = true },
         toplevel_parent = 'program', -- internal defines are a function's interior
         is_method = function () return false end,
         entry_names = { main = true },
@@ -1013,7 +1013,7 @@ M.spec = {
                 p2 = p2:parent()
             end
         end,
-        id_query = '(name) @id',
+        mention_types = { name = true },
         -- OO extends: child class -> superclass name (bare last segment,
         -- the same key form defs use). Feeds transitive parent::m resolution.
         super_query = [=[
@@ -1137,7 +1137,7 @@ M.spec = {
         -- $x expansions carry variable_name; a bare word in argument
         -- position can NAME a function (trap cleanup EXIT) — both mention
         -- kinds feed the id pass
-        id_query = '[(word) (variable_name)] @id',
+        mention_types = { word = true, variable_name = true },
         df_ids = { variable_name = true },
         is_method = function () return false end,
         -- source/. splice a file in at RUN time: resolve like C includes —
@@ -2662,13 +2662,257 @@ end
 -- the cache diffs the tree with the same walk/exclusion rules extraction uses
 function M.list_files(root, subdirs) return list_files(root, subdirs) end
 
+-- ── mentions: collect (phase 1, tree live) + reduce (lookups ready) ──────
+-- The id pass needs GLOBAL lookups (uniqueness is corpus-wide), so it used
+-- to be a second read+parse of every file after the node set settled. Split
+-- it instead: collect_mentions rides the phase-1 tree and packs every
+-- identifier occurrence into a per-file varint string; reduce_mentions
+-- replays the id-pass decisions over that buffer — pure table lookups, no
+-- tree, no second parse. Lexical boundness (scope-model step 3) is the one
+-- decision that needs the tree, so collect computes it EAGERLY with a scope
+-- STACK folded on the fly during its single DFS: harvest a scope's symtab
+-- on entry, pop on exit, answer per identifier from that name's active
+-- binders — measured 3x cheaper than per-mention resolve() ancestor walks,
+-- bound-for-bound identical on libs/self/server. Buffers stay small
+-- (server: ~7 MB packed occurrences + ~4 MB interned names).
+
+local MENTION_ID = { identifier = true }
+local NO_NAMES = {}
+
+-- LEB128, little-endian base-128
+local function vput(parts, v)
+    while v >= 0x80 do
+        parts[#parts + 1] = string.char(v % 0x80 + 0x80)
+        v = math.floor(v / 0x80)
+    end
+    parts[#parts + 1] = string.char(v)
+end
+local function vget(s, i)
+    local v, m = 0, 1
+    local b = s:byte(i)
+    while b >= 0x80 do
+        v = v + (b - 0x80) * m
+        m = m * 0x80
+        i = i + 1
+        b = s:byte(i)
+    end
+    return v + b * m, i + 1
+end
+
+local MF_ELIGIBLE = 1 -- >=3 chars, non-stdlib: fn-ref / name-index candidate
+local MF_CALLEE = 2   -- call position (the call pass already owns it)
+local MF_BOUND = 4    -- lexically bound at the use site (scope stack)
+local MF_SCOPED = 8   -- collected under a spec WITH a scope model
+local MF_RANGE = 16   -- token isn't single-line name-width: explicit end follows
+
+-- the buffer must SHIP (worker chunk, binary codec): no spec table (it
+-- holds functions), just the two spec facts the reduce needs
+local function mention_buf(spec)
+    return { names = {}, nidx = {}, ok = {}, parts = {}, n = 0,
+        fnrefs = spec.id_fn_refs ~= false,
+        noindex = spec.name_index == false }
+end
+
+--- One DFS over a phase-1 tree: pack identifier occurrences (with
+--- eligible/callee/bound flags) into buf. Shared by the fused extract and
+--- the standalone id_pass (refresh path).
+local function collect_mentions(buf, tsroot, src, spec)
+    local scopes = spec.scopes
+    local idt = spec.mention_types or MENTION_ID
+    local stdlib = spec.stdlib_names or NO_NAMES
+    local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
+    local scoped = scopes and MF_SCOPED or 0
+    local active = {} -- name -> stack of visibility rows (false = scope-wide)
+    local function walk(n)
+        local pushed
+        local entry = scopes and scopes[n:type()]
+        if entry then
+            local t = {}
+            entry.harvest(n, src, t)
+            pushed = {}
+            for name, b in pairs(t) do
+                local a = active[name]
+                if not a then a = {} active[name] = a end
+                a[#a + 1] = b.row or false
+                pushed[#pushed + 1] = name
+            end
+        end
+        local nt = n:type()
+        local iscall = nt == 'call_expression' or nt == 'function_call'
+            or nt == 'call' or nt == 'apply'
+        local head = nt == 'list' -- sexp head IS the callee (no fields)
+        local i, c = 0, n:child(0)
+        while c do
+            if idt[c:type()] and c:named() then
+                local name = node_text(c, src)
+                local sr, sc, er, ec = c:range()
+                local callee = iscall
+                    and (n:field('function')[1] == c or n:field('name')[1] == c)
+                    or (head and c:named())
+                local idx = nidx[name]
+                if not idx then
+                    idx = buf.n + 1
+                    buf.n = idx
+                    nidx[name] = idx
+                    names[idx] = name
+                    nok[idx] = (#name >= 3 and not stdlib[name]) or nil
+                end
+                local bound
+                local a = active[name]
+                if a then
+                    for j = #a, 1, -1 do
+                        local r = a[j]
+                        if r == false or r <= sr then bound = true break end
+                    end
+                end
+                local flags = scoped + (nok[idx] and MF_ELIGIBLE or 0)
+                    + (callee and MF_CALLEE or 0) + (bound and MF_BOUND or 0)
+                local simple = er == sr and ec == sc + #name
+                if not simple then flags = flags + MF_RANGE end
+                vput(parts, idx)
+                vput(parts, sr)
+                vput(parts, sc)
+                parts[#parts + 1] = string.char(flags)
+                if not simple then
+                    vput(parts, er)
+                    vput(parts, ec)
+                end
+            end
+            if head and c:named() then head = false end
+            if c:child(0) then walk(c) end
+            i = i + 1
+            c = n:child(i)
+        end
+        if pushed then
+            for k = #pushed, 1, -1 do
+                local a = active[pushed[k]]
+                a[#a] = nil
+            end
+        end
+    end
+    walk(tsroot)
+end
+
+--- Replay the id-pass decisions over a collected buffer: pure lookups
+--- against L (the same callback contract id_pass always took).
+local function reduce_mentions(file, buf, L)
+    local ranges = L.fn_ranges[file]
+    if not ranges then return end
+    local fnrefs = buf.fnrefs
+    local names = buf.names
+    local function fn_at(line)
+        local best
+        for _, r in ipairs(ranges) do
+            if r.s <= line and line <= r.e
+                and (not best or r.s >= best.s) then best = r end
+        end
+        return best and best.id
+    end
+    local useEdge, regEdge = {}, {}
+    local m = buf.m
+    local i, len = 1, #m
+    while i <= len do
+        local idx, sr, sc, flags
+        idx, i = vget(m, i)
+        sr, i = vget(m, i)
+        sc, i = vget(m, i)
+        flags = m:byte(i)
+        i = i + 1
+        local name = names[idx]
+        local er, ec = sr, sc + #name
+        if flags >= MF_RANGE then
+            flags = flags - MF_RANGE
+            er, i = vget(m, i)
+            ec, i = vget(m, i)
+        end
+        local scoped = flags >= MF_SCOPED
+        local bound = flags % MF_SCOPED >= MF_BOUND
+        local callee = flags % MF_BOUND >= MF_CALLEE
+        local eligible = flags % MF_CALLEE >= MF_ELIGIBLE
+        if eligible and not callee and fnrefs then
+            local u = L.fn_unique[name]
+            if u and L.scopes and L.scopes[u.file] ~= L.scopes[file] then
+                u = nil -- unique, but across a boundary
+            end
+            -- lexical-first (scope-model step 3): a BOUND name never
+            -- crosses the file boundary
+            if u and scoped and u.file ~= file and bound then u = nil end
+            if u and not (u.file == file and sr == u.line) then
+                local from = fn_at(sr)
+                local at = { start = { line = sr, char = sc },
+                    ['end'] = { line = er, char = ec } }
+                if from then
+                    L.addref(from, u.id, at, true)
+                else
+                    -- referenced from top-level DATA (a dispatch table /
+                    -- registry): the fn is kept alive, and the reference is
+                    -- a REGISTRATION edge from this module — an alibi you
+                    -- can descend into
+                    L.mark_cbarg(u)
+                    local rk = file .. '\31' .. u.id
+                    local e = regEdge[rk]
+                    if not e then
+                        e = { from = file, to = u.id, kind = 'reg', at = {} }
+                        regEdge[rk] = e
+                        L.adduse(e)
+                    end
+                    e.at[#e.at + 1] = at
+                end
+            end
+        end
+        local cands = L.var_named[name]
+        if cands then
+            local var
+            for _, v in ipairs(cands) do
+                if v.file == file then var = v break end
+            end
+            if not var and #cands == 1
+                and not (L.scopes and L.scopes[cands[1].file]
+                    ~= L.scopes[file]) then
+                -- the cross-file unique fallback only for FREE names:
+                -- bound never crosses the file boundary
+                if not (scoped and bound) then var = cands[1] end
+            end
+            if var and not (var.file == file and sr == var.line) then
+                local from = fn_at(sr)
+                if from then
+                    local k = from .. '\31' .. var.id
+                    local e = useEdge[k]
+                    if not e then
+                        e = { from = from, to = var.id, kind = 'use', at = {} }
+                        useEdge[k] = e
+                        L.adduse(e)
+                    end
+                    e.at[#e.at + 1] = { start = { line = sr, char = sc },
+                        ['end'] = { line = er, char = ec } }
+                end
+            end
+        end
+    end
+    -- the per-file identifier NAME SET (the mention index): what lets a
+    -- later splice answer "which files mention this global?" without a
+    -- corpus scan
+    if L.add_names and not buf.noindex and buf.n > 0 then
+        local ns = {}
+        for j = 1, buf.n do
+            if buf.ok[j] then ns[#ns + 1] = names[j] end
+        end
+        if #ns > 0 then
+            table.sort(ns) -- deterministic pack (worker == inline)
+            L.add_names(file, '\31' .. table.concat(ns, '\31') .. '\31')
+        end
+    end
+end
+
 -- The id pass: identifier occurrences naming a known top-level var (same
 -- file, or unique across the workspace) or — outside call position — a
 -- unique function (dispatch tables, registry values). A top-level
 -- function reference marks the target dynamically dispatched (cbarg): a
--- dispatch-table entry is not dead code. Takes SUPPLIED lookups so the
--- parallel driver can run it in workers against parent-built GLOBAL
--- indexes: slice-local uniqueness is not global uniqueness.
+-- dispatch-table entry is not dead code. Takes SUPPLIED lookups because
+-- every decision is corpus-global: slice-local uniqueness is not global
+-- uniqueness. This standalone form (read + parse + collect + reduce) is
+-- the REFRESH path; the fused extract collects during phase 1 and only
+-- reduces here-style at the end — no second parse.
 -- L = { fn_unique = name -> {id,file,line,node?} (globally unique fns),
 --       var_named = name -> { {id,file,line}, ... } (top-level vars),
 --       fn_ranges = file -> { {s,e,id}, ... },
@@ -2683,143 +2927,25 @@ function M.list_files(root, subdirs) return list_files(root, subdirs) end
 local function id_pass(root, files, L, abs)
     abs = abs or function (f) return root .. '/' .. f end
     for _, file in ipairs(files) do
-        local lang, spec = lang_for(file)
-        local clang = container_for(file)
-        if clang then lang, spec = 'javascript', M.spec.javascript end
-        local ranges = L.fn_ranges[file]
-        if ranges then
+        if L.fn_ranges[file] then
+            local lang, spec = lang_for(file)
+            local clang = container_for(file)
+            if clang then lang, spec = 'javascript', M.spec.javascript end
             local fd = io.open(abs(file), 'r')
             local src = fd and fd:read('a')
             if fd then fd:close() end
             local okp, parser = pcall(vim.treesitter.get_string_parser,
                 src or '', clang or lang)
             if src and okp then
-                local nameset = (L.add_names and spec.name_index ~= false)
-                    and {} or nil
-                local function fn_at(line)
-                    local best
-                    for _, r in ipairs(ranges) do
-                        if r.s <= line and line <= r.e
-                            and (not best or r.s >= best.s) then best = r end
-                    end
-                    return best and best.id
-                end
                 local troots = container_trees(parser, clang)
                     or { { root = parser:parse()[1]:root(), spec = spec,
                         lang = lang } }
-                local useEdge, regEdge = {}, {}
+                local buf = mention_buf(spec)
                 for _, tr in ipairs(troots) do
-                -- lexical-first (scope-model step 3): where the language has
-                -- a scope spec, A BOUND NAME NEVER CROSSES THE FILE BOUNDARY
-                -- — same-file matches survive (an inner binder may itself BE
-                -- a graph node: a lua nested `local function`, a chunk-level
-                -- module var), but the cross-file unique fallback is exactly
-                -- the false-positive channel (a local `force` matching some
-                -- other file's fn/var). Free identifiers escalate as before.
-                -- Resolved LAZILY, only when a lookup actually hits.
-                local sm = tr.spec.scopes
-                    and require('cartograph.scope').model(src, tr.spec.scopes) or nil
-                local q = parse_query(tr.lang, tr.spec.id_query or '(identifier) @id')
-                if q then
-                    for _, n in q:iter_captures(tr.root, src, 0, -1) do
-                        local name = node_text(n, src)
-                        local bound -- nil = not yet resolved; true/false = lexically bound here
-                        if nameset and #name >= 3
-                            and not (tr.spec.stdlib_names or {})[name] then
-                            nameset[name] = true
-                        end
-                        local parent = n:parent()
-                        local pt = parent and parent:type() or ''
-                        local callee_pos = (pt == 'call_expression' or pt == 'function_call'
-                                or pt == 'call' or pt == 'apply')
-                            and (parent:field('function')[1] == n or parent:field('name')[1] == n)
-                            -- sexp grammars have no fields: the head IS the callee
-                            or (pt == 'list' and parent:named_child(0) == n)
-                        if not callee_pos and #name >= 3
-                            and tr.spec.id_fn_refs ~= false
-                            and not (tr.spec.stdlib_names or {})[name] then
-                            local u = L.fn_unique[name]
-                            if u and L.scopes
-                                and L.scopes[u.file] ~= L.scopes[file] then
-                                u = nil -- unique, but across a boundary
-                            end
-                            if u and sm and u.file ~= file then
-                                if bound == nil then
-                                    local _, k = sm.resolve(name, n)
-                                    bound = k > 0
-                                end
-                                if bound then u = nil end
-                            end
-                            if u then
-                                local line = select(1, n:range())
-                                if not (u.file == file and line == u.line) then
-                                    local from = fn_at(line)
-                                    if from then
-                                        L.addref(from, u.id, pos_of(n), true)
-                                    else
-                                        -- referenced from top-level DATA (a
-                                        -- dispatch table / registry): the fn
-                                        -- is kept alive, and the reference is
-                                        -- a REGISTRATION edge from this module
-                                        -- — an alibi you can descend into
-                                        L.mark_cbarg(u)
-                                        local rk = file .. '\31' .. u.id
-                                        local e = regEdge[rk]
-                                        if not e then
-                                            e = { from = file, to = u.id,
-                                                kind = 'reg', at = {} }
-                                            regEdge[rk] = e
-                                            L.adduse(e)
-                                        end
-                                        e.at[#e.at + 1] = pos_of(n)
-                                    end
-                                end
-                            end
-                        end
-                        local cands = L.var_named[name]
-                        if cands then
-                            local var
-                            for _, v in ipairs(cands) do
-                                if v.file == file then var = v break end
-                            end
-                            if not var and #cands == 1
-                                and not (L.scopes and L.scopes[cands[1].file]
-                                    ~= L.scopes[file]) then
-                                -- the cross-file unique fallback only for
-                                -- FREE names: bound never crosses the file
-                                if sm then
-                                    if bound == nil then
-                                        local _, k = sm.resolve(name, n)
-                                        bound = k > 0
-                                    end
-                                    if not bound then var = cands[1] end
-                                else
-                                    var = cands[1]
-                                end
-                            end
-                            local line = select(1, n:range())
-                            if var and not (var.file == file and line == var.line) then
-                                local from = fn_at(line)
-                                if from then
-                                    local k = from .. '\31' .. var.id
-                                    local e = useEdge[k]
-                                    if not e then
-                                        e = { from = from, to = var.id, kind = 'use', at = {} }
-                                        useEdge[k] = e
-                                        L.adduse(e)
-                                    end
-                                    e.at[#e.at + 1] = pos_of(n)
-                                end
-                            end
-                        end
-                    end
+                    collect_mentions(buf, tr.root, src, tr.spec)
                 end
-                end
-                if nameset and next(nameset) then
-                    local ns = vim.tbl_keys(nameset)
-                    table.sort(ns) -- deterministic pack (worker == inline)
-                    L.add_names(file, '\31' .. table.concat(ns, '\31') .. '\31')
-                end
+                buf.m = table.concat(buf.parts)
+                reduce_mentions(file, buf, L)
             end
         end
     end
@@ -2904,10 +3030,10 @@ end
 
 --- Standalone id pass over `files` with global lookups (parallel phase
 --- 2, run inside a worker). Returns { edges = {...}, cbarg = {id, ...} }.
-function M.id_pass(root, files, lookups, abs)
+local function idpass_sink(lookups)
     local out = { edges = {}, cbarg = {}, names = {} }
     local refEdge, seen_cb = {}, {}
-    id_pass(root, files, {
+    local L = {
         fn_unique = lookups.fn_unique,
         var_named = lookups.var_named,
         fn_ranges = lookups.fn_ranges,
@@ -2932,7 +3058,25 @@ function M.id_pass(root, files, lookups, abs)
                 out.cbarg[#out.cbarg + 1] = u.id
             end
         end,
-    }, abs)
+    }
+    return L, out
+end
+
+function M.id_pass(root, files, lookups, abs)
+    local L, out = idpass_sink(lookups)
+    id_pass(root, files, L, abs)
+    return out
+end
+
+--- Parallel phase 2 without processes: reduce SHIPPED mention buffers
+--- (collected by phase-1 workers) against parent-built global lookups.
+--- Same output contract as M.id_pass.
+function M.mention_reduce(files, mentions, lookups)
+    local L, out = idpass_sink(lookups)
+    for _, file in ipairs(files) do
+        local buf = mentions[file]
+        if buf then reduce_mentions(file, buf, L) end
+    end
     return out
 end
 
@@ -2975,6 +3119,7 @@ function M.extract(root, opts)
     local varsByName = {}      -- name -> {var node,...}
     local lastFn = {}          -- file -> last emitted fn node (equation merging)
     local fnRanges = {}        -- file -> { {s=line, e=line, id=id}, ... }
+    local mentions = {}        -- file -> packed mention buffer (Stage B)
     local pending = {}         -- unresolved references, matched after all files
 
     local function fn_at(file, line)
@@ -3465,6 +3610,15 @@ function M.extract(root, opts)
             if script then extract_defs(file, r.lang, r.spec, src, r.root) end
             extract_calls(file, r.lang, r.spec, src, r.root)
         end
+        if fnRanges[file] then
+            local buf = mention_buf(M.spec.javascript)
+            for _, r in ipairs(regions) do
+                collect_mentions(buf, r.root, src, r.spec)
+            end
+            buf.m = table.concat(buf.parts)
+            buf.parts, buf.nidx = nil, nil
+            mentions[file] = buf
+        end
         -- the template as ONE visible block row (a jump target): its
         -- extent is the top-level markup that isn't script/style
         local tps, tpe
@@ -3527,6 +3681,16 @@ function M.extract(root, opts)
                     and spec.module_effects(tsroot, src) or nil }
             extract_defs(file, lang, spec, src, tsroot)
             extract_calls(file, lang, spec, src, tsroot)
+            -- fusion Stage B: mentions ride the SAME tree — the id pass
+            -- never parses again (files without functions stay out, the
+            -- same gate the id pass always had)
+            if fnRanges[file] then
+                local buf = mention_buf(spec)
+                collect_mentions(buf, tsroot, src, spec)
+                buf.m = table.concat(buf.parts)
+                buf.parts, buf.nidx = nil, nil
+                mentions[file] = buf
+            end
         end
         ::next_file::
     end
@@ -3815,7 +3979,7 @@ function M.extract(root, opts)
                 seq_any = true
             end
         end
-        id_pass(root, files, {
+        local L = {
             fn_unique = fn_unique,
             var_named = var_named,
             fn_ranges = fnRanges,
@@ -3824,11 +3988,16 @@ function M.extract(root, opts)
             adduse = function (e) edges[#edges + 1] = e end,
             mark_cbarg = function (u) u.node.cbarg = true end,
             add_names = function (f, s) data.names[f] = s end,
-        }, abs)
+        }
+        for _, file in ipairs(files) do
+            local buf = mentions[file]
+            if buf then reduce_mentions(file, buf, L) end
+        end
     else
-        -- the parallel driver needs each slice's function extents to run
-        -- the id pass later (fn_at over these files)
+        -- the parallel driver needs each slice's function extents AND
+        -- mention buffers to run the reduce later (all decisions global)
         data.fn_ranges = fnRanges
+        data.mentions = mentions
     end
 
     -- minified bundles as OPAQUE frontiers: visible modules, no parsed

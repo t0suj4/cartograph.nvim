@@ -1,8 +1,9 @@
 -- Parallel-extraction worker. NOT a module: run as
 --   nvim -u NONE -i NONE --headless -l worker.lua <job.json>
--- Phase 'parse': extract a slice of files (skip_idpass) -> chunk JSON.
--- Phase 'ids':   run the id pass with PARENT-built global lookups
---                (slice-local uniqueness is not global uniqueness).
+-- One phase, 'parse': extract a slice of files (skip_idpass) -> binary
+-- chunk. The chunk carries packed mention buffers (fusion Stage B); the
+-- id pass is a pure reduce in the PARENT (global lookups live there —
+-- slice-local uniqueness is not global uniqueness).
 
 -- LuaJIT's default trace budgets (maxtrace=1000, maxmcode=512K) are too
 -- small for the extractor: traces flush and recompile in a churn loop that
@@ -40,18 +41,6 @@ if job.phase == 'parse' then
         files = job.files, fileset = job.fileset, skip_idpass = true,
         abs = abs,
     })
-elseif job.phase == 'ids' then
-    local ifd = assert(io.open(job.index_file, 'rb'))
-    local index = codec.decode(ifd:read('a'))
-    ifd:close()
-    out = ts.id_pass(job.root, job.files, {
-        fn_unique = index.fn_unique,
-        var_named = index.var_named,
-        scopes = index.scopes, -- confinement is global state too: without
-        -- it a worker links bare names across scope boundaries the
-        -- sequential path refuses
-        fn_ranges = job.fn_ranges,
-    }, abs)
 else
     error('worker: unknown phase ' .. tostring(job.phase))
 end

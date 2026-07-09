@@ -209,6 +209,12 @@ local function merge_chunk(s, chunk)
         if not seen[f] then acc.fn_ranges[f] = r end
         new[f] = true
     end
+    -- mention buffers (fusion Stage B): phase 2 reduces these in-parent
+    -- instead of spawning re-parse workers
+    for f, b in pairs(chunk.mentions or {}) do
+        if not seen[f] then acc.mentions[f] = b end
+        new[f] = true
+    end
     for _, l in ipairs(chunk.no_parser or {}) do acc._no_parser[l] = true end
     for f in pairs(new) do seen[f] = true end
 end
@@ -317,7 +323,7 @@ function M.extract(root, o)
         roots = o.roots,
         capabilities = { calls = true, litdata = true, df = 'lite' },
         nodes = {}, edges = {}, calls = {}, stamps = {}, fn_ranges = {},
-        _no_parser = {} }
+        mentions = {}, _no_parser = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
         on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1,
         wmetrics = {} }
@@ -397,6 +403,7 @@ function M.extract(root, o)
         acc.no_parser = next(acc._no_parser) and vim.tbl_keys(acc._no_parser) or nil
         acc._no_parser = nil
         acc.fn_ranges = nil
+        acc.mentions = nil
         if s.keywatch then pcall(vim.on_key, nil, s.keywatch) end -- stop listening
         M._last_stalls = M.summarize(stalls) -- on the module, not acc (cache)
         -- worker footprint envelope: peak RSS (per-process high-water),
@@ -432,43 +439,14 @@ function M.extract(root, o)
     end
 
     local function phase2()
+        -- fusion Stage B: phase-1 workers shipped packed mention buffers
+        -- with their chunks, so the id pass is a pure REDUCE against the
+        -- parent-built global lookups — no re-parse worker fleet.
         s.phase = 2
         local L = ts.lookups(acc.nodes, root)
-        local idxf = vim.fn.tempname() .. '.index.bin'
-        local fd = assert(io.open(idxf, 'wb'))
-        fd:write(require('cartograph.cache').encode(L))
-        fd:close()
-
-        -- fn_ranges are consumed here, split evenly across the id-pass
-        -- workers (batching no longer matters: all decisions are global)
-        local groups = {}
-        for i = 1, nw do groups[i] = {} end
-        for i, f in ipairs(files) do
-            table.insert(groups[(i % nw) + 1], f)
-        end
-        local done = 0
-        for _, g in ipairs(groups) do
-            local fr = {}
-            for _, f in ipairs(g) do fr[f] = acc.fn_ranges[f] end
-            local g0 = vim.uv.hrtime()
-            spawn({ phase = 'ids', root = root, files = g, rtp = rtp,
-                roots = o.roots, index_file = idxf, fn_ranges = fr },
-                function (chunk, res)
-                done = done + 1
-                if chunk then
-                    take_metrics(s, chunk, (vim.uv.hrtime() - g0) / 1e6)
-                    ts.merge_idpass(acc, chunk)
-                elseif o.on_note then
-                    o.on_note(('id-pass group failed (%d) — use edges for '
-                        .. '%d files missing; :CartographRefresh! rebuilds')
-                        :format(res.code, #g))
-                end
-                if done == #groups then
-                    vim.fn.delete(idxf)
-                    finalize()
-                end
-            end)
-        end
+        L.fn_ranges = acc.fn_ranges
+        ts.merge_idpass(acc, ts.mention_reduce(files, acc.mentions, L))
+        finalize()
     end
 
     local failed = {}
