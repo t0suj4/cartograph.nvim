@@ -16,6 +16,7 @@ local HOME = vim.env.HOME or os.getenv('HOME')
 return {
     server = {
         root = HOME .. '/git/elasticsearch/server/src/main/java',
+        budget_mb = 3000, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/elastic/elasticsearch',
         rev = '4743238408a4',
         lang = 'java',
@@ -41,6 +42,7 @@ return {
     },
     sylius = {
         root = HOME .. '/git/sylius/src',
+        budget_mb = 1400, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/sylius/sylius',
         rev = '9b6799e2b884',
         expected = { refs = 5595, nodes = 32160 }, -- calibrated @ 098c537
@@ -57,6 +59,7 @@ return {
     },
     ghost = {
         root = HOME .. '/git/ghost/ghost/core',
+        budget_mb = 1600, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/TryGhost/Ghost',
         rev = 'f7d7df8f9816',
         expected = { refs = 5840, nodes = 21128 }, -- calibrated @ require-imports (v22)
@@ -66,6 +69,7 @@ return {
     },
     v8 = {
         root = HOME .. '/git/v8/src',
+        budget_mb = 7500, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://chromium.googlesource.com/v8/v8',
         rev = '0646faaada71',
         expected = { refs = 74413, nodes = 165859 }, -- calibrated @ js-corpora join (v22)
@@ -191,6 +195,7 @@ return {
     },
     openfirmware = {
         root = HOME .. '/git/openfirmware',
+        budget_mb = 1200, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/openbios/openfirmware',
         rev = 'd1681c6293f6',
         expected = { refs = 67997, nodes = 48349 }, -- recalibrated @ dup-id fix; walk +52 only (fload paths ${BP}-templated, banked)

@@ -141,6 +141,16 @@ function M.ingest(data)
     for _, e in ipairs(M.data.edges or {}) do idx_edge(M, e) end
     -- baseline for a subsequent incremental step (see M.ingest_step)
     M._ing = { n = #M.data.nodes, c = #(M.data.calls or {}), e = #(M.data.edges or {}) }
+    -- extraction-peak Stage 0: LuaJIT traces compiled DURING a big extract
+    -- pin extraction-era objects as GC trace constants — measured on the
+    -- server corpus: 151.9MB of dead extraction garbage held resident,
+    -- 0.8MB after a flush. Traces recompile in ms; the pinned garbage
+    -- never collects on its own. Small graphs skip it (nothing pinned
+    -- worth the re-warm).
+    if #M.data.nodes > 20000 and rawget(_G, 'jit') and jit.flush then
+        jit.flush()
+        collectgarbage(); collectgarbage()
+    end
     return M.data
 end
 

@@ -91,6 +91,18 @@ local validate = require 'cartograph.validate'
 local vr = validate.check(data)
 print(validate.report(vr))
 failed = failed or not vr.ok
+
+-- memory budget (INLINE runs only — parallel peaks in workers): coarse,
+-- calibrated at ~2x the observed fresh-process peak — a tripwire for
+-- 2x regressions, not a 5%-noise gate. Wall time stays ungated (box
+-- noise; the same-day-A/B discipline owns it).
+if not parallel and stats.corpus.budget_mb and stats.peak then
+    local mb = stats.peak / 2^20
+    local okb = mb <= stats.corpus.budget_mb
+    print(('memory: peak %.0f MB budget %d MB %s')
+        :format(mb, stats.corpus.budget_mb, okb and 'OK' or 'FAIL'))
+    failed = failed or not okb
+end
 local expected = stats.corpus.expected
 if expected then
     local refs = c.edges.by_kind.ref or 0

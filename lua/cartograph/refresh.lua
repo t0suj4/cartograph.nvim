@@ -289,6 +289,12 @@ function M.splice(data, rels, deleted)
                     drop = true
                     killpair[e.from .. '\31' .. e.to] = true
                 end
+            elseif e.kind == 'reg' and candidates[e.from] then
+                -- module-level registration edges are id-pass artifacts
+                -- too (from = the FILE, so cand_fns misses them); the pass
+                -- below rebuilds them wholesale, and a surviving copy
+                -- DOUBLES its occurrences (the refresh-sweep spec's find)
+                drop = true
             end
             if not drop then edges2[#edges2 + 1] = e end
         end
