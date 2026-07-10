@@ -121,8 +121,10 @@ end
 function M.extract(name_or_root, opts)
     M.bootstrap()
     local c = M.corpus(name_or_root)
-    local ts = require 'cartograph.providers.treesitter'
-    local data, stats = M.measure(function () return ts.extract(c.root, opts) end)
+    -- provider dispatch: a corpus names its GraphProvider (default
+    -- treesitter); any module producing the neutral schema slots in
+    local prov = require('cartograph.providers.' .. (c.provider or 'treesitter'))
+    local data, stats = M.measure(function () return prov.extract(c.root, opts) end)
     stats.corpus = c
     return data, stats
 end
@@ -134,6 +136,10 @@ end
 function M.extract_parallel(name_or_root, opts)
     M.bootstrap()
     local c = M.corpus(name_or_root)
+    -- the worker pipeline is treesitter-only; refuse loudly, not wrongly
+    assert(not c.provider or c.provider == 'treesitter',
+        ('corpus %s uses provider %q — no parallel pipeline for it')
+            :format(c.root, c.provider))
     local par = require 'cartograph.parallel'
     local data, stats = M.measure(function ()
         local done

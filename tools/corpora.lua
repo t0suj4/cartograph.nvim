@@ -157,6 +157,38 @@ return {
             .. ' eval-heavy, the aperture design\'s first real workout)',
     },
 
+    -- ── stack languages (token provider — no tree-sitter substrate) ──
+    postscript = {
+        root = HOME .. '/git/postscript-examples',
+        repo = 'https://github.com/jwaite/postscript-examples',
+        rev = 'b6c8be09c600',
+        expected = { refs = 0, nodes = 348 }, -- calibrated @ token-provider v1
+        provider = 'tokens',
+        lang = 'postscript',
+        notes = 'postscript quick tier (43 files); inline only (no parallel'
+            .. ' pipeline for the token provider)',
+    },
+    gforth = {
+        root = HOME .. '/git/gforth',
+        repo = 'https://git.savannah.gnu.org/git/gforth.git',
+        rev = '0235f65b468a',
+        expected = { refs = 27804, nodes = 21165 }, -- calibrated @ token-provider v1
+        provider = 'tokens',
+        lang = 'forth',
+        notes = 'forth mid tier (555 files) — the language\'s own kernel;'
+            .. ' [IF] dup defs = candidate sets; inline only',
+    },
+    openfirmware = {
+        root = HOME .. '/git/openfirmware',
+        repo = 'https://github.com/openbios/openfirmware',
+        rev = 'd1681c6293f6',
+        expected = { refs = 67943, nodes = 48349 }, -- calibrated @ token-provider v1
+        provider = 'tokens',
+        lang = 'forth',
+        notes = 'forth SCALE tier (1804 .fth, 1.77M tokens) — the volume'
+            .. ' discipline proof; inline only',
+    },
+
     self = {
         root = HOME .. '/git/cartograph.nvim',
         repo = 'git@github.com:t0suj4/cartograph.nvim.git',
