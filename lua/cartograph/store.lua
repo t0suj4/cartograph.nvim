@@ -154,6 +154,22 @@ function M.ingest(data)
     return M.data
 end
 
+-- The resident TOPOLOGY view: a fold-backed Band, built lazily on first
+-- query and cached until the next ingest (generation-keyed). This is rung
+-- (c) — the fold becomes the resident representation consumers read
+-- topology through; the wide uses/usedby/… tables stay for the detail
+-- readers (at/sideeffect) until rung (d) migrates and drops them. Lazy so
+-- ingest_step (streaming) pays nothing until the graph settles and a
+-- consumer asks.
+function M.topo()
+    if M._topo_gen ~= M.generation then
+        M._fold = require('cartograph.fold').build(M.data)
+        M._topo = require('cartograph.band').from_fold(M._fold)
+        M._topo_gen = M.generation
+    end
+    return M._topo
+end
+
 --- Repoint the store at a growing accumulator for INCREMENTAL streaming. The
 --- (stub) full ingest already built the base indexes + the complete file list;
 --- this just marks the baseline so ingest_step folds in only what arrives

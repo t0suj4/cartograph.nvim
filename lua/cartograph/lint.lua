@@ -616,8 +616,8 @@ M.rules = {
         name = 'dead-function', severity = 'warn',
         run = function (store)
             local out = {}
-            -- topology through the Band seam (representation-agnostic)
-            local band = require('cartograph.band').from_store(store)
+            -- topology through the RESIDENT fold-backed Band (rung c)
+            local band = store.topo()
             -- manifest projects: XML-referenced handlers are engine-dispatched
             local xmlh = store.toc and store.toc.handlers or {}
             for _, n in ipairs(store.data.nodes) do
@@ -651,7 +651,7 @@ M.rules = {
     {
         name = 'call-cycle', severity = 'warn',
         run = function (store)
-            local band = require('cartograph.band').from_store(store)
+            local band = store.topo()
             local ids, adj = {}, {}
             for _, n in ipairs(store.data.nodes) do
                 if n.kind ~= 'module' then ids[#ids + 1] = n.id; adj[n.id] = band:callees(n.id) end
