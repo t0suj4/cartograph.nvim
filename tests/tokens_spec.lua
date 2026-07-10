@@ -125,3 +125,28 @@ test('tokens: at-cap keeps counted truth (no silent caps)', function ()
     eq(12, e.atn, 'full occurrence count kept')
     eq(8, #e.at, 'at list capped at MAX_AT')
 end)
+
+test('tokens: declared stack effects — parsed, raw-only, multi-line', function ()
+    local _, byid = fixture({
+        ['e.fs'] = table.concat({
+            ': square ( n -- n^2 ) dup * ;',
+            ': noop ( -- ) ;',
+            ': weird ( compilation: x -- ; run-time: -- y ) ;',
+            ': multi ( a b', '  -- c ) + ;',
+            ': bare 1 ;',
+            'variable ptr ( -- addr )',
+        }, '\n'),
+    })
+    eq({ 'n' }, byid['e.fs::square@0'].params, 'ins ride params')
+    eq({ 'n^2' }, byid['e.fs::square@0'].effect.outs)
+    eq({}, byid['e.fs::noop@1'].params, 'declared-zero is {} not nil')
+    local w = byid['e.fs::weird@2']
+    ok(w.effect and w.effect.raw and not w.effect.ins,
+        'double effect stays raw-only, never guessed')
+    eq({ 'a', 'b' }, byid['e.fs::multi@3'].params, 'multi-line effect assembles')
+    ok(byid['e.fs::bare@5'].effect == nil and byid['e.fs::bare@5'].params == nil,
+        'no comment, no fields')
+    local p = byid['e.fs::ptr@6']
+    ok(p.effect and p.effect.outs[1] == 'addr' and p.params == nil,
+        'var effect attaches without params')
+end)

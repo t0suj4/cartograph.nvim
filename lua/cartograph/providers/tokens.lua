@@ -79,15 +79,25 @@ end
 
 local function forth_tokens(src)
     local out, l = {}, 0
+    local parens = {} -- first ( … ) comment per line: l -> {c=, text=}
     local incomment = false -- an unclosed ( … comment spans lines
+    local opentext -- the paren record still accumulating text
     for line in (src .. '\n'):gmatch('(.-)\n') do
         local c = 1
         if incomment then
             local close = line:find(')', 1, true)
             if close then
                 incomment = false
+                if opentext then
+                    opentext.text = opentext.text .. ' '
+                        .. line:sub(1, close - 1)
+                    opentext = nil
+                end
                 c = close + 1
             else
+                if opentext then
+                    opentext.text = opentext.text .. ' ' .. line
+                end
                 c = #line + 1
             end
         end
@@ -99,8 +109,15 @@ local function forth_tokens(src)
             if t == '\\' or t:lower() == '\\g' then break end
             if t == '(' or t == '.(' then
                 local close = line:find(')', e + 1, true)
+                local rec
+                if t == '(' and not parens[l] then
+                    rec = { c = s - 1,
+                        text = line:sub(e + 1, (close or #line + 1) - 1) }
+                    parens[l] = rec
+                end
                 if not close then
                     incomment = true
+                    opentext = rec
                     break
                 end
                 c = close + 1
@@ -117,7 +134,32 @@ local function forth_tokens(src)
         end
         l = l + 1
     end
-    return out
+    return out, parens
+end
+
+-- declared stack effect: the community's own summary format, extracted
+-- as a DECLARED contract (documentation tier — v3's checker will derive
+-- effects and grade these). `n1 n2 -- n3` parses to ins/outs; anything
+-- fancier (compilation/run-time double effects) keeps the raw text only
+-- — never guessed at.
+local function parse_effect(text)
+    text = text:match('^%s*(.-)%s*$')
+    if text == '' then return nil end
+    local eff = { raw = text }
+    local seps = 0
+    for w in text:gmatch('%S+') do
+        if w == '--' then seps = seps + 1 end
+    end
+    if seps == 1 and not text:find('[;:]') then
+        local ins, outs, after = {}, {}, false
+        for w in text:gmatch('%S+') do
+            if w == '--' then after = true
+            elseif after then outs[#outs + 1] = w
+            else ins[#ins + 1] = w end
+        end
+        eff.ins, eff.outs = ins, outs
+    end
+    return eff
 end
 
 local function ps_tokens(src)
@@ -334,7 +376,7 @@ function M.extract(root, opts)
                 end
             else
                 -- ── Forth: definer tables + a colon-def range stack ──
-                local toks = forth_tokens(src)
+                local toks, parens = forth_tokens(src)
                 local open -- the current : … ; definition
                 local i = 1
                 while i <= #toks do
@@ -345,6 +387,18 @@ function M.extract(root, opts)
                         local nm = toks[i + 1].t
                         local node = add_def(file, nm, kind, toks[i + 1].l,
                             toks[i + 1].c, nil, dialect)
+                        -- declared stack effect: the ( … ) right after
+                        -- the name; ins double as params (arity for free)
+                        local pc = parens[toks[i + 1].l]
+                        if pc and pc.c > toks[i + 1].c then
+                            local eff = parse_effect(pc.text)
+                            if eff then
+                                node.effect = eff
+                                if kind == 'function' and eff.ins then
+                                    node.params = eff.ins
+                                end
+                            end
+                        end
                         if dialect.enders[';'] and (key == ':' or key == 'code') then
                             if open then open.node.range['end'].line = tk.l end
                             open = { node = node, opener = key }
