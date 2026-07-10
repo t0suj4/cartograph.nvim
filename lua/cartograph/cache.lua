@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 19 -- v19: df def entries carry sparse BINDER TAGS (s.defr —
+M.VERSION = 20 -- v20: module nodes carry APERTURE witnesses (eval sites)
+              -- and bash resolution refuses namespaced defless calls with
+              -- rule='aperture' + witness — a v19 cache lacks both, and
+              -- torn-by-node/literal-names (same arc) moved bash graphs;
+              -- v19: df def entries carry sparse BINDER TAGS (s.defr —
               -- decl-row of the resolved binder) for shadow-ambiguous
               -- names (scope-model phase 2); a v18 cache lacks them and
               -- trace would silently fall back to name matching;

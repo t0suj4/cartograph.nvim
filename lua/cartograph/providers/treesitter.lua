@@ -1143,6 +1143,19 @@ M.spec = {
         -- literally (slashed ble/* names are exact identifiers) — never
         -- tail-match, never tail-vocab
         literal_names = true,
+        -- APERTURE emission (scope-model memo: emit from day one, zero
+        -- analyzers — the refusal IS the contract): eval conjures
+        -- functions and vars no static pass can enumerate. Witness sites
+        -- ride the module node; resolution turns "namespaced name with
+        -- no def" into refusal-with-witness instead of presuming an
+        -- external command. Capture name = the aperture rule.
+        aperture_query = [=[
+            ((command name: (command_name (word) @_kw)) @eval
+                (#eq? @_kw "eval"))
+            ((command name: (command_name (word) @_b)
+                . argument: (word) @_arg) @eval
+                (#eq? @_b "builtin") (#eq? @_arg "eval"))
+        ]=],
         -- a bash function_definition is self-contained (no class context
         -- to escape), and tree-sitter-bash chokes locally on exotic
         -- parameter expansions (`${1//&/&amp;}` tears testssl.sh at line
@@ -3827,6 +3840,20 @@ function M.extract(root, opts)
                 range = pos_of(tsroot), order = -1,
                 effects = spec.module_effects
                     and spec.module_effects(tsroot, src) or nil }
+            if spec.aperture_query then
+                local aq = parse_query(lang, spec.aperture_query)
+                if aq then
+                    local aps
+                    for cid, an in aq:iter_captures(tsroot, src, 0, -1) do
+                        local cap = aq.captures[cid]
+                        if cap:sub(1, 1) ~= '_' then
+                            aps = aps or {}
+                            aps[#aps + 1] = { rule = cap, line = (an:range()) }
+                        end
+                    end
+                    nodes[#nodes].apertures = aps
+                end
+            end
             local dfreg = {}
             extract_defs(file, lang, spec, src, tsroot, dfreg)
             extract_calls(file, lang, spec, src, tsroot)
@@ -3880,6 +3907,36 @@ function M.extract(root, opts)
             edges[#edges + 1] = e
         end
         if at then e.at[#e.at + 1] = at end
+    end
+    -- aperture witnesses + corpus fn NAMESPACES (literal-name languages):
+    -- an unresolved call whose first /-or-# segment matches a known fn
+    -- namespace is corpus-internal (ble/bash/read), not an external
+    -- command — with conjuring sites in the corpus, the honest answer is
+    -- refusal-with-witness, not silence. Witness pick is deterministic
+    -- (same file first, else lexicographically smallest file's first site)
+    local apertures, ns_pfx, global_witness = {}, {}, nil
+    for _, n in ipairs(nodes) do
+        if n.kind == 'module' and n.apertures then
+            apertures[n.file] = n.apertures
+            if not global_witness or n.file < global_witness.file then
+                global_witness = { file = n.file, line = n.apertures[1].line }
+            end
+        elseif n.kind == 'function' or n.kind == 'method' then
+            local pfx = n.name:match('^([^/#]+)[/#]')
+            if pfx then
+                local _, dsp = elang_for(n.file)
+                if dsp and dsp.literal_names then ns_pfx[pfx] = true end
+            end
+        end
+    end
+    local function aperture_refusal(name, file)
+        local pfx = name:match('^([^/#]+)[/#]')
+        if not (pfx and ns_pfx[pfx]) then return nil end
+        local w = apertures[file]
+            and { file = file, line = apertures[file][1].line }
+            or global_witness
+        if not w then return nil end -- nothing conjures: stay silent
+        return { rule = 'aperture', witness = w.file .. ':' .. (w.line + 1) }
     end
     local function resolve(name, file)
         -- 1-2 char names are shadow-bait (pattern vars, loop counters):
@@ -3953,8 +4010,14 @@ function M.extract(root, opts)
         -- literal-name languages never tail-match: a bash command names
         -- its function EXACTLY (slashes are just characters), so `split`
         -- must not fuzzy-hit thousands of ble/string#split-style defs —
-        -- an unknown name is an external command, not a near-miss
-        if spec and spec.literal_names then return nil end
+        -- an unknown name is an external command, not a near-miss...
+        -- UNLESS it wears a known fn namespace and the corpus contains
+        -- conjuring sites: then refusal-with-witness (the aperture)
+        if spec and spec.literal_names then
+            local ar = aperture_refusal(name, file)
+            if ar then return nil, nil, ar end
+            return nil
+        end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
         if tc then
@@ -4214,6 +4277,30 @@ function M.relink(data, touched)
             end
         end
     end
+    local apertures, ns_pfx, global_witness = {}, {}, nil
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'module' and n.apertures then
+            apertures[n.file] = n.apertures
+            if not global_witness or n.file < global_witness.file then
+                global_witness = { file = n.file, line = n.apertures[1].line }
+            end
+        elseif n.kind == 'function' or n.kind == 'method' then
+            local pfx = n.name:match('^([^/#]+)[/#]')
+            if pfx then
+                local _, dsp = elang_for(n.file)
+                if dsp and dsp.literal_names then ns_pfx[pfx] = true end
+            end
+        end
+    end
+    local function aperture_refusal(name, file)
+        local pfx = name:match('^([^/#]+)[/#]')
+        if not (pfx and ns_pfx[pfx]) then return nil end
+        local w = apertures[file]
+            and { file = file, line = apertures[file][1].line }
+            or global_witness
+        if not w then return nil end
+        return { rule = 'aperture', witness = w.file .. ':' .. (w.line + 1) }
+    end
     local refEdge, regEdge = {}, {}
     for _, e in ipairs(data.edges) do
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e
@@ -4305,8 +4392,14 @@ function M.relink(data, touched)
         -- literal-name languages never tail-match: a bash command names
         -- its function EXACTLY (slashes are just characters), so `split`
         -- must not fuzzy-hit thousands of ble/string#split-style defs —
-        -- an unknown name is an external command, not a near-miss
-        if spec and spec.literal_names then return nil end
+        -- an unknown name is an external command, not a near-miss...
+        -- UNLESS it wears a known fn namespace and the corpus contains
+        -- conjuring sites: then refusal-with-witness (the aperture)
+        if spec and spec.literal_names then
+            local ar = aperture_refusal(name, file)
+            if ar then return nil, nil, ar end
+            return nil
+        end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
         if tc then

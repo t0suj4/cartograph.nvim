@@ -3511,3 +3511,51 @@ test('bash: node-local torn — a parse error does not tear the file', function 
     ok(linked, 'call past the error resolves (the cascade is gone)')
     vim.fn.delete(root, 'rf')
 end)
+
+test('bash: eval aperture — namespaced defless call refuses with witness', function ()
+    -- emission only, zero analyzers (the scope-model memo's contract):
+    -- eval conjures what no static pass can enumerate. A call wearing a
+    -- KNOWN fn namespace with no visible def is corpus-internal, not an
+    -- external command — with conjuring sites present, the honest answer
+    -- is refusal-with-witness. Bare unknown commands stay silent.
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('bash') then skip 'no bash parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('core.sh', table.concat({
+        'ns/defined() {',
+        '    echo real',
+        '}',
+        'ns/boot() {',
+        '    builtin eval -- "function ns/conjured { :; }"',
+        '}',
+    }, '\n'))
+    put('user.sh', table.concat({
+        'run() {',
+        '    ns/defined',
+        '    ns/conjured',
+        '    grep -q x /dev/null',
+        '}',
+    }, '\n'))
+    local data = ts.extract(root)
+    local mod
+    for _, n in ipairs(data.nodes) do
+        if n.id == 'core.sh' then mod = n end
+    end
+    ok(mod and mod.apertures and mod.apertures[1].rule == 'eval',
+        'eval witness rides the module node')
+    local by = {}
+    for _, c in ipairs(data.calls) do by[c.full or c.callee] = c end
+    ok(by['ns/defined'] and by['ns/defined'].to, 'namespaced call with a def links')
+    local conj = by['ns/conjured']
+    ok(conj and not conj.to and conj.refused
+        and conj.refused.rule == 'aperture', 'defless namespaced call refuses as aperture')
+    ok(conj and conj.refused.witness and conj.refused.witness:match('^core%.sh:%d+$'),
+        'the refusal names its witness: ' .. tostring(conj and conj.refused.witness))
+    ok(by.grep and not by.grep.to and not by.grep.refused,
+        'bare unknown command stays a silent external')
+    vim.fn.delete(root, 'rf')
+end)
