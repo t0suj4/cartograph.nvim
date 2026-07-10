@@ -233,7 +233,12 @@ function M.audit(data)
     -- the tier flip). Over-reopening is safe: relink re-derives.
     local fname = {}
     for _, n in ipairs(data.nodes or {}) do
-        if n.kind == 'function' or n.kind == 'method' then
+        -- mirror the resolvers' candidate criterion (exact[]/lookups):
+        -- torn defs and prototype declarations never index, so they must
+        -- not break uniqueness here either — a C header's `log` prototype
+        -- must not hide the dispatch mark on the one real `log` (v8 parity)
+        if (n.kind == 'function' or n.kind == 'method')
+            and not n.torn and not n.decl then
             fname[n.name] = fname[n.name] == nil and n or false
         end
     end

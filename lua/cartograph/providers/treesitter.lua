@@ -4235,14 +4235,23 @@ function M.extract(root, opts)
     -- module-level identifier args naming a globally-unique fn (the
     -- name-only core of the upgrade's criterion; the upgrade itself still
     -- runs in the pass, it just no longer marks).
-    for _, p in ipairs(pending) do
-        if not fn_at(p.file, p.at.start.line) then
-            for _, a in ipairs(p.call.argv) do
-                if a.k == 'local' and a.name then
-                    local cands = exact[a.name]
-                    if cands and #cands == 1 and (cands[1].kind == 'function'
-                        or cands[1].kind == 'method') then
-                        cands[1].cbarg = true
+    -- ... and they must be GLOBAL evidence: a worker slice's "unique" is a
+    -- batch artifact (one arch header per slice makes GENERAL_REGISTERS
+    -- unique), and a slice-minted mark RIDES THE NODE through merge into
+    -- relink, denying the same-file priority inline grants — the parity
+    -- gate caught it (ghost/v8). Slice extracts skip the pre-scan; the
+    -- audit's dispatched[] recompute + relink's own global pre-scan are
+    -- the authoritative correction.
+    if not (opts and opts.skip_idpass) then
+        for _, p in ipairs(pending) do
+            if not fn_at(p.file, p.at.start.line) then
+                for _, a in ipairs(p.call.argv) do
+                    if a.k == 'local' and a.name then
+                        local cands = exact[a.name]
+                        if cands and #cands == 1 and (cands[1].kind == 'function'
+                            or cands[1].kind == 'method') then
+                            cands[1].cbarg = true
+                        end
                     end
                 end
             end
