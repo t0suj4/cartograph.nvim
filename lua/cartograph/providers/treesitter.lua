@@ -4140,44 +4140,74 @@ function M.extract(root, opts)
         if not lit then return nil end
         return resolve(lit, p.file), lit
     end
-    -- typed-strings v1: single-assignment STRING recovery for a sink arg.
-    -- Same discipline as literal_flow (exactly one def in the fn), but the
-    -- prize is the VALUE: the def line's quoted string — full when the
-    -- quote closes into plain punctuation, otherwise an honest PREFIX
-    -- (multiline SQL, '…' . $x concatenation).
+    -- typed-strings: STRING recovery for a sink arg — the prize is the
+    -- VALUE: the def line's quoted string, full when the quote closes
+    -- into plain punctuation, otherwise an honest PREFIX (multiline SQL,
+    -- '…' . $x concatenation). One def in the fn = CONFIDENT. Several
+    -- defs = the NEAREST ABOVE the use, HEDGED: right for sequential
+    -- reuse (mantis redefines $t_query per query), but a branch may have
+    -- chosen — the tier says so (the literal-flow analyzer, mantis cut).
     local function flow_string(file, line0, varname)
         local fnid = fn_at(file, line0)
         if not (varname and fnid) then return nil end
         local df = node_index[fnid] and node_index[fnid].df
         if not df then return nil end
-        local defstmt, ndefs = nil, 0
+        local ndefs = 0
         for _, st in ipairs(df.stmts) do
             for _, d in ipairs(st.def) do
-                if d == varname then
-                    ndefs = ndefs + 1
-                    defstmt = st
-                end
+                if d == varname then ndefs = ndefs + 1 end
             end
         end
-        if ndefs ~= 1 or not defstmt then return nil end
+        if ndefs == 0 then return nil end
+        local hedged = ndefs > 1 or nil
+        local fnrow = 0
+        for _, r in ipairs(fnRanges[file] or {}) do
+            if r.id == fnid then fnrow = r.s break end
+        end
         if src_cache[file] == nil then
             local fd = io.open(abs(file), 'r')
             src_cache[file] = fd
                 and vim.split(fd:read('a'), '\n', { plain = true }) or false
             if fd then fd:close() end
         end
-        local line = src_cache[file] and src_cache[file][defstmt.l] or ''
-        local qch, pos = line:match('%$?' .. varname .. [=[%s*=%s*(['"])()]=])
+        -- the assignment may sit NESTED inside its statement (an
+        -- if-guard) and `.=` appends may follow it — appends PRESERVE the
+        -- base as a prefix, so scan the source upward from the use over
+        -- the whole fn for the nearest PLAIN assignment (`.=` never
+        -- matches); df already hedged multi-def flows
+        local line, qch, pos
+        for l = line0, fnrow + 1, -1 do
+            local cand = src_cache[file] and src_cache[file][l] or ''
+            qch, pos = cand:match('%$?' .. varname .. [=[%s*=%s*(['"])()]=])
+            if qch then
+                line = cand
+                break
+            end
+            -- php heredoc (<<<SQL … SQL;): the following lines ARE the
+            -- literal, until the terminator (or the use = still a prefix)
+            local hd = cand:match('%$?' .. varname .. '%s*=%s*<<<%s*[\'"]?(%u+)')
+            if hd then
+                local parts = {}
+                for hl = l + 1, line0 do
+                    local t2 = src_cache[file][hl] or ''
+                    if t2:match('^%s*' .. hd .. '%s*;?%s*$') then
+                        return table.concat(parts, ' '), nil, hedged
+                    end
+                    parts[#parts + 1] = t2
+                end
+                return table.concat(parts, ' '), true, hedged
+            end
+        end
         if not qch then return nil end
         local rest = line:sub(pos)
         local close = rest:find(qch, 1, true)
-        if not close then return rest, true end -- runs off the line: prefix
+        if not close then return rest, true, hedged end -- off the line: prefix
         local v = rest:sub(1, close - 1)
         local after = rest:sub(close + 1):match('^%s*(%p?)')
         if after == '' or after == ';' or after == ',' or after == ')' then
-            return v, nil
+            return v, nil, hedged
         end
-        return v, true -- concatenation continues: the literal is a prefix
+        return v, true, hedged -- concatenation continues: a prefix
     end
 
     -- cbarg marks are RESOLUTION INPUT (same-file priority skips dispatched
@@ -4214,15 +4244,19 @@ function M.extract(root, opts)
                 and psp.string_sinks[p.full or p.call.callee]
             local a = sink and p.call.argv[sink.arg]
             if a then
-                local v, pre
+                local v, pre, hedged
                 if a.k == 'lit' then v = a.v
                 elseif a.k == 'concat' then v, pre = a.prefix, true
                 elseif a.k == 'local' and a.name then
-                    v, pre = flow_string(p.file, p.at.start.line, a.name)
+                    v, pre, hedged =
+                        flow_string(p.file, p.at.start.line, a.name)
                 end
                 if v and v ~= '' then
-                    p.call.strarg = { ty = sink.ty, v = v, pre = pre or nil }
-                    if sink.ty == 'code' and not p.call.traced then
+                    p.call.strarg = { ty = sink.ty, v = v, pre = pre or nil,
+                        hedge = hedged or nil }
+                    -- a hedged head must not mint a confident dispatch
+                    if sink.ty == 'code' and not hedged
+                        and not p.call.traced then
                         -- head only when its boundary is PROVEN: trailing
                         -- whitespace, or the whole string was read
                         local head = pre

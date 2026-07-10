@@ -3600,6 +3600,66 @@ test('typed strings: sql sink flow + confidence tiers', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+test('typed strings: literal-flow analyzer — multi-def hedge, appends, heredoc', function ()
+    -- the mantis cut: sequential $t_query reuse flows via the NEAREST
+    -- plain assignment (hedged ~ — a branch may have chosen), `.=`
+    -- appends preserve the base as a PREFIX, heredocs read verbatim
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('php') then skip 'no php parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.php', 'w'))
+    fd:write(table.concat({
+        '<?php',
+        'function seq() {',
+        "    $t_query = 'SELECT a FROM {alpha_t} WHERE x=1';",
+        '    db_query( $t_query );',
+        "    $t_query = 'SELECT b FROM {beta_t} WHERE y=2';",
+        '    db_query( $t_query );',
+        '}',
+        'function appended($flag) {',
+        "    $t_query = 'SELECT c FROM {gamma_t} WHERE 1=1';",
+        '    if( $flag ) {',
+        "        $t_query .= ' AND z=3';",
+        '    }',
+        '    db_query( $t_query );',
+        '}',
+        'function heredoc() {',
+        '    $t_query = <<< SQL',
+        '        SELECT d FROM {delta_t}',
+        '        ORDER BY d',
+        '        SQL;',
+        '    db_query( $t_query );',
+        '}',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local got = {}
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'db_query' and c.strarg then
+            got[#got + 1] = c.strarg
+        end
+    end
+    eq(4, #got) -- every sink site recovered
+    require('cartograph.sql').attach(data)
+    local edges = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'use' and e.to:match('^sql::table:') then edges[e.to] = e end
+    end
+    -- sequential reuse: BOTH tables mined, per-site nearest def; hedged ~
+    ok(edges['sql::table:alpha_t'] and edges['sql::table:alpha_t'].inferred,
+        'first sequential def mines its table, hedged')
+    ok(edges['sql::table:beta_t'] and edges['sql::table:beta_t'].inferred,
+        'second sequential def mines its table, hedged')
+    -- append: the base is a prefix; hedged (the append is a second def)
+    ok(edges['sql::table:gamma_t'] and edges['sql::table:gamma_t'].inferred,
+        'append-shaped flow mines the base prefix, hedged')
+    -- heredoc: single def, read verbatim to its terminator: CONFIDENT
+    ok(edges['sql::table:delta_t'] and not edges['sql::table:delta_t'].inferred,
+        'heredoc flow is confident')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('typed strings: eval head is the real callee (bash code sink)', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

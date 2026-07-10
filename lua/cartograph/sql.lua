@@ -114,7 +114,9 @@ function M.scan(data)
                 v = v:gsub('[%w_]+$', '')
             end
             q = M.parse(v)
-            if q then record(c, q, 'sink') end
+            -- a HEDGED flow (nearest-above among several defs) mines,
+            -- but its edges stay ~ — a branch may have chosen
+            if q then record(c, q, c.strarg.hedge and 'content' or 'sink') end
         end
         if not q then
             -- content sniffing over literal args: LOW confidence by
