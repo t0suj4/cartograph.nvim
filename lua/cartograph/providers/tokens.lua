@@ -213,8 +213,6 @@ local function ps_tokens(src)
     return out
 end
 
--- ── extraction ─────────────────────────────────────────────────────────
-
 local function is_forth_number(t)
     return t:match('^%-?%d[%d%.,]*$') or t:match('^%$%-?%x+$')
         or t:match('^#%-?%d+$') or t:match('^%%[01]+$')
@@ -225,6 +223,152 @@ local function is_ps_number(t)
     return t:match('^%-?[%d%.]+$') or t:match('^%-?%d+%.%d*[eE]') ~= nil
         or t:match('^%d+#%x+$')
 end
+
+-- ── the positional checker (v3) ────────────────────────────────────────
+-- Derive each colon def's data-stack arity by composing its body left to
+-- right (the Wasm-validation shape: track current height h and deepest
+-- reach low; a callee (p,q) does h-=p, low=min, h+=q; the word's effect
+-- is (-low, h-low)). Callees contribute their DECLARED effects — modular
+-- checking, no fixpoint — with a builtin table for primitives the corpus
+-- defines below .fs level. Everything beyond the model BAILS with a
+-- reason code (the hedge-reason discipline): loops, return-stack
+-- juggling, execute/evaluate, fp literals, unbalanced IF joins. Factor
+-- proves combinator inference is possible; it costs macro expansion —
+-- deliberately out of scope, quotations stay honest bails.
+
+-- data-stack arities for core primitives (Forth-2012 core; the corpus
+-- can't declare these — gforth's live in Vmgen's prim, not .fs)
+local FORTH_FX = {
+    dup = { 1, 2 }, drop = { 1, 0 }, swap = { 2, 2 }, over = { 2, 3 },
+    rot = { 3, 3 }, ['-rot'] = { 3, 3 }, nip = { 2, 1 }, tuck = { 2, 3 },
+    ['2dup'] = { 2, 4 }, ['2drop'] = { 2, 0 }, ['2swap'] = { 4, 4 },
+    ['2over'] = { 4, 6 }, ['2nip'] = { 4, 2 },
+    ['+'] = { 2, 1 }, ['-'] = { 2, 1 }, ['*'] = { 2, 1 }, ['/'] = { 2, 1 },
+    mod = { 2, 1 }, ['/mod'] = { 2, 2 }, ['*/'] = { 3, 1 },
+    ['*/mod'] = { 3, 2 }, ['um*'] = { 2, 2 }, ['um/mod'] = { 3, 2 },
+    ['m*'] = { 2, 2 }, ['fm/mod'] = { 3, 2 }, ['sm/rem'] = { 3, 2 },
+    ['and'] = { 2, 1 }, ['or'] = { 2, 1 }, xor = { 2, 1 },
+    lshift = { 2, 1 }, rshift = { 2, 1 }, min = { 2, 1 }, max = { 2, 1 },
+    ['1+'] = { 1, 1 }, ['1-'] = { 1, 1 }, ['2+'] = { 1, 1 },
+    ['2-'] = { 1, 1 }, ['2*'] = { 1, 1 }, ['2/'] = { 1, 1 },
+    negate = { 1, 1 }, invert = { 1, 1 }, abs = { 1, 1 },
+    ['='] = { 2, 1 }, ['<>'] = { 2, 1 }, ['<'] = { 2, 1 },
+    ['>'] = { 2, 1 }, ['u<'] = { 2, 1 }, ['u>'] = { 2, 1 },
+    ['<='] = { 2, 1 }, ['>='] = { 2, 1 }, ['0='] = { 1, 1 },
+    ['0<'] = { 1, 1 }, ['0>'] = { 1, 1 }, ['0<>'] = { 1, 1 },
+    ['@'] = { 1, 1 }, ['!'] = { 2, 0 }, ['c@'] = { 1, 1 },
+    ['c!'] = { 2, 0 }, ['w@'] = { 1, 1 }, ['w!'] = { 2, 0 },
+    ['2@'] = { 1, 2 }, ['2!'] = { 3, 0 }, ['+!'] = { 2, 0 },
+    ['.'] = { 1, 0 }, ['u.'] = { 1, 0 }, emit = { 1, 0 }, cr = { 0, 0 },
+    space = { 0, 0 }, spaces = { 1, 0 }, type = { 2, 0 },
+    count = { 1, 2 }, bl = { 0, 1 }, ['true'] = { 0, 1 },
+    ['false'] = { 0, 1 }, depth = { 0, 1 }, here = { 0, 1 },
+    allot = { 1, 0 }, [','] = { 1, 0 }, ['c,'] = { 1, 0 },
+    cells = { 1, 1 }, ['cell+'] = { 1, 1 }, chars = { 1, 1 },
+    ['char+'] = { 1, 1 }, aligned = { 1, 1 }, cell = { 0, 1 },
+    move = { 3, 0 }, fill = { 3, 0 }, erase = { 2, 0 },
+    compare = { 4, 1 }, ['s='] = { 4, 1 },
+}
+-- beyond the arity model: bail, with the reason as the code
+local FORTH_BAIL = {
+    ['begin'] = 'loop', ['until'] = 'loop', ['while'] = 'loop',
+    ['repeat'] = 'loop', ['again'] = 'loop', ['do'] = 'loop',
+    ['?do'] = 'loop', ['loop'] = 'loop', ['+loop'] = 'loop',
+    leave = 'loop', unloop = 'loop', i = 'loop', j = 'loop',
+    ['>r'] = 'rstack', ['r>'] = 'rstack', ['r@'] = 'rstack',
+    ['2>r'] = 'rstack', ['2r>'] = 'rstack', ['2r@'] = 'rstack',
+    ['rdrop'] = 'rstack',
+    execute = 'execute', evaluate = 'execute', perform = 'execute',
+    ['catch'] = 'exception', throw = 'exception', abort = 'exception',
+    exit = 'early-exit', ['?dup'] = 'conditional-push',
+    ['case'] = 'case', ['does>'] = 'does', postpone = 'immediate',
+    ['['] = 'immediate', [']'] = 'immediate', immediate = 'immediate',
+    recurse = 'recurse', ['{:'] = 'locals', ['{'] = 'locals',
+    pick = 'computed-depth', roll = 'computed-depth',
+}
+
+local function is_fp_literal(t)
+    return t:match('^%-?%d[%d%.]*[eE][%-+]?%d*$') ~= nil
+end
+
+-- effect of one body token; returns p, q | nil, bailreason
+local function forth_token_fx(t, bind, file, line)
+    local key = t:lower()
+    local bail = FORTH_BAIL[key]
+    if bail then return nil, bail end
+    if is_fp_literal(t) then return nil, 'fpstack' end
+    if is_forth_number(t) then return 0, 1 end
+    if t:sub(-1) == '"' then
+        local k2 = key
+        if k2 == 's"' or k2 == 's\\"' then return 0, 2 end
+        if k2 == 'c"' then return 0, 1 end
+        if k2 == '."' then return 0, 0 end
+        if k2 == 'abort"' then return 1, 0 end
+        return nil, 'string-word'
+    end
+    local fx = FORTH_FX[key]
+    if fx then return fx[1], fx[2] end
+    local node, amb = bind(key, file, line)
+    if amb then return nil, 'callee-ambiguous' end
+    if node then
+        if node.kind == 'var' then return 0, 1 end -- addr/value push
+        local e = node.effect
+        if e and e.ins then return #e.ins, #e.outs end
+        return nil, 'callee-undeclared'
+    end
+    return nil, 'callee-unknown'
+end
+
+-- derive a body slice; returns {ins,outs} | nil, reason
+local function derive_effect(toks, s, e, dialect, bind, file)
+    local h, low = 0, 0
+    local frames = {}
+    local i = s
+    while i <= e do
+        local tk = toks[i]
+        local key = tk.t:lower()
+        if key == 'if' then
+            h = h - 1
+            if h < low then low = h end
+            frames[#frames + 1] = { h = h, arm = nil }
+        elseif key == 'else' then
+            local f = frames[#frames]
+            if not f then return nil, 'if-join' end
+            f.arm = h
+            h = f.h
+        elseif key == 'then' or key == 'endif' then
+            local f = table.remove(frames)
+            if not f then return nil, 'if-join' end
+            -- both arms (or arm and fallthrough) must agree on net
+            local other = f.arm ~= nil and f.arm or f.h
+            if h ~= other then return nil, 'if-join' end
+        elseif FORTH_BAIL[key] then
+            -- checked before tickers: postpone is a ticker for reference
+            -- extraction but compile-time for stack semantics
+            return nil, FORTH_BAIL[key]
+        elseif dialect.tickers[key] or dialect.eaters[key] then
+            h = h + 1 -- pushes an xt / char
+            i = i + 1 -- and consumes the next token from the source
+        elseif dialect.writers[key] then
+            h = h - 1
+            if h < low then low = h end
+            i = i + 1
+        elseif dialect.imports[key] then
+            i = i + 1 -- include path: no stack effect
+        else
+            local p, q = forth_token_fx(tk.t, bind, file, tk.l)
+            if not p then return nil, q end
+            h = h - p
+            if h < low then low = h end
+            h = h + q
+        end
+        i = i + 1
+    end
+    if #frames > 0 then return nil, 'if-join' end
+    return { ins = -low, outs = h - low }
+end
+
+-- ── extraction ─────────────────────────────────────────────────────────
 
 function M.extract(root, opts)
     local uv = vim.uv or vim.loop
@@ -283,7 +427,7 @@ function M.extract(root, opts)
         local fd = io.open(abs(file), 'r')
         local src = fd and fd:read('a')
         if fd then fd:close() end
-        perfile[file] = { defs = {}, mentions = {}, imports = {} }
+        perfile[file] = { defs = {}, mentions = {}, imports = {}, spans = {} }
         nodes[#nodes + 1] = { id = file, name = file, kind = 'module',
             file = file, order = -1,
             range = { start = { line = 0, char = 0 },
@@ -400,8 +544,15 @@ function M.extract(root, opts)
                             end
                         end
                         if dialect.enders[';'] and (key == ':' or key == 'code') then
-                            if open then open.node.range['end'].line = tk.l end
-                            open = { node = node, opener = key }
+                            if open then
+                                open.node.range['end'].line = tk.l
+                                if open.sidx then
+                                    pf.spans[#pf.spans + 1] = { node = open.node,
+                                        s = open.sidx, e = i - 1 }
+                                end
+                            end
+                            open = { node = node, opener = key,
+                                sidx = key == ':' and (i + 2) or nil }
                         end
                         if key == 'synonym' or key == 'alias' then
                             -- SYNONYM new old: old is a mention
@@ -416,6 +567,10 @@ function M.extract(root, opts)
                     elseif dialect.enders[key] then
                         if open then
                             open.node.range['end'].line = tk.l
+                            if open.sidx then
+                                pf.spans[#pf.spans + 1] = { node = open.node,
+                                    s = open.sidx, e = i - 1 }
+                            end
                             open = nil
                         end
                         i = i + 1
@@ -451,6 +606,10 @@ function M.extract(root, opts)
                 if open then
                     open.node.range['end'].line =
                         toks[#toks] and toks[#toks].l or 0
+                    if open.sidx then
+                        pf.spans[#pf.spans + 1] = { node = open.node,
+                            s = open.sidx, e = #toks }
+                    end
                 end
             end
         end
@@ -574,6 +733,60 @@ function M.extract(root, opts)
                     calls[#calls + 1] = u
                 end
                 u.n = u.n + 1
+            end
+        end
+    end
+
+    -- ── the checker pass: derive arities, grade declared contracts ──
+    -- Re-tokenizes (deterministic, and cheaper than retaining 1.7M token
+    -- tables across the file loop — the volume rule again). Callees are
+    -- bound with the same rule as mentions; the derivation itself never
+    -- guesses — anything outside the model is a reason-coded bail.
+    local function bind(key, file, line)
+        local cands = roster[key]
+        if not cands then return nil end
+        local same
+        for _, n in ipairs(cands) do
+            if n.file == file and n.order <= line
+                and (not same or n.order > same.order) then
+                same = n
+            end
+        end
+        if same then return same end
+        local one, multi
+        for _, n in ipairs(cands) do
+            if not one then one = n
+            elseif n.file ~= one.file then multi = true; break
+            elseif n.order > one.order then one = n end -- redefinition chain
+        end
+        if multi then return nil, true end
+        return one
+    end
+    for _, file in ipairs(files) do
+        local pf = perfile[file]
+        if pf.dialect and not pf.dialect.ps and #pf.spans > 0 then
+            local fd = io.open(abs(file), 'r')
+            local src = fd and fd:read('a')
+            if fd then fd:close() end
+            if src then
+                local toks = forth_tokens(src)
+                for _, sp in ipairs(pf.spans) do
+                    local d, reason = derive_effect(toks, sp.s, sp.e,
+                        pf.dialect, bind, file)
+                    local node = sp.node
+                    if d then
+                        node.derived = d
+                        local eff = node.effect
+                        if eff and eff.ins then
+                            node.echeck = (#eff.ins == d.ins
+                                and #eff.outs == d.outs) and 'ok' or 'mismatch'
+                        else
+                            node.echeck = 'undeclared'
+                        end
+                    else
+                        node.echeck = reason
+                    end
+                end
             end
         end
     end

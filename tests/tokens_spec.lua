@@ -150,3 +150,41 @@ test('tokens: declared stack effects — parsed, raw-only, multi-line', function
     ok(p.effect and p.effect.outs[1] == 'addr' and p.params == nil,
         'var effect attaches without params')
 end)
+
+test('tokens: the positional checker — derive, grade, bail with reasons', function ()
+    local _, byid = fixture({
+        ['c.fs'] = table.concat({
+            ': sq ( n -- n2 ) dup * ;',
+            ': bad ( a b -- c ) drop ;',
+            ': pick1 ( f a b -- x ) rot if drop else nip then ;',
+            ': odd if dup then ;',
+            ': looper ( -- ) begin dup until ;',
+            ': juggler ( a -- a ) >r r> ;',
+            ': plus2 2 + ;',
+            ': chain sq sq ;',
+            'variable v',
+            ': getv ( -- n ) v @ ;',
+            ': dyn ( xt -- ) execute ;',
+        }, '\n'),
+    })
+    local function chk(id, verdict, ins, outs)
+        local n = byid[id]
+        eq(verdict, n.echeck, id)
+        if ins then
+            eq(ins, n.derived.ins, id .. ' ins')
+            eq(outs, n.derived.outs, id .. ' outs')
+        else
+            ok(n.derived == nil, id .. ' underivable')
+        end
+    end
+    chk('c.fs::sq@0', 'ok', 1, 1)
+    chk('c.fs::bad@1', 'mismatch', 1, 0)
+    chk('c.fs::pick1@2', 'ok', 3, 1)          -- IF/ELSE/THEN arms join
+    chk('c.fs::odd@3', 'if-join')             -- unbalanced arm: honest bail
+    chk('c.fs::looper@4', 'loop')
+    chk('c.fs::juggler@5', 'rstack')
+    chk('c.fs::plus2@6', 'undeclared', 1, 1)  -- derived fills missing docs
+    chk('c.fs::chain@7', 'undeclared', 1, 1)  -- composes via sq's DECLARED
+    chk('c.fs::getv@9', 'ok', 0, 1)           -- var mention pushes addr
+    chk('c.fs::dyn@10', 'execute')            -- quotations stay honest
+end)
