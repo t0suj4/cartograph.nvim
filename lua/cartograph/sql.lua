@@ -22,6 +22,9 @@ local KIND = {
 local function pats_for(keyword)
     return {
         keyword .. '%s+`?([%w_%.]+)`?',
+        -- {bugnote}: the {table} placeholder convention (prefix
+        -- substituted at runtime — mantis, drupal)
+        keyword .. '%s+{([%w_]+)}',
         keyword .. '%s+{?%$[%w_]+%->([%w_]+)',
         -- {$this->getTable('sales/order')}: the ARGUMENT is the table
         keyword .. [=[%s+{?%$[%w_]+%->[%w_]+%(%s*['"]([%w_/%.]+)['"]]=],
@@ -84,24 +87,45 @@ end
 ---   sites = { {call, kind}, ... } } }, queries = n }.
 function M.scan(data)
     local tables, nq = {}, 0
+    local function record(c, q, conf)
+        nq = nq + 1
+        for _, t in ipairs(q.tables) do
+            local e = tables[t]
+            if not e then
+                e = { reads = 0, writes = 0, ddl = 0, sites = {} }
+                tables[t] = e
+            end
+            e[q.kind == 'read' and 'reads'
+                or q.kind == 'ddl' and 'ddl' or 'writes'] =
+                e[q.kind == 'read' and 'reads'
+                    or q.kind == 'ddl' and 'ddl' or 'writes'] + 1
+            table.insert(e.sites, { call = c, kind = q.kind,
+                inferred = conf == 'content' or nil })
+        end
+    end
     for _, c in ipairs(data.calls or {}) do
-        for _, a in ipairs(c.args or {}) do
-            local q = a ~= '' and M.parse(a)
-            if q then
-                nq = nq + 1
-                for _, t in ipairs(q.tables) do
-                    local e = tables[t]
-                    if not e then
-                        e = { reads = 0, writes = 0, ddl = 0, sites = {} }
-                        tables[t] = e
-                    end
-                    e[q.kind == 'read' and 'reads'
-                        or q.kind == 'ddl' and 'ddl' or 'writes'] =
-                        e[q.kind == 'read' and 'reads'
-                            or q.kind == 'ddl' and 'ddl' or 'writes'] + 1
-                    table.insert(e.sites, { call = c, kind = q.kind })
+        -- sink-typed first: the API contract said sql (CONFIDENT). A
+        -- PREFIX may cut mid-token — drop the unfinished tail before
+        -- mining, never guess it.
+        local q
+        if c.strarg and c.strarg.ty == 'sql' then
+            local v = c.strarg.v
+            if c.strarg.pre and v:match('[%w_]$') then
+                v = v:gsub('[%w_]+$', '')
+            end
+            q = M.parse(v)
+            if q then record(c, q, 'sink') end
+        end
+        if not q then
+            -- content sniffing over literal args: LOW confidence by
+            -- design (an email template mentioning SELECT must not
+            -- confidently mint entities) — sites carry inferred
+            for _, a in ipairs(c.args or {}) do
+                q = a ~= '' and M.parse(a)
+                if q then
+                    record(c, q, 'content')
+                    break -- one SQL string per call is the signal
                 end
-                break -- one SQL string per call is the signal
             end
         end
     end
@@ -153,11 +177,15 @@ function M.attach(data)
             if fn then
                 local edge = per_fn[fn]
                 if not edge then
-                    edge = { from = fn, to = id, kind = 'use', at = {} }
+                    -- ~ until a sink-typed site corroborates: content-only
+                    -- SQL is a guess about a string, not an API contract
+                    edge = { from = fn, to = id, kind = 'use', at = {},
+                        inferred = true }
                     per_fn[fn] = edge
                     data.edges[#data.edges + 1] = edge
                     stats.edges = stats.edges + 1
                 end
+                if not site.inferred then edge.inferred = nil end
                 table.insert(edge.at, key_range(site.call, t))
             end
         end

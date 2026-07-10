@@ -3559,3 +3559,79 @@ test('bash: eval aperture — namespaced defless call refuses with witness', fun
         'bare unknown command stays a silent external')
     vim.fn.delete(root, 'rf')
 end)
+
+test('typed strings: sql sink flow + confidence tiers', function ()
+    -- sink position = CONFIDENT (the API contract types the arg);
+    -- content sniffing = ~ by design (typed-strings v1)
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('php') then skip 'no php parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.php', 'w'))
+    fd:write(table.concat({
+        '<?php',
+        'function loader() {',
+        "    $t_query = 'SELECT id FROM {widgets} WHERE deleted=0';",
+        '    db_query( $t_query );',
+        '}',
+        'function renderer() {',
+        "    helper('SELECT name FROM prose_t WHERE x=1');",
+        '}',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    -- the sink call carries the FLOWED, sink-typed string
+    local sq
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'db_query' then sq = c.strarg end
+    end
+    ok(sq and sq.ty == 'sql' and sq.v:find('FROM {widgets}', 1, true),
+        'single-assignment string flows into the sink, typed sql')
+    require('cartograph.sql').attach(data)
+    local edges = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'use' and e.to:match('^sql::table:') then
+            edges[e.to] = e
+        end
+    end
+    local w, pr = edges['sql::table:widgets'], edges['sql::table:prose_t']
+    ok(w and not w.inferred, 'sink-typed table edge is CONFIDENT (brace pattern mined)')
+    ok(pr and pr.inferred, 'content-only table edge is ~')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('typed strings: eval head is the real callee (bash code sink)', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('bash') then skip 'no bash parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.sh', 'w'))
+    fd:write(table.concat({
+        'ns/target() {',
+        '    echo hi',
+        '}',
+        'run() {',
+        '    eval "ns/target $arg"',
+        '}',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local target
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'ns/target' then target = n end
+    end
+    local ev
+    for _, c in ipairs(data.calls) do
+        if (c.full or c.callee) == 'eval' then ev = c end
+    end
+    ok(ev and ev.strarg and ev.strarg.ty == 'code' and ev.strarg.pre,
+        'interpolated eval arg is a code-typed PREFIX')
+    ok(ev and ev.traced == 'ns/target', 'the proven head token rides traced')
+    ok(ev and target and ev.to == target.id, 'the eval call links to the eval´d fn')
+    local linked
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.to == (target or {}).id then linked = e end
+    end
+    ok(linked, 'run -> ns/target edge exists through the eval')
+    vim.fn.delete(root, 'rf')
+end)

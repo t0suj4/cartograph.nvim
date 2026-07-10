@@ -225,15 +225,40 @@ end
 --- the equivalence test.
 function M.audit(data)
     local kill, dropped = {}, 0
+    -- the global dispatch core (mirrors the resolvers' cbarg pre-scan):
+    -- a worker's SAME-FILE priority hit assumed its target was not
+    -- dispatched, but dispatch testimony (a module-level arg naming the
+    -- fn) can live in ANOTHER slice — recompute over the merged graph
+    -- and reopen resolutions into marked targets (the parity gate caught
+    -- the tier flip). Over-reopening is safe: relink re-derives.
+    local fname = {}
+    for _, n in ipairs(data.nodes or {}) do
+        if n.kind == 'function' or n.kind == 'method' then
+            fname[n.name] = fname[n.name] == nil and n or false
+        end
+    end
+    local dispatched = {}
+    for _, c in ipairs(data.calls or {}) do
+        if not c.fn then
+            for _, a in ipairs(c.argv or {}) do
+                if (a.k == 'local' or a.up) and a.name then
+                    local u = fname[a.name]
+                    if u then dispatched[u.id] = true end
+                end
+            end
+        end
+    end
     for _, c in ipairs(data.calls or {}) do
         -- ANY resolution that leaned on uniqueness (name-match inferred,
         -- indirect literal, traced literal) is a batch-scoped hypothesis —
         -- even a SAME-FILE one, because the tail fallback and the
         -- unique-candidate branch count candidates globally. Null them
         -- all; relink re-derives with global indexes. The only survivors
-        -- are same-file PRIORITY hits (plain calls, inferred=false):
-        -- those decisions never looked past their own file.
-        if c.to and (c.inferred or c.indirect or type(c.traced) == 'string') then
+        -- are same-file PRIORITY hits (plain calls, inferred=false) into
+        -- UNDISPATCHED targets: those decisions never looked past their
+        -- own file.
+        if c.to and (c.inferred or c.indirect or type(c.traced) == 'string'
+            or dispatched[c.to]) then
             if c.fn then kill[c.fn .. '\31' .. c.to] = true end
             c.to = nil
             c.inferred = nil

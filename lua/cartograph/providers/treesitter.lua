@@ -898,6 +898,14 @@ M.spec = {
     },
     php = {
         exts = { 'php' },
+        -- typed-string SINKS (typed-strings v1): the API contract types
+        -- the arg — CONFIDENT, unlike content sniffing (~ by design)
+        string_sinks = {
+            db_query = { arg = 1, ty = 'sql' },     -- mantis/drupal wrapper
+            mysql_query = { arg = 1, ty = 'sql' },
+            mysqli_query = { arg = 2, ty = 'sql' },
+            pg_query = { arg = 1, ty = 'sql' },
+        },
         functions = [=[
             (function_definition name: (name) @name) @def
             (method_declaration name: (name) @name) @def
@@ -1139,6 +1147,9 @@ M.spec = {
         -- kinds feed the id pass
         mention_types = { word = true, variable_name = true },
         df_ids = { variable_name = true },
+        -- typed-string SINK: eval's arg IS code — the literal head names
+        -- the real callee (the aperture-analyzer side of the eval story)
+        string_sinks = { eval = { arg = 1, ty = 'code' } },
         -- bash has NO qualification syntax: a command names its function
         -- literally (slashed ble/* names are exact identifiers) — never
         -- tail-match, never tail-vocab
@@ -2649,6 +2660,11 @@ function M.list_files(root, subdirs) return list_files(root, subdirs) end
 
 local MENTION_ID = { identifier = true }
 local NO_NAMES = {}
+-- pure-content pieces of a string literal, per grammar: anything ELSE
+-- inside a string is interpolation (typed-strings v1: k='lit' means KNOWN)
+local STR_PARTS = { string_content = true, string_value = true,
+    string_fragment = true, string_start = true, string_end = true,
+    escape_sequence = true, heredoc_start = true, heredoc_end = true }
 
 -- LEB128, little-endian base-128
 local function vput(parts, v)
@@ -3629,7 +3645,16 @@ function M.extract(root, opts)
                         argv[#argv + 1] = v ~= '' and { k = 'lit', v = v } or { k = 'expr' }
                         argsn = nil
                     end
-                    for _, a in (argsn and argsn.child and inext or NOOP), argsn, -1 do
+                    local argnodes
+                    if not argsn then
+                        -- bash: arguments are repeated `argument:` fields
+                        -- on the command itself, no container node
+                        local fa = calln:field('argument')
+                        if fa and #fa > 0 then argnodes = fa end
+                    end
+                    for _, a in (argsn and argsn.child and inext)
+                        or (argnodes and ipairs(argnodes)) or NOOP,
+                        argnodes or argsn, argnodes and 0 or -1 do
                         if a:named() and a:type() ~= 'comment' then
                             if a:type() == 'argument' then -- php wraps each arg
                                 a = a:named_child(0) or a
@@ -3637,9 +3662,42 @@ function M.extract(root, opts)
                             local t = a:type()
                             if t == 'string' or t == 'string_literal'
                                 or t == 'encapsed_string' then -- php "..."
-                                local v = node_text(a, src):gsub('^["\']', ''):gsub('["\']$', '')
-                                args[#args + 1] = v
-                                argv[#argv + 1] = { k = 'lit', v = v }
+                                -- interpolated string (typed-strings v1):
+                                -- k='lit' must mean KNOWN — "$var" IS the
+                                -- variable, "lead $x…" only proves a PREFIX
+                                local exp
+                                for _, sc2 in inext, a, -1 do
+                                    if sc2:named() and not STR_PARTS[sc2:type()] then
+                                        exp = sc2
+                                        break
+                                    end
+                                end
+                                if exp then
+                                    local txt = node_text(a, src)
+                                    local asr, asc = a:range()
+                                    local esr, esc = exp:range()
+                                    local head = esr == asr
+                                        and txt:sub(2, esc - asc) or nil
+                                    local lone = txt:gsub('^["\']', '')
+                                        :gsub('["\']$', '')
+                                        :match('^%${?([%w_]+)}?$')
+                                    args[#args + 1] = ''
+                                    if head and head ~= '' then
+                                        argv[#argv + 1] = { k = 'concat',
+                                            prefix = head }
+                                    elseif lone then
+                                        argv[#argv + 1] = { k = 'local',
+                                            name = lone,
+                                            l = select(1, a:range()) }
+                                    else
+                                        argv[#argv + 1] = { k = 'expr' }
+                                    end
+                                else
+                                    local v = node_text(a, src)
+                                        :gsub('^["\']', ''):gsub('["\']$', '')
+                                    args[#args + 1] = v
+                                    argv[#argv + 1] = { k = 'lit', v = v }
+                                end
                             elseif t == 'identifier' then
                                 args[#args + 1] = ''
                                 argv[#argv + 1] = { k = 'local', name = node_text(a, src),
@@ -4082,6 +4140,45 @@ function M.extract(root, opts)
         if not lit then return nil end
         return resolve(lit, p.file), lit
     end
+    -- typed-strings v1: single-assignment STRING recovery for a sink arg.
+    -- Same discipline as literal_flow (exactly one def in the fn), but the
+    -- prize is the VALUE: the def line's quoted string — full when the
+    -- quote closes into plain punctuation, otherwise an honest PREFIX
+    -- (multiline SQL, '…' . $x concatenation).
+    local function flow_string(file, line0, varname)
+        local fnid = fn_at(file, line0)
+        if not (varname and fnid) then return nil end
+        local df = node_index[fnid] and node_index[fnid].df
+        if not df then return nil end
+        local defstmt, ndefs = nil, 0
+        for _, st in ipairs(df.stmts) do
+            for _, d in ipairs(st.def) do
+                if d == varname then
+                    ndefs = ndefs + 1
+                    defstmt = st
+                end
+            end
+        end
+        if ndefs ~= 1 or not defstmt then return nil end
+        if src_cache[file] == nil then
+            local fd = io.open(abs(file), 'r')
+            src_cache[file] = fd
+                and vim.split(fd:read('a'), '\n', { plain = true }) or false
+            if fd then fd:close() end
+        end
+        local line = src_cache[file] and src_cache[file][defstmt.l] or ''
+        local qch, pos = line:match('%$?' .. varname .. [=[%s*=%s*(['"])()]=])
+        if not qch then return nil end
+        local rest = line:sub(pos)
+        local close = rest:find(qch, 1, true)
+        if not close then return rest, true end -- runs off the line: prefix
+        local v = rest:sub(1, close - 1)
+        local after = rest:sub(close + 1):match('^%s*(%p?)')
+        if after == '' or after == ';' or after == ',' or after == ')' then
+            return v, nil
+        end
+        return v, true -- concatenation continues: the literal is a prefix
+    end
 
     -- cbarg marks are RESOLUTION INPUT (same-file priority skips dispatched
     -- defs), so they must be COMPLETE BEFORE the pass, not minted during it:
@@ -4105,6 +4202,38 @@ function M.extract(root, opts)
         end
     end
     for _, p in ipairs(pending) do
+        -- typed-string SINKS (typed-strings v1): recover the sink arg —
+        -- literal, literal-headed concat (PREFIX), or single-assignment
+        -- local (flow). ty='sql' rides the call for the sql miner;
+        -- ty='code' (eval) exposes the head token as the REAL callee via
+        -- the traced machinery (relink re-derives after a parallel audit,
+        -- exactly like $fn literal flow).
+        do
+            local _, psp = elang_for(p.file)
+            local sink = psp and psp.string_sinks
+                and psp.string_sinks[p.full or p.call.callee]
+            local a = sink and p.call.argv[sink.arg]
+            if a then
+                local v, pre
+                if a.k == 'lit' then v = a.v
+                elseif a.k == 'concat' then v, pre = a.prefix, true
+                elseif a.k == 'local' and a.name then
+                    v, pre = flow_string(p.file, p.at.start.line, a.name)
+                end
+                if v and v ~= '' then
+                    p.call.strarg = { ty = sink.ty, v = v, pre = pre or nil }
+                    if sink.ty == 'code' and not p.call.traced then
+                        -- head only when its boundary is PROVEN: trailing
+                        -- whitespace, or the whole string was read
+                        local head = pre
+                            and v:match('^%s*([^%s$\'"`;|&<>]+)%s')
+                            or v:match('^%s*([^%s$\'"`;|&<>]+)%s*$')
+                            or v:match('^%s*([^%s$\'"`;|&<>]+)%s')
+                        if head and #head >= 3 then p.call.traced = head end
+                    end
+                end
+            end
+        end
         local target, inferred, refused
         if p.call.dynamic then
             -- $fn(...): frontier — unless single-assignment literal flow
@@ -4123,6 +4252,12 @@ function M.extract(root, opts)
             inferred = false -- the literal IS the dispatch mechanism
         else
             target, inferred, refused = resolve(p.full or p.call.callee, p.file)
+        end
+        if not target and not p.call.dynamic
+            and type(p.call.traced) == 'string' then
+            -- code sink: the eval'd HEAD is the dispatch (literal, so not ~)
+            local t2 = resolve(p.call.traced, p.file)
+            if t2 then target, inferred, refused = t2, false, nil end
         end
         if target then
             p.call.to = target.id
@@ -4430,11 +4565,14 @@ function M.relink(data, touched)
     end
     local n = 0
     -- cbarg pre-scan, mirroring extract's: marks are resolution INPUT and
-    -- must be complete before the pass (see extract; --parallel parity)
+    -- must be complete before the pass (see extract; --parallel parity).
+    -- An arg a WORKER already upgraded arrives as k='func' with a.up —
+    -- it still testifies (skipping it hid the mark from relink while the
+    -- inline pre-scan saw it: a tier flip the parity gate caught)
     for _, c in ipairs(data.calls or {}) do
         if not c.fn then
             for _, a in ipairs(c.argv or {}) do
-                if a.k == 'local' and a.name then
+                if (a.k == 'local' or (a.k == 'func' and a.up)) and a.name then
                     local cands = exact[a.name]
                     if cands and #cands == 1 and (cands[1].kind == 'function'
                         or cands[1].kind == 'method') then

@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 20 -- v20: module nodes carry APERTURE witnesses (eval sites)
+M.VERSION = 21 -- v21: typed strings v1 — argv distinguishes interpolated
+              -- strings (k='lit' means KNOWN; heads become k='concat',
+              -- "$var" becomes k='local'), sink-typed calls carry c.strarg
+              -- and eval heads ride c.traced;
+              -- v20: module nodes carry APERTURE witnesses (eval sites)
               -- and bash resolution refuses namespaced defless calls with
               -- rule='aperture' + witness — a v19 cache lacks both, and
               -- torn-by-node/literal-names (same arc) moved bash graphs;
