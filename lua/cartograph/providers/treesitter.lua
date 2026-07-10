@@ -1997,119 +1997,6 @@ local function callable_arg(a, src)
     return nil
 end
 
--- df-lite: the body's top-level statements with def/use NAME lists and
--- def->use dependencies. Approximate (no scoping) but structurally the same
--- contract as the lua-ls df, so the fn altitude and extract engine work.
-local function dataflow(def, spec, src, params)
-    local body = spec.body_field and def:field(spec.body_field)[1]
-    if not body then return nil end
-    local stmts = {}
-    -- def-site nodes per name, kept only while this fn is processed: names
-    -- with SEVERAL defs (or shadowing a param) get BINDER TAGS below —
-    -- scope-model phase 2, closing df's shadow conflation for its readers
-    local defsites = jvt_sm and {} or nil
-    -- which node types ARE identifiers for def/use purposes: most grammars
-    -- say identifier/name; bash variables are `variable_name` (spec.df_ids)
-    local idt = spec.df_ids
-    for _, stmt in inext, body, -1 do
-        if stmt:named() and stmt:type() ~= 'comment' then
-            local defs, uses, seen_d, seen_u = {}, {}, {}, {}
-            local function walk(n, defpos)
-                local t = n:type()
-                if t == 'identifier' or t == 'name' or (idt and idt[t]) then
-                    local name = node_text(n, src)
-                    if defpos and not seen_d[name] then
-                        seen_d[name] = true
-                        defs[#defs + 1] = name
-                        if defsites then
-                            local ds = defsites[name]
-                            if not ds then ds = {}; defsites[name] = ds end
-                            ds[#ds + 1] = { si = #stmts + 1, di = #defs, n = n }
-                        end
-                    elseif not defpos and not seen_u[name] and not seen_d[name] then
-                        seen_u[name] = true
-                        uses[#uses + 1] = name
-                    end
-                    return
-                end
-                -- definition positions: declaration/assignment left sides
-                if t == 'assignment_statement' or t == 'assignment'
-                    or t == 'assignment_expression'
-                    or t == 'augmented_assignment_expression'
-                    or t == 'variable_assignment' then -- bash x=… (name field)
-                    local left = n:field('left')[1] or n:field('name')[1]
-                        or n:child(0)
-                    for _, c in inext, n, -1 do
-                        if c:named() then walk(c, c == left) end
-                    end
-                    return
-                end
-                if t == 'declaration_command' then -- bash local/declare/export
-                    for _, c in inext, n, -1 do
-                        -- a bare `local x` defs the variable_name directly;
-                        -- `local x=…` recurses into variable_assignment
-                        if c:named() then walk(c, c:type() == 'variable_name') end
-                    end
-                    return
-                end
-                if t == 'init_declarator' or t == 'variable_declarator' then
-                    local d = n:field('declarator')[1] or n:field('name')[1]
-                    for _, c in inext, n, -1 do
-                        if c:named() then walk(c, c == d) end
-                    end
-                    return
-                end
-                for _, c in inext, n, -1 do
-                    if c:named() then
-                        -- def position survives transparent wrappers only
-                        walk(c, defpos and (t == 'variable_list'
-                            or t == 'variable_name'))
-                    end
-                end
-            end
-            walk(stmt, false)
-            stmts[#stmts + 1] = { l = stmt:range() + 1, def = defs, use = uses, dep = {} }
-        end
-    end
-    if #stmts == 0 then return nil end
-    -- binder tags (scope-model phase 2): only names that CAN be shadow-
-    -- ambiguous — several def sites, or a def shadowing a param — resolve
-    -- through the shared model; the tag is the binder's 0-based decl row
-    -- (-1 = param/field binder, -2 = free/global write), durable and
-    -- comparable with binder_at's answer at trace time. s.defr is sparse,
-    -- aligned with s.def indices; untagged names keep name semantics.
-    if defsites then
-        local isparam = {}
-        for _, p in ipairs(params or {}) do isparam[p] = true end
-        for name, ds in pairs(defsites) do
-            if #ds > 1 or isparam[name] then
-                for _, site in ipairs(ds) do
-                    local chain, k = jvt_sm.resolve(name, site.n)
-                    local s = stmts[site.si]
-                    s.defr = s.defr or {}
-                    s.defr[site.di] = k > 0 and (chain[1].row or -1) or -2
-                end
-            end
-        end
-    end
-    -- dependencies + free inputs
-    local defined, inputs, inset = {}, {}, {}
-    for _, p in ipairs(params or {}) do defined[p] = 0 end
-    for i, s in ipairs(stmts) do
-        for _, u in ipairs(s.use) do
-            local from = defined[u]
-            if from and from > 0 then
-                s.dep[#s.dep + 1] = { from = from, var = u }
-            elseif from == nil and not inset[u] then
-                inset[u] = true
-                inputs[#inputs + 1] = u
-            end
-        end
-        for _, d in ipairs(s.def) do defined[d] = defined[d] or i end
-    end
-    return { inputs = inputs, stmts = stmts }
-end
-
 local function fn_params(def, spec, src, method)
     local ps = spec.params_field and def:field(spec.params_field)[1]
     local out = method and { 'self' } or {}
@@ -2776,18 +2663,45 @@ local function mention_buf(spec)
 end
 
 --- One DFS over a phase-1 tree: pack identifier occurrences (with
---- eligible/callee/bound flags) into buf. Shared by the fused extract and
---- the standalone id_pass (refresh path).
-local function collect_mentions(buf, tsroot, src, spec)
+--- eligible/callee/bound flags) into buf — and, when extract registered
+--- function bodies in `dfreg`, compute df-lite IN THE SAME WALK (the
+--- second rider). df-lite: each body's top-level statements with def/use
+--- NAME lists and def->use dependencies — approximate (no scoping) but
+--- structurally the lua-ls df contract, so the fn altitude and extract
+--- engine work. Nested fn bodies feed EVERY enclosing context (a stack),
+--- exactly as the old per-fn walks did. Binder tags (scope-model phase 2)
+--- come straight off the LIVE scope stack at the def site — the same
+--- answer jvt_sm.resolve gave post-walk, without retaining nodes.
+--- Shared by the fused extract and the standalone id_pass (refresh path,
+--- which passes no dfreg — extract already computed df for those files).
+local function collect_mentions(buf, tsroot, src, spec, dfreg)
     local scopes = spec.scopes
     local idt = spec.mention_types or MENTION_ID
+    local dfid = spec.df_ids
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
     local scoped = scopes and MF_SCOPED or 0
     local active = {} -- name -> stack of visibility rows (false = scope-wide)
-    local function walk(n)
+    local ctxs, nctx = {}, 0 -- open df contexts, innermost last
+
+    -- the binder tag, from the live stack: nearest VISIBLE binder's
+    -- 0-based decl row; -1 = row-less binder (param/field), -2 = free
+    local function tag_of(name, row)
+        local a = active[name]
+        if a then
+            for j = #a, 1, -1 do
+                local r = a[j]
+                if r == false then return -1 end
+                if r <= row then return r end
+            end
+        end
+        return -2
+    end
+
+    local function walk(n, defpos, dfon)
+        local nt = n:type()
         local pushed
-        local entry = scopes and scopes[n:type()]
+        local entry = scopes and scopes[nt]
         if entry then
             local t = {}
             entry.harvest(n, src, t)
@@ -2799,18 +2713,97 @@ local function collect_mentions(buf, tsroot, src, spec)
                 pushed[#pushed + 1] = name
             end
         end
-        local nt = n:type()
+        local bodyctx = dfreg and dfreg[n:id()]
+        if bodyctx then
+            nctx = nctx + 1
+            ctxs[nctx] = bodyctx
+            bodyctx.stmts = {}
+            bodyctx.defsites = scopes and {} or nil
+        end
         local iscall = nt == 'call_expression' or nt == 'function_call'
             or nt == 'call' or nt == 'apply'
         local head = nt == 'list' -- sexp head IS the callee (no fields)
+        -- df def positions are THIS node's gift to its children:
+        -- assignment lefts, declarators, transparent wrappers
+        local asgleft, decld, dfk
+        if nctx > 0 then
+            if nt == 'assignment_statement' or nt == 'assignment'
+                or nt == 'assignment_expression'
+                or nt == 'augmented_assignment_expression'
+                or nt == 'variable_assignment' then -- bash x=… (name field)
+                asgleft = n:field('left')[1] or n:field('name')[1]
+                    or n:child(0)
+                dfk = 1
+            elseif nt == 'declaration_command' then -- bash local/declare
+                dfk = 2
+            elseif nt == 'init_declarator' or nt == 'variable_declarator' then
+                decld = n:field('declarator')[1] or n:field('name')[1]
+                dfk = 3
+            else
+                -- def position survives transparent wrappers only
+                dfk = defpos and (nt == 'variable_list'
+                    or nt == 'variable_name')
+            end
+        end
         local i, c = 0, n:child(0)
         while c do
-            if idt[c:type()] and c:named() then
-                local name = node_text(c, src)
+            local ct = c:type()
+            -- LAZY per-child facts: named() is an FFI call and most java
+            -- children are anonymous tokens — pay it only on paths that
+            -- consume it (the regression the first fused draft measured)
+            local cnamed, cdfon, name
+            local cdefpos, cdfid
+            if nctx > 0 then
+                cnamed = c:named()
+                if bodyctx and cnamed and ct ~= 'comment' then
+                    -- a body's direct named children ARE its statements
+                    bodyctx.cur = { l = c:range() + 1,
+                        def = {}, use = {}, dep = {} }
+                    bodyctx.sd, bodyctx.su = {}, {}
+                    bodyctx.stmts[#bodyctx.stmts + 1] = bodyctx.cur
+                end
+                if dfon and cnamed then
+                    if dfk == 1 then cdefpos = c == asgleft
+                    elseif dfk == 2 then cdefpos = ct == 'variable_name'
+                    elseif dfk == 3 then cdefpos = c == decld
+                    else cdefpos = dfk end
+                    if ct == 'identifier' or ct == 'name'
+                        or (dfid and dfid[ct]) then cdfid = true end
+                end
+                cdfon = dfon and cnamed and not cdfid
+            else
+                cdfon = true -- df restarts fresh at the next body anyway
+            end
+            if cdfid then
+                name = node_text(c, src)
+                for k = 1, nctx do
+                    local x = ctxs[k]
+                    local st = x.cur
+                    if st then
+                        if cdefpos then
+                            if not x.sd[name] then
+                                x.sd[name] = true
+                                st.def[#st.def + 1] = name
+                                if x.defsites then
+                                    local ds = x.defsites[name]
+                                    if not ds then ds = {} x.defsites[name] = ds end
+                                    ds[#ds + 1] = { si = #x.stmts, di = #st.def,
+                                        tag = tag_of(name, (c:range())) }
+                                end
+                            end
+                        elseif not x.su[name] and not x.sd[name] then
+                            x.su[name] = true
+                            st.use[#st.use + 1] = name
+                        end
+                    end
+                end
+            end
+            if idt[ct] and (cnamed or cnamed == nil and c:named()) then
+                if name == nil then name = node_text(c, src) end
                 local sr, sc, er, ec = c:range()
                 local callee = iscall
                     and (n:field('function')[1] == c or n:field('name')[1] == c)
-                    or (head and c:named())
+                    or head -- the mention guard already proved c named
                 local idx = nidx[name]
                 if not idx then
                     idx = buf.n + 1
@@ -2840,10 +2833,57 @@ local function collect_mentions(buf, tsroot, src, spec)
                     vput(parts, ec)
                 end
             end
-            if head and c:named() then head = false end
-            if c:child(0) then walk(c) end
+            if head and (cnamed or cnamed == nil and c:named()) then
+                head = false
+            end
+            if c:child(0) then walk(c, cdefpos, cdfon) end
             i = i + 1
             c = n:child(i)
+        end
+        if bodyctx then
+            nctx = nctx - 1
+            bodyctx.cur, bodyctx.sd, bodyctx.su = nil, nil, nil
+            local stmts = bodyctx.stmts
+            if #stmts > 0 then
+                -- binder tags: only names that CAN be shadow-ambiguous —
+                -- several def sites, or a def shadowing a param. s.defr is
+                -- sparse, aligned with s.def indices; untagged names keep
+                -- name semantics.
+                if bodyctx.defsites then
+                    local isparam = {}
+                    for _, p in ipairs(bodyctx.params or {}) do
+                        isparam[p] = true
+                    end
+                    for name, ds in pairs(bodyctx.defsites) do
+                        if #ds > 1 or isparam[name] then
+                            for _, site in ipairs(ds) do
+                                local st = stmts[site.si]
+                                st.defr = st.defr or {}
+                                st.defr[site.di] = site.tag
+                            end
+                        end
+                    end
+                end
+                -- dependencies + free inputs
+                local defined, inputs, inset = {}, {}, {}
+                for _, p in ipairs(bodyctx.params or {}) do defined[p] = 0 end
+                for si, st in ipairs(stmts) do
+                    for _, u in ipairs(st.use) do
+                        local from = defined[u]
+                        if from and from > 0 then
+                            st.dep[#st.dep + 1] = { from = from, var = u }
+                        elseif from == nil and not inset[u] then
+                            inset[u] = true
+                            inputs[#inputs + 1] = u
+                        end
+                    end
+                    for _, d in ipairs(st.def) do
+                        defined[d] = defined[d] or si
+                    end
+                end
+                bodyctx.node.df = { inputs = inputs, stmts = stmts }
+            end
+            bodyctx.stmts, bodyctx.defsites = nil, nil
         end
         if pushed then
             for k = #pushed, 1, -1 do
@@ -2852,7 +2892,7 @@ local function collect_mentions(buf, tsroot, src, spec)
             end
         end
     end
-    walk(tsroot)
+    walk(tsroot, false, true)
 end
 
 --- Replay the id-pass decisions over a collected buffer: pure lookups
@@ -3203,7 +3243,7 @@ function M.extract(root, opts)
     -- defs: functions, top-level vars, blocks, imports — one TREE at
     -- a time, so container files (vue/svelte SFCs) can run it once per
     -- script region while plain files run it on their single root
-    local function extract_defs(file, lang, spec, src, tsroot)
+    local function extract_defs(file, lang, spec, src, tsroot, dfreg)
         tree_model(tsroot, src, spec) -- df binder tags read the shared model
         -- a def extracted from BEYOND a parse error has escaped its
         -- context (magento's php5 `$s{0}` truncates the class; the
@@ -3293,8 +3333,17 @@ function M.extract(root, opts)
                     -- declared return type (base name): the per-function
                     -- SUMMARY the return-type rounds ride (graph-VM MVP)
                     ret = spec.def_ret and spec.def_ret(defn, src) or nil,
-                    df = (spec.dataflow or dataflow)(defn, spec, src, params) }
+                    df = spec.dataflow
+                        and spec.dataflow(defn, spec, src, params) or nil }
                 lastFn[file] = nodes[#nodes]
+                -- generic df rides the mention DFS: register this body
+                -- (per-tree keying — node ids are stable within a tree)
+                if not spec.dataflow and spec.body_field then
+                    local b = defn:field(spec.body_field)[1]
+                    if b then
+                        dfreg[b:id()] = { params = params, node = nodes[#nodes] }
+                    end
+                end
                 fnDefLines[sp.start.line] = true
                 -- the outermost query pattern may match a nested def too;
                 -- ranges keep the innermost containing fn for attribution
@@ -3665,18 +3714,24 @@ function M.extract(root, opts)
                 scripts[#scripts + 1] = { s = s, e = e }
             end
         end
-        for _, r in ipairs(regions) do
+        local regdfs = {}
+        for ri, r in ipairs(regions) do
             local script = false
             for _, x in ipairs(scripts) do
                 if r.s >= x.s and r.s <= x.e then script = true break end
             end
-            if script then extract_defs(file, r.lang, r.spec, src, r.root) end
+            -- per-REGION df registry: regions are separate trees, and
+            -- node ids alias across trees
+            regdfs[ri] = {}
+            if script then
+                extract_defs(file, r.lang, r.spec, src, r.root, regdfs[ri])
+            end
             extract_calls(file, r.lang, r.spec, src, r.root)
         end
         if fnRanges[file] then
             local buf = mention_buf(M.spec.javascript)
-            for _, r in ipairs(regions) do
-                collect_mentions(buf, r.root, src, r.spec)
+            for ri, r in ipairs(regions) do
+                collect_mentions(buf, r.root, src, r.spec, regdfs[ri])
             end
             buf.m = table.concat(buf.parts)
             buf.parts, buf.nidx = nil, nil
@@ -3749,14 +3804,16 @@ function M.extract(root, opts)
                 range = pos_of(tsroot), order = -1,
                 effects = spec.module_effects
                     and spec.module_effects(tsroot, src) or nil }
-            extract_defs(file, lang, spec, src, tsroot)
+            local dfreg = {}
+            extract_defs(file, lang, spec, src, tsroot, dfreg)
             extract_calls(file, lang, spec, src, tsroot)
             -- fusion Stage B: mentions ride the SAME tree — the id pass
             -- never parses again (files without functions stay out, the
-            -- same gate the id pass always had)
+            -- same gate the id pass always had). df rides the same walk
+            -- via dfreg (registered by extract_defs above).
             if fnRanges[file] then
                 local buf = mention_buf(spec)
-                collect_mentions(buf, tsroot, src, spec)
+                collect_mentions(buf, tsroot, src, spec, dfreg)
                 buf.m = table.concat(buf.parts)
                 buf.parts, buf.nidx = nil, nil
                 mentions[file] = buf
