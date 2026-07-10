@@ -103,6 +103,24 @@ return {
         lang = 'haskell',
         notes = 'haskell quick tier (515 files); ghc = the Track B reference repo',
     },
+    jquery = {
+        root = HOME .. '/git/jquery/src',
+        repo = 'https://github.com/jquery/jquery',
+        rev = 'b043db95042b',
+        expected = { refs = 672, nodes = 581 }, -- calibrated @ js-corpora join
+        lang = 'javascript',
+        notes = 'js quick tier (115 ESM files); selector/event-name strings'
+            .. ' = typed-string territory',
+    },
+    mootools = {
+        root = HOME .. '/git/mootools-core/Source',
+        repo = 'https://github.com/mootools/mootools-core',
+        rev = '187a16bae2d7',
+        expected = { refs = 334, nodes = 443 }, -- calibrated @ js-corpora join
+        lang = 'javascript',
+        notes = 'js archaeology tier (29 files, frozen 2017) — prototype-'
+            .. 'extension culture, string-keyed dispatch',
+    },
     bash = {
         root = HOME .. '/git/testssl.sh',
         repo = 'https://github.com/testssl/testssl.sh',
