@@ -50,7 +50,8 @@ M.DIALECTS = {
         eaters = { char = true, ['[char]'] = true },
     },
     postscript = {
-        exts = { ps = true },
+        -- ps.src = bwipp's pre-assembly encoder fragments (two-segment ext)
+        exts = { ps = true, ['ps.src'] = true },
         ci = false,
         ps = true, -- structurally different: /name … def, brace procs
     },
@@ -59,6 +60,16 @@ M.DIALECTS = {
 M.ext_dialect = {}
 for dname, d in pairs(M.DIALECTS) do
     for e in pairs(d.exts) do M.ext_dialect[e] = dname end
+end
+
+-- longest extension wins: name.ps.src is postscript-source, not ".src"
+local function dialect_of(name)
+    local two = name:match('%.([^%.]+%.[^%.]+)$')
+    if two and M.ext_dialect[two:lower()] then
+        return M.ext_dialect[two:lower()]
+    end
+    local one = name:match('%.([^%.]+)$')
+    return one and M.ext_dialect[one:lower()]
 end
 
 -- ── tokenizers ─────────────────────────────────────────────────────────
@@ -195,8 +206,7 @@ function M.extract(root, opts)
                     if ty == 'directory' then
                         scan(dir .. '/' .. name, r)
                     else
-                        local ext = name:match('%.([^%.]+)$')
-                        if ext and M.ext_dialect[ext:lower()] then
+                        if dialect_of(name) then
                             files[#files + 1] = r
                         end
                     end
@@ -242,8 +252,7 @@ function M.extract(root, opts)
                 :format(st.mtime.sec, st.mtime.nsec or 0, st.size)
         end
         if src then
-            local ext = file:match('%.([^%.]+)$')
-            local dname = M.ext_dialect[ext and ext:lower() or '']
+            local dname = dialect_of(file)
             local dialect = M.DIALECTS[dname]
             local pf = perfile[file]
             pf.dialect = dialect
@@ -252,10 +261,16 @@ function M.extract(root, opts)
                 local toks = ps_tokens(src)
                 local i, ndef = 1, nil
                 local opendefs = {} -- named procs by token span
+                local depth = 0 -- only top-level /name … def DEFINES;
+                -- /x exch def inside a body is a proc-LOCAL (suppressed
+                -- below), never a node — the roster must not learn 'x'
                 while i <= #toks do
                     local tk = toks[i]
                     local t = tk.t
-                    if t:sub(1, 1) == '/' and #t > 1 then
+                    if t == '{' then depth = depth + 1
+                    elseif t == '}' then depth = depth - 1
+                    end
+                    if depth == 0 and t:sub(1, 1) == '/' and #t > 1 then
                         local nm = t:sub(2)
                         -- find the matching def for this literal
                         local j, d2 = i + 1, 0

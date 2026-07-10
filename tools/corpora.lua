@@ -162,11 +162,22 @@ return {
         root = HOME .. '/git/postscript-examples',
         repo = 'https://github.com/jwaite/postscript-examples',
         rev = 'b6c8be09c600',
-        expected = { refs = 0, nodes = 348 }, -- calibrated @ token-provider v1
+        expected = { refs = 0, nodes = 159 }, -- recalibrated @ ps depth fix (348 counted proc-local false defs)
         provider = 'tokens',
         lang = 'postscript',
         notes = 'postscript quick tier (43 files); inline only (no parallel'
             .. ' pipeline for the token provider)',
+    },
+    bwipp = {
+        root = HOME .. '/git/postscriptbarcode',
+        repo = 'https://github.com/bwipp/postscriptbarcode',
+        rev = 'b22ce8fe921d',
+        provider = 'tokens',
+        lang = 'postscript',
+        expected = { refs = 11, nodes = 1234 }, -- calibrated @ token-provider v1
+        notes = 'postscript REAL tier (130 .ps.src encoders + examples) —'
+            .. ' declared --REQUIRES manifests = declared-vs-derived bait;'
+            .. ' findresource dispatch; inline only',
     },
     gforth = {
         root = HOME .. '/git/gforth',
