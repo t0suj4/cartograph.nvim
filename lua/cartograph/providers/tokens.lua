@@ -411,8 +411,16 @@ function M.extract(root, opts)
     local roster = {}       -- key -> { def node, ... } in discovery order
     local perfile = {}      -- file -> { defs = {..}, mentions = {..} }
 
+    local idseen = {}
     local function add_def(file, name, kind, l, c, el, dialect)
         local id = ('%s::%s@%d'):format(file, name, l)
+        -- same-name defs on one line must not alias (validator: dup-id)
+        if idseen[id] then
+            local k = 2
+            while idseen[id .. '~' .. k] do k = k + 1 end
+            id = id .. '~' .. k
+        end
+        idseen[id] = true
         local node = { id = id, name = name, kind = kind, file = file,
             order = l, range = { start = { line = l, char = c },
                 ['end'] = { line = el or l, char = 0 } } }

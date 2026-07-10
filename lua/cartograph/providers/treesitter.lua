@@ -3274,6 +3274,19 @@ function M.extract(root, opts)
     local mentions = {}        -- file -> packed mention buffer (Stage B)
     local pending = {}         -- unresolved references, matched after all files
 
+    -- ids are file::name@line — two same-name defs on ONE line (minified
+    -- bundles, same-line C++ prototypes) must not silently ALIAS in every
+    -- by-id index; a collision appends ~2, ~3… (validator: node-dup-id)
+    local idseen = {}
+    local function uid(id)
+        if not idseen[id] then idseen[id] = true; return id end
+        local k = 2
+        while idseen[id .. '~' .. k] do k = k + 1 end
+        id = id .. '~' .. k
+        idseen[id] = true
+        return id
+    end
+
     local function fn_at(file, line)
         local best
         for _, r in ipairs(fnRanges[file] or {}) do
@@ -3354,7 +3367,7 @@ function M.extract(root, opts)
                 if spec.qualify then name = spec.qualify(name, defn, src) end
                 local sp = pos_of(defn)
                 local method = spec.is_method(name, defn)
-                local id = ('%s::%s@%d'):format(file, name, sp.start.line)
+                local id = uid(('%s::%s@%d'):format(file, name, sp.start.line))
                 local params = fn_params(defn, spec, src, method and lang == 'lua')
                 -- tri-state visibility: true/false = the provider's
                 -- verdict (lint trusts it over kind heuristics);
@@ -3431,6 +3444,10 @@ function M.extract(root, opts)
                     and defn:parent():type() ~= spec.toplevel_parent) then
                 local name = node_text(namen, src)
                 local sp = pos_of(defn)
+                -- raw id, NOT uid(): the seen_var dedup below is the
+                -- multi-assign cross-product guard and works BY colliding
+                -- (pos, bb = a.p, a.b visits pos twice); a var can never
+                -- reach the graph with a dup id because this guard drops it
                 local id = ('%s::var:%s@%d'):format(file, name, sp.start.line)
                 if not seen_var[id] then
                     seen_var[id] = true
@@ -3459,7 +3476,7 @@ function M.extract(root, opts)
                 local torn = torn_of(defn, sp)
                 if cat == 'proto' or cat == 'macrofn' then
                     local node = { name = name, kind = 'function',
-                        id = ('%s::%s@%d'):format(file, name, sp.start.line),
+                        id = uid(('%s::%s@%d'):format(file, name, sp.start.line)),
                         file = file, range = sp, order = sp.start.line,
                         torn = torn, decl = cat == 'proto' or nil,
                         macro = cat == 'macrofn' or nil }
@@ -3476,7 +3493,7 @@ function M.extract(root, opts)
                     end
                 else -- struct / union / enum / typedef / object macro
                     nodes[#nodes + 1] = { name = name, kind = 'var',
-                        id = ('%s::type:%s@%d'):format(file, name, sp.start.line),
+                        id = uid(('%s::type:%s@%d'):format(file, name, sp.start.line)),
                         file = file, range = sp, order = sp.start.line,
                         torn = torn, ctype = cat }
                 end
@@ -3537,7 +3554,7 @@ function M.extract(root, opts)
             local run = nil
             local function flush()
                 if run then
-                    local id = ('%s::region@%d'):format(file, run.s.start.line)
+                    local id = uid(('%s::region@%d'):format(file, run.s.start.line))
                     nodes[#nodes + 1] = { id = id, name = run.name, kind = 'region',
                         file = file, order = run.s.start.line,
                         range = { start = run.s.start, ['end'] = run.e['end'] } }
@@ -3861,7 +3878,7 @@ function M.extract(root, opts)
             end
         end
         if tps then
-            nodes[#nodes + 1] = { id = ('%s::template@%d'):format(file, tps),
+            nodes[#nodes + 1] = { id = uid(('%s::template@%d'):format(file, tps)),
                 name = 'template', kind = 'region', file = file, order = tps,
                 range = { start = { line = tps, char = 0 },
                     ['end'] = { line = tpe, char = 0 } } }

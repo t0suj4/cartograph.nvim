@@ -83,6 +83,14 @@ print(('nodes %d · edges %d · ref trust: proven %d / ~%d / matched %d · calls
         ref.matched, c.calls.refused))
 
 local failed = false
+
+-- the closed schema as an executable registry: unknown fields, dangling
+-- endpoints, dup ids, malformed ranges all fail the gate (schema growth
+-- means growing validate.lua's allowlists in the same commit)
+local validate = require 'cartograph.validate'
+local vr = validate.check(data)
+print(validate.report(vr))
+failed = failed or not vr.ok
 local expected = stats.corpus.expected
 if expected then
     local refs = c.edges.by_kind.ref or 0

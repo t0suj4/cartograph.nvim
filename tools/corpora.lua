@@ -183,7 +183,7 @@ return {
         root = HOME .. '/git/gforth',
         repo = 'https://git.savannah.gnu.org/git/gforth.git',
         rev = '0235f65b468a',
-        expected = { refs = 33191, nodes = 21165 }, -- recalibrated @ load-order walk (+5387 walk-bound ~)
+        expected = { refs = 33195, nodes = 21165 }, -- recalibrated @ dup-id fix (aliased edges split honest)
         provider = 'tokens',
         lang = 'forth',
         notes = 'forth mid tier (555 files) — the language\'s own kernel;'
@@ -193,7 +193,7 @@ return {
         root = HOME .. '/git/openfirmware',
         repo = 'https://github.com/openbios/openfirmware',
         rev = 'd1681c6293f6',
-        expected = { refs = 67995, nodes = 48349 }, -- recalibrated @ load-order walk (+52 — fload paths are ${BP}-templated, walk starved; banked)
+        expected = { refs = 67997, nodes = 48349 }, -- recalibrated @ dup-id fix; walk +52 only (fload paths ${BP}-templated, banked)
         provider = 'tokens',
         lang = 'forth',
         notes = 'forth SCALE tier (1804 .fth, 1.77M tokens) — the volume'
