@@ -55,6 +55,24 @@ return {
         lang = 'cpp',
         notes = 'cpp quick tier (~325 cpp + 189 h); openmw is DIRTY — never pin it',
     },
+    ghost = {
+        root = HOME .. '/git/ghost/ghost/core',
+        repo = 'https://github.com/TryGhost/Ghost',
+        rev = 'f7d7df8f9816',
+        expected = { refs = 5840, nodes = 21128 }, -- calibrated @ require-imports (v22)
+        lang = 'javascript',
+        notes = 'js SCALE tier (2134 files) — a real node webapp: express'
+            .. ' routes + handlebars themes (parametric-files territory)',
+    },
+    v8 = {
+        root = HOME .. '/git/v8/src',
+        repo = 'https://chromium.googlesource.com/v8/v8',
+        rev = '0646faaada71',
+        expected = { refs = 74413, nodes = 165859 }, -- calibrated @ js-corpora join (v22)
+        lang = 'cpp',
+        notes = 'cpp SCALE tier (1267 cc + 1813 h) — preprocessor-heavy,'
+            .. ' the TU-walk torture target; .tq (torque) not spec\'d',
+    },
     scheme = {
         root = HOME .. '/git/guile/module',
         repo = 'https://github.com/cky/guile',
