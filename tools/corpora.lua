@@ -89,7 +89,7 @@ return {
         root = HOME .. '/git/rails/activesupport/lib',
         repo = 'https://github.com/rails/rails',
         rev = 'ed0f92c5e779',
-        expected = { refs = 904, nodes = 2592 }, -- calibrated @ 098c537
+        expected = { refs = 907, nodes = 2592 }, -- recalibrated @ kwargs
         lang = 'ruby',
         notes = 'ruby quick tier (305 files)',
     },
@@ -113,7 +113,7 @@ return {
         root = HOME .. '/git/django-oscar/src',
         repo = 'https://github.com/django-oscar/django-oscar',
         rev = 'c0608e0d167e',
-        expected = { refs = 1546, nodes = 3824 }, -- calibrated @ 098c537
+        expected = { refs = 1561, nodes = 3824 }, -- recalibrated @ kwargs (django default= callables register)
         lang = 'python',
         notes = 'python quick tier (483 files) — the django adapter\'s home turf',
     },

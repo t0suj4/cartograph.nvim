@@ -3690,11 +3690,51 @@ function M.extract(root, opts)
                         or (argnodes and ipairs(argnodes)) or NOOP,
                         argnodes or argsn, argnodes and 0 or -1 do
                         if a:named() and a:type() ~= 'comment' then
-                            if a:type() == 'argument' then -- php wraps each arg
-                                a = a:named_child(0) or a
+                            -- KEYWORD arguments: unwrap to the VALUE node
+                            -- (classified exactly like a positional) and
+                            -- remember the name — f(callback=handler) is
+                            -- dispatch testimony regardless of slot, and
+                            -- sink tables may index by name (MaD's
+                            -- Argument[name:]). Position semantics: kw
+                            -- entries don't occupy a positional index.
+                            local kw
+                            local t0 = a:type()
+                            if t0 == 'keyword_argument' then -- python
+                                local nf = a:field('name')[1]
+                                local vf = a:field('value')[1]
+                                if nf and vf then
+                                    kw = node_text(nf, src)
+                                    a = vf
+                                end
+                            elseif t0 == 'pair' then -- ruby kwargs
+                                local kf = a:field('key')[1]
+                                local vf = a:field('value')[1]
+                                if kf and vf then
+                                    kw = node_text(kf, src):gsub(':$', '')
+                                    a = vf
+                                end
+                            elseif t0 == 'argument' then -- php wraps each arg
+                                -- PHP 8 named: (argument name: (name) value)
+                                local nf = a:field('name')[1]
+                                if nf and a:named_child_count() > 1 then
+                                    kw = node_text(nf, src)
+                                    a = a:named_child(a:named_child_count() - 1) or a
+                                else
+                                    a = a:named_child(0) or a
+                                end
                             end
+                            local nargv = #argv
                             local t = a:type()
-                            if t == 'string' or t == 'string_literal'
+                            if t == 'list_splat' or t == 'dictionary_splat'
+                                or t == 'spread_element'
+                                or t == 'splat_argument'
+                                or t == 'variadic_unpacking' then
+                                -- spread DESTROYS positional knowledge for
+                                -- everything after it — consumers must not
+                                -- silently mis-index (knowledge lattice)
+                                args[#args + 1] = ''
+                                argv[#argv + 1] = { k = 'spread' }
+                            elseif t == 'string' or t == 'string_literal'
                                 or t == 'encapsed_string' then -- php "..."
                                 -- interpolated string (typed-strings v1):
                                 -- k='lit' must mean KNOWN — "$var" IS the
@@ -3758,6 +3798,9 @@ function M.extract(root, opts)
                                 argv[#argv + 1] = cname
                                     and { k = 'callable', name = cname }
                                     or { k = 'expr' }
+                            end
+                            if kw and #argv > nargv then
+                                argv[#argv].kw = kw
                             end
                         end
                     end
@@ -4285,7 +4328,26 @@ function M.extract(root, opts)
             local _, psp = elang_for(p.file)
             local sink = psp and psp.string_sinks
                 and psp.string_sinks[p.full or p.call.callee]
-            local a = sink and p.call.argv[sink.arg]
+            -- a sink arg is a POSITION (int) or a KEYWORD name (string —
+            -- MaD's Argument[name:]; python execute(sql=...) style)
+            local a
+            if sink then
+                if type(sink.arg) == 'string' then
+                    for _, x in ipairs(p.call.argv) do
+                        if x.kw == sink.arg then a = x; break end
+                    end
+                else
+                    a = p.call.argv[sink.arg]
+                    if a and (a.kw or a.k == 'spread') then a = nil end
+                    -- positional index past a spread is unknowable
+                    for i = 1, math.min(sink.arg or 0, #p.call.argv) do
+                        if p.call.argv[i].k == 'spread' and i < sink.arg then
+                            a = nil
+                            break
+                        end
+                    end
+                end
+            end
             if a then
                 local v, pre, hedged
                 if a.k == 'lit' then v = a.v

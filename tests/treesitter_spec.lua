@@ -3726,3 +3726,63 @@ test('treesitter: js — require() and dynamic import() are import edges', funct
     eq(3, n) -- computed/two-arg requires produced nothing
     vim.fn.delete(root, 'rf')
 end)
+
+test('argv: kwargs classify their VALUE and carry kw; spread is marked', function ()
+    if not has_parser('python') then skip 'no python parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/k.py', 'w'))
+    fd:write(table.concat({
+        'def my_handler(x):',
+        '    return x',
+        '',
+        'def go():',
+        '    register(callback=my_handler, retries=3)',
+        '    run(sql="SELECT 1", *extra)',
+        '    tail(*extra, my_handler)',
+    }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local by = {}
+    for _, c in ipairs(data.calls) do by[c.full or c.callee] = c end
+    local reg = by['register'].argv
+    eq('callback', reg[1].kw, 'kwarg name rides the entry')
+    ok(reg[1].k == 'func' or (reg[1].k == 'local' and reg[1].name == 'my_handler'),
+        'kwarg-passed callable is VISIBLE to dispatch')
+    eq('retries', reg[2].kw)
+    local run = by['run'].argv
+    eq('sql', run[1].kw)
+    eq('lit', run[1].k, 'kwarg string literal classifies as lit')
+    eq('SELECT 1', run[1].v)
+    eq('spread', run[2].k, '*extra is a spread')
+    eq('spread', by['tail'].argv[1].k,
+        'leading spread marked: later positions unknowable')
+    -- a kwarg-passed unique fn is dispatch testimony: the target must be
+    -- kept alive exactly like a positional callback
+    local target
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'my_handler' then target = n end
+    end
+    ok(target, 'handler extracted')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('argv: PHP 8 named arguments unwrap to the value node', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/k.php', 'w'))
+    fd:write('<?php\nfunction go($fn) {\n'
+        .. '    register(callback: $fn, retries: 3);\n'
+        .. "    sink(query: 'SELECT 1');\n"
+        .. '    spread_it(...$rest);\n}\n')
+    fd:close()
+    local data = ts.extract(root)
+    local by = {}
+    for _, c in ipairs(data.calls) do by[c.full or c.callee] = c end
+    eq('callback', by['register'].argv[1].kw)
+    eq('local', by['register'].argv[1].k)
+    eq('fn', by['register'].argv[1].name, 'named-arg $var classifies as local')
+    eq('lit', by['sink'].argv[1].k)
+    eq('query', by['sink'].argv[1].kw)
+    eq('spread', by['spread_it'].argv[1].k, '...$rest is a spread')
+    vim.fn.delete(root, 'rf')
+end)

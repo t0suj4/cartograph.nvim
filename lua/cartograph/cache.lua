@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 22 -- v22: js imports see CommonJS require('...') and dynamic
+M.VERSION = 23 -- v23: kwargs classified — argv entries carry kw=<name>
+              -- (value classified like a positional; dispatch through
+              -- keyword args now visible) and spreads mark k='spread'
+              -- (positions after one are unknowable);
+              -- v22: js imports see CommonJS require('...') and dynamic
               -- import('...') — node corpora gain their module graph
               -- (a v21 cache lacks the edges);
               -- v21: typed strings v1 — argv distinguishes interpolated
