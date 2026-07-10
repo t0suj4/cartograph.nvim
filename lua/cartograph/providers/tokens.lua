@@ -365,7 +365,8 @@ local function derive_effect(toks, s, e, dialect, bind, file)
         i = i + 1
     end
     if #frames > 0 then return nil, 'if-join' end
-    return { ins = -low, outs = h - low }
+    -- low<0 guard: LuaJIT's -0 is a float and poisons snapshots
+    return { ins = low < 0 and -low or 0, outs = h - low }
 end
 
 -- ── extraction ─────────────────────────────────────────────────────────
@@ -575,7 +576,10 @@ function M.extract(root, opts)
                         end
                         i = i + 1
                     elseif dialect.imports[key] and toks[i + 1] then
-                        pf.imports[#pf.imports + 1] = toks[i + 1].t
+                        -- position kept: the load-order walk interleaves
+                        -- includes with defs and mentions in source order
+                        pf.imports[#pf.imports + 1] =
+                            { path = toks[i + 1].t, l = tk.l, c = tk.c }
                         i = i + 2
                     elseif dialect.eaters[key] and toks[i + 1] then
                         i = i + 2 -- char X / [char] X: X is data
@@ -617,8 +621,10 @@ function M.extract(root, opts)
 
     -- ── imports (Forth include/require/fload) ──
     local impEdge = {}
+    local imported = {} -- files with an incoming import (root detection)
     for file, pf in pairs(perfile) do
-        for _, path in ipairs(pf.imports or {}) do
+        for _, imp in ipairs(pf.imports or {}) do
+            local path = imp.path
             local dir = file:match('^(.*)/[^/]*$')
             local cand = dir and (dir .. '/' .. path) or path
             -- normalize ./ and ../
@@ -631,6 +637,8 @@ function M.extract(root, opts)
             local target = fileset[cand] and cand
                 or fileset[path] and path or nil
             if target and target ~= file then
+                imp.to = target
+                imported[target] = true
                 local k = file .. '\31' .. target
                 if not impEdge[k] then
                     impEdge[k] = true
@@ -638,6 +646,95 @@ function M.extract(root, opts)
                         { from = file, to = target, kind = 'import' }
                 end
             end
+        end
+    end
+
+    -- ── the load-order walk ──
+    -- Forth's loader semantics, made static: from each root (a file no
+    -- one imports), DFS the include graph in SOURCE ORDER threading the
+    -- dictionary — later defs shadow earlier ones, include/require load
+    -- once (visited set; a real `include` reloads, approximated as once
+    -- and disclosed here). A mention of a MULTI-FILE-ambiguous name
+    -- binds to the dictionary top at its (file, line) in that walk; if
+    -- every root that reaches the mention agrees on one target, the
+    -- binding is a ~ edge — the walk is approximate (partial import
+    -- graph, unevaluated [IF] includes), never `matched`. Disagreement
+    -- or no coverage keeps the refusal. This is the census-priced cut:
+    -- callee-ambiguous dominated the checker bails (2777 + 8448).
+    local walkbind = {} -- file\31key\31line -> node | false (conflict)
+    do
+        -- names defined in more than one file: the only ones the walk
+        -- must arbitrate (single-file chains already bind lexically)
+        local ambkeys = {}
+        for key, cands in pairs(roster) do
+            local f1
+            for _, n in ipairs(cands) do
+                if not f1 then f1 = n.file
+                elseif n.file ~= f1 then ambkeys[key] = true; break end
+            end
+        end
+        -- per-file event streams, source order: defs, imports, and
+        -- mentions of ambiguous names only (volume discipline)
+        local events = {}
+        for _, file in ipairs(files) do
+            local pf = perfile[file]
+            if pf.dialect and not pf.dialect.ps then
+                local ev = {}
+                for _, n in ipairs(pf.defs) do
+                    ev[#ev + 1] = { l = n.order,
+                        c = n.range.start.char, def = n,
+                        key = pf.dialect.ci and n.name:lower() or n.name }
+                end
+                for _, imp in ipairs(pf.imports) do
+                    if imp.to then
+                        ev[#ev + 1] = { l = imp.l, c = imp.c, imp = imp.to }
+                    end
+                end
+                for _, m in ipairs(pf.mentions) do
+                    local key = pf.dialect.ci and m.name:lower() or m.name
+                    if ambkeys[key] then
+                        ev[#ev + 1] = { l = m.l, c = m.c, key = key, m = true }
+                    end
+                end
+                table.sort(ev, function (a, b)
+                    if a.l ~= b.l then return a.l < b.l end
+                    return (a.c or 0) < (b.c or 0)
+                end)
+                events[file] = ev
+            end
+        end
+        local roots = {}
+        for _, file in ipairs(files) do
+            if events[file] and not imported[file] then
+                roots[#roots + 1] = file
+            end
+        end
+        for _, root_f in ipairs(roots) do
+            local dict, visited = {}, {}
+            local function load(file)
+                if visited[file] or not events[file] then return end
+                visited[file] = true
+                for _, ev in ipairs(events[file]) do
+                    if ev.def then
+                        dict[ev.key] = ev.def
+                    elseif ev.imp then
+                        load(ev.imp)
+                    else
+                        local t = dict[ev.key]
+                        if t then
+                            local wk = file .. '\31' .. ev.key
+                                .. '\31' .. ev.l
+                            local prev = walkbind[wk]
+                            if prev == nil then
+                                walkbind[wk] = t
+                            elseif prev ~= t then
+                                walkbind[wk] = false -- roots disagree
+                            end
+                        end
+                    end
+                end
+            end
+            load(root_f)
         end
     end
 
@@ -708,6 +805,11 @@ function M.extract(root, opts)
                         -- only candidate was the mention's own def site
                     elseif nfiles == 1 then
                         emit(m.from, last, m, true, file)
+                    elseif walkbind[file .. '\31' .. key .. '\31' .. m.l] then
+                        -- every root's load order agrees on one def: ~
+                        emit(m.from,
+                            walkbind[file .. '\31' .. key .. '\31' .. m.l],
+                            m, true, file)
                     else
                         local ak = file .. '\31' .. key
                         local a = ambig[ak]
@@ -759,7 +861,12 @@ function M.extract(root, opts)
             elseif n.file ~= one.file then multi = true; break
             elseif n.order > one.order then one = n end -- redefinition chain
         end
-        if multi then return nil, true end
+        if multi then
+            -- the load-order walk may have arbitrated this exact site
+            local wb = walkbind[file .. '\31' .. key .. '\31' .. line]
+            if wb then return wb end
+            return nil, true
+        end
         return one
     end
     for _, file in ipairs(files) do

@@ -188,3 +188,26 @@ test('tokens: the positional checker — derive, grade, bail with reasons', func
     chk('c.fs::getv@9', 'ok', 0, 1)           -- var mention pushes addr
     chk('c.fs::dyn@10', 'execute')            -- quotations stay honest
 end)
+
+test('tokens: load-order walk — shadowing, islands, checker callees', function ()
+    local data, _, edges = fixture({
+        ['boot.fs'] = 'include early.fs\ninclude late.fs\ninclude user.fs\n',
+        ['early.fs'] = ': shared ( -- n ) 1 ;\n',
+        ['late.fs'] = ': shared ( -- n ) 2 ;\n',
+        ['user.fs'] = ': go ( -- n ) shared ;\n',
+        ['island.fs'] = ': lost shared ;\n', -- no root reaches it
+    })
+    local e = edges['user.fs::go@0>late.fs::shared@0[ref]']
+    ok(e and e.inferred, 'walk binds the LATEST def in load order, as ~')
+    ok(not edges['user.fs::go@0>early.fs::shared@0[ref]'],
+        'the shadowed def is not bound')
+    local refused
+    for _, c in ipairs(data.calls) do
+        if c.refused and c.file == 'island.fs' then refused = c end
+    end
+    ok(refused, 'unreached files keep the honest refusal')
+    local byid = {}
+    for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    eq('ok', byid['user.fs::go@0'].echeck,
+        'checker resolves callees through the walk')
+end)
