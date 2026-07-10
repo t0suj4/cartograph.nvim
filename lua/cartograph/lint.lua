@@ -616,6 +616,8 @@ M.rules = {
         name = 'dead-function', severity = 'warn',
         run = function (store)
             local out = {}
+            -- topology through the Band seam (representation-agnostic)
+            local band = require('cartograph.band').from_store(store)
             -- manifest projects: XML-referenced handlers are engine-dispatched
             local xmlh = store.toc and store.toc.handlers or {}
             for _, n in ipairs(store.data.nodes) do
@@ -623,9 +625,9 @@ M.rules = {
                     and not n.decl -- a prototype is a declaration, not dead code
                     and not exported(n) and not metamethod(n) and not n.cbarg
                     and not n.entry and not xmlh[n.name]
-                    and #(store.usedby[n.id] or {}) == 0
+                    and band:n_callers(n.id) == 0
                     -- a registration is an alibi: a dispatch table keeps it alive
-                    and #(store.reg_by[n.id] or {}) == 0 then
+                    and band:n_registrants(n.id) == 0 then
                     out[#out + 1] = { file = store.abspath(n), line = n.range.start.line + 1,
                         message = ("local function '%s' has no callers (possibly dead)"):format(n.name) }
                 end
@@ -649,9 +651,10 @@ M.rules = {
     {
         name = 'call-cycle', severity = 'warn',
         run = function (store)
+            local band = require('cartograph.band').from_store(store)
             local ids, adj = {}, {}
             for _, n in ipairs(store.data.nodes) do
-                if n.kind ~= 'module' then ids[#ids + 1] = n.id; adj[n.id] = store.uses[n.id] end
+                if n.kind ~= 'module' then ids[#ids + 1] = n.id; adj[n.id] = band:callees(n.id) end
             end
             local out = {}
             for _, comp in ipairs(sccs(ids, adj)) do
