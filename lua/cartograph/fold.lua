@@ -25,6 +25,21 @@ local M = {}
 M.PRED = { ref = 0, use = 1, reg = 2, import = 3, refused = 4 }
 M.PRED_NAME = { [0] = 'ref', 'use', 'reg', 'import', 'refused' }
 
+-- the FLAGS column (u8/row): the honesty model, folded — and the VM's write
+-- medium ([[graph-vm-type-resolution]]). WITHOUT it a confident edge and a
+-- name-matched ~ hypothesis are indistinguishable, and invariant #3 (uniform
+-- honesty) dies at the fold boundary. Layout, tier space RESERVED for the VM:
+--   bit 0 (0x01)  INFERRED  — the ~ tier (name-matched, not confident)
+--   bits 1-3      REFUSAL RULE (refused rows) — see M.RULE
+--   bits 4-5 RESERVED for the VM ladder (type-inferred / runtime-confirmed)
+--   bits 6-7 RESERVED for provenance (which pass set it)
+M.FLAG = { INFERRED = 1 }
+M.RULE = { none = 0, ambiguous = 1, blocked = 2, vocab = 3,
+    aperture = 4, samefile = 5, other = 6 }
+M.RULE_NAME = { [0] = 'none', 'ambiguous', 'blocked', 'vocab',
+    'aperture', 'samefile', 'other' }
+local RULE_SHIFT = 2 -- rule occupies bits 1-3 → value * 2
+
 local floor, char, byte = math.floor, string.char, string.byte
 
 local function pack_u32(arr, len) -- 1-based arr[1..len] → LE u32 bytes
@@ -103,12 +118,38 @@ function Fold:incoming(obj, pred, no_self)
     return out
 end
 
--- resident/serialized size of the folded core, exact (3 columns + 2 offset
--- arrays + the object permutation, all u32; strings measured separately)
+-- resident/serialized size of the folded core, exact (3 u32 columns + the
+-- u8 flags column + 2 offset arrays + the object permutation)
 function Fold:bytes()
-    local cols = self.m * 4 * 3               -- subj/pred/obj
+    local cols = self.m * 4 * 3 + self.m      -- subj/pred/obj (u32) + flag (u8)
     local idx = (self.n + 1) * 4 * 2 + self.m * 4 -- 2 offsets + 1 perm
     return cols + idx
+end
+
+-- the certainty of a specific edge (subject→object via pred, 0-based ids):
+-- 'confident' | 'inferred' | nil (no such edge). O(out-degree) point query.
+function Fold:tier(subj, obj, pred)
+    local lo, hi = self:subj_span(subj)
+    for r = lo, hi - 1 do
+        if self.obj[r + 1] == obj and (not pred or self.pred[r + 1] == pred) then
+            return (self.flag[r + 1] % 2 == 1) and 'inferred' or 'confident'
+        end
+    end
+    return nil
+end
+
+-- the refusal rules at `subj` (frontier facts): a list of rule NAMES, the
+-- honest "what did we decline to resolve here, and why"
+function Fold:refusals(subj)
+    local lo, hi = self:subj_span(subj)
+    local out, k = {}, 0
+    for r = lo, hi - 1 do
+        if self.pred[r + 1] == M.PRED.refused then
+            local rule = floor(self.flag[r + 1] / 2) % 8
+            k = k + 1; out[k] = M.RULE_NAME[rule] or 'other'
+        end
+    end
+    return out
 end
 
 -- byte size of the interned node-name string table (the only non-columnar
@@ -127,28 +168,30 @@ function M.build(data)
     for _, n in ipairs(data.nodes or {}) do it.id(n.id) end
     local SENTINEL = it.id('\0frontier') -- refused calls point here
 
-    local subj, pred, obj, m = {}, {}, {}, 0
-    local function emit(s, p, o)
+    local subj, pred, obj, flag, m = {}, {}, {}, {}, 0
+    local function emit(s, p, o, f)
         m = m + 1
-        subj[m] = it.id(s); pred[m] = p; obj[m] = it.id(o)
+        subj[m] = it.id(s); pred[m] = p; obj[m] = it.id(o); flag[m] = f or 0
     end
     local skipped_edge, skipped_refused = 0, 0
 
     for _, e in ipairs(data.edges or {}) do
         local p = M.PRED[e.kind]
         if p and e.from and e.to then
-            emit(e.from, p, e.to)
+            emit(e.from, p, e.to, e.inferred and M.FLAG.INFERRED or 0)
         else
             skipped_edge = skipped_edge + 1
         end
     end
     -- refused calls = frontier facts (sentinel object), only per-fn ones
-    -- (top-level refusals have no subject to hang on — counted, not folded)
+    -- (top-level refusals have no subject to hang on — counted, not folded).
+    -- The rule rides the flags nibble: an aperture frontier and an ambiguous
+    -- one are DIFFERENT honesty, and the fold must keep the distinction.
     for _, c in ipairs(data.calls or {}) do
         if c.refused then
             if c.fn then
-                m = m + 1
-                subj[m] = it.id(c.fn); pred[m] = M.PRED.refused; obj[m] = SENTINEL
+                local rule = M.RULE[c.refused.rule] or M.RULE.other
+                emit(c.fn, M.PRED.refused, '\0frontier', rule * RULE_SHIFT)
             else
                 skipped_refused = skipped_refused + 1
             end
@@ -172,12 +215,12 @@ function M.build(data)
         cur[u] = cur[u] + 1
     end
     -- permute the columns into subject order (so subj_span reads directly)
-    local s2, p2, o2 = {}, {}, {}
+    local s2, p2, o2, f2 = {}, {}, {}, {}
     for slot = 1, m do
         local k = order[slot]
-        s2[slot] = subj[k]; p2[slot] = pred[k]; o2[slot] = obj[k]
+        s2[slot] = subj[k]; p2[slot] = pred[k]; o2[slot] = obj[k]; f2[slot] = flag[k]
     end
-    subj, pred, obj = s2, p2, o2
+    subj, pred, obj, flag = s2, p2, o2, f2
 
     -- by-object: transpose — offsets over obj + a permutation of rows
     local ooff = {}
@@ -201,7 +244,7 @@ function M.build(data)
 
     local self = setmetatable({
         n = n, m = m, it = it, names = it.list,
-        subj = subj, pred = pred, obj = obj,
+        subj = subj, pred = pred, obj = obj, flag = flag,
         sentinel = SENTINEL,
         skipped_edge = skipped_edge, skipped_refused = skipped_refused,
         _so = u32_reader(off_s), _oo = u32_reader(ooff_s),

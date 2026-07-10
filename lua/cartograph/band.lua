@@ -36,6 +36,11 @@ function Band:imports_in(id)   return self:_bwd(id, 'import') end
 function Band:n_callers(id)     return #self:callers(id) end
 function Band:n_registrants(id) return #self:registrants(id) end
 
+-- CERTAINTY: the honesty tier of a ref edge (from→to), the thing that must
+-- survive the representation swap — 'confident' | 'inferred' (~) | nil.
+-- (Backends implement _tier; the sugar keeps the ref-graph default.)
+function Band:tier(from, to) return self:_tier(from, to) end
+
 -- ── store backend: the wide forward/backward index tables ────────────────
 local StoreBand = setmetatable({}, { __index = Band })
 StoreBand.__index = StoreBand
@@ -60,6 +65,14 @@ local function store_slice(store, spec, id)
 end
 function StoreBand:_fwd(id, kind) return store_slice(self.store, S_FWD[kind], id) end
 function StoreBand:_bwd(id, kind) return store_slice(self.store, S_BWD[kind], id) end
+function StoreBand:_tier(from, to)
+    local u = self.store.uses[from]
+    if not u then return nil end
+    local found = false
+    for i = 1, #u do if u[i] == to then found = true; break end end
+    if not found then return nil end
+    return self.store.edge_inferred[from .. '\31' .. to] and 'inferred' or 'confident'
+end
 
 function M.from_store(store)
     return setmetatable({ store = store }, StoreBand)
@@ -86,6 +99,12 @@ function FoldBand:_bwd(id, kind)
     local oid = f.it.get(id)
     if not oid then return {} end
     return names_of(f, f:incoming(oid, fold_mod.PRED[kind], kind == 'ref'))
+end
+function FoldBand:_tier(from, to)
+    local f = self.fold
+    local s, o = f.it.get(from), f.it.get(to)
+    if not s or not o then return nil end
+    return f:tier(s, o, fold_mod.PRED.ref)
 end
 
 function M.from_fold(fold)

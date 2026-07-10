@@ -49,6 +49,24 @@ test('band: store and fold backends return identical slices', function ()
     end
 end)
 
+test('band: certainty tier survives, identical on both backends', function ()
+    local D = {
+        root = '/x',
+        nodes = { node('a'), node('b'), node('c') },
+        edges = {
+            { from = 'a', to = 'b', kind = 'ref', at = { R } },
+            { from = 'a', to = 'c', kind = 'ref', inferred = true, at = { R } },
+        },
+        calls = {},
+    }
+    store.ingest(D)
+    local bs = band.from_store(store)
+    local bf = band.from_fold(fold.build(D))
+    eq('confident', bs:tier('a', 'b')); eq('confident', bf:tier('a', 'b'))
+    eq('inferred', bs:tier('a', 'c')); eq('inferred', bf:tier('a', 'c'))
+    eq(nil, bs:tier('b', 'c')); eq(nil, bf:tier('b', 'c')) -- no such edge
+end)
+
 test('band: the ref view excludes self-loops (both backends)', function ()
     store.ingest(DATA)
     local bs = band.from_store(store)

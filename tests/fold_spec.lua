@@ -94,6 +94,29 @@ test('fold: isolated nodes interned; size is columnar-small', function ()
     local f = fold.build(DATA)
     ok(f.it.get('iso'), 'isolated node exists in the id space')
     eq(0, #f:out(f.it.get('iso')), 'and has no facts')
-    -- core = 3 columns + 2 offset arrays + 1 permutation, all u32
-    eq(f.m * 4 * 3 + (f.n + 1) * 4 * 2 + f.m * 4, f:bytes())
+    -- core = 3 u32 columns + u8 flags + 2 offset arrays + 1 permutation
+    eq(f.m * 4 * 3 + f.m + (f.n + 1) * 4 * 2 + f.m * 4, f:bytes())
+end)
+
+test('fold: the flags column keeps tier and refusal rule', function ()
+    local D = {
+        root = '/x',
+        nodes = { node('m.lua', 'module'), node('a'), node('b'), node('c') },
+        edges = {
+            { from = 'a', to = 'b', kind = 'ref', at = { R } },            -- confident
+            { from = 'a', to = 'c', kind = 'ref', inferred = true, at = { R } }, -- ~
+        },
+        calls = {
+            { callee = 'x', fn = 'a', file = 'm.lua', line = 1,
+                refused = { rule = 'aperture' } },
+            { callee = 'y', fn = 'b', file = 'm.lua', line = 2,
+                refused = { rule = 'ambiguous' } },
+        },
+    }
+    local f = fold.build(D)
+    local A, B, C = f.it.get('a'), f.it.get('b'), f.it.get('c')
+    eq('confident', f:tier(A, B, fold.PRED.ref))
+    eq('inferred', f:tier(A, C, fold.PRED.ref), 'the ~ tier survives the fold')
+    eq({ 'aperture' }, f:refusals(A), "a's frontier rule preserved")
+    eq({ 'ambiguous' }, f:refusals(B))
 end)
