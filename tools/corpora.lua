@@ -107,7 +107,7 @@ return {
         root = HOME .. '/git/testssl.sh',
         repo = 'https://github.com/testssl/testssl.sh',
         rev = 'deda4c762768',
-        expected = { refs = 264, nodes = 618 }, -- calibrated @ bash-spec cut
+        expected = { refs = 822, nodes = 618 }, -- recalibrated @ torn-by-node + literal names
         lang = 'bash',
         notes = 'bash quick tier (~20 files, one giant sophisticated script)',
     },
@@ -115,7 +115,7 @@ return {
         root = HOME .. '/git/ble.sh',
         repo = 'https://github.com/akinomyoga/ble.sh.git',
         rev = '5d39ebe6db67',
-        expected = { refs = 2985, nodes = 5078 }, -- calibrated @ bash-spec cut
+        expected = { refs = 5231, nodes = 5078 }, -- recalibrated @ torn-by-node + literal names
         lang = 'bash',
         notes = 'bash SCALE tier (~420 files; a line editor written in bash —'
             .. ' eval-heavy, the aperture design\'s first real workout)',

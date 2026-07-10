@@ -1139,6 +1139,15 @@ M.spec = {
         -- kinds feed the id pass
         mention_types = { word = true, variable_name = true },
         df_ids = { variable_name = true },
+        -- bash has NO qualification syntax: a command names its function
+        -- literally (slashed ble/* names are exact identifiers) — never
+        -- tail-match, never tail-vocab
+        literal_names = true,
+        -- a bash function_definition is self-contained (no class context
+        -- to escape), and tree-sitter-bash chokes locally on exotic
+        -- parameter expansions (`${1//&/&amp;}` tears testssl.sh at line
+        -- 580 of 26k): tear only defs whose OWN subtree holds the error
+        torn_by_node = true,
         is_method = function () return false end,
         -- source/. splice a file in at RUN time: resolve like C includes —
         -- relative to the sourcing file, then the root, then a unique
@@ -3264,6 +3273,20 @@ function M.extract(root, opts)
             end
             errow = rec(tsroot)
         end
+        -- torn policy. Default: everything beyond the FIRST error row —
+        -- calibrated on truncated class contexts (magento php5), where a
+        -- def after the error has lost its enclosing qualifier. Languages
+        -- whose defs carry no enclosing context opt into NODE-LOCAL
+        -- tearing (spec.torn_by_node): torn only when the error sits
+        -- inside the def's own subtree. bash needs this — one exotic
+        -- parameter expansion at line 580 must not tear the remaining 98%
+        -- of a 26k-line script (testssl.sh, ble.sh contribs measured).
+        local function torn_of(dn, sp)
+            if spec.torn_by_node then
+                return errow ~= nil and dn:has_error() or nil
+            end
+            return errow and sp.start.line >= errow or nil
+        end
         -- functions / vars / interface / super: ONE cursor (fusion
         -- Stage A). Every query cursor walks the WHOLE tree in C, and
         -- this ran four of them per file; the sections' captures are
@@ -3322,7 +3345,7 @@ function M.extract(root, opts)
                     fnDefLines[sp.start.line] = true
                     goto fn_done
                 end
-                local torn = errow and sp.start.line >= errow or nil
+                local torn = torn_of(defn, sp)
                 nodes[#nodes + 1] = { id = id, name = name,
                     kind = method and 'method' or 'function', file = file,
                     range = sp, order = sp.start.line, params = params,
@@ -3372,7 +3395,7 @@ function M.extract(root, opts)
                     seen_var[id] = true
                     local d = valn and (spec.litdata_types or {})[valn:type()]
                         and litval(valn, src, spec, 0) or nil
-                    local torn = errow and sp.start.line >= errow or nil
+                    local torn = torn_of(defn, sp)
                     nodes[#nodes + 1] = { id = id, name = name, kind = 'var',
                         file = file, range = sp, order = sp.start.line,
                         torn = torn,
@@ -3392,7 +3415,7 @@ function M.extract(root, opts)
             if defn and namen then
                 local name = node_text(namen, src):gsub('%s+', '')
                 local sp = pos_of(defn)
-                local torn = errow and sp.start.line >= errow or nil
+                local torn = torn_of(defn, sp)
                 if cat == 'proto' or cat == 'macrofn' then
                     local node = { name = name, kind = 'function',
                         id = ('%s::%s@%d'):format(file, name, sp.start.line),
@@ -3867,8 +3890,10 @@ function M.extract(root, opts)
         if snames[name] then return nil end
         local cands = exact[name]
         -- the stdlib TAIL gate guards the fallbacks below; an exact match
-        -- on a fully-qualified name (Engine::new) clears first
-        if not cands
+        -- on a fully-qualified name (Engine::new) clears first. Literal-
+        -- name languages (bash) have no qualification syntax at all — a
+        -- slashed fn like ble/bash/read must not vocab-die on tail `read`
+        if not cands and not (spec and spec.literal_names)
             and snames[name:match('([%w_%-]+)$') or ''] then
             return nil, nil, { rule = 'vocab' }
         end
@@ -3925,6 +3950,11 @@ function M.extract(root, opts)
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
             if name:sub(1, #pre) == pre then return nil end
         end
+        -- literal-name languages never tail-match: a bash command names
+        -- its function EXACTLY (slashes are just characters), so `split`
+        -- must not fuzzy-hit thousands of ble/string#split-style defs —
+        -- an unknown name is an external command, not a near-miss
+        if spec and spec.literal_names then return nil end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
         if tc then
@@ -4215,8 +4245,10 @@ function M.relink(data, touched)
         if snames[name] then return nil end
         local cands = exact[name]
         -- the stdlib TAIL gate guards the fallbacks below; an exact match
-        -- on a fully-qualified name (Engine::new) clears first
-        if not cands
+        -- on a fully-qualified name (Engine::new) clears first. Literal-
+        -- name languages (bash) have no qualification syntax at all — a
+        -- slashed fn like ble/bash/read must not vocab-die on tail `read`
+        if not cands and not (spec and spec.literal_names)
             and snames[name:match('([%w_%-]+)$') or ''] then
             return nil, nil, { rule = 'vocab' }
         end
@@ -4270,6 +4302,11 @@ function M.relink(data, touched)
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
             if name:sub(1, #pre) == pre then return nil end
         end
+        -- literal-name languages never tail-match: a bash command names
+        -- its function EXACTLY (slashes are just characters), so `split`
+        -- must not fuzzy-hit thousands of ble/string#split-style defs —
+        -- an unknown name is an external command, not a near-miss
+        if spec and spec.literal_names then return nil end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
         if tc then

@@ -3465,3 +3465,49 @@ test('bash: functions, command calls, source imports, vars + df', function ()
     ok(uses.CONF, '$CONF expansion is a use')
     vim.fn.delete(root, 'rf')
 end)
+
+test('bash: node-local torn — a parse error does not tear the file', function ()
+    -- the everything-after-first-error rule was calibrated on truncated
+    -- class contexts; bash defs have no enclosing context, and one exotic
+    -- construct tears 98% of testssl.sh (26k lines, error at 580) under
+    -- it. spec.torn_by_node: only defs whose OWN subtree errors are torn.
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('bash') then skip 'no bash parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local src = table.concat({
+        '#!/usr/bin/env bash',
+        'early() {',
+        '    echo ok',
+        '}',
+        'wreck() {', -- truncated def: the parse error
+        'late() {',
+        '    echo fine',
+        '}',
+        'caller() {',
+        '    late',
+        '}',
+    }, '\n')
+    local fd = assert(io.open(root .. '/big.sh', 'w')); fd:write(src); fd:close()
+    -- the test only means something while the grammar actually errors
+    -- here AND recovers late() as a real def
+    local p = vim.treesitter.get_string_parser(src, 'bash')
+    if not p:parse()[1]:root():has_error() then
+        vim.fn.delete(root, 'rf')
+        skip 'grammar parses the truncated def now'
+    end
+    local data = ts.extract(root)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do byname[n.name] = byname[n.name] or n end
+    -- structurally intact defs before AND after the error stay matchable;
+    -- the wreck either fails to extract or is torn — both honest
+    ok(byname.early and not byname.early.torn, 'def before the error is NOT torn')
+    ok(byname.late and not byname.late.torn, 'def after the error is NOT torn')
+    ok(not byname.wreck or byname.wreck.torn, 'the wreck never becomes matchable')
+    local linked
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'late' then linked = c.to == byname.late.id end
+    end
+    ok(linked, 'call past the error resolves (the cascade is gone)')
+    vim.fn.delete(root, 'rf')
+end)
