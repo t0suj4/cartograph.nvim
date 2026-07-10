@@ -19,7 +19,10 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 21 -- v21: typed strings v1 — argv distinguishes interpolated
+M.VERSION = 22 -- v22: js imports see CommonJS require('...') and dynamic
+              -- import('...') — node corpora gain their module graph
+              -- (a v21 cache lacks the edges);
+              -- v21: typed strings v1 — argv distinguishes interpolated
               -- strings (k='lit' means KNOWN; heads become k='concat',
               -- "$var" becomes k='local'), sink-typed calls carry c.strarg
               -- and eval heads ride c.traced;

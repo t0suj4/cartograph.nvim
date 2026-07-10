@@ -3695,3 +3695,34 @@ test('typed strings: eval head is the real callee (bash code sink)', function ()
     ok(linked, 'run -> ns/target edge exists through the eval')
     vim.fn.delete(root, 'rf')
 end)
+
+test('treesitter: js — require() and dynamic import() are import edges', function ()
+    if not has_parser('javascript') then skip 'no javascript parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/lib', 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('a.js', 'function apply() { return 1 }\nmodule.exports = { apply };\n')
+    put('lib/index.js', 'module.exports = { helper: () => 2 };\n')
+    put('b.js', table.concat({
+        "const a = require('./a');",         -- CommonJS, extensionless
+        "const lib = require('./lib');",     -- resolves lib/index.js
+        "const which = './a';",
+        "const dyn = require(which);",       -- computed: NO edge, no guess
+        "const two = require('./a', 'x');",  -- two args: not the require shape
+        'module.exports = () => a.apply();',
+    }, '\n'))
+    put('c.js', "export async function load() { return import('./a'); }\n")
+    local data = ts.extract(root)
+    local imp = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'import' then imp[e.from .. '>' .. e.to] = true end
+    end
+    ok(imp['b.js>a.js'], "require('./a') is an import edge")
+    ok(imp['b.js>lib/index.js'], "require('./lib') resolves index.js")
+    ok(imp['c.js>a.js'], "dynamic import('./a') is an import edge")
+    local n = 0
+    for _ in pairs(imp) do n = n + 1 end
+    eq(3, n) -- computed/two-arg requires produced nothing
+    vim.fn.delete(root, 'rf')
+end)

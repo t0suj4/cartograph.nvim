@@ -860,7 +860,19 @@ M.spec = {
             charAt = true,
             ['$emit'] = true, ['$on'] = true, ['$nextTick'] = true },
         litdata_types = { object = true, array = true },
-        import_query = [=[ (import_statement source: (string) @path) ]=],
+        -- ESM imports + CommonJS require + dynamic import(). require/import
+        -- match ONLY a lone string literal argument — computed paths stay
+        -- unresolved (honest frontier, not a guess). Predicates demand
+        -- iter_matches in the consumer (iter_captures ignores #eq?).
+        import_query = [=[
+            (import_statement source: (string) @path)
+            (call_expression
+                function: (identifier) @_fn (#eq? @_fn "require")
+                arguments: (arguments . (string) @path .))
+            (call_expression
+                function: (import)
+                arguments: (arguments . (string) @path .))
+        ]=],
         resolve_import = function (path, files, from)
             path = path:gsub('^["\']', ''):gsub('["\']$', '')
             local function norm(p) -- ./ and ../ segments
@@ -3556,11 +3568,16 @@ function M.extract(root, opts)
         if spec.import_query then
             q = parse_query(lang, spec.import_query)
             if q then
-                for id, n in q:iter_captures(tsroot, src, 0, -1) do
-                    if q.captures[id] == 'path' then
-                        local target = spec.resolve_import(node_text(n, src), fileset, file)
-                        if target and target ~= file then
-                            edges[#edges + 1] = { from = file, to = target, kind = 'import' }
+                -- iter_matches, not iter_captures: predicates (#eq?) only
+                -- apply to matches; iter_captures would yield raw captures
+                for _, match in q:iter_matches(tsroot, src, 0, -1) do
+                    for id, ns in pairs(match) do
+                        if q.captures[id] == 'path' then
+                            local target = spec.resolve_import(
+                                node_text(cap_node(ns), src), fileset, file)
+                            if target and target ~= file then
+                                edges[#edges + 1] = { from = file, to = target, kind = 'import' }
+                            end
                         end
                     end
                 end
