@@ -392,6 +392,11 @@ end
 -- present. elseif arms never claim set-once (the top condition is FALSE
 -- there). Everything unprovable stays class 1 — a named hedge, not a lie.
 
+-- scalar literal node types across the grammars (lua/php/js/python/java…)
+local SCALAR_LIT = { ['true'] = true, ['false'] = true, ['nil'] = true,
+    number = true, boolean = true, null = true, integer = true, float = true,
+    none = true, true_ = true, false_ = true }
+
 local IDXC = { dot_index_expression = true, bracket_index_expression = true,
     subscript_expression = true, member_access_expression = true,
     variable_name = true }
@@ -441,6 +446,55 @@ local function conj_abs(G, n, src, chain)
     return G.abs_test(n, src, chain)
 end
 
+-- param-name map of a fn node: name -> 1-based index (nil when no params)
+local function param_map(fnnode, src, pfield)
+    local ps = fnnode:field(pfield)[1]
+    if not ps then return nil end
+    local map, i = nil, 0
+    for ch in ps:iter_children() do
+        if ch:named() then
+            local nm
+            local t = ch:type()
+            if t == 'identifier' then nm = node_text(ch, src)
+            elseif t == 'simple_parameter' or t == 'variable_name'
+                or t == 'property_promotion_parameter' then
+                nm = node_text(ch, src):match('%$[%w_]+')
+            end
+            i = i + 1
+            if nm then
+                map = map or {}
+                map[nm] = i
+            end
+        end
+    end
+    return map
+end
+
+-- a bare param (or its negation) in CONJUNCT position: returns ±index.
+-- Sound in the SKIP direction only: "no write unless param i truthy" —
+-- additional conjuncts merely restrict further, they cannot fire a write.
+local function param_conj(G, n, src, params)
+    while n:type() == 'parenthesized_expression' do n = n:named_child(0) end
+    local t = n:type()
+    if t == G.binop and optext_is(n, src, G.andops) then
+        return param_conj(G, n:named_child(0), src, params)
+            or param_conj(G, n:named_child(1), src, params)
+    end
+    if t == G.negop then
+        local op = n:child(0)
+        if op and not op:named() and op:type() == G.negtok then
+            local x = n:named_child(0)
+            if x then
+                local i = params[node_text(x, src)]
+                if i then return -i end
+            end
+        end
+        return nil
+    end
+    local i = params[node_text(n, src)]
+    return i
+end
+
 local function guard_class(c, n, src, G)
     local top = chain_top(c, n)
     local chain -- LAZY: most writes never reach a text comparison
@@ -450,10 +504,11 @@ local function guard_class(c, n, src, G)
     end
     if G.rhs_setonce(top, src, ch) then return 2 end
     local class = 0
+    local conds, nc, negcond, fnnode
     local node, p = top, top:parent()
     while p do
         local pt = p:type()
-        if G.fn[pt] then break end
+        if G.fn[pt] then fnnode = p break end
         if G.cond[pt] then
             -- the condition is the first named child in both grammars
             -- (field() allocates a result table per call — this loop is
@@ -464,13 +519,33 @@ local function guard_class(c, n, src, G)
                 local at = node:type()
                 if at == G.else_t then
                     if G.presence(cond, src, ch()) then return 2 end
+                    negcond = negcond or cond
                 elseif at ~= G.elseif_t then
                     if conj_abs(G, cond, src, ch()) then return 2 end
+                    nc = (nc or 0) + 1
+                    conds = conds or {}
+                    conds[nc] = cond
                 end
             end
         end
         node = p
         p = p:parent()
+    end
+    -- the param predicate (gp): only when guarded, not set-once, in a fn
+    if class == 1 and fnnode then
+        local params = param_map(fnnode, src, G.pfield)
+        if params then
+            for i = 1, nc or 0 do
+                local gp = param_conj(G, conds[i], src, params)
+                if gp then return 1, gp end
+            end
+            if negcond then -- else-arm: the whole condition, negated
+                local x = negcond
+                while x:type() == 'parenthesized_expression' do x = x:named_child(0) end
+                local i = params[node_text(x, src)]
+                if i then return 1, -i end
+            end
+        end
     end
     return class
 end
@@ -485,6 +560,7 @@ local LUA_GUARDS = {
     else_t = 'else_statement', elseif_t = 'elseif_statement',
     fn = { function_declaration = true, function_definition = true },
     binop = 'binary_expression', andops = { ['and'] = true },
+    negop = 'unary_expression', negtok = 'not', pfield = 'parameters',
     -- `not X` / `X == nil` / `nil == X`, X the written chain
     abs_test = function (n, src, chain)
         local t = n:type()
@@ -551,6 +627,7 @@ local PHP_GUARDS = {
     fn = { function_definition = true, method_declaration = true,
         anonymous_function_creation_expression = true, arrow_function = true },
     binop = 'binary_expression', andops = { ['&&'] = true, ['and'] = true },
+    negop = 'unary_op_expression', negtok = '!', pfield = 'parameters',
     -- `!isset(X)` / `empty(X)` / `!X` / `X === null` / `null === X`
     abs_test = function (n, src, chain)
         local t = n:type()
@@ -3066,7 +3143,8 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
     local scopes = spec.scopes
     local idt = spec.mention_types or MENTION_ID
     local wgate, is_write, guards = spec.write_gate, spec.is_write, spec.guards
-    local wq, wqn = {}, 0 -- queued write mentions: (node, parent, flag slot)
+    local wq, wqn = {}, 0 -- queued write mentions: (node, parent, flag slot, ordinal)
+    local nm = buf.nm or 0 -- mention ordinal (continues across region calls)
     local dfid = spec.df_ids
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
@@ -3216,6 +3294,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                 if not simple then flags = flags + MF_RANGE end
                 local iswrite = wgate and wgate[nt] and is_write(c, n)
                 if iswrite then flags = flags + MF_WRITE end
+                nm = nm + 1
                 vput(parts, idx)
                 vput(parts, sr)
                 vput(parts, sc)
@@ -3224,7 +3303,8 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                     -- classify OUT OF LINE (its loops would break the JIT
                     -- trace of this hot loop): queue node + flag-slot index
                     wqn = wqn + 1
-                    wq[wqn * 3 - 2], wq[wqn * 3 - 1], wq[wqn * 3] = c, n, #parts
+                    local b = wqn * 4
+                    wq[b - 3], wq[b - 2], wq[b - 1], wq[b] = c, n, #parts, nm
                 end
                 if not simple then
                     vput(parts, er)
@@ -3291,13 +3371,23 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
         end
     end
     walk(tsroot, false, true)
+    buf.nm = nm
     -- the deferred guard classification: a tight monomorphic loop, the
-    -- flag byte patched in place (each flag is its own parts slot)
+    -- flag byte patched in place (each flag is its own parts slot). The
+    -- param predicate (±index) can't ride the FULL flag byte — it ships
+    -- as flat (ordinal, gp) pairs on the buffer (JSON-safe for workers).
     for i = 1, wqn do
-        local g = guard_class(wq[i * 3 - 2], wq[i * 3 - 1], src, guards)
+        local b = i * 4
+        local g, gp = guard_class(wq[b - 3], wq[b - 2], src, guards)
         if g > 0 then
-            local slot = wq[i * 3]
+            local slot = wq[b - 1]
             parts[slot] = string.char(parts[slot]:byte() + g * MF_GW)
+        end
+        if gp then
+            local l = buf.gp
+            if not l then l = {}; buf.gp = l end
+            l[#l + 1] = wq[b]
+            l[#l + 1] = gp
         end
     end
 end
@@ -3319,6 +3409,12 @@ local function reduce_mentions(file, buf, L)
     end
     local useEdge, regEdge = {}, {}
     local wmode = buf.wmode
+    local gpmap
+    if buf.gp then
+        gpmap = {}
+        for i = 1, #buf.gp, 2 do gpmap[buf.gp[i]] = buf.gp[i + 1] end
+    end
+    local ord = 0
     local m = buf.m
     local i, len = 1, #m
     while i <= len do
@@ -3328,6 +3424,7 @@ local function reduce_mentions(file, buf, L)
         sc, i = vget(m, i)
         flags = m:byte(i)
         i = i + 1
+        ord = ord + 1
         local name = names[idx]
         local er, ec = sr, sc + #name
         local gw = 0
@@ -3419,11 +3516,20 @@ local function reduce_mentions(file, buf, L)
                         if write then
                             local g = gw + 1
                             if not e.gw or g < e.gw then e.gw = g end
+                            -- param predicate: kept only when EVERY write
+                            -- agrees on the same ±param index (false = dead)
+                            local gp = gpmap and gpmap[ord]
+                            if e.gp == nil then e.gp = gp or false
+                            elseif gp ~= e.gp then e.gp = false end
                         end
                     end
                 end
             end
         end
+    end
+    -- a dead param predicate (conflicting/unguarded writes) reads as absent
+    for _, e in pairs(useEdge) do
+        if e.gp == false then e.gp = nil end
     end
     -- the per-file identifier NAME SET (the mention index): what lets a
     -- later splice answer "which files mention this global?" without a
@@ -4156,6 +4262,12 @@ function M.extract(root, opts)
                                     args[#args + 1] = v
                                     argv[#argv + 1] = { k = 'lit', v = v }
                                 end
+                            elseif SCALAR_LIT[t] then
+                                -- boolean/nil/number literals: the FLAG
+                                -- pattern (f(x, true)) — dischargeable
+                                -- against param-guarded writes (e.gp)
+                                args[#args + 1] = ''
+                                argv[#argv + 1] = { k = 'scalar', v = node_text(a, src) }
                             elseif t == 'identifier' then
                                 args[#args + 1] = ''
                                 argv[#argv + 1] = { k = 'local', name = node_text(a, src),

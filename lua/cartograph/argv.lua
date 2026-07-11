@@ -22,9 +22,9 @@ local M = {}
 
 -- kind enum (the k column); 0 = absent slot
 M.K = { lit = 1, concat = 2, ['local'] = 3, func = 4, callable = 5,
-    expr = 6, spread = 7 }
+    expr = 6, spread = 7, scalar = 8 }
 M.KNAME = { [0] = nil, 'lit', 'concat', 'local', 'func', 'callable',
-    'expr', 'spread' }
+    'expr', 'spread', 'scalar' }
 
 -- ── dual-mode accessor ───────────────────────────────────────────────────
 -- number of args on call `c`

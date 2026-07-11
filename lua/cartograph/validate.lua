@@ -33,6 +33,9 @@ M.EDGE_FIELDS = {
     rw = true, -- the write axis (use edges): 1 read / 2 write / 3 both
     gw = true, -- guard chain of the writes: 1 some-unguarded / 2 all-guarded
                -- / 3 all-set-once (absence-guarded: commutative)
+    gp = true, -- param predicate: ALL writes fire only when param |gp| is
+               -- truthy (gp>0) / falsy (gp<0) — dischargeable per call site
+               -- against argv literals (skip direction only)
 }
 M.CALL_FIELDS = {
     callee = true, full = true, file = true, line = true, at = true,

@@ -19,7 +19,12 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 26 -- v26: GUARD SUMMARIES — write occurrences classify their
+M.VERSION = 27 -- v27: PARAM PREDICATES + scalar argv — use edges carry gp
+               -- (±param index: all writes fire only when that param is
+               -- truthy/falsy; skip-direction sound), argv classifies
+               -- boolean/nil/number literals as k='scalar' (dischargeable
+               -- flags); a v26 cache lacks both;
+               -- v26: GUARD SUMMARIES — write occurrences classify their
                -- guard (unguarded/guarded/SET-ONCE, AST-hardened conjunct-
                -- sound absence tests + else-arm + or/??= idioms); use edges
                -- carry gw = min over writes; a v25 cache lacks it;
