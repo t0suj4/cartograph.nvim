@@ -302,9 +302,87 @@ local function java_var_type(ident, from, fields_only)
     end
 end
 
+-- WRITE-position classifiers (the write axis, rung 1: syntactic). A mention
+-- is a WRITE when it sits anywhere on an assignment-target chain: the base
+-- is MUTATED, the final field ASSIGNED, intermediates mutated too — all
+-- writes in the "does this fn change state reachable through this name"
+-- sense the use edge answers. Bracket KEYS are reads:
+--   x = v          x writes            state.x = 1    state AND x write
+--   t[k] = v       t writes, k reads   a.b.c = v      a, b, c all write
+-- Policy per language, called from collect_mentions only when the mention's
+-- parent type is in spec.write_gate (zero cost on the read-heavy common
+-- path). Languages without a classifier ship no mode — absent, not wrong.
+
+local function lua_is_write(c, n)
+    local cur, p = c, n
+    while true do
+        local pt = p:type()
+        if pt == 'dot_index_expression' then
+            -- both base and field ride the write path
+        elseif pt == 'bracket_index_expression' then
+            if p:named_child(0) ~= cur then return false end -- key = a read
+        else
+            break
+        end
+        cur = p
+        p = p:parent()
+        if not p then return false end
+    end
+    if p:type() ~= 'variable_list' then return false end
+    local asg = p:parent()
+    if not asg or asg:type() ~= 'assignment_statement' then return false end
+    local wrap = asg:parent() -- `local x = v` BINDS a name, writes nothing
+    return not (wrap and wrap:type() == 'variable_declaration')
+end
+
+local function php_is_write(c, n)
+    local cur, p = c, n
+    if p:type() == 'variable_name' then      -- $x: unwrap the sigil
+        cur, p = p, p:parent()
+    elseif p:type() ~= 'member_access_expression' then
+        return false                          -- ->name rides the chain below
+    end
+    while p do
+        local pt = p:type()
+        if pt == 'subscript_expression' then
+            if p:named_child(0) ~= cur then return false end -- key = a read
+            cur, p = p, p:parent()
+        elseif pt == 'member_access_expression' then
+            cur, p = p, p:parent() -- object and field both ride the chain
+        elseif pt == 'assignment_expression'
+            or pt == 'augmented_assignment_expression'
+            or pt == 'reference_assignment_expression' then
+            return p:named_child(0) == cur
+        elseif pt == 'update_expression' then -- $x++ / --$x
+            return true
+        elseif pt == 'unset_statement' then
+            return true
+        elseif pt == 'by_ref' then            -- foreach ($a as &$v): $v aliases
+            return true
+        elseif pt == 'foreach_statement' then
+            -- the ITERATED array is written only when iterated by reference
+            if p:named_child(0) ~= cur then return false end
+            for ch in p:iter_children() do
+                if ch:type() == 'by_ref' then return true end
+            end
+            return false
+        elseif pt == 'list_literal' then      -- list($a, $b) = f()
+            local gp = p:parent()
+            return gp ~= nil and gp:type() == 'assignment_expression'
+                and gp:named_child(0) == p
+        else
+            return false                      -- a plain read context
+        end
+    end
+    return false
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
+        write_gate = { variable_list = true, dot_index_expression = true,
+            bracket_index_expression = true },
+        is_write = lua_is_write,
         scopes = LUA_SCOPES, -- lexical-first id pass (scope-model step 3)
         functions = [[
             (function_declaration name: (_) @name) @def
@@ -910,6 +988,8 @@ M.spec = {
     },
     php = {
         exts = { 'php' },
+        write_gate = { variable_name = true, member_access_expression = true },
+        is_write = php_is_write,
         -- typed-string SINKS (typed-strings v1): the API contract types
         -- the arg — CONFIDENT, unlike content sniffing (~ by design)
         string_sinks = {
@@ -2708,13 +2788,17 @@ local MF_CALLEE = 2   -- call position (the call pass already owns it)
 local MF_BOUND = 4    -- lexically bound at the use site (scope stack)
 local MF_SCOPED = 8   -- collected under a spec WITH a scope model
 local MF_RANGE = 16   -- token isn't single-line name-width: explicit end follows
+local MF_WRITE = 32   -- write position (last name segment of an assign target)
 
 -- the buffer must SHIP (worker chunk, binary codec): no spec table (it
 -- holds functions), just the two spec facts the reduce needs
 local function mention_buf(spec)
     return { names = {}, nidx = {}, ok = {}, parts = {}, n = 0,
         fnrefs = spec.id_fn_refs ~= false,
-        noindex = spec.name_index == false }
+        noindex = spec.name_index == false,
+        -- a write classifier ran: use edges may carry rw. Absent = the
+        -- language ships NO mode (unknown), never a claimed "read".
+        wmode = spec.is_write ~= nil or nil }
 end
 
 --- One DFS over a phase-1 tree: pack identifier occurrences (with
@@ -2732,6 +2816,7 @@ end
 local function collect_mentions(buf, tsroot, src, spec, dfreg)
     local scopes = spec.scopes
     local idt = spec.mention_types or MENTION_ID
+    local wgate, is_write = spec.write_gate, spec.is_write
     local dfid = spec.df_ids
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
@@ -2879,6 +2964,9 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                     + (callee and MF_CALLEE or 0) + (bound and MF_BOUND or 0)
                 local simple = er == sr and ec == sc + #name
                 if not simple then flags = flags + MF_RANGE end
+                if wgate and wgate[nt] and is_write(c, n) then
+                    flags = flags + MF_WRITE
+                end
                 vput(parts, idx)
                 vput(parts, sr)
                 vput(parts, sc)
@@ -2966,6 +3054,7 @@ local function reduce_mentions(file, buf, L)
         return best and best.id
     end
     local useEdge, regEdge = {}, {}
+    local wmode = buf.wmode
     local m = buf.m
     local i, len = 1, #m
     while i <= len do
@@ -2977,6 +3066,11 @@ local function reduce_mentions(file, buf, L)
         i = i + 1
         local name = names[idx]
         local er, ec = sr, sc + #name
+        local write
+        if flags >= MF_WRITE then
+            write = true
+            flags = flags - MF_WRITE
+        end
         if flags >= MF_RANGE then
             flags = flags - MF_RANGE
             er, i = vget(m, i)
@@ -3042,6 +3136,15 @@ local function reduce_mentions(file, buf, L)
                     end
                     e.at[#e.at + 1] = { start = { line = sr, char = sc },
                         ['end'] = { line = er, char = ec } }
+                    -- the write axis: 1 read / 2 write / 3 both, OR of the
+                    -- edge's occurrences — only where a classifier ran
+                    -- (buf.wmode); elsewhere mode stays ABSENT, never "read"
+                    if wmode then
+                        local mode = write and 2 or 1
+                        if e.rw ~= mode and e.rw ~= 3 then
+                            e.rw = e.rw and 3 or mode
+                        end
+                    end
                 end
             end
         end

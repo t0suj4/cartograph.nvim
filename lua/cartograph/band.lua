@@ -41,6 +41,10 @@ function Band:n_registrants(id) return #self:registrants(id) end
 -- (Backends implement _tier; the sugar keeps the ref-graph default.)
 function Band:tier(from, to) return self:_tier(from, to) end
 
+-- ACCESS MODE of a use edge (the write axis): 'read' | 'write' | 'both' |
+-- nil (no edge, or the language shipped no classifier — mode unknown)
+function Band:rw(from, to) return self:_rw(from, to) end
+
 -- ── store backend: the wide forward/backward index tables ────────────────
 local StoreBand = setmetatable({}, { __index = Band })
 StoreBand.__index = StoreBand
@@ -75,6 +79,15 @@ function StoreBand:_tier(from, to)
     if self.store.edge_tinf and self.store.edge_tinf[k] then return 'type-inferred' end
     return self.store.edge_inferred[k] and 'inferred' or 'confident'
 end
+local RW_NAME = { 'read', 'write', 'both' }
+function StoreBand:_rw(from, to)
+    local vu = self.store.var_uses and self.store.var_uses[from]
+    if not vu then return nil end
+    for i = 1, #vu do
+        if vu[i].to == to then return RW_NAME[vu[i].rw] end
+    end
+    return nil
+end
 
 function M.from_store(store)
     return setmetatable({ store = store }, StoreBand)
@@ -107,6 +120,12 @@ function FoldBand:_tier(from, to)
     local s, o = f.it.get(from), f.it.get(to)
     if not s or not o then return nil end
     return f:tier(s, o, fold_mod.PRED.ref)
+end
+function FoldBand:_rw(from, to)
+    local f = self.fold
+    local s, o = f.it.get(from), f.it.get(to)
+    if not s or not o then return nil end
+    return f:rw(s, o)
 end
 
 function M.from_fold(fold)

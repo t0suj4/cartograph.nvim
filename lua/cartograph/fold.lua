@@ -30,12 +30,16 @@ M.PRED_NAME = { [0] = 'ref', 'use', 'reg', 'import', 'refused' }
 -- name-matched ~ hypothesis are indistinguishable, and invariant #3 (uniform
 -- honesty) dies at the fold boundary. Layout, tier space RESERVED for the VM:
 --   bit 0 (0x01)  INFERRED  — the ~ tier (name-matched, not confident)
---   bits 1-3      REFUSAL RULE (refused rows) — see M.RULE
+--   bits 1-3      PREDICATE-SCOPED: refused rows carry the REFUSAL RULE
+--                 (M.RULE); use rows carry RW (1 read / 2 write / 3 both,
+--                 0 = no classifier ran, mode unknown). Unambiguous by
+--                 pred: a use row is never a refused row.
 --   bit 4  (0x10) TYPE_INFERRED — the graph-VM resolved it via a return-type
 --                 summary (the honesty ladder's middle rung, stronger than ~)
 --   bit 5  RESERVED for the VM ladder (runtime-confirmed)
 --   bits 6-7 RESERVED for provenance (which pass set it)
 M.FLAG = { INFERRED = 1, TYPE_INFERRED = 16 }
+M.RW_NAME = { 'read', 'write', 'both' } -- rw 1/2/3; 0/absent = unclassified
 M.RULE = { none = 0, ambiguous = 1, blocked = 2, vocab = 3,
     aperture = 4, samefile = 5, other = 6 }
 M.RULE_NAME = { [0] = 'none', 'ambiguous', 'blocked', 'vocab',
@@ -144,6 +148,19 @@ function Fold:tier(subj, obj, pred)
     return nil
 end
 
+-- the access mode of a use edge subj→obj: 'read' | 'write' | 'both' | nil
+-- (nil = no such edge, or the language shipped no classifier — unknown,
+-- never a claimed "read"). O(out-degree) point query, like tier().
+function Fold:rw(subj, obj)
+    local lo, hi = self:subj_span(subj)
+    for r = lo, hi - 1 do
+        if self.obj[r + 1] == obj and self.pred[r + 1] == M.PRED.use then
+            return M.RW_NAME[floor(self.flag[r + 1] / 2) % 8]
+        end
+    end
+    return nil
+end
+
 -- the refusal rules at `subj` (frontier facts): a list of rule NAMES, the
 -- honest "what did we decline to resolve here, and why"
 function Fold:refusals(subj)
@@ -186,7 +203,9 @@ function M.build(data)
         if p and e.from and e.to then
             emit(e.from, p, e.to,
                 (e.inferred and M.FLAG.INFERRED or 0)
-                + (e.tinf and M.FLAG.TYPE_INFERRED or 0))
+                + (e.tinf and M.FLAG.TYPE_INFERRED or 0)
+                -- the write axis rides the rule region on use rows
+                + (p == M.PRED.use and e.rw and e.rw * RULE_SHIFT or 0))
         else
             skipped_edge = skipped_edge + 1
         end

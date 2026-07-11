@@ -30,6 +30,7 @@ M.EDGE_FIELDS = {
     -- trust tiers: type-inferred (graph-VM), oracle proven/xlang,
     -- runtime-confirmed (session-live overlay, self://loaded / MCP)
     tinf = true, proven = true, xlang = true, conf = true,
+    rw = true, -- the write axis (use edges): 1 read / 2 write / 3 both
 }
 M.CALL_FIELDS = {
     callee = true, full = true, file = true, line = true, at = true,

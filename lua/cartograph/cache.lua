@@ -19,7 +19,10 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 24 -- v24: type-inferred TIER — graph-VM return-type-resolved
+M.VERSION = 25 -- v25: the WRITE AXIS — lua/php use edges carry rw
+               -- (1 read / 2 write / 3 both; ABSENT = no classifier ran,
+               -- mode unknown); a v24 cache lacks the mode;
+               -- v24: type-inferred TIER — graph-VM return-type-resolved
                -- calls/edges carry tinf (the honesty ladder's middle rung,
                -- fold flag bit 4); a v23 cache lacks the distinction;
                -- v23: kwargs classified — argv entries carry kw=<name>
