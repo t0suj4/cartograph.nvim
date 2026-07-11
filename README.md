@@ -768,9 +768,14 @@ checks luacheck can't:
   which keeps it silent on parameterised/ORM code (mantis, sylius, grocy: 0).
   Sanitisers: casts/coercion, parameterisation (`bindValue`, prepared
   placeholders), escapes. On DVWA the low/impossible gradient falls out cleanly
-  — low fires, impossible (prepared + `bindParam`) stays silent. Still `~`: the
-  sink is a hypothesis, and a same-scope-only tracer misses cross-function and
-  session flows (reachability = rung 2).
+  — low fires, impossible (prepared + `bindParam`) stays silent. Sources are
+  superglobals **plus framework request inputs** (a controller action — one
+  `Request`-typed param — has its `Request` and route-`array` params treated as
+  external). And a value **validated by a guard** (`IsIsoDate`, `filter_var`,
+  `is_numeric`, …) is sanitised — so grocy's `Spendings` fires on its
+  *unguarded* `product_group` concat while its `IsIsoDate`-guarded date path
+  stays silent, in the same method. Still `~`: the sink is a hypothesis, and a
+  same-scope tracer misses cross-function and session flows.
 
 Structural smells, not proofs — dynamically-invoked functions (event handlers,
 test cases run by a harness) can still read as "no caller". Rules live in

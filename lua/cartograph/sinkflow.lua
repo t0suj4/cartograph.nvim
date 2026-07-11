@@ -33,6 +33,25 @@
 -- distinction is what keeps it quiet on grocy/mantis/sylius). Sanitizers as
 -- rung 0 + scalar casts. Validated on DVWA: the sqli low/impossible gradient
 -- (low fires, impossible silent); grocy/mantis/sylius 0.
+--
+-- RUNG 1.5: guard sanitizers (a value validated by IsIsoDate/filter_var/
+-- is_numeric/… in scope is sanitized) + FRAMEWORK request sources (a
+-- controller action — a *Request*-typed param — treats its Request + array
+-- params as external input). Together they let framework flows be found
+-- without regressing the guarded precision pole (grocy Spendings: the
+-- IsIsoDate-guarded start_date is suppressed, the UNGUARDED product_group
+-- fires — the guard model validated both ways in one method).
+--
+-- RUNG 2 (inter-procedural cross-function taint) is NOT here: a standalone
+-- re-parse prototype worked (confirmed grocy's keystone: route arg ->
+-- GetProductStockLocations -> sink) but re-derived the resolved call graph,
+-- types, and SCC fixpoint the graph-VM + effects.summaries already own — to be
+-- re-founded on that substrate (resolved c.to + scc.lua + VM types; embedding
+-- shape as EXTRACTED facts). See [[cartograph-taint-analysis]].
+--
+-- The sink hypothesis (sink_reason) is EXACT (SQL_METHODS + *query suffix + DB
+-- receiver): substring matching mismatches non-SQL names (print_date_selection_set,
+-- shell_exec) — measured on mantis (1887 fns).
 
 local M = {}
 
@@ -216,18 +235,24 @@ function M.candidates(store)
     return out
 end
 
+-- SQL sink callees, EXACT (lowercased). Substring matching ('select'/'where'
+-- as fragments) matches UI/helper names (print_date_selection_set) — measured
+-- FP source on mantis (1887 fns). Exact also excludes shell_exec/system
+-- cleanly (command injection ≠ SQL).
+-- Suffix `*query` catches the wrapper family (ExecuteDbQuery, rawQuery).
+local SQL_METHODS = {
+    query = true, exec = true, execute = true, prepare = true,
+    where = true, having = true, orwhere = true, andwhere = true,
+    wherein = true, whereraw = true, executestatement = true,
+    executedbstatement = true, mysqli_query = true, mysql_query = true,
+    pg_query = true, sqlite_query = true, db_query = true,
+}
+
 -- the `~`-tier sink hypothesis: returns the reason string, or nil
 local function sink_reason(c)
     local cl = c.callee:lower()
-    -- 'execute' not bare 'exec': keeps ExecuteDb*/PDOStatement::execute but
-    -- excludes shell_exec/exec/system (command injection is a DIFFERENT sink
-    -- class — don't mislabel it SQL)
-    if cl:find('query') or cl:find('execute') or cl:find('where')
-        or cl:find('prepare') or cl:find('select') then
+    if SQL_METHODS[cl] or cl:find('query$') or cl:find('_query$') then
         return ("method '%s'"):format(c.callee)
-    end
-    if c.prefix and c.prefix:match('[=<>!]=?%s*$') then
-        return 'SQL-fragment (concat ends on a dangling operator)'
     end
     local r = c.receiver and c.receiver:lower()
     if r and (r:find('database') or r:find('->db') or r:find('pdo')) then
@@ -332,42 +357,121 @@ local function embedded_at(v, root)
     return false
 end
 
--- unsanitized taint carried into `node`: { src, embedded } or nil. `embedded`
--- is true when the taint reaches `node` inside SQL-carrying string text
--- (here, or inherited transitively). A ref bound/escaped by a parameterizer
--- or scalar cast is not raw.
-local function embed_witness(node, src, tainted)
+local CALLTYPES = { 'member_call_expression', 'function_call_expression',
+    'scoped_call_expression' }
+
+-- ── rung 1.5: framework request sources + guard sanitizers ──────────────────
+
+-- ENTRY-POINT sources: a controller-action method (one param typed *Request*)
+-- treats its Request param + any array params (Slim/PSR route args, e.g.
+-- $args['id']) as external input — the portable framework-source shape.
+local function entry_sources(fnnode, src)
+    local fp
+    for c in fnnode:iter_children() do
+        if c:type() == 'formal_parameters' then fp = c break end
+    end
+    if not fp then return nil end
+    local ps, hasreq = {}, false
+    for p in fp:iter_children() do
+        if p:named() and p:type() == 'simple_parameter' then
+            local ty, nm = txt(p, src):match('^%s*%??%s*([%w_\\]+)%s+%$([%w_]+)')
+            if nm then
+                ps[#ps + 1] = { name = nm, ty = ty }
+                if ty and ty:lower():find('request') then hasreq = true end
+            end
+        end
+    end
+    if not hasreq then return nil end
+    local seed = {}
+    for _, p in ipairs(ps) do
+        if p.ty and (p.ty:lower():find('request') or p.ty:lower() == 'array') then
+            seed[p.name] = { origin = '$' .. p.name .. ' (request)', embedded = false }
+        end
+    end
+    return next(seed) and seed or nil
+end
+
+-- GUARD sanitizers: an expression passed to a validator is checked — the
+-- classic guard (grocy's Spendings uses IsIsoDate / filter_var). Scope-level
+-- set of the validated expressions' normalized text; an access whose text is
+-- in it is treated as sanitized. Key-based, so it distinguishes Spendings
+-- (validates its inputs) from ProductStockLocations (does not).
+local VALIDATORS = { isisodate = true, isisodatetime = true, filter_var = true,
+    is_numeric = true, is_int = true, ctype_digit = true, ctype_alnum = true,
+    preg_match = true, in_array = true, intval = true }
+
+local function normtext(node, src) return (txt(node, src):gsub('%s+', '')) end
+
+local function validated_set(scope, src)
+    local set = {}
+    for _, call in ipairs(collect_scoped(scope, CALLTYPES)) do
+        local namef = call:field('name')[1] or call:field('function')[1]
+        local cn = namef and txt(namef, src):lower()
+        if cn and VALIDATORS[cn] then
+            local argsn = call:field('arguments')[1]
+            if argsn then
+                for arg in argsn:iter_children() do
+                    if arg:named() and arg:type() == 'argument' then
+                        set[normtext(arg:named_child(0) or arg, src)] = true
+                    end
+                end
+            end
+        end
+    end
+    return set
+end
+
+-- outermost access expression (subscript / member chain) around `v`
+local function access_expr(v)
+    local top, p = v, v:parent()
+    while p and (p:type() == 'subscript_expression'
+        or p:type() == 'member_access_expression'
+        or p:type() == 'member_call_expression'
+        or p:type() == 'scoped_call_expression') do
+        top = p; p = p:parent()
+    end
+    return top
+end
+
+-- unsanitized taint carried into `node`: { origin, embedded } or nil.
+-- `origin` is a request-source string ('$_GET') OR, when seeded from params,
+-- a param INDEX number. `embedded` = the taint reaches `node` inside
+-- SQL-carrying string text (here, or inherited). A ref bound/escaped by a
+-- parameterizer or scalar cast is not raw.
+local function embed_witness(node, src, tainted, validated)
     local best
     for _, v in ipairs(collect(node, { 'variable_name' })) do
-        if not protected_ref(v, node, src) and not cast_ancestor(v, node, src) then
+        if not protected_ref(v, node, src) and not cast_ancestor(v, node, src)
+            and not (validated and validated[normtext(access_expr(v), src)]) then
             local nm = txt(v, src):gsub('^%$', '')
-            local base = SOURCES[nm] and { src = '$' .. nm, embedded = false }
+            local base = SOURCES[nm] and { origin = '$' .. nm, embedded = false }
                 or tainted[nm]
             if base then
                 local emb = base.embedded or embedded_at(v, node)
-                if emb then return { src = base.src, embedded = true } end
-                best = best or { src = base.src, embedded = false }
+                if emb then return { origin = base.origin, embedded = true } end
+                best = best or { origin = base.origin, embedded = false }
             end
         end
     end
     return best
 end
 
--- forward taint over one scope's own assignments (fixpoint; carries the root
--- source AND whether it has been embedded in SQL string text yet)
-local function scope_taint(scope, src)
+-- forward taint over one scope's own assignments (fixpoint). `seed` pre-taints
+-- names (entry_sources seeds a controller action's request/route params).
+local function scope_taint(scope, src, seed, validated)
+    local tainted = {}
+    if seed then for k, v in pairs(seed) do tainted[k] = v end end
     local assigns = collect_scoped(scope,
         { 'assignment_expression', 'augmented_assignment_expression' })
-    local tainted, changed = {}, true
+    local changed = true
     while changed do
         changed = false
         for _, a in ipairs(assigns) do
             local lhs, rhs = a:field('left')[1], a:field('right')[1]
             if lhs and rhs and lhs:type() == 'variable_name' then
                 local nm = txt(lhs, src):gsub('^%$', '')
-                local w = embed_witness(rhs, src, tainted)
+                local w = embed_witness(rhs, src, tainted, validated)
                 local cur = tainted[nm]
-                -- monotone: take taint, and upgrade to embedded if newly so
                 if w and (not cur or (w.embedded and not cur.embedded)) then
                     tainted[nm] = w; changed = true
                 end
@@ -377,10 +481,10 @@ local function scope_taint(scope, src)
     return tainted
 end
 
-local function scope_findings(scope, src, file, out)
-    local tainted = scope_taint(scope, src)
-    for _, call in ipairs(collect_scoped(scope,
-        { 'member_call_expression', 'function_call_expression', 'scoped_call_expression' })) do
+local function scope_findings(scope, src, file, out, seed)
+    local validated = validated_set(scope, src)
+    local tainted = scope_taint(scope, src, seed, validated)
+    for _, call in ipairs(collect_scoped(scope, CALLTYPES)) do
         local namef = call:field('name')[1] or call:field('function')[1]
         local callee = namef and txt(namef, src) or '?'
         local objf = call:field('object')[1]
@@ -389,12 +493,12 @@ local function scope_findings(scope, src, file, out)
             receiver = objf and txt(objf, src) or nil }) then
             for arg in argsn:iter_children() do
                 if arg:named() and arg:type() == 'argument' then
-                    local w = embed_witness(arg:named_child(0) or arg, src, tainted)
+                    local w = embed_witness(arg:named_child(0) or arg, src, tainted, validated)
                     -- only STRING-EMBEDDED taint is injection; a bare tainted
                     -- value passed standalone is a bound parameter
-                    if w and w.embedded then
+                    if w and w.embedded and type(w.origin) == 'string' then
                         out[#out + 1] = { file = file, line = select(1, call:range()) + 1,
-                            source = w.src, callee = callee }
+                            source = w.origin, callee = callee }
                         break -- one finding per sink call
                     end
                 end
@@ -403,9 +507,7 @@ local function scope_findings(scope, src, file, out)
     end
 end
 
---- Lint findings: a request source reaches a SQL sink, unsanitized (rung 1).
-function M.source_findings(store)
-    local out = {}
+local function each_php(store, fn)
     for _, file in ipairs(store.files or {}) do
         if file:match('%.php$') then
             local path = store.abs(file)
@@ -413,19 +515,24 @@ function M.source_findings(store)
             if lines then
                 local s = table.concat(lines, '\n')
                 local ok, parser = pcall(vim.treesitter.get_string_parser, s, 'php')
-                if ok and parser then
-                    local root = parser:parse()[1]:root()
-                    -- top-level scope (function-less scripts) + each function
-                    local scopes = { root }
-                    for _, fn in ipairs(collect(root,
-                        { 'function_definition', 'method_declaration' })) do
-                        scopes[#scopes + 1] = fn
-                    end
-                    for _, sc in ipairs(scopes) do scope_findings(sc, s, file, out) end
-                end
+                if ok and parser then fn(file, s, parser) end
             end
         end
     end
+end
+
+--- Lint findings: a request source reaches a SQL sink, unsanitized (rung 1).
+function M.source_findings(store)
+    local out = {}
+    each_php(store, function (file, s, parser)
+        local root = parser:parse()[1]:root()
+        scope_findings(root, s, file, out) -- top-level: superglobals only
+        for _, fn in ipairs(collect(root,
+            { 'function_definition', 'method_declaration' })) do
+            -- controller-action params (Request / route args) as sources too
+            scope_findings(fn, s, file, out, entry_sources(fn, s))
+        end
+    end)
     local fs = {}
     for _, c in ipairs(out) do
         fs[#fs + 1] = { file = store.abs(c.file), line = c.line,

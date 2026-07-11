@@ -114,3 +114,30 @@ test('sink-source: request source interpolated into a sink fires; bound/prepared
     ok(fs[1].file:find('low.php', 1, true), 'the one finding is low.php')
     ok(fs[1].message:find('mysqli_query', 1, true))
 end)
+
+test('sink-source: guard-validated input is sanitized; unguarded fires (rung 1.5)', function ()
+    if not ready() then skip 'no php parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    -- one controller action, two request inputs: one guarded, one not — the
+    -- grocy Spendings shape (framework source + guard sanitizer)
+    write(root, 'C.php', table.concat({
+        '<?php',
+        'use Psr\\Http\\Message\\ServerRequestInterface as Request;',
+        'class C {',
+        '  public function act(Request $request, $response, array $args) {',
+        '    $d = $request->getQueryParams()[\'d\'];',
+        '    if (IsIsoDate($request->getQueryParams()[\'d\'])) {',    -- guarded
+        '      $w = "date = \'$d\'";',
+        '      $this->db->query("SELECT * FROM t WHERE $w");',        -- must NOT fire
+        '    }',
+        '    $g = $args[\'group\'];',                                 -- route arg, unguarded
+        '    $this->db->query("SELECT * FROM t WHERE g = $g");',      -- FIRES
+        '  }',
+        '}',
+    }, '\n'))
+    store.ingest(ts.extract(root))
+    local fs = sinkflow.source_findings(store)
+    eq(1, #fs, 'only the unguarded route-arg flow fires; the IsIsoDate-guarded date is clean')
+    ok(fs[1].message:find('%$args'), 'names the route-arg source')
+end)
