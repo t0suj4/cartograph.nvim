@@ -165,6 +165,11 @@ function M.ingest(data)
     -- go through at.lua's dual-mode accessors; post-fold arrivals (refresh
     -- files, oracle callers, literal highlight ranges) stay raw tables.
     require('cartograph.at').fold(M.data)
+    -- REFUSED INTERNING: identical refusals (same rule/cands/n/witness)
+    -- share ONE record — 8x dedup on server, shape unchanged, readers
+    -- untouched. Records are immutable post-resolution (resolution clears
+    -- the FIELD, never edits the record), so sharing is safe.
+    require('cartograph.refused').intern(M.data)
     -- extraction-peak Stage 0: LuaJIT traces compiled DURING a big extract
     -- pin extraction-era objects as GC trace constants — measured on the
     -- server corpus: 151.9MB of dead extraction garbage held resident,
