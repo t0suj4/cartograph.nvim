@@ -12,6 +12,7 @@
 -- Resolution quality is lua-ls's own: annotations help it here exactly
 -- as they help hover.
 
+local atr = require 'cartograph.at'
 local M = {}
 
 local function find_bin()
@@ -28,13 +29,13 @@ end
 -- the name's last segment)
 local function name_pos(node, lines)
     local tailname = node.name:match('([%w_]+)$') or node.name
-    for l = node.range.start.line, math.min(node.range.start.line + 4,
-        node.range['end'].line) do
+    for l = atr.sl(node.range), math.min(atr.sl(node.range) + 4,
+        atr.el(node.range)) do
         local text = lines[l + 1] or ''
         local s = text:find('%f[%w_]' .. tailname .. '%f[^%w_]')
         if s then return { line = l, character = s - 1 } end
     end
-    return { line = node.range.start.line, character = node.range.start.char }
+    return { line = atr.sl(node.range), character = atr.sc(node.range) }
 end
 
 --- Enrich a tree-sitter extraction in place. Returns stats or nil, reason.
@@ -76,7 +77,7 @@ function M.enrich(data, opts)
     local sites = {} -- file .. '\31' .. line -> { call, ... }
     for _, c in ipairs(data.calls or {}) do
         if c.at and c.file:match('%.lua$') then
-            local k = c.file .. '\31' .. c.at.start.line
+            local k = c.file .. '\31' .. atr.sl(c.at)
             sites[k] = sites[k] or {}
             table.insert(sites[k], c)
         end
@@ -130,7 +131,7 @@ function M.enrich(data, opts)
                 local line = loc.range.start.line
                 local ch = loc.range.start.character
                 for _, c in ipairs(sites[ffile .. '\31' .. line] or {}) do
-                    if ch >= c.at.start.char and ch < c.at['end'].char then
+                    if ch >= atr.sc(c.at) and ch < atr.ec(c.at) then
                         matched[c] = matched[c] or {}
                         table.insert(matched[c], n.id)
                     end
@@ -234,7 +235,7 @@ function M.enrich_async(data, opts, on_done)
     local sites = {} -- file\31line -> { call, ... } (the phantom-caller guard)
     for _, c in ipairs(data.calls or {}) do
         if c.at and c.file:match('%.lua$') then
-            local k = c.file .. '\31' .. c.at.start.line
+            local k = c.file .. '\31' .. atr.sl(c.at)
             sites[k] = sites[k] or {}
             table.insert(sites[k], c)
         end
@@ -269,7 +270,7 @@ function M.enrich_async(data, opts, on_done)
                         local line = loc.range.start.line
                         local ch = loc.range.start.character
                         for _, c in ipairs(sites[ffile .. '\31' .. line] or {}) do
-                            if ch >= c.at.start.char and ch < c.at['end'].char then
+                            if ch >= atr.sc(c.at) and ch < atr.ec(c.at) then
                                 matched[c] = matched[c] or {}
                                 table.insert(matched[c], n.id)
                             end

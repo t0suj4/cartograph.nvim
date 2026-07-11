@@ -10,6 +10,7 @@
 
 local M = {}
 local argv = require 'cartograph.argv'
+local atr = require 'cartograph.at'
 
 local function exported(n)
     if n.exported ~= nil then return n.exported end -- provider's verdict
@@ -184,7 +185,7 @@ local function swallowed_findings(store)
                 for _, g in ipairs(resolved_at[c.file .. ':' .. recv.l] or {}) do
                     local gn = store.node(g.to)
                     if gn and class_of(gn.name) == class then
-                        file, line = gn.file, gn.range.start.line
+                        file, line = gn.file, atr.sl(gn.range)
                         fix   = { file = store.abs(file), line = line,
                                   text = '---@return ' .. class }
                         label = ('---@return %s on %s'):format(class, gn.name)
@@ -335,7 +336,7 @@ local function greenspun_findings(store)
     end
     for _, t in ipairs(g.dispatch_tables(store.data)) do
         out[#out + 1] = { file = store.abs(t.var.file),
-            line = t.var.range.start.line + 1,
+            line = atr.sl(t.var.range) + 1,
             message = ("ad-hoc funcall table: '%s' maps %d of %d entries to functions")
                 :format(t.var.name, t.fns, t.entries) }
     end
@@ -399,7 +400,7 @@ local function mirror_findings(store)
                 :format(table.concat(m.members, ' ~ '))
         end
         out[#out + 1] = { file = store.abs(m.node.file),
-            line = m.node.range.start.line + 1, message = msg }
+            line = atr.sl(m.node.range) + 1, message = msg }
     end
     return out
 end
@@ -419,7 +420,7 @@ local function access_point_findings(store)
                 and (stmts <= 2 or (gettish and stmts <= 4)) then
                 n.access = true
                 out[#out + 1] = { file = store.abspath(n),
-                    line = n.range.start.line + 1,
+                    line = atr.sl(n.range) + 1,
                     message = ("access point: '%s' — %d callers, %d statement(s); its fan-in is plumbing, not coupling")
                         :format(n.name, callers, stmts) }
             end
@@ -435,10 +436,10 @@ local function clone_findings(store)
         local names = {}
         for _, n in ipairs(g) do
             names[#names + 1] = ('%s (%s:%d)'):format(
-                n.name, n.file, n.range.start.line + 1)
+                n.name, n.file, atr.sl(n.range) + 1)
         end
         out[#out + 1] = { file = store.abspath(g[1]),
-            line = g[1].range.start.line + 1,
+            line = atr.sl(g[1].range) + 1,
             message = ('possible clones (%d statements, same shape and callees): %s')
                 :format(require('cartograph.df').count(g[1]), table.concat(names, ' ~ ')) }
     end
@@ -500,7 +501,7 @@ M.rules = {
                 local n = store.node('sql::table:' .. m.name)
                 out[#out + 1] = {
                     file = n and (store.abs(n.file)) or '',
-                    line = n and n.range.start.line + 1 or 1,
+                    line = n and atr.sl(n.range) + 1 or 1,
                     message = ("table '%s' is queried in code but %s")
                         :format(m.name, m.why
                             and ('ambiguous in the database (' .. m.why .. ')')
@@ -629,7 +630,7 @@ M.rules = {
                     and band:n_callers(n.id) == 0
                     -- a registration is an alibi: a dispatch table keeps it alive
                     and band:n_registrants(n.id) == 0 then
-                    out[#out + 1] = { file = store.abspath(n), line = n.range.start.line + 1,
+                    out[#out + 1] = { file = store.abspath(n), line = atr.sl(n.range) + 1,
                         message = ("local function '%s' has no callers (possibly dead)"):format(n.name) }
                 end
             end
@@ -664,7 +665,7 @@ M.rules = {
                     for _, id in ipairs(comp) do names[#names + 1] = store.node(id).name end
                     table.sort(names)
                     local n0 = store.node(comp[1])
-                    out[#out + 1] = { file = store.abspath(n0), line = n0.range.start.line + 1,
+                    out[#out + 1] = { file = store.abspath(n0), line = atr.sl(n0.range) + 1,
                         message = 'call cycle: ' .. table.concat(names, ' <-> ') }
                 end
             end

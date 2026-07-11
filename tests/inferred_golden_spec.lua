@@ -4,6 +4,7 @@
 -- non-call field reads must NOT link. Self-skips without the CLI.
 
 local store = require 'cartograph.store'
+local atr = require 'cartograph.at'
 
 local BIN = vim.fn.expand '~/.local/lib/lua-language-server/bin/lua-language-server'
 local CLI = vim.fn.expand '~/.local/lib/lua-language-server/script/cli/graph.lua'
@@ -47,5 +48,5 @@ test('inferred: unique method name links, ambiguous and reads do not', function 
     local f = lint.run(store, { only = { ['swallowed-type'] = true } })
     eq(1, #f)
     eq('---@return Thing', f[1].fix.text)
-    eq(store.node(ids['Thing.get']).range.start.line + 1, f[1].line)
+    eq(atr.sl(store.node(ids['Thing.get']).range) + 1, f[1].line)
 end)

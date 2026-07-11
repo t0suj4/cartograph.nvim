@@ -15,6 +15,7 @@
 local M = {}
 
 local refs = require 'cartograph.refs'
+local atr = require 'cartograph.at'
 
 local function file_of(id)
     return id:match('^(.-)::') or id
@@ -323,8 +324,8 @@ function M.splice(data, rels, deleted)
     for _, n in ipairs(data.nodes) do
         if candidates[n.file]
             and (n.kind == 'function' or n.kind == 'method') then
-            table.insert(franges[n.file], { s = n.range.start.line,
-                e = n.range['end'].line, id = n.id })
+            table.insert(franges[n.file], { s = atr.sl(n.range),
+                e = atr.el(n.range), id = n.id })
         end
     end
     for f in pairs(candidates) do

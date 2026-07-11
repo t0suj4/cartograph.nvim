@@ -1,26 +1,78 @@
--- Range-coordinate SEAM for occurrence `at` ranges (call sites, edge
--- occurrences). Consumers read coordinates through sl/sc/el/ec instead of
--- reaching into `.start.line` / `['end'].char`, so the banked at fold
--- (columnar start-coords + derived end, [[cartograph-scaling-sharded-index]])
--- becomes a ONE-PLACE swap here — not a migration of every reader. This is
--- the API-first discipline applied ahead of the fold: seam now (behavior-
--- identical, a range is still a nested table), swap the representation
--- later (a range becomes a fold index; these accessors dispatch on type
--- and the end-derivation lands with the fold).
+-- Range coordinates, eager-but-FOLDED — the seam that became the swap.
+-- Occurrence ranges (c.at, e.at lists) and node ranges (n.range) are the
+-- same nested {start={line,char}, end={line,char}} type: three tables per
+-- range, ~128 MB resident on server. The fold interns every range into
+-- four flat coordinate columns and replaces the value with its INDEX; the
+-- accessors below are dual-mode (number → column read, table → raw field),
+-- so every consumer — all seamed through here by the shape roster + seam
+-- rewriter ([[cartograph-shape-roster]]) — reads identically.
 --
--- Scope: OCCURRENCE ranges only (the foldable 100 MB — c.at / e.at). Node
--- ranges (n.range, kept for navigation) are NOT routed here; they stay
--- nested tables and are read directly.
+-- Interning is BY TABLE IDENTITY, which dissolves the banked "all-or-
+-- nothing shared pool" hazard: addref aliases c.at tables into e.at lists,
+-- and the identity map gives the alias the same index for free. e.at
+-- lists mutate IN PLACE (same list table, elements become indexes), so
+-- store.occ references stay valid. Same lifecycle as the argv/df folds:
+-- fold at ingest, AFTER cache.save encoded raw; idempotent; post-fold
+-- arrivals (refresh files, oracle callers, literal highlight ranges)
+-- stay raw tables and read through the same accessors.
+--
+-- The column store is a module-level upvalue (the store is a singleton —
+-- one live graph per session); fold() re-points it.
 
 local M = {}
 
--- start line / start char / end line / end char of an occurrence range
-function M.sl(r) return r.start.line end
-function M.sc(r) return r.start.char end
-function M.el(r) return r['end'].line end
-function M.ec(r) return r['end'].char end
+local C -- the live column store { sl, sc, el, ec }
+
+-- start line / start char / end line / end char of a range
+function M.sl(r) if type(r) == 'number' then return C.sl[r] end return r.start.line end
+function M.sc(r) if type(r) == 'number' then return C.sc[r] end return r.start.char end
+function M.el(r) if type(r) == 'number' then return C.el[r] end return r['end'].line end
+function M.ec(r) if type(r) == 'number' then return C.ec[r] end return r['end'].char end
 
 -- whether the range is single-line (the common token case)
-function M.oneline(r) return r.start.line == r['end'].line end
+function M.oneline(r)
+    if type(r) == 'number' then return C.el[r] == C.sl[r] end
+    return r.start.line == r['end'].line
+end
+
+-- ── the fold: nested range tables → four coordinate columns ──────────────
+function M.fold(data)
+    if data._atcol then
+        C = data._atcol -- re-ingest of an already-folded graph: re-point
+        return 0
+    end
+    local col = { sl = {}, sc = {}, el = {}, ec = {} }
+    local seen = {} -- table identity -> index (c.at↔e.at aliasing folds once)
+    local n = 0
+    local function intern(r)
+        local i = seen[r]
+        if not i then
+            n = n + 1
+            local s, e = r.start, r['end']
+            col.sl[n], col.sc[n] = s.line, s.char
+            col.el[n], col.ec[n] = e.line, e.char
+            seen[r] = n
+            i = n
+        end
+        return i
+    end
+    for _, c in ipairs(data.calls or {}) do
+        if type(c.at) == 'table' then c.at = intern(c.at) end
+    end
+    for _, e in ipairs(data.edges or {}) do
+        local at = e.at
+        if type(at) == 'table' then
+            for i = 1, #at do
+                if type(at[i]) == 'table' then at[i] = intern(at[i]) end
+            end
+        end
+    end
+    for _, nd in ipairs(data.nodes or {}) do
+        if type(nd.range) == 'table' then nd.range = intern(nd.range) end
+    end
+    data._atcol = col
+    C = col
+    return n
+end
 
 return M

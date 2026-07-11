@@ -1,3 +1,4 @@
+local atr = require 'cartograph.at'
 -- Temporal (change) coupling — pure core. Two functions are coupled when they
 -- tend to be edited in the same commits. This reveals coupling the static graph
 -- CANNOT: shared assumptions, parallel data formats, copy-paste siblings — things
@@ -21,7 +22,7 @@ function M.attribute(nodes, changed)
         if n.kind ~= 'module' then
             local lines = changed[n.file]
             if lines then
-                local s, e = n.range.start.line + 1, n.range['end'].line + 1
+                local s, e = atr.sl(n.range) + 1, atr.el(n.range) + 1
                 for ln in pairs(lines) do
                     if ln >= s and ln <= e then touched[M.key(n)] = true; break end
                 end

@@ -299,7 +299,7 @@ local function render_file(ctx, file)
         local icon = ICON[n.kind] or '?'
         ctx.lines[#ctx.lines + 1] = ('  %s %s'):format(icon, n.name or '?')
         ctx.marks[#ctx.lines] = { { 2, 2 + #icon, 'CartographDim' } }
-        ctx.vnums[#ctx.lines] = tostring(n.range.start.line + 1)
+        ctx.vnums[#ctx.lines] = tostring(atr.sl(n.range) + 1)
         ctx.line_node[#ctx.lines] = n.id
         ctx.node_line[n.id]       = #ctx.lines
         ctx.line_file[#ctx.lines] = file
@@ -313,7 +313,7 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
     -- defensive: one row per distinct (function, position)
     local seen, uniq = {}, {}
     for _, s in ipairs(sites) do
-        local k = ('%s\31%d\31%d'):format(s.fn, s.line, s.range and s.range.start.char or 0)
+        local k = ('%s\31%d\31%d'):format(s.fn, s.line, s.range and atr.sc(s.range) or 0)
         if not seen[k] then seen[k] = true; uniq[#uniq + 1] = s end
     end
     sites = uniq
@@ -397,17 +397,17 @@ local function table_members(id)
     local node = store.node(id)
     if not node or not node.name then return {} end
     local p1, p2 = node.name .. '.', node.name .. ':'
-    local s, e = node.range.start.line, node.range['end'].line
+    local s, e = atr.sl(node.range), atr.el(node.range)
     local out = {}
     for _, n in ipairs(store.by_file[node.file] or {}) do
         if n.id ~= id and n.kind ~= 'region' and n.kind ~= 'module' then
             local named = n.name and (n.name:sub(1, #p1) == p1 or n.name:sub(1, #p2) == p2)
             local inside = n.kind ~= 'var'
-                and n.range.start.line >= s and n.range['end'].line <= e
+                and atr.sl(n.range) >= s and atr.el(n.range) <= e
             if named or inside then out[#out + 1] = n end
         end
     end
-    table.sort(out, function (a, b) return a.range.start.line < b.range.start.line end)
+    table.sort(out, function (a, b) return atr.sl(a.range) < atr.sl(b.range) end)
     return out
 end
 
@@ -561,7 +561,7 @@ local function render_tbl(ctx, id)
         if pref then name = name:sub(#node.name + 1) end -- .foo / :bar
         ctx.lines[#ctx.lines + 1] = ('  %s %s'):format(icon, name)
         ctx.marks[#ctx.lines] = { { 2, 2 + #icon, 'CartographDim' } }
-        ctx.vnums[#ctx.lines] = tostring(n.range.start.line + 1)
+        ctx.vnums[#ctx.lines] = tostring(atr.sl(n.range) + 1)
         ctx.line_node[#ctx.lines] = n.id
         ctx.node_line[n.id]       = #ctx.lines
     end
@@ -787,7 +787,7 @@ local function render_occs(ctx, key)
             ranges[#ranges + 1] = r
         end
     end
-    table.sort(ranges, function (a, b) return a.start.line < b.start.line end)
+    table.sort(ranges, function (a, b) return atr.sl(a) < atr.sl(b) end)
     local fname = fn.name or '?'
     ctx.lines[1] = ('%s — sites of %s (%d)'):format(fname, en.name or '?', #ranges)
     ctx.marks[1] = { { 0, #fname, 'CartographTitle' }, { #fname, -1, 'CartographDim' } }
@@ -803,19 +803,20 @@ local function render_occs(ctx, key)
         return (cache[file] and cache[file][l0 + 1]) or ''
     end
     for _, r in ipairs(ranges) do
-        local line = rawline(fn.file, r.start.line)
+        local rsl, rsc = atr.sl(r), atr.sc(r)
+        local line = rawline(fn.file, rsl)
         local t
-        if r['end'].line == r.start.line then
-            t = line:sub(r.start.char + 1, r['end'].char)
+        if atr.oneline(r) then
+            t = line:sub(rsc + 1, atr.ec(r))
         else
-            t = line:sub(r.start.char + 1)
+            t = line:sub(rsc + 1)
         end
         if t == '' then t = line:gsub('^%s+', '') end
         -- follow the whole access CHAIN through the reference: `local x =
         -- self.bnw.home.surface` shows (and highlights) as `.bnw.home.surface`;
         -- a genuinely standalone ref (argument position) keeps the bare name
-        if r['end'].line == r.start.line then
-            local bs, be = line:find('^[%w_]+', r.start.char + 1)
+        if atr.oneline(r) then
+            local bs, be = line:find('^[%w_]+', rsc + 1)
             if bs then
                 local i, parts = be + 1, {}
                 while true do
@@ -826,14 +827,15 @@ local function render_occs(ctx, key)
                 end
                 if #parts > 0 then
                     t = table.concat(parts)
-                    r = { start = r.start, ['end'] = { line = r.start.line, char = i - 1 } }
+                    r = { start = { line = rsl, char = rsc },
+                        ['end'] = { line = rsl, char = i - 1 } }
                 end
             end
         end
         ctx.lines[#ctx.lines + 1] = '  ' .. t
-        ctx.vnums[#ctx.lines] = tostring(r.start.line + 1)
+        ctx.vnums[#ctx.lines] = tostring(rsl + 1)
         ctx.line_site[#ctx.lines] = { fn = fnid, name = fname, file = fn.file,
-            line = r.start.line, range = r }
+            line = rsl, range = r }
     end
 end
 
@@ -869,7 +871,7 @@ end
 local function var_context(v, needle)
     local lines = vim.fn.readfile(store.abspath(v))
     local ranges = {}
-    for l = v.range.start.line, math.min(v.range['end'].line, #lines - 1) do
+    for l = atr.sl(v.range), math.min(atr.el(v.range), #lines - 1) do
         local s, e = (lines[l + 1] or ''):find(needle)
         if s then
             ranges[#ranges + 1] = { start = { line = l, char = s - 1 },
@@ -935,7 +937,7 @@ local function render_state(ctx, state)
             ctx.line_node[#ctx.lines] = e.fn
             ctx.node_line[e.fn] = #ctx.lines
             local n = store.node(e.fn)
-            if n then ctx.vnums[#ctx.lines] = tostring(n.range.start.line + 1) end
+            if n then ctx.vnums[#ctx.lines] = tostring(atr.sl(n.range) + 1) end
         end
     end
 end
@@ -946,12 +948,12 @@ local function render_region(ctx, id)
     if not node then ctx.lines[1] = '(gone)'; return end
     ctx.lines[1] = ('≡ %s'):format(node.name or '?')
     ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
-    local s, e = node.range.start.line, node.range['end'].line
+    local s, e = atr.sl(node.range), atr.el(node.range)
     for _, n in ipairs(store.by_file[node.file] or {}) do
-        if n.kind == 'var' and n.range.start.line >= s and n.range.start.line <= e then
+        if n.kind == 'var' and atr.sl(n.range) >= s and atr.sl(n.range) <= e then
             ctx.lines[#ctx.lines + 1] = ('  · %s'):format(n.name or '?')
             ctx.marks[#ctx.lines] = { { 2, 3, 'CartographDim' } }
-            ctx.vnums[#ctx.lines] = tostring(n.range.start.line + 1)
+            ctx.vnums[#ctx.lines] = tostring(atr.sl(n.range) + 1)
             ctx.line_node[#ctx.lines] = n.id
             ctx.node_line[n.id]       = #ctx.lines
         end
@@ -1015,7 +1017,7 @@ local function render_fn(ctx, id)
             ctx.marks[3] = { { 0, -1, 'CartographSection' } }
             local r = node.range
             ctx.line_block[3] = ('%s\31%d\31%d\31%d\31%d'):format(id,
-                r.start.line, r.start.char, r['end'].line, r['end'].char)
+                atr.sl(r), atr.sc(r), atr.el(r), atr.ec(r))
         end
         return
     end
@@ -1166,7 +1168,7 @@ local function detail_scope() -- -> node, sr, sc, er, ec, has_df, fnid
     if lvl == 'fn' then
         local n = store.node(M.view.fn); if not n then return end
         local r = n.range
-        return n, r.start.line, r.start.char, r['end'].line, r['end'].char,
+        return n, atr.sl(r), atr.sc(r), atr.el(r), atr.ec(r),
             dfa.present(n) or nil, M.view.fn
     elseif lvl == 'block' then
         local fnid, sr, sc, er, ec =
@@ -1178,7 +1180,7 @@ local function detail_scope() -- -> node, sr, sc, er, ec, has_df, fnid
     elseif lvl == 'region' then
         local n = store.node(M.view.region); if not n then return end
         local r = n.range
-        return n, r.start.line, r.start.char, r['end'].line, r['end'].char, nil, nil
+        return n, atr.sl(r), atr.sc(r), atr.el(r), atr.ec(r), nil, nil
     end
 end
 local function render_detail(ctx)
@@ -2339,8 +2341,8 @@ function M.attach(win)
         end
         local function region_of(v)
             for _, n in ipairs(store.by_file[v.file] or {}) do
-                if n.kind == 'region' and n.range.start.line <= v.range.start.line
-                    and n.range['end'].line >= v.range['end'].line then
+                if n.kind == 'region' and atr.sl(n.range) <= atr.sl(v.range)
+                    and atr.el(n.range) >= atr.el(v.range) then
                     return n
                 end
             end
@@ -2696,7 +2698,7 @@ function M.attach(win)
             or (M.view.level == 'fn' and store.node(M.view.fn) and store.node(M.view.fn).file)
         if not file then return end
         local lnum = (site and site.line + 1) or (M.view.level == 'fn' and M.line_stmt[r])
-            or (n and n.range.start.line + 1) or 1
+            or (n and atr.sl(n.range) + 1) or 1
         vim.cmd('tab drop ' .. vim.fn.fnameescape(store.data.root .. '/' .. file))
         pcall(vim.api.nvim_win_set_cursor, 0, { lnum, 0 })
     end, { buffer = M.buf, desc = 'cartograph: open the real file here' })

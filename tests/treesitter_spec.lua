@@ -5,6 +5,7 @@
 -- cross-file calls, include edges, df-lite, dispatch-table cbarg, main entry.
 
 local ts    = require 'cartograph.providers.treesitter'
+local atr = require 'cartograph.at'
 local store = require 'cartograph.store'
 local lint  = require 'cartograph.lint'
 
@@ -144,11 +145,11 @@ test('treesitter: lua blocks, litdata and require edges', function ()
     ok(#blks >= 3, 'the interleaved fixture yields several blocks (' .. #blks .. ')')
     for _, b in ipairs(blks) do
         for _, f in ipairs(fns) do
-            ok(not (b.range.start.line <= f.range.start.line
-                and b.range['end'].line >= f.range['end'].line),
+            ok(not (atr.sl(b.range) <= atr.sl(f.range)
+                and atr.el(b.range) >= atr.el(f.range)),
                 ('block L%d-%d must not swallow fn %s L%d'):format(
-                    b.range.start.line + 1, b.range['end'].line + 1, f.name,
-                    f.range.start.line + 1))
+                    atr.sl(b.range) + 1, atr.el(b.range) + 1, f.name,
+                    atr.sl(f.range) + 1))
         end
     end
 end)
@@ -286,7 +287,7 @@ test('treesitter: haskell — equations merge, where stays interior, imports', f
     end
     -- two equations, ONE node spanning both
     eq(1, count.double)
-    ok(byname.double.range['end'].line > byname.double.range.start.line,
+    ok(atr.el(byname.double.range) > atr.sl(byname.double.range),
         'range extends over the second equation')
     -- the where-bind `go` is interior, not a node
     ok(not byname.go, 'where binds are not top-level nodes')
@@ -2443,7 +2444,7 @@ test('sfc containers: script regions, template calls, handler cbarg', function (
     ok(byid['App.vue'], 'vue module node')
     ok(byid['Board.svelte'], 'svelte module node')
     ok(byname.save and byname.save.file == 'App.vue', 'script fn extracted')
-    eq(13, byname.save.range.start.line)
+    eq(13, atr.sl(byname.save.range))
     -- @click="save(total)" is a real call: linked, file-level
     local linked
     for _, c in ipairs(data.calls) do

@@ -158,6 +158,13 @@ function M.ingest(data)
     -- materialize raw-shaped on demand. Cache shards encoded BEFORE ingest
     -- stay raw; refresh's fresh per-file df reads raw via dual mode.
     require('cartograph.df').fold(M.data)
+    -- RANGE FOLD (the 128MB half): every c.at / e.at element / n.range
+    -- interns BY TABLE IDENTITY into four coordinate columns (the c.at↔e.at
+    -- addref aliasing folds to one index for free) and becomes an index;
+    -- e.at lists mutate in place so occ references stay valid. Readers all
+    -- go through at.lua's dual-mode accessors; post-fold arrivals (refresh
+    -- files, oracle callers, literal highlight ranges) stay raw tables.
+    require('cartograph.at').fold(M.data)
     -- extraction-peak Stage 0: LuaJIT traces compiled DURING a big extract
     -- pin extraction-era objects as GC trace constants — measured on the
     -- server corpus: 151.9MB of dead extraction garbage held resident,

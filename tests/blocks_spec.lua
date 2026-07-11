@@ -2,6 +2,7 @@
 -- statements, named by their first source line. Self-skips without the CLI.
 
 local store = require 'cartograph.store'
+local atr = require 'cartograph.at'
 
 local BIN = vim.fn.expand '~/.local/lib/lua-language-server/bin/lua-language-server'
 local CLI = vim.fn.expand '~/.local/lib/lua-language-server/script/cli/graph.lua'
@@ -35,8 +36,8 @@ test('blocks: statement runs roll up, functions break them', function ()
     eq('return M',    blocks[3].name)
     -- the middle block spans through M.y (the bare call doesn't split it)
     local my_line
-    for _, v in ipairs(vars) do if v.name == 'M.y' then my_line = v.range.start.line end end
-    ok(blocks[2].range['end'].line >= my_line, 'block 2 spans through M.y')
+    for _, v in ipairs(vars) do if v.name == 'M.y' then my_line = atr.sl(v.range) end end
+    ok(atr.el(blocks[2].range) >= my_line, 'block 2 spans through M.y')
     -- vars still emitted individually (they populate the block level)
     eq(6, #vars) -- a, b, c, M, M.x, M.y
 

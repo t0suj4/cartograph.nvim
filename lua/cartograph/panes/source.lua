@@ -32,10 +32,10 @@ local function enclosing_region(node)
     local reg
     for _, n in ipairs(store.by_file[node.file] or {}) do
         if n.kind == 'region'
-            and n.range.start.line <= node.range.start.line
-            and n.range['end'].line >= node.range['end'].line
-            and (not reg or (n.range['end'].line - n.range.start.line)
-                < (reg.range['end'].line - reg.range.start.line)) then
+            and atr.sl(n.range) <= atr.sl(node.range)
+            and atr.el(n.range) >= atr.el(node.range)
+            and (not reg or (atr.el(n.range) - atr.sl(n.range))
+                < (atr.el(reg.range) - atr.sl(reg.range))) then
             reg = n
         end
     end
@@ -49,21 +49,21 @@ local function body_lines(node)
     if not all then return { ('── %s   %s  (unreadable)'):format(node.name or '?', node.file) } end
     -- a top-level statement widens to the region it belongs to
     local shown = enclosing_region(node) or node
-    local s = shown.range.start.line + 1     -- schema line is 0-based
-    local e = shown.range['end'].line + 1
+    local s = atr.sl(shown.range) + 1     -- schema line is 0-based
+    local e = atr.el(shown.range) + 1
     -- show the def WITH its leading doc comment: walk up over the block that
     -- adheres to it (the same per-language patterns + file-header decline the
     -- edit verbs use), so focusing a symbol shows what it's FOR, not just its
     -- signature. Python-style docstrings live inside [s,e] and already show.
-    local ds = shown.range.start.line -- 0-based first shown line
+    local ds = atr.sl(shown.range) -- 0-based first shown line
     local pats = require('cartograph.providers.treesitter').attach_pats(node.file)
     if #pats > 0 then
         local up, header = require('cartograph.txn').attach_above(
-            all, shown.range.start.line, pats)
+            all, atr.sl(shown.range), pats)
         if not header then ds = up end
     end
     M._shown_start[node.id] = ds
-    M._shown_end[node.id] = shown.range['end'].line
+    M._shown_end[node.id] = atr.el(shown.range)
     -- external edits (git checkout, codegen) never fire BufWritePost: the
     -- range below may not line up with the fresh bytes — say so
     local stale = store.stale(node.file)
@@ -91,8 +91,8 @@ end
 local function buf_row(node, file_line)
     -- map against the first SHOWN line (doc comment included), not the def's
     -- signature line — otherwise highlights/jumps are off by the doc height
-    local start = M._shown_start[node.id] or node.range.start.line
-    local last = M._shown_end[node.id] or node.range['end'].line
+    local start = M._shown_start[node.id] or atr.sl(node.range)
+    local last = M._shown_end[node.id] or atr.el(node.range)
     if file_line < start or file_line > last then return nil end
     return HEADER_ROWS + (file_line - start)
 end
@@ -126,10 +126,10 @@ end
 local function apply_hl(buf, node, ranges)
     vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
     for _, r in ipairs(ranges or {}) do
-        local row = buf_row(node, r.start.line)
+        local row = buf_row(node, atr.sl(r))
         if row then
-            local col_end = (r['end'].line == r.start.line) and r['end'].char or -1
-            pcall(vim.api.nvim_buf_set_extmark, buf, ns, row, r.start.char, {
+            local col_end = atr.oneline(r) and atr.ec(r) or -1
+            pcall(vim.api.nvim_buf_set_extmark, buf, ns, row, atr.sc(r), {
                 end_col = col_end >= 0 and col_end or nil,
                 end_row = col_end < 0 and (row + 1) or nil,
                 hl_group = 'IncSearch',
@@ -168,8 +168,8 @@ local function cursor_file_line(win, node)
     if not node then return nil end
     local row0 = vim.api.nvim_win_get_cursor(win)[1] - 1
     if row0 < HEADER_ROWS then return nil end
-    local fl = node.range.start.line + (row0 - HEADER_ROWS)
-    if fl > node.range['end'].line then return nil end
+    local fl = atr.sl(node.range) + (row0 - HEADER_ROWS)
+    if fl > atr.el(node.range) then return nil end
     return fl
 end
 
@@ -177,7 +177,7 @@ end
 -- cursor corresponds to (the node's first line when on a header row).
 local function goto_real(win, node)
     if not node then return end
-    local fl = cursor_file_line(win, node) or node.range.start.line
+    local fl = cursor_file_line(win, node) or atr.sl(node.range)
     vim.cmd('tab drop ' .. vim.fn.fnameescape(store.abspath(node)))
     pcall(vim.api.nvim_win_set_cursor, 0, { fl + 1, 0 })
 end
@@ -209,8 +209,8 @@ end
 function M.extract(line1, line2, name)
     local node = M.cur
     if not node then return vim.notify('cartograph: no function focused', vim.log.levels.WARN) end
-    local fn_start = node.range.start.line + 1        -- 1-based
-    local body_end = node.range['end'].line           -- last body line (before `end`)
+    local fn_start = atr.sl(node.range) + 1        -- 1-based
+    local body_end = atr.el(node.range)           -- last body line (before `end`)
     -- top buffer row 3 (1-based) shows file line fn_start
     local file_first = fn_start + (line1 - (HEADER_ROWS + 1))
     local file_last  = fn_start + (line2 - (HEADER_ROWS + 1))
@@ -302,7 +302,7 @@ function M.highlight(hl)
     if not hl or not shown or hl.file ~= shown.file then return end
     apply_hl(M.buf, shown, hl.ranges)
     local r = hl.ranges and hl.ranges[1]
-    if r then ensure_visible(M.win_top, buf_row(shown, r.start.line)) end
+    if r then ensure_visible(M.win_top, buf_row(shown, atr.sl(r))) end
 end
 
 --- The "other end" temporarily takes over the pane: a hovered call site /
@@ -325,7 +325,7 @@ function M.context(ctx)
     if ctx.ranges then
         apply_hl(M.buf, M.ctx, ctx.ranges)
         local r = ctx.ranges[1]
-        if r then ensure_visible(M.win_top, buf_row(M.ctx, r.start.line)) end
+        if r then ensure_visible(M.win_top, buf_row(M.ctx, atr.sl(r))) end
     end
 end
 

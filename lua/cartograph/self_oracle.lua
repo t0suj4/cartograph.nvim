@@ -16,6 +16,7 @@
 
 local M = {}
 local argv = require 'cartograph.argv'
+local atr = require 'cartograph.at'
 
 local MAXDEPTH = 5   -- table nesting we descend when snapshotting a value
 local MAXN     = 300 -- entries per table (dispatch tables can be large)
@@ -122,7 +123,7 @@ function M.resolve_fn(fn, data, hint)
     local same = {}
     for _, n in ipairs(data.nodes) do
         if (n.kind == 'function' or n.kind == 'method')
-            and n.file == key and n.range.start.line == line then
+            and n.file == key and atr.sl(n.range) == line then
             same[#same + 1] = n
         end
     end

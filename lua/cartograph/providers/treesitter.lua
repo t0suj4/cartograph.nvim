@@ -11,6 +11,7 @@
 -- approximation (statement lines, def/use names), `effects`/`rets` are not
 -- emitted; consumers already degrade to honest frontiers.
 
+local atr = require 'cartograph.at' -- dual-mode range reads: relink/refresh re-run these paths over the FOLDED store
 local M = {}
 
 -- Node text, hot-path fast form. vim.treesitter.get_node_text allocates two
@@ -2285,8 +2286,8 @@ local function resolve_returns(calls, node_index, exact, addref)
     -- profiled at ~2% of extract on server — 3 rounds x 240k calls)
     local deferred, dn = {}, 0
     for _, c in ipairs(calls or {}) do
-        if c.at and c.at.start then
-            callidx[c.file .. '\31' .. c.at.start.line .. '\31' .. c.at.start.char] = c
+        if c.at then
+            callidx[c.file .. '\31' .. atr.sl(c.at) .. '\31' .. atr.sc(c.at)] = c
         end
         if c.rt and not c.to and c.callee then
             dn = dn + 1
@@ -3227,12 +3228,12 @@ function M.lookups(nodes, root)
         elseif (n.kind == 'function' or n.kind == 'method')
             and not n.decl and count[n.name] == 1 then
             fn_unique[n.name] = { id = n.id, file = n.file,
-                line = n.range.start.line }
+                line = atr.sl(n.range) }
         elseif n.kind == 'var' and not n.sql and not n.ctype then
             -- interface types/macros (ctype) are browse-only, not use targets
             var_named[n.name] = var_named[n.name] or {}
             table.insert(var_named[n.name],
-                { id = n.id, file = n.file, line = n.range.start.line })
+                { id = n.id, file = n.file, line = atr.sl(n.range) })
         end
     end
     -- scope map: languages with a resolution boundary (rust crates) get
@@ -4561,7 +4562,7 @@ function M.extract(root, opts)
         for name, fns in pairs(exact) do
             if #fns == 1 then
                 fn_unique[name] = { id = fns[1].id, file = fns[1].file,
-                    line = fns[1].range.start.line, node = fns[1] }
+                    line = atr.sl(fns[1].range), node = fns[1] }
             end
         end
         local var_named = {}
@@ -4569,7 +4570,7 @@ function M.extract(root, opts)
             local list = {}
             for _, v in ipairs(vars) do
                 list[#list + 1] = { id = v.id, file = v.file,
-                    line = v.range.start.line }
+                    line = atr.sl(v.range) }
             end
             var_named[name] = list
         end

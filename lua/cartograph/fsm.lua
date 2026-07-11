@@ -11,6 +11,7 @@
 
 local M = {}
 local argv = require 'cartograph.argv'
+local atr = require 'cartograph.at'
 
 local function var_by_name(store, name, no_data)
     for _, n in pairs(store.by_id) do
@@ -70,10 +71,10 @@ function M.callbacks(store, model)
     local out = {}
     local v = model.callbacks_var
     if not v then return out end
-    local s, e = v.range.start.line, v.range['end'].line
+    local s, e = atr.sl(v.range), atr.el(v.range)
     for _, n in ipairs(store.by_file[v.file] or {}) do
         if (n.kind == 'function' or n.kind == 'method')
-            and n.range.start.line >= s and n.range['end'].line <= e then
+            and atr.sl(n.range) >= s and atr.el(n.range) <= e then
             out[n.name] = n.id
         end
     end

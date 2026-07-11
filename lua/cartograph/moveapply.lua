@@ -60,14 +60,14 @@ local function collect(store, ids, dest, plan)
         -- comment adhesion: the doc lines directly above travel too —
         -- unless the block touches the top of the file (a license /
         -- file header belongs to the FILE; disclosed, left behind)
-        local s, header = n.range.start.line, false
+        local s, header = atr.sl(n.range), false
         local ls = file_lines(n.file)
         if ls then
             s, header = txn.attach_above(ls, s,
                 okp and ts.attach_pats(n.file) or {})
         end
         plan.moves[#plan.moves + 1] = { id = id, name = n.name, file = n.file,
-            lines = { s = s, e = n.range['end'].line },
+            lines = { s = s, e = atr.el(n.range) },
             ref = store.ref_of(id) }
         touched[n.file] = true
         if header then

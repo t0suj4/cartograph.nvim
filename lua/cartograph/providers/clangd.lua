@@ -11,6 +11,7 @@
 -- clangd cross-file eyes — without one the upgrade degrades to open-file
 -- resolution and says so.
 
+local atr = require 'cartograph.at'
 local M = {}
 
 -- candidates, first hit wins: user config, PATH, the user-local deb tree
@@ -130,8 +131,8 @@ end
 -- name's last identifier segment (clangd wants the cursor on the name)
 local function name_pos(node, lines)
     local tailname = node.name:match('([%w_]+)$') or node.name
-    for l = node.range.start.line, math.min(node.range.start.line + 4,
-        node.range['end'].line) do
+    for l = atr.sl(node.range), math.min(atr.sl(node.range) + 4,
+        atr.el(node.range)) do
         local text = lines[l + 1] or ''
         local init = 1
         while true do
@@ -141,7 +142,7 @@ local function name_pos(node, lines)
             return { line = l, character = s - 1 }
         end
     end
-    return { line = node.range.start.line, character = node.range.start.char }
+    return { line = atr.sl(node.range), character = atr.sc(node.range) }
 end
 
 --- Enrich a tree-sitter extraction in place. Returns stats or nil, reason.
@@ -166,8 +167,8 @@ function M.enrich(data, opts)
     local function node_at(file, line)
         local best
         for _, n in ipairs(by_file[file] or {}) do
-            if n.range.start.line <= line and line <= n.range['end'].line
-                and (not best or n.range.start.line >= best.range.start.line) then
+            if atr.sl(n.range) <= line and line <= atr.el(n.range)
+                and (not best or atr.sl(n.range) >= atr.sl(best.range)) then
                 best = n
             end
         end
@@ -305,8 +306,8 @@ function M.enrich_async(data, opts, on_done)
     local function node_at(file, line)
         local best
         for _, n in ipairs(by_file[file] or {}) do
-            if n.range.start.line <= line and line <= n.range['end'].line
-                and (not best or n.range.start.line >= best.range.start.line) then
+            if atr.sl(n.range) <= line and line <= atr.el(n.range)
+                and (not best or atr.sl(n.range) >= atr.sl(best.range)) then
                 best = n
             end
         end
@@ -447,8 +448,8 @@ end
 local function sess_node_at(sess, file, line)
     local best
     for _, n in ipairs(sess.by_file[file] or {}) do
-        if n.range.start.line <= line and line <= n.range['end'].line
-            and (not best or n.range.start.line >= best.range.start.line) then best = n end
+        if atr.sl(n.range) <= line and line <= atr.el(n.range)
+            and (not best or atr.sl(n.range) >= atr.sl(best.range)) then best = n end
     end
     return best
 end

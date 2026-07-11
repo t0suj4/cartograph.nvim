@@ -79,7 +79,7 @@ function M.plan(store, id)
     for _, t in ipairs(twins) do
         -- comment adhesion: the doc lines above a removed twin go too —
         -- unless the block touches the top of the file (a header stays)
-        local s, header = t.range.start.line, false
+        local s, header = atr.sl(t.range), false
         local tls = file_lines(t.file)
         if tls then
             local okp, ts = pcall(require, 'cartograph.providers.treesitter')
@@ -93,7 +93,7 @@ function M.plan(store, id)
         end
         plan.removed[#plan.removed + 1] = {
             id = t.id, name = t.name, file = t.file,
-            lines = { s = s, e = t.range['end'].line },
+            lines = { s = s, e = atr.el(t.range) },
             ref = store.ref_of(t.id),
         }
         touched[t.file] = true

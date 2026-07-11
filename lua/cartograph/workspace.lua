@@ -1,3 +1,4 @@
+local atr = require 'cartograph.at'
 -- The workspace — the Smalltalk "doit" for cartograph: evaluate ad-hoc Lua
 -- against the LOADED graph. Every detector in this repo (spines, territory,
 -- greenspun) started as a throwaway probe against `store`; this makes that
@@ -90,7 +91,7 @@ function M.render_nodes(nodes)
         :format(#nodes, #nodes == 1 and '' or 's') }
     local ids = {}
     for _, n in ipairs(nodes) do
-        local loc = n.file and (n.file .. (n.range and (':' .. (n.range.start.line + 1)) or '')) or ''
+        local loc = n.file and (n.file .. (n.range and (':' .. (atr.sl(n.range) + 1)) or '')) or ''
         lines[#lines + 1] = ('%-8s %-32s %s'):format(n.kind or '?', (n.name or n.id):sub(1, 32), loc)
         ids[#lines] = n.id
     end
@@ -105,7 +106,7 @@ function M.render_nodes(nodes)
         if n and n.file then
             local path = (store.abs and store.abs(n.file)) or n.file
             vim.cmd('tab drop ' .. vim.fn.fnameescape(path))
-            if n.range then pcall(vim.api.nvim_win_set_cursor, 0, { n.range.start.line + 1, 0 }) end
+            if n.range then pcall(vim.api.nvim_win_set_cursor, 0, { atr.sl(n.range) + 1, 0 }) end
         end
     end, { buffer = buf, desc = 'cartograph: open this node\'s file' })
     return buf

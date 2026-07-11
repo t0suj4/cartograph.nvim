@@ -21,6 +21,7 @@ local M = {}
 
 local argv = require 'cartograph.argv'
 local df = require 'cartograph.df'
+local atr = require 'cartograph.at'
 
 local EVAL_VERBS = {
     eval = true, exec = true, load = true, loadstring = true, dofile = true,
@@ -963,7 +964,7 @@ function M.mirrors(data, opts)
                 local label = sd.label
                 if seen_l[label] then
                     label = ('%s@%s:%d'):format(label,
-                        sd.node.file:match('[^/]+$'), sd.node.range.start.line + 1)
+                        sd.node.file:match('[^/]+$'), atr.sl(sd.node.range) + 1)
                 end
                 seen_l[sd.label] = true
                 labels[x] = label
