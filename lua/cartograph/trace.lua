@@ -24,10 +24,11 @@ function M.origins(store, fn_id, i)
     if not calls or #calls == 0 then
         return {}, 'no resolved call sites — dynamic dispatch (event handler?) or dead'
     end
+    local argv = require 'cartograph.argv'
     local out = {}
     for _, c in ipairs(calls) do
         out[#out + 1] = {
-            v    = (c.argv or {})[i] or { k = 'absent' },
+            v    = argv.at(c, i) or { k = 'absent' },
             fn   = c.fn,
             site = site_of(c),
         }
