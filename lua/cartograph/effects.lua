@@ -290,6 +290,7 @@ local VERDICT_TIER = { ['writes-once'] = 3, ['writes-guarded'] = 2,
 -- world effects ride a pseudo-var key: every conflict/tier machinery
 -- (commute, min-merge) treats world-order like state-order for free
 local IOKEY = '\1io\31'
+M.IOKEY = IOKEY
 
 --- Compute (and cache per graph generation) every fn's write summary.
 function M.summaries(store)
@@ -471,6 +472,60 @@ function M.summaries(store)
     end
     store._fx, store._fxgen = sums, store.generation
     return sums
+end
+
+--- ONE call's effect slice, for statement-level attribution (the reorder
+--- report): the callee's summary with the caller's per-site gp discharge,
+--- or the signature registry for unresolved callees. Returns
+--- { w = {key->tier}, hedges = {...}|nil } (w includes the IOKEY row).
+function M.call_effects(store, c, caller_file)
+    local out = { w = {} }
+    local function hedge(why)
+        out.hedges = out.hedges or {}
+        out.hedges[#out.hedges + 1] = why
+    end
+    local to = c.to
+    if to then
+        local cs = M.summaries(store)[to]
+        if not cs then
+            hedge('callee outside the fn graph')
+            return out
+        end
+        if cs.over then hedge('write-set overflow in callee') end
+        if cs.h then hedge(cs.h[1]) end
+        local tn = store.node(to)
+        for key, tier in pairs(cs.w) do
+            local gp = cs.gpk and cs.gpk[key]
+            if gp then
+                local v = M.verdict({ rw = 2, gw = tier, gp = gp }, c,
+                    tn and tn.file)
+                if v ~= 'skips' then
+                    out.w[key] = VERDICT_TIER[v] or tier
+                end
+            else
+                out.w[key] = tier
+            end
+        end
+        if cs.pwx then hedge('callee mutates its params (aliasing unmodeled)') end
+        return out
+    end
+    local lang = caller_file and (caller_file:match('%.lua$') and 'lua'
+        or caller_file:match('%.php$') and 'php')
+    local bname = c.full or c.callee
+    local sig
+    if lang and bname then sig = M.sig_of(lang, bname, c.method) end
+    if sig then
+        if sig.io then out.w[IOKEY] = 1 end
+        if sig.w then hedge(('%s writes its args (targets unattributed here)')
+            :format(bname)) end
+        if sig.calls then hedge(('%s invokes a callback'):format(bname)) end
+        -- pure: no effect, no hedge
+    elseif c.refused then
+        hedge(('refused (%s): %s'):format(c.refused.rule or '?', bname or '?'))
+    else
+        hedge(('unresolved: %s'):format(bname or 'dynamic call'))
+    end
+    return out
 end
 
 --- Purity label: 'pure' | 'io' (world-only effects) | 'writes' (module

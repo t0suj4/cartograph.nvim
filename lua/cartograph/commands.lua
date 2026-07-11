@@ -277,6 +277,18 @@ function M.register()
         scratch(lines)
     end, { desc = 'cartograph: check the RUNNING system against the static model (MCP oracle)' })
 
+    -- ── safe-reorder: which of the focused fn's statements commute ───
+    cmd('CartographReorder', function ()
+        local store = live() if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first',
+                vim.log.levels.WARN)
+        end
+        scratch(require('cartograph.reorder').report(store, id))
+    end, { desc = 'cartograph: statement commutativity of the focused fn — deps, conflicts, freely-movable (the cockpit reorder view)' })
+
     -- ── the honesty census: how well is this graph actually resolved ─
     cmd('CartographCensus', function ()
         local store = live() if not store then return end
