@@ -10,6 +10,7 @@
 -- (onbefore<event> / on<event> / onleave<state> / onenter<state> / onstatechange).
 
 local M = {}
+local argv = require 'cartograph.argv'
 
 local function var_by_name(store, name, no_data)
     for _, n in pairs(store.by_id) do
@@ -35,9 +36,9 @@ function M.bindings(store, cfg)
     for _, c in ipairs(store.data.calls or {}) do
         if c.callee == verb then
             local off = c.method and 1 or 0
-            local name = c.args[1 + off]
+            local name = argv.str(c, 1 + off)
             if name and name ~= '' then
-                local hv = c.argv and c.argv[2 + off]
+                local hv = argv.at(c, 2 + off)
                 local hid
                 if hv and hv.k == 'func' and hv.to then
                     hid = store.node(hv.to) and hv.to -- inline fn, named by its key

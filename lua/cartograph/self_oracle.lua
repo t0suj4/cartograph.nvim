@@ -15,6 +15,7 @@
 -- never cached into the persisted graph.
 
 local M = {}
+local argv = require 'cartograph.argv'
 
 local MAXDEPTH = 5   -- table nesting we descend when snapshotting a value
 local MAXN     = 300 -- entries per table (dispatch tables can be large)
@@ -161,12 +162,12 @@ function M.resolve_requires(data)
     end
     local added = 0
     for _, c in ipairs(data.calls or {}) do
-        if c.callee == 'require' and c.file and c.args
-            and type(c.args[1]) == 'string' and c.args[1] ~= '' then
-            local key = mod2key[c.args[1]]
+        local a1 = c.callee == 'require' and c.file and argv.str(c, 1)
+        if a1 and a1 ~= '' then
+            local key = mod2key[a1]
             if key and key ~= c.file and not have[c.file .. '\31' .. key] then
                 data.edges[#data.edges + 1] = { from = c.file, to = key,
-                    kind = 'import', proven = true, mod = c.args[1],
+                    kind = 'import', proven = true, mod = a1,
                     at = c.at }
                 have[c.file .. '\31' .. key] = true
                 added = added + 1
@@ -301,14 +302,12 @@ function M.registrations(data)
     local cmds, maps = {}, {}
     for _, c in ipairs(data.calls or {}) do
         local n = c.full or c.callee or ''
-        local a = c.args or {}
-        if n:find('nvim_create_user_command', 1, true)
-            and type(a[1]) == 'string' and a[1] ~= '' then
-            cmds[a[1]] = cmds[a[1]] or c.file
-        elseif n:find('keymap.set', 1, true)
-            and type(a[2]) == 'string' and a[2] ~= '' then
-            local mode = (type(a[1]) == 'string' and a[1] ~= '') and a[1] or 'n'
-            maps[mode .. '\31' .. norm_lhs(a[2])] = { lhs = a[2], mode = mode, file = c.file }
+        local a1, a2 = argv.str(c, 1), argv.str(c, 2)
+        if n:find('nvim_create_user_command', 1, true) and a1 ~= '' then
+            cmds[a1] = cmds[a1] or c.file
+        elseif n:find('keymap.set', 1, true) and a2 ~= '' then
+            local mode = a1 ~= '' and a1 or 'n'
+            maps[mode .. '\31' .. norm_lhs(a2)] = { lhs = a2, mode = mode, file = c.file }
         end
     end
     local live_cmd = vim.api.nvim_get_commands({})

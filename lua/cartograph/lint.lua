@@ -9,6 +9,7 @@
 -- the checks are structural — they surface smells, they don't prove bugs.
 
 local M = {}
+local argv = require 'cartograph.argv'
 
 local function exported(n)
     if n.exported ~= nil then return n.exported end -- provider's verdict
@@ -81,7 +82,7 @@ local function listener_findings(store)
     if not calls or #calls == 0 then return {} end
     local function abs(c) return store.abs(c.file) end
     local function keyname(c, spec)
-        local a = c.args[spec.at + (c.method and 1 or 0)]
+        local a = argv.str(c, spec.at + (c.method and 1 or 0))
         return (a and a ~= '') and a or nil
     end
 
@@ -176,7 +177,7 @@ local function swallowed_findings(store)
         local tn = c.inferred and c.to and store.node(c.to)
         local class = tn and class_of(tn.name)
         if class then
-            local recv = c.method and c.argv and c.argv[1]
+            local recv = c.method and argv.at(c, 1)
             local file, line, fix, label
             if recv and recv.k == 'local' and recv.l then
                 file, line = c.file, recv.l

@@ -13,9 +13,10 @@
 -- and fold() can later drop the raw tables with nothing to crash — the
 -- API-first swap, exactly as the topology fold did with the Band.
 --
--- Resolution-only fields (a.to/a.up — the callback upgrade) are NOT folded:
--- they are consumed during resolution/post-passes, before fold() runs, and
--- never read post-fold. Query-read fields (k, name, v, prefix, kw) are kept.
+-- a.to (the callback upgrade's resolved target) IS query-read — xlang's
+-- find_handler reads it on refresh re-attach — so it's folded too. a.up
+-- (the upgrade marker) is resolution/merge-only (audit/relink, all pre-fold)
+-- and is dropped. Query-read fields: k, name, v, prefix, kw, to, l.
 
 local M = {}
 
@@ -37,11 +38,10 @@ end
 -- entry table. Fields absent in the fold read nil, matching raw.
 function M.at(c, i)
     if c._av then
+        if i < 1 or i > c._avn then return nil end -- out of range, like raw
         local col, r = c._av, c._av0 + i
-        local k = M.KNAME[col.k[r] or 0]
-        if not k then return nil end
-        return { k = k, name = col.name[r], v = col.v[r],
-            prefix = col.prefix[r], kw = col.kw[r] }
+        return { k = M.KNAME[col.k[r] or 0], name = col.name[r], v = col.v[r],
+            prefix = col.prefix[r], kw = col.kw[r], to = col.to[r], l = col.l[r] }
     end
     return c.argv and c.argv[i]
 end
@@ -53,23 +53,44 @@ function M.str(c, i)
 end
 
 -- ── the fold: raw argv/args tables → one columnar store, tables dropped ──
+-- the fields a folded entry can carry (columns). The neutral-schema argv is
+-- OPEN — trace/other providers emit richer kinds (param/call/field) with
+-- extra fields (i/callee/path/…) the columnar store doesn't model. An entry
+-- outside this shape keeps its CALL raw (the accessor's dual mode serves the
+-- mix); the fold still collapses the tree-sitter majority (the 197MB win).
+local FOLDABLE = { k = true, name = true, v = true, prefix = true,
+    kw = true, to = true, l = true, up = true } -- up is read pre-fold, ignored
+local function simple(a)
+    if not M.K[a.k] then return false end -- unknown kind (param/call/field/…)
+    for f in pairs(a) do if not FOLDABLE[f] then return false end end
+    return true
+end
+
 function M.fold(data)
     if data._argvcol then return 0 end -- already folded (idempotent)
-    local col = { k = {}, name = {}, v = {}, prefix = {}, kw = {} }
+    local col = { k = {}, name = {}, v = {}, prefix = {}, kw = {}, to = {}, l = {} }
     local n = 0
     for _, c in ipairs(data.calls or {}) do
         if c.argv and not c._av then
-            local base = n
-            for i, a in ipairs(c.argv) do
-                n = n + 1
-                col.k[n] = M.K[a.k] or 0
-                col.name[n] = a.name
-                col.v[n] = a.v or (c.args and c.args[i] ~= '' and c.args[i]) or nil
-                col.prefix[n] = a.prefix
-                col.kw[n] = a.kw
+            local foldable = true
+            for _, a in ipairs(c.argv) do
+                if not simple(a) then foldable = false; break end
             end
-            c._av, c._av0, c._avn = col, base, #c.argv
-            c.argv, c.args = nil, nil -- the fat tables, gone
+            if foldable then
+                local base = n
+                for i, a in ipairs(c.argv) do
+                    n = n + 1
+                    col.k[n] = M.K[a.k]
+                    col.name[n] = a.name
+                    col.v[n] = a.v or (c.args and c.args[i] ~= '' and c.args[i]) or nil
+                    col.prefix[n] = a.prefix
+                    col.kw[n] = a.kw
+                    col.to[n] = a.to
+                    col.l[n] = a.l
+                end
+                c._av, c._av0, c._avn = col, base, #c.argv
+                c.argv, c.args = nil, nil -- the fat tables, gone
+            end
         end
     end
     data._argvcol = col
@@ -80,7 +101,7 @@ end
 function M.bytes(data)
     local col = data._argvcol
     if not col then return 0 end
-    return #col.k * (1 + 8 * 4) -- k byte + 4 ref slots (name/v/prefix/kw)
+    return #col.k * (1 + 8 * 6) -- k byte + 6 ref slots (name/v/prefix/kw/to/l)
 end
 
 return M

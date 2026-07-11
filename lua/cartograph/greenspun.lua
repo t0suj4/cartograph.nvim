@@ -19,6 +19,8 @@
 
 local M = {}
 
+local argv = require 'cartograph.argv'
+
 local EVAL_VERBS = {
     eval = true, exec = true, load = true, loadstring = true, dofile = true,
     create_function = true, Function = true, dlsym = true,
@@ -76,7 +78,8 @@ local function key_positions(calls)
     local counts, total = {}, 0
     for _, c in ipairs(calls) do
         total = total + 1
-        for i, a in ipairs(c.args or {}) do
+        for i = 1, argv.n(c) do
+            local a = argv.str(c, i)
             local li = i - (c.method and 1 or 0)
             if li >= 1 and a ~= '' then counts[li] = (counts[li] or 0) + 1 end
         end
@@ -155,7 +158,7 @@ end
 local function keys_at(calls, pos)
     local keys = {}
     for _, c in ipairs(calls) do
-        local a = (c.args or {})[pos + (c.method and 1 or 0)]
+        local a = argv.str(c, pos + (c.method and 1 or 0))
         if a and a ~= '' then keys[a] = true end
     end
     return keys
@@ -187,7 +190,8 @@ function M.registries(data, opts)
                 local cache = opts and opts.deep and (opts._cache or {}) or nil
                 for _, c in ipairs(calls) do
                     local hit = false
-                    for i, a in ipairs(c.argv or {}) do
+                    for i = 1, argv.n(c) do
+                        local a = argv.at(c, i)
                         local li = i - (c.method and 1 or 0)
                         if li >= 1 and li ~= kpos
                             and (a.k == 'func' or a.k == 'callable'
@@ -316,7 +320,8 @@ function M.explain(data, verb, opts)
         local callable, by_k = 0, {}
         for _, c in ipairs(calls) do
             local hit
-            for i, a in ipairs(c.argv or {}) do
+            for i = 1, argv.n(c) do
+                local a = argv.at(c, i)
                 local li = i - (c.method and 1 or 0)
                 if li >= 1 and li ~= kpos then
                     if a.k == 'func' or a.k == 'callable'
@@ -547,7 +552,7 @@ function M.audit(data, bindings, opts)
             for c in matching_calls(data, names) do
                 local shift = c.method and 1 or 0
                 if evs[c.callee] or (c.full and evs[c.full]) then
-                    local k = (c.args or {})[(b.export.name or 1) + shift]
+                    local k = argv.str(c, (b.export.name or 1) + shift)
                     if k and k ~= '' then
                         reg[k] = true
                         reg_site[k] = reg_site[k] or c
@@ -555,7 +560,7 @@ function M.audit(data, bindings, opts)
                         reg_dyn = true
                     end
                 elseif ivs[c.callee] or (c.full and ivs[c.full]) then
-                    local k = (c.args or {})[(b.import.name or 1) + shift]
+                    local k = argv.str(c, (b.import.name or 1) + shift)
                     if k and k ~= '' then
                         disp[k] = true
                         disp_site[k] = disp_site[k] or c
@@ -566,7 +571,7 @@ function M.audit(data, bindings, opts)
                         -- file scan is only a fallback for graphs without
                         -- argv kinds (lua-ls dumps)
                         local pfx
-                        local a = (c.argv or {})[(b.import.name or 1) + shift]
+                        local a = argv.at(c, (b.import.name or 1) + shift)
                         if a and a.k == 'concat' and a.prefix then
                             pfx = a.prefix
                         elseif cache then
@@ -742,7 +747,7 @@ function M.pair_audit(data, vpairs)
         for c in matching_calls(data, names) do
             local shift = c.method and 1 or 0
             if c.callee == pr.acquire.verb then
-                local k = (c.args or {})[pr.acquire.key + shift]
+                local k = argv.str(c, pr.acquire.key + shift)
                 if k and k ~= '' then
                     acq[k] = true
                     acq_site[k] = acq_site[k] or c
@@ -751,7 +756,7 @@ function M.pair_audit(data, vpairs)
                 end
             elseif c.callee == pr.release.verb then
                 if pr.release.key then
-                    local k = (c.args or {})[pr.release.key + shift]
+                    local k = argv.str(c, pr.release.key + shift)
                     if k and k ~= '' then
                         rel[k] = true
                         rel_sites[k] = rel_sites[k] or c

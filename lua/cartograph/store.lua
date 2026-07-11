@@ -141,6 +141,13 @@ function M.ingest(data)
     for _, e in ipairs(M.data.edges or {}) do idx_edge(M, e) end
     -- baseline for a subsequent incremental step (see M.ingest_step)
     M._ing = { n = #M.data.nodes, c = #(M.data.calls or {}), e = #(M.data.edges or {}) }
+    -- ARGV FOLD (eager-but-folded): resolution is done by now (it runs in
+    -- extract, before ingest), so a.to is set — collapse the fat per-call
+    -- argv/args tables into one columnar store. Every argv reader goes
+    -- through the dual-mode accessor, so post-passes (xlang/sql/… re-run on
+    -- the folded graph, incl. refresh's whole-graph re-attach) read columns
+    -- transparently. Idempotent; refresh's fresh per-file argv re-folds.
+    require('cartograph.argv').fold(M.data)
     -- extraction-peak Stage 0: LuaJIT traces compiled DURING a big extract
     -- pin extraction-era objects as GC trace constants — measured on the
     -- server corpus: 151.9MB of dead extraction garbage held resident,

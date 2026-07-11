@@ -2410,7 +2410,9 @@ test('live oracle: the diff classifies missing, leaked and unknown', function ()
     store.ingest({ schema = 1, root = '/x', nodes = {}, edges = {}, calls = {
         -- a permanent, load-time subscription
         { callee = 'subscribe', method = true, top = true, file = 'c.lua', line = 1,
-          args = { '', 'ev', 'always_on' }, argv = {} },
+          args = { '', 'ev', 'always_on' },
+          argv = { { k = 'expr' }, { k = 'lit', v = 'ev' },
+              { k = 'lit', v = 'always_on' } } }, -- argv parallel to args
     } })
     local model = {
         subs = { flying = { { listener = 'handle_flight' },

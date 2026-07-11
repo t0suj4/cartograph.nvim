@@ -43,8 +43,11 @@ local function verb_matches(c, verb)
         or (c.full and c.full:sub(-#verb - 1) == '.' .. verb)
 end
 
+local argv = require 'cartograph.argv'
+
 local function logical_arg(c, i)
-    return c.args and c.args[i + (c.method and 1 or 0)]
+    local j = i + (c.method and 1 or 0)
+    return j <= argv.n(c) and argv.str(c, j) or nil
 end
 
 --- The call's own source text, bounded by its paren balance — scanning
@@ -78,7 +81,7 @@ end
 --- name (the &Class::Method inside base::BindRepeating spans lines).
 local function find_handler(c, root, exact, export)
     if export.fn then
-        local a = c.argv and c.argv[export.fn + (c.method and 1 or 0)]
+        local a = argv.at(c, export.fn + (c.method and 1 or 0))
         if a then
             if a.k == 'func' and a.to then return a.to end
             local name = a.k == 'lit' and a.v or a.k == 'local' and a.name
@@ -91,10 +94,12 @@ local function find_handler(c, root, exact, export)
             if a.k ~= 'expr' then return nil end
         end
     end
-    for _, a in ipairs(c.argv or {}) do
+    for i = 1, argv.n(c) do
+        local a = argv.at(c, i)
         if a.k == 'func' and a.to then return a.to end
     end
-    for _, a in ipairs(c.argv or {}) do
+    for i = 1, argv.n(c) do
+        local a = argv.at(c, i)
         if (a.k == 'local' or a.k == 'callable') and a.name and exact[a.name]
             and #exact[a.name] == 1 then
             return exact[a.name][1].id

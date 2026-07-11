@@ -16,6 +16,7 @@
 -- single atomic call, stamped with when it was true.
 
 local M = {}
+local argv = require 'cartograph.argv'
 
 --- Pure: diff the live picture against the static model.
 --- live = { subscriptions = {name...}, states = {force -> state} }
@@ -30,7 +31,7 @@ function M.diff(store, model, live)
     local lc = require('cartograph.lint').listener_config
     for _, c in ipairs(store.data.calls or {}) do
         if c.top and c.callee == lc.subscribe.verb then
-            local n = (c.args or {})[lc.subscribe.at + (c.method and 1 or 0)]
+            local n = argv.str(c, lc.subscribe.at + (c.method and 1 or 0))
             if n and n ~= '' then expected[n] = true end
         end
     end

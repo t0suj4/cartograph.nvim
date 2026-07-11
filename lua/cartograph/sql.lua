@@ -7,6 +7,7 @@
 -- table names ({$wpdb->posts}) stay honest misses.
 
 local M = {}
+local argv = require 'cartograph.argv'
 
 local KIND = {
     select = 'read', insert = 'write', update = 'write', delete = 'write',
@@ -122,7 +123,8 @@ function M.scan(data)
             -- content sniffing over literal args: LOW confidence by
             -- design (an email template mentioning SELECT must not
             -- confidently mint entities) — sites carry inferred
-            for _, a in ipairs(c.args or {}) do
+            for ai = 1, argv.n(c) do
+                local a = argv.str(c, ai)
                 q = a ~= '' and M.parse(a)
                 if q then
                     record(c, q, 'content')

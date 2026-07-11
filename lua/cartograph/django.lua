@@ -15,6 +15,7 @@
 -- never persisted (nodes marked dj = true).
 
 local M = {}
+local argv = require 'cartograph.argv'
 
 local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
 
@@ -196,8 +197,8 @@ function M.attach(data)
     -- ── reverse('name') lookups in code ──────────────────────────────────
     for _, c in ipairs(data.calls or {}) do
         if LOOKUP[c.callee:match('([%w_]+)$') or ''] and c.fn
-            and c.args and c.args[1] and c.args[1] ~= '' then
-            link(c.fn, c.args[1], c.file, c.line)
+            and argv.str(c, 1) ~= '' then
+            link(c.fn, argv.str(c, 1), c.file, c.line)
         end
     end
 
