@@ -88,9 +88,19 @@ M.SIGS = {
             ['Map.'] = IO, ['Game.'] = IO,                          -- desynced
             ['C_'] = IO,                                            -- wow C_*
         },
-        methods = { -- receiver-untyped (~): overwhelmingly string methods
+        methods = { -- receiver-untyped (~): string methods + the WoW frame
+            -- API surface (SetPoint/Fire/… — usually GAME objects: the
+            -- call won't resolve in-corpus, but its EFFECT is known world)
             gsub = P, sub = P, find = P, match = P, gmatch = P, format = P,
             rep = P, upper = P, lower = P, byte = P, len = P,
+            SetPoint = IO, SetScript = IO, Fire = IO, Show = IO, Hide = IO,
+            SetText = IO, SetSize = IO, SetWidth = IO, SetHeight = IO,
+            RegisterEvent = IO, UnregisterEvent = IO, SetShown = IO,
+            ClearAllPoints = IO, EnableMouse = IO, SetAlpha = IO,
+            SetParent = IO, SetFrameStrata = IO, CreateTexture = IO,
+            CreateFontString = IO, SetTexture = IO, SetColorTexture = IO,
+            GetName = P, GetParent = P, GetWidth = P, GetHeight = P,
+            IsShown = P, IsVisible = P, GetText = P, GetPoint = P,
         },
     },
     php = {

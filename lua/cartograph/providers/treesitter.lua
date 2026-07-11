@@ -749,9 +749,49 @@ local PHP_GUARDS = {
 -- and reruns the write/guard classifiers on live nodes)
 M.guard_class = guard_class
 
+-- WoW-addon boundary detection, memoized per (root, top segment): an
+-- addon tree is <root>/<Addon>/<Addon>.toc (or any *.toc in the dir).
+local TOC_DIR = {}
+local function toc_scope(file, _, root)
+    local seg = file:match('^([^/]+)/')
+    -- multi-root corpora (self://) pass a table root: never an addon tree
+    if not seg or type(root) ~= 'string' then return '' end
+    local key = root .. '\31' .. seg
+    local hit = TOC_DIR[key]
+    if hit == nil then
+        local dir = root .. '/' .. seg
+        hit = vim.uv.fs_stat(dir .. '/' .. seg .. '.toc') ~= nil
+        if not hit then
+            local it = vim.uv.fs_scandir(dir)
+            while it do
+                local name = vim.uv.fs_scandir_next(it)
+                if not name then break end
+                if name:sub(-4) == '.toc' then hit = true break end
+            end
+        end
+        TOC_DIR[key] = hit
+    end
+    return hit and seg or ''
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
+        -- RESOLUTION BOUNDARY (the .toc scoping adapter): in a WoW-addon
+        -- tree every addon vendors the same libraries (353 Ace3 copies),
+        -- and whole-tree name resolution drowns in the ambiguity — the
+        -- hedge census measured 63.6% of wow's hedge mass as refused-
+        -- with-candidates. Each addon dir (identified by its .toc
+        -- manifest) becomes a scope: calls resolve against the addon's
+        -- OWN files (incl. its vendored libs); cross-addon names stay
+        -- honestly unresolved (runtime cross-addon calls go through
+        -- globals — name-matching them would be a guess). A lua tree
+        -- with no .toc dirs partitions to ONE scope: behavior unchanged.
+        scope = toc_scope,
+        -- qualified/method names resolve within the addon boundary too:
+        -- self:RegisterEvent means THIS addon's vendored AceEvent; a
+        -- cross-addon unique-name match is a guess, not a fact
+        qualified_scope_local = true,
         write_gate = { variable_list = true, dot_index_expression = true,
             bracket_index_expression = true },
         is_write = lua_is_write,
@@ -4746,6 +4786,13 @@ function M.extract(root, opts)
                 if dotted then
                     fits = not (spec and spec.dot_calls_are_methods)
                         or n.kind == 'method'
+                    -- WoW addons: a qualified/method name's receiver is
+                    -- the addon's OWN object (its vendored Ace copy) —
+                    -- qualified names stay scope-local too. Single-scope
+                    -- trees ('' everywhere) are unaffected.
+                    if fits and spec and spec.qualified_scope_local then
+                        fits = sc == nil or scope_of(n.file) == sc
+                    end
                 else
                     fits = sc == nil or scope_of(n.file) == sc
                 end
@@ -4787,6 +4834,13 @@ function M.extract(root, opts)
                 if dotted then
                     fits = not (spec and spec.dot_calls_are_methods)
                         or n.kind == 'method'
+                    -- WoW addons: a qualified/method name's receiver is
+                    -- the addon's OWN object (its vendored Ace copy) —
+                    -- qualified names stay scope-local too. Single-scope
+                    -- trees ('' everywhere) are unaffected.
+                    if fits and spec and spec.qualified_scope_local then
+                        fits = sc == nil or scope_of(n.file) == sc
+                    end
                 else
                     fits = sc == nil or scope_of(n.file) == sc
                 end
@@ -5268,6 +5322,13 @@ function M.relink(data, touched)
                 if dotted then
                     fits = not (spec and spec.dot_calls_are_methods)
                         or n.kind == 'method'
+                    -- WoW addons: a qualified/method name's receiver is
+                    -- the addon's OWN object (its vendored Ace copy) —
+                    -- qualified names stay scope-local too. Single-scope
+                    -- trees ('' everywhere) are unaffected.
+                    if fits and spec and spec.qualified_scope_local then
+                        fits = sc == nil or scope_of(n.file) == sc
+                    end
                 else
                     fits = sc == nil or scope_of(n.file) == sc
                 end
@@ -5309,6 +5370,13 @@ function M.relink(data, touched)
                 if dotted then
                     fits = not (spec and spec.dot_calls_are_methods)
                         or n.kind == 'method'
+                    -- WoW addons: a qualified/method name's receiver is
+                    -- the addon's OWN object (its vendored Ace copy) —
+                    -- qualified names stay scope-local too. Single-scope
+                    -- trees ('' everywhere) are unaffected.
+                    if fits and spec and spec.qualified_scope_local then
+                        fits = sc == nil or scope_of(n.file) == sc
+                    end
                 else
                     fits = sc == nil or scope_of(n.file) == sc
                 end
