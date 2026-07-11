@@ -229,4 +229,21 @@ return {
         lang = 'lua', -- not a git repo
         notes = 'game-script corpus; adapter gap banked',
     },
+    factorio = {
+        root = HOME .. '/work/factorio-mods',
+        lang = 'lua', -- symlink-assembled multi-mod root (SE + postprocess
+        -- + scripts + bravest-new-world) — the CROSS-PROJECT corpus:
+        -- __modname__ requires resolve by info.json identity across mods
+        notes = 'factorio multi-mod: cross-mod imports (scripts->SE x9),'
+            .. ' mod dirs = scope boundaries, per-phase entry cones',
+    },
+    se = {
+        root = HOME .. '/work/space-exploration_0.7.57',
+        lang = 'lua', -- version-pinned mod dir, not a git repo
+        notes = 'Space Exploration 0.7.57 — the FACTORIO reference corpus:'
+            .. ' 5 phase entries (control/data/updates/final-fixes/settings),'
+            .. ' phase cones separate via imports (2 shared files), unreached'
+            .. ' = conditional compat requires + menu-simulations engine'
+            .. ' entries; the factorio sharing-model cut lands here',
+    },
 }

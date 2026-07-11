@@ -749,6 +749,37 @@ local PHP_GUARDS = {
 -- and reruns the write/guard classifiers on live nodes)
 M.guard_class = guard_class
 
+-- factorio mod-name -> top dir, from each dir's info.json "name" (the
+-- mod's IDENTITY — dir names carry versions and may not match: space-
+-- exploration-postprocess lives in space-exploration_0.7.5). The root's
+-- OWN info.json maps its name to '' (self-references resolve in a
+-- single-mod extraction too). Memoized per root.
+local FMODS = {}
+local function factorio_mods(root, files)
+    local map = FMODS[root]
+    if map then return map end
+    map = {}
+    local segs = { [''] = true }
+    for f in pairs(files) do
+        local seg = f:match('^([^/]+)/')
+        if seg then segs[seg] = true end
+    end
+    for seg in pairs(segs) do
+        local p = root .. (seg == '' and '' or '/' .. seg) .. '/info.json'
+        local fd = io.open(p, 'r')
+        if fd then
+            local txt = fd:read('*a')
+            fd:close()
+            local okj, m = pcall(vim.json.decode, txt)
+            if okj and type(m) == 'table' and type(m.name) == 'string' then
+                map[m.name] = seg
+            end
+        end
+    end
+    FMODS[root] = map
+    return map
+end
+
 -- WoW-addon boundary detection, memoized per (root, top segment): an
 -- addon tree is <root>/<Addon>/<Addon>.toc (or any *.toc in the dir).
 local TOC_DIR = {}
@@ -761,6 +792,8 @@ local function toc_scope(file, _, root)
     if hit == nil then
         local dir = root .. '/' .. seg
         hit = vim.uv.fs_stat(dir .. '/' .. seg .. '.toc') ~= nil
+            -- factorio mods folder: info.json is the manifest marker
+            or vim.uv.fs_stat(dir .. '/info.json') ~= nil
         if not hit then
             local it = vim.uv.fs_scandir(dir)
             while it do
@@ -823,10 +856,51 @@ M.spec = {
         is_method = function (name) return name:find(':') ~= nil end,
         -- `require "x"` / `local x = require "x"`: module -> file
         import_call = 'require',
-        resolve_import = function (mod, files)
+        resolve_import = function (mod, files, from, root)
             local slashed = mod:gsub('%.', '/')
             for _, cand in ipairs({ slashed .. '.lua', slashed .. '/init.lua', mod .. '.lua' }) do
                 if files[cand] then return cand end
+            end
+            -- FACTORIO-ONLY semantics (stock lua require is package.path
+            -- based — dir-relative matching elsewhere would be a GUESS,
+            -- exactly what the self oracle exists to confirm instead; the
+            -- self_spec caught the over-reach): factorio resolves requires
+            -- relative to the CURRENT FILE's directory (bnw's
+            -- migrations/lib/ is the proof), and in a multi-project root
+            -- the project dir prefixes mod-root-relative requires (SE's
+            -- require("scripts.zone") = space-exploration/scripts/zone.lua)
+            if from and type(root) == 'string'
+                and next(factorio_mods(root, files)) then
+                local dir = from:match('^(.*)/[^/]*$')
+                local pre = from:match('^([^/]+)/')
+                local tries = {}
+                if dir then
+                    tries[#tries + 1] = dir .. '/' .. slashed .. '.lua'
+                    tries[#tries + 1] = dir .. '/' .. slashed .. '/init.lua'
+                end
+                if pre and pre ~= dir then
+                    tries[#tries + 1] = pre .. '/' .. slashed .. '.lua'
+                    tries[#tries + 1] = pre .. '/' .. slashed .. '/init.lua'
+                end
+                for _, cand in ipairs(tries) do
+                    if files[cand] then return cand end
+                end
+            end
+            -- factorio cross-mod require: __name__/path or __name__.dotted
+            -- — the DECLARED cross-project import (cross-project layer 1).
+            -- The target dir comes from info.json identity; __base__/
+            -- __core__ (engine data, not in corpus) stay unresolved, honest.
+            local mn, rest = mod:match('^__([%w%-_]+)__[./](.+)$')
+            if mn and type(root) == 'string' then
+                local dir = factorio_mods(root, files)[mn]
+                if dir then
+                    local pre = dir == '' and '' or dir .. '/'
+                    local rs = rest:gsub('%.', '/')
+                    for _, cand in ipairs({ pre .. rest, pre .. rs .. '.lua',
+                        pre .. rs .. '/init.lua' }) do
+                        if files[cand] then return cand end
+                    end
+                end
             end
         end,
         -- which LOCAL names this import: `local util = require 'x'`
@@ -3112,6 +3186,7 @@ local EXCLUDE_DIRS = { node_modules = true, vendor = true, dist = true,
 
 local function list_files(root, subdirs)
     local out, minified = {}, {}
+    local seen_real = {} -- external symlink targets already walked (cycles/dups)
     local function in_scope(rel)
         if not subdirs then return true end
         for _, p in ipairs(subdirs) do
@@ -3133,6 +3208,29 @@ local function list_files(root, subdirs)
             if not name then break end
             if name:sub(1, 1) ~= '.' then
                 local r = rel == '' and name or (rel .. '/' .. name)
+                if t == 'link' then
+                    -- a symlinked DIR: follow only when it points OUTSIDE
+                    -- the root (a corpus assembled from symlinks —
+                    -- factorio-mods). An INTERNAL alias (ripgrep's
+                    -- HomebrewFormula -> pkg/brew) is skipped: the real
+                    -- path is walked normally, and following both would
+                    -- duplicate every file under two keys.
+                    local p = root .. '/' .. r
+                    local st = vim.uv.fs_stat(p)
+                    if st and st.type == 'directory' then
+                        local rp = vim.uv.fs_realpath(p)
+                        local rootrp = vim.uv.fs_realpath(root)
+                        if rp and rootrp
+                            and rp:sub(1, #rootrp + 1) ~= rootrp .. '/' then
+                            if not seen_real[rp] then
+                                seen_real[rp] = true
+                                t = 'directory'
+                            end
+                        end
+                    elseif st and st.type == 'file' then
+                        t = 'file'
+                    end
+                end
                 if t == 'directory' then
                     local ex = EXCLUDE_DIRS[name:lower()]
                     if not ex then
@@ -4245,7 +4343,7 @@ function M.extract(root, opts)
                     for id, ns in pairs(match) do
                         if q.captures[id] == 'path' then
                             local target = spec.resolve_import(
-                                node_text(cap_node(ns), src), fileset, file)
+                                node_text(cap_node(ns), src), fileset, file, root)
                             if target and target ~= file then
                                 edges[#edges + 1] = { from = file, to = target, kind = 'import' }
                             end
@@ -4470,7 +4568,7 @@ function M.extract(root, opts)
                     -- which module)
                     if spec.import_call and full == spec.import_call then
                         local target = args[1] and args[1] ~= ''
-                            and spec.resolve_import(args[1], fileset, file)
+                            and spec.resolve_import(args[1], fileset, file, root)
                         if target and target ~= file then
                             local pt = calln:parent()
                             local ptt = pt and pt:type() or ''
@@ -4486,7 +4584,7 @@ function M.extract(root, opts)
                     -- literal; the edge is name-matched, so it carries ~
                     if spec.import_call_like and args[1] and args[1] ~= ''
                         and spec.import_call_like(full, args[1]) then
-                        local target = spec.resolve_import(args[1], fileset, file)
+                        local target = spec.resolve_import(args[1], fileset, file, root)
                         if target and target ~= file then
                             edges[#edges + 1] = { from = file, to = target,
                                 kind = 'import', inferred = true }

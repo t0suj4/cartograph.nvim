@@ -73,3 +73,54 @@ test('tocscope: a plain lua tree keeps ONE scope', function ()
     end
     ok(hit and hit.to, 'no .toc anywhere: cross-directory resolution intact')
 end)
+
+test('factorio: __modname__ requires resolve by info.json identity', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    -- mod identity comes from info.json, NOT the dir name (the postprocess
+    -- lesson: space-exploration-postprocess lives in space-exploration_0.7.5)
+    write(root, 'alpha_1.2.3/info.json', '{"name": "alpha-core", "version": "1.2.3"}')
+    write(root, 'alpha_1.2.3/lib/zone.lua', 'local M = {}\nfunction M.hi() return 1 end\nreturn M')
+    write(root, 'alpha_1.2.3/control.lua',
+        'local Zone = require("__alpha-core__.lib.zone")\nreturn Zone')
+    write(root, 'beta_0.1/info.json', '{"name": "beta", "version": "0.1"}')
+    write(root, 'beta_0.1/control.lua', table.concat({
+        'local Zone = require("__alpha-core__.lib.zone")',      -- dotted
+        'local Z2 = require("__alpha-core__/lib/zone.lua")',    -- path form
+        'local eng = require("__base__.util")',                 -- engine: honest nil
+        'return { Zone, Z2 }',
+    }, '\n'))
+    local data = ts.extract(root)
+    local hits, base = {}, nil
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'import' then
+            hits[#hits + 1] = e.from .. ' -> ' .. e.to
+        end
+    end
+    table.sort(hits)
+    eq({
+        'alpha_1.2.3/control.lua -> alpha_1.2.3/lib/zone.lua', -- self-ref via __name__
+        'beta_0.1/control.lua -> alpha_1.2.3/lib/zone.lua',    -- dotted cross-mod
+        'beta_0.1/control.lua -> alpha_1.2.3/lib/zone.lua',    -- path-form cross-mod
+    }, hits, 'cross-mod requires resolve; __base__ stays honestly unresolved')
+end)
+
+test('factorio: info.json dirs are scope boundaries too', function ()
+    if not ready() then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    write(root, 'modx_1.0/info.json', '{"name": "modx"}')
+    write(root, 'modx_1.0/a.lua', 'function Shared() return 1 end\nreturn true')
+    write(root, 'mody_1.0/info.json', '{"name": "mody"}')
+    write(root, 'mody_1.0/a.lua', 'function Shared() return 2 end\nreturn true')
+    write(root, 'mody_1.0/b.lua',
+        'local function go() return Shared() end\nreturn { go }')
+    local data = ts.extract(root)
+    for _, c in ipairs(data.calls) do
+        if c.callee == 'Shared' then
+            ok(c.to and c.to:match('^mody_1%.0/'),
+                'bare name resolves within the MOD boundary')
+        end
+    end
+end)
