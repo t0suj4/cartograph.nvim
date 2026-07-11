@@ -429,9 +429,34 @@ local function render_var(ctx, id)
         end
     end
     -- the state atlas label rides the title: what KIND of state is this
-    local a = require('cartograph.atlas').classify(store, id)
+    local atlas = require 'cartograph.atlas'
+    local a = atlas.classify(store, id)
     render_sites(ctx, node, '·', 'used by · ' .. a.label, sites,
         '(no reads found — writes only, or dynamic access)')
+    -- the FIELD decomposition (on demand, ~ms with warm parses): a
+    -- multi-writer var often blurs per-field ownership — show it
+    local fa = atlas.fields(store, id)
+    if fa and next(fa.fields) then
+        local names = {}
+        for f in pairs(fa.fields) do names[#names + 1] = f end
+        table.sort(names)
+        ctx.lines[#ctx.lines + 1] = ''
+        ctx.lines[#ctx.lines + 1] = fa.whole.nw > 0
+            and 'fields (~ hedged: a whole-var write exists):'
+            or 'fields:'
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
+        for i = 1, math.min(#names, 16) do
+            local f = names[i]
+            local rec = fa.fields[f]
+            ctx.lines[#ctx.lines + 1] = ('  .%s — %s%s'):format(
+                f, rec.label, rec.hedged and ' ~' or '')
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        end
+        if #names > 16 then
+            ctx.lines[#ctx.lines + 1] = ('  … %d more'):format(#names - 16)
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        end
+    end
 end
 
 -- A function's callers: every call site, cross-referenced from the ref edges

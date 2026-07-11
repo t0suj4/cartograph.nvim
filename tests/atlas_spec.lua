@@ -80,3 +80,64 @@ test('atlas: end-to-end on a real extract', function ()
     eq('dead', byname.trace)
     eq('set-once', byname.memo)
 end)
+
+test('atlas fields: a multi-writer var decomposes per field', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local state = {}',
+        'local function setx(v) state.x = v end',       -- x: single-writer
+        'local function bump1() state.y = 1 end',       -- y: two writers
+        'local function bump2() state.y = 2 end',
+        'local function readz() return state.z end',    -- z: read-only
+        'local function init() if not state.m then state.m = {} end end',
+        'local function dump() return state.x, state.y end',
+        'return { setx, bump1, bump2, readz, init, dump }',
+    }, '\n'))
+    fd:close()
+    store.ingest(require('cartograph.providers.treesitter').extract(root))
+    local vid
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'var' and n.name == 'state' then vid = n.id end
+    end
+    ok(vid, 'state var extracted')
+    eq('multi-writer', atlas.classify(store, vid).label,
+        'edge-level: the aggregate blurs the fields')
+    local fa = atlas.fields(store, vid)
+    ok(fa, 'field decomposition ran')
+    eq('single-writer', fa.fields.x.label, 'x has one owner')
+    eq('multi-writer', fa.fields.y.label, 'y is genuinely contended')
+    eq('const', fa.fields.z.label, 'z is read-only')
+    eq('set-once', fa.fields.m.label, 'm is absence-guarded init')
+    eq(nil, fa.fields.x.hedged, 'no whole-var write: claims unhedged')
+    eq(0, fa.whole.nw, 'no whole-var writes in this fixture')
+end)
+
+test('atlas fields: a whole-var write hedges every field claim', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local cfg = {}',
+        'local function seta(v) cfg.a = v end',
+        'local function reset() cfg = {} end', -- rebind: whole-var write
+        'local function get() return cfg.a end',
+        'return { seta, reset, get }',
+    }, '\n'))
+    fd:close()
+    store.ingest(require('cartograph.providers.treesitter').extract(root))
+    local vid
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'var' and n.name == 'cfg' then vid = n.id end
+    end
+    local fa = atlas.fields(store, vid)
+    ok(fa.whole.nw > 0, 'the rebind lands in the whole bucket as a write')
+    ok(fa.fields.a.hedged, '...and hedges the per-field claim')
+end)

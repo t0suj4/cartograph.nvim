@@ -699,6 +699,10 @@ local PHP_GUARDS = {
     end,
 }
 
+-- exported for on-demand re-analysis (the field atlas re-parses a file
+-- and reruns the write/guard classifiers on live nodes)
+M.guard_class = guard_class
+
 M.spec = {
     lua = {
         exts = { 'lua' },
