@@ -17,6 +17,27 @@
 
 local M = {}
 
+local char, byte, concat = string.char, string.byte, table.concat
+
+-- LE-u32 packed column + 1-based getter (fixed width: views READ BY INDEX)
+local function pack_u32(arr, len)
+    local parts = {}
+    for i = 1, len do
+        local v = arr[i]
+        local lo = v % 65536
+        parts[i] = char(lo % 256, (lo - lo % 256) / 256,
+            (v - v % 65536) / 65536 % 256, (v - v % 16777216) / 16777216 % 256)
+    end
+    return concat(parts)
+end
+local function getter(s)
+    return function (i)
+        local p = (i - 1) * 4 + 1
+        local a, b, c, d = byte(s, p, p + 3)
+        return a + b * 256 + c * 65536 + d * 16777216
+    end
+end
+
 -- ── dual-mode accessors ──────────────────────────────────────────────────
 
 -- does this node carry (non-empty) dataflow?
@@ -47,17 +68,20 @@ end
 -- contiguously per stmt, so def count = u0[g] - d0[g] and use count =
 -- d0[g+1] - u0[g] (sentinel rows close the last stmt); dep/defr likewise.
 local function stmt_view(col, g)
-    local st = { l = col.l[g], def = {}, use = {}, dep = {} }
-    local b, e = col.d0[g], col.u0[g]
-    for j = 1, e - b do st.def[j] = col.nm[b + j] end
-    b, e = e, col.d0[g + 1]
-    for j = 1, e - b do st.use[j] = col.nm[b + j] end
-    b, e = col.p0[g], col.p0[g + 1]
-    for j = 1, e - b do st.dep[j] = { from = col.depf[b + j], var = col.depv[b + j] } end
-    b, e = col.r0[g], col.r0[g + 1]
+    local nms = col.names
+    local st = { l = col.l(g), def = {}, use = {}, dep = {} }
+    local b, e = col.d0(g), col.u0(g)
+    for j = 1, e - b do st.def[j] = nms[col.nm(b + j)] end
+    b, e = e, col.d0(g + 1)
+    for j = 1, e - b do st.use[j] = nms[col.nm(b + j)] end
+    b, e = col.p0(g), col.p0(g + 1)
+    for j = 1, e - b do
+        st.dep[j] = { from = col.depf(b + j), var = nms[col.depv(b + j)] }
+    end
+    b, e = col.r0(g), col.r0(g + 1)
     if e > b then
         local defr = {}
-        for j = 1, e - b do defr[col.rdi[b + j]] = col.rtag[b + j] end
+        for j = 1, e - b do defr[col.rdi(b + j)] = col.rtag(b + j) - 2 end
         st.defr = defr
     end
     return st
@@ -65,12 +89,36 @@ end
 
 -- the statement list for a node (empty when none), for ipairs iteration.
 -- Folded nodes materialize views FRESH per call (transient, raw-shaped).
+-- Offsets ROLL across consecutive stmts (each boundary decoded once): for
+-- the common small statement the offset reads dominate the element reads.
 function M.stmts(n)
     if not n then return {} end
     local col = n._df
     if col then
         local out = {}
-        for i = 1, n._dfn do out[i] = stmt_view(col, n._df0 + i) end
+        local nms = col.names
+        local g = n._df0
+        local d1 = col.d0(g + 1)
+        local p1 = col.p0(g + 1)
+        local r1 = col.r0(g + 1)
+        for i = 1, n._dfn do
+            g = g + 1
+            local d0, p0, r0 = d1, p1, r1
+            d1, p1, r1 = col.d0(g + 1), col.p0(g + 1), col.r0(g + 1)
+            local st = { l = col.l(g), def = {}, use = {}, dep = {} }
+            local u0 = col.u0(g)
+            for j = 1, u0 - d0 do st.def[j] = nms[col.nm(d0 + j)] end
+            for j = 1, d1 - u0 do st.use[j] = nms[col.nm(u0 + j)] end
+            for j = 1, p1 - p0 do
+                st.dep[j] = { from = col.depf(p0 + j), var = nms[col.depv(p0 + j)] }
+            end
+            if r1 > r0 then
+                local defr = {}
+                for j = 1, r1 - r0 do defr[col.rdi(r0 + j)] = col.rtag(r0 + j) - 2 end
+                st.defr = defr
+            end
+            out[i] = st
+        end
         return out
     end
     return (n.df and n.df.stmts) or {}
@@ -83,7 +131,7 @@ function M.get(n)
     local col = n._df
     if col then
         local inputs = {}
-        for i = 1, n._dfin do inputs[i] = col.inm[n._dfi0 + i] end
+        for i = 1, n._dfin do inputs[i] = col.names[col.inm(n._dfi0 + i)] end
         return { inputs = inputs, stmts = M.stmts(n) }
     end
     return n.df
@@ -103,7 +151,18 @@ function M.fold(data)
     local col = {
         l = {}, d0 = {}, u0 = {}, p0 = {}, r0 = {},
         nm = {}, depf = {}, depv = {}, rdi = {}, rtag = {}, inm = {},
+        names = {},
     }
+    local nid = {} -- name -> interned id (build-time only)
+    local function id(nm)
+        local i = nid[nm]
+        if not i then
+            i = #col.names + 1
+            col.names[i] = nm
+            nid[nm] = i
+        end
+        return i
+    end
     local ns, nn, np, nr, ni = 0, 0, 0, 0, 0
     for _, node in ipairs(data.nodes or {}) do
         local df = node.df
@@ -113,28 +172,29 @@ function M.fold(data)
                 ns = ns + 1
                 col.l[ns] = st.l
                 col.d0[ns] = nn
-                for _, d in ipairs(st.def) do nn = nn + 1; col.nm[nn] = d end
+                for _, d in ipairs(st.def) do nn = nn + 1; col.nm[nn] = id(d) end
                 col.u0[ns] = nn
-                for _, u in ipairs(st.use) do nn = nn + 1; col.nm[nn] = u end
+                for _, u in ipairs(st.use) do nn = nn + 1; col.nm[nn] = id(u) end
                 col.p0[ns] = np
                 for _, dp in ipairs(st.dep or {}) do
                     np = np + 1
                     col.depf[np] = dp.from
-                    col.depv[np] = dp.var
+                    col.depv[np] = id(dp.var)
                 end
                 col.r0[ns] = nr
                 if st.defr then
                     for di, tag in pairs(st.defr) do
                         nr = nr + 1
                         col.rdi[nr] = di
-                        col.rtag[nr] = tag
+                        col.rtag[nr] = tag + 2 -- binder tags are SIGNED (-2 free,
+                        -- -1 row-less): bias into u32, views un-bias
                     end
                 end
             end
             local i0 = ni
             for _, x in ipairs(df.inputs or {}) do
                 ni = ni + 1
-                col.inm[ni] = x
+                col.inm[ni] = id(x)
             end
             node._df = col
             node._df0, node._dfn = s0, ns - s0
@@ -144,7 +204,27 @@ function M.fold(data)
     end
     -- sentinels: close the last stmt's derived counts
     col.d0[ns + 1], col.p0[ns + 1], col.r0[ns + 1] = nn, np, nr
-    data._dfcol = col
+    -- pack: number arrays -> LE-u32 byte strings; name pools -> id columns
+    -- over ONE interned names array (Lua interning made repeats free as
+    -- refs; the id column makes them free as 4 BYTES)
+    local packed = {
+        l = getter(pack_u32(col.l, ns)),
+        d0 = getter(pack_u32(col.d0, ns + 1)),
+        u0 = getter(pack_u32(col.u0, ns)),
+        p0 = getter(pack_u32(col.p0, ns + 1)),
+        r0 = getter(pack_u32(col.r0, ns + 1)),
+        nm = getter(pack_u32(col.nm, nn)),
+        depf = getter(pack_u32(col.depf, np)),
+        depv = getter(pack_u32(col.depv, np)),
+        rdi = getter(pack_u32(col.rdi, nr)),
+        rtag = getter(pack_u32(col.rtag, nr)),
+        inm = getter(pack_u32(col.inm, ni)),
+        names = col.names,
+    }
+    for _, node in ipairs(data.nodes or {}) do
+        if node._df == col then node._df = packed end
+    end
+    data._dfcol = packed
     return ns
 end
 
