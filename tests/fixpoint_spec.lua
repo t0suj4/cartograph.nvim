@@ -127,3 +127,66 @@ test('fixpoint: calls_commute — conflict, set-once excuse, honesty', function 
     local v4 = effects.calls_commute(store, callto('mystery'), callto('leaf'))
     eq('unknown', v4, 'a hedged summary never claims commute')
 end)
+
+test('signatures: packs un-hedge, io orders, higher-order inherits', function ()
+    if not ready() then skip 'no lua parser' end
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local acc = {}',
+        'local function calc(x) return math.floor(x) + #tostring(x) end',
+        'local function methodpure(s) return s:gsub("a", "b") end',
+        'local function noisy(m) print(m) end',
+        'local function noisy2() vim.api.nvim_echo() end',
+        'local function rolled() return math.random() end',
+        'local function writer() acc.n = 1 end',
+        'local function guarded() pcall(writer) end',      -- higher-order
+        'local function guarded2() pcall(function() end) end', -- anonymous
+        'local function asserted_call() MYAPI_poke() end',
+        'return { calc, methodpure, noisy, noisy2, rolled, writer,',
+        '    guarded, guarded2, asserted_call }',
+    }, '\n'))))
+    local by = byname()
+    local sums = effects.summaries(store)
+    eq('pure', effects.purity(store, by.calc.id),
+        'stdlib pack: math.floor/tostring/# no longer hedge')
+    eq('pure~', effects.purity(store, by.methodpure.id),
+        'method tier is name-matched: pure, but ~')
+    eq('io', effects.purity(store, by.noisy.id), 'print writes the world')
+    eq('io', effects.purity(store, by.noisy2.id), 'vim.api.* prefix: world')
+    eq('pure', effects.purity(store, by.rolled.id),
+        'math.random: effect-free — nondet rides a flag, not a hedge')
+    ok(sums[by.rolled.id].nd, '...and the flag is set')
+    -- higher-order: pcall(writer) costs what writer costs
+    ok(sums[by.guarded.id].w[by.acc.id .. '\31n'],
+        'pcall(writer) inherits the write through calls={1}')
+    eq('writes', effects.purity(store, by.guarded.id))
+    eq('pure~', effects.purity(store, by.guarded2.id),
+        'pcall(anonymous): callback effects unknown — hedged, never pure')
+    -- io-io ordering conflict through commute
+    local c1, c2
+    for _, c in ipairs(store.data.calls) do
+        if c.to == by.noisy.id then c1 = c end
+        if c.to == by.noisy2.id then c2 = c end
+    end
+    if c1 and c2 then
+        local v, why = effects.calls_commute(store, c1, c2)
+        eq('conflict', v, 'two world-writers do not commute: ' .. (why or ''))
+    end
+end)
+
+test('signatures: asserted tier applies AND hedges with the name', function ()
+    if not ready() then skip 'no lua parser' end
+    local config = require 'cartograph.config'
+    local saved = config.effects
+    config.effects = { MYAPI_poke = { io = true } }
+    store.ingest(ts.extract(mkroot(table.concat({
+        'local function asserted_call() MYAPI_poke() end',
+        'return { asserted_call }',
+    }, '\n'))))
+    local by = byname()
+    local sum = effects.summaries(store)[by.asserted_call.id]
+    config.effects = saved
+    ok(sum.w['\1io\31'], 'the asserted io contract is APPLIED')
+    ok(sum.h and sum.h[1]:find('asserted contract: MYAPI_poke', 1, true),
+        'and every use is hedged with the assertion named')
+    -- label: io~ — conditional on the user being right, visibly
+end)

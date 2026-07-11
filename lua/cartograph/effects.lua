@@ -21,30 +21,124 @@ local argv = require 'cartograph.argv'
 
 local M = {}
 
--- BUILTIN effect table: stdlib callees that write their arguments — the
--- fact resolution can never discover (builtins resolve to no node), and
--- without which every table.insert would be an honest-but-useless
--- "may write anything" in the purity fixpoint. w = 1-based arg indexes
--- written. Curated, deliberately small; absence means UNKNOWN, not pure.
-M.BUILTINS = {
+-- EFFECT-SIGNATURE REGISTRY: contracts for callees resolution can never
+-- see inside (stdlib, runtime APIs) — without them every table.insert /
+-- math.floor is an honest-but-useless hedge in the purity fixpoint.
+-- Vocabulary per signature (absence of a signature = UNKNOWN, never pure):
+--   pure = true      no module-state or world effect
+--   w = {i,...}      writes its 1-based args (through references)
+--   calls = {i,...}  HIGHER-ORDER: invokes its args — the passed fn's
+--                    summary is inherited at the site (pcall costs what
+--                    its argument costs)
+--   io = true        writes the WORLD (editor/game/files) — modeled as a
+--                    write to the '\1io' pseudo-var so commute/ordering
+--                    machinery treats world-order for free
+--   nondet = true    effect-free but not referentially transparent
+--                    (os.time, math.random) — matters for idempotence
+--   reads = {i,...} / returns_arg = i   parsed, INERT in v1 (read
+--                    modeling and aliasing land with their consumers)
+-- THREE TIERS, per the hedge census (2026-07-11):
+--   exact/prefix     shipped packs, curated where the documentation lives
+--   methods          receiver-untyped method names (~): s:gsub, no callee
+--                    table reaches these — name-matched honesty
+--   asserted         config.effects (user contracts): APPLIED but every
+--                    use also HEDGES with the assertion named — user
+--                    knowledge is unreliable; claims through assertions
+--                    stay visibly conditional
+local P = { pure = true }
+local IO = { io = true }
+local ND = { pure = true, nondet = true }
+M.SIGS = {
     lua = {
-        ['table.insert'] = { w = { 1 } },
-        ['table.remove'] = { w = { 1 } },
-        ['table.sort'] = { w = { 1 } },
-        ['table.move'] = { w = { 5 } }, -- a2 (defaults to a1: conservative)
-        ['setmetatable'] = { w = { 1 } },
-        ['rawset'] = { w = { 1 } },
+        exact = {
+            -- language core
+            pairs = P, ipairs = P, next = P, type = P, tostring = P,
+            tonumber = P, select = P, rawget = P, rawequal = P, rawlen = P,
+            unpack = P, error = P, assert = P, getmetatable = P,
+            rawset = { w = { 1 } }, setmetatable = { w = { 1 }, returns_arg = 1 },
+            pcall = { calls = { 1 } }, xpcall = { calls = { 1 } },
+            print = IO, require = IO, collectgarbage = IO,
+            ['math.random'] = ND, ['math.randomseed'] = IO,
+            ['os.time'] = ND, ['os.clock'] = ND, ['os.date'] = ND,
+            ['os.getenv'] = ND,
+            ['table.insert'] = { w = { 1 } }, ['table.remove'] = { w = { 1 } },
+            ['table.sort'] = { w = { 1 }, calls = { 2 } },
+            ['table.move'] = { w = { 5 } }, ['table.concat'] = P,
+            ['table.unpack'] = P,
+            ['string.gsub'] = { calls = { 3 } }, -- repl may be a fn; strings/tables pure
+            ['coroutine.wrap'] = { calls = { 1 } },
+            ['coroutine.create'] = { calls = { 1 } },
+            -- WoW's documented global ALIASES (the census's "opaque" bucket)
+            tinsert = { w = { 1 } }, tremove = { w = { 1 } }, wipe = { w = { 1 } },
+            strsub = P, strlen = P, strfind = P, strlower = P, strupper = P,
+            strsplit = P, strjoin = P, format = P, gsub = P, strmatch = P,
+            getglobal = P, tostringall = P,
+        },
+        prefix = {
+            ['math.'] = P, ['string.'] = P, ['bit.'] = P,
+            ['io.'] = IO, ['os.'] = IO, -- os.* not listed above: world
+            ['vim.api.'] = IO, ['vim.fn.'] = IO, ['vim.uv.'] = IO,
+            ['vim.cmd'] = IO, ['vim.notify'] = IO, ['vim.schedule'] = { calls = { 1 } },
+            ['vim.inspect'] = P, ['vim.deepcopy'] = P, ['vim.split'] = P,
+            ['vim.tbl_'] = P, ['vim.startswith'] = P, ['vim.endswith'] = P,
+            ['vim.treesitter.'] = P, -- parse allocates, mutates nothing of ours
+            ['vim.json.'] = P, ['vim.mpack.'] = P,
+            -- game runtimes (the user's real targets)
+            ['game.'] = IO, ['script.'] = IO, ['rendering.'] = IO, -- factorio
+            ['Map.'] = IO, ['Game.'] = IO,                          -- desynced
+            ['C_'] = IO,                                            -- wow C_*
+        },
+        methods = { -- receiver-untyped (~): overwhelmingly string methods
+            gsub = P, sub = P, find = P, match = P, gmatch = P, format = P,
+            rep = P, upper = P, lower = P, byte = P, len = P,
+        },
     },
     php = {
-        sort = { w = { 1 } }, rsort = { w = { 1 } }, usort = { w = { 1 } },
-        ksort = { w = { 1 } }, asort = { w = { 1 } }, arsort = { w = { 1 } },
-        array_push = { w = { 1 } }, array_pop = { w = { 1 } },
-        array_shift = { w = { 1 } }, array_unshift = { w = { 1 } },
-        array_splice = { w = { 1 } },
-        preg_match = { w = { 3 } }, preg_match_all = { w = { 3 } },
-        settype = { w = { 1 } },
+        exact = {
+            sort = { w = { 1 } }, rsort = { w = { 1 } }, usort = { w = { 1 }, calls = { 2 } },
+            ksort = { w = { 1 } }, asort = { w = { 1 } }, arsort = { w = { 1 } },
+            array_push = { w = { 1 } }, array_pop = { w = { 1 } },
+            array_shift = { w = { 1 } }, array_unshift = { w = { 1 } },
+            array_splice = { w = { 1 } }, settype = { w = { 1 } },
+            preg_match = { w = { 3 } }, preg_match_all = { w = { 3 } },
+            array_map = { calls = { 1 } }, array_filter = { calls = { 2 } },
+            array_walk = { w = { 1 }, calls = { 2 } },
+            call_user_func = { calls = { 1 } },
+            strlen = P, substr = P, str_replace = P, implode = P, explode = P,
+            sprintf = P, count = P, in_array = P, array_keys = P,
+            array_values = P, array_merge = P, trim = P, strtolower = P,
+            strtoupper = P, intval = P, is_array = P, is_string = P,
+            is_numeric = P, isset = P, json_encode = P, json_decode = P,
+            time = ND, rand = ND, mt_rand = ND,
+            echo = IO, printf = IO, file_get_contents = IO,
+            file_put_contents = IO, fopen = IO, fwrite = IO,
+        },
+        prefix = {},
+        methods = {},
     },
 }
+
+-- signature lookup: exact → prefix (longest wins not needed; families are
+-- disjoint) → method tier (~, only for method-style calls)
+function M.sig_of(lang, name, is_method)
+    local sl = M.SIGS[lang]
+    if not sl or not name then return nil end
+    if is_method then
+        -- method calls consult the METHOD tier first: an exact entry is a
+        -- contract for the GLOBAL of that name (WoW's gsub alias), not for
+        -- an arbitrary receiver — the ~ grade must not be laundered away
+        local last = name:match('([%w_]+)$')
+        local ms = last and sl.methods[last]
+        if ms then return ms, 'method~' end
+        return nil
+    end
+    local sig = sl.exact[name]
+    if sig then return sig end
+    for p, ps in pairs(sl.prefix) do
+        if name:sub(1, #p) == p then return ps end
+    end
+    return nil
+end
 
 -- literal truthiness by language family (nil = unknown)
 local function truthy_of(a, lang)
@@ -183,6 +277,10 @@ end
 local VERDICT_TIER = { ['writes-once'] = 3, ['writes-guarded'] = 2,
     ['may-write'] = 2, writes = 1 }
 
+-- world effects ride a pseudo-var key: every conflict/tier machinery
+-- (commute, min-merge) treats world-order like state-order for free
+local IOKEY = '\1io\31'
+
 --- Compute (and cache per graph generation) every fn's write summary.
 function M.summaries(store)
     if store._fx and store._fxgen == store.generation then return store._fx end
@@ -276,10 +374,28 @@ function M.summaries(store)
                     local lang = file and (file:match('%.lua$') and 'lua'
                         or file:match('%.php$') and 'php')
                     local bname = c.full or c.callee
-                    local b = lang and bname and M.BUILTINS[lang]
-                        and M.BUILTINS[lang][bname]
-                    if b then
-                        for _, ai in ipairs(b.w) do
+                    local sig, grade
+                    if lang and bname then
+                        -- (explicit call: and/or would truncate the
+                        -- second return — the grade)
+                        sig, grade = M.sig_of(lang, bname, c.method)
+                    end
+                    local asserted
+                    if not sig and bname then
+                        local ue = require('cartograph.config').effects
+                        sig = ue and ue[bname] or nil
+                        asserted = sig ~= nil
+                    end
+                    if sig then
+                        -- apply the contract, at its honesty grade
+                        if asserted then
+                            s_hedge(sum, ('asserted contract: %s'):format(bname))
+                        elseif grade == 'method~' then
+                            sum.mh = true -- name-matched method tier (~)
+                        end
+                        if sig.io then s_add(sum, IOKEY, 1) end
+                        if sig.nondet then sum.nd = true end
+                        for _, ai in ipairs(sig.w or {}) do
                             local kind, x = arg_target(store, c, ai, caller)
                             if kind == 'var' then
                                 s_add(sum, x .. '\31', 1)
@@ -291,6 +407,42 @@ function M.summaries(store)
                                     :format(bname, c.file or '?', c.line or 0))
                             end
                         end
+                        -- HIGHER-ORDER: the passed fn's summary is this
+                        -- call's effect. a.to = the callback upgrade's
+                        -- resolved target (resolution already did the work)
+                        for _, ai in ipairs(sig.calls or {}) do
+                            local a = argv.at(c, ai)
+                            local target = a and a.to
+                            if not target and a
+                                and (a.k == 'local' or a.k == 'callable')
+                                and a.name then
+                                for _, fn2 in ipairs(store.by_file[c.file] or {}) do
+                                    if (fn2.kind == 'function' or fn2.kind == 'method')
+                                        and fn2.name == a.name then
+                                        target = fn2.id
+                                        break
+                                    end
+                                end
+                            end
+                            local ts2 = target and sums[target]
+                            if ts2 then
+                                if ts2.over then sum.over = true end
+                                if ts2.h then s_hedge(sum, ts2.h[1]) end
+                                if ts2.nd then sum.nd = true end
+                                for key, tier in pairs(ts2.w) do
+                                    s_add(sum, key, tier)
+                                end
+                                if ts2.pwx then
+                                    s_hedge(sum, ('callback %s mutates its params @%s:%d')
+                                        :format(a.name or '?', c.file or '?', c.line or 0))
+                                end
+                            elseif a then
+                                s_hedge(sum, ('%s: callback effects unknown @%s:%d')
+                                    :format(bname, c.file or '?', c.line or 0))
+                            end
+                        end
+                        -- sig.pure / sig.reads / sig.returns_arg: no hedge,
+                        -- no effect (reads/aliasing land with their consumers)
                     elseif c.refused then
                         s_hedge(sum, ('refused (%s): %s @%s:%d'):format(
                             c.refused.rule or '?', bname or '?',
@@ -311,19 +463,28 @@ function M.summaries(store)
     return sums
 end
 
---- Purity label of one fn: 'pure' | 'pure~' | 'writes' | 'writes~'.
+--- Purity label: 'pure' | 'io' (world-only effects) | 'writes' (module
+--- state), each with a '~' variant (hedges, overflow, or the ~ method
+--- tier). io < writes: a fn that writes state AND world reads 'writes'.
 function M.purity(store, fid)
     local sum = M.summaries(store)[fid]
     if not sum then return nil end
-    local writes = sum.nk > 0 or sum.pwx ~= nil or sum.over
-    local hedged = sum.h ~= nil or sum.over
-    if writes then return hedged and 'writes~' or 'writes' end
-    return hedged and 'pure~' or 'pure'
+    local wmod = sum.over or sum.pwx ~= nil
+    if not wmod and sum.nk > 0 then
+        for key in pairs(sum.w) do
+            if key ~= IOKEY then wmod = true break end
+        end
+    end
+    local world = sum.w[IOKEY] ~= nil
+    local hedged = sum.h ~= nil or sum.over or sum.mh
+    local base = wmod and 'writes' or world and 'io' or 'pure'
+    return hedged and (base .. '~') or base
 end
 
 --- The graph's purity census: counts per label.
 function M.purity_census(store)
-    local counts = { pure = 0, ['pure~'] = 0, writes = 0, ['writes~'] = 0 }
+    local counts = { pure = 0, ['pure~'] = 0, io = 0, ['io~'] = 0,
+        writes = 0, ['writes~'] = 0 }
     for _, n in ipairs(store.data.nodes) do
         if n.kind == 'function' or n.kind == 'method' then
             local l = M.purity(store, n.id)
@@ -352,7 +513,8 @@ function M.calls_commute(store, c1, c2)
     for key, t1 in pairs(s1.w) do
         local t2 = s2.w[key]
         if t2 and not (t1 == 3 and t2 == 3) then
-            conflicts[#conflicts + 1] = key:gsub('\31', '.'):gsub('%.$', '')
+            conflicts[#conflicts + 1] = key == IOKEY and '(world order)'
+                or key:gsub('\31', '.'):gsub('%.$', '')
         end
     end
     if s1.pwx or s2.pwx then
