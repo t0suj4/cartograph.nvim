@@ -757,6 +757,20 @@ checks luacheck can't:
   article — it found a real (since-fixed) injection in grocy's
   `GetProductStockLocations` the moment it was pointed at the repo. Lone
   offenders with no divergent peer are reachability's job, not this rule's.
+- **sink-source** (PHP) — the classic shape: a *request source*
+  (`$_GET`/`$_POST`/`$_REQUEST`/`$_COOKIE`/`$_SERVER`/`$_FILES`) reaching a SQL
+  sink, unsanitized. No peer needed — a superglobal is definitionally tainted.
+  Scope-aware forward taint (top-level scripts *and* functions) tracks the
+  value from `$id = $_GET['id']` through `"… '$id'"` (interpolation) or `.`
+  concatenation to `mysqli_query`/`->query`/`->prepare`. Crucially it fires only
+  when the taint is **embedded in SQL-carrying string text** — a bare value
+  passed standalone (a bound parameter, `where('col', $v)`) is *not* injection,
+  which keeps it silent on parameterised/ORM code (mantis, sylius, grocy: 0).
+  Sanitisers: casts/coercion, parameterisation (`bindValue`, prepared
+  placeholders), escapes. On DVWA the low/impossible gradient falls out cleanly
+  — low fires, impossible (prepared + `bindParam`) stays silent. Still `~`: the
+  sink is a hypothesis, and a same-scope-only tracer misses cross-function and
+  session flows (reachability = rung 2).
 
 Structural smells, not proofs — dynamically-invoked functions (event handlers,
 test cases run by a harness) can still read as "no caller". Rules live in

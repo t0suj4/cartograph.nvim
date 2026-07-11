@@ -20,6 +20,19 @@
 -- Re-parses PHP on demand (the atlas.M.fields precedent): PHP param type hints
 -- and the build-a-string-then-pass flow are not in the closed schema. PHP-only
 -- in v1 (sanitizer notions are typed-/framework-specific; Lua would be noise).
+--
+-- RUNG 1 (M.source_findings, `sink-source` rule): a REQUEST SOURCE
+-- ($_GET/$_POST/$_REQUEST/$_COOKIE/$_SERVER/$_FILES) reaching a SQL sink,
+-- unsanitized — the classic vulnerable-script shape rung 0 can't see
+-- (top-level, source not param, interpolation not just concat). NO peer
+-- needed: a superglobal is definitionally tainted. Scope-aware forward taint
+-- (fixpoint over each scope's assignments; top-level scripts + each function),
+-- carrying whether taint has been EMBEDDED in SQL-carrying string text — only
+-- string-embedded taint at a sink is injection (a bare tainted value passed
+-- standalone is a bound parameter, e.g. LessQL `where('col', $v)`; that
+-- distinction is what keeps it quiet on grocy/mantis/sylius). Sanitizers as
+-- rung 0 + scalar casts. Validated on DVWA: the sqli low/impossible gradient
+-- (low fires, impossible silent); grocy/mantis/sylius 0.
 
 local M = {}
 
@@ -206,7 +219,10 @@ end
 -- the `~`-tier sink hypothesis: returns the reason string, or nil
 local function sink_reason(c)
     local cl = c.callee:lower()
-    if cl:find('query') or cl:find('exec') or cl:find('where')
+    -- 'execute' not bare 'exec': keeps ExecuteDb*/PDOStatement::execute but
+    -- excludes shell_exec/exec/system (command injection is a DIFFERENT sink
+    -- class — don't mislabel it SQL)
+    if cl:find('query') or cl:find('execute') or cl:find('where')
         or cl:find('prepare') or cl:find('select') then
         return ("method '%s'"):format(c.callee)
     end
@@ -252,6 +268,172 @@ function M.findings(store)
         end
     end
     return out
+end
+
+-- ── taint rung 1: a REQUEST SOURCE reaching a SQL sink ──────────────────
+-- Unlike rung 0, a superglobal is DEFINITIONALLY tainted, so no peer is
+-- needed — the source IS the evidence. Interpolation (`"…'$id'"`) and
+-- concatenation are both covered for free: a taint carrier is any tainted
+-- `variable_name` descendant of the arg, whatever the embedding. Scope-aware
+-- forward propagation ($id = $_GET[…]; $q = "… $id"; query($q)); handles the
+-- top-level (function-less) scripts that are the classic injection shape and
+-- that rung 0 cannot see.
+
+local SOURCES = { _GET = true, _POST = true, _REQUEST = true,
+    _COOKIE = true, _SERVER = true, _FILES = true }
+
+local BODY_STOP = { function_definition = true, method_declaration = true,
+    anonymous_function = true, arrow_function = true }
+
+-- descendants of `node` of the given types, NOT descending into nested
+-- function scopes (a scope sees only its own statements)
+local function collect_scoped(node, types)
+    local want, acc = {}, {}
+    for _, t in ipairs(types) do want[t] = true end
+    local function rec(n, top)
+        if not top and BODY_STOP[n:type()] then return end
+        if want[n:type()] then acc[#acc + 1] = n end
+        for c in n:iter_children() do if c:named() then rec(c, false) end end
+    end
+    rec(node, true)
+    return acc
+end
+
+-- a scalar cast (int/float/bool) enclosing `v` up to `root` — sanitizes
+local function cast_ancestor(v, root, src)
+    local p = v:parent()
+    while p do
+        if p:type() == 'cast_expression' then
+            local ty = txt(p, src):match('^%(%s*(%a+)')
+            if ty and (SCALAR[ty:lower()] or ty:lower() == 'integer'
+                or ty:lower() == 'boolean') then return true end
+        end
+        if p == root then break end
+        p = p:parent()
+    end
+    return false
+end
+
+-- is this variable_name occurrence embedded (up to `root`) in a STRING that
+-- carries SQL text — an interpolation, or a concat with a string literal?
+-- That embedding IS the injection; a bare value passed standalone (a bound
+-- parameter, e.g. LessQL `where('col', $v)`) is not.
+local function embedded_at(v, root)
+    local p = v:parent()
+    while p do
+        local t = p:type()
+        if t == 'encapsed_string' then return true end
+        if t == 'binary_expression' and #collect(p, { 'string', 'encapsed_string' }) > 0 then
+            return true
+        end
+        if p == root then break end
+        p = p:parent()
+    end
+    return false
+end
+
+-- unsanitized taint carried into `node`: { src, embedded } or nil. `embedded`
+-- is true when the taint reaches `node` inside SQL-carrying string text
+-- (here, or inherited transitively). A ref bound/escaped by a parameterizer
+-- or scalar cast is not raw.
+local function embed_witness(node, src, tainted)
+    local best
+    for _, v in ipairs(collect(node, { 'variable_name' })) do
+        if not protected_ref(v, node, src) and not cast_ancestor(v, node, src) then
+            local nm = txt(v, src):gsub('^%$', '')
+            local base = SOURCES[nm] and { src = '$' .. nm, embedded = false }
+                or tainted[nm]
+            if base then
+                local emb = base.embedded or embedded_at(v, node)
+                if emb then return { src = base.src, embedded = true } end
+                best = best or { src = base.src, embedded = false }
+            end
+        end
+    end
+    return best
+end
+
+-- forward taint over one scope's own assignments (fixpoint; carries the root
+-- source AND whether it has been embedded in SQL string text yet)
+local function scope_taint(scope, src)
+    local assigns = collect_scoped(scope,
+        { 'assignment_expression', 'augmented_assignment_expression' })
+    local tainted, changed = {}, true
+    while changed do
+        changed = false
+        for _, a in ipairs(assigns) do
+            local lhs, rhs = a:field('left')[1], a:field('right')[1]
+            if lhs and rhs and lhs:type() == 'variable_name' then
+                local nm = txt(lhs, src):gsub('^%$', '')
+                local w = embed_witness(rhs, src, tainted)
+                local cur = tainted[nm]
+                -- monotone: take taint, and upgrade to embedded if newly so
+                if w and (not cur or (w.embedded and not cur.embedded)) then
+                    tainted[nm] = w; changed = true
+                end
+            end
+        end
+    end
+    return tainted
+end
+
+local function scope_findings(scope, src, file, out)
+    local tainted = scope_taint(scope, src)
+    for _, call in ipairs(collect_scoped(scope,
+        { 'member_call_expression', 'function_call_expression', 'scoped_call_expression' })) do
+        local namef = call:field('name')[1] or call:field('function')[1]
+        local callee = namef and txt(namef, src) or '?'
+        local objf = call:field('object')[1]
+        local argsn = call:field('arguments')[1]
+        if callee ~= '?' and argsn and sink_reason({ callee = callee,
+            receiver = objf and txt(objf, src) or nil }) then
+            for arg in argsn:iter_children() do
+                if arg:named() and arg:type() == 'argument' then
+                    local w = embed_witness(arg:named_child(0) or arg, src, tainted)
+                    -- only STRING-EMBEDDED taint is injection; a bare tainted
+                    -- value passed standalone is a bound parameter
+                    if w and w.embedded then
+                        out[#out + 1] = { file = file, line = select(1, call:range()) + 1,
+                            source = w.src, callee = callee }
+                        break -- one finding per sink call
+                    end
+                end
+            end
+        end
+    end
+end
+
+--- Lint findings: a request source reaches a SQL sink, unsanitized (rung 1).
+function M.source_findings(store)
+    local out = {}
+    for _, file in ipairs(store.files or {}) do
+        if file:match('%.php$') then
+            local path = store.abs(file)
+            local lines = vim.fn.filereadable(path) == 1 and vim.fn.readfile(path)
+            if lines then
+                local s = table.concat(lines, '\n')
+                local ok, parser = pcall(vim.treesitter.get_string_parser, s, 'php')
+                if ok and parser then
+                    local root = parser:parse()[1]:root()
+                    -- top-level scope (function-less scripts) + each function
+                    local scopes = { root }
+                    for _, fn in ipairs(collect(root,
+                        { 'function_definition', 'method_declaration' })) do
+                        scopes[#scopes + 1] = fn
+                    end
+                    for _, sc in ipairs(scopes) do scope_findings(sc, s, file, out) end
+                end
+            end
+        end
+    end
+    local fs = {}
+    for _, c in ipairs(out) do
+        fs[#fs + 1] = { file = store.abs(c.file), line = c.line,
+            message = ('possible SQL injection (~, sink unconfirmed): request '
+                .. 'input %s reaches SQL sink %s() with no sanitizer on the path')
+                :format(c.source, c.callee) }
+    end
+    return fs
 end
 
 return M
