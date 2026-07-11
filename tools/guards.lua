@@ -1,0 +1,42 @@
+-- Development guards, self-applied: the CI-shaped dogfood run.
+--   nvim --headless -u NONE -l tools/guards.lua [<root>]
+-- Extracts the repo, declares cartograph's OWN representation seams, and
+-- runs the guard lints (seam-guard / truncation / require-cycle).
+-- Exit 1 on any warn-severity finding.
+
+local here = debug.getinfo(1, 'S').source:sub(2)
+local repo = vim.fn.fnamemodify(here, ':p:h:h')
+vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
+package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
+
+local root = (arg and arg[1]) or repo
+local config = require 'cartograph.config'
+-- cartograph's representation seams: the fold contracts, as lint config
+config.seams = {
+    { name = 'at', -- range coords fold behind atr.sl/sc/el/ec
+        patterns = { '%.start%.line', '%.start%.char',
+            "%['end'%]%.line", "%['end'%]%.char" },
+        owners = { '^lua/cartograph/providers/', '^lua/cartograph/at%.lua$',
+            '^lua/cartograph/validate%.lua$', '^tests/', '^tools/' } },
+    { name = 'df', -- statement dataflow folds behind dfa.*
+        patterns = { '%.df%.stmts', '%.df%.inputs' },
+        owners = { '^lua/cartograph/providers/', '^lua/cartograph/df%.lua$',
+            '^tests/', '^tools/' } },
+    { name = 'argv', -- argument shapes fold behind argv.n/at/str
+        patterns = { '%.argv%[', '%.args%[' },
+        owners = { '^lua/cartograph/providers/', '^lua/cartograph/argv%.lua$',
+            '^tests/', '^tools/' } },
+}
+
+local ts = require 'cartograph.providers.treesitter'
+local store = require 'cartograph.store'
+store.ingest(ts.extract(root))
+local findings = require('cartograph.lint').run(store,
+    { only = { ['seam-guard'] = true, truncation = true, ['require-cycle'] = true } })
+local warns = 0
+for _, f in ipairs(findings) do
+    print(('%s:%d [%s/%s] %s'):format(f.file, f.line, f.rule, f.severity, f.message))
+    if f.severity == 'warn' then warns = warns + 1 end
+end
+print(('guards: %d findings (%d warn)'):format(#findings, warns))
+if warns > 0 then os.exit(1) end

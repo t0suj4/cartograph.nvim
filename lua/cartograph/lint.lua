@@ -485,7 +485,146 @@ local function sql_findings(store)
     return out
 end
 
+-- ── DEVELOPMENT GUARDS: lints for building graph tools honestly ─────────
+-- (dogfooding rules born from cartograph's own development; generic
+-- mechanisms, project-specific declarations via config)
+
+-- seam-guard: a project can declare REPRESENTATION SEAMS (config.seams):
+--   { name = 'at', patterns = { '%.start%.line', ... },
+--     owners = { '^lua/x/providers/', 'store%.lua$' } }
+-- Any source line matching a pattern outside the owner allowlist is a
+-- violation: the representation behind an accessor seam may change at
+-- any time, and a raw read is a latent break. Line-tier scan (~).
+local function seam_findings(store)
+    local seams = require('cartograph.config').seams
+    if not seams or #seams == 0 then return {} end
+    local out = {}
+    for _, file in ipairs(store.files) do
+        if file:match('%.lua$') then
+            local owned = {}
+            for si, seam in ipairs(seams) do
+                for _, o in ipairs(seam.owners or {}) do
+                    if file:match(o) then owned[si] = true break end
+                end
+            end
+            local fd = io.open(store.abs(file), 'r')
+            if fd then
+                local ln = 0
+                for line in fd:lines() do
+                    ln = ln + 1
+                    local code = line:gsub('%-%-.*$', '')
+                    for si, seam in ipairs(seams) do
+                        if not owned[si] then
+                            for _, pat in ipairs(seam.patterns) do
+                                if code:find(pat) then
+                                    out[#out + 1] = { file = store.abs(file), line = ln,
+                                        message = ("raw '%s'-seam read (%s) — go through the accessor; the representation may be folded")
+                                            :format(seam.name, pat) }
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+                fd:close()
+            end
+        end
+    end
+    return out
+end
+
+-- multi-return truncation: `local a, b = x and f() or y` adjusts f's
+-- returns to ONE value (b = nil silently). Three real bugs in one day
+-- of cartograph's own development. AST-precise: 2+ targets, ONE rhs
+-- expression that is an and/or chain whose operand is a call.
+local function truncation_findings(store)
+    local out = {}
+    local okts = pcall(vim.treesitter.language.add, 'lua')
+    if not okts then return out end
+    for _, file in ipairs(store.files) do
+        if file:match('%.lua$') then
+            local fd = io.open(store.abs(file), 'r')
+            if fd then
+                local src = fd:read('*a')
+                fd:close()
+                local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
+                local tree = okp and parser and parser:parse()[1]
+                if tree then
+                    local function has_call(n) -- a call anywhere in the and/or chain
+                        local t = n:type()
+                        if t == 'function_call' then return true end
+                        if t == 'binary_expression' or t == 'parenthesized_expression' then
+                            for c in n:iter_children() do
+                                if c:named() and has_call(c) then return true end
+                            end
+                        end
+                        return false
+                    end
+                    local function walk(n)
+                        local t = n:type()
+                        if t == 'assignment_statement' then
+                            local vl, el = n:named_child(0), n:named_child(1)
+                            if vl and el and vl:named_child_count() >= 2
+                                and el:named_child_count() == 1 then
+                                local e = el:named_child(0)
+                                if e:type() == 'binary_expression' then
+                                    local isao = false
+                                    for i = 0, e:child_count() - 1 do
+                                        local ch = e:child(i)
+                                        if not ch:named() then
+                                            local ct = ch:type()
+                                            if ct == 'and' or ct == 'or' then isao = true break end
+                                        end
+                                    end
+                                    if isao and has_call(e) then
+                                        local l = select(1, n:range())
+                                        out[#out + 1] = { file = store.abs(file), line = l + 1,
+                                            message = 'and/or ADJUSTS a call to one value — the extra targets are silently nil (use an explicit if)' }
+                                    end
+                                end
+                            end
+                        end
+                        for c in n:iter_children() do
+                            if c:named() and c:child(0) then walk(c) end
+                        end
+                    end
+                    walk(tree:root())
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- require cycles: SCCs over the import edges. HEDGED: import edges do
+-- not record load-time vs lazy (an in-function require breaks the cycle
+-- at runtime), so a cycle is "fragile IF load-time", not a certain bug.
+local function cycle_findings(store)
+    local scc = require 'cartograph.scc'
+    local ids, adj = {}, {}
+    for f, tos in pairs(store.imports_out) do
+        ids[#ids + 1] = f
+        adj[f] = tos
+    end
+    table.sort(ids)
+    local con = scc.condense(adj, ids)
+    local out = {}
+    for ci = 1, con.n do
+        local m = con.members[ci]
+        if #m > 1 then
+            table.sort(m)
+            out[#out + 1] = { file = store.abs(m[1]), line = 1,
+                message = ('require cycle (%d modules): %s — fragile if any require is load-time (lazy requires break it; load-time-ness unrecorded)')
+                    :format(#m, table.concat(m, ' → ')) }
+        end
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'seam-guard', severity = 'warn', run = seam_findings },
+    { name = 'truncation', severity = 'info', run = truncation_findings },
+    { name = 'require-cycle', severity = 'info', run = cycle_findings },
     { name = 'sql', severity = 'info', run = sql_findings },
     {
         -- the state atlas's lint face: state that is written but never
