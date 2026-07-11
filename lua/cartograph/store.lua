@@ -152,6 +152,12 @@ function M.ingest(data)
     -- the folded graph, incl. refresh's whole-graph re-attach) read columns
     -- transparently. Idempotent; refresh's fresh per-file argv re-folds.
     require('cartograph.argv').fold(M.data)
+    -- DF FOLD (same lifecycle): the nested per-fn statement records — the
+    -- LARGEST foldable datum — collapse into one columnar store; every df
+    -- reader goes through the dual-mode df.lua accessors, so views
+    -- materialize raw-shaped on demand. Cache shards encoded BEFORE ingest
+    -- stay raw; refresh's fresh per-file df reads raw via dual mode.
+    require('cartograph.df').fold(M.data)
     -- extraction-peak Stage 0: LuaJIT traces compiled DURING a big extract
     -- pin extraction-era objects as GC trace constants — measured on the
     -- server corpus: 151.9MB of dead extraction garbage held resident,

@@ -56,7 +56,7 @@ test('treesitter: C project — nodes, calls, includes, df-lite', function ()
         and store.imports_out['main.c'][1] == 'util.h', 'include edge')
 
     -- df-lite: helper's statements carry lines and def/use names
-    local df = byname.helper.df
+    local df = require('cartograph.df').get(byname.helper)
     ok(df and #df.stmts == 2, 'two body statements')
     eq({ 't' }, df.stmts[1].def)
     ok(vim.tbl_contains(df.stmts[1].use, 'counter'), 'use names captured')
@@ -291,7 +291,7 @@ test('treesitter: haskell — equations merge, where stays interior, imports', f
     -- the where-bind `go` is interior, not a node
     ok(not byname.go, 'where binds are not top-level nodes')
     -- but it IS a df row of run
-    ok(byname.run.df and #byname.run.df.stmts == 2, 'match + where bind rows')
+    ok(require('cartograph.df').count(byname.run) == 2, 'match + where bind rows')
     ok(byname.main.entry, 'main is an entry point')
     -- cross-file call through the where clause: run -> double (~)
     local hit
@@ -2191,7 +2191,7 @@ end
     -- find the SECOND pick (3 statements) and point at it
     local second
     for id, n in pairs(store.by_id) do
-        if n.name == 'pick' and n.df and #n.df.stmts == 3 then second = id end
+        if n.name == 'pick' and require('cartograph.df').count(n) == 3 then second = id end
     end
     ok(second, 'the bigger twin found')
     local ref = store.ref_of(second)
@@ -3456,7 +3456,7 @@ test('bash: functions, command calls, source imports, vars + df', function ()
     ok(byname['main.sh'].effects, 'main.sh has load-time effects')
     ok(not byname['lib.sh'].effects, 'lib.sh is pure defs')
     -- df: main defs `out` (local + assignment) and uses CONF via $CONF
-    local df = byname.main.df
+    local df = require('cartograph.df').get(byname.main)
     ok(df and #df.stmts >= 2, 'df present')
     local defs, uses = {}, {}
     for _, s in ipairs(df.stmts) do

@@ -218,7 +218,8 @@ function M.extract(line1, line2, name)
     local all = store.content(node)
     if not all then return vim.notify('cartograph: cannot read ' .. node.file, vim.log.levels.ERROR) end
 
-    local plan = extract.plan { df = node.df, sel = { first = file_first, last = file_last },
+    local plan = extract.plan { df = require('cartograph.df').get(node),
+        sel = { first = file_first, last = file_last },
         fn_start = fn_start, body_end = body_end, file_lines = all, name = name,
         -- shadow safety: lets the plan attribute a shadowed name's uses to
         -- binders instead of refusing (multi-root-safe via store.abs)

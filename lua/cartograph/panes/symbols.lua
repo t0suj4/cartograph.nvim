@@ -1003,7 +1003,7 @@ local function render_fn(ctx, id)
             .. require('cartograph.ladder').summary(lad)
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
     end
-    local df = node.df
+    local df = dfa.get(node)
     if not df then
         if node.unparsed then
             ctx.lines[3] = '  (unparsed source — landed by text search)'
@@ -1161,12 +1161,13 @@ end
 -- arguments and a conditional's condition (from treesitter.detail, `l` descends
 -- into the element's forms), plus the module vars/fields the statement reads
 -- (from the data flow; `l` opens the var's usage sites). Derived on demand.
-local function detail_scope() -- -> node, sr, sc, er, ec, df, fnid
+local function detail_scope() -- -> node, sr, sc, er, ec, has_df, fnid
     local lvl = M.view.level
     if lvl == 'fn' then
         local n = store.node(M.view.fn); if not n then return end
         local r = n.range
-        return n, r.start.line, r.start.char, r['end'].line, r['end'].char, n.df, M.view.fn
+        return n, r.start.line, r.start.char, r['end'].line, r['end'].char,
+            dfa.present(n) or nil, M.view.fn
     elseif lvl == 'block' then
         local fnid, sr, sc, er, ec =
             (M.view.block or ''):match('^(.-)\31(%-?%d+)\31(%-?%d+)\31(%-?%d+)\31(%-?%d+)$')
@@ -2028,7 +2029,7 @@ function M.attach(win)
         -- via the retired trace pane; the sources axis will re-home them —
         -- see the cartograph-trace-axes design)
         -- a local: jump to its defining statement (latest before this row)
-        local i, df = M.line_stmtidx[r], node.df
+        local i, df = M.line_stmtidx[r], dfa.present(node)
         if word and i and df then
             local best, stmts = nil, dfa.stmts(node)
             for j = 1, #stmts do

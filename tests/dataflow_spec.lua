@@ -25,8 +25,8 @@ test('extractor: statement-level def-use (df) for a clean local chain', function
 
     local compute
     for _, n in ipairs(store.data.nodes) do if n.name:match('compute$') then compute = n end end
-    ok(compute and compute.df, 'compute has a df section')
-    local df = compute.df
+    ok(compute and require('cartograph.df').present(compute), 'compute has a df section')
+    local df = require('cartograph.df').get(compute)
 
     -- params are read -> inputs
     eq('base,n', names(vim.deepcopy(df.inputs)))
