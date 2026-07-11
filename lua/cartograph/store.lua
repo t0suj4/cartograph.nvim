@@ -74,6 +74,7 @@ local function idx_edge(T, e)
         end
         T.occ[e.from .. '\31' .. e.to] = e.at
         if e.inferred then T.edge_inferred[e.from .. '\31' .. e.to] = true end
+        if e.tinf then T.edge_tinf[e.from .. '\31' .. e.to] = true end
     elseif e.kind == 'import' then
         T.imports_in[e.to] = T.imports_in[e.to] or {}
         table.insert(T.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
@@ -100,6 +101,7 @@ local function reset_indexes()
     M.by_id, M.by_file, M.files = {}, {}, {}
     M.calls_to, M.calls_by_fn = {}, {}
     M.uses, M.usedby, M.occ, M.edge_inferred = {}, {}, {}, {}
+    M.edge_tinf = {}
     M.cone, M._cone_set, M._cone_files = nil, nil, nil -- ids churn on re-ingest
     M._territory = nil
     M.marks = {} -- node marks (char -> id); ids churn, so reset with the graph
@@ -273,7 +275,7 @@ function M.audit()
     if not M.data then return nil, 'no graph' end
     if M.data.partial then return nil, 'streaming — audit after the stream settles' end
     local T = { by_id = {}, by_file = {}, calls_to = {}, calls_by_fn = {},
-        uses = {}, usedby = {}, occ = {}, edge_inferred = {},
+        uses = {}, usedby = {}, occ = {}, edge_inferred = {}, edge_tinf = {},
         var_usedby = {}, var_uses = {}, imports_in = {}, imports_out = {},
         reg_by = {}, registers = {} }
     for _, n in ipairs(M.data.nodes or {}) do idx_node(T, n) end

@@ -113,10 +113,14 @@ test('fold: the flags column keeps tier and refusal rule', function ()
                 refused = { rule = 'ambiguous' } },
         },
     }
+    D.edges[#D.edges + 1] = { from = 'a', to = 'm.lua', kind = 'ref',
+        inferred = true, tinf = true, at = { R } } -- graph-VM resolved
     local f = fold.build(D)
     local A, B, C = f.it.get('a'), f.it.get('b'), f.it.get('c')
     eq('confident', f:tier(A, B, fold.PRED.ref))
     eq('inferred', f:tier(A, C, fold.PRED.ref), 'the ~ tier survives the fold')
+    eq('type-inferred', f:tier(A, f.it.get('m.lua'), fold.PRED.ref),
+        'the graph-VM tier is distinct from ~ (flag bit 4)')
     eq({ 'aperture' }, f:refusals(A), "a's frontier rule preserved")
     eq({ 'ambiguous' }, f:refusals(B))
 end)

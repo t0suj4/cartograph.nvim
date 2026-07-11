@@ -2250,13 +2250,18 @@ local function resolve_returns(calls, node_index, exact, addref)
                     if fit and not dup then
                         c.to = fit.id
                         c.inferred = true -- type INFERRED through a summary
+                        c.tinf = true -- the TYPE-INFERRED tier (the VM's own
+                        -- output: resolved via a return-type summary, a
+                        -- stronger signal than a name-matched ~ guess; the
+                        -- honesty ladder's middle rung). inferred STAYS so
+                        -- the parallel audit still nulls + relink re-derives.
                         c.refused = nil
                         -- c.rt STAYS: a worker settles chains slice-locally,
                         -- the parallel audit nulls every inferred resolution,
                         -- and relink must re-derive from the provenance
                         -- (idempotent — the `not c.to` guard skips settled
                         -- calls; name-ambiguous chains have no tail rescue)
-                        if c.fn then addref(c.fn, fit.id, c.at, true) end
+                        if c.fn then addref(c.fn, fit.id, c.at, true, true) end
                         n = n + 1
                         progress = true
                         settled = true
@@ -3191,7 +3196,7 @@ local function idpass_sink(lookups)
         fn_ranges = lookups.fn_ranges,
         scopes = lookups.scopes,
         add_names = function (f, s) out.names[f] = s end,
-        addref = function (from, to, at, inferred)
+        addref = function (from, to, at, inferred, tinf)
             local k = from .. '\31' .. to
             local e = refEdge[k]
             if not e then
@@ -4018,7 +4023,7 @@ function M.extract(root, opts)
         return scope_cache[f] or nil
     end
     local refEdge = {}
-    local function addref(from, to, at, inferred)
+    local function addref(from, to, at, inferred, tinf)
         local k = from .. '\31' .. to
         local e = refEdge[k]
         if not e then
@@ -4028,6 +4033,7 @@ function M.extract(root, opts)
             edges[#edges + 1] = e
         end
         if not inferred then e.inferred = nil end
+        if tinf then e.tinf = true end -- type-inferred tier (upgrade-only)
         e.at[#e.at + 1] = at
     end
     -- a REGISTRATION edge: fn passed as data at load time (a callback
@@ -4580,7 +4586,7 @@ function M.relink(data, touched)
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e
         elseif e.kind == 'reg' then regEdge[e.from .. '\31' .. e.to] = e end
     end
-    local function addref(from, to, at, inferred)
+    local function addref(from, to, at, inferred, tinf)
         local k = from .. '\31' .. to
         local e = refEdge[k]
         if not e then
@@ -4590,6 +4596,7 @@ function M.relink(data, touched)
             data.edges[#data.edges + 1] = e
         end
         if not inferred then e.inferred = nil end
+        if tinf then e.tinf = true end -- type-inferred tier (upgrade-only)
         e.at[#e.at + 1] = at
     end
     local function addreg(from, to, at)

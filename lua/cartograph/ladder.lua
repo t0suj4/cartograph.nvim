@@ -13,7 +13,10 @@
 
 local M = {}
 
-local RUNGS = { 'proven', 'linked', 'inferred', 'dynamic', 'refused', 'frontier' }
+-- 'typed': the graph-VM resolved this via a return-type summary — stronger
+-- than a bare unique-name ~ guess (it used type evidence), weaker than a
+-- plain same-scope link. The honesty ladder's middle rung.
+local RUNGS = { 'proven', 'linked', 'typed', 'inferred', 'dynamic', 'refused', 'frontier' }
 M.RUNGS = RUNGS
 
 -- which rung a single call sits on. `edge_proven` = a set of
@@ -21,6 +24,7 @@ M.RUNGS = RUNGS
 local function rung_of(c, proven)
     if c.to then
         if proven and c.fn and proven[c.fn .. '\31' .. c.to] then return 'proven' end
+        if c.tinf then return 'typed' end
         return c.inferred and 'inferred' or 'linked'
     end
     if c.dynamic then return 'dynamic' end
@@ -59,7 +63,7 @@ end
 --- A one-line summary (the fn-view header, the ladder report top).
 function M.summary(t)
     local parts = {}
-    local glyph = { proven = '✓', linked = '→', inferred = '~',
+    local glyph = { proven = '✓', linked = '→', typed = 'T', inferred = '~',
         dynamic = '$', refused = '?', frontier = '·' }
     for _, r in ipairs(RUNGS) do
         if t[r] > 0 then parts[#parts + 1] = ('%s%d'):format(glyph[r], t[r]) end
@@ -74,6 +78,7 @@ function M.report(store)
     local lines = { ('epistemic ladder — %d calls'):format(t.total) }
     local label = { proven = 'proven (oracle / cross-language)',
         linked = 'linked (same scope, plain)',
+        typed = 'typed (graph-VM return-type summary)',
         inferred = 'inferred (~ unique name)',
         dynamic = 'dynamic (unseeable frontier)',
         refused = 'refused (ambiguous fork)',

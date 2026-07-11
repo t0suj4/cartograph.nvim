@@ -71,7 +71,9 @@ function StoreBand:_tier(from, to)
     local found = false
     for i = 1, #u do if u[i] == to then found = true; break end end
     if not found then return nil end
-    return self.store.edge_inferred[from .. '\31' .. to] and 'inferred' or 'confident'
+    local k = from .. '\31' .. to
+    if self.store.edge_tinf and self.store.edge_tinf[k] then return 'type-inferred' end
+    return self.store.edge_inferred[k] and 'inferred' or 'confident'
 end
 
 function M.from_store(store)

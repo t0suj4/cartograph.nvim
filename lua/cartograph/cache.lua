@@ -19,7 +19,10 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 23 -- v23: kwargs classified — argv entries carry kw=<name>
+M.VERSION = 24 -- v24: type-inferred TIER — graph-VM return-type-resolved
+               -- calls/edges carry tinf (the honesty ladder's middle rung,
+               -- fold flag bit 4); a v23 cache lacks the distinction;
+               -- v23: kwargs classified — argv entries carry kw=<name>
               -- (value classified like a positional; dispatch through
               -- keyword args now visible) and spreads mark k='spread'
               -- (positions after one are unknowable);
