@@ -1126,11 +1126,11 @@ local function render_block(ctx, key)
     local function primary(f)
         local best
         for _, c in ipairs(calls) do
-            local at = c.at and c.at.start
-            if at and (at.line > f.sr or (at.line == f.sr and at.char >= f.sc))
-                and (at.line < f.er or (at.line == f.er and at.char < f.ec)) then
-                if not best or at.line < atr.sl(best.at)
-                    or (at.line == atr.sl(best.at) and at.char < atr.sc(best.at)) then
+            local a = c.at -- the range itself, not its interior: fold-ready
+            if a and (atr.sl(a) > f.sr or (atr.sl(a) == f.sr and atr.sc(a) >= f.sc))
+                and (atr.sl(a) < f.er or (atr.sl(a) == f.er and atr.sc(a) < f.ec)) then
+                if not best or atr.sl(a) < atr.sl(best.at)
+                    or (atr.sl(a) == atr.sl(best.at) and atr.sc(a) < atr.sc(best.at)) then
                     best = c
                 end
             end
