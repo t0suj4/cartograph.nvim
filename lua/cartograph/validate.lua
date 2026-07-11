@@ -27,8 +27,9 @@ M.NODE_FIELDS = {
 M.EDGE_FIELDS = {
     from = true, to = true, kind = true, at = true, atn = true,
     inferred = true, self = true,
-    -- trust tiers: type-inferred (graph-VM), oracle-era proven/xlang
-    tinf = true, proven = true, xlang = true,
+    -- trust tiers: type-inferred (graph-VM), oracle proven/xlang,
+    -- runtime-confirmed (session-live overlay, self://loaded / MCP)
+    tinf = true, proven = true, xlang = true, conf = true,
 }
 M.CALL_FIELDS = {
     callee = true, full = true, file = true, line = true, at = true,
@@ -36,6 +37,7 @@ M.CALL_FIELDS = {
     argv = true, method = true, top = true, dynamic = true,
     indirect = true, traced = true, strarg = true, hedge = true,
     rt = true, n = true, tinf = true, -- type-inferred tier (graph-VM)
+    conf = true, -- runtime-confirmed tier (session-live overlay)
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
 }
 

@@ -16,13 +16,17 @@ local M = {}
 -- 'typed': the graph-VM resolved this via a return-type summary — stronger
 -- than a bare unique-name ~ guess (it used type evidence), weaker than a
 -- plain same-scope link. The honesty ladder's middle rung.
-local RUNGS = { 'proven', 'linked', 'typed', 'inferred', 'dynamic', 'refused', 'frontier' }
+-- 'confirmed': observed live at runtime (self://loaded, MCP) — the SOUND
+-- top rung, above even a static oracle (proven).
+local RUNGS = { 'confirmed', 'proven', 'linked', 'typed', 'inferred',
+    'dynamic', 'refused', 'frontier' }
 M.RUNGS = RUNGS
 
 -- which rung a single call sits on. `edge_proven` = a set of
 -- "from\31to" the oracle/xlang marked proven (from store).
 local function rung_of(c, proven)
     if c.to then
+        if c.conf then return 'confirmed' end -- observed live: sound top rung
         if proven and c.fn and proven[c.fn .. '\31' .. c.to] then return 'proven' end
         if c.tinf then return 'typed' end
         return c.inferred and 'inferred' or 'linked'
@@ -63,8 +67,8 @@ end
 --- A one-line summary (the fn-view header, the ladder report top).
 function M.summary(t)
     local parts = {}
-    local glyph = { proven = '✓', linked = '→', typed = 'T', inferred = '~',
-        dynamic = '$', refused = '?', frontier = '·' }
+    local glyph = { confirmed = '⏺', proven = '✓', linked = '→', typed = 'T',
+        inferred = '~', dynamic = '$', refused = '?', frontier = '·' }
     for _, r in ipairs(RUNGS) do
         if t[r] > 0 then parts[#parts + 1] = ('%s%d'):format(glyph[r], t[r]) end
     end
@@ -76,7 +80,8 @@ end
 function M.report(store)
     local t = M.tally(store)
     local lines = { ('epistemic ladder — %d calls'):format(t.total) }
-    local label = { proven = 'proven (oracle / cross-language)',
+    local label = { confirmed = 'confirmed (observed live at runtime)',
+        proven = 'proven (oracle / cross-language)',
         linked = 'linked (same scope, plain)',
         typed = 'typed (graph-VM return-type summary)',
         inferred = 'inferred (~ unique name)',

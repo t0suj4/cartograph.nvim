@@ -49,6 +49,7 @@ local function key_for_abs(abs, data)
     end
     return nil
 end
+M.key_for_abs = key_for_abs -- the confirmed tier ([[confirm]]) reuses it
 
 --- abs file path -> loaded module name, for every module this instance has
 --- actually required. Built from package.loaded (the runtime's own record)

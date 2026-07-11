@@ -14,7 +14,8 @@ function M.take(data)
     local c = {
         nodes = { total = 0, by_kind = {}, unparsed = 0 },
         edges = { total = 0, by_kind = {},
-            ref = { proven = 0, xlang = 0, typed = 0, inferred = 0, matched = 0 } },
+            ref = { confirmed = 0, proven = 0, xlang = 0, typed = 0,
+                inferred = 0, matched = 0 } },
         calls = { total = 0, resolved = 0, refused = 0, unresolved = 0,
             hedged = 0, rules = {} },
     }
@@ -27,8 +28,9 @@ function M.take(data)
         c.edges.total = c.edges.total + 1
         c.edges.by_kind[e.kind] = (c.edges.by_kind[e.kind] or 0) + 1
         if e.kind == 'ref' then
-            local tier = e.proven and 'proven' or e.xlang and 'xlang'
-                or e.tinf and 'typed' or e.inferred and 'inferred' or 'matched'
+            local tier = e.conf and 'confirmed' or e.proven and 'proven'
+                or e.xlang and 'xlang' or e.tinf and 'typed'
+                or e.inferred and 'inferred' or 'matched'
             c.edges.ref[tier] = c.edges.ref[tier] + 1
         end
     end
@@ -74,14 +76,16 @@ end
 function M.report(data)
     local c = M.take(data)
     local ref = c.edges.ref
-    local reftotal = ref.proven + ref.xlang + ref.typed + ref.inferred + ref.matched
+    local reftotal = ref.confirmed + ref.proven + ref.xlang + ref.typed
+        + ref.inferred + ref.matched
     local lines = {
         ('cartograph census — %s'):format(data.root or '?'),
         '',
         ('nodes %d: %s'):format(c.nodes.total, kind_line(c.nodes.by_kind)),
         ('edges %d: %s'):format(c.edges.total, kind_line(c.edges.by_kind)),
-        ('ref trust: proven %d (%s) · xlang %d · typed %d (%s) · ~inferred %d (%s) · name-matched %d (%s)')
-            :format(ref.proven, pct(ref.proven, reftotal), ref.xlang,
+        ('ref trust: confirmed %d (%s) · proven %d (%s) · xlang %d · typed %d (%s) · ~inferred %d (%s) · name-matched %d (%s)')
+            :format(ref.confirmed, pct(ref.confirmed, reftotal),
+                ref.proven, pct(ref.proven, reftotal), ref.xlang,
                 ref.typed, pct(ref.typed, reftotal),
                 ref.inferred, pct(ref.inferred, reftotal),
                 ref.matched, pct(ref.matched, reftotal)),
