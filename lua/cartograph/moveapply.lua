@@ -13,6 +13,7 @@
 -- but not spell.
 
 local M = {}
+local atr = require 'cartograph.at'
 
 -- where inserted code lands in dest: before a trailing `return M`-ish
 -- line (the lua module idiom), else after the last nonblank line.
@@ -120,9 +121,9 @@ local function collect(store, ids, dest, plan)
             if F ~= dest and not (c.fn and in_move[c.fn]) then
                 local ls = file_lines(F)
                 local at = c.at
-                local token = at and ls and at.start.line == at['end'].line
-                    and (ls[at.start.line + 1] or '')
-                        :sub(at.start.char + 1, at['end'].char)
+                local token = at and ls and atr.oneline(at)
+                    and (ls[atr.sl(at) + 1] or '')
+                        :sub(atr.sc(at) + 1, atr.ec(at))
                 local srcAlias = binds[F] and binds[F][m.file]
                 local ok_site = srcAlias and token
                     and token == (srcAlias .. '.' .. tailname)

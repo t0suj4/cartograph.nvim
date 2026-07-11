@@ -6,6 +6,7 @@
 -- before any byte moves, splice the touched files back after.
 
 local M = {}
+local atr = require 'cartograph.at'
 
 function M.read_file(root, rel)
     local fd = io.open(root .. '/' .. rel, 'r')
@@ -53,7 +54,7 @@ function M.edit_file(text, dels, reps, ins)
     local lines = vim.split(text, '\n', { plain = true })
     local edits = {}
     for _, r in ipairs(reps or {}) do
-        edits[#edits + 1] = { line = r.at.start.line, ord = 2, rep = r }
+        edits[#edits + 1] = { line = atr.sl(r.at), ord = 2, rep = r }
     end
     for _, d in ipairs(dels or {}) do
         edits[#edits + 1] = { line = d.s, ord = 1, del = d }
@@ -68,8 +69,8 @@ function M.edit_file(text, dels, reps, ins)
     for _, e in ipairs(edits) do
         if e.rep then
             local l = lines[e.line + 1]
-            lines[e.line + 1] = l:sub(1, e.rep.at.start.char)
-                .. e.rep.to .. l:sub(e.rep.at['end'].char + 1)
+            lines[e.line + 1] = l:sub(1, atr.sc(e.rep.at))
+                .. e.rep.to .. l:sub(atr.ec(e.rep.at) + 1)
         elseif e.ins then
             for i = #e.ins.lines, 1, -1 do
                 table.insert(lines, e.ins.after + 2, e.ins.lines[i])

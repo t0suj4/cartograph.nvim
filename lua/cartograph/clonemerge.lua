@@ -17,6 +17,7 @@
 --            machinery every save uses.
 
 local M = {}
+local atr = require 'cartograph.at'
 
 local txn = require 'cartograph.txn'
 local read_file, disk_stamp = txn.read_file, txn.disk_stamp
@@ -106,9 +107,9 @@ function M.plan(store, id)
         for _, c in ipairs(store.calls_to[t.id] or {}) do
             local at = c.at
             local ls = file_lines(c.file)
-            local token = at and ls and at.start.line == at['end'].line
-                and (ls[at.start.line + 1] or '')
-                    :sub(at.start.char + 1, at['end'].char)
+            local token = at and ls and atr.oneline(at)
+                and (ls[atr.sl(at) + 1] or '')
+                    :sub(atr.sc(at) + 1, atr.ec(at))
             if token == t.name then
                 plan.rewrites[#plan.rewrites + 1] = { file = c.file,
                     at = at, from = t.name, to = survivor.name }
