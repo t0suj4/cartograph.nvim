@@ -67,6 +67,20 @@ test('consumers: deref paths, all binding forms', function ()
     }, paths(r), 'every deref path found, incl. alias / bracket / sub-shape prefix')
 end)
 
+test('consumers: deref rows carry the rewrite payload (ext + stem)', function ()
+    local r = consumers.scan(SRC, 'fix.lua', SPEC)
+    local byp = {}
+    for _, d in ipairs(r.derefs) do byp[d.path .. '|' .. (d.stem or '?')] = d end
+    local d = byp['end.char|r']            -- r['end'].char
+    ok(d and d.ext and d.ext[1] == d.ext[3], 'bracket-chain ext, single line')
+    ok(byp['[].start.line|sites[1]'], 'list-index stem is the indexed expr')
+    for _, x in ipairs(r.derefs) do
+        if x.path == 'start.line' and x.via == 'var:pos' then
+            ok(x.pre and not x.stem, 'prefix-taint row marked pre, no stem: never rewritten')
+        end
+    end
+end)
+
 test('consumers: the escape frontier is honest and complete', function ()
     local r = consumers.scan(SRC, 'fix.lua', SPEC)
     eq({

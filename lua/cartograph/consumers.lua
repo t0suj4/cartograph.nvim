@@ -153,14 +153,16 @@ local function line_col(n) local l, c = n:range(); return l + 1, c end
 function Scan:use(node, taint, via)
     local src = self.src
     local pre = preof(taint)
-    -- climb the index chain while `node` sits in table position
-    local path, cur = {}, node
+    -- climb the index chain while `node` sits in table position; keep the
+    -- chain nodes so a rewriter can splice (chain extent + stem expression)
+    local path, cur, chain = {}, node, { node }
     if pre then path[1] = pre end
     while true do
         local p = cur:parent()
         if p and IDX[p:type()] and p:named_child(0) == cur then
             path[#path + 1] = index_segment(p, src)
             cur = p
+            chain[#chain + 1] = p
         else break end
     end
     local climbed = #path - (pre and 1 or 0) > 0
@@ -181,8 +183,19 @@ function Scan:use(node, taint, via)
         return
     end
     if climbed then
-        self.derefs[#self.derefs + 1] = { line = l, col = c,
-            path = table.concat(path, '.'), via = via }
+        local d = { line = l, col = c, path = table.concat(path, '.'), via = via }
+        if pre then
+            d.pre = true -- prefix taint: the chain is PARTIAL, never rewrite
+        elseif #chain >= 3 then
+            -- rewrite payload: full-chain extent + the stem (chain minus the
+            -- last two segments = the expression whose value the accessor
+            -- takes: `sites[1].start.line` -> ext of the whole, stem `sites[1]`
+            local top = chain[#chain]
+            local sl2, sc2, el2, ec2 = top:range()
+            d.ext = { sl2, sc2, el2, ec2 }
+            d.stem = node_text(chain[#chain - 2], src)
+        end
+        self.derefs[#self.derefs + 1] = d
         return
     end
     -- from here down the SHAPE itself (or a derived sub-value) is in play;
@@ -423,7 +436,8 @@ function M.roster(root, files, spec)
                 for _, d in ipairs(r.derefs) do
                     by_path[d.path] = (by_path[d.path] or 0) + 1
                     sites[#sites + 1] = { file = f, line = d.line, col = d.col,
-                        path = d.path, via = d.via }
+                        path = d.path, via = d.via,
+                        ext = d.ext, stem = d.stem, pre = d.pre }
                 end
                 for _, e in ipairs(r.escapes) do
                     frontier[#frontier + 1] = { file = f, line = e.line, col = e.col,

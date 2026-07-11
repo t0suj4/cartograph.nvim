@@ -1,18 +1,32 @@
 -- Shape-consumer roster over a Lua tree. The Encapsulate Field checklist:
--- every deref path with sites, every escape as a frontier row.
+-- every deref path with sites, every escape as a frontier row — and the
+-- SEAM REWRITER: mechanically reroute coordinate derefs through an accessor.
 --
 --   nvim --headless -u NONE -l tools/consumers.lua <root> \
 --       [--call name[=list|elem]]... [--field name[=list|elem|any]]... \
---       [--bless fn,fn,...] [--full]
+--       [--bless fn,fn,...] [--full] \
+--       [--rw suffix=acc,...] [--rwmod module:binding] [--apply]
 --
--- e.g. the at display seam, with the at.lua accessors blessed:
+-- e.g. the at display seam, roster + planned rewrites (add --apply to write):
 --   nvim --headless -u NONE -l tools/consumers.lua . \
---       --call occurrences --field at --bless sl,sc,el,ec,oneline
+--       --call occurrences --field at --bless sl,sc,el,ec,oneline \
+--       --rw start.line=sl,start.char=sc,end.line=el,end.char=ec \
+--       --rwmod cartograph.at:atr
+--
+-- The rewrite is deliberately narrow: a deref whose path ENDS in a mapped
+-- two-segment suffix, with a physical chain (no prefix-taint partials),
+-- single-line, in a file that doesn't OWN the representation (providers/,
+-- store, fold, csr, argv, detail and the accessor module are skipped).
 
 vim.opt.rtp:prepend('.')
 local consumers = require 'cartograph.consumers'
 
 local root, spec, full = nil, { calls = {}, fields = {}, bless = {} }, false
+local rwmap, rwmod, rwbind, apply = nil, nil, nil, false
+local RWSKIP = { -- representation owners: the fold swaps their internals
+    '^lua/cartograph/providers/', 'store%.lua$', 'fold%.lua$', 'csr%.lua$',
+    'argv%.lua$', 'detail%.lua$', 'at%.lua$',
+}
 local i = 1
 while i <= #_G.arg do
     local a = _G.arg[i]
@@ -24,6 +38,14 @@ while i <= #_G.arg do
     elseif a == '--bless' then
         i = i + 1
         for fn in _G.arg[i]:gmatch('[%w_]+') do spec.bless[fn] = true end
+    elseif a == '--rw' then
+        i = i + 1
+        rwmap = {}
+        for suf, acc in _G.arg[i]:gmatch('([%w_.%[%]]+)=([%w_]+)') do rwmap[suf] = acc end
+    elseif a == '--rwmod' then
+        i = i + 1
+        rwmod, rwbind = _G.arg[i]:match('^([%w_.%-]+):([%w_]+)$')
+    elseif a == '--apply' then apply = true
     elseif a == '--full' then full = true
     else root = a end
     i = i + 1
@@ -73,6 +95,70 @@ emit('\nFRONTIER (%d rows — coverage STOPS here; each needs a human eye):',
 for _, e in ipairs(r.frontier) do
     emit('  %s:%d:%d  %-7s %-12s %s', e.file, e.line, e.col,
         e.kind, e.via, e.detail or '')
+end
+
+-- ── the seam rewriter ─────────────────────────────────────────────────────
+if rwmap and rwmod and rwbind then
+    local edits, skipped = {}, {} -- edits[file] = { {ext, to} }
+    for _, s in ipairs(r.sites) do
+        local suf = s.path:match('([%w_]+%.[%w_]+)$')
+        local acc = suf and rwmap[suf]
+        if acc then
+            local skip
+            for _, pat in ipairs(RWSKIP) do
+                if s.file:find(pat) then skip = 'owner file' break end
+            end
+            if not skip and s.pre then skip = 'prefix taint (partial chain)' end
+            if not skip and not (s.ext and s.stem) then skip = 'no extent' end
+            if not skip and s.ext[1] ~= s.ext[3] then skip = 'multi-line chain' end
+            if skip then
+                skipped[#skipped + 1] = { s = s, why = skip }
+            else
+                edits[s.file] = edits[s.file] or {}
+                table.insert(edits[s.file], { ext = s.ext,
+                    to = ('%s.%s(%s)'):format(rwbind, acc, s.stem) })
+            end
+        end
+    end
+    local files2, ne = {}, 0
+    for f in pairs(edits) do files2[#files2 + 1] = f end
+    table.sort(files2)
+    emit('\nREWRITES%s:', apply and ' (applied)' or ' (plan — add --apply to write)')
+    for _, f in ipairs(files2) do
+        -- bottom-up so earlier splices don't shift later extents
+        table.sort(edits[f], function (a, b)
+            return a.ext[1] > b.ext[1] or (a.ext[1] == b.ext[1] and a.ext[2] > b.ext[2])
+        end)
+        local lines = vim.fn.readfile(root .. '/' .. f)
+        for _, ed in ipairs(edits[f]) do
+            local ln = lines[ed.ext[1] + 1]
+            local before = ln:sub(1, ed.ext[2])
+            local after = ln:sub(ed.ext[4] + 1)
+            emit('  %s:%d  %s  ->  %s', f, ed.ext[1] + 1,
+                ln:sub(ed.ext[2] + 1, ed.ext[4]), ed.to)
+            lines[ed.ext[1] + 1] = before .. ed.to .. after
+            ne = ne + 1
+        end
+        -- ensure the accessor module is required (after the last top require)
+        local has, last_req = false, 0
+        for j, ln in ipairs(lines) do
+            if ln:find(rwmod:gsub('%W', '%%%0'), 1, false) then has = true break end
+            if j <= 60 and ln:match('^local [%w_]+%s*=%s*require') then last_req = j end
+        end
+        if not has then
+            table.insert(lines, last_req + 1,
+                ("local %s = require '%s'"):format(rwbind, rwmod))
+            emit('  %s:+  local %s = require \'%s\'', f, rwbind, rwmod)
+        end
+        if apply then vim.fn.writefile(lines, root .. '/' .. f) end
+    end
+    emit('%d rewrites in %d files', ne, #files2)
+    if #skipped > 0 then
+        emit('SKIPPED (manual):')
+        for _, k in ipairs(skipped) do
+            emit('  %s:%d  %-14s %s', k.s.file, k.s.line, k.s.path, k.why)
+        end
+    end
 end
 io.write(table.concat(out, '\n'), '\n')
 vim.cmd('qall!')
