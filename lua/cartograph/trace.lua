@@ -55,13 +55,13 @@ end
 -- binder tags own it. No binder info (dump graphs, no scope spec, stale
 -- file) ⇒ exactly the old name-matched behavior.
 local function local_defs(store, fn, name, line0)
-    local df = fn and fn.df
-    if not df then return {} end
+    local stmts = require('cartograph.df').stmts(fn)
+    if #stmts == 0 then return {} end
     local ts = require 'cartograph.providers.treesitter'
     local abs = store.abs(fn.file)
     local use_b = line0 and ts.binder_at(abs, fn.file, name, line0) or nil
     local before, all = {}, {}
-    for i, s in ipairs(df.stmts) do
+    for i, s in ipairs(stmts) do
         for di, d in ipairs(s.def) do
             if d == name then
                 local keep = true
@@ -77,7 +77,7 @@ local function local_defs(store, fn, name, line0)
                         if db ~= use_b then
                             -- containment: the binder's own decl lives
                             -- inside this (compound) statement's row span
-                            local nxt = df.stmts[i + 1]
+                            local nxt = stmts[i + 1]
                             local declrow1 = use_b.row and use_b.row + 1
                             keep = declrow1 ~= nil and declrow1 >= s.l
                                 and (nxt == nil or declrow1 < nxt.l)

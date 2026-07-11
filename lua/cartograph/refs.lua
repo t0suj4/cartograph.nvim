@@ -24,9 +24,10 @@ local M = {}
 ---@param node table
 ---@param callees string[]?  callee names of this node's calls
 function M.witness(node, callees)
-    if not node.df or not node.df.stmts then return nil end
+    local dfa = require 'cartograph.df'
+    if not dfa.present(node) then return nil end
     local sig = { tostring(#(node.params or {})) }
-    for _, st in ipairs(node.df.stmts) do
+    for _, st in ipairs(dfa.stmts(node)) do
         local deps = {}
         for _, d in ipairs(st.dep or {}) do deps[#deps + 1] = d.from end
         table.sort(deps)

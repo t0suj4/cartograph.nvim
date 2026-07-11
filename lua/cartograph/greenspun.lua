@@ -20,6 +20,7 @@
 local M = {}
 
 local argv = require 'cartograph.argv'
+local df = require 'cartograph.df'
 
 local EVAL_VERBS = {
     eval = true, exec = true, load = true, loadstring = true, dofile = true,
@@ -996,11 +997,11 @@ function M.clones(data, opts)
     end
     local groups = {}
     for _, n in ipairs(data.nodes) do
-        if (n.kind == 'function' or n.kind == 'method') and n.df
-            and #n.df.stmts >= min_stmts
+        if (n.kind == 'function' or n.kind == 'method')
+            and df.count(n) >= min_stmts
             and not n.name:match('^[%u_%d]+$') then -- TEST/BENCHMARK macros
             local sig = { tostring(#(n.params or {})) }
-            for _, st in ipairs(n.df.stmts) do
+            for _, st in ipairs(df.stmts(n)) do
                 local deps = {}
                 for _, d in ipairs(st.dep or {}) do deps[#deps + 1] = d.from end
                 table.sort(deps)
@@ -1020,7 +1021,7 @@ function M.clones(data, opts)
     for _, g in pairs(groups) do
         -- shared CALLEES are the real clone signal; a callee-less shape
         -- match is coincidence unless the shape is substantial
-        if #g >= 2 and (g.callees or #g[1].df.stmts >= 5) then
+        if #g >= 2 and (g.callees or df.count(g[1]) >= 5) then
             table.sort(g, function (a, b)
                 if a.file ~= b.file then return a.file < b.file end
                 return a.order < b.order
@@ -1028,7 +1029,7 @@ function M.clones(data, opts)
             out[#out + 1] = g
         end
     end
-    table.sort(out, function (a, b) return #a[1].df.stmts > #b[1].df.stmts end)
+    table.sort(out, function (a, b) return df.count(a[1]) > df.count(b[1]) end)
     return out
 end
 

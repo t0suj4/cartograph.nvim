@@ -14,6 +14,7 @@
 local store  = require 'cartograph.store'
 local heat   = require 'cartograph.heat'
 local config = require 'cartograph.config'
+local dfa    = require 'cartograph.df'
 
 -- file level shows functions and BLOCKS (runs of top-level statements rolled
 -- up under their first line); the individual vars live one level down
@@ -1024,9 +1025,9 @@ local function render_fn(ctx, id)
     -- nested in an if/for body belongs to the last statement starting at or
     -- before its line.
     local function stmt_of(line0)
-        local li, best = line0 + 1, nil
-        for i = 1, #df.stmts do
-            if df.stmts[i].l <= li then best = i else break end
+        local li, best, stmts = line0 + 1, nil, dfa.stmts(node)
+        for i = 1, #stmts do
+            if stmts[i].l <= li then best = i else break end
         end
         return best
     end
@@ -1051,7 +1052,7 @@ local function render_fn(ctx, id)
             end
         end
     end
-    for i, s in ipairs(df.stmts) do
+    for i, s in ipairs(dfa.stmts(node)) do
         local defs = table.concat(s.def, ', ')
         local uses = table.concat(s.use, ', ')
         local text, dim_from
@@ -1199,7 +1200,7 @@ local function render_detail(ctx)
         local fnode = store.node(fnid)
         for _, p in ipairs(fnode and fnode.params or {}) do locals[p] = true end
         if df then
-            for _, s in ipairs(df.stmts) do
+            for _, s in ipairs(dfa.stmts(node)) do
                 for _, d in ipairs(s.def or {}) do locals[d] = true end
             end
         end
@@ -2028,10 +2029,10 @@ function M.attach(win)
         -- a local: jump to its defining statement (latest before this row)
         local i, df = M.line_stmtidx[r], node.df
         if word and i and df then
-            local best
-            for j = 1, #df.stmts do
+            local best, stmts = nil, dfa.stmts(node)
+            for j = 1, #stmts do
                 if j ~= i then
-                    for _, d in ipairs(df.stmts[j].def) do
+                    for _, d in ipairs(stmts[j].def) do
                         if d == word and (j < i or not best) then best = j end
                     end
                 end

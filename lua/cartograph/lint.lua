@@ -412,7 +412,7 @@ local function access_point_findings(store)
     for _, n in ipairs(store.data.nodes) do
         if (n.kind == 'function' or n.kind == 'method') then
             local callers = #(store.usedby[n.id] or {})
-            local stmts = n.df and #n.df.stmts or 0
+            local stmts = require('cartograph.df').count(n)
             local gettish = n.name:match('[Gg]et[%u_]?') or n.name:match('instance')
                 or n.name:match('current')
             if callers >= 15 and stmts > 0
@@ -440,7 +440,7 @@ local function clone_findings(store)
         out[#out + 1] = { file = store.abspath(g[1]),
             line = g[1].range.start.line + 1,
             message = ('possible clones (%d statements, same shape and callees): %s')
-                :format(#g[1].df.stmts, table.concat(names, ' ~ ')) }
+                :format(require('cartograph.df').count(g[1]), table.concat(names, ' ~ ')) }
     end
     return out
 end
