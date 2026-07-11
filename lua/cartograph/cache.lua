@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 25 -- v25: the WRITE AXIS — lua/php use edges carry rw
+M.VERSION = 26 -- v26: GUARD SUMMARIES — write occurrences classify their
+               -- guard (unguarded/guarded/SET-ONCE, AST-hardened conjunct-
+               -- sound absence tests + else-arm + or/??= idioms); use edges
+               -- carry gw = min over writes; a v25 cache lacks it;
+               -- v25: the WRITE AXIS — lua/php use edges carry rw
                -- (1 read / 2 write / 3 both; ABSENT = no classifier ran,
                -- mode unknown); a v24 cache lacks the mode;
                -- v24: type-inferred TIER — graph-VM return-type-resolved

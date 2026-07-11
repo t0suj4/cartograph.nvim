@@ -31,6 +31,8 @@ M.EDGE_FIELDS = {
     -- runtime-confirmed (session-live overlay, self://loaded / MCP)
     tinf = true, proven = true, xlang = true, conf = true,
     rw = true, -- the write axis (use edges): 1 read / 2 write / 3 both
+    gw = true, -- guard chain of the writes: 1 some-unguarded / 2 all-guarded
+               -- / 3 all-set-once (absence-guarded: commutative)
 }
 M.CALL_FIELDS = {
     callee = true, full = true, file = true, line = true, at = true,

@@ -378,12 +378,257 @@ local function php_is_write(c, n)
     return false
 end
 
+-- GUARD CLASS of a write (the guard-summaries rung, census-justified:
+-- ~half of all in-fn writes are guarded). Returns a SOUND chain:
+--   0 = unguarded   1 = guarded (some enclosing condition — the hedge)
+--   2 = SET-ONCE    (the write provably cannot overwrite: an absence test
+--                    of the SAME target chain in conjunct position, an
+--                    else-arm of a presence test, or an idiom form —
+--                    `X = X or v`, `$x ??= v`)
+-- Set-once matching is AST-hardened: the tested chain's source text must
+-- equal the written chain's (the text census's word-match over-credited
+-- receiver mentions). Conjunct-sound: absence tests are only accepted
+-- through `and` — under `or`/`not` the branch can run with the target
+-- present. elseif arms never claim set-once (the top condition is FALSE
+-- there). Everything unprovable stays class 1 — a named hedge, not a lie.
+
+local IDXC = { dot_index_expression = true, bracket_index_expression = true,
+    subscript_expression = true, member_access_expression = true,
+    variable_name = true }
+
+-- the written chain's top node (same climb as is_write; bracket KEYS stop it)
+local function chain_top(c, n)
+    local cur, p = c, n
+    while p do
+        local pt = p:type()
+        if not IDXC[pt] then break end
+        if (pt == 'bracket_index_expression' or pt == 'subscript_expression')
+            and p:named_child(0) ~= cur then break end
+        cur = p
+        p = p:parent()
+    end
+    return cur
+end
+
+local function ntext(x, src) return (node_text(x, src):gsub('%s', '')) end
+
+-- does node x's source text equal the (whitespace-free) chain? Byte-length
+-- pre-filter: SHORTER than the chain can never match — instant reject with
+-- no string extraction (the guard classifier's hot comparison)
+local function chain_eq(x, src, chain)
+    local d = select(3, x:end_()) - select(3, x:start())
+    if d < #chain then return false end
+    if d == #chain then return node_text(x, src) == chain end
+    return ntext(x, src) == chain -- longer: whitespace variance, rare
+end
+
+-- anonymous nodes' type() IS their literal text: no string extraction
+local function optext_is(n, _, want)
+    for i = 0, n:child_count() - 1 do
+        local ch = n:child(i)
+        if not ch:named() and want[ch:type()] then return true end
+    end
+    return false
+end
+
+-- absence test anywhere in CONJUNCT position (descend parens + and only)
+local function conj_abs(G, n, src, chain)
+    while n:type() == 'parenthesized_expression' do n = n:named_child(0) end
+    if n:type() == G.binop and optext_is(n, src, G.andops) then
+        return conj_abs(G, n:named_child(0), src, chain)
+            or conj_abs(G, n:named_child(1), src, chain)
+    end
+    return G.abs_test(n, src, chain)
+end
+
+local function guard_class(c, n, src, G)
+    local top = chain_top(c, n)
+    local chain -- LAZY: most writes never reach a text comparison
+    local function ch()
+        if not chain then chain = ntext(top, src) end
+        return chain
+    end
+    if G.rhs_setonce(top, src, ch) then return 2 end
+    local class = 0
+    local node, p = top, top:parent()
+    while p do
+        local pt = p:type()
+        if G.fn[pt] then break end
+        if G.cond[pt] then
+            -- the condition is the first named child in both grammars
+            -- (field() allocates a result table per call — this loop is
+            -- per-write × per-ancestor, measured hot)
+            local cond = p:named_child(0)
+            if cond and node ~= cond then
+                class = 1
+                local at = node:type()
+                if at == G.else_t then
+                    if G.presence(cond, src, ch()) then return 2 end
+                elseif at ~= G.elseif_t then
+                    if conj_abs(G, cond, src, ch()) then return 2 end
+                end
+            end
+        end
+        node = p
+        p = p:parent()
+    end
+    return class
+end
+
+local function unparen(n)
+    while n and n:type() == 'parenthesized_expression' do n = n:named_child(0) end
+    return n
+end
+
+local LUA_GUARDS = {
+    cond = { if_statement = true, elseif_statement = true, while_statement = true },
+    else_t = 'else_statement', elseif_t = 'elseif_statement',
+    fn = { function_declaration = true, function_definition = true },
+    binop = 'binary_expression', andops = { ['and'] = true },
+    -- `not X` / `X == nil` / `nil == X`, X the written chain
+    abs_test = function (n, src, chain)
+        local t = n:type()
+        if t == 'unary_expression' then
+            local op = n:child(0)
+            if op and not op:named() and op:type() == 'not' then
+                local x = n:named_child(0)
+                return x ~= nil and chain_eq(x, src, chain)
+            end
+        elseif t == 'binary_expression' and optext_is(n, src, { ['=='] = true }) then
+            local a, b = n:named_child(0), n:named_child(1)
+            if a and b then
+                if a:type() == 'nil' then return chain_eq(b, src, chain) end
+                if b:type() == 'nil' then return chain_eq(a, src, chain) end
+            end
+        end
+        return false
+    end,
+    -- else arm of `if X then` / `if X ~= nil then`
+    presence = function (cond, src, chain)
+        cond = unparen(cond)
+        if chain_eq(cond, src, chain) then return true end
+        if cond:type() == 'binary_expression'
+            and optext_is(cond, src, { ['~='] = true }) then
+            local a, b = cond:named_child(0), cond:named_child(1)
+            if a and b then
+                if a:type() == 'nil' then return chain_eq(b, src, chain) end
+                if b:type() == 'nil' then return chain_eq(a, src, chain) end
+            end
+        end
+        return false
+    end,
+    -- `X = X or v` (the memoize idiom); positional in multi-assignment
+    rhs_setonce = function (top, src, chain)
+        local vl = top:parent()
+        if not vl or vl:type() ~= 'variable_list' then return false end
+        local pos, i = nil, 0
+        for ch in vl:iter_children() do
+            if ch:named() then
+                i = i + 1
+                if ch == top then pos = i break end
+            end
+        end
+        local asg = vl:parent()
+        local exprs = asg and asg:named_child(1)
+        if not (pos and exprs) then return false end
+        local rhs, j = nil, 0
+        for ch in exprs:iter_children() do
+            if ch:named() then
+                j = j + 1
+                if j == pos then rhs = ch break end
+            end
+        end
+        if not rhs or rhs:type() ~= 'binary_expression'
+            or not optext_is(rhs, src, { ['or'] = true }) then return false end
+        local l = rhs:named_child(0)
+        return l ~= nil and chain_eq(l, src, chain())
+    end,
+}
+
+local PHP_GUARDS = {
+    cond = { if_statement = true, else_if_clause = true, while_statement = true },
+    else_t = 'else_clause', elseif_t = 'else_if_clause',
+    fn = { function_definition = true, method_declaration = true,
+        anonymous_function_creation_expression = true, arrow_function = true },
+    binop = 'binary_expression', andops = { ['&&'] = true, ['and'] = true },
+    -- `!isset(X)` / `empty(X)` / `!X` / `X === null` / `null === X`
+    abs_test = function (n, src, chain)
+        local t = n:type()
+        if t == 'unary_op_expression' then
+            local op = n:child(0)
+            if op and not op:named() and op:type() == '!' then
+                local x = unparen(n:named_child(0))
+                if not x then return false end
+                if chain_eq(x, src, chain) then return true end
+                if x:type() == 'function_call_expression' then
+                    local fname = x:field('function')[1]
+                    if fname and node_text(fname, src) == 'isset' then
+                        local args = x:field('arguments')[1]
+                        local a = args and args:named_child(0)
+                        return a ~= nil and chain_eq(a, src, chain)
+                    end
+                end
+            end
+        elseif t == 'function_call_expression' then
+            local fname = n:field('function')[1]
+            if fname and node_text(fname, src) == 'empty' then
+                local args = n:field('arguments')[1]
+                local a = args and args:named_child(0)
+                return a ~= nil and chain_eq(a, src, chain)
+            end
+        elseif t == 'binary_expression'
+            and optext_is(n, src, { ['==='] = true, ['=='] = true }) then
+            local a, b = n:named_child(0), n:named_child(1)
+            if a and b then
+                if a:type() == 'null' then return chain_eq(b, src, chain) end
+                if b:type() == 'null' then return chain_eq(a, src, chain) end
+            end
+        end
+        return false
+    end,
+    presence = function (cond, src, chain)
+        cond = unparen(cond)
+        if cond == nil then return false end
+        if chain_eq(cond, src, chain) then return true end
+        if cond:type() == 'function_call_expression' then
+            local fname = cond:field('function')[1]
+            if fname and node_text(fname, src) == 'isset' then
+                local args = cond:field('arguments')[1]
+                local a = args and args:named_child(0)
+                return a ~= nil and chain_eq(a, src, chain)
+            end
+        end
+        return false
+    end,
+    -- `X ??= v` / `X = X ?? v`
+    rhs_setonce = function (top, src, chain)
+        local p = top:parent()
+        if not p then return false end
+        local pt = p:type()
+        if pt == 'augmented_assignment_expression'
+            and p:named_child(0) == top
+            and optext_is(p, src, { ['??='] = true }) then
+            return true
+        end
+        if pt == 'assignment_expression' and p:named_child(0) == top then
+            local rhs = p:named_child(1)
+            if rhs and rhs:type() == 'binary_expression'
+                and optext_is(rhs, src, { ['??'] = true }) then
+                local l = rhs:named_child(0)
+                return l ~= nil and chain_eq(l, src, chain())
+            end
+        end
+        return false
+    end,
+}
+
 M.spec = {
     lua = {
         exts = { 'lua' },
         write_gate = { variable_list = true, dot_index_expression = true,
             bracket_index_expression = true },
         is_write = lua_is_write,
+        guards = LUA_GUARDS,
         scopes = LUA_SCOPES, -- lexical-first id pass (scope-model step 3)
         functions = [[
             (function_declaration name: (_) @name) @def
@@ -991,6 +1236,7 @@ M.spec = {
         exts = { 'php' },
         write_gate = { variable_name = true, member_access_expression = true },
         is_write = php_is_write,
+        guards = PHP_GUARDS,
         -- typed-string SINKS (typed-strings v1): the API contract types
         -- the arg — CONFIDENT, unlike content sniffing (~ by design)
         string_sinks = {
@@ -2789,7 +3035,9 @@ local MF_CALLEE = 2   -- call position (the call pass already owns it)
 local MF_BOUND = 4    -- lexically bound at the use site (scope stack)
 local MF_SCOPED = 8   -- collected under a spec WITH a scope model
 local MF_RANGE = 16   -- token isn't single-line name-width: explicit end follows
-local MF_WRITE = 32   -- write position (last name segment of an assign target)
+local MF_WRITE = 32   -- write position (anywhere on an assign-target chain)
+local MF_GW = 64      -- x2 bits: write's guard class (0 unguarded / 1 guarded
+                      -- / 2 set-once) — only meaningful when MF_WRITE set
 
 -- the buffer must SHIP (worker chunk, binary codec): no spec table (it
 -- holds functions), just the two spec facts the reduce needs
@@ -2817,7 +3065,8 @@ end
 local function collect_mentions(buf, tsroot, src, spec, dfreg)
     local scopes = spec.scopes
     local idt = spec.mention_types or MENTION_ID
-    local wgate, is_write = spec.write_gate, spec.is_write
+    local wgate, is_write, guards = spec.write_gate, spec.is_write, spec.guards
+    local wq, wqn = {}, 0 -- queued write mentions: (node, parent, flag slot)
     local dfid = spec.df_ids
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
@@ -2965,13 +3214,18 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                     + (callee and MF_CALLEE or 0) + (bound and MF_BOUND or 0)
                 local simple = er == sr and ec == sc + #name
                 if not simple then flags = flags + MF_RANGE end
-                if wgate and wgate[nt] and is_write(c, n) then
-                    flags = flags + MF_WRITE
-                end
+                local iswrite = wgate and wgate[nt] and is_write(c, n)
+                if iswrite then flags = flags + MF_WRITE end
                 vput(parts, idx)
                 vput(parts, sr)
                 vput(parts, sc)
                 parts[#parts + 1] = string.char(flags)
+                if iswrite and guards then
+                    -- classify OUT OF LINE (its loops would break the JIT
+                    -- trace of this hot loop): queue node + flag-slot index
+                    wqn = wqn + 1
+                    wq[wqn * 3 - 2], wq[wqn * 3 - 1], wq[wqn * 3] = c, n, #parts
+                end
                 if not simple then
                     vput(parts, er)
                     vput(parts, ec)
@@ -3037,6 +3291,15 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
         end
     end
     walk(tsroot, false, true)
+    -- the deferred guard classification: a tight monomorphic loop, the
+    -- flag byte patched in place (each flag is its own parts slot)
+    for i = 1, wqn do
+        local g = guard_class(wq[i * 3 - 2], wq[i * 3 - 1], src, guards)
+        if g > 0 then
+            local slot = wq[i * 3]
+            parts[slot] = string.char(parts[slot]:byte() + g * MF_GW)
+        end
+    end
 end
 
 --- Replay the id-pass decisions over a collected buffer: pure lookups
@@ -3067,6 +3330,11 @@ local function reduce_mentions(file, buf, L)
         i = i + 1
         local name = names[idx]
         local er, ec = sr, sc + #name
+        local gw = 0
+        if flags >= MF_GW then
+            gw = (flags - flags % MF_GW) / MF_GW
+            flags = flags % MF_GW
+        end
         local write
         if flags >= MF_WRITE then
             write = true
@@ -3144,6 +3412,13 @@ local function reduce_mentions(file, buf, L)
                         local mode = write and 2 or 1
                         if e.rw ~= mode and e.rw ~= 3 then
                             e.rw = e.rw and 3 or mode
+                        end
+                        -- guard chain, MIN over write occurrences (a true
+                        -- claim about ALL writes): 1 some-unguarded /
+                        -- 2 all-guarded / 3 all-SET-ONCE (commutative)
+                        if write then
+                            local g = gw + 1
+                            if not e.gw or g < e.gw then e.gw = g end
                         end
                     end
                 end
