@@ -10,6 +10,7 @@
 local store    = require 'cartograph.store'
 local extract  = require 'cartograph.extract'
 local hl       = require 'cartograph.hl'
+local atr = require 'cartograph.at'
 
 local HEADER_ROWS = 2 -- header line + blank before the code body
 local ns = vim.api.nvim_create_namespace('cartograph_source_hl')
@@ -147,8 +148,8 @@ function M.resolve_jump(node, file_line, col, cword)
     local byword
     for _, to in ipairs(store.uses[node.id] or {}) do
         for _, r in ipairs(store.occurrences(node.id, to) or {}) do
-            if r.start.line == file_line and col >= r.start.char
-                and (r['end'].line > file_line or col < r['end'].char) then
+            if atr.sl(r) == file_line and col >= atr.sc(r)
+                and (atr.el(r) > file_line or col < atr.ec(r)) then
                 return to
             end
         end

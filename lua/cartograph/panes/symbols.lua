@@ -15,6 +15,7 @@ local store  = require 'cartograph.store'
 local heat   = require 'cartograph.heat'
 local config = require 'cartograph.config'
 local dfa    = require 'cartograph.df'
+local atr = require 'cartograph.at'
 
 -- file level shows functions and BLOCKS (runs of top-level statements rolled
 -- up under their first line); the individual vars live one level down
@@ -423,7 +424,7 @@ local function render_var(ctx, id)
         for _, r in ipairs(u.at) do
             sites[#sites + 1] = { fn = u.from, name = fn and fn.name or u.from,
                 short = member and fn.name:sub(#(node.name or '') + 1) or nil,
-                file = fn and fn.file, line = r.start.line, range = r,
+                file = fn and fn.file, line = atr.sl(r), range = r,
                 internal = member }
         end
     end
@@ -442,7 +443,7 @@ local function render_callers(ctx, id)
         and node.name:sub(#class_of(node.name) + 1) or nil
     for _, r in ipairs(store.occurrences(id, id) or {}) do -- recursion (self edge)
         sites[#sites + 1] = { fn = id, name = node.name or id, short = selfshort,
-            file = node.file, line = r.start.line, range = r, rec = true, internal = true }
+            file = node.file, line = atr.sl(r), range = r, rec = true, internal = true }
     end
     for _, from in ipairs(store.usedby[id] or {}) do
         local fn = store.node(from)
@@ -454,7 +455,7 @@ local function render_callers(ctx, id)
         for _, r in ipairs(store.occurrences(from, id) or {}) do
             sites[#sites + 1] = { fn = from, name = fn and fn.name or from,
                 short = short,
-                file = fn and fn.file, line = r.start.line, range = r, inferred = inf,
+                file = fn and fn.file, line = atr.sl(r), range = r, inferred = inf,
                 rec = rec, internal = internal }
         end
     end
@@ -525,7 +526,7 @@ local function render_regfor(ctx, id)
         { #pre + 1 + #(node.name or '?'), -1, 'CartographDim' } }
     for _, r in ipairs(regs) do
         local at = r.at and r.at[1]
-        local line = at and at.start.line
+        local line = at and atr.sl(at)
         local label = line and ('%s:%d'):format(r.from, line + 1) or r.from
         ctx.lines[#ctx.lines + 1] = '  ' .. label
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographTitle' } }
@@ -1044,7 +1045,7 @@ local function render_fn(ctx, id)
         local vn = store.node(u.to)
         if vn then
             for _, r in ipairs(u.at) do
-                local best = stmt_of(r.start.line)
+                local best = stmt_of(atr.sl(r))
                 if best then
                     vars_at[best] = vars_at[best] or {}
                     table.insert(vars_at[best], { name = vn.name, id = u.to })
@@ -1128,8 +1129,8 @@ local function render_block(ctx, key)
             local at = c.at and c.at.start
             if at and (at.line > f.sr or (at.line == f.sr and at.char >= f.sc))
                 and (at.line < f.er or (at.line == f.er and at.char < f.ec)) then
-                if not best or at.line < best.at.start.line
-                    or (at.line == best.at.start.line and at.char < best.at.start.char) then
+                if not best or at.line < atr.sl(best.at)
+                    or (at.line == atr.sl(best.at) and at.char < atr.sc(best.at)) then
                     best = c
                 end
             end
@@ -1208,8 +1209,8 @@ local function render_detail(ctx)
             local vn = store.node(u.to)
             if vn and not locals[vn.name] then
                 for _, r in ipairs(u.at or {}) do
-                    vars_by_line[r.start.line] = vars_by_line[r.start.line] or {}
-                    vars_by_line[r.start.line][u.to] = true
+                    vars_by_line[atr.sl(r)] = vars_by_line[atr.sl(r)] or {}
+                    vars_by_line[atr.sl(r)][u.to] = true
                 end
             end
         end
