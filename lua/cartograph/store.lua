@@ -85,10 +85,12 @@ local function idx_edge(T, e)
         -- language ships no classifier — unknown, never a claimed "read"
         T.var_usedby[e.to] = T.var_usedby[e.to] or {}
         table.insert(T.var_usedby[e.to],
-            { from = e.from, at = e.at or {}, rw = e.rw, gw = e.gw, gp = e.gp })
+            { from = e.from, at = e.at or {}, rw = e.rw, gw = e.gw, gp = e.gp,
+                flds = e.flds })
         T.var_uses[e.from] = T.var_uses[e.from] or {}
         table.insert(T.var_uses[e.from],
-            { to = e.to, at = e.at or {}, rw = e.rw, gw = e.gw, gp = e.gp })
+            { to = e.to, at = e.at or {}, rw = e.rw, gw = e.gw, gp = e.gp,
+                flds = e.flds })
     elseif e.kind == 'reg' then
         -- a registration: the fn is kept alive by `from` (a module,
         -- dispatch table). The alibi both ways — a fn's registrants,
