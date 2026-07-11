@@ -428,7 +428,9 @@ local function render_var(ctx, id)
                 internal = member }
         end
     end
-    render_sites(ctx, node, '·', 'used by', sites,
+    -- the state atlas label rides the title: what KIND of state is this
+    local a = require('cartograph.atlas').classify(store, id)
+    render_sites(ctx, node, '·', 'used by · ' .. a.label, sites,
         '(no reads found — writes only, or dynamic access)')
 end
 

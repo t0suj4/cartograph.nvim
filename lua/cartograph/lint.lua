@@ -488,6 +488,26 @@ end
 M.rules = {
     { name = 'sql', severity = 'info', run = sql_findings },
     {
+        -- the state atlas's lint face: state that is written but never
+        -- read is dead weight — or reached dynamically in a way the graph
+        -- cannot see, so the hedge is spoken, severity stays info
+        name = 'dead-state', severity = 'info',
+        run = function (store)
+            local out = {}
+            local census = require('cartograph.atlas').census(store)
+            for _, v in ipairs(census.vars.dead) do
+                local n = store.node(v.id)
+                out[#out + 1] = {
+                    file = n and store.abs(n.file) or '',
+                    line = n and require('cartograph.at').sl(n.range) + 1 or 1,
+                    message = ("'%s' is written (%d fn%s) but never read — dead state, or dynamic access")
+                        :format(v.name or '?', v.nw, v.nw == 1 and '' or 's'),
+                }
+            end
+            return out
+        end,
+    },
+    {
         -- the code<->database audit (needs setup{ db = ... }): tables the
         -- code queries but the database lacks are typos or missing
         -- migrations; tables the database holds but nothing queries are
