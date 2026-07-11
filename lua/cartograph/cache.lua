@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 27 -- v27: PARAM PREDICATES + scalar argv — use edges carry gp
+M.VERSION = 28 -- v28: PURITY INPUTS — fns carry pw (indexes of own params
+               -- written through: the lua/js reference-semantics fact) and
+               -- use edges carry flds (per-field packed rw+gw, ''=whole-var);
+               -- a v27 cache lacks both;
+               -- v27: PARAM PREDICATES + scalar argv — use edges carry gp
                -- (±param index: all writes fire only when that param is
                -- truthy/falsy; skip-direction sound), argv classifies
                -- boolean/nil/number literals as k='scalar' (dischargeable

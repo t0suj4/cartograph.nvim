@@ -21,6 +21,8 @@ M.NODE_FIELDS = {
     params = true, torn = true, decl = true, macro = true, cbarg = true,
     unparsed = true, df = true, data = true, ctype = true, ret = true,
     entry = true, exported = true, effects = true, apertures = true,
+    pw = true, -- param-write fact: sorted indexes of OWN params this fn
+               -- writes through (lua/js reference semantics; ~ to own params)
     -- token provider (stack languages)
     effect = true, derived = true, echeck = true,
 }
@@ -36,6 +38,7 @@ M.EDGE_FIELDS = {
     gp = true, -- param predicate: ALL writes fire only when param |gp| is
                -- truthy (gp>0) / falsy (gp<0) — dischargeable per call site
                -- against argv literals (skip direction only)
+    flds = true, -- per-field facts: field -> packed rw + gw*4 ('' = whole-var)
 }
 M.CALL_FIELDS = {
     callee = true, full = true, file = true, line = true, at = true,

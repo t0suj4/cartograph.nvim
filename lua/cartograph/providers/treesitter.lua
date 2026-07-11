@@ -470,6 +470,41 @@ local function param_map(fnnode, src, pfield)
     return map
 end
 
+-- the immediate FIELD of a base-position mention (`state.x` at the state
+-- mention -> 'x'; computed keys -> '[]'; not a field access -> nil).
+-- Language-generic over the IDXC types; php unwraps the $ sigil.
+local function mention_field(c, n, src)
+    local p = n
+    if p:type() == 'variable_name' then c = p; p = p:parent() end
+    if not p then return nil end
+    local t = p:type()
+    if t == 'dot_index_expression' or t == 'member_access_expression' then
+        if p:named_child(0) ~= c then return nil end
+        local f = p:named_child(1)
+        return f and node_text(f, src) or '[]'
+    end
+    if t == 'bracket_index_expression' or t == 'subscript_expression' then
+        if p:named_child(0) ~= c then return nil end
+        local k = p:named_child(1)
+        if k and k:type() == 'string' then
+            local inner = k:named_child(0)
+            if inner then return node_text(inner, src) end
+        end
+        return '[]'
+    end
+    return nil
+end
+
+-- the leftmost identifier of a chain (its BASE): `t.x['k']` -> t
+local function leftmost(top)
+    local x = top
+    while true do
+        local ch = x:named_child(0)
+        if not ch then return x end
+        x = ch
+    end
+end
+
 -- a bare param (or its negation) in CONJUNCT position: returns ±index.
 -- Sound in the SKIP direction only: "no write unless param i truthy" —
 -- additional conjuncts merely restrict further, they cannot fire a write.
@@ -531,23 +566,33 @@ local function guard_class(c, n, src, G)
         node = p
         p = p:parent()
     end
+    -- pw: this write's BASE is a param of the enclosing fn — the
+    -- param-MUTATION fact the purity fixpoint needs, and it is a
+    -- LANGUAGE SEMANTIC: lua/js tables are reference-typed (`function
+    -- f(t) t.x = 1` writes the CALLER's table), php arrays/scalars are
+    -- VALUE-typed (a param write mutates a local copy — no fact; php
+    -- object mutation and &-params belong to the by-ref rung).
+    -- Name-matched to THIS fn's own params (~): closure writes to an
+    -- outer fn's param are not attributed — a known honesty gap.
+    local params = fnnode and param_map(fnnode, src, G.pfield)
+    local pw
+    if params and G.pw_refsem and leftmost(top) == c then
+        pw = params[node_text(c, src)]
+    end
     -- the param predicate (gp): only when guarded, not set-once, in a fn
-    if class == 1 and fnnode then
-        local params = param_map(fnnode, src, G.pfield)
-        if params then
-            for i = 1, nc or 0 do
-                local gp = param_conj(G, conds[i], src, params)
-                if gp then return 1, gp end
-            end
-            if negcond then -- else-arm: the whole condition, negated
-                local x = negcond
-                while x:type() == 'parenthesized_expression' do x = x:named_child(0) end
-                local i = params[node_text(x, src)]
-                if i then return 1, -i end
-            end
+    if class == 1 and params then
+        for i = 1, nc or 0 do
+            local gp = param_conj(G, conds[i], src, params)
+            if gp then return 1, gp, pw end
+        end
+        if negcond then -- else-arm: the whole condition, negated
+            local x = negcond
+            while x:type() == 'parenthesized_expression' do x = x:named_child(0) end
+            local i = params[node_text(x, src)]
+            if i then return 1, -i, pw end
         end
     end
-    return class
+    return class, nil, pw
 end
 
 local function unparen(n)
@@ -561,6 +606,7 @@ local LUA_GUARDS = {
     fn = { function_declaration = true, function_definition = true },
     binop = 'binary_expression', andops = { ['and'] = true },
     negop = 'unary_expression', negtok = 'not', pfield = 'parameters',
+    pw_refsem = true, -- tables are reference-typed: param writes escape
     -- `not X` / `X == nil` / `nil == X`, X the written chain
     abs_test = function (n, src, chain)
         local t = n:type()
@@ -3147,8 +3193,11 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
     local scopes = spec.scopes
     local idt = spec.mention_types or MENTION_ID
     local wgate, is_write, guards = spec.write_gate, spec.is_write, spec.guards
-    local wq, wqn = {}, 0 -- queued write mentions: (node, parent, flag slot, ordinal)
+    local wq, wqn = {}, 0 -- queued write mentions (stride 5, see below)
     local nm = buf.nm or 0 -- mention ordinal (continues across region calls)
+    local FLDGATE = { dot_index_expression = true, bracket_index_expression = true,
+        member_access_expression = true, subscript_expression = true,
+        variable_name = true }
     local dfid = spec.df_ids
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
@@ -3299,6 +3348,27 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                 local iswrite = wgate and wgate[nt] and is_write(c, n)
                 if iswrite then flags = flags + MF_WRITE end
                 nm = nm + 1
+                -- FIELD CAPTURE: which field does this mention access —
+                -- ships as (ordinal, name-id) pairs; the reduce aggregates
+                -- per use edge (e.flds). Gated on the parent type: zero
+                -- cost for plain mentions.
+                if FLDGATE[nt] then
+                    local fname = mention_field(c, n, src)
+                    if fname then
+                        local fidx = nidx[fname]
+                        if not fidx then
+                            fidx = buf.n + 1
+                            buf.n = fidx
+                            nidx[fname] = fidx
+                            names[fidx] = fname
+                            nok[fidx] = (#fname >= 3 and not stdlib[fname]) or nil
+                        end
+                        local l = buf.fld
+                        if not l then l = {}; buf.fld = l end
+                        l[#l + 1] = nm
+                        l[#l + 1] = fidx
+                    end
+                end
                 vput(parts, idx)
                 vput(parts, sr)
                 vput(parts, sc)
@@ -3306,9 +3376,11 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                 if iswrite and guards then
                     -- classify OUT OF LINE (its loops would break the JIT
                     -- trace of this hot loop): queue node + flag-slot index
+                    -- + ordinal + the enclosing fn's node (pw attribution)
                     wqn = wqn + 1
-                    local b = wqn * 4
-                    wq[b - 3], wq[b - 2], wq[b - 1], wq[b] = c, n, #parts, nm
+                    local b = wqn * 5
+                    wq[b - 4], wq[b - 3], wq[b - 2], wq[b - 1] = c, n, #parts, nm
+                    wq[b] = nctx > 0 and ctxs[nctx].node or false
                 end
                 if not simple then
                     vput(parts, er)
@@ -3380,18 +3452,41 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
     -- flag byte patched in place (each flag is its own parts slot). The
     -- param predicate (±index) can't ride the FULL flag byte — it ships
     -- as flat (ordinal, gp) pairs on the buffer (JSON-safe for workers).
+    local pwseen
     for i = 1, wqn do
-        local b = i * 4
-        local g, gp = guard_class(wq[b - 3], wq[b - 2], src, guards)
+        local b = i * 5
+        local g, gp, pw = guard_class(wq[b - 4], wq[b - 3], src, guards)
         if g > 0 then
-            local slot = wq[b - 1]
+            local slot = wq[b - 2]
             parts[slot] = string.char(parts[slot]:byte() + g * MF_GW)
         end
         if gp then
             local l = buf.gp
             if not l then l = {}; buf.gp = l end
-            l[#l + 1] = wq[b]
+            l[#l + 1] = wq[b - 1]
             l[#l + 1] = gp
+        end
+        -- the param-write fact lands on the FN NODE (a node fact, minted
+        -- at extract; refresh re-extracts the file, so it stays fresh)
+        local fnode = pw and wq[b]
+        if fnode then
+            local set = fnode._pwset
+            if not set then set = {}; fnode._pwset = set; pwseen = pwseen or {}; pwseen[#pwseen + 1] = fnode end
+            set[pw] = true
+        end
+    end
+    if pwseen then
+        for _, fnode in ipairs(pwseen) do
+            local set = fnode._pwset
+            if set then
+                local arr = fnode.pw or {}
+                for _, x in ipairs(arr) do set[x] = true end
+                local out2, k2 = {}, 0
+                for x in pairs(set) do k2 = k2 + 1; out2[k2] = x end
+                table.sort(out2)
+                fnode.pw = out2
+                fnode._pwset = nil
+            end
         end
     end
 end
@@ -3417,6 +3512,11 @@ local function reduce_mentions(file, buf, L)
     if buf.gp then
         gpmap = {}
         for i = 1, #buf.gp, 2 do gpmap[buf.gp[i]] = buf.gp[i + 1] end
+    end
+    local fldmap
+    if buf.fld then
+        fldmap = {}
+        for i = 1, #buf.fld, 2 do fldmap[buf.fld[i]] = buf.fld[i + 1] end
     end
     local ord = 0
     local m = buf.m
@@ -3506,6 +3606,26 @@ local function reduce_mentions(file, buf, L)
                     end
                     e.at[#e.at + 1] = { start = { line = sr, char = sc },
                         ['end'] = { line = er, char = ec } }
+                    -- FIELD FACTS: per-edge per-field packed rw+gw*4
+                    -- ('' = whole-var access — rebinds, f(state), pairs)
+                    if wmode then
+                        local fi = fldmap and fldmap[ord]
+                        local fname = fi and names[fi] or ''
+                        local fl = e.flds
+                        if not fl then fl = {}; e.flds = fl end
+                        local cur = fl[fname] or 0
+                        local prevrw = cur % 4
+                        local rwb = write and 2 or 1
+                        if prevrw ~= rwb and prevrw ~= 3 then
+                            prevrw = prevrw == 0 and rwb or 3
+                        end
+                        local g = (cur - cur % 4) / 4
+                        if write then
+                            local gg = gw + 1
+                            if g == 0 or gg < g then g = gg end
+                        end
+                        fl[fname] = prevrw + g * 4
+                    end
                     -- the write axis: 1 read / 2 write / 3 both, OR of the
                     -- edge's occurrences — only where a classifier ran
                     -- (buf.wmode); elsewhere mode stays ABSENT, never "read"

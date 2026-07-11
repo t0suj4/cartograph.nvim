@@ -21,6 +21,31 @@ local argv = require 'cartograph.argv'
 
 local M = {}
 
+-- BUILTIN effect table: stdlib callees that write their arguments — the
+-- fact resolution can never discover (builtins resolve to no node), and
+-- without which every table.insert would be an honest-but-useless
+-- "may write anything" in the purity fixpoint. w = 1-based arg indexes
+-- written. Curated, deliberately small; absence means UNKNOWN, not pure.
+M.BUILTINS = {
+    lua = {
+        ['table.insert'] = { w = { 1 } },
+        ['table.remove'] = { w = { 1 } },
+        ['table.sort'] = { w = { 1 } },
+        ['table.move'] = { w = { 5 } }, -- a2 (defaults to a1: conservative)
+        ['setmetatable'] = { w = { 1 } },
+        ['rawset'] = { w = { 1 } },
+    },
+    php = {
+        sort = { w = { 1 } }, rsort = { w = { 1 } }, usort = { w = { 1 } },
+        ksort = { w = { 1 } }, asort = { w = { 1 } }, arsort = { w = { 1 } },
+        array_push = { w = { 1 } }, array_pop = { w = { 1 } },
+        array_shift = { w = { 1 } }, array_unshift = { w = { 1 } },
+        array_splice = { w = { 1 } },
+        preg_match = { w = { 3 } }, preg_match_all = { w = { 3 } },
+        settype = { w = { 1 } },
+    },
+}
+
 -- literal truthiness by language family (nil = unknown)
 local function truthy_of(a, lang)
     if not a then return nil end
