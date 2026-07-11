@@ -728,9 +728,35 @@ checks luacheck can't:
   name. Configurable via `lint.listener_config`; generalises to lock/unlock,
   open/close — any argument-keyed acquire/release.
 
+- **dead-state** — a module var written (from functions) but never read: dead
+  weight, or dynamic access the graph can't see — the hedge is in the message.
+- **seam-guard** — raw reads of a *folded representation*. Declare your seams
+  (`config.seams = { { name, patterns, owners } }`) and any source line
+  matching a pattern outside the owner files is a violation: the
+  representation behind an accessor seam may change at any time, and a raw
+  read is a latent break. cartograph's own at/df/argv seams are declared in
+  `tools/guards.lua` — the migration that built them is an invariant now.
+- **truncation** — `local a, b = x and f() or y`: `and`/`or` ADJUSTS a call to
+  one value, so the extra targets are silently nil. Three real bugs in one
+  day of this repo's own development earned the rule.
+- **require-cycle** — SCCs over the *import* edges (call-cycle covers calls).
+  Hedged in the message itself: import edges don't record load-time vs lazy,
+  and a lazy require breaks the cycle at runtime.
+
 Structural smells, not proofs — dynamically-invoked functions (event handlers,
 test cases run by a harness) can still read as "no caller". Rules live in
 `lint.lua` and are pure/testable.
+
+## Reorder (statement commutativity)
+
+`:CartographReorder` reports, for the focused function, which statements can
+change order and which cannot: local dataflow chains (`#1 → #2  local stack`),
+same-state conflicts (two *set-once* writes to the same key are excused — they
+commute), world-order conflicts (two `io` effects — external order is
+observable), and **opaque** statements whose effects didn't resolve — certified
+for nothing, with the hedge named. The report's header carries its own
+disclaimer: reads through calls are not modeled. Built entirely from the write
+axis (`rw`/`gw`/`gp`), the effect summaries, and the signature packs.
 
 ## Offline: history archaeology
 
@@ -795,6 +821,16 @@ nvim --headless -u NONE -l tools/gate.lua server
 # (re)establish the baseline on a known-good rev
 nvim --headless -u NONE -l tools/gate.lua server --save
 ```
+
+`tools/preflight.lua` is the dev loop as one command: git-diff impact (changed
+lines → containing functions → reverse call cone → the specs whose
+require-cones reach any touched file), then the development guards, then the
+suite — `--fast` runs only the selected specs (`SPEC=` filter on
+`tests/run.sh`; selection is import-cone based, so the *full* suite still
+guards the push). `tools/guards.lua` self-applies the development lints with
+cartograph's own seam declarations. `tools/consumers.lua` is the shape roster
+and seam rewriter (`--rw`/`--rwmod`/`--apply`, refusals printed as a review
+ledger).
 
 `tools/corpora.lua` names the corpora and holds calibrated baselines as data;
 `tools/bench.lua` is the bootstrap + measurement discipline (timed runs, peak

@@ -20,7 +20,7 @@ for _, a in ipairs(arg or {}) do
 end
 
 -- ── impact ────────────────────────────────────────────────────────────
-local changed, nlines = {}, 0
+local changed, nlines, nonlua = {}, 0, nil
 do
     -- UNTRACKED lua files are invisible to `git diff HEAD` — count every
     -- line of a new file as changed (preflight's own first run missed
@@ -51,6 +51,10 @@ do
             file = nf ~= '/dev/null' and nf or nil
         else
             local start, count = line:match('^@@ %-[%d,]+ %+(%d+),?(%d*) @@')
+            if start and file and not file:match('%.lua$') then
+                nonlua = (nonlua or 0) + 1
+                file = nil -- count once, then stop attributing its hunks
+            end
             if start and file and file:match('%.lua$') then
                 local s, c = tonumber(start), tonumber(count) or 1
                 if c > 0 then
@@ -67,7 +71,11 @@ end
 
 local failures = 0
 if not next(changed) then
-    print('impact: working tree clean vs HEAD — nothing to select')
+    -- say what we MEAN: non-lua changes are invisible to impact by design
+    print(nonlua
+        and ('impact: no lua changes (%d non-lua file(s) changed — outside impact scope)')
+            :format(nonlua)
+        or 'impact: working tree clean vs HEAD — nothing to select')
 else
     local ts = require 'cartograph.providers.treesitter'
     local store = require 'cartograph.store'
