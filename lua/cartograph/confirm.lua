@@ -54,6 +54,88 @@ function M.apply(data, observed)
     return { confirmed = confirmed, recovered = recovered }
 end
 
+-- DISAGREEMENT AS PRODUCT: static resolution vs observed dispatch. Where
+-- they agree = confirmed; where the runtime resolved what static REFUSED =
+-- recovered (a win); where static resolved (fn,callee)->B but the runtime
+-- only ever dispatched it to C (never B) = a CONFLICT — the memo's "VM
+-- error OR real finding: dead branch / unexpected dispatch / config drift".
+--
+-- `dispatch` = { [fn_id\31callee] = { [target_id] = true, ... } } — the
+-- targets a call point routed to at runtime (a set: >1 = genuinely
+-- polymorphic). SOUNDNESS: a conflict is only sound when the observed set
+-- is a SINGLE target (monomorphic site) — then runtime->C refutes static->B.
+-- If the site dispatched to several, static->B may just be an unobserved
+-- arm, so it's reported as 'polymorphic' context, not a conflict. Absence
+-- of any observation for a call = never touched (not-yet-run, not a finding).
+function M.diff(data, dispatch)
+    local function keys(set)
+        local k = {}; for id in pairs(set) do k[#k + 1] = id end
+        table.sort(k); return k
+    end
+    local confirmed, recovered, findings = 0, 0, {}
+    for _, c in ipairs(data.calls or {}) do
+        local obs = c.fn and dispatch[c.fn .. '\31' .. (c.full or c.callee or '')]
+        if obs then
+            local rt = keys(obs)
+            local mono = #rt == 1
+            if c.to then
+                if obs[c.to] then
+                    c.conf = true; confirmed = confirmed + 1
+                elseif mono then
+                    -- static picked B, runtime only ever went to C — sound
+                    findings[#findings + 1] = { kind = 'conflict',
+                        fn = c.fn, callee = c.callee, file = c.file,
+                        line = c.line, static = c.to, runtime = rt }
+                else
+                    findings[#findings + 1] = { kind = 'polymorphic',
+                        fn = c.fn, callee = c.callee, file = c.file,
+                        line = c.line, static = c.to, runtime = rt }
+                end
+            else
+                -- static refused/frontier; runtime resolved it
+                if mono then c.to, c.conf = rt[1], true end
+                findings[#findings + 1] = { kind = 'recovered',
+                    fn = c.fn, callee = c.callee, file = c.file,
+                    line = c.line, static = nil, runtime = rt }
+                recovered = recovered + 1
+            end
+        end
+    end
+    return { confirmed = confirmed, recovered = recovered, findings = findings }
+end
+
+-- Render a diff report as sorted finding lines (the honest product): each
+-- disagreement is a place to look, tagged by kind.
+function M.report(diff, node_name)
+    local nm = node_name or function (id) return id end
+    local lines = { ('runtime diff: %d confirmed · %d recovered · %d disagreements')
+        :format(diff.confirmed, diff.recovered, #diff.findings) }
+    local order = {}
+    for _, f in ipairs(diff.findings) do order[#order + 1] = f end
+    table.sort(order, function (a, b)
+        if a.file ~= b.file then return (a.file or '') < (b.file or '') end
+        return (a.line or 0) < (b.line or 0)
+    end)
+    for _, f in ipairs(order) do
+        local rt = {}
+        for _, id in ipairs(f.runtime) do rt[#rt + 1] = nm(id) end
+        if f.kind == 'recovered' then
+            lines[#lines + 1] = ('  %s:%d  %s → %s (RECOVERED: static refused)')
+                :format(f.file or '?', (f.line or 0) + 1, f.callee,
+                    table.concat(rt, ', '))
+        elseif f.kind == 'conflict' then
+            lines[#lines + 1] = ('  %s:%d  %s → static %s, runtime %s (CONFLICT)')
+                :format(f.file or '?', (f.line or 0) + 1, f.callee,
+                    nm(f.static), table.concat(rt, ', '))
+        else
+            lines[#lines + 1] = ('  %s:%d  %s → static %s, runtime {%s} (polymorphic)')
+                :format(f.file or '?', (f.line or 0) + 1, f.callee,
+                    nm(f.static), table.concat(rt, ', '))
+        end
+    end
+    return lines
+end
+
 -- Observe cartograph's OWN running state (self://loaded): the module
 -- import graph, confirmed against package.loaded — a require edge whose
 -- target module is actually LIVE is runtime-confirmed. The bounded first
