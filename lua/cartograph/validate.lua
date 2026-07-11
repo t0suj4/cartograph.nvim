@@ -32,6 +32,9 @@ M.EDGE_FIELDS = {
     -- trust tiers: type-inferred (graph-VM), oracle proven/xlang,
     -- runtime-confirmed (session-live overlay, self://loaded / MCP)
     tinf = true, proven = true, xlang = true, conf = true,
+    bind = true, -- import edges: the local name the import binds (v8);
+                 -- absent from the 17-corpus inventory until SE exercised it
+    sideeffect = true, -- import edges: required for effect, no binding
     rw = true, -- the write axis (use edges): 1 read / 2 write / 3 both
     gw = true, -- guard chain of the writes: 1 some-unguarded / 2 all-guarded
                -- / 3 all-set-once (absence-guarded: commutative)
