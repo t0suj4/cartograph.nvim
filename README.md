@@ -742,6 +742,21 @@ checks luacheck can't:
 - **require-cycle** — SCCs over the *import* edges (call-cycle covers calls).
   Hedged in the message itself: import edges don't record load-time vs lazy,
   and a lazy require breaks the cycle at runtime.
+- **sink-concat** (PHP) — a *divergent* SQL-injection smell: one function
+  string-concatenates a param into a query-shaped sink **without** sanitizing
+  it, while a *sibling* concatenates the same shape into the same sink and
+  **does** — "you defended the peer, not this one". The sanitizing peer is
+  *required*: it's the evidence. Sanitizers recognised are coercion (a scalar
+  type hint `int $id`, an inline cast `(int)$id`) and **parameterization /
+  escaping** (`param()`/`db_param()`, PDO `bindValue`, the escape family) — a
+  param bound through one of those is the safe channel, not raw. The sink is a
+  `~` **hypothesis**, never confirmed (a `query`/`where`/`exec…` method, a
+  concat ending on a dangling `… id = `, or a DB receiver), so every finding
+  says "sink unconfirmed". Because the divergence is required, it stays silent
+  on uniformly-parameterised code (mantis, sylius: 0) and fires on the genuine
+  article — it found a real (since-fixed) injection in grocy's
+  `GetProductStockLocations` the moment it was pointed at the repo. Lone
+  offenders with no divergent peer are reachability's job, not this rule's.
 
 Structural smells, not proofs — dynamically-invoked functions (event handlers,
 test cases run by a harness) can still read as "no caller". Rules live in

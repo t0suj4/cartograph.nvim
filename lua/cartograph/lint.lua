@@ -626,6 +626,8 @@ M.rules = {
     { name = 'truncation', severity = 'info', run = truncation_findings },
     { name = 'require-cycle', severity = 'info', run = cycle_findings },
     { name = 'sql', severity = 'info', run = sql_findings },
+    { name = 'sink-concat', severity = 'warn',
+        run = function (store) return require('cartograph.sinkflow').findings(store) end },
     {
         -- the state atlas's lint face: state that is written but never
         -- read is dead weight — or reached dynamically in a way the graph
