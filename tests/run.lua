@@ -20,11 +20,22 @@ end
 -- skip the current test (sentinel table so the runner can tell it apart)
 function _G.skip(msg) error({ __skip = true, msg = msg }, 0) end
 
--- load every spec
+-- load every spec — or only $SPEC (comma list of basenames: the
+-- preflight's test-selection hook; the full suite still guards the push)
+local only
+do
+    local sel = vim.env.SPEC
+    if sel and sel ~= '' then
+        only = {}
+        for n in sel:gmatch('[^,]+') do only[n] = true end
+    end
+end
 for _, f in ipairs(vim.fn.glob('tests/*_spec.lua', false, true)) do
-    local chunk, err = loadfile(f)
-    if not chunk then error('cannot load ' .. f .. ': ' .. err) end
-    chunk()
+    if not only or only[f:match('([^/]+)%.lua$')] then
+        local chunk, err = loadfile(f)
+        if not chunk then error('cannot load ' .. f .. ': ' .. err) end
+        chunk()
+    end
 end
 
 local pass, fail, skipped = 0, 0, 0
