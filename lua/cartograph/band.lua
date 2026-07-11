@@ -45,6 +45,13 @@ function Band:tier(from, to) return self:_tier(from, to) end
 -- nil (no edge, or the language shipped no classifier — mode unknown)
 function Band:rw(from, to) return self:_rw(from, to) end
 
+-- GUARD CHAIN of a use edge's writes: 1 some-unguarded / 2 all-guarded /
+-- 3 all-set-once / nil; PARAM PREDICATE (±index); PER-FIELD facts
+-- ({field -> packed rw+gw*4}) — the analysis ladder, both backends
+function Band:gw(from, to) return self:_gw(from, to) end
+function Band:gp(from, to) return self:_gp(from, to) end
+function Band:flds(from, to) return self:_flds(from, to) end
+
 -- ── store backend: the wide forward/backward index tables ────────────────
 local StoreBand = setmetatable({}, { __index = Band })
 StoreBand.__index = StoreBand
@@ -80,13 +87,28 @@ function StoreBand:_tier(from, to)
     return self.store.edge_inferred[k] and 'inferred' or 'confident'
 end
 local RW_NAME = { 'read', 'write', 'both' }
-function StoreBand:_rw(from, to)
-    local vu = self.store.var_uses and self.store.var_uses[from]
+local function vurec(store, from, to)
+    local vu = store.var_uses and store.var_uses[from]
     if not vu then return nil end
     for i = 1, #vu do
-        if vu[i].to == to then return RW_NAME[vu[i].rw] end
+        if vu[i].to == to then return vu[i] end
     end
-    return nil
+end
+function StoreBand:_rw(from, to)
+    local u = vurec(self.store, from, to)
+    return u and RW_NAME[u.rw] or nil
+end
+function StoreBand:_gw(from, to)
+    local u = vurec(self.store, from, to)
+    return u and u.gw or nil
+end
+function StoreBand:_gp(from, to)
+    local u = vurec(self.store, from, to)
+    return u and u.gp or nil
+end
+function StoreBand:_flds(from, to)
+    local u = vurec(self.store, from, to)
+    return u and u.flds or nil
 end
 
 function M.from_store(store)
@@ -126,6 +148,24 @@ function FoldBand:_rw(from, to)
     local s, o = f.it.get(from), f.it.get(to)
     if not s or not o then return nil end
     return f:rw(s, o)
+end
+function FoldBand:_gw(from, to)
+    local f = self.fold
+    local s, o = f.it.get(from), f.it.get(to)
+    if not s or not o then return nil end
+    return f:gw(s, o)
+end
+function FoldBand:_gp(from, to)
+    local f = self.fold
+    local s, o = f.it.get(from), f.it.get(to)
+    if not s or not o then return nil end
+    return f:gp(s, o)
+end
+function FoldBand:_flds(from, to)
+    local f = self.fold
+    local s, o = f.it.get(from), f.it.get(to)
+    if not s or not o then return nil end
+    return f:flds(s, o)
 end
 
 function M.from_fold(fold)

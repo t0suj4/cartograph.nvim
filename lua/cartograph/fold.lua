@@ -37,7 +37,14 @@ M.PRED_NAME = { [0] = 'ref', 'use', 'reg', 'import', 'refused' }
 --   bit 4  (0x10) TYPE_INFERRED — the graph-VM resolved it via a return-type
 --                 summary (the honesty ladder's middle rung, stronger than ~)
 --   bit 5  RESERVED for the VM ladder (runtime-confirmed)
---   bits 6-7 RESERVED for provenance (which pass set it)
+--   bits 6-7 PREDICATE-SCOPED: use rows carry GW (the guard chain: 1 some-
+--                 unguarded / 2 all-guarded / 3 all-set-once); ref rows keep
+--                 the provenance reservation
+-- Side payloads (sparse, slot-keyed, carried through the subject sort):
+--   gpr  { slot -> ±param }  the param predicate (dischargeable writes)
+--   fldr { slot -> packed }  per-field facts: (u32 field-name id, u8 mode
+--        rw+gw*4) pairs over the fnames array — the analysis ladder's
+--        edge facts survive the wide tables' death (the record-fold arc)
 M.FLAG = { INFERRED = 1, TYPE_INFERRED = 16 }
 M.RW_NAME = { 'read', 'write', 'both' } -- rw 1/2/3; 0/absent = unclassified
 M.RULE = { none = 0, ambiguous = 1, blocked = 2, vocab = 3,
@@ -161,6 +168,50 @@ function Fold:rw(subj, obj)
     return nil
 end
 
+-- guard chain of a use edge's writes: 'read'-less analog of rw —
+-- 1 some-unguarded / 2 all-guarded / 3 all-set-once / nil unknown
+function Fold:gw(subj, obj)
+    local lo, hi = self:subj_span(subj)
+    for r = lo, hi - 1 do
+        if self.obj[r + 1] == obj and self.pred[r + 1] == M.PRED.use then
+            local g = floor(self.flag[r + 1] / 64)
+            return g > 0 and g or nil
+        end
+    end
+    return nil
+end
+
+-- the param predicate of a use edge: ±param index, or nil
+function Fold:gp(subj, obj)
+    if not self.gpr then return nil end
+    local lo, hi = self:subj_span(subj)
+    for r = lo, hi - 1 do
+        if self.obj[r + 1] == obj and self.pred[r + 1] == M.PRED.use then
+            return self.gpr[r + 1]
+        end
+    end
+    return nil
+end
+
+-- per-field facts of a use edge: { field -> packed rw+gw*4 } or nil
+function Fold:flds(subj, obj)
+    if not self.fldr then return nil end
+    local lo, hi = self:subj_span(subj)
+    for r = lo, hi - 1 do
+        if self.obj[r + 1] == obj and self.pred[r + 1] == M.PRED.use then
+            local packed = self.fldr[r + 1]
+            if not packed then return nil end
+            local out = {}
+            for i = 1, #packed, 5 do
+                local a, b, c2, d, mode = byte(packed, i, i + 4)
+                out[self.fnames[a + b * 256 + c2 * 65536 + d * 16777216]] = mode
+            end
+            return out
+        end
+    end
+    return nil
+end
+
 -- the refusal rules at `subj` (frontier facts): a list of rule NAMES, the
 -- honest "what did we decline to resolve here, and why"
 function Fold:refusals(subj)
@@ -198,14 +249,40 @@ function M.build(data)
     end
     local skipped_edge, skipped_refused = 0, 0
 
+    local gpe, fde = {}, {}         -- sparse per-emit-row payloads
+    local fni, fnames = {}, {}      -- field-name intern
     for _, e in ipairs(data.edges or {}) do
         local p = M.PRED[e.kind]
         if p and e.from and e.to then
             emit(e.from, p, e.to,
                 (e.inferred and M.FLAG.INFERRED or 0)
                 + (e.tinf and M.FLAG.TYPE_INFERRED or 0)
-                -- the write axis rides the rule region on use rows
-                + (p == M.PRED.use and e.rw and e.rw * RULE_SHIFT or 0))
+                -- the write axis rides the rule region on use rows;
+                -- the guard chain rides bits 6-7
+                + (p == M.PRED.use and e.rw and e.rw * RULE_SHIFT or 0)
+                + (p == M.PRED.use and e.gw and e.gw * 64 or 0))
+            if p == M.PRED.use then
+                if e.gp then gpe[m] = e.gp end
+                if e.flds then
+                    local parts = {}
+                    for fname, mode in pairs(e.flds) do
+                        local fid = fni[fname]
+                        if not fid then
+                            fid = #fnames + 1
+                            fnames[fid] = fname
+                            fni[fname] = fid
+                        end
+                        local lo = fid % 65536
+                        parts[#parts + 1] = char(lo % 256,
+                            (lo - lo % 256) / 256,
+                            (fid - lo) / 65536 % 256,
+                            (fid - fid % 16777216) / 16777216 % 256,
+                            mode % 256)
+                    end
+                    table.sort(parts) -- deterministic (pairs order is not)
+                    fde[m] = table.concat(parts)
+                end
+            end
         else
             skipped_edge = skipped_edge + 1
         end
@@ -241,11 +318,23 @@ function M.build(data)
         order[cur[u] + 1] = k   -- 1-based fact row at 0-based slot cur[u]
         cur[u] = cur[u] + 1
     end
-    -- permute the columns into subject order (so subj_span reads directly)
+    -- permute the columns into subject order (so subj_span reads directly);
+    -- the sparse payloads ride the same permutation, slot-keyed
     local s2, p2, o2, f2 = {}, {}, {}, {}
+    local gpr, fldr
     for slot = 1, m do
         local k = order[slot]
         s2[slot] = subj[k]; p2[slot] = pred[k]; o2[slot] = obj[k]; f2[slot] = flag[k]
+        local g = gpe[k]
+        if g then
+            if not gpr then gpr = {} end
+            gpr[slot] = g
+        end
+        local fd = fde[k]
+        if fd then
+            if not fldr then fldr = {} end
+            fldr[slot] = fd
+        end
     end
     subj, pred, obj, flag = s2, p2, o2, f2
 
@@ -272,6 +361,7 @@ function M.build(data)
     local self = setmetatable({
         n = n, m = m, it = it, names = it.list,
         subj = subj, pred = pred, obj = obj, flag = flag,
+        gpr = gpr, fldr = fldr, fnames = fnames,
         sentinel = SENTINEL,
         skipped_edge = skipped_edge, skipped_refused = skipped_refused,
         _so = u32_reader(off_s), _oo = u32_reader(ooff_s),

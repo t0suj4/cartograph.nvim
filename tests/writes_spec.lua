@@ -91,6 +91,48 @@ test('writes: php assignment forms, unset, foreach by-ref', function ()
         'foreach by-ref writes the iterated array')
 end)
 
+test('writes: gw/gp/flds survive the fold, both Band backends agree', function ()
+    local fold = require 'cartograph.fold'
+    local band = require 'cartograph.band'
+    local R = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
+    local function node(id, kind)
+        return { id = id, name = id, kind = kind or 'function',
+            file = 'm.lua', range = R, order = 0 }
+    end
+    local DATA = {
+        root = '/x',
+        nodes = { node('m.lua', 'module'), node('a'), node('b'), node('c'),
+            node('v', 'var') },
+        edges = {
+            { from = 'a', to = 'v', kind = 'use', at = { R }, rw = 2, gw = 3,
+                flds = { x = 14, [''] = 1 } },        -- x: rw3+gw3, whole read
+            { from = 'b', to = 'v', kind = 'use', at = { R }, rw = 3, gw = 2,
+                gp = -2 },
+            { from = 'c', to = 'v', kind = 'use', at = { R }, rw = 1 },
+        },
+        calls = {},
+    }
+    local store = require 'cartograph.store'
+    store.ingest(DATA)
+    local f = fold.build(store.data)
+    local bs, bf = band.from_store(store), band.from_fold(f)
+    for _, pair in ipairs({ { 'a', 3 }, { 'b', 2 }, { 'c', nil } }) do
+        eq(pair[2], bs:gw(pair[1], 'v'), 'store gw of ' .. pair[1])
+        eq(pair[2], bf:gw(pair[1], 'v'), 'fold gw of ' .. pair[1])
+    end
+    eq(-2, bs:gp('b', 'v'))
+    eq(-2, bf:gp('b', 'v'), 'the param predicate survives the fold')
+    eq(nil, bf:gp('a', 'v'), 'no gp where none was recorded')
+    eq({ x = 14, [''] = 1 }, bs:flds('a', 'v'))
+    eq({ x = 14, [''] = 1 }, bf:flds('a', 'v'),
+        'per-field facts decode identically from the packed rows')
+    eq(nil, bf:flds('c', 'v'))
+    -- and the honesty tiers are undisturbed by the new bits
+    local si, vi = f.it.get('a'), f.it.get('v')
+    eq('confident', f:tier(si, vi, fold.PRED.use), 'gw bits leave tier() intact')
+    eq('write', bf:rw('a', 'v'), '...and rw intact')
+end)
+
 test('writes: rw survives the fold, both Band backends agree', function ()
     local fold = require 'cartograph.fold'
     local band = require 'cartograph.band'
