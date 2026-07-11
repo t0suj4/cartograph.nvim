@@ -34,13 +34,18 @@
 -- rung 0 + scalar casts. Validated on DVWA: the sqli low/impossible gradient
 -- (low fires, impossible silent); grocy/mantis/sylius 0.
 --
--- RUNG 1.5: guard sanitizers (a value validated by IsIsoDate/filter_var/
--- is_numeric/… in scope is sanitized) + FRAMEWORK request sources (a
--- controller action — a *Request*-typed param — treats its Request + array
--- params as external input). Together they let framework flows be found
--- without regressing the guarded precision pole (grocy Spendings: the
--- IsIsoDate-guarded start_date is suppressed, the UNGUARDED product_group
--- fires — the guard model validated both ways in one method).
+-- RUNG 1.5: FRAMEWORK request sources (a controller action — a *Request*-typed
+-- param — treats its Request + array/route-arg params as external input) +
+-- GUARD sanitizers via CFG-phase-1 DOMINANCE ([[cartograph-cfg-scope]]): a
+-- value is sanitized only when a validator on it (IsIsoDate/filter_var/
+-- is_numeric/…) guards it on a DOMINATING path — positive nesting
+-- (`if(valid($x)){…sink…}`) OR an early-exit guard-clause
+-- (`if(!valid($x)){return}` then …sink…), with conjunct/negation soundness
+-- (no `||` for positive, negated validator for early-exit). Flow-sensitive,
+-- unlike the old scope-wide "validated anywhere" set: a branch-split (validate
+-- in A, use raw in B) correctly FIRES, and a guard-clause correctly SUPPRESSES.
+-- grocy Spendings validates the model both ways in one method (IsIsoDate-guarded
+-- date suppressed; unguarded product_group fires).
 --
 -- RUNG 2 (inter-procedural cross-function taint) is NOT here: a standalone
 -- re-parse prototype worked (confirmed grocy's keystone: route arg ->
@@ -54,6 +59,8 @@
 -- shell_exec) — measured on mantis (1887 fns).
 
 local M = {}
+
+local cfg = require 'cartograph.cfg'
 
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
 
@@ -391,35 +398,15 @@ local function entry_sources(fnnode, src)
     return next(seed) and seed or nil
 end
 
--- GUARD sanitizers: an expression passed to a validator is checked — the
--- classic guard (grocy's Spendings uses IsIsoDate / filter_var). Scope-level
--- set of the validated expressions' normalized text; an access whose text is
--- in it is treated as sanitized. Key-based, so it distinguishes Spendings
--- (validates its inputs) from ProductStockLocations (does not).
+-- GUARD sanitizers: functions whose argument is thereby validated (grocy's
+-- Spendings uses IsIsoDate / filter_var). A carrier is sanitized when such a
+-- call on its access-expression appears in a DOMINATING guard condition (see
+-- guard_validates + cfg.guards_over) — structural, not scope-wide.
 local VALIDATORS = { isisodate = true, isisodatetime = true, filter_var = true,
     is_numeric = true, is_int = true, ctype_digit = true, ctype_alnum = true,
     preg_match = true, in_array = true, intval = true }
 
 local function normtext(node, src) return (txt(node, src):gsub('%s+', '')) end
-
-local function validated_set(scope, src)
-    local set = {}
-    for _, call in ipairs(collect_scoped(scope, CALLTYPES)) do
-        local namef = call:field('name')[1] or call:field('function')[1]
-        local cn = namef and txt(namef, src):lower()
-        if cn and VALIDATORS[cn] then
-            local argsn = call:field('arguments')[1]
-            if argsn then
-                for arg in argsn:iter_children() do
-                    if arg:named() and arg:type() == 'argument' then
-                        set[normtext(arg:named_child(0) or arg, src)] = true
-                    end
-                end
-            end
-        end
-    end
-    return set
-end
 
 -- outermost access expression (subscript / member chain) around `v`
 local function access_expr(v)
@@ -433,16 +420,71 @@ local function access_expr(v)
     return top
 end
 
+-- is `inner` under a `!`/`not` negation somewhere up to `outer`?
+local function neg_over(inner, outer, src)
+    local p = inner:parent()
+    while p do
+        if p:type():find('unary') then
+            local s = txt(p, src)
+            if s:match('^%s*!') or s:match('^%s*not%f[^%w_]') then return true end
+        end
+        if p == outer then break end
+        p = p:parent()
+    end
+    return false
+end
+
+-- GUARD-DOMINANCE sanitizer (CFG phase 1, [[cartograph-cfg-scope]]): a carrier
+-- `v` is sanitized iff a validator on v's access-expression guards it along a
+-- DOMINATING path (cfg.guards_over gives positive-nesting AND early-exit
+-- guard-clauses). Flow-sensitive (branch-split use is NOT suppressed) with
+-- conjunct/negation soundness: positive nesting needs a NON-negated validator
+-- and no `||` (it must be a conjunct); an early-exit `if(!valid)exit` needs a
+-- NEGATED validator and no `&&`.
+local function guard_validates(v, src)
+    local guards = cfg.guards_over(v, src)
+    if #guards == 0 then return false end
+    local target = normtext(access_expr(v), src)
+    for _, g in ipairs(guards) do
+        local cond = g.cond
+        local ct = txt(cond, src)
+        local has_or = ct:find('||', 1, true) or ct:match('%f[%w]or%f[%W]')
+        local has_and = ct:find('&&', 1, true) or ct:match('%f[%w]and%f[%W]')
+        for _, call in ipairs(collect(cond, CALLTYPES)) do
+            local namef = call:field('name')[1] or call:field('function')[1]
+            local cn = namef and txt(namef, src):lower()
+            if cn and VALIDATORS[cn] then
+                local argsn = call:field('arguments')[1]
+                local hit = false
+                if argsn then
+                    for arg in argsn:iter_children() do
+                        if arg:named() and arg:type() == 'argument'
+                            and normtext(arg:named_child(0) or arg, src) == target then
+                            hit = true; break
+                        end
+                    end
+                end
+                if hit then
+                    local negd = neg_over(call, cond, src)
+                    if not g.neg and not negd and not has_or then return true end
+                    if g.neg and negd and not has_and then return true end
+                end
+            end
+        end
+    end
+    return false
+end
+
 -- unsanitized taint carried into `node`: { origin, embedded } or nil.
 -- `origin` is a request-source string ('$_GET') OR, when seeded from params,
 -- a param INDEX number. `embedded` = the taint reaches `node` inside
 -- SQL-carrying string text (here, or inherited). A ref bound/escaped by a
--- parameterizer or scalar cast is not raw.
-local function embed_witness(node, src, tainted, validated)
+-- parameterizer, scalar cast, or a DOMINATING guard is not raw.
+local function embed_witness(node, src, tainted)
     local best
     for _, v in ipairs(collect(node, { 'variable_name' })) do
         if not protected_ref(v, node, src) and not cast_ancestor(v, node, src)
-            and not (validated and validated[normtext(access_expr(v), src)]) then
+            and not guard_validates(v, src) then
             local nm = txt(v, src):gsub('^%$', '')
             local base = SOURCES[nm] and { origin = '$' .. nm, embedded = false }
                 or tainted[nm]
@@ -458,7 +500,7 @@ end
 
 -- forward taint over one scope's own assignments (fixpoint). `seed` pre-taints
 -- names (entry_sources seeds a controller action's request/route params).
-local function scope_taint(scope, src, seed, validated)
+local function scope_taint(scope, src, seed)
     local tainted = {}
     if seed then for k, v in pairs(seed) do tainted[k] = v end end
     local assigns = collect_scoped(scope,
@@ -470,7 +512,7 @@ local function scope_taint(scope, src, seed, validated)
             local lhs, rhs = a:field('left')[1], a:field('right')[1]
             if lhs and rhs and lhs:type() == 'variable_name' then
                 local nm = txt(lhs, src):gsub('^%$', '')
-                local w = embed_witness(rhs, src, tainted, validated)
+                local w = embed_witness(rhs, src, tainted)
                 local cur = tainted[nm]
                 if w and (not cur or (w.embedded and not cur.embedded)) then
                     tainted[nm] = w; changed = true
@@ -482,8 +524,7 @@ local function scope_taint(scope, src, seed, validated)
 end
 
 local function scope_findings(scope, src, file, out, seed)
-    local validated = validated_set(scope, src)
-    local tainted = scope_taint(scope, src, seed, validated)
+    local tainted = scope_taint(scope, src, seed)
     for _, call in ipairs(collect_scoped(scope, CALLTYPES)) do
         local namef = call:field('name')[1] or call:field('function')[1]
         local callee = namef and txt(namef, src) or '?'
@@ -493,7 +534,7 @@ local function scope_findings(scope, src, file, out, seed)
             receiver = objf and txt(objf, src) or nil }) then
             for arg in argsn:iter_children() do
                 if arg:named() and arg:type() == 'argument' then
-                    local w = embed_witness(arg:named_child(0) or arg, src, tainted, validated)
+                    local w = embed_witness(arg:named_child(0) or arg, src, tainted)
                     -- only STRING-EMBEDDED taint is injection; a bare tainted
                     -- value passed standalone is a bound parameter
                     if w and w.embedded and type(w.origin) == 'string' then

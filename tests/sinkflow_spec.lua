@@ -115,21 +115,20 @@ test('sink-source: request source interpolated into a sink fires; bound/prepared
     ok(fs[1].message:find('mysqli_query', 1, true))
 end)
 
-test('sink-source: guard-validated input is sanitized; unguarded fires (rung 1.5)', function ()
+test('sink-source: framework source + guard DOMINANCE (rung 1.5 / CFG phase 1)', function ()
     if not ready() then skip 'no php parser' end
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
-    -- one controller action, two request inputs: one guarded, one not — the
-    -- grocy Spendings shape (framework source + guard sanitizer)
+    -- the grocy Spendings shape: a controller action, source read INSIDE a
+    -- dominating IsIsoDate guard (clean) vs an unguarded route arg (fires)
     write(root, 'C.php', table.concat({
         '<?php',
         'use Psr\\Http\\Message\\ServerRequestInterface as Request;',
         'class C {',
         '  public function act(Request $request, $response, array $args) {',
-        '    $d = $request->getQueryParams()[\'d\'];',
-        '    if (IsIsoDate($request->getQueryParams()[\'d\'])) {',    -- guarded
-        '      $w = "date = \'$d\'";',
-        '      $this->db->query("SELECT * FROM t WHERE $w");',        -- must NOT fire
+        '    if (isset($request->getQueryParams()[\'d\']) && IsIsoDate($request->getQueryParams()[\'d\'])) {',
+        '      $d = $request->getQueryParams()[\'d\'];',              -- read INSIDE the guard
+        '      $this->db->query("SELECT * FROM t WHERE d = \'$d\'");', -- must NOT fire (dominated)
         '    }',
         '    $g = $args[\'group\'];',                                 -- route arg, unguarded
         '    $this->db->query("SELECT * FROM t WHERE g = $g");',      -- FIRES
@@ -138,6 +137,28 @@ test('sink-source: guard-validated input is sanitized; unguarded fires (rung 1.5
     }, '\n'))
     store.ingest(ts.extract(root))
     local fs = sinkflow.source_findings(store)
-    eq(1, #fs, 'only the unguarded route-arg flow fires; the IsIsoDate-guarded date is clean')
+    eq(1, #fs, 'the dominated IsIsoDate path is clean; the unguarded route arg fires')
     ok(fs[1].message:find('%$args'), 'names the route-arg source')
+end)
+
+test('sink-source: guard-clause (early exit) sanitizes; branch-split still fires', function ()
+    if not ready() then skip 'no php parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    write(root, 'gc.php', table.concat({          -- early-exit clause = post-dominating guard
+        '<?php',
+        "$a = $_GET['a'];",
+        "if (!is_numeric($a)) { die('bad'); }",   -- ¬cond ⟹ $a numeric → clean
+        '$r = mysqli_query($c, "SELECT * FROM t WHERE a = $a");',   -- must NOT fire
+    }, '\n'))
+    write(root, 'bs.php', table.concat({          -- validator in a NON-dominating branch
+        '<?php',
+        "$b = $_GET['b'];",
+        "if (is_numeric($b)) { echo 'ok'; }",      -- validated here, but not over the sink
+        '$r = mysqli_query($c, "SELECT * FROM t WHERE b = $b");',   -- FIRES (branch-split)
+    }, '\n'))
+    store.ingest(ts.extract(root))
+    local fs = sinkflow.source_findings(store)
+    eq(1, #fs, 'guard-clause sanitizes gc.php; branch-split bs.php fires (scope-wide would miss it)')
+    ok(fs[1].file:find('bs.php', 1, true))
 end)
