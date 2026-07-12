@@ -218,15 +218,17 @@ function M.extract(line1, line2, name)
     local all = store.content(node)
     if not all then return vim.notify('cartograph: cannot read ' .. node.file, vim.log.levels.ERROR) end
 
+    -- shadow safety: scope-correct CFG reaching attributes a shadowed name's
+    -- later uses to defs by ROW, so the plan drops a false return (or refuses an
+    -- unsure one) instead of emitting split-variable code (df-strangler step-5)
+    local flow = require 'cartograph.flow'
+    local reaching, flow_rows
+    local fl = flow.present(node) and flow.record(node)
+    if fl then flow_rows, reaching = fl.stmts, flow.reaching_cfg(fl) end
     local plan = extract.plan { df = require('cartograph.df').get(node),
         sel = { first = file_first, last = file_last },
         fn_start = fn_start, body_end = body_end, file_lines = all, name = name,
-        -- shadow safety: lets the plan attribute a shadowed name's uses to
-        -- binders instead of refusing (multi-root-safe via store.abs)
-        resolve_binder = function (nm, row0)
-            return require('cartograph.providers.treesitter')
-                .binder_at(store.abs(node.file), node.file, nm, row0)
-        end }
+        reaching = reaching, flow_rows = flow_rows }
     local function show_then_restore(lines, prompt)
         set_lines(M.buf, lines)
         scroll_top(M.win_top)

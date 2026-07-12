@@ -34,10 +34,13 @@ local function has_control_escape(lines)
     return false
 end
 
---- @param opts { df:table, sel:{first:integer,last:integer}, fn_start:integer, body_end:integer, file_lines:string[], name:string, resolve_binder:nil|fun(name:string,row0:integer):table? }
+--- @param opts { df:table, sel:{first:integer,last:integer}, fn_start:integer, body_end:integer, file_lines:string[], name:string, reaching:nil|table[], flow_rows:nil|table[] }
 --- fn_start / body_end / sel are 1-based file line numbers. df.stmts[].l are too.
---- resolve_binder(name, row0) -> binder handle {row?} (0-based decl row; nil
---- row = param/field) or nil — the shadow-attribution service (binder_at).
+--- reaching = flow.reaching_cfg edges ({at,var,from,hedged}, row indices into
+--- flow_rows); flow_rows = flow.stmts (row → {l,def,...}). Together they attribute
+--- a shadowed name's later use to a def by SCOPE-correct reaching instead of by
+--- name (df-strangler step-5 fine half). Absent (no flow) ⇒ an ambiguous return
+--- REFUSES rather than guess.
 --- @return table plan  { ok, reason?, name, params, returns, new_fn, call, replace, insert_before, hazards }
 function M.plan(opts)
     local df, sel, name = opts.df, opts.sel, opts.name
@@ -100,67 +103,81 @@ function M.plan(opts)
         end
     end
 
-    -- SHADOW SAFETY (scope-model): df def entries carry binder tags
-    -- (stmt.defr, aligned with stmt.def) when a name resolves to SEVERAL
-    -- binders in this function. For such a name the name-keyed deps above
-    -- can invent a RETURN — the selection defines one binder, the later
-    -- use reads another — which generates junk code (a false `local x =
-    -- f(...)` splitting the variable in two). With opts.resolve_binder
-    -- the post-selection uses are attributed precisely: the return
-    -- survives only when some use's binder matches an in-selection def's
-    -- tag. Without a resolver, or when attribution fails, REFUSE — this
-    -- engine's contract. Params stay name-based deliberately: a read-only
-    -- live-in is a value copy equal to the closure read either way, and
-    -- enclosing params pre-seed the dep map so a param shadow cannot
-    -- reach the returns set.
-    local tagvals = {}
-    for _, s in ipairs(stmts) do
-        if s.defr then
-            for di, d in ipairs(s.def) do
-                if s.defr[di] ~= nil then
-                    tagvals[d] = tagvals[d] or {}
-                    tagvals[d][s.defr[di]] = true
+    -- SHADOW SAFETY (df-strangler step-5 fine half, pt 2): a name-keyed dep can
+    -- invent a RETURN when the name is defined BOTH inside and outside the
+    -- selection (a shadow, or a reused local) — the selection defines one binding
+    -- but the later use reads another, so `local r = f(...)` would split the
+    -- variable in two. Flow's CFG REACHING (scope-correct via INC B′) decides
+    -- precisely, RETIRING the df.defr binder-tag scheme + binder_at:
+    --   • a post-selection use reaches an in-selection def (exact) → KEEP (genuine)
+    --   • it reaches one only via a conservative edge (~)          → REFUSE (unsure)
+    --   • no post-use reaches any in-selection def                 → DROP (false)
+    -- A return defined ONLY in the selection is unambiguous and kept as-is. Params
+    -- stay name-based deliberately: a read-only live-in is a value copy equal to
+    -- the closure read either way, and enclosing params cannot reach the returns
+    -- set. Without reaching (flow absent) an ambiguous return REFUSES — never
+    -- guessing. ([[cartograph-df-strangler]])
+    local reaching = (opts.flow_rows and opts.reaching) or nil
+    local rows = opts.flow_rows
+    local function in_sel(l) return l ~= nil and l >= sel.first and l <= sel.last end
+    -- is `r` defined anywhere OUTSIDE the selection? (the ambiguity signal — flow
+    -- rows when present, else the coarse df stmts)
+    local function defined_outside(r)
+        if rows then
+            for _, row in ipairs(rows) do
+                if not in_sel(row.l) then
+                    for _, d in ipairs(row.def or {}) do if d == r then return true end end
+                end
+            end
+        else
+            for idx, s in ipairs(stmts) do
+                if idx < firstIdx or idx > lastIdx then
+                    for _, d in ipairs(s.def or {}) do if d == r then return true end end
                 end
             end
         end
+        return false
     end
     for r in pairs(returns_set) do
-        local n = 0
-        for _ in pairs(tagvals[r] or {}) do n = n + 1 end
-        if n >= 2 then
-            if not opts.resolve_binder then
-                return { ok = false, reason = ('`%s` is shadowed in this function '
-                    .. '(several distinct binders) — the plan cannot attribute its '
-                    .. 'defs and uses by name'):format(r) }
+        if defined_outside(r) then
+            if not (rows and reaching) then
+                return { ok = false, reason = ('`%s` is defined both inside and '
+                    .. 'outside the selection (a shadow or reused local); with no '
+                    .. 'reaching info to attribute its later use, refusing rather '
+                    .. 'than guess'):format(r) }
             end
-            local sel_t = {}
-            for idx = firstIdx, lastIdx do
-                local s = stmts[idx]
-                if s.defr then
-                    for di, d in ipairs(s.def) do
-                        if d == r and s.defr[di] ~= nil then sel_t[s.defr[di]] = true end
-                    end
-                end
-            end
-            local genuine, unknown = false, false
-            for j = lastIdx + 1, #stmts do
-                for _, u in ipairs(stmts[j].use) do
-                    if u == r then
-                        local b = opts.resolve_binder(r, stmts[j].l - 1)
-                        if not b then
-                            unknown = true
-                        elseif sel_t[b.row or -1] then
-                            genuine = true
+            -- genuine = a post-selection use reaches an in-selection def
+            -- EXACTLY; uncertain = a post-use whose reach is unclear (only a
+            -- conservative edge into the selection, or reaches nothing confident)
+            -- — refuse rather than guess, mirroring the old resolver's
+            -- unattributable case. A post-use that cleanly reaches only
+            -- out-of-selection defs contributes to neither → the value is read
+            -- from an outer binding, so the return is DROPPED.
+            local genuine, uncertain = false, false
+            for _, e in ipairs(reaching) do
+                if e.var == r and rows[e.at] and rows[e.at].l > sel.last then
+                    local reached = false
+                    for _, dr in ipairs(e.from) do
+                        if dr ~= 0 and rows[dr] then
+                            reached = true
+                            if in_sel(rows[dr].l) then
+                                if e.hedged and e.hedged[dr] then uncertain = true
+                                else genuine = true end
+                            end
                         end
                     end
+                    if not reached then uncertain = true end
                 end
             end
-            if unknown and not genuine then
-                return { ok = false, reason = ('`%s` is shadowed and a use after '
-                    .. 'the selection could not be attributed to a binder — '
-                    .. 'refusing rather than guess'):format(r) }
+            if not genuine then
+                if uncertain then
+                    return { ok = false, reason = ('`%s` is shadowed and a use after '
+                        .. 'the selection could not be confidently attributed to a '
+                        .. 'def (only a conservative reach) — refusing rather than '
+                        .. 'guess'):format(r) }
+                end
+                returns_set[r] = nil
             end
-            if not genuine then returns_set[r] = nil end
         end
     end
 

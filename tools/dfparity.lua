@@ -38,7 +38,7 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 68, ['df-over-collects'] = 415,
+    self = { ['binding-as-use'] = 69, ['df-over-collects'] = 414,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 },
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /

@@ -104,9 +104,10 @@ test('extract: a side-effecting statement extracts with params and no returns', 
     ok(#p.hazards >= 1, 'non-local-state hazard disclosed')
 end)
 
--- SHADOW SAFETY (scope-model): `x` has two binders — an inner one whose
--- do-block is the selection (decl row 2, 0-based) and an outer one after
--- it (decl row 5). The name-keyed dep invents a return of x.
+-- SHADOW SAFETY (df-strangler step-5 fine half): `x` has two binders — an inner
+-- one inside the do-block (the selection) and an outer one after it. The coarse
+-- df name-keyed dep invents a return of x; flow's scope-correct CFG reaching
+-- decides genuineness by def ROW.
 --   1 local function f(a)
 --   2     do                  ← selection 2..5
 --   3         local x = a * 2
@@ -125,51 +126,70 @@ local S = {
     '    h(x)',
     'end',
 }
+-- coarse df (the do-block collapses to one stmt at line 2); the post-block use of
+-- x carries a FALSE name-keyed dep back into the selection.
 local S_DF = { inputs = { 'a' }, stmts = {
-    { l = 2, def = { 'x' }, use = { 'a' }, dep = {}, defr = { 2 } },
-    { l = 6, def = { 'x' }, use = { 'a' }, dep = {}, defr = { 5 } },
+    { l = 2, def = { 'x' }, use = { 'a' }, dep = {} },
+    { l = 6, def = { 'x' }, use = { 'a' }, dep = {} },
     { l = 7, def = {}, use = { 'x' }, dep = { dep(1, 'x') } }, -- FALSE dep
 } }
+-- fine flow rows: the inner x (l=3) and outer x (l=6) are DISTINCT def rows;
+-- h(x) at l=7 reaches the OUTER def (the inner is block-scoped, masked away).
+local S_ROWS = {
+    { l = 3, def = { 'x' }, use = { 'a' } }, -- 1: inner local x = a*2
+    { l = 4, def = {}, use = { 'x' } },      -- 2: g(x)
+    { l = 6, def = { 'x' }, use = { 'a' } }, -- 3: outer local x = a+1
+    { l = 7, def = {}, use = { 'x' } },      -- 4: h(x)
+}
+local S_REACH = {
+    { at = 1, var = 'a', from = { 0 } },
+    { at = 2, var = 'x', from = { 1 } }, -- g(x) reaches inner def
+    { at = 3, var = 'a', from = { 0 } },
+    { at = 4, var = 'x', from = { 3 } }, -- h(x) reaches OUTER def, not the selection
+}
 
-test('extract shadow: without a resolver, a shadowed return REFUSES', function ()
+test('extract shadow: without reaching, an ambiguous return REFUSES', function ()
     local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
         fn_start = 1, body_end = 7, file_lines = S, name = 'f2' }
     ok(not p.ok)
-    ok(p.reason:match('shadowed'), p.reason)
+    ok(p.reason:match('inside and'), p.reason)
 end)
 
-test('extract shadow: the resolver attributes the use and DROPS the false return', function ()
+test('extract shadow: reaching DROPS the false return (post-use misses the selection)', function ()
     local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
         fn_start = 1, body_end = 7, file_lines = S, name = 'f2',
-        resolve_binder = function (nm, row0)
-            eq('x', nm)
-            eq(6, row0)          -- the h(x) row, 0-based
-            return { row = 5 }   -- the OUTER binder
-        end }
+        flow_rows = S_ROWS, reaching = S_REACH }
     ok(p.ok, p.reason)
     eq({}, p.returns)            -- no junk `local x = f2(...)`
     eq('    f2()', p.call[1])
 end)
 
-test('extract shadow: a use matching an in-selection binder KEEPS the return', function ()
-    -- select the OUTER decl (line 6); craft the dep to point at it
+test('extract shadow: reaching KEEPS a return a post-use actually reaches', function ()
+    -- select the OUTER decl (line 6); the coarse dep points at it, and h(x)'s
+    -- reaching def (row 3, l=6) IS in the selection → genuine return
     local df2 = { inputs = { 'a' }, stmts = {
-        { l = 2, def = { 'x' }, use = { 'a' }, dep = {}, defr = { 2 } },
-        { l = 6, def = { 'x' }, use = { 'a' }, dep = {}, defr = { 5 } },
+        { l = 2, def = { 'x' }, use = { 'a' }, dep = {} },
+        { l = 6, def = { 'x' }, use = { 'a' }, dep = {} },
         { l = 7, def = {}, use = { 'x' }, dep = { dep(2, 'x') } },
     } }
     local p = extract.plan { df = df2, sel = { first = 6, last = 6 },
         fn_start = 1, body_end = 7, file_lines = S, name = 'f2',
-        resolve_binder = function () return { row = 5 } end }
+        flow_rows = S_ROWS, reaching = S_REACH }
     ok(p.ok, p.reason)
     eq({ 'x' }, p.returns)
     eq('    local x = f2()', p.call[1])
 end)
 
-test('extract shadow: unattributable use refuses rather than guess', function ()
+test('extract shadow: a hedged reach into the selection refuses rather than guess', function ()
+    -- h(x) reaches the in-selection inner def (row 1, l=3) but ONLY via a
+    -- conservative edge (~) → feasibility unclear → refuse
+    local reach = {
+        { at = 2, var = 'x', from = { 1 } },
+        { at = 4, var = 'x', from = { 1 }, hedged = { [1] = true } },
+    }
     local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
         fn_start = 1, body_end = 7, file_lines = S, name = 'f2',
-        resolve_binder = function () return nil end }
+        flow_rows = S_ROWS, reaching = reach }
     ok(not p.ok)
-    ok(p.reason:match('could not be attributed'), p.reason)
+    ok(p.reason:match('conservative reach'), p.reason)
 end)

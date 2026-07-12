@@ -3039,52 +3039,10 @@ local function child_forms(node, lisp)
     return out
 end
 
--- trace-time scope service: a tiny content-stamped cache of (parse tree +
--- scope model) for the few files a trace hops through — derived on demand,
--- never in the graph, evicted FIFO (trees die with their entry)
-local BND_CACHE, BND_ORDER = {}, {}
-local function binder_ctx(abs, file)
-    local lang, spec = lang_for(file)
-    if not (lang and spec and spec.scopes) then return nil end
-    local st = vim.uv.fs_stat(abs)
-    if not st then return nil end
-    local stamp = st.mtime.sec .. ':' .. st.mtime.nsec .. ':' .. st.size
-    local e = BND_CACHE[abs]
-    if e and e.stamp == stamp then return e end
-    local fd = io.open(abs, 'r')
-    if not fd then return nil end
-    local src = fd:read('a')
-    fd:close()
-    local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
-    if not okp then return nil end
-    e = { stamp = stamp, parser = parser, root = parser:parse()[1]:root(),
-        sm = require('cartograph.scope').model(src, spec.scopes) }
-    BND_CACHE[abs] = e
-    BND_ORDER[#BND_ORDER + 1] = abs
-    if #BND_ORDER > 4 then BND_CACHE[table.remove(BND_ORDER, 1)] = nil end
-    return e
-end
-
---- The binder visible for `name` at 0-based `row` of `file` (abs = the
---- resolved path — store.abs keeps this multi-root-safe). The trace-time
---- shadow disambiguation service (scope-model phase 1): a returned binder
---- is a handle comparable BY IDENTITY across calls on the same file
---- content — same table ⇒ same binder. `row` resolves from the deepest
---- named node containing the line start, so the precision is the scope
---- chain of the enclosing statement. Returns nil when the language has no
---- scope spec, the file is unreadable/stale, or the name is free there —
---- callers fall back to name matching, exactly the old behavior.
-function M.binder_at(abs, file, name, row)
-    local e = binder_ctx(abs, file)
-    if not e then return nil end
-    local node = e.root:named_descendant_for_range(row, 0, row, 0)
-    if not node then return nil end
-    -- the entry node may BE a scope (a block containing the line): resolve
-    -- includes it, with the query row as the visibility row
-    local chain, k = e.sm.resolve(name, node, nil, row)
-    -- chain is the model's reused array: take the binder handle out NOW
-    return k > 0 and chain[1] or nil
-end
+-- (binder_at — the scope-model shadow-attribution service — was RETIRED here
+-- with df-strangler step-5 fine half: extract.plan, its last consumer, now takes
+-- flow's scope-correct CFG reaching, so a shadowed name resolves by def ROW
+-- without a separate on-demand binder resolver. [[cartograph-df-strangler]])
 
 --- Immediate sub-forms of a form in `file`, for the browser's block descent.
 --- Two modes:
