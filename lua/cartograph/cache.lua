@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 31 -- v31: FLOW ROWS — eager per-fn fine flow (df-strangler step 4).
+M.VERSION = 32 -- v32: FLOW ROWS gain a start COLUMN (`c`, 1-based) — same-line
+               -- entities (minified/generated blobs, chained one-liners) become
+               -- ordered + jump-locatable by (l,c). Folds as one more column
+               -- (u16, auto-u32 for extreme minified lines). A v31 cache lacks it.
+               -- v31: FLOW ROWS — eager per-fn fine flow (df-strangler step 4).
                -- Every body_field-lang function node now carries `flow`
                -- ({stmts,params}), folded to a shape-interned columnar store at
                -- ingest. A v30 cache lacks it → re-extract. (df untouched: flow

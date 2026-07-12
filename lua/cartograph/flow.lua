@@ -78,6 +78,12 @@ local SUSPEND = { yield = true, await = true,
 -- seam alongside pfield/df_ids/method.
 
 local function line(n) return (select(1, n:range())) + 1 end
+-- start COLUMN (1-based, matching line's convention). Carried on every fine row
+-- so same-line entities — minified/generated blobs, chained one-liners — are
+-- ORDERED and JUMP-LOCATABLE by (l,c); coarse stays line-only (df parity). The
+-- fold's width-narrowing keeps `c` u16 normally and auto-upgrades to u32 only for
+-- the extreme minified line (e.g. a 113k-col bundle). ([[cartograph-df-strangler]])
+local function col(n) return (select(2, n:range())) + 1 end
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
 
 -- constant loop condition → EDGE FEASIBILITY. `do{}while(0)` (the C one-shot
@@ -298,7 +304,7 @@ function M.build(fnnode, src, cfg)
         local idx = #stmts + 1
         local sb = CTRL[t] and true or false
         local d, u = du(node, src, sb, ids)
-        stmts[idx] = { l = line(node), kind = CTRL[t] and t or 'stmt',
+        stmts[idx] = { l = line(node), c = col(node), kind = CTRL[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
             suspend = has_suspend(node, sb) or nil } -- yield/await = a Tier-1 continuation point
@@ -328,7 +334,7 @@ function M.build(fnnode, src, cfg)
             end
             if POST[t] and cond then
                 local cd, cu = du(cond, src, false, ids)
-                stmts[#stmts + 1] = { l = line(cond), kind = 'cond',
+                stmts[#stmts + 1] = { l = line(cond), c = col(cond), kind = 'cond',
                     parent = idx, pol = 'cond', def = cd, use = cu }
             end
         end
@@ -356,7 +362,7 @@ function M.build(fnnode, src, cfg)
             local vf = node:field('value')[1]
             local d, u = du(vf, src, false, ids) -- default (no value) → {},{}
             local idx = #stmts + 1
-            stmts[idx] = { l = line(node), kind = 'case', parent = parent,
+            stmts[idx] = { l = line(node), c = col(node), kind = 'case', parent = parent,
                 pol = 'case', def = d, use = u, t = node:type() }
             for c in node:iter_children() do
                 if c:named() and c ~= vf and c:type() ~= 'comment' then
@@ -372,7 +378,7 @@ function M.build(fnnode, src, cfg)
             -- `elseif_statement` / python `elif_clause`: body under `consequence`.
             local d, u = du(node, src, true, ids)
             local idx = #stmts + 1
-            stmts[idx] = { l = line(node), kind = node:type(), parent = parent,
+            stmts[idx] = { l = line(node), c = col(node), kind = node:type(), parent = parent,
                 pol = 'elseif', def = d, use = u, t = node:type() }
             local cons = node:field('consequence')[1] or node:field('body')[1]
             if cons and BODY[cons:type()] then
@@ -393,7 +399,7 @@ function M.build(fnnode, src, cfg)
             -- unbound in the fine model and df's spurious use of it is unmatched.
             local d, u = du(node, src, true, ids)
             local idx = #stmts + 1
-            stmts[idx] = { l = line(node), kind = 'catch', parent = parent,
+            stmts[idx] = { l = line(node), c = col(node), kind = 'catch', parent = parent,
                 pol = 'catch', def = d, use = u }
             -- python `except_clause` has no `body` field (the block is an unnamed
             -- child); fall back to the first BODY-type child.
@@ -880,7 +886,7 @@ local function width_for(maxv) return maxv < 65536 and 2 or 4 end
 local function row_view(col, g)
     local nms = col.names
     local d = col.shapes[col.shape(g)]
-    local s = { l = col.l(g), parent = col.parent(g), def = {}, use = {},
+    local s = { l = col.l(g), c = col.c(g), parent = col.parent(g), def = {}, use = {},
         kind = d.kind, pol = d.pol, t = d.t,
         regime = d.regime, const = d.const, suspend = d.suspend }
     local b, e = col.d0(g), col.u0(g)
@@ -945,7 +951,7 @@ end
 function M.fold(data)
     if data._flowcol then return 0 end
     local col = {
-        shape = {}, l = {}, parent = {},
+        shape = {}, l = {}, c = {}, parent = {},
         d0 = {}, u0 = {}, nm = {}, pm = {}, names = {}, shapes = {},
     }
     local nid = {} -- var-name -> interned id (build-time only); 0 = nil
@@ -971,7 +977,7 @@ function M.fold(data)
         end
         return i
     end
-    local ns, nn, np, maxp = 0, 0, 0, 0
+    local ns, nn, np, maxp, maxc = 0, 0, 0, 0, 0
     for _, node in ipairs(data.nodes or {}) do
         local fl = node.flow
         if fl and fl.stmts and not node._flow then
@@ -980,8 +986,10 @@ function M.fold(data)
                 ns = ns + 1
                 col.shape[ns] = shape_of(s)
                 col.l[ns] = s.l
+                col.c[ns] = s.c
                 col.parent[ns] = s.parent
                 if s.parent > maxp then maxp = s.parent end
+                if s.c > maxc then maxc = s.c end
                 col.d0[ns] = nn
                 for _, d in ipairs(s.def) do nn = nn + 1; col.nm[nn] = id(d) end
                 col.u0[ns] = nn
@@ -1002,9 +1010,11 @@ function M.fold(data)
     local nw = width_for(#col.names)
     local pw = width_for(maxp)
     local sw = width_for(#col.shapes)
+    local cw = width_for(maxc) -- u16 normal; u32 only for extreme minified lines
     local packed = {
         shape = getter(pack(col.shape, ns, sw), sw),
         l = getter(pack(col.l, ns, 4), 4),
+        c = getter(pack(col.c, ns, cw), cw),
         parent = getter(pack(col.parent, ns, pw), pw),
         d0 = getter(pack(col.d0, ns + 1, 4), 4),
         u0 = getter(pack(col.u0, ns, 4), 4),

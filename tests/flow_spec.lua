@@ -780,6 +780,9 @@ test('flow.fold: round-trips rows + params bit-for-bit; accessors dual-mode', fu
     eq(raw2, flow.record(n2), 'fn2 record round-trips (suspend + catch rows)')
     eq(raw3, flow.record(n3), 'fn3 record round-trips (POST cond + const + declarator)')
     eq(r1.stmts, flow.rows(n1), 'fn1 rows round-trip')
+    -- every fine row carries a 1-based start column (v32) — same-line entities
+    -- are jump-locatable by (l,c); survives the fold like l.
+    for _, s in ipairs(flow.rows(n1)) do ok(s.c and s.c >= 1, 'row has 1-based column') end
 
     -- accessors dual-mode consistent post-fold
     ok(flow.has(n1) and not flow.has(empty), 'has (folded)')
