@@ -131,15 +131,16 @@ test('trace: shadow disambiguation — a shadowed local traces its OWN defs', fu
         if n.name == 'pick' then pick = id end
     end
     ok(pick, 'pick found')
-    -- INNER use (0-based line 4): before phase 1 this trace ALSO returned
-    -- the outer def at line 2 — a false origin from another variable.
-    -- Now: exactly the do-statement (the inner decl's containing stmt).
+    -- INNER use (0-based line 4): flow's CFG reaching (df-strangler step-5 fine
+    -- half) returns exactly the INNER def, and flow is FINE so it points at the
+    -- precise decl (`local mode = "inner"`, line 4 / 0-based 3) — not the coarse
+    -- do-statement df collapsed it into. The inner masks the outer at this use.
     local inner = trace.origins_local(store, pick, 'mode', 4)
     eq(1, #inner)
-    eq(2, inner[1].site.line) -- 0-based row of the do-stmt
-    -- OUTER use (0-based line 6): with phase 2's binder tags (node-precise
-    -- at harvest) the compound holding only the INNER decl is pruned too —
-    -- the phase-1 residue closes; exactly the outer def remains
+    eq(3, inner[1].site.line) -- 0-based row of `local mode = "inner"`
+    -- OUTER use (0-based line 6): the inner is block-scoped, so after the block
+    -- it's masked away and the enclosing def is RESTORED (the INC B′ fix) —
+    -- exactly the outer def, no false inner origin
     local outer = trace.origins_local(store, pick, 'mode', 6)
     eq(1, #outer)
     eq(1, outer[1].site.line) -- the `local mode = "outer"` row

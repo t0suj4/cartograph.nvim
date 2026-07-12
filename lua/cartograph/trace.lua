@@ -40,54 +40,54 @@ function M.origins(store, fn_id, i)
     return out
 end
 
--- defs of local `name` in fn's data flow at/before `line` (1-based df lines);
--- falls back to all defs when none precede the use site.
---
--- SHADOW DISAMBIGUATION (scope-model phase 1): when the provider can
--- resolve binders for this file, defs are filtered to the binder VISIBLE
--- AT THE USE SITE — a shadowed name no longer feeds another variable's
--- defs into the trace. A def statement is kept when its row resolves to
--- the same binder (identity), or when it CONTAINS the binder's own
--- declaration row (df is statement-granular: an inner decl inside a
--- compound statement reports the compound's row). Known residue: a
--- compound statement that both contains an inner shadow-decl and assigns
--- the outer binder stays conflated — that is df's granularity, phase 2's
--- binder tags own it. No binder info (dump graphs, no scope spec, stale
--- file) ⇒ exactly the old name-matched behavior.
-local function local_defs(store, fn, name, line0)
+-- defs of local `name` reaching the use at `line0` (0-based). SHADOW
+-- DISAMBIGUATION, df-strangler step-5 fine half: sourced from flow's CFG
+-- REACHING (flow.reaching_cfg) — the def ROWS that actually reach this use,
+-- scope-correctly. This RETIRES the df+`defr` binder-tag scheme: reaching now
+-- masks a shadowing inner AND restores the enclosing def after the block (the
+-- INC B′ scoped-kill/restore fix), so a shadowed name resolves to its OWN
+-- binder without cached tags — and flow is FINE, so the def points at the
+-- precise decl line, not the coarse compound. No use anchor / no reaching edge
+-- ⇒ every def row of `name`. Fns WITHOUT flow (haskell etc.) fall back to
+-- name-matched df stmts (no shadow filter — rare non-imperative langs).
+local function local_defs(_store, fn, name, line0)
+    local flow = require 'cartograph.flow'
+    if flow.present(fn) then
+        local fl = flow.record(fn)
+        local rc = flow.reaching_cfg(fl)
+        local want = line0 and (line0 + 1) or nil -- flow .l is 1-based
+        local from
+        for _, e in ipairs(rc) do
+            if e.var == name and (not want or fl.stmts[e.at].l == want) then
+                from = e.from
+                if want then break end
+            end
+        end
+        local out = {}
+        if from then
+            for _, r in ipairs(from) do
+                if r ~= 0 then out[#out + 1] = fl.stmts[r] end -- 0 = param/entry (up-call)
+            end
+        end
+        if #out == 0 then -- no reaching anchor: every def row of `name`
+            for _, s in ipairs(fl.stmts) do
+                for _, d in ipairs(s.def) do
+                    if d == name then out[#out + 1] = s; break end
+                end
+            end
+        end
+        return out
+    end
+    -- no flow: name-matched df stmts (before the use, else all)
     local stmts = require('cartograph.df').stmts(fn)
     if #stmts == 0 then return {} end
-    local ts = require 'cartograph.providers.treesitter'
-    local abs = store.abs(fn.file)
-    local use_b = line0 and ts.binder_at(abs, fn.file, name, line0) or nil
     local before, all = {}, {}
-    for i, s in ipairs(stmts) do
-        for di, d in ipairs(s.def) do
+    for _, s in ipairs(stmts) do
+        for _, d in ipairs(s.def) do
             if d == name then
-                local keep = true
-                if use_b then
-                    local tag = s.defr and s.defr[di]
-                    if tag then
-                        -- phase 2: the def entry carries its binder's decl
-                        -- row — node-precise at harvest, so the compound-
-                        -- statement residue is gone
-                        keep = tag == (use_b.row or -1)
-                    else
-                        local db = ts.binder_at(abs, fn.file, name, s.l - 1)
-                        if db ~= use_b then
-                            -- containment: the binder's own decl lives
-                            -- inside this (compound) statement's row span
-                            local nxt = stmts[i + 1]
-                            local declrow1 = use_b.row and use_b.row + 1
-                            keep = declrow1 ~= nil and declrow1 >= s.l
-                                and (nxt == nil or declrow1 < nxt.l)
-                        end
-                    end
-                end
-                if keep then
-                    all[#all + 1] = s
-                    if line0 and s.l <= line0 + 1 then before[#before + 1] = s end
-                end
+                all[#all + 1] = s
+                if line0 and s.l <= line0 + 1 then before[#before + 1] = s end
+                break
             end
         end
     end

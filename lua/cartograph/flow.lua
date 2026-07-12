@@ -830,6 +830,24 @@ function M.reaching_cfg(flow)
         end
         return true
     end
+    -- SCOPE of a def = the region it lives in: a BLOCK-regime def is scoped to
+    -- its enclosing region (its parent); everything else (function/hoisted,
+    -- assignments, params) is function-scoped (region 0). This is what makes a
+    -- block-scoped def's KILL region-local (below).
+    local function scope_of(r)
+        if r == 0 then return 0 end
+        return S[r].regime == 'block' and S[r].parent or 0
+    end
+    -- region `a` is `b` or nested inside it (walk a's region-parent chain to b)
+    local function subscope(a, b)
+        if b == 0 then return true end -- the function scope encloses everything
+        local cur = a
+        while cur ~= 0 do
+            if cur == b then return true end
+            cur = S[cur].parent
+        end
+        return false
+    end
     -- reaching-definitions fixpoint over a predecessor map → reach_in per row
     local function run(predof)
         local rout, rin = {}, {}
@@ -852,7 +870,21 @@ function M.reaching_cfg(flow)
                         local d = {}; for r in pairs(defs) do d[r] = true end; o[v] = d
                     end
                 end
-                for _, v in ipairs(S[n].def) do o[v] = { [n] = true } end -- gen (kills prior)
+                -- gen with SCOPED kill (INC B′, shadow/restore-as-edges): n's def
+                -- of v kills prior defs whose scope is n's scope or NESTED inside
+                -- it; it only MASKS defs in an ENCLOSING scope (they survive past
+                -- n and are RESTORED once n's block exits — the fix for the
+                -- block-kill leak). regime drives the scope: a `local` shadow in a
+                -- block masks the outer; a plain assignment (function-scoped)
+                -- kills it. ([[cartograph-df-strangler]] step-5 fine half)
+                for _, v in ipairs(S[n].def) do
+                    local sn = scope_of(n)
+                    local kept = { [n] = true }
+                    for m in pairs(i[v] or {}) do
+                        if not subscope(scope_of(m), sn) then kept[m] = true end -- enclosing → mask
+                    end
+                    o[v] = kept
+                end
                 if not eqmap(o, rout[n]) then rout[n] = o; changed = true end
             end
         end
@@ -882,12 +914,27 @@ function M.reaching_cfg(flow)
     local edges = {} -- a use of v at u sees reach_in[u][v], scope-filtered; `hedged`
     -- = the subset of `from` that reaches ONLY via a conservative edge (INC C, ~).
     for u = 1, #S do
+        -- u's enclosing-region depths (0 = innermost = u's own region), for the
+        -- NEAREST-scope preference below
+        local depth, d, p = {}, 0, S[u].parent
+        while true do depth[p] = d; if p == 0 then break end; d = d + 1; p = S[p].parent end
         for _, v in ipairs(S[u].use) do
             local reaching, from, hset = rin[u] and rin[u][v], {}, nil
             if reaching then
                 local ex = rin_exact[u] and rin_exact[u][v]
+                -- NEAREST-scope preference (the restore half): among the visible
+                -- reaching defs, keep only those in the INNERMOST scope — a
+                -- shadowing inner masks the enclosing def AT THE USE, while the
+                -- enclosing def, never killed, is what reaches uses AFTER the block.
+                local best = math.huge
                 for r in pairs(reaching) do
                     if visible(r, u) then
+                        local dr = depth[scope_of(r)] or math.huge
+                        if dr < best then best = dr end
+                    end
+                end
+                for r in pairs(reaching) do
+                    if visible(r, u) and (depth[scope_of(r)] or math.huge) == best then
                         from[#from + 1] = r
                         if not (ex and ex[r]) then hset = hset or {}; hset[r] = true end -- ~ (no exact path)
                     end
