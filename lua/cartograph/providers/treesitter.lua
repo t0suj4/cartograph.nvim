@@ -2985,6 +2985,41 @@ local function resolve_self(calls, node_index, extends, exact, addref)
         end
         if not progress and round > 1 then break end
     end
+    -- V3: FRAMEWORK-INVOKED methods have NO in-corpus call site, so the backward-
+    -- flow fixpoint above left them untyped. Type self LEXICALLY for a colon-method
+    -- `M:foo` whose owner M is a GENUINE OBJECT (owns >=2 colon-methods): the OO/
+    -- framework contract invokes M:foo with M as self (Ace3 :NewModule modules,
+    -- widget mixins, event handlers). Chain-walked so a member inherited from a
+    -- mixin/base resolves; unique-hit only; inferred (~). This is NOT the naive
+    -- ~89%-wrong lexical guess — it fires ONLY where call-site typing hedged, gated
+    -- to multi-method owners, and the extends chain fixes the mixin misses that
+    -- sank the naive form. ([[cartograph-linker]] V3 framework adapters)
+    local methodcount = {}
+    for name in pairs(exact) do
+        local owner, sep = name:match('^([%w_]+)(:)')
+        if owner and sep then methodcount[owner] = (methodcount[owner] or 0) + 1 end
+    end
+    for _, c in ipairs(calls or {}) do
+        -- ONLY methods with NO in-corpus call site (selft untouched = truly
+        -- framework-invoked). A POISONED method (selft==false, called with an
+        -- untypeable receiver) keeps V1's hedge — lexical self would be unsound
+        -- there (the method IS invoked on an unknown receiver, maybe not M).
+        if not c.to and c.full and c.fn and node_index[c.fn] and selft[c.fn] == nil then
+            local member = c.full:match('^self[:.]([%w_]+)$')
+            local fn = node_index[c.fn]
+            local owner = member and fn.name and fn.name:match('^([%w_]+)[:.]')
+            if owner and (methodcount[owner] or 0) >= 2 then
+                local fit = chain_lookup(super, exact, owner, member, elang_for(c.file))
+                if fit then
+                    c.to = fit.id; c.inferred = true; c.refused = nil
+                    addref(c.fn, fit.id, c.at
+                        or { start = { line = c.line, char = 0 },
+                             ['end'] = { line = c.line, char = 0 } }, true)
+                    n = n + 1
+                end
+            end
+        end
+    end
     return n
 end
 

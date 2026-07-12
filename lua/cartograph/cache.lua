@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 39 -- v39: CONSTRUCTOR RETURN-CLASS (V2 cut 2) — a constructor's
+M.VERSION = 40 -- v40: FRAMEWORK-INVOKED self (V3) — a colon-method M:foo on a
+               -- genuine object M (>=2 colon-methods) with NO in-corpus call
+               -- site (framework-invoked: Ace3 modules, widget mixins, event
+               -- handlers) types self=M by the OO/framework contract, self:member
+               -- chain-walked. Fires only where V1's call-site fixpoint hedged;
+               -- unique-hit, inferred ~. [[cartograph-linker]] V3.
+               -- v39: CONSTRUCTOR RETURN-CLASS (V2 cut 2) — a constructor's
                -- return-class = the class its in-body setmetatable points at
                -- (a setmetatable-extends edge inside the fn's range). Types
                -- `local obj = anyCtor()` from the RETURN, bypassing the `.new`

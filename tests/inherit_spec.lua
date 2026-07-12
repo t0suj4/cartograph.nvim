@@ -193,3 +193,54 @@ test('ctor cut2: return-class types the local for a non-.new constructor', funct
     eq(widget_render, call.to)    -- x typed Widget via Widget.create's return-class
     ok(call.inferred, 'inferred (~)')
 end)
+
+-- V3: Widget:OnAcquire is FRAMEWORK-INVOKED (no in-corpus call site → V1 hedges).
+-- Widget owns >=2 colon-methods (a genuine object), so self=Widget by contract;
+-- self:shared() is inherited from Base — the chain walk finds Base:shared (the
+-- naive lexical "owner has no such member" miss, fixed). shared is ambiguous.
+local FW_SRC = table.concat({
+    'local Base = {}',                                       -- 1
+    'function Base:shared() return 1 end',                   -- 2
+    'local Widget = {}',                                     -- 3
+    'setmetatable(Widget, {__index = Base})',                -- 4  Widget extends Base
+    'function Widget:OnAcquire() return self:shared() end',  -- 5  framework-invoked
+    'function Widget:extra() return 2 end',                  -- 6  (Widget owns 2 methods)
+    'local Deco = {}',                                       -- 7
+    'function Deco:shared() return 9 end',                   -- 8  (shared ambiguous)
+    'return { Widget = Widget }',                            -- 9
+}, '\n')
+
+test('framework self (V3): a framework-invoked method types self by contract, chain-walked', function ()
+    if not ts_ready() then return skip 'no lua parser' end
+    local data = extract_src(FW_SRC)
+    local base_shared
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'Base:shared' then base_shared = n.id end
+    end
+    local call
+    for _, c in ipairs(data.calls) do if c.full == 'self:shared' then call = c end end
+    ok(call, 'self:shared call found')
+    eq(base_shared, call.to)      -- self=Widget (contract) → chain → Base:shared
+    ok(call.inferred, 'inferred (~)')
+end)
+
+-- V3 GATE: a single-method owner is NOT treated as an object (too weak a signal) —
+-- self:m() there stays hedged rather than lexically guessed.
+local FW_WEAK_SRC = table.concat({
+    'local T = {}',                                          -- 1
+    'function T:only() return self:amb() end',               -- 2  T owns just ONE method
+    'local A = {}',                                          -- 3
+    'function A:amb() return 1 end',                         -- 4
+    'local B = {}',                                          -- 5
+    'function B:amb() return 2 end',                         -- 6  (amb ambiguous)
+    'return { T = T }',                                      -- 7
+}, '\n')
+
+test('framework self (V3): a single-method owner is too weak — stays hedged', function ()
+    if not ts_ready() then return skip 'no lua parser' end
+    local data = extract_src(FW_WEAK_SRC)
+    local call
+    for _, c in ipairs(data.calls) do if c.full == 'self:amb' then call = c end end
+    ok(call, 'self:amb call found')
+    eq(nil, call.to)              -- T owns 1 method → not a genuine object → hedged
+end)
