@@ -3294,18 +3294,21 @@ test('luals oracle: references settle what names refuse', function ()
             '~/.local/lib/lua-language-server/bin/lua-language-server')) == 1
     if not bin_ok then skip 'no lua-language-server' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/luaoracle')
-    -- two defs named pick: the name graph REFUSES the a.pick(3) call
+    -- a.pick: MODULE-ALIAS resolves it STATICALLY (a = require 'alpha' → alpha's
+    -- pick) at inferred (~); the oracle then UPGRADES that ~ to solid — the tier
+    -- ladder (static rung-1 → oracle proven), luals explicitly targets ~ edges.
     local site
     for _, c in ipairs(data.calls) do
         if c.callee == 'pick' and c.file == 'user.lua' then site = c end
     end
     ok(site, 'call site found')
-    eq(nil, site.to)
+    ok(site.to and site.to:match('^alpha%.lua') and site.inferred,
+        'module-alias pre-resolves a.pick to alpha at ~')
     local stats, why = luals.enrich(data)
     ok(stats, tostring(why))
-    -- lua-ls knows the require binding: the call links to ALPHA's pick
+    -- lua-ls confirms the require binding: the ~ edge is upgraded to solid
     ok(site.to and site.to:match('^alpha%.lua'), tostring(site.to))
-    ok(not site.inferred, 'oracle answers are solid, not ~')
+    ok(not site.inferred, 'oracle upgrades the ~ to solid')
 end)
 
 test('luals async: settles the same, without blocking the caller', function ()
@@ -3335,11 +3338,14 @@ test('refusals are places: an ambiguous call keeps its candidates', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
-    -- alpha.lua and beta.lua both define M.pick; user.lua calls a.pick(3)
+    -- alpha.lua and beta.lua both define M.roll; user.lua calls it BARE (roll(x))
+    -- — no require-alias receiver, so module-alias can't narrow it: genuinely
+    -- ambiguous. (a.pick, by contrast, IS module-alias-resolved — see the oracle
+    -- test.) The refusal-as-a-PLACE contract rides the bare call.
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/luaoracle')
     local site
     for _, c in ipairs(data.calls) do
-        if c.callee == 'pick' and c.file == 'user.lua' then site = c end
+        if c.callee == 'roll' and c.file == 'user.lua' then site = c end
     end
     ok(site, 'call site found')
     eq(nil, site.to) -- name-matching refuses
@@ -3347,10 +3353,10 @@ test('refusals are places: an ambiguous call keeps its candidates', function ()
     eq('ambiguous', site.refused.rule)
     eq(2, site.refused.n)
     eq(2, #site.refused.cands)
-    -- the candidates are real, jumpable defs (both M.pick)
+    -- the candidates are real, jumpable defs (both M.roll)
     for _, cid in ipairs(site.refused.cands) do
         local n = store.ingest(data) or store.node(cid)
-        ok(store.node(cid) and store.node(cid).name == 'M.pick', tostring(cid))
+        ok(store.node(cid) and store.node(cid).name == 'M.roll', tostring(cid))
     end
 end)
 
@@ -3388,12 +3394,13 @@ test('ladder: the epistemic distribution and refusal ranking', function ()
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not has_parser('lua') then skip 'no lua parser' end
     local ladder = require 'cartograph.ladder'
-    -- luaoracle: user.lua's go() calls a.pick — a refused (ambiguous) call
+    -- luaoracle: user.lua's guess() calls roll BARE — a refused (ambiguous) call
+    -- (a.pick is module-alias-resolved, on the inferred rung, not refused)
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/luaoracle')
     store.ingest(data)
     local t = ladder.tally(store)
     ok(t.total > 0, 'calls counted')
-    ok(t.refused >= 1, 'the ambiguous a.pick is on the refused rung')
+    ok(t.refused >= 1, 'the ambiguous bare roll is on the refused rung')
     -- every call sits on exactly one rung (the total is the partition)
     local sum = 0
     for _, r in ipairs(ladder.RUNGS) do sum = sum + t[r] end
@@ -3402,7 +3409,7 @@ test('ladder: the epistemic distribution and refusal ranking', function ()
     local blob = table.concat(ladder.report(store), '\n')
     ok(blob:match('refused'), blob)
     ok(blob:match('heaviest refusals'), 'forks surfaced')
-    ok(blob:match('pick'), 'the ambiguous callee named')
+    ok(blob:match('roll'), 'the ambiguous callee named')
 end)
 
 test('bash: functions, command calls, source imports, vars + df', function ()

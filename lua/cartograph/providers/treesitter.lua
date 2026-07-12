@@ -2772,6 +2772,56 @@ local function resolve_super(calls, extends, exact, addref)
     return n
 end
 
+-- Upgrade still-refused MODULE-ALIAS calls: `alias.member(...)` where `alias` is
+-- bound to require('mod') in this file (the import edge's `bind`) → mod's `member`
+-- export. The receiver's module is KNOWN, so the ambiguous tail (`get`/`has`/…)
+-- narrows to the unique fn/method defined in that module file. This is RUNG-1
+-- receiver resolution ([[cartograph-scope-model]]) — require-alias, VM-INDEPENDENT
+-- — wiring the import edges + the tail index, no new analysis. Marked inferred
+-- (~): a derived resolution via the alias binding (a single-assignment/reaching
+-- check would promote it, and rule out reassigned aliases — banked). Lua-only
+-- today (only lua's spec captures import_bind); js/php import forms come later.
+local function resolve_module_alias(calls, edges, exact, tail, addref)
+    local amap = {} -- file -> { alias -> module-file }, from require binds
+    for _, e in ipairs(edges or {}) do
+        if e.kind == 'import' and e.bind and e.from and e.to then
+            local m = amap[e.from]; if not m then m = {}; amap[e.from] = m end
+            m[e.bind] = e.to
+        end
+    end
+    if not next(amap) then return 0 end
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        if not c.to and c.refused and c.full then
+            -- receiver.member (lua dot/colon); a SINGLE segment before the member
+            -- (a bare alias, not a.b.c chain)
+            local recv, member = c.full:match('^([%w_]+)[.:]([%w_]+)$')
+            local mod = recv and amap[c.file] and amap[c.file][recv]
+            if mod then
+                -- the UNIQUE fn/method with this tail defined in the alias's module
+                local fit, dup = nil, false
+                for _, nd in ipairs(tail[member] or exact[member] or {}) do
+                    if nd.file == mod and (nd.kind == 'function' or nd.kind == 'method') then
+                        if fit and fit.id ~= nd.id then dup = true else fit = nd end
+                    end
+                end
+                if fit and not dup then
+                    c.to = fit.id
+                    c.inferred = true
+                    c.refused = nil
+                    if c.fn then
+                        addref(c.fn, fit.id, c.at
+                            or { start = { line = c.line, char = 0 },
+                                ['end'] = { line = c.line, char = 0 } }, true)
+                    end
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return n
+end
+
 -- Return-type rounds (the graph-VM MVP — see the graph-vm design memo).
 -- A call whose receiver is ANOTHER call (f().g()) or a local typed only by
 -- its initializer's return (`var x = f(); x.g()`) could not be qualified
@@ -5259,6 +5309,11 @@ function M.extract(root, opts)
     -- the nearest ancestor that defines it. Bounded; over the full graph.
     resolve_super(calls, data.extends, exact, addref)
 
+    -- module-alias: `alias.member` where alias = require('mod') → mod's member
+    -- (rung-1 receiver resolution) — before the return rounds, so a resolved
+    -- module call can be a determining call for a receiver-typed chain
+    resolve_module_alias(calls, data.edges, exact, tail, addref)
+
     -- return-type rounds: settle the receiver-deferred calls (c.rt) now
     -- that plain + super resolution populated the determining calls
     local retn, retrounds = resolve_returns(calls, node_index, exact, addref)
@@ -5621,6 +5676,8 @@ function M.relink(data, touched)
     -- extract's enrichment so the parallel and refresh paths resolve the
     -- same superclass chains the sequential path does
     n = n + resolve_super(data.calls, data.extends, exact, addref)
+    -- module-alias (rung-1 receiver resolution), same parity as extract
+    n = n + resolve_module_alias(data.calls, data.edges, exact, tail, addref)
     -- and the return-type rounds, for the same parity (cross-chunk chains:
     -- a worker slice may hold the chain but not the determining target)
     local node_index = {}

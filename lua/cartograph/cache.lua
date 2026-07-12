@@ -19,7 +19,12 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 33 -- v33: FLOW rows carry a control-transfer LABEL (`s.label`) —
+M.VERSION = 34 -- v34: MODULE-ALIAS resolution (receiver-typing rung 1) — a
+               -- still-refused `alias.member(...)` where `alias = require('mod')`
+               -- (the import edge's bind) now resolves to mod's `member` export,
+               -- inferred (~). Lua-only (only lua captures import_bind); shifts
+               -- refused↓/ref-edges↑ on lua corpora. A v33 cache lacks it.
+               -- v33: FLOW rows carry a control-transfer LABEL (`s.label`) —
                -- break/continue TARGET, goto target, labeled-loop / C-label
                -- DEFINITION. successors resolves labeled break/continue to the
                -- named loop + goto to its label row. Sparse (rare) — folds as a
