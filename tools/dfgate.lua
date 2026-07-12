@@ -20,7 +20,10 @@ bench.bootstrap()
 local dfp = dofile(here .. '/dfparity.lua')
 
 local name = arg and arg[1]
-if not name then print('usage: dfgate <corpus>'); os.exit(2) end
+if not name then print('usage: dfgate <corpus> [--show [<class>]]'); os.exit(2) end
+-- --show [<class>]: the fix-side EXPLORER — dump the divergence instances of a
+-- class with source (Tool 1), instead of gating. No class → list the classes.
+local show = (arg[2] == '--show') and (arg[3] or true) or nil
 
 -- corpus identity (mirror gate.lua): a moved/dirty pinned checkout makes the
 -- oracle meaningless
@@ -34,6 +37,22 @@ if corpus.rev and not bench.same_rev(corpus.rev, now) then
 end
 
 local data = bench.extract(name)
+
+if show then -- EXPLORER mode: dump divergence instances of a class, don't gate
+    local r = dfp.check(data, type(show) == 'string' and { [show] = true } or nil)
+    print(('dfgate %s --show %s'):format(name, tostring(show)))
+    print('  census: ' .. dfp.census(r.cats))
+    print('')
+    if type(show) == 'string' then
+        for _, l in ipairs(dfp.show_instances(r.instances[show] or {}, show)) do print(l) end
+    else
+        print('  pass a class name to --show to dump its instances, e.g.:')
+        print('    df-over-collects | flow-over-collects | binding-as-use | receiver |')
+        print('    df-empty-name | OTHER | disjoint | partition-mismatch | line-skew')
+    end
+    os.exit(0)
+end
+
 local r = dfp.check(data)
 print(('dfgate %-6s fns=%d stmts=%d  flow-invariant-errors=%d')
     :format(name, r.nfn, r.nstmt, r.ferr))

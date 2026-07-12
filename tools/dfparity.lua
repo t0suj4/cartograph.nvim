@@ -30,7 +30,7 @@ local M = {}
 -- corpus-lang produced — e.g. cpp's .sh files and libs' native .rs/.cpp.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 67, ['df-over-collects'] = 407,
+    self = { ['binding-as-use'] = 67, ['df-over-collects'] = 409,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 },
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     cpp = {}, -- PERFECT parity (the old residual was .sh files parsed as C++)
@@ -64,6 +64,7 @@ local FN = { function_definition = true, method_declaration = true,
     method_definition = true, arrow_function = true }
 
 local function toset(t) local s = {} for _, v in ipairs(t) do s[v] = true end return s end
+local function sortset(s) local o = {} for k in pairs(s) do o[#o + 1] = k end table.sort(o) return table.concat(o, ',') end
 local function eqset(a, b)
     for k in pairs(a) do if not b[k] then return false end end
     for k in pairs(b) do if not a[k] then return false end end
@@ -99,8 +100,11 @@ end
 --- PER FILE (ts.lang_of) — the same way extraction does — so a mixed-language
 --- corpus (e.g. elasticsearch/libs = java + native rust/cpp) is each checked
 --- under its own grammar, not a single nominal corpus lang.
---- Returns { cats = {class -> count}, ferr, nfn, nstmt }.
-function M.check(data)
+--- Returns { cats = {class -> count}, ferr, nfn, nstmt, instances }. When
+--- `collect` (a set {class=true}) is given, `instances[class]` gathers the
+--- divergence instances (file/line/axis/flow/df/src) — the fix-side explorer
+--- behind `dfgate --show <class>`.
+function M.check(data, collect)
     local byfile = {}
     for _, n in ipairs(data.nodes or {}) do
         if (n.kind == 'function' or n.kind == 'method') and n.file and df.present(n) then
@@ -108,8 +112,15 @@ function M.check(data)
             table.insert(byfile[n.file], n)
         end
     end
-    local cats, ferr, nfn, nstmt = {}, 0, 0, 0
-    local function tally(c) if c then cats[c] = (cats[c] or 0) + 1 end end
+    local cats, ferr, nfn, nstmt, instances = {}, 0, 0, 0, {}
+    local function record(c, info)
+        if not c then return end
+        cats[c] = (cats[c] or 0) + 1
+        if collect and collect[c] then
+            local l = instances[c]; if not l then l = {}; instances[c] = l end
+            l[#l + 1] = info
+        end
+    end
     for file, nodes in pairs(byfile) do
         local lang = ts.lang_of(file)
         local spec = lang and ts.spec[lang]
@@ -141,24 +152,31 @@ function M.check(data)
                             local co = flow.coarse(fl)
                             local dfs = df.get(n).stmts
                             if #co ~= #dfs then
-                                tally('partition-mismatch')
+                                record('partition-mismatch', { file = file, l = atr.sl(n.range) + 1,
+                                    note = ('%s: flow %d stmts vs df %d'):format(n.name or '?', #co, #dfs) })
                             else
                                 for i, cs in ipairs(co) do
                                     local ds = dfs[i]
                                     if cs.l ~= ds.l then
-                                        tally('line-skew')
+                                        record('line-skew', { file = file, l = cs.l,
+                                            note = ('flow L%d vs df L%d'):format(cs.l, ds.l) })
                                     else
                                         nstmt = nstmt + 1
                                         local fd, fu = toset(cs.def), toset(cs.use)
                                         local dd, du = toset(ds.def), toset(ds.use)
+                                        local srcline = lines[cs.l]
                                         if eqset(fd, dd) and eqset(fu, du) then
                                             -- agree
                                         elseif eqset(fd, du) and eqset(fu, dd)
                                             and (not empty(fd) or not empty(fu)) then
-                                            tally('binding-as-use')
+                                            record('binding-as-use', { file = file, l = cs.l, src = srcline,
+                                                axis = 'def/use swap', flow = sortset(fd) .. ' / ' .. sortset(fu),
+                                                df = sortset(dd) .. ' / ' .. sortset(du) })
                                         else
-                                            tally(classify_axis(fd, dd))
-                                            tally(classify_axis(fu, du))
+                                            record(classify_axis(fd, dd), { file = file, l = cs.l, src = srcline,
+                                                axis = 'def', flow = sortset(fd), df = sortset(dd) })
+                                            record(classify_axis(fu, du), { file = file, l = cs.l, src = srcline,
+                                                axis = 'use', flow = sortset(fu), df = sortset(du) })
                                         end
                                     end
                                 end
@@ -169,7 +187,24 @@ function M.check(data)
             end
         end
     end
-    return { cats = cats, ferr = ferr, nfn = nfn, nstmt = nstmt }
+    return { cats = cats, ferr = ferr, nfn = nfn, nstmt = nstmt, instances = instances }
+end
+
+--- Render collected instances of a class as report lines (the `--show` output).
+function M.show_instances(list, class, cap)
+    cap = cap or 40
+    local n = list and #list or 0
+    local L = { ('%s: %d instance(s)%s'):format(class, n, n > cap and (' (showing first ' .. cap .. ')') or ''), '' }
+    for i = 1, math.min(n, cap) do
+        local it = list[i]
+        L[#L + 1] = ('%s:%d'):format(it.file, it.l)
+        if it.note then L[#L + 1] = '    ' .. it.note end
+        if it.src then L[#L + 1] = '    | ' .. it.src:gsub('^%s+', ''):sub(1, 76) end
+        if it.flow or it.df then
+            L[#L + 1] = ('    [%s]  flow={%s}  df={%s}'):format(it.axis or '', it.flow or '', it.df or '')
+        end
+    end
+    return L
 end
 
 --- Census one-liner (the labelled divergence counts, stable order).
