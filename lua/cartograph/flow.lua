@@ -19,6 +19,8 @@ local CTRL = { if_statement = true, while_statement = true, for_statement = true
     for_numeric_statement = true, for_generic_statement = true,
     foreach_statement = true, repeat_statement = true, do_statement = true,
     switch_statement = true, match_expression = true, try_statement = true,
+    expression_switch_statement = true, type_switch_statement = true,
+    select_statement = true, -- go switch/select
     -- rust control is EXPRESSIONS (wrapped in expression_statement — emit
     -- unwraps); node types are rust-unique so listing them is language-safe
     if_expression = true, while_expression = true, loop_expression = true,
@@ -35,12 +37,25 @@ local PRELOOP = { while_statement = true, for_statement = true,
 local TRY_T = { try_statement = true }
 local CLAUSE = { else_statement = true, elseif_statement = true,
     else_clause = true, elseif_clause = true, else_if_clause = true,
+    elif_clause = true, -- python elif
     case_statement = true, default_statement = true,
+    expression_case = true, default_case = true,
     catch_clause = true, except_clause = true, finally_clause = true }
-local ELSEIF = { elseif_statement = true, elseif_clause = true, else_if_clause = true }
+local ELSEIF = { elseif_statement = true, elseif_clause = true,
+    else_if_clause = true, elif_clause = true } -- + python elif (ruby `if` isn't
+    -- in CTRL yet, so ruby `elsif` is out of scope — left folded, parity-clean)
 -- exception handlers (bind an exception var, then region a body): java/php/JS
 -- `catch_clause`, python `except_clause`
 local CATCH = { catch_clause = true, except_clause = true }
+-- switch CASES: a label (`value` field = a use) guarding a body of statements
+-- that must be REGIONED as rows (not folded into the case row). C/php/java
+-- `case_statement`/`default_statement`, go `expression_case`/`default_case`.
+local CASE = { case_statement = true, default_statement = true,
+    expression_case = true, default_case = true }
+-- switch-like heads (the switched expr is under `value` for go, `condition`
+-- elsewhere; a `break` inside a case exits the switch, its join)
+local SWITCH = { switch_statement = true, expression_switch_statement = true,
+    type_switch_statement = true, select_statement = true }
 
 -- SCOPE-REGIME classification (df-strangler step 2b): per language, which
 -- declaration node types are BLOCK-scoped (the binding dies at its region's
@@ -278,6 +293,7 @@ function M.build(fnnode, src, cfg)
             regime = regimetab[t] or 'function', t = t } -- t = raw node type (CFG terminators)
         if CTRL[t] then
             local cond = node:field('condition')[1]
+                or (SWITCH[t] and node:field('value')[1]) -- go switch: `value` is the switched expr
             -- loop feasibility flag (do{}while(0) / while(true) / rust loop)
             if POST[t] or PRELOOP[t] then
                 stmts[idx].const = (t == 'loop_expression') and true or const_cond(cond, src)
@@ -307,18 +323,57 @@ function M.build(fnnode, src, cfg)
         end
     end
 
-    -- a block/region: its direct named children are statements
+    -- a block/region: its direct named children are statements. CLAUSE children
+    -- (a C switch body is a compound_statement of `case_statement`s) route to
+    -- clause() so their bodies are regioned, not folded.
     function region(block, parent, pol)
         for c in block:iter_children() do
-            if c:named() and c:type() ~= 'comment' then emit(c, parent, pol) end
+            if c:named() and c:type() ~= 'comment' then
+                if CLAUSE[c:type()] then clause(c, parent) else emit(c, parent, pol) end
+            end
         end
     end
 
     -- a clause (else/elseif/case/catch): elseif is its own guard (control row);
     -- the rest region their statements under `parent`
     function clause(node, parent)
+        if CASE[node:type()] then
+            -- a switch case: the `value` label is a USE; the statement body is
+            -- REGIONED as rows (was folded into the case row, hiding it from the
+            -- fine model + blocking case CFG feasibility). break rows inside now
+            -- surface — successors routes them to the switch join.
+            local vf = node:field('value')[1]
+            local d, u = du(vf, src, false, ids) -- default (no value) → {},{}
+            local idx = #stmts + 1
+            stmts[idx] = { l = line(node), kind = 'case', parent = parent,
+                pol = 'case', def = d, use = u, t = node:type() }
+            for c in node:iter_children() do
+                if c:named() and c ~= vf and c:type() ~= 'comment' then
+                    if BODY[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
+                end
+            end
+            return
+        end
         if ELSEIF[node:type()] then
-            emit(node, parent, 'elseif')
+            -- an elseif is a guard (its condition) over a body: emit the control
+            -- row (condition only, stop_body) and REGION its consequence as rows
+            -- (was folded — the body statements were invisible). lua
+            -- `elseif_statement` / python `elif_clause`: body under `consequence`.
+            local d, u = du(node, src, true, ids)
+            local idx = #stmts + 1
+            stmts[idx] = { l = line(node), kind = node:type(), parent = parent,
+                pol = 'elseif', def = d, use = u, t = node:type() }
+            local cons = node:field('consequence')[1] or node:field('body')[1]
+            if cons and BODY[cons:type()] then
+                region(cons, idx, 'body')
+            else -- fallback: region non-condition named children
+                local condn = node:field('condition')[1]
+                for c in node:iter_children() do
+                    if c:named() and c ~= condn and c:type() ~= 'comment' then
+                        if BODY[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
+                    end
+                end
+            end
             return
         end
         if CATCH[node:type()] then
@@ -593,7 +648,12 @@ function M.successors(flow)
                 if not hasfalse then add(r, nxt) end -- no else → condition may fall through
             elseif kids and t == 'do_statement' then
                 add(r, wire(kids['body'], nxt, brk, cont)) -- lua `do...end`: plain block
-            elseif kids then -- switch/match/other control head: sound over-approx
+            elseif kids and SWITCH[t] then
+                -- switch: cases fall through in order; break exits the switch, so
+                -- the case bodies are wired with brk = nxt (the switch join).
+                for _, rr in pairs(kids) do add(r, wire(rr, nxt, nxt, cont)) end
+                add(r, nxt) -- no case matched (no default)
+            elseif kids then -- match/try/other control head: sound over-approx
                 for _, rr in pairs(kids) do add(r, wire(rr, nxt, brk, cont)) end
                 add(r, nxt)
             else

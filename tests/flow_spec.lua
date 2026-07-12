@@ -506,6 +506,49 @@ test('flow: C/C++ bare declarations (no initializer, multi) DEF their names', fu
     local d6, u6 = du(6); ok(d6.n and u6.sz and not u6.n, 'int n = sz: n def, sz use preserved')
 end)
 
+test('flow: elseif body statements are regioned as rows, not folded', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f(x)',
+        '  if x == 1 then',
+        '    a()',
+        '  elseif x == 2 then',
+        '    b()',        -- the elseif BODY: its own row now (was folded away)
+        '  end',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src)
+    local ei = row(fl, 'elseif_statement')
+    ok(ei, 'the elseif is a control row (its condition)')
+    local bcall = row(fl, 'stmt', 5)
+    ok(bcall, 'the elseif body b() is its own row')
+    eq(ei, fl.stmts[bcall].parent, 'b() is parented to the elseif, not the if head')
+end)
+
+test('flow: switch case bodies unfold; break routes to the switch join', function ()
+    if not ready('c') then skip 'no c parser' end
+    local fn, src = parse_fn(table.concat({
+        'void f(int x){',
+        '  switch (x) {',
+        '    case 1: a(); break;',
+        '    default: b();',
+        '  }',
+        '  tail();',
+        '}',
+    }, '\n'), 'c')
+    local fl = flow.build(fn, src, { regime = flow.REGIME.c })
+    local brkrow, acall
+    for i, s in ipairs(fl.stmts) do
+        if s.t == 'break_statement' then brkrow = i end
+        if s.t == 'expression_statement' and s.l == 3 then acall = i end
+    end
+    ok(row(fl, 'case'), 'the case is a row')
+    ok(acall, 'the case body a() is its own row (was folded)')
+    ok(brkrow, 'break inside the case is its own row (was folded)')
+    local cfg = flow.successors(fl)
+    ok(has(cfg.succ, brkrow, row(fl, 'stmt', 6)), 'break routes to the switch join (tail), not fn exit')
+end)
+
 test('flow: python except_clause is recognised as an exception handler', function ()
     if not ready('python') then skip 'no python parser' end
     local fn, src = parse_fn(table.concat({
