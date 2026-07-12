@@ -862,6 +862,12 @@ nvim --headless -u NONE -l tools/dfgate.lua cpp
 # --show <class>: the divergence EXPLORER — dump a class's instances with source
 # + the flow={}/df={} sets (the fix-side view); no class lists the classes.
 nvim --headless -u NONE -l tools/dfgate.lua rust --show flow-over-collects
+# dfconsumers: the df-strangler STEP-5 consumer census — who reads the df.* seam
+# (a require-scoped scan = reliable + complete) plus a dogfood cross-check that
+# surfaces cartograph REFUSING ambiguous method names (get/has/count/present) —
+# the receiver-typing gap, and the argument for re-backing df.* with flow.coarse
+# (consumers untouched, equivalence guaranteed by dfgate) rather than rewriting.
+nvim --headless -u NONE -l tools/dfconsumers.lua
 ```
 
 `tools/preflight.lua` is the dev loop as one command: git-diff impact (changed
