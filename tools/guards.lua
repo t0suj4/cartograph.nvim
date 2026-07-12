@@ -47,6 +47,8 @@ local dffail = false
 if root == repo then
     local dfp = dofile(repo .. '/tools/dfparity.lua')
     local r = dfp.check(store.data)
+    -- flow is now sourced from the STORED graph (df-strangler step 4), so this
+    -- census validates the ACTUAL extracted+folded flow's coarse projection == df.
     print(('df/flow parity (self): fns=%d stmts=%d flow-invariant-errors=%d · %s')
         :format(r.nfn, r.nstmt, r.ferr, dfp.census(r.cats)))
     -- HARD-GATE only the churn-INSENSITIVE signal: flow's CFG

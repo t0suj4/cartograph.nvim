@@ -12,6 +12,7 @@
 -- emitted; consumers already degrade to honest frontiers.
 
 local atr = require 'cartograph.at' -- dual-mode range reads: relink/refresh re-run these paths over the FOLDED store
+local flowmod = require 'cartograph.flow' -- df-strangler step 4: eager per-fn fine flow rows, folded at ingest (flow requires nothing back → no cycle)
 local M = {}
 
 -- Node text, hot-path fast form. vim.treesitter.get_node_text allocates two
@@ -4187,6 +4188,16 @@ function M.extract(root, opts)
                     goto fn_done
                 end
                 local torn = torn_of(defn, sp)
+                -- FINE flow rows (df-strangler step 4): eager per-fn flow, folded
+                -- at ingest (store.ingest). Coverage MATCHES the generic df
+                -- (body_field langs) — haskell's custom-dataflow model isn't
+                -- imperative, so flow skips it and df's hook stays sole there.
+                -- cfg mirrors df: method seeds 'self' exactly as df's fn_params
+                -- (`method and lang=='lua'`) so flow.params ≡ df params → coarse
+                -- parity is airtight. Keep only {stmts,params} (cfg is build-time).
+                local fl = spec.body_field and flowmod.build(defn, src, {
+                    pfield = spec.params_field, df_ids = spec.df_ids,
+                    regime = spec.regime, method = method and lang == 'lua' }) or nil
                 nodes[#nodes + 1] = { id = id, name = name,
                     kind = method and 'method' or 'function', file = file,
                     range = sp, order = sp.start.line, params = params,
@@ -4198,7 +4209,8 @@ function M.extract(root, opts)
                     -- SUMMARY the return-type rounds ride (graph-VM MVP)
                     ret = spec.def_ret and spec.def_ret(defn, src) or nil,
                     df = spec.dataflow
-                        and spec.dataflow(defn, spec, src, params) or nil }
+                        and spec.dataflow(defn, spec, src, params) or nil,
+                    flow = fl and { stmts = fl.stmts, params = fl.params } or nil }
                 lastFn[file] = nodes[#nodes]
                 -- generic df rides the mention DFS: register this body
                 -- (per-tree keying — node ids are stable within a tree)

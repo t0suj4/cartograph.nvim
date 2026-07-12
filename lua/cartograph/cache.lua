@@ -19,7 +19,12 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 30 -- v30: C/C++ BARE-DECLARATION DEFS — a declaration with no
+M.VERSION = 31 -- v31: FLOW ROWS — eager per-fn fine flow (df-strangler step 4).
+               -- Every body_field-lang function node now carries `flow`
+               -- ({stmts,params}), folded to a shape-interned columnar store at
+               -- ingest. A v30 cache lacks it → re-extract. (df untouched: flow
+               -- rides ALONGSIDE, its coarse projection == df, the parity oracle.)
+               -- v30: C/C++ BARE-DECLARATION DEFS — a declaration with no
                -- initializer (no init_declarator) now defs its name via the
                -- `declaration` node's own declarator field(s): `int x;`,
                -- `Foo *p;`, multi `int a, b;`, `unique_ptr<T> arr[N];`. A v29

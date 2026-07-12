@@ -162,6 +162,12 @@ function M.ingest(data)
     -- materialize raw-shaped on demand. Cache shards encoded BEFORE ingest
     -- stay raw; refresh's fresh per-file df reads raw via dual mode.
     require('cartograph.df').fold(M.data)
+    -- FLOW FOLD (df-strangler step 4, same lifecycle as df): collapse the eager
+    -- per-fn fine flow rows into one shape-interned columnar store; dual-mode
+    -- flow.lua accessors materialize rows raw-shaped on demand. Cache shards
+    -- encoded pre-ingest stay raw; refresh's fresh per-file flow reads raw. The
+    -- coarse projection of this store == df (dfgate/guards parity oracle).
+    require('cartograph.flow').fold(M.data)
     -- RANGE FOLD (the 128MB half): every c.at / e.at element / n.range
     -- interns BY TABLE IDENTITY into four coordinate columns (the c.at↔e.at
     -- addref aliasing folds to one index for free) and becomes an index;

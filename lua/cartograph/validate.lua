@@ -19,7 +19,7 @@ M.NODE_FIELDS = {
     order = true,
     -- extraction facts
     params = true, torn = true, decl = true, macro = true, cbarg = true,
-    unparsed = true, df = true, data = true, ctype = true, ret = true,
+    unparsed = true, df = true, flow = true, data = true, ctype = true, ret = true,
     entry = true, exported = true, effects = true, apertures = true,
     pw = true, -- param-write fact: sorted indexes of OWN params this fn
                -- writes through (lua/js reference semantics; ~ to own params)

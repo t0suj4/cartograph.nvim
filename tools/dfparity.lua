@@ -28,14 +28,22 @@ local M = {}
 -- (calibrated with PER-FILE language detection: each file checked under its own
 -- grammar, matching extraction. This removed mis-parse artifacts that a single
 -- corpus-lang produced — e.g. cpp's .sh files and libs' native .rs/.cpp.)
+-- RECALIBRATED 2026-07-12 when flow moved to the STORED source (df-strangler
+-- step 4): the census now compares the ACTUAL extracted+folded flow vs df, with
+-- NO re-parse node-resolution. This DISSOLVED a class of harness artifacts —
+-- `partition-mismatch`/`disjoint` and re-parse-induced flow-over-collects/OTHER
+-- collapsed to ~0 (they were the walk mis-picking minified/nested-JS fns sharing
+-- a start position, + the .ts-under-JS boundary), and `df-over-collects` (the
+-- REAL closure-leak divergences) rose as leaks got attributed to the right node.
+-- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 67, ['df-over-collects'] = 409,
+    self = { ['binding-as-use'] = 67, ['df-over-collects'] = 413,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 },
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
-    cpp = {}, -- PERFECT parity (the old residual was .sh files parsed as C++)
-    -- go: pure .go is perfect; this residual is non-Go files in the corpus dir.
-    go = { ['df-over-collects'] = 22, ['partition-mismatch'] = 21 },
+    cpp = {}, -- PERFECT parity
+    go = { ['df-over-collects'] = 27 }, -- closure-leaks; partition-mismatch=21 was
+    -- the re-parse artifact (minified vendored JS), gone with stored flow.
     -- rust: all flow-MORE-correct — flow.du captures let/for/if-let bindings df
     -- misses (flow-over-collects), df leaks closure names (df-over-collects),
     -- and bare bindings swap def/use (binding-as-use). 0 flow-invariant errors.
@@ -43,17 +51,15 @@ M.EXPECTED = {
         ['flow-over-collects'] = 1988 },
     python = { ['df-over-collects'] = 3 }, -- closure-leak/dedup only
     ruby = {}, -- perfect parity
-    -- ghost = the JS scale corpus; df-over-collects (closure-leak) dominates.
-    -- The residual OTHER/disjoint/partition/line-skew is try-block aggregation +
-    -- the .ts-under-JS-grammar boundary — a corpus caveat, not a flow.du bug.
-    ghost = { ['df-over-collects'] = 1397, ['flow-over-collects'] = 49,
-        ['OTHER'] = 8, ['disjoint'] = 14, ['partition-mismatch'] = 16,
-        ['line-skew'] = 6 },
-    jquery = {}, -- perfect parity (js quick tier)
+    -- ghost = the JS scale corpus; df-over-collects (closure-leak) dominates. The
+    -- old partition/disjoint/flow-over-collects residual was the re-parse .ts-
+    -- under-JS + node-resolution artifact — gone with stored flow (OTHER=3 left).
+    ghost = { ['df-over-collects'] = 1746, ['OTHER'] = 3 },
+    jquery = { ['df-over-collects'] = 2 }, -- closure-leak (was masked by re-parse)
     mootools = {}, -- perfect parity (js archaeology tier)
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
     -- grammar. All flow-more-correct (closure-leak + bindings df misses).
-    libs = { ['df-over-collects'] = 1550, ['flow-over-collects'] = 4 },
+    libs = { ['df-over-collects'] = 1586, ['flow-over-collects'] = 4 },
 }
 
 M.ORDER = { 'binding-as-use', 'df-over-collects', 'flow-over-collects',
@@ -139,12 +145,21 @@ function M.check(data, collect)
                 rec(root)
                 for _, n in ipairs(nodes) do
                     local af = byline[atr.sl(n.range)]
-                    if af then
-                        local cfg = { pfield = spec.params_field, df_ids = spec.df_ids,
-                            regime = spec.regime,
-                            method = spec.is_method and spec.is_method(n.name or '', af) or false }
-                        local okb, fl = pcall(flow.build, af, src, cfg)
-                        if okb then
+                    -- SOURCE flow from the STORED graph (df-strangler step 4): the
+                    -- eager-extracted + folded flow IS the shipped artifact, and
+                    -- flow.record(n) is unambiguously node n's flow — no re-parse
+                    -- node-resolution guesswork (which mis-picked minified/nested-JS
+                    -- fns sharing a start position → false divergences). This makes
+                    -- the census validate the ACTUAL stored flow vs df (the fusion
+                    -- gate is now the census itself). Fall back to a fresh build only
+                    -- for df fns WITHOUT stored flow (haskell's custom-df model).
+                    local fl
+                    if flow.present(n) then fl = flow.record(n)
+                    elseif af then fl = select(2, pcall(flow.build, af, src, {
+                        pfield = spec.params_field, df_ids = spec.df_ids, regime = spec.regime,
+                        method = spec.is_method and spec.is_method(n.name or '', af) or false })) end
+                    if fl then
+                        do
                             nfn = nfn + 1
                             if not pcall(function () flow.successors(fl); flow.liveness(fl); flow.reaching_cfg(fl) end) then
                                 ferr = ferr + 1
