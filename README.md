@@ -867,7 +867,10 @@ require-cones reach any touched file), then the development guards, then the
 suite — `--fast` runs only the selected specs (`SPEC=` filter on
 `tests/run.sh`; selection is import-cone based, so the *full* suite still
 guards the push). `tools/guards.lua` self-applies the development lints with
-cartograph's own seam declarations. `tools/consumers.lua` is the shape roster
+cartograph's own seam declarations, and (reusing that same extraction) runs the
+df/flow parity check on the repo — hard-gating `flow-invariant-errors==0` (the
+CFG must never throw); the churning self census is reported here but pinned only
+in `dfgate self`. The check core is `tools/dfparity.lua`, shared with `dfgate`. `tools/consumers.lua` is the shape roster
 and seam rewriter (`--rw`/`--rwmod`/`--apply`, refusals printed as a review
 ledger).
 
