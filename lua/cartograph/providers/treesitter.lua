@@ -3384,7 +3384,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
         local head = nt == 'list' -- sexp head IS the callee (no fields)
         -- df def positions are THIS node's gift to its children:
         -- assignment lefts, declarators, transparent wrappers
-        local asgleft, decld, dfk
+        local asgleft, decld, dfk, declist
         if nctx > 0 then
             if nt == 'assignment_statement' or nt == 'assignment'
                 or nt == 'assignment_expression'
@@ -3405,6 +3405,14 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                 -- or pointer `type_qualifier`, which are uses/non-names).
                 decld = n:field('declarator')[1]
                 dfk = 3
+            elseif nt == 'declaration' then
+                -- C/C++ declaration: EVERY `declarator`-field child is
+                -- def-position (bare `int x;` / `Foo *p;`, multi `int a, b;`,
+                -- and `= init` via init_declarator). The `type` field is left
+                -- alone. This is what defs a NO-INITIALIZER declaration's name
+                -- (init_declarator only exists WITH `=`).
+                declist = n:field('declarator')
+                dfk = 7
             else
                 -- def position survives transparent wrappers only; C++
                 -- `reference_declarator` (`Type &r`) has no declarator field —
@@ -3434,6 +3442,9 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                     if dfk == 1 then cdefpos = c == asgleft
                     elseif dfk == 2 then cdefpos = ct == 'variable_name'
                     elseif dfk == 3 then cdefpos = c == decld
+                    elseif dfk == 7 then
+                        cdefpos = false
+                        for _, dd in ipairs(declist) do if c == dd then cdefpos = true break end end
                     else cdefpos = dfk end
                     if ct == 'identifier' or ct == 'name'
                         or (dfid and dfid[ct]) then cdfid = true end

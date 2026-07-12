@@ -486,6 +486,26 @@ test('flow: C/C++ pointer/reference/array declarators DEF the inner name', funct
     ok(not u6.arr, 'arr is not also a use')
 end)
 
+test('flow: C/C++ bare declarations (no initializer, multi) DEF their names', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    local fn, src = parse_fn(table.concat({
+        'void g(){',
+        '  int x;',                     -- bare plain
+        '  SMesh *p;',                  -- bare pointer
+        '  int a, b;',                  -- multi-declarator (both defs)
+        '  std::unique_ptr<T> arr[4];', -- bare array-of-smart-ptr
+        '  int n = sz;',                -- init: n def, sz still a use (not eaten)
+        '}',
+    }, '\n'), 'cpp')
+    local fl = flow.build(fn, src, { regime = flow.REGIME.cpp })
+    local function du(ln) for _, s in ipairs(fl.stmts) do if s.l == ln then return setof(s.def), setof(s.use) end end end
+    ok(du(2).x, 'bare `int x;` defs x')
+    ok(du(3).p, 'bare `SMesh *p;` defs p')
+    local d4 = du(4); ok(d4.a and d4.b, 'multi `int a, b;` defs both')
+    ok(du(5).arr, 'bare `unique_ptr<T> arr[4];` defs arr')
+    local d6, u6 = du(6); ok(d6.n and u6.sz and not u6.n, 'int n = sz: n def, sz use preserved')
+end)
+
 test('flow: python except_clause is recognised as an exception handler', function ()
     if not ready('python') then skip 'no python parser' end
     local fn, src = parse_fn(table.concat({

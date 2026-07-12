@@ -137,7 +137,7 @@ local function du(root, src, stop_body, ids)
     local def, use, dseen, useen = {}, {}, {}, {}
     local function rec(node, defpos)
         local t = node:type()
-        local asgleft, decld, k
+        local asgleft, decld, k, declist
         if ASSIGN[t] then
             asgleft = node:field('left')[1] or node:field('name')[1] or node:child(0)
             k = 1
@@ -153,6 +153,13 @@ local function du(root, src, stop_body, ids)
             k = 6 -- bash `local/declare x`: a direct variable_name child is a DEF
         elseif defpos and DECLWRAP[t] then
             decld = node:field('declarator')[1]; k = 3 -- C/C++ *ptr / arr[]: continue to the inner name
+        elseif t == 'declaration' then
+            -- C/C++ declaration: EVERY `declarator`-field child is def-position
+            -- (or continues to one — bare `int x;`, `Foo *p;`, multi `int a, b;`,
+            -- and `= init` via init_declarator). The `type` field is left alone
+            -- (types aren't counted names). This is what makes a NO-INITIALIZER
+            -- declaration def its name (init_declarator only exists WITH `=`).
+            declist = node:field('declarator'); k = 7
         else
             k = defpos and WRAP[t] or false
         end
@@ -166,6 +173,9 @@ local function du(root, src, stop_body, ids)
                     or c:type() == 'identifier')
                 elseif k == 5 then cdefpos = (c:type() == 'variable_name')
                 elseif k == 6 then cdefpos = (c:type() == 'variable_name')
+                elseif k == 7 then
+                    cdefpos = false
+                    for _, dd in ipairs(declist) do if same(c, dd) then cdefpos = true; break end end
                 else cdefpos = k end
                 if ids[c:type()] then
                     local nm = txt(c, src)

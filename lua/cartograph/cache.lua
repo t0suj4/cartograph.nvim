@@ -19,7 +19,12 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 29 -- v29: C/C++ POINTER-DECLARATOR DEFS — df def/use now defs the
+M.VERSION = 30 -- v30: C/C++ BARE-DECLARATION DEFS — a declaration with no
+               -- initializer (no init_declarator) now defs its name via the
+               -- `declaration` node's own declarator field(s): `int x;`,
+               -- `Foo *p;`, multi `int a, b;`, `unique_ptr<T> arr[N];`. A v29
+               -- cache miscounts these as uses;
+               -- v29: C/C++ POINTER-DECLARATOR DEFS — df def/use now defs the
                -- inner name through pointer_declarator / reference_declarator /
                -- array_declarator (incl nested `**`), instead of miscounting it
                -- as a use (`Type *p = f()` DEFs p). ~20% of cpp declarations;
