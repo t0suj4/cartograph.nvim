@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 36 -- v36: LUA INHERITANCE (V0) — `setmetatable(X, {__index = P})`
+M.VERSION = 37 -- v37: SOUND self:member (V1) — `self` (param-0 of a colon-
+               -- method) typed by the JOIN of receiver types over the method's
+               -- resolved call sites (backward), then self:member resolved
+               -- through the extends chain. Hedges when undetermined (any
+               -- untypeable call site poisons to hedge) — never the lexical
+               -- owner. Bounded fixpoint; inferred (~). [[cartograph-linker]] V1.
+               -- v36: LUA INHERITANCE (V0) — `setmetatable(X, {__index = P})`
                -- emits an extends edge X->P (data.extends), so resolve_super
                -- resolves ambiguous inherited `X:m()`/`X.m()` calls to the
                -- ancestor that defines m. resolve_super separator generalized

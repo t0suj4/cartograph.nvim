@@ -58,3 +58,51 @@ test('inherit: an ambiguous inherited X:m() resolves to the ancestor def', funct
     eq(animal_speak, call.to)          -- resolved to the inherited ancestor
     ok(call.inferred, 'marked inferred (~), a derived resolution')
 end)
+
+-- V1: `self` typed by the call site. Animal:describe() is called with a literal
+-- class receiver → self=Animal inside it → self:speak() resolves to Animal:speak
+-- (NOT the ambiguous Plant:speak).
+local SELF_SRC = table.concat({
+    'local Animal = {}',                                  -- 1
+    'function Animal:speak() return 1 end',               -- 2
+    'function Animal:describe() return self:speak() end', -- 3  self:speak
+    'local Plant = {}',                                   -- 4
+    'function Plant:speak() return 2 end',                -- 5  (speak ambiguous)
+    'local function use() return Animal:describe() end',  -- 6  literal-class seed
+    'return { use = use }',                               -- 7
+}, '\n')
+
+test('self: self:m() resolves via the call-site-typed class, not the ambiguous tail', function ()
+    if not ts_ready() then return skip 'no lua parser' end
+    local data = extract_src(SELF_SRC)
+    local animal_speak
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'Animal:speak' then animal_speak = n.id end
+    end
+    local call
+    for _, c in ipairs(data.calls) do if c.full == 'self:speak' then call = c end end
+    ok(call, 'self:speak call found')
+    eq(animal_speak, call.to)     -- self typed to Animal via Animal:describe() call site
+    ok(call.inferred, 'inferred (~)')
+end)
+
+-- V1 SOUNDNESS: when self's type is undetermined (an untypeable call site poisons
+-- the method), self:member is LEFT UNRESOLVED — never guessed to the lexical owner.
+local HEDGE_SRC = table.concat({
+    'local A = {}',                              -- 1
+    'function A:foo() return self:amb() end',    -- 2  self:amb
+    'function A:amb() return 1 end',             -- 3
+    'local B = {}',                              -- 4
+    'function B:amb() return 2 end',             -- 5  (amb ambiguous)
+    'local function use(x) return x:foo() end',  -- 6  untypeable receiver → poisons A:foo
+    'return { use = use }',                      -- 7
+}, '\n')
+
+test('self: an untypeable call site hedges — self:m() stays unresolved, no lexical guess', function ()
+    if not ts_ready() then return skip 'no lua parser' end
+    local data = extract_src(HEDGE_SRC)
+    local call
+    for _, c in ipairs(data.calls) do if c.full == 'self:amb' then call = c end end
+    ok(call, 'self:amb call found')
+    eq(nil, call.to)              -- A:foo poisoned by x:foo() → self hedged, NOT A:amb
+end)

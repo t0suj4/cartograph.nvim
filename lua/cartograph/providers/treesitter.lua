@@ -2871,6 +2871,101 @@ local function resolve_module_alias(calls, edges, exact, tail, addref)
     return n
 end
 
+-- V1: SOUND self:member resolution ([[cartograph-linker]] receiver-typing).
+-- `self` is param-0 of a colon-method; its type is the JOIN of receiver types
+-- over the method's RESOLVED call sites (backward flow) — NOT the lexical owner,
+-- which the census showed is ~89% wrong (handler-self = an API frame; mixin-self
+-- = a derived instance). Once self's class C is DETERMINED (all call sites agree
+-- on one class), self:member resolves in C's own defs + extends chain. The
+-- soundness gate: any untypeable call site POISONS the method to hedge, and a
+-- receiver that is `self` inherits the ENCLOSING method's class — so a resolution
+-- happens only when every path types self to a single class; otherwise the call
+-- is left unresolved (never a lexical guess). Bounded fixpoint: typing a method
+-- propagates to the methods it reaches via self:. Marked inferred (~) — a derived
+-- resolution (known limit: a local shadowing a class NAME could mis-seed; the ~
+-- tier is honest about it). Lua-shaped (self as an explicit param-0).
+local function resolve_self(calls, node_index, extends, exact, addref)
+    -- class-name set: any table T that owns a method (`T:x` / `T.x` in exact)
+    local is_class = {}
+    for name in pairs(exact) do
+        local owner = name:match('^([%w_]+)[:.]')
+        if owner then is_class[owner] = true end
+    end
+    if not next(is_class) then return 0 end
+    local super = build_super(extends)
+    -- member in class C: own defs first, then walk the extends chain; unique or nil
+    local function lookup(C, member, clang)
+        local seen, cur = {}, C
+        for _ = 1, SUPER_STEP_LIMIT do
+            for _, sep in ipairs({ ':', '.' }) do
+                local fit, dup
+                for _, nd in ipairs(exact[cur .. sep .. member] or {}) do
+                    if elang_for(nd.file) == clang then
+                        if fit and fit.id ~= nd.id then dup = true else fit = nd end
+                    end
+                end
+                if dup then return nil end
+                if fit then return fit end
+            end
+            local par = super[cur]
+            if not par or seen[par] then break end
+            seen[par] = true; cur = par
+        end
+        return nil
+    end
+    local selft = {}    -- method-id -> { [class]=true } accumulator, or false=poisoned
+    local function addtype(mid, C)
+        if selft[mid] == false then return end
+        selft[mid] = selft[mid] or {}
+        selft[mid][C] = true
+    end
+    local function selfclass(mid) -- the SINGLE determined class, or nil (hedge)
+        local s = selft[mid]
+        if not s then return nil end
+        local one
+        for c in pairs(s) do if one then return nil else one = c end end
+        return one
+    end
+    local n = 0
+    for round = 1, 6 do
+        local progress = false
+        -- (1) accumulate self-types from resolved method call sites (backward)
+        for _, c in ipairs(calls or {}) do
+            if c.to and c.full and node_index[c.to] and node_index[c.to].kind == 'method' then
+                local recv = c.full:match('^([%w_]+)[:.]')
+                if recv == 'self' then
+                    local CE = c.fn and selfclass(c.fn) -- enclosing method's self
+                    if CE then addtype(c.to, CE)
+                    elseif c.fn and selft[c.fn] == false then selft[c.to] = false end
+                elseif recv and is_class[recv] then
+                    addtype(c.to, recv)            -- literal class receiver
+                elseif recv then
+                    selft[c.to] = false            -- untypeable receiver → hedge
+                end
+            end
+        end
+        -- (2) resolve self:member calls whose enclosing method is typed to one class
+        for _, c in ipairs(calls or {}) do
+            if not c.to and c.full and c.fn then
+                local member = c.full:match('^self[:.]([%w_]+)$')
+                local C = member and selfclass(c.fn)
+                if C then
+                    local fit = lookup(C, member, elang_for(c.file))
+                    if fit then
+                        c.to = fit.id; c.inferred = true; c.refused = nil
+                        addref(c.fn, fit.id, c.at
+                            or { start = { line = c.line, char = 0 },
+                                 ['end'] = { line = c.line, char = 0 } }, true)
+                        n = n + 1; progress = true
+                    end
+                end
+            end
+        end
+        if not progress and round > 1 then break end
+    end
+    return n
+end
+
 -- Return-type rounds (the graph-VM MVP — see the graph-vm design memo).
 -- A call whose receiver is ANOTHER call (f().g()) or a local typed only by
 -- its initializer's return (`var x = f(); x.g()`) could not be qualified
@@ -5326,6 +5421,10 @@ function M.extract(root, opts)
     local retn, retrounds = resolve_returns(calls, node_index, exact, addref)
     if retn > 0 then data.ret_resolved, data.ret_rounds = retn, retrounds end
 
+    -- self:member — type `self` from resolved call sites (backward), resolve
+    -- through the extends chain; hedge when undetermined (V1 receiver typing)
+    resolve_self(calls, node_index, data.extends, exact, addref)
+
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
     -- lookups; slice-local uniqueness is not global uniqueness)
@@ -5690,6 +5789,7 @@ function M.relink(data, touched)
     local node_index = {}
     for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
     local retn = resolve_returns(data.calls, node_index, exact, addref)
+    n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
     return n + retn
 end
 
