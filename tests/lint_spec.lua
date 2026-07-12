@@ -88,3 +88,29 @@ test('lint: silent-drop ignores resolved, dynamic, qualified, and short-name cal
         } })
     eq(0, #lint.run(store, only('silent-drop')))
 end)
+
+test('ladder: narrowable-refusal classifies receivers and ranks the work-list', function ()
+    local ladder = require 'cartograph.ladder'
+    local caller = fn('u.lua', 'run'); caller.params = { 'obj' }
+    local amb = { rule = 'ambiguous', n = 2, cands = { 'a.lua::M.x', 'b.lua::M.x' } }
+    store.ingest({ schema = 1, root = '/x',
+        nodes = { mod('u.lua'), caller, fn('a.lua', 'M.x'), fn('b.lua', 'M.x') },
+        edges = { { from = 'u.lua', to = 'mod.lua', kind = 'import', bind = 'm' } },
+        calls = {
+            { callee = 'get',  full = 'm.get',    fn = 'u.lua::run', file = 'u.lua', at = R0, refused = amb }, -- alias
+            { callee = 'load', full = 'm.load',   fn = 'u.lua::run', file = 'u.lua', at = R0, refused = amb }, -- alias (2nd member)
+            { callee = 'bar',  full = 'self.bar', fn = 'u.lua::run', file = 'u.lua', at = R0, refused = amb }, -- self
+            { callee = 'baz',  full = 'obj.baz',  fn = 'u.lua::run', file = 'u.lua', at = R0, refused = amb }, -- local (obj = param)
+            { callee = 'qux',  full = 'x.qux',    fn = 'u.lua::run', file = 'u.lua', at = R0, refused = amb }, -- unknown
+        } })
+    local nb = ladder.narrowable(store)
+    local by = {}; for _, a in ipairs(nb) do by[a.class] = a end
+    ok(by.alias and by.alias.recv == 'm' and by.alias.calls == 2 and by.alias.nmembers == 2,
+        'require-alias receiver: 2 calls, 2 members')
+    ok(by.self and by.self.recv == 'self', 'self receiver classed self')
+    ok(by['local'] and by['local'].recv == 'obj', 'param receiver classed local')
+    ok(by.unknown and by.unknown.recv == 'x', 'free receiver classed unknown')
+    -- ranked by payoff = calls × narrowability (alias 2×4 > self 1×3 > local 1×2 > unknown 1×1)
+    eq('alias', nb[1].class)
+    ok(nb[1].score >= nb[#nb].score, 'sorted by descending score')
+end)

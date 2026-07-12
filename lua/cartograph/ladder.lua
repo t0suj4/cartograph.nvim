@@ -75,6 +75,72 @@ function M.summary(t)
     return #parts > 0 and table.concat(parts, ' ') or '(no calls)'
 end
 
+--- NARROWABLE REFUSALS — rule 2 of the resolution-health analyzer. An ambiguous
+--- refusal on a QUALIFIED call (`recv.member`) is narrowable by typing the
+--- receiver; classify the receiver by WHICH rung would resolve it and rank the
+--- receiver-typing WORK-LIST by payoff (calls unlocked × narrowability). This is
+--- the df-census insight as a standing ranking: which receivers, once typed,
+--- dissolve the most refusals. Returns a sorted list of
+--- { file, recv, class, calls, nmembers, score }.
+---   alias  = receiver is a require-import bind (module-alias, rung 1 — surest;
+---            what's left here is a member the module-alias pass couldn't pick)
+---   self   = self/this receiver (class-property atlas / receiver typing)
+---   local  = receiver is a local/param of the enclosing fn (reaching / VM tinf)
+---   unknown= a free receiver (hardest)
+function M.narrowable(store)
+    local calls = store.data.calls or {}
+    local alias = {} -- file -> { require-bound alias name -> true }
+    for _, e in ipairs(store.data.edges or {}) do
+        if e.kind == 'import' and e.bind and e.from then
+            local m = alias[e.from]; if not m then m = {}; alias[e.from] = m end
+            m[e.bind] = true
+        end
+    end
+    local df = require 'cartograph.df'
+    local locals = {}
+    local function fn_locals(id)
+        local s = locals[id]; if s then return s end
+        s = {}; local n = id and store.node(id)
+        if n then
+            for _, p in ipairs(n.params or {}) do s[p] = true end
+            for _, st in ipairs(df.stmts(n)) do for _, d in ipairs(st.def or {}) do s[d] = true end end
+        end
+        locals[id] = s; return s
+    end
+    local W = { alias = 4, self = 3, ['local'] = 2, unknown = 1 } -- narrowability
+    local agg = {}
+    for _, c in ipairs(calls) do
+        if not c.to and not c.dynamic and c.refused and c.refused.rule == 'ambiguous'
+            and c.refused.cands and #c.refused.cands > 0 and c.full then
+            local recv, member = c.full:match('^([%w_]+)[.:]([%w_]+)$')
+            if recv and member then
+                local class = (recv == 'self' or recv == 'this') and 'self'
+                    or (alias[c.file] and alias[c.file][recv]) and 'alias'
+                    or (c.fn and fn_locals(c.fn)[recv]) and 'local'
+                    or 'unknown'
+                local key = c.file .. '\31' .. recv .. '\31' .. class
+                local a = agg[key]
+                if not a then a = { file = c.file, recv = recv, class = class,
+                    calls = 0, members = {} }; agg[key] = a end
+                a.calls = a.calls + 1
+                a.members[member] = true
+            end
+        end
+    end
+    local out = {}
+    for _, a in pairs(agg) do
+        a.nmembers = 0; for _ in pairs(a.members) do a.nmembers = a.nmembers + 1 end
+        a.members = nil
+        a.score = a.calls * W[a.class] -- payoff = calls unlocked × narrowability
+        out[#out + 1] = a
+    end
+    table.sort(out, function (x, y)
+        if x.score ~= y.score then return x.score > y.score end
+        return x.calls > y.calls
+    end)
+    return out
+end
+
 --- The graph report: the distribution, then the heaviest refusal sites
 --- (the forks worth resolving), each as { file, line, callee, n }.
 function M.report(store)
@@ -111,6 +177,19 @@ function M.report(store)
             local c = refs[i]
             lines[#lines + 1] = ('  %s:%d  %s  (%d candidates)')
                 :format(c.file, c.line + 1, c.callee, c.refused.n or 0)
+        end
+    end
+    -- the receiver-typing WORK-LIST: which receivers, typed, dissolve the most
+    -- ambiguous forks (rule 2 of the resolution-health analyzer)
+    local nb = M.narrowable(store)
+    if #nb > 0 then
+        lines[#lines + 1] = ''
+        lines[#lines + 1] = 'narrowable by receiver (type the receiver → resolve the fork):'
+        for i = 1, math.min(12, #nb) do
+            local a = nb[i]
+            lines[#lines + 1] = ('  %-12s [%-7s] %s  (%d call%s, %d member%s)')
+                :format(a.recv, a.class, a.file, a.calls, a.calls == 1 and '' or 's',
+                    a.nmembers, a.nmembers == 1 and '' or 's')
         end
     end
     return lines
