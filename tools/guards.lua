@@ -39,4 +39,28 @@ for _, f in ipairs(findings) do
     if f.severity == 'warn' then warns = warns + 1 end
 end
 print(('guards: %d findings (%d warn)'):format(#findings, warns))
-if warns > 0 then os.exit(1) end
+
+-- df/flow PARITY on the SELF repo: coarse(flow)==df + flow CFG invariants, the
+-- check the structure snapshot can't do (it drops df). Reuses the extraction
+-- above — no second pass. Skipped for a custom root (not a calibrated corpus).
+local dffail = false
+if root == repo then
+    local dfp = dofile(repo .. '/tools/dfparity.lua')
+    local r = dfp.check(store.data, 'lua')
+    print(('df/flow parity (self): fns=%d stmts=%d flow-invariant-errors=%d · %s')
+        :format(r.nfn, r.nstmt, r.ferr, dfp.census(r.cats)))
+    -- HARD-GATE only the churn-INSENSITIVE signal: flow's CFG
+    -- (successors/liveness/reaching) must never THROW on valid code, no matter
+    -- how the repo evolves. The census itself CHURNS with cartograph's own code
+    -- (every added closure ticks df-over-collects), like the self structure
+    -- snapshot — so it's REPORTED here but pinned+gated only in the push-time
+    -- CLI (`dfgate self`, recalibrated on commit); gating it in this dev-loop
+    -- run would cry wolf. Asymmetry regressions are caught on the STABLE
+    -- external corpora (`dfgate cpp|rust|…`), which don't churn.
+    if r.ferr > 0 then
+        print(('  FAIL: %d flow-invariant errors (successors/liveness/reaching threw)'):format(r.ferr))
+        dffail = true
+    end
+end
+
+if warns > 0 or dffail then os.exit(1) end
