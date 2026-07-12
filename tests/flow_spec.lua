@@ -252,3 +252,44 @@ test('flow: scope-regime — lua locals are block-scoped (die at do..end)', func
     ok(edge_at(fl, edges, 'w', 4).kind == 'lexical', 'w reaches inside its block')
     ok(edge_at(fl, edges, 'w', 6).kind == 'free', 'local w does NOT reach after the do-block')
 end)
+
+-- per-language config step: rust control is EXPRESSIONS (if_expression, wrapped
+-- in expression_statement) and `let` is let_declaration — flow now regions them
+-- via cfg-independent node-type support, so rust `let` is block-scoped.
+test('flow: scope-regime — rust let is block-scoped (fine structure)', function ()
+    if not ready('rust') then skip 'no rust parser' end
+    local fn, src = parse_fn(table.concat({
+        'fn f(c: bool) {',
+        '    if c {',
+        '        let w = 1;',
+        '        g(w);',           -- line 4: in scope
+        '    }',
+        '    h(w);',               -- line 6: let w dead after the if-block → free
+        '}',
+    }, '\n'), 'rust')
+    ok(fn, 'found the function node')
+    local fl = flow.build(fn, src, { regime = flow.REGIME.rust })
+    local edges = flow.reaching(fl)
+    ok(edge_at(fl, edges, 'w', 4).kind == 'lexical', 'w reaches inside its block')
+    ok(edge_at(fl, edges, 'w', 6).kind == 'free', 'let w does NOT reach after the if-block')
+end)
+
+-- per-language config step: bash names are `variable_name` LEAVES (not
+-- identifier/name), so du must count them via the language's df_ids extension
+-- (cfg.df_ids); `local x=…` is a declaration_command def-position.
+test('flow: per-language df_ids — bash variable_name leaves + local def', function ()
+    if not ready('bash') then skip 'no bash parser' end
+    local fn, src = parse_fn(table.concat({
+        'f() {',
+        '  local x=1',
+        '  echo "$x"',
+        '}',
+    }, '\n'), 'bash')
+    ok(fn, 'found the function node')
+    local co = flow.coarse(flow.build(fn, src, { df_ids = { variable_name = true } }))
+    ok(setof(co[1].def).x, 'bash `local x=1` defines x (declaration_command + df_ids)')
+    ok(setof(co[2].use).x, 'bash `echo "$x"` uses x (variable_name leaf counted)')
+    -- without df_ids, variable_name is invisible → x is neither def nor use
+    local co0 = flow.coarse(flow.build(fn, src))
+    ok(not setof(co0[1].def).x, 'without df_ids, bash variable_name is not counted')
+end)

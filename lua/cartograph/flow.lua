@@ -18,7 +18,11 @@ local BODY = { block = true, compound_statement = true, statement_block = true }
 local CTRL = { if_statement = true, while_statement = true, for_statement = true,
     for_numeric_statement = true, for_generic_statement = true,
     foreach_statement = true, repeat_statement = true, do_statement = true,
-    switch_statement = true, match_expression = true, try_statement = true }
+    switch_statement = true, match_expression = true, try_statement = true,
+    -- rust control is EXPRESSIONS (wrapped in expression_statement — emit
+    -- unwraps); node types are rust-unique so listing them is language-safe
+    if_expression = true, while_expression = true, loop_expression = true,
+    for_expression = true, match_block = true }
 -- clause nodes carrying a sub-region's statements
 -- POST-condition loops: the condition runs AFTER the body
 local POST = { do_statement = true, repeat_statement = true }
@@ -85,7 +89,11 @@ end
 -- the row owns only its condition — an elseif/else/case condition belongs to
 -- that clause's row, not the head's (else it lands at the wrong DFS position
 -- and defeats the order-sensitive shadow).
-local function du(root, src, stop_body)
+-- `ids` = the leaf-name node types to count = DFID plus the language's df_ids
+-- extension (bash counts `variable_name` as a LEAF; php descends it as a WRAP —
+-- so this is the one genuinely per-language-conflicting set, gated by cfg).
+local function du(root, src, stop_body, ids)
+    ids = ids or DFID
     if not root then return {}, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
     local function rec(node, defpos)
@@ -96,10 +104,14 @@ local function du(root, src, stop_body)
             k = 1
         elseif DECL[t] then
             decld = node:field('declarator')[1] or node:field('name')[1]; k = 3
+        elseif t == 'let_declaration' then
+            decld = node:field('pattern')[1]; k = 3 -- rust `let <pat> = …`
         elseif t == 'variable_declaration' or t == 'local_declaration' then
             k = 4 -- lua bare `local a, b` (no `=`): the variable_list is a DEF
         elseif t == 'catch_clause' then
             k = 5 -- catch(Type $e): the variable_name is a BINDING (DEF), type a use
+        elseif t == 'declaration_command' then
+            k = 6 -- bash `local/declare x`: a direct variable_name child is a DEF
         else
             k = defpos and WRAP[t] or false
         end
@@ -112,8 +124,9 @@ local function du(root, src, stop_body)
                 elseif k == 4 then cdefpos = (c:type() == 'variable_list'
                     or c:type() == 'identifier')
                 elseif k == 5 then cdefpos = (c:type() == 'variable_name')
+                elseif k == 6 then cdefpos = (c:type() == 'variable_name')
                 else cdefpos = k end
-                if DFID[c:type()] then
+                if ids[c:type()] then
                     local nm = txt(c, src)
                     if cdefpos then
                         if not dseen[nm] then dseen[nm] = true; def[#def + 1] = nm end
@@ -128,7 +141,7 @@ local function du(root, src, stop_body)
     -- a statement that IS a bare name leaf — e.g. a rust/ml tail-expression
     -- `out` (implicit return), an enum `None`. du only inspects CHILDREN, so a
     -- root name would be missed; count it as a use (a root has no def-context).
-    if DFID[root:type()] and root:named() and root:child_count() == 0 then
+    if ids[root:type()] and root:named() and root:child_count() == 0 then
         local nm = txt(root, src)
         if not dseen[nm] and not useen[nm] then useen[nm] = true; use[#use + 1] = nm end
     end
@@ -182,14 +195,33 @@ end
 function M.build(fnnode, src, cfg)
     cfg = cfg or {}
     local regimetab = cfg.regime or {}
+    -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
+    local ids = DFID
+    if cfg.df_ids then
+        ids = {}
+        for k in pairs(DFID) do ids[k] = true end
+        for k in pairs(cfg.df_ids) do ids[k] = true end
+    end
     local stmts = {}
     local emit, region, clause -- fwd
 
     -- emit `node` as a statement row (parent/pol) and recurse its sub-regions
     function emit(node, parent, pol)
         local t = node:type()
+        -- rust: control is EXPRESSIONS wrapped in an expression_statement.
+        -- Unwrap a sole CTRL child so it is regioned like a control statement.
+        if t == 'expression_statement' then
+            local inner
+            for c in node:iter_children() do
+                if c:named() and c:type() ~= 'comment' then
+                    if inner then inner = nil; break end
+                    inner = c
+                end
+            end
+            if inner and CTRL[inner:type()] then return emit(inner, parent, pol) end
+        end
         local idx = #stmts + 1
-        local d, u = du(node, src, CTRL[t] and true or false)
+        local d, u = du(node, src, CTRL[t] and true or false, ids)
         stmts[idx] = { l = line(node), kind = CTRL[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function' }
@@ -213,7 +245,7 @@ function M.build(fnnode, src, cfg)
                 end
             end
             if POST[t] and cond then
-                local cd, cu = du(cond, src, false)
+                local cd, cu = du(cond, src, false, ids)
                 stmts[#stmts + 1] = { l = line(cond), kind = 'cond',
                     parent = idx, pol = 'cond', def = cd, use = cu }
             end
@@ -238,7 +270,7 @@ function M.build(fnnode, src, cfg)
             -- the header binds the exception var (DEF) and references the type
             -- (use); the body regions under it. Without this the caught var is
             -- unbound in the fine model and df's spurious use of it is unmatched.
-            local d, u = du(node, src, true)
+            local d, u = du(node, src, true, ids)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), kind = 'catch', parent = parent,
                 pol = 'catch', def = d, use = u }
