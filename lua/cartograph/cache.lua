@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 35 -- v35: nvim-plugin REPO SHAPE — a corpus with a `lua/` package
+M.VERSION = 36 -- v36: LUA INHERITANCE (V0) — `setmetatable(X, {__index = P})`
+               -- emits an extends edge X->P (data.extends), so resolve_super
+               -- resolves ambiguous inherited `X:m()`/`X.m()` calls to the
+               -- ancestor that defines m. resolve_super separator generalized
+               -- (:: php/java, :/. lua). The receiver-typing foundation
+               -- ([[cartograph-linker]] V0). New inherited-method ref edges.
+               -- v35: nvim-plugin REPO SHAPE — a corpus with a `lua/` package
                -- layout resolves `require 'foo.bar'` → lua/foo/bar.lua (marker-
                -- gated). Unblocks module-alias (v34) on self: self's own
                -- `require 'cartograph.X'` now resolve → import edges + binds →

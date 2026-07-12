@@ -861,6 +861,25 @@ M.spec = {
         -- through the table, invisible to a name graph
         field_fn_cbarg = true,
         calls = [[ (function_call name: (_) @name) @call ]],
+        -- OO inheritance/instancing via metatables: `setmetatable(X, {__index =
+        -- P})` makes X's `:method` dispatch fall through to P (and P's own
+        -- __index chain). The __index relation is what matters for method
+        -- resolution — X may be a subclass OR an instance, both sound (X's
+        -- methods come from P either way). Emitted as an extends edge X->P
+        -- (data.extends), consumed by resolve_super for `X:m()`/`X.m()` calls
+        -- (V0, [[cartograph-linker]] receiver-typing foundation). Only the
+        -- explicit `{__index = <id>}` form (unambiguous); the bare-2nd-arg
+        -- `setmetatable(X, P)` heuristic + the `local X = setmetatable({},…)`
+        -- assignment form are deferred (soundness-first).
+        super_query = [=[
+            (function_call
+                name: (identifier) @_smt (#eq? @_smt "setmetatable")
+                arguments: (arguments
+                    (identifier) @child
+                    (table_constructor
+                        (field name: (identifier) @_k (#eq? @_k "__index")
+                               value: (identifier) @parent))))
+        ]=],
         vars = [[
             (variable_declaration
                 (assignment_statement
@@ -2761,15 +2780,18 @@ local function resolve_super(calls, extends, exact, addref)
     local n = 0
     for _, c in ipairs(calls or {}) do
         if not c.to and c.refused and c.refused.cands and c.full then
-            local head, method = c.full:match('^([%w_]+)::([%w_]+)$')
-            if head and super[head] then
+            -- separator is language-relative: `::` (php/java), `:`/`.` (lua
+            -- colon/dot methods). Captured so the ancestor lookup key reuses the
+            -- SAME separator the def keys and this call use — one path, all langs.
+            local head, sep, method = c.full:match('^([%w_]+)([:.]+)([%w_]+)$')
+            if head and sep and super[head] then
                 local clang = elang_for(c.file)
                 local seen, cur, target = { [head] = true }, head, nil
                 for _ = 1, SUPER_STEP_LIMIT do
                     local par = super[cur]
                     if not par or seen[par] then break end -- top of chain / cycle
                     seen[par] = true
-                    local cands = exact[par .. '::' .. method]
+                    local cands = exact[par .. sep .. method]
                     if cands then
                         local fit, dup = nil, false
                         for _, node in ipairs(cands) do
