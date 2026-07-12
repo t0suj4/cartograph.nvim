@@ -56,6 +56,12 @@ local CASE = { case_statement = true, default_statement = true,
 -- elsewhere; a `break` inside a case exits the switch, its join)
 local SWITCH = { switch_statement = true, expression_switch_statement = true,
     type_switch_statement = true, select_statement = true }
+-- SUSPENSION points (continuations, Tier 1): a `yield`/`await` suspends — control
+-- may leave to the caller/scheduler HERE (a suspend edge to exit) — then RESUMES
+-- at the next statement (the normal sequential successor). python `yield`/`await`,
+-- JS/TS `yield_expression`/`await_expression`.
+local SUSPEND = { yield = true, await = true,
+    yield_expression = true, await_expression = true }
 
 -- SCOPE-REGIME classification (df-strangler step 2b): per language, which
 -- declaration node types are BLOCK-scoped (the binding dies at its region's
@@ -215,6 +221,21 @@ local function du(root, src, stop_body, ids)
     return def, use
 end
 
+-- does `root`'s OWN subtree contain a suspension point (yield/await)? Mirrors
+-- du's traversal: NOT into nested function bodies, and (when stop_body, a
+-- control head's own row) NOT into sub-regions — a yield in a loop body is that
+-- body row's suspend, not the head's.
+local function has_suspend(root, stop_body)
+    if SUSPEND[root:type()] then return true end
+    for c in root:iter_children() do
+        if c:named() and not FN[c:type()]
+            and not (stop_body and (BODY[c:type()] or CLAUSE[c:type()])) then
+            if has_suspend(c, stop_body) then return true end
+        end
+    end
+    return false
+end
+
 -- parameter binder names of a fn node — mirrors df's fn_params (treesitter.lua)
 -- for coarse-dep PARITY: the pfield container's leaves; php `variable_name`
 -- drops its `$`; a method seeds 'self' first; nested declarators (C params,
@@ -287,10 +308,12 @@ function M.build(fnnode, src, cfg)
             if inner and CTRL[inner:type()] then return emit(inner, parent, pol) end
         end
         local idx = #stmts + 1
-        local d, u = du(node, src, CTRL[t] and true or false, ids)
+        local sb = CTRL[t] and true or false
+        local d, u = du(node, src, sb, ids)
         stmts[idx] = { l = line(node), kind = CTRL[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
-            regime = regimetab[t] or 'function', t = t } -- t = raw node type (CFG terminators)
+            regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
+            suspend = has_suspend(node, sb) or nil } -- yield/await = a Tier-1 continuation point
         if CTRL[t] then
             local cond = node:field('condition')[1]
                 or (SWITCH[t] and node:field('value')[1]) -- go switch: `value` is the switched expr
@@ -593,6 +616,11 @@ function M.successors(flow)
             local r, nxt = rows[i], (rows[i + 1] or after)
             local s, kids = S[r], region[r]
             local t = s.t
+            -- SUSPENSION (yield/await): control may leave to the caller/scheduler
+            -- here (suspend → exit), IN ADDITION to resuming at the normal
+            -- successor the dispatch below adds. Resume-scheduling is external → a
+            -- `~` in spirit; the edge itself is sound (control can leave here).
+            if s.suspend then add(r, 'exit') end
             if RET_T[t] then add(r, 'exit')
             elseif t == 'break_statement' then add(r, brk or 'exit')
             elseif t == 'continue_statement' then add(r, cont or 'exit')

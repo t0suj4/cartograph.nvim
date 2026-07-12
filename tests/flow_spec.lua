@@ -383,6 +383,22 @@ test('flow: predecessors transposes successors; exit is the backward root', func
     ok(has(pred, 'exit', row(fl, 'stmt', 2)), 'the return is a predecessor of exit (a backward root)')
 end)
 
+test('flow: yield/await are suspension points — suspend to exit + resume to next', function ()
+    if not ready('python') then skip 'no python parser' end
+    local fn, src = parse_fn(table.concat({
+        'def g():',
+        '  a()',
+        '  x = yield v',   -- suspend (yield v out), resume (x = sent value) here
+        '  b(x)',
+    }, '\n'), 'python')
+    local fl = flow.build(fn, src, { regime = flow.REGIME.python })
+    local y = row(fl, 'stmt', 3)
+    ok(fl.stmts[y].suspend, 'the yield row is flagged as a suspension point')
+    local cfg = flow.successors(fl)
+    ok(has(cfg.succ, y, cfg.EXIT), 'suspend edge: control may leave to the caller at yield')
+    ok(has(cfg.succ, y, row(fl, 'stmt', 4)), 'resume edge: the continuation b(x) runs on resume')
+end)
+
 -- CFG phase 2b: post-condition loops, plain blocks, feasibility, exception edges.
 test('flow: POST-condition loop (repeat/until) — body runs before the test, no zero-trip', function ()
     if not ready('lua') then skip 'no lua parser' end
