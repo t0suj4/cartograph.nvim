@@ -3398,10 +3398,19 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
             elseif nt == 'init_declarator' or nt == 'variable_declarator' then
                 decld = n:field('declarator')[1] or n:field('name')[1]
                 dfk = 3
+            elseif defpos and (nt == 'pointer_declarator'
+                or nt == 'array_declarator') then
+                -- C/C++ `Type *p`, `**pp`, `arr[N]`: def-position continues down
+                -- the `declarator` field to the inner name (NOT to array `size`
+                -- or pointer `type_qualifier`, which are uses/non-names).
+                decld = n:field('declarator')[1]
+                dfk = 3
             else
-                -- def position survives transparent wrappers only
+                -- def position survives transparent wrappers only; C++
+                -- `reference_declarator` (`Type &r`) has no declarator field —
+                -- its lone named child IS the inner declarator.
                 dfk = defpos and (nt == 'variable_list'
-                    or nt == 'variable_name')
+                    or nt == 'variable_name' or nt == 'reference_declarator')
             end
         end
         local i, c = 0, n:child(0)

@@ -462,6 +462,30 @@ test('flow: try/catch/finally — every try point reaches the handler; finally i
     ok(has(cfg.succ, fin, tail), 'finally completes to the statement after the try')
 end)
 
+test('flow: C/C++ pointer/reference/array declarators DEF the inner name', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    local fn, src = parse_fn(table.concat({
+        'void g(){',
+        '  SMesh *mesh = make();',   -- pointer: mesh is a DEF (was miscounted as a use)
+        '  int x = 5;',              -- plain: control
+        '  Foo &r = getref();',      -- reference: r is a DEF
+        '  char **pp = argv;',       -- double pointer: pp is a DEF
+        '  int arr[4] = {0};',       -- array: arr is a DEF, size 4 is not
+        '}',
+    }, '\n'), 'cpp')
+    local fl = flow.build(fn, src, { regime = flow.REGIME.cpp })
+    local function defuse(ln)
+        for _, s in ipairs(fl.stmts) do
+            if s.l == ln then return setof(s.def), setof(s.use) end
+        end
+    end
+    local d2 = defuse(2); ok(d2.mesh, 'SMesh *mesh is a def')
+    local d4 = defuse(4); ok(d4.r, 'Foo &r is a def (reference_declarator)')
+    local d5 = defuse(5); ok(d5.pp, 'char **pp is a def (nested pointer_declarator)')
+    local d6, u6 = defuse(6); ok(d6.arr, 'int arr[4] is a def (array_declarator)')
+    ok(not u6.arr, 'arr is not also a use')
+end)
+
 test('flow: python except_clause is recognised as an exception handler', function ()
     if not ready('python') then skip 'no python parser' end
     local fn, src = parse_fn(table.concat({

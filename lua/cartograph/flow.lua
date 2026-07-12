@@ -104,7 +104,16 @@ local DECL = { init_declarator = true, variable_declarator = true }
 -- an inner `name` — count the inner name only (df does), else `$x` AND `x`
 -- double-count; but variable_name still propagates def-position (WRAP).
 local DFID = { identifier = true, name = true }
-local WRAP = { variable_list = true, variable_name = true } -- def-pos passes through
+-- def-position passes THROUGH these transparent wrappers to the inner name.
+-- `reference_declarator` (C++ `Type &r`) has no `declarator` field — its only
+-- named child IS the inner declarator — so it rides the blanket WRAP path.
+local WRAP = { variable_list = true, variable_name = true,
+    reference_declarator = true }
+-- C/C++ declarator wrappers WITH a `declarator` field (a `*`/`[]` around the
+-- declared name): def-position continues down that field, NOT to siblings like
+-- an array `size` or pointer `type_qualifier` (which are uses/non-names). So
+-- `SMesh *mesh = f()` and `char **pp`, `int arr[4]` all DEF the inner name.
+local DECLWRAP = { pointer_declarator = true, array_declarator = true }
 
 local function same(a, b)
     if not (a and b) then return false end
@@ -142,6 +151,8 @@ local function du(root, src, stop_body, ids)
             k = 5 -- catch(Type $e): the variable_name is a BINDING (DEF), type a use
         elseif t == 'declaration_command' then
             k = 6 -- bash `local/declare x`: a direct variable_name child is a DEF
+        elseif defpos and DECLWRAP[t] then
+            decld = node:field('declarator')[1]; k = 3 -- C/C++ *ptr / arr[]: continue to the inner name
         else
             k = defpos and WRAP[t] or false
         end

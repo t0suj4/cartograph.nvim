@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 28 -- v28: PURITY INPUTS — fns carry pw (indexes of own params
+M.VERSION = 29 -- v29: C/C++ POINTER-DECLARATOR DEFS — df def/use now defs the
+               -- inner name through pointer_declarator / reference_declarator /
+               -- array_declarator (incl nested `**`), instead of miscounting it
+               -- as a use (`Type *p = f()` DEFs p). ~20% of cpp declarations;
+               -- fixes reaching/write-axis/reorder on cpp. Mirrors flow.du;
+               -- a v28 cache miscounts cpp pointer decls;
+               -- v28: PURITY INPUTS — fns carry pw (indexes of own params
                -- written through: the lua/js reference-semantics fact) and
                -- use edges carry flds (per-field packed rw+gw, ''=whole-var);
                -- a v27 cache lacks both;
