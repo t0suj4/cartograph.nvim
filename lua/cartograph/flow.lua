@@ -3,7 +3,11 @@
 -- one row; flow emits statements at EVERY nesting level and records a
 -- CONTROL-PARENT (the region tree = CFG dominance df can't express). Increment
 -- 1: the STRUCTURE only (l/kind/parent/pol), on-demand from an AST node (like
--- cfg.lua); def/use/dep + fold + extraction-fusion are later strangler steps.
+-- cfg.lua). Since shipped: fine def/use (step 2), scope-regime reaching (2b),
+-- per-language config seam (2c), and the COLUMNAR FOLD (step 3, M.fold +
+-- dual-mode accessors at the foot of this file). REMAINING: extraction-fusion
+-- (step 4 — emit rows in collect_mentions, VERSION bump) → migrate df consumers
+-- → retire df.
 --
 -- PARITY ORACLE: flow's TOP-LEVEL rows (parent==0) reproduce df's coarse
 -- statement partition (same lines) — that is what lets df's read-contract and
@@ -800,6 +804,220 @@ function M.reaching_cfg(flow)
         end
     end
     return edges
+end
+
+-- ── the fold: nested flow records → one columnar store (df-strangler step 3) ──
+-- A flow record ({ stmts = {rows}, params = {names} }) is the df successor and
+-- the LARGER datum — a row per statement at EVERY nesting level. The fold
+-- collapses every node's record into ONE columnar store per graph, leaving each
+-- node an offset+count slice (_flow0/_flown into rows, _flowp0/_flowpn into
+-- params). Row VIEWS materialize on demand, shaped EXACTLY like M.build's rows,
+-- so successors/coarse/liveness/reaching_cfg (all PURE functions of the rows)
+-- read identically whether folded or raw. Dual-mode accessors (folded slice when
+-- n._flow is set, raw n.flow otherwise) = the argv/df fold lifecycle.
+--
+-- SHAPE INTERNING (the flow-specific win over df's uniform-u32 scheme): df rows
+-- are payload (l + variable def/use/dep); flow rows are dominated by CATEGORICAL
+-- descriptors (kind/pol/t/regime/const/suspend) whose distinct combinations are
+-- BOUNDED BY THE GRAMMAR, not the corpus — MEASURED at 55-71 across Java/C++/Lua
+-- and a full PHP framework+deps tree. So the whole descriptor tuple interns to
+-- ONE small `shape` id per row (a ~70-entry decode table) instead of six columns.
+-- The remaining columns pack at their MEASURED width (parent/name-ids fit u16 on
+-- every corpus; u32 fallback chosen at fold time for a pathological outlier).
+-- This roughly HALVES the store vs the naive layout — putting flow's fine model
+-- below df's coarse one in bytes despite carrying ~1.3-2.6x the rows.
+--
+-- cfg is BUILD-TIME ONLY: regime/pfield/df_ids/method are baked into each row at
+-- build (regime as a per-row tag, the rest into def/use), and NOTHING reads
+-- flow.cfg downstream — so cfg is not folded. This is why fold + its future
+-- extraction-fusion carry no VERSION dependency on the cfg seam.
+
+local char, byte, concat = string.char, string.byte, table.concat
+
+-- LE packed column at the given BYTE width (2 or 4) + a matching 1-based getter.
+-- Width is chosen per column at fold time from the measured max value: u16 while
+-- it fits (< 65536), else u32. The getter captures its own width, so materialize
+-- is width-agnostic.
+local function pack(arr, len, w)
+    local parts = {}
+    if w == 2 then
+        for i = 1, len do
+            local v = arr[i]
+            parts[i] = char(v % 256, (v - v % 256) / 256 % 256)
+        end
+    else
+        for i = 1, len do
+            local v = arr[i]
+            local lo = v % 65536
+            parts[i] = char(lo % 256, (lo - lo % 256) / 256,
+                (v - v % 65536) / 65536 % 256, (v - v % 16777216) / 16777216 % 256)
+        end
+    end
+    return concat(parts)
+end
+local function getter(s, w)
+    if w == 2 then
+        return function (i)
+            local p = (i - 1) * 2 + 1
+            local a, b = byte(s, p, p + 1)
+            return a + b * 256
+        end
+    end
+    return function (i)
+        local p = (i - 1) * 4 + 1
+        local a, b, c, d = byte(s, p, p + 3)
+        return a + b * 256 + c * 65536 + d * 16777216
+    end
+end
+local function width_for(maxv) return maxv < 65536 and 2 or 4 end
+
+-- materialize one row from the columns (M.build-identical shape). The row's whole
+-- categorical descriptor is one `shape` id into col.shapes (a captured table with
+-- exactly the fields the built row had — absent keys stay absent, so a `cond` row
+-- with no t/regime round-trips; const=false and suspend=true are preserved as the
+-- shape captured them). def then use pack contiguously in `nm` (df's end-
+-- derivation: use start = def end = u0[g], use end = d0[g+1]).
+local function row_view(col, g)
+    local nms = col.names
+    local d = col.shapes[col.shape(g)]
+    local s = { l = col.l(g), parent = col.parent(g), def = {}, use = {},
+        kind = d.kind, pol = d.pol, t = d.t,
+        regime = d.regime, const = d.const, suspend = d.suspend }
+    local b, e = col.d0(g), col.u0(g)
+    for j = 1, e - b do s.def[j] = nms[col.nm(b + j)] end
+    b, e = e, col.d0(g + 1)
+    for j = 1, e - b do s.use[j] = nms[col.nm(b + j)] end
+    return s
+end
+
+-- ── dual-mode accessors ──────────────────────────────────────────────────
+
+--- does this node carry (non-empty) flow?
+function M.has(n)
+    if not n then return false end
+    if n._flow then return n._flown > 0 end
+    return n.flow and n.flow.stmts and #n.flow.stmts > 0 or false
+end
+
+--- has a flow record at all (may be 0-row) — the absent-vs-empty distinction
+function M.present(n)
+    if not n then return false end
+    if n._flow then return true end
+    return n.flow and n.flow.stmts ~= nil or false
+end
+
+--- row count (the common size query)
+function M.count(n)
+    if not n then return 0 end
+    if n._flow then return n._flown end
+    return (n.flow and n.flow.stmts) and #n.flow.stmts or 0
+end
+
+--- the fine rows for a node (empty when none), for ipairs iteration. Folded
+--- nodes materialize views FRESH per call (transient, M.build-shaped).
+function M.rows(n)
+    if not n then return {} end
+    local col = n._flow
+    if col then
+        local out, g = {}, n._flow0
+        for i = 1, n._flown do out[i] = row_view(col, g + i) end
+        return out
+    end
+    return (n.flow and n.flow.stmts) or {}
+end
+
+--- the whole flow record { stmts, params } (the shape successors/coarse/liveness/
+--- reaching_cfg consume). cfg is build-time only → not restored.
+function M.record(n)
+    if not n then return nil end
+    local col = n._flow
+    if col then
+        local params = {}
+        for i = 1, n._flowpn do params[i] = col.names[col.pm(n._flowp0 + i)] end
+        return { stmts = M.rows(n), params = params }
+    end
+    return n.flow
+end
+
+--- fold every node's `.flow` record into one columnar store; drop the records.
+--- Idempotent (a second call no-ops via data._flowcol). Mirrors df.fold's
+--- lifecycle: run at ingest, AFTER raw records are encoded to shards.
+function M.fold(data)
+    if data._flowcol then return 0 end
+    local col = {
+        shape = {}, l = {}, parent = {},
+        d0 = {}, u0 = {}, nm = {}, pm = {}, names = {}, shapes = {},
+    }
+    local nid = {} -- var-name -> interned id (build-time only); 0 = nil
+    local function id(nm)
+        if nm == nil then return 0 end
+        local i = nid[nm]
+        if not i then i = #col.names + 1; col.names[i] = nm; nid[nm] = i end
+        return i
+    end
+    -- intern the categorical descriptor tuple → a small shape id. The key
+    -- distinguishes const nil/true/false and suspend nil/true (tostring), and
+    -- the STORED descriptor keeps exactly the fields the row had (nil = absent).
+    local sid = {}
+    local function shape_of(s)
+        local key = concat({ s.kind or '', s.pol or '', s.t or '',
+            s.regime or '', tostring(s.const), tostring(s.suspend) }, '\1')
+        local i = sid[key]
+        if not i then
+            i = #col.shapes + 1
+            col.shapes[i] = { kind = s.kind, pol = s.pol, t = s.t,
+                regime = s.regime, const = s.const, suspend = s.suspend }
+            sid[key] = i
+        end
+        return i
+    end
+    local ns, nn, np, maxp = 0, 0, 0, 0
+    for _, node in ipairs(data.nodes or {}) do
+        local fl = node.flow
+        if fl and fl.stmts and not node._flow then
+            local s0 = ns
+            for _, s in ipairs(fl.stmts) do
+                ns = ns + 1
+                col.shape[ns] = shape_of(s)
+                col.l[ns] = s.l
+                col.parent[ns] = s.parent
+                if s.parent > maxp then maxp = s.parent end
+                col.d0[ns] = nn
+                for _, d in ipairs(s.def) do nn = nn + 1; col.nm[nn] = id(d) end
+                col.u0[ns] = nn
+                for _, u in ipairs(s.use) do nn = nn + 1; col.nm[nn] = id(u) end
+            end
+            local p0 = np
+            for _, p in ipairs(fl.params or {}) do np = np + 1; col.pm[np] = id(p) end
+            node._flow = col
+            node._flow0, node._flown = s0, ns - s0
+            node._flowp0, node._flowpn = p0, np - p0
+            node.flow = nil
+        end
+    end
+    col.d0[ns + 1] = nn -- sentinel: closes the last row's derived use count
+    -- per-column widths from the measured max: name-ids over #names, parent over
+    -- maxp, shape over #shapes; l and the nm-offsets (d0/u0) stay u32 (source
+    -- lines + global name-pool offsets both exceed u16 at scale).
+    local nw = width_for(#col.names)
+    local pw = width_for(maxp)
+    local sw = width_for(#col.shapes)
+    local packed = {
+        shape = getter(pack(col.shape, ns, sw), sw),
+        l = getter(pack(col.l, ns, 4), 4),
+        parent = getter(pack(col.parent, ns, pw), pw),
+        d0 = getter(pack(col.d0, ns + 1, 4), 4),
+        u0 = getter(pack(col.u0, ns, 4), 4),
+        nm = getter(pack(col.nm, nn, nw), nw),
+        pm = getter(pack(col.pm, np, nw), nw),
+        names = col.names,
+        shapes = col.shapes,
+    }
+    for _, node in ipairs(data.nodes or {}) do
+        if node._flow == col then node._flow = packed end
+    end
+    data._flowcol = packed
+    return ns
 end
 
 return M

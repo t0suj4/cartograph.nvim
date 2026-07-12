@@ -713,3 +713,83 @@ test('flow: python except_clause is recognised as an exception handler', functio
     ok(catch ~= nil, 'except_clause produces a catch row (not a plain body statement)')
     ok(has(cfg.succ, try_body, catch), 'the try body reaches the except handler')
 end)
+
+-- ── the columnar fold (df-strangler step 3) ────────────────────────────────
+-- Fold a synthetic data.nodes of built flow records and assert the dual-mode
+-- accessors round-trip to the raw rows BIT-FOR-BIT (vim.deep_equal), so
+-- successors/coarse/liveness/reaching_cfg read folded storage identically.
+
+test('flow.fold: round-trips rows + params bit-for-bit; accessors dual-mode', function ()
+    if not (ready('lua') and ready('python') and ready('c')) then skip 'parsers' end
+    -- three functions spanning the interesting row shapes: lua control + block
+    -- regime, python yield (suspend) + try/except (catch, cond-less), C do-while
+    -- (POST cond row + const) + declarators.
+    local fn1, s1 = parse_fn(table.concat({
+        'function f(a, b)',
+        '  local x = a + b',
+        '  if x > 0 then',
+        '    do local y = x end',   -- block-regime def in a closed block
+        '    return x',
+        '  end',
+        '  while x < 10 do x = x + 1 end',
+        'end',
+    }, '\n'), 'lua')
+    local fn2, s2 = parse_fn(table.concat({
+        'def g(n):',
+        '  for i in range(n):',
+        '    yield i * 2',          -- suspend row
+        '  try:',
+        '    risky()',
+        '  except E as e:',         -- catch row (no regime/t on some rows)
+        '    handle(e)',
+    }, '\n'), 'python')
+    local fn3, s3 = parse_fn(table.concat({
+        'void h(int n) {',
+        '  int *p = 0;',            -- pointer declarator def
+        '  do { p = step(p); } while (0);',  -- POST cond row + const=false
+        '}',
+    }, '\n'), 'c')
+    local r1 = flow.build(fn1, s1, { pfield = 'parameters', regime = tsspec.lua.regime })
+    local r2 = flow.build(fn2, s2, { pfield = 'parameters', regime = tsspec.python.regime })
+    local r3 = flow.build(fn3, s3, { pfield = 'parameters', regime = tsspec.c.regime })
+
+    -- raw records, before folding (accessors read them dual-mode)
+    local n1 = { flow = { stmts = r1.stmts, params = r1.params } }
+    local n2 = { flow = { stmts = r2.stmts, params = r2.params } }
+    local n3 = { flow = { stmts = r3.stmts, params = r3.params } }
+    local empty = { flow = { stmts = {}, params = {} } }
+    local none = {}
+    local data = { nodes = { n1, n2, empty, n3, none } }
+
+    -- pre-fold accessor behaviour (raw branch)
+    ok(flow.has(n1) and not flow.has(empty), 'has: non-empty vs empty (raw)')
+    ok(flow.present(empty) and not flow.present(none), 'present: 0-row vs absent (raw)')
+    eq(#r2.stmts, flow.count(n2), 'count (raw)')
+
+    -- capture raw rows/records, then fold
+    local raw1, raw2, raw3 = flow.record(n1), flow.record(n2), flow.record(n3)
+    local total = flow.fold(data)
+    eq(#r1.stmts + #r2.stmts + #r3.stmts, total, 'fold returns total rows folded')
+    eq(0, flow.fold(data), 'fold is idempotent')
+
+    -- post-fold: records dropped, columnar slice present
+    ok(n1.flow == nil and n1._flow ~= nil, 'raw record dropped, column slice set')
+
+    -- round-trip identity through the folded accessors
+    eq(raw1, flow.record(n1), 'fn1 record round-trips bit-for-bit')
+    eq(raw2, flow.record(n2), 'fn2 record round-trips (suspend + catch rows)')
+    eq(raw3, flow.record(n3), 'fn3 record round-trips (POST cond + const + declarator)')
+    eq(r1.stmts, flow.rows(n1), 'fn1 rows round-trip')
+
+    -- accessors dual-mode consistent post-fold
+    ok(flow.has(n1) and not flow.has(empty), 'has (folded)')
+    ok(flow.present(empty) and not flow.present(none), 'present (folded)')
+    eq(#r2.stmts, flow.count(n2), 'count (folded)')
+
+    -- CFG analyses read folded storage identically to raw
+    eq(flow.successors(raw2).succ, flow.successors(flow.record(n2)).succ,
+        'successors identical folded vs raw')
+    local cr, ci = flow.coarse(flow.record(n1))
+    local cr0, ci0 = flow.coarse(raw1)
+    eq(cr0, cr, 'coarse partition identical folded vs raw'); eq(ci0, ci, 'coarse inputs identical')
+end)
