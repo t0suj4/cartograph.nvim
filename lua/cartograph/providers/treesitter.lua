@@ -2394,6 +2394,21 @@ M.spec = {
 M.spec.typescript = vim.tbl_extend('force', {}, M.spec.javascript)
 M.spec.typescript.exts = { 'ts' }
 
+-- SCOPE-REGIME per language: declaration node types that are BLOCK-scoped (the
+-- binding dies at its region's end); everything unlisted = function-scoped. The
+-- per-language config home for flow's fine reaching (consumed via flow.build's
+-- cfg.regime seam; was flow.REGIME, consolidated here alongside params_field /
+-- is_method / df_ids). php/python/ruby have no block scope → no regime.
+M.spec.lua.regime = { variable_declaration = 'block', local_declaration = 'block',
+    local_variable_declaration = 'block' }
+M.spec.javascript.regime = { lexical_declaration = 'block' } -- let/const; var = hoisted
+M.spec.typescript.regime = M.spec.javascript.regime
+M.spec.rust.regime = { let_declaration = 'block' }
+M.spec.c.regime = { declaration = 'block' }
+M.spec.cpp.regime = { declaration = 'block' }
+M.spec.java.regime = { local_variable_declaration = 'block' }
+M.spec.go.regime = { short_var_declaration = 'block', var_declaration = 'block' }
+
 local LIT_DEPTH, LIT_ITEMS, NAME_CAP = 6, 64, 48
 
 -- ── helpers ──────────────────────────────────────────────────────────────────

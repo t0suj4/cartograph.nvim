@@ -141,7 +141,7 @@ function M.check(data, collect)
                     local af = byline[atr.sl(n.range)]
                     if af then
                         local cfg = { pfield = spec.params_field, df_ids = spec.df_ids,
-                            regime = flow.REGIME[lang],
+                            regime = spec.regime,
                             method = spec.is_method and spec.is_method(n.name or '', af) or false }
                         local okb, fl = pcall(flow.build, af, src, cfg)
                         if okb then

@@ -65,30 +65,13 @@ local SUSPEND = { yield = true, await = true,
 
 -- SCOPE-REGIME classification (df-strangler step 2b): per language, which
 -- declaration node types are BLOCK-scoped (the binding dies at its region's
--- end). Everything unlisted defaults to 'function' — function-scoped, the
--- binding survives block exit (php/python variables, JS `var` (a distinct node
--- type from let/const), lua globals). This is the input the FINE reaching scan
--- (M.reaching_cfg's scope filter) consumes to decide whether a def in a
--- now-closed block still reaches a later use. NOTE: this is flow's reference
--- copy; the intent is for
--- it to migrate into the shared per-language cfg alongside pfield/dfid.
-local REGIME = {
-    lua        = { variable_declaration = 'block', local_declaration = 'block',
-                   local_variable_declaration = 'block' },
-    javascript = { lexical_declaration = 'block' }, -- let/const; var = variable_declaration = function (hoisted)
-    typescript = { lexical_declaration = 'block' },
-    rust       = { let_declaration = 'block' },
-    c          = { declaration = 'block' },
-    cpp        = { declaration = 'block' },
-    java       = { local_variable_declaration = 'block' },
-    go         = { short_var_declaration = 'block', var_declaration = 'block' },
-    -- function-scoped languages: no block scope; every def defaults to
-    -- 'function'. Explicit (empty) so callers can name them without a nil.
-    php        = {},
-    python     = {},
-    ruby       = {},
-}
-M.REGIME = REGIME
+-- end). Everything unlisted defaults to 'function' — the binding survives block
+-- exit (php/python vars, JS `var`, lua globals). flow.build consumes it via
+-- `cfg.regime`; the FINE reaching scan (M.reaching_cfg's scope filter) uses the
+-- per-row `regime` tag to decide whether a def in a now-closed block still
+-- reaches. The DATA lives with the other per-language config in the extraction
+-- spec (ts.spec[lang].regime) — flow is decoupled, receiving it through the cfg
+-- seam alongside pfield/df_ids/method.
 
 local function line(n) return (select(1, n:range())) + 1 end
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end

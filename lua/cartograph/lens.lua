@@ -33,7 +33,7 @@ local function build_flow(store, node)
     rec(parser:parse()[1]:root())
     if not target then return nil, 'could not locate the function AST' end
     local cfg = { pfield = spec.params_field, df_ids = spec.df_ids,
-        regime = flow.REGIME[lang],
+        regime = spec.regime,
         method = spec.is_method and spec.is_method(node.name or '', target) or false }
     return flow.build(target, src, cfg)
 end

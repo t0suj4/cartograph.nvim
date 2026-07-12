@@ -3,6 +3,7 @@
 -- parent (the region tree df collapses away).
 
 local flow = require 'cartograph.flow'
+local tsspec = require('cartograph.providers.treesitter').spec -- per-language cfg (regime lives here now)
 
 local function ready(lang)
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
@@ -304,7 +305,7 @@ test('flow: reaching_cfg — a branch join reaches BOTH arms defs', function ()
         '  use(x)',          -- 8: reaches x@4 AND x@6 (join)
         'end',
     }, '\n'), 'lua')
-    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.lua.regime })
     local rc = flow.reaching_cfg(fl)
     local a4, b6, u8 = row(fl, 'stmt', 4), row(fl, 'stmt', 6), row(fl, 'stmt', 8)
     local from
@@ -325,7 +326,7 @@ test('flow: reaching_cfg — a loop back-edge reaches the pre-loop AND loop def'
         '  end',
         'end',
     }, '\n'), 'lua')
-    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.lua.regime })
     local rc = flow.reaching_cfg(fl)
     local pre, loopdef, usex = row(fl, 'stmt', 2), row(fl, 'stmt', 5), row(fl, 'stmt', 4)
     local from
@@ -346,7 +347,7 @@ test('flow: reaching_cfg INC B — a block-scoped def dies at block exit', funct
         '  use(x)',             -- 7: x OUT of scope (if-body closed) → filtered → free
         'end',
     }, '\n'), 'lua')
-    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.lua.regime })
     local rc = flow.reaching_cfg(fl)
     local x4, u5, u7 = row(fl, 'stmt', 4), row(fl, 'stmt', 5), row(fl, 'stmt', 7)
     local inb, outb
@@ -365,7 +366,7 @@ test('flow: reaching_cfg — an unmodified param reaches from the entry sentinel
         '  use(p)',   -- 2: p reaches from entry (0), no intervening def
         'end',
     }, '\n'), 'lua')
-    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.lua.regime })
     local rc = flow.reaching_cfg(fl)
     local from
     for _, e in ipairs(rc) do if e.var == 'p' and e.at == row(fl, 'stmt', 2) then from = setof(e.from) end end
@@ -413,7 +414,7 @@ test('flow: reaching_cfg scope-regime — JS let is block-scoped, var survives',
         '  d(y);',            -- 10: var y survives → reaches
         '}',
     }, '\n'), 'javascript')
-    local f2 = flow.build(fn, src, { regime = flow.REGIME.javascript })
+    local f2 = flow.build(fn, src, { regime = tsspec.javascript.regime })
     local rc = flow.reaching_cfg(f2)
     ok(next(rc_at(rc, f2, 'x', 4)), 'let x reaches inside its own block')
     ok(not next(rc_at(rc, f2, 'x', 6)), 'let x does NOT reach after the block (block-scoped → empty)')
@@ -430,7 +431,7 @@ test('flow: reaching_cfg scope-regime — php variables survive blocks (function
         '  use_it($z);',      -- line 6: php has no block scope → $z reaches
         '}',
     }, '\n'))
-    local f2 = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.php })
+    local f2 = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.php.regime })
     ok(next(rc_at(flow.reaching_cfg(f2), f2, 'z', 6)), 'php $z reaches after the block (function scope)')
 end)
 
@@ -445,7 +446,7 @@ test('flow: reaching_cfg scope-regime — rust let is block-scoped', function ()
         '    h(w);',            -- 6: let w dead after the if-block → free (empty)
         '}',
     }, '\n'), 'rust')
-    local f2 = flow.build(fn, src, { regime = flow.REGIME.rust })
+    local f2 = flow.build(fn, src, { regime = tsspec.rust.regime })
     local rc = flow.reaching_cfg(f2)
     ok(next(rc_at(rc, f2, 'w', 4)), 'let w reaches inside its block')
     ok(not next(rc_at(rc, f2, 'w', 6)), 'let w does NOT reach after the if-block (block-scoped → empty)')
@@ -463,7 +464,7 @@ test('lens: branch-value — per-branch live values (what flows through each bra
         '  end',
         'end',
     }, '\n'), 'lua')
-    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.lua.regime })
     local heads = lens.branches(fl)
     local ifh
     for _, h in ipairs(heads) do if h.kind == 'if_statement' then ifh = h end end
@@ -504,7 +505,7 @@ test('flow: yield/await are suspension points — suspend to exit + resume to ne
         '  x = yield v',   -- suspend (yield v out), resume (x = sent value) here
         '  b(x)',
     }, '\n'), 'python')
-    local fl = flow.build(fn, src, { regime = flow.REGIME.python })
+    local fl = flow.build(fn, src, { regime = tsspec.python.regime })
     local y = row(fl, 'stmt', 3)
     ok(fl.stmts[y].suspend, 'the yield row is flagged as a suspension point')
     local cfg = flow.successors(fl)
@@ -620,7 +621,7 @@ test('flow: C/C++ pointer/reference/array declarators DEF the inner name', funct
         '  int arr[4] = {0};',       -- array: arr is a DEF, size 4 is not
         '}',
     }, '\n'), 'cpp')
-    local fl = flow.build(fn, src, { regime = flow.REGIME.cpp })
+    local fl = flow.build(fn, src, { regime = tsspec.cpp.regime })
     local function defuse(ln)
         for _, s in ipairs(fl.stmts) do
             if s.l == ln then return setof(s.def), setof(s.use) end
@@ -644,7 +645,7 @@ test('flow: C/C++ bare declarations (no initializer, multi) DEF their names', fu
         '  int n = sz;',                -- init: n def, sz still a use (not eaten)
         '}',
     }, '\n'), 'cpp')
-    local fl = flow.build(fn, src, { regime = flow.REGIME.cpp })
+    local fl = flow.build(fn, src, { regime = tsspec.cpp.regime })
     local function du(ln) for _, s in ipairs(fl.stmts) do if s.l == ln then return setof(s.def), setof(s.use) end end end
     ok(du(2).x, 'bare `int x;` defs x')
     ok(du(3).p, 'bare `SMesh *p;` defs p')
@@ -683,7 +684,7 @@ test('flow: switch case bodies unfold; break routes to the switch join', functio
         '  tail();',
         '}',
     }, '\n'), 'c')
-    local fl = flow.build(fn, src, { regime = flow.REGIME.c })
+    local fl = flow.build(fn, src, { regime = tsspec.c.regime })
     local brkrow, acall
     for i, s in ipairs(fl.stmts) do
         if s.t == 'break_statement' then brkrow = i end
