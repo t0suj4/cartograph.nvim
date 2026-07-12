@@ -68,8 +68,9 @@ local SUSPEND = { yield = true, await = true,
 -- end). Everything unlisted defaults to 'function' — function-scoped, the
 -- binding survives block exit (php/python variables, JS `var` (a distinct node
 -- type from let/const), lua globals). This is the input the FINE reaching scan
--- (M.reaching) consumes to decide whether a def in a now-closed block still
--- reaches a later use. NOTE: this is flow's reference copy; the intent is for
+-- (M.reaching_cfg's scope filter) consumes to decide whether a def in a
+-- now-closed block still reaches a later use. NOTE: this is flow's reference
+-- copy; the intent is for
 -- it to migrate into the shared per-language cfg alongside pfield/dfid.
 local REGIME = {
     lua        = { variable_declaration = 'block', local_declaration = 'block',
@@ -479,8 +480,9 @@ function M.coarse(flow)
     -- statements (params seed defined=0; a use is a dep on the FIRST stmt that
     -- defined it, else a free input). This is the coarse PARITY projection —
     -- deliberately flat and scope-BLIND, matching df exactly. Scope-aware
-    -- reaching (block vs function/hoisted regimes) is the FINE model, M.reaching
-    -- — the coarse partition has no blocks to scope over. ([[cartograph-df-strangler]])
+    -- reaching (block vs function/hoisted regimes) is the FINE model,
+    -- M.reaching_cfg — the coarse partition has no blocks to scope over.
+    -- ([[cartograph-df-strangler]])
     local defined, inset, inputs = {}, {}, {}
     for _, p in ipairs(flow.params or {}) do defined[p] = 0 end
     for si, st in ipairs(out) do
@@ -497,64 +499,6 @@ function M.coarse(flow)
         end
     end
     return out, inputs
-end
-
---- FINE, SCOPE-REGIME-aware reaching (df-strangler step 2b, the value-add over
---- df's flat coarse dep). For each use it names the def that reaches it,
---- honoring block vs function scoping — the thing the coarse projection CAN'T
---- express (its blocks are collapsed). Returns a list of edges
---- `{ at=<use row>, var, from=<def row | nil>, kind='lexical'|'function-scope'|'free' }`.
----
---- Rule: (1) the nearest def of the var in an ENCLOSING region (an ancestor of
---- the use, before the branch the use descends into) reaches — it is lexically
---- in scope regardless of regime; (2) else the latest FUNCTION/hoisted-regime
---- def before the use reaches, even from a now-CLOSED sibling/prior block (it
---- survived block exit) — but a BLOCK-regime def in a closed block does NOT
---- (this is the scope-regime payoff: JS `let` in an if-block is unreachable
---- after it, `var` is reachable); (3) else free (a param or an outer/undeclared
---- name). LIMITATION: branch JOINS (both arms define the var → a set) and loop
---- BACK-EDGES are approximated as the nearest prior def; exact multi-def
---- reaching rides CFG phase-2 successor edges ([[cartograph-cfg-scope]]).
-function M.reaching(flow)
-    local stmts = flow.stmts
-    local defsByVar = {}
-    for i, s in ipairs(stmts) do
-        for _, d in ipairs(s.def) do
-            local l = defsByVar[d]; if not l then l = {}; defsByVar[d] = l end
-            l[#l + 1] = i
-        end
-    end
-    -- is def row `dr` in a region that ENCLOSES use row `ur` (same region, or a
-    -- region on ur's ancestor chain with the def placed before that branch)?
-    local function encloses(dr, ur)
-        if stmts[dr].parent == stmts[ur].parent then return dr < ur end
-        local p = stmts[ur].parent
-        while p ~= 0 do
-            if stmts[dr].parent == stmts[p].parent then return dr < p end
-            p = stmts[p].parent
-        end
-        return stmts[dr].parent == 0 and dr < ur
-    end
-    local edges = {}
-    for i, s in ipairs(stmts) do
-        for _, u in ipairs(s.use) do
-            local defs, from, kind = defsByVar[u], nil, 'free'
-            if defs then
-                for k = #defs, 1, -1 do -- (1) nearest enclosing def
-                    if defs[k] < i and encloses(defs[k], i) then from, kind = defs[k], 'lexical'; break end
-                end
-                if not from then -- (2) latest function-scoped def that survived block exit
-                    for k = #defs, 1, -1 do
-                        if defs[k] < i and stmts[defs[k]].regime ~= 'block' then
-                            from, kind = defs[k], 'function-scope'; break
-                        end
-                    end
-                end
-            end
-            edges[#edges + 1] = { at = i, var = u, from = from, kind = kind }
-        end
-    end
-    return edges
 end
 
 -- ── CFG phase 2: successor edges over the fine rows ─────────────────────────
@@ -837,9 +781,9 @@ function M.reaching_cfg(flow)
     local rin_exact = run(pred_exact)  -- exact edges only (INC C)
     -- INC B: LEXICAL-SCOPE filter over the control-reaching set. region_encloses
     -- (dr, ur) = dr's region is ur's or an ANCESTOR — the binding is OPEN at ur.
-    -- Order-INDEPENDENT (control order is INC A's job; conflating them, as the
-    -- structural M.reaching does with dr<ur, wrongly drops a block-regime def
-    -- reaching an earlier same-block use via a loop back-edge). A block-regime
+    -- Order-INDEPENDENT (control order is INC A's job; conflating them with a
+    -- dr<ur ordering, as the RETIRED structural reaching did, wrongly drops a
+    -- block-regime def reaching an earlier same-block use via a back-edge). A block-regime
     -- def in a now-CLOSED sibling/prior block is dropped (block-death); a
     -- function/hoisted-regime def survives block exit; a param (0) is always in.
     local function region_encloses(dr, ur)

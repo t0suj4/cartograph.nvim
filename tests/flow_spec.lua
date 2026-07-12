@@ -48,6 +48,12 @@ local function edge_at(fl, edges, var, ln)
         if e.var == var and fl.stmts[e.at].l == ln then return e end
     end
 end
+-- reaching_cfg: the `from` set (as a set) for the use of `var` at source line `ln`
+local function rc_at(rc, fl, var, ln)
+    for _, e in ipairs(rc) do
+        if e.var == var and fl.stmts[e.at].l == ln then return setof(e.from) end
+    end
+end
 
 test('flow: fine nesting with control-parent; coarse == top-level partition', function ()
     if not ready() then skip 'no php parser' end
@@ -202,87 +208,6 @@ test('flow: coarse dep is df\'s flat first-def-wins scan; params seed inputs', f
     eq(1, depvars(co[2]).a, 'stmt 2 use of a depends on stmt 1 (first def)')
     eq(nil, depvars(co[2]).q, 'q is a free input, not a dep')
     eq(2, depvars(co[3]).b, 'stmt 3 use of b depends on stmt 2')
-end)
-
--- step 2b, scope-regime: the FINE reaching scan honors block vs function
--- scoping — a def in a now-closed block reaches a later use ONLY under a
--- function/hoisted regime. JS `let` (block) vs `var` (hoisted) is the case.
-test('flow: scope-regime — JS let is block-scoped, var survives block exit', function ()
-    if not ready('javascript') then skip 'no javascript parser' end
-    local fn, src = parse_fn(table.concat({
-        'function f(c) {',
-        '  if (c) {',
-        '    let x = 1;',
-        '    a(x);',          -- line 4: x in scope here (lexical/enclosing)
-        '  }',
-        '  b(x);',            -- line 6: let x is dead after the block → free
-        '  if (c) {',
-        '    var y = 2;',
-        '  }',
-        '  d(y);',            -- line 10: var y survives the block → reaches
-        '}',
-    }, '\n'), 'javascript')
-    ok(fn, 'found the function node')
-    local fl = flow.build(fn, src, { regime = flow.REGIME.javascript })
-    local edges = flow.reaching(fl)
-    ok(edge_at(fl, edges, 'x', 4).kind == 'lexical', 'x reaches inside its own block')
-    ok(edge_at(fl, edges, 'x', 6).kind == 'free', 'let x does NOT reach after the block (block-scoped)')
-    ok(edge_at(fl, edges, 'y', 10).kind == 'function-scope', 'var y reaches after the block (hoisted/function-scoped)')
-end)
-
-test('flow: scope-regime — php variables are function-scoped (survive blocks)', function ()
-    if not ready('php') then skip 'no php parser' end
-    local fn, src = parse_fn(table.concat({
-        'function h($c) {',
-        '  if ($c) {',            -- (line 3 after the <?php preamble)
-        '    $z = 1;',            -- line 4
-        '  }',                    -- line 5
-        '  use_it($z);',          -- line 6: php has no block scope → $z reaches
-        '}',
-    }, '\n'))
-    ok(fn, 'found the function node')
-    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.php })
-    local e = edge_at(fl, flow.reaching(fl), 'z', 6)
-    ok(e and e.kind == 'function-scope', 'php $z reaches after the block (function scope)')
-end)
-
-test('flow: scope-regime — lua locals are block-scoped (die at do..end)', function ()
-    if not ready('lua') then skip 'no lua parser' end
-    local fn, src = parse_fn(table.concat({
-        'local function f()',
-        '  do',
-        '    local w = 1',
-        '    g(w)',              -- line 4: in scope
-        '  end',
-        '  h(w)',                -- line 6: local w dead after the do-block → free
-        'end',
-    }, '\n'), 'lua')
-    ok(fn, 'found the function node')
-    local fl = flow.build(fn, src, { regime = flow.REGIME.lua })
-    local edges = flow.reaching(fl)
-    ok(edge_at(fl, edges, 'w', 4).kind == 'lexical', 'w reaches inside its block')
-    ok(edge_at(fl, edges, 'w', 6).kind == 'free', 'local w does NOT reach after the do-block')
-end)
-
--- per-language config step: rust control is EXPRESSIONS (if_expression, wrapped
--- in expression_statement) and `let` is let_declaration — flow now regions them
--- via cfg-independent node-type support, so rust `let` is block-scoped.
-test('flow: scope-regime — rust let is block-scoped (fine structure)', function ()
-    if not ready('rust') then skip 'no rust parser' end
-    local fn, src = parse_fn(table.concat({
-        'fn f(c: bool) {',
-        '    if c {',
-        '        let w = 1;',
-        '        g(w);',           -- line 4: in scope
-        '    }',
-        '    h(w);',               -- line 6: let w dead after the if-block → free
-        '}',
-    }, '\n'), 'rust')
-    ok(fn, 'found the function node')
-    local fl = flow.build(fn, src, { regime = flow.REGIME.rust })
-    local edges = flow.reaching(fl)
-    ok(edge_at(fl, edges, 'w', 4).kind == 'lexical', 'w reaches inside its block')
-    ok(edge_at(fl, edges, 'w', 6).kind == 'free', 'let w does NOT reach after the if-block')
 end)
 
 -- per-language config step: bash names are `variable_name` LEAVES (not
@@ -468,6 +393,62 @@ test('flow: reaching_cfg INC C — reaching only via a may-throw edge is hedged 
     ok(defx and usex, 'x has a def and a reaching use')
     ok(setof(usex.from)[defx], 'x@def reaches the catch use (control-wise)')
     ok(usex.hedged and usex.hedged[defx], 'the reaching is ~ — only via the conservative may-throw edge')
+end)
+
+-- reaching_cfg scope-regime coverage (ported from the retired structural
+-- M.reaching tests): block-regime dies at block exit → empty reaching set;
+-- function/hoisted-regime survives → non-empty.
+test('flow: reaching_cfg scope-regime — JS let is block-scoped, var survives', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fn, src = parse_fn(table.concat({
+        'function f(c) {',
+        '  if (c) {',
+        '    let x = 1;',
+        '    a(x);',          -- 4: x in scope
+        '  }',
+        '  b(x);',            -- 6: let x dead after the block → free (empty)
+        '  if (c) {',
+        '    var y = 2;',
+        '  }',
+        '  d(y);',            -- 10: var y survives → reaches
+        '}',
+    }, '\n'), 'javascript')
+    local f2 = flow.build(fn, src, { regime = flow.REGIME.javascript })
+    local rc = flow.reaching_cfg(f2)
+    ok(next(rc_at(rc, f2, 'x', 4)), 'let x reaches inside its own block')
+    ok(not next(rc_at(rc, f2, 'x', 6)), 'let x does NOT reach after the block (block-scoped → empty)')
+    ok(next(rc_at(rc, f2, 'y', 10)), 'var y reaches after the block (hoisted/function-scoped)')
+end)
+
+test('flow: reaching_cfg scope-regime — php variables survive blocks (function scope)', function ()
+    if not ready('php') then skip 'no php parser' end
+    local fn, src = parse_fn(table.concat({
+        'function h($c) {',
+        '  if ($c) {',
+        '    $z = 1;',        -- (line 4 after <?php)
+        '  }',
+        '  use_it($z);',      -- line 6: php has no block scope → $z reaches
+        '}',
+    }, '\n'))
+    local f2 = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.php })
+    ok(next(rc_at(flow.reaching_cfg(f2), f2, 'z', 6)), 'php $z reaches after the block (function scope)')
+end)
+
+test('flow: reaching_cfg scope-regime — rust let is block-scoped', function ()
+    if not ready('rust') then skip 'no rust parser' end
+    local fn, src = parse_fn(table.concat({
+        'fn f(c: bool) {',
+        '    if c {',
+        '        let w = 1;',
+        '        g(w);',        -- 4: in scope
+        '    }',
+        '    h(w);',            -- 6: let w dead after the if-block → free (empty)
+        '}',
+    }, '\n'), 'rust')
+    local f2 = flow.build(fn, src, { regime = flow.REGIME.rust })
+    local rc = flow.reaching_cfg(f2)
+    ok(next(rc_at(rc, f2, 'w', 4)), 'let w reaches inside its block')
+    ok(not next(rc_at(rc, f2, 'w', 6)), 'let w does NOT reach after the if-block (block-scoped → empty)')
 end)
 
 test('flow: predecessors transposes successors; exit is the backward root', function ()
