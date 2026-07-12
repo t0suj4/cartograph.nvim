@@ -106,3 +106,60 @@ test('self: an untypeable call site hedges — self:m() stays unresolved, no lex
     ok(call, 'self:amb call found')
     eq(nil, call.to)              -- A:foo poisoned by x:foo() → self hedged, NOT A:amb
 end)
+
+-- V2: `local d = Dog.new()` types d as Dog → d:speak() resolves through Dog's
+-- extends chain to Animal:speak (ambiguous tail; V2+V0 disambiguate).
+local CTOR_SRC = table.concat({
+    'local Animal = {}',                                  -- 1
+    'function Animal:speak() return 1 end',               -- 2
+    'local Dog = {}',                                     -- 3
+    'setmetatable(Dog, {__index = Animal})',              -- 4  Dog extends Animal
+    'function Dog.new() return setmetatable({}, Dog) end', -- 5 constructor
+    'local Plant = {}',                                   -- 6
+    'function Plant:speak() return 2 end',                -- 7  (speak ambiguous)
+    'local function use()',                               -- 8
+    '    local d = Dog.new()',                            -- 9  d : Dog
+    '    return d:speak()',                               -- 10 d:speak → Animal:speak
+    'end',                                                -- 11
+    'return { use = use }',                               -- 12
+}, '\n')
+
+test('ctor: local = C.new() types the local; obj:m() resolves through the chain', function ()
+    if not ts_ready() then return skip 'no lua parser' end
+    local data = extract_src(CTOR_SRC)
+    local animal_speak
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'Animal:speak' then animal_speak = n.id end
+    end
+    local call
+    for _, c in ipairs(data.calls) do if c.full == 'd:speak' then call = c end end
+    ok(call, 'd:speak call found')
+    eq(animal_speak, call.to)     -- d typed Dog → chain → Animal:speak
+    ok(call.inferred, 'inferred (~)')
+end)
+
+-- V2 SOUNDNESS: a local rebound to a different constructor (n>1) is dropped —
+-- obj:m() stays unresolved rather than committing to a stale type.
+local REBIND_SRC = table.concat({
+    'local Dog = {}',                                     -- 1
+    'function Dog:speak() return 1 end',                  -- 2
+    'local Cat = {}',                                     -- 3
+    'function Cat:speak() return 2 end',                  -- 4  (speak ambiguous)
+    'function Dog.new() return setmetatable({}, Dog) end',-- 5
+    'function Cat.new() return setmetatable({}, Cat) end',-- 6
+    'local function use()',                               -- 7
+    '    local d = Dog.new()',                            -- 8  bind 1
+    '    d = Cat.new()',                                  -- 9  rebind → n>1, dropped
+    '    return d:speak()',                               -- 10
+    'end',                                                -- 11
+    'return { use = use }',                               -- 12
+}, '\n')
+
+test('ctor: a rebound local is dropped — obj:m() stays unresolved, no stale type', function ()
+    if not ts_ready() then return skip 'no lua parser' end
+    local data = extract_src(REBIND_SRC)
+    local call
+    for _, c in ipairs(data.calls) do if c.full == 'd:speak' then call = c end end
+    ok(call, 'd:speak call found')
+    eq(nil, call.to)              -- d bound twice → not typed → ambiguous speak stays unresolved
+end)

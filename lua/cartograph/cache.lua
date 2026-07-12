@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 37 -- v37: SOUND self:member (V1) — `self` (param-0 of a colon-
+M.VERSION = 38 -- v38: CONSTRUCTOR-TYPED LOCALS (V2) — `local obj = C.new(...)`
+               -- / `C:new(...)` (C a class) → obj:member resolves through C's
+               -- extends chain (data.ctorbinds, single-assignment gated,
+               -- inferred ~). Widens V1's receiver typing. [[cartograph-linker]] V2.
+               -- v37: SOUND self:member (V1) — `self` (param-0 of a colon-
                -- method) typed by the JOIN of receiver types over the method's
                -- resolved call sites (backward), then self:member resolved
                -- through the extends chain. Hedges when undetermined (any

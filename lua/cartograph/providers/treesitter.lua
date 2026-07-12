@@ -880,6 +880,15 @@ M.spec = {
                         (field name: (identifier) @_k (#eq? @_k "__index")
                                value: (identifier) @parent))))
         ]=],
+        -- V2 constructor binds: `obj = C.new(...)` / `C:new(...)` (the callee is
+        -- captured as text and filtered to the `.new`/`:new` convention in
+        -- handle_ctor). Matches the inner assignment of `local obj = …` AND bare
+        -- reassignments, so a rebind is counted (single-assignment gate).
+        ctor_query = [=[
+            (assignment_statement
+                (variable_list name: (identifier) @cvar)
+                (expression_list value: (function_call name: (_) @cctor)))
+        ]=],
         vars = [[
             (variable_declaration
                 (assignment_statement
@@ -2771,6 +2780,28 @@ local function build_super(extends)
     end
     return super
 end
+-- member in class C: own defs (`:` then `.`), else walk the extends `super`
+-- chain; unique fit or nil. Shared by resolve_self (self:m) and
+-- resolve_local_ctor (obj:m) — the receiver-typing chain resolver.
+local function chain_lookup(super, exact, C, member, clang)
+    local seen, cur = {}, C
+    for _ = 1, SUPER_STEP_LIMIT do
+        for _, sep in ipairs({ ':', '.' }) do
+            local fit, dup
+            for _, nd in ipairs(exact[cur .. sep .. member] or {}) do
+                if elang_for(nd.file) == clang then
+                    if fit and fit.id ~= nd.id then dup = true else fit = nd end
+                end
+            end
+            if dup then return nil end
+            if fit then return fit end
+        end
+        local par = super[cur]
+        if not par or seen[par] then break end
+        seen[par] = true; cur = par
+    end
+    return nil
+end
 -- Upgrade still-refused `Head::method` calls in place (addref + inferred);
 -- returns how many resolved. `exact` and `addref` come from whichever pass
 -- calls this (extract or relink) so it reads the CURRENT full node set.
@@ -2893,26 +2924,6 @@ local function resolve_self(calls, node_index, extends, exact, addref)
     end
     if not next(is_class) then return 0 end
     local super = build_super(extends)
-    -- member in class C: own defs first, then walk the extends chain; unique or nil
-    local function lookup(C, member, clang)
-        local seen, cur = {}, C
-        for _ = 1, SUPER_STEP_LIMIT do
-            for _, sep in ipairs({ ':', '.' }) do
-                local fit, dup
-                for _, nd in ipairs(exact[cur .. sep .. member] or {}) do
-                    if elang_for(nd.file) == clang then
-                        if fit and fit.id ~= nd.id then dup = true else fit = nd end
-                    end
-                end
-                if dup then return nil end
-                if fit then return fit end
-            end
-            local par = super[cur]
-            if not par or seen[par] then break end
-            seen[par] = true; cur = par
-        end
-        return nil
-    end
     local selft = {}    -- method-id -> { [class]=true } accumulator, or false=poisoned
     local function addtype(mid, C)
         if selft[mid] == false then return end
@@ -2950,7 +2961,7 @@ local function resolve_self(calls, node_index, extends, exact, addref)
                 local member = c.full:match('^self[:.]([%w_]+)$')
                 local C = member and selfclass(c.fn)
                 if C then
-                    local fit = lookup(C, member, elang_for(c.file))
+                    local fit = chain_lookup(super, exact, C, member, elang_for(c.file))
                     if fit then
                         c.to = fit.id; c.inferred = true; c.refused = nil
                         addref(c.fn, fit.id, c.at
@@ -2962,6 +2973,46 @@ local function resolve_self(calls, node_index, extends, exact, addref)
             end
         end
         if not progress and round > 1 then break end
+    end
+    return n
+end
+
+-- V2: locals typed by a constructor ([[cartograph-linker]] receiver-typing).
+-- `local obj = C.new(...)` / `C:new(...)` (C a class) conventionally makes obj a
+-- C-instance, so obj:member / obj.member resolves through C's extends chain.
+-- Reads per-file ctor binds (data.ctorbinds: file -> { local -> {class, n} },
+-- collected at extraction). SINGLE-ASSIGNMENT gated: a local bound more than once
+-- OR to differing classes is dropped (n ~= 1) — a reassignment would change the
+-- type. Inferred (~): a CONVENTION, not proven — a reassignment to a non-ctor
+-- value escapes the single-assignment count, so this is honestly ~ (cut 2 =
+-- verify via the constructor's actual return-class + reaching). C must own
+-- methods (is_class) to be a class. Widens V1's fixpoint: constructor-typed
+-- locals become determined receivers.
+local function resolve_local_ctor(calls, ctorbinds, extends, exact, addref)
+    if not (ctorbinds and next(ctorbinds)) then return 0 end
+    local super = build_super(extends)
+    local is_class = {}
+    for name in pairs(exact) do
+        local owner = name:match('^([%w_]+)[:.]')
+        if owner then is_class[owner] = true end
+    end
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        if not c.to and c.full and c.fn then
+            local recv, member = c.full:match('^([%w_]+)[:.]([%w_]+)$')
+            local fb = recv and recv ~= 'self' and ctorbinds[c.file]
+            local b = fb and fb[recv]
+            if b and b.n == 1 and b.class and is_class[b.class] then
+                local fit = chain_lookup(super, exact, b.class, member, elang_for(c.file))
+                if fit then
+                    c.to = fit.id; c.inferred = true; c.refused = nil
+                    addref(c.fn, fit.id, c.at
+                        or { start = { line = c.line, char = 0 },
+                             ['end'] = { line = c.line, char = 0 } }, true)
+                    n = n + 1
+                end
+            end
+        end
     end
     return n
 end
@@ -4458,17 +4509,32 @@ function M.extract(root, opts)
             data.extends[#data.extends + 1] =
                 { child = child, parent = parent, file = file }
         end
+        -- V2: `obj = C.new(...)` / `C:new(...)` → obj is a C-instance. Count binds
+        -- per (file, local); n>1 (rebound, or to a different class) drops it at
+        -- resolve time (single-assignment soundness gate). Only the `.new`/`:new`
+        -- constructor convention (strongest); non-ctor RHS calls no-op here.
+        local function handle_ctor(varn, ctorn)
+            local cls = node_text(ctorn, src):match('^([%w_]+)[.:]new$')
+            if not cls then return end
+            local lv = node_text(varn, src)
+            data.ctorbinds = data.ctorbinds or {}
+            local fb = data.ctorbinds[file]
+            if not fb then fb = {}; data.ctorbinds[file] = fb end
+            local b = fb[lv]
+            if not b then fb[lv] = { class = cls, n = 1 } else b.n = b.n + 1 end
+        end
         local combined = spec._defs_query
         if combined == nil then
             combined = table.concat({ spec.functions or '', spec.vars or '',
-                spec.interface or '', spec.super_query or '' }, '\n')
+                spec.interface or '', spec.super_query or '',
+                spec.ctor_query or '' }, '\n')
             spec._defs_query = combined
         end
         local q = parse_query(lang, combined)
         if q then
             for _, match in q:iter_matches(tsroot, src, 0, -1) do
                 local defn, namen, vdefn, vnamen, valn
-                local childn, parentn, catn, cat
+                local childn, parentn, catn, cat, cvarn, cctorn
                 for id, ns in pairs(match) do
                     local capn = q.captures[id]
                     local n = cap_node(ns)
@@ -4479,9 +4545,13 @@ function M.extract(root, opts)
                     elseif capn == 'value' then valn = n
                     elseif capn == 'child' then childn = n
                     elseif capn == 'parent' then parentn = n
+                    elseif capn == 'cvar' then cvarn = n
+                    elseif capn == 'cctor' then cctorn = n
                     elseif capn:sub(1, 1) ~= '_' then catn, cat = n, capn end
                 end
-                if childn and parentn then
+                if cvarn and cctorn then
+                    handle_ctor(cvarn, cctorn)
+                elseif childn and parentn then
                     handle_super(childn, parentn)
                 elseif vdefn and vnamen then
                     handle_var(vdefn, vnamen, valn)
@@ -5425,6 +5495,10 @@ function M.extract(root, opts)
     -- through the extends chain; hedge when undetermined (V1 receiver typing)
     resolve_self(calls, node_index, data.extends, exact, addref)
 
+    -- obj:member where `local obj = C.new(...)` — constructor-typed locals
+    -- resolved through C's extends chain (V2 receiver typing)
+    resolve_local_ctor(calls, data.ctorbinds, data.extends, exact, addref)
+
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
     -- lookups; slice-local uniqueness is not global uniqueness)
@@ -5790,6 +5864,7 @@ function M.relink(data, touched)
     for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
     local retn = resolve_returns(data.calls, node_index, exact, addref)
     n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
+    n = n + resolve_local_ctor(data.calls, data.ctorbinds, data.extends, exact, addref)
     return n + retn
 end
 
