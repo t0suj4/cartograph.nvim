@@ -854,6 +854,11 @@ plugin's runtime path, never required from `lua/cartograph/`.
 nvim --headless -u NONE -l tools/gate.lua server
 # (re)establish the baseline on a known-good rev
 nvim --headless -u NONE -l tools/gate.lua server --save
+# df/flow PARITY gate: coarse(flow)==df (per-statement def/use, category-
+# catalogued) + flow's CFG invariants (successors/liveness/reaching) run clean.
+# The structure snapshot DROPS df, so this is what catches a flow.du-vs-df
+# def/use drift. Pins a per-corpus labeled census; fails on any class delta.
+nvim --headless -u NONE -l tools/dfgate.lua cpp
 ```
 
 `tools/preflight.lua` is the dev loop as one command: git-diff impact (changed
