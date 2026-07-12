@@ -31,6 +31,17 @@ end
 
 local function setof(t) local s = {} for _, v in ipairs(t) do s[v] = true end return s end
 
+-- first row index matching (kind, line); line optional
+local function row(fl, kind, ln)
+    for i, s in ipairs(fl.stmts) do
+        if s.kind == kind and (not ln or s.l == ln) then return i end
+    end
+end
+local function has(succ, i, target) -- is `target` a successor of row i?
+    for _, s in ipairs(succ[i] or {}) do if s == target then return true end end
+    return false
+end
+
 -- the reaching edge for a use of `var` at source line `ln`
 local function edge_at(fl, edges, var, ln)
     for _, e in ipairs(edges) do
@@ -292,4 +303,64 @@ test('flow: per-language df_ids — bash variable_name leaves + local def', func
     -- without df_ids, variable_name is invisible → x is neither def nor use
     local co0 = flow.coarse(flow.build(fn, src))
     ok(not setof(co0[1].def).x, 'without df_ids, bash variable_name is not counted')
+end)
+
+-- CFG phase 2: successor edges + liveness over the fine rows.
+test('flow: liveness — used var lives to its use; defined-unused var is dead', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f()',
+        '  local a = 1',   -- a is used → live out
+        '  print(a)',
+        '  local b = 2',   -- b never used → dead
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src)
+    local lv = flow.liveness(fl)
+    ok(lv.live_out[row(fl, 'stmt', 2)].a, 'a is live after its definition (used next)')
+    ok(next(lv.live_out[row(fl, 'stmt', 4)]) == nil, 'local b=2 is dead (never used) → empty live-out')
+end)
+
+test('flow: CFG if/else joins both branches; loop body has a back-edge to the head', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f(c)',
+        '  if c then g() else h() end',   -- both branches → the join
+        '  done()',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src)
+    local cfg = flow.successors(fl)
+    local ifr, join = row(fl, 'if_statement'), row(fl, 'stmt', 3)
+    eq(2, #cfg.succ[ifr], 'the if branches two ways (then / else)')
+    for _, br in ipairs(cfg.succ[ifr]) do
+        ok(has(cfg.succ, br, join), 'each branch flows to the join (done())')
+    end
+
+    local fn2, src2 = parse_fn(table.concat({
+        'local function g(n)',
+        '  while n > 0 do n = n - 1 end',
+        '  return n',
+        'end',
+    }, '\n'), 'lua')
+    local fl2 = flow.build(fn2, src2)
+    local cfg2 = flow.successors(fl2)
+    local head = row(fl2, 'while_statement')
+    local body = row(fl2, 'stmt', 2) -- `n = n - 1`
+    ok(has(cfg2.succ, body, head), 'the loop body flows back to the head (back-edge)')
+    ok(has(cfg2.succ, head, row(fl2, 'stmt', 3)), 'the head can exit the loop (zero-trip)')
+end)
+
+test('flow: an early return flows to exit; the fall-through use stays live', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f(c, x)',
+        '  if c then return end',
+        '  use(x)',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src)
+    local cfg, lv = flow.successors(fl), flow.liveness(fl)
+    ok(has(cfg.succ, row(fl, 'stmt', 2), cfg.EXIT), 'the return flows to the function exit')
+    ok(lv.live_out[row(fl, 'if_statement')].x, 'x is live after the if (needed on the fall-through path)')
 end)

@@ -224,7 +224,7 @@ function M.build(fnnode, src, cfg)
         local d, u = du(node, src, CTRL[t] and true or false, ids)
         stmts[idx] = { l = line(node), kind = CTRL[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
-            regime = regimetab[t] or 'function' }
+            regime = regimetab[t] or 'function', t = t } -- t = raw node type (CFG terminators)
         if CTRL[t] then
             local cond = node:field('condition')[1]
             -- POST-condition loops (do-while, lua repeat-until): the condition
@@ -415,6 +415,110 @@ function M.reaching(flow)
         end
     end
     return edges
+end
+
+-- ── CFG phase 2: successor edges over the fine rows ─────────────────────────
+local LOOP_T = { while_statement = true, for_statement = true,
+    for_numeric_statement = true, for_generic_statement = true,
+    foreach_statement = true, repeat_statement = true, do_statement = true,
+    while_expression = true, loop_expression = true, for_expression = true }
+local IF_T = { if_statement = true, if_expression = true }
+local RET_T = { return_statement = true, throw_statement = true,
+    raise_statement = true }
+
+--- Structured control-flow SUCCESSOR edges over flow's fine rows (CFG phase 2,
+--- [[cartograph-cfg-scope]]). Returns { succ = {[row] = <succ ids>},
+--- entry = <id|'exit'>, EXIT = 'exit' }. Node ids are row indices; 'exit' is
+--- the function-exit sentinel. Models: sequential flow; if/then/else (elseif
+--- rows are alternatives off the head); loops (body entry + back-edge to head +
+--- zero-trip skip to the join; break→loop exit, continue→head); early exits
+--- (return/throw/raise→exit). SOUND over-approximation for the rest —
+--- switch/try/match branch to every sub-region entry + the join (infeasible
+--- edges possible → CONSERVATIVE dataflow, never unsound). do-while POST-cond
+--- ordering and exception edges are phase-2b.
+function M.successors(flow)
+    local S = flow.stmts
+    local region = {} -- region[parent][pol] = ordered row ids
+    for i, s in ipairs(S) do
+        local p, pol = s.parent, s.pol or ''
+        local rp = region[p]; if not rp then rp = {}; region[p] = rp end
+        local rr = rp[pol]; if not rr then rr = {}; rp[pol] = rr end
+        rr[#rr + 1] = i
+    end
+    local succ = {}
+    local function add(a, b) local l = succ[a]; if not l then l = {}; succ[a] = l end l[#l + 1] = b end
+    -- wire `rows` as a sequence completing to `after`; brk/cont = loop exit/head
+    local function wire(rows, after, brk, cont)
+        if not rows or #rows == 0 then return after end
+        for i = 1, #rows do
+            local r, nxt = rows[i], (rows[i + 1] or after)
+            local s, kids = S[r], region[r]
+            local t = s.t
+            if RET_T[t] then add(r, 'exit')
+            elseif t == 'break_statement' then add(r, brk or 'exit')
+            elseif t == 'continue_statement' then add(r, cont or 'exit')
+            elseif kids and LOOP_T[s.kind] then
+                add(r, wire(kids['body'], r, nxt, r)) -- enter body (back-edge to head)
+                add(r, nxt)                           -- zero-trip / exit
+                for pol, rr in pairs(kids) do -- python for/while `else`, etc.
+                    if pol ~= 'body' then add(r, wire(rr, nxt, brk, cont)) end
+                end
+            elseif kids and IF_T[s.kind] then
+                add(r, wire(kids['body'], nxt, brk, cont))
+                local hasfalse = false
+                for _, pol in ipairs({ 'elseif', 'else' }) do
+                    if kids[pol] then
+                        for _, e in ipairs(kids[pol]) do add(r, e); wire({ e }, nxt, brk, cont) end
+                        hasfalse = true
+                    end
+                end
+                if not hasfalse then add(r, nxt) end -- no else → condition may fall through
+            elseif kids then -- switch/try/match/other control head: sound over-approx
+                for _, rr in pairs(kids) do add(r, wire(rr, nxt, brk, cont)) end
+                add(r, nxt)
+            else
+                add(r, nxt)
+            end
+        end
+        return rows[1]
+    end
+    local entry = wire(region[0] and region[0][''], 'exit', nil, nil)
+    return { succ = succ, entry = entry, EXIT = 'exit' }
+end
+
+--- LIVENESS over the successor graph (backward dataflow to fixpoint) — the
+--- canonical phase-2 consumer (data-lifecycle reading (a)). Returns
+--- { live_in = {[row]=set}, live_out = {[row]=set} } (set = name→true). A var
+--- is live at a point if it may be READ before being overwritten on some path.
+--- live_out[n] = ∪ live_in[succ]; live_in[n] = use[n] ∪ (live_out[n] \ def[n]).
+--- Over-approximate where M.successors is (conservative — never misses a live).
+function M.liveness(flow)
+    local S = flow.stmts
+    local succ = M.successors(flow).succ
+    local li, lo = {}, {}
+    for i = 1, #S do li[i] = {}; lo[i] = {} end
+    local function seteq(a, b)
+        for k in pairs(a) do if not b[k] then return false end end
+        for k in pairs(b) do if not a[k] then return false end end
+        return true
+    end
+    local changed, guard = true, 0
+    while changed and guard < 100000 do
+        changed = false; guard = guard + 1
+        for i = #S, 1, -1 do
+            local o = {}
+            for _, s in ipairs(succ[i] or {}) do
+                if s ~= 'exit' and li[s] then for k in pairs(li[s]) do o[k] = true end end
+            end
+            local n = {}
+            for k in pairs(o) do n[k] = true end
+            for _, d in ipairs(S[i].def) do n[d] = nil end
+            for _, u in ipairs(S[i].use) do n[u] = true end
+            if not seteq(o, lo[i]) or not seteq(n, li[i]) then changed = true end
+            lo[i], li[i] = o, n
+        end
+    end
+    return { live_in = li, live_out = lo }
 end
 
 return M
