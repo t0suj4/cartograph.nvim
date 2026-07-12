@@ -19,7 +19,12 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 32 -- v32: FLOW ROWS gain a start COLUMN (`c`, 1-based) — same-line
+M.VERSION = 33 -- v33: FLOW rows carry a control-transfer LABEL (`s.label`) —
+               -- break/continue TARGET, goto target, labeled-loop / C-label
+               -- DEFINITION. successors resolves labeled break/continue to the
+               -- named loop + goto to its label row. Sparse (rare) — folds as a
+               -- side map. def/use unchanged (coarse parity intact). v32 lacks it.
+               -- v32: FLOW ROWS gain a start COLUMN (`c`, 1-based) — same-line
                -- entities (minified/generated blobs, chained one-liners) become
                -- ordered + jump-locatable by (l,c). Folds as one more column
                -- (u16, auto-u32 for extreme minified lines). A v31 cache lacks it.

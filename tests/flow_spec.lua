@@ -796,3 +796,69 @@ test('flow.fold: round-trips rows + params bit-for-bit; accessors dual-mode', fu
     local cr0, ci0 = flow.coarse(raw1)
     eq(cr0, cr, 'coarse partition identical folded vs raw'); eq(ci0, ci, 'coarse inputs identical')
 end)
+
+-- ── control transfer (non-local-transfer): labeled break/continue + goto ────
+-- find the first row with raw node type `tt`
+local function rowt(fl, tt) for i, s in ipairs(fl.stmts) do if s.t == tt then return i end end end
+
+test('flow: labeled break jumps to the OUTER loop exit, not the inner (go)', function ()
+    if not ready('go') then skip 'no go parser' end
+    local fn, src = parse_fn(table.concat({
+        'func f() {',
+        'Outer:',
+        '  for i := 0; i < 3; i++ {',
+        '    for j := 0; j < 3; j++ {',
+        '      break Outer',
+        '    }',
+        '    work()',   -- inner-loop exit lands here (rest of OUTER body)
+        '  }',
+        '  done()',     -- OUTER-loop exit lands here
+        '}',
+    }, '\n'), 'go')
+    local fl = flow.build(fn, src, { regime = tsspec.go.regime })
+    local brk = rowt(fl, 'break_statement')
+    local done = row(fl, 'stmt', 9)   -- done()
+    local work = row(fl, 'stmt', 7)   -- work()
+    ok(brk and done, 'found break + done rows')
+    local cfg = flow.successors(fl)
+    ok(has(cfg.succ, brk, done), 'break Outer → the OUTER loop exit (done)')
+    ok(not has(cfg.succ, brk, work), 'break Outer does NOT fall to the inner-loop exit (work)')
+end)
+
+test('flow: labeled continue targets the OUTER loop head (js)', function ()
+    if not ready('javascript') then skip 'no js parser' end
+    local fn, src = parse_fn(table.concat({
+        'function f() {',
+        '  outer: for (let i = 0; i < 3; i++) {',
+        '    for (let j = 0; j < 3; j++) {',
+        '      continue outer;',
+        '    }',
+        '  }',
+        '}',
+    }, '\n'), 'javascript')
+    local fl = flow.build(fn, src, { regime = tsspec.javascript.regime })
+    local cont = rowt(fl, 'continue_statement')
+    local outer = row(fl, 'for_statement', 2) -- the labeled outer loop head
+    ok(cont and outer, 'found continue + outer-loop rows')
+    local cfg = flow.successors(fl)
+    ok(has(cfg.succ, cont, outer), 'continue outer → the OUTER loop head')
+end)
+
+test('flow: goto jumps to its label target row (c)', function ()
+    if not ready('c') then skip 'no c parser' end
+    local fn, src = parse_fn(table.concat({
+        'void f() {',
+        '  if (x) goto done;',
+        '  work();',
+        ' done:',
+        '  cleanup();',
+        '}',
+    }, '\n'), 'c')
+    local fl = flow.build(fn, src, { regime = tsspec.c.regime })
+    local go = rowt(fl, 'goto_statement')
+    local target = row(fl, 'stmt', 5) -- cleanup() — the labeled target
+    ok(go and target, 'found goto + label-target rows')
+    local cfg = flow.successors(fl)
+    ok(has(cfg.succ, go, target), 'goto done → the cleanup() row under `done:`')
+    ok(#cfg.succ[go] == 1, 'goto has ONLY the jump edge (no fall-through)')
+end)

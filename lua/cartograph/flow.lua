@@ -67,6 +67,17 @@ local SWITCH = { switch_statement = true, expression_switch_statement = true,
 local SUSPEND = { yield = true, await = true,
     yield_expression = true, await_expression = true }
 
+-- CONTROL TRANSFER (non-local-transfer model, [[cartograph-nonlocal-transfer]]):
+-- break/continue carry an optional TARGET label; `goto` targets a label;
+-- `labeled_statement` (go/java/js/c) DEFINES a label over the statement it wraps;
+-- rust loops carry their own `label` child. Every such row stores the label name
+-- in `s.label` — a TARGET on break/continue/goto rows, a DEFINITION elsewhere
+-- (successors disambiguates by node type). def/use are UNTOUCHED (du runs as
+-- before → coarse parity unchanged); `label` is orthogonal, for CFG wiring only.
+local TRANSFER = { break_statement = true, continue_statement = true,
+    goto_statement = true }
+local LABELED = { labeled_statement = true }
+
 -- SCOPE-REGIME classification (df-strangler step 2b): per language, which
 -- declaration node types are BLOCK-scoped (the binding dies at its region's
 -- end). Everything unlisted defaults to 'function' — the binding survives block
@@ -83,8 +94,46 @@ local function line(n) return (select(1, n:range())) + 1 end
 -- ORDERED and JUMP-LOCATABLE by (l,c); coarse stays line-only (df parity). The
 -- fold's width-narrowing keeps `c` u16 normally and auto-upgrades to u32 only for
 -- the extreme minified line (e.g. a 113k-col bundle). ([[cartograph-df-strangler]])
-local function col(n) return (select(2, n:range())) + 1 end
+local function startcol(n) return (select(2, n:range())) + 1 end
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
+
+-- normalise a label (rust strips leading `'`; a label node may include a `:`)
+local function normlbl(s) return (vim.trim(s):gsub("^'", ""):gsub(":$", "")) end
+-- the label a break/continue/goto TARGETS (its sole label operand), or nil.
+-- go break: a `label_name` child; js/c: `label` field; java: a bare identifier;
+-- rust: a `label` child.
+local function target_label(node, src)
+    local lf = node:field('label')[1]
+    if lf then return normlbl(txt(lf, src)) end
+    for c in node:iter_children() do
+        if c:named() and c:type() ~= 'comment' then return normlbl(txt(c, src)) end
+    end
+    return nil
+end
+-- (label, wrapped statement) for a labeled_statement: `label` field (go/js/c) or
+-- a leading bare identifier (java); the OTHER named child is the wrapped stmt.
+local function labeled_parts(node, src)
+    local lf = node:field('label')[1]
+    local label = lf and normlbl(txt(lf, src)) or nil
+    local inner
+    for c in node:iter_children() do
+        if c:named() and c:type() ~= 'comment' and c ~= lf then
+            local ct = c:type()
+            if not label and (ct == 'identifier' or ct == 'statement_identifier'
+                or ct == 'label_name') then
+                label = normlbl(txt(c, src))
+            elseif not inner then inner = c end
+        end
+    end
+    return label, inner
+end
+-- a loop's OWN label (rust `'outer: loop`), else nil
+local function loop_label(node, src)
+    for c in node:iter_children() do
+        if c:type() == 'label' then return normlbl(txt(c, src)) end
+    end
+    return nil
+end
 
 -- constant loop condition → EDGE FEASIBILITY. `do{}while(0)` (the C one-shot
 -- macro idiom) has no back-edge; `while(true)` / rust `loop` never take the
@@ -301,13 +350,33 @@ function M.build(fnnode, src, cfg)
             end
             if inner and CTRL[inner:type()] then return emit(inner, parent, pol) end
         end
+        -- labeled_statement (go/java/js/c): DEFINES a label over the wrapped
+        -- statement — unwrap, emit the inner statement, and tag its HEAD row with
+        -- the label so break/continue/goto can target it. An empty target (C
+        -- `done: ;`) emits a bare `label` marker row.
+        if LABELED[t] then
+            local lbl, inner = labeled_parts(node, src)
+            if inner then
+                local before = #stmts
+                emit(inner, parent, pol)
+                if lbl and stmts[before + 1] then stmts[before + 1].label = lbl end
+            else
+                stmts[#stmts + 1] = { l = line(node), c = startcol(node), kind = 'label',
+                    parent = parent, pol = pol, def = {}, use = {}, t = t, label = lbl }
+            end
+            return
+        end
         local idx = #stmts + 1
         local sb = CTRL[t] and true or false
         local d, u = du(node, src, sb, ids)
-        stmts[idx] = { l = line(node), c = col(node), kind = CTRL[t] and t or 'stmt',
+        stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
-            suspend = has_suspend(node, sb) or nil } -- yield/await = a Tier-1 continuation point
+            suspend = has_suspend(node, sb) or nil, -- yield/await = a Tier-1 continuation point
+            -- control-transfer label: TARGET on break/continue/goto, else the
+            -- loop's OWN label (rust). def/use above are unaffected.
+            label = (TRANSFER[t] and target_label(node, src))
+                or (CTRL[t] and loop_label(node, src)) or nil }
         if CTRL[t] then
             local cond = node:field('condition')[1]
                 or (SWITCH[t] and node:field('value')[1]) -- go switch: `value` is the switched expr
@@ -334,7 +403,7 @@ function M.build(fnnode, src, cfg)
             end
             if POST[t] and cond then
                 local cd, cu = du(cond, src, false, ids)
-                stmts[#stmts + 1] = { l = line(cond), c = col(cond), kind = 'cond',
+                stmts[#stmts + 1] = { l = line(cond), c = startcol(cond), kind = 'cond',
                     parent = idx, pol = 'cond', def = cd, use = cu }
             end
         end
@@ -362,7 +431,7 @@ function M.build(fnnode, src, cfg)
             local vf = node:field('value')[1]
             local d, u = du(vf, src, false, ids) -- default (no value) → {},{}
             local idx = #stmts + 1
-            stmts[idx] = { l = line(node), c = col(node), kind = 'case', parent = parent,
+            stmts[idx] = { l = line(node), c = startcol(node), kind = 'case', parent = parent,
                 pol = 'case', def = d, use = u, t = node:type() }
             for c in node:iter_children() do
                 if c:named() and c ~= vf and c:type() ~= 'comment' then
@@ -378,7 +447,7 @@ function M.build(fnnode, src, cfg)
             -- `elseif_statement` / python `elif_clause`: body under `consequence`.
             local d, u = du(node, src, true, ids)
             local idx = #stmts + 1
-            stmts[idx] = { l = line(node), c = col(node), kind = node:type(), parent = parent,
+            stmts[idx] = { l = line(node), c = startcol(node), kind = node:type(), parent = parent,
                 pol = 'elseif', def = d, use = u, t = node:type() }
             local cons = node:field('consequence')[1] or node:field('body')[1]
             if cons and BODY[cons:type()] then
@@ -399,7 +468,7 @@ function M.build(fnnode, src, cfg)
             -- unbound in the fine model and df's spurious use of it is unmatched.
             local d, u = du(node, src, true, ids)
             local idx = #stmts + 1
-            stmts[idx] = { l = line(node), c = col(node), kind = 'catch', parent = parent,
+            stmts[idx] = { l = line(node), c = startcol(node), kind = 'catch', parent = parent,
                 pol = 'catch', def = d, use = u }
             -- python `except_clause` has no `body` field (the block is an unnamed
             -- child); fall back to the first BODY-type child.
@@ -549,8 +618,19 @@ function M.successors(flow)
         end
         return seen
     end
-    -- wire `rows` as a sequence completing to `after`; brk/cont = loop exit/head
-    local function wire(rows, after, brk, cont)
+    -- CONTROL TRANSFER (non-local-transfer): `gotomap` = label DEFINITIONS (a
+    -- labeled loop's head, a C label target) → row, for `goto`'s unstructured
+    -- jump (global — goto reaches any label). Labeled break/continue instead ride
+    -- `lbls`, a SCOPED map {label → {brk,cont}} for ENCLOSING labeled loops,
+    -- threaded through wire and extended per labeled loop.
+    local gotomap = {}
+    for i, s in ipairs(S) do
+        if s.label and not TRANSFER[s.t] then gotomap[s.label] = i end
+    end
+    local function extend(m, k, v) return setmetatable({ [k] = v }, { __index = m }) end
+    -- wire `rows` as a sequence completing to `after`; brk/cont = innermost loop
+    -- exit/head; lbls = labeled-loop targets in scope
+    local function wire(rows, after, brk, cont, lbls)
         if not rows or #rows == 0 then return after end
         for i = 1, #rows do
             local r, nxt = rows[i], (rows[i + 1] or after)
@@ -562,26 +642,34 @@ function M.successors(flow)
             -- `~` in spirit; the edge itself is sound (control can leave here).
             if s.suspend then add(r, 'exit') end
             if RET_T[t] then add(r, 'exit')
-            elseif t == 'break_statement' then add(r, brk or 'exit')
-            elseif t == 'continue_statement' then add(r, cont or 'exit')
+            elseif t == 'break_statement' then
+                local tgt = s.label and lbls[s.label] -- labeled → that loop's exit
+                add(r, tgt and tgt.brk or brk or 'exit')
+            elseif t == 'continue_statement' then
+                local tgt = s.label and lbls[s.label] -- labeled → that loop's head
+                add(r, tgt and tgt.cont or cont or 'exit')
+            elseif t == 'goto_statement' then
+                add(r, (s.label and gotomap[s.label]) or 'exit') -- jump; no fall-through
             elseif kids and kids['cond'] then
                 -- POST-condition loop (do-while / lua repeat-until): body runs
                 -- once before the test → NO zero-trip; the `cond` row is the join.
                 local condrow = kids['cond'][1]
-                local bentry = wire(kids['body'], condrow, nxt, condrow) -- break→exit, continue→cond
+                local lb = s.label and extend(lbls, s.label, { brk = nxt, cont = condrow }) or lbls
+                local bentry = wire(kids['body'], condrow, nxt, condrow, lb) -- break→exit, continue→cond
                 add(r, bentry)                                    -- always enter body
                 if s.const ~= false then add(condrow, bentry) end -- back-edge (dropped for do{}while(0))
                 if s.const ~= true then add(condrow, nxt) end     -- loop exit
                 for pol, rr in pairs(kids) do
-                    if pol ~= 'body' and pol ~= 'cond' then add(r, wire(rr, nxt, brk, cont)) end
+                    if pol ~= 'body' and pol ~= 'cond' then add(r, wire(rr, nxt, brk, cont, lbls)) end
                 end
             elseif kids and PRELOOP[s.kind] then
                 -- PRE-condition loop (while/for): test first → zero-trip skip,
                 -- suppressed when constant-true (while(true), rust `loop`).
-                add(r, wire(kids['body'], r, nxt, r)) -- body, back-edge to head
+                local lb = s.label and extend(lbls, s.label, { brk = nxt, cont = r }) or lbls
+                add(r, wire(kids['body'], r, nxt, r, lb)) -- body, back-edge to head
                 if s.const ~= true then add(r, nxt) end
                 for pol, rr in pairs(kids) do -- python for/while `else`, etc.
-                    if pol ~= 'body' then add(r, wire(rr, nxt, brk, cont)) end
+                    if pol ~= 'body' then add(r, wire(rr, nxt, brk, cont, lbls)) end
                 end
             elseif kids and TRY_T[t] then
                 -- exception edges: a throw may occur at ANY try-body point, so
@@ -590,39 +678,39 @@ function M.successors(flow)
                 -- uncaught-propagation path to fn-exit is left implicit (a hedge —
                 -- it only ever adds `exit`, whose live-in is empty, so liveness
                 -- stays sound).
-                local after2 = kids['finally'] and wire(kids['finally'], nxt, brk, cont) or nxt
-                add(r, wire(kids['body'], after2, brk, cont)) -- normal entry
+                local after2 = kids['finally'] and wire(kids['finally'], nxt, brk, cont, lbls) or nxt
+                add(r, wire(kids['body'], after2, brk, cont, lbls)) -- normal entry
                 if kids['catch'] then
                     local trybody = subtree(kids['body'])
                     for _, crow in ipairs(kids['catch']) do
-                        local centry = wire(region[crow] and region[crow]['catch'], after2, brk, cont)
+                        local centry = wire(region[crow] and region[crow]['catch'], after2, brk, cont, lbls)
                         add(crow, centry)                          -- bind exc var → handler body
                         addh(r, crow)                              -- exception at/near entry (conservative)
                         for tr in pairs(trybody) do addh(tr, crow) end -- throw anywhere (conservative)
                     end
                 end
                 for pol, rr in pairs(kids) do -- python try/except `else` etc.: sound over-approx
-                    if pol ~= 'body' and pol ~= 'catch' and pol ~= 'finally' then add(r, wire(rr, after2, brk, cont)) end
+                    if pol ~= 'body' and pol ~= 'catch' and pol ~= 'finally' then add(r, wire(rr, after2, brk, cont, lbls)) end
                 end
             elseif kids and IF_T[s.kind] then
-                add(r, wire(kids['body'], nxt, brk, cont))
+                add(r, wire(kids['body'], nxt, brk, cont, lbls))
                 local hasfalse = false
                 for _, pol in ipairs({ 'elseif', 'else' }) do
                     if kids[pol] then
-                        for _, e in ipairs(kids[pol]) do add(r, e); wire({ e }, nxt, brk, cont) end
+                        for _, e in ipairs(kids[pol]) do add(r, e); wire({ e }, nxt, brk, cont, lbls) end
                         hasfalse = true
                     end
                 end
                 if not hasfalse then add(r, nxt) end -- no else → condition may fall through
             elseif kids and t == 'do_statement' then
-                add(r, wire(kids['body'], nxt, brk, cont)) -- lua `do...end`: plain block
+                add(r, wire(kids['body'], nxt, brk, cont, lbls)) -- lua `do...end`: plain block
             elseif kids and SWITCH[t] then
                 -- switch: cases fall through in order; break exits the switch, so
                 -- the case bodies are wired with brk = nxt (the switch join).
-                for _, rr in pairs(kids) do add(r, wire(rr, nxt, nxt, cont)) end
+                for _, rr in pairs(kids) do add(r, wire(rr, nxt, nxt, cont, lbls)) end
                 add(r, nxt) -- no case matched (no default)
             elseif kids then -- match/try/other control head: sound over-approx
-                for _, rr in pairs(kids) do add(r, wire(rr, nxt, brk, cont)) end
+                for _, rr in pairs(kids) do add(r, wire(rr, nxt, brk, cont, lbls)) end
                 add(r, nxt)
             else
                 add(r, nxt)
@@ -630,7 +718,7 @@ function M.successors(flow)
         end
         return rows[1]
     end
-    local entry = wire(region[0] and region[0][''], 'exit', nil, nil)
+    local entry = wire(region[0] and region[0][''], 'exit', nil, nil, {})
     return { succ = succ, entry = entry, EXIT = 'exit', hedged = hedged }
 end
 
@@ -888,7 +976,8 @@ local function row_view(col, g)
     local d = col.shapes[col.shape(g)]
     local s = { l = col.l(g), c = col.c(g), parent = col.parent(g), def = {}, use = {},
         kind = d.kind, pol = d.pol, t = d.t,
-        regime = d.regime, const = d.const, suspend = d.suspend }
+        regime = d.regime, const = d.const, suspend = d.suspend,
+        label = col.labels[g] } -- sparse (control-transfer): nil for the vast majority
     local b, e = col.d0(g), col.u0(g)
     for j = 1, e - b do s.def[j] = nms[col.nm(b + j)] end
     b, e = e, col.d0(g + 1)
@@ -953,6 +1042,9 @@ function M.fold(data)
     local col = {
         shape = {}, l = {}, c = {}, parent = {},
         d0 = {}, u0 = {}, nm = {}, pm = {}, names = {}, shapes = {},
+        labels = {}, -- SPARSE (global-row → label name): control-transfer targets/
+        -- definitions, rare enough that a plain map beats a packed column (a
+        -- merge-friendly sparse (row,name-id) packing is a later refinement).
     }
     local nid = {} -- var-name -> interned id (build-time only); 0 = nil
     local function id(nm)
@@ -987,6 +1079,7 @@ function M.fold(data)
                 col.shape[ns] = shape_of(s)
                 col.l[ns] = s.l
                 col.c[ns] = s.c
+                if s.label then col.labels[ns] = s.label end
                 col.parent[ns] = s.parent
                 if s.parent > maxp then maxp = s.parent end
                 if s.c > maxc then maxc = s.c end
@@ -1022,6 +1115,7 @@ function M.fold(data)
         pm = getter(pack(col.pm, np, nw), nw),
         names = col.names,
         shapes = col.shapes,
+        labels = col.labels, -- sparse map (global-row → label), passed through
     }
     for _, node in ipairs(data.nodes or {}) do
         if node._flow == col then node._flow = packed end

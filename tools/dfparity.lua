@@ -38,12 +38,16 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 67, ['df-over-collects'] = 413,
+    self = { ['binding-as-use'] = 68, ['df-over-collects'] = 413,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 },
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
-    cpp = {}, -- PERFECT parity
-    go = { ['df-over-collects'] = 27 }, -- closure-leaks; partition-mismatch=21 was
-    -- the re-parse artifact (minified vendored JS), gone with stored flow.
+    -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
+    -- C label target now heads its own coarse row at the LOOP's line rather than
+    -- the label's line — a 1-line cosmetic label difference, def/use unchanged.
+    cpp = { ['line-skew'] = 11 },
+    go = { ['df-over-collects'] = 27, ['line-skew'] = 17 }, -- +line-skew (labels);
+    -- df-over-collects=27 closure-leaks; partition-mismatch=21 was the re-parse
+    -- artifact (minified vendored JS), gone with stored flow.
     -- rust: all flow-MORE-correct — flow.du captures let/for/if-let bindings df
     -- misses (flow-over-collects), df leaks closure names (df-over-collects),
     -- and bare bindings swap def/use (binding-as-use). 0 flow-invariant errors.
@@ -59,7 +63,7 @@ M.EXPECTED = {
     mootools = {}, -- perfect parity (js archaeology tier)
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
     -- grammar. All flow-more-correct (closure-leak + bindings df misses).
-    libs = { ['df-over-collects'] = 1586, ['flow-over-collects'] = 4 },
+    libs = { ['df-over-collects'] = 1588, ['flow-over-collects'] = 4 },
 }
 
 M.ORDER = { 'binding-as-use', 'df-over-collects', 'flow-over-collects',
