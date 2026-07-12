@@ -379,7 +379,7 @@ test('flow: reaching_cfg — a branch join reaches BOTH arms defs', function ()
         '  use(x)',          -- 8: reaches x@4 AND x@6 (join)
         'end',
     }, '\n'), 'lua')
-    local fl = flow.build(fn, src)
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
     local rc = flow.reaching_cfg(fl)
     local a4, b6, u8 = row(fl, 'stmt', 4), row(fl, 'stmt', 6), row(fl, 'stmt', 8)
     local from
@@ -400,13 +400,51 @@ test('flow: reaching_cfg — a loop back-edge reaches the pre-loop AND loop def'
         '  end',
         'end',
     }, '\n'), 'lua')
-    local fl = flow.build(fn, src)
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
     local rc = flow.reaching_cfg(fl)
     local pre, loopdef, usex = row(fl, 'stmt', 2), row(fl, 'stmt', 5), row(fl, 'stmt', 4)
     local from
     for _, e in ipairs(rc) do if e.var == 'x' and e.at == usex then from = setof(e.from) end end
     ok(from and from[pre], 'the pre-loop def x@2 reaches the loop-body use (first iteration)')
     ok(from and from[loopdef], 'the loop def x@5 reaches the use via the back-edge (later iterations)')
+end)
+
+test('flow: reaching_cfg INC B — a block-scoped def dies at block exit', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f(c)',
+        '  local inner',       -- (unused decl; the real def is in the block)
+        '  if c then',
+        '    local x = 1',      -- 4: block-regime, in the if-body region
+        '    use(x)',           -- 5: x IN scope → reaches x@4
+        '  end',
+        '  use(x)',             -- 7: x OUT of scope (if-body closed) → filtered → free
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
+    local rc = flow.reaching_cfg(fl)
+    local x4, u5, u7 = row(fl, 'stmt', 4), row(fl, 'stmt', 5), row(fl, 'stmt', 7)
+    local inb, outb
+    for _, e in ipairs(rc) do
+        if e.var == 'x' and e.at == u5 then inb = setof(e.from) end
+        if e.var == 'x' and e.at == u7 then outb = setof(e.from) end
+    end
+    ok(inb and inb[x4], 'inside the block, x@4 reaches the use')
+    ok(outb and not outb[x4], 'after the block, the block-scoped x@4 is filtered (block-death)')
+end)
+
+test('flow: reaching_cfg — an unmodified param reaches from the entry sentinel 0', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f(p)',
+        '  use(p)',   -- 2: p reaches from entry (0), no intervening def
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
+    local rc = flow.reaching_cfg(fl)
+    local from
+    for _, e in ipairs(rc) do if e.var == 'p' and e.at == row(fl, 'stmt', 2) then from = setof(e.from) end end
+    ok(from and from[0], 'the param p reaches from the entry sentinel 0 (always in scope)')
 end)
 
 test('flow: predecessors transposes successors; exit is the backward root', function ()

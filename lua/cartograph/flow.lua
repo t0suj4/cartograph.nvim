@@ -755,11 +755,12 @@ end
 --- back-edge → the pre-loop def AND the loop's own. Params reach from the entry
 --- sentinel 0. gen[n]={(v,n):v∈def[n]}, kill = the other defs of those vars;
 --- reach_in[n] = ∪ reach_out[pred] (+ params at entry); reach_out = gen ∪
---- (reach_in \ kill). This is CONTROL-flow reaching only — the lexical-scope
---- filter (block-death, in-scope candidacy) is INC B, and `~` for reaching via
---- an over-approximate edge (switch/try/elseif/suspend) is INC C; until then it
---- is over-approximate exactly where M.successors is. Returns a list of
---- { at = <use row>, var, from = { def rows… ; 0 = param/entry } } per (use,var).
+--- (reach_in \ kill). Control reaching (INC A) is then SCOPE-FILTERED (INC B):
+--- a block-regime def in a now-closed block is dropped (block-death),
+--- function/hoisted-regime survives, params are always in scope. `~` for
+--- reaching via an over-approximate edge (switch/try/elseif/suspend) is INC C;
+--- until then it is over-approximate exactly where M.successors is. Returns a
+--- list of { at = <use row>, var, from = { def rows… ; 0 = param/entry } }.
 function M.reaching_cfg(flow)
     local S = flow.stmts
     local cfg = M.successors(flow)
@@ -810,11 +811,33 @@ function M.reaching_cfg(flow)
             if not eqmap(o, rout[n]) then rout[n] = o; changed = true end
         end
     end
-    local edges = {} -- a use of v at row u sees reach_in[u][v]
+    -- INC B: LEXICAL-SCOPE filter over the control-reaching set. region_encloses
+    -- (dr, ur) = dr's region is ur's or an ANCESTOR — the binding is OPEN at ur.
+    -- Order-INDEPENDENT (control order is INC A's job; conflating them, as the
+    -- structural M.reaching does with dr<ur, wrongly drops a block-regime def
+    -- reaching an earlier same-block use via a loop back-edge). A block-regime
+    -- def in a now-CLOSED sibling/prior block is dropped (block-death); a
+    -- function/hoisted-regime def survives block exit; a param (0) is always in.
+    local function region_encloses(dr, ur)
+        if S[dr].parent == S[ur].parent then return true end
+        local p = S[ur].parent
+        while p ~= 0 do
+            if S[dr].parent == S[p].parent then return true end
+            p = S[p].parent
+        end
+        return S[dr].parent == 0
+    end
+    local function visible(dr, ur)
+        return dr == 0 or S[dr].regime ~= 'block' or region_encloses(dr, ur)
+    end
+    local edges = {} -- a use of v at row u sees reach_in[u][v], scope-filtered
     for u = 1, #S do
         for _, v in ipairs(S[u].use) do
             local reaching, from = rin[u] and rin[u][v], {}
-            if reaching then for r in pairs(reaching) do from[#from + 1] = r end table.sort(from) end
+            if reaching then
+                for r in pairs(reaching) do if visible(r, u) then from[#from + 1] = r end end
+                table.sort(from)
+            end
             edges[#edges + 1] = { at = u, var = v, from = from }
         end
     end
