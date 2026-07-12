@@ -19,7 +19,12 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 38 -- v38: CONSTRUCTOR-TYPED LOCALS (V2) — `local obj = C.new(...)`
+M.VERSION = 39 -- v39: CONSTRUCTOR RETURN-CLASS (V2 cut 2) — a constructor's
+               -- return-class = the class its in-body setmetatable points at
+               -- (a setmetatable-extends edge inside the fn's range). Types
+               -- `local obj = anyCtor()` from the RETURN, bypassing the `.new`
+               -- naming convention. [[cartograph-linker]] V2 cut 2.
+               -- v38: CONSTRUCTOR-TYPED LOCALS (V2) — `local obj = C.new(...)`
                -- / `C:new(...)` (C a class) → obj:member resolves through C's
                -- extends chain (data.ctorbinds, single-assignment gated,
                -- inferred ~). Widens V1's receiver typing. [[cartograph-linker]] V2.

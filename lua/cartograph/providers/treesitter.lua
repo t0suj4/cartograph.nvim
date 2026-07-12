@@ -889,6 +889,17 @@ M.spec = {
                 (variable_list name: (identifier) @cvar)
                 (expression_list value: (function_call name: (_) @cctor)))
         ]=],
+        -- V2 cut 2: any `setmetatable(_, {__index = C})` (first arg unconstrained,
+        -- so the anonymous `setmetatable({}, …)` return form is caught) → C at its
+        -- line; a fn whose body contains one has return-class C.
+        smt_query = [=[
+            (function_call
+                name: (identifier) @_s (#eq? @_s "setmetatable")
+                arguments: (arguments (_)
+                    (table_constructor
+                        (field name: (identifier) @_ki (#eq? @_ki "__index")
+                               value: (identifier) @smtclass))))
+        ]=],
         vars = [[
             (variable_declaration
                 (assignment_statement
@@ -2978,17 +2989,20 @@ local function resolve_self(calls, node_index, extends, exact, addref)
 end
 
 -- V2: locals typed by a constructor ([[cartograph-linker]] receiver-typing).
--- `local obj = C.new(...)` / `C:new(...)` (C a class) conventionally makes obj a
--- C-instance, so obj:member / obj.member resolves through C's extends chain.
--- Reads per-file ctor binds (data.ctorbinds: file -> { local -> {class, n} },
--- collected at extraction). SINGLE-ASSIGNMENT gated: a local bound more than once
--- OR to differing classes is dropped (n ~= 1) — a reassignment would change the
--- type. Inferred (~): a CONVENTION, not proven — a reassignment to a non-ctor
--- value escapes the single-assignment count, so this is honestly ~ (cut 2 =
--- verify via the constructor's actual return-class + reaching). C must own
--- methods (is_class) to be a class. Widens V1's fixpoint: constructor-typed
--- locals become determined receivers.
-local function resolve_local_ctor(calls, ctorbinds, extends, exact, addref)
+-- `local obj = C.new(...)` / `obj = make()` etc. → obj:member / obj.member
+-- resolves through obj's class's extends chain. Reads per-file ctor binds
+-- (data.ctorbinds: file -> { local -> {callee, n} }, collected at extraction).
+-- The class is derived two ways:
+--   CUT 1 — the `.new`/`:new` CONVENTION: callee `C.new` → class C (C a class).
+--   CUT 2 — the constructor's RETURN-CLASS: the callee resolves to a fn whose
+--     body setmetatable's a table to C (a setmetatable-extends edge INSIDE the
+--     fn's range) → that fn's return-class is C. Bypasses the naming convention
+--     (works for `.make`/`.create`/any name, and inline setmetatable). Reuses V0's
+--     extends edges + `line`.
+-- SINGLE-ASSIGNMENT gated (n ~= 1 dropped — a rebind would change the type).
+-- Inferred (~): a reassignment to a non-ctor value escapes the count (cut 3 =
+-- reaching-verify the returned value IS the setmetatable'd one → promote ~→proven).
+local function resolve_local_ctor(calls, node_index, ctorbinds, smtclasses, extends, exact, addref)
     if not (ctorbinds and next(ctorbinds)) then return 0 end
     local super = build_super(extends)
     local is_class = {}
@@ -2996,20 +3010,45 @@ local function resolve_local_ctor(calls, ctorbinds, extends, exact, addref)
         local owner = name:match('^([%w_]+)[:.]')
         if owner then is_class[owner] = true end
     end
+    -- CUT 2: return-class per fn NAME = the unique __index class of a setmetatable
+    -- inside the fn's range (data.smtclasses: file -> {{class,line}}). A fn whose
+    -- body builds one instance-metatable returns that instance. Ambiguous (2+
+    -- distinct classes in range) → nil (hedge).
+    local retclass = {}
+    if smtclasses and next(smtclasses) then
+        for _, nd in pairs(node_index or {}) do
+            if (nd.kind == 'function' or nd.kind == 'method') and nd.name and nd.range
+                and smtclasses[nd.file] then
+                local s, en = nd.range.start.line, nd.range['end'].line
+                local one, amb
+                for _, sm in ipairs(smtclasses[nd.file]) do
+                    if sm.line >= s and sm.line <= en then
+                        if one and one ~= sm.class then amb = true else one = sm.class end
+                    end
+                end
+                if one and not amb then retclass[nd.name] = one end
+            end
+        end
+    end
     local n = 0
     for _, c in ipairs(calls or {}) do
         if not c.to and c.full and c.fn then
             local recv, member = c.full:match('^([%w_]+)[:.]([%w_]+)$')
             local fb = recv and recv ~= 'self' and ctorbinds[c.file]
             local b = fb and fb[recv]
-            if b and b.n == 1 and b.class and is_class[b.class] then
-                local fit = chain_lookup(super, exact, b.class, member, elang_for(c.file))
-                if fit then
-                    c.to = fit.id; c.inferred = true; c.refused = nil
-                    addref(c.fn, fit.id, c.at
-                        or { start = { line = c.line, char = 0 },
-                             ['end'] = { line = c.line, char = 0 } }, true)
-                    n = n + 1
+            if b and b.n == 1 and b.callee then
+                -- CUT 1 (.new convention) then CUT 2 (callee fn's return-class)
+                local cls = b.callee:match('^([%w_]+)[.:]new$')
+                if not (cls and is_class[cls]) then cls = retclass[b.callee] end
+                if cls and is_class[cls] then
+                    local fit = chain_lookup(super, exact, cls, member, elang_for(c.file))
+                    if fit then
+                        c.to = fit.id; c.inferred = true; c.refused = nil
+                        addref(c.fn, fit.id, c.at
+                            or { start = { line = c.line, char = 0 },
+                                 ['end'] = { line = c.line, char = 0 } }, true)
+                        n = n + 1
+                    end
                 end
             end
         end
@@ -4509,32 +4548,45 @@ function M.extract(root, opts)
             data.extends[#data.extends + 1] =
                 { child = child, parent = parent, file = file }
         end
-        -- V2: `obj = C.new(...)` / `C:new(...)` → obj is a C-instance. Count binds
-        -- per (file, local); n>1 (rebound, or to a different class) drops it at
-        -- resolve time (single-assignment soundness gate). Only the `.new`/`:new`
-        -- constructor convention (strongest); non-ctor RHS calls no-op here.
-        local function handle_ctor(varn, ctorn)
-            local cls = node_text(ctorn, src):match('^([%w_]+)[.:]new$')
-            if not cls then return end
+        -- V2 cut 2: a `setmetatable(_, {__index = C})` ANYWHERE (any first arg,
+        -- incl. the anonymous `setmetatable({}, …)` return form) records C + its
+        -- line, so a fn whose body contains one has return-class C (the fn returns
+        -- a C-instance). Separate from extends (which needs a NAMED child).
+        local function handle_smt(clsn)
+            local cls = node_text(clsn, src)
+            data.smtclasses = data.smtclasses or {}
+            local fs = data.smtclasses[file]
+            if not fs then fs = {}; data.smtclasses[file] = fs end
+            fs[#fs + 1] = { class = cls, line = ({ clsn:range() })[1] }
+        end
+        -- V2: `local obj = <call>(...)` → obj may be a class instance. Record the
+        -- CALLEE text per (file, local); n>1 (rebound) drops it at resolve time
+        -- (single-assignment gate). resolve_local_ctor derives the class two ways:
+        -- the `.new`/`:new` convention (cut 1) OR the callee fn's return-class
+        -- (cut 2 — bypasses the naming convention). Only constructor-SHAPED callees
+        -- (`X`, `X.m`, `X:m`) are recorded; deeper chains skipped.
+        local function handle_ctor(varn, calln)
+            local callee = node_text(calln, src)
+            if not callee:match('^[%w_]+[:.]?[%w_]*$') then return end
             local lv = node_text(varn, src)
             data.ctorbinds = data.ctorbinds or {}
             local fb = data.ctorbinds[file]
             if not fb then fb = {}; data.ctorbinds[file] = fb end
             local b = fb[lv]
-            if not b then fb[lv] = { class = cls, n = 1 } else b.n = b.n + 1 end
+            if not b then fb[lv] = { callee = callee, n = 1 } else b.n = b.n + 1 end
         end
         local combined = spec._defs_query
         if combined == nil then
             combined = table.concat({ spec.functions or '', spec.vars or '',
                 spec.interface or '', spec.super_query or '',
-                spec.ctor_query or '' }, '\n')
+                spec.ctor_query or '', spec.smt_query or '' }, '\n')
             spec._defs_query = combined
         end
         local q = parse_query(lang, combined)
         if q then
             for _, match in q:iter_matches(tsroot, src, 0, -1) do
                 local defn, namen, vdefn, vnamen, valn
-                local childn, parentn, catn, cat, cvarn, cctorn
+                local childn, parentn, catn, cat, cvarn, cctorn, smtn
                 for id, ns in pairs(match) do
                     local capn = q.captures[id]
                     local n = cap_node(ns)
@@ -4547,9 +4599,12 @@ function M.extract(root, opts)
                     elseif capn == 'parent' then parentn = n
                     elseif capn == 'cvar' then cvarn = n
                     elseif capn == 'cctor' then cctorn = n
+                    elseif capn == 'smtclass' then smtn = n
                     elseif capn:sub(1, 1) ~= '_' then catn, cat = n, capn end
                 end
-                if cvarn and cctorn then
+                if smtn then
+                    handle_smt(smtn)
+                elseif cvarn and cctorn then
                     handle_ctor(cvarn, cctorn)
                 elseif childn and parentn then
                     handle_super(childn, parentn)
@@ -5497,7 +5552,7 @@ function M.extract(root, opts)
 
     -- obj:member where `local obj = C.new(...)` — constructor-typed locals
     -- resolved through C's extends chain (V2 receiver typing)
-    resolve_local_ctor(calls, data.ctorbinds, data.extends, exact, addref)
+    resolve_local_ctor(calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
 
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
@@ -5864,7 +5919,7 @@ function M.relink(data, touched)
     for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
     local retn = resolve_returns(data.calls, node_index, exact, addref)
     n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
-    n = n + resolve_local_ctor(data.calls, data.ctorbinds, data.extends, exact, addref)
+    n = n + resolve_local_ctor(data.calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
     return n + retn
 end
 

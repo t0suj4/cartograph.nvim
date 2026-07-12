@@ -163,3 +163,33 @@ test('ctor: a rebound local is dropped — obj:m() stays unresolved, no stale ty
     ok(call, 'd:speak call found')
     eq(nil, call.to)              -- d bound twice → not typed → ambiguous speak stays unresolved
 end)
+
+-- V2 CUT 2: a constructor NOT named `.new` (`.create`), returning the anonymous
+-- `setmetatable({}, {__index = Widget})` form. Cut 1 (name) can't type it; cut 2
+-- reads the constructor's return-class (Widget) → x:render resolves to Widget:render.
+local RETCLASS_SRC = table.concat({
+    'local Widget = {}',                                            -- 1
+    'function Widget:render() return 1 end',                        -- 2
+    'local Gadget = {}',                                            -- 3
+    'function Gadget:render() return 2 end',                        -- 4  (render ambiguous)
+    'function Widget.create() return setmetatable({}, {__index = Widget}) end', -- 5 NOT .new
+    'local function use()',                                         -- 6
+    '    local x = Widget.create()',                               -- 7  x : Widget (cut 2)
+    '    return x:render()',                                        -- 8
+    'end',                                                          -- 9
+    'return { use = use }',                                         -- 10
+}, '\n')
+
+test('ctor cut2: return-class types the local for a non-.new constructor', function ()
+    if not ts_ready() then return skip 'no lua parser' end
+    local data = extract_src(RETCLASS_SRC)
+    local widget_render
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'Widget:render' then widget_render = n.id end
+    end
+    local call
+    for _, c in ipairs(data.calls) do if c.full == 'x:render' then call = c end end
+    ok(call, 'x:render call found')
+    eq(widget_render, call.to)    -- x typed Widget via Widget.create's return-class
+    ok(call.inferred, 'inferred (~)')
+end)
