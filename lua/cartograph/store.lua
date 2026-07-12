@@ -156,6 +156,27 @@ function M.ingest(data)
     -- the folded graph, incl. refresh's whole-graph re-attach) read columns
     -- transparently. Idempotent; refresh's fresh per-file argv re-folds.
     require('cartograph.argv').fold(M.data)
+    -- DF-STRANGLER STEP 5 (trivial half): df becomes a COARSE PROJECTION OF FLOW,
+    -- not a parallel build. Before folding, rebuild each fn's df from
+    -- flow.coarse (proven ==df by dfgate, adopting flow's MORE-CORRECT coarse
+    -- where they diverge — the benign witness/clone re-baseline the strangler
+    -- anticipated). The dfreg-built `defr` (binder tags flow doesn't carry yet) is
+    -- transplanted onto the coarse stmts BY LINE; trace/extract.plan degrade
+    -- gracefully to name-based where a tag is absent (their fold=tags→name
+    -- fallback), until they migrate onto flow's fine model (the fine half). The
+    -- dfreg RIDE still runs solely for defr until then.
+    do
+        local flow = require 'cartograph.flow'
+        for _, n in ipairs(M.data.nodes or {}) do
+            if n.flow and n.df then
+                local dbl = {} -- line -> defr, from the legacy dfreg df
+                for _, s in ipairs(n.df.stmts) do if s.defr then dbl[s.l] = s.defr end end
+                local co, inputs = flow.coarse(n.flow)
+                if next(dbl) then for _, s in ipairs(co) do s.defr = dbl[s.l] end end
+                n.df = { inputs = inputs, stmts = co }
+            end
+        end
+    end
     -- DF FOLD (same lifecycle): the nested per-fn statement records — the
     -- LARGEST foldable datum — collapse into one columnar store; every df
     -- reader goes through the dual-mode df.lua accessors, so views
