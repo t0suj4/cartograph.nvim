@@ -71,6 +71,19 @@ test('cfg: early-exit guard-clause post-dominates; non-terminating does not', fu
     ok(gs[1]:find('!', 1, true) and gs[1]:find('bad', 1, true), 'it is the negated early-exit guard')
 end)
 
+test('cfg: JS ternary condition dominates the consequence, not the alternative', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'javascript') then skip 'no javascript parser' end
+    local src = 'function f(x) { const y = isValid(x) ? use(x) : bail(); }'
+    local root = vim.treesitter.get_string_parser(src, 'javascript'):parse()[1]:root()
+    local cons = find(root, src, 'call_expression', 'use(x)')
+    local alt = find(root, src, 'call_expression', 'bail(')
+    eq(1, #guard_texts(cons, src), 'the ternary consequence is dominated by the condition')
+    ok(guard_texts(cons, src)[1]:find('isValid', 1, true), 'guard is the ternary condition')
+    eq(0, #guard_texts(alt, src), 'the ternary alternative is NOT dominated')
+end)
+
 test('cfg: climbing stops at the function boundary', function ()
     if not ready() then skip 'no php parser' end
     local root, src = parse(table.concat({

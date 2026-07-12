@@ -15,17 +15,20 @@
 -- resource-pairing.
 --
 -- Per-grammar: `condition`-field constructs cover php + lua if/elseif/while and
--- php ternary. Loops without a boolean condition (for/foreach) and
+-- php/c/JS ternaries. Loops without a boolean condition (for/foreach) and
 -- short-circuit sub-branches are NOT modeled here (phase 2) — for guard
 -- dominance they simply don't contribute, which is sound.
 
 local M = {}
 
--- constructs whose `condition` field positively dominates their guarded body
+-- constructs whose `condition` field positively dominates their guarded body.
+-- Ternaries: php/c `conditional_expression` and JS/TS `ternary_expression` both
+-- expose `condition` + `alternative` (the consequence is neither → the
+-- positively-guarded child), so guards_over handles them uniformly.
 local COND = {
     if_statement = true, elseif_statement = true, elseif_clause = true,
     else_if_clause = true, while_statement = true,
-    conditional_expression = true,
+    conditional_expression = true, ternary_expression = true,
 }
 -- direct-child types that put us on the NEGATED (else/elseif) path of an
 -- enclosing if — the positive condition above does not dominate through them
