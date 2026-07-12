@@ -135,7 +135,7 @@ function M.check(data)
                         local okb, fl = pcall(flow.build, af, src, cfg)
                         if okb then
                             nfn = nfn + 1
-                            if not pcall(function () flow.successors(fl); flow.liveness(fl); flow.reaching(fl) end) then
+                            if not pcall(function () flow.successors(fl); flow.liveness(fl); flow.reaching(fl); flow.reaching_cfg(fl) end) then
                                 ferr = ferr + 1
                             end
                             local co = flow.coarse(fl)

@@ -365,6 +365,50 @@ test('flow: an early return flows to exit; the fall-through use stays live', fun
     ok(lv.live_out[row(fl, 'if_statement')].x, 'x is live after the if (needed on the fall-through path)')
 end)
 
+-- reaching-on-CFG INC A: control-flow reaching definitions (set-valued).
+test('flow: reaching_cfg — a branch join reaches BOTH arms defs', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f(c)',
+        '  local x',        -- 2
+        '  if c then',
+        '    x = 1',         -- 4: arm A
+        '  else',
+        '    x = 2',         -- 6: arm B
+        '  end',
+        '  use(x)',          -- 8: reaches x@4 AND x@6 (join)
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src)
+    local rc = flow.reaching_cfg(fl)
+    local a4, b6, u8 = row(fl, 'stmt', 4), row(fl, 'stmt', 6), row(fl, 'stmt', 8)
+    local from
+    for _, e in ipairs(rc) do if e.var == 'x' and e.at == u8 then from = setof(e.from) end end
+    ok(from, 'use(x) has a reaching set for x')
+    ok(from[a4] and from[b6], 'both arm defs (x@4 and x@6) reach the join use — the multi-def the structural approx cannot express')
+end)
+
+test('flow: reaching_cfg — a loop back-edge reaches the pre-loop AND loop def', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f(n)',
+        '  local x = 0',       -- 2: pre-loop def
+        '  while n > 0 do',
+        '    use(x)',          -- 4: reaches x@2 (first trip) AND x@5 (back-edge)
+        '    x = x + 1',       -- 5: loop def
+        '    n = n - 1',
+        '  end',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src)
+    local rc = flow.reaching_cfg(fl)
+    local pre, loopdef, usex = row(fl, 'stmt', 2), row(fl, 'stmt', 5), row(fl, 'stmt', 4)
+    local from
+    for _, e in ipairs(rc) do if e.var == 'x' and e.at == usex then from = setof(e.from) end end
+    ok(from and from[pre], 'the pre-loop def x@2 reaches the loop-body use (first iteration)')
+    ok(from and from[loopdef], 'the loop def x@5 reaches the use via the back-edge (later iterations)')
+end)
+
 test('flow: predecessors transposes successors; exit is the backward root', function ()
     if not ready('lua') then skip 'no lua parser' end
     local fn, src = parse_fn(table.concat({

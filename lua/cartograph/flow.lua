@@ -749,4 +749,76 @@ function M.liveness(flow)
     return { live_in = li, live_out = lo }
 end
 
+--- REACHING DEFINITIONS over the CFG (forward dataflow to fixpoint) — INC A of
+--- reaching-on-CFG ([[cartograph-cfg-scope]]). For each use, the SET of defs
+--- that reach it along successor paths: a branch join → multiple defs; a loop
+--- back-edge → the pre-loop def AND the loop's own. Params reach from the entry
+--- sentinel 0. gen[n]={(v,n):v∈def[n]}, kill = the other defs of those vars;
+--- reach_in[n] = ∪ reach_out[pred] (+ params at entry); reach_out = gen ∪
+--- (reach_in \ kill). This is CONTROL-flow reaching only — the lexical-scope
+--- filter (block-death, in-scope candidacy) is INC B, and `~` for reaching via
+--- an over-approximate edge (switch/try/elseif/suspend) is INC C; until then it
+--- is over-approximate exactly where M.successors is. Returns a list of
+--- { at = <use row>, var, from = { def rows… ; 0 = param/entry } } per (use,var).
+function M.reaching_cfg(flow)
+    local S = flow.stmts
+    local cfg = M.successors(flow)
+    local pred = M.predecessors(flow)
+    local entry = cfg.entry
+    local seed = {} -- params reach from sentinel 0
+    for _, p in ipairs(flow.params or {}) do
+        seed[p] = seed[p] or {}; seed[p][0] = true
+    end
+    local function mergeinto(dst, src)
+        for v, defs in pairs(src) do
+            local d = dst[v]; if not d then d = {}; dst[v] = d end
+            for r in pairs(defs) do d[r] = true end
+        end
+    end
+    local function eqmap(a, b)
+        for v, defs in pairs(a) do
+            local bd = b[v]; if not bd then return false end
+            for r in pairs(defs) do if not bd[r] then return false end end
+        end
+        for v, defs in pairs(b) do
+            if not a[v] then return false end
+            for r in pairs(defs) do if not a[v][r] then return false end end
+        end
+        return true
+    end
+    local rout, rin = {}, {}
+    for i = 1, #S do rout[i] = {} end
+    local changed, guard = true, 0
+    while changed and guard < 100000 do
+        changed = false; guard = guard + 1
+        for n = 1, #S do
+            local i = {}
+            if n == entry then mergeinto(i, seed) end
+            for _, p in ipairs(pred[n] or {}) do
+                if type(p) == 'number' then mergeinto(i, rout[p]) end
+            end
+            rin[n] = i
+            local defset = {}
+            for _, v in ipairs(S[n].def) do defset[v] = true end
+            local o = {}
+            for v, defs in pairs(i) do -- reach_in \ kill (vars n does NOT redefine survive)
+                if not defset[v] then
+                    local d = {}; for r in pairs(defs) do d[r] = true end; o[v] = d
+                end
+            end
+            for _, v in ipairs(S[n].def) do o[v] = { [n] = true } end -- gen (kills prior)
+            if not eqmap(o, rout[n]) then rout[n] = o; changed = true end
+        end
+    end
+    local edges = {} -- a use of v at row u sees reach_in[u][v]
+    for u = 1, #S do
+        for _, v in ipairs(S[u].use) do
+            local reaching, from = rin[u] and rin[u][v], {}
+            if reaching then for r in pairs(reaching) do from[#from + 1] = r end table.sort(from) end
+            edges[#edges + 1] = { at = u, var = v, from = from }
+        end
+    end
+    return edges
+end
+
 return M
