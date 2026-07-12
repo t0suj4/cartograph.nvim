@@ -666,6 +666,26 @@ function M.successors(flow)
     return { succ = succ, entry = entry, EXIT = 'exit' }
 end
 
+--- PREDECESSOR edges — the transpose of M.successors. Returns
+--- `pred = {[row] = { predecessor rows }}`, with `pred['exit']` = the rows that
+--- flow to the function exit (return/throw/fall-through end) — the roots for a
+--- BACKWARD walk, the mirror of `entry` for the forward direction. A backward
+--- walk needs a visited-set (loop back-edges make the reverse graph cyclic too)
+--- and inherits the successor graph's conservative over-approximation (it may
+--- over-include predecessors — same uniform honesty as forward). The substrate
+--- for backward slicing + reaching-with-joins ([[cartograph-cfg-scope]]).
+function M.predecessors(flow)
+    local succ = M.successors(flow).succ
+    local pred = {}
+    for a, outs in pairs(succ) do
+        for _, b in ipairs(outs) do
+            local p = pred[b]; if not p then p = {}; pred[b] = p end
+            p[#p + 1] = a
+        end
+    end
+    return pred
+end
+
 --- LIVENESS over the successor graph (backward dataflow to fixpoint) — the
 --- canonical phase-2 consumer (data-lifecycle reading (a)). Returns
 --- { live_in = {[row]=set}, live_out = {[row]=set} } (set = name→true). A var

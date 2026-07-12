@@ -365,6 +365,24 @@ test('flow: an early return flows to exit; the fall-through use stays live', fun
     ok(lv.live_out[row(fl, 'if_statement')].x, 'x is live after the if (needed on the fall-through path)')
 end)
 
+test('flow: predecessors transposes successors; exit is the backward root', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f(c, x)',
+        '  if c then return end',
+        '  use(x)',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src)
+    local cfg, pred = flow.successors(fl), flow.predecessors(fl)
+    for a, outs in pairs(cfg.succ) do
+        for _, b in ipairs(outs) do
+            ok(has(pred, b, a), ('succ edge %s->%s appears in pred[%s]'):format(tostring(a), tostring(b), tostring(b)))
+        end
+    end
+    ok(has(pred, 'exit', row(fl, 'stmt', 2)), 'the return is a predecessor of exit (a backward root)')
+end)
+
 -- CFG phase 2b: post-condition loops, plain blocks, feasibility, exception edges.
 test('flow: POST-condition loop (repeat/until) — body runs before the test, no zero-trip', function ()
     if not ready('lua') then skip 'no lua parser' end
