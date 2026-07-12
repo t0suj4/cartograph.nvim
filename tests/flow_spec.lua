@@ -447,6 +447,29 @@ test('flow: reaching_cfg — an unmodified param reaches from the entry sentinel
     ok(from and from[0], 'the param p reaches from the entry sentinel 0 (always in scope)')
 end)
 
+test('flow: reaching_cfg INC C — reaching only via a may-throw edge is hedged (~)', function ()
+    if not ready('php') then skip 'no php parser' end
+    local fn, src = parse_fn(table.concat({
+        'function f() {',
+        '  try {',
+        '    $x = risky();',   -- def x in the try body
+        '  } catch (E $e) {',
+        '    use($x);',         -- x reaches here ONLY via the conservative may-throw edge → ~
+        '  }',
+        '}',
+    }, '\n'))
+    local fl = flow.build(fn, src, { pfield = 'parameters' })
+    local rc = flow.reaching_cfg(fl)
+    local defx, usex
+    for i, s in ipairs(fl.stmts) do
+        for _, d in ipairs(s.def) do if d == 'x' then defx = i end end
+    end
+    for _, e in ipairs(rc) do if e.var == 'x' then usex = e end end
+    ok(defx and usex, 'x has a def and a reaching use')
+    ok(setof(usex.from)[defx], 'x@def reaches the catch use (control-wise)')
+    ok(usex.hedged and usex.hedged[defx], 'the reaching is ~ — only via the conservative may-throw edge')
+end)
+
 test('flow: predecessors transposes successors; exit is the backward root', function ()
     if not ready('lua') then skip 'no lua parser' end
     local fn, src = parse_fn(table.concat({

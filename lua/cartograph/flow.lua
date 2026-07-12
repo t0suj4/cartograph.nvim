@@ -593,7 +593,10 @@ function M.successors(flow)
         rr[#rr + 1] = i
     end
     local succ = {}
+    local hedged = {} -- CONSERVATIVE edges (may be infeasible): [a][b]=true. Reaching
+    -- via ONLY these is `~` (INC C). Currently the try "may-throw-anywhere" edges.
     local function add(a, b) local l = succ[a]; if not l then l = {}; succ[a] = l end l[#l + 1] = b end
+    local function addh(a, b) add(a, b); local h = hedged[a]; if not h then h = {}; hedged[a] = h end h[b] = true end
     -- every row transitively under `roots` (via all sub-regions) — the try-body
     -- subtree for exceptional edges
     local function subtree(roots)
@@ -657,8 +660,8 @@ function M.successors(flow)
                     for _, crow in ipairs(kids['catch']) do
                         local centry = wire(region[crow] and region[crow]['catch'], after2, brk, cont)
                         add(crow, centry)                          -- bind exc var → handler body
-                        add(r, crow)                               -- exception at/near entry
-                        for tr in pairs(trybody) do add(tr, crow) end -- throw anywhere in the try
+                        addh(r, crow)                              -- exception at/near entry (conservative)
+                        for tr in pairs(trybody) do addh(tr, crow) end -- throw anywhere (conservative)
                     end
                 end
                 for pol, rr in pairs(kids) do -- python try/except `else` etc.: sound over-approx
@@ -691,7 +694,7 @@ function M.successors(flow)
         return rows[1]
     end
     local entry = wire(region[0] and region[0][''], 'exit', nil, nil)
-    return { succ = succ, entry = entry, EXIT = 'exit' }
+    return { succ = succ, entry = entry, EXIT = 'exit', hedged = hedged }
 end
 
 --- PREDECESSOR edges — the transpose of M.successors. Returns
@@ -757,18 +760,33 @@ end
 --- reach_in[n] = ∪ reach_out[pred] (+ params at entry); reach_out = gen ∪
 --- (reach_in \ kill). Control reaching (INC A) is then SCOPE-FILTERED (INC B):
 --- a block-regime def in a now-closed block is dropped (block-death),
---- function/hoisted-regime survives, params are always in scope. `~` for
---- reaching via an over-approximate edge (switch/try/elseif/suspend) is INC C;
---- until then it is over-approximate exactly where M.successors is. Returns a
---- list of { at = <use row>, var, from = { def rows… ; 0 = param/entry } }.
+--- function/hoisted-regime survives, params are always in scope. INC C: each
+--- edge also carries `hedged` = the subset of `from` that reaches ONLY via a
+--- CONSERVATIVE edge (in `from` but not in the exact-edges reaching) — currently
+--- the try may-throw-anywhere edges; a def reaching a catch use is `~`. (Switch
+--- fall-through / go-no-fall-through is language-dependent → not tagged yet.)
+--- Returns a list of { at=<use row>, var, from={def rows; 0=param/entry},
+--- hedged={def rows reaching only conservatively, ~} | nil }.
 function M.reaching_cfg(flow)
     local S = flow.stmts
     local cfg = M.successors(flow)
     local pred = M.predecessors(flow)
+    local hedged = cfg.hedged or {}
     local entry = cfg.entry
     local seed = {} -- params reach from sentinel 0
     for _, p in ipairs(flow.params or {}) do
         seed[p] = seed[p] or {}; seed[p][0] = true
+    end
+    -- EXACT predecessors = pred MINUS the conservative (hedged) edges. Reaching
+    -- computed over these is what feasibly reaches; a def in the full set but not
+    -- this one reaches ONLY via a conservative edge → `~` (INC C).
+    local pred_exact = {}
+    for n, ps in pairs(pred) do
+        local keep = {}
+        for _, a in ipairs(ps) do
+            if not (type(a) == 'number' and hedged[a] and hedged[a][n]) then keep[#keep + 1] = a end
+        end
+        pred_exact[n] = keep
     end
     local function mergeinto(dst, src)
         for v, defs in pairs(src) do
@@ -787,30 +805,36 @@ function M.reaching_cfg(flow)
         end
         return true
     end
-    local rout, rin = {}, {}
-    for i = 1, #S do rout[i] = {} end
-    local changed, guard = true, 0
-    while changed and guard < 100000 do
-        changed = false; guard = guard + 1
-        for n = 1, #S do
-            local i = {}
-            if n == entry then mergeinto(i, seed) end
-            for _, p in ipairs(pred[n] or {}) do
-                if type(p) == 'number' then mergeinto(i, rout[p]) end
-            end
-            rin[n] = i
-            local defset = {}
-            for _, v in ipairs(S[n].def) do defset[v] = true end
-            local o = {}
-            for v, defs in pairs(i) do -- reach_in \ kill (vars n does NOT redefine survive)
-                if not defset[v] then
-                    local d = {}; for r in pairs(defs) do d[r] = true end; o[v] = d
+    -- reaching-definitions fixpoint over a predecessor map → reach_in per row
+    local function run(predof)
+        local rout, rin = {}, {}
+        for i = 1, #S do rout[i] = {} end
+        local changed, guard = true, 0
+        while changed and guard < 100000 do
+            changed = false; guard = guard + 1
+            for n = 1, #S do
+                local i = {}
+                if n == entry then mergeinto(i, seed) end
+                for _, p in ipairs(predof[n] or {}) do
+                    if type(p) == 'number' then mergeinto(i, rout[p]) end
                 end
+                rin[n] = i
+                local defset = {}
+                for _, v in ipairs(S[n].def) do defset[v] = true end
+                local o = {}
+                for v, defs in pairs(i) do -- reach_in \ kill (vars n does NOT redefine survive)
+                    if not defset[v] then
+                        local d = {}; for r in pairs(defs) do d[r] = true end; o[v] = d
+                    end
+                end
+                for _, v in ipairs(S[n].def) do o[v] = { [n] = true } end -- gen (kills prior)
+                if not eqmap(o, rout[n]) then rout[n] = o; changed = true end
             end
-            for _, v in ipairs(S[n].def) do o[v] = { [n] = true } end -- gen (kills prior)
-            if not eqmap(o, rout[n]) then rout[n] = o; changed = true end
         end
+        return rin
     end
+    local rin = run(pred)              -- all edges (INC A/B)
+    local rin_exact = run(pred_exact)  -- exact edges only (INC C)
     -- INC B: LEXICAL-SCOPE filter over the control-reaching set. region_encloses
     -- (dr, ur) = dr's region is ur's or an ANCESTOR — the binding is OPEN at ur.
     -- Order-INDEPENDENT (control order is INC A's job; conflating them, as the
@@ -830,15 +854,22 @@ function M.reaching_cfg(flow)
     local function visible(dr, ur)
         return dr == 0 or S[dr].regime ~= 'block' or region_encloses(dr, ur)
     end
-    local edges = {} -- a use of v at row u sees reach_in[u][v], scope-filtered
+    local edges = {} -- a use of v at u sees reach_in[u][v], scope-filtered; `hedged`
+    -- = the subset of `from` that reaches ONLY via a conservative edge (INC C, ~).
     for u = 1, #S do
         for _, v in ipairs(S[u].use) do
-            local reaching, from = rin[u] and rin[u][v], {}
+            local reaching, from, hset = rin[u] and rin[u][v], {}, nil
             if reaching then
-                for r in pairs(reaching) do if visible(r, u) then from[#from + 1] = r end end
+                local ex = rin_exact[u] and rin_exact[u][v]
+                for r in pairs(reaching) do
+                    if visible(r, u) then
+                        from[#from + 1] = r
+                        if not (ex and ex[r]) then hset = hset or {}; hset[r] = true end -- ~ (no exact path)
+                    end
+                end
                 table.sort(from)
             end
-            edges[#edges + 1] = { at = u, var = v, from = from }
+            edges[#edges + 1] = { at = u, var = v, from = from, hedged = hset }
         end
     end
     return edges
