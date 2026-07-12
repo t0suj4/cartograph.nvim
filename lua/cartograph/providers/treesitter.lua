@@ -781,6 +781,25 @@ local function factorio_mods(root, files)
     return map
 end
 
+-- nvim-plugin REPO SHAPE (a 3rd per-root detector, deliberately EMBEDDED INLINE
+-- beside factorio_mods/toc_scope — the scattered cluster that the resolution-
+-- health analyzer's rule 3 [scattered-special-case finder] must later detect as
+-- one missing-abstraction; see [[cartograph-cross-project]] repo shapes). An nvim
+-- plugin puts its package under `lua/` (`require 'foo.bar'` → lua/foo/bar.lua), so
+-- `lua/` is the package root. MARKER-GATED (fires only when a lua/ layout is
+-- present), NOT the reverted blind dir-relative guess. Memoized per root.
+local NLROOT = {}
+local function nvim_lua_root(root, files)
+    local v = NLROOT[root]
+    if v ~= nil then return v end
+    v = false
+    for f in pairs(files) do
+        if f:match('^lua/.+%.lua$') then v = true; break end
+    end
+    NLROOT[root] = v
+    return v
+end
+
 -- WoW-addon boundary detection, memoized per (root, top segment): an
 -- addon tree is <root>/<Addon>/<Addon>.toc (or any *.toc in the dir).
 local TOC_DIR = {}
@@ -861,6 +880,14 @@ M.spec = {
             local slashed = mod:gsub('%.', '/')
             for _, cand in ipairs({ slashed .. '.lua', slashed .. '/init.lua', mod .. '.lua' }) do
                 if files[cand] then return cand end
+            end
+            -- nvim-plugin repo shape: the package lives under lua/ (require
+            -- 'foo.bar' → lua/foo/bar.lua) — marker-gated, so a non-nvim corpus
+            -- without a lua/ layout is unaffected
+            if type(root) == 'string' and nvim_lua_root(root, files) then
+                for _, cand in ipairs({ 'lua/' .. slashed .. '.lua', 'lua/' .. slashed .. '/init.lua' }) do
+                    if files[cand] then return cand end
+                end
             end
             -- FACTORIO-ONLY semantics (stock lua require is package.path
             -- based — dir-relative matching elsewhere would be a GUESS,

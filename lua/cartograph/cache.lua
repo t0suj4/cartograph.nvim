@@ -19,7 +19,12 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 34 -- v34: MODULE-ALIAS resolution (receiver-typing rung 1) — a
+M.VERSION = 35 -- v35: nvim-plugin REPO SHAPE — a corpus with a `lua/` package
+               -- layout resolves `require 'foo.bar'` → lua/foo/bar.lua (marker-
+               -- gated). Unblocks module-alias (v34) on self: self's own
+               -- `require 'cartograph.X'` now resolve → import edges + binds →
+               -- alias.member calls resolve. A v34 cache lacks the lua/ root.
+               -- v34: MODULE-ALIAS resolution (receiver-typing rung 1) — a
                -- still-refused `alias.member(...)` where `alias = require('mod')`
                -- (the import edge's bind) now resolves to mod's `member` export,
                -- inferred (~). Lua-only (only lua captures import_bind); shifts
