@@ -46,7 +46,7 @@ print(('guards: %d findings (%d warn)'):format(#findings, warns))
 local dffail = false
 if root == repo then
     local dfp = dofile(repo .. '/tools/dfparity.lua')
-    local r = dfp.check(store.data, 'lua')
+    local r = dfp.check(store.data)
     print(('df/flow parity (self): fns=%d stmts=%d flow-invariant-errors=%d · %s')
         :format(r.nfn, r.nstmt, r.ferr, dfp.census(r.cats)))
     -- HARD-GATE only the churn-INSENSITIVE signal: flow's CFG

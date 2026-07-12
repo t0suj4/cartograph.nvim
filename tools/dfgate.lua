@@ -34,7 +34,7 @@ if corpus.rev and not bench.same_rev(corpus.rev, now) then
 end
 
 local data = bench.extract(name)
-local r = dfp.check(data, corpus.lang)
+local r = dfp.check(data)
 print(('dfgate %-6s fns=%d stmts=%d  flow-invariant-errors=%d')
     :format(name, r.nfn, r.nstmt, r.ferr))
 print('  divergences: ' .. dfp.census(r.cats))

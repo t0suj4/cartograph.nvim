@@ -25,13 +25,17 @@ local M = {}
 -- per-corpus EXPECTED census (calibrated on a known-good rev). A deliberate
 -- flow/df change recalibrates the affected entry (review the delta first),
 -- exactly like the structure gate's --save. Uncalibrated corpus → nil.
+-- (calibrated with PER-FILE language detection: each file checked under its own
+-- grammar, matching extraction. This removed mis-parse artifacts that a single
+-- corpus-lang produced — e.g. cpp's .sh files and libs' native .rs/.cpp.)
 M.EXPECTED = {
-    self = { ['binding-as-use'] = 67, ['df-over-collects'] = 405,
-        ['flow-over-collects'] = 3, ['OTHER'] = 1 },
+    -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
+    self = { ['binding-as-use'] = 67, ['df-over-collects'] = 407,
+        ['flow-over-collects'] = 2, ['OTHER'] = 1 },
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
-    cpp = { ['df-over-collects'] = 1, ['receiver'] = 10, ['df-empty-name'] = 1,
-        ['partition-mismatch'] = 2, ['line-skew'] = 1 },
-    go = {}, -- perfect parity: coarse(flow)==df exactly
+    cpp = {}, -- PERFECT parity (the old residual was .sh files parsed as C++)
+    -- go: pure .go is perfect; this residual is non-Go files in the corpus dir.
+    go = { ['df-over-collects'] = 22, ['partition-mismatch'] = 21 },
     -- rust: all flow-MORE-correct — flow.du captures let/for/if-let bindings df
     -- misses (flow-over-collects), df leaks closure names (df-over-collects),
     -- and bare bindings swap def/use (binding-as-use). 0 flow-invariant errors.
@@ -39,14 +43,17 @@ M.EXPECTED = {
         ['flow-over-collects'] = 1988 },
     python = { ['df-over-collects'] = 3 }, -- closure-leak/dedup only
     ruby = {}, -- perfect parity
-    -- ghost = the JS scale corpus. df-over-collects (closure-leak) dominates;
-    -- the residual OTHER/disjoint/partition/line-skew is the .ts-under-the-JS-
-    -- grammar boundary (ghost mixes .js/.ts: `x: any`, `as`, type predicates)
-    -- plus try-block aggregation — a CORPUS caveat, not a flow.du bug; 0
-    -- flow-invariant errors. Baselined so future drift from it fires.
+    -- ghost = the JS scale corpus; df-over-collects (closure-leak) dominates.
+    -- The residual OTHER/disjoint/partition/line-skew is try-block aggregation +
+    -- the .ts-under-JS-grammar boundary — a corpus caveat, not a flow.du bug.
     ghost = { ['df-over-collects'] = 1397, ['flow-over-collects'] = 49,
         ['OTHER'] = 8, ['disjoint'] = 14, ['partition-mismatch'] = 16,
         ['line-skew'] = 6 },
+    jquery = {}, -- perfect parity (js quick tier)
+    mootools = {}, -- perfect parity (js archaeology tier)
+    -- libs = elasticsearch: java + native rust/cpp, each checked under its own
+    -- grammar. All flow-more-correct (closure-leak + bindings df misses).
+    libs = { ['df-over-collects'] = 1550, ['flow-over-collects'] = 4 },
 }
 
 M.ORDER = { 'binding-as-use', 'df-over-collects', 'flow-over-collects',
@@ -88,10 +95,12 @@ local function classify_axis(fs, ds)
     return 'OTHER'
 end
 
---- Run the parity check over already-extracted `data` for `lang`.
+--- Run the parity check over already-extracted `data`. Language is detected
+--- PER FILE (ts.lang_of) — the same way extraction does — so a mixed-language
+--- corpus (e.g. elasticsearch/libs = java + native rust/cpp) is each checked
+--- under its own grammar, not a single nominal corpus lang.
 --- Returns { cats = {class -> count}, ferr, nfn, nstmt }.
-function M.check(data, lang)
-    local spec = ts.spec[lang] or {}
+function M.check(data)
     local byfile = {}
     for _, n in ipairs(data.nodes or {}) do
         if (n.kind == 'function' or n.kind == 'method') and n.file and df.present(n) then
@@ -102,8 +111,11 @@ function M.check(data, lang)
     local cats, ferr, nfn, nstmt = {}, 0, 0, 0
     local function tally(c) if c then cats[c] = (cats[c] or 0) + 1 end end
     for file, nodes in pairs(byfile) do
-        local ok_read, lines = pcall(vim.fn.readfile, store.abs_in(data, file))
-        if ok_read then
+        local lang = ts.lang_of(file)
+        local spec = lang and ts.spec[lang]
+        local ok_read, lines = false, nil
+        if spec then ok_read, lines = pcall(vim.fn.readfile, store.abs_in(data, file)) end
+        if ok_read and spec then
             local src = table.concat(lines, '\n')
             local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
             if okp then
