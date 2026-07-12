@@ -859,6 +859,9 @@ nvim --headless -u NONE -l tools/gate.lua server --save
 # The structure snapshot DROPS df, so this is what catches a flow.du-vs-df
 # def/use drift. Pins a per-corpus labeled census; fails on any class delta.
 nvim --headless -u NONE -l tools/dfgate.lua cpp
+# --show <class>: the divergence EXPLORER — dump a class's instances with source
+# + the flow={}/df={} sets (the fix-side view); no class lists the classes.
+nvim --headless -u NONE -l tools/dfgate.lua rust --show flow-over-collects
 ```
 
 `tools/preflight.lua` is the dev loop as one command: git-diff impact (changed
