@@ -621,7 +621,57 @@ local function cycle_findings(store)
     return out
 end
 
+-- SILENT HONESTY GAP (the uniform-honesty invariant, read as a lint): a BARE
+-- call whose callee is a LOCAL or PARAM of the enclosing function, yet resolved
+-- to NOTHING and was NOT refused — resolution silently gave up on a callable it
+-- can see the binding for. This is the function-value-flow / forward-decl class
+-- (`local g = f; g()`, `local ra; ra = function…; ra()`): the engine should
+-- either RESOLVE it (fn-value alias) or SPEAK a refusal; silence violates the
+-- invariant. Bare-only (a qualified `obj.m` receiver-typing drop is the separate
+-- narrowable-refusal work-list); local-only (a free external name resolving to
+-- nil is an honest "not ours", not a gap).
+local function silent_drop_findings(store)
+    local calls = store.data.calls
+    if not calls or #calls == 0 then return {} end
+    local df = require 'cartograph.df'
+    local at = require 'cartograph.at'
+    local locals, seen, out = {}, {}, {}
+    local function fn_locals(id) -- params ∪ df-def names of the enclosing fn
+        local s = locals[id]
+        if s then return s end
+        s = {}
+        local n = store.node(id)
+        if n then
+            for _, p in ipairs(n.params or {}) do s[p] = true end
+            for _, st in ipairs(df.stmts(n)) do
+                for _, d in ipairs(st.def or {}) do s[d] = true end
+            end
+        end
+        locals[id] = s
+        return s
+    end
+    for _, c in ipairs(calls) do
+        if not c.to and not c.refused and not c.dynamic and not c.full
+            and c.fn and c.callee and #c.callee >= 3
+            and fn_locals(c.fn)[c.callee] then
+            local k = c.fn .. '\31' .. c.callee -- one finding per (fn, local)
+            if not seen[k] then
+                seen[k] = true
+                local fn = store.node(c.fn)
+                out[#out + 1] = {
+                    file = fn and store.abs(fn.file) or (c.file and store.abs(c.file)) or '',
+                    line = c.at and at.sl(c.at) + 1 or ((c.line or 0) + 1),
+                    message = ("call to local '%s' resolved to nothing and was not refused — a silent honesty gap (the local is a callable in scope: resolution neither linked it nor spoke a refusal)")
+                        :format(c.callee),
+                }
+            end
+        end
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'silent-drop', severity = 'warn', run = silent_drop_findings },
     { name = 'seam-guard', severity = 'warn', run = seam_findings },
     { name = 'truncation', severity = 'info', run = truncation_findings },
     { name = 'require-cycle', severity = 'info', run = cycle_findings },

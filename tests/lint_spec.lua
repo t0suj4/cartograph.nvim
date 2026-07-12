@@ -58,3 +58,33 @@ test('lint: mutual recursion is a call cycle; plain recursion is not', function 
     eq(1, #f)                                   -- only the a<->b cycle
     ok(f[1].message:match('a <%-> b'), f[1].message)
 end)
+
+test('lint: silent-drop flags a bare call to a local callable, neither resolved nor refused', function ()
+    -- run(handler): `handler` is a param (a local callable). Three call sites:
+    --  1. handler()     — unresolved + NOT refused → the silent honesty gap
+    --  2. external_fn() — a FREE name (not a local) resolving to nil → honest external, NOT flagged
+    --  3. handler()     — but honestly REFUSED → not silent, NOT flagged
+    local caller = fn('m.lua', 'run'); caller.params = { 'handler' }
+    store.ingest({ schema = 1, root = '/x', nodes = { mod('m.lua'), caller }, edges = {},
+        calls = {
+            { callee = 'handler', fn = 'm.lua::run', file = 'm.lua', at = R0 },
+            { callee = 'external_fn', fn = 'm.lua::run', file = 'm.lua', at = R0 },
+            { callee = 'handler', fn = 'm.lua::run', file = 'm.lua', at = R0, refused = { rule = 'ambiguous' } },
+        } })
+    local f = lint.run(store, only('silent-drop'))
+    eq(1, #f) -- only the silent handler() (deduped per (fn,local); external + refused excluded)
+    ok(f[1].message:match("'handler'"), f[1].message)
+    ok(f[1].message:match('silent honesty gap'), f[1].message)
+end)
+
+test('lint: silent-drop ignores resolved, dynamic, qualified, and short-name calls', function ()
+    local caller = fn('m.lua', 'run'); caller.params = { 'handler', 'obj', 'go' }
+    store.ingest({ schema = 1, root = '/x', nodes = { mod('m.lua'), caller }, edges = {},
+        calls = {
+            { callee = 'handler', fn = 'm.lua::run', file = 'm.lua', at = R0, to = 'm.lua::run' }, -- resolved
+            { callee = 'handler', fn = 'm.lua::run', file = 'm.lua', at = R0, dynamic = true },    -- dynamic frontier
+            { callee = 'method', full = 'obj.method', fn = 'm.lua::run', file = 'm.lua', at = R0 }, -- qualified (receiver-typing, not this rule)
+            { callee = 'go', fn = 'm.lua::run', file = 'm.lua', at = R0 }, -- short name (<3): resolution noise, not a gap
+        } })
+    eq(0, #lint.run(store, only('silent-drop')))
+end)

@@ -708,6 +708,13 @@ checks luacheck can't:
 - **dead-function** — a *local* function with no caller anywhere (exported
   functions and metamethods are excluded — public/dynamically-dispatched surface
   isn't dead).
+- **silent-drop** — a *bare* call whose callee is a **local or param** of the
+  enclosing function, yet resolved to nothing **and** was not refused: resolution
+  silently gave up on a callable it can see the binding for (the function-value /
+  forward-declared-local class — `local g = f; g()`). The engine's contract is to
+  resolve it *or* speak a refusal; silence is a uniform-honesty violation. Local-
+  and bare-only (a free external name resolving to nil is an honest "not ours"; a
+  qualified `obj.method` drop is receiver-typing, a separate concern).
 - **redundant-require** — a pure module `require`d only for effect, but it has
   none, so the require does nothing.
 - **call-cycle** — mutual recursion / cyclic call clusters (plain self-recursion
