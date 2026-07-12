@@ -26,11 +26,21 @@ local CTRL = { if_statement = true, while_statement = true, for_statement = true
 -- clause nodes carrying a sub-region's statements
 -- POST-condition loops: the condition runs AFTER the body
 local POST = { do_statement = true, repeat_statement = true }
+-- PRE-condition loops (test FIRST → a zero-trip skip is feasible). do/repeat are
+-- POST (tested above the back-edge); lua `do...end` is NEITHER — a plain block.
+local PRELOOP = { while_statement = true, for_statement = true,
+    for_numeric_statement = true, for_generic_statement = true,
+    foreach_statement = true, while_expression = true, for_expression = true,
+    loop_expression = true } -- rust `loop {}` = infinite (const-true, no zero-trip)
+local TRY_T = { try_statement = true }
 local CLAUSE = { else_statement = true, elseif_statement = true,
     else_clause = true, elseif_clause = true, else_if_clause = true,
     case_statement = true, default_statement = true,
-    catch_clause = true, finally_clause = true }
+    catch_clause = true, except_clause = true, finally_clause = true }
 local ELSEIF = { elseif_statement = true, elseif_clause = true, else_if_clause = true }
+-- exception handlers (bind an exception var, then region a body): java/php/JS
+-- `catch_clause`, python `except_clause`
+local CATCH = { catch_clause = true, except_clause = true }
 
 -- SCOPE-REGIME classification (df-strangler step 2b): per language, which
 -- declaration node types are BLOCK-scoped (the binding dies at its region's
@@ -60,6 +70,26 @@ M.REGIME = REGIME
 
 local function line(n) return (select(1, n:range())) + 1 end
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
+
+-- constant loop condition → EDGE FEASIBILITY. `do{}while(0)` (the C one-shot
+-- macro idiom) has no back-edge; `while(true)` / rust `loop` never take the
+-- zero-trip or condition-exit edge (only `break` leaves). Returns true|false|nil
+-- (nil = unknown → keep both edges, the sound default). Unwraps parens.
+local FALSE_LIT = { ['0'] = true, ['0.0'] = true, ['false'] = true,
+    ['False'] = true, ['nil'] = true, ['null'] = true }
+local TRUE_LIT = { ['true'] = true, ['True'] = true, ['1'] = true }
+local function const_cond(node, src)
+    while node and node:type() == 'parenthesized_expression' do
+        local inner
+        for c in node:iter_children() do if c:named() then inner = c break end end
+        node = inner
+    end
+    if not node then return nil end
+    local s = vim.trim(txt(node, src))
+    if FALSE_LIT[s] then return false end
+    if TRUE_LIT[s] then return true end
+    return nil
+end
 
 local FN = { function_definition = true, function_declaration = true,
     method_declaration = true, anonymous_function = true, arrow_function = true,
@@ -227,6 +257,10 @@ function M.build(fnnode, src, cfg)
             regime = regimetab[t] or 'function', t = t } -- t = raw node type (CFG terminators)
         if CTRL[t] then
             local cond = node:field('condition')[1]
+            -- loop feasibility flag (do{}while(0) / while(true) / rust loop)
+            if POST[t] or PRELOOP[t] then
+                stmts[idx].const = (t == 'loop_expression') and true or const_cond(cond, src)
+            end
             -- POST-condition loops (do-while, lua repeat-until): the condition
             -- runs AFTER the body, so its def/use must be ordered after it (a
             -- var def'd in the body and read in the condition is not a free
@@ -266,7 +300,7 @@ function M.build(fnnode, src, cfg)
             emit(node, parent, 'elseif')
             return
         end
-        if node:type() == 'catch_clause' then
+        if CATCH[node:type()] then
             -- the header binds the exception var (DEF) and references the type
             -- (use); the body regions under it. Without this the caught var is
             -- unbound in the fine model and df's spurious use of it is unmatched.
@@ -274,7 +308,14 @@ function M.build(fnnode, src, cfg)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), kind = 'catch', parent = parent,
                 pol = 'catch', def = d, use = u }
+            -- python `except_clause` has no `body` field (the block is an unnamed
+            -- child); fall back to the first BODY-type child.
             local b = node:field('body')[1]
+            if not (b and BODY[b:type()]) then
+                for c in node:iter_children() do
+                    if BODY[c:type()] then b = c break end
+                end
+            end
             if b and BODY[b:type()] then region(b, idx, 'catch') end
             return
         end
@@ -418,24 +459,31 @@ function M.reaching(flow)
 end
 
 -- ── CFG phase 2: successor edges over the fine rows ─────────────────────────
-local LOOP_T = { while_statement = true, for_statement = true,
-    for_numeric_statement = true, for_generic_statement = true,
-    foreach_statement = true, repeat_statement = true, do_statement = true,
-    while_expression = true, loop_expression = true, for_expression = true }
 local IF_T = { if_statement = true, if_expression = true }
 local RET_T = { return_statement = true, throw_statement = true,
     raise_statement = true }
 
---- Structured control-flow SUCCESSOR edges over flow's fine rows (CFG phase 2,
---- [[cartograph-cfg-scope]]). Returns { succ = {[row] = <succ ids>},
+--- Structured control-flow SUCCESSOR edges over flow's fine rows (CFG phase 2 +
+--- 2b, [[cartograph-cfg-scope]]). Returns { succ = {[row] = <succ ids>},
 --- entry = <id|'exit'>, EXIT = 'exit' }. Node ids are row indices; 'exit' is
---- the function-exit sentinel. Models: sequential flow; if/then/else (elseif
---- rows are alternatives off the head); loops (body entry + back-edge to head +
---- zero-trip skip to the join; break→loop exit, continue→head); early exits
---- (return/throw/raise→exit). SOUND over-approximation for the rest —
---- switch/try/match branch to every sub-region entry + the join (infeasible
---- edges possible → CONSERVATIVE dataflow, never unsound). do-while POST-cond
---- ordering and exception edges are phase-2b.
+--- the function-exit sentinel. Models:
+---  • sequential flow; early exits (return/throw/raise→exit);
+---  • if/then/else (elseif rows are alternatives off the head);
+---  • PRE-condition loops (while/for): body + back-edge to head + zero-trip skip
+---    (suppressed when the condition is constant-true — while(true)/rust `loop`);
+---    break→loop exit, continue→head;
+---  • POST-condition loops (do-while / lua repeat-until, phase-2b): body runs
+---    once BEFORE the test, so NO zero-trip; the trailing `cond` row is the loop
+---    join (back-edge to body + exit); `do{}while(0)` (const-false) drops the
+---    back-edge (one-shot); break→exit, continue→cond;
+---  • lua `do...end`: a plain lexical block (no loop);
+---  • try/catch/finally (phase-2b): a throw may occur at ANY try-body point, so
+---    every catch is reachable from every such point (sound); finally is on the
+---    normal completion path.
+--- SOUND over-approximation for the rest — switch/match branch to every
+--- sub-region entry + the join (infeasible edges possible → CONSERVATIVE
+--- dataflow, never unsound). Chained-elseif / distinct-case feasibility is
+--- blocked on build folding clause bodies into the clause row (remaining).
 function M.successors(flow)
     local S = flow.stmts
     local region = {} -- region[parent][pol] = ordered row ids
@@ -447,6 +495,21 @@ function M.successors(flow)
     end
     local succ = {}
     local function add(a, b) local l = succ[a]; if not l then l = {}; succ[a] = l end l[#l + 1] = b end
+    -- every row transitively under `roots` (via all sub-regions) — the try-body
+    -- subtree for exceptional edges
+    local function subtree(roots)
+        local seen, stack = {}, {}
+        for _, x in ipairs(roots or {}) do stack[#stack + 1] = x end
+        while #stack > 0 do
+            local x = table.remove(stack)
+            if not seen[x] then
+                seen[x] = true
+                local rr = region[x]
+                if rr then for _, l in pairs(rr) do for _, y in ipairs(l) do stack[#stack + 1] = y end end end
+            end
+        end
+        return seen
+    end
     -- wire `rows` as a sequence completing to `after`; brk/cont = loop exit/head
     local function wire(rows, after, brk, cont)
         if not rows or #rows == 0 then return after end
@@ -457,11 +520,45 @@ function M.successors(flow)
             if RET_T[t] then add(r, 'exit')
             elseif t == 'break_statement' then add(r, brk or 'exit')
             elseif t == 'continue_statement' then add(r, cont or 'exit')
-            elseif kids and LOOP_T[s.kind] then
-                add(r, wire(kids['body'], r, nxt, r)) -- enter body (back-edge to head)
-                add(r, nxt)                           -- zero-trip / exit
+            elseif kids and kids['cond'] then
+                -- POST-condition loop (do-while / lua repeat-until): body runs
+                -- once before the test → NO zero-trip; the `cond` row is the join.
+                local condrow = kids['cond'][1]
+                local bentry = wire(kids['body'], condrow, nxt, condrow) -- break→exit, continue→cond
+                add(r, bentry)                                    -- always enter body
+                if s.const ~= false then add(condrow, bentry) end -- back-edge (dropped for do{}while(0))
+                if s.const ~= true then add(condrow, nxt) end     -- loop exit
+                for pol, rr in pairs(kids) do
+                    if pol ~= 'body' and pol ~= 'cond' then add(r, wire(rr, nxt, brk, cont)) end
+                end
+            elseif kids and PRELOOP[s.kind] then
+                -- PRE-condition loop (while/for): test first → zero-trip skip,
+                -- suppressed when constant-true (while(true), rust `loop`).
+                add(r, wire(kids['body'], r, nxt, r)) -- body, back-edge to head
+                if s.const ~= true then add(r, nxt) end
                 for pol, rr in pairs(kids) do -- python for/while `else`, etc.
                     if pol ~= 'body' then add(r, wire(rr, nxt, brk, cont)) end
+                end
+            elseif kids and TRY_T[t] then
+                -- exception edges: a throw may occur at ANY try-body point, so
+                -- every catch handler is reachable from every such point (sound).
+                -- finally (if present) is on the normal completion path; the
+                -- uncaught-propagation path to fn-exit is left implicit (a hedge —
+                -- it only ever adds `exit`, whose live-in is empty, so liveness
+                -- stays sound).
+                local after2 = kids['finally'] and wire(kids['finally'], nxt, brk, cont) or nxt
+                add(r, wire(kids['body'], after2, brk, cont)) -- normal entry
+                if kids['catch'] then
+                    local trybody = subtree(kids['body'])
+                    for _, crow in ipairs(kids['catch']) do
+                        local centry = wire(region[crow] and region[crow]['catch'], after2, brk, cont)
+                        add(crow, centry)                          -- bind exc var → handler body
+                        add(r, crow)                               -- exception at/near entry
+                        for tr in pairs(trybody) do add(tr, crow) end -- throw anywhere in the try
+                    end
+                end
+                for pol, rr in pairs(kids) do -- python try/except `else` etc.: sound over-approx
+                    if pol ~= 'body' and pol ~= 'catch' and pol ~= 'finally' then add(r, wire(rr, after2, brk, cont)) end
                 end
             elseif kids and IF_T[s.kind] then
                 add(r, wire(kids['body'], nxt, brk, cont))
@@ -473,7 +570,9 @@ function M.successors(flow)
                     end
                 end
                 if not hasfalse then add(r, nxt) end -- no else → condition may fall through
-            elseif kids then -- switch/try/match/other control head: sound over-approx
+            elseif kids and t == 'do_statement' then
+                add(r, wire(kids['body'], nxt, brk, cont)) -- lua `do...end`: plain block
+            elseif kids then -- switch/match/other control head: sound over-approx
                 for _, rr in pairs(kids) do add(r, wire(rr, nxt, brk, cont)) end
                 add(r, nxt)
             else

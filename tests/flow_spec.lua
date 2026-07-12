@@ -364,3 +364,117 @@ test('flow: an early return flows to exit; the fall-through use stays live', fun
     ok(has(cfg.succ, row(fl, 'stmt', 2), cfg.EXIT), 'the return flows to the function exit')
     ok(lv.live_out[row(fl, 'if_statement')].x, 'x is live after the if (needed on the fall-through path)')
 end)
+
+-- CFG phase 2b: post-condition loops, plain blocks, feasibility, exception edges.
+test('flow: POST-condition loop (repeat/until) — body runs before the test, no zero-trip', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f(n)',
+        '  repeat',
+        '    n = n - 1',
+        '  until n <= 0',
+        '  return n',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src)
+    local cfg = flow.successors(fl)
+    local head, body, cond = row(fl, 'repeat_statement'), row(fl, 'stmt', 3), row(fl, 'cond')
+    local ret = row(fl, 'stmt', 5)
+    eq(1, #cfg.succ[head], 'the head has ONE successor: it always enters the body (no zero-trip skip)')
+    ok(has(cfg.succ, head, body), 'the head enters the body')
+    ok(has(cfg.succ, body, cond), 'the body flows to the until-condition (tested AFTER the body)')
+    ok(has(cfg.succ, cond, body), 'the condition loops back to the body (back-edge THROUGH the test)')
+    ok(has(cfg.succ, cond, ret), 'the condition can exit the loop')
+end)
+
+test('flow: do{}while(0) — the const-false one-shot idiom has no back-edge', function ()
+    if not ready('c') then skip 'no c parser' end
+    local fn, src = parse_fn(table.concat({
+        'void f(int n){',
+        '  do { work(n); } while(0);',
+        '  tail();',
+        '}',
+    }, '\n'), 'c')
+    local fl = flow.build(fn, src)
+    local cfg = flow.successors(fl)
+    local cond, body, tail = row(fl, 'cond'), row(fl, 'stmt', 2), row(fl, 'stmt', 3)
+    ok(not has(cfg.succ, cond, body), 'const-false condition drops the back-edge (runs exactly once)')
+    ok(has(cfg.succ, cond, tail), 'the condition falls straight through to the tail')
+end)
+
+test('flow: while(true)+break — const-true loop has no zero-trip; break is the only exit', function ()
+    if not ready('c') then skip 'no c parser' end
+    local fn, src = parse_fn(table.concat({
+        'void f(int n){',
+        '  while(1){ if(n) break; step(); }',
+        '  tail();',
+        '}',
+    }, '\n'), 'c')
+    local fl = flow.build(fn, src)
+    local cfg = flow.successors(fl)
+    local head, tail, brk = row(fl, 'while_statement'), row(fl, 'stmt', 3), row(fl, 'stmt', 2)
+    ok(not has(cfg.succ, head, tail), 'const-true head takes no zero-trip / condition-exit edge')
+    ok(has(cfg.succ, brk, tail), 'break is the only way out of the infinite loop')
+end)
+
+test('flow: lua do...end is a plain block — no back-edge, no zero-trip', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f()',
+        '  do',
+        '    local x = 1',
+        '  end',
+        '  g()',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src)
+    local cfg = flow.successors(fl)
+    local head, body, tail = row(fl, 'do_statement'), row(fl, 'stmt', 3), row(fl, 'stmt', 5)
+    ok(has(cfg.succ, head, body), 'the do-block enters its body')
+    ok(has(cfg.succ, body, tail), 'the body flows straight to the next statement')
+    ok(not has(cfg.succ, body, head), 'no spurious loop back-edge (it is NOT a loop)')
+end)
+
+test('flow: try/catch/finally — every try point reaches the handler; finally is on the normal path', function ()
+    if not ready('php') then skip 'no php parser' end
+    local fn, src = parse_fn(table.concat({
+        'function f(){',
+        '  try {',            -- line 2
+        '    a();',           -- line 3
+        '    risky();',       -- line 4
+        '  } catch (E $e) {',  -- line 5
+        '    handle($e);',    -- line 6
+        '  } finally {',      -- line 7
+        '    clean();',       -- line 8
+        '  }',
+        '  tail();',          -- line 10
+        '}',
+    }, '\n'), 'php')
+    local fl = flow.build(fn, src)
+    local cfg = flow.successors(fl)
+    -- the <?php\n preamble shifts every source line by one
+    local a, risky = row(fl, 'stmt', 4), row(fl, 'stmt', 5)
+    local catch, fin, tail = row(fl, 'catch'), row(fl, 'stmt', 9), row(fl, 'stmt', 11)
+    ok(has(cfg.succ, a, catch), 'a throw at try stmt 1 reaches the handler')
+    ok(has(cfg.succ, risky, catch), 'a throw at try stmt 2 reaches the handler')
+    ok(has(cfg.succ, risky, fin), 'normal try completion goes to finally')
+    ok(has(cfg.succ, catch, row(fl, 'stmt', 7)), 'the catch binds then runs its body')
+    ok(has(cfg.succ, fin, tail), 'finally completes to the statement after the try')
+end)
+
+test('flow: python except_clause is recognised as an exception handler', function ()
+    if not ready('python') then skip 'no python parser' end
+    local fn, src = parse_fn(table.concat({
+        'def f():',
+        '  try:',
+        '    x = risky()',
+        '  except ValueError as e:',
+        '    handle(e)',
+        '  done()',
+    }, '\n'), 'python')
+    local fl = flow.build(fn, src)
+    local cfg = flow.successors(fl)
+    local try_body, catch = row(fl, 'stmt', 3), row(fl, 'catch')
+    ok(catch ~= nil, 'except_clause produces a catch row (not a plain body statement)')
+    ok(has(cfg.succ, try_body, catch), 'the try body reaches the except handler')
+end)
