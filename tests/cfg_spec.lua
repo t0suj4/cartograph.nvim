@@ -112,6 +112,28 @@ test('cfg: python comprehension if-clause guards the element body only', functio
     eq(0, #guard_texts(iter, src), 'the iterable is evaluated before the filter → not guarded')
 end)
 
+test('cfg: short-circuit && guards its right operand (positive), not the left', function ()
+    if not ready_lang('javascript') then skip 'no javascript parser' end
+    local src = 'function f(x) { const q = isOk(x) && use(x); const p = isOk(x); }'
+    local root = vim.treesitter.get_string_parser(src, 'javascript'):parse()[1]:root()
+    local rhs = find(root, src, 'call_expression', 'use(x)')
+    local lhs = find(root, src, 'call_expression', 'isOk(x)')  -- the left operand
+    local gs = guard_texts(rhs, src)
+    eq(1, #gs, 'the right operand is guarded by the left')
+    ok(gs[1] == 'isOk(x)', 'positive guard = the left operand (no negation)')
+    eq(0, #guard_texts(lhs, src), 'the left operand is evaluated unconditionally')
+end)
+
+test('cfg: short-circuit || guards its right operand NEGATED', function ()
+    if not ready_lang('javascript') then skip 'no javascript parser' end
+    local src = 'function f(x) { const q = bad(x) || use(x); }'
+    local root = vim.treesitter.get_string_parser(src, 'javascript'):parse()[1]:root()
+    local rhs = find(root, src, 'call_expression', 'use(x)')
+    local gs = guard_texts(rhs, src)
+    eq(1, #gs, 'the right operand is guarded')
+    ok(gs[1] == '!bad(x)', 'the || guard is NEGATED (right runs when left is falsy)')
+end)
+
 test('cfg: climbing stops at the function boundary', function ()
     if not ready() then skip 'no php parser' end
     local root, src = parse(table.concat({

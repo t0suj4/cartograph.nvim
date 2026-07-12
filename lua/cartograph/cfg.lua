@@ -14,10 +14,9 @@
 -- (successor edges: joins, loop back-edges) is a separate cut for liveness /
 -- resource-pairing.
 --
--- Per-grammar: `condition`-field constructs cover php + lua if/elseif/while and
--- php/c/JS ternaries. Loops without a boolean condition (for/foreach) and
--- short-circuit sub-branches are NOT modeled here (phase 2) — for guard
--- dominance they simply don't contribute, which is sound.
+-- Per-grammar: covers if/elseif/while, php/c/JS/python ternaries, python
+-- comprehension if-clauses, and short-circuit `&&`/`||` right operands. Loops
+-- without a boolean condition (for/foreach) don't contribute (sound).
 
 local M = {}
 
@@ -39,6 +38,12 @@ local COMPREHENSION = {
     list_comprehension = true, set_comprehension = true,
     dictionary_comprehension = true, generator_expression = true,
 }
+-- short-circuit boolean ops: the RIGHT operand is conditionally evaluated.
+-- `a && b` → b guarded by a (positive); `a || b` → b guarded by ¬a (negated).
+-- (`??` is nullish, not a boolean validator guard — excluded.)
+local SHORTCIRCUIT = { binary_expression = true, boolean_operator = true }
+local SC_AND = { ['&&'] = true, ['and'] = true }
+local SC_OR = { ['||'] = true, ['or'] = true }
 -- direct-child types that put us on the NEGATED (else/elseif) path of an
 -- enclosing if — the positive condition above does not dominate through them
 local ELSE = {
@@ -102,6 +107,27 @@ local BLOCK = { block = true, compound_statement = true, program = true }
 
 local function txt(n, src) return vim.treesitter.get_node_text(n, src) end
 
+-- short-circuit guard: within `a && b` / `a || b`, only the RIGHT operand is
+-- conditionally evaluated. Returns (cond, neg) when `child` IS the right
+-- operand — cond = the left operand; neg=false for &&/and (left holds),
+-- neg=true for ||/or (¬left holds when the right runs). nil otherwise.
+-- NB this models EVALUATION-dominance of the right operand (uniform across
+-- languages), NOT the expression's RESULT value: php `&&`/`||` COERCE their
+-- result to bool (so `$q = cond && $x` detaints — a coercion-sanitizer),
+-- whereas `?:`/`??` and JS/python `&&`/`||` pass an operand VALUE through.
+-- That result-value distinction is a taint value-flow concern, not a guard one
+-- ([[cartograph-taint-analysis]]).
+local function shortcircuit_guard(p, child, src)
+    local right = p:field('right')[1]
+    if not (right and same(child, right)) then return nil end
+    local op, left = p:field('operator')[1], p:field('left')[1]
+    if not (op and left) then return nil end
+    local ot = txt(op, src)
+    if SC_AND[ot] then return left, false end
+    if SC_OR[ot] then return left, true end
+    return nil
+end
+
 -- does `body` definitely terminate — last named stmt is a TERM, or an
 -- exit()/die() expression-statement? (favors NON-termination when unsure, so
 -- a non-terminating `if` is not mistaken for a guard-clause → no over-suppress)
@@ -136,6 +162,9 @@ function M.guards_over(node, src)
         if COND[p:type()] then
             local cond = positive_guard(p, child)
             if cond then out[#out + 1] = { cond = cond, neg = false } end
+        elseif SHORTCIRCUIT[p:type()] then
+            local cond, neg = shortcircuit_guard(p, child, src)
+            if cond then out[#out + 1] = { cond = cond, neg = neg } end
         end
         -- early-exit guard-clauses: preceding `if(C){…exit}` siblings of the
         -- statement `child`, within this block, make ¬C dominate `node`
