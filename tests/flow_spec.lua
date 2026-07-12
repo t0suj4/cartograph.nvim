@@ -4,30 +4,43 @@
 
 local flow = require 'cartograph.flow'
 
-local function ready()
+local function ready(lang)
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
-    return pcall(vim.treesitter.language.add, 'php')
+    return pcall(vim.treesitter.language.add, lang or 'php')
 end
 
-local function parse_fn(code)
-    local src = '<?php\n' .. code
-    local root = vim.treesitter.get_string_parser(src, 'php'):parse()[1]:root()
+local FN_TYPES = { function_definition = true, method_declaration = true,
+    function_declaration = true, method_definition = true, function_item = true }
+
+-- parse `code` and return the first function-like node. `lang` defaults to php
+-- (with the <?php preamble); other langs take the code verbatim.
+local function parse_fn(code, lang)
+    lang = lang or 'php'
+    local src = lang == 'php' and ('<?php\n' .. code) or code
+    local root = vim.treesitter.get_string_parser(src, lang):parse()[1]:root()
     local fn
     local function rec(n)
         if fn then return end
-        if n:type() == 'function_definition' or n:type() == 'method_declaration' then
-            fn = n; return
-        end
+        if FN_TYPES[n:type()] then fn = n; return end
         for c in n:iter_children() do if c:named() then rec(c) end end
     end
     rec(root)
-    return fn
+    return fn, src
+end
+
+local function setof(t) local s = {} for _, v in ipairs(t) do s[v] = true end return s end
+
+-- the reaching edge for a use of `var` at source line `ln`
+local function edge_at(fl, edges, var, ln)
+    for _, e in ipairs(edges) do
+        if e.var == var and fl.stmts[e.at].l == ln then return e end
+    end
 end
 
 test('flow: fine nesting with control-parent; coarse == top-level partition', function ()
     if not ready() then skip 'no php parser' end
-    local fn = parse_fn(table.concat({
+    local fn, src = parse_fn(table.concat({
         'function f($x) {',
         '  $a = 1;',            -- top-level
         '  if ($x > 0) {',      -- top-level control
@@ -38,10 +51,11 @@ test('flow: fine nesting with control-parent; coarse == top-level partition', fu
         '}',
     }, '\n'))
     ok(fn, 'found the function node')
-    local f = flow.build(fn)
+    local f = flow.build(fn, src)
 
     -- coarse projection = the 3 top-level statements ($a, if, $c)
-    eq(3, #flow.coarse(f), 'three top-level statements (df-coarse partition)')
+    local co = flow.coarse(f)
+    eq(3, #co, 'three top-level statements (df-coarse partition)')
 
     -- the fine model has MORE rows than df would (the nested $b/return)
     ok(#f.stmts >= 5, 'fine model emits the nested statements too')
@@ -55,4 +69,186 @@ test('flow: fine nesting with control-parent; coarse == top-level partition', fu
     ok(ifidx, 'the if is a control row')
     ok(nested and nested.parent == ifidx, 'a nested statement points at the if as its control parent')
     ok(nested.pol == 'body', 'nested statement is in the then/body region')
+
+    -- def/use (increment 2): the `if` coarse row aggregates its body's dataflow
+    -- (df's control-row semantics): defines b, uses x and a
+    local ifco = co[2]
+    ok(setof(ifco.def).b, 'coarse if-row defines b (aggregated from the body)')
+    ok(setof(ifco.use).x and setof(ifco.use).a, 'coarse if-row uses x and a')
+    ok(not setof(ifco.use).b, 'b is a def, not also a use (df shadow rule)')
+end)
+
+-- increment 2, def/use correctness fix: a control head's OWN row owns only its
+-- condition — a sibling elseif/else/case condition belongs to that clause's
+-- row, not the head (else it lands at the wrong DFS position and the coarse
+-- order-sensitive shadow mis-fires).
+test('flow: an elseif condition stays in the elseif clause, not the if head', function ()
+    if not ready('php') then skip 'no php parser' end
+    local fn, src = parse_fn(table.concat({
+        'function f($x, $z) {',
+        '  if ($x > 0) {',
+        '    $y = 1;',
+        '  } elseif ($z > 0) {',
+        '    $y = 2;',
+        '  }',
+        '}',
+    }, '\n'))
+    ok(fn, 'found the function node')
+    local f = flow.build(fn, src)
+    local head, elif
+    for _, s in ipairs(f.stmts) do
+        if s.kind == 'if_statement' and s.pol ~= 'elseif' and not head then head = s end
+        if s.pol == 'elseif' then elif = s end
+    end
+    ok(head, 'the if head is a control row')
+    ok(setof(head.use).x, 'the if head uses its own condition var x')
+    ok(not setof(head.use).z, 'the if head does NOT absorb the elseif condition var z')
+    ok(elif and setof(elif.use).z, 'the elseif clause row owns z')
+end)
+
+-- increment 2: a catch clause binds its exception variable (a DEF) and
+-- references the type (a use); the body regions under it. Without this the
+-- caught var is unbound in the fine model.
+test('flow: catch binds the exception var as a def, type as a use', function ()
+    if not ready('php') then skip 'no php parser' end
+    local fn, src = parse_fn(table.concat({
+        'function f() {',
+        '  try {',
+        '    risky();',
+        '  } catch (SomeError $e) {',
+        '    handle($e);',
+        '  }',
+        '}',
+    }, '\n'))
+    ok(fn, 'found the function node')
+    local co = flow.coarse(flow.build(fn, src))
+    local tryco = co[1]
+    ok(setof(tryco.def).e, 'the caught variable e is a DEF (binding)')
+    ok(setof(tryco.use).SomeError, 'the exception type is a use')
+    ok(not setof(tryco.use).e, 'e is a binding, not a free use (df shadow rule)')
+end)
+
+-- increment 2: JS/TS `{...}` blocks are `statement_block`; they must be treated
+-- as region bodies (else control bodies are never regioned and their nested
+-- statements — e.g. an else-if condition — are dropped).
+test('flow: js statement_block bodies are regioned; else-if condition captured', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fn, src = parse_fn(table.concat({
+        'function f(err) {',
+        '  if (err.code === "X") {',
+        '    a();',
+        '  } else if (err instanceof SyntaxError) {',
+        '    b();',
+        '  }',
+        '}',
+    }, '\n'), 'javascript')
+    ok(fn, 'found the function node')
+    local f = flow.build(fn, src)
+    -- the block bodies are regioned into their own rows (a(), b())
+    local bodyrows = 0
+    for _, s in ipairs(f.stmts) do if s.kind == 'stmt' and s.pol == 'body' then bodyrows = bodyrows + 1 end end
+    ok(bodyrows >= 2, 'both block bodies are regioned as statement rows')
+    -- the else-if condition use is captured in the coarse projection
+    local co = flow.coarse(f)
+    ok(setof(co[1].use).SyntaxError, 'the else-if condition use (SyntaxError) is captured')
+end)
+
+-- increment 2: a statement that IS a bare name leaf — a rust/ml tail-expression
+-- (implicit return) — must count as a use (du inspects children, so a root
+-- name would otherwise be missed).
+test('flow: a bare tail-expression name counts as a use (rust implicit return)', function ()
+    if not ready('rust') then skip 'no rust parser' end
+    local fn, src = parse_fn(table.concat({
+        'fn f() -> String {',
+        '    let mut out = String::new();',
+        '    out = out.replace("a", "b");',
+        '    out',                                -- bare tail expression
+        '}',
+    }, '\n'), 'rust')
+    ok(fn, 'found the function node')
+    local co = flow.coarse(flow.build(fn, src))
+    local tail = co[#co]
+    ok(setof(tail.use).out, 'the bare tail-expression `out` is counted as a use')
+end)
+
+-- step 2b: coarse dep = df's flat FIRST-def-wins reaching scan (params seed
+-- defined=0); the parity projection. A later use depends on the FIRST stmt
+-- that defined the var; an undefined name is a free input.
+test('flow: coarse dep is df\'s flat first-def-wins scan; params seed inputs', function ()
+    if not ready('php') then skip 'no php parser' end
+    local fn, src = parse_fn(table.concat({
+        'function f($p) {',
+        '  $a = $p + 1;',   -- stmt 1: def a, use p (a param → not an input, not a dep)
+        '  $b = $a + $q;',  -- stmt 2: def b, use a (dep on stmt 1), use q (free input)
+        '  return $b;',     -- stmt 3: use b (dep on stmt 2)
+        '}',
+    }, '\n'))
+    ok(fn, 'found the function node')
+    local co, inputs = flow.coarse(flow.build(fn, src, { pfield = 'parameters' }))
+    eq({ 'q' }, inputs, 'q is the only free input (p is a param, a/b are defined)')
+    -- stmt 2 (index 2) depends on stmt 1 for a
+    local function depvars(st) local o = {} for _, d in ipairs(st.dep) do o[d.var] = d.from end return o end
+    eq(1, depvars(co[2]).a, 'stmt 2 use of a depends on stmt 1 (first def)')
+    eq(nil, depvars(co[2]).q, 'q is a free input, not a dep')
+    eq(2, depvars(co[3]).b, 'stmt 3 use of b depends on stmt 2')
+end)
+
+-- step 2b, scope-regime: the FINE reaching scan honors block vs function
+-- scoping — a def in a now-closed block reaches a later use ONLY under a
+-- function/hoisted regime. JS `let` (block) vs `var` (hoisted) is the case.
+test('flow: scope-regime — JS let is block-scoped, var survives block exit', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fn, src = parse_fn(table.concat({
+        'function f(c) {',
+        '  if (c) {',
+        '    let x = 1;',
+        '    a(x);',          -- line 4: x in scope here (lexical/enclosing)
+        '  }',
+        '  b(x);',            -- line 6: let x is dead after the block → free
+        '  if (c) {',
+        '    var y = 2;',
+        '  }',
+        '  d(y);',            -- line 10: var y survives the block → reaches
+        '}',
+    }, '\n'), 'javascript')
+    ok(fn, 'found the function node')
+    local fl = flow.build(fn, src, { regime = flow.REGIME.javascript })
+    local edges = flow.reaching(fl)
+    ok(edge_at(fl, edges, 'x', 4).kind == 'lexical', 'x reaches inside its own block')
+    ok(edge_at(fl, edges, 'x', 6).kind == 'free', 'let x does NOT reach after the block (block-scoped)')
+    ok(edge_at(fl, edges, 'y', 10).kind == 'function-scope', 'var y reaches after the block (hoisted/function-scoped)')
+end)
+
+test('flow: scope-regime — php variables are function-scoped (survive blocks)', function ()
+    if not ready('php') then skip 'no php parser' end
+    local fn, src = parse_fn(table.concat({
+        'function h($c) {',
+        '  if ($c) {',            -- (line 3 after the <?php preamble)
+        '    $z = 1;',            -- line 4
+        '  }',                    -- line 5
+        '  use_it($z);',          -- line 6: php has no block scope → $z reaches
+        '}',
+    }, '\n'))
+    ok(fn, 'found the function node')
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.php })
+    local e = edge_at(fl, flow.reaching(fl), 'z', 6)
+    ok(e and e.kind == 'function-scope', 'php $z reaches after the block (function scope)')
+end)
+
+test('flow: scope-regime — lua locals are block-scoped (die at do..end)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fn, src = parse_fn(table.concat({
+        'local function f()',
+        '  do',
+        '    local w = 1',
+        '    g(w)',              -- line 4: in scope
+        '  end',
+        '  h(w)',                -- line 6: local w dead after the do-block → free
+        'end',
+    }, '\n'), 'lua')
+    ok(fn, 'found the function node')
+    local fl = flow.build(fn, src, { regime = flow.REGIME.lua })
+    local edges = flow.reaching(fl)
+    ok(edge_at(fl, edges, 'w', 4).kind == 'lexical', 'w reaches inside its block')
+    ok(edge_at(fl, edges, 'w', 6).kind == 'free', 'local w does NOT reach after the do-block')
 end)
