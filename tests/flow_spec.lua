@@ -451,6 +451,33 @@ test('flow: reaching_cfg scope-regime — rust let is block-scoped', function ()
     ok(not next(rc_at(rc, f2, 'w', 6)), 'let w does NOT reach after the if-block (block-scoped → empty)')
 end)
 
+test('lens: branch-value — per-branch live values (what flows through each branch)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local lens = require 'cartograph.lens'
+    local fn, src = parse_fn(table.concat({
+        'local function f(c, x, y)',
+        '  if c then',
+        '    use(x)',      -- then-branch: x flows in
+        '  else',
+        '    use(y)',      -- else-branch: y flows in
+        '  end',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = flow.REGIME.lua })
+    local heads = lens.branches(fl)
+    local ifh
+    for _, h in ipairs(heads) do if h.kind == 'if_statement' then ifh = h end end
+    ok(ifh, 'the if is a branch head')
+    ok(#ifh.branches >= 2, 'the if has >=2 outgoing branches')
+    local hasx, hasy = false, false
+    for _, b in ipairs(ifh.branches) do
+        local ls = setof(b.live)
+        if ls.x then hasx = true end
+        if ls.y then hasy = true end
+    end
+    ok(hasx and hasy, 'one branch flows x (then), another flows y (else) — per-branch live values')
+end)
+
 test('flow: predecessors transposes successors; exit is the backward root', function ()
     if not ready('lua') then skip 'no lua parser' end
     local fn, src = parse_fn(table.concat({

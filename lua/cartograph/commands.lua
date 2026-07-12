@@ -289,6 +289,18 @@ function M.register()
         scratch(require('cartograph.reorder').report(store, id))
     end, { desc = 'cartograph: statement commutativity of the focused fn — deps, conflicts, freely-movable (the cockpit reorder view)' })
 
+    -- ── the branch-value lens: what flows through each CFG branch ────
+    cmd('CartographBranchValues', function ()
+        local store = live() if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first',
+                vim.log.levels.WARN)
+        end
+        scratch(require('cartograph.lens').report(store, id))
+    end, { desc = 'cartograph: values LIVE through each CFG branch of the focused fn (~=hedged reaching) — the branch-value lens' })
+
     -- ── the honesty census: how well is this graph actually resolved ─
     cmd('CartographCensus', function ()
         local store = live() if not store then return end
