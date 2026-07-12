@@ -47,6 +47,12 @@ local EXPECTED = {
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     cpp = { ['df-over-collects'] = 1, ['receiver'] = 10, ['df-empty-name'] = 1,
         ['partition-mismatch'] = 2, ['line-skew'] = 1 },
+    go = {}, -- perfect parity: coarse(flow)==df exactly
+    -- rust: all flow-MORE-correct — flow.du captures let/for/if-let bindings df
+    -- misses (flow-over-collects), df leaks closure names (df-over-collects),
+    -- and bare bindings swap def/use (binding-as-use). 0 flow-invariant errors.
+    rust = { ['binding-as-use'] = 363, ['df-over-collects'] = 1980,
+        ['flow-over-collects'] = 1988 },
 }
 
 local FN = { function_definition = true, method_declaration = true,
