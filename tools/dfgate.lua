@@ -53,6 +53,16 @@ local EXPECTED = {
     -- and bare bindings swap def/use (binding-as-use). 0 flow-invariant errors.
     rust = { ['binding-as-use'] = 363, ['df-over-collects'] = 1980,
         ['flow-over-collects'] = 1988 },
+    python = { ['df-over-collects'] = 3 }, -- closure-leak/dedup only
+    ruby = {}, -- perfect parity
+    -- ghost = the JS scale corpus. df-over-collects (closure-leak) dominates;
+    -- the residual OTHER/disjoint/partition/line-skew is the .ts-under-the-JS-
+    -- grammar boundary (ghost mixes .js/.ts: `x: any`, `as`, type predicates)
+    -- plus try-block aggregation — a CORPUS caveat, not a flow.du bug; 0
+    -- flow-invariant errors. Baselined so future drift from it fires.
+    ghost = { ['df-over-collects'] = 1397, ['flow-over-collects'] = 49,
+        ['OTHER'] = 8, ['disjoint'] = 14, ['partition-mismatch'] = 16,
+        ['line-skew'] = 6 },
 }
 
 local FN = { function_definition = true, method_declaration = true,
