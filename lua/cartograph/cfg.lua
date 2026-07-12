@@ -21,14 +21,23 @@
 
 local M = {}
 
--- constructs whose `condition` field positively dominates their guarded body.
--- Ternaries: php/c `conditional_expression` and JS/TS `ternary_expression` both
--- expose `condition` + `alternative` (the consequence is neither → the
--- positively-guarded child), so guards_over handles them uniformly.
+-- constructs whose condition positively dominates their guarded body.
+-- Ternaries: php/c `conditional_expression` + JS/TS `ternary_expression` expose
+-- `condition`+`alternative` fields (consequence = neither → the guarded child);
+-- python `conditional_expression` has NO fields — positional named children
+-- [consequence, condition, alternative]. Comprehensions carry the guard in an
+-- `if_clause`; only the `body` (element) is guarded. positive_guard() below
+-- resolves each shape.
 local COND = {
     if_statement = true, elseif_statement = true, elseif_clause = true,
     else_if_clause = true, while_statement = true,
     conditional_expression = true, ternary_expression = true,
+    list_comprehension = true, set_comprehension = true,
+    dictionary_comprehension = true, generator_expression = true,
+}
+local COMPREHENSION = {
+    list_comprehension = true, set_comprehension = true,
+    dictionary_comprehension = true, generator_expression = true,
 }
 -- direct-child types that put us on the NEGATED (else/elseif) path of an
 -- enclosing if — the positive condition above does not dominate through them
@@ -50,6 +59,37 @@ local function same(a, b)
     local a1, a2, a3, a4 = a:range()
     local b1, b2, b3, b4 = b:range()
     return a1 == b1 and a2 == b2 and a3 == b3 and a4 == b4
+end
+
+-- ELSE-path node types (forward decl; ELSE is defined above)
+-- The condition that positively dominates `child` within COND-node `p`, or nil.
+-- Handles: (1) field-based if/while/ternary (php/c/JS) — cond=condition field,
+-- guarded = anything but the condition/alternative/else; (2) python
+-- `conditional_expression` (no fields) — positional [consequence, condition,
+-- alternative], guarded = consequence; (3) comprehensions — cond = the
+-- `if_clause` filter, guarded = the `body` (element) only.
+local function positive_guard(p, child)
+    local pt = p:type()
+    if COMPREHENSION[pt] then
+        local body = p:field('body')[1]
+        if not (body and same(child, body)) then return nil end
+        for c in p:iter_children() do
+            if c:type() == 'if_clause' then return c:named_child(0) end
+        end
+        return nil
+    end
+    local cond = p:field('condition')[1]
+    if not cond and pt == 'conditional_expression' then -- python positional ternary
+        local cons = p:named_child(0)
+        if cons and same(child, cons) then return p:named_child(1) end
+        return nil
+    end
+    local alt = p:field('alternative')[1]
+    if cond and not same(child, cond) and not same(child, alt)
+        and not ELSE[child:type()] then
+        return cond
+    end
+    return nil
 end
 
 -- statements that unconditionally leave the flow, so a preceding
@@ -94,12 +134,8 @@ function M.guards_over(node, src)
     while p do
         if FN_BOUND[p:type()] then break end
         if COND[p:type()] then
-            local cond = p:field('condition')[1]
-            local alt = p:field('alternative')[1] -- php else / ternary-else
-            if cond and not same(child, cond) and not same(child, alt)
-                and not ELSE[child:type()] then
-                out[#out + 1] = { cond = cond, neg = false }
-            end
+            local cond = positive_guard(p, child)
+            if cond then out[#out + 1] = { cond = cond, neg = false } end
         end
         -- early-exit guard-clauses: preceding `if(C){…exit}` siblings of the
         -- statement `child`, within this block, make ¬C dominate `node`

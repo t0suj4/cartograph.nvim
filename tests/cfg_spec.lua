@@ -84,6 +84,34 @@ test('cfg: JS ternary condition dominates the consequence, not the alternative',
     eq(0, #guard_texts(alt, src), 'the ternary alternative is NOT dominated')
 end)
 
+local function ready_lang(lang)
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.language.add, lang)
+end
+
+test('cfg: python ternary (positional, no condition field) dominates consequence', function ()
+    if not ready_lang('python') then skip 'no python parser' end
+    local src = 'y = use(x) if valid(x) else bail()'
+    local root = vim.treesitter.get_string_parser(src, 'python'):parse()[1]:root()
+    local cons = find(root, src, 'call', 'use(x)')
+    local alt = find(root, src, 'call', 'bail(')
+    eq(1, #guard_texts(cons, src), 'consequence dominated by the condition')
+    ok(guard_texts(cons, src)[1]:find('valid', 1, true), 'guard is the condition')
+    eq(0, #guard_texts(alt, src), 'the else value is NOT dominated')
+end)
+
+test('cfg: python comprehension if-clause guards the element body only', function ()
+    if not ready_lang('python') then skip 'no python parser' end
+    local src = 'r = [clean(x) for x in xs if pred(x)]'
+    local root = vim.treesitter.get_string_parser(src, 'python'):parse()[1]:root()
+    local body = find(root, src, 'call', 'clean(x)')
+    local iter = find(root, src, 'identifier', 'xs')
+    eq(1, #guard_texts(body, src), 'the element body is dominated by the if-clause')
+    ok(guard_texts(body, src)[1]:find('pred', 1, true), 'guard is the if-clause filter')
+    eq(0, #guard_texts(iter, src), 'the iterable is evaluated before the filter → not guarded')
+end)
+
 test('cfg: climbing stops at the function boundary', function ()
     if not ready() then skip 'no php parser' end
     local root, src = parse(table.concat({
