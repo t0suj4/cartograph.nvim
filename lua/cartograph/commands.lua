@@ -324,6 +324,22 @@ function M.register()
         scratch(out)
     end, { desc = 'cartograph: diff live indexes against a fresh derive (catches in-place writer drift)' })
 
+    -- ── escalation-on-hedge: confirm the ~ hotspots vs lua-ls ────────
+    cmd('CartographEscalate', function ()
+        local store = live() if not store then return end
+        local f, why = require('cartograph.escalate').run(store.data)
+        if not f then
+            return vim.notify('cartograph: escalate — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        local byid = {}
+        for _, n in ipairs(store.data.nodes) do byid[n.id] = n end
+        require('cartograph.panes.symbols').render() -- the upgraded ~→proven show
+        scratch(require('cartograph.escalate').report(f, function (id)
+            return byid[id] and byid[id].name or tostring(id)
+        end))
+    end, { desc = 'cartograph: escalate hedge-saturated fns to lua-ls — confirmed/CONFLICT/refuted/recovered (the disagreement product)' })
+
     -- ── the self oracle: declared vs actually-registered ────────────
     cmd('CartographSelf', function ()
         local store = live() if not store then return end
