@@ -788,6 +788,31 @@ Structural smells, not proofs — dynamically-invoked functions (event handlers,
 test cases run by a harness) can still read as "no caller". Rules live in
 `lint.lua` and are pure/testable.
 
+## Escalation (confirm the `~` hotspots against lua-ls)
+
+`:CartographEscalate` spends the expensive oracle *only where the cheap
+resolvers gave up*. A **hedge-saturated** function — one whose resolved calls
+are *all* `~` (name-matched), none proven — is the signal that lua-ls will pay
+off; those hedges are the work-list. cartograph runs a headless lua-ls over just
+that work-list and **reconciles** each hedge against what the oracle says:
+
+- **confirmed** — the oracle agreed; the `~` is promoted to proven.
+- **conflict** — static resolved to *B*, lua-ls to *C* ≠ *B*: a real bug on
+  **one** side (ours or theirs). This is the point — a disagreement is a lead.
+- **refuted** — lua-ls found no such target; our name-match over-reached.
+- **recovered** — lua-ls resolved a call static had *refused* (a free win).
+
+It runs **async** — lua-ls's workspace load never freezes the editor — and is
+idempotent within a generation: a hedge the oracle can't settle is marked so it
+never re-fires, so a second run drains only what's left (on this repo, the
+second pass asks ~13× fewer questions). `:CartographEscalate!` widens past the
+saturated set to the whole graph.
+
+Conflicts and refutations land as **in-buffer diagnostics** (`diag.lua`) — a
+conflict is an error sign, a refutation a warning — right on the offending call,
+not only in a report. The confirmations upgrade the live graph in place, so the
+symbols pane shows `~`→proven the moment the oracle speaks.
+
 ## Reorder (statement commutativity)
 
 `:CartographReorder` reports, for the focused function, which statements can
