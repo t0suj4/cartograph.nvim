@@ -19,7 +19,12 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 40 -- v40: FRAMEWORK-INVOKED self (V3) — a colon-method M:foo on a
+M.VERSION = 41 -- v41: INHERITANCE PATTERN B — `local Sub = setmetatable({},
+               -- {__index = Base})` (anonymous first arg, the common subclass
+               -- idiom) now emits extends Sub->Base, completing the inheritance
+               -- graph (StoreBand/FoldBand->Band etc.). Improves V0/V1/V3 chain
+               -- resolution. [[cartograph-linker]] V0 Pattern B.
+               -- v40: FRAMEWORK-INVOKED self (V3) — a colon-method M:foo on a
                -- genuine object M (>=2 colon-methods) with NO in-corpus call
                -- site (framework-invoked: Ace3 modules, widget mixins, event
                -- handlers) types self=M by the OO/framework contract, self:member

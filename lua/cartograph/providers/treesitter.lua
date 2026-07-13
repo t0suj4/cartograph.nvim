@@ -867,10 +867,13 @@ M.spec = {
         -- resolution — X may be a subclass OR an instance, both sound (X's
         -- methods come from P either way). Emitted as an extends edge X->P
         -- (data.extends), consumed by resolve_super for `X:m()`/`X.m()` calls
-        -- (V0, [[cartograph-linker]] receiver-typing foundation). Only the
-        -- explicit `{__index = <id>}` form (unambiguous); the bare-2nd-arg
-        -- `setmetatable(X, P)` heuristic + the `local X = setmetatable({},…)`
-        -- assignment form are deferred (soundness-first).
+        -- (V0, [[cartograph-linker]] receiver-typing foundation). Two forms of the
+        -- explicit `{__index = <id>}` inheritance (both unambiguous): PATTERN A
+        -- `setmetatable(X, {__index=P})` (named first arg) and PATTERN B
+        -- `local X = setmetatable(_, {__index=P})` (the LHS local is the child, so
+        -- the common `local Sub = setmetatable({}, {__index=Base})` subclass form is
+        -- captured — needed for a complete inheritance graph). The bare-2nd-arg
+        -- `setmetatable(X, P)` heuristic stays deferred (soundness-first).
         super_query = [=[
             (function_call
                 name: (identifier) @_smt (#eq? @_smt "setmetatable")
@@ -879,6 +882,15 @@ M.spec = {
                     (table_constructor
                         (field name: (identifier) @_k (#eq? @_k "__index")
                                value: (identifier) @parent))))
+            (variable_declaration
+                (assignment_statement
+                    (variable_list name: (identifier) @child)
+                    (expression_list value: (function_call
+                        name: (identifier) @_smt2 (#eq? @_smt2 "setmetatable")
+                        arguments: (arguments (_)
+                            (table_constructor
+                                (field name: (identifier) @_k2 (#eq? @_k2 "__index")
+                                       value: (identifier) @parent)))))))
         ]=],
         -- V2 constructor binds: `obj = C.new(...)` / `C:new(...)` (the callee is
         -- captured as text and filtered to the `.new`/`:new` convention in

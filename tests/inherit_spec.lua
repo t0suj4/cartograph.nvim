@@ -244,3 +244,33 @@ test('framework self (V3): a single-method owner is too weak — stays hedged', 
     ok(call, 'self:amb call found')
     eq(nil, call.to)              -- T owns 1 method → not a genuine object → hedged
 end)
+
+-- Pattern B: `local Sub = setmetatable({}, {__index = Base})` (anonymous first
+-- arg — the common subclass idiom) emits Sub->Base, so an ambiguous inherited
+-- Sub:shared() resolves to Base:shared. (V0 Pattern A only caught a NAMED first arg.)
+local PATB_SRC = table.concat({
+    'local Base = {}',                                    -- 1
+    'function Base:shared() return 1 end',                -- 2
+    'local Sub = setmetatable({}, {__index = Base})',     -- 3  Pattern B: Sub extends Base
+    'function Sub:own() return 2 end',                    -- 4  (Sub owns a method → a class)
+    'local Other = {}',                                   -- 5
+    'function Other:shared() return 9 end',               -- 6  (shared ambiguous)
+    'local function use() return Sub:shared() end',       -- 7  literal-class receiver, inherited
+    'return { use = use }',                               -- 8
+}, '\n')
+
+test('inherit pattern B: `local Sub = setmetatable({}, {__index=Base})` → extends', function ()
+    if not ts_ready() then return skip 'no lua parser' end
+    local data = extract_src(PATB_SRC)
+    local found
+    for _, e in ipairs(data.extends or {}) do
+        if e.child == 'Sub' and e.parent == 'Base' then found = true end
+    end
+    ok(found, 'Sub->Base extends edge from the assignment form')
+    local base_shared
+    for _, n in ipairs(data.nodes) do if n.name == 'Base:shared' then base_shared = n.id end end
+    local call
+    for _, c in ipairs(data.calls) do if c.full == 'Sub:shared' then call = c end end
+    ok(call, 'Sub:shared call found')
+    eq(base_shared, call.to)      -- inherited via the Pattern B extends edge
+end)
