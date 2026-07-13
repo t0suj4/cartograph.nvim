@@ -34,7 +34,7 @@ local function run_diff()
     local c_rec = { fn = 'B', callee = 'm4', file = 'a.lua', line = 3 } -- refused (no to)
     local c_stale = { fn = 'B', callee = 'm5', to = 'X', inferred = true, file = 'a.lua', line = 4 }
     local data = { calls = { c_conf, c_confl, c_ref, c_rec, c_stale } }
-    local snap = escalate.snapshot(data)
+    local snap = escalate.snapshot(escalate.worklist(data, nil))
     -- simulate the lua-ls oracle mutating in place:
     c_conf.inferred = nil                     -- agreed on X → proven
     c_confl.to = 'Y'; c_confl.inferred = nil   -- said Y, not X → CONFLICT
@@ -69,12 +69,40 @@ end)
 test('escalate: anti-thrash — a stale hedge is marked and skipped next time', function ()
     local _, calls = run_diff()
     ok(calls.c_stale.escalated, 'the untouched hedge is marked escalated')
-    -- a re-snapshot excludes it (never re-fires)
-    local snap2 = escalate.snapshot({ calls = { calls.c_stale } })
-    ok(next(snap2) == nil, 'an escalated call is not a candidate again')
-    -- a confirmed (now-proven) call is also not a candidate
-    local snap3 = escalate.snapshot({ calls = { calls.c_conf } })
-    ok(next(snap3) == nil, 'a confirmed (proven) call is not a candidate again')
+    -- the work-list excludes it (never re-fires)
+    local w2 = escalate.worklist({ calls = { calls.c_stale } }, nil)
+    eq(0, #w2, 'an escalated call is not on the work-list again')
+    -- a confirmed (now-proven) call is also off the work-list
+    local w3 = escalate.worklist({ calls = { calls.c_conf } }, nil)
+    eq(0, #w3, 'a confirmed (proven) call is not on the work-list again')
+end)
+
+test('escalate: work-list demand-scopes to hedge-saturated fns when sat given', function ()
+    local data = { calls = {
+        -- fn S is saturated (one hedge, no proven); its hedge is in scope
+        { fn = 'S', callee = 'a', to = 'x', inferred = true, file = 'a.lua', line = 0 },
+        -- fn P has a proven edge → NOT saturated; its hedge is OUT of scope
+        { fn = 'P', callee = 'b', to = 'y', file = 'a.lua', line = 1 },
+        { fn = 'P', callee = 'c', to = 'z', inferred = true, file = 'a.lua', line = 2 },
+    } }
+    local sat = escalate.saturated(data)
+    local scoped = escalate.worklist(data, sat)
+    eq(1, #scoped, 'only the saturated fn\'s hedge is on the scoped work-list')
+    eq('a', scoped[1].callee)
+    local wide = escalate.worklist(data, nil)
+    eq(2, #wide, 'sat=nil widens to every lua hedge (both fns)')
+end)
+
+test('escalate: diagnostics surface conflict (error) + refuted (warn), not wins', function ()
+    local f = run_diff()
+    local ds = escalate.diagnostics(f, function (x) return '/abs/' .. x end,
+        function (id) return 'N:' .. id end)
+    eq(2, #ds, 'one conflict + one refuted (confirmed/recovered are not signs)')
+    local sev = {}
+    for _, d in ipairs(ds) do sev[d.severity] = (sev[d.severity] or 0) + 1 end
+    eq(1, sev.error, 'the conflict is an error')
+    eq(1, sev.warn, 'the refuted name-match is a warning')
+    ok(ds[1].file:find('/abs/'), 'the file is absolutised')
 end)
 
 test('escalate: report renders, conflicts headlined', function ()

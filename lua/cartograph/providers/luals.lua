@@ -47,11 +47,19 @@ function M.enrich(data, opts)
     if not bin then return nil, 'no lua-language-server binary (config.luals_bin / PATH)' end
     local root = data.root
 
+    -- DEMAND-SCOPE: `opts.calls` narrows the oracle to a work-list (the
+    -- escalation caller passes the hedge-saturated fns' hedges) — it seeds the
+    -- candidate defs, the site index, and the mutation loops. Absent, the whole
+    -- graph is the work-list (the general enrichment). File opens and the edge
+    -- rebuild stay whole-graph so the clear loop only ever refutes a site
+    -- lua-ls could actually see (soundness: every mutated site's file is open).
+    local calls = opts.calls or data.calls or {}
+
     -- candidates: lua defs that either carry an inferred inbound call
     -- (upgrade-or-refute) or whose tail an UNRESOLVED call names (a
     -- refusal the oracle might settle)
     local inferred_in, want_tail = {}, {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in ipairs(calls) do
         if c.file:match('%.lua$') and not c.dynamic then
             if c.to and c.inferred then
                 inferred_in[c.to] = true
@@ -73,9 +81,10 @@ function M.enrich(data, opts)
     end
     if #cands == 0 then return nil, 'nothing for the oracle to settle' end
 
-    -- call-site index: position -> the call whose callee token covers it
+    -- call-site index: position -> the call whose callee token covers it.
+    -- Scoped to the work-list so only in-scope sites can upgrade/refute.
     local sites = {} -- file .. '\31' .. line -> { call, ... }
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in ipairs(calls) do
         if c.at and c.file:match('%.lua$') then
             local k = c.file .. '\31' .. atr.sl(c.at)
             sites[k] = sites[k] or {}
@@ -155,7 +164,7 @@ function M.enrich(data, opts)
             c.inferred = nil
         end
     end
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in ipairs(calls) do
         if c.to and c.inferred and answered[c.to] and not matched[c] then
             c.to = nil
             c.inferred = nil
@@ -208,8 +217,10 @@ function M.enrich_async(data, opts, on_done)
     end
     local root = data.root
 
+    -- DEMAND-SCOPE (see M.enrich): opts.calls is the work-list; absent → whole graph.
+    local calls = opts.calls or data.calls or {}
     local inferred_in, want_tail = {}, {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in ipairs(calls) do
         if c.file:match('%.lua$') and not c.dynamic then
             if c.to and c.inferred then inferred_in[c.to] = true
             elseif not c.to then want_tail[c.callee] = true end
@@ -232,8 +243,8 @@ function M.enrich_async(data, opts, on_done)
         end) end
         return
     end
-    local sites = {} -- file\31line -> { call, ... } (the phantom-caller guard)
-    for _, c in ipairs(data.calls or {}) do
+    local sites = {} -- file\31line -> { call, ... } (the phantom-caller guard); work-list-scoped
+    for _, c in ipairs(calls) do
         if c.at and c.file:match('%.lua$') then
             local k = c.file .. '\31' .. atr.sl(c.at)
             sites[k] = sites[k] or {}
@@ -290,7 +301,7 @@ function M.enrich_async(data, opts, on_done)
                     c.inferred = nil
                 end
             end
-            for _, c in ipairs(data.calls or {}) do
+            for _, c in ipairs(calls) do
                 if c.to and c.inferred and answered[c.to] and not matched[c] then
                     c.to = nil
                     c.inferred = nil
