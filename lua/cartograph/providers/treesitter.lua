@@ -120,6 +120,17 @@ end
 local JAVA_STEREOTYPES = {}
 for _, a in ipairs({ 'Service', 'Component', 'Repository', 'Controller',
     'RestController', 'Configuration' }) do JAVA_STEREOTYPES[a] = true end
+-- SERVICE-LOCATOR marker interfaces (metasfresh/adempiere `Services.get(
+-- IFoo.class)` idiom): an interface transitively extending one of these is a
+-- registry service — its receiver holds the single registered impl, so
+-- resolve_interface resolves it to its unique implementer WITHOUT bean-gating
+-- (the marker certifies a fat, single-impl service, so the no-lambda-impls
+-- assumption holds). Absent in a codebase → the gate is simply inert. Framework
+-- config; extend per-project later.
+local JAVA_SERVICE_MARKERS = {}
+for _, a in ipairs({ 'ISingletonService', 'IMultitonService', 'IService' }) do
+    JAVA_SERVICE_MARKERS[a] = true
+end
 -- the first positional string argument of an annotation (@Service("x") → "x"),
 -- or nil. Positional form only — the `@Service(value="x")` element-pair form is
 -- rare and falls back to the default name (sound: a missed explicit name just
@@ -3013,47 +3024,71 @@ end
 -- names one of the impls (bean name = explicit @Service("x") or the
 -- decapitalized class name) → narrow to it; 0 → leave (no-impl frontier).
 --
--- BEAN-GATING IS THE SOUNDNESS BOUNDARY, not just a fixture nicety — do NOT
--- drop it to "generalize" to plain Java. An @Autowired receiver holds the
--- injected BEAN, so "unique bean impl" is the actual dispatch target. Counting
--- all named implementers would be UNSOUND on functional-interface-heavy code
--- (an interface with one named class impl but many anonymous/lambda impls —
--- not captured by `implements` — would look "unique" and mis-redirect). The
--- price is that this is a no-op on non-Spring Java (no stereotypes, no
--- candidates) — the correct refuse-don't-guess outcome, verified: `gate libs`
--- (elasticsearch, non-Spring) stays identical. Simple-name keyed, so a
--- cross-package name COLLISION stays refused (sound — FQN-via-imports is the
--- follow-on). Runs over the full graph like resolve_super, bounded by the same
--- step limit + cycle guard.
-local function resolve_interface(calls, implements, beans, extends, exact, addref)
+-- TWO SOUNDNESS GATES select the candidate implementer set — do NOT drop
+-- either to "generalize" to plain Java (counting all named implementers is
+-- UNSOUND: a functional interface has one named impl but many anonymous/lambda
+-- impls that `implements` never captures → a false "unique"):
+--   (1) BEAN gate (Spring @Autowired): candidates = @stereotype implementers.
+--       An injected receiver holds the bean, so "unique bean impl" is the real
+--       dispatch target. @Qualifier narrows an ambiguous set by bean name.
+--   (2) SERVICE-MARKER gate (a service-locator idiom like metasfresh's
+--       `Services.get(IFoo.class)`): when the interface transitively extends a
+--       MARKER (ISingletonService/…), candidates = ALL implementers. Sound
+--       here precisely because a marked service interface is FAT (many methods,
+--       so no lambda impls) and single-impl by convention; the receiver is the
+--       registered singleton. The marker is the certificate that lifts the
+--       "no lambdas" assumption the bean gate gets from @stereotype.
+-- Both: singleton → resolve (~inferred); >1 → leave at the interface (honest
+-- polymorphic frontier); 0 → leave (no-impl frontier). Simple-name keyed, so a
+-- cross-package name COLLISION stays refused. No markers present (e.g. plain
+-- non-Spring Java) → gate (2) is inert, behaviour is exactly the bean gate —
+-- verified: `gate libs` (elasticsearch) stays identical. Bounded like
+-- resolve_super by the step limit + cycle guard.
+local function resolve_interface(calls, implements, beans, extends, exact, addref, markers)
     if not (implements and implements[1]) then return 0 end
-    beans = beans or {}
+    beans = beans or {}; markers = markers or {}
     local super = build_super(extends)
-    local impls = {} -- iface -> { [class]=true } : bean implementers
-    local ifext = {} -- iface -> { superiface, ... } : I extends J
-    local function add(iface, cls)
-        local s = impls[iface]; if not s then s = {}; impls[iface] = s end
+    local allimpls, beanimpls = {}, {} -- iface -> { [class]=true }
+    local ifext = {} -- iface(child) -> { parent iface, ... } : child extends parent
+    local function add(map, iface, cls)
+        local s = map[iface]; if not s then s = {}; map[iface] = s end
         s[cls] = true
     end
     for _, e in ipairs(implements) do
         if e.cintf then
             local l = ifext[e.child]; if not l then l = {}; ifext[e.child] = l end
             l[#l + 1] = e.iface
-        elseif beans[e.child] then
-            add(e.iface, e.child)
+        else
+            add(allimpls, e.iface, e.child)
+            if beans[e.child] then add(beanimpls, e.iface, e.child) end
         end
     end
-    -- push each interface's bean members up its extends chain (I extends J ⟹
-    -- J's impls include I's) to a fixpoint; bounded rounds
+    -- SERVICE TYPES: interfaces transitively extending a marker (fixpoint over
+    -- the interface-extends edges, seeded by the marker set)
+    local svc = {}
     for _ = 1, SUPER_STEP_LIMIT do
         local changed = false
-        for iface, supers in pairs(ifext) do
-            local members = impls[iface]
-            if members then
-                for _, sup in ipairs(supers) do
-                    for cls in pairs(members) do
-                        if not (impls[sup] and impls[sup][cls]) then
-                            add(sup, cls); changed = true
+        for child, parents in pairs(ifext) do
+            if not svc[child] then
+                for _, p in ipairs(parents) do
+                    if markers[p] or svc[p] then svc[child] = true; changed = true; break end
+                end
+            end
+        end
+        if not changed then break end
+    end
+    -- push each interface's members up its extends chain (I extends J ⟹ J's
+    -- impls include I's) to a fixpoint, for both maps; bounded rounds
+    for _ = 1, SUPER_STEP_LIMIT do
+        local changed = false
+        for child, parents in pairs(ifext) do
+            for _, p in ipairs(parents) do
+                for _, map in ipairs({ allimpls, beanimpls }) do
+                    if map[child] then
+                        for cls in pairs(map[child]) do
+                            if not (map[p] and map[p][cls]) then
+                                add(map, p, cls); changed = true
+                            end
                         end
                     end
                 end
@@ -3065,7 +3100,9 @@ local function resolve_interface(calls, implements, beans, extends, exact, addre
     for _, c in ipairs(calls or {}) do
         if c.full then
             local head, sep, method = c.full:match('^([%w_]+)([:.]+)([%w_]+)$')
-            local set = head and impls[head]
+            -- a service-marked interface draws from ALL implementers; otherwise
+            -- only @stereotype beans are candidates
+            local set = head and (svc[head] and allimpls[head] or beanimpls[head])
             if set then
                 local only, cnt = nil, 0
                 for cls in pairs(set) do cnt = cnt + 1; only = cls end
@@ -5870,8 +5907,10 @@ function M.extract(root, opts)
     resolve_local_ctor(calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
 
     -- interface→impl: redirect an interface-stub call `I::m` to its unique
-    -- @stereotype bean impl `C::m` (F1 DI resolution)
-    resolve_interface(calls, data.implements, data.beans, data.extends, exact, addref)
+    -- impl `C::m` — @stereotype bean (Spring DI) or unique implementer of a
+    -- service-locator marker interface (metasfresh Services.get) (F1)
+    resolve_interface(calls, data.implements, data.beans, data.extends, exact,
+        addref, JAVA_SERVICE_MARKERS)
 
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
@@ -6240,7 +6279,8 @@ function M.relink(data, touched)
     n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
     n = n + resolve_local_ctor(data.calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
     -- interface→impl (F1), same parity as extract
-    n = n + resolve_interface(data.calls, data.implements, data.beans, data.extends, exact, addref)
+    n = n + resolve_interface(data.calls, data.implements, data.beans, data.extends,
+        exact, addref, JAVA_SERVICE_MARKERS)
     return n + retn
 end
 

@@ -228,3 +228,69 @@ test('spring: @Qualifier matches an explicit @Service("name")', function ()
     ok(c, 'the qualified call is present')
     eq(nm['RepoA::save'].id, c.to) -- narrowed by explicit bean name
 end)
+
+-- SERVICE-MARKER gate (metasfresh Services.get(IFoo.class) idiom): a receiver
+-- typed as an interface that extends a service marker (ISingletonService) is
+-- resolved to its UNIQUE implementer even though the impl is NOT a @stereotype
+-- bean — the marker certifies a fat single-impl service. The bean gate alone
+-- (F1) misses these; this is the metasfresh-native kind.
+local SVC = {
+    ['ISingletonService.java'] = table.concat({
+        'package svc;',
+        'public interface ISingletonService {}',
+    }, '\n'),
+    ['IProductBL.java'] = table.concat({
+        'package svc;',
+        'public interface IProductBL extends ISingletonService { void doIt(); }',
+    }, '\n'),
+    -- the impl is a PLAIN class (no @Service) — the metasfresh style
+    ['ProductBL.java'] = table.concat({
+        'package svc;',
+        'public class ProductBL implements IProductBL { public void doIt() {} }',
+    }, '\n'),
+    ['Consumer.java'] = table.concat({
+        'package svc;',
+        'public class Consumer {',
+        '  private final IProductBL bl = Services.get(IProductBL.class);',
+        '  public void go() { bl.doIt(); }',
+        '}',
+    }, '\n'),
+}
+
+test('spring: service-marker interface resolves to its unique impl (non-bean)', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(SVC)
+    local nm = byname(data)
+    ok(not (data.beans or {})['ProductBL'], 'the impl is NOT a @stereotype bean')
+    local c = callof(data, 'IProductBL::doIt')
+    ok(c, 'the interface-typed call is present')
+    eq(nm['ProductBL::doIt'].id, c.to) -- service-gate redirect, not bean-gated
+    ok(c.inferred, 'inferred (~)')
+end)
+
+-- the marker IS the gate: the same shape WITHOUT the service marker (and no
+-- @stereotype) must NOT redirect — counting all impls unconditionally would be
+-- the unsound generalization the gates exist to prevent.
+local NOMARKER = {
+    ['IFoo.java'] = table.concat({
+        'package nm;',
+        'public interface IFoo { void doIt(); }', -- no marker extends
+    }, '\n'),
+    ['FooImpl.java'] = table.concat({
+        'package nm;',
+        'public class FooImpl implements IFoo { public void doIt() {} }', -- not a bean
+    }, '\n'),
+    ['C.java'] = table.concat({
+        'package nm;',
+        'public class C { private IFoo f; public void go() { f.doIt(); } }',
+    }, '\n'),
+}
+
+test('spring: no marker + no stereotype → stays at the interface (sound)', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(NOMARKER)
+    local nm = byname(data)
+    local c = callof(data, 'IFoo::doIt')
+    ok(c, 'the call is present')
+    eq(nm['IFoo::doIt'].id, c.to) -- unchanged: neither gate fires
+end)

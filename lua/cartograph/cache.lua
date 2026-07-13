@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 43 -- v43: @Qualifier NARROWING — a call's receiver field @Qualifier
+M.VERSION = 44 -- v44: SERVICE-MARKER GATE — resolve_interface resolves a call on
+               -- a service-locator marker interface (extends ISingletonService/
+               -- IMultitonService/IService, the metasfresh Services.get idiom) to
+               -- its unique implementer WITHOUT bean-gating (F1 sibling gate).
+-- v43: @Qualifier NARROWING — a call's receiver field @Qualifier
                -- bean name rides on c.qualifier + beans carry their explicit
                -- @Service("name"); resolve_interface narrows an AMBIGUOUS
                -- interface (>1 impl) to the named bean impl.
