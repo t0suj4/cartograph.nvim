@@ -1,0 +1,169 @@
+-- F1: interface→impl DI resolution (the linker's first Java kind). A call on a
+-- field typed as an interface lands on the interface's abstract method stub;
+-- resolve_interface REDIRECTS it to the unique @stereotype bean impl. SET
+-- semantics: >1 impl or 0 impls → leave at the interface (honest). Bean-gated:
+-- an unannotated implementor is not a candidate. Mirrors examples/spring-di.
+
+local function ts_ready()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.get_string_parser, '', 'java')
+end
+
+-- extract a set of {name=source} java files under one temp root
+local function extract_files(files)
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for name, src in pairs(files) do
+        local fd = assert(io.open(root .. '/' .. name, 'w'))
+        fd:write(src); fd:close()
+    end
+    local data = ts.extract(root)
+    vim.fn.delete(root, 'rf')
+    return data
+end
+
+-- one package-private type per file (Java allows ≤1 public top-level type).
+local FILES = {
+    ['PaymentService.java'] = table.concat({
+        'package com.example.app;',
+        'interface PaymentService { void charge(); }',
+    }, '\n'),
+    ['PaymentServiceImpl.java'] = table.concat({
+        'package com.example.app;',
+        '@Service class PaymentServiceImpl implements PaymentService {',
+        '  public void charge() {}',
+        '}',
+    }, '\n'),
+    ['NotificationService.java'] = table.concat({
+        'package com.example.app;',
+        'interface NotificationService { void send(); }',
+    }, '\n'),
+    ['EmailNotificationService.java'] = table.concat({
+        'package com.example.app;',
+        '@Service class EmailNotificationService implements NotificationService {',
+        '  public void send() {}',
+        '}',
+    }, '\n'),
+    ['SmsNotificationService.java'] = table.concat({
+        'package com.example.app;',
+        '@Service class SmsNotificationService implements NotificationService {',
+        '  public void send() {}',
+        '}',
+    }, '\n'),
+    ['AuditLog.java'] = table.concat({
+        'package com.example.app;',
+        'interface AuditLog { void record(); }',
+    }, '\n'),
+    ['OrderController.java'] = table.concat({
+        'package com.example.app;',
+        '@Service class OrderController {',
+        '  private PaymentService paymentService;',
+        '  private NotificationService anyNotifier;',
+        '  private AuditLog auditLog;',
+        '  public void go() {',
+        '    paymentService.charge();',
+        '    anyNotifier.send();',
+        '    auditLog.record();',
+        '  }',
+        '}',
+    }, '\n'),
+}
+
+local function byname(data)
+    local m = {}
+    for _, n in ipairs(data.nodes) do m[n.name] = n end
+    return m
+end
+local function callof(data, full)
+    for _, c in ipairs(data.calls) do if c.full == full then return c end end
+end
+
+test('spring: implements/extends captured to data.implements', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(FILES)
+    local seen = {}
+    for _, e in ipairs(data.implements or {}) do
+        seen[e.child .. '->' .. e.iface] = true
+    end
+    ok(seen['PaymentServiceImpl->PaymentService'], 'impl edge present')
+    ok(seen['EmailNotificationService->NotificationService'], 'email impl edge')
+    ok(seen['SmsNotificationService->NotificationService'], 'sms impl edge')
+end)
+
+-- bean detection is scoped to IMPLEMENTERS (the only place resolve_interface
+-- needs it) — an @stereotype implementer is a candidate; the annotation gates
+-- membership. (A bean that implements nothing is never a candidate, so it need
+-- not be tracked; the negative test below covers the exclusion side.)
+test('spring: @stereotype implementer captured as a bean', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(FILES)
+    ok((data.beans or {})['PaymentServiceImpl'], 'annotated impl is a bean')
+    ok((data.beans or {})['EmailNotificationService'], 'annotated impl is a bean')
+end)
+
+test('spring: unique bean impl — I::m redirects to C::m', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(FILES)
+    local nm = byname(data)
+    ok(nm['PaymentServiceImpl::charge'], 'impl method node exists')
+    local c = callof(data, 'PaymentService::charge')
+    ok(c, 'the interface-typed call is present')
+    eq(nm['PaymentServiceImpl::charge'].id, c.to) -- redirected to the impl
+    ok(c.inferred, 'marked inferred (~), a DI-inferred resolution')
+end)
+
+test('spring: ambiguous (>1 impl) stays at the interface — no guess', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(FILES)
+    local nm = byname(data)
+    local c = callof(data, 'NotificationService::send')
+    ok(c, 'the ambiguous call is present')
+    -- two bean impls → NOT redirected to either; left at the interface stub
+    eq(nm['NotificationService::send'].id, c.to)
+end)
+
+test('spring: interface with 0 impls stays a frontier', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(FILES)
+    local nm = byname(data)
+    local c = callof(data, 'AuditLog::record')
+    ok(c, 'the no-impl call is present')
+    eq(nm['AuditLog::record'].id, c.to) -- unchanged
+end)
+
+-- bean gating: an unannotated implementor must NOT count as a candidate, so a
+-- lone bean impl stays UNIQUE (the negative/spring-di StorePlain guard).
+local GATED = {
+    ['Store.java'] = table.concat({
+        'package com.example.ann;',
+        'interface Store { void put(); }',
+    }, '\n'),
+    ['StoreBean.java'] = table.concat({
+        'package com.example.ann;',
+        '@Service class StoreBean implements Store { public void put() {} }',
+    }, '\n'),
+    ['StorePlain.java'] = table.concat({
+        'package com.example.ann;',
+        'class StorePlain implements Store { public void put() {} }', -- NOT a bean
+    }, '\n'),
+    ['StoreConsumer.java'] = table.concat({
+        'package com.example.ann;',
+        '@Service class StoreConsumer {',
+        '  private Store store;',
+        '  public void go() { store.put(); }',
+        '}',
+    }, '\n'),
+}
+
+test('spring: unannotated implementor excluded — resolution stays unique', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(GATED)
+    local nm = byname(data)
+    ok(not (data.beans or {})['StorePlain'], 'plain impl is not a bean')
+    local c = callof(data, 'Store::put')
+    ok(c, 'the call is present')
+    -- StorePlain excluded → {StoreBean} is the sole candidate → redirect
+    eq(nm['StoreBean::put'].id, c.to)
+    ok(c.inferred, 'inferred (~)')
+end)

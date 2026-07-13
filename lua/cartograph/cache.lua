@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 41 -- v41: INHERITANCE PATTERN B — `local Sub = setmetatable({},
+M.VERSION = 42 -- v42: INTERFACE→IMPL (F1) — Java `implements`/interface-`extends`
+               -- captured to data.implements + @stereotype beans to data.beans;
+               -- resolve_interface REDIRECTS an interface-stub call `I::m` to its
+               -- unique bean impl `C::m` (SET semantics: >1 or 0 → leave honest).
+-- v41: INHERITANCE PATTERN B — `local Sub = setmetatable({},
                -- {__index = Base})` (anonymous first arg, the common subclass
                -- idiom) now emits extends Sub->Base, completing the inheritance
                -- graph (StoreBand/FoldBand->Band etc.). Improves V0/V1/V3 chain

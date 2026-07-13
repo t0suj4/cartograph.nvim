@@ -113,6 +113,28 @@ local function java_enclosing_class(node, src)
     end
 end
 
+-- Spring stereotype annotations: a class carrying one is a DI-managed BEAN.
+-- Only beans count as interface→impl candidates in resolve_interface — an
+-- unannotated implementor is never wired, so it must not inflate the candidate
+-- set to a false ambiguity (the negative/spring-di `StorePlain` guard).
+local JAVA_STEREOTYPES = {}
+for _, a in ipairs({ 'Service', 'Component', 'Repository', 'Controller',
+    'RestController', 'Configuration' }) do JAVA_STEREOTYPES[a] = true end
+local function java_is_bean(decln, src)
+    local mods = decln:child(0)
+    if not (mods and mods:type() == 'modifiers') then return false end
+    for _, c in inext, mods, -1 do
+        local t = c:type()
+        if t == 'marker_annotation' or t == 'annotation' then
+            local nm = c:field('name')[1]
+            local name = nm and node_text(nm, src) or ''
+            name = name:match('([%w_]+)%s*$') or name -- tail of a scoped name
+            if JAVA_STEREOTYPES[name] then return true end
+        end
+    end
+    return false
+end
+
 -- Java scope spec for the ScopeModel (cartograph.scope): which node types
 -- open scopes and how to harvest their binders. This IS the old memoized
 -- jvt_scope_sym, expressed as data + three harvesters; the model owns the
@@ -2068,13 +2090,29 @@ M.spec = {
             return cls and (cls .. '::' .. name) or nil, cls and hedge or nil,
                 (not cls) and defer or nil
         end,
-        -- single-inheritance chain (superclass only — interfaces would poison
-        -- the one-parent-per-class model resolve_super relies on): feeds
-        -- transitive super.m()/inherited this.m() resolution once built
+        -- single-inheritance chain (superclass ONLY here — a class implements
+        -- MANY interfaces, which would collapse build_super's one-parent map to
+        -- `false`; the implements relation is SET-valued and lives separately in
+        -- iface_query → data.implements, consumed by resolve_interface). Feeds
+        -- transitive super.m()/inherited this.m() resolution.
         super_query = [=[
             (class_declaration
                 name: (identifier) @child
                 superclass: (superclass (type_identifier) @parent))
+        ]=],
+        -- interface→impl (F1, [[cartograph-linker]]'s first Java kind): a class's
+        -- `implements I, J` and an interface's `extends K` clauses. SET-valued
+        -- (multiple @iface per decl), so it runs its own extraction pass (the
+        -- shared defs loop's cap_node keeps only one). resolve_interface reads
+        -- data.implements + data.beans to redirect an interface-stub call to its
+        -- unique @stereotype impl.
+        iface_query = [=[
+            (class_declaration
+                name: (identifier) @ichild
+                (super_interfaces (type_list (type_identifier) @iface))) @idecl
+            (interface_declaration
+                name: (identifier) @ichild
+                (extends_interfaces (type_list (type_identifier) @iface))) @idecl
         ]=],
         entry_names = { main = true },
         -- an ANNOTATION WITH ARGUMENTS passes the method into a framework
@@ -2868,6 +2906,120 @@ local function resolve_super(calls, extends, exact, addref)
                                 ['end'] = { line = c.line, char = 0 } }, true)
                     end
                     n = n + 1
+                end
+            end
+        end
+    end
+    return n
+end
+
+-- Find the def of `cls<sep>method`, separator-generic (`::` java/php,
+-- `:`/`.` lua): cls's OWN def first, else walk its superclass `super` chain to
+-- the nearest ancestor that defines it. Unique language-fitting node or nil
+-- (ambiguous-where-defined → nil, refuse). Mirrors resolve_super's walk but
+-- starts AT cls (checks cls itself), so an impl that defines the method
+-- directly resolves without a chain.
+local function find_def(cls, sep, method, super, exact, clang)
+    local seen, cur = {}, cls
+    for _ = 1, SUPER_STEP_LIMIT do
+        local cands = exact[cur .. sep .. method]
+        if cands then
+            local fit, dup = nil, false
+            for _, nd in ipairs(cands) do
+                if elang_for(nd.file) == clang then
+                    if fit and fit.id ~= nd.id then dup = true else fit = nd end
+                end
+            end
+            if dup then return nil end
+            if fit then return fit end
+        end
+        local par = super[cur]
+        if not par or seen[par] then break end
+        seen[par] = true; cur = par
+    end
+    return nil
+end
+
+-- Interface→impl DI resolution (F1 — [[cartograph-linker]]'s first Java kind,
+-- SET-valued). A call lands on an interface's ABSTRACT method `I::m` (the stub
+-- exact-matches the receiver's declared interface type — the edge "stubbed at
+-- the service boundary"). If exactly ONE @stereotype bean class implements I
+-- (directly or through I's super-interfaces), REDIRECT the call to that impl's
+-- concrete `C::m` — the only dispatch target an @Autowired receiver can hold.
+-- Linker set semantics: singleton → resolve (inferred ~, since reflection/
+-- manual instantiation could differ); >1 → leave at the interface (honest
+-- polymorphic frontier); 0 → leave (no-impl frontier).
+--
+-- BEAN-GATING IS THE SOUNDNESS BOUNDARY, not just a fixture nicety — do NOT
+-- drop it to "generalize" to plain Java. An @Autowired receiver holds the
+-- injected BEAN, so "unique bean impl" is the actual dispatch target. Counting
+-- all named implementers would be UNSOUND on functional-interface-heavy code
+-- (an interface with one named class impl but many anonymous/lambda impls —
+-- not captured by `implements` — would look "unique" and mis-redirect). The
+-- price is that this is a no-op on non-Spring Java (no stereotypes, no
+-- candidates) — the correct refuse-don't-guess outcome, verified: `gate libs`
+-- (elasticsearch, non-Spring) stays identical. Simple-name keyed, so a
+-- cross-package name COLLISION stays refused (sound — FQN-via-imports is the
+-- follow-on). Runs over the full graph like resolve_super, bounded by the same
+-- step limit + cycle guard.
+local function resolve_interface(calls, implements, beans, extends, exact, addref)
+    if not (implements and implements[1]) then return 0 end
+    beans = beans or {}
+    local super = build_super(extends)
+    local impls = {} -- iface -> { [class]=true } : bean implementers
+    local ifext = {} -- iface -> { superiface, ... } : I extends J
+    local function add(iface, cls)
+        local s = impls[iface]; if not s then s = {}; impls[iface] = s end
+        s[cls] = true
+    end
+    for _, e in ipairs(implements) do
+        if e.cintf then
+            local l = ifext[e.child]; if not l then l = {}; ifext[e.child] = l end
+            l[#l + 1] = e.iface
+        elseif beans[e.child] then
+            add(e.iface, e.child)
+        end
+    end
+    -- push each interface's bean members up its extends chain (I extends J ⟹
+    -- J's impls include I's) to a fixpoint; bounded rounds
+    for _ = 1, SUPER_STEP_LIMIT do
+        local changed = false
+        for iface, supers in pairs(ifext) do
+            local members = impls[iface]
+            if members then
+                for _, sup in ipairs(supers) do
+                    for cls in pairs(members) do
+                        if not (impls[sup] and impls[sup][cls]) then
+                            add(sup, cls); changed = true
+                        end
+                    end
+                end
+            end
+        end
+        if not changed then break end
+    end
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        if c.full then
+            local head, sep, method = c.full:match('^([%w_]+)([:.]+)([%w_]+)$')
+            local set = head and impls[head]
+            if set then
+                local only, cnt = nil, 0
+                for cls in pairs(set) do cnt = cnt + 1; only = cls end
+                if cnt == 1 then
+                    local target = find_def(only, sep, method, super, exact,
+                        elang_for(c.file))
+                    if target and target.id ~= c.to then
+                        c.to = target.id
+                        c.inferred = true
+                        c.refused = nil
+                        if c.fn then
+                            addref(c.fn, target.id, c.at
+                                or { start = { line = c.line, char = 0 },
+                                    ['end'] = { line = c.line, char = 0 } }, true)
+                        end
+                        n = n + 1
+                    end
                 end
             end
         end
@@ -4724,6 +4876,43 @@ function M.extract(root, opts)
             end
         end
 
+        -- interface→impl: its own pass (SET-valued @iface — one `implements`
+        -- clause captures many interfaces, and the shared defs loop's cap_node
+        -- would keep only the last). Records data.implements (child→iface, with
+        -- cintf marking the interface-extends-interface arm) + data.beans (the
+        -- @stereotype implementers). resolve_interface consumes both.
+        if spec.iface_query then
+            q = parse_query(lang, spec.iface_query)
+            if q then
+                for _, match in q:iter_matches(tsroot, src, 0, -1) do
+                    local decl, childn, ifaces = nil, nil, {}
+                    for id, ns in pairs(match) do
+                        local cn = q.captures[id]
+                        if cn == 'idecl' then decl = cap_node(ns)
+                        elseif cn == 'ichild' then childn = cap_node(ns)
+                        elseif cn == 'iface' then
+                            if type(ns) == 'table' and ns[1] ~= nil then
+                                for _, x in ipairs(ns) do ifaces[#ifaces + 1] = x end
+                            else ifaces[#ifaces + 1] = ns end
+                        end
+                    end
+                    if childn and decl then
+                        local child = node_text(childn, src)
+                        local cintf = decl:type() == 'interface_declaration'
+                        data.implements = data.implements or {}
+                        for _, ifn in ipairs(ifaces) do
+                            data.implements[#data.implements + 1] = { child = child,
+                                iface = node_text(ifn, src), cintf = cintf, file = file }
+                        end
+                        if not cintf and java_is_bean(decl, src) then
+                            data.beans = data.beans or {}
+                            data.beans[child] = true
+                        end
+                    end
+                end
+            end
+        end
+
 
     end
 
@@ -5601,6 +5790,10 @@ function M.extract(root, opts)
     -- resolved through C's extends chain (V2 receiver typing)
     resolve_local_ctor(calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
 
+    -- interface→impl: redirect an interface-stub call `I::m` to its unique
+    -- @stereotype bean impl `C::m` (F1 DI resolution)
+    resolve_interface(calls, data.implements, data.beans, data.extends, exact, addref)
+
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
     -- lookups; slice-local uniqueness is not global uniqueness)
@@ -5967,6 +6160,8 @@ function M.relink(data, touched)
     local retn = resolve_returns(data.calls, node_index, exact, addref)
     n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
     n = n + resolve_local_ctor(data.calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
+    -- interface→impl (F1), same parity as extract
+    n = n + resolve_interface(data.calls, data.implements, data.beans, data.extends, exact, addref)
     return n + retn
 end
 
