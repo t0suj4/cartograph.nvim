@@ -120,19 +120,76 @@ end
 local JAVA_STEREOTYPES = {}
 for _, a in ipairs({ 'Service', 'Component', 'Repository', 'Controller',
     'RestController', 'Configuration' }) do JAVA_STEREOTYPES[a] = true end
-local function java_is_bean(decln, src)
+-- the first positional string argument of an annotation (@Service("x") → "x"),
+-- or nil. Positional form only — the `@Service(value="x")` element-pair form is
+-- rare and falls back to the default name (sound: a missed explicit name just
+-- means the default-name path decides).
+local function anno_str_arg(anno, src)
+    local args = anno:field('arguments')[1]
+    if not args then return nil end
+    for _, a in inext, args, -1 do
+        if a:type() == 'string_literal' then
+            local s = node_text(a, src):gsub('^["\']', ''):gsub('["\']$', '')
+            if s ~= '' then return s end
+        end
+    end
+    return nil
+end
+-- a class's bean identity: its explicit @Service("name") arg, else `true` for a
+-- default-named bean (name = decapitalized class name, computed at match time),
+-- else nil if not a bean. Only beans are interface-impl candidates.
+local function java_bean_name(decln, src)
     local mods = decln:child(0)
-    if not (mods and mods:type() == 'modifiers') then return false end
+    if not (mods and mods:type() == 'modifiers') then return nil end
     for _, c in inext, mods, -1 do
         local t = c:type()
         if t == 'marker_annotation' or t == 'annotation' then
             local nm = c:field('name')[1]
             local name = nm and node_text(nm, src) or ''
             name = name:match('([%w_]+)%s*$') or name -- tail of a scoped name
-            if JAVA_STEREOTYPES[name] then return true end
+            if JAVA_STEREOTYPES[name] then
+                return (t == 'annotation' and anno_str_arg(c, src)) or true
+            end
         end
     end
-    return false
+    return nil
+end
+-- the @Qualifier("bean") bean name on the field named `fieldname` in the class
+-- enclosing `calln`, or nil. Bounded walk over the enclosing class's own field
+-- declarations — the qualifier disambiguates which of an interface's several
+-- impls this receiver holds (resolve_interface consumes it).
+local function java_field_qualifier(calln, fieldname, src)
+    local _, cnode = java_enclosing_class(calln, src)
+    local body = cnode and cnode:field('body')[1]
+    if not body then return nil end
+    for _, fd in inext, body, -1 do
+        if fd:type() == 'field_declaration' then
+            local declares = false
+            for _, ch in inext, fd, -1 do
+                if ch:type() == 'variable_declarator' then
+                    local dn = ch:field('name')[1]
+                    if dn and node_text(dn, src) == fieldname then
+                        declares = true; break
+                    end
+                end
+            end
+            if declares then
+                local mods = fd:child(0)
+                if mods and mods:type() == 'modifiers' then
+                    for _, an in inext, mods, -1 do
+                        if an:type() == 'annotation' then
+                            local nm = an:field('name')[1]
+                            if nm and node_text(nm, src):match('([%w_]+)%s*$') == 'Qualifier' then
+                                return anno_str_arg(an, src)
+                            end
+                        end
+                    end
+                end
+                return nil -- the field is here, but carries no qualifier
+            end
+        end
+    end
+    return nil
 end
 
 -- Java scope spec for the ScopeModel (cartograph.scope): which node types
@@ -2034,7 +2091,7 @@ M.spec = {
         qualify_call = function (calln, name, src)
             if calln:type() ~= 'method_invocation' then return nil end
             local obj = calln:field('object')[1]
-            local cls, hedge, defer
+            local cls, hedge, defer, qual
             if not obj then -- implicit this
                 cls = java_enclosing_class(calln, src)
             else
@@ -2053,6 +2110,9 @@ M.spec = {
                 elseif ot == 'identifier' then
                     local objname = node_text(obj, src)
                     cls, hedge, defer = java_var_type(objname, calln)
+                    -- a @Qualifier on the receiver field disambiguates which of
+                    -- an interface's several impls it holds (resolve_interface)
+                    if cls then qual = java_field_qualifier(calln, objname, src) end
                     if not cls and not defer and objname:match('^%u') then
                         -- no binder and PascalCase: a STATIC call on the
                         -- class named right here (convention-sound; the
@@ -2086,9 +2146,10 @@ M.spec = {
             -- def: leave it bare for the stdlib_names/prefix gate to skip
             if cls and JAVA_JDK_TYPES[cls] then return nil end
             -- the hedge rides the qualification: a hedged qualification makes
-            -- the resulting edge INFERRED even where resolution is confident
+            -- the resulting edge INFERRED even where resolution is confident.
+            -- 4th value = the receiver field's @Qualifier bean name (or nil).
             return cls and (cls .. '::' .. name) or nil, cls and hedge or nil,
-                (not cls) and defer or nil
+                (not cls) and defer or nil, cls and qual or nil
         end,
         -- single-inheritance chain (superclass ONLY here — a class implements
         -- MANY interfaces, which would collapse build_super's one-parent map to
@@ -2948,7 +3009,9 @@ end
 -- concrete `C::m` — the only dispatch target an @Autowired receiver can hold.
 -- Linker set semantics: singleton → resolve (inferred ~, since reflection/
 -- manual instantiation could differ); >1 → leave at the interface (honest
--- polymorphic frontier); 0 → leave (no-impl frontier).
+-- polymorphic frontier) UNLESS the receiver field carries a @Qualifier that
+-- names one of the impls (bean name = explicit @Service("x") or the
+-- decapitalized class name) → narrow to it; 0 → leave (no-impl frontier).
 --
 -- BEAN-GATING IS THE SOUNDNESS BOUNDARY, not just a fixture nicety — do NOT
 -- drop it to "generalize" to plain Java. An @Autowired receiver holds the
@@ -3006,6 +3069,17 @@ local function resolve_interface(calls, implements, beans, extends, exact, addre
             if set then
                 local only, cnt = nil, 0
                 for cls in pairs(set) do cnt = cnt + 1; only = cls end
+                -- @Qualifier narrows an ambiguous set to the named bean: the
+                -- impl whose bean name (explicit @Service("x"), else the
+                -- decapitalized class name) matches the receiver's qualifier
+                if cnt > 1 and c.qualifier then
+                    for cls in pairs(set) do
+                        local bn = beans[cls]
+                        local name = (type(bn) == 'string' and bn)
+                            or (cls:sub(1, 1):lower() .. cls:sub(2))
+                        if name == c.qualifier then only = cls; cnt = 1; break end
+                    end
+                end
                 if cnt == 1 then
                     local target = find_def(only, sep, method, super, exact,
                         elang_for(c.file))
@@ -4904,9 +4978,12 @@ function M.extract(root, opts)
                             data.implements[#data.implements + 1] = { child = child,
                                 iface = node_text(ifn, src), cintf = cintf, file = file }
                         end
-                        if not cintf and java_is_bean(decl, src) then
-                            data.beans = data.beans or {}
-                            data.beans[child] = true
+                        if not cintf then
+                            local bn = java_bean_name(decl, src)
+                            if bn then
+                                data.beans = data.beans or {}
+                                data.beans[child] = bn -- explicit name or `true`
+                            end
                         end
                     end
                 end
@@ -4962,10 +5039,10 @@ function M.extract(root, opts)
                     -- may rewrite the resolution key to Class::name —
                     -- exact match beats every tail fallback; inheritance
                     -- still falls through to tails
-                    local qhedge, qdefer
+                    local qhedge, qdefer, qqual
                     if spec.qualify_call then
-                        local q, h, d = spec.qualify_call(calln, full, src)
-                        full, qhedge, qdefer = q or full, h, d
+                        local q, h, d, qn = spec.qualify_call(calln, full, src)
+                        full, qhedge, qdefer, qqual = q or full, h, d, qn
                     end
                     -- the inventory names the VERB (lint configs match on it);
                     -- the full expression text drives resolution. A dynamic
@@ -5157,6 +5234,8 @@ function M.extract(root, opts)
                         hedge = qhedge, -- hedged qualification: edge gets ~
                         rt = qdefer, -- receiver typed by ANOTHER call's
                         -- return: the return-type rounds settle it
+                        qualifier = qqual, -- @Qualifier bean name on the
+                        -- receiver field (resolve_interface narrows on it)
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
                         top = is_top or nil }

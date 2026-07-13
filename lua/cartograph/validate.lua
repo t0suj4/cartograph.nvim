@@ -49,6 +49,7 @@ M.CALL_FIELDS = {
     argv = true, method = true, top = true, dynamic = true,
     indirect = true, traced = true, strarg = true, hedge = true,
     rt = true, n = true, tinf = true, -- type-inferred tier (graph-VM)
+    qualifier = true, -- @Qualifier bean name (interface→impl narrowing)
     conf = true, -- runtime-confirmed tier (session-live overlay)
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
 }

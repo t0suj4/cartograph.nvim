@@ -19,7 +19,11 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 42 -- v42: INTERFACE→IMPL (F1) — Java `implements`/interface-`extends`
+M.VERSION = 43 -- v43: @Qualifier NARROWING — a call's receiver field @Qualifier
+               -- bean name rides on c.qualifier + beans carry their explicit
+               -- @Service("name"); resolve_interface narrows an AMBIGUOUS
+               -- interface (>1 impl) to the named bean impl.
+-- v42: INTERFACE→IMPL (F1) — Java `implements`/interface-`extends`
                -- captured to data.implements + @stereotype beans to data.beans;
                -- resolve_interface REDIRECTS an interface-stub call `I::m` to its
                -- unique bean impl `C::m` (SET semantics: >1 or 0 → leave honest).

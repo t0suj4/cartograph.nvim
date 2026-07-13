@@ -68,6 +68,14 @@ local FILES = {
         '  }',
         '}',
     }, '\n'),
+    -- a @Qualifier field of the same 2-impl interface: names one impl by bean
+    ['Dispatcher.java'] = table.concat({
+        'package com.example.app;',
+        '@Service class Dispatcher {',
+        '  @Qualifier("emailNotificationService") private NotificationService emailNotifier;',
+        '  public void go() { emailNotifier.send(); }',
+        '}',
+    }, '\n'),
 }
 
 local function byname(data)
@@ -77,6 +85,12 @@ local function byname(data)
 end
 local function callof(data, full)
     for _, c in ipairs(data.calls) do if c.full == full then return c end end
+end
+-- find a call by full AND qualifier (nil = the unqualified one)
+local function callof_q(data, full, qual)
+    for _, c in ipairs(data.calls) do
+        if c.full == full and c.qualifier == qual then return c end
+    end
 end
 
 test('spring: implements/extends captured to data.implements', function ()
@@ -117,10 +131,23 @@ test('spring: ambiguous (>1 impl) stays at the interface — no guess', function
     if not ts_ready() then return skip 'no java parser' end
     local data = extract_files(FILES)
     local nm = byname(data)
-    local c = callof(data, 'NotificationService::send')
-    ok(c, 'the ambiguous call is present')
+    local c = callof_q(data, 'NotificationService::send', nil) -- unqualified
+    ok(c, 'the unqualified ambiguous call is present')
     -- two bean impls → NOT redirected to either; left at the interface stub
     eq(nm['NotificationService::send'].id, c.to)
+end)
+
+-- @Qualifier: the receiver field's bean name picks one impl of an otherwise
+-- ambiguous interface. Default bean name = decapitalized class name, so
+-- @Qualifier("emailNotificationService") → EmailNotificationService.
+test('spring: @Qualifier narrows an ambiguous interface to the named bean', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(FILES)
+    local nm = byname(data)
+    local c = callof_q(data, 'NotificationService::send', 'emailNotificationService')
+    ok(c, 'the qualified call is present with its qualifier recorded')
+    eq(nm['EmailNotificationService::send'].id, c.to) -- narrowed to the named impl
+    ok(c.inferred, 'inferred (~)')
 end)
 
 test('spring: interface with 0 impls stays a frontier', function ()
@@ -166,4 +193,38 @@ test('spring: unannotated implementor excluded — resolution stays unique', fun
     -- StorePlain excluded → {StoreBean} is the sole candidate → redirect
     eq(nm['StoreBean::put'].id, c.to)
     ok(c.inferred, 'inferred (~)')
+end)
+
+-- explicit @Service("name"): the qualifier matches the DECLARED bean name, not
+-- the decapitalized class name (which would be "repoA" and miss).
+local EXPL = {
+    ['Repo.java'] = table.concat({
+        'package com.example.expl;',
+        'interface Repo { void save(); }',
+    }, '\n'),
+    ['RepoA.java'] = table.concat({
+        'package com.example.expl;',
+        '@Service("customRepo") class RepoA implements Repo { public void save() {} }',
+    }, '\n'),
+    ['RepoB.java'] = table.concat({
+        'package com.example.expl;',
+        '@Service class RepoB implements Repo { public void save() {} }',
+    }, '\n'),
+    ['RepoConsumer.java'] = table.concat({
+        'package com.example.expl;',
+        '@Service class RepoConsumer {',
+        '  @Qualifier("customRepo") private Repo repo;',
+        '  public void go() { repo.save(); }',
+        '}',
+    }, '\n'),
+}
+
+test('spring: @Qualifier matches an explicit @Service("name")', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(EXPL)
+    local nm = byname(data)
+    eq('customRepo', (data.beans or {})['RepoA']) -- explicit name captured
+    local c = callof_q(data, 'Repo::save', 'customRepo')
+    ok(c, 'the qualified call is present')
+    eq(nm['RepoA::save'].id, c.to) -- narrowed by explicit bean name
 end)
