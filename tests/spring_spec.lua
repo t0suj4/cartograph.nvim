@@ -241,18 +241,30 @@ local SVC = {
     }, '\n'),
     ['IProductBL.java'] = table.concat({
         'package svc;',
-        'public interface IProductBL extends ISingletonService { void doIt(); }',
+        'public interface IProductBL extends ISingletonService { void doIt(); void doInline(); }',
     }, '\n'),
     -- the impl is a PLAIN class (no @Service) — the metasfresh style
     ['ProductBL.java'] = table.concat({
         'package svc;',
-        'public class ProductBL implements IProductBL { public void doIt() {} }',
+        'public class ProductBL implements IProductBL {',
+        '  public void doIt() {}',
+        '  public void doInline() {}',
+        '}',
+    }, '\n'),
+    -- the locator: a real generic signature `<T> T get(Class<T>)`, so the
+    -- return-type rounds can bind the return from the call's class literal
+    ['Services.java'] = table.concat({
+        'package svc;',
+        'public class Services {',
+        '  public static <T extends ISingletonService> T get(Class<T> c) { return null; }',
+        '}',
     }, '\n'),
     ['Consumer.java'] = table.concat({
         'package svc;',
         'public class Consumer {',
         '  private final IProductBL bl = Services.get(IProductBL.class);',
         '  public void go() { bl.doIt(); }',
+        '  public void inline() { Services.get(IProductBL.class).doInline(); }',
         '}',
     }, '\n'),
 }
@@ -266,6 +278,17 @@ test('spring: service-marker interface resolves to its unique impl (non-bean)', 
     ok(c, 'the interface-typed call is present')
     eq(nm['ProductBL::doIt'].id, c.to) -- service-gate redirect, not bean-gated
     ok(c.inferred, 'inferred (~)')
+end)
+
+-- the inline-chain form Services.get(IFoo.class).m(): the locator return type
+-- (IFoo) types the chained call, which the service-marker gate then redirects.
+test('spring: inline Services.get(IFoo.class).m() resolves to the impl', function ()
+    if not ts_ready() then return skip 'no java parser' end
+    local data = extract_files(SVC)
+    local nm = byname(data)
+    local c = callof(data, 'IProductBL::doInline')
+    ok(c, 'the inline-chain call is present and typed to the interface')
+    eq(nm['ProductBL::doInline'].id, c.to) -- locator return-type + marker gate
 end)
 
 -- the marker IS the gate: the same shape WITHOUT the service marker (and no

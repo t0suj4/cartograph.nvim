@@ -2093,11 +2093,57 @@ M.spec = {
         -- Class::m turns the largest refusal bucket (getters/setters shared
         -- across many model classes) into exact or inheritance-walked links.
         scopes = JAVA_SCOPES, -- lexical-first id pass (scope-model step 3)
-        -- declared return type = the per-method SUMMARY (graph-VM MVP)
+        -- declared return type = the per-method SUMMARY (graph-VM MVP). Second
+        -- return = retclass: the 1-based value-parameter position of a
+        -- `Class<T>` argument that BINDS the return type variable T. A generic
+        -- `<T> T get(Class<T> c)` returns the type its class-literal argument
+        -- names — the return-type rounds bind T from the call's `X.class` arg
+        -- (the general form of the metasfresh Services.get(IFoo.class) idiom;
+        -- sound because it reads the method's real signature, not a name).
         def_ret = function (defn, src)
-            if defn:type() == 'method_declaration' then
-                return java_base_type(defn:field('type')[1], src)
+            if defn:type() ~= 'method_declaration' then return nil end
+            local ret = java_base_type(defn:field('type')[1], src)
+            local tps = defn:field('type_parameters')[1]
+            if not (ret and tps) then return ret end
+            local tvars = {}
+            for _, tp in inext, tps, -1 do
+                if tp:type() == 'type_parameter' then
+                    local id = tp:named_child(0)
+                    if id and id:type() == 'type_identifier' then
+                        tvars[node_text(id, src)] = true
+                    end
+                end
             end
+            if not tvars[ret] then return ret end -- return isn't a type variable
+            -- find a Class<ret> parameter (Class<T> / Class<? extends T>)
+            local function names_var(nd, depth)
+                if nd:type() == 'type_identifier' and node_text(nd, src) == ret then
+                    return true
+                end
+                if depth < 3 then
+                    for i = 0, nd:named_child_count() - 1 do
+                        if names_var(nd:named_child(i), depth + 1) then return true end
+                    end
+                end
+                return false
+            end
+            local params, k = defn:field('parameters')[1], 0
+            for _, pn in (params and inext or NOOP), params, -1 do
+                local pt = pn:type()
+                if pt == 'formal_parameter' or pt == 'spread_parameter' then
+                    k = k + 1
+                    local ty = pn:field('type')[1]
+                    if ty and ty:type() == 'generic_type' then
+                        local base = ty:named_child(0)
+                        local targs = ty:named_child(1)
+                        if base and node_text(base, src) == 'Class'
+                            and targs and names_var(targs, 0) then
+                            return ret, k -- return bound to this Class<T> arg
+                        end
+                    end
+                end
+            end
+            return ret
         end,
         qualify_call = function (calln, name, src)
             if calln:type() ~= 'method_invocation' then return nil end
@@ -2135,8 +2181,10 @@ M.spec = {
                     end
                 elseif ot == 'method_invocation' then
                     -- CHAINED receiver f().g(): g's class is f's return type,
-                    -- knowable only after f resolves — defer to the
-                    -- return-type rounds, recording f's call site
+                    -- knowable only after f resolves — defer to the return-type
+                    -- rounds, recording f's call site. A generic locator like
+                    -- `Services.get(IFoo.class)` is settled there too, from f's
+                    -- Class<T>-argument binding (resolve_returns).
                     local vn = obj:field('name')[1]
                     if vn then
                         local r2, c2 = vn:range()
@@ -3401,7 +3449,17 @@ local function resolve_returns(calls, node_index, exact, addref)
             local settled = false
             do
                 local d = callidx[c.file .. '\31' .. c.rt.r .. '\31' .. c.rt.c]
-                local ret = d and d.to and node_index[d.to] and node_index[d.to].ret
+                local dnode = d and d.to and node_index[d.to]
+                local ret = dnode and dnode.ret
+                -- GENERIC Class<T> return: the determining call's target binds
+                -- its return type to a Class<T> parameter, so the concrete
+                -- return is the type its class-literal argument names
+                -- (Services.get(IFoo.class) → IFoo). Reads the call's own arg —
+                -- signature-driven, general to any `<T> T m(Class<T>)`.
+                if dnode and dnode.retclass and d.argv then
+                    local a = d.argv[dnode.retclass]
+                    if a and a.k == 'class' and a.v then ret = a.v end
+                end
                 if not ret and d and d.refused and d.refused.cands
                     and d.refused.n and d.refused.n <= #d.refused.cands then
                     -- overloads refuse the CALL, but when every candidate
@@ -3427,6 +3485,11 @@ local function resolve_returns(calls, node_index, exact, addref)
                     end
                     if fit and not dup then
                         c.to = fit.id
+                        -- a deferred chained call had no lexical qualification;
+                        -- record the one the return type gives it, so a later
+                        -- pass (resolve_interface) can act on it — e.g. redirect
+                        -- an interface-typed return `Ret::m` to its impl
+                        c.full = c.full or (ret .. '::' .. c.callee)
                         c.inferred = true -- type INFERRED through a summary
                         c.tinf = true -- the TYPE-INFERRED tier (the VM's own
                         -- output: resolved via a return-type summary, a
@@ -4750,6 +4813,8 @@ function M.extract(root, opts)
                 local fl = spec.body_field and flowmod.build(defn, src, {
                     pfield = spec.params_field, df_ids = spec.df_ids,
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
+                local dret, dretclass
+                if spec.def_ret then dret, dretclass = spec.def_ret(defn, src) end
                 nodes[#nodes + 1] = { id = id, name = name,
                     kind = method and 'method' or 'function', file = file,
                     range = sp, order = sp.start.line, params = params,
@@ -4759,7 +4824,10 @@ function M.extract(root, opts)
                     entry = (spec.entry_names or {})[name] or nil,
                     -- declared return type (base name): the per-function
                     -- SUMMARY the return-type rounds ride (graph-VM MVP)
-                    ret = spec.def_ret and spec.def_ret(defn, src) or nil,
+                    ret = dret,
+                    -- generic `Class<T>` return: the arg index binding T (the
+                    -- return-type rounds read the call's class-literal there)
+                    retclass = dretclass,
                     df = spec.dataflow
                         and spec.dataflow(defn, spec, src, params) or nil,
                     flow = fl and { stmts = fl.stmts, params = fl.params } or nil }
@@ -5160,6 +5228,15 @@ function M.extract(root, opts)
                                 -- silently mis-index (knowledge lattice)
                                 args[#args + 1] = ''
                                 argv[#argv + 1] = { k = 'spread' }
+                            elseif t == 'class_literal' then
+                                -- java `X.class` — carry the named TYPE so a
+                                -- generic `Class<T>` return can bind T = X in
+                                -- the return-type rounds (resolve_returns)
+                                local ti = a:named_child(0)
+                                args[#args + 1] = ''
+                                argv[#argv + 1] = { k = 'class',
+                                    v = ti and ti:type() == 'type_identifier'
+                                        and node_text(ti, src) or nil }
                             elseif t == 'string' or t == 'string_literal'
                                 or t == 'encapsed_string' then -- php "..."
                                 -- interpolated string (typed-strings v1):

@@ -19,7 +19,12 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 44 -- v44: SERVICE-MARKER GATE — resolve_interface resolves a call on
+M.VERSION = 45 -- v45: GENERIC Class<T> RETURN (graph-VM) — a method summary now
+               -- carries `retclass` (the arg index of a Class<T> param binding
+               -- the return var); the return-type rounds bind `<T> T get(Class<T>)`
+               -- from the call's `X.class` literal, so `Services.get(IFoo.class).m()`
+               -- types as IFoo::m (→ service-marker gate). argv gains k='class'.
+-- v44: SERVICE-MARKER GATE — resolve_interface resolves a call on
                -- a service-locator marker interface (extends ISingletonService/
                -- IMultitonService/IService, the metasfresh Services.get idiom) to
                -- its unique implementer WITHOUT bean-gating (F1 sibling gate).

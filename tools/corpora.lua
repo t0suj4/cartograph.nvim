@@ -28,7 +28,7 @@ return {
         repo = 'https://github.com/elastic/elasticsearch',
         rev = '4743238408a4',
         lang = 'java',
-        expected = { refs = 10821, nodes = 13888 }, -- recalibrated @ bash-spec (.sh scripts join)
+        expected = { refs = 10822, nodes = 13888 }, -- +1 @ generic Class<T> return (getLibrary(VectorLibrary.class))
         notes = 'the small/fast java corpus (943 files, ~10s) — quick iteration',
     },
     -- ── per-language quick tier (libs-sized: seconds, calibrated, pinned) ──
