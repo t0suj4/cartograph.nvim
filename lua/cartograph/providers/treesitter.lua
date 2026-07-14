@@ -3519,6 +3519,75 @@ local function resolve_returns(calls, node_index, exact, addref)
     return n, rounds
 end
 
+-- HONESTY (the uniform-honesty invariant, read as a resolver pass): a bare call
+-- whose callee is a PARAM or a LOCAL of the enclosing fn must resolve OR refuse
+-- — never drop silently (it is a callable we can SEE the binding for; silence
+-- is the gap the silent-drop lint exists to catch). Two regimes, keyed by what
+-- the binding IS:
+--   * a PARAM callee is HIGHER-ORDER — its target is whatever the caller
+--     passed, unknowable at the def site → an honest refusal (rule
+--     'higher-order'); the effects machinery already inherits its summary via
+--     CALLS={i}, but the REF edge has no single static target.
+--   * a LOCAL callee (a df-def of the fn) that names a UNIQUE same-file
+--     function/method def resolves to it, INFERRED — this is the forward-decl /
+--     short-name local fn the `#name<3` name gate dropped: we gate on
+--     UNBOUND-ness, not length (a BOUND short name like `nm`/`go` resolves; a
+--     free one — a loop counter — has no matching def and stays silent). A
+--     local with no unique matching def is an honest refusal (rule 'fn-value').
+-- Only touches calls the main pass + the resolve_* siblings left SILENT
+-- (to==nil AND refused==nil), so it can neither override a resolution nor a
+-- prior refusal. Runs last, after every other call resolver. Returns a count.
+local function resolve_local_callable(calls, node_index, exact, addref)
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        if c.callee and not c.full and not c.dynamic and not c.to
+            and not c.refused and c.fn then
+            local fn = node_index[c.fn]
+            if fn then
+                local isparam = false
+                for _, p in ipairs(fn.params or {}) do
+                    if p == c.callee then isparam = true; break end
+                end
+                if isparam then
+                    c.refused = { rule = 'higher-order' }
+                    n = n + 1
+                else
+                    -- is the callee a LOCAL (df-def) of this fn?
+                    local islocal, df = false, fn.df
+                    if df then
+                        for _, st in ipairs(df.stmts) do
+                            for _, d in ipairs(st.def or {}) do
+                                if d == c.callee then islocal = true; break end
+                            end
+                            if islocal then break end
+                        end
+                    end
+                    if islocal then
+                        -- resolve to a UNIQUE same-file function/method def
+                        local hit, dup
+                        for _, d in ipairs(exact[c.callee] or {}) do
+                            if d.file == c.file
+                                and (d.kind == 'function' or d.kind == 'method') then
+                                if hit then dup = true; break end
+                                hit = d
+                            end
+                        end
+                        if hit and not dup then
+                            c.to = hit.id
+                            c.inferred = true
+                            if c.at then addref(c.fn, hit.id, c.at, true) end
+                        else
+                            c.refused = { rule = 'fn-value' }
+                        end
+                        n = n + 1
+                    end
+                end
+            end
+        end
+    end
+    return n
+end
+
 -- leading lines that BELONG to a def — comments, decorators,
 -- attributes, annotations: what must travel with its text when an
 -- edit verb moves it. Keyed by effective language.
@@ -5989,6 +6058,10 @@ function M.extract(root, opts)
     resolve_interface(calls, data.implements, data.beans, data.extends, exact,
         addref, JAVA_SERVICE_MARKERS)
 
+    -- honesty: silent-dropped local/param callables → resolve or refuse (last,
+    -- after every other call resolver, so it catches only the true residual)
+    resolve_local_callable(calls, node_index, exact, addref)
+
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
     -- lookups; slice-local uniqueness is not global uniqueness)
@@ -6358,6 +6431,8 @@ function M.relink(data, touched)
     -- interface→impl (F1), same parity as extract
     n = n + resolve_interface(data.calls, data.implements, data.beans, data.extends,
         exact, addref, JAVA_SERVICE_MARKERS)
+    -- honesty pass, same parity as extract (silent local/param callables)
+    n = n + resolve_local_callable(data.calls, node_index, exact, addref)
     return n + retn
 end
 

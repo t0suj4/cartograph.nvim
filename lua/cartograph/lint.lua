@@ -629,7 +629,11 @@ end
 -- either RESOLVE it (fn-value alias) or SPEAK a refusal; silence violates the
 -- invariant. Bare-only (a qualified `obj.m` receiver-typing drop is the separate
 -- narrowable-refusal work-list); local-only (a free external name resolving to
--- nil is an honest "not ours", not a gap).
+-- nil is an honest "not ours", not a gap). Gated on UNBOUND-ness (the fn_locals
+-- membership IS the boundedness test), NOT length: the resolver's honesty pass
+-- (resolve_local_callable) now resolves-or-refuses these regardless of name
+-- length, so a residual finding of ANY length is a real regression — the old
+-- `#callee >= 3` guard would have hidden a short one (a `nm`/`go` re-broken).
 local function silent_drop_findings(store)
     local calls = store.data.calls
     if not calls or #calls == 0 then return {} end
@@ -652,7 +656,7 @@ local function silent_drop_findings(store)
     end
     for _, c in ipairs(calls) do
         if not c.to and not c.refused and not c.dynamic and not c.full
-            and c.fn and c.callee and #c.callee >= 3
+            and c.fn and c.callee
             and fn_locals(c.fn)[c.callee] then
             local k = c.fn .. '\31' .. c.callee -- one finding per (fn, local)
             if not seen[k] then

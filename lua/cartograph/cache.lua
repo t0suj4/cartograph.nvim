@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 45 -- v45: GENERIC Class<T> RETURN (graph-VM) — a method summary now
+M.VERSION = 46 -- v46: HONESTY PASS (resolve_local_callable) — a bare call whose
+               -- callee is a PARAM (higher-order) or a LOCAL df-def of the
+               -- enclosing fn no longer drops SILENTLY: a param refuses
+               -- ('higher-order'), a local resolves to a unique same-file fn def
+               -- (INFERRED — the forward-decl/short-name `nm`/`go` the <3 name
+               -- gate blocked; bound-ness not length) else refuses ('fn-value').
+-- v45: GENERIC Class<T> RETURN (graph-VM) — a method summary now
                -- carries `retclass` (the arg index of a Class<T> param binding
                -- the return var); the return-type rounds bind `<T> T get(Class<T>)`
                -- from the call's `X.class` literal, so `Services.get(IFoo.class).m()`

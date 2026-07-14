@@ -77,16 +77,30 @@ test('lint: silent-drop flags a bare call to a local callable, neither resolved 
     ok(f[1].message:match('silent honesty gap'), f[1].message)
 end)
 
-test('lint: silent-drop ignores resolved, dynamic, qualified, and short-name calls', function ()
-    local caller = fn('m.lua', 'run'); caller.params = { 'handler', 'obj', 'go' }
+test('lint: silent-drop ignores resolved, dynamic, and qualified calls', function ()
+    local caller = fn('m.lua', 'run'); caller.params = { 'handler', 'obj' }
     store.ingest({ schema = 1, root = '/x', nodes = { mod('m.lua'), caller }, edges = {},
         calls = {
             { callee = 'handler', fn = 'm.lua::run', file = 'm.lua', at = R0, to = 'm.lua::run' }, -- resolved
             { callee = 'handler', fn = 'm.lua::run', file = 'm.lua', at = R0, dynamic = true },    -- dynamic frontier
             { callee = 'method', full = 'obj.method', fn = 'm.lua::run', file = 'm.lua', at = R0 }, -- qualified (receiver-typing, not this rule)
-            { callee = 'go', fn = 'm.lua::run', file = 'm.lua', at = R0 }, -- short name (<3): resolution noise, not a gap
         } })
     eq(0, #lint.run(store, only('silent-drop')))
+end)
+
+test('lint: silent-drop gates on unbound-ness, not length — a SHORT bound name is flagged', function ()
+    -- `go` is a 2-char PARAM (a local callable); a silent bare call to it is a
+    -- gap the same as any longer name. The old `#callee >= 3` guard hid this —
+    -- the resolver's honesty pass now resolves/refuses these regardless of
+    -- length, so a residual short silent drop is a real regression.
+    local caller = fn('m.lua', 'run'); caller.params = { 'go' }
+    store.ingest({ schema = 1, root = '/x', nodes = { mod('m.lua'), caller }, edges = {},
+        calls = {
+            { callee = 'go', fn = 'm.lua::run', file = 'm.lua', at = R0 }, -- short + bound + silent = a gap
+        } })
+    local f = lint.run(store, only('silent-drop'))
+    eq(1, #f)
+    ok(f[1].message:match("'go'"), f[1].message)
 end)
 
 test('ladder: narrowable-refusal classifies receivers and ranks the work-list', function ()

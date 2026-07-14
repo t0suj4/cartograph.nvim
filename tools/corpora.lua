@@ -20,7 +20,7 @@ return {
         repo = 'https://github.com/elastic/elasticsearch',
         rev = '4743238408a4',
         lang = 'java',
-        expected = { refs = 77109, nodes = 87241 }, -- calibrated @ step-4 return rounds
+        expected = { refs = 77127, nodes = 87241 }, -- +18 @ honesty pass v46 (stale baseline caught up on prior Java refused→resolved)
         notes = 'THE parity gate corpus (5x scale, 4843 files, ~55s extract)',
     },
     libs = {
@@ -62,7 +62,7 @@ return {
         budget_mb = 1600, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/TryGhost/Ghost',
         rev = 'f7d7df8f9816',
-        expected = { refs = 5840, nodes = 21128 }, -- calibrated @ require-imports (v22)
+        expected = { refs = 5842, nodes = 21128 }, -- +2 @ honesty pass v46 (local-fn callable resolved)
         lang = 'javascript',
         notes = 'js SCALE tier (2134 files) — a real node webapp: express'
             .. ' routes + handlebars themes (parametric-files territory)',
@@ -129,7 +129,7 @@ return {
         root = HOME .. '/git/jquery/src',
         repo = 'https://github.com/jquery/jquery',
         rev = 'b043db95042b',
-        expected = { refs = 672, nodes = 581 }, -- calibrated @ js-corpora join
+        expected = { refs = 673, nodes = 581 }, -- +1 @ honesty pass v46 (local-fn callable resolved)
         lang = 'javascript',
         notes = 'js quick tier (115 ESM files); selector/event-name strings'
             .. ' = typed-string territory',
