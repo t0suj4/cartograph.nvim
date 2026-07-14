@@ -714,7 +714,11 @@ checks luacheck can't:
   forward-declared-local class — `local g = f; g()`). The engine's contract is to
   resolve it *or* speak a refusal; silence is a uniform-honesty violation. Local-
   and bare-only (a free external name resolving to nil is an honest "not ours"; a
-  qualified `obj.method` drop is receiver-typing, a separate concern).
+  qualified `obj.method` drop is receiver-typing, a separate concern). The
+  resolver itself now enforces this — a param callee refuses as *higher-order*, a
+  local one resolves to a unique same-file def or refuses as *fn-value* — so the
+  lint is a regression detector: it gates on **boundedness, not name length** (a
+  short bound name like `go` is still a gap), and in practice reports nothing.
 - **redundant-require** — a pure module `require`d only for effect, but it has
   none, so the require does nothing.
 - **call-cycle** — mutual recursion / cyclic call clusters (plain self-recursion
