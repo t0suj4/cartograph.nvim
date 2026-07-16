@@ -917,6 +917,17 @@ nvim --headless -u NONE -l tools/matrix.lua --quick      # seconds-tier only
 nvim --headless -u NONE -l tools/matrix.lua libs server  # named rows
 nvim --headless -u NONE -l tools/matrix.lua --cols par   # one column
 nvim --headless -u NONE -l tools/matrix.lua --save       # re-baseline structs
+# GENERATED-CODE fuzz bed: synthesize a corpus (seeded, deterministic, valid
+# by construction — load()-asserted) and let the matrix's invariant columns
+# judge it. The third oracle kind: not history (baselines), not ourselves
+# agreeing (parity) — truth by construction. silent==0 is the headline
+# oracle: a generated program where a bound callable resolves to nothing
+# with no refusal is a fresh honesty bug. Failing seeds keep their dir as
+# the repro artifact. Idiom mix = the resolution-ladder bestiary (forward
+# decls, fn-value aliases, higher-order params, shadows, short names,
+# setmetatable classes, cross-module requires, goto-continue).
+nvim --headless -u NONE -l tools/gen.lua lua --check --runs 20
+nvim --headless -u NONE -l tools/gen.lua lua --seed 7 --out /tmp/g  # just generate
 ```
 
 `tools/preflight.lua` is the dev loop as one command: git-diff impact (changed

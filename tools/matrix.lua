@@ -354,6 +354,11 @@ local function run_row(name)
     end
 
     return { corpus = name, cells = cells, wall = stats.wall,
+        -- extraction-floor facts for generated-corpus callers (tools/gen.lua):
+        -- a syntax-error wipeout would leave every invariant vacuously green
+        fns = (c.nodes.by_kind['function'] or 0)
+            + (c.nodes.by_kind.method or 0),
+        unparsed = c.nodes.unparsed,
         info = ('nodes %d · edges %d · refs %d · refused %d'):format(
             c.nodes.total, c.edges.total, c.edges.by_kind.ref or 0,
             c.calls.refused) }
@@ -384,8 +389,11 @@ if #names == 0 then
     if not opts.quick then vim.list_extend(names, heavy) end
 end
 for _, n in ipairs(names) do
-    if not reg[n] then
-        say(('matrix: unknown corpus %q (see tools/corpora.lua)'):format(n))
+    -- a literal directory is a row too (bench.corpus accepts it): ad-hoc
+    -- roots and GENERATED corpora (tools/gen.lua) sweep like any corpus
+    if not reg[n] and vim.fn.isdirectory(n) ~= 1 then
+        say(('matrix: unknown corpus %q (see tools/corpora.lua, or pass a'
+            .. ' directory)'):format(n))
         os.exit(2)
     end
 end
