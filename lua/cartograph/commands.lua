@@ -411,6 +411,13 @@ function M.register()
         scratch(require('cartograph.ladder').report(store))
     end, { desc = 'cartograph: the call graph\'s epistemic distribution + heaviest refusals' })
 
+    -- ── the EXTERNAL SURFACE: names used but defined nowhere here, with the
+    --    shape inferred backward from usage (the boundary map + write-side seed)
+    cmd('CartographExternals', function ()
+        local store = live() if not store then return end
+        scratch(require('cartograph.externals').report(store))
+    end, { desc = 'cartograph: the external boundary — unresolved names + their used-shape (~)' })
+
     -- ── which project shape was detected, and what it changed ──────
     cmd('CartographShapes', function ()
         local st = require 'cartograph.store'
