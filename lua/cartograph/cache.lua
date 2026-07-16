@@ -19,7 +19,16 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 48 -- v48: SHORT-NAME HONESTY — resolve()'s #name<3 gate now
+M.VERSION = 49 -- v49: DF-STRANGLER STEP 6 — df is now a COARSE PROJECTION of
+               -- flow, DERIVED at extract (n.df = flow.coarse(fl), no separate
+               -- dfreg walk) — the step-4 double build retired. `defr` binder
+               -- tags dropped everywhere (fully unconsumed since trace +
+               -- extract.plan moved to flow.reaching_cfg): gone from
+               -- collect_mentions, the df.fold r0/rdi/rtag columns, and the
+               -- store.ingest transplant. The legacy dfreg df survives ONLY
+               -- under opts.legacy_df (bench.extract), the parity oracle path.
+               -- Extraction output changes (df loses defr, is flow-sourced).
+-- v48: SHORT-NAME HONESTY — resolve()'s #name<3 gate now
                -- applies to CROSS-FILE matching only: a 1-2-char callee
                -- with a SAME-FILE def resolves through the same-file tier
                -- (was a SILENT drop — the synjs min.js q3 key witness,

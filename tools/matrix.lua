@@ -179,11 +179,15 @@ local function run_row(name)
         end
     end
 
-    -- dfpar runs on the RAW records (pre-fold), exactly like dfgate's
-    -- bench.extract path — same data the 11 calibrated censuses were pinned on
+    -- dfpar runs on a SEPARATE legacy_df extract (df-strangler step 6): the
+    -- shared `data` above is production, whose df IS flow.coarse — comparing it
+    -- to flow.coarse would be circular. legacy_df builds the INDEPENDENT dfreg
+    -- df (double walk, oracle-only), exactly like dfgate. Kept out of `data` so
+    -- the mem column still measures the real single-walk production peak.
     if wanted('dfpar') then
         local dfp = dofile(here .. '/dfparity.lua')
-        local r = dfp.check(data)
+        local ldata = bench.extract(name, { legacy_df = true })
+        local r = dfp.check(ldata)
         if r.nfn == 0 then
             cell('dfpar', '--') -- no df-bearing functions (token provider)
         else

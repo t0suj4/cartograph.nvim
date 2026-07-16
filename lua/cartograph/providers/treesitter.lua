@@ -4036,7 +4036,11 @@ end
 --- answer jvt_sm.resolve gave post-walk, without retaining nodes.
 --- Shared by the fused extract and the standalone id_pass (refresh path,
 --- which passes no dfreg — extract already computed df for those files).
-local function collect_mentions(buf, tsroot, src, spec, dfreg)
+-- dfrec: build the legacy df RECORD off the fn-node stack (the oracle's
+-- independent df, opts.legacy_df). When false, the stack is still tracked for
+-- write-axis (pw) attribution, but no def/use/dep is accumulated — df comes
+-- from flow.coarse (df-strangler step 6).
+local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec)
     local scopes = spec.scopes
     local idt = spec.mention_types or MENTION_ID
     local wgate, is_write, guards = spec.write_gate, spec.is_write, spec.guards
@@ -4050,21 +4054,9 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
     local scoped = scopes and MF_SCOPED or 0
     local active = {} -- name -> stack of visibility rows (false = scope-wide)
-    local ctxs, nctx = {}, 0 -- open df contexts, innermost last
-
-    -- the binder tag, from the live stack: nearest VISIBLE binder's
-    -- 0-based decl row; -1 = row-less binder (param/field), -2 = free
-    local function tag_of(name, row)
-        local a = active[name]
-        if a then
-            for j = #a, 1, -1 do
-                local r = a[j]
-                if r == false then return -1 end
-                if r <= row then return r end
-            end
-        end
-        return -2
-    end
+    local ctxs, nctx = {}, 0 -- open df contexts (dfrec only), innermost last
+    local fnstack, fdepth = {}, 0 -- enclosing fn NODES, for pw attribution
+    -- (tracked always — decoupled from the df-record build ctxs above)
 
     local function walk(n, defpos, dfon)
         local nt = n:type()
@@ -4083,10 +4075,13 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
         end
         local bodyctx = dfreg and dfreg[n:id()]
         if bodyctx then
-            nctx = nctx + 1
-            ctxs[nctx] = bodyctx
-            bodyctx.stmts = {}
-            bodyctx.defsites = scopes and {} or nil
+            fdepth = fdepth + 1
+            fnstack[fdepth] = bodyctx.node -- always: pw attribution
+            if dfrec then                  -- oracle df record build only
+                nctx = nctx + 1
+                ctxs[nctx] = bodyctx
+                bodyctx.stmts = {}
+            end
         end
         local iscall = nt == 'call_expression' or nt == 'function_call'
             or nt == 'call' or nt == 'apply'
@@ -4172,12 +4167,6 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                             if not x.sd[name] then
                                 x.sd[name] = true
                                 st.def[#st.def + 1] = name
-                                if x.defsites then
-                                    local ds = x.defsites[name]
-                                    if not ds then ds = {} x.defsites[name] = ds end
-                                    ds[#ds + 1] = { si = #x.stmts, di = #st.def,
-                                        tag = tag_of(name, (c:range())) }
-                                end
                             end
                         elseif not x.su[name] and not x.sd[name] then
                             x.su[name] = true
@@ -4247,7 +4236,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                     wqn = wqn + 1
                     local b = wqn * 5
                     wq[b - 4], wq[b - 3], wq[b - 2], wq[b - 1] = c, n, #parts, nm
-                    wq[b] = nctx > 0 and ctxs[nctx].node or false
+                    wq[b] = fdepth > 0 and fnstack[fdepth] or false
                 end
                 if not simple then
                     vput(parts, er)
@@ -4262,29 +4251,13 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
             c = n:child(i)
         end
         if bodyctx then
+            fdepth = fdepth - 1
+        end
+        if bodyctx and dfrec then
             nctx = nctx - 1
             bodyctx.cur, bodyctx.sd, bodyctx.su = nil, nil, nil
             local stmts = bodyctx.stmts
             if #stmts > 0 then
-                -- binder tags: only names that CAN be shadow-ambiguous —
-                -- several def sites, or a def shadowing a param. s.defr is
-                -- sparse, aligned with s.def indices; untagged names keep
-                -- name semantics.
-                if bodyctx.defsites then
-                    local isparam = {}
-                    for _, p in ipairs(bodyctx.params or {}) do
-                        isparam[p] = true
-                    end
-                    for name, ds in pairs(bodyctx.defsites) do
-                        if #ds > 1 or isparam[name] then
-                            for _, site in ipairs(ds) do
-                                local st = stmts[site.si]
-                                st.defr = st.defr or {}
-                                st.defr[site.di] = site.tag
-                            end
-                        end
-                    end
-                end
                 -- dependencies + free inputs
                 local defined, inputs, inset = {}, {}, {}
                 for _, p in ipairs(bodyctx.params or {}) do defined[p] = 0 end
@@ -4304,7 +4277,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg)
                 end
                 bodyctx.node.df = { inputs = inputs, stmts = stmts }
             end
-            bodyctx.stmts, bodyctx.defsites = nil, nil
+            bodyctx.stmts = nil
         end
         if pushed then
             for k = #pushed, 1, -1 do
@@ -4788,6 +4761,11 @@ function M.extract(root, opts)
     -- a time, so container files (vue/svelte SFCs) can run it once per
     -- script region while plain files run it on their single root
     local function extract_defs(file, lang, spec, src, tsroot, dfreg)
+        -- df-strangler step 6: production DERIVES df from flow.coarse (no
+        -- second AST walk). The legacy dfreg df-build survives ONLY as the
+        -- parity ORACLE, gated on opts.legacy_df (bench.extract) so dfparity
+        -- compares flow.coarse against an INDEPENDENT df, not a circular echo.
+        local legacy_df = opts and opts.legacy_df or false
         tree_model(tsroot, src, spec) -- df binder tags read the shared model
         -- a def extracted from BEYOND a parse error has escaped its
         -- context (magento's php5 `$s{0}` truncates the class; the
@@ -4893,6 +4871,18 @@ function M.extract(root, opts)
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 local dret, dretclass
                 if spec.def_ret then dret, dretclass = spec.def_ret(defn, src) end
+                -- df (step 6): a custom-df lang (haskell) builds its own; every
+                -- generic body_field lang DERIVES df from flow.coarse — the
+                -- coarse projection of the fine rows already built, no second
+                -- walk. Under legacy_df the derivation is SKIPPED so the dfreg
+                -- rider below can build df independently (the oracle target).
+                local dfrec
+                if spec.dataflow then
+                    dfrec = spec.dataflow(defn, spec, src, params)
+                elseif fl and not legacy_df then
+                    local co, inputs = flowmod.coarse(fl)
+                    dfrec = { inputs = inputs, stmts = co }
+                end
                 nodes[#nodes + 1] = { id = id, name = name,
                     kind = method and 'method' or 'function', file = file,
                     range = sp, order = sp.start.line, params = params,
@@ -4906,12 +4896,15 @@ function M.extract(root, opts)
                     -- generic `Class<T>` return: the arg index binding T (the
                     -- return-type rounds read the call's class-literal there)
                     retclass = dretclass,
-                    df = spec.dataflow
-                        and spec.dataflow(defn, spec, src, params) or nil,
+                    df = dfrec,
                     flow = fl and { stmts = fl.stmts, params = fl.params } or nil }
                 lastFn[file] = nodes[#nodes]
-                -- generic df rides the mention DFS: register this body
-                -- (per-tree keying — node ids are stable within a tree)
+                -- register this body in dfreg: ALWAYS (cheap — one entry) so
+                -- the mention DFS keeps a fn-node stack for write-axis (pw)
+                -- attribution. The df-record ACCUMULATION off that stack runs
+                -- only under legacy_df (the oracle's independent df); in
+                -- production the stack is used for pw alone, df stays the
+                -- flow.coarse derived above.
                 if not spec.dataflow and spec.body_field then
                     local b = defn:field(spec.body_field)[1]
                     if b then
@@ -5491,7 +5484,8 @@ function M.extract(root, opts)
         if fnRanges[file] then
             local buf = mention_buf(M.spec.javascript)
             for ri, r in ipairs(regions) do
-                collect_mentions(buf, r.root, src, r.spec, regdfs[ri])
+                collect_mentions(buf, r.root, src, r.spec, regdfs[ri],
+                    opts and opts.legacy_df)
             end
             buf.m = table.concat(buf.parts)
             buf.parts, buf.nidx = nil, nil
@@ -5587,7 +5581,7 @@ function M.extract(root, opts)
             -- via dfreg (registered by extract_defs above).
             if fnRanges[file] then
                 local buf = mention_buf(spec)
-                collect_mentions(buf, tsroot, src, spec, dfreg)
+                collect_mentions(buf, tsroot, src, spec, dfreg, opts and opts.legacy_df)
                 buf.m = table.concat(buf.parts)
                 buf.parts, buf.nidx = nil, nil
                 mentions[file] = buf

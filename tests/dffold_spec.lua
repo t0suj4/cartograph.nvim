@@ -19,8 +19,7 @@ local function mkdata()
             stmts = {
                 { l = 2, def = { 'a' }, use = { 'store' }, dep = {} },
                 { l = 3, def = { 'b', 'c' }, use = { 'a', 'config' },
-                    dep = { { from = 1, var = 'a' } },
-                    defr = { [1] = -1, [2] = 4 } },
+                    dep = { { from = 1, var = 'a' } } },
                 { l = 5, def = {}, use = { 'b', 'c', 'a' },
                     dep = { { from = 2, var = 'b' }, { from = 2, var = 'c' },
                         { from = 1, var = 'a' } } },

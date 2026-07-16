@@ -36,7 +36,10 @@ if corpus.rev and not bench.same_rev(corpus.rev, now) then
     os.exit(2)
 end
 
-local data = bench.extract(name)
+-- legacy_df: build the INDEPENDENT dfreg df (df-strangler step 6) so the
+-- census compares flow.coarse against a real, separately-built df — production
+-- df IS flow.coarse now, so a plain extract would make the oracle circular.
+local data = bench.extract(name, { legacy_df = true })
 
 if show then -- EXPLORER mode: dump divergence instances of a class, don't gate
     local r = dfp.check(data, type(show) == 'string' and { [show] = true } or nil)

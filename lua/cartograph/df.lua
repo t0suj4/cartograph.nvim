@@ -1,6 +1,9 @@
--- Dataflow, eager-but-FOLDED. df (per-function statement dataflow:
+-- Dataflow, eager-but-FOLDED. Since df-strangler step 6 df is a COARSE
+-- PROJECTION of flow (flow.coarse, derived at extract — no separate build);
+-- this module is now just its columnar storage + read API. df
+-- (per-function statement dataflow:
 -- { inputs = {names}, stmts = { {l, def={names}, use={names},
--- dep={{from=si, var=name}}, defr={[di]=tag}?} } }) is the LARGEST foldable
+-- dep={{from=si, var=name}}} } }) is the LARGEST foldable
 -- datum (~132 MB deep on server as nested tables: every statement is five
 -- small tables). The fold collapses it to ONE global columnar store per
 -- graph — flat line/offset/count arrays plus name-ref pools — and each
@@ -66,7 +69,7 @@ end
 -- materialize one statement view from the columns (raw-identical shape).
 -- Counts are DERIVED (the end-derivation lesson): defs then uses pack
 -- contiguously per stmt, so def count = u0[g] - d0[g] and use count =
--- d0[g+1] - u0[g] (sentinel rows close the last stmt); dep/defr likewise.
+-- d0[g+1] - u0[g] (sentinel rows close the last stmt); dep likewise.
 local function stmt_view(col, g)
     local nms = col.names
     local st = { l = col.l(g), def = {}, use = {}, dep = {} }
@@ -77,12 +80,6 @@ local function stmt_view(col, g)
     b, e = col.p0(g), col.p0(g + 1)
     for j = 1, e - b do
         st.dep[j] = { from = col.depf(b + j), var = nms[col.depv(b + j)] }
-    end
-    b, e = col.r0(g), col.r0(g + 1)
-    if e > b then
-        local defr = {}
-        for j = 1, e - b do defr[col.rdi(b + j)] = col.rtag(b + j) - 2 end
-        st.defr = defr
     end
     return st
 end
@@ -100,22 +97,16 @@ function M.stmts(n)
         local g = n._df0
         local d1 = col.d0(g + 1)
         local p1 = col.p0(g + 1)
-        local r1 = col.r0(g + 1)
         for i = 1, n._dfn do
             g = g + 1
-            local d0, p0, r0 = d1, p1, r1
-            d1, p1, r1 = col.d0(g + 1), col.p0(g + 1), col.r0(g + 1)
+            local d0, p0 = d1, p1
+            d1, p1 = col.d0(g + 1), col.p0(g + 1)
             local st = { l = col.l(g), def = {}, use = {}, dep = {} }
             local u0 = col.u0(g)
             for j = 1, u0 - d0 do st.def[j] = nms[col.nm(d0 + j)] end
             for j = 1, d1 - u0 do st.use[j] = nms[col.nm(u0 + j)] end
             for j = 1, p1 - p0 do
                 st.dep[j] = { from = col.depf(p0 + j), var = nms[col.depv(p0 + j)] }
-            end
-            if r1 > r0 then
-                local defr = {}
-                for j = 1, r1 - r0 do defr[col.rdi(r0 + j)] = col.rtag(r0 + j) - 2 end
-                st.defr = defr
             end
             out[i] = st
         end
@@ -138,19 +129,18 @@ function M.get(n)
 end
 
 -- ── the fold: nested df records → one columnar store, records dropped ────
--- Columns per stmt: l + THREE offsets (d0 into nm where its defs start,
--- p0 into depf/depv, r0 into rdi/rtag) + u0 (where uses start = where defs
--- end). All counts derive from the NEXT stmt's offsets — stmts are laid
--- down in one global order, so offsets are monotone and a final sentinel
--- row closes the last stmt (end-derivation, the at-fold lesson). Pools:
--- nm (def+use names), depf/depv (LOCAL stmt index + var name), rdi/rtag
--- (sparse defr binder tags, ~6% of stmts), inm (per-node inputs). Name
+-- Columns per stmt: l + TWO offsets (d0 into nm where its defs start,
+-- p0 into depf/depv) + u0 (where uses start = where defs end). All counts
+-- derive from the NEXT stmt's offsets — stmts are laid down in one global
+-- order, so offsets are monotone and a final sentinel row closes the last
+-- stmt (end-derivation, the at-fold lesson). Pools: nm (def+use names),
+-- depf/depv (LOCAL stmt index + var name), inm (per-node inputs). Name
 -- "interning" is Lua's own string interning: columns hold refs.
 function M.fold(data)
     if data._dfcol then return 0 end -- already folded (idempotent)
     local col = {
-        l = {}, d0 = {}, u0 = {}, p0 = {}, r0 = {},
-        nm = {}, depf = {}, depv = {}, rdi = {}, rtag = {}, inm = {},
+        l = {}, d0 = {}, u0 = {}, p0 = {},
+        nm = {}, depf = {}, depv = {}, inm = {},
         names = {},
     }
     local nid = {} -- name -> interned id (build-time only)
@@ -163,7 +153,7 @@ function M.fold(data)
         end
         return i
     end
-    local ns, nn, np, nr, ni = 0, 0, 0, 0, 0
+    local ns, nn, np, ni = 0, 0, 0, 0
     for _, node in ipairs(data.nodes or {}) do
         local df = node.df
         if df and df.stmts and not node._df then
@@ -181,15 +171,6 @@ function M.fold(data)
                     col.depf[np] = dp.from
                     col.depv[np] = id(dp.var)
                 end
-                col.r0[ns] = nr
-                if st.defr then
-                    for di, tag in pairs(st.defr) do
-                        nr = nr + 1
-                        col.rdi[nr] = di
-                        col.rtag[nr] = tag + 2 -- binder tags are SIGNED (-2 free,
-                        -- -1 row-less): bias into u32, views un-bias
-                    end
-                end
             end
             local i0 = ni
             for _, x in ipairs(df.inputs or {}) do
@@ -203,7 +184,7 @@ function M.fold(data)
         end
     end
     -- sentinels: close the last stmt's derived counts
-    col.d0[ns + 1], col.p0[ns + 1], col.r0[ns + 1] = nn, np, nr
+    col.d0[ns + 1], col.p0[ns + 1] = nn, np
     -- pack: number arrays -> LE-u32 byte strings; name pools -> id columns
     -- over ONE interned names array (Lua interning made repeats free as
     -- refs; the id column makes them free as 4 BYTES)
@@ -212,12 +193,9 @@ function M.fold(data)
         d0 = getter(pack_u32(col.d0, ns + 1)),
         u0 = getter(pack_u32(col.u0, ns)),
         p0 = getter(pack_u32(col.p0, ns + 1)),
-        r0 = getter(pack_u32(col.r0, ns + 1)),
         nm = getter(pack_u32(col.nm, nn)),
         depf = getter(pack_u32(col.depf, np)),
         depv = getter(pack_u32(col.depv, np)),
-        rdi = getter(pack_u32(col.rdi, nr)),
-        rtag = getter(pack_u32(col.rtag, nr)),
         inm = getter(pack_u32(col.inm, ni)),
         names = col.names,
     }

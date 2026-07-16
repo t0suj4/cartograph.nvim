@@ -20,10 +20,10 @@ config.seams = {
             '^lua/cartograph/validate%.lua$', '^tests/', '^tools/' } },
     { name = 'df', -- statement dataflow folds behind dfa.*
         patterns = { '%.df%.stmts', '%.df%.inputs' },
-        -- store.lua: a PRODUCER since df-strangler step 5 (ingest rebuilds df
-        -- from flow.coarse, transplanting legacy defr) — drops out at step 6
+        -- store.lua dropped out at step 6: ingest no longer rebuilds df (it is
+        -- flow.coarse, derived at extract) — it only folds, touching no df.stmts.
         owners = { '^lua/cartograph/providers/', '^lua/cartograph/df%.lua$',
-            '^lua/cartograph/store%.lua$', '^tests/', '^tools/' } },
+            '^tests/', '^tools/' } },
     { name = 'argv', -- argument shapes fold behind argv.n/at/str
         patterns = { '%.argv%[', '%.args%[' },
         owners = { '^lua/cartograph/providers/', '^lua/cartograph/argv%.lua$',
@@ -32,7 +32,11 @@ config.seams = {
 
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
-store.ingest(ts.extract(root))
+-- legacy_df: build the INDEPENDENT dfreg df beside flow (df-strangler step 6)
+-- so the parity census below is a real coarse(flow)==df check, not a circular
+-- echo of the now-flow-derived production df. The guard lints (seam-guard/
+-- truncation/require-cycle) don't read df, so the choice is inert for them.
+store.ingest(ts.extract(root, { legacy_df = true }))
 local findings = require('cartograph.lint').run(store,
     { only = { ['seam-guard'] = true, truncation = true, ['require-cycle'] = true } })
 local warns = 0
