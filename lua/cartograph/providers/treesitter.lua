@@ -3239,6 +3239,90 @@ local function resolve_module_alias(calls, edges, exact, tail, addref)
     return n
 end
 
+-- STRING-KEYED REGISTRY (the linker kind; the read-dual of `reg` edges,
+-- [[cartograph-linker]] stage 3). A retrieval keyed by a string literal resolves
+-- to the value REGISTERED under that key, WITHIN the same sharing scope — a WoW
+-- addon bundles its own library copies, so LibStub("AceAddon-3.0") in addon A
+-- binds to A's OWN AceAddon (same .toc scope); a key with no in-scope registration
+-- stays unresolved (the honest external boundary, and it never mints the
+-- cross-addon edge the .toc scoping killed). Keys arrive as folded literals
+-- (const-fold, v50). Register: `local L = <recv>:NewLibrary("X")` /
+-- `:NewModule("Y")` / `:NewAddon("Z")` → the bound local (the registered table).
+-- Retrieve: LibStub("X") (fn-call form) + :GetLibrary/:GetModule/:GetAddon("X").
+-- Emits a ref edge to the registered table + records `c.registry` (inferred ~);
+-- does NOT set c.to (the target is a table, not a call target). INERT on any
+-- corpus without these idioms (non-WoW) → no gate recalibration there.
+local REG_REGISTER = { NewLibrary = 'lib', NewModule = 'module', NewAddon = 'addon' }
+local REG_RETRIEVE = { GetLibrary = 'lib', GetModule = 'module', GetAddon = 'addon' }
+local function resolve_registry(calls, node_index, addref, scope_of, consts)
+    -- the key as a STRING: a folded literal (k='lit', warm/relink argv) OR a
+    -- k='local' whose name resolves to a same-file scalar-string const (the
+    -- INITIAL extract runs before const-fold's post-pass, so fold the key here
+    -- from the same const index — `consts` is nil on relink where argv is folded)
+    local function keyof(a, file)
+        if not a then return nil end
+        if a.k == 'lit' then return a.v end
+        if a.k == 'local' and a.name and consts and consts[file] then
+            local v = consts[file][a.name]
+            return type(v) == 'string' and v or nil
+        end
+    end
+    -- the local a register call's result binds to = the registered table, found
+    -- by (file, line): `local L = recv:NewLibrary("X")` puts L on the call's line
+    local varAt
+    local index, n = {}, 0
+    for _, c in ipairs(calls or {}) do
+        local kind = c.method and REG_REGISTER[c.callee]
+        local key = kind and keyof(c.argv and c.argv[2], c.file)
+        if key then
+            if not varAt then
+                varAt = {}
+                for _, nd in pairs(node_index) do
+                    if nd.kind == 'var' and nd.file and nd.range then
+                        -- the LEFTMOST var on the line = the primary binding
+                        -- (`local Lib, oldminor = :NewLibrary(...)` → Lib, not
+                        -- the returned minor); smallest start.char wins
+                        local vk = nd.file .. '\0' .. nd.range.start.line
+                        local cur = varAt[vk]
+                        if not cur or nd.range.start.char < cur.range.start.char then
+                            varAt[vk] = nd
+                        end
+                    end
+                end
+            end
+            local def = varAt[c.file .. '\0' .. c.line]
+            if def then
+                index[(scope_of(c.file) or '') .. '\0' .. kind .. '\0' .. key] = def
+            end
+        end
+    end
+    if not next(index) then return 0 end
+    -- a retrieval RESOLVES TO the LibStub/Get* function as a normal call target;
+    -- the registry link is about what it RETURNS (the registered table), so it
+    -- rides ALONGSIDE c.to (additive ref edge + c.registry marker), not instead.
+    for _, c in ipairs(calls or {}) do
+        if not c.registry then
+            local kind, key
+            if c.method and REG_RETRIEVE[c.callee] then
+                kind, key = REG_RETRIEVE[c.callee], keyof(c.argv and c.argv[2], c.file)
+            elseif c.callee == 'LibStub' and not c.method then
+                kind, key = 'lib', keyof(c.argv and c.argv[1], c.file)
+            end
+            local def = kind and key
+                and index[(scope_of(c.file) or '') .. '\0' .. kind .. '\0' .. key]
+            -- the resolution FACT (c.registry) is recorded even at top level
+            -- (c.fn nil — the common `local X = LibStub("Y")` module form); the
+            -- navigable ref edge rides only when there's an enclosing fn `from`
+            if def and def.id ~= c.fn then
+                if c.fn and c.at then addref(c.fn, def.id, c.at, true) end
+                c.registry = def.id
+                n = n + 1
+            end
+        end
+    end
+    return n
+end
+
 -- V1: SOUND self:member resolution ([[cartograph-linker]] receiver-typing).
 -- `self` is param-0 of a colon-method; its type is the JOIN of receiver types
 -- over the method's RESOLVED call sites (backward flow) — NOT the lexical owner,
@@ -6153,6 +6237,11 @@ function M.extract(root, opts)
     -- module call can be a determining call for a receiver-typed chain
     resolve_module_alias(calls, data.edges, exact, tail, addref)
 
+    -- string-keyed registry (stage 3): LibStub("X")/:GetModule("Y") → the
+    -- :NewLibrary/:NewModule-registered table, scoped to the addon (.toc).
+    -- constDefs folds k='local' keys here (const-fold's post-pass runs later)
+    resolve_registry(calls, node_index, addref, scope_of, constDefs)
+
     -- return-type rounds: settle the receiver-deferred calls (c.rt) now
     -- that plain + super resolution populated the determining calls
     local retn, retrounds = resolve_returns(calls, node_index, exact, addref)
@@ -6547,6 +6636,8 @@ function M.relink(data, touched)
     -- a worker slice may hold the chain but not the determining target)
     local node_index = {}
     for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
+    -- string-keyed registry (stage 3), same parity as extract
+    n = n + resolve_registry(data.calls, node_index, addref, scope_of)
     local retn = resolve_returns(data.calls, node_index, exact, addref)
     n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
     n = n + resolve_local_ctor(data.calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)

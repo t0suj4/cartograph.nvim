@@ -19,7 +19,14 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 51 -- v51: ANONYMOUS CALLBACK FNS (df-strangler B) — a JS arrow/
+M.VERSION = 52 -- v52: STRING-KEYED REGISTRY LINKER (stage 3) — a retrieval keyed
+               -- by a string literal (LibStub("X") fn-call form + :GetLibrary/
+               -- :GetModule/:GetAddon("X")) resolves to the :NewLibrary/:NewModule/
+               -- :NewAddon-registered table (the bound local), SCOPED to the addon
+               -- (.toc) so it never crosses the sharing boundary. Keys are folded
+               -- literals (const-fold v50). Emits a ref edge + c.registry (~).
+               -- INERT on non-WoW corpora (no such idioms) → gate corpora unmoved.
+-- v51: ANONYMOUS CALLBACK FNS (df-strangler B) — a JS arrow/
                -- function_expression passed as a call ARGUMENT is now extracted
                -- as its own fn node (synthetic name `<callee>#cb`, NOT in the
                -- name-resolution index). Its body gets its own df/flow and its
