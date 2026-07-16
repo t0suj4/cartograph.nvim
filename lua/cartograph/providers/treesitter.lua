@@ -16,6 +16,17 @@ local flowmod = require 'cartograph.flow' -- df-strangler step 4: eager per-fn f
 local constfold = require 'cartograph.constfold' -- const-fold ladder step 1: same-file scalar-const index + argv fold (no cycle)
 local M = {}
 
+-- P0 EXTRACTION PROFILER ([[cartograph-perf-cut]]): per-phase wall accumulators,
+-- gated on M.PROFILE so a normal run pays only a bool short-circuit (pstart
+-- returns nil when off → padd is a nil no-op; the hot flow.build site never even
+-- calls hrtime). tools/profile.lua flips it and reads data.prof. Nanoseconds.
+M.PROFILE = false
+local prof
+local function pstart() return M.PROFILE and vim.uv.hrtime() or nil end
+local function padd(key, t0)
+    if t0 then prof[key] = (prof[key] or 0) + (vim.uv.hrtime() - t0) end
+end
+
 -- Node text, hot-path fast form. vim.treesitter.get_node_text allocates two
 -- throwaway tables (opts, metadata) on EVERY call before doing this same
 -- byte-slice; over a big corpus that is millions of dead tables feeding the
@@ -4836,6 +4847,7 @@ end
 ---@param root string
 ---@return table data  the schema-1 graph (ready for store.ingest)
 function M.extract(root, opts)
+    if M.PROFILE then prof = {}; prof._t0 = vim.uv.hrtime() end
     -- a URI root (self://loaded — the running instance's multi-root corpus)
     -- keeps off the filesystem's path rules: its files are plugin-labelled
     -- keys (telescope.nvim/lua/…) that resolve to real directories through
@@ -5023,9 +5035,11 @@ function M.extract(root, opts)
                 -- cfg mirrors df: method seeds 'self' exactly as df's fn_params
                 -- (`method and lang=='lua'`) so flow.params ≡ df params → coarse
                 -- parity is airtight. Keep only {stmts,params} (cfg is build-time).
+                local _pf = pstart()
                 local fl = spec.body_field and flowmod.build(defn, src, {
                     pfield = spec.params_field, df_ids = spec.df_ids,
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
+                padd('flow.build', _pf)
                 local dret, dretclass
                 if spec.def_ret then dret, dretclass = spec.def_ret(defn, src) end
                 -- df (step 6): a custom-df lang (haskell) builds its own; every
@@ -5732,6 +5746,7 @@ function M.extract(root, opts)
             local tsroot
             local rawtree = raw_parse(lang, src) -- keep referenced: nodes
             -- below live only as long as their tree does
+            local _pp = pstart()
             if rawtree then
                 tsroot = rawtree:root()
             else
@@ -5742,6 +5757,7 @@ function M.extract(root, opts)
                 end
                 tsroot = parser:parse()[1]:root()
             end
+            padd('parse', _pp)
             stamp(file)
             nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
                 range = pos_of(tsroot), order = -1,
@@ -5762,15 +5778,21 @@ function M.extract(root, opts)
                 end
             end
             local dfreg = {}
+            local _pd = pstart()
             extract_defs(file, lang, spec, src, tsroot, dfreg)
+            padd('extract_defs', _pd) -- incl. flow.build (timed separately)
+            local _pc = pstart()
             extract_calls(file, lang, spec, src, tsroot)
+            padd('extract_calls', _pc)
             -- fusion Stage B: mentions ride the SAME tree — the id pass
             -- never parses again (files without functions stay out, the
             -- same gate the id pass always had). df rides the same walk
             -- via dfreg (registered by extract_defs above).
             if fnRanges[file] then
                 local buf = mention_buf(spec)
+                local _pm = pstart()
                 collect_mentions(buf, tsroot, src, spec, dfreg, opts and opts.legacy_df)
+                padd('collect_mentions', _pm)
                 buf.m = table.concat(buf.parts)
                 buf.parts, buf.nidx = nil, nil
                 mentions[file] = buf
@@ -6230,6 +6252,7 @@ function M.extract(root, opts)
     -- transitive parent::m — for the refusals the direct-parent qualify
     -- couldn't settle (parent only inherits m), walk the extends chain to
     -- the nearest ancestor that defines it. Bounded; over the full graph.
+    local _pr = pstart()
     resolve_super(calls, data.extends, exact, addref)
 
     -- module-alias: `alias.member` where alias = require('mod') → mod's member
@@ -6264,6 +6287,7 @@ function M.extract(root, opts)
     -- honesty: silent-dropped local/param callables → resolve or refuse (last,
     -- after every other call resolver, so it catches only the true residual)
     resolve_local_callable(calls, node_index, exact, addref)
+    padd('resolve', _pr)
 
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
@@ -6338,7 +6362,10 @@ function M.extract(root, opts)
     -- CONST-FOLD post-pass (ladder step 1): upgrade identifier call args to
     -- literals where the name folds to a same-file set-once scalar constant.
     -- Baked into calls here so parallel workers + relink inherit folded argv.
+    local _pcf = pstart()
     constfold.fold(calls, constDefs)
+    padd('constfold', _pcf)
+    if M.PROFILE then padd('total', prof._t0); data.prof = prof end
     return data
 end
 
