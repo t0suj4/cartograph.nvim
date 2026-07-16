@@ -195,10 +195,17 @@ end
 -- `ids` = the leaf-name node types to count = DFID plus the language's df_ids
 -- extension (bash counts `variable_name` as a LEAF; php descends it as a WRAP —
 -- so this is the one genuinely per-language-conflicting set, gated by cfg).
+--
+-- THIRD return `sus` = does the walked subtree contain a suspension point
+-- (yield/await)? FUSED in here (was a separate has_suspend walk over the SAME
+-- node set under the SAME stop-rules — a measured ~33% of flow.build spent
+-- re-traversing every statement just to usually return false). Set on any
+-- visited node whose type is in SUSPEND; the root is checked too.
 local function du(root, src, stop_body, ids)
     ids = ids or DFID
-    if not root then return {}, {} end
+    if not root then return {}, {}, false end
     local def, use, dseen, useen = {}, {}, {}, {}
+    local sus = SUSPEND[root:type()] or false
     local function rec(node, defpos)
         local t = node:type()
         local asgleft, decld, k, declist
@@ -228,20 +235,23 @@ local function du(root, src, stop_body, ids)
             k = defpos and WRAP[t] or false
         end
         for c in node:iter_children() do
-            if c:named() and not FN[c:type()]
-                and not (stop_body and (BODY[c:type()] or CLAUSE[c:type()])) then
+            if c:named() then
+              local ct = c:type() -- cache the per-child type FFI (was called 2-6× below)
+              if not FN[ct]
+                and not (stop_body and (BODY[ct] or CLAUSE[ct])) then
+                if SUSPEND[ct] then sus = true end -- fused suspension detection
                 local cdefpos
                 if k == 1 then cdefpos = same(c, asgleft)
                 elseif k == 3 then cdefpos = same(c, decld)
-                elseif k == 4 then cdefpos = (c:type() == 'variable_list'
-                    or c:type() == 'identifier')
-                elseif k == 5 then cdefpos = (c:type() == 'variable_name')
-                elseif k == 6 then cdefpos = (c:type() == 'variable_name')
+                elseif k == 4 then cdefpos = (ct == 'variable_list'
+                    or ct == 'identifier')
+                elseif k == 5 then cdefpos = (ct == 'variable_name')
+                elseif k == 6 then cdefpos = (ct == 'variable_name')
                 elseif k == 7 then
                     cdefpos = false
                     for _, dd in ipairs(declist) do if same(c, dd) then cdefpos = true; break end end
                 else cdefpos = k end
-                if ids[c:type()] then
+                if ids[ct] then
                     local nm = txt(c, src)
                     if cdefpos then
                         if not dseen[nm] then dseen[nm] = true; def[#def + 1] = nm end
@@ -250,6 +260,7 @@ local function du(root, src, stop_body, ids)
                     end
                 end
                 rec(c, cdefpos)
+              end
             end
         end
     end
@@ -261,23 +272,9 @@ local function du(root, src, stop_body, ids)
         if not dseen[nm] and not useen[nm] then useen[nm] = true; use[#use + 1] = nm end
     end
     rec(root, false)
-    return def, use
+    return def, use, sus
 end
 
--- does `root`'s OWN subtree contain a suspension point (yield/await)? Mirrors
--- du's traversal: NOT into nested function bodies, and (when stop_body, a
--- control head's own row) NOT into sub-regions — a yield in a loop body is that
--- body row's suspend, not the head's.
-local function has_suspend(root, stop_body)
-    if SUSPEND[root:type()] then return true end
-    for c in root:iter_children() do
-        if c:named() and not FN[c:type()]
-            and not (stop_body and (BODY[c:type()] or CLAUSE[c:type()])) then
-            if has_suspend(c, stop_body) then return true end
-        end
-    end
-    return false
-end
 
 -- parameter binder names of a fn node — mirrors df's fn_params (treesitter.lua)
 -- for coarse-dep PARITY: the pfield container's leaves; php `variable_name`
@@ -368,11 +365,11 @@ function M.build(fnnode, src, cfg)
         end
         local idx = #stmts + 1
         local sb = CTRL[t] and true or false
-        local d, u = du(node, src, sb, ids)
+        local d, u, sus = du(node, src, sb, ids)
         stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
-            suspend = has_suspend(node, sb) or nil, -- yield/await = a Tier-1 continuation point
+            suspend = sus or nil, -- yield/await = a Tier-1 continuation point (fused from du)
             -- control-transfer label: TARGET on break/continue/goto, else the
             -- loop's OWN label (rust). def/use above are unaffected.
             label = (TRANSFER[t] and target_label(node, src))
@@ -390,13 +387,14 @@ function M.build(fnnode, src, cfg)
             -- use). Drop it from the control row; re-emit as a trailing row.
             if POST[t] then stmts[idx].def, stmts[idx].use = {}, {} end
             for gc in node:iter_children() do
-                if gc:named() and gc ~= cond and gc:type() ~= 'comment' then
+                if gc:named() and gc ~= cond then
                     local gt = gc:type()
-                    if BODY[gt] then
+                    if gt == 'comment' then -- skip
+                    elseif BODY[gt] then
                         region(gc, idx, 'body')          -- php block body / loop body
                     elseif CLAUSE[gt] then
                         clause(gc, idx)                  -- else/elseif/case/catch
-                    elseif not BODY[gt] then
+                    else
                         emit(gc, idx, 'body')            -- lua inline body statement
                     end
                 end
@@ -414,8 +412,11 @@ function M.build(fnnode, src, cfg)
     -- clause() so their bodies are regioned, not folded.
     function region(block, parent, pol)
         for c in block:iter_children() do
-            if c:named() and c:type() ~= 'comment' then
-                if CLAUSE[c:type()] then clause(c, parent) else emit(c, parent, pol) end
+            if c:named() then
+                local ct = c:type()
+                if ct ~= 'comment' then
+                    if CLAUSE[ct] then clause(c, parent) else emit(c, parent, pol) end
+                end
             end
         end
     end
