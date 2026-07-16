@@ -72,7 +72,7 @@ return {
         budget_mb = 1600, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/TryGhost/Ghost',
         rev = 'f7d7df8f9816',
-        expected = { refs = 5853, nodes = 21128 }, -- +11 @ v48 short-name honesty (id/qs/t same-file helpers)
+        expected = { refs = 21048, nodes = 39867 }, -- +anon callback fns @ v51 (df-strangler B; ~18.7k #cb nodes)
         lang = 'javascript',
         notes = 'js SCALE tier (2134 files) — a real node webapp: express'
             .. ' routes + handlebars themes (parametric-files territory)',
@@ -139,7 +139,7 @@ return {
         root = HOME .. '/git/jquery/src',
         repo = 'https://github.com/jquery/jquery',
         rev = 'b043db95042b',
-        expected = { refs = 673, nodes = 581 }, -- +1 @ honesty pass v46 (local-fn callable resolved)
+        expected = { refs = 1029, nodes = 811 }, -- +anon callback fns @ v51 (df-strangler B; +257 #cb nodes)
         lang = 'javascript',
         notes = 'js quick tier (115 ESM files); selector/event-name strings'
             .. ' = typed-string territory',
@@ -148,7 +148,7 @@ return {
         root = HOME .. '/git/mootools-core/Source',
         repo = 'https://github.com/mootools/mootools-core',
         rev = '187a16bae2d7',
-        expected = { refs = 334, nodes = 443 }, -- calibrated @ js-corpora join
+        expected = { refs = 390, nodes = 542 }, -- +anon callback fns @ v51 (df-strangler B; +99 #cb nodes)
         lang = 'javascript',
         notes = 'js archaeology tier (29 files, frozen 2017) — prototype-'
             .. 'extension culture, string-keyed dispatch',

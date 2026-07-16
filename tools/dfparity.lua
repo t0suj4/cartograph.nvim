@@ -38,12 +38,11 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 73, ['df-over-collects'] = 457,
-        ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- +1/+11 @ v50 const-fold
-        -- (self analyzes its own new source: constfold.lua + the handle_var /
-        -- post-pass edits add loop/binding patterns the catalogue counts; the
-        -- fold is df-INERT — php/libs/grocy dfpar unchanged — so this is pure
-        -- new-source churn, not a df-behavior change)
+    self = { ['binding-as-use'] = 74, ['df-over-collects'] = 457,
+        ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- +11 df-over @ v50 const-fold
+        -- (self analyzes its own new source); binding-as-use +1 @ v51 anon-callback
+        -- fns (self's js test fixtures gain a #cb fn). fold + anon extraction are
+        -- df-additive/inert — the moves are new-source/new-node census growth.
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than
@@ -62,8 +61,11 @@ M.EXPECTED = {
     -- ghost = the JS scale corpus; df-over-collects (closure-leak) dominates. The
     -- old partition/disjoint/flow-over-collects residual was the re-parse .ts-
     -- under-JS + node-resolution artifact — gone with stored flow (OTHER=3 left).
-    ghost = { ['df-over-collects'] = 1746, ['OTHER'] = 3 },
-    jquery = { ['df-over-collects'] = 2 }, -- closure-leak (was masked by re-parse)
+    -- v51 anon-callback fns: their bodies (previously covered by NO fn) now get
+    -- their own df/flow, surfacing catalogued closure-leak (df-over-collects) +
+    -- pre-existing flow/dfreg diffs (OTHER) in now-covered code. ferr=0 (additive).
+    ghost = { ['df-over-collects'] = 6982, ['OTHER'] = 9, ['receiver'] = 1 },
+    jquery = { ['df-over-collects'] = 12, ['OTHER'] = 2 },
     mootools = {}, -- perfect parity (js archaeology tier)
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
     -- grammar. All flow-more-correct (closure-leak + bindings df misses).

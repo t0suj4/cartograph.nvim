@@ -1544,6 +1544,8 @@ M.spec = {
             (variable_declarator name: (identifier) @name value: (function_expression) @def)
             (pair key: (property_identifier) @name value: (arrow_function) @def)
             (pair key: (property_identifier) @name value: (function_expression) @def)
+            (arguments (arrow_function) @adef)
+            (arguments (function_expression) @adef)
         ]=],
         calls = [=[
             (call_expression function: (identifier) @name) @call
@@ -3547,50 +3549,108 @@ end
 -- Only touches calls the main pass + the resolve_* siblings left SILENT
 -- (to==nil AND refused==nil), so it can neither override a resolution nor a
 -- prior refusal. Runs last, after every other call resolver. Returns a count.
+-- The binding may live in the IMMEDIATE fn or in an ENCLOSING (lexical) one:
+-- a callback fn is its own node (v51), so a param/local CAPTURED from an outer
+-- scope and called inside the callback is not in the callback's own params/df —
+-- walk the enclosing-fn chain (innermost→outermost, nearest binding wins). The
+-- fast path (immediate fn) covers the common case; ancestors only on a miss.
 local function resolve_local_callable(calls, node_index, exact, addref)
     local n = 0
+    local function has_param(fn, name)
+        for _, p in ipairs(fn.params or {}) do if p == name then return true end end
+    end
+    local function has_local(fn, name)
+        local df = fn.df
+        if df then
+            for _, st in ipairs(df.stmts) do
+                for _, d in ipairs(st.def or {}) do if d == name then return true end end
+            end
+        end
+    end
+    -- parent_fn[id] = innermost ENCLOSING fn node — precomputed ONCE (stack over
+    -- range-sorted fns, O(n log n)) so the ancestor walk on a captured-callee
+    -- miss is a parent-link chase (O(nesting depth)), NOT an O(fns-in-file) scan
+    -- per call (quadratic on minified JS — thousands of fns per line).
+    local parent_fn
+    local function le(a, b) -- position a <= b (line,char)
+        return a.line < b.line or (a.line == b.line and a.char <= b.char)
+    end
+    local function build_parents()
+        parent_fn = {}
+        local byfile = {}
+        for _, node in pairs(node_index) do
+            if (node.kind == 'function' or node.kind == 'method')
+                and node.file and node.range then
+                local l = byfile[node.file]
+                if not l then l = {}; byfile[node.file] = l end
+                l[#l + 1] = node
+            end
+        end
+        for _, fns in pairs(byfile) do
+            -- STRICT weak ordering (a<b and b<a must never both hold, else
+            -- table.sort garbles the array → inverted parents): start asc, then
+            -- OUTER (strictly-later end) first, then id as a stable tiebreak.
+            table.sort(fns, function (a, b)
+                local as, bs = a.range.start, b.range.start
+                if as.line ~= bs.line then return as.line < bs.line end
+                if as.char ~= bs.char then return as.char < bs.char end
+                local ae, be = a.range['end'], b.range['end']
+                if ae.line ~= be.line then return ae.line > be.line end
+                if ae.char ~= be.char then return ae.char > be.char end
+                return a.id < b.id
+            end)
+            local stack = {}
+            for _, f in ipairs(fns) do
+                while #stack > 0 and not le(f.range.start, stack[#stack].range['end']) do
+                    stack[#stack] = nil
+                end
+                if #stack > 0 then parent_fn[f.id] = stack[#stack] end
+                stack[#stack + 1] = f
+            end
+        end
+    end
     for _, c in ipairs(calls or {}) do
         if c.callee and not c.full and not c.dynamic and not c.to
             and not c.refused and c.fn then
             local fn = node_index[c.fn]
             if fn then
-                local isparam = false
-                for _, p in ipairs(fn.params or {}) do
-                    if p == c.callee then isparam = true; break end
+                -- regime by nearest binding: a PARAM callee is higher-order, a
+                -- LOCAL df-def resolves-or-refuses. Immediate fn first, then the
+                -- enclosing chain (for captures across a callback boundary).
+                local regime
+                if has_param(fn, c.callee) then regime = 'higher-order'
+                elseif has_local(fn, c.callee) then regime = 'local'
+                else
+                    -- captured from an enclosing scope? chase the parent chain
+                    if not parent_fn then build_parents() end
+                    local f = parent_fn[fn.id]
+                    while f do
+                        if has_param(f, c.callee) then regime = 'higher-order'; break end
+                        if has_local(f, c.callee) then regime = 'local'; break end
+                        f = parent_fn[f.id]
+                    end
                 end
-                if isparam then
+                if regime == 'higher-order' then
                     c.refused = { rule = 'higher-order' }
                     n = n + 1
-                else
-                    -- is the callee a LOCAL (df-def) of this fn?
-                    local islocal, df = false, fn.df
-                    if df then
-                        for _, st in ipairs(df.stmts) do
-                            for _, d in ipairs(st.def or {}) do
-                                if d == c.callee then islocal = true; break end
-                            end
-                            if islocal then break end
+                elseif regime == 'local' then
+                    -- resolve to a UNIQUE same-file function/method def
+                    local hit, dup
+                    for _, d in ipairs(exact[c.callee] or {}) do
+                        if d.file == c.file
+                            and (d.kind == 'function' or d.kind == 'method') then
+                            if hit then dup = true; break end
+                            hit = d
                         end
                     end
-                    if islocal then
-                        -- resolve to a UNIQUE same-file function/method def
-                        local hit, dup
-                        for _, d in ipairs(exact[c.callee] or {}) do
-                            if d.file == c.file
-                                and (d.kind == 'function' or d.kind == 'method') then
-                                if hit then dup = true; break end
-                                hit = d
-                            end
-                        end
-                        if hit and not dup then
-                            c.to = hit.id
-                            c.inferred = true
-                            if c.at then addref(c.fn, hit.id, c.at, true) end
-                        else
-                            c.refused = { rule = 'fn-value' }
-                        end
-                        n = n + 1
+                    if hit and not dup then
+                        c.to = hit.id
+                        c.inferred = true
+                        if c.at then addref(c.fn, hit.id, c.at, true) end
+                    else
+                        c.refused = { rule = 'fn-value' }
                     end
+                    n = n + 1
                 end
             end
         end
@@ -4820,15 +4880,24 @@ function M.extract(root, opts)
         -- a multi-assignment (`a, b = 1, 2`) cross-products name×value in
         -- the query, so dedup by the (name,line) id it produces
         local seen_var = {}
-        local function handle_fn(defn, namen)
-            if defn and namen and not (spec.toplevel_only
-                and in_function(defn, spec))
-                and not (spec.toplevel_parent and defn:parent()
+        -- `aname` (optional): an ANONYMOUS fn (a callback arrow/function passed
+        -- as a call argument, no binding name) — extracted as its own fn node so
+        -- its body has a home (its own df/flow, its inner calls attribute to IT
+        -- via fn_at). Given a synthetic display name; NOT added to the name
+        -- resolution index (exact/tail) — it is never a call target by name.
+        local function handle_fn(defn, namen, aname)
+            if defn and (namen or aname)
+                and not (not aname and spec.toplevel_only
+                    and in_function(defn, spec))
+                and not (not aname and spec.toplevel_parent and defn:parent()
                     and defn:parent():type() ~= spec.toplevel_parent) then
-                local name = node_text(namen, src):gsub('%s+', '')
-                if spec.qualify then name = spec.qualify(name, defn, src) end
+                local name = aname
+                if not name then
+                    name = node_text(namen, src):gsub('%s+', '')
+                    if spec.qualify then name = spec.qualify(name, defn, src) end
+                end
                 local sp = pos_of(defn)
-                local method = spec.is_method(name, defn)
+                local method = not aname and spec.is_method(name, defn)
                 local id = uid(('%s::%s@%d'):format(file, name, sp.start.line))
                 local params = fn_params(defn, spec, src, method and lang == 'lua')
                 -- tri-state visibility: true/false = the provider's
@@ -4838,8 +4907,9 @@ function M.extract(root, opts)
                 if spec.exported_def then
                     exp = spec.exported_def(defn, src) == true
                 end
-                local isfield = spec.field_fn_cbarg
-                    and namen:parent() and namen:parent():type() == 'field'
+                local isfield = aname and true
+                    or (spec.field_fn_cbarg
+                        and namen:parent() and namen:parent():type() == 'field')
                 if spec.cbarg_within and not isfield then
                     local a = defn:parent()
                     while a do
@@ -4852,7 +4922,7 @@ function M.extract(root, opts)
                 end
                 -- multi-equation definitions (haskell) are ONE function:
                 -- fold this equation into the previous node
-                local prev = spec.merge_equations and lastFn[file]
+                local prev = not aname and spec.merge_equations and lastFn[file]
                 if prev and prev.name == name then
                     prev.range['end'] = sp['end']
                     for _, r in ipairs(fnRanges[file] or {}) do
@@ -4919,7 +4989,7 @@ function M.extract(root, opts)
                 -- ranges keep the innermost containing fn for attribution
                 fnRanges[file] = fnRanges[file] or {}
                 table.insert(fnRanges[file], { s = sp.start.line, e = sp['end'].line, id = id })
-                if not torn then
+                if not torn and not aname then
                     exact[name] = exact[name] or {}
                     table.insert(exact[name], nodes[#nodes])
                     local tl = name:match('([%w_]+)$')
@@ -4930,6 +5000,24 @@ function M.extract(root, opts)
                 end
                 ::fn_done::
             end
+        end
+        -- an anonymous callback fn (arrow/function_expression passed as a call
+        -- argument): name it after the call it is an argument to, for
+        -- navigability (`forEach#cb`), then take handle_fn's anonymous path.
+        local function handle_anon_fn(defn)
+            local nm = 'fn'
+            local args = defn:parent()
+            local call = args and args:parent()
+            if call then
+                local ct = call:type()
+                if ct == 'call_expression' or ct == 'new_expression' then
+                    local f = call:field('function')[1]
+                        or call:field('constructor')[1]
+                    local seg = f and node_text(f, src):match('([%w_$]+)%s*$')
+                    if seg then nm = seg end
+                end
+            end
+            handle_fn(defn, nil, nm .. '#cb')
         end
         local function handle_var(defn, namen, valn)
             if defn and namen and not in_function(defn, spec)
@@ -5048,12 +5136,13 @@ function M.extract(root, opts)
         local q = parse_query(lang, combined)
         if q then
             for _, match in q:iter_matches(tsroot, src, 0, -1) do
-                local defn, namen, vdefn, vnamen, valn
+                local defn, namen, vdefn, vnamen, valn, adefn
                 local childn, parentn, catn, cat, cvarn, cctorn, smtn
                 for id, ns in pairs(match) do
                     local capn = q.captures[id]
                     local n = cap_node(ns)
                     if capn == 'def' then defn = n
+                    elseif capn == 'adef' then adefn = n
                     elseif capn == 'name' then namen = n
                     elseif capn == 'vdef' then vdefn = n
                     elseif capn == 'vname' then vnamen = n
@@ -5077,6 +5166,8 @@ function M.extract(root, opts)
                     handle_iface(defn, catn, cat)
                 elseif defn and namen then
                     handle_fn(defn, namen)
+                elseif adefn then
+                    handle_anon_fn(adefn)
                 end
             end
         end

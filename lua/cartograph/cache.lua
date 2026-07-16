@@ -19,7 +19,21 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 50 -- v50: CONST-FOLD ladder step 1 — a call argument that is a bare
+M.VERSION = 51 -- v51: ANONYMOUS CALLBACK FNS (df-strangler B) — a JS arrow/
+               -- function_expression passed as a call ARGUMENT is now extracted
+               -- as its own fn node (synthetic name `<callee>#cb`, NOT in the
+               -- name-resolution index). Its body gets its own df/flow and its
+               -- inner calls/defs attribute to IT (fn_at) — closing the v49
+               -- regression where defs inside nested callbacks were invisible to
+               -- df (resolve_local_callable starved → captured fn-value callees
+               -- dropped silent instead of refused 'fn-value'). Purely ADDITIVE
+               -- (enclosing fns' flow already stopped at the arrow boundary). New
+               -- fn nodes on JS corpora; df-parity census recalibrated. PAIRED
+               -- with resolve_local_callable now walking the ENCLOSING-fn chain
+               -- (a param/local CAPTURED from an outer scope and called inside a
+               -- callback is no longer orphaned by the callback's new fn boundary
+               -- — stays refused higher-order/fn-value, not silent).
+-- v50: CONST-FOLD ladder step 1 — a call argument that is a bare
                -- identifier (argv k='local') is upgraded to a literal (k='lit')
                -- when the name folds to a same-file SET-ONCE scalar-STRING const
                -- (constfold.lua; index built in handle_var, baked into calls
