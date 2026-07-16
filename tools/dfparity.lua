@@ -38,8 +38,12 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 72, ['df-over-collects'] = 446,
-        ['flow-over-collects'] = 2, ['OTHER'] = 1 },
+    self = { ['binding-as-use'] = 73, ['df-over-collects'] = 457,
+        ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- +1/+11 @ v50 const-fold
+        -- (self analyzes its own new source: constfold.lua + the handle_var /
+        -- post-pass edits add loop/binding patterns the catalogue counts; the
+        -- fold is df-INERT — php/libs/grocy dfpar unchanged — so this is pure
+        -- new-source churn, not a df-behavior change)
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than

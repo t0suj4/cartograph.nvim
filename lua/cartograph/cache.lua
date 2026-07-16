@@ -19,7 +19,15 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 49 -- v49: DF-STRANGLER STEP 6 — df is now a COARSE PROJECTION of
+M.VERSION = 50 -- v50: CONST-FOLD ladder step 1 — a call argument that is a bare
+               -- identifier (argv k='local') is upgraded to a literal (k='lit')
+               -- when the name folds to a same-file SET-ONCE scalar-STRING const
+               -- (constfold.lua; index built in handle_var, baked into calls
+               -- pre-return). String-only + symmetric poisoning = sound; the
+               -- register-side registry-key idiom (local MAJOR="X";
+               -- LibStub:NewLibrary(MAJOR)) now carries the folded key. argv
+               -- content changes (some k='local' → k='lit', v set, cf=true).
+-- v49: DF-STRANGLER STEP 6 — df is now a COARSE PROJECTION of
                -- flow, DERIVED at extract (n.df = flow.coarse(fl), no separate
                -- dfreg walk) — the step-4 double build retired. `defr` binder
                -- tags dropped everywhere (fully unconsumed since trace +

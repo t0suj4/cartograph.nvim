@@ -13,6 +13,7 @@
 
 local atr = require 'cartograph.at' -- dual-mode range reads: relink/refresh re-run these paths over the FOLDED store
 local flowmod = require 'cartograph.flow' -- df-strangler step 4: eager per-fn fine flow rows, folded at ingest (flow requires nothing back → no cycle)
+local constfold = require 'cartograph.constfold' -- const-fold ladder step 1: same-file scalar-const index + argv fold (no cycle)
 local M = {}
 
 -- Node text, hot-path fast form. vim.treesitter.get_node_text allocates two
@@ -4723,6 +4724,8 @@ function M.extract(root, opts)
     -- per-name def indexes for the resolution pass
     local exact, tail = {}, {} -- name -> {fn node,...}; last segment -> {...}
     local varsByName = {}      -- name -> {var node,...}
+    local constDefs = {}       -- file -> name -> string|false (const-fold index,
+                               -- set-once scalar-string bindings; false=poisoned)
     local lastFn = {}          -- file -> last emitted fn node (equation merging)
     local fnRanges = {}        -- file -> { {s=line, e=line, id=id}, ... }
     local mentions = {}        -- file -> packed mention buffer (Stage B)
@@ -4952,6 +4955,17 @@ function M.extract(root, opts)
                         varsByName[name] = varsByName[name] or {}
                         table.insert(varsByName[name], nodes[#nodes])
                     end
+                    -- CONST-FOLD index (ladder step 1): a set-once STRING
+                    -- literal binding lets identifier args fold to k='lit'
+                    -- (constfold.fold, post-pass). A non-string / torn / rebind
+                    -- binding POISONS the name — sound, string-only keeps the
+                    -- k='lit' contract. [[cartograph-const-fold]]
+                    local sv
+                    if not torn and valn then
+                        local cv = litval(valn, src, spec, 0)
+                        if type(cv) == 'string' then sv = cv end
+                    end
+                    constfold.record(constDefs, file, name, sv)
                 end
             end
         end
@@ -6141,6 +6155,10 @@ function M.extract(root, opts)
         end
     end
     data.no_parser = next(no_parser) and vim.tbl_keys(no_parser) or nil
+    -- CONST-FOLD post-pass (ladder step 1): upgrade identifier call args to
+    -- literals where the name folds to a same-file set-once scalar constant.
+    -- Baked into calls here so parallel workers + relink inherit folded argv.
+    constfold.fold(calls, constDefs)
     return data
 end
 
