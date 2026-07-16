@@ -847,13 +847,13 @@ local function js_min(ans)
         want = 'to', target = 'qone', tier = 'plain' }
     ans[#ans + 1] = { file = 'min.js', line = 1, callee = 'qtwo',
         want = 'to', target = 'qtwo', tier = 'plain' }
-    -- q3 is 2 chars ON PURPOSE: resolve()'s #name<3 gate SILENTLY skips
-    -- short free names even with a same-file def — the documented meta-gap
-    -- (the honesty ladder's short-name floor). want='silent' encodes the
-    -- CURRENT RUNG loudly: fixing the gate (gate on unbound-ness, not
-    -- length) makes this site FAIL and forces the reviewed key upgrade.
+    -- q3 is 2 chars ON PURPOSE: it used to document resolve()'s #name<3
+    -- SILENT skip (want='silent'); v48 fixed the gate — short names now
+    -- resolve through the SAME-FILE tier (cross-file stays noise-gated) —
+    -- so this is the reviewed key UPGRADE the design promised: the gap
+    -- site became a positive spec line the moment the gap closed.
     ans[#ans + 1] = { file = 'min.js', line = 1, callee = 'q3',
-        want = 'silent' }
+        want = 'to', target = 'q3', tier = 'plain' }
     return 'min.js', src, 3
 end
 

@@ -53,7 +53,7 @@ return {
         root = HOME .. '/git/7kaa',
         repo = 'https://git.code.sf.net/p/skfans/7kaa',
         rev = '9e5cde1bc1d7',
-        expected = { refs = 8016, nodes = 12144 }, -- recalibrated @ bash-spec (.sh scripts join)
+        expected = { refs = 8017, nodes = 12144 }, -- +1 @ v48 short-name honesty (same-file sq)
         lang = 'cpp',
         notes = 'cpp quick tier (~325 cpp + 189 h); openmw is DIRTY — never pin it',
     },
@@ -62,7 +62,7 @@ return {
         budget_mb = 1600, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/TryGhost/Ghost',
         rev = 'f7d7df8f9816',
-        expected = { refs = 5842, nodes = 21128 }, -- +2 @ honesty pass v46 (local-fn callable resolved)
+        expected = { refs = 5853, nodes = 21128 }, -- +11 @ v48 short-name honesty (id/qs/t same-file helpers)
         lang = 'javascript',
         notes = 'js SCALE tier (2134 files) — a real node webapp: express'
             .. ' routes + handlebars themes (parametric-files territory)',
@@ -72,7 +72,7 @@ return {
         budget_mb = 7500, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://chromium.googlesource.com/v8/v8',
         rev = '0646faaada71',
-        expected = { refs = 74413, nodes = 165859 }, -- calibrated @ js-corpora join (v22)
+        expected = { refs = 74420, nodes = 165859 }, -- +7 @ v48 short-name honesty (V/I/T/F macro helpers)
         lang = 'cpp',
         notes = 'cpp SCALE tier (1267 cc + 1813 h) — preprocessor-heavy,'
             .. ' the TU-walk torture target; .tq (torque) not spec\'d',
@@ -81,7 +81,7 @@ return {
         root = HOME .. '/git/guile/module',
         repo = 'https://github.com/cky/guile',
         rev = '89ce9fb31b00',
-        expected = { refs = 3596, nodes = 3288 }, -- calibrated @ 098c537
+        expected = { refs = 3601, nodes = 3288 }, -- +5 @ v48 short-name honesty (scheme's ??/>>/vv culture)
         lang = 'scheme',
         notes = 'scheme quick tier (280 files)',
     },
@@ -97,7 +97,7 @@ return {
         root = HOME .. '/git/hugo',
         repo = 'https://github.com/gohugoio/hugo',
         rev = '5a5f4a549522',
-        expected = { refs = 9526, nodes = 11624 }, -- recalibrated @ bash-spec (.sh scripts join)
+        expected = { refs = 9550, nodes = 11624 }, -- +24 @ v48 short-name honesty (same-file, incl vendored minified js)
         lang = 'go',
         notes = 'go quick tier (901 files)',
     },
@@ -105,7 +105,7 @@ return {
         root = HOME .. '/git/ripgrep',
         repo = 'https://github.com/burntsushi/ripgrep',
         rev = '48b0c795f4fe',
-        expected = { refs = 2455, nodes = 3360 }, -- recalibrated @ bash-spec (.sh scripts join)
+        expected = { refs = 2468, nodes = 3360 }, -- +13 @ v48 short-name honesty (same-file ov/m/e)
         lang = 'rust',
         notes = 'rust quick tier (100 files)',
     },
@@ -121,7 +121,7 @@ return {
         root = HOME .. '/git/ghc/libraries/base',
         repo = 'https://github.com/ghc/ghc',
         rev = '8585f8cb561e',
-        expected = { refs = 1560, nodes = 2805 }, -- calibrated @ 098c537
+        expected = { refs = 1571, nodes = 2805 }, -- +11 @ v48 short-name honesty (ghc test snippets' 1-char fns)
         lang = 'haskell',
         notes = 'haskell quick tier (515 files); ghc = the Track B reference repo',
     },
@@ -155,7 +155,7 @@ return {
         root = HOME .. '/git/ble.sh',
         repo = 'https://github.com/akinomyoga/ble.sh.git',
         rev = '5d39ebe6db67',
-        expected = { refs = 5232, nodes = 5078 }, -- recalibrated @ typed-strings v1 (eval heads)
+        expected = { refs = 5260, nodes = 5078 }, -- +28 @ v48 short-name honesty (memo f1..fA chains)
         lang = 'bash',
         notes = 'bash SCALE tier (~420 files; a line editor written in bash —'
             .. ' eval-heavy, the aperture design\'s first real workout)',
@@ -236,7 +236,7 @@ return {
         root = HOME .. '/.cache/cartograph-tools/syn/js-g4-s1',
         synthetic = { lang = 'js', seed = 1, files = 8 },
         lang = 'javascript',
-        expected = { refs = 137, nodes = 283 }, -- calibrated @ gen v4
+        expected = { refs = 142, nodes = 283 }, -- +5 @ v48 short-name same-file honesty
         notes = 'synthetic js (gen.lua g4 seed 1): hoisted fwd calls,'
             .. ' fn-value consts, let/var regimes, arrows, classes, ESM +'
             .. ' one CommonJS module, and min.js — a one-line minified'

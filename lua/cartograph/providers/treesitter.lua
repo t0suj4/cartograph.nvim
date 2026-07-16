@@ -5664,9 +5664,13 @@ function M.extract(root, opts)
         return { rule = 'aperture', witness = w.file .. ':' .. (w.line + 1) }
     end
     local function resolve(name, file)
-        -- 1-2 char names are shadow-bait (pattern vars, loop counters):
-        -- name-matching them is noise-dominated in every language
-        if #name < 3 then return nil end
+        -- 1-2 char names are shadow-bait for WORKSPACE matching (pattern
+        -- vars, loop counters — noise-dominated in every language), but a
+        -- name with a SAME-FILE def has a definite binder: silently
+        -- skipping those was a real honesty gap (the synjs min.js `q3()`
+        -- key witness). Short names get the same-file tier ONLY; every
+        -- cross-file fallback below stays behind the noise floor.
+        local short = #name < 3
         local clang, spec = elang_for(file)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil end
@@ -5696,6 +5700,7 @@ function M.extract(root, opts)
             end
             if samedup then return nil, nil, refusal('samefile', samedup) end
             if same then return same, false end
+            if short then return nil end -- no same-file binder: noise floor
             -- workspace-unique, but never across a scope boundary (rust
             -- crates: bare names cannot legally cross); dotted callees
             -- are method syntax and never match free functions
@@ -5736,6 +5741,7 @@ function M.extract(root, opts)
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or cands)
         end
+        if short then return nil end -- free short name: noise floor holds
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
             if name:sub(1, #pre) == pre then return nil end
         end
@@ -6228,7 +6234,9 @@ function M.relink(data, touched)
         data.edges[#data.edges + 1] = e
     end
     local function resolve(name, file)
-        if #name < 3 then return nil end
+        -- short names: same-file tier only (see extract's resolve, the
+        -- synjs q3 witness); cross-file fallbacks stay noise-gated
+        local short = #name < 3
         local clang, spec = elang_for(file)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil end
@@ -6255,6 +6263,7 @@ function M.relink(data, touched)
             end
             if samedup then return nil, nil, refusal('samefile', samedup) end
             if same then return same, false end
+            if short then return nil end -- no same-file binder: noise floor
             -- workspace-unique, but never across a scope boundary (rust
             -- crates: bare names cannot legally cross); dotted callees
             -- are method syntax and never match free functions
@@ -6295,6 +6304,7 @@ function M.relink(data, touched)
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or cands)
         end
+        if short then return nil end -- free short name: noise floor holds
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
             if name:sub(1, #pre) == pre then return nil end
         end

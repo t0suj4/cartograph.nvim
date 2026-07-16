@@ -19,7 +19,14 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 47 -- v47: PARALLEL PARITY — calls mark a rounds-SYNTHESIZED
+M.VERSION = 48 -- v48: SHORT-NAME HONESTY — resolve()'s #name<3 gate now
+               -- applies to CROSS-FILE matching only: a 1-2-char callee
+               -- with a SAME-FILE def resolves through the same-file tier
+               -- (was a SILENT drop — the synjs min.js q3 key witness,
+               -- want='silent' flipped to want='to' in the same commit);
+               -- free short names stay noise-gated. New same-file edges
+               -- on corpora with short-named fns.
+-- v47: PARALLEL PARITY — calls mark a rounds-SYNTHESIZED
                -- qualification (c.rtfull) so the parallel audit can null it
                -- with the resolution it rode (a kept one changed relink's
                -- question and minted edges inline never had, nondeterministic

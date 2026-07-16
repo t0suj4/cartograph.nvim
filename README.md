@@ -963,10 +963,12 @@ count drift. Calibrating the keys formalized real gaps as
 executable spec: V2 ctor-typing doesn't fire on module-top-level locals
 (in-function is the supported shape); js receiver typing doesn't exist
 (this-chains and `obj.method()` refuse as ambiguous — the encoded current
-rung); and `want='silent'` documents resolve()'s `#name<3` short-name skip —
-a deliberately shameful key kind that FAILS the moment the gap is fixed,
-forcing the reviewed upgrade. F1 bean redirects and rt-round chain tiers are
-pinned positively.
+rung). The `want='silent'` key kind documents honesty gaps that must FAIL
+the moment they're fixed — and it already worked once: it documented
+resolve()'s `#name<3` short-name silent skip, the fix landed (short names
+now resolve through the SAME-FILE tier; cross-file stays noise-gated), and
+the site flipped to a positive spec line as the reviewed upgrade. F1 bean
+redirects and rt-round chain tiers are pinned positively.
 
 `tools/preflight.lua` is the dev loop as one command: git-diff impact (changed
 lines → containing functions → reverse call cone → the specs whose
