@@ -918,17 +918,32 @@ nvim --headless -u NONE -l tools/matrix.lua libs server  # named rows
 nvim --headless -u NONE -l tools/matrix.lua --cols par   # one column
 nvim --headless -u NONE -l tools/matrix.lua --save       # re-baseline structs
 # GENERATED-CODE fuzz bed: synthesize a corpus (seeded, deterministic, valid
-# by construction — load()-asserted) and let the matrix's invariant columns
-# judge it. The third oracle kind: not history (baselines), not ourselves
-# agreeing (parity) — truth by construction. silent==0 is the headline
-# oracle: a generated program where a bound callable resolves to nothing
-# with no refusal is a fresh honesty bug. Failing seeds keep their dir as
-# the repro artifact. Idiom mix = the resolution-ladder bestiary (forward
-# decls, fn-value aliases, higher-order params, shadows, short names,
-# setmetatable classes, cross-module requires, goto-continue).
+# by construction — tree-sitter parse-clean, lua additionally load()-asserted)
+# and let the matrix's invariant columns judge it. The third oracle kind: not
+# history (baselines), not ourselves agreeing (parity) — truth by
+# construction. silent==0 is the headline oracle: a generated program where a
+# bound callable resolves to nothing with no refusal is a fresh honesty bug.
+# Failing seeds keep their dir as the repro artifact. Idiom mixes = the
+# resolution-ladder bestiary. lua: forward decls, fn-value aliases,
+# higher-order params, shadows, short names, setmetatable classes, requires,
+# goto-continue. java: interfaces + @Service impls (the only LOCALLY-testable
+# F1 bean redirects — local Java corpora are non-Spring), unique Builder<k>
+# chains (the positive return-type-rounds path), nested enums with methods,
+# overloads, method references, cross-file statics.
 nvim --headless -u NONE -l tools/gen.lua lua --check --runs 20
-nvim --headless -u NONE -l tools/gen.lua lua --seed 7 --out /tmp/g  # just generate
+nvim --headless -u NONE -l tools/gen.lua java --check --runs 10
+nvim --headless -u NONE -l tools/gen.lua java --seed 7 --out /tmp/g  # just generate
 ```
+
+Two SYNTHETIC corpora are registered first-class in `tools/corpora.lua` —
+`synlua` and `synjava`, identity `(GEN_VERSION, lang, seed, files)` instead of
+a git rev. `bench.corpus` materializes a missing root by running the
+generator, so `gate synjava`, `dfgate synjava` and their matrix rows run on
+**any machine, with zero corpus checkouts** — the portable regression tier
+(the real pinned corpora keep the jobs synthesis can't do: ecology validity
+and surprise). Both are fully calibrated: expected counts, structure
+baselines, df/flow parity censuses. A generator change bumps `GEN_VERSION` →
+new root paths + recalibration, the same discipline as expected counts.
 
 `tools/preflight.lua` is the dev loop as one command: git-diff impact (changed
 lines → containing functions → reverse call cone → the specs whose

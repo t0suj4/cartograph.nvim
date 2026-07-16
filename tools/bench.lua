@@ -44,6 +44,13 @@ function M.corpus(name_or_root)
         error(('bench: unknown corpus %q (have: %s; or pass a directory)')
             :format(name_or_root, table.concat(names, ', ')))
     end
+    -- a SYNTHETIC corpus materializes on demand: deterministic content from
+    -- (GEN_VERSION, lang, seed, files) — the root path embeds the identity,
+    -- so a stale dir from an older generator is simply never referenced
+    if c.synthetic and vim.fn.isdirectory(c.root) ~= 1 then
+        dofile(REPO .. '/tools/gen.lua').generate(
+            c.synthetic.lang, c.root, c.synthetic.files, c.synthetic.seed)
+    end
     if vim.fn.isdirectory(c.root) ~= 1 then
         error(('bench: corpus root missing: %s'):format(c.root))
     end

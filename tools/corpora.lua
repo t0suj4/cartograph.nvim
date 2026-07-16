@@ -205,6 +205,33 @@ return {
             .. ' discipline proof; inline only',
     },
 
+    -- ── SYNTHETIC corpora (tools/gen.lua) ───────────────────────────────
+    -- Identity = (GEN_VERSION, lang, seed, files) — deterministic, byte-
+    -- reproducible, no checkout to pin. The root path EMBEDS g<genversion>-
+    -- s<seed>: a generator change bumps GEN_VERSION → new paths here + a
+    -- recalibration, the same discipline as expected counts. bench.corpus
+    -- MATERIALIZES a missing root by running the generator — so these
+    -- gates run on any machine, no ~/git checkouts required.
+    synlua = {
+        root = HOME .. '/.cache/cartograph-tools/syn/lua-g2-s1',
+        synthetic = { lang = 'lua', seed = 1, files = 8 },
+        lang = 'lua',
+        expected = { refs = 87, nodes = 142 }, -- calibrated @ gen v2
+        notes = 'synthetic lua (gen.lua g2 seed 1): the resolution-ladder'
+            .. ' bestiary — fwd-decls, fn-values, higher-order, shadows,'
+            .. ' smt classes, requires, goto',
+    },
+    synjava = {
+        root = HOME .. '/.cache/cartograph-tools/syn/java-g2-s1',
+        synthetic = { lang = 'java', seed = 1, files = 8 },
+        lang = 'java',
+        expected = { refs = 47, nodes = 87 }, -- calibrated @ gen v2
+        notes = 'synthetic java (gen.lua g2 seed 1): @Service impls = the'
+            .. ' ONLY locally-testable F1 bean redirects; unique Builder<k>'
+            .. ' chains = the positive rt-rounds path; enums, overloads,'
+            .. ' method refs, cross-file',
+    },
+
     self = {
         root = HOME .. '/git/cartograph.nvim',
         repo = 'git@github.com:t0suj4/cartograph.nvim.git',

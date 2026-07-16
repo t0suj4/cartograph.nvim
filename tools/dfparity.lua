@@ -64,6 +64,10 @@ M.EXPECTED = {
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
     -- grammar. All flow-more-correct (closure-leak + bindings df misses).
     libs = { ['df-over-collects'] = 1588, ['flow-over-collects'] = 4 },
+    -- synthetic corpora (tools/gen.lua): deterministic content, so these
+    -- censuses are exact for (GEN_VERSION, seed) — recalibrate on gen bumps
+    synlua = { ['df-over-collects'] = 47 }, -- closure-leak, flow-correct
+    synjava = {}, -- perfect parity
 }
 
 M.ORDER = { 'binding-as-use', 'df-over-collects', 'flow-over-collects',
