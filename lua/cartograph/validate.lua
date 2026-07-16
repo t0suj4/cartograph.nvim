@@ -50,6 +50,9 @@ M.CALL_FIELDS = {
     argv = true, method = true, top = true, dynamic = true,
     indirect = true, traced = true, strarg = true, hedge = true,
     rt = true, n = true, tinf = true, -- type-inferred tier (graph-VM)
+    rtfull = true, -- c.full was SYNTHESIZED by the return-type rounds (not
+    -- lexical): the parallel audit nulls it with the resolution it rode
+
     qualifier = true, -- @Qualifier bean name (interface→impl narrowing)
     escalated = true, -- escalation-on-hedge: oracle-tried, still ~ (anti-thrash)
     conf = true, -- runtime-confirmed tier (session-live overlay)

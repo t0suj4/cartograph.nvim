@@ -19,7 +19,17 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 46 -- v46: HONESTY PASS (resolve_local_callable) — a bare call whose
+M.VERSION = 47 -- v47: PARALLEL PARITY — calls mark a rounds-SYNTHESIZED
+               -- qualification (c.rtfull) so the parallel audit can null it
+               -- with the resolution it rode (a kept one changed relink's
+               -- question and minted edges inline never had, nondeterministic
+               -- with slice boundaries); the audit also nulls the stale tinf
+               -- verdict, the merge carries implements/beans/ctorbinds/
+               -- smtclasses (everything after extends had been DROPPED — F1
+               -- redirects were silently missing from parallel extracts), and
+               -- chunks merge back into CANONICAL fileset order before
+               -- audit/relink (worker completion order leaked into resolution).
+-- v46: HONESTY PASS (resolve_local_callable) — a bare call whose
                -- callee is a PARAM (higher-order) or a LOCAL df-def of the
                -- enclosing fn no longer drops SILENTLY: a param refuses
                -- ('higher-order'), a local resolves to a unique same-file fn def

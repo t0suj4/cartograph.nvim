@@ -200,6 +200,31 @@ local function merge_chunk(s, chunk)
     for _, x in ipairs(chunk.extends or {}) do
         if not seen[x.file] then acc.extends[#acc.extends + 1] = x end
     end
+    -- the OTHER resolution side-tables relink's passes consume — every one
+    -- added since extends was wired had been DROPPED here, so the parallel
+    -- graph silently resolved java method-refs a tier lower and lost F1
+    -- interface→impl redirects entirely (the matrix's par column caught it).
+    -- implements: file-tagged list, deduped like extends
+    acc.implements = acc.implements or {}
+    for _, x in ipairs(chunk.implements or {}) do
+        if not seen[x.file] then acc.implements[#acc.implements + 1] = x end
+    end
+    -- beans: class -> bean-name map (file-less). Extraction is a pure
+    -- function of content, so a demanded file's duplicate chunk overlays
+    -- the same values; conflicting SAME-class beans across different files
+    -- would be arrival-ordered — pathological (dup class names w/ distinct
+    -- @Service names), accepted and left to the par gate to surface
+    acc.beans = acc.beans or {}
+    for cls, bn in pairs(chunk.beans or {}) do acc.beans[cls] = bn end
+    -- ctorbinds / smtclasses: keyed BY FILE — per-file overlay, seen-guarded
+    acc.ctorbinds = acc.ctorbinds or {}
+    for f, fb in pairs(chunk.ctorbinds or {}) do
+        if not seen[f] then acc.ctorbinds[f] = fb end
+    end
+    acc.smtclasses = acc.smtclasses or {}
+    for f, fs in pairs(chunk.smtclasses or {}) do
+        if not seen[f] then acc.smtclasses[f] = fs end
+    end
     local new = {}
     for f, v in pairs(chunk.stamps or {}) do
         if not seen[f] then acc.stamps[f] = v end
@@ -267,6 +292,15 @@ function M.audit(data)
             if c.fn then kill[c.fn .. '\31' .. c.to] = true end
             c.to = nil
             c.inferred = nil
+            -- c.rt STAYS (file-scoped chain provenance the relink rounds
+            -- re-derive from) — but the ROUNDS' side-writes do not: a kept
+            -- tinf is a stale tier verdict, and a kept rounds-synthesized
+            -- full (rtfull) changes relink's question from the bare
+            -- stdlib-gated callee to a qualified name — the generic pass
+            -- then minted same-file/unique edges inline never had, varying
+            -- with slice boundaries (the par gate's nondeterminism)
+            c.tinf = nil
+            if c.rtfull then c.full, c.rtfull = nil, nil end
             dropped = dropped + 1
         end
         for _, a in ipairs(c.argv or {}) do
@@ -479,12 +513,42 @@ function M.extract(root, o)
         finalize()
     end
 
+    -- Chunks merge in ARRIVAL order (worker completion is racy), so before
+    -- any global pass runs, restore the CANONICAL order: the fileset list —
+    -- the same order the inline extract walks. Within a file items keep
+    -- their extraction order (a file lives in one chunk, contiguously), so
+    -- the sorted arrays match inline's. Without this, relink's input order
+    -- varies run to run and any order-sensitive choice inside resolution
+    -- flips with it — three pristine gate runs produced two different edge
+    -- sets before this existed (the matrix's par column caught it).
+    local function canonicalize()
+        local fidx = {}
+        for i, f in ipairs(files) do fidx[f] = i end
+        local function reorder(list, fileof)
+            local dec = {}
+            for i, v in ipairs(list) do
+                dec[i] = { fidx[fileof(v)] or math.huge, i, v }
+            end
+            table.sort(dec, function (a, b)
+                if a[1] ~= b[1] then return a[1] < b[1] end
+                return a[2] < b[2] -- stable: preserve within-file order
+            end)
+            for i, d in ipairs(dec) do list[i] = d[3] end
+        end
+        reorder(acc.nodes, function (n) return n.file end)
+        reorder(acc.edges, function (e) return file_of(e.from) end)
+        reorder(acc.calls, function (c) return c.file end)
+        reorder(acc.extends or {}, function (x) return x.file end)
+        reorder(acc.implements or {}, function (x) return x.file end)
+    end
+
     local failed = {}
     local function finish_phase1()
         for _, fb in ipairs(failed) do -- sequential fallback, honest
             merge_chunk(s, ts.extract(root, { files = fb,
                 fileset = files, skip_idpass = true, abs = abs }))
         end
+        canonicalize()
         M.audit(acc)
         ts.relink(acc)
         phase2()

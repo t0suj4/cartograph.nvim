@@ -3488,8 +3488,17 @@ local function resolve_returns(calls, node_index, exact, addref)
                         -- a deferred chained call had no lexical qualification;
                         -- record the one the return type gives it, so a later
                         -- pass (resolve_interface) can act on it — e.g. redirect
-                        -- an interface-typed return `Ret::m` to its impl
-                        c.full = c.full or (ret .. '::' .. c.callee)
+                        -- an interface-typed return `Ret::m` to its impl.
+                        -- rtfull MARKS the synthesis: this full is part of the
+                        -- ROUNDS' verdict, not lexical fact — the parallel
+                        -- audit nulls it with the resolution it belongs to (a
+                        -- kept one changed relink's question from the bare
+                        -- stdlib-gated callee to a qualified name, minting
+                        -- edges inline never had; the par gate caught it)
+                        if not c.full then
+                            c.full = ret .. '::' .. c.callee
+                            c.rtfull = true
+                        end
                         c.inferred = true -- type INFERRED through a summary
                         c.tinf = true -- the TYPE-INFERRED tier (the VM's own
                         -- output: resolved via a return-type summary, a
