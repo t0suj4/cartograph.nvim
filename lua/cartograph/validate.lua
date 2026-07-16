@@ -53,6 +53,8 @@ M.CALL_FIELDS = {
     rtfull = true, -- c.full was SYNTHESIZED by the return-type rounds (not
     -- lexical): the parallel audit nulls it with the resolution it rode
 
+    registry = true, -- string-keyed registry (stage 3): the node id this
+    -- retrieval (LibStub("X")/:GetModule("Y")) resolves to (the registered table)
     qualifier = true, -- @Qualifier bean name (interface→impl narrowing)
     escalated = true, -- escalation-on-hedge: oracle-tried, still ~ (anti-thrash)
     conf = true, -- runtime-confirmed tier (session-live overlay)

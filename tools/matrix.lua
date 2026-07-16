@@ -366,6 +366,20 @@ local function run_row(name)
                         why = ('refusal rule %s ≠ expected %s'):format(
                             tostring(cc.refused.rule), a.rule)
                     end
+                elseif a.want == 'registry' then
+                    -- string-keyed registry (stage 3): the retrieval resolves,
+                    -- via c.registry, to the registered table (a var node)
+                    local rn = cc.registry and nidx[cc.registry]
+                        and nidx[cc.registry].name
+                    if not cc.registry then
+                        why = ('expected registry → %s, got %s'):format(a.target,
+                            cc.to and ('call → ' ..
+                                (nidx[cc.to] and nidx[cc.to].name or cc.to))
+                            or 'nothing')
+                    elseif rn ~= a.target then
+                        why = ('expected registry → %s, got → %s'):format(
+                            a.target, tostring(rn))
+                    end
                 end
                 if why then
                     bad[#bad + 1] = ('%s:%d %s — %s'):format(

@@ -71,7 +71,7 @@ M.EXPECTED = {
     libs = { ['df-over-collects'] = 1588, ['flow-over-collects'] = 4 },
     -- synthetic corpora (tools/gen.lua): deterministic content, so these
     -- censuses are exact for (GEN_VERSION, seed) — recalibrate on gen bumps
-    synlua = { ['df-over-collects'] = 47 }, -- closure-leak, flow-correct
+    synlua = { ['df-over-collects'] = 49 }, -- closure-leak, flow-correct (@ gen v5)
     synjava = {}, -- perfect parity
     synjs = { ['df-over-collects'] = 294 }, -- closure-leak (arrows), flow-correct
 }

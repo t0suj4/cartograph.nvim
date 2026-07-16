@@ -56,7 +56,11 @@ local here = SELF:match('^(.*)/gen%.lua$')
 
 local function say(s) io.stdout:write(s .. '\n') end
 
-local M = { GEN_VERSION = 4 } -- v4: +JS generator (hoisting, fn-value
+local M = { GEN_VERSION = 5 } -- v5: +lua STRING-KEYED REGISTRY idiom (stage-3
+-- resolve_registry: LibStub:NewLibrary(CONST_KEY) register + LibStub("lit")
+-- retrieve, keyed want='registry' — also exercises const-fold of the register
+-- key). lua output changes (new sites); java/js byte-identical to v4 (additive).
+-- v4: +JS generator (hoisting, fn-value
 -- consts, let/var regimes, arrows, classes, ESM + one CommonJS module, and
 -- an EXTRA minified one-line module — the (l,c) column-spill's home turf).
 -- lua/java output byte-identical to v3 (additive language; paths bump per
@@ -306,6 +310,26 @@ local function gen_lua_module(k, _, fname, ans)
         indent = indent - 1
         w('end')
         exports[#exports + 1] = ('fz%d'):format(k)
+    end
+
+    -- STRING-KEYED REGISTRY (stage 3, v52) + const-fold of the register key
+    -- (v50): a library is registered under a same-file CONST key (must fold for
+    -- the register index to see it), retrieved by a literal LibStub("...") — the
+    -- retrieval resolves (c.registry) to the registered table. Same module =
+    -- same scope, so it fires regardless of the corpus's scope model.
+    if chance(75) then
+        local lk = ('MyLib-%d'):format(k)
+        w(('local MJR%d = "%s"'):format(k, lk)) -- the key as a same-file const
+        w(('local Lib%d = LibStub:NewLibrary(MJR%d, 1)'):format(k, k)) -- register w/ const key
+        w(('function Lib%d:doit() return %d end'):format(k, rnd(9))); emitted = emitted + 1
+        w(('local function useLib%d()'):format(k)); emitted = emitted + 1
+        indent = indent + 1
+        w(('local got%d = LibStub("%s")'):format(k, lk)) -- retrieve w/ literal key
+        expect('LibStub', { want = 'registry', target = ('Lib%d'):format(k) })
+        w(('return got%d'):format(k))
+        indent = indent - 1
+        w('end')
+        exports[#exports + 1] = ('useLib%d'):format(k)
     end
 
     -- the PROBE fn: one deliberate line per honesty-ladder rung, keyed
