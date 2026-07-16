@@ -892,8 +892,10 @@ nvim --headless -u NONE -l tools/gate.lua server
 nvim --headless -u NONE -l tools/gate.lua server --save
 # df/flow PARITY gate: coarse(flow)==df (per-statement def/use, category-
 # catalogued) + flow's CFG invariants (successors/liveness/reaching) run clean.
-# The structure snapshot DROPS df, so this is what catches a flow.du-vs-df
-# def/use drift. Pins a per-corpus labeled census; fails on any class delta.
+# Since the df-strangler completed (step 6), production df IS flow.coarse, so
+# the gate extracts with legacy_df to build the INDEPENDENT (dfreg) df and
+# checks flow.coarse still reproduces it — a pure regression oracle. Pins a
+# per-corpus labeled census; fails on any class delta.
 nvim --headless -u NONE -l tools/dfgate.lua cpp
 # --show <class>: the divergence EXPLORER — dump a class's instances with source
 # + the flow={}/df={} sets (the fix-side view); no class lists the classes.
