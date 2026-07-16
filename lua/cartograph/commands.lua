@@ -87,6 +87,30 @@ function M.register()
             fix.text, vim.fn.fnamemodify(fix.file, ':t'), fix.line + 1), vim.log.levels.INFO)
     end, { desc = 'cartograph: apply the annotation quick fix of the current quickfix entry' })
 
+    -- ── A1: lint findings as IN-BUFFER SIGNS (diag surface) ──────────
+    -- the whole shipped lint suite (taint rungs, external-surface, redundant-
+    -- require, seam-guard, …) lands where the code is, not only in quickfix.
+    cmd('CartographLintSigns', function ()
+        local store = live() if not store then return end
+        local findings = require('cartograph.lint').run(store)
+        local pub = {}
+        for _, f in ipairs(findings) do
+            local file = f.file
+            if file and file:sub(1, 1) ~= '/' then file = store.abs(file) end
+            pub[#pub + 1] = { file = file, line = f.line, col = f.col,
+                severity = f.severity,                 -- the rule's curated tier
+                message = ('[%s] %s'):format(f.rule, f.message) }
+        end
+        local n = require('cartograph.diag').publish(pub, 'lint')
+        vim.notify(('cartograph: %d lint finding(s) on in-buffer signs'):format(n),
+            vim.log.levels.INFO)
+    end, { desc = 'cartograph: publish lint findings as in-buffer signs (A1)' })
+
+    cmd('CartographLintClear', function ()
+        require('cartograph.diag').clear('lint')
+        vim.notify('cartograph: cleared in-buffer lint signs', vim.log.levels.INFO)
+    end, { desc = 'cartograph: clear the in-buffer lint signs' })
+
     -- ── live refresh ────────────────────────────────────────────────
     cmd('CartographRefresh', function (o)
         local store = live() if not store then return end
@@ -345,7 +369,7 @@ function M.register()
                 require('cartograph.panes.symbols').render() -- upgraded ~→proven show
                 -- in-buffer surface: conflicts (★ error) + refuted (warn) as signs
                 local n = require('cartograph.diag').publish(
-                    esc.diagnostics(f, store.abs, nameof))
+                    esc.diagnostics(f, store.abs, nameof), 'escalate')
                 scratch(esc.report(f, nameof))
                 if n > 0 then
                     vim.notify(('cartograph: %d conflict/refuted finding(s) on in-buffer signs')
