@@ -904,6 +904,19 @@ nvim --headless -u NONE -l tools/dfgate.lua rust --show flow-over-collects
 # the receiver-typing gap, and the argument for re-backing df.* with flow.coarse
 # (consumers untouched, equivalence guaranteed by dfgate) rather than rewriting.
 nvim --headless -u NONE -l tools/dfconsumers.lua
+# THE MATRIX: every parity/honesty invariant × every registered corpus, one
+# command — the push-time sweep. One inline extract per corpus feeds all the
+# cheap columns (counts, validate, memory budget, df/flow parity, fold
+# round-trip, silent-local gap, cold==warm cache); only `par` pays for a
+# second extraction (inline==parallel, in a pristine child process — the
+# previously unswept oracle: it found a real inline≠parallel divergence on
+# its first full run). Each corpus runs in a fresh process, so one row
+# crashing costs one row. Exit 1 on any FAIL, 2 on soft notes, 0 all green.
+nvim --headless -u NONE -l tools/matrix.lua              # full sweep
+nvim --headless -u NONE -l tools/matrix.lua --quick      # seconds-tier only
+nvim --headless -u NONE -l tools/matrix.lua libs server  # named rows
+nvim --headless -u NONE -l tools/matrix.lua --cols par   # one column
+nvim --headless -u NONE -l tools/matrix.lua --save       # re-baseline structs
 ```
 
 `tools/preflight.lua` is the dev loop as one command: git-diff impact (changed

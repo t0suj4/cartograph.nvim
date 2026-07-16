@@ -20,8 +20,10 @@ config.seams = {
             '^lua/cartograph/validate%.lua$', '^tests/', '^tools/' } },
     { name = 'df', -- statement dataflow folds behind dfa.*
         patterns = { '%.df%.stmts', '%.df%.inputs' },
+        -- store.lua: a PRODUCER since df-strangler step 5 (ingest rebuilds df
+        -- from flow.coarse, transplanting legacy defr) — drops out at step 6
         owners = { '^lua/cartograph/providers/', '^lua/cartograph/df%.lua$',
-            '^tests/', '^tools/' } },
+            '^lua/cartograph/store%.lua$', '^tests/', '^tools/' } },
     { name = 'argv', -- argument shapes fold behind argv.n/at/str
         patterns = { '%.argv%[', '%.args%[' },
         owners = { '^lua/cartograph/providers/', '^lua/cartograph/argv%.lua$',
