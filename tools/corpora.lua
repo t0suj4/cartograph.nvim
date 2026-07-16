@@ -107,7 +107,7 @@ return {
         root = HOME .. '/git/hugo',
         repo = 'https://github.com/gohugoio/hugo',
         rev = '5a5f4a549522',
-        expected = { refs = 9550, nodes = 11624 }, -- +24 @ v48 short-name honesty (same-file, incl vendored minified js)
+        expected = { refs = 9567, nodes = 11707 }, -- +anon callback fns @ v51 (livereload/alpinejs; enclosing-chain wins)
         lang = 'go',
         notes = 'go quick tier (901 files)',
     },
@@ -123,7 +123,7 @@ return {
         root = HOME .. '/git/django-oscar/src',
         repo = 'https://github.com/django-oscar/django-oscar',
         rev = 'c0608e0d167e',
-        expected = { refs = 1561, nodes = 3824 }, -- recalibrated @ kwargs (django default= callables register)
+        expected = { refs = 1571, nodes = 3872 }, -- +enclosing-chain captured-callable wins @ v51
         lang = 'python',
         notes = 'python quick tier (483 files) — the django adapter\'s home turf',
     },

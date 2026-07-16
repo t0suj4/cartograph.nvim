@@ -38,8 +38,9 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 74, ['df-over-collects'] = 457,
+    self = { ['binding-as-use'] = 74, ['df-over-collects'] = 461,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- +11 df-over @ v50 const-fold
+        -- +4 df-over @ v51 (self analyzes its own new anon-fn/enclosing-chain source)
         -- (self analyzes its own new source); binding-as-use +1 @ v51 anon-callback
         -- fns (self's js test fixtures gain a #cb fn). fold + anon extraction are
         -- df-additive/inert — the moves are new-source/new-node census growth.
@@ -48,7 +49,7 @@ M.EXPECTED = {
     -- C label target now heads its own coarse row at the LOOP's line rather than
     -- the label's line — a 1-line cosmetic label difference, def/use unchanged.
     cpp = { ['line-skew'] = 11 },
-    go = { ['df-over-collects'] = 27, ['line-skew'] = 17 }, -- +line-skew (labels);
+    go = { ['df-over-collects'] = 30, ['line-skew'] = 17 }, -- +3 @ v51 anon-callback fns (alpinejs); +line-skew (labels);
     -- df-over-collects=27 closure-leaks; partition-mismatch=21 was the re-parse
     -- artifact (minified vendored JS), gone with stored flow.
     -- rust: all flow-MORE-correct — flow.du captures let/for/if-let bindings df
