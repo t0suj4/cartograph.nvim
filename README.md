@@ -786,7 +786,22 @@ checks luacheck can't:
   `is_numeric`, …) is sanitised — so grocy's `Spendings` fires on its
   *unguarded* `product_group` concat while its `IsIsoDate`-guarded date path
   stays silent, in the same method. Still `~`: the sink is a hypothesis, and a
-  same-scope tracer misses cross-function and session flows.
+  same-scope tracer misses session/cross-page flows (cross-*function* flows are
+  `sink-reach`, next).
+- **sink-reach** (PHP) — taint rung 2: the *inter-procedural* shape a same-scope
+  tracer can't see — a request source flows across ≥1 resolved call hop into a
+  callee parameter that reaches a SQL sink. It rides the **resolved call graph**
+  (`c.to` + an SCC pass, callees-first) rather than re-matching names: per
+  function it computes which *parameters* reach an embedded sink, then
+  propagates that backward — a caller passing its own param inherits the
+  reachability, a caller passing a source is flagged. The sanitiser that
+  matters here is the **coercion** one, and it's a per-language fact: a PHP
+  scalar type hint (`int $x`) rewrites the value at runtime so it clears taint,
+  but a TypeScript annotation is erased and clears nothing — so the coercion set
+  is declared per language, defaulting to *none* (sound: a type never silently
+  drops taint). Validated on grocy: it fires on exactly the one real SQLi
+  (`GetProductStockLocations`, an untyped `$productId` reaching `->where`) and
+  stays silent on the `int $productId` sibling; mantis/sylius/DVWA: 0.
 
 Structural smells, not proofs — dynamically-invoked functions (event handlers,
 test cases run by a harness) can still read as "no caller". Rules live in
