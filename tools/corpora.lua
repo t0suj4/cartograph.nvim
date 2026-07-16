@@ -49,6 +49,16 @@ return {
         lang = 'php',
         notes = 'php SCALE tier (4636 files) — symfony adapter territory',
     },
+    grocy = {
+        root = HOME .. '/git/grocy',
+        repo = 'https://github.com/grocy/grocy',
+        rev = '297cc5724441', -- PRE-FIX of #2259 (c415e2f) — the taint keystone
+        expected = { refs = 1088, nodes = 1317 }, -- calibrated @ taint rung 2
+        lang = 'php',
+        notes = 'the TAINT keystone (Slim/PSR-7 + LessQL): both poles ground-'
+            .. 'truth-validated — rung-2 fires on GetProductStockLocations (the '
+            .. 'real SQLi), silent on the int-typed sibling; [[cartograph-taint-analysis]]',
+    },
     cpp = {
         root = HOME .. '/git/7kaa',
         repo = 'https://git.code.sf.net/p/skfans/7kaa',

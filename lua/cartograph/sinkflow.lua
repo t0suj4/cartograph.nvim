@@ -76,7 +76,28 @@ local function collect(node, types)
     return acc
 end
 
-local SCALAR = { int = true, float = true, bool = true }
+-- COERCION SANITIZER = a per-LANGUAGE fact ([[cartograph-taint-analysis]],
+-- "TYPE DECIDES THE REGIME"). The question is NOT "is this a primitive type?"
+-- but "does a primitive TYPE ANNOTATION rewrite the value at runtime, so it
+-- CLEARS taint?" — and that is true only in languages that COERCE:
+--   • PHP scalar hints coerce: `int $x` turns "5 OR 1=1" into the int 5 (or
+--     TypeErrors in strict mode) — no SQL metacharacter survives. So a
+--     scalar-typed param is a genuine sanitizer. Casts `(int)$x` coerce too.
+--   • TypeScript / Flow annotations are ERASED at runtime — `x: number` is a
+--     compile-time promise the runtime does NOT enforce (any / `as` casts /
+--     untyped JS callers / JSON.parse all defeat it). A type there sanitizes
+--     NOTHING; it is at most a `~` hint. So JS/TS is intentionally ABSENT below.
+-- DEFAULT for an unconfigured language = {} (no coercive types) → a type can
+-- never drop taint → SOUND (a missing entry causes false positives at worst,
+-- never a false negative). A future JS/TS rung inherits the correct behaviour
+-- for free; adding a language means declaring whether/what it coerces.
+local COERCION = {
+    php = { int = true, float = true, bool = true }, -- the valid scalar hints;
+    -- cast_ancestor also accepts the (integer)/(boolean) cast spellings
+    -- javascript = {} / typescript = {}  -- erased annotations, no coercion
+}
+-- sinkflow is PHP-only in v1; the PHP coercive-type set (type hints + casts)
+local SCALAR = COERCION.php
 
 -- parameterization / escaping wrappers: a param passed to one of these is
 -- bound or escaped, NOT concatenated raw — the dominant sanitizer in
@@ -255,10 +276,19 @@ local SQL_METHODS = {
     pg_query = true, sqlite_query = true, db_query = true,
 }
 
+-- a raw-SQL METHOD name (the strong sink signal): a query verb or a *query
+-- wrapper suffix. Deliberately NOT the DB-receiver catch-all — an ORM
+-- insert/update on a DB object (LessQL createRow, `->users()`) is
+-- PARAMETERIZED, and a receiver-only hypothesis mislabels it a raw sink (the
+-- grocy TrackChore FP). rung 2 keys sinks on this alone.
+local function is_sql_method(callee)
+    local cl = callee:lower()
+    return SQL_METHODS[cl] or cl:find('query$') ~= nil or cl:find('_query$') ~= nil
+end
+
 -- the `~`-tier sink hypothesis: returns the reason string, or nil
 local function sink_reason(c)
-    local cl = c.callee:lower()
-    if SQL_METHODS[cl] or cl:find('query$') or cl:find('_query$') then
+    if is_sql_method(c.callee) then
         return ("method '%s'"):format(c.callee)
     end
     local r = c.receiver and c.receiver:lower()
@@ -580,6 +610,182 @@ function M.source_findings(store)
             message = ('possible SQL injection (~, sink unconfirmed): request '
                 .. 'input %s reaches SQL sink %s() with no sanitizer on the path')
                 :format(c.source, c.callee) }
+    end
+    return fs
+end
+
+-- ── taint rung 2: INTER-PROCEDURAL source → sink reachability ───────────────
+-- Rides the RESOLVED call graph (store.calls_by_fn / c.to) + scc.lua — NOT the
+-- name-matching the stripped prototype used ([[cartograph-taint-analysis]]
+-- architecture finding). Two-pass ASSEMBLY of shipped parts:
+--   PASS 1 (re-parse PHP, like rungs 0/1): per fn, a scope taint seeded with
+--     BOTH its request/route sources (entry_sources) AND its non-scalar params
+--     (by INDEX). From it derive (a) sink_params = which param INDEX reaches an
+--     EMBEDDED SQL sink inside this fn, and (b) per outgoing-call arg: does it
+--     carry a source (string origin) or a caller param (number origin)?
+--   PASS 2 (scc.condense over the resolved call graph, callees-first — the SAME
+--     scaffolding as effects.summaries): propagate sink-reachability BACKWARD.
+--     A caller passing its own param to a callee's sink-param INHERITS it
+--     (grows its sink_params); a caller passing a SOURCE to a callee sink-param
+--     emits a finding. Fixpoint within each SCC (recursion).
+-- COERCION sanitizer = TYPE DECIDES THE REGIME: a scalar-typed param is never
+-- seeded (value rewritten at the boundary) so it can't be a sink_param — the
+-- grocy keystone exactly (untyped GetProductStockLocations vuln fires, the
+-- `int $productId` sibling stays silent). GUARD sanitizers ride embed_witness
+-- (cfg dominance) intra-proc. Sound under-claim: an arg embed_witness can't
+-- attribute (opaque local / aggregate) simply doesn't propagate — never
+-- fabricated. Sink stays a `~` hypothesis (sink_reason), like rungs 0/1.
+
+-- ordered params (1-based, matching argv/effects.arg_target) with scalar flag
+local function ordered_params(fnnode, src)
+    local out = {}
+    local fp
+    for c in fnnode:iter_children() do
+        if c:type() == 'formal_parameters' then fp = c break end
+    end
+    if not fp then return out end
+    for p in fp:iter_children() do
+        local t = p:type()
+        if p:named() and (t == 'simple_parameter'
+            or t == 'property_promotion_parameter' or t == 'variadic_parameter') then
+            local pt = txt(p, src)
+            local ty, nm = pt:match('^%s*%??%s*([%a_\\]+)%s+%$([%w_]+)')
+            if not nm then nm = pt:match('%$([%w_]+)') end
+            if nm then out[#out + 1] = { name = nm,
+                scalar = ty ~= nil and SCALAR[ty] or false } end
+        end
+    end
+    return out
+end
+
+--- Lint findings (rung 2): a request/route source flows, across ≥1 resolved
+--- call hop, into a callee param that reaches a SQL sink unsanitized.
+function M.reach_findings(store)
+    local atr = require 'cartograph.at'
+    -- bridge: (file, 0-based start line) -> store fn-node id
+    local fid_at = {}
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            fid_at[n.file .. ':' .. atr.sl(n.range)] = n.id
+        end
+    end
+
+    -- PASS 1: intra-proc analysis per fn, keyed by store node id
+    local info = {} -- fid -> { sinkparams = {idx=true}, argclass = {line -> {callee_lower -> {argidx -> origin}}} }
+    each_php(store, function (file, s, parser)
+        local root = parser:parse()[1]:root()
+        for _, fn in ipairs(collect(root,
+            { 'function_definition', 'method_declaration' })) do
+            local fid = fid_at[file .. ':' .. select(1, fn:range())]
+            if fid then
+                local params = ordered_params(fn, s)
+                local seed = {}
+                for i, p in ipairs(params) do
+                    if not p.scalar then seed[p.name] = { origin = i, embedded = false } end
+                end
+                local srcseed = entry_sources(fn, s)
+                if srcseed then for k, v in pairs(srcseed) do seed[k] = v end end
+                local tainted = scope_taint(fn, s, seed)
+                local rec = { sinkparams = {}, argclass = {} }
+                for _, call in ipairs(collect_scoped(fn, CALLTYPES)) do
+                    local namef = call:field('name')[1] or call:field('function')[1]
+                    local callee = namef and txt(namef, s) or '?'
+                    local argsn = call:field('arguments')[1]
+                    -- 0-based, to match the store's c.line in pass 2
+                    local line = select(1, call:range())
+                    -- classify each positional arg (source / caller-param / nil)
+                    local byidx, ai = {}, 0
+                    for arg in (argsn and argsn:iter_children() or function () end) do
+                        if arg:named() and arg:type() == 'argument' then
+                            ai = ai + 1
+                            local w = embed_witness(arg:named_child(0) or arg, s, tainted)
+                            if w then byidx[ai] = w.origin end
+                        end
+                    end
+                    if next(byidx) then
+                        rec.argclass[line] = rec.argclass[line] or {}
+                        rec.argclass[line][callee:lower()] = byidx
+                    end
+                    -- intra sink_params: a param INDEX embedded at a raw SQL
+                    -- sink here (method-name signal; ORM inserts are excluded —
+                    -- is_sql_method, not the DB-receiver catch-all, so a
+                    -- parameterized createRow does not read as a sink)
+                    if callee ~= '?' and argsn and is_sql_method(callee) then
+                        for arg in argsn:iter_children() do
+                            if arg:named() and arg:type() == 'argument' then
+                                local w = embed_witness(arg:named_child(0) or arg, s, tainted)
+                                if w and w.embedded and type(w.origin) == 'number' then
+                                    rec.sinkparams[w.origin] = true
+                                end
+                            end
+                        end
+                    end
+                end
+                info[fid] = rec
+            end
+        end
+    end)
+
+    -- PASS 2: backward propagation over the resolved call graph, callees-first
+    local scc = require 'cartograph.scc'
+    local ids, calladj = {}, {}
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'function' or n.kind == 'method' then
+            ids[#ids + 1] = n.id
+            local adj = {}
+            for _, c in ipairs(store.calls_by_fn[n.id] or {}) do
+                if c.to then adj[#adj + 1] = c.to end
+            end
+            calladj[n.id] = adj
+        end
+    end
+    table.sort(ids)
+    local con = scc.condense(calladj, ids)
+    local sp = {} -- fid -> {idx=true}, seeded from intra, GROWS during propagation
+    for fid, rec in pairs(info) do
+        sp[fid] = {}
+        for i in pairs(rec.sinkparams) do sp[fid][i] = true end
+    end
+    local findings, seen = {}, {}
+    for ci = 1, con.n do
+        local changed = true
+        while changed do -- fixpoint within the SCC (recursion)
+            changed = false
+            for _, fid in ipairs(con.members[ci]) do
+                local rec = info[fid]
+                for _, c in ipairs(rec and store.calls_by_fn[fid] or {}) do
+                    local gsp = c.to and sp[c.to]
+                    if gsp and next(gsp) then
+                        local ac = rec.argclass[c.line]
+                            and rec.argclass[c.line][(c.callee or ''):lower()]
+                        if ac then
+                            for i in pairs(gsp) do
+                                local o = ac[i]
+                                if type(o) == 'string' then
+                                    local key = fid .. '\31' .. c.line .. '\31' .. i
+                                    if not seen[key] then
+                                        seen[key] = true
+                                        findings[#findings + 1] = { file = c.file,
+                                            line = c.line, source = o, callee = c.callee }
+                                    end
+                                elseif type(o) == 'number' and not sp[fid][o] then
+                                    sp[fid][o] = true; changed = true
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local fs = {}
+    for _, f in ipairs(findings) do
+        fs[#fs + 1] = { file = store.abs(f.file), line = f.line,
+            message = ('possible SQL injection (~, inter-procedural, sink '
+                .. 'unconfirmed): request input %s is passed to %s(), whose '
+                .. 'parameter reaches a SQL sink unsanitized (no scalar type '
+                .. 'hint or guard on the cross-function path)')
+                :format(f.source, f.callee) }
     end
     return fs
 end

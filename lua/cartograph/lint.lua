@@ -684,6 +684,8 @@ M.rules = {
         run = function (store) return require('cartograph.sinkflow').findings(store) end },
     { name = 'sink-source', severity = 'warn',
         run = function (store) return require('cartograph.sinkflow').source_findings(store) end },
+    { name = 'sink-reach', severity = 'warn',
+        run = function (store) return require('cartograph.sinkflow').reach_findings(store) end },
     {
         -- the state atlas's lint face: state that is written but never
         -- read is dead weight — or reached dynamically in a way the graph

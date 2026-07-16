@@ -162,3 +162,39 @@ test('sink-source: guard-clause (early exit) sanitizes; branch-split still fires
     eq(1, #fs, 'guard-clause sanitizes gc.php; branch-split bs.php fires (scope-wide would miss it)')
     ok(fs[1].file:find('bs.php', 1, true))
 end)
+
+test('sink-reach (rung 2): source flows across a call hop into a callee sink; int-typed sibling safe', function ()
+    if not ready() then skip 'no php parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    -- the grocy keystone shape, reduced to resolvable free-function calls:
+    -- controller reads a route arg and passes it to a service fn whose UNTYPED
+    -- param reaches a raw where() sink; the `int`-typed sibling is coercion-safe.
+    write(root, 'controllers.php', table.concat({
+        '<?php',
+        'use Psr\\Http\\Message\\ServerRequestInterface as Request;',
+        'function handle(Request $request, array $args) {',
+        '  return get_locations($args[\'productId\']);',   -- source -> vuln callee: FIRES
+        '}',
+        'function handle_safe(Request $request, array $args) {',
+        '  return get_entries($args[\'productId\']);',      -- source -> int-typed callee: safe
+        '}',
+    }, '\n'))
+    write(root, 'services.php', table.concat({
+        '<?php',
+        'function get_locations($productId) {',            -- UNTYPED: taint survives
+        '  $w = \'product_id = \' . $productId;',           -- embedded in SQL
+        '  return db()->where($w);',                        -- raw sink
+        '}',
+        'function get_entries(int $productId) {',           -- int hint = coercion sanitizer
+        '  $w = \'product_id = \' . $productId;',
+        '  return db()->where($w);',
+        '}',
+    }, '\n'))
+    store.ingest(ts.extract(root))
+    local fs = sinkflow.reach_findings(store)
+    eq(1, #fs, 'the untyped-param chain fires once; the int-typed sibling is coercion-safe')
+    ok(fs[1].file:find('controllers.php', 1, true), 'finding lands at the source-entry (controller)')
+    ok(fs[1].message:find('get_locations', 1, true), 'names the callee whose param reaches the sink')
+    ok(fs[1].message:find('%$args'), 'names the route-arg source')
+end)
