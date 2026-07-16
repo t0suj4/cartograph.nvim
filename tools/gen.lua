@@ -50,7 +50,10 @@ local here = SELF:match('^(.*)/gen%.lua$')
 
 local function say(s) io.stdout:write(s .. '\n') end
 
-local M = { GEN_VERSION = 2 } -- v2: +java generator, library form (v1 = lua-only CLI)
+local M = { GEN_VERSION = 3 } -- v3: ANSWER KEY — deliberate keyed call sites
+-- (probe fns, deliberate alias/class/import calls) + per-site expectations
+-- recorded during emission (M.answers regenerates them in-memory; the
+-- matrix's `key` column verifies outcomes). v2: +java, library form. v1: lua CLI.
 
 -- ── seeded randomness (Park-Miller; exact in doubles) ───────────────────
 local S = 1
@@ -68,9 +71,17 @@ local function pick(t) return t[rnd(#t)] end
 local NAMES = { 'nm', 'go', 'cb', 'db', 'acc', 'res', 'tmp', 'flag', 'item',
     'count', 'value', 'handler', 'worker', 'store', 'alpha', 'beta', 'gamma' }
 
-local function gen_lua_module(k)
+local function gen_lua_module(k, _, fname, ans)
     local B, indent, emitted = {}, 0, 0
     local function w(line) B[#B + 1] = string.rep('    ', indent) .. line end
+    -- an EXPECTATION for the call on the line just written: the answer key.
+    -- want='to' → must resolve to target (node name) at tier; want='refused'
+    -- → must refuse with rule. Recorded during emission, so the key is a
+    -- pure function of (GEN_VERSION, seed) — regenerated, never persisted.
+    local function expect(callee, a)
+        a.file, a.line, a.callee = fname, #B, callee
+        ans[#ans + 1] = a
+    end
     local uniq = 0
     local function fresh(base)
         uniq = uniq + 1
@@ -200,6 +211,9 @@ local function gen_lua_module(k)
     for j = 1, k - 1 do
         if chance(35) then
             w(("local m%d = require('m%d')"):format(j, j))
+            w(('local use%d = m%d.fa%d(1)'):format(j, j, j))
+            expect(('fa%d'):format(j), { want = 'to',
+                target = ('fa%d'):format(j), tier = '~' })
             ctx.calls[#ctx.calls + 1] = ('m%d.fa%d'):format(j, j)
         end
     end
@@ -221,10 +235,25 @@ local function gen_lua_module(k)
         w(('function C%d:calc(n)'):format(k)); emitted = emitted + 1
         indent = indent + 1
         w('return self:get() + n')
+        expect('get', { want = 'to', target = ('C%d:get'):format(k),
+            tier = '~' }) -- V1 self:member via call-site join
         indent = indent - 1
         w('end')
+        -- class usage lives INSIDE a fn: V2 ctor-typing resolves
+        -- in-function locals; at module top level (c.fn nil) it does not
+        -- fire and the honest outcome is refusal — a gap the key
+        -- formalized, kept OUT of the keyed sites deliberately
+        w(('local function usec%d()'):format(k)); emitted = emitted + 1
+        indent = indent + 1
         w(('local obj%d = C%d.new(%d)'):format(k, k, rnd(9)))
-        ctx.calls[#ctx.calls + 1] = ('obj%d:calc'):format(k)
+        expect('new', { want = 'to', target = ('C%d.new'):format(k),
+            tier = 'plain' })
+        w(('return obj%d:calc(2)'):format(k))
+        expect('calc', { want = 'to', target = ('C%d:calc'):format(k),
+            tier = '~' }) -- V2 ctor-typed local, inferred
+        indent = indent - 1
+        w('end')
+        ctx.calls[#ctx.calls + 1] = ('usec%d'):format(k)
     end
 
     -- a FORWARD DECLARATION assigned later, called later still (the v46
@@ -269,6 +298,22 @@ local function gen_lua_module(k)
         exports[#exports + 1] = ('fz%d'):format(k)
     end
 
+    -- the PROBE fn: one deliberate line per honesty-ladder rung, keyed
+    w(('local function probe%d(ph)'):format(k)); emitted = emitted + 1
+    indent = indent + 1
+    w('ph(1)')
+    expect('ph', { want = 'refused', rule = 'higher-order' }) -- v46 param callable
+    if hasfwd then
+        w(('fwd%d(2)'):format(k))
+        expect(('fwd%d'):format(k), { want = 'to',
+            target = ('fwd%d'):format(k), tier = 'plain' }) -- forward decl
+    end
+    w(('return %s(3)'):format(exports[1]))
+    expect(exports[1], { want = 'to', target = exports[1], tier = 'plain' })
+    indent = indent - 1
+    w('end')
+    exports[#exports + 1] = ('probe%d'):format(k)
+
     -- top-level load-time statement, sometimes
     if chance(40) and #ctx.calls > 0 then
         w(('local boot%d = %s(%d)'):format(k, pick(ctx.calls), rnd(9)))
@@ -290,9 +335,13 @@ end
 -- Everything int/String-typed: declared types are what the rt rounds read;
 -- runtime semantics never execute.
 
-local function gen_java_module(k, exports)
+local function gen_java_module(k, exports, fname, ans)
     local B, indent, emitted = {}, 0, 0
     local function w(line) B[#B + 1] = string.rep('    ', indent) .. line end
+    local function expect(callee, a) -- see the lua twin: the answer key
+        a.file, a.line, a.callee = fname, #B, callee
+        ans[#ans + 1] = a
+    end
     local uniq = 0
     local function fresh(base)
         uniq = uniq + 1
@@ -474,16 +523,32 @@ local function gen_java_module(k, exports)
     end
     if hasthing then
         w(('Thing%d t = Thing%d.builder().value(n).build();'):format(k, k))
+        expect('builder', { want = 'to',
+            target = ('Thing%d::builder'):format(k), tier = 'plain' })
+        expect('value', { want = 'to',
+            target = ('Builder%d::value'):format(k), tier = 'tinf' })
+        expect('build', { want = 'to',
+            target = ('Builder%d::build'):format(k), tier = 'tinf' })
         w('int tx = t.getX();')
+        expect('getX', { want = 'to',
+            target = ('Thing%d::getX'):format(k), tier = 'plain' })
         ctx.ints[#ctx.ints + 1] = 'tx'
     end
     if hasiface then
         w('int ib = api.compute(n);')
+        expect('compute', { want = 'to', -- THE F1 bean redirect
+            target = ('Api%dImpl::compute'):format(k), tier = '~' })
         ctx.ints[#ctx.ints + 1] = 'ib'
         w('String lb = api.label("x");')
+        expect('label', { want = 'to',
+            target = ('Api%dImpl::label'):format(k), tier = '~' })
     end
     if hasenum then
         w(('boolean ok = State%d.OK.done();'):format(k))
+        -- enum-CONSTANT receiver typing is not built: `State.OK.done()`
+        -- refuses among the corpus's State*::done — the sound current
+        -- rung, formalized here; an upgrade edits this expectation
+        expect('done', { want = 'refused', rule = 'ambiguous' })
         w('if (ok) {')
         indent = indent + 1
         stmts(subctx(ctx), 1, rnd(2))
@@ -492,7 +557,13 @@ local function gen_java_module(k, exports)
     end
     if overloaded then
         w(('int ov = helper%d(n, %d);'):format(k, rnd(9))) -- deliberate ambiguity site
+        expect(('helper%d'):format(k), { want = 'refused', rule = 'samefile' })
         ctx.ints[#ctx.ints + 1] = 'ov'
+    else
+        w(('int hh = helper%d(n);'):format(k))
+        expect(('helper%d'):format(k), { want = 'to',
+            target = ('M%d::helper%d'):format(k, k), tier = 'plain' })
+        ctx.ints[#ctx.ints + 1] = 'hh'
     end
     if chance(40) then
         -- method reference (parses without semantic backing)
@@ -504,20 +575,32 @@ local function gen_java_module(k, exports)
     indent = indent - 1
     w('}')
 
-    -- cross-file: earlier modules' statics + instance entries
+    -- cross-file: earlier modules' statics + instance entries. The
+    -- generator KNOWS whether module j OVERLOADED its helper, so the
+    -- expectation is conditional — refusal for the overloaded ones,
+    -- resolution otherwise: intent a count gate could never express
     if k > 1 and chance(70) then
         local j = rnd(k - 1)
         w('')
         w(('public static int cross%d(int n) {'):format(k)); emitted = emitted + 1
         indent = indent + 1
         w(('return M%d.helper%d(n) + new M%d().run%d(n);'):format(j, j, j, j))
+        if exports[j] and exports[j].overloaded then
+            expect(('helper%d'):format(j),
+                { want = 'refused', rule = 'ambiguous' })
+        else
+            expect(('helper%d'):format(j), { want = 'to',
+                target = ('M%d::helper%d'):format(j, j), tier = 'plain' })
+        end
+        expect(('run%d'):format(j), { want = 'to', -- `new M<j>()` receiver
+            target = ('M%d::run%d'):format(j, j), tier = '~' }) -- typed by inference
         indent = indent - 1
         w('}')
     end
 
     indent = indent - 1
     w('}')
-    exports[k] = true
+    exports[k] = { overloaded = overloaded }
     return table.concat(B, '\n') .. '\n', emitted
 end
 
@@ -541,32 +624,54 @@ local function assert_valid(src, lang, what)
 end
 
 local LANGS = {
-    lua = { gen = function (k, _) return gen_lua_module(k) end,
+    lua = { gen = gen_lua_module,
         fname = function (k) return ('m%d.lua'):format(k) end },
     java = { gen = gen_java_module,
         fname = function (k) return ('M%d.java'):format(k) end },
 }
 
+--- Build a corpus IN MEMORY: { files = {name→src}, emitted, answers }.
+--- The single source both generate() (writes) and answers() (key) share.
+local function build(lang, nfiles, seed)
+    local L = assert(LANGS[lang], 'gen: no generator for ' .. tostring(lang))
+    srand(seed or 1)
+    local out = { files = {}, order = {}, emitted = 0, answers = {} }
+    local exports = {}
+    for k = 1, nfiles do
+        local fname = L.fname(k)
+        local src, emitted = L.gen(k, exports, fname, out.answers)
+        out.files[fname] = src
+        out.order[k] = fname
+        out.emitted = out.emitted + emitted
+    end
+    return out
+end
+
+--- The ANSWER KEY alone (no writes): per-call intended outcomes at the
+--- deliberate sites — { file, line (1-based), callee, want='to'|'refused',
+--- target?, tier='plain'|'~'|'tinf', rule? }. Deterministic per
+--- (GEN_VERSION, lang, seed, files); the matrix's `key` column consumes it.
+function M.answers(lang, nfiles, seed)
+    return build(lang, nfiles, seed).answers
+end
+
 --- Generate a corpus into dir; returns the emitted named-fn count.
 --- Deterministic for a given (GEN_VERSION, lang, seed, nfiles).
 function M.generate(lang, dir, nfiles, seed)
-    local L = assert(LANGS[lang], 'gen: no generator for ' .. tostring(lang))
     if lang ~= 'lua' then
         -- non-lua validity needs the tree-sitter grammar on the rtp
         dofile(here .. '/bench.lua').bootstrap()
     end
-    srand(seed or 1)
+    local out = build(lang, nfiles, seed)
     vim.fn.mkdir(dir, 'p')
-    local total, exports = 0, {}
-    for k = 1, nfiles do
-        local src, emitted = L.gen(k, exports)
-        assert_valid(src, lang, L.fname(k))
-        local fd = assert(io.open(dir .. '/' .. L.fname(k), 'w'))
+    for _, fname in ipairs(out.order) do
+        local src = out.files[fname]
+        assert_valid(src, lang, fname)
+        local fd = assert(io.open(dir .. '/' .. fname, 'w'))
         fd:write(src)
         fd:close()
-        total = total + emitted
     end
-    return total
+    return out.emitted
 end
 
 -- ══ CLI ═══════════════════════════════════════════════════════════════════

@@ -945,6 +945,22 @@ and surprise). Both are fully calibrated: expected counts, structure
 baselines, df/flow parity censuses. A generator change bumps `GEN_VERSION` →
 new root paths + recalibration, the same discipline as expected counts.
 
+Synthetic corpora also carry an **ANSWER KEY** — the matrix's `key` column.
+While emitting its deliberate idiom sites the generator records the *intended
+outcome* per call — resolve to THIS def at THIS honesty tier
+(`plain`/`~`/`tinf`), or refuse with THIS rule — and the column checks the
+extracted graph against it (the key regenerates in-memory from the seed;
+nothing is persisted). This is the semantic gate: every other column asks
+"did the answer change", the key asks "is the answer RIGHT". Where the
+resolver's sound current answer is a refusal (enum-constant receivers,
+overloads — the generator *knows* which modules it overloaded and predicts
+refusal vs resolution per site), the key encodes the refusal explicitly: an
+upgrade later edits the expectation as a reviewed claim, never as silent
+count drift. Calibrating the first key immediately formalized one gap
+(V2 ctor-typing doesn't fire on module-top-level locals — in-function is the
+supported shape) and pinned F1 bean redirects + rt-round chain tiers as
+executable spec.
+
 `tools/preflight.lua` is the dev loop as one command: git-diff impact (changed
 lines → containing functions → reverse call cone → the specs whose
 require-cones reach any touched file), then the development guards, then the

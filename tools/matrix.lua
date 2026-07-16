@@ -48,7 +48,7 @@ local here = SELF:match('^(.*)/matrix%.lua$')
 local function say(s) io.stdout:write(s .. '\n') end
 
 local COLS = { 'counts', 'valid', 'mem', 'dfpar', 'fold', 'silent',
-    'cache', 'struct', 'par' }
+    'cache', 'key', 'struct', 'par' }
 -- the minutes-tier corpora (scale extracts); everything else is seconds
 local HEAVY = { server = true, v8 = true, sylius = true, ghost = true,
     blesh = true, gforth = true, openfirmware = true, bwipp = true }
@@ -294,6 +294,71 @@ local function run_row(name)
                     findings[i].line, findings[i].message)
             end
             cell('silent', 'FAIL', d)
+        end
+    end
+
+    -- the ANSWER KEY (synthetic corpora only): the generator's per-call
+    -- intended outcomes, regenerated in-memory (deterministic) and checked
+    -- against the extracted graph. The SEMANTIC gate: every other column
+    -- asks "did the answer change" — this one asks "is the answer RIGHT".
+    -- A key edit is a REVIEWED claim ("the new resolution is correct
+    -- because…"), not count acceptance.
+    if wanted('key') then
+        if not corpus.synthetic then
+            cell('key', '--')
+        else
+            local gen = dofile(here .. '/gen.lua')
+            local ans = gen.answers(corpus.synthetic.lang,
+                corpus.synthetic.files, corpus.synthetic.seed)
+            local cidx = {}
+            for _, cc in ipairs(data.calls or {}) do
+                cidx[(cc.file or '') .. '\31' .. ((cc.line or -1) + 1)
+                    .. '\31' .. (cc.callee or '')] = cc
+            end
+            local nidx = {}
+            for _, nn in ipairs(data.nodes or {}) do nidx[nn.id] = nn end
+            local bad = {}
+            for _, a in ipairs(ans) do
+                local cc = cidx[a.file .. '\31' .. a.line .. '\31' .. a.callee]
+                local why
+                if not cc then
+                    why = 'no call extracted at keyed site'
+                elseif a.want == 'to' then
+                    local tn = cc.to and nidx[cc.to] and nidx[cc.to].name
+                    local tier = cc.tinf and 'tinf' or cc.inferred and '~'
+                        or 'plain'
+                    if not cc.to then
+                        why = ('expected → %s, got %s'):format(a.target,
+                            cc.refused and ('refused ' .. tostring(cc.refused.rule))
+                            or 'UNRESOLVED (silent)')
+                    elseif tn ~= a.target then
+                        why = ('expected → %s, got → %s'):format(
+                            a.target, tostring(tn))
+                    elseif a.tier and tier ~= a.tier then
+                        why = ('right target, tier %s ≠ expected %s')
+                            :format(tier, a.tier)
+                    end
+                elseif a.want == 'refused' then
+                    if cc.to then
+                        why = ('expected refusal %s, got → %s'):format(
+                            tostring(a.rule),
+                            nidx[cc.to] and nidx[cc.to].name or cc.to)
+                    elseif not cc.refused then
+                        why = ('expected refusal %s, got SILENT')
+                            :format(tostring(a.rule))
+                    elseif a.rule and cc.refused.rule ~= a.rule then
+                        why = ('refusal rule %s ≠ expected %s'):format(
+                            tostring(cc.refused.rule), a.rule)
+                    end
+                end
+                if why then
+                    bad[#bad + 1] = ('%s:%d %s — %s'):format(
+                        a.file, a.line, a.callee, why)
+                end
+            end
+            cell('key', #bad == 0 and 'OK' or 'FAIL',
+                #bad > 0 and bad
+                or { ('%d keyed sites verified'):format(#ans) })
         end
     end
 

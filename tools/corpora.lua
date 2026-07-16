@@ -213,19 +213,19 @@ return {
     -- MATERIALIZES a missing root by running the generator — so these
     -- gates run on any machine, no ~/git checkouts required.
     synlua = {
-        root = HOME .. '/.cache/cartograph-tools/syn/lua-g2-s1',
+        root = HOME .. '/.cache/cartograph-tools/syn/lua-g3-s1',
         synthetic = { lang = 'lua', seed = 1, files = 8 },
         lang = 'lua',
-        expected = { refs = 87, nodes = 142 }, -- calibrated @ gen v2
+        expected = { refs = 108, nodes = 158 }, -- calibrated @ gen v3
         notes = 'synthetic lua (gen.lua g2 seed 1): the resolution-ladder'
             .. ' bestiary — fwd-decls, fn-values, higher-order, shadows,'
             .. ' smt classes, requires, goto',
     },
     synjava = {
-        root = HOME .. '/.cache/cartograph-tools/syn/java-g2-s1',
+        root = HOME .. '/.cache/cartograph-tools/syn/java-g3-s1',
         synthetic = { lang = 'java', seed = 1, files = 8 },
         lang = 'java',
-        expected = { refs = 47, nodes = 87 }, -- calibrated @ gen v2
+        expected = { refs = 47, nodes = 87 }, -- calibrated @ gen v3
         notes = 'synthetic java (gen.lua g2 seed 1): @Service impls = the'
             .. ' ONLY locally-testable F1 bean redirects; unique Builder<k>'
             .. ' chains = the positive rt-rounds path; enums, overloads,'
