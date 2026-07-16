@@ -38,7 +38,7 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 71, ['df-over-collects'] = 445,
+    self = { ['binding-as-use'] = 72, ['df-over-collects'] = 446,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 },
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
@@ -68,6 +68,7 @@ M.EXPECTED = {
     -- censuses are exact for (GEN_VERSION, seed) — recalibrate on gen bumps
     synlua = { ['df-over-collects'] = 47 }, -- closure-leak, flow-correct
     synjava = {}, -- perfect parity
+    synjs = { ['df-over-collects'] = 294 }, -- closure-leak (arrows), flow-correct
 }
 
 M.ORDER = { 'binding-as-use', 'df-over-collects', 'flow-over-collects',

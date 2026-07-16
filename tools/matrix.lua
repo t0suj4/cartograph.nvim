@@ -338,6 +338,18 @@ local function run_row(name)
                         why = ('right target, tier %s ≠ expected %s')
                             :format(tier, a.tier)
                     end
+                elseif a.want == 'silent' then
+                    -- a DOCUMENTED honesty gap, encoded as the current rung
+                    -- (e.g. resolve()'s #name<3 silent skip): this site must
+                    -- stay silent until the gap is FIXED — then it fails
+                    -- loudly and the key upgrade is the reviewed claim
+                    if cc.to then
+                        why = ('expected SILENT (documented gap), got → %s')
+                            :format(nidx[cc.to] and nidx[cc.to].name or cc.to)
+                    elseif cc.refused then
+                        why = ('expected SILENT (documented gap), got refusal %s')
+                            :format(tostring(cc.refused.rule))
+                    end
                 elseif a.want == 'refused' then
                     if cc.to then
                         why = ('expected refusal %s, got → %s'):format(

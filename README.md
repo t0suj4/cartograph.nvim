@@ -932,12 +932,15 @@ nvim --headless -u NONE -l tools/matrix.lua --save       # re-baseline structs
 # overloads, method references, cross-file statics.
 nvim --headless -u NONE -l tools/gen.lua lua --check --runs 20
 nvim --headless -u NONE -l tools/gen.lua java --check --runs 10
+nvim --headless -u NONE -l tools/gen.lua js --check --runs 10
 nvim --headless -u NONE -l tools/gen.lua java --seed 7 --out /tmp/g  # just generate
 ```
 
-Two SYNTHETIC corpora are registered first-class in `tools/corpora.lua` —
-`synlua` and `synjava`, identity `(GEN_VERSION, lang, seed, files)` instead of
-a git rev. `bench.corpus` materializes a missing root by running the
+Three SYNTHETIC corpora are registered first-class in `tools/corpora.lua` —
+`synlua`, `synjava` and `synjs` (js adds hoisted forward calls, fn-value
+consts, let/var scope regimes, arrows, ESM + one CommonJS module, and
+`min.js`, a one-line minified module exercising the (l,c) column spill),
+identity `(GEN_VERSION, lang, seed, files)` instead of a git rev. `bench.corpus` materializes a missing root by running the
 generator, so `gate synjava`, `dfgate synjava` and their matrix rows run on
 **any machine, with zero corpus checkouts** — the portable regression tier
 (the real pinned corpora keep the jobs synthesis can't do: ecology validity
@@ -956,10 +959,14 @@ resolver's sound current answer is a refusal (enum-constant receivers,
 overloads — the generator *knows* which modules it overloaded and predicts
 refusal vs resolution per site), the key encodes the refusal explicitly: an
 upgrade later edits the expectation as a reviewed claim, never as silent
-count drift. Calibrating the first key immediately formalized one gap
-(V2 ctor-typing doesn't fire on module-top-level locals — in-function is the
-supported shape) and pinned F1 bean redirects + rt-round chain tiers as
-executable spec.
+count drift. Calibrating the keys formalized real gaps as
+executable spec: V2 ctor-typing doesn't fire on module-top-level locals
+(in-function is the supported shape); js receiver typing doesn't exist
+(this-chains and `obj.method()` refuse as ambiguous — the encoded current
+rung); and `want='silent'` documents resolve()'s `#name<3` short-name skip —
+a deliberately shameful key kind that FAILS the moment the gap is fixed,
+forcing the reviewed upgrade. F1 bean redirects and rt-round chain tiers are
+pinned positively.
 
 `tools/preflight.lua` is the dev loop as one command: git-diff impact (changed
 lines → containing functions → reverse call cone → the specs whose

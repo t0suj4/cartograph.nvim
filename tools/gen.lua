@@ -1,7 +1,7 @@
 -- The GENERATED-CODE fuzz bed: synthesize a corpus with a seeded generator,
 -- then let the matrix's invariant columns judge it.
 --
---   nvim --headless -u NONE -l tools/gen.lua <lua|java> [--seed N]
+--   nvim --headless -u NONE -l tools/gen.lua <lua|java|js> [--seed N]
 --        [--files K] [--out DIR] [--check] [--runs R] [--keep]
 --
 -- Every other gate tests against HISTORY (a baseline = what the extractor
@@ -42,6 +42,12 @@
 --         methods (the State::completed shape from the parallel-fix
 --         adjudication), method references, overloads (ambiguity
 --         refusals), cross-file statics + instance calls.
+--   js:   HOISTED forward calls, fn-value consts (`const g = f; g()`),
+--         higher-order callbacks, arrows, classes with this-chains,
+--         let/var SCOPE REGIMES (block vs hoisted — flow's regime seam),
+--         ESM + one CommonJS module, template literals — plus an EXTRA
+--         MINIFIED one-line module (min.js): same-line entities, the v32
+--         (l,c) column spill's reason to exist.
 -- Weights are a starting point — seed new idioms from corpus censuses, not
 -- imagination (generator bias is the known risk).
 
@@ -50,10 +56,14 @@ local here = SELF:match('^(.*)/gen%.lua$')
 
 local function say(s) io.stdout:write(s .. '\n') end
 
-local M = { GEN_VERSION = 3 } -- v3: ANSWER KEY — deliberate keyed call sites
--- (probe fns, deliberate alias/class/import calls) + per-site expectations
--- recorded during emission (M.answers regenerates them in-memory; the
--- matrix's `key` column verifies outcomes). v2: +java, library form. v1: lua CLI.
+local M = { GEN_VERSION = 4 } -- v4: +JS generator (hoisting, fn-value
+-- consts, let/var regimes, arrows, classes, ESM + one CommonJS module, and
+-- an EXTRA minified one-line module — the (l,c) column-spill's home turf).
+-- lua/java output byte-identical to v3 (additive language; paths bump per
+-- the discipline, calibrations carry). v3: ANSWER KEY — deliberate keyed
+-- call sites + per-site expectations recorded during emission (M.answers
+-- regenerates in-memory; the matrix's `key` column verifies outcomes).
+-- v2: +java, library form. v1: lua CLI.
 
 -- ── seeded randomness (Park-Miller; exact in doubles) ───────────────────
 local S = 1
@@ -604,6 +614,249 @@ local function gen_java_module(k, exports, fname, ans)
     return table.concat(B, '\n') .. '\n', emitted
 end
 
+
+-- ══ the js generator ══════════════════════════════════════════════════════
+-- The JS sharp edges: HOISTING (a call textually before its function
+-- declaration resolves — js-only forward-decl shape), fn-value consts
+-- (`const g = f; g()` — the resolve-or-refuse class), let/var SCOPE
+-- REGIMES (flow's per-language regime seam: let dies with its block, var
+-- hoists), arrows, classes with this-chains, ESM everywhere + ONE
+-- CommonJS module (v22's require class). min.js rides as an EXTRA file
+-- (see js_min below).
+
+local function gen_js_module(k, exports, fname, ans)
+    local B, indent, emitted = {}, 0, 0
+    local function w(line) B[#B + 1] = string.rep('    ', indent) .. line end
+    local function expect(callee, a) -- the answer key, see the lua twin
+        a.file, a.line, a.callee = fname, #B, callee
+        ans[#ans + 1] = a
+    end
+    local uniq = 0
+    local function fresh(base)
+        uniq = uniq + 1
+        return ('%s%d'):format(base or pick(NAMES), uniq)
+    end
+
+    local function expr(ctx, d)
+        local r = rnd(10)
+        if d <= 0 or r <= 3 then return tostring(rnd(100)) end
+        if r == 4 then return ("'s%d'"):format(rnd(50)) end
+        if r == 5 and #ctx.vars > 0 then
+            return ('`t${%s}`'):format(pick(ctx.vars)) -- template literal
+        end
+        if r == 6 and #ctx.vars > 0 then return pick(ctx.vars) end
+        if r == 7 then
+            return expr(ctx, d - 1) .. pick({ ' + ', ' - ', ' * ' })
+                .. expr(ctx, d - 1)
+        end
+        if r == 8 and #ctx.calls > 0 then
+            return pick(ctx.calls) .. '(' .. expr(ctx, d - 1) .. ')'
+        end
+        if r == 9 then
+            return '{ a: ' .. expr(ctx, d - 1) .. ', b: ' .. expr(ctx, d - 1) .. ' }'
+        end
+        return '[' .. expr(ctx, d - 1) .. ']'
+    end
+    local function cond(ctx)
+        local r = rnd(3)
+        if r == 1 and #ctx.vars > 0 then return pick(ctx.vars) end
+        if r == 2 then return expr(ctx, 1) .. ' < ' .. expr(ctx, 1) end
+        return '!(' .. expr(ctx, 1) .. ')'
+    end
+    local function subctx(ctx)
+        local c = { vars = {}, calls = {} }
+        for _, v in ipairs(ctx.vars) do c.vars[#c.vars + 1] = v end
+        for _, v in ipairs(ctx.calls) do c.calls[#c.calls + 1] = v end
+        return c
+    end
+
+    local body
+    local function stmt(ctx, d)
+        local r = rnd(10)
+        if r <= 3 then -- const decl; js redeclaring const in the same block
+            -- is a (parse-fine) semantic error, so always a fresh name
+            local nm = fresh()
+            w(('const %s = %s'):format(nm, expr(ctx, 2)))
+            ctx.vars[#ctx.vars + 1] = nm
+        elseif r <= 5 and #ctx.calls > 0 then
+            w(('%s(%s)'):format(pick(ctx.calls), expr(ctx, 1)))
+        elseif r == 6 and d > 0 then
+            w(('if (%s) {'):format(cond(ctx)))
+            indent = indent + 1; body(subctx(ctx), d - 1, rnd(3)); indent = indent - 1
+            if chance(50) then
+                w('} else {')
+                indent = indent + 1; body(subctx(ctx), d - 1, rnd(2)); indent = indent - 1
+            end
+            w('}')
+        elseif r == 7 and d > 0 then -- for..let (block regime)
+            local iv = fresh('i')
+            w(('for (let %s = 0; %s < %d; %s++) {'):format(iv, iv, rnd(9), iv))
+            indent = indent + 1
+            local c = subctx(ctx)
+            c.vars[#c.vars + 1] = iv
+            body(c, d - 1, rnd(2))
+            indent = indent - 1
+            w('}')
+        elseif r == 8 and d > 0 then -- let/var REGIME block: let dies with
+            -- the block, var hoists out — flow's per-language regime seam
+            local lv, vv = fresh('l'), fresh('v')
+            w('{')
+            indent = indent + 1
+            w(('let %s = %s'):format(lv, expr(ctx, 1)))
+            w(('var %s = %s'):format(vv, expr(ctx, 1)))
+            body(subctx(ctx), d - 1, rnd(2))
+            indent = indent - 1
+            w('}')
+            ctx.vars[#ctx.vars + 1] = vv -- the var IS visible after; let is not
+        else -- arrow closure bound to a const, then callable
+            local nm = fresh('h')
+            w(('const %s = (a) => {'):format(nm))
+            indent = indent + 1; body(subctx(ctx), 0, rnd(2)); indent = indent - 1
+            w('}')
+            ctx.calls[#ctx.calls + 1] = nm
+        end
+    end
+    body = function (ctx, d, n)
+        for _ = 1, n do stmt(ctx, d) end
+        if chance(40) then w(('return %s'):format(expr(ctx, 1))) end
+    end
+    local function fnbody(ctx, params)
+        indent = indent + 1
+        for _, p in ipairs(params) do ctx.vars[#ctx.vars + 1] = p end
+        body(ctx, 2, 2 + rnd(3))
+        indent = indent - 1
+    end
+
+    -- ── module layout ────────────────────────────────────────────────────
+    -- ESM everywhere except the LAST module, which is the CommonJS one
+    local cjs = exports.ncjs == k
+    w(('// generated module m%d (seed-deterministic; do not edit)'):format(k))
+    local ctx = { vars = {}, calls = {} }
+
+    -- imports of earlier modules + a deliberate keyed call
+    for j = 1, k - 1 do
+        if chance(35) then
+            if cjs then
+                w(("const q%d = require('./m%d.js')"):format(j, j))
+                w(('const use%d = q%d.fa%d(1)'):format(j, j, j))
+            else
+                w(("import { fa%d } from './m%d.js'"):format(j, j))
+                w(('const use%d = fa%d(1)'):format(j, j, j))
+            end
+            expect(('fa%d'):format(j), { want = 'to',
+                target = ('fa%d'):format(j), tier = '~' }) -- adjudicated below
+            ctx.calls[#ctx.calls + 1] = ('fa%d'):format(j)
+        end
+    end
+
+    -- HOISTING: the call line sits ABOVE the declaration it names — the
+    -- js-native forward-decl shape (resolves same-file, no decl needed)
+    w(('function early%d(n) {'):format(k)); emitted = emitted + 1
+    indent = indent + 1
+    w(('return late%d(n) + 1'):format(k))
+    expect(('late%d'):format(k), { want = 'to',
+        target = ('late%d'):format(k), tier = 'plain' })
+    indent = indent - 1
+    w('}')
+    w(('function late%d(n) {'):format(k)); emitted = emitted + 1
+    indent = indent + 1; w('return n * 2'); indent = indent - 1
+    w('}')
+    ctx.calls[#ctx.calls + 1] = ('early%d'):format(k)
+
+    -- a class with a this-chain. JS RECEIVER TYPING IS NOT BUILT (no V1/V2
+    -- analog — the wow residual's sibling): this.getv() and obj.calc() refuse
+    -- among the corpus-wide candidates — the sound CURRENT RUNG, encoded;
+    -- a js receiver-typing cut upgrades these expectations as reviewed edits
+    if chance(60) then
+        w(('class C%d {'):format(k))
+        indent = indent + 1
+        w('constructor(x) { this.x = x }')
+        w('getv() { return this.x }'); emitted = emitted + 1
+        w('calc(n) {'); emitted = emitted + 1
+        indent = indent + 1
+        w('return this.getv() + n')
+        expect('getv', { want = 'refused', rule = 'ambiguous' })
+        indent = indent - 1
+        w('}')
+        indent = indent - 1
+        w('}')
+        w(('function usec%d() {'):format(k)); emitted = emitted + 1
+        indent = indent + 1
+        w(('const obj = new C%d(3)'):format(k))
+        w('return obj.calc(2)')
+        expect('calc', { want = 'refused', rule = 'ambiguous' })
+        indent = indent - 1
+        w('}')
+        ctx.calls[#ctx.calls + 1] = ('usec%d'):format(k)
+    end
+
+    -- named functions (the exports), params sometimes CALLED (higher-order)
+    local nf = 1 + rnd(2)
+    local names = {}
+    for i = 1, nf do
+        local fnm = ('f%s%d'):format(i == 1 and 'a' or ('%c'):format(96 + i), k)
+        local params = {}
+        for p = 1, rnd(2) do params[p] = fresh('p') end
+        w(('function %s(%s) {'):format(fnm, table.concat(params, ', ')))
+        emitted = emitted + 1
+        local fctx = subctx(ctx)
+        fnbody(fctx, params)
+        w('}')
+        ctx.calls[#ctx.calls + 1] = fnm
+        names[#names + 1] = fnm
+    end
+
+    -- the PROBE fn: keyed honesty-ladder sites
+    w(('function probe%d(ph) {'):format(k)); emitted = emitted + 1
+    indent = indent + 1
+    w('ph(1)')
+    expect('ph', { want = 'refused', rule = 'higher-order' })
+    w(('const ali%d = %s'):format(k, names[1]))
+    w(('const av%d = ali%d(2)'):format(k, k))
+    expect(('ali%d'):format(k), { want = 'refused', rule = 'fn-value' })
+    w(('const arr%d = (a) => a + 1'):format(k))
+    w(('return arr%d(3) + av%d'):format(k, k))
+    expect(('arr%d'):format(k), { want = 'to',
+        target = ('arr%d'):format(k), tier = 'plain' }) -- assigned arrow = a def
+    indent = indent - 1
+    w('}')
+    emitted = emitted + 1 -- the assigned arrow arr<k> extracts as a fn too
+
+    -- exports
+    local ex = {}
+    for _, nm in ipairs(names) do ex[#ex + 1] = nm end
+    ex[#ex + 1] = ('probe%d'):format(k)
+    ex[#ex + 1] = ('early%d'):format(k)
+    if cjs then
+        w(('module.exports = { %s }'):format(table.concat(ex, ', ')))
+    else
+        w(('export { %s }'):format(table.concat(ex, ', ')))
+    end
+
+    return table.concat(B, '\n') .. '\n', emitted
+end
+
+-- min.js: the whole module on ONE line — same-line entities are exactly
+-- what the v32 (l,c) column spill exists for (minified/generated blobs);
+-- extraction, flow rows, fold and navigation must all survive it
+local function js_min(ans)
+    local src = 'function qone(a){return a+1}function qtwo(a){return qone(a)*2}'
+        .. 'function q3(a){return qtwo(a)+1}const qr=q3(5)\n'
+    -- positive same-line resolutions (the (l,c) spill's home turf)
+    ans[#ans + 1] = { file = 'min.js', line = 1, callee = 'qone',
+        want = 'to', target = 'qone', tier = 'plain' }
+    ans[#ans + 1] = { file = 'min.js', line = 1, callee = 'qtwo',
+        want = 'to', target = 'qtwo', tier = 'plain' }
+    -- q3 is 2 chars ON PURPOSE: resolve()'s #name<3 gate SILENTLY skips
+    -- short free names even with a same-file def — the documented meta-gap
+    -- (the honesty ladder's short-name floor). want='silent' encodes the
+    -- CURRENT RUNG loudly: fixing the gate (gate on unbound-ness, not
+    -- length) makes this site FAIL and forces the reviewed key upgrade.
+    ans[#ans + 1] = { file = 'min.js', line = 1, callee = 'q3',
+        want = 'silent' }
+    return 'min.js', src, 3
+end
+
 -- ══ validity + generation ════════════════════════════════════════════════
 
 -- the generator's contract with itself: emitted source parses CLEAN under
@@ -628,6 +881,9 @@ local LANGS = {
         fname = function (k) return ('m%d.lua'):format(k) end },
     java = { gen = gen_java_module,
         fname = function (k) return ('M%d.java'):format(k) end },
+    js = { gen = gen_js_module, extra = js_min, cjs_last = true,
+        tslang = 'javascript', -- the grammar name (CLI name stays js)
+        fname = function (k) return ('m%d.js'):format(k) end },
 }
 
 --- Build a corpus IN MEMORY: { files = {name→src}, emitted, answers }.
@@ -637,11 +893,18 @@ local function build(lang, nfiles, seed)
     srand(seed or 1)
     local out = { files = {}, order = {}, emitted = 0, answers = {} }
     local exports = {}
+    if L.cjs_last then exports.ncjs = nfiles end -- the one CommonJS module
     for k = 1, nfiles do
         local fname = L.fname(k)
         local src, emitted = L.gen(k, exports, fname, out.answers)
         out.files[fname] = src
         out.order[k] = fname
+        out.emitted = out.emitted + emitted
+    end
+    if L.extra then -- a deliberate extra file (js: the minified module)
+        local fname, src, emitted = L.extra(out.answers)
+        out.files[fname] = src
+        out.order[#out.order + 1] = fname
         out.emitted = out.emitted + emitted
     end
     return out
@@ -664,9 +927,10 @@ function M.generate(lang, dir, nfiles, seed)
     end
     local out = build(lang, nfiles, seed)
     vim.fn.mkdir(dir, 'p')
+    local parselang = LANGS[lang].tslang or lang
     for _, fname in ipairs(out.order) do
         local src = out.files[fname]
-        assert_valid(src, lang, fname)
+        assert_valid(src, parselang, fname)
         local fd = assert(io.open(dir .. '/' .. fname, 'w'))
         fd:write(src)
         fd:close()
@@ -699,7 +963,7 @@ do
 end
 
 if not LANGS[opts.lang or ''] then
-    say('usage: nvim --headless -u NONE -l tools/gen.lua <lua|java> [--seed N]'
+    say('usage: nvim --headless -u NONE -l tools/gen.lua <lua|java|js> [--seed N]'
         .. ' [--files K] [--out DIR] [--check] [--runs R] [--keep]')
     os.exit(2)
 end

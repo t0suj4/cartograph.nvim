@@ -213,23 +213,34 @@ return {
     -- MATERIALIZES a missing root by running the generator — so these
     -- gates run on any machine, no ~/git checkouts required.
     synlua = {
-        root = HOME .. '/.cache/cartograph-tools/syn/lua-g3-s1',
+        root = HOME .. '/.cache/cartograph-tools/syn/lua-g4-s1',
         synthetic = { lang = 'lua', seed = 1, files = 8 },
         lang = 'lua',
-        expected = { refs = 108, nodes = 158 }, -- calibrated @ gen v3
+        expected = { refs = 108, nodes = 158 }, -- calibrated @ gen v3, byte-identical @ v4
         notes = 'synthetic lua (gen.lua g2 seed 1): the resolution-ladder'
             .. ' bestiary — fwd-decls, fn-values, higher-order, shadows,'
             .. ' smt classes, requires, goto',
     },
     synjava = {
-        root = HOME .. '/.cache/cartograph-tools/syn/java-g3-s1',
+        root = HOME .. '/.cache/cartograph-tools/syn/java-g4-s1',
         synthetic = { lang = 'java', seed = 1, files = 8 },
         lang = 'java',
-        expected = { refs = 47, nodes = 87 }, -- calibrated @ gen v3
+        expected = { refs = 47, nodes = 87 }, -- calibrated @ gen v3, byte-identical @ v4
         notes = 'synthetic java (gen.lua g2 seed 1): @Service impls = the'
             .. ' ONLY locally-testable F1 bean redirects; unique Builder<k>'
             .. ' chains = the positive rt-rounds path; enums, overloads,'
             .. ' method refs, cross-file',
+    },
+
+    synjs = {
+        root = HOME .. '/.cache/cartograph-tools/syn/js-g4-s1',
+        synthetic = { lang = 'js', seed = 1, files = 8 },
+        lang = 'javascript',
+        expected = { refs = 137, nodes = 283 }, -- calibrated @ gen v4
+        notes = 'synthetic js (gen.lua g4 seed 1): hoisted fwd calls,'
+            .. ' fn-value consts, let/var regimes, arrows, classes, ESM +'
+            .. ' one CommonJS module, and min.js — a one-line minified'
+            .. ' module (the (l,c) column-spill exercise)',
     },
 
     self = {
