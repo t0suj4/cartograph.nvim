@@ -982,11 +982,14 @@ constant folding. Where a guard *proves* something about a variable (`if x`,
 guard dominates: *in here, `x` is non-nil*. It reuses the same `guards_over` CFG
 dominance the taint sanitizers ride, and narrows only where the predicate actually
 proves it — an `and`-conjunction narrows every conjunct, but an `or` or a negated
-compound narrows nothing. The guard vocabulary is per-language and extensible (Lua
-nil/truthiness today; `typeof`/`instanceof` slot in for other codebases). On top of
-it, the lens flags **redundant checks** — an `if` re-testing something a dominating
-guard already proved (`always true` / `dead branch`) — the type twin of a dead-branch
-constant fold. It is careful where control flow is: it distinguishes truthy from
+compound narrows nothing. The guard vocabulary is per-language and extensible. Beyond nil and
+truthiness it reads **type tests**: `if type(x) == 'string'` narrows `x` to that type in
+the region — the seed of devirtualization — which is sound for a local (a call can't
+change its type) and, importantly, is only trusted when `type` is the real global and not
+a variable that shadows it. On top of these facts the lens flags **redundant checks** —
+an `if` re-testing something a dominating guard already proved (`always true` / `dead
+branch`), including a re-tested or contradictory type (`type(x) == 'number'` under a
+proven `type(x) == 'string'` is dead) — the type twin of a dead-branch constant fold. It is careful where control flow is: it distinguishes truthy from
 non-nil (a non-nil value can still be `false`) and drops a narrowing once the variable
 is reassigned, so it reports a redundancy only when the earlier guard genuinely still
 holds.
