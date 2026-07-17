@@ -900,6 +900,79 @@ local function assert_valid(src, lang, what)
         ('gen: emitted %s with PARSE ERRORS for %s'):format(lang, what))
 end
 
+-- ══ ANALYSIS ground-truth: narrowing scenarios (syn-analysis INC 1) ══════════
+-- Each scenario emits a fn with a guard + a use and records the EXPECTED narrow
+-- env at the use line: fact='non-nil' (MUST narrow) or fact=false (must NOT — the
+-- false-positive net: `or`, no-guard, use-before-a-following-guard). A separate
+-- in-memory corpus from the resolution generators (M.answers/matrix untouched);
+-- deterministic per seed. Consumed by tools/syngate.lua.
+local function gen_lua_narrow(k, akey)
+    local B, fname = {}, ('n%d.lua'):format(k)
+    local function w(line) B[#B + 1] = line; return #B end
+    local function key(var, fact, line)
+        akey[#akey + 1] = { file = fname, line = line, var = var, fact = fact }
+    end
+    local scen = {
+        function (nm, a) -- + truthiness
+            w(('local function %s(%s)'):format(nm, a)); w(('  if %s then'):format(a))
+            local ln = w(('    use(%s)'):format(a)); w('  end'); w('end'); key(a, 'non-nil', ln)
+        end,
+        function (nm, a) -- + x ~= nil
+            w(('local function %s(%s)'):format(nm, a)); w(('  if %s ~= nil then'):format(a))
+            local ln = w(('    use(%s)'):format(a)); w('  end'); w('end'); key(a, 'non-nil', ln)
+        end,
+        function (nm, a) -- + early-exit `x == nil then return`
+            w(('local function %s(%s)'):format(nm, a)); w(('  if %s == nil then return end'):format(a))
+            local ln = w(('  use(%s)'):format(a)); w('end'); key(a, 'non-nil', ln)
+        end,
+        function (nm, a, b) -- + and-conjunction narrows both
+            w(('local function %s(%s, %s)'):format(nm, a, b)); w(('  if %s and %s then'):format(a, b))
+            local ln = w(('    use(%s, %s)'):format(a, b)); w('  end'); w('end')
+            key(a, 'non-nil', ln); key(b, 'non-nil', ln)
+        end,
+        function (nm, a, b) -- − `or` does NOT narrow
+            w(('local function %s(%s, %s)'):format(nm, a, b)); w(('  if %s or %s then'):format(a, b))
+            local ln = w(('    use(%s)'):format(a)); w('  end'); w('end'); key(a, false, ln)
+        end,
+        function (nm, a) -- − no guard
+            w(('local function %s(%s)'):format(nm, a))
+            local ln = w(('  use(%s)'):format(a)); w('end'); key(a, false, ln)
+        end,
+        function (nm, a) -- − use BEFORE a following guard (not dominated); after IS
+            w(('local function %s(%s)'):format(nm, a))
+            local ln = w(('  step(%s)'):format(a)); w(('  if %s == nil then return end'):format(a))
+            local ln2 = w(('  use(%s)'):format(a)); w('end')
+            key(a, false, ln); key(a, 'non-nil', ln2)
+        end,
+    }
+    local names = {}
+    for i = 1, 6 + rnd(6) do
+        local a, b = pick(NAMES), pick(NAMES)
+        while b == a do b = pick(NAMES) end
+        local nm = ('s%d'):format(i)
+        scen[rnd(#scen)](nm, a, b); names[#names + 1] = nm; w('')
+    end
+    w(('return { %s }'):format(table.concat(names, ', ')))
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
+--- ANALYSIS ground-truth corpus (INC 1: Lua narrowing). Returns
+--- { files = {name→src}, order, key = { {file, line, var, fact} } } where
+--- fact='non-nil' (must narrow) or false (must NOT). tools/syngate.lua runs the
+--- narrow lens over it and diffs. Deterministic per (lang, nfiles, seed).
+function M.analysis(lang, nfiles, seed)
+    assert(lang == 'lua', 'gen.analysis: INC 1 is lua-only')
+    srand(seed or 1)
+    local out = { files = {}, order = {}, key = {} }
+    for k = 1, (nfiles or 12) do
+        local fname, src = gen_lua_narrow(k, out.key)
+        out.files[fname] = src; out.order[#out.order + 1] = fname
+    end
+    return out
+end
+
 local LANGS = {
     lua = { gen = gen_lua_module,
         fname = function (k) return ('m%d.lua'):format(k) end },
