@@ -864,6 +864,15 @@ live-out→returns, refusing on control-escape or ambiguous returns) — so unta
 picks the boundary and extract.plan checks it. A scattered concern is refused
 until a reorder gathers it.
 
+`:CartographUntangleModule` is the same idea one level up — it clusters the
+focused *file's functions* into independent groups over call edges + shared
+mutable module state (read-only shared consts don't couple), the god-file split
+signal. Same sound verdict: a cluster is `CERTIFIED` safe to extract as its own
+module only when no unmodeled edge — a silently-unresolved call to an in-scope
+name, a `t[k]()` dispatch, dynamic dispatch, or unclassified state — could
+secretly connect it to another cluster; otherwise `~`, with the blocking calls
+named.
+
 ## Offline: history archaeology
 
 A sibling tool that lives under `cartograph.history` and runs *outside* the live
