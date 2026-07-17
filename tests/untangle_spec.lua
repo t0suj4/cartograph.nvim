@@ -83,6 +83,57 @@ test('untangle: empty body is inert', function ()
     eq(0, a.tangle)
 end)
 
+-- ── community detection (modularity refinement of the components) ────────────
+
+test('communities: a single clique is one community', function ()
+    -- triangle 1-2-3: every pair linked -> one cohesive group, no seam
+    local c = untangle.communities(3, { { 1, 2 }, { 2, 3 }, { 1, 3 } })
+    eq(1, c.ncomp)
+    eq(0, c.cut)
+end)
+
+test('communities: two cliques joined by a bridge split into 2 (with the seam)', function ()
+    -- {1,2,3} clique + {4,5,6} clique + one bridge edge 3-4. Connected-components
+    -- would call this ONE blob; modularity finds the 2 cohesive groups and the
+    -- single bridge edge is the seam (cut cost 1).
+    local c = untangle.communities(6, {
+        { 1, 2 }, { 2, 3 }, { 1, 3 },      -- clique A
+        { 4, 5 }, { 5, 6 }, { 4, 6 },      -- clique B
+        { 3, 4, kind = 'data' },           -- the bridge
+    })
+    eq(2, c.ncomp)
+    eq(1, c.cut)                            -- exactly the bridge edge
+    eq(1, #c.crossing)
+    eq('data', c.crossing[1].kind)
+    ok(c.comp[1] == c.comp[2] and c.comp[2] == c.comp[3], 'clique A stays together')
+    ok(c.comp[4] == c.comp[5] and c.comp[5] == c.comp[6], 'clique B stays together')
+    ok(c.comp[1] ~= c.comp[4], 'the two cliques are distinct communities')
+end)
+
+test('communities: disconnected nodes never merge (refinement of components)', function ()
+    -- edge 1-2 only; node 3 isolated. Merging across a zero-edge gap lowers Q, so
+    -- 3 stays its own community -> matches (never coarser than) the components.
+    local c = untangle.communities(3, { { 1, 2 } })
+    eq(2, c.ncomp)
+    ok(c.comp[1] == c.comp[2], 'the linked pair is one community')
+    ok(c.comp[3] ~= c.comp[1], 'the isolated node is its own community')
+end)
+
+test('communities: weight (repeated edges) strengthens coupling', function ()
+    -- 1-2 linked 3× vs 2-3 once: the strong pair coheres, the weak edge is the seam
+    local c = untangle.communities(3, {
+        { 1, 2 }, { 1, 2 }, { 1, 2 }, { 2, 3 },
+    })
+    ok(c.comp[1] == c.comp[2], 'the triple-weight pair coheres')
+end)
+
+test('communities: empty graph is inert', function ()
+    eq(0, untangle.communities(0, {}).ncomp)
+    local c = untangle.communities(3, {})
+    eq(3, c.ncomp)                          -- no edges -> all singletons
+    eq(0, c.cut)
+end)
+
 -- ── INC 1: analyze_flow (fine rows + reaching_cfg data deps) ─────────────────
 
 test('untangle_flow: two independent chains -> 2 concerns', function ()
@@ -158,6 +209,29 @@ end)
 test('untangle_flow: empty/nil flow is inert', function ()
     eq(0, untangle.analyze_flow(nil).ncomp)
     eq(0, untangle.analyze_flow({ stmts = {} }).ncomp)
+end)
+
+test('untangle_flow: communities refine a connected concern into cohesive groups', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- one connected data-flow chain (components = 1 concern), but two dense
+    -- clusters joined by a single bridge assignment -> modularity finds the seam.
+    local fl = build_flow([[
+local function f()
+  local a = 1
+  local b = a + 1
+  local c = a + b
+  local x = c
+  local y = x + 1
+  local z = x + y
+  return z
+end]])
+    local r = untangle.analyze_flow(fl)
+    eq(1, r.ncomp)                                  -- connected: ONE concern (sound)
+    ok(r.communities.ncomp >= 2, 'modularity refines the blob into sub-groups')
+    ok(r.communities.ncomp > r.ncomp, 'communities are strictly finer than components')
+    ok(#r.communities.crossing >= 1, 'the seam has a real (nonzero) cut cost')
+    -- rows 2 (b<-a) and 6 (z<-x,y) live in different sub-groups
+    ok(r.communities.comp[2] ~= r.communities.comp[6], 'the two clusters are distinct communities')
 end)
 
 -- ── INC 2: control + output (WAW) dependencies ──────────────────────────────
@@ -366,6 +440,13 @@ local function comp_of(res, name)
     end
 end
 
+-- the community (sub-group) index of a named fn, for the modularity tests
+local function comp_of_c(res, name)
+    for k, node in ipairs(res.fns) do
+        if res.names[node.id] == name then return res.communities.comp[k] end
+    end
+end
+
 local function ingest_file(lines)
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
@@ -498,6 +579,59 @@ test('untangle_module: a dynamic dispatch uncertifies + names the blocker (INC 2
         for _, w in ipairs(rows) do if w.reason:match('dynamic') then found = true end end
     end
     ok(found, 'the breakdown names the dynamic-dispatch blocker')
+end)
+
+test('untangle_scope: communities split a connected god-file into sub-modules', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- two mutually-recursive triplets joined by ONE bridge call (a3 -> b1). The
+    -- call graph is fully connected (components = 1 cluster), but modularity finds
+    -- the two cohesive sub-modules + the single bridge as the seam.
+    local file = ingest_file {
+        'local a1, a2, a3, b1, b2, b3',
+        'function a1() return a2() end',
+        'function a2() return a3() end',
+        'function a3() return a1() + b1() end',   -- bridge into the B triplet
+        'function b1() return b2() end',
+        'function b2() return b3() end',
+        'function b3() return b1() end',
+        'return { a1, a2, a3, b1, b2, b3 }',
+    }
+    local res = untangle.analyze_module(store, file)
+    eq(6, res.n)
+    eq(1, res.ncomp)                                -- connected via the bridge
+    ok(res.communities.ncomp >= 2, 'modularity finds the two sub-modules')
+    ok(comp_of_c(res, 'a1') == comp_of_c(res, 'a2'), 'the A triplet coheres')
+    ok(comp_of_c(res, 'b1') == comp_of_c(res, 'b2'), 'the B triplet coheres')
+    ok(comp_of_c(res, 'a1') ~= comp_of_c(res, 'b1'), 'A and B are distinct communities')
+end)
+
+test('untangle: report surfaces cohesive sub-groups + the cut cost', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local function f()',
+        '  local a = 1',
+        '  local b = a + 1',
+        '  local c = a + b',      -- dense cluster {a,b,c}
+        '  local x = c',          -- bridge
+        '  local y = x + 1',
+        '  local z = x + y',      -- dense cluster {x,y,z}
+        '  return z',
+        'end',
+        'return { f }',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local id
+    for _, node in ipairs(store.data.nodes) do
+        if node.name == 'f' then id = node.id end
+    end
+    local joined = table.concat(untangle.report(store, id), '\n')
+    ok(joined:match('cohesive sub%-groups'), 'the seam suggestion is surfaced')
+    ok(joined:match('breaks %d+ dependency edge'), 'the cut cost is spelled out')
+    ok(joined:match('%[%a%]'), 'rows carry a sub-group letter tag')
 end)
 
 test('untangle: report renders concerns + verdict + why breakdown (INC 4)', function ()

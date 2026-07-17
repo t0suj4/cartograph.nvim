@@ -58,6 +58,115 @@ local function partition(n, add_edges)
              switches = switches, tangle = tangle, maxspan = maxspan }
 end
 
+-- Greedy agglomerative modularity (Clauset–Newman–Moore, deterministic). Where
+-- `partition` answers "are a and b connected AT ALL" (ANY edge merges them — the
+-- SOUND independence claim), this answers "do a and b sit in the same COHESIVE
+-- cluster" — groups linked more densely inside than across the boundary. Because
+-- merging two disconnected communities can only LOWER modularity, the result is a
+-- strict refinement of the connected components: it never contradicts the safety
+-- verdict, it just finds sub-structure INSIDE a connected blob that components are
+-- blind to (the [[cartograph-untangle-pdg]] "cohesive blob" case — one concern,
+-- but with natural seams). NOT a safety claim: communities DO share edges across
+-- their boundary, so cutting them apart BREAKS real dependencies — the returned
+-- `cut`/`crossing` is exactly that price. Edges are undirected; repeated (a,b)
+-- pairs accumulate as weight = coupling strength.
+--- @param n integer  node count (1..n)
+--- @param edges { [1]:integer, [2]:integer, kind?:string, w?:number }[]
+--- @return { comp:integer[], ncomp:integer, modularity:number, cut:number,
+---           crossing: table[], sizes:table }
+function M.communities(n, edges)
+    if n == 0 then return { comp = {}, ncomp = 0, modularity = 0, cut = 0, crossing = {}, sizes = {} } end
+    -- adjacency weights (symmetric, self-loops dropped) + degrees + total weight m
+    local w, deg, m = {}, {}, 0
+    for i = 1, n do w[i] = {}; deg[i] = 0 end
+    for _, e in ipairs(edges or {}) do
+        local a, b, ew = e[1], e[2], e.w or 1
+        if a and b and a ~= b and a >= 1 and a <= n and b >= 1 and b <= n then
+            w[a][b] = (w[a][b] or 0) + ew
+            w[b][a] = (w[b][a] or 0) + ew
+            deg[a] = deg[a] + ew; deg[b] = deg[b] + ew; m = m + ew
+        end
+    end
+    local com = {}
+    for i = 1, n do com[i] = i end
+    if m > 0 then
+        local two_m2 = 2 * m * m
+        while true do
+            -- Σtot per current community + edge weight E[c][d] (c<d) between them
+            local sigma, E = {}, {}
+            for i = 1, n do sigma[com[i]] = (sigma[com[i]] or 0) + deg[i] end
+            for a = 1, n do
+                for b, ew in pairs(w[a]) do
+                    local ca, cb = com[a], com[b]
+                    if a < b and ca ~= cb then
+                        local lo, hi = ca, cb
+                        if lo > hi then lo, hi = hi, lo end
+                        E[lo] = E[lo] or {}
+                        E[lo][hi] = (E[lo][hi] or 0) + ew
+                    end
+                end
+            end
+            -- pick the merge with the largest ΔQ (deterministic tie-break: lowest c,d)
+            local best_dq, bc, bd = 0, nil, nil
+            for c, row in pairs(E) do
+                for d, ecd in pairs(row) do          -- c < d by construction
+                    local dq = ecd / m - sigma[c] * sigma[d] / two_m2
+                    if dq > 1e-12 and (not bc or dq > best_dq + 1e-12
+                        or (dq >= best_dq - 1e-12 and (c < bc or (c == bc and d < bd)))) then
+                        best_dq, bc, bd = dq, c, d
+                    end
+                end
+            end
+            if not bc then break end
+            local keep, drop = math.min(bc, bd), math.max(bc, bd)
+            for i = 1, n do if com[i] == drop then com[i] = keep end end
+        end
+    end
+    -- relabel 0-based by first appearance in row order (matches `partition`)
+    local root2comp, comp, next_id = {}, {}, 0
+    for i = 1, n do
+        local r = com[i]
+        if root2comp[r] == nil then root2comp[r] = next_id; next_id = next_id + 1 end
+        comp[i] = root2comp[r]
+    end
+    local ncomp, sizes = next_id, {}
+    for i = 1, n do sizes[comp[i]] = (sizes[comp[i]] or 0) + 1 end
+    -- the seam: inter-community edges (their kinds are the coupling a cut breaks)
+    local cut, crossing = 0, {}
+    for _, e in ipairs(edges or {}) do
+        local a, b = e[1], e[2]
+        if a and b and a ~= b and a >= 1 and a <= n and b >= 1 and b <= n
+            and comp[a] ~= comp[b] then
+            cut = cut + (e.w or 1)
+            crossing[#crossing + 1] = { a = a, b = b, kind = e.kind, ca = comp[a], cb = comp[b] }
+        end
+    end
+    -- final modularity Q = Σ_c [ Σin(c)/2m − (Σtot(c)/2m)² ]
+    local q = 0
+    if m > 0 then
+        local sin, stot = {}, {}
+        for c = 0, ncomp - 1 do sin[c] = 0; stot[c] = 0 end
+        for i = 1, n do stot[comp[i]] = stot[comp[i]] + deg[i] end
+        for a = 1, n do
+            for b, ew in pairs(w[a]) do
+                if comp[a] == comp[b] then sin[comp[a]] = sin[comp[a]] + ew end -- both dirs = Σin
+            end
+        end
+        for c = 0, ncomp - 1 do q = q + sin[c] / (2 * m) - (stot[c] / (2 * m)) ^ 2 end
+    end
+    return { comp = comp, ncomp = ncomp, modularity = q, cut = cut, crossing = crossing, sizes = sizes }
+end
+
+-- "3 data, 1 control" — tally a crossing-edge list by kind, for the seam report.
+local function kinds_summary(crossing)
+    local by = {}
+    for _, x in ipairs(crossing) do by[x.kind or '?'] = (by[x.kind or '?'] or 0) + 1 end
+    local parts = {}
+    for k, v in pairs(by) do parts[#parts + 1] = ('%d %s'):format(v, k) end
+    table.sort(parts)
+    return #parts > 0 and table.concat(parts, ', ') or '(untyped)'
+end
+
 --- COARSE lens (the shipped comprehension view): union-find over df's data-dep
 --- edges. Locals-only, top-level statements only, not a safety claim.
 --- @param df { inputs:string[], stmts: table[] } | nil
@@ -111,22 +220,30 @@ function M.analyze_flow(flow, extra_edges, opaque)
             tangle = 0, maxspan = 0, hedged = {}, certified = true }
     end
     local raw, waw = flowmod.reaching_cfg(flow)
+    -- collect the PDG edges once (kind-tagged), then feed BOTH the sound union-find
+    -- partition (connected components = the independence claim) AND community
+    -- detection (cohesive sub-groups = the seam suggestion) from the same list.
+    local edges = {}
+    local function E(a, b, kind)
+        if a and b and a >= 1 and a <= n and b >= 1 and b <= n and a ~= b then
+            edges[#edges + 1] = { a, b, kind = kind }
+        end
+    end
+    for _, e in ipairs(raw) do                  -- DATA (RAW)
+        local at = e.at
+        for _, from in ipairs(e.from) do
+            if from ~= 0 then E(at, from, 'data') end
+        end
+    end
+    for _, w in ipairs(waw) do E(w[1], w[2], 'output') end          -- OUTPUT (WAW)
+    for i = 1, n do E(i, stmts[i].parent, 'control') end            -- CONTROL (parent, 0=skip)
+    for _, e in ipairs(extra_edges or {}) do E(e[1], e[2], 'effect') end -- SIDE-EFFECT (INC 2b)
     local res = partition(n, function (union, span)
-        local function couple(a, b) -- union + record the span (both directions)
-            if a and b and a >= 1 and a <= n and b >= 1 and b <= n then
-                union(a, b); local s = a - b; if s < 0 then s = -s end; span(s)
-            end
+        for _, e in ipairs(edges) do
+            union(e[1], e[2]); local s = e[1] - e[2]; if s < 0 then s = -s end; span(s)
         end
-        for _, e in ipairs(raw) do              -- DATA (RAW)
-            local at = e.at
-            for _, from in ipairs(e.from) do
-                if from ~= 0 then couple(at, from) end
-            end
-        end
-        for _, w in ipairs(waw) do couple(w[1], w[2]) end       -- OUTPUT (WAW)
-        for i = 1, n do couple(i, stmts[i].parent) end          -- CONTROL (parent, 0=skip)
-        for _, e in ipairs(extra_edges or {}) do couple(e[1], e[2]) end -- SIDE-EFFECT (INC 2b)
     end)
+    res.communities = M.communities(n, edges)
     -- verdict: localize opacity to its concern(s); any opacity → uncertified.
     -- `why[c]` breaks down WHY concern c can't be certified — the blocking rows
     -- with their reason (from reorder's per-statement hedge). An `opaque` entry is
@@ -221,29 +338,32 @@ function M.analyze_scope(store, files, opts)
             hedged = {}, certified = true, why = {} }
     end
     local calls, states = 0, 0
+    local edges = {}                                       -- kind-tagged, for communities
+    for k, node in ipairs(fns) do                          -- CALL edges (intra-scope)
+        for _, callee in ipairs(store.uses[node.id] or {}) do
+            if idx[callee] then edges[#edges + 1] = { k, idx[callee], kind = 'call' }; calls = calls + 1 end
+        end
+    end
+    for _, v in ipairs(scope) do                           -- SHARED WRITTEN STATE
+        if v.kind == 'var' then
+            local written, touchers = false, {}
+            for _, u in ipairs(store.var_usedby[v.id] or {}) do
+                if u.rw and u.rw >= 2 then written = true end
+                if idx[u.from] then touchers[idx[u.from]] = true end
+            end
+            if shared(v, written) then
+                local first
+                for k in pairs(touchers) do
+                    if not first then first = k
+                    else edges[#edges + 1] = { first, k, kind = 'state' }; states = states + 1 end
+                end
+            end
+        end
+    end
     local res = partition(n, function (union, span)
-        for k, node in ipairs(fns) do                     -- CALL edges (intra-scope)
-            for _, callee in ipairs(store.uses[node.id] or {}) do
-                if idx[callee] then union(k, idx[callee]); span(0); calls = calls + 1 end
-            end
-        end
-        for _, v in ipairs(scope) do                       -- SHARED WRITTEN STATE
-            if v.kind == 'var' then
-                local written, touchers = false, {}
-                for _, u in ipairs(store.var_usedby[v.id] or {}) do
-                    if u.rw and u.rw >= 2 then written = true end
-                    if idx[u.from] then touchers[idx[u.from]] = true end
-                end
-                if shared(v, written) then
-                    local first
-                    for k in pairs(touchers) do
-                        if not first then first = k
-                        else union(first, k); span(0); states = states + 1 end
-                    end
-                end
-            end
-        end
+        for _, e in ipairs(edges) do union(e[1], e[2]); span(0) end
     end)
+    res.communities = M.communities(n, edges)
     res.fns, res.names, res.calledges, res.stateedges = fns, names, calls, states
     -- INC 2 verdict: clusters are DISCONNECTED under the modeled edges by
     -- construction, so the only threat to "safe to extract as a module" is an
@@ -363,6 +483,27 @@ function M.report_scope(store, files, label)
         L[#L + 1] = ('  %s%s (%d): %s'):format(string.char(65 + (c % 26)),
             res.hedged[c] and '~' or ' ', #m, table.concat(m, ', '))
     end
+    -- cohesive sub-modules (community detection): when the functions form ONE
+    -- connected cluster (they all call/share state — a god-file with no clean
+    -- split), modularity still finds the denser sub-groups + the seam. SUGGESTION,
+    -- not a safety claim: the crossing edges are real call/state coupling to break.
+    local cm = res.communities
+    if cm and cm.ncomp > res.ncomp then
+        local sub = {} -- community id → {names}
+        for k, node in ipairs(res.fns) do
+            local g = cm.comp[k]
+            sub[g] = sub[g] or {}
+            sub[g][#sub[g] + 1] = res.names[node.id] or ('#' .. tostring(node.id))
+        end
+        L[#L + 1] = ''
+        L[#L + 1] = ('cohesive sub-groups: %d inside the %d connected cluster(s) — '
+            .. 'suggested split, breaks %d coupling edge(s) (%s):')
+            :format(cm.ncomp, res.ncomp, #cm.crossing, kinds_summary(cm.crossing))
+        for g = 0, cm.ncomp - 1 do
+            L[#L + 1] = ('  %s: %s'):format(string.char(97 + (g % 26)),
+                table.concat(sub[g] or {}, ', '))
+        end
+    end
     L[#L + 1] = ''
     if res.certified then
         L[#L + 1] = 'CERTIFIED: each cluster is safe to extract as its own module'
@@ -471,12 +612,18 @@ function M.report(store, fn_id)
         res.certified and 'CERTIFIED safe to split' or '~ NOT certified')
     L[#L + 1] = ('tangle %d (0 = already grouped in source), maxspan %d')
         :format(res.tangle, res.maxspan)
+    -- community refinement: when modularity finds cohesive sub-groups INSIDE a
+    -- connected concern, tag each row with a lowercase sub-group letter so the
+    -- seam is visible in the listing. Only when it actually refines the components.
+    local cm = res.communities
+    local refine = cm and cm.ncomp > res.ncomp
     L[#L + 1] = ''
     for i, s in ipairs(flow.stmts) do
         local c = res.comp[i]
-        L[#L + 1] = ('  %s%s L%-5d %s%s'):format(letter(c),
+        local sub = refine and (' [%s]'):format(string.char(97 + (cm.comp[i] % 26))) or ''
+        L[#L + 1] = ('  %s%s L%-5d %s%s%s'):format(letter(c),
             res.hedged[c] and '~' or ' ', s.l, ('  '):rep(depth(i)),
-            s.kind or 'stmt')
+            s.kind or 'stmt', sub)
     end
     L[#L + 1] = ''
     if res.certified then
@@ -487,6 +634,17 @@ function M.report(store, fn_id)
         L[#L + 1] = 'CANNOT guarantee safety — unresolved effects could couple'
         L[#L + 1] = 'concerns across a boundary. Blocking statements (resolve to certify):'
         for _, w in ipairs(M.why_unsafe(res)) do L[#L + 1] = '  ~ ' .. w end
+    end
+    -- COHESIVE SUB-GROUPS (community detection): where connected-components see one
+    -- tangled blob, modularity finds the denser sub-clusters + the SEAM between
+    -- them. This is a SUGGESTION, not a safety claim — the crossing edges are real
+    -- dependencies a split would have to break (that's the price, spelled out).
+    if refine then
+        L[#L + 1] = ''
+        L[#L + 1] = ('cohesive sub-groups: %d group(s) inside the %d concern(s) — '
+            .. 'suggested seams, NOT free to split'):format(cm.ncomp, res.ncomp)
+        L[#L + 1] = ('cutting them apart breaks %d dependency edge(s): %s')
+            :format(#cm.crossing, kinds_summary(cm.crossing))
     end
     -- extract candidates (the extract.plan handoff): only meaningful when a fn
     -- has >1 concern (extracting one of several). extract.plan validates the
