@@ -362,6 +362,32 @@ test('flow: reaching_cfg — a block-local reassigned in a nested loop reaches a
     ok(from and from[reassign], 'the in-loop reassignment pos@5 reaches use(pos) (was dropped)')
 end)
 
+test('flow: reaching_cfg — a read-modify-write self-read reaches (rmw column)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- flow-precision-gaps #1: `total = total + x` — the df contract drops the RHS
+    -- read of `total` from `use` (a def name is not also a use), so reaching used
+    -- to miss the self-read entirely. The sparse `rmw` column keeps it; reaching_cfg
+    -- must emit an edge for it (the accumulator reads its own prior value).
+    local fn, src = parse_fn(table.concat({
+        'local function f(xs)',
+        '  local total = 0',      -- 2: pre-loop def
+        '  for _, x in ipairs(xs) do',
+        '    total = total + x',    -- 4: reads AND writes total (a read-modify-write)
+        '  end',
+        '  return total',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.lua.regime })
+    local rmwrow = row(fl, 'stmt', 4)
+    ok(fl.stmts[rmwrow].rmw and fl.stmts[rmwrow].rmw[1] == 'total',
+        'the RHS self-read of total is recorded in the rmw column, not lost')
+    local rc = flow.reaching_cfg(fl)
+    local from
+    for _, e in ipairs(rc) do if e.var == 'total' and e.at == rmwrow then from = setof(e.from) end end
+    ok(from, 'reaching emits an edge for the self-read of total (was dropped entirely)')
+    ok(from and from[row(fl, 'stmt', 2)], 'the self-read sees the pre-loop def total@2')
+end)
+
 test('flow: reaching_cfg — a genuine inner shadow is NOT resurrected by the reassign fix', function ()
     if not ready('lua') then skip 'no lua parser' end
     -- the control for the fix above: a real inner `local x` is a NEW binding that

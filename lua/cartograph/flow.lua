@@ -203,8 +203,9 @@ end
 -- visited node whose type is in SUSPEND; the root is checked too.
 local function du(root, src, stop_body, ids)
     ids = ids or DFID
-    if not root then return {}, {}, false end
+    if not root then return {}, {}, false, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
+    local rmw, rmwseen = {}, {} -- read-modify-write LHS names (see the branch below)
     local sus = SUSPEND[root:type()] or false
     local function rec(node, defpos)
         local t = node:type()
@@ -255,7 +256,17 @@ local function du(root, src, stop_body, ids)
                     local nm = txt(c, src)
                     if cdefpos then
                         if not dseen[nm] then dseen[nm] = true; def[#def + 1] = nm end
-                    elseif not useen[nm] and not dseen[nm] then
+                    elseif dseen[nm] then
+                        -- use-position but ALREADY a def in this statement = a
+                        -- read-modify-write (`a = a + …`). The df contract drops it
+                        -- from `use` (a def name is not also a use), losing the READ.
+                        -- Record it SEPARATELY so reaching_cfg can see the self-read
+                        -- without perturbing the du/df census or the rw edge kinds
+                        -- ([[flow-precision-gaps]] #1).
+                        if not rmwseen[nm] and not useen[nm] then
+                            rmwseen[nm] = true; rmw[#rmw + 1] = nm
+                        end
+                    elseif not useen[nm] then
                         useen[nm] = true; use[#use + 1] = nm
                     end
                 end
@@ -272,7 +283,7 @@ local function du(root, src, stop_body, ids)
         if not dseen[nm] and not useen[nm] then useen[nm] = true; use[#use + 1] = nm end
     end
     rec(root, false)
-    return def, use, sus
+    return def, use, sus, rmw
 end
 
 
@@ -365,11 +376,12 @@ function M.build(fnnode, src, cfg)
         end
         local idx = #stmts + 1
         local sb = CTRL[t] and true or false
-        local d, u, sus = du(node, src, sb, ids)
+        local d, u, sus, rmw = du(node, src, sb, ids)
         stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
             suspend = sus or nil, -- yield/await = a Tier-1 continuation point (fused from du)
+            rmw = (rmw and rmw[1]) and rmw or nil, -- read-modify-write reads (sparse)
             -- control-transfer label: TARGET on break/continue/goto, else the
             -- loop's OWN label (rust). def/use above are unaffected.
             label = (TRANSFER[t] and target_label(node, src))
@@ -919,7 +931,15 @@ function M.reaching_cfg(flow)
         -- NEAREST-scope preference below
         local depth, d, p = {}, 0, S[u].parent
         while true do depth[p] = d; if p == 0 then break end; d = d + 1; p = S[p].parent end
-        for _, v in ipairs(S[u].use) do
+        -- reads = uses PLUS read-modify-write LHS names (`a = a + …`), whose self-read
+        -- the df contract drops from `use` (kept in `rmw`) — [[flow-precision-gaps]] #1.
+        local reads = S[u].use
+        if S[u].rmw then
+            reads = {}
+            for _, v in ipairs(S[u].use) do reads[#reads + 1] = v end
+            for _, v in ipairs(S[u].rmw) do reads[#reads + 1] = v end
+        end
+        for _, v in ipairs(reads) do
             local reaching, from, hset = rin[u] and rin[u][v], {}, nil
             if reaching then
                 local ex = rin_exact[u] and rin_exact[u][v]
@@ -1071,7 +1091,8 @@ local function row_view(col, g)
     local s = { l = col.l(g), c = col.c(g), parent = col.parent(g), def = {}, use = {},
         kind = d.kind, pol = d.pol, t = d.t,
         regime = d.regime, const = d.const, suspend = d.suspend,
-        label = col.labels[g] } -- sparse (control-transfer): nil for the vast majority
+        label = col.labels[g], -- sparse (control-transfer): nil for the vast majority
+        rmw = col.rmw and col.rmw[g] or nil } -- sparse (read-modify-write reads)
     local b, e = col.d0(g), col.u0(g)
     for j = 1, e - b do s.def[j] = nms[col.nm(b + j)] end
     b, e = e, col.d0(g + 1)
@@ -1139,6 +1160,8 @@ function M.fold(data)
         labels = {}, -- SPARSE (global-row → label name): control-transfer targets/
         -- definitions, rare enough that a plain map beats a packed column (a
         -- merge-friendly sparse (row,name-id) packing is a later refinement).
+        rmw = {}, -- SPARSE (global-row → {name,…}): read-modify-write reads dropped
+        -- from `use` by the df contract; consumed by reaching_cfg. Rare → plain map.
     }
     local nid = {} -- var-name -> interned id (build-time only); 0 = nil
     local function id(nm)
@@ -1174,6 +1197,7 @@ function M.fold(data)
                 col.l[ns] = s.l
                 col.c[ns] = s.c
                 if s.label then col.labels[ns] = s.label end
+                if s.rmw then col.rmw[ns] = s.rmw end
                 col.parent[ns] = s.parent
                 if s.parent > maxp then maxp = s.parent end
                 if s.c > maxc then maxc = s.c end
@@ -1210,6 +1234,7 @@ function M.fold(data)
         names = col.names,
         shapes = col.shapes,
         labels = col.labels, -- sparse map (global-row → label), passed through
+        rmw = col.rmw, -- sparse map (global-row → {name,…}), passed through
     }
     for _, node in ipairs(data.nodes or {}) do
         if node._flow == col then node._flow = packed end

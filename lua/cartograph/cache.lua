@@ -19,7 +19,10 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 52 -- v52: STRING-KEYED REGISTRY LINKER (stage 3) — a retrieval keyed
+M.VERSION = 53 -- v53: flow rows carry a sparse `rmw` column (read-modify-write LHS
+               -- reads `a = a + …` the df contract drops from `use`); reaching_cfg
+               -- consumes it so a self-read reaches (flow-precision-gaps #1).
+-- v52: STRING-KEYED REGISTRY LINKER (stage 3) — a retrieval keyed
                -- by a string literal (LibStub("X") fn-call form + :GetLibrary/
                -- :GetModule/:GetAddon("X")) resolves to the :NewLibrary/:NewModule/
                -- :NewAddon-registered table (the bound local), SCOPED to the addon
