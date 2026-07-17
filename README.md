@@ -921,6 +921,16 @@ nvim --headless -u NONE -l tools/dfgate.lua rust --show flow-over-collects
 # the receiver-typing gap, and the argument for re-backing df.* with flow.coarse
 # (consumers untouched, equivalence guaranteed by dfgate) rather than rewriting.
 nvim --headless -u NONE -l tools/dfconsumers.lua
+# EXTRACTION PROFILER: where does a corpus's cold-extraction wall go? Flips the
+# treesitter `M.PROFILE` gate (nanosecond accumulators, output-inert, off by
+# default) and prints the per-phase breakdown sorted by cost — parse /
+# extract_defs (incl. flow.build, reported separately) / extract_calls /
+# collect_mentions / resolve / constfold, with the unmeasured remainder as
+# `other`. Measure-first for perf work: it pinned flow.build as the hot phase
+# (52% of ghost) and the fusion win that followed (a redundant per-statement
+# subtree walk, −43% flow.build) — MEASURE, don't guess (the obvious FFI
+# micro-opt profiled as pure noise).
+nvim --headless -u NONE -l tools/profile.lua ghost server
 # THE MATRIX: every parity/honesty invariant × every registered corpus, one
 # command — the push-time sweep. One inline extract per corpus feeds all the
 # cheap columns (counts, validate, memory budget, df/flow parity, fold
