@@ -388,6 +388,32 @@ test('flow: reaching_cfg — a read-modify-write self-read reaches (rmw column)'
     ok(from and from[row(fl, 'stmt', 2)], 'the self-read sees the pre-loop def total@2')
 end)
 
+test('flow: reaching_cfg — reassigning an inner shadow does not leak past its block', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- comprehensive #2 (assignment scoping): `a = 3` writes the INNER block-local,
+    -- so it must be scoped to the block and NOT reach the post-block `return a`
+    -- (which sees the outer a@2). The filter-only surgical fix scoped the assignment
+    -- to function scope, so it would have leaked here; correct assignment scoping
+    -- confines it.
+    local fn, src = parse_fn(table.concat({
+        'local function f()',
+        '  local a = 1',        -- 2: outer a
+        '  do',
+        '    local a = 2',       -- 4: inner shadow
+        '    a = 3',             -- 5: reassign the INNER a (block-scoped)
+        '  end',
+        '  return a',           -- 7: reads OUTER a@2 only
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.lua.regime })
+    local rc = flow.reaching_cfg(fl)
+    local outer, reassign, ret = row(fl, 'stmt', 2), row(fl, 'stmt', 5), row(fl, 'stmt', 7)
+    local from
+    for _, e in ipairs(rc) do if e.var == 'a' and e.at == ret then from = setof(e.from) end end
+    ok(from and from[outer], 'the post-block return reads the outer a@2')
+    ok(from and not from[reassign], 'the inner reassignment a@5 is confined to its block (not leaked)')
+end)
+
 test('flow: reaching_cfg — a genuine inner shadow is NOT resurrected by the reassign fix', function ()
     if not ready('lua') then skip 'no lua parser' end
     -- the control for the fix above: a real inner `local x` is a NEW binding that

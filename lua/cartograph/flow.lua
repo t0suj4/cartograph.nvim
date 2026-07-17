@@ -843,13 +843,33 @@ function M.reaching_cfg(flow)
         end
         return true
     end
-    -- SCOPE of a def = the region it lives in: a BLOCK-regime def is scoped to
-    -- its enclosing region (its parent); everything else (function/hoisted,
-    -- assignments, params) is function-scoped (region 0). This is what makes a
-    -- block-scoped def's KILL region-local (below).
-    local function scope_of(r)
+    -- block-declared vars per region (a BLOCK-regime def, keyed by its enclosing
+    -- region S[d].parent) — the binding table an assignment resolves against.
+    local blockdecl = {}
+    for d = 1, #S do
+        if S[d].regime == 'block' then
+            local set = blockdecl[S[d].parent]
+            if not set then set = {}; blockdecl[S[d].parent] = set end
+            for _, v in ipairs(S[d].def) do set[v] = true end
+        end
+    end
+    -- SCOPE of a def of `v` at row `r` = the region the BINDING lives in. A BLOCK
+    -- declaration is scoped to its enclosing region (its parent). A plain
+    -- ASSIGNMENT does NOT open a scope — it writes the binding visible at its
+    -- position — so it is scoped to the nearest ENCLOSING region that block-declares
+    -- `v` (walk r's region-parent chain); a function-level binding / no enclosing
+    -- decl → function scope (region 0). This is what makes a block-local's KILL and
+    -- its later in-block reads region-correct even when the write is a reassignment
+    -- nested in an inner loop ([[flow-precision-gaps]] #2, comprehensive fix).
+    local function scope_of(r, v)
         if r == 0 then return 0 end
-        return S[r].regime == 'block' and S[r].parent or 0
+        if S[r].regime == 'block' then return S[r].parent end
+        local R = S[r].parent
+        while R ~= 0 do
+            if blockdecl[R] and blockdecl[R][v] then return R end
+            R = S[R].parent
+        end
+        return 0
     end
     -- region `a` is `b` or nested inside it (walk a's region-parent chain to b)
     local function subscope(a, b)
@@ -891,10 +911,10 @@ function M.reaching_cfg(flow)
                 -- block masks the outer; a plain assignment (function-scoped)
                 -- kills it. ([[cartograph-df-strangler]] step-5 fine half)
                 for _, v in ipairs(S[n].def) do
-                    local sn = scope_of(n)
+                    local sn = scope_of(n, v)
                     local kept = { [n] = true }
                     for m in pairs(i[v] or {}) do
-                        if not subscope(scope_of(m), sn) then kept[m] = true end -- enclosing → mask
+                        if not subscope(scope_of(m, v), sn) then kept[m] = true end -- enclosing → mask
                     end
                     o[v] = kept
                 end
@@ -947,40 +967,19 @@ function M.reaching_cfg(flow)
                 -- reaching defs, keep only those in the INNERMOST scope — a
                 -- shadowing inner masks the enclosing def AT THE USE, while the
                 -- enclosing def, never killed, is what reaches uses AFTER the block.
-                local best, bestregions = math.huge, {}
+                -- scope_of resolves an assignment to its binding's region, so a
+                -- reassignment of a block-local now shares the declaration's depth
+                -- and the depth filter keeps it (no special-case needed — the
+                -- comprehensive fix for [[flow-precision-gaps]] #2).
+                local best = math.huge
                 for r in pairs(reaching) do
                     if visible(r, u) then
-                        local dr = depth[scope_of(r)] or math.huge
+                        local dr = depth[scope_of(r, v)] or math.huge
                         if dr < best then best = dr end
                     end
                 end
                 for r in pairs(reaching) do
-                    if visible(r, u) and (depth[scope_of(r)] or math.huge) == best then
-                        bestregions[scope_of(r)] = true
-                    end
-                end
-                -- A plain ASSIGNMENT does NOT open a scope — it writes the binding
-                -- visible at its position — but flow scopes it to FUNCTION scope
-                -- (region 0), so a reassignment of a BLOCK-local looks "outer" (a
-                -- deeper `depth`) than the local's declaration and the depth filter
-                -- wrongly drops it (missing a real reaching def past an inner loop —
-                -- [[flow-precision-gaps]] #2). So ALSO keep a non-declaration def
-                -- whose LEXICAL position is nested inside a best-depth binding's
-                -- region: it reassigns that same binding. (A genuine shadow — a new
-                -- inner `local` — is regime 'block' and excluded here, so it is not
-                -- resurrected; a same-name def OUTSIDE the inner region isn't nested,
-                -- so it stays dropped.)
-                local function same_binding(r)
-                    if r == 0 then return false end               -- param sentinel (S[0] is nil)
-                    if S[r].regime == 'block' then return false end -- a declaration, not a reassign
-                    for R0 in pairs(bestregions) do
-                        if R0 ~= 0 and subscope(S[r].parent, R0) then return true end
-                    end
-                    return false
-                end
-                for r in pairs(reaching) do
-                    if visible(r, u)
-                        and ((depth[scope_of(r)] or math.huge) == best or same_binding(r)) then
+                    if visible(r, u) and (depth[scope_of(r, v)] or math.huge) == best then
                         from[#from + 1] = r
                         if not (ex and ex[r]) then hset = hset or {}; hset[r] = true end -- ~ (no exact path)
                     end
