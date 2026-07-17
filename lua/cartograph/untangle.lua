@@ -84,38 +84,61 @@ end
 ---   • CONTROL — a row is control-dependent on its enclosing control head
 ---     (`parent`), so a branch/loop body joins its guard's concern even with no
 ---     data flow to the condition (fixes the "isolated body statement" mis-split).
---- (WAR/anti falls out transitively via RAW+WAW.) STILL missing for a full safety
---- claim: side-effect ordering of impure statements (INC 2b, rides effects).
+---   • SIDE-EFFECT ordering (INC 2b) — passed in via `extra_edges` (store-dependent,
+---     so it can't be derived from the flow record alone; the caller supplies it
+---     from M.effect_edges). Non-commuting impure statements couple.
+--- (WAR/anti falls out transitively via RAW+WAW.)
 --- @param flow { stmts: table[], params: string[] } | nil  (flow.record(n) shape)
+--- @param extra_edges { [1]:integer, [2]:integer }[] | nil  extra coupling row-pairs
 --- @return { n:integer, ncomp:integer, comp:integer[], sizes:table, switches:integer, tangle:integer, maxspan:integer }
-function M.analyze_flow(flow)
+function M.analyze_flow(flow, extra_edges)
     local stmts = flow and flow.stmts or {}
     local n = #stmts
     if n == 0 then return { n = 0, ncomp = 0, comp = {}, sizes = {}, switches = 0, tangle = 0, maxspan = 0 } end
     local raw, waw = flowmod.reaching_cfg(flow)
     return partition(n, function (union, span)
+        local function couple(a, b) -- union + record the span (both directions)
+            if a and b and a >= 1 and a <= n and b >= 1 and b <= n then
+                union(a, b); local s = a - b; if s < 0 then s = -s end; span(s)
+            end
+        end
         for _, e in ipairs(raw) do              -- DATA (RAW)
             local at = e.at
             for _, from in ipairs(e.from) do
-                if from ~= 0 and from >= 1 and from <= n then
-                    union(at, from); span(at - from)
-                end
+                if from ~= 0 then couple(at, from) end
             end
         end
-        for _, w in ipairs(waw) do               -- OUTPUT (WAW)
-            local a, b = w[1], w[2]
-            if a >= 1 and a <= n and b >= 1 and b <= n then
-                union(a, b)
-                local s = a - b; if s < 0 then s = -s end; span(s)
-            end
-        end
-        for i = 1, n do                          -- CONTROL
-            local p = stmts[i].parent
-            if p and p ~= 0 and p >= 1 and p <= n then
-                union(i, p); span(i - p)
-            end
-        end
+        for _, w in ipairs(waw) do couple(w[1], w[2]) end       -- OUTPUT (WAW)
+        for i = 1, n do couple(i, stmts[i].parent) end          -- CONTROL (parent, 0=skip)
+        for _, e in ipairs(extra_edges or {}) do couple(e[1], e[2]) end -- SIDE-EFFECT (INC 2b)
     end)
+end
+
+--- Compute the INC-2b SIDE-EFFECT ordering edges for `fn_id`'s flow, as row-pairs
+--- consumable by analyze_flow's `extra_edges`. Reuses reorder.lua's state/world
+--- conflict analysis (per-statement module-state writes/reads + discharged call
+--- effects, set-once excused) — its conflicts are between COARSE (top-level) df
+--- statements, and by df/flow parity coarse statement k == the k-th `parent==0`
+--- flow row, so we map each conflict onto those rows (nested rows already ride
+--- CONTROL edges up to their top-level ancestor). Store-dependent → separate from
+--- the pure analyze_flow. Opaque (unresolved-effect) statements are the INC-3
+--- honesty concern, not coupled here.
+--- @return { [1]:integer, [2]:integer }[]  effect-coupling row-pairs (fine indices)
+function M.effect_edges(store, fn_id, flow)
+    local reorder = require 'cartograph.reorder'
+    local ok, m = pcall(reorder.analyze, store, fn_id)
+    if not ok or not m or not m.conflicts or #m.conflicts == 0 then return {} end
+    local stmts = flow and flow.stmts or {}
+    local toprow, k = {}, 0 -- k-th top-level flow row (coarse statement k)
+    for i, s in ipairs(stmts) do
+        if s.parent == 0 then k = k + 1; toprow[k] = i end
+    end
+    local edges = {}
+    for _, c in ipairs(m.conflicts) do
+        local a, b = toprow[c[1]], toprow[c[2]]
+        if a and b then edges[#edges + 1] = { a, b } end
+    end
+    return edges
 end
 
 return M

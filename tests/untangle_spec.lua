@@ -3,7 +3,9 @@
 
 local untangle = require 'cartograph.untangle'
 local flow = require 'cartograph.flow'
-local tsspec = require('cartograph.providers.treesitter').spec
+local ts = require 'cartograph.providers.treesitter'
+local store = require 'cartograph.store'
+local tsspec = ts.spec
 
 local function ready(lang)
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
@@ -205,4 +207,53 @@ local function f()
 end]])
     local r = untangle.analyze_flow(fl)
     ok(r.ncomp >= 2, 'the two independent loops are not merged by reused `i`')
+end)
+
+test('untangle_flow: extra_edges couple otherwise-independent rows (INC 2b seam)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- 4 independent single-statement rows; a synthetic effect edge {1,3} merges
+    -- those two into one concern (the pure seam analyze_flow exposes).
+    local fl = build_flow([[
+local function f()
+  print(1)
+  print(2)
+  print(3)
+  print(4)
+end]])
+    local base = untangle.analyze_flow(fl)
+    eq(4, base.ncomp)                              -- all independent w/o effects
+    local coupled = untangle.analyze_flow(fl, { { 1, 3 } })
+    eq(3, coupled.ncomp)                           -- rows 1 & 3 merged
+    eq(coupled.comp[1], coupled.comp[3])
+end)
+
+test('untangle_flow: effect_edges couples two world-writing calls (INC 2b)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local function noisy() print("x") end',
+        'local function noisy2() print("y") end',
+        'local function target()',
+        '  local a = 1',       -- 1: pure
+        '  local b = a + 1',   -- 2: RAW dep on 1
+        '  noisy()',           -- 3: world
+        '  noisy2()',          -- 4: world (conflicts w/ 3)
+        'end',
+        'return { target, noisy, noisy2 }',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local id, tnode
+    for _, node in ipairs(store.data.nodes) do
+        if node.name == 'target' then id, tnode = node.id, node end
+    end
+    ok(id, 'found target')
+    local fl = flow.record(tnode)
+    local base = untangle.analyze_flow(fl)
+    local fx = untangle.effect_edges(store, id, fl)
+    ok(#fx >= 1, 'reorder found a world/state conflict to couple')
+    local withfx = untangle.analyze_flow(fl, fx)
+    ok(withfx.ncomp < base.ncomp, 'the two world calls collapse into one concern')
 end)
