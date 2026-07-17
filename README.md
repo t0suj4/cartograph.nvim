@@ -925,7 +925,14 @@ always-safe speedup; the report lists each with its in-loop call count. Undernea
 of this now reads the shape of each expression from the same intermediate representation
 that powers `:CartographExpr`, rather than scanning source text: allocations, table
 reads, and the "is this the same computation?" test are answered structurally, so a
-brace inside a string or a comment mid-expression can no longer fool them.
+brace inside a string or a comment mid-expression can no longer fool them. Redundancy
+is found across blocks, not just within one: a computation whose value was already
+produced by a statement that *dominates* it — one that runs on every path leading here —
+can reuse that result, and a computation performed in *both* arms of an exhaustive
+`if`/`else` over inputs fixed before the branch can be lifted **above** it and computed
+once (partial-redundancy elimination). Dominance is judged on the control-arm path, so a
+value computed in one branch is never mistaken for available in a sibling branch it never
+reaches.
 
 `:CartographNarrow` is the branch-sensitive counterpart — the type sibling of
 constant folding. Where a guard *proves* something about a variable (`if x`,
