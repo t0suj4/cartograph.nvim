@@ -17,6 +17,8 @@ local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 local narrow = require 'cartograph.narrow'
 local optimize = require 'cartograph.optimize'
+local flow = require 'cartograph.flow'
+local untangle = require 'cartograph.untangle'
 
 local SEED, NFILES = 1, 12
 local a = gen.analysis('lua', NFILES, SEED)
@@ -28,7 +30,7 @@ end
 store.ingest(ts.extract(dir))
 
 -- collect each lens's per-(file,line) facts in one pass (a line belongs to one fn)
-local narrowenv, hoist, reuse, redun = {}, {}, {}, {}
+local narrowenv, hoist, reuse, redun, ncomp = {}, {}, {}, {}, {}
 local function K(f, l) return (f or '') .. '\31' .. l end
 for _, n in ipairs(store.data.nodes) do
     if n.kind == 'function' then
@@ -37,6 +39,14 @@ for _, n in ipairs(store.data.nodes) do
         if okn then for _, p in ipairs(nr.points) do narrowenv[K(f, p.line)] = p.env end end
         local okr, rr = pcall(narrow.redundant, store, n.id)
         if okr then for _, c in ipairs(rr.checks) do redun[K(f, c.line)] = c.always end end
+        local oku, fl = pcall(flow.record, n)
+        if oku and fl then
+            local oka, res = pcall(function ()
+                local e, o = untangle.effect_edges(store, n.id, fl)
+                return untangle.analyze_flow(fl, e, o)
+            end)
+            if oka and res then ncomp[K(f, n.name or '?')] = res.ncomp end
+        end
         local okl, lr = pcall(optimize.licm, store, n.id)
         if okl then for _, h in ipairs(lr.heads) do
             for r in pairs(lr.loops[h].hoistable) do hoist[K(f, lr.rows[r].l)] = true end
@@ -86,11 +96,15 @@ for _, e in ipairs(a.key) do
             else c.pass = c.pass + 1 end
         elseif got == e.want then c.pass = c.pass + 1
         else c.fn[#c.fn + 1] = ('%s:%d expected redundant always=%s, got %s'):format(e.file, e.line, tostring(e.want), tostring(got)) end
+    elseif e.lens == 'untangle' then
+        local got = ncomp[K(e.file, e.fn)]
+        if got == e.ncomp then c.pass = c.pass + 1
+        else c.fn[#c.fn + 1] = ('%s:%s expected ncomp=%d, got %s'):format(e.file, e.fn, e.ncomp, tostring(got)) end
     end
 end
 
 local failed = false
-for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse' }) do
+for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle' }) do
     local c = census[lens]
     if c then
         print(('syngate %-7s %d ok, %d false-pos, %d false-neg')

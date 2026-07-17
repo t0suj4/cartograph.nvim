@@ -1056,6 +1056,31 @@ local function gen_lua_redundant(k, akey)
     return fname, src
 end
 
+-- UNTANGLE ground-truth (syn-analysis INC 3): independent PURE data chains → the fn
+-- partitions into that many concerns; a coupling statement (using two chains' vars)
+-- merges them. Key is per-FN {lens='untangle', fn, ncomp}. Pure (no calls) so effect
+-- edges don't couple; no shared return (a return of all chains would join them).
+local function gen_lua_untangle(k, akey)
+    local B, fname = {}, ('u%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(fn, ncomp) akey[#akey + 1] = { lens = 'untangle', file = fname, fn = fn, ncomp = ncomp } end
+    w('local function u1(p)'); w('  local a = p + 1'); w('  local a2 = a + 1')
+    w('  return a2'); w('end'); key('u1', 1)
+    w('local function u3(p, q, r)')
+    w('  local a = p + 1'); w('  local a2 = a + 1')
+    w('  local b = q + 1'); w('  local b2 = b + 1')
+    w('  local c = r + 1'); w('  local c2 = c + 1'); w('end'); key('u3', 3)
+    w('local function uc(p, q, r)')
+    w('  local a = p + 1'); w('  local a2 = a + 1')
+    w('  local b = q + 1'); w('  local b2 = b + 1')
+    w('  local c = r + 1'); w('  local c2 = c + 1')
+    w('  local x = a2 + b2'); w('end'); key('uc', 2) -- x couples a & b → 2 concerns
+    w('return { u1, u3, uc }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 --- ANALYSIS ground-truth corpus. Returns { files = {name→src}, order, key } where
 --- each key carries `lens` ('narrow'|'licm'|'cse') + the per-line expectation:
 --- narrow {var, fact='non-nil'|false}; licm {hoistable=bool}; cse {reuses=<line>|false}.
@@ -1070,6 +1095,7 @@ function M.analysis(lang, nfiles, seed)
     for i = 1, 4 do add(gen_lua_licm(i, out.key)) end
     for i = 1, 4 do add(gen_lua_cse(i, out.key)) end
     for i = 1, 4 do add(gen_lua_redundant(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_untangle(i, out.key)) end
     return out
 end
 
