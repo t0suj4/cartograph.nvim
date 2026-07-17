@@ -871,7 +871,11 @@ signal. Same sound verdict: a cluster is `CERTIFIED` safe to extract as its own
 module only when no unmodeled edge — a silently-unresolved call to an in-scope
 name, a `t[k]()` dispatch, dynamic dispatch, or unclassified state — could
 secretly connect it to another cluster; otherwise `~`, with the blocking calls
-named.
+named. Pass a directory (`:CartographUntangleModule <dir>`) to cluster a whole
+package across files; a certified cluster hands off to the module extractor
+(`moveapply`), whose load-order/cycle hazards are the independent cross-check.
+What counts as shared state is a per-ecosystem sharing-model seam (the default
+couples any written module var).
 
 ## Offline: history archaeology
 
