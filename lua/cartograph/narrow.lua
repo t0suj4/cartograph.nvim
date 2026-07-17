@@ -73,14 +73,30 @@ end
 -- non-nil AND non-false) or 'non-nil' (from x~=nil); truthy ⟹ non-nil.
 local vocab = {}
 
--- `type(x)` over a single identifier → x's name, else nil (the type-test devirt seed)
-local function type_call_var(n, src)
+-- canonical dot-path of a narrowable location: an identifier (`x`) or a dot-index
+-- chain rooted at one (`opts.subdirs`, `self.cache.x`). Returns {path, root, depth}
+-- (depth 0 = a bare var, ≥1 = a field path), else nil. Bracket-index and any
+-- non-identifier root are NOT paths (unpredictable key / not staling-trackable).
+local function path_of(n, src)
+    if not n then return nil end
+    if n:type() == 'identifier' then return { path = txt(n, src), root = txt(n, src), depth = 0 } end
+    if n:type() == 'dot_index_expression' then
+        local base = path_of(n:named_child(0), src)
+        local fld = n:field('field')[1]
+        if base and fld then
+            return { path = base.path .. '.' .. txt(fld, src), root = base.root, depth = base.depth + 1 }
+        end
+    end
+    return nil
+end
+-- `type(P)` over a single path (identifier or field path) → its path info, else nil
+local function type_call_path(n, src)
     if not n or n:type() ~= 'function_call' then return nil end
     local callee = n:named_child(0)
     if not (callee and callee:type() == 'identifier' and txt(callee, src) == 'type') then return nil end
     local args = n:field('arguments')[1]
     local arg = args and args:named_child(0)
-    if arg and arg:type() == 'identifier' and not args:named_child(1) then return txt(arg, src) end
+    if arg and not args:named_child(1) then return path_of(arg, src) end
     return nil
 end
 -- the content of a string literal (quotes stripped), else nil
@@ -88,6 +104,18 @@ local function str_lit(n, src)
     if not n or n:type() ~= 'string' then return nil end
     return (txt(n, src):match('^["\'](.-)["\']$'))
 end
+-- a DISCRIMINANT literal (string or number) → an `eq:` kind tag; the s:/n: prefix
+-- keeps the string "1" distinct from the number 1 (never confuse them at compare).
+local function disc_kind(n, src)
+    if not n then return nil end
+    local s = str_lit(n, src)
+    if s then return 'eq:s:' .. s end
+    if n:type() == 'number' then return 'eq:n:' .. txt(n, src) end
+    return nil
+end
+-- a fact over a narrowed path: carries root + depth so staling (field_unstable) can
+-- gate depth-≥1 paths while leaving depth-0 vars on the call-immune floor.
+local function fact(p, kind) return { var = p.path, kind = kind, root = p.root, depth = p.depth } end
 
 local function lua_classify(cond, src, holds)
     if not cond then return {} end
@@ -112,25 +140,31 @@ local function lua_classify(cond, src, holds)
             local out = lua_classify(l, src, false)
             for _, f in ipairs(lua_classify(r, src, false)) do out[#out + 1] = f end
             return out
-        elseif op == '==' or op == '~=' then -- x == nil / x ~= nil (either order)
-            local var
-            if txt(r, src) == 'nil' and l:type() == 'identifier' then var = txt(l, src)
-            elseif txt(l, src) == 'nil' and r:type() == 'identifier' then var = txt(r, src) end
-            if var and ((op == '~=') == holds) then return { { var = var, kind = 'non-nil' } } end
-            -- TYPE-TEST (narrow v2, devirt seed): type(x) == 'T' / ~= 'T' (either order).
-            -- Sound like var narrowing — a call can't change a local's type, only reassignment
-            -- (mutated_of kills it). Positive only: x IS T when (== & holds) or (~= & ¬holds).
-            local tv = type_call_var(l, src) and str_lit(r, src) and { type_call_var(l, src), str_lit(r, src) }
-                or (type_call_var(r, src) and str_lit(l, src) and { type_call_var(r, src), str_lit(l, src) })
-            if tv and ((op == '==') == holds) then return { { var = tv[1], kind = 'type:' .. tv[2] } } end
+        elseif op == '==' or op == '~=' then
+            -- P == nil / P ~= nil (either order), P a var OR a field path (narrow v2)
+            local p
+            if txt(r, src) == 'nil' then p = path_of(l, src)
+            elseif txt(l, src) == 'nil' then p = path_of(r, src) end
+            if p and ((op == '~=') == holds) then return { fact(p, 'non-nil') } end
+            if p then return {} end -- P == nil under holds proves P nil — no positive fact
+            -- TYPE-TEST (devirt seed): type(P) == 'T' / ~= 'T'. Sound — a call can't change a
+            -- local's type, and a field path's type is gated by field_unstable. Positive only.
+            local tp = type_call_path(l, src) and str_lit(r, src) and { type_call_path(l, src), str_lit(r, src) }
+                or (type_call_path(r, src) and str_lit(l, src) and { type_call_path(r, src), str_lit(l, src) })
+            if tp and ((op == '==') == holds) then return { fact(tp[1], 'type:' .. tp[2]) } end
+            -- DISCRIMINANT (narrow v2): P == 'lit' / P ~= 'lit', a string/number literal.
+            -- P holds value `lit` when (== & holds) or (~= & ¬holds); implies non-nil + truthy.
+            local dp = path_of(l, src) and disc_kind(r, src) and { path_of(l, src), disc_kind(r, src) }
+                or (path_of(r, src) and disc_kind(l, src) and { path_of(r, src), disc_kind(l, src) })
+            if dp and ((op == '==') == holds) then return { fact(dp[1], dp[2]) } end
             return {}
         end
         return {}
-    elseif t == 'identifier' then
-        if holds then return { { var = txt(cond, src), kind = 'truthy' } } end -- `if x`
+    else -- `if P` — P a var (`if x`) or a field path (`if opts.subdirs`)
+        local p = path_of(cond, src)
+        if p and holds then return { fact(p, 'truthy') } end
         return {}
     end
-    return {}
 end
 vocab.lua = lua_classify
 
@@ -152,6 +186,97 @@ local function fn_node(node, src, lang)
     return nil
 end
 
+-- ── field-path STALING (the aliasing floor for depth-≥1 facts) ──────────────
+-- A field path `r.f` narrowed by a guard can be invalidated in ways a bare local
+-- cannot. We collect STALING PREFIXES (whole-fn, conservative like mutated_of):
+--   • field-write `A.f = …` / `A[i] = …` → the exact path (and everything under it)
+--     may change → prefix A.f INCLUSIVE (a bracket-write's key is unknown → the base
+--     A becomes exclusive-unstable: any field of A may change).
+--   • a call receiving container `A` (`foo(A)` / `A:m()`) or an ALIAS (`y = A`) → the
+--     callee/alias may write A's FIELDS but cannot rebind A itself → prefix A EXCLUSIVE
+--     (kills `A.x`, leaves `A`). Passing `A.f` (a field VALUE) only exposes `A.f.*`.
+-- A depth-≥1 fact on path P is dropped if some prefix entry covers P (see fact_live);
+-- bare-var facts are immune (a call can't nil a caller's local) and use mutated_of.
+-- Root reassignment is covered separately by mutated_of.
+local function field_unstable_of(fn, src)
+    local stale = {} -- list of { prefix = <path str>, inclusive = bool }
+    local function mark(prefix, inclusive) if prefix then stale[#stale + 1] = { prefix = prefix, inclusive = inclusive } end end
+    local function walk(n)
+        local t = n:type()
+        -- `assignment_statement` = (variable_list) = (expression_list); `local x = …` is
+        -- a `variable_declaration` wrapping one, so handling the inner form catches both.
+        if t == 'assignment_statement' then
+            local vlist, elist
+            for c in n:iter_children() do
+                if c:type() == 'variable_list' then vlist = c
+                elseif c:type() == 'expression_list' then elist = c end
+            end
+            if vlist then for tgt in vlist:iter_children() do -- field-write targets
+                if tgt:type() == 'dot_index_expression' then
+                    local p = path_of(tgt, src); if p then mark(p.path, true) end -- A.f inclusive
+                elseif tgt:type() == 'bracket_index_expression' then
+                    local b = path_of(tgt:named_child(0), src); if b then mark(b.path, false) end -- A[?] → A.*
+                end
+            end end
+            if elist then for v in elist:iter_children() do -- alias RHS (identifier or field path)
+                if v:named() then local p = path_of(v, src); if p then mark(p.path, false) end end -- y = A → A.*
+            end end
+        elseif t == 'function_call' then -- A passed as arg, or A:m() receiver
+            local args = n:field('arguments')[1]
+            if args then for a in args:iter_children() do
+                if a:named() then local p = path_of(a, src); if p then mark(p.path, false) end end
+            end end
+            local callee = n:named_child(0)
+            if callee and callee:type() == 'method_index_expression' then
+                local p = path_of(callee:named_child(0), src); if p then mark(p.path, false) end
+            end
+        end
+        for c in n:iter_children() do
+            if c:named() and not FN_TYPES[c:type()] then walk(c) end -- nested fns = own scope
+        end
+    end
+    walk(fn)
+    return stale
+end
+
+-- does staling prefix `a` cover path `p`? `a` is a prefix of `p` when p == a or p
+-- continues past a dot boundary (`a.` …). Inclusive covers the exact path too.
+local function prefix_covers(a, inclusive, p)
+    if p == a then return inclusive end
+    return p:sub(1, #a + 1) == a .. '.'
+end
+-- keep a fact `f` at a point. A field path (depth ≥ 1) needs its root un-reassigned
+-- AND no staling prefix covering its path; a bare var only needs un-reassignment.
+local function fact_live(f, mutated, stale)
+    if mutated[f.root] then return false end
+    if (f.depth or 0) >= 1 then
+        for _, e in ipairs(stale) do
+            if prefix_covers(e.prefix, e.inclusive, f.var) then return false end
+        end
+    end
+    return true
+end
+
+-- kind precedence: a concrete value (eq:) proves a type, a type proves non-nil +
+-- truthy; truthy/non-nil are the floor. Higher = stronger; env keeps the strongest.
+local function kind_rank(k)
+    if not k then return 0 end
+    if k:match('^eq:') then return 4 end
+    if k:match('^type:') then return 3 end
+    if k == 'truthy' then return 2 end
+    return 1 -- non-nil
+end
+-- the DISPLAY collapse for M.narrow's report env: eq:/type: are shown verbatim,
+-- truthy/non-nil collapse to the sound floor 'non-nil' (what a guard minimally proves).
+local function disp(kind) return (kind:match('^eq:') or kind:match('^type:')) and kind or 'non-nil' end
+-- human form of a kind for the lens: `is string` / `= 'foo'` / `= 3` / `non-nil`.
+local function show_kind(kind)
+    local ty = kind:match('^type:(.+)$'); if ty then return 'is ' .. ty end
+    local s = kind:match('^eq:s:(.*)$'); if s then return ("= '%s'"):format(s) end
+    local n = kind:match('^eq:n:(.+)$'); if n then return '= ' .. n end
+    return kind
+end
+
 --- Branch-sensitive narrowing of the focused fn. Walks the body's statements; at
 --- each, cfg.guards_over gives the dominating guards, the vocab classifies each into
 --- facts, and a fact is kept when its polarity matches the guard's truth value.
@@ -168,6 +293,7 @@ function M.narrow(store, fn_id)
     if not fn then return { lang = lang, points = {} } end
     local classify = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node)))
     local mutated = mutated_of(node)
+    local funstable = field_unstable_of(fn, src)
 
     local points, seenguard = {}, {}
     local function visit(n)
@@ -179,10 +305,12 @@ function M.narrow(store, fn_id)
                             local env = {}
                             for _, g in ipairs(cfg.guards_over(stmt, src)) do
                                 for _, f in ipairs(classify(g.cond, src, not g.neg)) do
-                                    if not mutated[f.var] then -- reassigned → stale, skip
-                                        -- nil/truthy collapse to 'non-nil' (the sound floor);
-                                        -- a TYPE fact (devirt seed) is preserved as 'type:T'
-                                        env[f.var] = f.kind:match('^type:') and f.kind or 'non-nil'
+                                    if fact_live(f, mutated, funstable) then
+                                        -- keep the STRONGEST kind; eq:/type: shown verbatim,
+                                        -- nil/truthy collapse to the sound floor 'non-nil'
+                                        if kind_rank(f.kind) > kind_rank(env[f.var]) then
+                                            env[f.var] = disp(f.kind)
+                                        end
                                         seenguard[g.cond:id()] = true
                                     end
                                 end
@@ -206,27 +334,31 @@ function M.narrow(store, fn_id)
 end
 
 -- the narrowing env active AT a node from its DOMINATING guards (excludes the
--- node's own condition — guards_over walks parents). Keeps the STRONGEST kind
--- (truthy ⊐ non-nil), which redundant-check determination needs.
-local function env_of(node, src, classify, mutated)
+-- node's own condition — guards_over walks parents). Keeps the RAW STRONGEST kind
+-- (eq: ⊐ type: ⊐ truthy ⊐ non-nil) — determine() needs truthy distinct from non-nil
+-- and the eq: value verbatim. Keyed by PATH (a bare var or a field path).
+local function env_of(node, src, classify, mutated, funstable)
     local env = {}
     for _, g in ipairs(cfg.guards_over(node, src)) do
         for _, f in ipairs(classify(g.cond, src, not g.neg)) do
-            if not (mutated and mutated[f.var]) then
-                local cur = env[f.var]
-                -- STRONGEST wins: type:T ⊐ truthy ⊐ non-nil (a type proves both)
-                if f.kind:match('^type:') then env[f.var] = f.kind
-                elseif f.kind == 'truthy' and not (cur and cur:match('^type:')) then env[f.var] = 'truthy'
-                elseif not cur then env[f.var] = 'non-nil' end
+            if fact_live(f, mutated or {}, funstable or {}) then
+                if kind_rank(f.kind) > kind_rank(env[f.var]) then env[f.var] = f.kind end
             end
         end
     end
     return env
 end
 
--- env-fact interrogation: a TYPE fact implies non-nil (type(nil)=='nil'), and truthy for
--- every type except boolean (false is truthy-negative) and nil.
-local function env_type(env, v) local e = env[v]; return e and e:match('^type:(.+)$') end
+-- env-fact interrogation: an eq: value proves its literal's type (string/number); a
+-- TYPE fact implies non-nil (type(nil)=='nil') and truthy for every type but boolean
+-- (false) and nil. `v` is a path key (bare var or field path).
+local function env_type(env, v)
+    local e = env[v]; if not e then return nil end
+    local ty = e:match('^type:(.+)$'); if ty then return ty end
+    if e:match('^eq:s:') then return 'string' end
+    if e:match('^eq:n:') then return 'number' end
+    return nil
+end
 local function env_nonnil(env, v)
     local e = env[v]
     return e == 'truthy' or e == 'non-nil' or (env_type(env, v) and env_type(env, v) ~= 'nil') or false
@@ -239,41 +371,54 @@ end
 
 -- is a SIMPLE condition already DETERMINED by `env`? → 'always-true' (tautology,
 -- then-branch always taken) | 'dead' (contradiction, then-branch dead) | nil.
--- `if x` needs TRUTHY; `x~=nil`/`x==nil` need non-nil; `not x` dead under truthy; a
--- type-test is determined by a proven TYPE fact (redundant re-test / contradiction).
+-- `if P` needs TRUTHY; `P~=nil`/`P==nil` need non-nil; `not P` dead under truthy; a
+-- type-test is determined by a proven TYPE fact; a discriminant `P=='v'` by a proven
+-- eq: value (P a bare var or a field path throughout).
 local function determine(cond, src, env)
     local t = cond:type()
     if t == 'parenthesized_expression' then return determine(cond:named_child(0), src, env) end
-    if t == 'identifier' then
-        if env_truthy(env, txt(cond, src)) then return 'always-true' end
+    if t == 'unary_expression' and txt(cond:child(0), src) == 'not' then
+        local ip = path_of(cond:named_child(0), src)
+        if ip and env_truthy(env, ip.path) then return 'dead' end
         return nil
     end
-    if t == 'unary_expression' and txt(cond:child(0), src) == 'not' then
-        local inner = cond:named_child(0)
-        if inner and inner:type() == 'identifier' and env_truthy(env, txt(inner, src)) then
-            return 'dead'
-        end
+    local pp = path_of(cond, src) -- `if P` truthy test
+    if pp then
+        if env_truthy(env, pp.path) then return 'always-true' end
         return nil
     end
     if t == 'binary_expression' then
         local l, r = cond:named_child(0), cond:named_child(1)
         local op = txt(cond:child(1), src)
-        local var
-        if txt(r, src) == 'nil' and l:type() == 'identifier' then var = txt(l, src)
-        elseif txt(l, src) == 'nil' and r:type() == 'identifier' then var = txt(r, src) end
-        if var and env_nonnil(env, var) then
-            if op == '~=' then return 'always-true' end -- x~=nil, x known non-nil
-            if op == '==' then return 'dead' end        -- x==nil, x known non-nil
+        local np -- P == nil / P ~= nil
+        if txt(r, src) == 'nil' then np = path_of(l, src)
+        elseif txt(l, src) == 'nil' then np = path_of(r, src) end
+        if np and env_nonnil(env, np.path) then
+            if op == '~=' then return 'always-true' end -- P~=nil, P known non-nil
+            if op == '==' then return 'dead' end        -- P==nil, P known non-nil
         end
-        -- type-test determined by a proven type fact
         if op == '==' or op == '~=' then
-            local tv = type_call_var(l, src) and str_lit(r, src) and { type_call_var(l, src), str_lit(r, src) }
-                or (type_call_var(r, src) and str_lit(l, src) and { type_call_var(r, src), str_lit(l, src) })
-            local known = tv and env_type(env, tv[1])
-            if known then
-                local same = (known == tv[2])
-                if op == '==' then return same and 'always-true' or 'dead' end
-                return same and 'dead' or 'always-true' -- ~=
+            -- type-test determined by a proven type fact
+            local tp = (type_call_path(l, src) and str_lit(r, src) and { type_call_path(l, src), str_lit(r, src) })
+                or (type_call_path(r, src) and str_lit(l, src) and { type_call_path(r, src), str_lit(l, src) })
+            if tp then
+                local kty = env_type(env, tp[1].path)
+                if kty then
+                    local same = (kty == tp[2])
+                    if op == '==' then return same and 'always-true' or 'dead' end
+                    return same and 'dead' or 'always-true' -- ~=
+                end
+            end
+            -- discriminant determined by a proven eq: value
+            local dp = (path_of(l, src) and disc_kind(r, src) and { path_of(l, src), disc_kind(r, src) })
+                or (path_of(r, src) and disc_kind(l, src) and { path_of(r, src), disc_kind(l, src) })
+            if dp then
+                local kv = env[dp[1].path]
+                if kv and kv:match('^eq:') then
+                    local same = (kv == dp[2])
+                    if op == '==' then return same and 'always-true' or 'dead' end
+                    return same and 'dead' or 'always-true' -- ~=
+                end
             end
         end
     end
@@ -357,6 +502,7 @@ function M.param_nilability(store, fn_id)
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, params = {} } end
     local classify, mutated = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node))), mutated_of(node)
+    local funstable = field_unstable_of(fn, src)
     local fl = flowmod.present(node) and flowmod.record(node)
     local plist = (fl and fl.params) or {}
     local params = {}
@@ -384,7 +530,7 @@ function M.param_nilability(store, fn_id)
         end
         if CONDN[t] then local c = n:field('condition')[1]; if c then note_tested(c) end end
         for _, p in ipairs(param_derefs(n, src, params)) do
-            if not proven[p] and not env_of(n, src, classify, mutated)[p] then
+            if not proven[p] and not env_of(n, src, classify, mutated, funstable)[p] then
                 unguarded[p] = unguarded[p] or (n:start() + 1)
             end
         end
@@ -450,6 +596,7 @@ function M.redundant(store, fn_id)
     if not fn then return { lang = lang, checks = {} } end
     local classify = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node)))
     local mutated = mutated_of(node)
+    local funstable = field_unstable_of(fn, src)
     -- determine() handles only SINGLE predicates, so a conjunction `cond and other()`
     -- (where only `cond` is known) is correctly NOT flagged — the other conjunct still
     -- gates the branch.
@@ -460,7 +607,7 @@ function M.redundant(store, fn_id)
                 if c:type() == 'if_statement' then
                     local cond = c:field('condition')[1]
                     if cond then
-                        local d = determine(cond, src, env_of(c, src, classify, mutated))
+                        local d = determine(cond, src, env_of(c, src, classify, mutated, funstable))
                         if d then
                             checks[#checks + 1] = { line = cond:start() + 1,
                                 always = (d == 'always-true'), cond = txt(cond, src) }
@@ -494,7 +641,7 @@ function M.report(store, fn_id)
     for _, p in ipairs(res.points) do
         local facts = {}
         for var, kind in pairs(p.env) do
-            facts[#facts + 1] = ('%s: %s'):format(var, (kind:gsub('^type:', 'is ')))
+            facts[#facts + 1] = ('%s: %s'):format(var, show_kind(kind))
         end
         table.sort(facts)
         L[#L + 1] = ('  L%-4d %-16s %s'):format(p.line, p.kind, table.concat(facts, ', '))
@@ -512,9 +659,11 @@ function M.report(store, fn_id)
         end
     end
     L[#L + 1] = ''
-    L[#L + 1] = 'a fact holds only where its guard PROVES it (nil-check / truthiness /'
-    L[#L + 1] = 'and-conjunction; `or` and negated compounds do not narrow). Sound knowledge,'
-    L[#L + 1] = 'not a guess — feeds redundant-check elimination + null-deref (INC 2/3).'
+    L[#L + 1] = 'a fact holds only where its guard PROVES it (nil-check / truthiness / type-test /'
+    L[#L + 1] = 'discriminant `f == "v"` / and-conjunction; `or` and negated compounds do not narrow).'
+    L[#L + 1] = 'a FIELD path (opts.mode) is narrowed too, dropped where the root is field-written,'
+    L[#L + 1] = 'passed to a call, or aliased (may stale it). Sound knowledge — feeds redundant-check'
+    L[#L + 1] = 'elimination + devirtualization, not a guess.'
     return L
 end
 

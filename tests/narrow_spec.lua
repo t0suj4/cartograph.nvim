@@ -234,6 +234,105 @@ test('narrow: report renders facts; unknown language is reported unsupported', f
     ok(joined:match('x: non%-nil'), 'and the fact')
 end)
 
+-- ── field-path narrowing (narrow v2) ─────────────────────────────────────────
+test('narrow v2: `if opts.subdirs then` narrows the field path', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(opts)',
+        '  if opts.subdirs then',
+        '    use(opts.subdirs)',   -- L3
+        '  end',
+        'end',
+        'return { f }',
+    }
+    eq('non-nil', env_at('f', 3)['opts.subdirs'])
+end)
+
+test('narrow v2: discriminant `x.kind == "A"` narrows the path to a value', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x)',
+        '  if x.kind == "A" then',
+        '    local v = x.value',   -- L3 — reads a sibling field, does not stale x.kind
+        '  end',
+        'end',
+        'return { f }',
+    }
+    eq('eq:s:A', env_at('f', 3)['x.kind'])
+end)
+
+test('narrow v2: a field-write on the root STALES the path (sound kill)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(opts)',
+        '  if opts.mode then',
+        '    opts.mode = nil',      -- field-write → opts unstable
+        '    use(opts.mode)',   -- L4 — must NOT be narrowed
+        '  end',
+        'end',
+        'return { f }',
+    }
+    eq(nil, env_at('f', 4)['opts.mode'])
+end)
+
+test('narrow v2: passing the root to a call STALES the path (call may mutate)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(opts)',
+        '  if opts.mode then',
+        '    mutate(opts)',         -- opts escapes → unstable
+        '    use(opts.mode)',   -- L4 — must NOT be narrowed
+        '  end',
+        'end',
+        'return { f }',
+    }
+    eq(nil, env_at('f', 4)['opts.mode'])
+end)
+
+test('narrow v2: aliasing the root STALES the path (invisible mutation)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(opts)',
+        '  if opts.mode then',
+        '    local y = opts',       -- alias → later y.mode=… invisible to opts.mode
+        '    use(opts.mode)',   -- L4 — must NOT be narrowed
+        '  end',
+        'end',
+        'return { f }',
+    }
+    eq(nil, env_at('f', 4)['opts.mode'])
+end)
+
+test('narrow v2: a bare var passed to a call is STILL narrowed (call-immune)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x)',
+        '  if x then',
+        '    use(x)',              -- call receives x, but cannot nil a caller local
+        '    other(x)',   -- L4 — x still non-nil
+        '  end',
+        'end',
+        'return { f }',
+    }
+    eq('non-nil', env_at('f', 4).x)
+end)
+
+test('narrow v2: redundant discriminant re-test on a field path (dead / always)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x)',
+        '  if x.kind == "A" then',
+        '    if x.kind == "B" then return 1 end',   -- L3 dead (A ~= B)
+        '    if x.kind == "A" then return 2 end',   -- L4 always-true
+        '  end',
+        'end',
+        'return { f }',
+    }
+    local r = redundant('f')
+    eq(false, r[3] and r[3].always)   -- dead
+    eq(true, r[4] and r[4].always)    -- always-true
+end)
+
 -- ── parameter-nilability (Rung 2, the lua-ls disagreement oracle) ─────────────
 -- verdict for param `pn` of fn `name`, plus its conflict flag
 local function pnil(name, pn)

@@ -1083,6 +1083,33 @@ local function gen_lua_redundant(k, akey)
     return fname, src
 end
 
+-- FIELD-PATH NARROWING ground-truth (narrow v2): a guard over a field path
+-- (`if opts.mode`, discriminant `x.kind == 'A'`) narrows the PATH — but a field-write,
+-- passing the CONTAINER to a call, or aliasing it may stale the field, so those are
+-- NEGATIVES (fact=false = must-stay-unknown). The anti-over-kill positive checks the
+-- staling is PREFIX-precise: reading a SIBLING field must NOT drop the narrowed path.
+local function gen_lua_fieldpath(k, akey)
+    local B, fname = {}, ('fp%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function kn(var, fact, line) akey[#akey + 1] = { lens = 'narrow', file = fname, line = line, var = var, fact = fact } end
+    w('local function fa(opts)'); w('  if opts.mode then') -- + path truthy narrows
+    kn('opts.mode', 'non-nil', w('    use(opts.mode)')); w('  end'); w('end')
+    w('local function fb(x)'); w('  if x.kind == "A" then') -- + discriminant → a value
+    kn('x.kind', 'eq:s:A', w('    local v = x.value')); w('  end'); w('end')
+    w('local function fc(opts)'); w('  if opts.mode then'); w('    opts.mode = get()') -- − field-write stales
+    kn('opts.mode', false, w('    use(opts.mode)')); w('  end'); w('end')
+    w('local function fd(x)'); w('  if x.kind == "A" then'); w('    handler(x)') -- − container to a call stales
+    kn('x.kind', false, w('    log(x.value)')); w('  end'); w('end')
+    w('local function fe(opts)'); w('  if opts.mode then'); w('    local y = opts') -- − alias stales
+    kn('opts.mode', false, w('    use(opts.mode)')); w('  end'); w('end')
+    w('local function ff(opts)'); w('  if opts.mode then'); w('    local v = opts.other') -- + sibling read: NO over-kill
+    kn('opts.mode', 'non-nil', w('    use(opts.mode)')); w('  end'); w('end')
+    w('return { fa, fb, fc, fd, fe, ff }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 -- UNTANGLE ground-truth (syn-analysis INC 3): independent PURE data chains → the fn
 -- partitions into that many concerns; a coupling statement (using two chains' vars)
 -- merges them. Key is per-FN {lens='untangle', fn, ncomp}. Pure (no calls) so effect
@@ -1269,6 +1296,7 @@ function M.analysis(lang, nfiles, seed)
     local function add(fname, src) out.files[fname] = src; out.order[#out.order + 1] = fname end
     for i = 1, (nfiles or 12) do add(gen_lua_narrow(i, out.key)) end
     for i = 1, 4 do add(gen_lua_typenarrow(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_fieldpath(i, out.key)) end
     for i = 1, 4 do add(gen_lua_licm(i, out.key)) end
     for i = 1, 4 do add(gen_lua_cse(i, out.key)) end
     for i = 1, 4 do add(gen_lua_redundant(i, out.key)) end
