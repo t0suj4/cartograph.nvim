@@ -909,8 +909,11 @@ the same value every iteration, so it can be hoisted above the loop. Each is mar
 `*` (unconditionally hoistable) or `~` (invariant but hedged — a table-content read
 whose aliasing we can't rule out, or branch-guarded). It is deliberately conservative:
 allocations (`{}` — fresh identity each iteration), loop induction variables, and
-reassignments (which may be read before the write) are never certified. A suggestion,
-never a silent transform — the same discipline as the rest.
+reassignments (which may be read before the write) are never certified. The same lens
+also reports **redundant computations** (CSE): two statements in one block computing
+the same expression over the same operand values, where the earlier already produced
+the result — so the later can reuse it (again `~` when a table read might have changed
+under it). A suggestion, never a silent transform — the same discipline as the rest.
 
 ## Offline: history archaeology
 
