@@ -73,9 +73,14 @@ test('optapply: a HEDGED (table-read) redundancy is not applied', function ()
         '  return a, b',
         'end', 'return { f }',
     }
-    -- the pair is reported (hedged) by cse, but the apply verb refuses to touch it
-    local plan, why = optapply.plan_cse(store, fn_id('f'))
-    ok(not plan, 'no clean plan: ' .. tostring(why))
+    -- the pair is reported (hedged) by cse; the apply verb refuses it — WITH provenance
+    local plan = optapply.plan_cse(store, fn_id('f'))
+    eq(0, #plan.moves)
+    eq(1, #plan.declined)
+    ok(plan.declined[1].reason:match('hedged'), 'the decline names the reason: ' .. plan.declined[1].reason)
+    -- run surfaces the ledger too
+    local res = optapply.run(store, fn_id('f'))
+    ok(not res.ok and #res.declined == 1, 'run refuses but carries the ledger')
 end)
 
 test('optapply: span drift is refused (CAS)', function ()
@@ -111,7 +116,8 @@ test('optapply: opts.line targets a single finding, leaving the rest', function 
     eq(1, #p3.reps); eq(3, p3.moves[1].line)                  -- only L3
     local p5 = optapply.plan_cse(store, fn_id('f'), { line = 5 })
     eq(1, #p5.reps); eq(5, p5.moves[1].line)                  -- only L5
-    ok(not (optapply.plan_cse(store, fn_id('f'), { line = 99 })), 'no finding at L99')
+    local p99 = optapply.plan_cse(store, fn_id('f'), { line = 99 })
+    eq(0, #p99.reps); eq(0, #p99.declined)  -- no finding at L99 (others out of target, not declined)
 end)
 
 test('optapply: M.at resolves the INNERMOST enclosing function by location', function ()
@@ -171,8 +177,14 @@ test('optapply: localize declines a non-stdlib global and a name collision', fun
         '  for _, x in ipairs(xs) do table.insert(xs, x) end',
         'end', 'return { f, g }',
     }
-    ok(not optapply.plan_localize(store, fn_id('f')), 'non-stdlib global not localized')
-    ok(not optapply.plan_localize(store, fn_id('g')), 'colliding leaf name not localized')
+    local pf = optapply.plan_localize(store, fn_id('f'))
+    eq(0, #pf.moves)
+    ok(pf.declined[1] and pf.declined[1].reason:match('not a known always%-present global'),
+        'non-stdlib decline named: ' .. (pf.declined[1] or {}).reason)
+    local pg = optapply.plan_localize(store, fn_id('g'))
+    eq(0, #pg.moves)
+    ok(pg.declined[1] and pg.declined[1].reason:match('shadow'),
+        'collision decline named: ' .. (pg.declined[1] or {}).reason)
 end)
 
 -- ── hoist (LICM) apply ────────────────────────────────────────────────────────
@@ -210,6 +222,122 @@ test('optapply: hoist declines a possibly zero-trip (for) loop', function ()
         '  end',
         'end', 'return { f }',
     }
-    local plan, why = optapply.plan_hoist(store, fn_id('f'))
-    ok(not plan, 'not hoisted (zero-trip hazard): ' .. tostring(why))
+    local plan = optapply.plan_hoist(store, fn_id('f'))
+    eq(0, #plan.moves)
+    ok(plan.declined[1] and plan.declined[1].reason:match('zero times'),
+        'zero-trip decline named: ' .. (plan.declined[1] or {}).reason)
+end)
+
+-- ── hedge resolution: discharge a decline by supplying the premise ────────────
+test('optapply: a decline carries its class + resolution menu', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(base, xs)',
+        '  for _, x in ipairs(xs) do',   -- L2 loop header
+        '    local k = base + 1',
+        '    use(k, x)',
+        '  end',
+        'end', 'return { f }',
+    }
+    local plan = optapply.plan_hoist(store, fn_id('f'))
+    eq('risk', plan.declined[1].class)
+    eq('iterates', plan.declined[1].resolutions[1].id)
+end)
+
+test('optapply: assuming `iterates` discharges the zero-trip hoist and records it', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = ingest {
+        'local function f(base, xs)',
+        '  for _, x in ipairs(xs) do',   -- L2
+        '    local k = base + 1',
+        '    use(k, x)',
+        '  end',
+        'end', 'return { f }',
+    }
+    local res = optapply.run_hoist(store, fn_id('f'), { assume = { [2] = 'iterates' } })
+    ok(res.ok, 'applied under assumption: ' .. tostring(res.reason))
+    ok(res.moves[1].waived:match('iterates'), 'the waiver is recorded: ' .. tostring(res.moves[1].waived))
+    local after = vim.fn.readfile(root .. '/m.lua')
+    local kl, fl2
+    for i, l in ipairs(after) do
+        if l:match('local k = base') then kl = i end
+        if l:match('for _, x') then fl2 = i end
+    end
+    ok(kl < fl2, 'k hoisted above the for')
+end)
+
+test('optapply: assuming `present` discharges the possibly-nil-global localize', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = ingest {
+        'local function f(xs)',
+        '  for _, x in ipairs(xs) do',   -- L2
+        '    myglobal.step(x)',
+        '  end',
+        'end', 'return { f }',
+    }
+    local plan = optapply.plan_localize(store, fn_id('f'))
+    eq('present', plan.declined[1].resolutions[1].id)
+    local res = optapply.run_localize(store, fn_id('f'), { assume = { [2] = 'present' } })
+    ok(res.ok, 'applied: ' .. tostring(res.reason))
+    ok(res.moves[1].waived:match('present'), 'waiver recorded')
+    ok(table.concat(vim.fn.readfile(root .. '/m.lua'), '\n'):match('local step = myglobal%.step'), 'localized')
+end)
+
+test('optapply: the `rename` resolution is MECHANICAL — rebinds fresh, no shadow, no waiver-risk', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = ingest {
+        'local function f(xs, t, insert)',       -- `insert` param would be shadowed
+        '  for _, x in ipairs(xs) do',           -- L2
+        '    table.insert(t, x)',
+        '  end',
+        'end', 'return { f }',
+    }
+    local plan = optapply.plan_localize(store, fn_id('f'))
+    eq('wrong', plan.declined[1].class)
+    eq('rename', plan.declined[1].resolutions[1].id)
+    local res = optapply.run_localize(store, fn_id('f'), { assume = { [2] = 'rename' } })
+    ok(res.ok, 'applied: ' .. tostring(res.reason))
+    local after = table.concat(vim.fn.readfile(root .. '/m.lua'), '\n')
+    ok(after:match('local insert_ = table%.insert'), 'rebound under a fresh name')
+    ok(after:match('insert_%(t, x%)'), 'the call site uses the fresh name')
+end)
+
+-- ── provenance on likely-bug declines + the informed override ─────────────────
+test('optapply: a `wrong` decline carries evidence, and `stable` overrides it', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = ingest {
+        'local function f(x, y)',
+        '  local a = x + y',   -- L2 source
+        '  local b = x + y',   -- L3 recompute (a reassigned below → declined)
+        '  a = 0',             -- L4 the reassignment (AFTER the reuse — so `stable` holds)
+        '  return a, b',
+        'end', 'return { f }',
+    }
+    local plan = optapply.plan_cse(store, fn_id('f'))
+    eq('wrong', plan.declined[1].class)
+    ok(plan.declined[1].evidence:match('L4'), 'evidence points at the reassignment: ' .. plan.declined[1].evidence)
+    eq('stable', plan.declined[1].resolutions[1].id)
+    -- informed override: L4 is after the reuse at L3, so the premise is sound
+    local res = optapply.run(store, fn_id('f'), { assume = { [3] = 'stable' } })
+    ok(res.ok, 'applied under assertion: ' .. tostring(res.reason))
+    ok(res.moves[1].waived:match('stable'), 'waiver recorded')
+    ok(table.concat(vim.fn.readfile(root .. '/m.lua'), '\n'):match('local b = a'), 'reuse applied')
+end)
+
+test('optapply: a capture-unsafe hoist carries the collision site as evidence', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(base)',
+        '  local k = 99',       -- k outside the loop → hoisting the inner k collides
+        '  repeat',            -- POST loop → iterates, so it is the CAPTURE gate that fires
+        '    local k = base + 1',
+        '    use(k)',
+        '  until base > 100',
+        '  return k',
+        'end', 'return { f }',
+    }
+    local plan = optapply.plan_hoist(store, fn_id('f'))
+    local d = plan.declined[1]
+    ok(d and d.class == 'wrong' and d.reason:match('capture'), 'capture-unsafe decline')
+    ok(d.evidence and d.evidence:match('outside the loop'), 'evidence names the collision: ' .. tostring(d.evidence))
 end)

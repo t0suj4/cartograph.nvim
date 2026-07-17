@@ -29,6 +29,30 @@ for lang, s in pairs(spec) do
 end
 local function lang_of(file) return EXT[(file or ''):match('%.(%w+)$') or ''] end
 
+-- ── hedge resolution ([[cartograph-hedge-resolution-writes]]) ─────────────────
+-- A decline is a HEDGE; the caller DISCHARGES it by supplying the missing premise at
+-- that site: opts.assume = { [line] = resolution_id | {resolution_id, …} }. A supplied
+-- premise waives that JUDGMENT gate (never the mechanical floor — span-CAS/parse-clean/
+-- CAS always run) and is RECORDED as the edit's `waived` provenance.
+local function assumed(opts, line, id)
+    local a = opts.assume and opts.assume[line]
+    if not a then return false end
+    if type(a) == 'string' then return a == id end
+    for _, v in ipairs(a) do if v == id then return true end end
+    return false
+end
+-- a name not already bound in the fn (for the MECHANICAL shadow resolution — rebind
+-- under a fresh name rather than shadowing an existing binding)
+local function fresh_name(base, bound)
+    if not bound[base] then return base end
+    for _, suf in ipairs({ '_', '2', '_l' }) do
+        if not bound[base .. suf] then return base .. suf end
+    end
+    local i = 1
+    while bound[base .. i] do i = i + 1 end
+    return base .. i
+end
+
 local ASSIGN = { assignment_statement = true, assignment = true, assignment_expression = true }
 local LOCALDECL = { variable_declaration = true, local_declaration = true }
 
@@ -92,17 +116,43 @@ function M.plan_cse(store, fn_id, opts)
     local root = parser:parse()[1]:root()
     local srclines = vim.split(src, '\n', { plain = true })
 
-    local reps, moves = {}, {}
+    local reps, moves, declined = {}, {}, {}
     for _, p in ipairs(cse.redundant) do
-        local a = rows[p.first].def and rows[p.first].def[1]
-        local b = rows[p.second].def and rows[p.second].def[1]
-        -- per-finding target: the rewrite lands on the recompute row (p.second)
-        if (not opts.line or rows[p.second].l == opts.line)
-            and not p.hedged and a and b
-            and #(rows[p.first].def or {}) == 1 and #(rows[p.second].def or {}) == 1
-            and defcount[a] == 1 then
-            local rn = rhs_node(root, src, rows[p.second].l, b)
-            if rn then
+        local line = rows[p.second].l
+        if not opts.line or line == opts.line then -- out-of-target candidates aren't "declined"
+            local a = rows[p.first].def and rows[p.first].def[1]
+            local b = rows[p.second].def and rows[p.second].def[1]
+            local reason, class, res, evidence, waived
+            if p.hedged then
+                reason, class = 'hedged: an aliasing table read could change the value', 'risk'
+            elseif not (a and b) then reason, class = 'not a single-target reuse', 'blocked'
+            elseif #(rows[p.first].def or {}) ~= 1 or #(rows[p.second].def or {}) ~= 1 then
+                reason, class = 'multi-target assignment', 'blocked'
+            elseif defcount[a] ~= 1 then
+                -- PROVENANCE for the likely-bug: WHERE `a` is (re)assigned besides the reuse
+                -- source, so an override is informed (is any of these BETWEEN the two uses?).
+                local elines = {}
+                for r = 1, #rows do
+                    if r ~= p.first then
+                        for _, d in ipairs(rows[r].def or {}) do if d == a then elines[#elines + 1] = rows[r].l end end
+                    end
+                end
+                evidence = ('`%s` is also assigned at L%s'):format(a, table.concat(elines, ', L'))
+                if assumed(opts, line, 'stable') then
+                    waived = ('`%s` is stable between the two (asserted)'):format(a)
+                else
+                    reason, class = ('reuse source `%s` is reassigned elsewhere'):format(a), 'wrong'
+                    res = { { id = 'stable', premise = ('`%s` is not reassigned between the two uses'):format(a) } }
+                end
+            end
+            local rn = not reason and rhs_node(root, src, line, b)
+            if not reason and not rn then
+                reason, class = 'recompute RHS is not a single-line expression', 'blocked'
+            end
+            if reason then
+                declined[#declined + 1] = { line = line, what = p.expr, reason = reason,
+                    class = class, resolutions = res, evidence = evidence }
+            else
                 -- treesitter :range() is 0-BASED (start line/col, end line/col-exclusive),
                 -- matching the `at` range txn.edit_file consumes — kept 0-based on purpose
                 -- (NOT flow's 1-based rows). The 1-based Lua slice for `old` is sc+1..ec.
@@ -114,19 +164,14 @@ function M.plan_cse(store, fn_id, opts)
                 if e then expr.walk(e, function (nd) if nd.k == 'call' then ncalls = ncalls + 1 end end) end
                 reps[#reps + 1] = { at = { start = { line = sr, char = sc }, ['end'] = { line = er, char = ec } },
                     to = a, old = old }
-                moves[#moves + 1] = { line = rows[p.second].l, reuse = a, was = old,
-                    reuses_line = rows[p.first].l, removes_calls = ncalls }
+                moves[#moves + 1] = { line = line, reuse = a, was = old,
+                    reuses_line = rows[p.first].l, removes_calls = ncalls, waived = waived }
             end
         end
     end
-    if #reps == 0 then
-        return nil, opts.line
-            and ('no clean CSE-reuse at %s:%d'):format(rel, opts.line)
-            or 'no clean CSE-reuse candidates (all hedged or rebound sources)'
-    end
     return { verb = 'optimize-cse', touched = { rel }, generation = store.generation,
         stamps = { [rel] = txn.disk_stamp(store.data.root, rel) }, rel = rel,
-        reps = reps, moves = moves }
+        reps = reps, moves = moves, declined = declined }
 end
 
 -- ── localize-upvalue apply ───────────────────────────────────────────────────
@@ -210,38 +255,54 @@ function M.plan_localize(store, fn_id, opts)
     local root = parser:parse()[1]:root()
     local srclines = vim.split(src, '\n', { plain = true })
 
-    local ins, reps, moves = {}, {}, {}
+    local ins, reps, moves, declined = {}, {}, {}, {}
     for _, lp in ipairs(loc.loops) do
         if not opts.line or lp.line == opts.line then
             local ln = loop_node(root, lp.line)
-            if ln and not has_nested_fn(ln) then
-                local indent = (srclines[lp.line] or ''):match('^(%s*)') or ''
-                for _, c in ipairs(lp.cands) do
-                    local rootname = c.full:match('^([%w_]+)')
-                    if rootname and KNOWN_GLOBAL[rootname] and not bound[c.leaf] then
-                        local occ = callee_occurrences(ln, src, c.full)
-                        if #occ > 0 then
-                            -- insert ABOVE the header: after = header(1-based) - 2 (0-based)
-                            ins[#ins + 1] = { after = lp.line - 2,
-                                lines = { indent .. ('local %s = %s'):format(c.leaf, c.full) } }
-                            for _, at in ipairs(occ) do
-                                reps[#reps + 1] = { at = at, to = c.leaf, old = c.full }
-                            end
-                            moves[#moves + 1] = { line = lp.line, leaf = c.leaf, full = c.full, sites = #occ }
-                            bound[c.leaf] = true -- don't localize the same leaf twice
-                        end
+            local nested = ln and has_nested_fn(ln)
+            local indent = (srclines[lp.line] or ''):match('^(%s*)') or ''
+            for _, c in ipairs(lp.cands) do
+                local rootname = c.full:match('^([%w_]+)')
+                local reason, class, res, waived, name = nil, nil, nil, nil, c.leaf
+                if not ln then reason, class = 'could not locate the loop', 'blocked'
+                elseif nested then reason, class = 'loop contains a nested function (scope-unsafe)', 'risk'
+                elseif not (rootname and KNOWN_GLOBAL[rootname]) then
+                    if assumed(opts, lp.line, 'present') then
+                        waived = ('`%s` present (asserted)'):format(rootname)
+                    else
+                        reason, class = ('root `%s` is not a known always-present global (may be nil)')
+                            :format(rootname or '?'), 'risk'
+                        res = { { id = 'present', premise = ('`%s` is always defined here'):format(rootname or 'the global') } }
                     end
+                end
+                if not reason and bound[c.leaf] then
+                    if assumed(opts, lp.line, 'rename') then
+                        name = fresh_name(c.leaf, bound)
+                        waived = (waived and waived .. '; ' or '') .. ('rebound as `%s`'):format(name)
+                    else
+                        reason, class = ('`%s` is already bound here — would shadow'):format(c.leaf), 'wrong'
+                        res = { { id = 'rename',
+                            premise = ('rebind under a fresh name (e.g. `%s`)'):format(fresh_name(c.leaf, bound)) } }
+                    end
+                end
+                local occ = (not reason) and callee_occurrences(ln, src, c.full) or nil
+                if not reason and (not occ or #occ == 0) then reason, class = 'no rewritable call site found', 'blocked' end
+                if reason then
+                    declined[#declined + 1] = { line = lp.line, what = c.full, reason = reason, class = class, resolutions = res }
+                else
+                    -- insert ABOVE the header: after = header(1-based) - 2 (0-based)
+                    ins[#ins + 1] = { after = lp.line - 2,
+                        lines = { indent .. ('local %s = %s'):format(name, c.full) } }
+                    for _, atr in ipairs(occ) do reps[#reps + 1] = { at = atr, to = name, old = c.full } end
+                    moves[#moves + 1] = { line = lp.line, leaf = name, full = c.full, sites = #occ, waived = waived }
+                    bound[name] = true -- don't reuse the same local name twice
                 end
             end
         end
     end
-    if #moves == 0 then
-        return nil, opts.line and ('no safe localize at %s:%d'):format(node.file, opts.line)
-            or 'no safe localize candidates (non-stdlib root, name collision, or nested fn)'
-    end
     return { verb = 'optimize-localize', touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
-        reps = reps, ins = ins, moves = moves }
+        reps = reps, ins = ins, moves = moves, declined = declined }
 end
 
 -- POST-condition (repeat/do-while) or const-true loops run at least once → hoisting a
@@ -261,32 +322,54 @@ function M.plan_hoist(store, fn_id, opts)
     local node = store.node and store.node(fn_id)
     if not node or not node.file then return nil, 'no such node' end
     local res = optimize.hoist_plan(store, fn_id)
+    if #res.plans == 0 then return nil, 'no loop-invariant computations' end
     local rows = res.rows
     local src = table.concat(store.content(node) or {}, '\n')
     local srclines = vim.split(src, '\n', { plain = true })
-    local dels, ins, moves = {}, {}, {}
+    local dels, ins, moves, declined = {}, {}, {}, {}
     for _, p in ipairs(res.plans) do
-        local L = rows[p.loop]
-        local iterates = L and (POSTISH[L.t or ''] or L.const == true)
-        if p.safe and iterates and (not opts.line or p.line == opts.line) then
+        if not opts.line or p.line == opts.line then
+            local L = rows[p.loop]
+            local iterates = L and (POSTISH[L.t or ''] or L.const == true)
+            local waived
+            if not iterates and assumed(opts, p.line, 'iterates') then
+                iterates, waived = true, 'loop-always-iterates (asserted)'
+            end
+            -- per-loop refusal (hoist_plan marks the whole plan un/safe by capture)
+            local loopreason, loopclass, loopres, loopev
+            if not p.safe then
+                loopreason, loopclass = 'capture-unsafe: a hoisted local collides with an outer binding', 'wrong'
+                -- PROVENANCE: the exact collision site(s) hoist_plan found (rename resolution
+                -- teed up, not yet wired — but the evidence explains the likely-bug now)
+                local ev = {}
+                for _, h in ipairs(p.hazards or {}) do ev[#ev + 1] = h.reason end
+                loopev = #ev > 0 and table.concat(ev, '; ') or nil
+            elseif not iterates then
+                loopreason = 'loop may run zero times (for/while) — a zero-trip path could gain a throwing computation'
+                loopclass = 'risk'
+                loopres = { { id = 'iterates', premise = 'this loop always runs at least once' } }
+            end
             local indent = (srclines[p.line] or ''):match('^(%s*)') or ''
             for _, m in ipairs(p.moves) do
-                if not m.text:find('\n') then -- single-line statement only
+                local reason, class, res, ev = loopreason, loopclass, loopres, loopev
+                if not reason and m.text:find('\n') then
+                    reason, class = 'multi-line statement (single-line only for now)', 'blocked'
+                end
+                if reason then
+                    declined[#declined + 1] = { line = m.line, what = m.def or m.text, reason = reason,
+                        class = class, resolutions = res, evidence = ev }
+                else
                     local body = m.text:gsub('^%s*', '')
                     dels[#dels + 1] = { s = m.line - 1, e = m.line - 1, old = { srclines[m.line] } }
                     ins[#ins + 1] = { after = p.line - 2, lines = { indent .. body } }
-                    moves[#moves + 1] = { line = m.line, to = p.line, text = body, def = m.def }
+                    moves[#moves + 1] = { line = m.line, to = p.line, text = body, def = m.def, waived = waived }
                 end
             end
         end
     end
-    if #moves == 0 then
-        return nil, opts.line and ('no safe hoist at %s:%d'):format(node.file, opts.line)
-            or 'no safe hoist (needs a run-once loop — repeat/while-true — and a single-line invariant)'
-    end
     return { verb = 'optimize-hoist', touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
-        dels = dels, ins = ins, moves = moves }
+        dels = dels, ins = ins, moves = moves, declined = declined }
 end
 
 -- the edit callback for txn (single file: apply this plan's token-replacements)
@@ -330,6 +413,9 @@ end
 --- @return any entry_or_reason  (journal entry on ok, refusal reason otherwise)
 --- @return table? diff_lines
 function M.apply(store, plan)
+    if #(plan.reps or {}) == 0 and #(plan.dels or {}) == 0 and #(plan.ins or {}) == 0 then
+        return false, ('nothing applicable (%d declined)'):format(#(plan.declined or {}))
+    end
     local refuse = txn.verify(store, plan, {})
     if refuse then return false, refuse end
     local root = store.data.root
@@ -363,39 +449,34 @@ function M.apply(store, plan)
         return false, 'the edit would not parse cleanly — refused'
     end
     local diff = txn.difftext(before, after, plan.touched)
-    local entry, why = txn.execute(store, plan, 'optimize: CSE-reuse', edit_of(plan))
+    -- journal desc: the verb + any WAIVED premises (the recorded provenance of an override)
+    local waivers = {}
+    for _, m in ipairs(plan.moves or {}) do if m.waived then waivers[#waivers + 1] = m.waived end end
+    local desc = plan.verb .. (#waivers > 0 and (' under: ' .. table.concat(waivers, '; ')) or '')
+    local entry, why = txn.execute(store, plan, desc, edit_of(plan))
     if not entry then return false, why end
     return true, entry, diff
 end
 
---- One-call agent entry: plan + apply the focused fn's clean CSE reuses (`opts.line`
---- targets one finding). Returns a structured result (never throws) —
---- { ok, applied, moves, diff, reason }.
-function M.run(store, fn_id, opts)
-    local plan, why = M.plan_cse(store, fn_id, opts)
-    if not plan then return { ok = false, applied = 0, reason = why } end
+-- shared: apply a (plan, why) pair → the structured result (never throws). Always
+-- carries `declined` (the per-site refusal ledger) so a caller sees BOTH what was
+-- applied and what was refused-with-reason — even when nothing applied.
+local function run_plan(store, plan, why)
+    if not plan then return { ok = false, applied = 0, declined = {}, reason = why } end
     local ok, entry_or_reason, diff = M.apply(store, plan)
-    if not ok then return { ok = false, applied = 0, moves = plan.moves, reason = entry_or_reason } end
-    return { ok = true, applied = #plan.reps, moves = plan.moves, diff = diff }
+    if not ok then
+        return { ok = false, applied = 0, moves = plan.moves, declined = plan.declined,
+            reason = entry_or_reason }
+    end
+    return { ok = true, applied = #plan.moves, moves = plan.moves, declined = plan.declined, diff = diff }
 end
 
---- One-call agent entry for LOCALIZE-UPVALUE (`opts.line` targets one loop).
-function M.run_localize(store, fn_id, opts)
-    local plan, why = M.plan_localize(store, fn_id, opts)
-    if not plan then return { ok = false, applied = 0, reason = why } end
-    local ok, entry_or_reason, diff = M.apply(store, plan)
-    if not ok then return { ok = false, applied = 0, moves = plan.moves, reason = entry_or_reason } end
-    return { ok = true, applied = #plan.moves, moves = plan.moves, diff = diff }
-end
-
---- One-call agent entry for HOIST/LICM (`opts.line` targets one loop).
-function M.run_hoist(store, fn_id, opts)
-    local plan, why = M.plan_hoist(store, fn_id, opts)
-    if not plan then return { ok = false, applied = 0, reason = why } end
-    local ok, entry_or_reason, diff = M.apply(store, plan)
-    if not ok then return { ok = false, applied = 0, moves = plan.moves, reason = entry_or_reason } end
-    return { ok = true, applied = #plan.moves, moves = plan.moves, diff = diff }
-end
+--- One-call agent entries (never throw): plan + apply the focused fn's clean rewrites
+--- (`opts.line` targets one finding/loop). Result: { ok, applied, moves, declined, diff,
+--- reason } — `declined` = the per-site ledger { {line, what, reason} }.
+function M.run(store, fn_id, opts) return run_plan(store, M.plan_cse(store, fn_id, opts)) end
+function M.run_localize(store, fn_id, opts) return run_plan(store, M.plan_localize(store, fn_id, opts)) end
+function M.run_hoist(store, fn_id, opts) return run_plan(store, M.plan_hoist(store, fn_id, opts)) end
 
 -- ── location entry (targeted refactoring: point at a spot, not an id) ─────────
 --- the INNERMOST function/method whose range encloses `file`:`line` (1-based), or nil.
@@ -446,10 +527,23 @@ function M.report(store, fn_id)
     }
     for _, s in ipairs(sections) do
         local label, plan = s[1], s[2]
-        if plan then
+        if plan and (#plan.moves > 0 or #(plan.declined or {}) > 0) then
             any = true
-            L[#L + 1] = ('optimize-apply [%s]: %s — %d rewrite(s) (dry-run):'):format(label, name, #plan.moves)
-            for _, l in ipairs(M.preview(store, plan)) do L[#L + 1] = l end
+            L[#L + 1] = ('optimize-apply [%s]: %s — %d applicable, %d declined (dry-run):')
+                :format(label, name, #plan.moves, #(plan.declined or {}))
+            if #plan.moves > 0 then
+                for _, l in ipairs(M.preview(store, plan)) do L[#L + 1] = l end
+            end
+            for _, d in ipairs(plan.declined or {}) do -- the refusal ledger: why NOT applied
+                L[#L + 1] = ('  ✗ L%-4d %-22s [%s] %s'):format(d.line, tostring(d.what), d.class or '?', d.reason)
+                if d.evidence then -- provenance: the fact(s) behind the verdict, so an override is informed
+                    L[#L + 1] = ('       evidence: %s'):format(d.evidence)
+                end
+                for _, r in ipairs(d.resolutions or {}) do -- the menu: premises you can supply
+                    L[#L + 1] = ('       → assume `%s`%s: %s'):format(r.id,
+                        d.class == 'wrong' and ' (⚠ overrides a likely-bug)' or '', r.premise)
+                end
+            end
             L[#L + 1] = ''
         end
     end
