@@ -1028,6 +1028,33 @@ end
 -- (always-true), {want=false} (dead then), or {want='none'} (must NOT flag). The
 -- NEGATIVES are the three soundness traps dogfooding found: truthy≠non-nil,
 -- conjunction-under-early-exit, reassignment-between.
+-- TYPE-TEST narrowing ground-truth (narrow v2, [[cartograph-type-narrowing]]): `type(x)=='T'`
+-- narrows x's TYPE (`narrow` lens, fact='type:T'); a redundant re-test / a contradiction /
+-- an unproven var drive the `redundant` lens. NEGATIVES: `or` doesn't narrow; a different
+-- var isn't determined.
+local function gen_lua_typenarrow(k, akey)
+    local B, fname = {}, ('q%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function kn(var, fact, line) akey[#akey + 1] = { lens = 'narrow', file = fname, line = line, var = var, fact = fact } end
+    local function kr(line, want) akey[#akey + 1] = { lens = 'redundant', file = fname, line = line, want = want } end
+    w('local function qa(a)'); w('  if type(a) == "string" then')
+    kn('a', 'type:string', w('    use(a)')); w('  end'); w('end') -- + type narrows
+    w('local function qb(a, c)'); w('  if type(a) == "string" or c then')
+    kn('a', false, w('    use(a)')); w('  end'); w('end') -- − `or` does not narrow
+    w('local function qc(x)'); w('  if type(x) == "table" then')
+    kr(w('    if type(x) == "table" then y() end'), true); w('  end'); w('end') -- + redundant re-test
+    w('local function qd(x)'); w('  if type(x) == "string" then')
+    kr(w('    if type(x) == "number" then y() end'), false); w('  end'); w('end') -- + dead contradiction
+    w('local function qe(x, z)'); w('  if type(x) == "string" then')
+    kr(w('    if type(z) == "number" then y() end'), 'none'); w('  end'); w('end') -- − different var undetermined
+    w('local function qf(a, type)'); w('  if type(a) == "string" then') -- − `type` SHADOWED (param)
+    kn('a', false, w('    use(a)')); w('  end'); w('end')
+    w('return { qa, qb, qc, qd, qe, qf }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 local function gen_lua_redundant(k, akey)
     local B, fname = {}, ('r%d.lua'):format(k)
     local function w(s) B[#B + 1] = s; return #B end
@@ -1238,6 +1265,7 @@ function M.analysis(lang, nfiles, seed)
     local out = { files = {}, order = {}, key = {} }
     local function add(fname, src) out.files[fname] = src; out.order[#out.order + 1] = fname end
     for i = 1, (nfiles or 12) do add(gen_lua_narrow(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_typenarrow(i, out.key)) end
     for i = 1, 4 do add(gen_lua_licm(i, out.key)) end
     for i = 1, 4 do add(gen_lua_cse(i, out.key)) end
     for i = 1, 4 do add(gen_lua_redundant(i, out.key)) end

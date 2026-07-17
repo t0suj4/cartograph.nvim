@@ -34,6 +34,33 @@ end
 
 local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or '' end
 
+-- is `name` BOUND (a param or a local/assignment target) anywhere in the fn? A `type`
+-- bound here SHADOWS the global builtin, so `type(x)` is not the real type() and its
+-- type-test narrowing would be unsound — the gate below drops those facts. Conservative:
+-- a shadow anywhere (even a sibling scope) disables type narrowing for the whole fn.
+local function binds(store_node, name)
+    local fl = store_node and flowmod.present(store_node) and flowmod.record(store_node)
+    if not fl then return false end
+    for _, p in ipairs(fl.params or {}) do if p == name then return true end end
+    for _, s in ipairs(fl.stmts or {}) do for _, d in ipairs(s.def or {}) do if d == name then return true end end end
+    return false
+end
+
+-- wrap the raw classifier so TYPE-test facts are dropped when `type` is shadowed in the
+-- fn (they bubble up to the flat result list, so filtering the top level catches all
+-- nesting depths). nil/truthy facts are untouched. Returns the raw classifier unchanged
+-- when type is the genuine global.
+local function gated_classify(raw, type_shadowed)
+    if not type_shadowed then return raw end
+    return function (cond, src, holds)
+        local out = {}
+        for _, f in ipairs(raw(cond, src, holds)) do
+            if not f.kind:match('^type:') then out[#out + 1] = f end
+        end
+        return out
+    end
+end
+
 -- ── per-language guard vocabulary ────────────────────────────────────────────
 -- vocab[lang](cond, src, holds) -> { {var, kind}, ... } = the facts that MUST hold
 -- given the condition evaluates to `holds` (true for positive nesting, false for a
@@ -42,6 +69,22 @@ local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or 
 -- return` → after, ¬(a∧b) proves NOTHING) is sound. kind: 'truthy' (from `if x` —
 -- non-nil AND non-false) or 'non-nil' (from x~=nil); truthy ⟹ non-nil.
 local vocab = {}
+
+-- `type(x)` over a single identifier → x's name, else nil (the type-test devirt seed)
+local function type_call_var(n, src)
+    if not n or n:type() ~= 'function_call' then return nil end
+    local callee = n:named_child(0)
+    if not (callee and callee:type() == 'identifier' and txt(callee, src) == 'type') then return nil end
+    local args = n:field('arguments')[1]
+    local arg = args and args:named_child(0)
+    if arg and arg:type() == 'identifier' and not args:named_child(1) then return txt(arg, src) end
+    return nil
+end
+-- the content of a string literal (quotes stripped), else nil
+local function str_lit(n, src)
+    if not n or n:type() ~= 'string' then return nil end
+    return (txt(n, src):match('^["\'](.-)["\']$'))
+end
 
 local function lua_classify(cond, src, holds)
     if not cond then return {} end
@@ -71,6 +114,12 @@ local function lua_classify(cond, src, holds)
             if txt(r, src) == 'nil' and l:type() == 'identifier' then var = txt(l, src)
             elseif txt(l, src) == 'nil' and r:type() == 'identifier' then var = txt(r, src) end
             if var and ((op == '~=') == holds) then return { { var = var, kind = 'non-nil' } } end
+            -- TYPE-TEST (narrow v2, devirt seed): type(x) == 'T' / ~= 'T' (either order).
+            -- Sound like var narrowing — a call can't change a local's type, only reassignment
+            -- (mutated_of kills it). Positive only: x IS T when (== & holds) or (~= & ¬holds).
+            local tv = type_call_var(l, src) and str_lit(r, src) and { type_call_var(l, src), str_lit(r, src) }
+                or (type_call_var(r, src) and str_lit(l, src) and { type_call_var(r, src), str_lit(l, src) })
+            if tv and ((op == '==') == holds) then return { { var = tv[1], kind = 'type:' .. tv[2] } } end
             return {}
         end
         return {}
@@ -114,7 +163,7 @@ function M.narrow(store, fn_id)
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, points = {} } end
-    local classify = vocab[lang]
+    local classify = gated_classify(vocab[lang], binds(node, 'type'))
     local mutated = mutated_of(node)
 
     local points, seenguard = {}, {}
@@ -128,7 +177,9 @@ function M.narrow(store, fn_id)
                             for _, g in ipairs(cfg.guards_over(stmt, src)) do
                                 for _, f in ipairs(classify(g.cond, src, not g.neg)) do
                                     if not mutated[f.var] then -- reassigned → stale, skip
-                                        env[f.var] = 'non-nil' -- narrowing = non-nil (truthy ⟹ non-nil)
+                                        -- nil/truthy collapse to 'non-nil' (the sound floor);
+                                        -- a TYPE fact (devirt seed) is preserved as 'type:T'
+                                        env[f.var] = f.kind:match('^type:') and f.kind or 'non-nil'
                                         seenguard[g.cond:id()] = true
                                     end
                                 end
@@ -159,28 +210,44 @@ local function env_of(node, src, classify, mutated)
     for _, g in ipairs(cfg.guards_over(node, src)) do
         for _, f in ipairs(classify(g.cond, src, not g.neg)) do
             if not (mutated and mutated[f.var]) then
-                if f.kind == 'truthy' then env[f.var] = 'truthy'
-                elseif not env[f.var] then env[f.var] = 'non-nil' end
+                local cur = env[f.var]
+                -- STRONGEST wins: type:T ⊐ truthy ⊐ non-nil (a type proves both)
+                if f.kind:match('^type:') then env[f.var] = f.kind
+                elseif f.kind == 'truthy' and not (cur and cur:match('^type:')) then env[f.var] = 'truthy'
+                elseif not cur then env[f.var] = 'non-nil' end
             end
         end
     end
     return env
 end
 
+-- env-fact interrogation: a TYPE fact implies non-nil (type(nil)=='nil'), and truthy for
+-- every type except boolean (false is truthy-negative) and nil.
+local function env_type(env, v) local e = env[v]; return e and e:match('^type:(.+)$') end
+local function env_nonnil(env, v)
+    local e = env[v]
+    return e == 'truthy' or e == 'non-nil' or (env_type(env, v) and env_type(env, v) ~= 'nil') or false
+end
+local function env_truthy(env, v)
+    if env[v] == 'truthy' then return true end
+    local ty = env_type(env, v)
+    return ty ~= nil and ty ~= 'boolean' and ty ~= 'nil'
+end
+
 -- is a SIMPLE condition already DETERMINED by `env`? → 'always-true' (tautology,
 -- then-branch always taken) | 'dead' (contradiction, then-branch dead) | nil.
--- `if x` needs TRUTHY (x could be false, so non-nil alone doesn't determine it);
--- `x~=nil`/`x==nil` need non-nil; `not x` dead only under truthy.
+-- `if x` needs TRUTHY; `x~=nil`/`x==nil` need non-nil; `not x` dead under truthy; a
+-- type-test is determined by a proven TYPE fact (redundant re-test / contradiction).
 local function determine(cond, src, env)
     local t = cond:type()
     if t == 'parenthesized_expression' then return determine(cond:named_child(0), src, env) end
     if t == 'identifier' then
-        if env[txt(cond, src)] == 'truthy' then return 'always-true' end
+        if env_truthy(env, txt(cond, src)) then return 'always-true' end
         return nil
     end
     if t == 'unary_expression' and txt(cond:child(0), src) == 'not' then
         local inner = cond:named_child(0)
-        if inner and inner:type() == 'identifier' and env[txt(inner, src)] == 'truthy' then
+        if inner and inner:type() == 'identifier' and env_truthy(env, txt(inner, src)) then
             return 'dead'
         end
         return nil
@@ -191,9 +258,20 @@ local function determine(cond, src, env)
         local var
         if txt(r, src) == 'nil' and l:type() == 'identifier' then var = txt(l, src)
         elseif txt(l, src) == 'nil' and r:type() == 'identifier' then var = txt(r, src) end
-        if var and (env[var] == 'truthy' or env[var] == 'non-nil') then
+        if var and env_nonnil(env, var) then
             if op == '~=' then return 'always-true' end -- x~=nil, x known non-nil
             if op == '==' then return 'dead' end        -- x==nil, x known non-nil
+        end
+        -- type-test determined by a proven type fact
+        if op == '==' or op == '~=' then
+            local tv = type_call_var(l, src) and str_lit(r, src) and { type_call_var(l, src), str_lit(r, src) }
+                or (type_call_var(r, src) and str_lit(l, src) and { type_call_var(r, src), str_lit(l, src) })
+            local known = tv and env_type(env, tv[1])
+            if known then
+                local same = (known == tv[2])
+                if op == '==' then return same and 'always-true' or 'dead' end
+                return same and 'dead' or 'always-true' -- ~=
+            end
         end
     end
     return nil
@@ -275,7 +353,7 @@ function M.param_nilability(store, fn_id)
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, params = {} } end
-    local classify, mutated = vocab[lang], mutated_of(node)
+    local classify, mutated = gated_classify(vocab[lang], binds(node, 'type')), mutated_of(node)
     local fl = flowmod.present(node) and flowmod.record(node)
     local plist = (fl and fl.params) or {}
     local params = {}
@@ -367,7 +445,7 @@ function M.redundant(store, fn_id)
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, checks = {} } end
-    local classify = vocab[lang]
+    local classify = gated_classify(vocab[lang], binds(node, 'type'))
     local mutated = mutated_of(node)
     -- determine() handles only SINGLE predicates, so a conjunction `cond and other()`
     -- (where only `cond` is known) is correctly NOT flagged — the other conjunct still
@@ -412,7 +490,9 @@ function M.report(store, fn_id)
         :format(node.name or fn_id, res.nguards, #res.points), '' }
     for _, p in ipairs(res.points) do
         local facts = {}
-        for var, kind in pairs(p.env) do facts[#facts + 1] = ('%s: %s'):format(var, kind) end
+        for var, kind in pairs(p.env) do
+            facts[#facts + 1] = ('%s: %s'):format(var, (kind:gsub('^type:', 'is ')))
+        end
         table.sort(facts)
         L[#L + 1] = ('  L%-4d %-16s %s'):format(p.line, p.kind, table.concat(facts, ', '))
     end

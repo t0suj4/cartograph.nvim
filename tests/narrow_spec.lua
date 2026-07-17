@@ -301,3 +301,55 @@ test('paramnil: a complex `{…}?` annotation is not mis-read (no false conflict
     eq('optional', p.verdict)
     ok(not p.conflict, 'a complex optional type is either parsed optional or skipped — never a false conflict')
 end)
+
+-- ── narrow v2: type-test narrowing (the devirtualization seed) ────────────────
+test('narrow: type(x)==\'T\' narrows x to that type; `or` does not', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(a, c)',
+        '  if type(a) == "string" then',
+        '    use(a)',                       -- L3: a is type:string
+        '  end',
+        '  if type(a) == "table" or c then',
+        '    use(a)',                       -- L6: `or` → not narrowed
+        '  end',
+        '  if type(a) ~= "number" then return end',
+        '  step(a)',                        -- L9: early-exit → a is type:number
+        'end', 'return { f }',
+    }
+    eq('type:string', env_at('f', 3).a)
+    eq(nil, env_at('f', 6).a)
+    eq('type:number', env_at('f', 9).a)
+end)
+
+test('narrow: redundant + dead type-checks; a type implies non-nil', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x, z)',
+        '  if type(x) == "table" then',
+        '    if type(x) == "table" then a() end',  -- L3 redundant (always true)
+        '    if type(x) == "number" then b() end', -- L4 contradiction (dead)
+        '    if x == nil then c() end',             -- L5 dead (type ⟹ non-nil)
+        '    if type(z) == "number" then d() end',  -- L6 different var → NOT flagged
+        '  end',
+        'end', 'return { f }',
+    }
+    local checks = {}
+    for _, c in ipairs(narrow.redundant(store, fn_id('f')).checks) do checks[c.line] = c.always end
+    eq(true, checks[3])   -- always-true
+    eq(false, checks[4])  -- dead
+    eq(false, checks[5])  -- dead (type implies non-nil)
+    eq(nil, checks[6])    -- undetermined (different var) → not a check
+end)
+
+test('narrow: a shadowed `type` disables type-test narrowing (soundness)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function g(x, type)',            -- `type` is a PARAM → not the builtin
+        '  if type(x) == "string" then',
+        '    use(x)',                            -- must NOT narrow (type is shadowed)
+        '  end',
+        'end', 'return { g }',
+    }
+    eq(nil, env_at('g', 3).x)
+end)
