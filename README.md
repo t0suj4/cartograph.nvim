@@ -950,6 +950,17 @@ file hasn't shifted under it, and it reports the graph change rather than forbid
 Only the safe rewrites are offered: never a hedged one, and only when the reused value
 lives in a variable that is assigned once and so can't have changed underneath.
 
+The same machinery drives two more rewrites. `optapply` can **localize** a global looked
+up inside a loop — insert `local floor = math.floor` above the loop and rewrite the calls
+to `floor(x)` — and it can **hoist** a loop-invariant computation above its loop. Both
+apply a discipline worth naming: the *apply* is stricter than the *suggestion*, because
+acting on a finding has to consider things a read-only report doesn't. Localizing only
+touches a genuinely-always-present global (so the line it lifts out can't raise an error
+on a path that never ran the original), never shadows a name already in scope, and stays
+out of loops containing nested functions; hoisting only lifts out of a loop that is
+guaranteed to run at least once, so a computation that might throw can't be relocated onto
+a path — an empty loop — that would have skipped it.
+
 `:CartographNarrow` is the branch-sensitive counterpart — the type sibling of
 constant folding. Where a guard *proves* something about a variable (`if x`,
 `x ~= nil`, `if x == nil then return`), it records the refinement in the region the
