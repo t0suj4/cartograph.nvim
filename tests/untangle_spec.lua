@@ -257,3 +257,55 @@ test('untangle_flow: effect_edges couples two world-writing calls (INC 2b)', fun
     local withfx = untangle.analyze_flow(fl, fx)
     ok(withfx.ncomp < base.ncomp, 'the two world calls collapse into one concern')
 end)
+
+-- ── INC 3: safety verdict + honesty ─────────────────────────────────────────
+
+test('untangle_flow: opaque rows downgrade the safety verdict (INC 3)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local fl = build_flow([[
+local function f()
+  print(1)
+  print(2)
+end]])
+    local clean = untangle.analyze_flow(fl)                 -- no opaque supplied
+    ok(clean.certified, 'nothing opaque -> the partition is certified')
+    local hedged = untangle.analyze_flow(fl, nil, { 2 })    -- row 2 opaque (synthetic)
+    ok(not hedged.certified, 'a single opaque row uncertifies the whole partition')
+    ok(hedged.hedged[hedged.comp[2]], "the opaque row's concern is flagged ~")
+    ok(not untangle.concern_safe(hedged, hedged.comp[2]), 'that concern is not safe')
+end)
+
+test('untangle_flow: effect_edges surfaces opaque calls; clean fn is certified (INC 3)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local function target()',
+        '  local a = 1',
+        '  MYSTERY()',            -- opaque: unresolved call, unknown effects
+        'end',
+        'local function clean(x)',
+        '  local a = x + 1',      -- pure, fully modeled
+        '  return a',
+        'end',
+        'return { target, clean }',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local tid, tnode, cid, cnode
+    for _, node in ipairs(store.data.nodes) do
+        if node.name == 'target' then tid, tnode = node.id, node end
+        if node.name == 'clean' then cid, cnode = node.id, node end
+    end
+    -- target: the opaque call uncertifies
+    local tfl = flow.record(tnode)
+    local te, topaque = untangle.effect_edges(store, tid, tfl)
+    ok(#topaque >= 1, 'MYSTERY is opaque')
+    ok(not untangle.analyze_flow(tfl, te, topaque).certified, 'opaque call -> uncertified')
+    -- clean: fully modeled -> certified safe
+    local cfl = flow.record(cnode)
+    local ce, copaque = untangle.effect_edges(store, cid, cfl)
+    eq(0, #copaque)
+    ok(untangle.analyze_flow(cfl, ce, copaque).certified, 'a fully-modeled fn is certified')
+end)

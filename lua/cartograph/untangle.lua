@@ -88,15 +88,30 @@ end
 ---     so it can't be derived from the flow record alone; the caller supplies it
 ---     from M.effect_edges). Non-commuting impure statements couple.
 --- (WAR/anti falls out transitively via RAW+WAW.)
+--- INC 3 honesty (the SAFETY verdict): two statements in different concerns are
+--- provably independent ONLY if the PDG is complete. It isn't where a statement's
+--- effects are UNRESOLVED (`opaque` — an unresolved call, aliasing, dynamic
+--- dispatch): its hidden effect could couple it to any concern. So a concern
+--- CONTAINING an opaque row is flagged `hedged`, and any opaque row at all sets
+--- `certified=false` — the whole "safe to extract/reorder" claim drops to `~`
+--- (sound-or-silent, honoring "a half-PDG is worse than none"). reaching-`hedged`
+--- edges are conservative-INCLUSIVE (they only over-merge = safe to SEPARATE), so
+--- they do NOT undermine the verdict. `certified=true` means: safe under the
+--- MODELED effects (name-matched module state + resolved calls) — the residual `~`
+--- is exactly the aliasing/unresolved-call gap that `opaque` captures.
 --- @param flow { stmts: table[], params: string[] } | nil  (flow.record(n) shape)
---- @param extra_edges { [1]:integer, [2]:integer }[] | nil  extra coupling row-pairs
---- @return { n:integer, ncomp:integer, comp:integer[], sizes:table, switches:integer, tangle:integer, maxspan:integer }
-function M.analyze_flow(flow, extra_edges)
+--- @param extra_edges { [1]:integer, [2]:integer }[] | nil  effect-coupling row-pairs
+--- @param opaque integer[] | nil  rows with unresolved effects (from effect_edges)
+--- @return table  { n, ncomp, comp, sizes, switches, tangle, maxspan, hedged, certified }
+function M.analyze_flow(flow, extra_edges, opaque)
     local stmts = flow and flow.stmts or {}
     local n = #stmts
-    if n == 0 then return { n = 0, ncomp = 0, comp = {}, sizes = {}, switches = 0, tangle = 0, maxspan = 0 } end
+    if n == 0 then
+        return { n = 0, ncomp = 0, comp = {}, sizes = {}, switches = 0,
+            tangle = 0, maxspan = 0, hedged = {}, certified = true }
+    end
     local raw, waw = flowmod.reaching_cfg(flow)
-    return partition(n, function (union, span)
+    local res = partition(n, function (union, span)
         local function couple(a, b) -- union + record the span (both directions)
             if a and b and a >= 1 and a <= n and b >= 1 and b <= n then
                 union(a, b); local s = a - b; if s < 0 then s = -s end; span(s)
@@ -112,6 +127,22 @@ function M.analyze_flow(flow, extra_edges)
         for i = 1, n do couple(i, stmts[i].parent) end          -- CONTROL (parent, 0=skip)
         for _, e in ipairs(extra_edges or {}) do couple(e[1], e[2]) end -- SIDE-EFFECT (INC 2b)
     end)
+    -- verdict: localize opacity to its concern(s); any opacity → uncertified.
+    local hedged, certified = {}, true
+    for _, r in ipairs(opaque or {}) do
+        if r >= 1 and r <= n and res.comp[r] ~= nil then
+            hedged[res.comp[r]] = true; certified = false
+        end
+    end
+    res.hedged, res.certified = hedged, certified
+    return res
+end
+
+--- is concern `c` (a comp id) safe to extract/reorder in isolation? Sound: only
+--- when the whole function is certified (no opaque row anywhere could secretly
+--- couple across a boundary) AND this concern isn't the one carrying the opacity.
+function M.concern_safe(res, c)
+    return res.certified and not res.hedged[c]
 end
 
 --- Compute the INC-2b SIDE-EFFECT ordering edges for `fn_id`'s flow, as row-pairs
@@ -121,24 +152,29 @@ end
 --- statements, and by df/flow parity coarse statement k == the k-th `parent==0`
 --- flow row, so we map each conflict onto those rows (nested rows already ride
 --- CONTROL edges up to their top-level ancestor). Store-dependent → separate from
---- the pure analyze_flow. Opaque (unresolved-effect) statements are the INC-3
---- honesty concern, not coupled here.
---- @return { [1]:integer, [2]:integer }[]  effect-coupling row-pairs (fine indices)
+--- the pure analyze_flow. Returns BOTH the effect-coupling edges AND the OPAQUE
+--- rows (statements reorder couldn't resolve effects for) — analyze_flow's INC-3
+--- honesty input — each mapped from reorder's coarse index onto its `parent==0` row.
+--- @return { [1]:integer, [2]:integer }[] edges, integer[] opaque  (fine indices)
 function M.effect_edges(store, fn_id, flow)
     local reorder = require 'cartograph.reorder'
     local ok, m = pcall(reorder.analyze, store, fn_id)
-    if not ok or not m or not m.conflicts or #m.conflicts == 0 then return {} end
+    if not ok or not m then return {}, {} end
     local stmts = flow and flow.stmts or {}
     local toprow, k = {}, 0 -- k-th top-level flow row (coarse statement k)
     for i, s in ipairs(stmts) do
         if s.parent == 0 then k = k + 1; toprow[k] = i end
     end
     local edges = {}
-    for _, c in ipairs(m.conflicts) do
+    for _, c in ipairs(m.conflicts or {}) do
         local a, b = toprow[c[1]], toprow[c[2]]
         if a and b then edges[#edges + 1] = { a, b } end
     end
-    return edges
+    local opaque = {}
+    for _, ci in ipairs(m.opaque or {}) do
+        if toprow[ci] then opaque[#opaque + 1] = toprow[ci] end
+    end
+    return edges, opaque
 end
 
 return M
