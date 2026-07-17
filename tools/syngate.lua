@@ -19,6 +19,8 @@ local narrow = require 'cartograph.narrow'
 local optimize = require 'cartograph.optimize'
 local flow = require 'cartograph.flow'
 local untangle = require 'cartograph.untangle'
+local exprlint = require 'cartograph.exprlint'
+local expr = require 'cartograph.expr'
 
 local SEED, NFILES = 1, 12
 local a = gen.analysis('lua', NFILES, SEED)
@@ -30,11 +32,24 @@ end
 store.ingest(ts.extract(dir))
 
 -- collect each lens's per-(file,line) facts in one pass (a line belongs to one fn)
-local narrowenv, hoist, reuse, redun, ncomp = {}, {}, {}, {}, {}
+local narrowenv, hoist, reuse, redun, ncomp, rung0 = {}, {}, {}, {}, {}, {}
+local gatebad = {} -- expr self-gate disagreements (reads ≠ use∪rmw) — must be empty
 local function K(f, l) return (f or '') .. '\31' .. l end
+local function KR(f, l, r) return (f or '') .. '\31' .. l .. '\31' .. r end
 for _, n in ipairs(store.data.nodes) do
     if n.kind == 'function' then
         local f = n.file or ''
+        local oke, got = pcall(expr.of, store, n.id)
+        if oke and got then
+            for _, d in ipairs(expr.gate(got.fl)) do
+                gatebad[#gatebad + 1] = ('%s:%d reads≠use∪rmw missing=[%s] extra=[%s]')
+                    :format(f, d.line, table.concat(d.missing, ','), table.concat(d.extra, ','))
+            end
+        end
+        local okx, xr = pcall(exprlint.lint, store, n.id)
+        if okx and xr and xr.findings then
+            for _, fd in ipairs(xr.findings) do rung0[KR(f, fd.line, fd.rule)] = true end
+        end
         local okn, nr = pcall(narrow.narrow, store, n.id)
         if okn then for _, p in ipairs(nr.points) do narrowenv[K(f, p.line)] = p.env end end
         local okr, rr = pcall(narrow.redundant, store, n.id)
@@ -100,11 +115,24 @@ for _, e in ipairs(a.key) do
         local got = ncomp[K(e.file, e.fn)]
         if got == e.ncomp then c.pass = c.pass + 1
         else c.fn[#c.fn + 1] = ('%s:%s expected ncomp=%d, got %s'):format(e.file, e.fn, e.ncomp, tostring(got)) end
+    elseif e.lens == 'rung0' then
+        local got = rung0[KR(e.file, e.line, e.rule)] or false
+        if e.present then
+            if got then c.pass = c.pass + 1
+            else c.fn[#c.fn + 1] = ('%s:%d expected `%s`, not flagged'):format(e.file, e.line, e.rule) end
+        else
+            if got then c.fp[#c.fp + 1] = ('%s:%d FALSE-POSITIVE `%s` (must not flag)'):format(e.file, e.line, e.rule)
+            else c.pass = c.pass + 1 end
+        end
     end
 end
 
 local failed = false
-for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle' }) do
+-- the expr SELF-GATE: reads ≡ use∪rmw over every syn fn (an independent derivation;
+-- a disagreement is a real bug on one side — the oracle discipline in the substrate)
+print(('syngate %-7s %d disagreement(s)'):format('exprgate:', #gatebad))
+for _, m in ipairs(gatebad) do print('  GATE ' .. m); failed = true end
+for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0' }) do
     local c = census[lens]
     if c then
         print(('syngate %-7s %d ok, %d false-pos, %d false-neg')

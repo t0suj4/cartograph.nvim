@@ -386,12 +386,26 @@ function M.build(fnnode, src, cfg)
             -- loop's OWN label (rust). def/use above are unaffected.
             label = (TRANSFER[t] and target_label(node, src))
                 or (CTRL[t] and loop_label(node, src)) or nil }
+        -- CO-EMIT the expression IR at the row-birth point ([[cartograph-expression-layer]]):
+        -- by here rust/labeled unwrapping is done and `node` IS the row's node, so
+        -- row↔expr is 1:1 by construction. Off unless a consumer set cfg.expr (a
+        -- harvester fn). CTRL rows are harvested below (flow knows POST-stripping +
+        -- the body/clause boundary du stops at); plain rows here. The hot ingest path
+        -- never even builds the closure.
+        if cfg.expr and not CTRL[t] then stmts[idx].expr = cfg.expr(node, src) end
         if CTRL[t] then
             local cond = node:field('condition')[1]
                 or (SWITCH[t] and node:field('value')[1]) -- go switch: `value` is the switched expr
             -- loop feasibility flag (do{}while(0) / while(true) / rust loop)
             if POST[t] or PRELOOP[t] then
                 stmts[idx].const = (t == 'loop_expression') and true or const_cond(cond, src)
+            end
+            -- the head expr: 'ctrlhead' = condition + clause (skipping body — mirrors
+            -- du's stop_body); POST loops strip their cond onto a trailing 'cond' row
+            -- (below), so their head carries no expr.
+            if cfg.expr then
+                stmts[idx].expr = POST[t] and { lhs = {}, rhs = {} }
+                    or cfg.expr(node, src, 'ctrlhead')
             end
             -- POST-condition loops (do-while, lua repeat-until): the condition
             -- runs AFTER the body, so its def/use must be ordered after it (a
@@ -414,7 +428,8 @@ function M.build(fnnode, src, cfg)
             if POST[t] and cond then
                 local cd, cu = du(cond, src, false, ids)
                 stmts[#stmts + 1] = { l = line(cond), c = startcol(cond), kind = 'cond',
-                    parent = idx, pol = 'cond', def = cd, use = cu }
+                    parent = idx, pol = 'cond', def = cd, use = cu,
+                    expr = cfg.expr and cfg.expr(cond, src, 'cond') or nil }
             end
         end
     end
@@ -446,6 +461,7 @@ function M.build(fnnode, src, cfg)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'case', parent = parent,
                 pol = 'case', def = d, use = u, t = node:type() }
+            if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'casehead') end
             for c in node:iter_children() do
                 if c:named() and c ~= vf and c:type() ~= 'comment' then
                     if BODY[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
@@ -462,6 +478,7 @@ function M.build(fnnode, src, cfg)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = node:type(), parent = parent,
                 pol = 'elseif', def = d, use = u, t = node:type() }
+            if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'ctrlhead') end
             local cons = node:field('consequence')[1] or node:field('body')[1]
             if cons and BODY[cons:type()] then
                 region(cons, idx, 'body')

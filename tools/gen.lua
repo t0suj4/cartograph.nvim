@@ -1081,6 +1081,51 @@ local function gen_lua_untangle(k, akey)
     return fname, src
 end
 
+-- RUNG-0 EXPRESSION-LINT ground-truth ([[cartograph-expression-layer]]): for each
+-- Rung-0 rule, a POSITIVE (must flag) paired with the NEGATIVE that would be a false
+-- positive if the pure-gate / structural check regressed. Key {lens='rung0', line,
+-- rule, present=bool}: present=false = "must NOT flag `rule` at this line".
+local function gen_lua_rung0(k, akey)
+    local B, fname = {}, ('e%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(line, rule, present)
+        akey[#akey + 1] = { lens = 'rung0', file = fname, line = line, rule = rule, present = present }
+    end
+    -- self-compare: identical operands (+) vs different / impure operands (−)
+    w('local function sca(a)'); key(w('  if a == a then return 1 end'), 'self-compare', true); w('end')
+    w('local function scb(a, b)'); key(w('  if a == b then return 1 end'), 'self-compare', false); w('end')
+    w('local function scc()'); key(w('  if f() == f() then return 1 end'), 'self-compare', false); w('end')
+    -- duplicated logical operand
+    w('local function doa(a)'); key(w('  local x = a or a'), 'duplicated-operand', true); w('  return x'); w('end')
+    w('local function dob(a, b)'); key(w('  local x = a or b'), 'duplicated-operand', false); w('  return x'); w('end')
+    -- comparison to a boolean literal
+    w('local function bca(a)'); key(w('  if a == true then return 1 end'), 'bool-comparison', true); w('end')
+    w('local function bcb(a, b)'); key(w('  if a == b then return 1 end'), 'bool-comparison', false); w('end')
+    -- self-assignment: a REASSIGNMENT x=x (+) vs `local a2 = a` capture / x=y (−)
+    w('local function saa(a)'); key(w('  a = a'), 'self-assignment', true); w('  return a'); w('end')
+    w('local function sab(a)'); key(w('  local a2 = a'), 'self-assignment', false); w('  return a2'); w('end')
+    w('local function sac(a, b)'); key(w('  a = b'), 'self-assignment', false); w('  return a'); w('end')
+    -- pseudo-ternary: middle operand statically falsy (+) vs a live value (−)
+    w('local function pta(a, b)'); key(w('  local z = (a and false) or b'), 'pseudo-ternary', true); w('  return z'); w('end')
+    w('local function ptb(a, x, b)'); key(w('  local z = (a and x) or b'), 'pseudo-ternary', false); w('  return z'); w('end')
+    -- constant condition: folds to a constant (+) vs a real test (−)
+    w('local function cca()'); key(w('  if 1 > 2 then return 1 end'), 'constant-condition', true); w('end')
+    w('local function ccb(a, b)'); key(w('  if a > b then return 1 end'), 'constant-condition', false); w('end')
+    -- string concat in a loop (+) vs a concat outside any loop (−)
+    w('local function cla(xs)'); w('  local s = ""'); w('  for _, x in ipairs(xs) do')
+    key(w('    s = s .. x'), 'concat-in-loop', true); w('  end'); w('  return s'); w('end')
+    w('local function clb(a, b)'); key(w('  local s = a .. b'), 'concat-in-loop', false); w('  return s'); w('end')
+    -- duplicated branch condition (+) vs distinct branches (−)
+    w('local function dca(a)'); w('  if a then'); w('    return 1')
+    key(w('  elseif a then'), 'duplicated-condition', true); w('    return 2'); w('  end'); w('end')
+    w('local function dcb(a, b)'); w('  if a then'); w('    return 1')
+    key(w('  elseif b then'), 'duplicated-condition', false); w('    return 2'); w('  end'); w('end')
+    w('return { sca, scb, scc, doa, dob, bca, bcb, saa, sab, sac, pta, ptb, cca, ccb, cla, clb, dca, dcb }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 --- ANALYSIS ground-truth corpus. Returns { files = {name→src}, order, key } where
 --- each key carries `lens` ('narrow'|'licm'|'cse') + the per-line expectation:
 --- narrow {var, fact='non-nil'|false}; licm {hoistable=bool}; cse {reuses=<line>|false}.
@@ -1096,6 +1141,7 @@ function M.analysis(lang, nfiles, seed)
     for i = 1, 4 do add(gen_lua_cse(i, out.key)) end
     for i = 1, 4 do add(gen_lua_redundant(i, out.key)) end
     for i = 1, 4 do add(gen_lua_untangle(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_rung0(i, out.key)) end
     return out
 end
 
