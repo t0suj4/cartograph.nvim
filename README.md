@@ -926,8 +926,13 @@ guard dominates: *in here, `x` is non-nil*. It reuses the same `guards_over` CFG
 dominance the taint sanitizers ride, and narrows only where the predicate actually
 proves it — an `and`-conjunction narrows every conjunct, but an `or` or a negated
 compound narrows nothing. The guard vocabulary is per-language and extensible (Lua
-nil/truthiness today; `typeof`/`instanceof` slot in for other codebases). This feeds
-redundant-check elimination and null-dereference detection.
+nil/truthiness today; `typeof`/`instanceof` slot in for other codebases). On top of
+it, the lens flags **redundant checks** — an `if` re-testing something a dominating
+guard already proved (`always true` / `dead branch`) — the type twin of a dead-branch
+constant fold. It is careful where control flow is: it distinguishes truthy from
+non-nil (a non-nil value can still be `false`) and drops a narrowing once the variable
+is reassigned, so it reports a redundancy only when the earlier guard genuinely still
+holds.
 
 ## Offline: history archaeology
 
