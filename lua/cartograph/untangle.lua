@@ -290,6 +290,21 @@ function M.module_safe(res, c)
     return res.certified and not res.hedged[c]
 end
 
+--- THE extract handoff (INC 3): plan cluster `c`'s functions into a new module
+--- `relpath`. No contiguity gate — moveapply moves a scattered SYMBOL SET,
+--- rewriting call sites + adding requires. plan_extract_ids independently computes
+--- the moves + rewrites + LOAD-ORDER/cycle hazards (the disagreement oracle:
+--- untangle picks the cluster, moveapply checks the move mechanics). Returns the
+--- moveapply plan, or (nil, reason). ([[cartograph-untangle-inter]])
+function M.extract_module(store, res, c, relpath)
+    local ids = {}
+    for k, node in ipairs(res.fns) do
+        if res.comp[k] == c then ids[#ids + 1] = node.id end
+    end
+    if #ids == 0 then return nil, 'empty cluster' end
+    return require('cartograph.moveapply').plan_extract_ids(store, ids, relpath)
+end
+
 --- Module report (the inter-untangle surface): the file's function clusters —
 --- how many independent concerns are jammed into one file (the god-file signal).
 function M.report_module(store, file)
@@ -319,6 +334,24 @@ function M.report_module(store, file)
     if res.certified then
         L[#L + 1] = 'CERTIFIED: each cluster is safe to extract as its own module'
         L[#L + 1] = '(sound under the modeled call + shared-written-state edges)'
+        -- INC 3 handoff: dry-run each cluster through moveapply.plan_extract_ids
+        -- (a synthesized dest); show the move + hazard counts it would produce.
+        if res.ncomp > 1 then
+            local dir = file:match('^(.*)/[^/]*$')
+            local base = file:match('([^/]+)%.%w+$') or 'module'
+            L[#L + 1] = 'extract-as-module candidates:'
+            for c = 0, res.ncomp - 1 do
+                local lt = string.char(65 + (c % 26))
+                local rel = (dir and dir .. '/' or '') .. base .. '_' .. lt:lower() .. '.lua'
+                local plan, err = M.extract_module(store, res, c, rel)
+                if plan then
+                    L[#L + 1] = ('  %s → %s: %d move(s), %d hazard(s)'):format(
+                        lt, rel, #plan.moves, #plan.hazards)
+                else
+                    L[#L + 1] = ('  %s: %s'):format(lt, err)
+                end
+            end
+        end
     else
         L[#L + 1] = 'NOT certified — an unmodeled coupling could connect clusters:'
         for c = 0, res.ncomp - 1 do

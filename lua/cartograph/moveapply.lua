@@ -219,6 +219,14 @@ function M.plan_extract(store, relpath)
     if #ids == 0 then
         return nil, 'nothing staged — dd cuts a function into the move-set'
     end
+    return M.plan_extract_ids(store, ids, relpath)
+end
+
+--- plan_extract from an EXPLICIT id set (not the staged move-set) — the seam the
+--- inter-untangle handoff uses to plan a function CLUSTER into a new module
+--- without touching the live staging. Read-only (builds a plan; apply mutates).
+function M.plan_extract_ids(store, ids, relpath)
+    if not ids or #ids == 0 then return nil, 'no functions to extract' end
     relpath = (relpath or ''):gsub('^%s+', ''):gsub('%s+$', '')
     if relpath == '' then
         return nil, 'usage: :CartographExtractModule <new-file-path>'

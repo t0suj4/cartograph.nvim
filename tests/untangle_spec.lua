@@ -426,6 +426,25 @@ test('untangle_module: a clean file certifies each cluster as extractable (INC 2
     ok(untangle.module_safe(res, comp_of(res, 'a1')), 'the sa cluster is safe to extract')
 end)
 
+test('untangle_module: extract_module plans a cluster into a new module (INC 3)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local file = ingest_file {
+        'local sa = {}', 'local sb = {}',
+        'local function a1() sa.x = 1 end',
+        'local function a2() return sa.x end',
+        'local function b1() sb.y = 1 end',
+        'local function b2() return sb.y end',
+        'return { a1, a2, b1, b2 }',
+    }
+    local res = untangle.analyze_module(store, file)
+    local plan, err = untangle.extract_module(store, res, comp_of(res, 'a1'), 'out_a.lua')
+    ok(plan, 'a certified cluster hands off to a moveapply plan: ' .. tostring(err))
+    eq(2, #plan.moves)                       -- the sa cluster = a1, a2
+    local moved = {}
+    for _, m in ipairs(plan.moves) do moved[m.name] = true end
+    ok(moved.a1 and moved.a2, 'both sa-cluster functions are in the move-set')
+end)
+
 test('untangle_module: a dynamic dispatch uncertifies + names the blocker (INC 2)', function ()
     if not ready('lua') then skip 'no lua parser' end
     local file = ingest_file {
