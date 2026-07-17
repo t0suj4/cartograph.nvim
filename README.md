@@ -934,6 +934,20 @@ once (partial-redundancy elimination). Dominance is judged on the control-arm pa
 value computed in one branch is never mistaken for available in a sibling branch it never
 reaches.
 
+These are suggestions until you ask for them to be *applied*. `optapply` is the piece
+that acts: it takes the CSE-reuse finding and rewrites the source — `local b = x + y`
+becomes `local b = a` where an earlier `local a = x + y` already holds the value — through
+the same transaction layer the move and extract refactors ride (journalled, undoable). It
+runs headless, so it is something a program can drive rather than a person clicking in a
+pane: plan, preview the exact diff, then apply. Because a common-subexpression rewrite
+*deliberately* changes the dataflow (it removes a recomputation, and any call inside it),
+it can't lean on the move refactor's "the graph must look identical afterwards" check;
+instead it verifies that the text it is about to replace is still exactly what it planned
+against, that the result parses cleanly, and — through the transaction layer — that the
+file hasn't shifted under it, and it reports the graph change rather than forbidding it.
+Only the safe rewrites are offered: never a hedged one, and only when the reused value
+lives in a variable that is assigned once and so can't have changed underneath.
+
 `:CartographNarrow` is the branch-sensitive counterpart — the type sibling of
 constant folding. Where a guard *proves* something about a variable (`if x`,
 `x ~= nil`, `if x == nil then return`), it records the refinement in the region the
