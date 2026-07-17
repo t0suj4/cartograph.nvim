@@ -129,11 +129,171 @@ function M.plan_cse(store, fn_id, opts)
         reps = reps, moves = moves }
 end
 
+-- ── localize-upvalue apply ───────────────────────────────────────────────────
+-- global MODULE tables that ALWAYS exist and never error on a field read (`M.f` for a
+-- non-nil table M returns the field or nil, never throws) — so inserting `local f = M.f`
+-- ABOVE a loop is zero-trip-safe (can't raise where the original in-loop read wouldn't).
+-- An arbitrary user global might be nil, so localize-APPLY is gated to this set (the
+-- report still SUGGESTS the rest; only the write is gated). vim = the nvim runtime table.
+local KNOWN_GLOBAL = { math = true, string = true, table = true, os = true, io = true,
+    coroutine = true, debug = true, utf8 = true, bit = true, bit32 = true, vim = true }
+
+local LOOPISH = { for_statement = true, for_in_statement = true, while_statement = true,
+    repeat_statement = true, loop_statement = true, foreach_statement = true,
+    for_numeric_statement = true, for_generic_statement = true }
+
+-- the loop node whose header starts on `line` (1-based), else nil
+local function loop_node(root, line)
+    local found
+    local function rec(n)
+        if found then return end
+        if n:start() + 1 == line and LOOPISH[n:type()] then found = n; return end
+        for c in n:iter_children() do if c:named() then rec(c) end end
+    end
+    rec(root)
+    return found
+end
+-- does the subtree contain a nested function definition? (localize-apply skips those —
+-- a nested closure complicates scope/shadowing; conservative)
+local FN_DEF = { function_definition = true, function_declaration = true,
+    method_declaration = true, arrow_function = true }
+local function has_nested_fn(n)
+    for c in n:iter_children() do
+        if c:named() then
+            if FN_DEF[c:type()] then return true end
+            if has_nested_fn(c) then return true end
+        end
+    end
+    return false
+end
+-- ranges of every callee occurrence of the dotted name `full` inside `loopn`
+local function callee_occurrences(loopn, src, full)
+    local out = {}
+    local function rec(n)
+        if n:type() == 'function_call' or n:type() == 'call_expression' then
+            local callee = n:named_child(0)
+            if callee and vim.treesitter.get_node_text(callee, src) == full then
+                local sr, sc, er, ec = callee:range()
+                if sr == er then out[#out + 1] = { start = { line = sr, char = sc }, ['end'] = { line = er, char = ec } } end
+            end
+        end
+        for c in n:iter_children() do if c:named() then rec(c) end end
+    end
+    rec(loopn)
+    return out
+end
+
+--- Build a LOCALIZE-UPVALUE plan for the focused fn: bind each in-loop global/module
+--- function to a `local` above its loop and rewrite the call sites. `opts.line` targets
+--- one loop (by header line). SOUND-gated for the WRITE: the root must be a known
+--- always-present global (`math`/`string`/`table`/`vim`/… — so the hoisted read can't
+--- throw where the original wouldn't), the leaf name must be free in the fn (no shadow),
+--- and the loop must not contain a nested function.
+--- @return table? plan
+--- @return string? why
+function M.plan_localize(store, fn_id, opts)
+    opts = opts or {}
+    local node = store.node and store.node(fn_id)
+    if not node or not node.file then return nil, 'no such node' end
+    local lang = lang_of(node.file)
+    if not lang then return nil, 'unsupported language' end
+    local loc = optimize.localize(store, fn_id)
+    if #loc.loops == 0 then return nil, 'no loops with global lookups' end
+    local flow = require 'cartograph.flow'
+    local fl = flow.present(node) and flow.record(node)
+    local bound = {}
+    for _, p in ipairs((fl and fl.params) or {}) do bound[p] = true end
+    for _, r in ipairs((fl and fl.stmts) or {}) do for _, d in ipairs(r.def or {}) do bound[d] = true end end
+    local src = table.concat(store.content(node) or {}, '\n')
+    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    if not ok then return nil, 'cannot parse' end
+    local root = parser:parse()[1]:root()
+    local srclines = vim.split(src, '\n', { plain = true })
+
+    local ins, reps, moves = {}, {}, {}
+    for _, lp in ipairs(loc.loops) do
+        if not opts.line or lp.line == opts.line then
+            local ln = loop_node(root, lp.line)
+            if ln and not has_nested_fn(ln) then
+                local indent = (srclines[lp.line] or ''):match('^(%s*)') or ''
+                for _, c in ipairs(lp.cands) do
+                    local rootname = c.full:match('^([%w_]+)')
+                    if rootname and KNOWN_GLOBAL[rootname] and not bound[c.leaf] then
+                        local occ = callee_occurrences(ln, src, c.full)
+                        if #occ > 0 then
+                            -- insert ABOVE the header: after = header(1-based) - 2 (0-based)
+                            ins[#ins + 1] = { after = lp.line - 2,
+                                lines = { indent .. ('local %s = %s'):format(c.leaf, c.full) } }
+                            for _, at in ipairs(occ) do
+                                reps[#reps + 1] = { at = at, to = c.leaf, old = c.full }
+                            end
+                            moves[#moves + 1] = { line = lp.line, leaf = c.leaf, full = c.full, sites = #occ }
+                            bound[c.leaf] = true -- don't localize the same leaf twice
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if #moves == 0 then
+        return nil, opts.line and ('no safe localize at %s:%d'):format(node.file, opts.line)
+            or 'no safe localize candidates (non-stdlib root, name collision, or nested fn)'
+    end
+    return { verb = 'optimize-localize', touched = { node.file }, generation = store.generation,
+        stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
+        reps = reps, ins = ins, moves = moves }
+end
+
+-- POST-condition (repeat/do-while) or const-true loops run at least once → hoisting a
+-- computation above them adds no execution on a zero-trip path (there is none), so it
+-- can't raise where the original wouldn't. A PRE-loop (for/while) MAY be zero-trip, so
+-- hoisting a possibly-throwing expr above it could introduce an error → not applied.
+local POSTISH = { repeat_statement = true, do_statement = true }
+
+--- Build a HOIST (LICM) plan for the focused fn: lift a clean-hoistable invariant above
+--- its loop header. `opts.line` targets one loop. SOUND-gated for the WRITE beyond
+--- hoist_plan's capture check: the loop must run AT LEAST ONCE (POST loop or const-true)
+--- so no zero-trip path gains a computation, and the moved statement is single-line.
+--- @return table? plan
+--- @return string? why
+function M.plan_hoist(store, fn_id, opts)
+    opts = opts or {}
+    local node = store.node and store.node(fn_id)
+    if not node or not node.file then return nil, 'no such node' end
+    local res = optimize.hoist_plan(store, fn_id)
+    local rows = res.rows
+    local src = table.concat(store.content(node) or {}, '\n')
+    local srclines = vim.split(src, '\n', { plain = true })
+    local dels, ins, moves = {}, {}, {}
+    for _, p in ipairs(res.plans) do
+        local L = rows[p.loop]
+        local iterates = L and (POSTISH[L.t or ''] or L.const == true)
+        if p.safe and iterates and (not opts.line or p.line == opts.line) then
+            local indent = (srclines[p.line] or ''):match('^(%s*)') or ''
+            for _, m in ipairs(p.moves) do
+                if not m.text:find('\n') then -- single-line statement only
+                    local body = m.text:gsub('^%s*', '')
+                    dels[#dels + 1] = { s = m.line - 1, e = m.line - 1, old = { srclines[m.line] } }
+                    ins[#ins + 1] = { after = p.line - 2, lines = { indent .. body } }
+                    moves[#moves + 1] = { line = m.line, to = p.line, text = body, def = m.def }
+                end
+            end
+        end
+    end
+    if #moves == 0 then
+        return nil, opts.line and ('no safe hoist at %s:%d'):format(node.file, opts.line)
+            or 'no safe hoist (needs a run-once loop — repeat/while-true — and a single-line invariant)'
+    end
+    return { verb = 'optimize-hoist', touched = { node.file }, generation = store.generation,
+        stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
+        dels = dels, ins = ins, moves = moves }
+end
+
 -- the edit callback for txn (single file: apply this plan's token-replacements)
 local function edit_of(plan)
     return function (rel, before)
         if rel ~= plan.rel then return before end
-        return txn.edit_file(before, {}, plan.reps, {})
+        return txn.edit_file(before, plan.dels or {}, plan.reps or {}, plan.ins or {})
     end
 end
 
@@ -180,12 +340,20 @@ function M.apply(store, plan)
     local text = txn.read_file(root, plan.rel)
     if not text then return false, 'cannot read ' .. plan.rel end
     local lines = vim.split(text, '\n', { plain = true })
-    for _, r in ipairs(plan.reps) do
+    for _, r in ipairs(plan.reps or {}) do
         local sl0 = r.at.start.line -- 0-based line
         local cur = (lines[sl0 + 1] or ''):sub(r.at.start.char + 1, r.at['end'].char)
         if cur ~= r.old then
             return false, ('span drifted at %s:%d (expected `%s`, found `%s`) — re-plan')
                 :format(plan.rel, sl0 + 1, r.old, cur)
+        end
+    end
+    for _, d in ipairs(plan.dels or {}) do -- d.s/d.e 0-based inclusive; d.old = captured lines
+        for i = d.s, d.e do
+            if (lines[i + 1] or '\0') ~= (d.old and d.old[i - d.s + 1]) then
+                return false, ('span drifted at %s:%d (delete target changed) — re-plan')
+                    :format(plan.rel, i + 1)
+            end
         end
     end
     -- parse-clean on the dry-run result BEFORE committing anything
@@ -209,6 +377,24 @@ function M.run(store, fn_id, opts)
     local ok, entry_or_reason, diff = M.apply(store, plan)
     if not ok then return { ok = false, applied = 0, moves = plan.moves, reason = entry_or_reason } end
     return { ok = true, applied = #plan.reps, moves = plan.moves, diff = diff }
+end
+
+--- One-call agent entry for LOCALIZE-UPVALUE (`opts.line` targets one loop).
+function M.run_localize(store, fn_id, opts)
+    local plan, why = M.plan_localize(store, fn_id, opts)
+    if not plan then return { ok = false, applied = 0, reason = why } end
+    local ok, entry_or_reason, diff = M.apply(store, plan)
+    if not ok then return { ok = false, applied = 0, moves = plan.moves, reason = entry_or_reason } end
+    return { ok = true, applied = #plan.moves, moves = plan.moves, diff = diff }
+end
+
+--- One-call agent entry for HOIST/LICM (`opts.line` targets one loop).
+function M.run_hoist(store, fn_id, opts)
+    local plan, why = M.plan_hoist(store, fn_id, opts)
+    if not plan then return { ok = false, applied = 0, reason = why } end
+    local ok, entry_or_reason, diff = M.apply(store, plan)
+    if not ok then return { ok = false, applied = 0, moves = plan.moves, reason = entry_or_reason } end
+    return { ok = true, applied = #plan.moves, moves = plan.moves, diff = diff }
 end
 
 -- ── location entry (targeted refactoring: point at a spot, not an id) ─────────
@@ -248,22 +434,30 @@ function M.run_at(store, file, line, opts)
     return M.run(store, fid, opts)
 end
 
---- Report lines (the thin surface): what a CSE-reuse apply WOULD do (dry-run only).
+--- Report lines (the thin surface): every apply the focused fn admits — CSE-reuse,
+--- localize-upvalue, hoist — as DRY-RUN diffs (nothing written). The write is the API.
 function M.report(store, fn_id)
-    local plan, why = M.plan_cse(store, fn_id)
-    if not plan then return { 'optimize-apply: ' .. (why or 'nothing to apply') } end
-    local L = { ('optimize-apply: %s — %d CSE-reuse rewrite(s) (dry-run):')
-        :format((store.node(fn_id) or {}).name or fn_id, #plan.moves), '' }
-    for _, m in ipairs(plan.moves) do
-        L[#L + 1] = ('  L%-4d reuse `%s` (was `%s`, computed at L%d)%s')
-            :format(m.line, m.reuse, m.was, m.reuses_line,
-                m.removes_calls > 0 and (' — removes %d call(s)'):format(m.removes_calls) or '')
+    local name = (store.node(fn_id) or {}).name or fn_id
+    local L, any = {}, false
+    local sections = {
+        { 'CSE-reuse', M.plan_cse(store, fn_id) },
+        { 'localize-upvalue', M.plan_localize(store, fn_id) },
+        { 'hoist (LICM)', M.plan_hoist(store, fn_id) },
+    }
+    for _, s in ipairs(sections) do
+        local label, plan = s[1], s[2]
+        if plan then
+            any = true
+            L[#L + 1] = ('optimize-apply [%s]: %s — %d rewrite(s) (dry-run):'):format(label, name, #plan.moves)
+            for _, l in ipairs(M.preview(store, plan)) do L[#L + 1] = l end
+            L[#L + 1] = ''
+        end
     end
-    L[#L + 1] = ''
-    for _, l in ipairs(M.preview(store, plan)) do L[#L + 1] = l end
-    L[#L + 1] = ''
-    L[#L + 1] = '(dry-run — call optapply.apply to write it: txn-journaled + undoable,'
-    L[#L + 1] = ' guarded by generation + file-stamp CAS + span-CAS + parse-clean.)'
+    if not any then return { ('optimize-apply: %s — nothing to apply'):format(name) } end
+    L[#L + 1] = '(dry-run — the API applies it: txn-journaled + undoable, guarded by'
+    L[#L + 1] = ' generation + file-stamp CAS + span-CAS + parse-clean. Sound gates: CSE'
+    L[#L + 1] = ' = non-hedged/single-assignment source; localize = stdlib-global root,'
+    L[#L + 1] = ' free leaf name, no nested fn; hoist = run-once loop, single-line invariant.)'
     return L
 end
 

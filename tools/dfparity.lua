@@ -38,7 +38,7 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 80, ['df-over-collects'] = 525,
+    self = { ['binding-as-use'] = 81, ['df-over-collects'] = 525,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- self analyzes its OWN new
         -- source each cut: +11 df-over @ v50 const-fold, +4/+1 @ v51 anon-fns/
         -- enclosing-chain, +1/+1 @ v52 resolve_registry, +1 binding-as-use/+3
@@ -50,7 +50,8 @@ M.EXPECTED = {
         -- (optimize migration + localize + expr.dotted/rootname), +3 df-over @ expr
         -- Rung 2 (narrow.param_nilability), +1 df-over @ INC 3 (optimize cross-block
         -- CSE + PRE), +1 binding-as-use/+6 df-over @ the optapply APPLY verb, +1
-        -- binding-as-use @ optapply targeting (M.at/plan_at/run_at). benign classes,
+        -- binding-as-use @ optapply targeting (M.at/plan_at/run_at), +1 binding-as-use @
+        -- optapply hoist/localize verbs (plan_localize/plan_hoist). benign classes,
         -- flow-over-collects still 2.
         -- df-additive/inert — external corpora unchanged, the flow.build cfg.expr hook
         -- is OFF on the ingest path.

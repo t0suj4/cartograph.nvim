@@ -137,3 +137,79 @@ test('optapply: M.at resolves the INNERMOST enclosing function by location', fun
     ok(after:match('local d = c'), 'inner rewritten')
     ok(after:match('local a = x %+ y'), 'outer left intact')
 end)
+
+-- ── localize-upvalue apply ────────────────────────────────────────────────────
+test('optapply: localize binds an in-loop stdlib call to a local + rewrites sites', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = ingest {
+        'local function f(xs)',
+        '  local s = 0',
+        '  for _, x in ipairs(xs) do',
+        '    s = s + math.floor(x) + math.floor(x)',  -- two sites, one line
+        '  end',
+        '  return s',
+        'end', 'return { f }',
+    }
+    local res = optapply.run_localize(store, fn_id('f'))
+    ok(res.ok, 'applied: ' .. tostring(res.reason))
+    eq(2, res.moves[1].sites)
+    local after = table.concat(vim.fn.readfile(root .. '/m.lua'), '\n')
+    ok(after:match('local floor = math%.floor'), 'the local is inserted')
+    ok(after:match('s %+ floor%(x%) %+ floor%(x%)'), 'BOTH same-line sites rewritten')
+    -- idempotent: now `floor` is a local, localize no longer fires
+    store.ingest(ts.extract(root))
+    ok(not optapply.plan_localize(store, fn_id('f')), 'nothing left to localize')
+end)
+
+test('optapply: localize declines a non-stdlib global and a name collision', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(xs)',
+        '  for _, x in ipairs(xs) do myglobal.step(x) end',  -- non-stdlib root → declined
+        'end',
+        'local function g(xs, insert)',                       -- `insert` param collides
+        '  for _, x in ipairs(xs) do table.insert(xs, x) end',
+        'end', 'return { f, g }',
+    }
+    ok(not optapply.plan_localize(store, fn_id('f')), 'non-stdlib global not localized')
+    ok(not optapply.plan_localize(store, fn_id('g')), 'colliding leaf name not localized')
+end)
+
+-- ── hoist (LICM) apply ────────────────────────────────────────────────────────
+test('optapply: hoist lifts an invariant out of a run-once (repeat) loop', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = ingest {
+        'local function f(base)',
+        '  local n = 0',
+        '  repeat',
+        '    local k = base + 1',
+        '    n = n + k',
+        '  until n > 100',
+        '  return n',
+        'end', 'return { f }',
+    }
+    local res = optapply.run_hoist(store, fn_id('f'))
+    ok(res.ok, 'applied: ' .. tostring(res.reason))
+    local after = vim.fn.readfile(root .. '/m.lua')
+    -- the declaration now precedes the `repeat`
+    local kline, rline
+    for i, l in ipairs(after) do
+        if l:match('local k = base %+ 1') then kline = i end
+        if l:match('^%s*repeat') then rline = i end
+    end
+    ok(kline and rline and kline < rline, 'k hoisted above the repeat')
+end)
+
+test('optapply: hoist declines a possibly zero-trip (for) loop', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(base, xs)',
+        '  for _, x in ipairs(xs) do',
+        '    local k = base + 1',   -- invariant, but the for-loop may run 0 times
+        '    use(k, x)',
+        '  end',
+        'end', 'return { f }',
+    }
+    local plan, why = optapply.plan_hoist(store, fn_id('f'))
+    ok(not plan, 'not hoisted (zero-trip hazard): ' .. tostring(why))
+end)

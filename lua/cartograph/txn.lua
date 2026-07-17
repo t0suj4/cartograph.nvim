@@ -64,7 +64,12 @@ function M.edit_file(text, dels, reps, ins)
     end
     table.sort(edits, function (a, b)
         if a.line ~= b.line then return a.line > b.line end
-        return a.ord > b.ord
+        if a.ord ~= b.ord then return a.ord > b.ord end
+        -- two replacements on the SAME line: apply the RIGHTMOST first, so each
+        -- in-place splice leaves the earlier columns valid (else the first shifts
+        -- them and the second corrupts — a latent bug for any multi-rep-per-line verb)
+        if a.rep and b.rep then return atr.sc(a.rep.at) > atr.sc(b.rep.at) end
+        return false
     end)
     for _, e in ipairs(edits) do
         if e.rep then
