@@ -1029,6 +1029,18 @@ because that says nothing about which method runs. The summary counts the two ti
 the report doubles as an honest measure of the devirtualization gap: what a concrete
 receiver type turns static now, and how much the VM still gates.
 
+`:CartographFields` is the data-member half of receiver typing — go-to-definition for a
+field. Inside a method of class `C`, a `self.field` *read* resolves to the `self.field =
+…` *write(s)* on `C` (its own methods plus its `extends` ancestors): where is this member
+actually set? It's the field analog of `self:method` resolution, and it lands squarely on
+the Ace3 `self.db`-assigned-in-`OnInitialize`, read-everywhere pattern. Self is typed by
+the same genuine-object contract (the class owns ≥2 colon-methods); a field written in
+several places resolves to the set (the definition is the join). Crucially this is
+**resolution, not a lint**: a read with *no* same-class write is left unresolved, never
+flagged — Lua's dynamic members (metatables, `rawset`, table loops) make a writeless read
+a poor signal of a defect, so the undefined-member lint stays off and only sound
+read→write links are reported.
+
 `:CartographExpr` reads one level deeper still. The flow rows know *which* names a
 statement defines and uses, but not the **shape** of the expression that computes them —
 the operator, the operands, the callee, whether it allocates. That structure is a small

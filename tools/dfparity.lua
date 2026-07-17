@@ -38,7 +38,7 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 81, ['df-over-collects'] = 533,
+    self = { ['binding-as-use'] = 81, ['df-over-collects'] = 539,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- self analyzes its OWN new
         -- source each cut: +11 df-over @ v50 const-fold, +4/+1 @ v51 anon-fns/
         -- enclosing-chain, +1/+1 @ v52 resolve_registry, +1 binding-as-use/+3
@@ -55,7 +55,8 @@ M.EXPECTED = {
         -- hedge-resolution + provenance, +2 df-over @ narrow-v2 type-tests
         -- (type_call_var/gated_classify/binds), +2 df-over @ narrow-v2 field-paths
         -- (field_unstable_of/path_of/fact_live added to narrow.lua), +3 df-over @ the
-        -- narrow-v2 DEVIRT report (M.devirt/M.devirt_report). benign, flow-over-collects still 2.
+        -- narrow-v2 DEVIRT report (M.devirt/M.devirt_report), +6 df-over @ the FIELD
+        -- LINKER (fieldlink.lua added to self). benign, flow-over-collects still 2.
         -- df-additive/inert — external corpora unchanged, the flow.build cfg.expr hook
         -- is OFF on the ingest path.
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },

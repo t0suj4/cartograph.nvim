@@ -1162,6 +1162,27 @@ local function gen_lua_registry(k, akey)
     return fname, src
 end
 
+-- FIELD-LINKER ground-truth ([[cartograph-linker]] Track 3, fieldlink): a self.field
+-- READ resolves to the self.field = … WRITE on the receiver-typed class. Key
+-- {lens='fieldlink', line, want=true|false}: true = the read at `line` resolves;
+-- false = a WRITELESS read must NOT resolve (the dead undefined-member lint — the
+-- soundness NEGATIVE). Class owns k-unique names; ≥2 methods = genuine-object gate.
+local function gen_lua_fieldlink(k, akey)
+    local B, fname = {}, ('fl%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(line, want) akey[#akey + 1] = { lens = 'fieldlink', file = fname, line = line, want = want } end
+    local C = ('FC%d'):format(k)
+    w(('local %s = {}'):format(C))                                       -- 1
+    w(('function %s:init() self.data = {}; self.n = 0 end'):format(C))   -- 2 writes data, n
+    key(w(('function %s:r1() return self.data end'):format(C)), true)    -- 3 + read resolves to init
+    key(w(('function %s:r2() return self.ghost end'):format(C)), false) -- 4 − writeless read: unresolved
+    w(('function %s:extra() return self.n end'):format(C))               -- 5 (≥2 methods → genuine object)
+    w(('return { %s }'):format(C))                                       -- 6
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 -- UNTANGLE ground-truth (syn-analysis INC 3): independent PURE data chains → the fn
 -- partitions into that many concerns; a coupling statement (using two chains' vars)
 -- merges them. Key is per-FN {lens='untangle', fn, ncomp}. Pure (no calls) so effect
@@ -1351,6 +1372,7 @@ function M.analysis(lang, nfiles, seed)
     for i = 1, 4 do add(gen_lua_fieldpath(i, out.key)) end
     for i = 1, 4 do add(gen_lua_devirt(i, out.key)) end
     for i = 1, 4 do add(gen_lua_registry(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_fieldlink(i, out.key)) end
     for i = 1, 4 do add(gen_lua_licm(i, out.key)) end
     for i = 1, 4 do add(gen_lua_cse(i, out.key)) end
     for i = 1, 4 do add(gen_lua_redundant(i, out.key)) end

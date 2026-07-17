@@ -409,6 +409,18 @@ function M.register()
         scratch(require('cartograph.narrow').devirt_report(store, id))
     end, { desc = 'cartograph: devirtualization of the focused fn — a method dispatch `recv:m()` whose receiver a guard narrows to a concrete type is a static-call candidate (string → stdlib target now, certified; other types → blocked on VM receiver typing). The devirt-gap consumer of the type/discriminant facts' })
 
+    -- ── field-link: where the focused method's self.field reads are DEFINED ─
+    cmd('CartographFields', function ()
+        local store = live() if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a method first',
+                vim.log.levels.WARN)
+        end
+        scratch(require('cartograph.fieldlink').report(store, id))
+    end, { desc = 'cartograph: field/member linker (Track 3) — resolves the focused method\'s self.field READS to the self.field = … WRITE(s) on its class (own methods + extends ancestors), receiver-typed. Go-to-definition for a data member; a writeless read is left unresolved (sound-first, not the dead undefined-member lint)' })
+
     -- ── untangle MODULE: independent function clusters in a file (or a dir) ─
     cmd('CartographUntangleModule', function (o)
         local store = live() if not store then return end

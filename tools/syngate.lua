@@ -16,6 +16,7 @@ local gen = dofile(repo .. '/tools/gen.lua')
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 local narrow = require 'cartograph.narrow'
+local fieldlink = require 'cartograph.fieldlink'
 local optimize = require 'cartograph.optimize'
 local flow = require 'cartograph.flow'
 local untangle = require 'cartograph.untangle'
@@ -37,6 +38,7 @@ local paramnil = {} -- KR(file, fn, param) -> {verdict, conflict}
 local prehoist = {} -- K(file, fn) -> true if a PRE hoist exists
 local devirt = {}   -- K(file, line) -> status ('certified'|'candidate') of a dispatch site
 local registry = {} -- K(file, line) -> the NAME of the node a LibStub retrieve resolved to
+local fieldlnk = {} -- K(file, line) -> true if a self.field read there resolved to a write
 local gatebad = {} -- expr self-gate disagreements (reads ≠ use∪rmw) — must be empty
 local function K(f, l) return (f or '') .. '\31' .. l end
 local function KR(f, l, r) return (f or '') .. '\31' .. l .. '\31' .. r end
@@ -95,6 +97,16 @@ for _, c in ipairs(store.data.calls or {}) do
     if c.registry and c.callee == 'LibStub' and not c.method then
         local nd = store.node and store.node(c.registry)
         registry[K(c.file, (c.line or 0) + 1)] = nd and nd.name or true -- c.line is 0-based; key is 1-based
+    end
+end
+
+-- fieldlink: per method node, resolve self.field reads to their same-class writes
+for _, n in ipairs(store.data.nodes) do
+    if (n.kind == 'method' or n.kind == 'function') and n.name and n.name:match(':') then
+        local okf, fr = pcall(fieldlink.fields, store, n.id)
+        if okf and fr and fr.reads then
+            for _, r in ipairs(fr.reads) do fieldlnk[K(n.file, r.line)] = true end
+        end
     end
 end
 
@@ -185,6 +197,16 @@ for _, e in ipairs(a.key) do
             else c.pass = c.pass + 1 end
         elseif got == e.want then c.pass = c.pass + 1
         else c.fn[#c.fn + 1] = ('%s:%d expected registry→%s, got %s'):format(e.file, e.line, e.want, tostring(got)) end
+    elseif e.lens == 'fieldlink' then
+        -- want = true (read resolves to a same-class write) | false (writeless → must NOT)
+        local got = fieldlnk[K(e.file, e.line)] or false
+        if e.want then
+            if got then c.pass = c.pass + 1
+            else c.fn[#c.fn + 1] = ('%s:%d self.field read expected to resolve, did not'):format(e.file, e.line) end
+        else
+            if got then c.fp[#c.fp + 1] = ('%s:%d writeless read RESOLVED (must not — dead lint)'):format(e.file, e.line)
+            else c.pass = c.pass + 1 end
+        end
     elseif e.lens == 'devirt' then
         -- want = 'certified' | 'candidate' | false (must NOT be a devirt site)
         local got = devirt[K(e.file, e.line)]
@@ -201,7 +223,7 @@ local failed = false
 -- a disagreement is a real bug on one side — the oracle discipline in the substrate)
 print(('syngate %-7s %d disagreement(s)'):format('exprgate:', #gatebad))
 for _, m in ipairs(gatebad) do print('  GATE ' .. m); failed = true end
-for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0', 'localize', 'paramnil', 'pre', 'devirt', 'registry' }) do
+for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0', 'localize', 'paramnil', 'pre', 'devirt', 'registry', 'fieldlink' }) do
     local c = census[lens]
     if c then
         print(('syngate %-7s %d ok, %d false-pos, %d false-neg')
