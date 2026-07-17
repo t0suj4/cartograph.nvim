@@ -1133,6 +1133,35 @@ local function gen_lua_devirt(k, akey)
     return fname, src
 end
 
+-- STRING-KEYED REGISTRY ground-truth ([[cartograph-linker]] stage 3, resolve_registry):
+-- `LibStub("X")` resolves to the :NewLibrary-registered table. Key {lens='registry',
+-- line, want = <resolved var name> | false}. The class-owner case is the point: a
+-- register line `local Lib, oldminor = :NewLibrary("X")` binds BOTH vars at char 0,
+-- so the retrieve must pick the CLASS-owner Lib (owns methods), not the returned minor
+-- (the v54 fix — a positive keyed to 'Alpha' catches a regression to 'oldminor').
+-- NEGATIVE: an unregistered key must NOT resolve. Literal keys (no const-fold needed).
+local function gen_lua_registry(k, akey)
+    local B, fname = {}, ('rg%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(line, want) akey[#akey + 1] = { lens = 'registry', file = fname, line = line, want = want } end
+    -- keys + class names are k-UNIQUE: the synthetic corpus is ONE scope (no .toc),
+    -- so identical keys across the 4 generated files would collide (in real WoW each
+    -- addon is its own scope — no collision). A_k owns methods (class-owner); Aminor
+    -- is the returned-minor sibling on the same line (both at char 0 → the fix's test).
+    local A, Bk = ('A%d'):format(k), ('B%d'):format(k)
+    w(('local %s, Aminor = LibStub:NewLibrary("Alpha%d-1.0", 1)'):format(A, k)) -- 1
+    w(('function %s:M() return 1 end'):format(A))                              -- 2 class-owner
+    w(('local %s = LibStub:NewLibrary("Beta%d-2.0", 1)'):format(Bk, k))        -- 3
+    w(('function %s:N() return 2 end'):format(Bk))                            -- 4
+    key(w(('local function ua() return LibStub("Alpha%d-1.0") end'):format(k)), A)  -- 5 + class-owner, NOT Aminor
+    key(w(('local function ub() return LibStub("Beta%d-2.0") end'):format(k)), Bk)  -- 6 + distinct key resolves distinctly
+    key(w(('local function uc() return LibStub("Ghost%d-9.9") end'):format(k)), false) -- 7 − unregistered → none
+    w('return { ua, ub, uc }')                                                -- 8
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 -- UNTANGLE ground-truth (syn-analysis INC 3): independent PURE data chains → the fn
 -- partitions into that many concerns; a coupling statement (using two chains' vars)
 -- merges them. Key is per-FN {lens='untangle', fn, ncomp}. Pure (no calls) so effect
@@ -1321,6 +1350,7 @@ function M.analysis(lang, nfiles, seed)
     for i = 1, 4 do add(gen_lua_typenarrow(i, out.key)) end
     for i = 1, 4 do add(gen_lua_fieldpath(i, out.key)) end
     for i = 1, 4 do add(gen_lua_devirt(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_registry(i, out.key)) end
     for i = 1, 4 do add(gen_lua_licm(i, out.key)) end
     for i = 1, 4 do add(gen_lua_cse(i, out.key)) end
     for i = 1, 4 do add(gen_lua_redundant(i, out.key)) end

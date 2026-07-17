@@ -36,6 +36,7 @@ local narrowenv, hoist, reuse, redun, ncomp, rung0, localized = {}, {}, {}, {}, 
 local paramnil = {} -- KR(file, fn, param) -> {verdict, conflict}
 local prehoist = {} -- K(file, fn) -> true if a PRE hoist exists
 local devirt = {}   -- K(file, line) -> status ('certified'|'candidate') of a dispatch site
+local registry = {} -- K(file, line) -> the NAME of the node a LibStub retrieve resolved to
 local gatebad = {} -- expr self-gate disagreements (reads ≠ use∪rmw) — must be empty
 local function K(f, l) return (f or '') .. '\31' .. l end
 local function KR(f, l, r) return (f or '') .. '\31' .. l .. '\31' .. r end
@@ -85,6 +86,15 @@ for _, n in ipairs(store.data.nodes) do
         if okpre and prr and #prr.hoists > 0 then prehoist[K(f, n.name or '?')] = true end
         local okd, dr = pcall(narrow.devirt, store, n.id)
         if okd and dr and dr.sites then for _, d in ipairs(dr.sites) do devirt[K(f, d.line)] = d.status end end
+    end
+end
+
+-- registry: resolve_registry ran at extract → LibStub retrieves carry c.registry
+-- (the resolved node id); record the resolved node's NAME per (file, line).
+for _, c in ipairs(store.data.calls or {}) do
+    if c.registry and c.callee == 'LibStub' and not c.method then
+        local nd = store.node and store.node(c.registry)
+        registry[K(c.file, (c.line or 0) + 1)] = nd and nd.name or true -- c.line is 0-based; key is 1-based
     end
 end
 
@@ -167,6 +177,14 @@ for _, e in ipairs(a.key) do
             local m = ('%s:%s(%s) conflict expected %s, got %s'):format(e.file, e.fn, e.param, tostring(e.conflict), tostring(got.conflict))
             if got.conflict then c.fp[#c.fp + 1] = m else c.fn[#c.fn + 1] = m end
         else c.pass = c.pass + 1 end
+    elseif e.lens == 'registry' then
+        -- want = <resolved var name> | false (must NOT resolve — unregistered key)
+        local got = registry[K(e.file, e.line)]
+        if e.want == false then
+            if got then c.fp[#c.fp + 1] = ('%s:%d resolved to %s (unregistered — must not)'):format(e.file, e.line, tostring(got))
+            else c.pass = c.pass + 1 end
+        elseif got == e.want then c.pass = c.pass + 1
+        else c.fn[#c.fn + 1] = ('%s:%d expected registry→%s, got %s'):format(e.file, e.line, e.want, tostring(got)) end
     elseif e.lens == 'devirt' then
         -- want = 'certified' | 'candidate' | false (must NOT be a devirt site)
         local got = devirt[K(e.file, e.line)]
@@ -183,7 +201,7 @@ local failed = false
 -- a disagreement is a real bug on one side — the oracle discipline in the substrate)
 print(('syngate %-7s %d disagreement(s)'):format('exprgate:', #gatebad))
 for _, m in ipairs(gatebad) do print('  GATE ' .. m); failed = true end
-for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0', 'localize', 'paramnil', 'pre', 'devirt' }) do
+for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0', 'localize', 'paramnil', 'pre', 'devirt', 'registry' }) do
     local c = census[lens]
     if c then
         print(('syngate %-7s %d ok, %d false-pos, %d false-neg')
