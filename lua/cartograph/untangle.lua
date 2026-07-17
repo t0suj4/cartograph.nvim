@@ -75,24 +75,44 @@ function M.analyze(df)
     end)
 end
 
---- FINE lens (INC 1): union-find over flow's reaching-definition edges across the
---- fine rows. `from` sets include 0 for a param/entry reach — skipped (no row to
---- join). More correct than analyze() where a var is redefined (reaching picks
---- the nearest def, not df's first-def-wins) and where control bodies would fold.
+--- FINE lens over flow's PDG. Concerns = connected components under the program-
+--- dependence edges, so statements in DIFFERENT concerns have NO dependency and
+--- are independently reorderable/extractable (the safety verdict itself is INC 3).
+--- Edge kinds (INC 1 + INC 2):
+---   • DATA (RAW) — reaching_cfg def→use (scope-aware; `from` 0 = param, skipped).
+---   • OUTPUT (WAW) — reaching_cfg's 2nd value: coupled defs of the same var.
+---   • CONTROL — a row is control-dependent on its enclosing control head
+---     (`parent`), so a branch/loop body joins its guard's concern even with no
+---     data flow to the condition (fixes the "isolated body statement" mis-split).
+--- (WAR/anti falls out transitively via RAW+WAW.) STILL missing for a full safety
+--- claim: side-effect ordering of impure statements (INC 2b, rides effects).
 --- @param flow { stmts: table[], params: string[] } | nil  (flow.record(n) shape)
 --- @return { n:integer, ncomp:integer, comp:integer[], sizes:table, switches:integer, tangle:integer, maxspan:integer }
 function M.analyze_flow(flow)
     local stmts = flow and flow.stmts or {}
     local n = #stmts
     if n == 0 then return { n = 0, ncomp = 0, comp = {}, sizes = {}, switches = 0, tangle = 0, maxspan = 0 } end
-    local reaching = flowmod.reaching_cfg(flow)
+    local raw, waw = flowmod.reaching_cfg(flow)
     return partition(n, function (union, span)
-        for _, e in ipairs(reaching) do
+        for _, e in ipairs(raw) do              -- DATA (RAW)
             local at = e.at
             for _, from in ipairs(e.from) do
                 if from ~= 0 and from >= 1 and from <= n then
                     union(at, from); span(at - from)
                 end
+            end
+        end
+        for _, w in ipairs(waw) do               -- OUTPUT (WAW)
+            local a, b = w[1], w[2]
+            if a >= 1 and a <= n and b >= 1 and b <= n then
+                union(a, b)
+                local s = a - b; if s < 0 then s = -s end; span(s)
+            end
+        end
+        for i = 1, n do                          -- CONTROL
+            local p = stmts[i].parent
+            if p and p ~= 0 and p >= 1 and p <= n then
+                union(i, p); span(i - p)
             end
         end
     end)

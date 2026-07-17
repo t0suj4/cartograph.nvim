@@ -102,11 +102,12 @@ end]])
     eq(1, r.maxspan)         -- each use is one row after its def
 end)
 
-test('untangle_flow: reaching picks the NEAREST def, not first-def-wins', function ()
+test('untangle_flow: redefinition couples all writes+reads of a var (RAW+WAW)', function ()
     if not ready('lua') then skip 'no lua parser' end
-    -- def x / use x / redef x / use x — the 2nd use reaches the REDEF (row 3),
-    -- so {1,2} and {3,4} are two concerns. df's first-def-wins would wrongly
-    -- link the 2nd use back to row 1; the fine lens is more correct here.
+    -- def x / use x / redef x / use x. reaching_cfg links the 2nd use to the
+    -- REDEF (row 3, nearest def — not df's first-def-wins), and WAW couples the
+    -- two writes (reordering them changes what the reads see). So all four rows
+    -- are one coupled concern — you couldn't extract half without renaming x.
     local fl = build_flow([[
 local function f()
   local x = 1
@@ -116,8 +117,7 @@ local function f()
 end]])
     local r = untangle.analyze_flow(fl)
     eq(4, r.n)
-    eq(2, r.ncomp)
-    eq({ 0, 0, 1, 1 }, r.comp)
+    eq(1, r.ncomp)                    -- WAW(row3,row1) + RAW closes the loop
 end)
 
 test('untangle_flow: one linear chain -> single concern', function ()
@@ -156,4 +156,53 @@ end)
 test('untangle_flow: empty/nil flow is inert', function ()
     eq(0, untangle.analyze_flow(nil).ncomp)
     eq(0, untangle.analyze_flow({ stmts = {} }).ncomp)
+end)
+
+-- ── INC 2: control + output (WAW) dependencies ──────────────────────────────
+
+test('untangle_flow: a branch body joins its guard (control dep)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- g() has NO data dep to `cond`; without control deps it would be its own
+    -- bogus concern. INC 2 makes it control-dependent on the if row, so the
+    -- if+body is ONE concern, separate from the a-chain -> 2 concerns total.
+    local fl = build_flow([[
+local function f()
+  local a = 1
+  print(a)
+  if cond then
+    g()
+  end
+end]])
+    local r = untangle.analyze_flow(fl)
+    eq(2, r.ncomp)
+    -- rows: 1 local a, 2 print(a), 3 if, 4 g()  -> concerns {1,2} and {3,4}
+    eq(r.comp[3], r.comp[4])          -- body shares the guard's concern
+    ok(r.comp[1] ~= r.comp[3], 'the a-chain is a distinct concern from the if')
+end)
+
+test('untangle_flow: two defs of a fn-scoped var couple (WAW)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- no RAW edge between the two writes, but reordering them changes what a
+    -- later reader sees -> output-dependent -> one concern.
+    local fl = build_flow([[
+local function f()
+  local x = 1
+  x = 2
+end]])
+    local r = untangle.analyze_flow(fl)
+    eq(2, r.n)
+    eq(1, r.ncomp)                    -- WAW couples the two writes
+end)
+
+test('untangle_flow: a reused BLOCK-local does NOT falsely couple (scope-gated WAW)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- `i` is block-scoped to each loop; the first def dies at its block exit, so
+    -- it never reaches the second -> no WAW edge -> the two loops stay separate.
+    local fl = build_flow([[
+local function f()
+  for i = 1, 3 do print(i) end
+  for i = 1, 3 do use(i) end
+end]])
+    local r = untangle.analyze_flow(fl)
+    ok(r.ncomp >= 2, 'the two independent loops are not merged by reused `i`')
 end)

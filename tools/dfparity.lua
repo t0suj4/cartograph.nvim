@@ -38,10 +38,12 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 75, ['df-over-collects'] = 462,
+    self = { ['binding-as-use'] = 76, ['df-over-collects'] = 465,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- self analyzes its OWN new
         -- source each cut: +11 df-over @ v50 const-fold, +4/+1 @ v51 anon-fns/
-        -- enclosing-chain, +1/+1 @ v52 resolve_registry. df-additive/inert.
+        -- enclosing-chain, +1/+1 @ v52 resolve_registry, +1 binding-as-use/+3
+        -- df-over @ untangle PDG INC 1-2 (flow.lua WAW + untangle.lua). df-
+        -- additive/inert — external corpora (jquery/cpp) unchanged, ferr=0.
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than

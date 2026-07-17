@@ -945,7 +945,28 @@ function M.reaching_cfg(flow)
             edges[#edges + 1] = { at = u, var = v, from = from, hedged = hset }
         end
     end
-    return edges
+    -- OUTPUT (WAW) dependencies — the PDG's second value ([[cartograph-untangle-pdg]]):
+    -- row n's def of v is output-dependent on every PRIOR def of v that reaches n
+    -- (in rin[n][v]). Returned as a SEPARATE 2nd value so the RAW-edge contract
+    -- (every existing caller reads only the first return) is unchanged. The
+    -- scope-regime reaching already keeps reused BLOCK-locals from reaching across
+    -- their blocks, so this doesn't falsely couple reused temps; a function-scoped
+    -- reuse (plain reassignment) IS a real output-dep and correctly couples. Each
+    -- entry is {n, d} = "n's def is output-dependent on d". (WAR/anti-deps fall out
+    -- transitively for connectivity: a use rides its RAW def, which WAW-chains to
+    -- the later def.)
+    local waw = {}
+    for n = 1, #S do
+        for _, v in ipairs(S[n].def) do
+            local rr = rin[n] and rin[n][v]
+            if rr then
+                for d in pairs(rr) do
+                    if d ~= 0 and d ~= n then waw[#waw + 1] = { n, d } end
+                end
+            end
+        end
+    end
+    return edges, waw
 end
 
 -- ── the fold: nested flow records → one columnar store (df-strangler step 3) ──
