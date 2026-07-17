@@ -1015,6 +1015,20 @@ kind of finding this project is built to surface. The inference is deliberately
 conservative — it never calls a parameter required if the code checks it even once, so a
 reported disagreement is trustworthy rather than a guess.
 
+`:CartographDevirt` is where the type facts pay off. A method call `recv:m()` is a
+dynamic dispatch; where a dominating guard narrows the receiver to a concrete type, the
+target is (partly) resolved. When the receiver is a **string** (`if type(s) == 'string'`,
+or the early-exit `if type(s) ~= 'string' then return`), `s:m()` *always* dispatches
+through the string metatable to `string.m` — fixed at the C level, so it is sound even if
+the global `string` is shadowed — and the site is reported **certified**, a named
+static-call target and an inline candidate. When the receiver is another concrete type
+(a table, say), the site is a **candidate**: the type is known but the actual target needs
+a class/metatable binding that guard-narrowing cannot supply — it waits on the VM's
+receiver typing. A receiver narrowed only to non-nil or truthy is *not* a devirt site,
+because that says nothing about which method runs. The summary counts the two tiers, so
+the report doubles as an honest measure of the devirtualization gap: what a concrete
+receiver type turns static now, and how much the VM still gates.
+
 `:CartographExpr` reads one level deeper still. The flow rows know *which* names a
 statement defines and uses, but not the **shape** of the expression that computes them —
 the operator, the operands, the callee, whether it allocates. That structure is a small
