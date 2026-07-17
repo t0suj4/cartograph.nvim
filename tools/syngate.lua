@@ -28,13 +28,15 @@ end
 store.ingest(ts.extract(dir))
 
 -- collect each lens's per-(file,line) facts in one pass (a line belongs to one fn)
-local narrowenv, hoist, reuse = {}, {}, {}
+local narrowenv, hoist, reuse, redun = {}, {}, {}, {}
 local function K(f, l) return (f or '') .. '\31' .. l end
 for _, n in ipairs(store.data.nodes) do
     if n.kind == 'function' then
         local f = n.file or ''
         local okn, nr = pcall(narrow.narrow, store, n.id)
         if okn then for _, p in ipairs(nr.points) do narrowenv[K(f, p.line)] = p.env end end
+        local okr, rr = pcall(narrow.redundant, store, n.id)
+        if okr then for _, c in ipairs(rr.checks) do redun[K(f, c.line)] = c.always end end
         local okl, lr = pcall(optimize.licm, store, n.id)
         if okl then for _, h in ipairs(lr.heads) do
             for r in pairs(lr.loops[h].hoistable) do hoist[K(f, lr.rows[r].l)] = true end
@@ -77,11 +79,18 @@ for _, e in ipairs(a.key) do
             if got then c.fp[#c.fp + 1] = ('%s:%d FALSE-POSITIVE redundant (must not be)'):format(e.file, e.line)
             else c.pass = c.pass + 1 end
         end
+    elseif e.lens == 'redundant' then
+        local got = redun[K(e.file, e.line)] -- true | false | nil
+        if e.want == 'none' then
+            if got ~= nil then c.fp[#c.fp + 1] = ('%s:%d FALSE-POSITIVE redundant-check (must not flag)'):format(e.file, e.line)
+            else c.pass = c.pass + 1 end
+        elseif got == e.want then c.pass = c.pass + 1
+        else c.fn[#c.fn + 1] = ('%s:%d expected redundant always=%s, got %s'):format(e.file, e.line, tostring(e.want), tostring(got)) end
     end
 end
 
 local failed = false
-for _, lens in ipairs({ 'narrow', 'licm', 'cse' }) do
+for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse' }) do
     local c = census[lens]
     if c then
         print(('syngate %-7s %d ok, %d false-pos, %d false-neg')

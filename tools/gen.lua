@@ -1024,6 +1024,38 @@ local function gen_lua_cse(k, akey)
     return fname, src
 end
 
+-- REDUNDANT-CHECK ground-truth (syn-analysis INC 2, narrow lint): key {want=true}
+-- (always-true), {want=false} (dead then), or {want='none'} (must NOT flag). The
+-- NEGATIVES are the three soundness traps dogfooding found: truthy≠non-nil,
+-- conjunction-under-early-exit, reassignment-between.
+local function gen_lua_redundant(k, akey)
+    local B, fname = {}, ('r%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(line, want) akey[#akey + 1] = { lens = 'redundant', file = fname, line = line, want = want } end
+    w('local function ra(x)'); w('  if x ~= nil then')
+    key(w('    if x ~= nil then use(x) end'), true) -- + always true
+    w('  end'); w('end')
+    w('local function rb(x)'); w('  if x ~= nil then')
+    key(w('    if x == nil then bad() end'), false) -- + dead then
+    w('  end'); w('end')
+    w('local function rc(x)'); w('  if x ~= nil then')
+    key(w('    if x then use(x) end'), 'none') -- − truthy≠non-nil (x could be false)
+    w('  end'); w('end')
+    w('local function rd(a)'); w('  if not a and cond() then return end')
+    key(w('  if a then use(a) end'), 'none') -- − ¬(not a ∧ cond) proves nothing
+    w('end')
+    w('local function re(x)'); w('  if x ~= nil then'); w('    x = f()')
+    key(w('    if x ~= nil then use(x) end'), 'none') -- − reassigned between
+    w('  end'); w('end')
+    w('local function rf(x, y)'); w('  if x ~= nil then')
+    key(w('    if y ~= nil then use(y) end'), 'none') -- − unproven var
+    w('  end'); w('end')
+    w('return { ra, rb, rc, rd, re, rf }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 --- ANALYSIS ground-truth corpus. Returns { files = {name→src}, order, key } where
 --- each key carries `lens` ('narrow'|'licm'|'cse') + the per-line expectation:
 --- narrow {var, fact='non-nil'|false}; licm {hoistable=bool}; cse {reuses=<line>|false}.
@@ -1037,6 +1069,7 @@ function M.analysis(lang, nfiles, seed)
     for i = 1, (nfiles or 12) do add(gen_lua_narrow(i, out.key)) end
     for i = 1, 4 do add(gen_lua_licm(i, out.key)) end
     for i = 1, 4 do add(gen_lua_cse(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_redundant(i, out.key)) end
     return out
 end
 

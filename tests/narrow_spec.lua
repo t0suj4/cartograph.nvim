@@ -121,6 +121,106 @@ test('narrow: a statement outside any guard has no narrowing', function ()
     eq(nil, next(env_at('f', 2)))
 end)
 
+-- ── INC 2: redundant-check elimination ──────────────────────────────────────
+
+-- redundant checks of a fn as { line -> {always} }
+local function redundant(name)
+    local out = {}
+    for _, c in ipairs(narrow.redundant(store, fn_id(name)).checks) do
+        out[c.line] = { always = c.always }
+    end
+    return out
+end
+
+test('narrow: re-testing a proven fact is redundant (always true)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- non-nil determines `x ~= nil` (always true). NOTE `if x` would NOT be redundant
+    -- here: x is non-nil but could be `false` — truthy is stronger than non-nil.
+    ingest {
+        'local function f(x)',
+        '  if x ~= nil then',
+        '    if x ~= nil then',   -- L3: x already non-nil -> always true
+        '      use(x)',
+        '    end',
+        '  end',
+        'end',
+        'return { f }',
+    }
+    local r = redundant('f')
+    ok(r[3], 'the inner `if x ~= nil` is redundant')
+    eq(true, r[3].always)
+end)
+
+test('narrow: `if x` is NOT redundant under x~=nil (x could be false)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x)',
+        '  if x ~= nil then',
+        '    if x then use(x) end',   -- L3: non-nil does NOT prove truthy
+        '  end',
+        'end',
+        'return { f }',
+    }
+    eq(nil, next(redundant('f')))
+end)
+
+test('narrow: a contradicting check is redundant (dead branch)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x)',
+        '  if x ~= nil then',
+        '    if x == nil then',   -- L3: contradicts -> always false, dead then
+        '      bad()',
+        '    end',
+        '  end',
+        'end',
+        'return { f }',
+    }
+    local r = redundant('f')
+    ok(r[3], 'the `if x == nil` is redundant')
+    eq(false, r[3].always)
+end)
+
+test('narrow: a check on an unproven var is NOT redundant', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x, y)',
+        '  if x ~= nil then',
+        '    if y then use(y) end',   -- L3: y unknown -> not redundant
+        '  end',
+        'end',
+        'return { f }',
+    }
+    eq(nil, next(redundant('f')))
+end)
+
+test('narrow: a check outside the proving guard is NOT redundant', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x)',
+        '  if x ~= nil then use(x) end',
+        '  if x then use(x) end',   -- L3: outside the first guard -> not redundant
+        'end',
+        'return { f }',
+    }
+    eq(nil, next(redundant('f')))
+end)
+
+test('narrow: report surfaces redundant checks', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x)',
+        '  if x ~= nil then',
+        '    if x ~= nil then use(x) end',
+        '  end',
+        'end',
+        'return { f }',
+    }
+    local joined = table.concat(narrow.report(store, fn_id('f')), '\n')
+    ok(joined:match('redundant check'), 'the report has a redundant-check section')
+    ok(joined:match('always true'), 'and the verdict')
+end)
+
 test('narrow: report renders facts; unknown language is reported unsupported', function ()
     if not ready('lua') then skip 'no lua parser' end
     ingest {

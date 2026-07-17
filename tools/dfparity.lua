@@ -38,7 +38,7 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 77, ['df-over-collects'] = 492,
+    self = { ['binding-as-use'] = 77, ['df-over-collects'] = 494,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- self analyzes its OWN new
         -- source each cut: +11 df-over @ v50 const-fold, +4/+1 @ v51 anon-fns/
         -- enclosing-chain, +1/+1 @ v52 resolve_registry, +1 binding-as-use/+3
