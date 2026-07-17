@@ -942,6 +942,20 @@ non-nil (a non-nil value can still be `false`) and drops a narrowing once the va
 is reassigned, so it reports a redundancy only when the earlier guard genuinely still
 holds.
 
+`:CartographParamNil` turns the same guard analysis outward, onto the function's
+*parameters*. For each one it infers a nilability contract from how the body uses it: a
+parameter that is dereferenced (`p.x`, `p()`, `#p`, arithmetic on it) without ever being
+checked — or that is `assert`ed — is inferred **required** (the code assumes it is
+non-nil); one whose every dereference sits behind a guard or a `p and p.x` short-circuit,
+or that is nil-tested anywhere, is **optional**; one never dereferenced or reassigned is
+left **unknown**. Where the function carries a `---@param` annotation, the inference is
+checked against it — and an inferred-required parameter annotated optional (`?`) is the
+telling case: the body will crash on a `nil` the type says is allowed. That's a
+disagreement with the type checker where one side is simply wrong, which is exactly the
+kind of finding this project is built to surface. The inference is deliberately
+conservative — it never calls a parameter required if the code checks it even once, so a
+reported disagreement is trustworthy rather than a guess.
+
 `:CartographExpr` reads one level deeper still. The flow rows know *which* names a
 statement defines and uses, but not the **shape** of the expression that computes them —
 the operator, the operands, the callee, whether it allocates. That structure is a small
