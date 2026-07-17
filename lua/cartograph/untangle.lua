@@ -128,13 +128,22 @@ function M.analyze_flow(flow, extra_edges, opaque)
         for _, e in ipairs(extra_edges or {}) do couple(e[1], e[2]) end -- SIDE-EFFECT (INC 2b)
     end)
     -- verdict: localize opacity to its concern(s); any opacity → uncertified.
-    local hedged, certified = {}, true
-    for _, r in ipairs(opaque or {}) do
-        if r >= 1 and r <= n and res.comp[r] ~= nil then
-            hedged[res.comp[r]] = true; certified = false
+    -- `why[c]` breaks down WHY concern c can't be certified — the blocking rows
+    -- with their reason (from reorder's per-statement hedge). An `opaque` entry is
+    -- either a bare row index (synthetic) or {row, line, reason}.
+    local hedged, certified, why = {}, true, {}
+    for _, o in ipairs(opaque or {}) do
+        local r = type(o) == 'table' and o.row or o
+        if r and r >= 1 and r <= n and res.comp[r] ~= nil then
+            local c = res.comp[r]
+            hedged[c] = true; certified = false
+            if type(o) == 'table' and o.reason then
+                why[c] = why[c] or {}
+                why[c][#why[c] + 1] = { row = r, line = o.line, reason = o.reason }
+            end
         end
     end
-    res.hedged, res.certified = hedged, certified
+    res.hedged, res.certified, res.why = hedged, certified, why
     return res
 end
 
@@ -143,6 +152,21 @@ end
 --- couple across a boundary) AND this concern isn't the one carrying the opacity.
 function M.concern_safe(res, c)
     return res.certified and not res.hedged[c]
+end
+
+--- flat, human-readable breakdown of WHY the partition isn't certified safe —
+--- one line per blocking (opaque) statement: "L<line>: <reason>". Empty when
+--- certified. The actionable half of the honesty: resolve a blocker (annotate /
+--- resolve the call via the oracle) → re-run → the concern can certify.
+function M.why_unsafe(res)
+    local out = {}
+    for _, rows in pairs(res.why or {}) do
+        for _, w in ipairs(rows) do
+            out[#out + 1] = ('L%s: %s'):format(w.line or '?', w.reason or 'unresolved effects')
+        end
+    end
+    table.sort(out)
+    return out
 end
 
 --- Compute the INC-2b SIDE-EFFECT ordering edges for `fn_id`'s flow, as row-pairs
@@ -172,7 +196,13 @@ function M.effect_edges(store, fn_id, flow)
     end
     local opaque = {}
     for _, ci in ipairs(m.opaque or {}) do
-        if toprow[ci] then opaque[#opaque + 1] = toprow[ci] end
+        local row = toprow[ci]
+        if row then
+            local st = m.stmts[ci] -- carry the REASON (reorder's per-stmt hedge) so
+            -- the verdict can break down WHY, not just flag ~ ([[cartograph-hedge-provenance]])
+            opaque[#opaque + 1] = { row = row, line = st and st.l,
+                reason = (st and st.hedges and st.hedges[1]) or 'unresolved effects' }
+        end
     end
     return edges, opaque
 end

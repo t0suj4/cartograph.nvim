@@ -298,11 +298,16 @@ test('untangle_flow: effect_edges surfaces opaque calls; clean fn is certified (
         if node.name == 'target' then tid, tnode = node.id, node end
         if node.name == 'clean' then cid, cnode = node.id, node end
     end
-    -- target: the opaque call uncertifies
+    -- target: the opaque call uncertifies AND the verdict breaks down WHY
     local tfl = flow.record(tnode)
     local te, topaque = untangle.effect_edges(store, tid, tfl)
     ok(#topaque >= 1, 'MYSTERY is opaque')
-    ok(not untangle.analyze_flow(tfl, te, topaque).certified, 'opaque call -> uncertified')
+    ok(topaque[1].reason, 'the opaque entry carries a reason string')
+    local tres = untangle.analyze_flow(tfl, te, topaque)
+    ok(not tres.certified, 'opaque call -> uncertified')
+    local why = untangle.why_unsafe(tres)
+    ok(#why >= 1, 'the verdict breaks down WHY it cannot certify')
+    ok(why[1]:match('^L%d'), 'each blocker names its source line')
     -- clean: fully modeled -> certified safe
     local cfl = flow.record(cnode)
     local ce, copaque = untangle.effect_edges(store, cid, cfl)
