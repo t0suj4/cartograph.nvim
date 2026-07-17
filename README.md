@@ -986,10 +986,17 @@ compound narrows nothing. The guard vocabulary is per-language and extensible. B
 truthiness it reads **type tests**: `if type(x) == 'string'` narrows `x` to that type in
 the region — the seed of devirtualization — which is sound for a local (a call can't
 change its type) and, importantly, is only trusted when `type` is the real global and not
-a variable that shadows it. On top of these facts the lens flags **redundant checks** —
-an `if` re-testing something a dominating guard already proved (`always true` / `dead
-branch`), including a re-tested or contradictory type (`type(x) == 'number'` under a
-proven `type(x) == 'string'` is dead) — the type twin of a dead-branch constant fold. It is careful where control flow is: it distinguishes truthy from
+a variable that shadows it. It narrows **field paths** too (`if opts.mode`, `self.cache.x`)
+and **discriminants** — `if x.kind == 'A'` records that `x.kind` *holds the value* `'A'` in
+the region, the tag-dispatch companion of the type-test seed. A field path is sound only
+while its container is stable, so the lens drops it where the root is field-written
+(`opts.mode = …`), passed to a call, or aliased (any of which could change the field behind
+its back) — but a bare local is immune to calls, so it distinguishes the two. On top of
+these facts the lens flags **redundant checks** — an `if` re-testing something a dominating
+guard already proved (`always true` / `dead branch`), including a re-tested or contradictory
+type (`type(x) == 'number'` under a proven `type(x) == 'string'` is dead) or discriminant
+(`x.kind == 'B'` under a proven `x.kind == 'A'` is dead) — the type twin of a dead-branch
+constant fold. It is careful where control flow is: it distinguishes truthy from
 non-nil (a non-nil value can still be `false`) and drops a narrowing once the variable
 is reassigned, so it reports a redundancy only when the earlier guard genuinely still
 holds.
