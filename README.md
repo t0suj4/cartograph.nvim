@@ -961,6 +961,17 @@ out of loops containing nested functions; hoisting only lifts out of a loop that
 guaranteed to run at least once, so a computation that might throw can't be relocated onto
 a path — an empty loop — that would have skipped it.
 
+When a rewrite is refused, the refusal is not silent — it's recorded with its reason
+(*"the loop may run zero times"*, *"`myglobal` may be nil"*, *"`a` is reassigned
+elsewhere"*), and for the sharper ones the *evidence* behind the verdict (the exact line
+`a` is reassigned at). A refusal is a **hedge**: a fact the analysis couldn't establish on
+its own. So rather than a blunt override, you *discharge* it by supplying that fact — "this
+loop always runs", "`math` is always defined" — chosen from the small menu each refusal
+carries; the premise you assert is written into the transaction journal, so the override
+is on the record. Some refusals need no assumption at all — a name that would be shadowed
+is simply rebound under a fresh one. And the mechanical checks never bend: supplying a
+premise waives a judgment, never the guards that stop a corrupt edit.
+
 `:CartographNarrow` is the branch-sensitive counterpart — the type sibling of
 constant folding. Where a guard *proves* something about a variable (`if x`,
 `x ~= nil`, `if x == nil then return`), it records the refinement in the region the
