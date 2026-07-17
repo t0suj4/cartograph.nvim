@@ -333,6 +333,64 @@ test('narrow v2: redundant discriminant re-test on a field path (dead / always)'
     eq(true, r[4] and r[4].always)    -- always-true
 end)
 
+-- ── devirtualization report (narrow v2, the type-fact consumer) ──────────────
+local function devirt(name) return narrow.devirt(store, fn_id(name)) end
+
+test('devirt: a string-narrowed receiver certifies `s:m()` → string.m', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(s)',
+        '  if type(s) == "string" then',
+        '    return s:upper()',
+        '  end',
+        'end',
+        'return { f }',
+    }
+    local r = devirt('f')
+    eq(1, r.summary.certified)
+    eq('certified', r.sites[1].status)
+    eq('string.upper', r.sites[1].target)
+end)
+
+test('devirt: an early-exit type guard certifies the fall-through dispatch', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(s)',
+        '  if type(s) ~= "string" then return end',
+        '  return s:match("%d+")',
+        'end',
+        'return { f }',
+    }
+    eq('string.match', devirt('f').sites[1].target)
+end)
+
+test('devirt: a truthy-only receiver is NOT a devirt site (type unknown)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(s)',
+        '  if s then return s:upper() end',   -- non-nil says nothing about the method
+        'end',
+        'return { f }',
+    }
+    local r = devirt('f')
+    eq(0, r.summary.typed)
+    eq(1, r.summary.method_calls)
+end)
+
+test('devirt: a table-narrowed receiver is a CANDIDATE (blocked on the VM)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(t)',
+        '  if type(t) == "table" then return t:method() end',
+        'end',
+        'return { f }',
+    }
+    local r = devirt('f')
+    eq(0, r.summary.certified)
+    eq(1, r.summary.candidate)
+    eq('candidate', r.sites[1].status)
+end)
+
 -- ── parameter-nilability (Rung 2, the lua-ls disagreement oracle) ─────────────
 -- verdict for param `pn` of fn `name`, plus its conflict flag
 local function pnil(name, pn)

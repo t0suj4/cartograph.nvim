@@ -1110,6 +1110,29 @@ local function gen_lua_fieldpath(k, akey)
     return fname, src
 end
 
+-- DEVIRTUALIZATION ground-truth (narrow v2, the type-fact consumer): a method call
+-- `recv:m()` whose receiver a guard narrows to `type:string` CERTIFIES to `string.m`;
+-- to another concrete type is a CANDIDATE (blocked on the VM); narrowed only to
+-- non-nil/truthy is NOT a devirt site (type unknown → must-not-fire negative).
+-- Key {lens='devirt', line, want = 'certified' | 'candidate' | false}.
+local function gen_lua_devirt(k, akey)
+    local B, fname = {}, ('dv%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(line, want) akey[#akey + 1] = { lens = 'devirt', file = fname, line = line, want = want } end
+    w('local function da(s)'); w('  if type(s) == "string" then')
+    key(w('    return s:upper()'), 'certified'); w('  end'); w('end') -- + string → stdlib
+    w('local function db(s)'); w('  if type(s) ~= "string" then return end')
+    key(w('  return s:match("%d")'), 'certified'); w('end') -- + early-exit certifies fall-through
+    w('local function dc(t)'); w('  if type(t) == "table" then')
+    key(w('    return t:method()'), 'candidate'); w('  end'); w('end') -- ± table → candidate, not certified
+    w('local function dd(s)'); w('  if s then')
+    key(w('    return s:upper()'), false); w('  end'); w('end') -- − truthy only: type unknown, no site
+    w('return { da, db, dc, dd }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 -- UNTANGLE ground-truth (syn-analysis INC 3): independent PURE data chains → the fn
 -- partitions into that many concerns; a coupling statement (using two chains' vars)
 -- merges them. Key is per-FN {lens='untangle', fn, ncomp}. Pure (no calls) so effect
@@ -1297,6 +1320,7 @@ function M.analysis(lang, nfiles, seed)
     for i = 1, (nfiles or 12) do add(gen_lua_narrow(i, out.key)) end
     for i = 1, 4 do add(gen_lua_typenarrow(i, out.key)) end
     for i = 1, 4 do add(gen_lua_fieldpath(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_devirt(i, out.key)) end
     for i = 1, 4 do add(gen_lua_licm(i, out.key)) end
     for i = 1, 4 do add(gen_lua_cse(i, out.key)) end
     for i = 1, 4 do add(gen_lua_redundant(i, out.key)) end

@@ -623,6 +623,73 @@ function M.redundant(store, fn_id)
     return { lang = lang, checks = checks }
 end
 
+--- DEVIRTUALIZATION report (narrow v2, the type-fact consumer). A method call
+--- `recv:m()` is dynamic dispatch; where a dominating guard narrows the receiver to a
+--- CONCRETE type, the target is (partly) resolved:
+---   • recv is `type:string` (or an eq: string) → `s:m()` ALWAYS dispatches through the
+---     string metatable to `string.m` (fixed at the C level — sound even if the global
+---     `string` is shadowed). CERTIFIED: a named static target, an inline candidate.
+---   • recv is another concrete `type:T` → a CANDIDATE: the receiver's type is known but
+---     the target needs a class/metatable binding, which guard-narrowing can't supply —
+---     it needs the VM's receiver typing ([[graph-vm-type-resolution]]/[[cartograph-linker]]).
+--- Receivers narrowed only to non-nil/truthy are NOT devirt sites (that says nothing
+--- about WHICH method). The summary quantifies the devirt gap: how many dispatches a
+--- concrete receiver type would turn static, and how many the VM still gates.
+--- @return table { lang, unsupported?, sites: { {line, recv, method, status, target?, fact, why?} }, summary }
+function M.devirt(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not node or not node.file then return { sites = {}, summary = {} } end
+    local lang = EXT_LANG[node.file:match('%.(%w+)$') or '']
+    if not lang or not vocab[lang] then
+        return { lang = node.file:match('%.(%w+)$'), unsupported = true, sites = {}, summary = {} }
+    end
+    local src = table.concat(store.content(node) or {}, '\n')
+    local fn = fn_node(node, src, lang)
+    if not fn then return { lang = lang, sites = {}, summary = {} } end
+    local classify = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node)))
+    local mutated, funstable = mutated_of(node), field_unstable_of(fn, src)
+
+    local sites = {}
+    local summary = { method_calls = 0, typed = 0, certified = 0, candidate = 0 }
+    local function visit(n)
+        for c in n:iter_children() do
+            if c:named() then
+                if c:type() == 'function_call' then
+                    local callee = c:named_child(0)
+                    if callee and callee:type() == 'method_index_expression' then
+                        summary.method_calls = summary.method_calls + 1
+                        local rp = path_of(callee:named_child(0), src)
+                        local method = callee:field('method')[1] and txt(callee:field('method')[1], src)
+                        if rp and method then
+                            local kind = env_of(c, src, classify, mutated, funstable)[rp.path]
+                            -- a concrete TYPE (from type-test or an eq: literal), not non-nil/truthy
+                            local ty = kind and (kind:match('^type:(.+)$')
+                                or (kind:match('^eq:s:') and 'string') or (kind:match('^eq:n:') and 'number'))
+                            if ty then
+                                summary.typed = summary.typed + 1
+                                if ty == 'string' then
+                                    summary.certified = summary.certified + 1
+                                    sites[#sites + 1] = { line = c:start() + 1, recv = rp.path, method = method,
+                                        status = 'certified', target = 'string.' .. method, fact = kind }
+                                else
+                                    summary.candidate = summary.candidate + 1
+                                    sites[#sites + 1] = { line = c:start() + 1, recv = rp.path, method = method,
+                                        status = 'candidate', fact = kind,
+                                        why = ('%s receiver — target needs a class binding (VM)'):format(ty) }
+                                end
+                            end
+                        end
+                    end
+                end
+                if not FN_TYPES[c:type()] then visit(c) end -- nested fns = their own scope
+            end
+        end
+    end
+    visit(fn)
+    table.sort(sites, function (a, b) return a.line < b.line end)
+    return { lang = lang, sites = sites, summary = summary }
+end
+
 --- The lens surface (:CartographNarrow): where a guard narrows a variable, and to
 --- what. Per statement under a narrowing guard, its active facts (`x: non-nil`).
 function M.report(store, fn_id)
@@ -698,6 +765,38 @@ function M.param_report(store, fn_id)
         L[#L + 1] = ' deref is guarded / short-circuited; unknown = never dereferenced, or reassigned.'
         L[#L + 1] = ' Where a `---@param` annotation exists, a mismatch is flagged ⚠.)'
     end
+    return L
+end
+
+--- The lens surface (:CartographDevirt): dispatch sites the narrowing facts can turn
+--- static, and the gap the VM still gates.
+function M.devirt_report(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not node then return { 'devirt: no such node' } end
+    local res = M.devirt(store, fn_id)
+    if res.unsupported then
+        return { ('devirt: %s not yet supported (Lua only)'):format(res.lang or '?') }
+    end
+    local s = res.summary
+    if #res.sites == 0 then
+        return { ('devirt: %s — no concretely-typed dispatch receivers (of %d method call(s))')
+            :format(node.name or fn_id, s.method_calls or 0) }
+    end
+    local L = { ('devirt: %s — %d method call(s), %d with a concrete-typed receiver')
+        :format(node.name or fn_id, s.method_calls, s.typed), '' }
+    for _, d in ipairs(res.sites) do
+        if d.status == 'certified' then
+            L[#L + 1] = ('  L%-4d %s:%s()  →  %s   [certified: %s]')
+                :format(d.line, d.recv, d.method, d.target, show_kind(d.fact))
+        else
+            L[#L + 1] = ('  L%-4d %s:%s()  ~  candidate (%s)'):format(d.line, d.recv, d.method, d.why)
+        end
+    end
+    L[#L + 1] = ''
+    L[#L + 1] = ('%d certified (dispatch resolved to a stdlib target now) · %d candidate (blocked')
+        :format(s.certified, s.candidate)
+    L[#L + 1] = 'on VM receiver typing). A certified site is sound: `s:m()` on a string always'
+    L[#L + 1] = 'dispatches to string.m. The candidate count is the devirt gap the VM would close.'
     return L
 end
 

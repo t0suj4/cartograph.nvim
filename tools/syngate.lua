@@ -35,6 +35,7 @@ store.ingest(ts.extract(dir))
 local narrowenv, hoist, reuse, redun, ncomp, rung0, localized = {}, {}, {}, {}, {}, {}, {}
 local paramnil = {} -- KR(file, fn, param) -> {verdict, conflict}
 local prehoist = {} -- K(file, fn) -> true if a PRE hoist exists
+local devirt = {}   -- K(file, line) -> status ('certified'|'candidate') of a dispatch site
 local gatebad = {} -- expr self-gate disagreements (reads ≠ use∪rmw) — must be empty
 local function K(f, l) return (f or '') .. '\31' .. l end
 local function KR(f, l, r) return (f or '') .. '\31' .. l .. '\31' .. r end
@@ -82,6 +83,8 @@ for _, n in ipairs(store.data.nodes) do
         end end
         local okpre, prr = pcall(optimize.pre, store, n.id)
         if okpre and prr and #prr.hoists > 0 then prehoist[K(f, n.name or '?')] = true end
+        local okd, dr = pcall(narrow.devirt, store, n.id)
+        if okd and dr and dr.sites then for _, d in ipairs(dr.sites) do devirt[K(f, d.line)] = d.status end end
     end
 end
 
@@ -164,6 +167,14 @@ for _, e in ipairs(a.key) do
             local m = ('%s:%s(%s) conflict expected %s, got %s'):format(e.file, e.fn, e.param, tostring(e.conflict), tostring(got.conflict))
             if got.conflict then c.fp[#c.fp + 1] = m else c.fn[#c.fn + 1] = m end
         else c.pass = c.pass + 1 end
+    elseif e.lens == 'devirt' then
+        -- want = 'certified' | 'candidate' | false (must NOT be a devirt site)
+        local got = devirt[K(e.file, e.line)]
+        if e.want == false then
+            if got then c.fp[#c.fp + 1] = ('%s:%d FALSE devirt site (%s; must be none)'):format(e.file, e.line, got)
+            else c.pass = c.pass + 1 end
+        elseif got == e.want then c.pass = c.pass + 1
+        else c.fn[#c.fn + 1] = ('%s:%d expected %s dispatch, got %s'):format(e.file, e.line, e.want, tostring(got)) end
     end
 end
 
@@ -172,7 +183,7 @@ local failed = false
 -- a disagreement is a real bug on one side — the oracle discipline in the substrate)
 print(('syngate %-7s %d disagreement(s)'):format('exprgate:', #gatebad))
 for _, m in ipairs(gatebad) do print('  GATE ' .. m); failed = true end
-for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0', 'localize', 'paramnil', 'pre' }) do
+for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0', 'localize', 'paramnil', 'pre', 'devirt' }) do
     local c = census[lens]
     if c then
         print(('syngate %-7s %d ok, %d false-pos, %d false-neg')
