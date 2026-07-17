@@ -919,6 +919,16 @@ the same expression over the same operand values, where the earlier already prod
 the result — so the later can reuse it (again `~` when a table read might have changed
 under it). A suggestion, never a silent transform — the same discipline as the rest.
 
+`:CartographNarrow` is the branch-sensitive counterpart — the type sibling of
+constant folding. Where a guard *proves* something about a variable (`if x`,
+`x ~= nil`, `if x == nil then return`), it records the refinement in the region the
+guard dominates: *in here, `x` is non-nil*. It reuses the same `guards_over` CFG
+dominance the taint sanitizers ride, and narrows only where the predicate actually
+proves it — an `and`-conjunction narrows every conjunct, but an `or` or a negated
+compound narrows nothing. The guard vocabulary is per-language and extensible (Lua
+nil/truthiness today; `typeof`/`instanceof` slot in for other codebases). This feeds
+redundant-check elimination and null-dereference detection.
+
 ## Offline: history archaeology
 
 A sibling tool that lives under `cartograph.history` and runs *outside* the live
