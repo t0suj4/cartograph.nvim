@@ -46,6 +46,20 @@ local function df(deplists)
     return { inputs = {}, stmts = stmts }
 end
 
+-- write `lines` as a single lua file, ingest it, return its relpath (shared by the
+-- module + block tests, hence defined up here before the first user)
+local function ingest_file(lines)
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat(lines, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'function' then return n.file end
+    end
+end
+
 test('untangle: two interleaved chains -> 2 concerns, positive tangle', function ()
     -- #1 a, #2 x, #3 b<-a, #4 y<-x   => comps [A,B,A,B]
     local a = untangle.analyze(df { {}, {}, { 1 }, { 2 } })
@@ -432,6 +446,133 @@ test('untangle: extract_plan hands a contiguous concern off; refuses a scattered
     ok(splan.scattered, 'a scattered concern is refused pending gather/reorder')
 end)
 
+-- ── nested-block extract-candidates ─────────────────────────────────────────
+
+-- find the candidate rooted at the given kind (first match in source order)
+local function cand_kind(cands, kind)
+    table.sort(cands, function (a, b) return (a.line or 0) < (b.line or 0) end)
+    for _, c in ipairs(cands) do if c.kind == kind then return c end end
+end
+
+local function fn_id(name)
+    for _, node in ipairs(store.data.nodes) do
+        if node.name == name then return node.id end
+    end
+end
+
+test('extract_candidates: a clean nested loop with its interface (params/returns)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest_file {
+        'local function f(xs)',
+        '  local total = 0',
+        '  for _, x in ipairs(xs) do',
+        '    total = total + x',        -- writes total (live-out: read after)
+        '  end',
+        '  return total',
+        'end',
+        'return { f }',
+    }
+    local cands = untangle.extract_candidates(store, fn_id('f'))
+    local loop = cand_kind(cands, 'for_in_statement') or cand_kind(cands, 'for_statement')
+    ok(loop, 'the for loop is a candidate')
+    ok(not loop.escape, 'no control escape -> cleanly extractable')
+    local function has(t, v) for _, x in ipairs(t) do if x == v then return true end end end
+    -- `total` is a body local read+reassigned in the loop -> in-out (param + return).
+    -- `xs` is an enclosing-fn PARAM (upvalue) -> captured by the helper closure, not
+    -- passed (matches extract.plan's convention), so it's NOT in params.
+    ok(has(loop.params, 'total'), 'total (defined before the loop, used inside) is a live-in param')
+    ok(not has(loop.params, 'xs'), 'xs is a captured upvalue, not a helper param')
+    ok(has(loop.returns, 'total'), 'total is defined inside and read after -> a return')
+end)
+
+test('extract_candidates: a return inside a block flags a control escape', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest_file {
+        'local function f(xs)',
+        '  for _, x in ipairs(xs) do',
+        '    if x < 0 then return nil end',   -- return exits the whole fn
+        '  end',
+        '  return true',
+        'end',
+        'return { f }',
+    }
+    local cands = untangle.extract_candidates(store, fn_id('f'))
+    local loop = cand_kind(cands, 'for_in_statement') or cand_kind(cands, 'for_statement')
+    ok(loop.escape and loop.escape:match('return'), 'the enclosed return blocks extraction')
+end)
+
+test('extract_candidates: a break stays with its own loop, escapes an inner branch', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest_file {
+        'local function f(xs, target)',
+        '  local found',
+        '  for _, x in ipairs(xs) do',
+        '    if x == target then found = x; break end',  -- break targets the for
+        '  end',
+        '  return found',
+        'end',
+        'return { f }',
+    }
+    local cands = untangle.extract_candidates(store, fn_id('f'))
+    local loop = cand_kind(cands, 'for_in_statement') or cand_kind(cands, 'for_statement')
+    local branch = cand_kind(cands, 'if_statement')
+    ok(not loop.escape, 'extracting the WHOLE loop keeps the break with its loop -> clean')
+    ok(branch and branch.escape and branch.escape:match('break'),
+        'extracting just the inner branch would orphan the break -> escape')
+end)
+
+test('extract_candidates: sub-clauses (elseif) are not standalone candidates', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest_file {
+        'local function f(x)',
+        '  if x == 1 then',
+        '    print("a")',
+        '  elseif x == 2 then',
+        '    print("b")',
+        '  end',
+        'end',
+        'return { f }',
+    }
+    local cands = untangle.extract_candidates(store, fn_id('f'))
+    for _, c in ipairs(cands) do
+        ok(c.kind ~= 'elseif_statement' and c.kind ~= 'else_statement',
+            'an elseif/else clause is part of its if, not its own candidate')
+    end
+    ok(cand_kind(cands, 'if_statement'), 'the whole if IS a candidate')
+end)
+
+test('extract_candidates: report renders candidates, marks sweet spots + escapes', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest_file {
+        'local function f(xs)',
+        '  local total = 0',
+        '  for _, x in ipairs(xs) do',
+        '    total = total + x',
+        '    print(total)',
+        '  end',
+        '  return total',
+        'end',
+        'return { f }',
+    }
+    local joined = table.concat(untangle.report_blocks(store, fn_id('f')), '\n')
+    ok(joined:match('extract%-blocks: f'), 'header names the fn')
+    ok(joined:match('%-> %(total%)'), 'the loop candidate shows total as a return')
+    ok(joined:match('cleanly extractable'), 'summarizes the clean count')
+end)
+
+test('extract_candidates: a straight-line fn has no control blocks', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest_file {
+        'local function f(a, b)',
+        '  local c = a + b',
+        '  return c',
+        'end',
+        'return { f }',
+    }
+    eq(0, #untangle.extract_candidates(store, fn_id('f')))
+    ok(table.concat(untangle.report_blocks(store, fn_id('f')), '\n'):match('no control blocks'))
+end)
+
 -- ── inter-function untangle (module clustering) ─────────────────────────────
 
 local function comp_of(res, name)
@@ -444,18 +585,6 @@ end
 local function comp_of_c(res, name)
     for k, node in ipairs(res.fns) do
         if res.names[node.id] == name then return res.communities.comp[k] end
-    end
-end
-
-local function ingest_file(lines)
-    local root = vim.fn.tempname()
-    vim.fn.mkdir(root, 'p')
-    local fd = assert(io.open(root .. '/m.lua', 'w'))
-    fd:write(table.concat(lines, '\n'))
-    fd:close()
-    store.ingest(ts.extract(root))
-    for _, n in ipairs(store.data.nodes) do
-        if n.kind == 'function' then return n.file end
     end
 end
 

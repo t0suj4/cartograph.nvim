@@ -157,6 +157,14 @@ function M.communities(n, edges)
     return { comp = comp, ncomp = ncomp, modularity = q, cut = cut, crossing = crossing, sizes = sizes }
 end
 
+-- the keys of a set as a sorted list (stable output for reports/tests)
+local function sorted_keys(set)
+    local out = {}
+    for k in pairs(set) do out[#out + 1] = k end
+    table.sort(out)
+    return out
+end
+
 -- "3 data, 1 control" — tally a crossing-edge list by kind, for the seam report.
 local function kinds_summary(crossing)
     local by = {}
@@ -709,6 +717,198 @@ function M.effect_edges(store, fn_id, flow)
         end
     end
     return edges, opaque
+end
+
+-- ── NESTED-BLOCK EXTRACT-CANDIDATES ([[cartograph-untangle-pdg]]): the SECOND
+-- kind of tangle — LINEAR-PIPELINE decomposition, not independent-slice. The
+-- concern lens correctly calls a nested loop/branch body "one concern" (it is
+-- control-dependent), so it can't suggest pulling that body into a helper. This
+-- view does: it enumerates the fn's control sub-regions from the flow tree (every
+-- loop/branch, at any depth) and, for each, computes the extraction interface
+-- straight from reaching over the block's ROW-SET — params = locals used inside
+-- whose reaching def is OUTSIDE (live-in), returns = locals defined inside and
+-- read after (live-out) — plus a control-escape hazard check. Unlike extract.plan
+-- (which handles whole TOP-LEVEL statements only, refusing anything nested), this
+-- reads NESTED blocks too, because it works on reaching row-sets rather than
+-- source-line selections. It SUGGESTS the blocks; extract.plan stays the
+-- mechanical validator for the top-level ones (the disagreement oracle).
+local LOOPISH = { for_statement = true, for_in_statement = true,
+    while_statement = true, repeat_statement = true, loop_statement = true,
+    loop_expression = true, switch_statement = true, switch_expression = true }
+local RET = { return_statement = true, throw_statement = true, raise_statement = true }
+local XFER = { break_statement = true, continue_statement = true, goto_statement = true }
+-- sub-clauses of an enclosing construct — not standalone candidates (you extract
+-- the whole if, incl. its elseifs, not a bare elseif)
+local SUBCLAUSE = { elseif_statement = true, else_statement = true,
+    else_if_clause = true, elif_clause = true, case = true, catch = true,
+    cond = true, label = true, finally_clause = true, default_clause = true }
+local FNDEF = { function_definition = true, function_declaration = true,
+    arrow_function = true, method_definition = true, lambda = true }
+
+--- Enumerate the focused fn's control sub-regions as extraction candidates. Each
+--- candidate = the subtree rooted at a control head (the whole loop/branch), with
+--- its live-in params, live-out returns, nesting depth, and a control-escape
+--- verdict (a return/throw, or a break/continue/goto whose target is outside the
+--- block, would change meaning if the block moved — so the block is not cleanly
+--- extractable). Sound for LOCALS + control flow; non-local (table/global) state
+--- is the residual gap, same as extract.plan.
+--- Each candidate carries: head (row index), kind, line, endline, depth, nstmts,
+--- params (string[] live-in), returns (string[] live-out), escape (reason|nil),
+--- toplevel (bool).
+--- @return table[]
+function M.extract_candidates(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not node then return {} end
+    local fl = flowmod.present(node) and flowmod.record(node)
+    if not fl or not fl.stmts or #fl.stmts == 0 then return {} end
+    local rows = fl.stmts
+    local n = #rows
+    local kids = {}                              -- child rows, from parent pointers
+    for i = 1, n do
+        local p = rows[i].parent
+        if p and p ~= 0 then kids[p] = kids[p] or {}; kids[p][#kids[p] + 1] = i end
+    end
+    local function depth(i)
+        local d, p = 0, rows[i].parent
+        while p and p ~= 0 do d = d + 1; p = rows[p].parent end
+        return d
+    end
+    local gotomap = {}                           -- label defs, for goto targets
+    for i = 1, n do
+        local s = rows[i]
+        if s.label and not XFER[s.t] then gotomap[s.label] = i end
+    end
+    local raw = flowmod.reaching_cfg(fl)         -- use row → def rows
+    local out = {}
+    for h = 1, n do
+        -- classify by the RAW node type `t` (flow flattens most rows' `kind` to
+        -- 'stmt'; only CTRL heads keep it — but `t` is always the real type)
+        local kind = rows[h].t or rows[h].kind or ''
+        if kids[h] and not SUBCLAUSE[kind] and not FNDEF[kind] then
+            local B, stack, endline = { [h] = true }, { h }, rows[h].l or 0
+            while #stack > 0 do                  -- subtree row-set B (h + descendants)
+                local x = table.remove(stack)
+                if (rows[x].l or 0) > endline then endline = rows[x].l end
+                for _, c in ipairs(kids[x] or {}) do
+                    if not B[c] then B[c] = true; stack[#stack + 1] = c end
+                end
+            end
+            local nstmts = 0; for _ in pairs(B) do nstmts = nstmts + 1 end
+            -- defs INSIDE the block (any), REASSIGNMENTS inside (non-declaration
+            -- defs — an accumulator, not a fresh binding), and defs OUTSIDE that
+            -- lexically precede the block.
+            local hl = rows[h].l or 0
+            local defsB, reassignB, defsBefore = {}, {}, {}
+            for r in pairs(B) do
+                local decl = (rows[r].t or ''):find('declaration') ~= nil
+                for _, v in ipairs(rows[r].def or {}) do
+                    defsB[v] = true
+                    if not decl then reassignB[v] = true end
+                end
+            end
+            for r = 1, n do
+                if not B[r] and (rows[r].l or 0) < hl then
+                    for _, v in ipairs(rows[r].def or {}) do defsBefore[v] = true end
+                end
+            end
+            -- params (live-in): (a) a recorded use inside whose reaching def is
+            -- outside (reaching-precise), PLUS (b) any var defined before the block
+            -- AND REASSIGNED (not freshly re-declared) inside it. Clause (b) is the
+            -- conservative catch for the accumulator `a = a + b`, whose RHS self-read
+            -- flow's `du` DROPS (reaching alone would miss `a` as live-in — unsound);
+            -- restricting to reassignments avoids a fresh `local a` shadow (a new
+            -- binding, not a param) firing it falsely.
+            local pset = {}
+            for _, e in ipairs(raw) do
+                if B[e.at] then
+                    for _, from in ipairs(e.from) do
+                        if from ~= 0 and not B[from] then pset[e.var] = true end
+                    end
+                end
+            end
+            for v in pairs(reassignB) do if defsBefore[v] then pset[v] = true end end
+            -- returns (live-out): a local DEFINED in the block and used lexically
+            -- after it. NOT reaching-based — reaching under-resolves a loop-carried
+            -- def (a post-loop use can resolve to the pre-loop def), so a reaching
+            -- live-out would MISS a var the block reassigns. This over-approximates
+            -- (an extra return is harmless; a missed one is unsound) — the safe
+            -- direction for an extraction interface.
+            local rset = {}
+            for r = 1, n do
+                if not B[r] and (rows[r].l or 0) > hl then
+                    for _, v in ipairs(rows[r].use or {}) do
+                        if defsB[v] then rset[v] = true end
+                    end
+                end
+            end
+            local escape                          -- control-escape hazard (by raw type `t`)
+            for r in pairs(B) do
+                local rk = rows[r].t or ''
+                if RET[rk] then
+                    escape = escape or 'return/throw exits the function'
+                elseif rk == 'goto_statement' then
+                    local tgt = rows[r].label and gotomap[rows[r].label]
+                    if not (tgt and B[tgt]) then escape = escape or 'goto leaves the block' end
+                elseif XFER[rk] then              -- break/continue: its loop must be inside B
+                    local p, ok = rows[r].parent, false
+                    while p and p ~= 0 do
+                        if LOOPISH[rows[p].t or ''] then ok = B[p] or false; break end
+                        p = rows[p].parent
+                    end
+                    if not ok then escape = escape or (rk:gsub('_statement', '') .. ' leaves the block') end
+                end
+            end
+            out[#out + 1] = {
+                head = h, kind = kind, line = rows[h].l, endline = endline,
+                depth = depth(h), nstmts = nstmts,
+                params = sorted_keys(pset), returns = sorted_keys(rset),
+                escape = escape, toplevel = (rows[h].parent == 0),
+            }
+        end
+    end
+    return out
+end
+
+--- The lens surface (:CartographExtractBlocks): the focused fn's control blocks as
+--- extraction candidates, in source order, indented by nesting. Each line gives
+--- the interface `(params) -> (returns)` and a verdict: `*` sweet spot (clean,
+--- substantial, small interface), a space (clean but trivial/whole-fn), or `~`
+--- with the control-escape reason. This is the tool for the LINEAR-PIPELINE
+--- god-function the concern lens honestly reports as "one concern".
+function M.report_blocks(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not node then return { 'extract-blocks: no such node' } end
+    local cands = M.extract_candidates(store, fn_id)
+    if #cands == 0 then
+        return { ('extract-blocks: %s has no control blocks to extract')
+            :format(node.name or fn_id) }
+    end
+    table.sort(cands, function (a, b)
+        if (a.line or 0) ~= (b.line or 0) then return (a.line or 0) < (b.line or 0) end
+        return a.head < b.head
+    end)
+    -- "substantial" = more than a couple statements but not nearly the whole body
+    local biggest = 0
+    for _, c in ipairs(cands) do if c.nstmts > biggest then biggest = c.nstmts end end
+    local function sweet(c)
+        return not c.escape and c.nstmts >= 3 and c.nstmts < biggest and #c.params <= 4
+    end
+    local clean = 0
+    for _, c in ipairs(cands) do if not c.escape then clean = clean + 1 end end
+    local L = {}
+    L[#L + 1] = ('extract-blocks: %s — %d control block(s), %d cleanly extractable')
+        :format(node.name or fn_id, #cands, clean)
+    L[#L + 1] = 'each = a whole loop/branch to pull into a helper; interface (params) -> (returns) from reaching'
+    L[#L + 1] = '(* = sweet spot: clean, 3+ stmts, small interface; ~ = a control escape blocks it)'
+    L[#L + 1] = ''
+    for _, c in ipairs(cands) do
+        local mark = c.escape and '~' or (sweet(c) and '*' or ' ')
+        L[#L + 1] = ('%s %sL%-4d %-14s %2d stmt  (%s) -> (%s)'):format(
+            mark, ('  '):rep(c.depth), c.line, (c.kind:gsub('_statement', '')),
+            c.nstmts, table.concat(c.params, ', '), table.concat(c.returns, ', '))
+        if c.escape then L[#L + 1] = ('  %s   ~ %s'):format(('  '):rep(c.depth), c.escape) end
+    end
+    return L
 end
 
 return M

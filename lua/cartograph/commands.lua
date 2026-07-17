@@ -325,6 +325,18 @@ function M.register()
         scratch(require('cartograph.untangle').report(store, id))
     end, { desc = 'cartograph: independent concerns of the focused fn over the data+control+effect PDG, with the safe-to-split verdict and why-not breakdown (the untangle lens)' })
 
+    -- ── extract-blocks: the focused fn's nested loops/branches as helper candidates
+    cmd('CartographExtractBlocks', function ()
+        local store = live() if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first',
+                vim.log.levels.WARN)
+        end
+        scratch(require('cartograph.untangle').report_blocks(store, id))
+    end, { desc = 'cartograph: the focused fn\'s control sub-regions (loops/branches) as extract-into-helper candidates, with the (params)->(returns) interface and control-escape verdict — the linear-pipeline decomposition view' })
+
     -- ── untangle MODULE: independent function clusters in a file (or a dir) ─
     cmd('CartographUntangleModule', function (o)
         local store = live() if not store then return end
