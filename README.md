@@ -843,6 +843,22 @@ for nothing, with the hedge named. The report's header carries its own
 disclaimer: reads through calls are not modeled. Built entirely from the write
 axis (`rw`/`gw`/`gp`), the effect summaries, and the signature packs.
 
+## Untangle (independent concerns + safe-to-split)
+
+`:CartographUntangle` partitions the focused function into independent
+**concerns** — connected components over the full **program-dependence graph**:
+data (RAW) + output (WAW) + control (a body depends on its guard) + side-effect
+ordering (non-commuting impure statements, via the reorder model). Statements in
+different concerns share *no* dependency, so they can be reordered or extracted
+independently. Each statement is tagged with its concern (A/B/C…), indented by
+nesting; the footer gives a **sound safe-to-split verdict**: `CERTIFIED` when the
+PDG is complete, or `~ NOT certified` with a breakdown of *why* — the specific
+opaque statements (unresolved calls, aliasing) whose hidden effects could couple
+concerns across a boundary. Resolve a blocker → re-run → it certifies. Built on
+`flow.reaching_cfg`, `cfg.guards_over`, and the reorder effect model; the PDG's
+WAW edges ride `reaching_cfg`'s scope-regime reaching, so reused block-locals
+don't falsely couple. A certified concern is a ready-made extraction selection.
+
 ## Offline: history archaeology
 
 A sibling tool that lives under `cartograph.history` and runs *outside* the live
