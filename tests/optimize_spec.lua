@@ -438,3 +438,41 @@ test('licm: report renders per-loop invariants + verdict; no-loop fn is inert', 
     ok(table.concat(optimize.report(store, fn_id('flat')), '\n'):match('no loops'),
         'a fn with no loops is inert')
 end)
+
+-- ── INC 2: expression-IR migration (structural predicates replace text scans) ──
+test('optimize: `{` inside a STRING is not mistaken for an allocation (structural)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- the old `{`-text scan flagged this string as allocating → excluded it from CSE;
+    -- expr.allocates is structural, so the two identical pure computations CSE cleanly.
+    ingest {
+        'local function g(a, b)',
+        '  local p = tostring(a) .. "{"',
+        '  local q = tostring(a) .. "{"',
+        '  return p, q',
+        'end', 'return { g }',
+    }
+    local red = redundant('g')
+    ok(red[3], 'the identical string-concat is recognized as redundant, not blocked by the brace')
+end)
+
+test('optimize: localize-upvalue suggests globals-in-loops, never locals', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function hot(xs, helper, m)',
+        '  for _, x in ipairs(xs) do',
+        '    use(math.floor(x), math.floor(x + 1))', -- math.floor x2
+        '    helper(x)',   -- a param callee (bare name) — never suggested
+        '    m.step(x)',   -- rooted at a LOCAL (param) — must NOT suggest
+        '  end',
+        'end',
+        'local function cold(x) return math.floor(x) end', -- no loop — must NOT suggest
+        'return { hot, cold }',
+    }
+    local loc = optimize.localize(store, fn_id('hot'))
+    eq(1, #loc.loops)
+    local by = {}
+    for _, c in ipairs(loc.loops[1].cands) do by[c.full] = c.count end
+    eq(2, by['math.floor'])
+    ok(by['m.fn'] == nil and by['m.step'] == nil, 'a local-rooted callee is not localized')
+    eq(0, #optimize.localize(store, fn_id('cold')).loops)
+end)

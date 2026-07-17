@@ -32,7 +32,7 @@ end
 store.ingest(ts.extract(dir))
 
 -- collect each lens's per-(file,line) facts in one pass (a line belongs to one fn)
-local narrowenv, hoist, reuse, redun, ncomp, rung0 = {}, {}, {}, {}, {}, {}
+local narrowenv, hoist, reuse, redun, ncomp, rung0, localized = {}, {}, {}, {}, {}, {}, {}
 local gatebad = {} -- expr self-gate disagreements (reads ≠ use∪rmw) — must be empty
 local function K(f, l) return (f or '') .. '\31' .. l end
 local function KR(f, l, r) return (f or '') .. '\31' .. l .. '\31' .. r end
@@ -65,6 +65,10 @@ for _, n in ipairs(store.data.nodes) do
         local okl, lr = pcall(optimize.licm, store, n.id)
         if okl then for _, h in ipairs(lr.heads) do
             for r in pairs(lr.loops[h].hoistable) do hoist[K(f, lr.rows[r].l)] = true end
+        end end
+        local okz, zr = pcall(optimize.localize, store, n.id)
+        if okz and zr then for _, lp in ipairs(zr.loops) do
+            for _, cd in ipairs(lp.cands) do localized[KR(f, n.name or '?', cd.full)] = true end
         end end
         local okc, cr = pcall(optimize.cse, store, n.id)
         if okc then for _, p in ipairs(cr.redundant) do
@@ -124,6 +128,15 @@ for _, e in ipairs(a.key) do
             if got then c.fp[#c.fp + 1] = ('%s:%d FALSE-POSITIVE `%s` (must not flag)'):format(e.file, e.line, e.rule)
             else c.pass = c.pass + 1 end
         end
+    elseif e.lens == 'localize' then
+        local got = localized[KR(e.file, e.fn, e.full)] or false
+        if e.present then
+            if got then c.pass = c.pass + 1
+            else c.fn[#c.fn + 1] = ('%s:%s expected localize `%s`, not suggested'):format(e.file, e.fn, e.full) end
+        else
+            if got then c.fp[#c.fp + 1] = ('%s:%s FALSE-POSITIVE localize `%s` (must not suggest)'):format(e.file, e.fn, e.full)
+            else c.pass = c.pass + 1 end
+        end
     end
 end
 
@@ -132,7 +145,7 @@ local failed = false
 -- a disagreement is a real bug on one side — the oracle discipline in the substrate)
 print(('syngate %-7s %d disagreement(s)'):format('exprgate:', #gatebad))
 for _, m in ipairs(gatebad) do print('  GATE ' .. m); failed = true end
-for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0' }) do
+for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0', 'localize' }) do
     local c = census[lens]
     if c then
         print(('syngate %-7s %d ok, %d false-pos, %d false-neg')

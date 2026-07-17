@@ -1126,6 +1126,30 @@ local function gen_lua_rung0(k, akey)
     return fname, src
 end
 
+-- LOCALIZE-UPVALUE ground-truth (Rung 1, [[cartograph-expression-layer]]): a global/
+-- module function called in a loop MUST be suggested for localization; a call rooted at
+-- a LOCAL, or a global call OUTSIDE any loop, must NOT. Key {lens='localize', fn, full,
+-- present=bool} — present=false is the false-positive guard.
+local function gen_lua_localize(k, akey)
+    local B, fname = {}, ('z%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(fn, full, present)
+        akey[#akey + 1] = { lens = 'localize', file = fname, fn = fn, full = full, present = present }
+    end
+    -- + a global module function called in a loop
+    w('local function za(xs)'); w('  for _, x in ipairs(xs) do')
+    w('    use(math.floor(x))'); w('  end'); w('end'); key('za', 'math.floor', true)
+    -- − a call rooted at a LOCAL (param) table in a loop — localizing it is wrong
+    w('local function zb(xs, m)'); w('  for _, x in ipairs(xs) do')
+    w('    use(m.fn(x))'); w('  end'); w('end'); key('zb', 'm.fn', false)
+    -- − a global module call OUTSIDE any loop — nothing to hoist
+    w('local function zc(x)'); w('  return math.floor(x)'); w('end'); key('zc', 'math.floor', false)
+    w('return { za, zb, zc }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 --- ANALYSIS ground-truth corpus. Returns { files = {name→src}, order, key } where
 --- each key carries `lens` ('narrow'|'licm'|'cse') + the per-line expectation:
 --- narrow {var, fact='non-nil'|false}; licm {hoistable=bool}; cse {reuses=<line>|false}.
@@ -1142,6 +1166,7 @@ function M.analysis(lang, nfiles, seed)
     for i = 1, 4 do add(gen_lua_redundant(i, out.key)) end
     for i = 1, 4 do add(gen_lua_untangle(i, out.key)) end
     for i = 1, 4 do add(gen_lua_rung0(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_localize(i, out.key)) end
     return out
 end
 

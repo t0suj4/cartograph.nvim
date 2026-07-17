@@ -337,6 +337,27 @@ function M.key(e)
     return '?' .. (e.t or '') .. '(' .. table.concat(parts, ',') .. ')'
 end
 
+--- the DOTTED path of a name/field chain (`vim.api.nvim_x`), or nil if it isn't a
+--- pure name.field.field… chain (an index/call/etc. in the way → nil).
+function M.dotted(e)
+    if not e then return nil end
+    if e.k == 'name' then return e.n end
+    if e.k == 'field' then
+        local b = M.dotted(e.b)
+        return b and (b .. '.' .. e.n) or nil
+    end
+    return nil
+end
+
+--- the ROOT name of a name/field/index/call chain (`vim` in `vim.api.f(x)`), or nil.
+function M.rootname(e)
+    if not e then return nil end
+    if e.k == 'name' then return e.n end
+    if e.k == 'field' or e.k == 'index' then return M.rootname(e.b) end
+    if e.k == 'call' then return M.rootname(e.f) end
+    return nil
+end
+
 --- PURE = no call / allocation / unknown / vararg anywhere. The single safety gate
 --- for every key-equality lint (comparing two side-effecting operands is unsound).
 function M.is_pure(e)

@@ -9,6 +9,7 @@
 
 local flow = require 'cartograph.flow'
 local effects = require 'cartograph.effects'
+local expr = require 'cartograph.expr'
 
 local M = {}
 
@@ -17,14 +18,8 @@ local LOOPISH = { for_statement = true, for_in_statement = true,
     while_statement = true, repeat_statement = true, loop_statement = true,
     loop_expression = true, foreach_statement = true }
 
--- calls that RETURN A FRESH MUTABLE object (a new table each call) — pure w.r.t. the
--- world, but their RESULT has fresh identity, so reusing/hoisting one is unsound the
--- same way `{}` is (each call site is meant to get its own object). Matched by the
--- callee's base name. Not exhaustive (a user allocator isn't listed → stays hedged via
--- the field-read on its receiver, or unknown-callee → impure); extend as needed.
-local KNOWN_ALLOC = { deepcopy = true, setmetatable = true, tbl_extend = true,
-    tbl_deep_extend = true, list_extend = true, list_slice = true, split = true,
-    tbl_keys = true, tbl_values = true, tbl_map = true, tbl_filter = true }
+-- (allocating-call detection — deepcopy/setmetatable/… returning fresh identity — now
+-- lives in expr.allocates' KNOWN_ALLOC, applied structurally to the row's value.)
 
 -- Shared per-fn context for the optimize analyses: the flow rows + reaching, a
 -- per-line purity/callee map, and the SOURCE-SPAN gates (allocation / content-read)
@@ -33,7 +28,12 @@ local KNOWN_ALLOC = { deepcopy = true, setmetatable = true, tbl_extend = true,
 local function context(store, fn_id)
     local node = store.node and store.node(fn_id)
     if not node then return nil end
-    local fl = flow.present(node) and flow.record(node)
+    -- rebuild flow WITH the per-row expression IR ([[cartograph-expression-layer]] INC 2):
+    -- the structural allocates/reads_content/CSE-key predicates replace the old
+    -- SOURCE-TEXT heuristics. expr.of re-parses (like narrow) — supports the same
+    -- body_field langs flow.record did, so no regression in reach.
+    local got = expr.of(store, fn_id)
+    local fl = got and got.fl
     if not fl or not fl.stmts or #fl.stmts == 0 then return nil end
     local rows, n = fl.stmts, #fl.stmts
     local function within(L, r) -- is r a proper descendant of L?
@@ -44,22 +44,20 @@ local function context(store, fn_id)
     local heads = {}
     for i = 1, n do if LOOPISH[rows[i].t or ''] then heads[#heads + 1] = i end end
     -- per-LINE impurity (a call with effects/hedges) + pure-callee names per line +
-    -- allocating-call lines + the set of pure QUALIFIED callee names (string.format,
-    -- table.concat) whose `.` is benign — stripped before the content-read check so a
-    -- pure module call isn't mistaken for a mutable-table field read.
-    local impure_line, callee_line, alloc_line, pure_dotted, pure_module = {}, {}, {}, {}, {}
+    -- the set of pure MODULE receiver names (`string` in string.format, `math` in
+    -- math.floor) whose field access is benign — a stable reference, not a mutable-table
+    -- read, so reads_content exempts them (allocation is now structural via expr).
+    local impure_line, callee_line, pure_module = {}, {}, {}
     for _, c in ipairs((store.calls_by_fn and store.calls_by_fn[fn_id]) or {}) do
         local ln = (c.line or 0) + 1
         local ce = effects.call_effects(store, c, node.file)
         local pure = (next(ce.w) == nil) and not ce.hedges
         if not pure then impure_line[ln] = true end
         if c.callee then callee_line[ln] = callee_line[ln] or {}; callee_line[ln][c.callee] = pure end
-        local base = (c.full or c.callee or ''):match('([%w_]+)$')
-        if base and KNOWN_ALLOC[base] then alloc_line[ln] = true end
         if pure and c.full and c.full:find('%.') then
-            pure_dotted[c.full] = true
             -- the module receiver of a pure qualified call (`string` in string.format)
-            -- is a STABLE reference, not a varying input — don't let it hedge invariance
+            -- is a STABLE reference, not a varying input — reads_content exempts a field
+            -- whose base is this name; also keeps it from hedging invariance.
             local mb = c.full:match('^([%w_]+)')
             if mb then pure_module[mb] = true end
         end
@@ -71,30 +69,32 @@ local function context(store, fn_id)
     end
     local lines = (store.content and store.content(node)) or {}
     local fn_end = node.range and require('cartograph.at').el(node.range) or #lines
-    local function span_text(r) -- the row's source, through to the next statement line
-        local rl, e = rows[r].l, fn_end
-        for _, s in ipairs(rows) do if s.l > rl and s.l - 1 < e then e = s.l - 1 end end
-        local parts = {}
-        for ln = rl, e do parts[#parts + 1] = lines[ln] or '' end
-        return table.concat(parts, '\n')
-    end
-    -- ALLOCATION: `{…}` / closure / a KNOWN_ALLOC call (deepcopy, setmetatable, …) =
-    -- fresh identity each time → never a safe hoist/reuse.
+    local function rowrhs(r) return (rows[r].expr and rows[r].expr.rhs) or {} end
+    -- ALLOCATION (structural, via the expression IR): a table/closure constructor or a
+    -- KNOWN_ALLOC call (deepcopy, setmetatable, …) anywhere in the row's value = fresh
+    -- identity each time → never a safe hoist/reuse. Replaces the `{`/`function`
+    -- SOURCE-TEXT scan (which a brace in a string/comment could fool).
     local function allocates(r)
-        if alloc_line[rows[r].l] then return true end
-        local t = span_text(r)
-        return t:find('{') ~= nil or t:find('%f[%a]function%f[%A]') ~= nil
+        for _, e in ipairs(rowrhs(r)) do if expr.allocates(e) then return true end end
+        return false
     end
-    -- CONTENT-READ: index/field/length read → contents a mutation can change (du can't
-    -- see it). HEDGES. First STRIP pure qualified-call names (string.format, …) so
-    -- their benign `.` isn't mistaken for a field read — reclaiming a pure module call
-    -- as clean. Still conservative for genuine field/index/length reads; sound.
-    local function reads_table(r)
-        local t = span_text(r)
-        for full in pairs(pure_dotted) do
-            t = t:gsub(full:gsub('[%p]', '%%%0'), ' ')
+    -- CONTENT-READ (structural): an index / field / length read = contents a mutation
+    -- elsewhere could change (du can't see it) → HEDGES. A pure MODULE receiver
+    -- (`string` in string.format) is exempt STRUCTURALLY — a field whose base is a
+    -- pure-module name is a stable reference, not a mutable-table read. Replaces the
+    -- `[%[%]#]`+dotted text scan and its pure_dotted stripping; more precise (no false
+    -- hits from braces/dots in strings), which is what reclaims hedges (~→*).
+    local function reads_content(r)
+        local hit = false
+        for _, e in ipairs(rowrhs(r)) do
+            expr.walk(e, function (nd)
+                if nd.k == 'index' or (nd.k == 'un' and nd.op == '#') then hit = true
+                elseif nd.k == 'field' then
+                    if not (nd.b.k == 'name' and pure_module[nd.b.n]) then hit = true end
+                end
+            end)
         end
-        return t:find('[%[%]#]') ~= nil or t:find('[%w_]%s*[%.:]%s*[%a_]') ~= nil
+        return hit
     end
     -- EXACT statement text via (line,col) bounds: from a row's own start to the start
     -- of the next row by position — handles multiple statements on one line AND
@@ -122,8 +122,8 @@ local function context(store, fn_id)
     return { node = node, rows = rows, n = n, within = within, heads = heads,
         impure_line = impure_line, callee_line = callee_line, reach = reach,
         pure_module = pure_module, lines = lines, fn_end = fn_end,
-        span_text = span_text, stmt_text = stmt_text,
-        allocates = allocates, reads_table = reads_table }
+        stmt_text = stmt_text, params = fl.params,
+        allocates = allocates, reads_content = reads_content }
 end
 
 --- LICM analysis of the focused fn. For each loop, the rows whose value is
@@ -140,7 +140,7 @@ function M.licm(store, fn_id)
     if not ctx then return { rows = {}, heads = {}, loops = {} } end
     local rows, n, within, heads = ctx.rows, ctx.n, ctx.within, ctx.heads
     local impure_line, callee_line, reach = ctx.impure_line, ctx.callee_line, ctx.reach
-    local allocates, reads_table, lines = ctx.allocates, ctx.reads_table, ctx.lines
+    local allocates, reads_content, lines = ctx.allocates, ctx.reads_content, ctx.lines
     local pure_module = ctx.pure_module
 
     local loops = {}
@@ -216,7 +216,7 @@ function M.licm(store, fn_id)
                         end
                         if allinv then
                             inv[r] = true; inputs[r] = ins
-                            if hed or reads_table(r) then hedged[r] = true end
+                            if hed or reads_content(r) then hedged[r] = true end
                             changed = true
                         end
                     end
@@ -247,19 +247,23 @@ function M.cse(store, fn_id)
     local ctx = context(store, fn_id)
     if not ctx then return { rows = {}, redundant = {} } end
     local rows, reach, impure_line = ctx.rows, ctx.reach, ctx.impure_line
-    local allocates, reads_table, stmt_text = ctx.allocates, ctx.reads_table, ctx.stmt_text
-    -- RHS of a single-target row, ws-normalized (trailing `;` stripped); nil unless a
-    -- real COMPUTATION (a bare literal / identifier / copy has nothing to CSE)
-    local function rhs_of(r)
+    local allocates, reads_content, stmt_text = ctx.allocates, ctx.reads_content, ctx.stmt_text
+    -- CSE identity is now the STRUCTURAL KEY of a single-target row's value expression
+    -- (ws- AND comment-immune by construction — the text scan mis-grouped on both).
+    -- A computation = bin/call/index/field (a bare literal/name/copy/allocation has
+    -- nothing to CSE — matches the old `[%(%[%.:]`/arith/`..` gate).
+    local COMPUTES = { bin = true, call = true, index = true, field = true }
+    local function comp_key(r)
         if #(rows[r].def or {}) ~= 1 then return nil end
-        local t = stmt_text(r)
-        local eq = t:find('=')
-        if not eq then return nil end
-        local rhs = t:sub(eq + 1):gsub(';%s*$', ''):gsub('%s+', ' '):gsub('^ ', ''):gsub(' $', '')
-        if not (rhs:find('[%(%[%.:]') or rhs:find('[%+%-%*/%%<>~]') or rhs:find('%.%.')) then
-            return nil -- not a computation
-        end
-        return rhs
+        local e = rows[r].expr and rows[r].expr.rhs and rows[r].expr.rhs[1]
+        if not e or not COMPUTES[e.k] then return nil end
+        return expr.key(e)
+    end
+    -- readable RHS text for the REPORT only (identity is comp_key, not this text)
+    local function disp_rhs(r)
+        local t = stmt_text(r); local eq = t:find('=')
+        if not eq then return (t:gsub('%s+', ' ')) end
+        return (t:sub(eq + 1):gsub(';%s*$', ''):gsub('%s+', ' '):gsub('^ ', ''):gsub(' $', ''))
     end
     -- do the two rows read the SAME operand values? (same reaching-def set per var —
     -- a redefinition between them would differ; same RHS text ⇒ same var set)
@@ -273,15 +277,15 @@ function M.cse(store, fn_id)
         end
         return true
     end
-    -- group candidate rows by (block, RHS text)
+    -- group candidate rows by (block, structural expression key)
     local groups = {}
     for r = 1, #rows do
         if not impure_line[rows[r].l] and not allocates(r) then
-            local rhs = rhs_of(r)
-            if rhs then
-                local key = tostring(rows[r].parent) .. '\1' .. rhs
+            local k = comp_key(r)
+            if k then
+                local key = tostring(rows[r].parent) .. '\1' .. k
                 groups[key] = groups[key] or {}
-                groups[key][#groups[key] + 1] = { r = r, rhs = rhs }
+                groups[key][#groups[key] + 1] = { r = r, disp = disp_rhs(r) }
             end
         end
     end
@@ -296,13 +300,66 @@ function M.cse(store, fn_id)
             for i = 2, #grp do -- first (earliest) dominates each later occurrence
                 if same_values(first.r, grp[i].r) then
                     redundant[#redundant + 1] = { first = first.r, second = grp[i].r,
-                        expr = first.rhs, hedged = reads_table(first.r) or reads_table(grp[i].r) }
+                        expr = first.disp, hedged = reads_content(first.r) or reads_content(grp[i].r) }
                 end
             end
         end
     end
     table.sort(redundant, function (a, b) return rows[a.second].l < rows[b.second].l end)
     return { rows = rows, redundant = redundant }
+end
+
+--- LOCALIZE-UPVALUE (Rung 1, [[cartograph-expression-layer]]): a GLOBAL/module function
+--- looked up by a dotted chain rooted at a FREE name (`math.floor`, `table.insert`,
+--- `vim.api.nvim_x`) inside a loop is re-resolved through the global table every
+--- iteration; binding it to a `local` above the loop is a classic, always-safe Lua
+--- speedup (the wow/game keystone). STRUCTURAL: the callee is a field-chain whose ROOT
+--- name is neither a local/param nor loop-defined → a global lookup. Advisory (never a
+--- silent transform); per loop, the distinct global callees with their in-loop call
+--- count. Low-FP by construction (localizing a global read is always sound).
+--- @return table { rows, loops: { {loop, line, cands: { {full, leaf, count} } } } }
+function M.localize(store, fn_id)
+    local ctx = context(store, fn_id)
+    if not ctx then return { rows = {}, loops = {} } end
+    local rows, within, heads = ctx.rows, ctx.within, ctx.heads
+    -- LOCAL names = params + everything def'd in the fn (a callee rooted here is NOT a
+    -- global lookup — it's a local holding a fn, out of scope for this suggestion).
+    local locals = {}
+    for _, p in ipairs(ctx.params or {}) do locals[p] = true end
+    for r = 1, ctx.n do for _, d in ipairs(rows[r].def or {}) do locals[d] = true end end
+    local loops = {}
+    for _, L in ipairs(heads) do
+        local cands, order = {}, {}
+        for r = 1, ctx.n do
+            if r == L or within(L, r) then
+                local es = {}
+                for _, e in ipairs((rows[r].expr and rows[r].expr.rhs) or {}) do es[#es + 1] = e end
+                if rows[r].expr and rows[r].expr.cond then es[#es + 1] = rows[r].expr.cond end
+                for _, e in ipairs(es) do
+                    expr.walk(e, function (nd)
+                        if nd.k == 'call' and nd.f.k == 'field' then
+                            local full = expr.dotted(nd.f)
+                            local root = expr.rootname(nd.f)
+                            if full and root and not locals[root] then
+                                if not cands[full] then
+                                    cands[full] = { full = full, leaf = nd.f.n, count = 0 }
+                                    order[#order + 1] = full
+                                end
+                                cands[full].count = cands[full].count + 1
+                            end
+                        end
+                    end)
+                end
+            end
+        end
+        if #order > 0 then
+            table.sort(order, function (a, b) return cands[a].count > cands[b].count end)
+            local list = {}
+            for _, f in ipairs(order) do list[#list + 1] = cands[f] end
+            loops[#loops + 1] = { loop = L, line = rows[L].l, cands = list }
+        end
+    end
+    return { rows = rows, loops = loops }
 end
 
 --- LICM INC 2 — the HOIST PLAN. For each loop, the clean-hoistable rows (from INC 1)
@@ -425,6 +482,23 @@ function M.report(store, fn_id)
         end
         L[#L + 1] = '(the later can reuse the earlier result; ~ = a table read whose'
         L[#L + 1] = ' value an aliasing write between the two could change — unverified)'
+    end
+
+    -- LOCALIZE-UPVALUE: global/module functions looked up inside a loop — bind them to
+    -- a local above the loop (always-safe speedup; the more calls, the more it pays).
+    local loc = M.localize(store, fn_id)
+    for _, lp in ipairs(loc.loops) do
+        L[#L + 1] = ''
+        L[#L + 1] = ('localize-upvalue @ loop L%d — %d global lookup(s) re-resolved each iteration:')
+            :format(lp.line, #lp.cands)
+        for _, c in ipairs(lp.cands) do
+            L[#L + 1] = ('  local %s = %s   (%d call%s in the loop)')
+                :format(c.leaf, c.full, c.count, c.count == 1 and '' or 's')
+        end
+    end
+    if #loc.loops > 0 then
+        L[#L + 1] = '(bind each above the loop; a global read walks _ENV every iteration.'
+        L[#L + 1] = ' Always sound — the name is a free global, not a local that could vary.)'
     end
     return L
 end

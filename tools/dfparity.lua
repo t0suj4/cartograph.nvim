@@ -38,7 +38,7 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 78, ['df-over-collects'] = 510,
+    self = { ['binding-as-use'] = 78, ['df-over-collects'] = 515,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- self analyzes its OWN new
         -- source each cut: +11 df-over @ v50 const-fold, +4/+1 @ v51 anon-fns/
         -- enclosing-chain, +1/+1 @ v52 resolve_registry, +1 binding-as-use/+3
@@ -46,9 +46,10 @@ M.EXPECTED = {
         -- handoff, +6 df-over @ inter-untangle (analyze_module/report_module),
         -- +5 df-over @ extract-candidates (nested-block view), +13 df-over @ expr
         -- layer INC 1 (expr.lua/exprlint.lua added to self) + +1 binding-as-use/+3
-        -- df-over base drift this cut (treesitter grammar; benign classes,
-        -- flow-over-collects still 2). df-additive/inert — external corpora
-        -- unchanged, the flow.build cfg.expr hook is OFF on the ingest path.
+        -- df-over base drift @ INC 1 (treesitter grammar), +5 df-over @ expr INC 2
+        -- (optimize migration + localize + expr.dotted/rootname — field-dense source).
+        -- benign classes, flow-over-collects still 2. df-additive/inert — external
+        -- corpora unchanged, the flow.build cfg.expr hook is OFF on the ingest path.
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than
