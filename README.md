@@ -889,6 +889,19 @@ share edges across their boundary, so the report always prices the cut (*"breaks
 N dependency edges: 15 data, 7 control"*): those are real dependencies a split
 would have to sever.
 
+Untangle detects *independent-slice* tangle. The other kind is *linear-pipeline*
+decomposition — a big function that's one cohesive concern but wants its nested
+loops and branches pulled into helpers. `:CartographExtractBlocks` is the view for
+that: it enumerates the focused function's control sub-regions (every loop/branch,
+at any nesting depth) as extract-into-helper candidates, in source order and
+indented by nesting. Each carries its interface — `(params) -> (returns)`, the
+locals live-in and live-out computed over the block's reaching row-set, so it reads
+*nested* blocks (where `extract.plan` handles only whole top-level statements) — and
+a control-escape verdict: a `return`/`throw`, or a `break`/`goto` whose target sits
+outside the block, marks it `~` (moving it would change control flow). A `*` flags
+the sweet spots (clean, substantial, small interface). On a 40-line render loop it
+surfaces the marker-scan `while` as `local pos = scan_markers(at, line, out, pos)`.
+
 ## Offline: history archaeology
 
 A sibling tool that lives under `cartograph.history` and runs *outside* the live
