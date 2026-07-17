@@ -28,9 +28,9 @@ end
 
 -- extract_defs contains flow.build; keep flow.build off the summed-phase
 -- total so `other` stays honest (it is a sub-phase, reported for insight).
-local SUBPHASE = { ['flow.build'] = true }
-local ORDER = { 'parse', 'extract_defs', 'flow.build', 'extract_calls',
-    'collect_mentions', 'resolve', 'constfold' }
+local SUBPHASE = { ['flow.build'] = true, ['flow.coarse'] = true }
+local ORDER = { 'parse', 'list_files', 'extract_defs', 'flow.build', 'flow.coarse',
+    'extract_calls', 'collect_mentions', 'resolve_setup', 'resolve', 'constfold' }
 
 ts.PROFILE = true
 for _, name in ipairs(corpora) do

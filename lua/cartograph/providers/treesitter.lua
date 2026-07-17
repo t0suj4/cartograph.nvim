@@ -4862,7 +4862,9 @@ function M.extract(root, opts)
         -- no tree walk, no bundle synthesis — the caller owns both
         files, minified = opts.files, {}
     else
+        local _plf = pstart()
         files, minified = list_files(root, opts and opts.subdirs)
+        padd('list_files', _plf)
     end
     local fileset = {}
     for _, f in ipairs(opts and opts.fileset or files) do fileset[f] = true end
@@ -5048,12 +5050,14 @@ function M.extract(root, opts)
                 -- walk. Under legacy_df the derivation is SKIPPED so the dfreg
                 -- rider below can build df independently (the oracle target).
                 local dfrec
+                local _pco = pstart()
                 if spec.dataflow then
                     dfrec = spec.dataflow(defn, spec, src, params)
                 elseif fl and not legacy_df then
                     local co, inputs = flowmod.coarse(fl)
                     dfrec = { inputs = inputs, stmts = co }
                 end
+                padd('flow.coarse', _pco)
                 nodes[#nodes + 1] = { id = id, name = name,
                     kind = method and 'method' or 'function', file = file,
                     range = sp, order = sp.start.line, params = params,
@@ -5802,6 +5806,7 @@ function M.extract(root, opts)
     end
 
     -- ── resolution pass: name-matched, ambiguity refuses to link ─────────────
+    local _prs = pstart()
     local scope_cache = {}
     local function scope_of(f)
         if scope_cache[f] == nil then
@@ -6252,6 +6257,7 @@ function M.extract(root, opts)
     -- transitive parent::m — for the refusals the direct-parent qualify
     -- couldn't settle (parent only inherits m), walk the extends chain to
     -- the nearest ancestor that defines it. Bounded; over the full graph.
+    padd('resolve_setup', _prs)
     local _pr = pstart()
     resolve_super(calls, data.extends, exact, addref)
 
