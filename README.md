@@ -902,6 +902,16 @@ outside the block, marks it `~` (moving it would change control flow). A `*` fla
 the sweet spots (clean, substantial, small interface). On a 40-line render loop it
 surfaces the marker-scan `while` as `local pos = scan_markers(at, line, out, pos)`.
 
+Where untangle and extract-blocks *refactor*, `:CartographOptimize` *optimizes* — it
+reads the same PDG to find **loop-invariant computations**: a pure declaration inside
+a loop whose inputs are all defined outside it (or are themselves invariant) computes
+the same value every iteration, so it can be hoisted above the loop. Each is marked
+`*` (unconditionally hoistable) or `~` (invariant but hedged — a table-content read
+whose aliasing we can't rule out, or branch-guarded). It is deliberately conservative:
+allocations (`{}` — fresh identity each iteration), loop induction variables, and
+reassignments (which may be read before the write) are never certified. A suggestion,
+never a silent transform — the same discipline as the rest.
+
 ## Offline: history archaeology
 
 A sibling tool that lives under `cartograph.history` and runs *outside* the live
