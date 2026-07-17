@@ -169,6 +169,55 @@ function M.why_unsafe(res)
     return out
 end
 
+--- The lens surface (INC 4): render the focused fn's fine-PDG concerns + the
+--- safety verdict as report lines (the scratch-buffer view, :CartographUntangle).
+--- Each statement row is tagged with its concern letter (A/B/C…), indented by
+--- nesting, and marked `~` when its concern can't be certified; the footer gives
+--- the verdict and — when uncertified — WHY (the blocking statements). A CERTIFIED
+--- concern is a ready-made extraction candidate for extract.plan (params=live-in,
+--- returns=live-out from reaching/liveness). ([[cartograph-untangle-pdg]])
+function M.report(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not node then return { 'untangle: no such node' } end
+    local flow = flowmod.record(node)
+    if not flow or not flow.stmts or #flow.stmts == 0 then
+        return { ('untangle: %s has no fine flow (not an imperative body?)')
+            :format(node.name or fn_id) }
+    end
+    local edges, opaque = M.effect_edges(store, fn_id, flow)
+    local res = M.analyze_flow(flow, edges, opaque)
+    local function letter(c) return string.char(65 + (c % 26)) end
+    local function depth(i)
+        local d, p = 0, flow.stmts[i].parent
+        while p and p ~= 0 do d = d + 1; p = flow.stmts[p].parent end
+        return d
+    end
+    local L = {}
+    L[#L + 1] = ('untangle: %s — %d statements, %d concern(s) — %s'):format(
+        node.name or fn_id, res.n, res.ncomp,
+        res.certified and 'CERTIFIED safe to split' or '~ NOT certified')
+    L[#L + 1] = ('tangle %d (0 = already grouped in source), maxspan %d')
+        :format(res.tangle, res.maxspan)
+    L[#L + 1] = ''
+    for i, s in ipairs(flow.stmts) do
+        local c = res.comp[i]
+        L[#L + 1] = ('  %s%s L%-5d %s%s'):format(letter(c),
+            res.hedged[c] and '~' or ' ', s.l, ('  '):rep(depth(i)),
+            s.kind or 'stmt')
+    end
+    L[#L + 1] = ''
+    if res.certified then
+        L[#L + 1] = ('%d independent concern(s) — each safe to extract/reorder'):format(res.ncomp)
+        L[#L + 1] = '(sound under the MODELED effects: name-matched module state +'
+        L[#L + 1] = ' resolved calls; aliasing / unresolved calls would be flagged ~)'
+    else
+        L[#L + 1] = 'CANNOT guarantee safety — unresolved effects could couple'
+        L[#L + 1] = 'concerns across a boundary. Blocking statements (resolve to certify):'
+        for _, w in ipairs(M.why_unsafe(res)) do L[#L + 1] = '  ~ ' .. w end
+    end
+    return L
+end
+
 --- Compute the INC-2b SIDE-EFFECT ordering edges for `fn_id`'s flow, as row-pairs
 --- consumable by analyze_flow's `extra_edges`. Reuses reorder.lua's state/world
 --- conflict analysis (per-statement module-state writes/reads + discharged call

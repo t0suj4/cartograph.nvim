@@ -313,6 +313,18 @@ function M.register()
         scratch(require('cartograph.reorder').report(store, id))
     end, { desc = 'cartograph: statement commutativity of the focused fn — deps, conflicts, freely-movable (the cockpit reorder view)' })
 
+    -- ── untangle: the focused fn's independent CONCERNS over the full PDG ─
+    cmd('CartographUntangle', function ()
+        local store = live() if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first',
+                vim.log.levels.WARN)
+        end
+        scratch(require('cartograph.untangle').report(store, id))
+    end, { desc = 'cartograph: independent concerns of the focused fn over the data+control+effect PDG, with the safe-to-split verdict and why-not breakdown (the untangle lens)' })
+
     -- ── the branch-value lens: what flows through each CFG branch ────
     cmd('CartographBranchValues', function ()
         local store = live() if not store then return end

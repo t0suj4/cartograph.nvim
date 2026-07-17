@@ -314,3 +314,29 @@ test('untangle_flow: effect_edges surfaces opaque calls; clean fn is certified (
     eq(0, #copaque)
     ok(untangle.analyze_flow(cfl, ce, copaque).certified, 'a fully-modeled fn is certified')
 end)
+
+test('untangle: report renders concerns + verdict + why breakdown (INC 4)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local function target()',
+        '  local a = 1',
+        '  print(a)',
+        '  MYSTERY()',        -- opaque -> uncertified + a why line
+        'end',
+        'return { target }',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local id
+    for _, node in ipairs(store.data.nodes) do
+        if node.name == 'target' then id = node.id end
+    end
+    local lines = untangle.report(store, id)
+    local joined = table.concat(lines, '\n')
+    ok(lines[1]:match('^untangle: target'), 'header names the fn')
+    ok(joined:match('NOT certified'), 'the verdict is surfaced')
+    ok(joined:match('MYSTERY'), 'the breakdown names the blocking call')
+end)
