@@ -93,3 +93,47 @@ test('optapply: span drift is refused (CAS)', function ()
     ok(not okp, 'apply refused')
     ok(tostring(reason):match('drift'), 'refusal names the drift: ' .. tostring(reason))
 end)
+
+-- ── targeted refactoring: per-finding + by-location ───────────────────────────
+test('optapply: opts.line targets a single finding, leaving the rest', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x, y)',
+        '  local a = x + y',
+        '  local b = x + y',  -- L3 finding
+        '  local c = x - y',
+        '  local d = x - y',  -- L5 finding
+        '  return a, b, c, d',
+        'end', 'return { f }',
+    }
+    eq(2, #optapply.plan_cse(store, fn_id('f')).reps)          -- both by default
+    local p3 = optapply.plan_cse(store, fn_id('f'), { line = 3 })
+    eq(1, #p3.reps); eq(3, p3.moves[1].line)                  -- only L3
+    local p5 = optapply.plan_cse(store, fn_id('f'), { line = 5 })
+    eq(1, #p5.reps); eq(5, p5.moves[1].line)                  -- only L5
+    ok(not (optapply.plan_cse(store, fn_id('f'), { line = 99 })), 'no finding at L99')
+end)
+
+test('optapply: M.at resolves the INNERMOST enclosing function by location', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = ingest {
+        'local function outer(x, y)',
+        '  local a = x + y',       -- L2 (outer)
+        '  local function inner(p, q)',
+        '    local c = p + q',
+        '    local d = p + q',     -- L5 (inner)
+        '    return c, d',
+        '  end',
+        '  return a, inner',
+        'end', 'return { outer }',
+    }
+    local function nm(id) local n = store.node(id); return n and n.name end
+    eq('outer', nm(optapply.at(store, 'm.lua', 2)))
+    eq('inner', nm(optapply.at(store, 'm.lua', 5)))   -- innermost, not outer
+    -- run_at targets inner's finding; outer's body is untouched
+    local res = optapply.run_at(store, 'm.lua', 5)
+    ok(res.ok, 'applied at inner: ' .. tostring(res.reason))
+    local after = table.concat(vim.fn.readfile(root .. '/m.lua'), '\n')
+    ok(after:match('local d = c'), 'inner rewritten')
+    ok(after:match('local a = x %+ y'), 'outer left intact')
+end)

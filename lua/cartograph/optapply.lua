@@ -18,6 +18,7 @@
 local optimize = require 'cartograph.optimize'
 local txn = require 'cartograph.txn'
 local expr = require 'cartograph.expr'
+local at = require 'cartograph.at'
 
 local M = {}
 
@@ -68,8 +69,12 @@ end
 
 --- Build a CSE-reuse plan for the focused fn: the CLEAN (non-hedged) redundant pairs
 --- whose reuse source is a single-assignment local, as txn token-replacements.
---- @return table? plan { verb, touched, generation, stamps, rel, reps, moves }, or nil+why
-function M.plan_cse(store, fn_id)
+--- `opts.line` (1-based) = TARGET a single finding — apply only the rewrite whose
+--- recompute is on that line (targeted refactoring); omit for all clean reuses in the fn.
+--- @return table? plan { verb, touched, generation, stamps, rel, reps, moves }
+--- @return string? why  (set when plan is nil)
+function M.plan_cse(store, fn_id, opts)
+    opts = opts or {}
     local node = store.node and store.node(fn_id)
     if not node or not node.file then return nil, 'no such node' end
     local lang = lang_of(node.file)
@@ -91,7 +96,9 @@ function M.plan_cse(store, fn_id)
     for _, p in ipairs(cse.redundant) do
         local a = rows[p.first].def and rows[p.first].def[1]
         local b = rows[p.second].def and rows[p.second].def[1]
-        if not p.hedged and a and b
+        -- per-finding target: the rewrite lands on the recompute row (p.second)
+        if (not opts.line or rows[p.second].l == opts.line)
+            and not p.hedged and a and b
             and #(rows[p.first].def or {}) == 1 and #(rows[p.second].def or {}) == 1
             and defcount[a] == 1 then
             local rn = rhs_node(root, src, rows[p.second].l, b)
@@ -112,7 +119,11 @@ function M.plan_cse(store, fn_id)
             end
         end
     end
-    if #reps == 0 then return nil, 'no clean CSE-reuse candidates (all hedged or rebound sources)' end
+    if #reps == 0 then
+        return nil, opts.line
+            and ('no clean CSE-reuse at %s:%d'):format(rel, opts.line)
+            or 'no clean CSE-reuse candidates (all hedged or rebound sources)'
+    end
     return { verb = 'optimize-cse', touched = { rel }, generation = store.generation,
         stamps = { [rel] = txn.disk_stamp(store.data.root, rel) }, rel = rel,
         reps = reps, moves = moves }
@@ -126,7 +137,10 @@ local function edit_of(plan)
     end
 end
 
---- Dry-run: the unified diff the apply WOULD write (nothing written). @return lines, before, after
+--- Dry-run: the unified diff the apply WOULD write (nothing written).
+--- @return table lines
+--- @return table? before
+--- @return table? after
 function M.preview(store, plan)
     local before, after, err = txn.dryrun(store, plan, edit_of(plan))
     if not before then return { 'optapply: ' .. (err or 'dry-run failed') } end
@@ -151,7 +165,10 @@ end
 --- Apply the plan — the FULL verified write. Checks (in order): txn.verify (live graph,
 --- same generation, file-stamp CAS, no dirty buffers) → span-CAS (each edit's old text
 --- still present) → parse-clean (the edited file re-parses) → txn.execute (journal +
---- write + refresh). @return ok:boolean, entry_or_reason, diff_lines
+--- write + refresh).
+--- @return boolean ok
+--- @return any entry_or_reason  (journal entry on ok, refusal reason otherwise)
+--- @return table? diff_lines
 function M.apply(store, plan)
     local refuse = txn.verify(store, plan, {})
     if refuse then return false, refuse end
@@ -183,14 +200,52 @@ function M.apply(store, plan)
     return true, entry, diff
 end
 
---- One-call agent entry: plan + apply the focused fn's clean CSE reuses. Returns a
---- structured result (never throws) — { ok, applied, moves, diff, reason }.
-function M.run(store, fn_id)
-    local plan, why = M.plan_cse(store, fn_id)
+--- One-call agent entry: plan + apply the focused fn's clean CSE reuses (`opts.line`
+--- targets one finding). Returns a structured result (never throws) —
+--- { ok, applied, moves, diff, reason }.
+function M.run(store, fn_id, opts)
+    local plan, why = M.plan_cse(store, fn_id, opts)
     if not plan then return { ok = false, applied = 0, reason = why } end
     local ok, entry_or_reason, diff = M.apply(store, plan)
     if not ok then return { ok = false, applied = 0, moves = plan.moves, reason = entry_or_reason } end
     return { ok = true, applied = #plan.reps, moves = plan.moves, diff = diff }
+end
+
+-- ── location entry (targeted refactoring: point at a spot, not an id) ─────────
+--- the INNERMOST function/method whose range encloses `file`:`line` (1-based), or nil.
+--- `file` matches a node's stored rel path exactly or as a trailing `/`-segment (so a
+--- suffix like a basename works). This is the "resolve the spot to a node" seam.
+function M.at(store, file, line)
+    if not (store.data and store.data.nodes and file and line) then return nil end
+    local best, bestspan
+    for _, n in ipairs(store.data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and n.range and n.file
+            and (n.file == file or n.file:sub(-(#file + 1)) == '/' .. file) then
+            local sl, el = at.sl(n.range) + 1, at.el(n.range) + 1 -- range is 0-based; make 1-based
+            if sl <= line and line <= el then
+                local span = el - sl
+                if not bestspan or span < bestspan then best, bestspan = n.id, span end
+            end
+        end
+    end
+    return best
+end
+
+--- plan by LOCATION: resolve the fn at `file`:`line`, then plan its CSE reuses. Pass
+--- `opts.line` to target a single finding (commonly = the location line).
+--- @return table? plan
+--- @return string? why  (set when plan is nil)
+function M.plan_at(store, file, line, opts)
+    local fid = M.at(store, file, line)
+    if not fid then return nil, ('no function at %s:%d'):format(file, line) end
+    return M.plan_cse(store, fid, opts)
+end
+
+--- run by LOCATION (the targeted one-call entry). Returns the same shape as M.run.
+function M.run_at(store, file, line, opts)
+    local fid = M.at(store, file, line)
+    if not fid then return { ok = false, applied = 0, reason = ('no function at %s:%d'):format(file, line) } end
+    return M.run(store, fid, opts)
 end
 
 --- Report lines (the thin surface): what a CSE-reuse apply WOULD do (dry-run only).
