@@ -315,6 +315,49 @@ test('untangle_flow: effect_edges surfaces opaque calls; clean fn is certified (
     ok(untangle.analyze_flow(cfl, ce, copaque).certified, 'a fully-modeled fn is certified')
 end)
 
+test('untangle: extract_plan hands a contiguous concern off; refuses a scattered one', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local function inc(n) return n + 1 end',  -- pure, resolved -> certified
+        'local function contig()',                 -- two RAW chains, each contiguous
+        '  local a = inc(1)',
+        '  local b = inc(a)',                       -- A: uses a
+        '  local c = inc(2)',
+        '  local d = inc(c)',                       -- B: uses c
+        'end',
+        'local function scattered()',              -- same chains, interleaved
+        '  local a = inc(1)',
+        '  local c = inc(2)',
+        '  local b = inc(a)',                       -- A: uses a (scattered from row1)
+        '  local d = inc(c)',                       -- B: uses c
+        'end',
+        'return { inc, contig, scattered }',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local cid, cnode, sid, snode
+    for _, node in ipairs(store.data.nodes) do
+        if node.name == 'contig' then cid, cnode = node.id, node end
+        if node.name == 'scattered' then sid, snode = node.id, node end
+    end
+    -- contiguous: distinct concerns, and the first reaches extract.plan (not scattered)
+    local cfl = flow.record(cnode)
+    local ce, cop = untangle.effect_edges(store, cid, cfl)
+    local cres = untangle.analyze_flow(cfl, ce, cop)
+    ok(cres.ncomp >= 2, 'state.a and other.b are distinct concerns (different state keys)')
+    local cplan = untangle.extract_plan(store, cid, cres, cres.comp[1])
+    ok(not cplan.scattered, 'a contiguous concern reaches extract.plan')
+    -- scattered: the same concern is interleaved -> refused pending gather/reorder
+    local sfl = flow.record(snode)
+    local se, sop = untangle.effect_edges(store, sid, sfl)
+    local sres = untangle.analyze_flow(sfl, se, sop)
+    local splan = untangle.extract_plan(store, sid, sres, sres.comp[1])
+    ok(splan.scattered, 'a scattered concern is refused pending gather/reorder')
+end)
+
 test('untangle: report renders concerns + verdict + why breakdown (INC 4)', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()

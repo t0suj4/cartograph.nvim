@@ -169,6 +169,48 @@ function M.why_unsafe(res)
     return out
 end
 
+--- THE extract.plan HANDOFF: turn concern `c` (a comp id from a res) into an
+--- extract.plan for the focused fn. A concern is directly extractable only when
+--- its TOP-LEVEL statements (`parent==0` rows == df statements by parity) form a
+--- CONTIGUOUS run — a scattered concern would need gathering/reorder first
+--- (refused with `scattered=true`; the reorder verdict is what would license it).
+--- Assembles the same opts the source-pane driver uses, then hands off to
+--- extract.plan, whose reaching-based shadow-safety (live-in→params, live-out→
+--- returns, ambiguous-return refusal) is an INDEPENDENT check of the boundary —
+--- the disagreement oracle: untangle picks the boundary, extract.plan validates
+--- the mechanics. Returns extract.plan's result (`{ok=false, reason}` or a plan).
+--- ([[cartograph-untangle-pdg]])
+function M.extract_plan(store, fn_id, res, c, name)
+    local node = store.node and store.node(fn_id)
+    if not node then return { ok = false, reason = 'no such node' } end
+    local fl = flowmod.present(node) and flowmod.record(node)
+    if not fl then return { ok = false, reason = 'no fine flow' } end
+    local rows = fl.stmts
+    local toplist = {} -- k-th top-level row (== df.stmts[k] by parity)
+    for i, s in ipairs(rows) do if s.parent == 0 then toplist[#toplist + 1] = i end end
+    local kmin, kmax
+    for k, row in ipairs(toplist) do
+        if res.comp[row] == c then kmin = kmin or k; kmax = k end
+    end
+    if not kmin then return { ok = false, reason = 'concern has no top-level statements' } end
+    for k = kmin, kmax do -- contiguity: no other concern interleaved
+        if res.comp[toplist[k]] ~= c then
+            return { ok = false, scattered = true, reason =
+                'concern is scattered (interleaved with other concerns) — gather/reorder first' }
+        end
+    end
+    local at = require 'cartograph.at'
+    local df = require('cartograph.df').get(node)
+    if not (df and df.stmts and df.stmts[kmin]) then return { ok = false, reason = 'no df' } end
+    local body_end = at.el(node.range)
+    local sel = { first = df.stmts[kmin].l,
+        last = (df.stmts[kmax + 1] and df.stmts[kmax + 1].l - 1) or body_end }
+    return require('cartograph.extract').plan {
+        df = df, sel = sel, fn_start = at.sl(node.range) + 1, body_end = body_end,
+        file_lines = store.content(node), reaching = flowmod.reaching_cfg(fl),
+        flow_rows = rows, name = name or ('extracted_' .. string.char(65 + (c % 26))) }
+end
+
 --- The lens surface (INC 4): render the focused fn's fine-PDG concerns + the
 --- safety verdict as report lines (the scratch-buffer view, :CartographUntangle).
 --- Each statement row is tagged with its concern letter (A/B/C…), indented by
@@ -214,6 +256,30 @@ function M.report(store, fn_id)
         L[#L + 1] = 'CANNOT guarantee safety — unresolved effects could couple'
         L[#L + 1] = 'concerns across a boundary. Blocking statements (resolve to certify):'
         for _, w in ipairs(M.why_unsafe(res)) do L[#L + 1] = '  ~ ' .. w end
+    end
+    -- extract candidates (the extract.plan handoff): only meaningful when a fn
+    -- has >1 concern (extracting one of several). extract.plan validates the
+    -- mechanics independently of the concern analysis (the disagreement oracle).
+    if res.ncomp > 1 then
+        L[#L + 1] = ''
+        L[#L + 1] = 'extract candidates (concern → extract.plan):'
+        for cc = 0, res.ncomp - 1 do
+            local lt = letter(cc)
+            local plan = M.extract_plan(store, fn_id, res, cc)
+            if plan.ok then
+                local tag = res.hedged[cc]
+                    and ' — mechanically clean, but ~ (unresolved effects, see above)' or ''
+                L[#L + 1] = ('  %s: extractable — %d param(s), %d return(s)%s'):format(
+                    lt, #plan.params, #plan.returns, tag)
+            elseif M.concern_safe(res, cc) and not plan.scattered then
+                -- untangle says independent, extract.plan refuses on mechanics:
+                -- a genuine boundary disagreement worth surfacing
+                L[#L + 1] = ('  %s: ⚠ independent but NOT mechanically extractable — %s')
+                    :format(lt, plan.reason)
+            else
+                L[#L + 1] = ('  %s: %s'):format(lt, plan.reason)
+            end
+        end
     end
     return L
 end
