@@ -1171,7 +1171,10 @@ local function gen_lua_localize(k, akey)
     w('    use(m.fn(x))'); w('  end'); w('end'); key('zb', 'm.fn', false)
     -- − a global module call OUTSIDE any loop — nothing to hoist
     w('local function zc(x)'); w('  return math.floor(x)'); w('end'); key('zc', 'math.floor', false)
-    w('return { za, zb, zc }')
+    -- − a SHADOWED builtin (`math` is a param here, not the stdlib) — must not localize
+    w('local function zd(xs, math)'); w('  for _, x in ipairs(xs) do')
+    w('    use(math.floor(x))'); w('  end'); w('end'); key('zd', 'math.floor', false)
+    w('return { za, zb, zc, zd }')
     local src = table.concat(B, '\n') .. '\n'
     assert_valid(src, 'lua', fname)
     return fname, src

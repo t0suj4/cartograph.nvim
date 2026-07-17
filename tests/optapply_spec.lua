@@ -179,7 +179,7 @@ test('optapply: localize declines a non-stdlib global and a name collision', fun
     }
     local pf = optapply.plan_localize(store, fn_id('f'))
     eq(0, #pf.moves)
-    ok(pf.declined[1] and pf.declined[1].reason:match('not a known always%-present global'),
+    ok(pf.declined[1] and pf.declined[1].reason:match('not a genuine always%-present global'),
         'non-stdlib decline named: ' .. (pf.declined[1] or {}).reason)
     local pg = optapply.plan_localize(store, fn_id('g'))
     eq(0, #pg.moves)

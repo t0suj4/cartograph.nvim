@@ -12,6 +12,7 @@
 local cfg = require 'cartograph.cfg'
 local at = require 'cartograph.at'
 local flowmod = require 'cartograph.flow'
+local builtins = require 'cartograph.builtins'
 
 local M = {}
 
@@ -34,16 +35,18 @@ end
 
 local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or '' end
 
--- is `name` BOUND (a param or a local/assignment target) anywhere in the fn? A `type`
--- bound here SHADOWS the global builtin, so `type(x)` is not the real type() and its
--- type-test narrowing would be unsound — the gate below drops those facts. Conservative:
--- a shadow anywhere (even a sibling scope) disables type narrowing for the whole fn.
-local function binds(store_node, name)
+-- the fn's BOUND names (params + every local/assignment target). A `type` in here
+-- SHADOWS the global builtin, so `type(x)` is not the real type() and its type-test
+-- narrowing would be unsound — the gate below drops those facts via builtins.genuine.
+-- Conservative: a shadow anywhere (even a sibling scope) disables type narrowing for the fn.
+local function bound_set(store_node)
+    local b = {}
     local fl = store_node and flowmod.present(store_node) and flowmod.record(store_node)
-    if not fl then return false end
-    for _, p in ipairs(fl.params or {}) do if p == name then return true end end
-    for _, s in ipairs(fl.stmts or {}) do for _, d in ipairs(s.def or {}) do if d == name then return true end end end
-    return false
+    if fl then
+        for _, p in ipairs(fl.params or {}) do b[p] = true end
+        for _, s in ipairs(fl.stmts or {}) do for _, d in ipairs(s.def or {}) do b[d] = true end end
+    end
+    return b
 end
 
 -- wrap the raw classifier so TYPE-test facts are dropped when `type` is shadowed in the
@@ -163,7 +166,7 @@ function M.narrow(store, fn_id)
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, points = {} } end
-    local classify = gated_classify(vocab[lang], binds(node, 'type'))
+    local classify = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node)))
     local mutated = mutated_of(node)
 
     local points, seenguard = {}, {}
@@ -353,7 +356,7 @@ function M.param_nilability(store, fn_id)
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, params = {} } end
-    local classify, mutated = gated_classify(vocab[lang], binds(node, 'type')), mutated_of(node)
+    local classify, mutated = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node))), mutated_of(node)
     local fl = flowmod.present(node) and flowmod.record(node)
     local plist = (fl and fl.params) or {}
     local params = {}
@@ -445,7 +448,7 @@ function M.redundant(store, fn_id)
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, checks = {} } end
-    local classify = gated_classify(vocab[lang], binds(node, 'type'))
+    local classify = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node)))
     local mutated = mutated_of(node)
     -- determine() handles only SINGLE predicates, so a conjunction `cond and other()`
     -- (where only `cond` is known) is correctly NOT flagged — the other conjunct still

@@ -19,6 +19,7 @@ local optimize = require 'cartograph.optimize'
 local txn = require 'cartograph.txn'
 local expr = require 'cartograph.expr'
 local at = require 'cartograph.at'
+local builtins = require 'cartograph.builtins'
 
 local M = {}
 
@@ -177,14 +178,11 @@ function M.plan_cse(store, fn_id, opts)
 end
 
 -- ── localize-upvalue apply ───────────────────────────────────────────────────
--- global MODULE tables that ALWAYS exist and never error on a field read (`M.f` for a
--- non-nil table M returns the field or nil, never throws) — so inserting `local f = M.f`
--- ABOVE a loop is zero-trip-safe (can't raise where the original in-loop read wouldn't).
--- An arbitrary user global might be nil, so localize-APPLY is gated to this set (the
--- report still SUGGESTS the rest; only the write is gated). vim = the nvim runtime table.
-local KNOWN_GLOBAL = { math = true, string = true, table = true, os = true, io = true,
-    coroutine = true, debug = true, utf8 = true, bit = true, bit32 = true, vim = true }
-
+-- localize-APPLY is gated to GENUINE builtins ([[cartograph.builtins]]): a stdlib/vim
+-- module table that ALWAYS exists and never errors on a field read (`M.f` returns the
+-- field or nil, never throws) AND is NOT shadowed by a local/param — so inserting
+-- `local f = M.f` above a loop is zero-trip-safe. A shadowed `math` (a possibly-nil
+-- local) would break that, so it's declined.
 local LOOPISH = { for_statement = true, for_in_statement = true, while_statement = true,
     repeat_statement = true, loop_statement = true, foreach_statement = true,
     for_numeric_statement = true, for_generic_statement = true }
@@ -268,11 +266,14 @@ function M.plan_localize(store, fn_id, opts)
                 local reason, class, res, waived, name = nil, nil, nil, nil, c.leaf
                 if not ln then reason, class = 'could not locate the loop', 'blocked'
                 elseif nested then reason, class = 'loop contains a nested function (scope-unsafe)', 'risk'
-                elseif not (rootname and KNOWN_GLOBAL[rootname]) then
+                elseif not (rootname and builtins.genuine('lua', rootname, bound)) then
+                    -- genuine = a stdlib/vim global NOT shadowed by a local/param here. A
+                    -- shadowed `math` breaks the no-throw insertion (the hoisted `local
+                    -- f = math.f` could raise if the local math is nil) → declined.
                     if assumed(opts, lp.line, 'present') then
                         waived = ('`%s` present (asserted)'):format(rootname)
                     else
-                        reason, class = ('root `%s` is not a known always-present global (may be nil)')
+                        reason, class = ('root `%s` is not a genuine always-present global (unknown, or shadowed → may be nil)')
                             :format(rootname or '?'), 'risk'
                         res = { { id = 'present', premise = ('`%s` is always defined here'):format(rootname or 'the global') } }
                     end
