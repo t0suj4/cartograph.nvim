@@ -1150,6 +1150,35 @@ local function gen_lua_localize(k, akey)
     return fname, src
 end
 
+-- PARAMETER-NILABILITY ground-truth (Rung 2, [[cartograph-expression-layer]]): per param,
+-- the inferred verdict (required/optional/unknown) + whether it CONFLICTS with the
+-- `---@param` annotation. The keystone = an unguarded deref of a param annotated `?`
+-- (required vs optional). Key {lens='paramnil', fn, param, verdict, conflict}.
+local function gen_lua_paramnil(k, akey)
+    local B, fname = {}, ('y%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(fn, param, verdict, conflict)
+        akey[#akey + 1] = { lens = 'paramnil', file = fname, fn = fn, param = param,
+            verdict = verdict, conflict = conflict }
+    end
+    w('local function ya(p) return p.x end'); key('ya', 'p', 'required', false) -- + unguarded deref
+    w('local function yb(p) if p then return p.x end end'); key('yb', 'p', 'optional', false) -- − guarded
+    w('local function yc(p) return p and p.x end'); key('yc', 'p', 'optional', false) -- − short-circuit
+    w('local function yd(p) assert(p) return p.x end'); key('yd', 'p', 'required', false) -- + assert
+    w('---@param s table'); w('local function ye(s) return s.x end'); key('ye', 's', 'required', false) -- + agrees @non-nil
+    w('---@param t? table'); w('local function yf(t) return t.x end'); key('yf', 't', 'required', true) -- CONFLICT (keystone)
+    w('---@param u table'); w('local function yg(u) if u then return u.x end end'); key('yg', 'u', 'optional', true) -- weak conflict
+    w('---@param v? table'); w('local function yh(v) if v then return v.x end end'); key('yh', 'v', 'optional', false) -- agrees @optional
+    w('local function yi(p) p = p or {} return p.x end'); key('yi', 'p', 'unknown', false) -- − reassigned
+    -- − nil-TESTED then unguarded deref (a correlated guard we can't track) → NOT required:
+    -- the tested clause keeps the oracle from a spurious required/conflict (the source.lua class)
+    w('local function yj(p) if p == nil then bad() end return p.x end'); key('yj', 'p', 'optional', false)
+    w('return { ya, yb, yc, yd, ye, yf, yg, yh, yi, yj }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 --- ANALYSIS ground-truth corpus. Returns { files = {name→src}, order, key } where
 --- each key carries `lens` ('narrow'|'licm'|'cse') + the per-line expectation:
 --- narrow {var, fact='non-nil'|false}; licm {hoistable=bool}; cse {reuses=<line>|false}.
@@ -1167,6 +1196,7 @@ function M.analysis(lang, nfiles, seed)
     for i = 1, 4 do add(gen_lua_untangle(i, out.key)) end
     for i = 1, 4 do add(gen_lua_rung0(i, out.key)) end
     for i = 1, 4 do add(gen_lua_localize(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_paramnil(i, out.key)) end
     return out
 end
 

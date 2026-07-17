@@ -233,3 +233,71 @@ test('narrow: report renders facts; unknown language is reported unsupported', f
     ok(joined:match('narrowing guard'), 'the report summarizes the narrowing')
     ok(joined:match('x: non%-nil'), 'and the fact')
 end)
+
+-- ── parameter-nilability (Rung 2, the lua-ls disagreement oracle) ─────────────
+-- verdict for param `pn` of fn `name`, plus its conflict flag
+local function pnil(name, pn)
+    for _, p in ipairs(narrow.param_nilability(store, fn_id(name)).params) do
+        if p.name == pn then return p end
+    end
+end
+
+test('paramnil: an unguarded deref infers a required (non-nil) parameter', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(p) return p.x end',      -- required
+        'local function g(a, b) return a + b end',  -- both required (arithmetic)
+        'return { f, g }',
+    }
+    eq('required', pnil('f', 'p').verdict)
+    eq('required', pnil('g', 'a').verdict)
+    eq('required', pnil('g', 'b').verdict)
+end)
+
+test('paramnil: a guarded / short-circuited / reassigned param is not required', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(p) if p then return p.x end end',   -- optional (guarded)
+        'local function g(p) return p and p.x end',            -- optional (short-circuit)
+        'local function h(p) if p == nil then bad() end return p.x end', -- optional (nil-tested, correlated)
+        'local function i(p) p = p or {} return p.x end',      -- unknown (reassigned)
+        'return { f, g, h, i }',
+    }
+    eq('optional', pnil('f', 'p').verdict)
+    eq('optional', pnil('g', 'p').verdict)
+    eq('optional', pnil('h', 'p').verdict)  -- the correlated-guard soundness case
+    eq('unknown', pnil('i', 'p').verdict)
+end)
+
+test('paramnil: assert(p) enforces required', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest { 'local function f(p) assert(p) return p.x end', 'return { f }' }
+    eq('required', pnil('f', 'p').verdict)
+end)
+
+test('paramnil: DISAGREEMENT — required deref of a param annotated optional (`?`)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        '---@param p? table',
+        'local function f(p) return p.x end',    -- required vs @optional → conflict
+        '---@param q table',
+        'local function g(q) return q.x end',    -- required vs @non-nil → agree
+        'return { f, g }',
+    }
+    local pf = pnil('f', 'p')
+    eq('required', pf.verdict); eq('optional', pf.annotated); ok(pf.conflict, 'conflict flagged')
+    local pg = pnil('g', 'q')
+    eq('non-nil', pg.annotated); ok(not pg.conflict, 'agreement is not a conflict')
+end)
+
+test('paramnil: a complex `{…}?` annotation is not mis-read (no false conflict)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        '---@param opts { a:string }?',
+        'local function f(opts) if opts then return opts.a end end',
+        'return { f }',
+    }
+    local p = pnil('f', 'opts')
+    eq('optional', p.verdict)
+    ok(not p.conflict, 'a complex optional type is either parsed optional or skipped — never a false conflict')
+end)

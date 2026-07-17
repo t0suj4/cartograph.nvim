@@ -199,6 +199,157 @@ local function determine(cond, src, env)
     return nil
 end
 
+-- ── parameter-nilability ([[cartograph-expression-layer]] Rung 2) ────────────
+-- a nil-UNSAFE dereference of a parameter at node `n` → the param name, else nil. In
+-- Lua these all ERROR on nil: p.x / p[i] / p:m() / p() / #p / arithmetic|concat on p.
+local DEREF_INDEX = { dot_index_expression = true, bracket_index_expression = true,
+    method_index_expression = true }
+local ARITH = { ['+'] = true, ['-'] = true, ['*'] = true, ['/'] = true,
+    ['%'] = true, ['^'] = true, ['..'] = true, ['//'] = true }
+-- returns the list of parameter names dereffed at `n` (arithmetic touches BOTH operands)
+local function param_derefs(n, src, params)
+    local out, t = {}, n:type()
+    local function add(o)
+        if o and o:type() == 'identifier' and params[txt(o, src)] then out[#out + 1] = txt(o, src) end
+    end
+    if DEREF_INDEX[t] then add(n:named_child(0))
+    elseif t == 'function_call' then add(n:named_child(0))
+    elseif t == 'unary_expression' then
+        if txt(n:child(0), src) == '#' then add(n:named_child(0)) end
+    elseif t == 'binary_expression' then
+        if ARITH[txt(n:child(1), src)] then add(n:named_child(0)); add(n:named_child(1)) end
+    end
+    return out
+end
+
+-- the LuaCATS `---@param` annotations in the doc block directly above the fn's
+-- top-level statement → { [name] = 'optional' | 'non-nil' }. Optional = `name?`,
+-- a `?`-suffixed type, or a `nil` union member (what lua-ls treats as nilable).
+-- optionality of a `---@param` TYPE (the text after `name[?] `): 'optional' /
+-- 'non-nil' when CONFIDENT, else nil = "don't compare" (a complex table/fun type we
+-- won't risk mis-reading — the oracle must never false-conflict on a parser guess).
+local function ann_optional(rest)
+    rest = vim.trim(rest or '')
+    local tok = rest:match('^(%S+)') -- the first token = a SIMPLE type, or the start of a complex one
+    if not tok then return nil end
+    if tok:match('^[{(]') or tok == 'fun' then return nil end -- `{…}` / `fun(…)` → unsure
+    if tok:match('%?$') then return 'optional' end
+    if ('|' .. tok .. '|'):match('|nil|') then return 'optional' end -- a nil union member
+    if tok:match('^[%w_%.%[%]|]+$') then return 'non-nil' end -- a clean plain type
+    return nil
+end
+local STMT_PARENT = { block = true, chunk = true }
+local function param_annotations(fn, src)
+    local s = fn
+    while s:parent() and not STMT_PARENT[s:parent():type()] do s = s:parent() end
+    local ann, block = {}, {}
+    local sib = s:prev_named_sibling()
+    while sib and sib:type() == 'comment' do block[#block + 1] = txt(sib, src); sib = sib:prev_named_sibling() end
+    for _, line in ipairs(block) do
+        local name, opt, rest = line:match('^%s*%-%-%-?@param%s+([%w_]+)(%??)%s*(.*)$')
+        if name then
+            local a = opt == '?' and 'optional' or ann_optional(rest)
+            if a then ann[name] = a end -- nil (unsure) → leave unset, no comparison
+        end
+    end
+    return ann
+end
+
+--- PARAMETER-NILABILITY inference (Rung 2, the lua-ls DISAGREEMENT ORACLE). For each
+--- parameter, infer whether the body REQUIRES it non-nil (an unguarded nil-unsafe
+--- deref, or an `assert`), TOLERATES nil (every deref guarded / short-circuited /
+--- nil-tested), or is UNCONSTRAINED. Sound-first: a deref is protected by a dominating
+--- guard (env_of/guards_over — incl. early-exit), an enclosing short-circuit
+--- (`p and p.x`, `p ~= nil and …`), or an assert; a REASSIGNED param (`p = p or {}`)
+--- is left unconstrained (conservative). Compared against the `---@param` annotation:
+--- inferred REQUIRED + annotated OPTIONAL (`?`) = a real defect (the body crashes on a
+--- nil the type permits) — the keystone disagreement.
+--- @return table { lang, unsupported?, params: { {name, verdict, site?, annotated?, conflict?} } }
+function M.param_nilability(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not node or not node.file then return { params = {} } end
+    local lang = EXT_LANG[node.file:match('%.(%w+)$') or '']
+    if not lang or not vocab[lang] then
+        return { lang = node.file:match('%.(%w+)$'), unsupported = true, params = {} }
+    end
+    local src = table.concat(store.content(node) or {}, '\n')
+    local fn = fn_node(node, src, lang)
+    if not fn then return { lang = lang, params = {} } end
+    local classify, mutated = vocab[lang], mutated_of(node)
+    local fl = flowmod.present(node) and flowmod.record(node)
+    local plist = (fl and fl.params) or {}
+    local params = {}
+    for _, p in ipairs(plist) do if p ~= 'self' then params[p] = true end end
+    if not next(params) then return { lang = lang, params = {} } end
+
+    local unguarded, asserted, tested = {}, {}, {}
+    local function note_tested(cond)
+        for _, f in ipairs(classify(cond, src, true)) do tested[f.var] = true end
+        for _, f in ipairs(classify(cond, src, false)) do tested[f.var] = true end
+    end
+    local CONDN = { if_statement = true, elseif_statement = true, while_statement = true,
+        repeat_statement = true }
+    local function walk(n, proven)
+        local t = n:type()
+        if t == 'function_call' then -- assert(cond) proves its conjuncts non-nil
+            local callee = n:named_child(0)
+            if callee and callee:type() == 'identifier' and txt(callee, src) == 'assert' then
+                local args = n:field('arguments')[1]
+                local cond = args and args:named_child(0)
+                if cond then for _, f in ipairs(classify(cond, src, true)) do
+                    asserted[f.var] = true; tested[f.var] = true
+                end end
+            end
+        end
+        if CONDN[t] then local c = n:field('condition')[1]; if c then note_tested(c) end end
+        for _, p in ipairs(param_derefs(n, src, params)) do
+            if not proven[p] and not env_of(n, src, classify, mutated)[p] then
+                unguarded[p] = unguarded[p] or (n:start() + 1)
+            end
+        end
+        if t == 'binary_expression' then
+            local op = txt(n:child(1), src)
+            local l, r = n:named_child(0), n:named_child(1)
+            if (op == 'and' or op == 'or') and l and r then
+                walk(l, proven)
+                local p2 = {}; for k in pairs(proven) do p2[k] = true end
+                for _, f in ipairs(classify(l, src, op == 'and')) do p2[f.var] = true; tested[f.var] = true end
+                walk(r, p2)
+                return
+            end
+        end
+        for c in n:iter_children() do
+            if c:named() and not FN_TYPES[c:type()] then walk(c, proven) end
+        end
+    end
+    walk(fn, {})
+
+    local ann = param_annotations(fn, src)
+    local out = {}
+    for _, p in ipairs(plist) do
+        if p ~= 'self' then
+            -- REQUIRED is HIGH-CONFIDENCE (the oracle must be trustworthy): either an
+            -- `assert`, or an unguarded deref of a param that is NEVER nil-tested
+            -- anywhere in the body — if the author checks it even once they are
+            -- nil-aware (a correlated guard through an intermediate we can't track →
+            -- optional), so a nil-tested param is never called required. Conservative:
+            -- under-infers required, never false-flags a defended param.
+            local verdict, site
+            if mutated[p] then verdict = 'unknown'
+            elseif asserted[p] then verdict = 'required'
+            elseif unguarded[p] and not tested[p] then verdict, site = 'required', unguarded[p]
+            elseif tested[p] or unguarded[p] then verdict = 'optional'
+            else verdict = 'unknown' end
+            local a = ann[p]
+            local conflict = (verdict == 'required' and a == 'optional')
+                or (verdict == 'optional' and a == 'non-nil')
+            out[#out + 1] = { name = p, verdict = verdict, site = site, annotated = a,
+                conflict = conflict or nil }
+        end
+    end
+    return { lang = lang, params = out }
+end
+
 --- REDUNDANT-CHECK ELIMINATION (INC 2, the paving-stone lint). An `if` whose
 --- condition re-tests a fact a DOMINATING guard already established is dead: the
 --- env at the guard already determines the condition. `always=true` → the
@@ -281,6 +432,40 @@ function M.report(store, fn_id)
     L[#L + 1] = 'a fact holds only where its guard PROVES it (nil-check / truthiness /'
     L[#L + 1] = 'and-conjunction; `or` and negated compounds do not narrow). Sound knowledge,'
     L[#L + 1] = 'not a guess — feeds redundant-check elimination + null-deref (INC 2/3).'
+    return L
+end
+
+--- The lens surface (:CartographParamNil): the focused fn's inferred parameter
+--- nilability contracts, and any DISAGREEMENT with the `---@param` annotations.
+function M.param_report(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not node then return { 'param-nil: no such node' } end
+    local res = M.param_nilability(store, fn_id)
+    if res.unsupported then
+        return { ('param-nil: %s not yet supported (Lua only)'):format(res.lang or '?') }
+    end
+    if #res.params == 0 then
+        return { ('param-nil: %s — no parameters'):format(node.name or fn_id) }
+    end
+    local L = { ('param-nil: %s — inferred parameter nilability'):format(node.name or fn_id), '' }
+    local nconf = 0
+    for _, p in ipairs(res.params) do
+        local mark = p.conflict and '⚠' or ' '
+        if p.conflict then nconf = nconf + 1 end
+        local ann = p.annotated and (' [@param: ' .. p.annotated .. ']') or ''
+        local site = p.site and (' — deref @L' .. p.site) or ''
+        L[#L + 1] = ('  %s %-16s %-10s%s%s'):format(mark, p.name, p.verdict, ann, site)
+    end
+    L[#L + 1] = ''
+    if nconf > 0 then
+        L[#L + 1] = ('⚠ %d DISAGREEMENT(S) with the annotations — inferred non-nil-required vs'):format(nconf)
+        L[#L + 1] = '  a nilable `?` param (the body derefs a nil the type permits), or the'
+        L[#L + 1] = '  reverse (a defended param the type forbids nil for). A real defect on one side.'
+    else
+        L[#L + 1] = '(required = an unguarded deref / assert assumes non-nil; optional = every'
+        L[#L + 1] = ' deref is guarded / short-circuited; unknown = never dereferenced, or reassigned.'
+        L[#L + 1] = ' Where a `---@param` annotation exists, a mismatch is flagged ⚠.)'
+    end
     return L
 end
 

@@ -33,6 +33,7 @@ store.ingest(ts.extract(dir))
 
 -- collect each lens's per-(file,line) facts in one pass (a line belongs to one fn)
 local narrowenv, hoist, reuse, redun, ncomp, rung0, localized = {}, {}, {}, {}, {}, {}, {}
+local paramnil = {} -- KR(file, fn, param) -> {verdict, conflict}
 local gatebad = {} -- expr self-gate disagreements (reads ≠ use∪rmw) — must be empty
 local function K(f, l) return (f or '') .. '\31' .. l end
 local function KR(f, l, r) return (f or '') .. '\31' .. l .. '\31' .. r end
@@ -69,6 +70,10 @@ for _, n in ipairs(store.data.nodes) do
         local okz, zr = pcall(optimize.localize, store, n.id)
         if okz and zr then for _, lp in ipairs(zr.loops) do
             for _, cd in ipairs(lp.cands) do localized[KR(f, n.name or '?', cd.full)] = true end
+        end end
+        local okp, pr = pcall(narrow.param_nilability, store, n.id)
+        if okp and pr and pr.params then for _, p in ipairs(pr.params) do
+            paramnil[KR(f, n.name or '?', p.name)] = { verdict = p.verdict, conflict = p.conflict or false }
         end end
         local okc, cr = pcall(optimize.cse, store, n.id)
         if okc then for _, p in ipairs(cr.redundant) do
@@ -137,6 +142,16 @@ for _, e in ipairs(a.key) do
             if got then c.fp[#c.fp + 1] = ('%s:%s FALSE-POSITIVE localize `%s` (must not suggest)'):format(e.file, e.fn, e.full)
             else c.pass = c.pass + 1 end
         end
+    elseif e.lens == 'paramnil' then
+        local got = paramnil[KR(e.file, e.fn, e.param)]
+        if not got then c.fn[#c.fn + 1] = ('%s:%s(%s) not analyzed'):format(e.file, e.fn, e.param)
+        elseif got.verdict ~= e.verdict then
+            c.fn[#c.fn + 1] = ('%s:%s(%s) expected %s, got %s'):format(e.file, e.fn, e.param, e.verdict, got.verdict)
+        elseif got.conflict ~= e.conflict then
+            -- a spurious conflict is the dangerous FP (the oracle must be trustworthy)
+            local m = ('%s:%s(%s) conflict expected %s, got %s'):format(e.file, e.fn, e.param, tostring(e.conflict), tostring(got.conflict))
+            if got.conflict then c.fp[#c.fp + 1] = m else c.fn[#c.fn + 1] = m end
+        else c.pass = c.pass + 1 end
     end
 end
 
@@ -145,7 +160,7 @@ local failed = false
 -- a disagreement is a real bug on one side — the oracle discipline in the substrate)
 print(('syngate %-7s %d disagreement(s)'):format('exprgate:', #gatebad))
 for _, m in ipairs(gatebad) do print('  GATE ' .. m); failed = true end
-for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0', 'localize' }) do
+for _, lens in ipairs({ 'narrow', 'redundant', 'licm', 'cse', 'untangle', 'rung0', 'localize', 'paramnil' }) do
     local c = census[lens]
     if c then
         print(('syngate %-7s %d ok, %d false-pos, %d false-neg')
