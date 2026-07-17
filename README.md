@@ -934,6 +934,25 @@ non-nil (a non-nil value can still be `false`) and drops a narrowing once the va
 is reassigned, so it reports a redundancy only when the earlier guard genuinely still
 holds.
 
+`:CartographExpr` reads one level deeper still. The flow rows know *which* names a
+statement defines and uses, but not the **shape** of the expression that computes them —
+the operator, the operands, the callee, whether it allocates. That structure is a small
+closed intermediate representation harvested alongside the flow rows (a literal, a name,
+a field/index, a call, a unary/binary op, a table or closure allocation, or an honest
+`?` for anything not yet modelled — so it never lies about what it doesn't understand).
+On top of it ride the **Rung-0 lints**: a comparison whose two sides are identical
+(`a == a`), a logical operator with a duplicated operand (`a or a`), a comparison to a
+boolean literal, a self-assignment (`x = x`), the classic `c and x or y` ternary trap
+when `x` can be falsy, a condition that folds to a constant, a string built with `..`
+inside a loop (quadratic — accumulate and `table.concat` instead), and a branch
+condition duplicating an earlier one in the same `if`-chain. Every equality-based check
+is gated on purity, so it never flags two calls that might return different values, and
+a runtime subtlety (NaN self-comparison, a metamethod on a field target) is marked `~`
+rather than asserted. The representation carries its own correctness proof: the names it
+says a row reads must exactly equal the names the independent def/use pass found — a
+disagreement is a real bug on one side, and that gate runs clean across the whole
+codebase.
+
 ## Offline: history archaeology
 
 A sibling tool that lives under `cartograph.history` and runs *outside* the live
