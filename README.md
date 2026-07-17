@@ -939,7 +939,9 @@ that acts: it takes the CSE-reuse finding and rewrites the source — `local b =
 becomes `local b = a` where an earlier `local a = x + y` already holds the value — through
 the same transaction layer the move and extract refactors ride (journalled, undoable). It
 runs headless, so it is something a program can drive rather than a person clicking in a
-pane: plan, preview the exact diff, then apply. Because a common-subexpression rewrite
+pane: plan, preview the exact diff, then apply — pointed at a single function, or even a
+single line (resolve the spot, rewrite just that redundancy, leave the rest untouched).
+Because a common-subexpression rewrite
 *deliberately* changes the dataflow (it removes a recomputation, and any call inside it),
 it can't lean on the move refactor's "the graph must look identical afterwards" check;
 instead it verifies that the text it is about to replace is still exactly what it planned
