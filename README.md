@@ -877,6 +877,18 @@ package across files; a certified cluster hands off to the module extractor
 What counts as shared state is a per-ecosystem sharing-model seam (the default
 couples any written module var).
 
+Connected components answer *"are these provably independent?"* — a strict
+yes/no. But cohesive code is often **one** connected concern with rich internal
+structure (a 90-line function, a god-file where everything calls everything).
+Both reports then run **community detection** (greedy modularity) over the same
+edges: a strict refinement of the components that finds the denser sub-groups
+inside a connected blob. In `:CartographUntangle`, refined rows carry a lowercase
+sub-group tag (`[a]`, `[b]`); `:CartographUntangleModule` lists the cohesive
+sub-modules. This is a *refactoring suggestion, not a safety claim* — communities
+share edges across their boundary, so the report always prices the cut (*"breaks
+N dependency edges: 15 data, 7 control"*): those are real dependencies a split
+would have to sever.
+
 ## Offline: history archaeology
 
 A sibling tool that lives under `cartograph.history` and runs *outside* the live
