@@ -218,6 +218,72 @@ test('licm: a reassignment (read-before-def flag) is not a hoist candidate', fun
     ok(not names(res, lp.invariant).first, 'a reassignment is not a LICM hoist candidate')
 end)
 
+-- ── LICM INC 2: the hoist plan ───────────────────────────────────────────────
+
+-- the sole loop's hoist plan
+local function sole_plan(name)
+    local hp = optimize.hoist_plan(store, fn_id(name))
+    eq(1, #hp.plans)
+    return hp, hp.plans[1]
+end
+
+test('hoist_plan: a clean-hoistable row plans a safe lift above the header', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function add(a, b) return a + b end',
+        'local function f(xs, base)',
+        '  for _, x in ipairs(xs) do',
+        '    local k = add(base, 1)',   -- clean-hoistable
+        '    use(k, x)',
+        '  end',
+        'end',
+        'return { f, add }',
+    }
+    local _, p = sole_plan('f')
+    ok(p.safe, 'no capture -> the plan is safe')
+    eq(1, #p.moves)
+    ok(p.moves[1].text:find('local k = add%(base, 1%)'), 'the exact statement is the move')
+    ok(p.insert_before == p.line, 'it inserts just before the loop header')
+end)
+
+test('hoist_plan: a hoisted local colliding with an outer name is flagged ⚠', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- the disagreement oracle: INC 1 says `k` is invariant/hoistable, but INC 2's
+    -- independent capture check sees the outer `k` — the MOVE is not mechanically safe.
+    ingest {
+        'local function add(a, b) return a + b end',
+        'local function f(xs)',
+        '  local k = 7',
+        '  use(k)',
+        '  for _, x in ipairs(xs) do',
+        '    local k = add(1, 2)',   -- hoistable value, but name collides with the outer k
+        '    use(k, x)',
+        '  end',
+        'end',
+        'return { f, add }',
+    }
+    local _, p = sole_plan('f')
+    ok(not p.safe, 'the collision makes the hoist unsafe')
+    ok(#p.hazards >= 1 and p.hazards[1].var == 'k', 'the hazard names the colliding var')
+end)
+
+test('hoist_plan: report renders the hoist plan + validation', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function add(a, b) return a + b end',
+        'local function f(xs, base)',
+        '  for _, x in ipairs(xs) do',
+        '    local k = add(base, 1)',
+        '    use(k, x)',
+        '  end',
+        'end',
+        'return { f, add }',
+    }
+    local joined = table.concat(optimize.report(store, fn_id('f')), '\n')
+    ok(joined:match('hoist plan'), 'the report shows a hoist plan')
+    ok(joined:match('no capture'), 'and its validation verdict')
+end)
+
 -- ── CSE INC 1: redundant computations ───────────────────────────────────────
 
 -- the redundant pairs of a fn as { second_line -> {first_line, expr, hedged} }

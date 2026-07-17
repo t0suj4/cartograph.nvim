@@ -68,10 +68,33 @@ local function context(store, fn_id)
         local t = span_text(r)
         return t:find('[%[%]#]') ~= nil or t:find('[%w_]%s*[%.:]%s*[%a_]') ~= nil
     end
+    -- EXACT statement text via (line,col) bounds: from a row's own start to the start
+    -- of the next row by position — handles multiple statements on one line AND
+    -- multi-line statements precisely (a whole-line span over-captures a neighbour).
+    -- rows[].c is 1-BASED (col of the first char); the next statement starts at nc, so
+    -- this one's text runs [c .. nc-1].
+    local order = {}
+    for r = 1, n do order[r] = r end
+    table.sort(order, function (a, b)
+        if rows[a].l ~= rows[b].l then return rows[a].l < rows[b].l end
+        return (rows[a].c or 1) < (rows[b].c or 1)
+    end)
+    local nextpos = {}
+    for i = 1, #order - 1 do nextpos[order[i]] = { rows[order[i + 1]].l, rows[order[i + 1]].c or 1 } end
+    local function stmt_text(r)
+        local l, c = rows[r].l, rows[r].c or 1
+        local el, ec = fn_end, #(lines[fn_end] or '') + 1
+        if nextpos[r] then el, ec = nextpos[r][1], nextpos[r][2] end
+        if l == el then return (lines[l] or ''):sub(c, ec - 1) end
+        local parts = { (lines[l] or ''):sub(c) }
+        for ln = l + 1, el - 1 do parts[#parts + 1] = lines[ln] or '' end
+        parts[#parts + 1] = (lines[el] or ''):sub(1, ec - 1)
+        return table.concat(parts, '\n')
+    end
     return { node = node, rows = rows, n = n, within = within, heads = heads,
         impure_line = impure_line, callee_line = callee_line, reach = reach,
-        lines = lines, fn_end = fn_end,
-        span_text = span_text, allocates = allocates, reads_table = reads_table }
+        lines = lines, fn_end = fn_end, span_text = span_text, stmt_text = stmt_text,
+        allocates = allocates, reads_table = reads_table }
 end
 
 --- LICM analysis of the focused fn. For each loop, the rows whose value is
@@ -194,32 +217,7 @@ function M.cse(store, fn_id)
     local ctx = context(store, fn_id)
     if not ctx then return { rows = {}, redundant = {} } end
     local rows, reach, impure_line = ctx.rows, ctx.reach, ctx.impure_line
-    local allocates, reads_table = ctx.allocates, ctx.reads_table
-    local lines, fn_end = ctx.lines, ctx.fn_end
-    -- EXACT statement text via (line,col) bounds: from a row's own start to the start
-    -- of the next row by position. Handles multiple statements on one line AND
-    -- multi-line statements precisely — unlike a whole-line span, which over-captures
-    -- a neighbour and produced garbage RHS matches (`false; guard = guard + 1`).
-    local order = {}
-    for r = 1, #rows do order[r] = r end
-    table.sort(order, function (a, b)
-        if rows[a].l ~= rows[b].l then return rows[a].l < rows[b].l end
-        return (rows[a].c or 1) < (rows[b].c or 1)
-    end)
-    local nextpos = {}
-    for i = 1, #order - 1 do nextpos[order[i]] = { rows[order[i + 1]].l, rows[order[i + 1]].c or 1 } end
-    -- rows[].c is 1-BASED (col of the statement's first char); the next statement
-    -- starts at nc, so this one's text runs [c .. nc-1].
-    local function stmt_text(r)
-        local l, c = rows[r].l, rows[r].c or 1
-        local el, ec = fn_end, #(lines[fn_end] or '') + 1
-        if nextpos[r] then el, ec = nextpos[r][1], nextpos[r][2] end
-        if l == el then return (lines[l] or ''):sub(c, ec - 1) end
-        local parts = { (lines[l] or ''):sub(c) }
-        for ln = l + 1, el - 1 do parts[#parts + 1] = lines[ln] or '' end
-        parts[#parts + 1] = (lines[el] or ''):sub(1, ec - 1)
-        return table.concat(parts, '\n')
-    end
+    local allocates, reads_table, stmt_text = ctx.allocates, ctx.reads_table, ctx.stmt_text
     -- RHS of a single-target row, ws-normalized (trailing `;` stripped); nil unless a
     -- real COMPUTATION (a bare literal / identifier / copy has nothing to CSE)
     local function rhs_of(r)
@@ -277,6 +275,55 @@ function M.cse(store, fn_id)
     return { rows = rows, redundant = redundant }
 end
 
+--- LICM INC 2 — the HOIST PLAN. For each loop, the clean-hoistable rows (from INC 1)
+--- to lift above the loop header, with an INDEPENDENT capture/scope check: a hoisted
+--- `local x` is safe only if x occurs ONLY inside the loop body — otherwise lifting
+--- its declaration above the header could capture or collide with an outer binding of
+--- the same name. This is the disagreement oracle for the optimize arc: INC 1 asserts
+--- value-invariance, INC 2 independently checks the MOVE is mechanically sound; a
+--- clean-hoistable row that fails the capture check is a real disagreement worth
+--- surfacing. Hoisted rows keep source order (a hoistable row's invariant inputs are
+--- themselves hoistable or pre-loop, so dependencies are preserved). Read-only.
+--- @return table { rows, plans: { loop, line, insert_before, moves, hazards, safe }[] }
+function M.hoist_plan(store, fn_id)
+    local ctx = context(store, fn_id)
+    if not ctx then return { rows = {}, plans = {} } end
+    local res = M.licm(store, fn_id)
+    local rows, stmt_text = res.rows, ctx.stmt_text
+    local plans = {}
+    for _, L in ipairs(res.heads) do
+        local lp = res.loops[L]
+        local hoist = {}
+        for r in pairs(lp.hoistable) do hoist[#hoist + 1] = r end
+        if #hoist > 0 then
+            table.sort(hoist, function (a, b) return rows[a].l < rows[b].l end)
+            local moves, hazards = {}, {}
+            for _, r in ipairs(hoist) do
+                for _, v in ipairs(rows[r].def or {}) do
+                    local outside -- v occurring in a row NOT in this loop's body → collision risk
+                    for r2 = 1, #rows do
+                        if r2 ~= L and not lp.members[r2] then
+                            for _, d in ipairs(rows[r2].def or {}) do if d == v then outside = rows[r2].l end end
+                            for _, u in ipairs(rows[r2].use or {}) do if u == v then outside = outside or rows[r2].l end end
+                        end
+                    end
+                    if outside then
+                        hazards[#hazards + 1] = { line = rows[r].l, var = v, reason =
+                            ('`%s` also occurs at L%d outside the loop — hoisting could capture/collide')
+                            :format(v, outside) }
+                    end
+                end
+                moves[#moves + 1] = { line = rows[r].l,
+                    def = table.concat(rows[r].def or {}, ', '),
+                    text = (stmt_text(r):gsub('%s+$', '')) }
+            end
+            plans[#plans + 1] = { loop = L, line = rows[L].l, insert_before = rows[L].l,
+                moves = moves, hazards = hazards, safe = (#hazards == 0) }
+        end
+    end
+    return { rows = rows, plans = plans }
+end
+
 --- The lens surface (:CartographOptimize): the focused fn's loop-invariant
 --- computations, per loop, in source order — each with its inputs and whether it's
 --- unconditionally hoistable (a `*`) or invariant-but-conditional (`~`, hoisting
@@ -319,6 +366,21 @@ function M.report(store, fn_id)
         L[#L + 1] = ' hoist — either branch-guarded, or its invariance rests on an aliasing /'
         L[#L + 1] = ' field / mutable-global stability assumption we cannot certify. Hoisting'
         L[#L + 1] = ' is a suggestion; a may-throw hoist over a zero-trip loop changes errors.)'
+
+        -- INC 2: the hoist plan — the * rows lifted above the header, with the
+        -- independent capture/scope check (⚠ = INC 1 said hoistable but the MOVE
+        -- would collide with an outer binding — a real disagreement to resolve).
+        for _, p in ipairs(M.hoist_plan(store, fn_id).plans) do
+            L[#L + 1] = ''
+            L[#L + 1] = ('hoist plan @ loop L%d — lift %d computation(s) above the header%s:')
+                :format(p.line, #p.moves, p.safe and '' or ' — ⚠ NOT safe')
+            for _, m in ipairs(p.moves) do L[#L + 1] = ('  L%-4d %s'):format(m.line, m.text) end
+            if p.safe then
+                L[#L + 1] = '  (validated: each hoisted local occurs only inside the loop — no capture)'
+            else
+                for _, h in ipairs(p.hazards) do L[#L + 1] = ('  ⚠ %s'):format(h.reason) end
+            end
+        end
     end
 
     -- CSE: redundant recomputations (same expression, same operand values, earlier
