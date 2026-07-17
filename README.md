@@ -918,6 +918,14 @@ also reports **redundant computations** (CSE): two statements in one block compu
 the same expression over the same operand values, where the earlier already produced
 the result — so the later can reuse it (again `~` when a table read might have changed
 under it). A suggestion, never a silent transform — the same discipline as the rest.
+It also flags **globals to localize**: a module function called inside a loop
+(`math.floor`, `table.insert`) is re-resolved through the global table every iteration,
+so binding it to a `local` above the loop — `local floor = math.floor` — is a small,
+always-safe speedup; the report lists each with its in-loop call count. Underneath, all
+of this now reads the shape of each expression from the same intermediate representation
+that powers `:CartographExpr`, rather than scanning source text: allocations, table
+reads, and the "is this the same computation?" test are answered structurally, so a
+brace inside a string or a comment mid-expression can no longer fool them.
 
 `:CartographNarrow` is the branch-sensitive counterpart — the type sibling of
 constant folding. Where a guard *proves* something about a variable (`if x`,
