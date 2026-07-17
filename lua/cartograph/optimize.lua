@@ -17,6 +17,15 @@ local LOOPISH = { for_statement = true, for_in_statement = true,
     while_statement = true, repeat_statement = true, loop_statement = true,
     loop_expression = true, foreach_statement = true }
 
+-- calls that RETURN A FRESH MUTABLE object (a new table each call) — pure w.r.t. the
+-- world, but their RESULT has fresh identity, so reusing/hoisting one is unsound the
+-- same way `{}` is (each call site is meant to get its own object). Matched by the
+-- callee's base name. Not exhaustive (a user allocator isn't listed → stays hedged via
+-- the field-read on its receiver, or unknown-callee → impure); extend as needed.
+local KNOWN_ALLOC = { deepcopy = true, setmetatable = true, tbl_extend = true,
+    tbl_deep_extend = true, list_extend = true, list_slice = true, split = true,
+    tbl_keys = true, tbl_values = true, tbl_map = true, tbl_filter = true }
+
 -- Shared per-fn context for the optimize analyses: the flow rows + reaching, a
 -- per-line purity/callee map, and the SOURCE-SPAN gates (allocation / content-read)
 -- that keep both LICM and CSE sound where du's def/use can't see index/length reads
@@ -34,14 +43,26 @@ local function context(store, fn_id)
     end
     local heads = {}
     for i = 1, n do if LOOPISH[rows[i].t or ''] then heads[#heads + 1] = i end end
-    -- per-LINE impurity (a call with effects/hedges) + pure-callee names per line
-    local impure_line, callee_line = {}, {}
+    -- per-LINE impurity (a call with effects/hedges) + pure-callee names per line +
+    -- allocating-call lines + the set of pure QUALIFIED callee names (string.format,
+    -- table.concat) whose `.` is benign — stripped before the content-read check so a
+    -- pure module call isn't mistaken for a mutable-table field read.
+    local impure_line, callee_line, alloc_line, pure_dotted, pure_module = {}, {}, {}, {}, {}
     for _, c in ipairs((store.calls_by_fn and store.calls_by_fn[fn_id]) or {}) do
         local ln = (c.line or 0) + 1
         local ce = effects.call_effects(store, c, node.file)
         local pure = (next(ce.w) == nil) and not ce.hedges
         if not pure then impure_line[ln] = true end
         if c.callee then callee_line[ln] = callee_line[ln] or {}; callee_line[ln][c.callee] = pure end
+        local base = (c.full or c.callee or ''):match('([%w_]+)$')
+        if base and KNOWN_ALLOC[base] then alloc_line[ln] = true end
+        if pure and c.full and c.full:find('%.') then
+            pure_dotted[c.full] = true
+            -- the module receiver of a pure qualified call (`string` in string.format)
+            -- is a STABLE reference, not a varying input — don't let it hedge invariance
+            local mb = c.full:match('^([%w_]+)')
+            if mb then pure_module[mb] = true end
+        end
     end
     -- reaching: reach[at][var] = { def rows } (0 = param/outside)
     local reach = {}
@@ -57,15 +78,22 @@ local function context(store, fn_id)
         for ln = rl, e do parts[#parts + 1] = lines[ln] or '' end
         return table.concat(parts, '\n')
     end
-    -- ALLOCATION: `{…}` / closure = fresh identity each time → never a safe hoist/reuse
+    -- ALLOCATION: `{…}` / closure / a KNOWN_ALLOC call (deepcopy, setmetatable, …) =
+    -- fresh identity each time → never a safe hoist/reuse.
     local function allocates(r)
+        if alloc_line[rows[r].l] then return true end
         local t = span_text(r)
         return t:find('{') ~= nil or t:find('%f[%a]function%f[%A]') ~= nil
     end
     -- CONTENT-READ: index/field/length read → contents a mutation can change (du can't
-    -- see it). HEDGES. Conservative (over-hedges a float/comment/module-call `.`); sound.
+    -- see it). HEDGES. First STRIP pure qualified-call names (string.format, …) so
+    -- their benign `.` isn't mistaken for a field read — reclaiming a pure module call
+    -- as clean. Still conservative for genuine field/index/length reads; sound.
     local function reads_table(r)
         local t = span_text(r)
+        for full in pairs(pure_dotted) do
+            t = t:gsub(full:gsub('[%p]', '%%%0'), ' ')
+        end
         return t:find('[%[%]#]') ~= nil or t:find('[%w_]%s*[%.:]%s*[%a_]') ~= nil
     end
     -- EXACT statement text via (line,col) bounds: from a row's own start to the start
@@ -93,7 +121,8 @@ local function context(store, fn_id)
     end
     return { node = node, rows = rows, n = n, within = within, heads = heads,
         impure_line = impure_line, callee_line = callee_line, reach = reach,
-        lines = lines, fn_end = fn_end, span_text = span_text, stmt_text = stmt_text,
+        pure_module = pure_module, lines = lines, fn_end = fn_end,
+        span_text = span_text, stmt_text = stmt_text,
         allocates = allocates, reads_table = reads_table }
 end
 
@@ -112,6 +141,7 @@ function M.licm(store, fn_id)
     local rows, n, within, heads = ctx.rows, ctx.n, ctx.within, ctx.heads
     local impure_line, callee_line, reach = ctx.impure_line, ctx.callee_line, ctx.reach
     local allocates, reads_table, lines = ctx.allocates, ctx.reads_table, ctx.lines
+    local pure_module = ctx.pure_module
 
     local loops = {}
     for _, L in ipairs(heads) do
@@ -165,8 +195,8 @@ function M.licm(store, fn_id)
                         end
                         local cl = callee_line[rows[r].l]
                         for _, v in ipairs(reads) do
-                            if cl and cl[v] ~= nil then -- a callee name: value doesn't vary
-                                if cl[v] == false then hed = true end -- an IMPURE callee (row already excluded, belt+braces)
+                            if (cl and cl[v] ~= nil) or pure_module[v] then -- a callee / a pure module receiver: stable, not a varying input
+                                if cl and cl[v] == false then hed = true end -- an IMPURE callee (row already excluded, belt+braces)
                             elseif loopvar[v] then
                                 allinv = false -- a loop induction var → varying
                             else

@@ -33,6 +33,16 @@ local function sole_loop(name)
 end
 
 -- the def name(s) of an invariant/hoistable row, as a set
+-- the redundant pairs of a fn as { second_line -> {first_line, expr, hedged} }
+local function redundant(name)
+    local res = optimize.cse(store, fn_id(name))
+    local out = {}
+    for _, p in ipairs(res.redundant) do
+        out[res.rows[p.second].l] = { first = res.rows[p.first].l, expr = p.expr, hedged = p.hedged }
+    end
+    return out
+end
+
 local function names(res, rowset)
     local out = {}
     for r in pairs(rowset) do
@@ -218,6 +228,54 @@ test('licm: a reassignment (read-before-def flag) is not a hoist candidate', fun
     ok(not names(res, lp.invariant).first, 'a reassignment is not a LICM hoist candidate')
 end)
 
+-- ── refinements: pure-module-call un-hedge + allocating-call detection ───────
+
+test('licm: a pure stdlib module call of invariant scalars is CLEAN (un-hedged)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- string.format is pure and returns an immutable value; base is a param. The
+    -- `.` in string.format is a benign call receiver, not a mutable-table field read.
+    ingest {
+        'local function f(xs, base)',
+        '  for _, x in ipairs(xs) do',
+        '    local s = string.format("%d", base)',
+        '    use(s, x)',
+        '  end',
+        'end',
+        'return { f }',
+    }
+    local res, lp = sole_loop('f')
+    ok(names(res, lp.hoistable).s, 'a pure module call of an invariant scalar is cleanly hoistable')
+end)
+
+test('licm: an allocating call (deepcopy) is not hoistable (fresh identity)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- vim.deepcopy returns a FRESH table each call; hoisting shares one -> excluded.
+    ingest {
+        'local function f(xs, base)',
+        '  for _, x in ipairs(xs) do',
+        '    local c = vim.deepcopy(base)',
+        '    use(c, x)',
+        '  end',
+        'end',
+        'return { f }',
+    }
+    local res, lp = sole_loop('f')
+    ok(not names(res, lp.invariant).c, 'an allocating call is not a hoist candidate')
+end)
+
+test('cse: an allocating call is not a redundant candidate (identity)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(base)',
+        '  local a = vim.deepcopy(base)',
+        '  local b = vim.deepcopy(base)',   -- same text, but each is a distinct object
+        '  return a, b',
+        'end',
+        'return { f }',
+    }
+    ok(not redundant('f')[3], 'two deepcopy calls are NOT a CSE pair — reuse would share identity')
+end)
+
 -- ── LICM INC 2: the hoist plan ───────────────────────────────────────────────
 
 -- the sole loop's hoist plan
@@ -285,16 +343,6 @@ test('hoist_plan: report renders the hoist plan + validation', function ()
 end)
 
 -- ── CSE INC 1: redundant computations ───────────────────────────────────────
-
--- the redundant pairs of a fn as { second_line -> {first_line, expr, hedged} }
-local function redundant(name)
-    local res = optimize.cse(store, fn_id(name))
-    local out = {}
-    for _, p in ipairs(res.redundant) do
-        out[res.rows[p.second].l] = { first = res.rows[p.first].l, expr = p.expr, hedged = p.hedged }
-    end
-    return out
-end
 
 test('cse: two identical pure computations in a block -> the later is redundant', function ()
     if not ready('lua') then skip 'no lua parser' end
