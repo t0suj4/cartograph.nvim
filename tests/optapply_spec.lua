@@ -341,3 +341,35 @@ test('optapply: a capture-unsafe hoist carries the collision site as evidence', 
     ok(d and d.class == 'wrong' and d.reason:match('capture'), 'capture-unsafe decline')
     ok(d.evidence and d.evidence:match('outside the loop'), 'evidence names the collision: ' .. tostring(d.evidence))
 end)
+
+-- ── PRE apply (the last verb) ─────────────────────────────────────────────────
+test('optapply: PRE lifts a both-arm computation to a local above the branch', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = ingest {
+        'local function f(x, y, c)',
+        '  if c then',
+        '    local a = x + y',
+        '    return a + 1',
+        '  else',
+        '    local b = x + y',
+        '    return b + 2',
+        '  end',
+        'end', 'return { f }',
+    }
+    local plan = optapply.plan_pre(store, fn_id('f'))
+    eq(1, #plan.moves)
+    local res = optapply.run_pre(store, fn_id('f'))
+    ok(res.ok, 'applied: ' .. tostring(res.reason))
+    local after = vim.fn.readfile(root .. '/m.lua')
+    local tl, ifl
+    for i, l in ipairs(after) do
+        if l:match('local t = x %+ y') then tl = i end
+        if l:match('if c then') then ifl = i end
+    end
+    ok(tl and ifl and tl < ifl, 'the computation is hoisted above the if')
+    local joined = table.concat(after, '\n')
+    ok(joined:match('local a = t') and joined:match('local b = t'), 'both arms reuse the hoisted local')
+    -- idempotent: the arms are now copies, not computations
+    store.ingest(ts.extract(root))
+    ok(not optapply.plan_pre(store, fn_id('f')), 'nothing left to hoist')
+end)

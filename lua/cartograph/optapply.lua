@@ -56,8 +56,10 @@ end
 local ASSIGN = { assignment_statement = true, assignment = true, assignment_expression = true }
 local LOCALDECL = { variable_declaration = true, local_declaration = true }
 
--- the RHS expression node of a single-target assignment at `line` declaring `defname`
--- (one-line RHS only — the token-replacement is single-line), else nil.
+-- the RHS expression node of a single-target assignment at `line` (one-line RHS only —
+-- the token-replacement is single-line), else nil. `defname` optional: when given the
+-- left must declare it (CSE reuse); when nil, the first single-target at the line (PRE,
+-- which locates arm occurrences by line, not name).
 local function rhs_node(root, src, line, defname)
     local found
     local function rec(n)
@@ -79,7 +81,7 @@ local function rhs_node(root, src, line, defname)
                 left = left or asg:field('left')[1]
                 right = right or asg:field('right')[1]
                 if left and right
-                    and vim.treesitter.get_node_text(left, src) == defname then
+                    and (not defname or vim.treesitter.get_node_text(left, src) == defname) then
                     local sr, _, er = right:range()
                     if sr == er then found = right end
                 end
@@ -372,6 +374,65 @@ function M.plan_hoist(store, fn_id, opts)
         dels = dels, ins = ins, moves = moves, declined = declined }
 end
 
+--- Build a PRE (partial-redundancy) plan: a pure computation in BOTH arms of an
+--- exhaustive if/else over pre-branch operands → bind it to a `local` above the branch
+--- and reuse in each arm. `opts.line` targets one branch. The SOUNDEST verb: an
+--- exhaustive if/else always takes one arm, so hoisting the common computation above it
+--- adds no work on any path (no zero-trip, no nilability) — optimize.pre already gated
+--- pure + both-arms + operands-fixed-before. Only `hedged` (an aliasing table read) is
+--- refused. @return table? plan @return string? why
+function M.plan_pre(store, fn_id, opts)
+    opts = opts or {}
+    local node = store.node and store.node(fn_id)
+    if not node or not node.file then return nil, 'no such node' end
+    local lang = lang_of(node.file)
+    if not lang then return nil, 'unsupported language' end
+    local pre = optimize.pre(store, fn_id)
+    if #pre.hoists == 0 then return nil, 'no partial-redundancy candidates' end
+    local flow = require 'cartograph.flow'
+    local fl = flow.present(node) and flow.record(node)
+    local bound = {}
+    for _, p in ipairs((fl and fl.params) or {}) do bound[p] = true end
+    for _, r in ipairs((fl and fl.stmts) or {}) do for _, d in ipairs(r.def or {}) do bound[d] = true end end
+    local src = table.concat(store.content(node) or {}, '\n')
+    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    if not ok then return nil, 'cannot parse' end
+    local root = parser:parse()[1]:root()
+    local srclines = vim.split(src, '\n', { plain = true })
+
+    local ins, reps, moves, declined = {}, {}, {}, {}
+    for _, h in ipairs(pre.hoists) do
+        if not opts.line or h.line == opts.line then
+            if h.hedged then
+                declined[#declined + 1] = { line = h.line, what = h.expr, class = 'risk',
+                    reason = 'hedged: an aliasing table read could change the value between the arms' }
+            else
+                -- the arm occurrences (single-target assignments; the RHS = the shared expr)
+                local rt = rhs_node(root, src, h.then_line, nil)
+                local re = rhs_node(root, src, h.else_line, nil)
+                if not (rt and re) then
+                    declined[#declined + 1] = { line = h.line, what = h.expr, class = 'blocked',
+                        reason = 'could not locate both arm occurrences' }
+                else
+                    local name = fresh_name('t', bound); bound[name] = true
+                    local indent = (srclines[h.line] or ''):match('^(%s*)') or ''
+                    ins[#ins + 1] = { after = h.line - 2, lines = { indent .. ('local %s = %s'):format(name, h.expr) } }
+                    for _, rn in ipairs({ rt, re }) do
+                        local sr, sc, er, ec = rn:range()
+                        reps[#reps + 1] = { at = { start = { line = sr, char = sc }, ['end'] = { line = er, char = ec } },
+                            to = name, old = (srclines[sr + 1] or ''):sub(sc + 1, ec) }
+                    end
+                    moves[#moves + 1] = { line = h.line, expr = h.expr, ['local'] = name,
+                        then_line = h.then_line, else_line = h.else_line }
+                end
+            end
+        end
+    end
+    return { verb = 'optimize-pre', touched = { node.file }, generation = store.generation,
+        stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
+        reps = reps, ins = ins, moves = moves, declined = declined }
+end
+
 -- the edit callback for txn (single file: apply this plan's token-replacements)
 local function edit_of(plan)
     return function (rel, before)
@@ -477,6 +538,7 @@ end
 function M.run(store, fn_id, opts) return run_plan(store, M.plan_cse(store, fn_id, opts)) end
 function M.run_localize(store, fn_id, opts) return run_plan(store, M.plan_localize(store, fn_id, opts)) end
 function M.run_hoist(store, fn_id, opts) return run_plan(store, M.plan_hoist(store, fn_id, opts)) end
+function M.run_pre(store, fn_id, opts) return run_plan(store, M.plan_pre(store, fn_id, opts)) end
 
 -- ── location entry (targeted refactoring: point at a spot, not an id) ─────────
 --- the INNERMOST function/method whose range encloses `file`:`line` (1-based), or nil.
@@ -524,6 +586,7 @@ function M.report(store, fn_id)
         { 'CSE-reuse', M.plan_cse(store, fn_id) },
         { 'localize-upvalue', M.plan_localize(store, fn_id) },
         { 'hoist (LICM)', M.plan_hoist(store, fn_id) },
+        { 'PRE', M.plan_pre(store, fn_id) },
     }
     for _, s in ipairs(sections) do
         local label, plan = s[1], s[2]
