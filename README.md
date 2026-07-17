@@ -1047,6 +1047,12 @@ nvim --headless -u NONE -l tools/gen.lua lua --check --runs 20
 nvim --headless -u NONE -l tools/gen.lua java --check --runs 10
 nvim --headless -u NONE -l tools/gen.lua js --check --runs 10
 nvim --headless -u NONE -l tools/gen.lua java --seed 7 --out /tmp/g  # just generate
+# SYNTHETIC ANALYSIS GROUND-TRUTH: the same truth-by-construction oracle, for the
+# analysis LENSES. Plants narrowing scenarios with a per-line answer key — including
+# NEGATIVES (guards that must NOT narrow) — then runs the lens and diffs. The
+# negatives are the point: a lens that fires where it must not is a false positive
+# caught mechanically, not by eyeballing self. Exit 1 on any false pos/neg.
+nvim --headless -u NONE -l tools/syngate.lua
 ```
 
 Three SYNTHETIC corpora are registered first-class in `tools/corpora.lua` —
