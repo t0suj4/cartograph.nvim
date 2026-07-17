@@ -325,17 +325,27 @@ function M.register()
         scratch(require('cartograph.untangle').report(store, id))
     end, { desc = 'cartograph: independent concerns of the focused fn over the data+control+effect PDG, with the safe-to-split verdict and why-not breakdown (the untangle lens)' })
 
-    -- ── untangle MODULE: the focused file's independent function clusters ─
-    cmd('CartographUntangleModule', function ()
+    -- ── untangle MODULE: independent function clusters in a file (or a dir) ─
+    cmd('CartographUntangleModule', function (o)
         local store = live() if not store then return end
+        local u = require 'cartograph.untangle'
+        local arg = o.args ~= '' and o.args or nil
+        if arg then -- a directory scope (god-package): cluster across its files
+            local files = u.files_under(store, arg)
+            if #files == 0 then
+                return vim.notify('cartograph: no files under ' .. arg, vim.log.levels.WARN)
+            end
+            return scratch(u.report_scope(store, files, arg))
+        end
         local id = store.focused
         local n = id and store.node(id)
         if not n or not n.file then
-            return vim.notify('cartograph: focus a node in the file first',
+            return vim.notify('cartograph: focus a node in the file first (or pass a dir)',
                 vim.log.levels.WARN)
         end
-        scratch(require('cartograph.untangle').report_module(store, n.file))
-    end, { desc = 'cartograph: independent function clusters in the focused file over call + shared-written-state edges — the god-file split signal (inter-function untangle)' })
+        scratch(u.report_module(store, n.file))
+    end, { nargs = '?', complete = 'dir',
+        desc = 'cartograph: independent function clusters in the focused file (or a directory arg = god-package scope) over call + shared-written-state edges — inter-function untangle' })
 
     -- ── the branch-value lens: what flows through each CFG branch ────
     cmd('CartographBranchValues', function ()

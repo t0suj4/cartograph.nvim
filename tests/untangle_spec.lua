@@ -378,6 +378,44 @@ local function ingest_file(lines)
     end
 end
 
+local function ingest_files(filemap)
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local rels = {}
+    for name, lines in pairs(filemap) do
+        local fd = assert(io.open(root .. '/' .. name, 'w'))
+        fd:write(table.concat(lines, '\n')); fd:close()
+        rels[#rels + 1] = name
+    end
+    store.ingest(ts.extract(root))
+    return rels
+end
+
+test('untangle_scope: clusters span a multi-file scope; independent files stay apart (INC 4)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest_files {
+        ['a.lua'] = { 'local function fa() return 1 end', 'return { fa }' },
+        ['b.lua'] = { 'local function fb() return 2 end', 'return { fb }' },
+    }
+    local res = untangle.analyze_scope(store, { 'a.lua', 'b.lua' })
+    eq(2, res.n)                        -- fa + fb, across two files
+    eq(2, res.ncomp)                    -- no cross-file coupling -> separate
+end)
+
+test('untangle_scope: the sharing-model seam decides whether shared state couples (INC 4)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local file = ingest_file {
+        'local sa = {}',
+        'local function a1() sa.x = 1 end',
+        'local function a2() return sa.x end',
+        'return { a1, a2 }',
+    }
+    -- default sharing model: written state couples a1 & a2
+    eq(1, untangle.analyze_module(store, file).ncomp)
+    -- a sharing model that shares NOTHING (e.g. a sandboxed ecosystem) -> uncoupled
+    eq(2, untangle.analyze_module(store, file, { shared = function () return false end }).ncomp)
+end)
+
 test('untangle_module: independent shared-state groups form separate clusters', function ()
     if not ready('lua') then skip 'no lua parser' end
     local file = ingest_file {

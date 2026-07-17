@@ -179,11 +179,25 @@ end
 -- handoff are INC 2/3. Scoped to ONE file (MVP): "module state" = the file's
 -- own vars, which sidesteps the shared-global blob (the sharing model, gated).
 
---- Cluster the functions defined in `file` into independent concerns.
---- @return table { n, fns:integer[] (source-ordered ids), comp, ncomp, sizes,
----   switches, tangle, names:table<id,string>, calledges:int, stateedges:int }
-function M.analyze_module(store, file)
-    local scope = (store.by_file and store.by_file[file]) or {}
+--- Cluster the functions across a SCOPE (a list of files) into independent
+--- concerns. INC 4: cross-file — CALL edges (store.uses spans files once resolved)
+--- + shared state span the whole scope, so a directory/package clusters as one.
+--- The SHARING MODEL is the `opts.shared(var, written)` seam: whether a touched
+--- module var actually couples. Default = written (mutable state couples;
+--- read-only consts don't). Per-ecosystem refinements plug in here — e.g. a
+--- factorio-runtime config would return false for cross-mod globals (sandboxed);
+--- WoW returns true for shared globals. Only the default is built (the gate).
+--- @return table { n, fns, comp, ncomp, sizes, switches, tangle, names,
+---   calledges, stateedges, hedged, certified, why }
+function M.analyze_scope(store, files, opts)
+    opts = opts or {}
+    local shared = opts.shared or function (_v, written) return written end
+    local scope = {}
+    for _, f in ipairs(files) do
+        for _, node in ipairs((store.by_file and store.by_file[f]) or {}) do
+            scope[#scope + 1] = node
+        end
+    end
     local fns, names = {}, {}
     for _, node in ipairs(scope) do
         if node.kind == 'function' or node.kind == 'method' then
@@ -220,7 +234,7 @@ function M.analyze_module(store, file)
                     if u.rw and u.rw >= 2 then written = true end
                     if idx[u.from] then touchers[idx[u.from]] = true end
                 end
-                if written then
+                if shared(v, written) then
                     local first
                     for k in pairs(touchers) do
                         if not first then first = k
@@ -280,7 +294,24 @@ function M.analyze_module(store, file)
         end
     end
     res.hedged, res.certified, res.why = hedged, certified, why
+    res.files = files
     return res
+end
+
+--- Single-file scope (the god-FILE view) — the common case.
+function M.analyze_module(store, file, opts)
+    return M.analyze_scope(store, { file }, opts)
+end
+
+--- files under a directory prefix (relpaths), for a god-DIRECTORY/package scope.
+function M.files_under(store, dir)
+    dir = dir:gsub('/*$', '') .. '/'
+    local out = {}
+    for f in pairs(store.by_file or {}) do
+        if f:sub(1, #dir) == dir then out[#out + 1] = f end
+    end
+    table.sort(out)
+    return out
 end
 
 --- is cluster `c` safe to extract as its own module? Sound: only when the whole
@@ -305,17 +336,19 @@ function M.extract_module(store, res, c, relpath)
     return require('cartograph.moveapply').plan_extract_ids(store, ids, relpath)
 end
 
---- Module report (the inter-untangle surface): the file's function clusters —
---- how many independent concerns are jammed into one file (the god-file signal).
-function M.report_module(store, file)
-    local res = M.analyze_module(store, file)
-    if res.n == 0 then return { ('untangle module: %s — no functions'):format(file) } end
-    local L = { ('untangle module: %s — %d functions, %d independent cluster(s)')
-        :format(file, res.n, res.ncomp) }
-    L[#L + 1] = ('%d intra-scope call edge(s), %d shared-written-state edge(s)')
+--- Scope report (the inter-untangle surface): the function clusters across a
+--- fileset — how many independent concerns are jammed into one file/directory
+--- (the god-file / god-package signal). `label` names the scope + seeds the
+--- synthesized extract destinations.
+function M.report_scope(store, files, label)
+    local res = M.analyze_scope(store, files)
+    if res.n == 0 then return { ('untangle: %s — no functions'):format(label) } end
+    local L = { ('untangle: %s — %d functions, %d independent cluster(s)')
+        :format(label, res.n, res.ncomp) }
+    L[#L + 1] = ('%d call edge(s), %d shared-written-state edge(s)')
         :format(res.calledges, res.stateedges)
     if res.ncomp > 1 then
-        L[#L + 1] = ('this file holds %d independent function groups — candidates to split apart')
+        L[#L + 1] = ('this scope holds %d independent function groups — candidates to split apart')
             :format(res.ncomp)
     end
     L[#L + 1] = ''
@@ -337,12 +370,11 @@ function M.report_module(store, file)
         -- INC 3 handoff: dry-run each cluster through moveapply.plan_extract_ids
         -- (a synthesized dest); show the move + hazard counts it would produce.
         if res.ncomp > 1 then
-            local dir = file:match('^(.*)/[^/]*$')
-            local base = file:match('([^/]+)%.%w+$') or 'module'
+            local base = label:gsub('%.%w+$', ''):gsub('/+$', '') -- strip ext / trailing slash
             L[#L + 1] = 'extract-as-module candidates:'
             for c = 0, res.ncomp - 1 do
                 local lt = string.char(65 + (c % 26))
-                local rel = (dir and dir .. '/' or '') .. base .. '_' .. lt:lower() .. '.lua'
+                local rel = base .. '_' .. lt:lower() .. '.lua'
                 local plan, err = M.extract_module(store, res, c, rel)
                 if plan then
                     L[#L + 1] = ('  %s → %s: %d move(s), %d hazard(s)'):format(
@@ -361,6 +393,11 @@ function M.report_module(store, file)
         end
     end
     return L
+end
+
+--- Single-file report (the god-FILE view) — the common :CartographUntangleModule.
+function M.report_module(store, file)
+    return M.report_scope(store, { file }, file)
 end
 
 --- THE extract.plan HANDOFF: turn concern `c` (a comp id from a res) into an
