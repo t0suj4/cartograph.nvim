@@ -1179,6 +1179,54 @@ local function gen_lua_paramnil(k, akey)
     return fname, src
 end
 
+-- CROSS-BLOCK CSE ground-truth (INC 3): a computation in a nested block whose value was
+-- already computed in a DOMINATING enclosing block reuses it (`reuses=<line>`); a
+-- computation in a SIBLING branch (neither dominates) must NOT (the false-positive net).
+-- Same `cse` lens/key as same-block.
+local function gen_lua_crosscse(k, akey)
+    local B, fname = {}, ('x%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(line, reuses) akey[#akey + 1] = { lens = 'cse', file = fname, line = line, reuses = reuses } end
+    w('local function xa(p, q, c)')
+    local la = w('  local a = p + q')
+    w('  if c then')
+    key(w('    local b = p + q'), la) -- + the outer `a` dominates the in-if recompute
+    w('    return a, b'); w('  end'); w('  return a'); w('end')
+    w('local function xb(p, q, c, d)')
+    w('  if c then'); w('    local e1 = p + q'); w('    return e1'); w('  end')
+    w('  if d then')
+    key(w('    local e2 = p + q'), false) -- − sibling branch: neither dominates → not redundant
+    w('    return e2'); w('  end'); w('end')
+    w('return { xa, xb }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
+-- PRE ground-truth (INC 3): a pure computation in BOTH arms of an exhaustive if/else over
+-- pre-branch operands is hoistable above the branch. Key {lens='pre', fn, want}. NEGATIVES:
+-- no-else (not exhaustive) / an operand reassigned inside an arm / different expressions.
+local function gen_lua_pre(k, akey)
+    local B, fname = {}, ('w%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(fn, want) akey[#akey + 1] = { lens = 'pre', file = fname, fn = fn, want = want } end
+    w('local function pa(p, q, c)') -- + both arms compute p+q over params → hoistable
+    w('  if c then'); w('    local a = p + q'); w('    return a + 1')
+    w('  else'); w('    local b = p + q'); w('    return b + 2'); w('  end'); w('end'); key('pa', true)
+    w('local function pb(p, q, c)') -- − no else (not exhaustive)
+    w('  if c then local a = p + q return a end'); w('  return 0'); w('end'); key('pb', false)
+    w('local function pc(p, q, c)') -- − operand q reassigned inside the then-arm (not pre-branch)
+    w('  if c then q = f() local a = p + q return a')
+    w('  else local b = p + q return b end'); w('end'); key('pc', false)
+    w('local function pd(p, q, c)') -- − different expressions in the arms
+    w('  if c then local a = p + q return a')
+    w('  else local b = p - q return b end'); w('end'); key('pd', false)
+    w('return { pa, pb, pc, pd }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
 --- ANALYSIS ground-truth corpus. Returns { files = {name→src}, order, key } where
 --- each key carries `lens` ('narrow'|'licm'|'cse') + the per-line expectation:
 --- narrow {var, fact='non-nil'|false}; licm {hoistable=bool}; cse {reuses=<line>|false}.
@@ -1197,6 +1245,8 @@ function M.analysis(lang, nfiles, seed)
     for i = 1, 4 do add(gen_lua_rung0(i, out.key)) end
     for i = 1, 4 do add(gen_lua_localize(i, out.key)) end
     for i = 1, 4 do add(gen_lua_paramnil(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_crosscse(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_pre(i, out.key)) end
     return out
 end
 

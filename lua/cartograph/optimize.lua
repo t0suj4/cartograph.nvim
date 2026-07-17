@@ -277,36 +277,148 @@ function M.cse(store, fn_id)
         end
         return true
     end
-    -- group candidate rows by (block, structural expression key)
-    local groups = {}
+    -- STRUCTURAL DOMINANCE (INC 3, cross-block CSE): r1 dominates r2 — every path that
+    -- reaches r2 first executes r1. flow FLATTENS a control head's arms to the SAME
+    -- parent (the head row) distinguished by `pol`, so "same parent" is NOT sequential:
+    -- a then-stmt and an else-stmt share the parent but are mutually exclusive. The
+    -- sound relation is on the ARM-PATH: the (control-head, arm-pol) chain from the root.
+    -- r1 dominates r2 iff r1 precedes r2 AND r1's arm-path is a PREFIX of r2's (r1 is in
+    -- an enclosing arm, or the same arm — never a divergent branch).
+    -- (Ignores goto-into-block, pathological; same_values adds the operand-stability net.)
+    local function armpath(r) -- root-first list of "head\1pol" for each control level r is in
+        local up = {}
+        local cur = r
+        while cur and cur ~= 0 do
+            local p = rows[cur].parent
+            if p and p ~= 0 then up[#up + 1] = p .. '\1' .. (rows[cur].pol or '') end
+            cur = p
+        end
+        local rev = {}
+        for i = #up, 1, -1 do rev[#rev + 1] = up[i] end
+        return rev
+    end
+    local function dominates(r1, r2)
+        if rows[r1].l >= rows[r2].l then return false end
+        local a1, a2 = armpath(r1), armpath(r2)
+        if #a1 > #a2 then return false end -- r1 nested deeper than r2 → cannot enclose it
+        for i = 1, #a1 do if a1[i] ~= a2[i] then return false end end -- prefix ⇒ same arms above
+        return true
+    end
+    -- group candidate rows by structural expression KEY across the WHOLE fn (cross-block)
+    local groups, order = {}, {}
     for r = 1, #rows do
         if not impure_line[rows[r].l] and not allocates(r) then
             local k = comp_key(r)
             if k then
-                local key = tostring(rows[r].parent) .. '\1' .. k
-                groups[key] = groups[key] or {}
-                groups[key][#groups[key] + 1] = { r = r, disp = disp_rhs(r) }
+                if not groups[k] then groups[k] = {}; order[#order + 1] = k end
+                groups[k][#groups[k] + 1] = { r = r, disp = disp_rhs(r) }
             end
         end
     end
     local redundant = {}
-    for _, grp in pairs(groups) do
+    for _, k in ipairs(order) do
+        local grp = groups[k]
         if #grp >= 2 then
             table.sort(grp, function (a, b)
                 if rows[a.r].l ~= rows[b.r].l then return rows[a.r].l < rows[b.r].l end
                 return a.r < b.r
             end)
-            local first = grp[1]
-            for i = 2, #grp do -- first (earliest) dominates each later occurrence
-                if same_values(first.r, grp[i].r) then
-                    redundant[#redundant + 1] = { first = first.r, second = grp[i].r,
-                        expr = first.disp, hedged = reads_content(first.r) or reads_content(grp[i].r) }
+            for i = 2, #grp do
+                -- the NEAREST earlier occurrence that DOMINATES this one with unchanged
+                -- operands is the reuse source (same-block precedence is the special case)
+                local src
+                for j = i - 1, 1, -1 do
+                    if dominates(grp[j].r, grp[i].r) and same_values(grp[j].r, grp[i].r) then
+                        src = grp[j].r; break
+                    end
+                end
+                if src then
+                    redundant[#redundant + 1] = { first = src, second = grp[i].r,
+                        expr = grp[i].disp, hedged = reads_content(src) or reads_content(grp[i].r),
+                        cross = rows[src].parent ~= rows[grp[i].r].parent }
                 end
             end
         end
     end
     table.sort(redundant, function (a, b) return rows[a.second].l < rows[b.second].l end)
     return { rows = rows, redundant = redundant }
+end
+
+--- PRE — PARTIAL-REDUNDANCY ELIMINATION (INC 3). A pure computation performed in BOTH
+--- arms of an exhaustive `if`/`else` (no elseif), over operands all defined BEFORE the
+--- branch, has the SAME value on every path — so it can be hoisted ABOVE the branch and
+--- computed once. Sound: present in every arm (hoisting adds no computation to a path
+--- that lacked it → no new work/errors), operands invariant across the branch (value is
+--- fixed before it). Same purity/allocation gates as CSE. Read-only suggestion.
+--- @return table { rows, hoists: { {head, line, key, expr, then_line, else_line, hedged} } }
+function M.pre(store, fn_id)
+    local ctx = context(store, fn_id)
+    if not ctx then return { rows = {}, hoists = {} } end
+    local rows, n, reach = ctx.rows, ctx.n, ctx.reach
+    local impure_line, allocates, reads_content = ctx.impure_line, ctx.allocates, ctx.reads_content
+    local COMPUTES = { bin = true, call = true, index = true, field = true }
+    -- the pol of the direct child of H on r's path (`body` = then, `else`, `elseif`), or nil
+    local function arm_of(r, H)
+        local cur = r
+        while cur and cur ~= 0 do
+            if rows[cur].parent == H then return rows[cur].pol end
+            cur = rows[cur].parent
+        end
+        return nil
+    end
+    -- are all of r's operands defined BEFORE the branch head H? (param, or a def row
+    -- lexically before H → the expression's value is fixed entering the branch)
+    local function operands_before(r, H)
+        for _, v in ipairs(rows[r].use or {}) do
+            for _, d in ipairs((reach[r] or {})[v] or {}) do
+                if d ~= 0 and rows[d] and rows[d].l >= rows[H].l then return false end
+            end
+        end
+        return true
+    end
+    local hoists = {}
+    for H = 1, n do
+        if rows[H].t == 'if_statement' then
+            -- arms present under H; PRE only for the clean two-arm if/else (no elseif)
+            local has_elseif, has_else = false, false
+            for r = 1, n do
+                if rows[r].parent == H then
+                    if rows[r].t == 'elseif_statement' or rows[r].kind == 'elseif_statement' then has_elseif = true end
+                    if rows[r].pol == 'else' then has_else = true end
+                end
+            end
+            if has_else and not has_elseif then
+                local inthen, inelse, disp = {}, {}, {}
+                for r = 1, n do
+                    if not impure_line[rows[r].l] and not allocates(r)
+                        and #(rows[r].def or {}) == 1 then
+                        local e = rows[r].expr and rows[r].expr.rhs and rows[r].expr.rhs[1]
+                        if e and COMPUTES[e.k] then
+                            local arm = arm_of(r, H)
+                            if (arm == 'body' or arm == 'else') and operands_before(r, H) then
+                                local k = expr.key(e)
+                                local slot = arm == 'body' and inthen or inelse
+                                if not slot[k] then slot[k] = r; disp[k] = disp[k] or r end
+                            end
+                        end
+                    end
+                end
+                for k, tr in pairs(inthen) do
+                    -- same key + operands_before on BOTH arms ⇒ both read the SAME pre-branch
+                    -- values (no in-arm redefinition reaches) ⇒ identical value on every path
+                    local er = inelse[k]
+                    if er then
+                        hoists[#hoists + 1] = { head = H, line = rows[H].l, key = k,
+                            expr = ctx.stmt_text(tr):match('=%s*(.-)%s*$') or ctx.stmt_text(tr),
+                            then_line = rows[tr].l, else_line = rows[er].l,
+                            hedged = reads_content(tr) or reads_content(er) }
+                    end
+                end
+            end
+        end
+    end
+    table.sort(hoists, function (a, b) return a.line < b.line end)
+    return { rows = rows, hoists = hoists }
 end
 
 --- LOCALIZE-UPVALUE (Rung 1, [[cartograph-expression-layer]]): a GLOBAL/module function
@@ -477,11 +589,26 @@ function M.report(store, fn_id)
         L[#L + 1] = ''
         L[#L + 1] = ('redundant computations (CSE) — %d:'):format(#cse.redundant)
         for _, p in ipairs(cse.redundant) do
-            L[#L + 1] = ('  %s L%-4d recomputes L%-4d: %s'):format(
-                p.hedged and '~' or ' ', rows[p.second].l, rows[p.first].l, p.expr)
+            L[#L + 1] = ('  %s L%-4d recomputes L%-4d: %s%s'):format(
+                p.hedged and '~' or ' ', rows[p.second].l, rows[p.first].l, p.expr,
+                p.cross and '  (cross-block: earlier dominates)' or '')
         end
         L[#L + 1] = '(the later can reuse the earlier result; ~ = a table read whose'
         L[#L + 1] = ' value an aliasing write between the two could change — unverified)'
+    end
+
+    -- PRE: a pure computation in BOTH arms of an if/else over pre-branch operands —
+    -- hoist it above the branch (computed once, same value on every path).
+    local pre = M.pre(store, fn_id)
+    if #pre.hoists > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('partial redundancy (PRE) — %d hoistable above a branch:'):format(#pre.hoists)
+        for _, h in ipairs(pre.hoists) do
+            L[#L + 1] = ('  %s L%-4d+L%-4d → lift above the if @L%d: %s'):format(
+                h.hedged and '~' or ' ', h.then_line, h.else_line, h.line, h.expr)
+        end
+        L[#L + 1] = '(computed in both arms over operands fixed before the branch → compute'
+        L[#L + 1] = ' once above it; sound only for an exhaustive if/else, pure & non-allocating)'
     end
 
     -- LOCALIZE-UPVALUE: global/module functions looked up inside a loop — bind them to

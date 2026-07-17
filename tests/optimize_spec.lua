@@ -476,3 +476,72 @@ test('optimize: localize-upvalue suggests globals-in-loops, never locals', funct
     ok(by['m.fn'] == nil and by['m.step'] == nil, 'a local-rooted callee is not localized')
     eq(0, #optimize.localize(store, fn_id('cold')).loops)
 end)
+
+-- ── INC 3: cross-block CSE + PRE ──────────────────────────────────────────────
+test('optimize: cross-block CSE — an enclosing computation dominates a nested recompute', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(p, q, c)',
+        '  local a = p + q',       -- L2
+        '  if c then',
+        '    local b = p + q',     -- L4 reuses a (outer dominates the if body)
+        '    return a, b',
+        '  end',
+        '  return a',
+        'end', 'return { f }',
+    }
+    local r = redundant('f')
+    ok(r[4], 'the nested recompute is redundant')
+    eq(2, r[4].first)  -- reuses the L2 computation
+end)
+
+test('optimize: cross-block CSE does NOT fire across sibling branches (no dominance)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(p, q, c, d)',
+        '  if c then local a = p + q return a end',   -- L2
+        '  if d then local b = p + q return b end',   -- L3 — sibling, neither dominates
+        'end', 'return { f }',
+    }
+    eq(0, #optimize.cse(store, fn_id('f')).redundant)
+end)
+
+test('optimize: PRE hoists a computation done in both arms of an if/else', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(p, q, c)',
+        '  if c then',
+        '    local a = p + q',
+        '    return a + 1',
+        '  else',
+        '    local b = p + q',
+        '    return b + 2',
+        '  end',
+        'end', 'return { f }',
+    }
+    local pre = optimize.pre(store, fn_id('f'))
+    eq(1, #pre.hoists)
+    eq(2, pre.hoists[1].line) -- the if head is on L2 → hoist above it
+end)
+
+test('optimize: PRE declines no-else, operand-in-arm, and different-expr branches', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function noelse(p, q, c)',
+        '  if c then local a = p + q return a end',
+        '  return 0',
+        'end',
+        'local function inarm(p, q, c)',
+        '  if c then q = h() local a = p + q return a',
+        '  else local b = p + q return b end',
+        'end',
+        'local function diff(p, q, c)',
+        '  if c then local a = p + q return a',
+        '  else local b = p - q return b end',
+        'end',
+        'return { noelse, inarm, diff }',
+    }
+    eq(0, #optimize.pre(store, fn_id('noelse')).hoists)
+    eq(0, #optimize.pre(store, fn_id('inarm')).hoists)
+    eq(0, #optimize.pre(store, fn_id('diff')).hoists)
+end)
