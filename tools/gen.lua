@@ -910,7 +910,7 @@ local function gen_lua_narrow(k, akey)
     local B, fname = {}, ('n%d.lua'):format(k)
     local function w(line) B[#B + 1] = line; return #B end
     local function key(var, fact, line)
-        akey[#akey + 1] = { file = fname, line = line, var = var, fact = fact }
+        akey[#akey + 1] = { lens = 'narrow', file = fname, line = line, var = var, fact = fact }
     end
     local scen = {
         function (nm, a) -- + truthiness
@@ -958,18 +958,85 @@ local function gen_lua_narrow(k, akey)
     return fname, src
 end
 
---- ANALYSIS ground-truth corpus (INC 1: Lua narrowing). Returns
---- { files = {name→src}, order, key = { {file, line, var, fact} } } where
---- fact='non-nil' (must narrow) or false (must NOT). tools/syngate.lua runs the
---- narrow lens over it and diffs. Deterministic per (lang, nfiles, seed).
+-- LICM ground-truth (syn-analysis INC 2): each fn = a loop with a MARKED row;
+-- key {hoistable=true} (a clean `*` hoist) or false (must NOT be — the
+-- false-positive classes: loop var / accumulator / allocation / allocating call /
+-- table-index read). One instance of every scenario per file (seeded base name).
+local function gen_lua_licm(k, akey)
+    local B, fname = {}, ('l%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(line, hoistable)
+        akey[#akey + 1] = { lens = 'licm', file = fname, line = line, hoistable = hoistable }
+    end
+    local base = pick(NAMES)
+    w(('local function la(xs, %s)'):format(base)); w('  for _, x in ipairs(xs) do')
+    key(w(('    local ka = %s + 1'):format(base)), true) -- + pure pre-loop scalar
+    w('    use(ka, x)'); w('  end'); w('end')
+    w(('local function lb(xs, %s)'):format(base)); w('  for _, x in ipairs(xs) do')
+    key(w(('    local sb = string.format("d", %s)'):format(base)), true) -- + pure module call
+    w('    use(sb, x)'); w('  end'); w('end')
+    w('local function lc(xs)'); w('  for _, x in ipairs(xs) do')
+    key(w('    local yc = x + 1'), false) -- − loop var
+    w('    use(yc)'); w('  end'); w('end')
+    w('local function ld(xs)'); w('  local td = 0'); w('  for _, x in ipairs(xs) do')
+    key(w('    td = td + x'), false) -- − accumulator (rmw + reassignment)
+    w('  end'); w('  return td'); w('end')
+    w('local function le(xs)'); w('  for _, x in ipairs(xs) do')
+    key(w('    local ae = {}'), false) -- − allocation (fresh identity)
+    w('    ae[1] = x'); w('  end'); w('end')
+    w(('local function lf(xs, %s)'):format(base)); w('  for _, x in ipairs(xs) do')
+    key(w(('    local cf = vim.deepcopy(%s)'):format(base)), false) -- − allocating call
+    w('    use(cf, x)'); w('  end'); w('end')
+    w('local function lg(xs, tg)'); w('  for _, x in ipairs(xs) do')
+    key(w('    local vg = tg[1]'), false) -- − table-index read (invariant~ not clean *)
+    w('    use(vg, x)'); w('  end'); w('end')
+    w('return { la, lb, lc, ld, le, lf, lg }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
+-- CSE ground-truth (syn-analysis INC 2): key {reuses=<first line>} (a redundant
+-- pair) or false (must NOT — operand redefined between / allocating call /
+-- different expression).
+local function gen_lua_cse(k, akey)
+    local B, fname = {}, ('c%d.lua'):format(k)
+    local function w(s) B[#B + 1] = s; return #B end
+    local function key(line, reuses)
+        akey[#akey + 1] = { lens = 'cse', file = fname, line = line, reuses = reuses }
+    end
+    w('local function ca(x, y)')
+    local l1 = w('  local aa = x + y')
+    key(w('  local ba = x + y'), l1) -- + redundant pair
+    w('  return aa, ba'); w('end')
+    w('local function cb(x, y)'); w('  local ab = x + y'); w('  x = 99')
+    key(w('  local bb = x + y'), false) -- − operand redefined between
+    w('  return ab, bb'); w('end')
+    w('local function cc(base)'); w('  local ac = vim.deepcopy(base)')
+    key(w('  local bc = vim.deepcopy(base)'), false) -- − allocating call
+    w('  return ac, bc'); w('end')
+    w('local function cd(x, y)'); w('  local ad = x + y')
+    key(w('  local bd = x - y'), false) -- − different expression
+    w('  return ad, bd'); w('end')
+    w('return { ca, cb, cc, cd }')
+    local src = table.concat(B, '\n') .. '\n'
+    assert_valid(src, 'lua', fname)
+    return fname, src
+end
+
+--- ANALYSIS ground-truth corpus. Returns { files = {name→src}, order, key } where
+--- each key carries `lens` ('narrow'|'licm'|'cse') + the per-line expectation:
+--- narrow {var, fact='non-nil'|false}; licm {hoistable=bool}; cse {reuses=<line>|false}.
+--- NEGATIVES (fact/hoistable false, reuses false) are the false-positive net.
+--- tools/syngate.lua runs the lenses and diffs. Deterministic per (lang, nfiles, seed).
 function M.analysis(lang, nfiles, seed)
-    assert(lang == 'lua', 'gen.analysis: INC 1 is lua-only')
+    assert(lang == 'lua', 'gen.analysis: INC 1-2 are lua-only')
     srand(seed or 1)
     local out = { files = {}, order = {}, key = {} }
-    for k = 1, (nfiles or 12) do
-        local fname, src = gen_lua_narrow(k, out.key)
-        out.files[fname] = src; out.order[#out.order + 1] = fname
-    end
+    local function add(fname, src) out.files[fname] = src; out.order[#out.order + 1] = fname end
+    for i = 1, (nfiles or 12) do add(gen_lua_narrow(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_licm(i, out.key)) end
+    for i = 1, 4 do add(gen_lua_cse(i, out.key)) end
     return out
 end
 

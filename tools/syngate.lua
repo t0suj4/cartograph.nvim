@@ -16,10 +16,9 @@ local gen = dofile(repo .. '/tools/gen.lua')
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 local narrow = require 'cartograph.narrow'
+local optimize = require 'cartograph.optimize'
 
 local SEED, NFILES = 1, 12
-
--- ── narrowing (INC 1) ────────────────────────────────────────────────────────
 local a = gen.analysis('lua', NFILES, SEED)
 local dir = vim.fn.tempname()
 vim.fn.mkdir(dir, 'p')
@@ -28,39 +27,68 @@ for name, src in pairs(a.files) do
 end
 store.ingest(ts.extract(dir))
 
--- env per (file, line) across every fn (each line belongs to one fn)
-local env_at = {}
+-- collect each lens's per-(file,line) facts in one pass (a line belongs to one fn)
+local narrowenv, hoist, reuse = {}, {}, {}
+local function K(f, l) return (f or '') .. '\31' .. l end
 for _, n in ipairs(store.data.nodes) do
     if n.kind == 'function' then
-        local ok, res = pcall(narrow.narrow, store, n.id)
-        if ok then
-            for _, p in ipairs(res.points) do
-                env_at[(n.file or '') .. '\31' .. p.line] = p.env
-            end
-        end
+        local f = n.file or ''
+        local okn, nr = pcall(narrow.narrow, store, n.id)
+        if okn then for _, p in ipairs(nr.points) do narrowenv[K(f, p.line)] = p.env end end
+        local okl, lr = pcall(optimize.licm, store, n.id)
+        if okl then for _, h in ipairs(lr.heads) do
+            for r in pairs(lr.loops[h].hoistable) do hoist[K(f, lr.rows[r].l)] = true end
+        end end
+        local okc, cr = pcall(optimize.cse, store, n.id)
+        if okc then for _, p in ipairs(cr.redundant) do
+            reuse[K(f, cr.rows[p.second].l)] = cr.rows[p.first].l
+        end end
     end
 end
 
-local pass, fpos, fneg = 0, {}, {}
+-- diff per lens: `pass` counts, `fp`/`fn` collect (false-positive = the lens fired
+-- where the negative key says it must NOT — the whole point of the negatives).
+local census = {} -- lens -> {pass, fp={}, fn={}}
+local function rec(lens) census[lens] = census[lens] or { pass = 0, fp = {}, fn = {} }; return census[lens] end
 for _, e in ipairs(a.key) do
-    local got = (env_at[e.file .. '\31' .. e.line] or {})[e.var]
-    if e.fact == false then -- must NOT narrow
-        if got ~= nil then
-            fpos[#fpos + 1] = ('%s:%d  `%s` FALSE-POSITIVE narrowed to %s (must stay unknown)')
-                :format(e.file, e.line, e.var, got)
-        else pass = pass + 1 end
-    else -- must narrow to e.fact
-        if got == e.fact then pass = pass + 1
+    local c = rec(e.lens)
+    if e.lens == 'narrow' then
+        local got = (narrowenv[K(e.file, e.line)] or {})[e.var]
+        if e.fact == false then
+            if got ~= nil then c.fp[#c.fp + 1] = ('%s:%d `%s` narrowed to %s (must stay unknown)'):format(e.file, e.line, e.var, got)
+            else c.pass = c.pass + 1 end
+        elseif got == e.fact then c.pass = c.pass + 1
+        else c.fn[#c.fn + 1] = ('%s:%d `%s` expected %s, got %s'):format(e.file, e.line, e.var, e.fact, tostring(got)) end
+    elseif e.lens == 'licm' then
+        local got = hoist[K(e.file, e.line)] or false
+        if e.hoistable then
+            if got then c.pass = c.pass + 1
+            else c.fn[#c.fn + 1] = ('%s:%d expected hoistable, was not'):format(e.file, e.line) end
         else
-            fneg[#fneg + 1] = ('%s:%d  `%s` expected %s, got %s')
-                :format(e.file, e.line, e.var, e.fact, tostring(got))
+            if got then c.fp[#c.fp + 1] = ('%s:%d FALSE-POSITIVE hoistable (must not be)'):format(e.file, e.line)
+            else c.pass = c.pass + 1 end
+        end
+    elseif e.lens == 'cse' then
+        local got = reuse[K(e.file, e.line)]
+        if e.reuses then
+            if got == e.reuses then c.pass = c.pass + 1
+            else c.fn[#c.fn + 1] = ('%s:%d expected reuse of L%s, got %s'):format(e.file, e.line, e.reuses, tostring(got)) end
+        else
+            if got then c.fp[#c.fp + 1] = ('%s:%d FALSE-POSITIVE redundant (must not be)'):format(e.file, e.line)
+            else c.pass = c.pass + 1 end
         end
     end
 end
 
-print(('syngate narrow: %d key facts — %d ok, %d false-pos, %d false-neg')
-    :format(#a.key, pass, #fpos, #fneg))
-for _, m in ipairs(fpos) do print('  FP ' .. m) end
-for _, m in ipairs(fneg) do print('  FN ' .. m) end
-if #fpos > 0 or #fneg > 0 then print('SYNGATE: FAIL'); os.exit(1) end
+local failed = false
+for _, lens in ipairs({ 'narrow', 'licm', 'cse' }) do
+    local c = census[lens]
+    if c then
+        print(('syngate %-7s %d ok, %d false-pos, %d false-neg')
+            :format(lens .. ':', c.pass, #c.fp, #c.fn))
+        for _, m in ipairs(c.fp) do print('  FP ' .. m); failed = true end
+        for _, m in ipairs(c.fn) do print('  FN ' .. m); failed = true end
+    end
+end
+if failed then print('SYNGATE: FAIL'); os.exit(1) end
 print('SYNGATE: PASS')
