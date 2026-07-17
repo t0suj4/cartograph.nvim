@@ -335,6 +335,57 @@ test('flow: reaching_cfg — a loop back-edge reaches the pre-loop AND loop def'
     ok(from and from[loopdef], 'the loop def x@5 reaches the use via the back-edge (later iterations)')
 end)
 
+test('flow: reaching_cfg — a block-local reassigned in a nested loop reaches a later in-block use', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- flow-precision-gaps #2: `pos` is block-scoped (the do-block); the reassign
+    -- `pos = f()` is function-scoped (assignments don't open a scope), so the
+    -- nearest-scope preference used to drop it as "outer" — losing a real reaching
+    -- def past the inner loop. Both the pre-loop decl AND the in-loop reassign must
+    -- reach use(pos).
+    local fn, src = parse_fn(table.concat({
+        'local function f()',
+        '  do',
+        '    local pos = 1',      -- 3: block-scoped decl
+        '    while cond() do',
+        '      pos = f2()',        -- 5: reassignment inside the inner loop
+        '    end',
+        '    use(pos)',           -- 7: reaches BOTH pos@3 and pos@5
+        '  end',
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.lua.regime })
+    local rc = flow.reaching_cfg(fl)
+    local decl, reassign, usep = row(fl, 'stmt', 3), row(fl, 'stmt', 5), row(fl, 'stmt', 7)
+    local from
+    for _, e in ipairs(rc) do if e.var == 'pos' and e.at == usep then from = setof(e.from) end end
+    ok(from and from[decl], 'the pre-loop block-local decl pos@3 reaches use(pos)')
+    ok(from and from[reassign], 'the in-loop reassignment pos@5 reaches use(pos) (was dropped)')
+end)
+
+test('flow: reaching_cfg — a genuine inner shadow is NOT resurrected by the reassign fix', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- the control for the fix above: a real inner `local x` is a NEW binding that
+    -- dies at block exit; the fix (which keeps a reassignment nested in the binding)
+    -- must NOT keep this shadow. After the inner block, use(x) sees the OUTER x only.
+    local fn, src = parse_fn(table.concat({
+        'local function f()',
+        '  local x = 1',          -- 2: outer decl
+        '  do',
+        '    local x = 2',         -- 4: inner shadow (a distinct binding)
+        '    keep(x)',
+        '  end',
+        '  use(x)',               -- 7: sees x@2 only, NOT the dead shadow x@4
+        'end',
+    }, '\n'), 'lua')
+    local fl = flow.build(fn, src, { pfield = 'parameters', regime = tsspec.lua.regime })
+    local rc = flow.reaching_cfg(fl)
+    local outer, shadow, usex = row(fl, 'stmt', 2), row(fl, 'stmt', 4), row(fl, 'stmt', 7)
+    local from
+    for _, e in ipairs(rc) do if e.var == 'x' and e.at == usex then from = setof(e.from) end end
+    ok(from and from[outer], 'the outer x@2 reaches the post-block use')
+    ok(from and not from[shadow], 'the dead inner shadow x@4 is NOT resurrected')
+end)
+
 test('flow: reaching_cfg INC B — a block-scoped def dies at block exit', function ()
     if not ready('lua') then skip 'no lua parser' end
     local fn, src = parse_fn(table.concat({

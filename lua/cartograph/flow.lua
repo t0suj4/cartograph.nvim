@@ -927,7 +927,7 @@ function M.reaching_cfg(flow)
                 -- reaching defs, keep only those in the INNERMOST scope — a
                 -- shadowing inner masks the enclosing def AT THE USE, while the
                 -- enclosing def, never killed, is what reaches uses AFTER the block.
-                local best = math.huge
+                local best, bestregions = math.huge, {}
                 for r in pairs(reaching) do
                     if visible(r, u) then
                         local dr = depth[scope_of(r)] or math.huge
@@ -936,6 +936,31 @@ function M.reaching_cfg(flow)
                 end
                 for r in pairs(reaching) do
                     if visible(r, u) and (depth[scope_of(r)] or math.huge) == best then
+                        bestregions[scope_of(r)] = true
+                    end
+                end
+                -- A plain ASSIGNMENT does NOT open a scope — it writes the binding
+                -- visible at its position — but flow scopes it to FUNCTION scope
+                -- (region 0), so a reassignment of a BLOCK-local looks "outer" (a
+                -- deeper `depth`) than the local's declaration and the depth filter
+                -- wrongly drops it (missing a real reaching def past an inner loop —
+                -- [[flow-precision-gaps]] #2). So ALSO keep a non-declaration def
+                -- whose LEXICAL position is nested inside a best-depth binding's
+                -- region: it reassigns that same binding. (A genuine shadow — a new
+                -- inner `local` — is regime 'block' and excluded here, so it is not
+                -- resurrected; a same-name def OUTSIDE the inner region isn't nested,
+                -- so it stays dropped.)
+                local function same_binding(r)
+                    if r == 0 then return false end               -- param sentinel (S[0] is nil)
+                    if S[r].regime == 'block' then return false end -- a declaration, not a reassign
+                    for R0 in pairs(bestregions) do
+                        if R0 ~= 0 and subscope(S[r].parent, R0) then return true end
+                    end
+                    return false
+                end
+                for r in pairs(reaching) do
+                    if visible(r, u)
+                        and ((depth[scope_of(r)] or math.huge) == best or same_binding(r)) then
                         from[#from + 1] = r
                         if not (ex and ex[r]) then hset = hset or {}; hset[r] = true end -- ~ (no exact path)
                     end
