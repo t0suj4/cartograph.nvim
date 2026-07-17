@@ -361,6 +361,18 @@ function M.register()
         scratch(require('cartograph.exprlint').report(store, id))
     end, { desc = 'cartograph: Rung-0 expression lints of the focused fn — self-compare / duplicated-operand / bool-comparison / self-assignment / pseudo-ternary / constant-condition / string-concat-in-loop / duplicated-condition, over the per-row expression IR (the expression layer)' })
 
+    -- ── optimize-apply: dry-run the CSE-reuse rewrite of the focused fn ───
+    cmd('CartographOptimizeApply', function ()
+        local store = live() if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first',
+                vim.log.levels.WARN)
+        end
+        scratch(require('cartograph.optapply').report(store, id))
+    end, { desc = 'cartograph: DRY-RUN the CSE-reuse rewrite of the focused fn (optapply) — the diff an apply would write, txn-journaled + CAS/span/parse-verified; the headless apply verb is optapply.run/apply' })
+
     -- ── narrow: branch-sensitive nil/type narrowing of the focused fn ─────
     cmd('CartographNarrow', function ()
         local store = live() if not store then return end
