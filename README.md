@@ -857,7 +857,12 @@ opaque statements (unresolved calls, aliasing) whose hidden effects could couple
 concerns across a boundary. Resolve a blocker → re-run → it certifies. Built on
 `flow.reaching_cfg`, `cfg.guards_over`, and the reorder effect model; the PDG's
 WAW edges ride `reaching_cfg`'s scope-regime reaching, so reused block-locals
-don't falsely couple. A certified concern is a ready-made extraction selection.
+don't falsely couple. When a function has more than one concern, the report ends
+with **extract candidates**: each contiguous certified concern is handed to
+`extract.plan`, which independently validates the mechanics (live-in→params,
+live-out→returns, refusing on control-escape or ambiguous returns) — so untangle
+picks the boundary and extract.plan checks it. A scattered concern is refused
+until a reorder gathers it.
 
 ## Offline: history archaeology
 
