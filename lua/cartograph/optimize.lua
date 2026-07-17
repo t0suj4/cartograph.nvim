@@ -17,6 +17,63 @@ local LOOPISH = { for_statement = true, for_in_statement = true,
     while_statement = true, repeat_statement = true, loop_statement = true,
     loop_expression = true, foreach_statement = true }
 
+-- Shared per-fn context for the optimize analyses: the flow rows + reaching, a
+-- per-line purity/callee map, and the SOURCE-SPAN gates (allocation / content-read)
+-- that keep both LICM and CSE sound where du's def/use can't see index/length reads
+-- or allocations. Returns nil when the fn has no fine flow.
+local function context(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not node then return nil end
+    local fl = flow.present(node) and flow.record(node)
+    if not fl or not fl.stmts or #fl.stmts == 0 then return nil end
+    local rows, n = fl.stmts, #fl.stmts
+    local function within(L, r) -- is r a proper descendant of L?
+        local p = rows[r].parent
+        while p and p ~= 0 do if p == L then return true end; p = rows[p].parent end
+        return false
+    end
+    local heads = {}
+    for i = 1, n do if LOOPISH[rows[i].t or ''] then heads[#heads + 1] = i end end
+    -- per-LINE impurity (a call with effects/hedges) + pure-callee names per line
+    local impure_line, callee_line = {}, {}
+    for _, c in ipairs((store.calls_by_fn and store.calls_by_fn[fn_id]) or {}) do
+        local ln = (c.line or 0) + 1
+        local ce = effects.call_effects(store, c, node.file)
+        local pure = (next(ce.w) == nil) and not ce.hedges
+        if not pure then impure_line[ln] = true end
+        if c.callee then callee_line[ln] = callee_line[ln] or {}; callee_line[ln][c.callee] = pure end
+    end
+    -- reaching: reach[at][var] = { def rows } (0 = param/outside)
+    local reach = {}
+    for _, e in ipairs(flow.reaching_cfg(fl)) do
+        reach[e.at] = reach[e.at] or {}; reach[e.at][e.var] = e.from
+    end
+    local lines = (store.content and store.content(node)) or {}
+    local fn_end = node.range and require('cartograph.at').el(node.range) or #lines
+    local function span_text(r) -- the row's source, through to the next statement line
+        local rl, e = rows[r].l, fn_end
+        for _, s in ipairs(rows) do if s.l > rl and s.l - 1 < e then e = s.l - 1 end end
+        local parts = {}
+        for ln = rl, e do parts[#parts + 1] = lines[ln] or '' end
+        return table.concat(parts, '\n')
+    end
+    -- ALLOCATION: `{…}` / closure = fresh identity each time → never a safe hoist/reuse
+    local function allocates(r)
+        local t = span_text(r)
+        return t:find('{') ~= nil or t:find('%f[%a]function%f[%A]') ~= nil
+    end
+    -- CONTENT-READ: index/field/length read → contents a mutation can change (du can't
+    -- see it). HEDGES. Conservative (over-hedges a float/comment/module-call `.`); sound.
+    local function reads_table(r)
+        local t = span_text(r)
+        return t:find('[%[%]#]') ~= nil or t:find('[%w_]%s*[%.:]%s*[%a_]') ~= nil
+    end
+    return { node = node, rows = rows, n = n, within = within, heads = heads,
+        impure_line = impure_line, callee_line = callee_line, reach = reach,
+        lines = lines, fn_end = fn_end,
+        span_text = span_text, allocates = allocates, reads_table = reads_table }
+end
+
 --- LICM analysis of the focused fn. For each loop, the rows whose value is
 --- invariant across iterations (pure + every input defined OUTSIDE the loop or
 --- itself invariant + a single def in the loop). Returns per-loop results; a row
@@ -27,75 +84,11 @@ local LOOPISH = { for_statement = true, for_in_statement = true,
 --- @return table { rows, heads:integer[], loops: { [head]: { head, line, kind,
 ---   members:set, invariant:set, hoistable:set, inputs: {[row]:string[]} } } }
 function M.licm(store, fn_id)
-    local node = store.node and store.node(fn_id)
-    if not node then return { rows = {}, heads = {}, loops = {} } end
-    local fl = flow.present(node) and flow.record(node)
-    if not fl or not fl.stmts or #fl.stmts == 0 then return { rows = {}, heads = {}, loops = {} } end
-    local rows, n = fl.stmts, #fl.stmts
-
-    local kids = {}
-    for i = 1, n do
-        local p = rows[i].parent
-        if p and p ~= 0 then kids[p] = kids[p] or {}; kids[p][#kids[p] + 1] = i end
-    end
-    -- is row r inside loop head L's body (a proper descendant of L)?
-    local function within(L, r)
-        local p = rows[r].parent
-        while p and p ~= 0 do if p == L then return true end; p = rows[p].parent end
-        return false
-    end
-    local heads = {}
-    for i = 1, n do if LOOPISH[rows[i].t or ''] then heads[#heads + 1] = i end end
-
-    -- per-LINE impurity: a call whose effects are non-empty or hedged makes its
-    -- line impure (side-effectful → not safe to move). Also the PURE callee names
-    -- per line (skipped as invariance inputs — a pure fn value doesn't vary).
-    local impure_line, callee_line = {}, {}
-    for _, c in ipairs((store.calls_by_fn and store.calls_by_fn[fn_id]) or {}) do
-        local ln = (c.line or 0) + 1
-        local ce = effects.call_effects(store, c, node.file)
-        local pure = (next(ce.w) == nil) and not ce.hedges
-        if not pure then impure_line[ln] = true end
-        if c.callee then callee_line[ln] = callee_line[ln] or {}; callee_line[ln][c.callee] = pure end
-    end
-
-    -- reaching: reach[at][var] = { def rows } (0 = param/outside)
-    local reach = {}
-    for _, e in ipairs(flow.reaching_cfg(fl)) do
-        reach[e.at] = reach[e.at] or {}; reach[e.at][e.var] = e.from
-    end
-
-    -- CONTENT-READ gate (soundness): a row that INDEXES / FIELDS / LENGTH-reads a
-    -- table reads the table's CONTENTS, which an in-loop mutation can change even
-    -- when the table VARIABLE binding is invariant (e.g. `fr = frames[#frames]`
-    -- where the loop pushes/pops frames). du's use list can't see index/length
-    -- reads (no name), so detect them from the row's SOURCE SPAN and HEDGE — a
-    -- clean hoist requires a scalar/pure computation. Conservative (over-hedges a
-    -- float/comment/module-call `.`); sound = never a false clean hoist.
-    local lines = (store.content and store.content(node)) or {}
-    local fn_end = node.range and require('cartograph.at').el(node.range) or #lines
-    local function span_text(r) -- the row's source, through to the next statement line
-        local rl, e = rows[r].l, fn_end
-        for _, s in ipairs(rows) do if s.l > rl and s.l - 1 < e then e = s.l - 1 end end
-        local parts = {}
-        for ln = rl, e do parts[#parts + 1] = lines[ln] or '' end
-        return table.concat(parts, '\n')
-    end
-    -- ALLOCATION: a table constructor `{…}` or a closure `function` produces a FRESH
-    -- object each iteration — loop-independent as an EXPRESSION but NOT hoistable
-    -- (hoisting shares one object across iterations, changing identity semantics).
-    -- Excluded from invariance entirely (not even ~ — it's not a hoist candidate).
-    local function allocates(r)
-        local t = span_text(r)
-        return t:find('{') ~= nil or t:find('%f[%a]function%f[%A]') ~= nil
-    end
-    -- CONTENT-READ: indexes / fields / length-reads a table → reads contents an
-    -- in-loop mutation can change (du can't see index/length reads). HEDGES a clean
-    -- hoist. Conservative (over-hedges a float/comment/module-call `.`); sound.
-    local function reads_table(r)
-        local t = span_text(r)
-        return t:find('[%[%]#]') ~= nil or t:find('[%w_]%s*[%.:]%s*[%a_]') ~= nil
-    end
+    local ctx = context(store, fn_id)
+    if not ctx then return { rows = {}, heads = {}, loops = {} } end
+    local rows, n, within, heads = ctx.rows, ctx.n, ctx.within, ctx.heads
+    local impure_line, callee_line, reach = ctx.impure_line, ctx.callee_line, ctx.reach
+    local allocates, reads_table, lines = ctx.allocates, ctx.reads_table, ctx.lines
 
     local loops = {}
     for _, L in ipairs(heads) do
@@ -188,6 +181,102 @@ function M.licm(store, fn_id)
     return { rows = rows, heads = heads, loops = loops }
 end
 
+--- CSE INC 1: redundant-computation pairs. Two rows in the SAME block computing the
+--- SAME expression (identical normalized RHS text) over the SAME operand reaching-
+--- defs, where the earlier lexically precedes (and so dominates) the later — the
+--- later recomputes a value already available, so it can reuse the earlier result.
+--- A redefinition of any operand BETWEEN them changes its reaching set → excluded
+--- (soundness rides the reachset equality). `~` when either reads a table (an
+--- aliasing write between could change the value). Only pure, non-allocating rows.
+--- Same-block only (conservative — cross-block/PRE is a later increment).
+--- @return table { rows, redundant: { first, second, expr, hedged }[] }
+function M.cse(store, fn_id)
+    local ctx = context(store, fn_id)
+    if not ctx then return { rows = {}, redundant = {} } end
+    local rows, reach, impure_line = ctx.rows, ctx.reach, ctx.impure_line
+    local allocates, reads_table = ctx.allocates, ctx.reads_table
+    local lines, fn_end = ctx.lines, ctx.fn_end
+    -- EXACT statement text via (line,col) bounds: from a row's own start to the start
+    -- of the next row by position. Handles multiple statements on one line AND
+    -- multi-line statements precisely — unlike a whole-line span, which over-captures
+    -- a neighbour and produced garbage RHS matches (`false; guard = guard + 1`).
+    local order = {}
+    for r = 1, #rows do order[r] = r end
+    table.sort(order, function (a, b)
+        if rows[a].l ~= rows[b].l then return rows[a].l < rows[b].l end
+        return (rows[a].c or 1) < (rows[b].c or 1)
+    end)
+    local nextpos = {}
+    for i = 1, #order - 1 do nextpos[order[i]] = { rows[order[i + 1]].l, rows[order[i + 1]].c or 1 } end
+    -- rows[].c is 1-BASED (col of the statement's first char); the next statement
+    -- starts at nc, so this one's text runs [c .. nc-1].
+    local function stmt_text(r)
+        local l, c = rows[r].l, rows[r].c or 1
+        local el, ec = fn_end, #(lines[fn_end] or '') + 1
+        if nextpos[r] then el, ec = nextpos[r][1], nextpos[r][2] end
+        if l == el then return (lines[l] or ''):sub(c, ec - 1) end
+        local parts = { (lines[l] or ''):sub(c) }
+        for ln = l + 1, el - 1 do parts[#parts + 1] = lines[ln] or '' end
+        parts[#parts + 1] = (lines[el] or ''):sub(1, ec - 1)
+        return table.concat(parts, '\n')
+    end
+    -- RHS of a single-target row, ws-normalized (trailing `;` stripped); nil unless a
+    -- real COMPUTATION (a bare literal / identifier / copy has nothing to CSE)
+    local function rhs_of(r)
+        if #(rows[r].def or {}) ~= 1 then return nil end
+        local t = stmt_text(r)
+        local eq = t:find('=')
+        if not eq then return nil end
+        local rhs = t:sub(eq + 1):gsub(';%s*$', ''):gsub('%s+', ' '):gsub('^ ', ''):gsub(' $', '')
+        if not (rhs:find('[%(%[%.:]') or rhs:find('[%+%-%*/%%<>~]') or rhs:find('%.%.')) then
+            return nil -- not a computation
+        end
+        return rhs
+    end
+    -- do the two rows read the SAME operand values? (same reaching-def set per var —
+    -- a redefinition between them would differ; same RHS text ⇒ same var set)
+    local function same_values(r1, r2)
+        for _, v in ipairs(rows[r1].use or {}) do
+            local sa, sb = {}, {}
+            for _, d in ipairs((reach[r1] or {})[v] or {}) do sa[d] = true end
+            for _, d in ipairs((reach[r2] or {})[v] or {}) do sb[d] = true end
+            for d in pairs(sa) do if not sb[d] then return false end end
+            for d in pairs(sb) do if not sa[d] then return false end end
+        end
+        return true
+    end
+    -- group candidate rows by (block, RHS text)
+    local groups = {}
+    for r = 1, #rows do
+        if not impure_line[rows[r].l] and not allocates(r) then
+            local rhs = rhs_of(r)
+            if rhs then
+                local key = tostring(rows[r].parent) .. '\1' .. rhs
+                groups[key] = groups[key] or {}
+                groups[key][#groups[key] + 1] = { r = r, rhs = rhs }
+            end
+        end
+    end
+    local redundant = {}
+    for _, grp in pairs(groups) do
+        if #grp >= 2 then
+            table.sort(grp, function (a, b)
+                if rows[a.r].l ~= rows[b.r].l then return rows[a.r].l < rows[b.r].l end
+                return a.r < b.r
+            end)
+            local first = grp[1]
+            for i = 2, #grp do -- first (earliest) dominates each later occurrence
+                if same_values(first.r, grp[i].r) then
+                    redundant[#redundant + 1] = { first = first.r, second = grp[i].r,
+                        expr = first.rhs, hedged = reads_table(first.r) or reads_table(grp[i].r) }
+                end
+            end
+        end
+    end
+    table.sort(redundant, function (a, b) return rows[a.second].l < rows[b.second].l end)
+    return { rows = rows, redundant = redundant }
+end
+
 --- The lens surface (:CartographOptimize): the focused fn's loop-invariant
 --- computations, per loop, in source order — each with its inputs and whether it's
 --- unconditionally hoistable (a `*`) or invariant-but-conditional (`~`, hoisting
@@ -197,36 +286,54 @@ function M.report(store, fn_id)
     local node = store.node and store.node(fn_id)
     if not node then return { 'optimize: no such node' } end
     local res = M.licm(store, fn_id)
-    if #res.heads == 0 then
-        return { ('optimize: %s has no loops'):format(node.name or fn_id) }
-    end
     local rows = res.rows
-    local L = {}
-    local total_inv, total_hoist = 0, 0
-    for _, h in ipairs(res.heads) do
-        local lp = res.loops[h]
-        local invrows = {}
-        for r in pairs(lp.invariant) do invrows[#invrows + 1] = r end
-        table.sort(invrows, function (a, b) return rows[a].l < rows[b].l end)
-        L[#L + 1] = ('%s loop @L%-4d — %d loop-invariant computation(s)')
-            :format((lp.kind or 'loop'):gsub('_statement', ''), lp.line, #invrows)
-        for _, r in ipairs(invrows) do
-            total_inv = total_inv + 1
-            local hoist = lp.hoistable[r]
-            if hoist then total_hoist = total_hoist + 1 end
-            L[#L + 1] = ('  %s L%-4d %s  <- (%s)'):format(
-                hoist and '*' or '~', rows[r].l,
-                table.concat(rows[r].def or {}, ', '),
-                table.concat(lp.inputs[r] or {}, ', '))
-        end
+    if #rows == 0 then
+        return { ('optimize: %s has no fine flow'):format(node.name or fn_id) }
     end
-    L[#L + 1] = ''
-    L[#L + 1] = ('%d invariant computation(s), %d unconditionally hoistable (*)')
-        :format(total_inv, total_hoist)
-    L[#L + 1] = '(* = safe to lift above the loop header; ~ = invariant but not a clean'
-    L[#L + 1] = ' hoist — either branch-guarded, or its invariance rests on an aliasing /'
-    L[#L + 1] = ' field / mutable-global stability assumption we cannot certify. Hoisting'
-    L[#L + 1] = ' is a suggestion; a may-throw hoist over a zero-trip loop changes errors.)'
+    local L = {}
+    if #res.heads == 0 then
+        L[#L + 1] = ('optimize: %s — no loops'):format(node.name or fn_id)
+    else
+        local total_inv, total_hoist = 0, 0
+        for _, h in ipairs(res.heads) do
+            local lp = res.loops[h]
+            local invrows = {}
+            for r in pairs(lp.invariant) do invrows[#invrows + 1] = r end
+            table.sort(invrows, function (a, b) return rows[a].l < rows[b].l end)
+            L[#L + 1] = ('%s loop @L%-4d — %d loop-invariant computation(s)')
+                :format((lp.kind or 'loop'):gsub('_statement', ''), lp.line, #invrows)
+            for _, r in ipairs(invrows) do
+                total_inv = total_inv + 1
+                local hoist = lp.hoistable[r]
+                if hoist then total_hoist = total_hoist + 1 end
+                L[#L + 1] = ('  %s L%-4d %s  <- (%s)'):format(
+                    hoist and '*' or '~', rows[r].l,
+                    table.concat(rows[r].def or {}, ', '),
+                    table.concat(lp.inputs[r] or {}, ', '))
+            end
+        end
+        L[#L + 1] = ''
+        L[#L + 1] = ('%d invariant computation(s), %d unconditionally hoistable (*)')
+            :format(total_inv, total_hoist)
+        L[#L + 1] = '(* = safe to lift above the loop header; ~ = invariant but not a clean'
+        L[#L + 1] = ' hoist — either branch-guarded, or its invariance rests on an aliasing /'
+        L[#L + 1] = ' field / mutable-global stability assumption we cannot certify. Hoisting'
+        L[#L + 1] = ' is a suggestion; a may-throw hoist over a zero-trip loop changes errors.)'
+    end
+
+    -- CSE: redundant recomputations (same expression, same operand values, earlier
+    -- dominates later). A suggestion to reuse the first result; `~` = aliasing-hedged.
+    local cse = M.cse(store, fn_id)
+    if #cse.redundant > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('redundant computations (CSE) — %d:'):format(#cse.redundant)
+        for _, p in ipairs(cse.redundant) do
+            L[#L + 1] = ('  %s L%-4d recomputes L%-4d: %s'):format(
+                p.hedged and '~' or ' ', rows[p.second].l, rows[p.first].l, p.expr)
+        end
+        L[#L + 1] = '(the later can reuse the earlier result; ~ = a table read whose'
+        L[#L + 1] = ' value an aliasing write between the two could change — unverified)'
+    end
     return L
 end
 

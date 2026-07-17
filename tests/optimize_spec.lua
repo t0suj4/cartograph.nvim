@@ -218,6 +218,97 @@ test('licm: a reassignment (read-before-def flag) is not a hoist candidate', fun
     ok(not names(res, lp.invariant).first, 'a reassignment is not a LICM hoist candidate')
 end)
 
+-- ── CSE INC 1: redundant computations ───────────────────────────────────────
+
+-- the redundant pairs of a fn as { second_line -> {first_line, expr, hedged} }
+local function redundant(name)
+    local res = optimize.cse(store, fn_id(name))
+    local out = {}
+    for _, p in ipairs(res.redundant) do
+        out[res.rows[p.second].l] = { first = res.rows[p.first].l, expr = p.expr, hedged = p.hedged }
+    end
+    return out
+end
+
+test('cse: two identical pure computations in a block -> the later is redundant', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function add(a, b) return a + b end',
+        'local function f(x, y)',
+        '  local p = add(x, y)',
+        '  local q = add(x, y)',   -- redundant: same expr, same x,y -> reuse p
+        '  return p, q',
+        'end',
+        'return { f, add }',
+    }
+    local red = redundant('f')
+    ok(red[4], 'the second add(x,y) is flagged redundant')
+    eq(3, red[4].first)
+    ok(not red[4].hedged, 'a scalar pure recompute is not hedged')
+end)
+
+test('cse: a redefinition of an operand between the two breaks the match', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x, y)',
+        '  local p = x + y',
+        '  x = 99',            -- x redefined
+        '  local q = x + y',   -- NOT redundant with p: x changed
+        '  return p, q',
+        'end',
+        'return { f }',
+    }
+    ok(not redundant('f')[4], 'the recompute after a redefinition is not matched')
+end)
+
+test('cse: a table-index recompute is flagged but HEDGED (aliasing)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(t)',
+        '  local a = t[1] + 1',
+        '  local b = t[1] + 1',   -- redundant text, but t[1] contents may change
+        '  return a, b',
+        'end',
+        'return { f }',
+    }
+    local red = redundant('f')
+    ok(red[3], 'the recompute is flagged')
+    ok(red[3].hedged, 'a table-index read makes it aliasing-hedged (~)')
+end)
+
+test('cse: different expressions are not matched', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(x, y)',
+        '  local p = x + y',
+        '  local q = x - y',   -- different op -> not redundant
+        '  return p, q',
+        'end',
+        'return { f }',
+    }
+    eq(nil, next(redundant('f')))
+end)
+
+test('cse: two statements on one line do not produce a garbage match', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- exercises the precise (line,col) statement extraction: `a = ...; b = ...`
+    -- must not over-capture across the `;` into a bogus shared expression.
+    ingest {
+        'local function f(x)',
+        '  local a = x + 1; local b = x + 2',
+        '  local c = x + 1; local d = x + 2',
+        '  return a, b, c, d',
+        'end',
+        'return { f }',
+    }
+    -- a/c both `x + 1` and b/d both `x + 2` ARE genuine redundant pairs, cleanly
+    -- extracted; the point is the expressions are the real ones, never `x + 1; local b`.
+    for _, p in ipairs(optimize.cse(store, fn_id('f')).redundant) do
+        ok(not p.expr:find(';'), 'no expr spans the statement separator: ' .. p.expr)
+        ok(not p.expr:find('local'), 'no expr captures the next statement: ' .. p.expr)
+    end
+end)
+
 test('licm: report renders per-loop invariants + verdict; no-loop fn is inert', function ()
     if not ready('lua') then skip 'no lua parser' end
     ingest {
