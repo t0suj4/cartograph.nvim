@@ -38,12 +38,12 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 77, ['df-over-collects'] = 467,
+    self = { ['binding-as-use'] = 77, ['df-over-collects'] = 473,
         ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- self analyzes its OWN new
         -- source each cut: +11 df-over @ v50 const-fold, +4/+1 @ v51 anon-fns/
         -- enclosing-chain, +1/+1 @ v52 resolve_registry, +1 binding-as-use/+3
-        -- df-over @ untangle PDG INC 1-2, +2 more @ INC 4, +1 binding-as-use @
-        -- the extract.plan handoff (untangle.extract_plan + report footer). df-
+        -- df-over @ untangle PDG INC 1-2, +2 @ INC 4, +1 binding-as-use @ extract
+        -- handoff, +6 df-over @ inter-untangle (analyze_module/report_module). df-
         -- additive/inert — external corpora unchanged, no extraction/flow change.
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /

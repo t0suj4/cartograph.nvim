@@ -169,6 +169,95 @@ function M.why_unsafe(res)
     return out
 end
 
+-- ── INTER-FUNCTION untangle ([[cartograph-untangle-inter.md]]): the intra arc
+-- one granularity up. Partition a SCOPE's functions into independent CLUSTERS
+-- over the inter-procedural dependence graph — CALL edges (intra-scope
+-- store.uses) + SHARED WRITTEN STATE (two fns that touch the same module var
+-- that SOMEONE writes; read-only shared consts don't couple — they can be
+-- imported freely). Reuses the same union-find `partition`, over functions
+-- instead of statements. INC 1 = clustering (comprehension); verdict + extract
+-- handoff are INC 2/3. Scoped to ONE file (MVP): "module state" = the file's
+-- own vars, which sidesteps the shared-global blob (the sharing model, gated).
+
+--- Cluster the functions defined in `file` into independent concerns.
+--- @return table { n, fns:integer[] (source-ordered ids), comp, ncomp, sizes,
+---   switches, tangle, names:table<id,string>, calledges:int, stateedges:int }
+function M.analyze_module(store, file)
+    local scope = (store.by_file and store.by_file[file]) or {}
+    local fns, names = {}, {}
+    for _, node in ipairs(scope) do
+        if node.kind == 'function' or node.kind == 'method' then
+            fns[#fns + 1] = node
+        end
+    end
+    table.sort(fns, function (a, b) -- source order (stable, id tiebreak)
+        local ao, bo = a.order or 0, b.order or 0
+        if ao ~= bo then return ao < bo end
+        return tostring(a.id) < tostring(b.id)
+    end)
+    local idx = {}
+    for k, node in ipairs(fns) do idx[node.id] = k; names[node.id] = node.name end
+    local n = #fns
+    if n == 0 then
+        return { n = 0, fns = {}, comp = {}, ncomp = 0, sizes = {},
+            switches = 0, tangle = 0, names = names, calledges = 0, stateedges = 0 }
+    end
+    local calls, states = 0, 0
+    local res = partition(n, function (union, span)
+        for k, node in ipairs(fns) do                     -- CALL edges (intra-scope)
+            for _, callee in ipairs(store.uses[node.id] or {}) do
+                if idx[callee] then union(k, idx[callee]); span(0); calls = calls + 1 end
+            end
+        end
+        for _, v in ipairs(scope) do                       -- SHARED WRITTEN STATE
+            if v.kind == 'var' then
+                local written, touchers = false, {}
+                for _, u in ipairs(store.var_usedby[v.id] or {}) do
+                    if u.rw and u.rw >= 2 then written = true end
+                    if idx[u.from] then touchers[idx[u.from]] = true end
+                end
+                if written then
+                    local first
+                    for k in pairs(touchers) do
+                        if not first then first = k
+                        else union(first, k); span(0); states = states + 1 end
+                    end
+                end
+            end
+        end
+    end)
+    res.fns, res.names, res.calledges, res.stateedges = fns, names, calls, states
+    return res
+end
+
+--- Module report (the inter-untangle surface): the file's function clusters —
+--- how many independent concerns are jammed into one file (the god-file signal).
+function M.report_module(store, file)
+    local res = M.analyze_module(store, file)
+    if res.n == 0 then return { ('untangle module: %s — no functions'):format(file) } end
+    local L = { ('untangle module: %s — %d functions, %d independent cluster(s)')
+        :format(file, res.n, res.ncomp) }
+    L[#L + 1] = ('%d intra-scope call edge(s), %d shared-written-state edge(s)')
+        :format(res.calledges, res.stateedges)
+    if res.ncomp > 1 then
+        L[#L + 1] = ('this file holds %d independent function groups — candidates to split apart')
+            :format(res.ncomp)
+    end
+    L[#L + 1] = ''
+    local members = {} -- comp id → {names}
+    for k, node in ipairs(res.fns) do
+        local c = res.comp[k]
+        members[c] = members[c] or {}
+        members[c][#members[c] + 1] = res.names[node.id] or ('#' .. tostring(node.id))
+    end
+    for c = 0, res.ncomp - 1 do
+        local m = members[c] or {}
+        L[#L + 1] = ('  %s (%d): %s'):format(string.char(65 + (c % 26)), #m,
+            table.concat(m, ', '))
+    end
+    return L
+end
+
 --- THE extract.plan HANDOFF: turn concern `c` (a comp id from a res) into an
 --- extract.plan for the focused fn. A concern is directly extractable only when
 --- its TOP-LEVEL statements (`parent==0` rows == df statements by parity) form a

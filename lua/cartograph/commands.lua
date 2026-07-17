@@ -325,6 +325,18 @@ function M.register()
         scratch(require('cartograph.untangle').report(store, id))
     end, { desc = 'cartograph: independent concerns of the focused fn over the data+control+effect PDG, with the safe-to-split verdict and why-not breakdown (the untangle lens)' })
 
+    -- ── untangle MODULE: the focused file's independent function clusters ─
+    cmd('CartographUntangleModule', function ()
+        local store = live() if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or not n.file then
+            return vim.notify('cartograph: focus a node in the file first',
+                vim.log.levels.WARN)
+        end
+        scratch(require('cartograph.untangle').report_module(store, n.file))
+    end, { desc = 'cartograph: independent function clusters in the focused file over call + shared-written-state edges — the god-file split signal (inter-function untangle)' })
+
     -- ── the branch-value lens: what flows through each CFG branch ────
     cmd('CartographBranchValues', function ()
         local store = live() if not store then return end

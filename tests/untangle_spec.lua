@@ -358,6 +358,59 @@ test('untangle: extract_plan hands a contiguous concern off; refuses a scattered
     ok(splan.scattered, 'a scattered concern is refused pending gather/reorder')
 end)
 
+-- ── inter-function untangle (module clustering) ─────────────────────────────
+
+local function comp_of(res, name)
+    for k, node in ipairs(res.fns) do
+        if res.names[node.id] == name then return res.comp[k] end
+    end
+end
+
+local function ingest_file(lines)
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat(lines, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'function' then return n.file end
+    end
+end
+
+test('untangle_module: independent shared-state groups form separate clusters', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local file = ingest_file {
+        'local sa = {}', 'local sb = {}',
+        'local function a1() sa.x = 1 end',      -- writes sa
+        'local function a2() return sa.x end',   -- reads sa -> coupled to a1
+        'local function b1() sb.y = 1 end',      -- writes sb
+        'local function b2() return sb.y end',   -- reads sb -> coupled to b1
+        'return { a1, a2, b1, b2 }',
+    }
+    local res = untangle.analyze_module(store, file)
+    eq(4, res.n)
+    eq(2, res.ncomp)
+    eq(comp_of(res, 'a1'), comp_of(res, 'a2'))
+    eq(comp_of(res, 'b1'), comp_of(res, 'b2'))
+    ok(comp_of(res, 'a1') ~= comp_of(res, 'b1'), 'sa-group and sb-group are distinct')
+end)
+
+test('untangle_module: calls couple; a read-only const does NOT', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local file = ingest_file {
+        'local K = 5',                                  -- read-only const (never written)
+        'local function helper() return K end',
+        'local function caller() return helper() + K end', -- calls helper -> coupled
+        'local function lonely() return K end',         -- only READS K -> not coupled
+        'return { helper, caller, lonely }',
+    }
+    local res = untangle.analyze_module(store, file)
+    eq(comp_of(res, 'helper'), comp_of(res, 'caller'))  -- call edge couples
+    ok(comp_of(res, 'lonely') ~= comp_of(res, 'helper'),
+        'a read-only shared const does not force togetherness')
+end)
+
 test('untangle: report renders concerns + verdict + why breakdown (INC 4)', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()
