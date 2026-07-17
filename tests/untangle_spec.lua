@@ -411,6 +411,38 @@ test('untangle_module: calls couple; a read-only const does NOT', function ()
         'a read-only shared const does not force togetherness')
 end)
 
+test('untangle_module: a clean file certifies each cluster as extractable (INC 2)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local file = ingest_file {
+        'local sa = {}', 'local sb = {}',
+        'local function a1() sa.x = 1 end',
+        'local function a2() return sa.x end',
+        'local function b1() sb.y = 1 end',
+        'local function b2() return sb.y end',
+        'return { a1, a2, b1, b2 }',
+    }
+    local res = untangle.analyze_module(store, file)
+    ok(res.certified, 'no unmodeled coupling -> certified')
+    ok(untangle.module_safe(res, comp_of(res, 'a1')), 'the sa cluster is safe to extract')
+end)
+
+test('untangle_module: a dynamic dispatch uncertifies + names the blocker (INC 2)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local file = ingest_file {
+        'local H = {}',
+        'local function reg() H.x = function () end end',
+        'local function dispatch(k) H[k]() end',   -- dynamic call -> can reach any fn
+        'return { reg, dispatch }',
+    }
+    local res = untangle.analyze_module(store, file)
+    ok(not res.certified, 'a dynamic dispatch could reach any fn -> not certified')
+    local found
+    for _, rows in pairs(res.why) do
+        for _, w in ipairs(rows) do if w.reason:match('dynamic') then found = true end end
+    end
+    ok(found, 'the breakdown names the dynamic-dispatch blocker')
+end)
+
 test('untangle: report renders concerns + verdict + why breakdown (INC 4)', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = vim.fn.tempname()

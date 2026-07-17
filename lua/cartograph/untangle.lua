@@ -195,12 +195,16 @@ function M.analyze_module(store, file)
         if ao ~= bo then return ao < bo end
         return tostring(a.id) < tostring(b.id)
     end)
-    local idx = {}
-    for k, node in ipairs(fns) do idx[node.id] = k; names[node.id] = node.name end
+    local idx, idx_name = {}, {} -- id→index, in-scope fn NAME set (for the verdict)
+    for k, node in ipairs(fns) do
+        idx[node.id] = k; names[node.id] = node.name
+        if node.name then idx_name[node.name] = true end
+    end
     local n = #fns
     if n == 0 then
-        return { n = 0, fns = {}, comp = {}, ncomp = 0, sizes = {},
-            switches = 0, tangle = 0, names = names, calledges = 0, stateedges = 0 }
+        return { n = 0, fns = {}, comp = {}, ncomp = 0, sizes = {}, switches = 0,
+            tangle = 0, names = names, calledges = 0, stateedges = 0,
+            hedged = {}, certified = true, why = {} }
     end
     local calls, states = 0, 0
     local res = partition(n, function (union, span)
@@ -227,7 +231,63 @@ function M.analyze_module(store, file)
         end
     end)
     res.fns, res.names, res.calledges, res.stateedges = fns, names, calls, states
+    -- INC 2 verdict: clusters are DISCONNECTED under the modeled edges by
+    -- construction, so the only threat to "safe to extract as a module" is an
+    -- UNMODELED edge that could secretly connect two clusters. Sound opacity
+    -- sources: (a) a silently-unresolved call whose callee NAMES an in-scope fn
+    -- (a missed intra-scope call edge would merge clusters) — name-matching keeps
+    -- stdlib/external calls from over-hedging; (b) dynamic dispatch (could reach
+    -- any fn); (c) unclassified module state (a hidden shared-state coupling). Any
+    -- opacity → certified=false; the carrying cluster(s) hedged + why-breakdown.
+    local hedged, why, certified = {}, {}, true
+    local function flag(k, line, reason)
+        local c = res.comp[k]
+        hedged[c] = true; certified = false
+        why[c] = why[c] or {}
+        why[c][#why[c] + 1] = { fn = fns[k].name, line = line, reason = reason }
+    end
+    for k, node in ipairs(fns) do
+        for _, c in ipairs(store.calls_by_fn[node.id] or {}) do
+            local line = (c.line or 0) + 1
+            if c.dynamic then
+                flag(k, line, 'dynamic dispatch (could reach any fn)')
+            elseif not c.to and not c.refused and c.callee then
+                -- SILENT unresolved (the resolver made no determination): could hide
+                -- an intra-scope edge. Name-matches an in-scope fn, OR a bracket-index
+                -- callee `t[k]()` = table dispatch (could reach any in-scope fn value).
+                -- `.`-qualified callees are left alone: those are stdlib/module calls
+                -- (table.insert, string.format) that can't target an in-scope local fn.
+                if idx_name[c.callee] then
+                    flag(k, line, ('unresolved call to in-scope `%s`'):format(c.callee))
+                elseif c.callee:find('%[') then
+                    flag(k, line, ('dynamic dispatch `%s` (could reach any fn)'):format(c.callee))
+                end
+            end
+        end
+    end
+    for _, v in ipairs(scope) do
+        if v.kind == 'var' then
+            local unk, touchers = false, {}
+            for _, u in ipairs(store.var_usedby[v.id] or {}) do
+                if u.rw == nil then unk = true end
+                if idx[u.from] then touchers[#touchers + 1] = idx[u.from] end
+            end
+            if unk then
+                for _, k in ipairs(touchers) do
+                    flag(k, (v.order or 0) + 1, ('unclassified state `%s`'):format(v.name or '?'))
+                end
+            end
+        end
+    end
+    res.hedged, res.certified, res.why = hedged, certified, why
     return res
+end
+
+--- is cluster `c` safe to extract as its own module? Sound: only when the whole
+--- file is certified (no unmodeled coupling could secretly connect clusters) AND
+--- this cluster isn't the one carrying the opacity.
+function M.module_safe(res, c)
+    return res.certified and not res.hedged[c]
 end
 
 --- Module report (the inter-untangle surface): the file's function clusters —
@@ -252,8 +312,20 @@ function M.report_module(store, file)
     end
     for c = 0, res.ncomp - 1 do
         local m = members[c] or {}
-        L[#L + 1] = ('  %s (%d): %s'):format(string.char(65 + (c % 26)), #m,
-            table.concat(m, ', '))
+        L[#L + 1] = ('  %s%s (%d): %s'):format(string.char(65 + (c % 26)),
+            res.hedged[c] and '~' or ' ', #m, table.concat(m, ', '))
+    end
+    L[#L + 1] = ''
+    if res.certified then
+        L[#L + 1] = 'CERTIFIED: each cluster is safe to extract as its own module'
+        L[#L + 1] = '(sound under the modeled call + shared-written-state edges)'
+    else
+        L[#L + 1] = 'NOT certified — an unmodeled coupling could connect clusters:'
+        for c = 0, res.ncomp - 1 do
+            for _, w in ipairs(res.why[c] or {}) do
+                L[#L + 1] = ('  ~ %s L%s: %s'):format(w.fn or '?', w.line or '?', w.reason)
+            end
+        end
     end
     return L
 end
