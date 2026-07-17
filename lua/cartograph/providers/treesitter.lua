@@ -3265,7 +3265,19 @@ end
 -- corpus without these idioms (non-WoW) → no gate recalibration there.
 local REG_REGISTER = { NewLibrary = 'lib', NewModule = 'module', NewAddon = 'addon' }
 local REG_RETRIEVE = { GetLibrary = 'lib', GetModule = 'module', GetAddon = 'addon' }
-local function resolve_registry(calls, node_index, addref, scope_of, consts)
+local function resolve_registry(calls, node_index, addref, scope_of, consts, exact)
+    -- class-owner set: a name that owns a method (`X:m`/`X.m` in exact). A register
+    -- line `local Lib, oldminor = :NewLibrary(...)` gives BOTH vars start.char 0 (the
+    -- extraction attributes them to the statement, not the identifier), so the
+    -- leftmost-by-char tiebreak below is a coin-flip decided by unstable pairs() order
+    -- — the returned-minor could win, so LibStub("AceConsole-3.0") resolved to
+    -- `oldminor` not `AceConsole`. Prefer the var that is a CLASS (the registered lib
+    -- OWNS methods; oldminor owns nothing) — sound + deterministic.
+    local is_class = {}
+    for name in pairs(exact or {}) do
+        local owner = name:match('^([%w_]+)[:.]')
+        if owner then is_class[owner] = true end
+    end
     -- the key as a STRING: a folded literal (k='lit', warm/relink argv) OR a
     -- k='local' whose name resolves to a same-file scalar-string const (the
     -- INITIAL extract runs before const-fold's post-pass, so fold the key here
@@ -3290,12 +3302,15 @@ local function resolve_registry(calls, node_index, addref, scope_of, consts)
                 varAt = {}
                 for _, nd in pairs(node_index) do
                     if nd.kind == 'var' and nd.file and nd.range then
-                        -- the LEFTMOST var on the line = the primary binding
-                        -- (`local Lib, oldminor = :NewLibrary(...)` → Lib, not
-                        -- the returned minor); smallest start.char wins
+                        -- the primary binding of the register line. Prefer a CLASS-
+                        -- owner (the lib table owns methods; a sibling `oldminor`
+                        -- owns nothing), then the leftmost by start.char. Fixes the
+                        -- char-0 tie where the returned-minor could win the toss.
                         local vk = nd.file .. '\0' .. nd.range.start.line
                         local cur = varAt[vk]
-                        if not cur or nd.range.start.char < cur.range.start.char then
+                        local ndc, curc = is_class[nd.name], cur and is_class[cur.name]
+                        if not cur or (ndc and not curc)
+                            or (ndc == curc and nd.range.start.char < cur.range.start.char) then
                             varAt[vk] = nd
                         end
                     end
@@ -6269,7 +6284,7 @@ function M.extract(root, opts)
     -- string-keyed registry (stage 3): LibStub("X")/:GetModule("Y") → the
     -- :NewLibrary/:NewModule-registered table, scoped to the addon (.toc).
     -- constDefs folds k='local' keys here (const-fold's post-pass runs later)
-    resolve_registry(calls, node_index, addref, scope_of, constDefs)
+    resolve_registry(calls, node_index, addref, scope_of, constDefs, exact)
 
     -- return-type rounds: settle the receiver-deferred calls (c.rt) now
     -- that plain + super resolution populated the determining calls
@@ -6670,7 +6685,7 @@ function M.relink(data, touched)
     local node_index = {}
     for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
     -- string-keyed registry (stage 3), same parity as extract
-    n = n + resolve_registry(data.calls, node_index, addref, scope_of)
+    n = n + resolve_registry(data.calls, node_index, addref, scope_of, nil, exact)
     local retn = resolve_returns(data.calls, node_index, exact, addref)
     n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
     n = n + resolve_local_ctor(data.calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)

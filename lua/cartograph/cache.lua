@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 53 -- v53: flow rows carry a sparse `rmw` column (read-modify-write LHS
+M.VERSION = 54 -- v54: REGISTRY CLASS-OWNER FIX — a register line `local Lib,
+               -- oldminor = :NewLibrary("X")` gives both vars start.char 0, so
+               -- resolve_registry's leftmost-var tiebreak was a pairs()-order
+               -- coin-flip (LibStub("AceConsole-3.0") could resolve to `oldminor`).
+               -- Now prefers the CLASS-owner var (owns methods) → correct + stable
+               -- retrieve target + ref edge. WoW-only idiom → inert elsewhere.
+-- v53: flow rows carry a sparse `rmw` column (read-modify-write LHS
                -- reads `a = a + …` the df contract drops from `use`); reaching_cfg
                -- consumes it so a self-read reaches (flow-precision-gaps #1).
 -- v52: STRING-KEYED REGISTRY LINKER (stage 3) — a retrieval keyed
