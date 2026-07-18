@@ -53,7 +53,19 @@ for _, tc in ipairs(ts.calls or {}) do
       -- setters. SAME-FILE-DIFF-LINE: both one file, cg picked the wrong
       -- same-named def / an overload.)
       local cls
-      if tsc_defs[1].file == tc.file and cg.file ~= tc.file then cls = 'local-shadow'
+      if tsc_defs[1].file == tc.file and cg.file ~= tc.file then
+        -- split local-shadow: is the callee a PARAM of any ENCLOSING fn (range
+        -- contains the call — what resolve_local_callable checks, fixable via
+        -- fn.params) vs a local decl (destructured const etc., needs capture)?
+        local isparam = false
+        for _, nn in pairs(nidx) do
+          if (nn.kind=='function' or nn.kind=='method') and nn.file==tc.file and nn.range
+            and nn.range.start.line <= tc.line and nn.range['end'].line >= tc.line then
+            for _, p in ipairs(nn.params or {}) do if p == tc.callee then isparam = true break end end
+          end
+          if isparam then break end
+        end
+        cls = isparam and 'local-shadow-PARAM' or 'local-shadow-other'
       elseif cg.file == tsc_defs[1].file then cls = 'same-file-diff-line'
       else cls = 'other' end
       T[cls] = (T[cls] or 0) + 1
@@ -68,10 +80,10 @@ end
 local both = T.agree + T.disagree
 print(('paired %d / unpaired %d (tsc calls %d)'):format(T.paired, T.unpaired, #ts.calls))
 print(('both-resolved: %d  AGREE %d (%.3f%%)  DISAGREE %d'):format(both, T.agree, both>0 and 100*T.agree/both or 0, T.disagree))
-print(('  disagreement classes: local-shadow %d  same-file-diff-line %d  other %d'):format(
-  T['local-shadow'] or 0, T['same-file-diff-line'] or 0, T.other or 0))
+print(('  disagreement classes: local-shadow-PARAM %d  same-file-diff-line %d  other %d'):format(
+  T['local-shadow-PARAM'] or 0, T['same-file-diff-line'] or 0, T.other or 0)); print(('  local-shadow-other (destructured/local, needs capture): %d'):format(T['local-shadow-other'] or 0))
 print(('coverage: tsc-only(cg gap) %d  cg-only(tsc external) %d  both-external %d'):format(T.tsc_only, T.cg_only, T.both_ext))
-for _, cls in ipairs({'local-shadow','same-file-diff-line','other'}) do
+for _, cls in ipairs({'local-shadow-PARAM','local-shadow-other','same-file-diff-line','other'}) do
   print('--- '..cls..' samples ---')
   for _,s in ipairs(samples[cls] or {}) do print('  '..s) end
 end
