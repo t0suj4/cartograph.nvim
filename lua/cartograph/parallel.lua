@@ -343,7 +343,8 @@ function M.demand(file)
     if not (s and s.phase == 1) or s.arrived[file] then return false end
     local ts = require 'cartograph.providers.treesitter'
     local chunk = ts.extract(s.root,
-        { files = { file }, fileset = s.fileset, skip_idpass = true, abs = s.abs })
+        { files = { file }, fileset = s.fileset, skip_idpass = true,
+            abs = s.abs, packs = s.packs })
     merge_chunk(s, chunk)
     s.arrived[file] = true -- even if unreadable: don't retry per descend
     if s.on_chunk then s.on_chunk(s.done, s.total, s.acc) end
@@ -373,7 +374,7 @@ function M.extract(root, o)
     local nw = math.min(o.workers or M.default_workers(),
         math.max(1, math.ceil(#files / M.BATCH)))
     if nw < 2 then
-        o.on_done(ts.extract(root, { files = files, abs = abs }))
+        o.on_done(ts.extract(root, { files = files, abs = abs, packs = o.packs }))
         return
     end
     local rtp = worker_rtp()
@@ -384,13 +385,13 @@ function M.extract(root, o)
     local ordered = M.order(files, attention(root, abs))
 
     local acc = { schema = 1, root = root, provider = o.provider or 'treesitter',
-        roots = o.roots,
+        roots = o.roots, packs = o.packs, -- so the parent's relink applies them
         capabilities = { calls = true, litdata = true, df = 'lite' },
         nodes = {}, edges = {}, calls = {}, stamps = {}, fn_ranges = {},
         mentions = {}, _no_parser = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
         on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1,
-        wmetrics = {} }
+        packs = o.packs, wmetrics = {} }
     M._session = s
 
     -- responsiveness telemetry: every synchronous main-loop block during the
@@ -546,7 +547,7 @@ function M.extract(root, o)
     local function finish_phase1()
         for _, fb in ipairs(failed) do -- sequential fallback, honest
             merge_chunk(s, ts.extract(root, { files = fb,
-                fileset = files, skip_idpass = true, abs = abs }))
+                fileset = files, skip_idpass = true, abs = abs, packs = o.packs }))
         end
         canonicalize()
         M.audit(acc)
@@ -587,7 +588,8 @@ function M.extract(root, o)
         inflight = inflight + 1
         local t0 = vim.uv.hrtime()
         spawn({ phase = 'parse', root = root, files = b,
-            fileset = files, rtp = rtp, roots = o.roots }, function (chunk, res)
+            fileset = files, rtp = rtp, roots = o.roots, packs = o.packs },
+            function (chunk, res)
             local cb0 = vim.uv.hrtime()
             inflight = inflight - 1
             if chunk then

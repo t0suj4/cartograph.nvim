@@ -1111,6 +1111,69 @@ local function ruby_synth_defs(tsroot, src)
     return out
 end
 
+-- The RAILS overlay pack's def-emitters ([[cartograph-modular-specs]]): reuse
+-- the R3 def-emitter mechanism for ActiveRecord associations and `delegate`.
+-- An association `has_many :posts` / `belongs_to :author` DEFINES instance
+-- accessors (`Model#posts`, `Model#posts=`); `delegate :name, :email, to: …`
+-- defines a delegating reader per method. These are Rails DSL, not base Ruby —
+-- so they live in the pack, composed on only for a Rails corpus.
+local RB_ASSOC = { belongs_to = true, has_one = true, has_many = true,
+    has_and_belongs_to_many = true }
+local function ruby_rails_synth(tsroot, src)
+    local out = {}
+    local function owner(callnode)
+        local p = callnode:parent()
+        while p do
+            local t = p:type()
+            if t == 'class' or t == 'module' then
+                local n = p:field('name')[1]
+                return n and node_text(n, src)
+            end
+            p = p:parent()
+        end
+    end
+    local function walk(n)
+        if n:type() == 'call' then
+            local m = n:field('method')[1]
+            local mn = m and node_text(m, src)
+            local args = mn and n:field('arguments')[1]
+            if args and RB_ASSOC[mn] then
+                local C = owner(n)
+                if C then
+                    -- the FIRST symbol is the association name → reader + writer
+                    for c in args:iter_children() do
+                        if c:type() == 'simple_symbol' then
+                            local sym = node_text(c, src):sub(2)
+                            if sym:match('^[%a_][%w_]*$') then
+                                out[#out + 1] = { name = C .. '#' .. sym, node = c }
+                                out[#out + 1] = { name = C .. '#' .. sym .. '=', node = c }
+                            end
+                            break
+                        end
+                    end
+                end
+            elseif args and mn == 'delegate' then
+                local C = owner(n)
+                if C then
+                    -- every top-level symbol is a delegated method; the `to:`/
+                    -- `prefix:`/`allow_nil:` options are pairs, skipped
+                    for c in args:iter_children() do
+                        if c:type() == 'simple_symbol' then
+                            local sym = node_text(c, src):sub(2)
+                            if sym:match('^[%a_][%w_]*$') then
+                                out[#out + 1] = { name = C .. '#' .. sym, node = c }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        for ch in n:iter_children() do walk(ch) end
+    end
+    walk(tsroot)
+    return out
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -2304,17 +2367,19 @@ M.spec = {
             return file
         end,
         id_fn_refs = false,
-        -- ruby/rails vocabulary: Object protocol, Enumerable, ActiveRecord
-        -- query/persistence verbs — never absorbed by a project def
-        stdlib_names = { new = true, save = true, update = true,
-            destroy = true, find = true, where = true, all = true,
-            first = true, last = true, count = true, create = true,
+        -- BASE-RUBY vocabulary: the Object protocol, Enumerable, String/Array/
+        -- Hash core — never absorbed by a project def. The RAILS framework verbs
+        -- (save/where/find/create/params/render/…) moved OUT to the `rails`
+        -- overlay pack (M.packs.rails) — a pure-Ruby project's `save` should
+        -- resolve to its OWN def, not be refused as ActiveRecord vocab. The pack
+        -- unions its vocab back in for a Rails corpus. ([[cartograph-modular-specs]])
+        stdlib_names = { new = true,
+            all = true, first = true, last = true, count = true,
             name = true, id = true, to_s = true, to_a = true, to_h = true,
             each = true, map = true, select = true, reject = true,
-            include = true, present = true, blank = true, empty = true,
-            length = true, size = true, push = true, params = true,
-            render = true, call = true, run = true, perform = true,
-            process = true, build = true, valid = true, inspect = true,
+            include = true, empty = true,
+            length = true, size = true, push = true,
+            call = true, run = true, inspect = true,
             hash = true, dup = true, freeze = true, fetch = true,
             dig = true, merge = true, join = true, split = true,
             strip = true, gsub = true, sub = true, match = true,
@@ -2322,7 +2387,7 @@ M.spec = {
             keys = true, values = true, sort = true, uniq = true,
             flatten = true, compact = true, reduce = true, inject = true,
             title = true, body = true, value = true, type = true,
-            status = true, message = true, errors = true, user = true },
+            status = true, message = true, user = true },
         -- R1 constant-receiver keying: `Foo.bar` / `A::B.baz` name a
         -- SINGLETON (class/module) method of the receiver constant, so the
         -- resolution key is `Receiver.method` — an exact match against the
@@ -5570,6 +5635,58 @@ function M.mention_reduce(files, mentions, lookups)
     return out
 end
 
+-- OVERLAY PACKS ([[cartograph-modular-specs]]): a framework/DSL layer that
+-- COMPOSES onto a base language spec — the unit of modularity is the framework,
+-- not the language. A pack targets a `lang` and contributes additive vocab
+-- (`stdlib_names`, unioned) and def-emitters (`synth_defs`, chained). The base
+-- ruby spec stays pure Ruby; the `rails` pack adds the ActiveRecord/ActiveSupport
+-- verbs (moved out of ruby.stdlib_names) + association/delegate def-emitters.
+-- Activated per-corpus (corpus.packs / opts.packs); measurable with-vs-without.
+M.packs = {
+    rails = {
+        lang = 'ruby',
+        -- ActiveRecord / ActionController / ActiveSupport verbs: framework
+        -- methods, refused rather than absorbed by a project def
+        stdlib_names = { save = true, update = true, destroy = true,
+            find = true, where = true, create = true, build = true,
+            params = true, render = true, perform = true, process = true,
+            valid = true, present = true, blank = true, errors = true },
+        synth_defs = ruby_rails_synth,
+    },
+}
+
+-- Build the effective spec for `lang` when overlay `packs` (a list of pack
+-- tables) are active: union stdlib_names, chain synth_defs; everything else is
+-- inherited from the base via metatable. Returns nil when no pack targets this
+-- lang (the caller keeps the base spec). Pure — never mutates the base.
+function M.compose_spec(lang, base, packs)
+    if not base then return nil end
+    local applicable = {}
+    for _, p in ipairs(packs) do
+        if p.lang == lang then applicable[#applicable + 1] = p end
+    end
+    if #applicable == 0 then return nil end
+    local composed = setmetatable({}, { __index = base })
+    local sn = {}
+    for k in pairs(base.stdlib_names or {}) do sn[k] = true end
+    local synths = base.synth_defs and { base.synth_defs } or {}
+    for _, p in ipairs(applicable) do
+        for k in pairs(p.stdlib_names or {}) do sn[k] = true end
+        if p.synth_defs then synths[#synths + 1] = p.synth_defs end
+    end
+    composed.stdlib_names = sn
+    if #synths > 0 then
+        composed.synth_defs = function (tsroot, src)
+            local all = {}
+            for _, fn in ipairs(synths) do
+                for _, d in ipairs(fn(tsroot, src)) do all[#all + 1] = d end
+            end
+            return all
+        end
+    end
+    return composed
+end
+
 --- Extract a neutral-schema graph from a directory tree. Any file whose
 --- extension has a spec (and an available parser) participates.
 ---@param root string
@@ -5606,6 +5723,26 @@ function M.extract(root, opts)
         nodes = {}, edges = {}, calls = {}, stamps = {} }
     local nodes, edges, calls = data.nodes, data.edges, data.calls
     local no_parser = {}
+
+    -- overlay packs (rails): compose the pack's vocab + def-emitters onto the
+    -- base spec per language. Stored on data.packs so relink/refresh re-apply
+    -- the same. `eff_spec` wraps a base spec with the composition (memoized).
+    local packnames = (opts and opts.packs) or {}
+    local active_packs = {}
+    for _, pn in ipairs(packnames) do
+        if M.packs[pn] then active_packs[#active_packs + 1] = M.packs[pn] end
+    end
+    if #packnames > 0 then data.packs = packnames end
+    local composed_spec = {}
+    local function eff_spec(lang, spec)
+        if #active_packs == 0 or not lang then return spec end
+        local c = composed_spec[lang]
+        if c == nil then
+            c = M.compose_spec(lang, spec, active_packs) or false
+            composed_spec[lang] = c
+        end
+        return c or spec
+    end
 
     -- per-name def indexes for the resolution pass
     local exact, tail = {}, {} -- name -> {fn node,...}; last segment -> {...}
@@ -6561,6 +6698,7 @@ function M.extract(root, opts)
         end
         do
             local lang, spec = lang_for(file)
+            spec = eff_spec(lang, spec) -- overlay pack composition (rails)
             -- vendored bundles that dodge the *.min.js name (nocodb's
             -- swagger-ui-bundle.js): a line no human wrote means BUNDLE —
             -- content decides what the filename doesn't say. Opaque
@@ -6713,6 +6851,7 @@ function M.extract(root, opts)
         -- cross-file fallback below stays behind the noise floor.
         local short = #name < 3
         local clang, spec = elang_for(file)
+        spec = eff_spec(clang, spec) -- overlay pack (rails vocab in stdlib_names)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil end
         local cands = exact[name]
@@ -7269,6 +7408,22 @@ function M.relink(data, touched)
     for _, n in ipairs(data.nodes) do
         if n.kind == 'module' then relset[n.file] = true end
     end
+    -- overlay packs: mirror extract's composition so relink's resolve uses the
+    -- same (rails) vocab. Synth nodes are already in data.nodes (indexed below).
+    local active_packs = {}
+    for _, pn in ipairs(data.packs or {}) do
+        if M.packs[pn] then active_packs[#active_packs + 1] = M.packs[pn] end
+    end
+    local composed_spec = {}
+    local function eff_spec(lang, spec)
+        if #active_packs == 0 or not lang then return spec end
+        local c = composed_spec[lang]
+        if c == nil then
+            c = M.compose_spec(lang, spec, active_packs) or false
+            composed_spec[lang] = c
+        end
+        return c or spec
+    end
     local scope_cache = {}
     local function scope_of(f)
         if scope_cache[f] == nil then
@@ -7345,6 +7500,7 @@ function M.relink(data, touched)
         -- synjs q3 witness); cross-file fallbacks stay noise-gated
         local short = #name < 3
         local clang, spec = elang_for(file)
+        spec = eff_spec(clang, spec) -- overlay pack (rails vocab in stdlib_names)
         local snames = spec and spec.stdlib_names or {}
         if snames[name] then return nil end
         local cands = exact[name]

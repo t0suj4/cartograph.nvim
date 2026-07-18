@@ -131,6 +131,9 @@ function M.extract(name_or_root, opts)
     -- provider dispatch: a corpus names its GraphProvider (default
     -- treesitter); any module producing the neutral schema slots in
     local prov = require('cartograph.providers.' .. (c.provider or 'treesitter'))
+    -- overlay packs (rails): a corpus declares its framework packs; thread them
+    -- into extraction opts so the composed spec is used
+    if c.packs then opts = vim.tbl_extend('keep', { packs = c.packs }, opts or {}) end
     local data, stats = M.measure(function () return prov.extract(c.root, opts) end)
     stats.corpus = c
     return data, stats
@@ -152,6 +155,7 @@ function M.extract_parallel(name_or_root, opts)
         local done
         par.extract(c.root, {
             workers = opts and opts.workers,
+            packs = c.packs, -- overlay packs (rails) — workers apply them too
             on_done = function (d) done = d end,
         })
         vim.wait(1800000, function () return done ~= nil end, 50)

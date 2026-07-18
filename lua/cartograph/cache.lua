@@ -19,7 +19,23 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 72 -- v72: RUBY R3 = OPEN-CEILING (bare-call capture) + attr_*
+M.VERSION = 73 -- v73: RAILS OVERLAY PACK — the modularity milestone. First
+               -- framework/DSL pack composing onto a base language spec
+               -- (M.packs + M.compose_spec: union stdlib_names, chain
+               -- synth_defs via metatable; activated per-corpus opts.packs,
+               -- threaded through extract + relink). ActiveRecord/ActionController
+               -- verbs (save/where/find/create/params/render/…) MOVED OUT of
+               -- base ruby stdlib_names into the pack (a pure-Ruby project's
+               -- `save` resolves to its own def, not refused as AR vocab).
+               -- Pack def-emitters (ruby_rails_synth): belongs_to/has_one/
+               -- has_many/has_and_belongs_to_many → Model#assoc + #assoc=;
+               -- delegate → a reader per method. Base ruby unchanged
+               -- (activesupport 19.5→19.6%, +1). rails corpus (discourse
+               -- app/models) +1667 assoc/delegate nodes; resolution R5-gated
+               -- (association reads are obj.assoc). +5 ruby_rails specs; new
+               -- `rails` corpus. attr_* stays base-ruby. NEXT: R4/R5 unlock the
+               -- association-read resolution the pack set up.
+-- v72: RUBY R3 = OPEN-CEILING (bare-call capture) + attr_*
                -- DEF-EMITTERS. (1) scan_bare_calls surfaces bare no-paren
                -- calls (`save`, attribute reads) that parse as `identifier`
                -- not `call`, applying ruby's var-vs-call rule (a bare name is

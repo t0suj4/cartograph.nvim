@@ -440,7 +440,13 @@ callers). Ariadne's thread, in text.
      `Owner#name=` (singleton accessors inside `class << self`), so a read of
      the attribute resolves like any method — while an explicit `def name`
      overrides the generated accessor. `@ivar`-receiver calls remain
-     file-scoped for now (constructor typing is a later step).
+     file-scoped for now (constructor typing is a later step). Framework
+     knowledge lives in **overlay packs** that compose onto the base language,
+     not in it: the `rails` pack adds the ActiveRecord/ActionController
+     vocabulary (`save`/`where`/`find`/…, which a *non*-Rails project would
+     resolve to its own methods) and reads `has_many`/`belongs_to`/`has_one`/
+     `delegate` as method definitions (`has_many :comments` → `Model#comments`),
+     activated per-project so pure Ruby stays pure.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

@@ -39,7 +39,7 @@ local out
 if job.phase == 'parse' then
     out = ts.extract(job.root, {
         files = job.files, fileset = job.fileset, skip_idpass = true,
-        abs = abs,
+        abs = abs, packs = job.packs, -- overlay packs (rails) apply in workers
     })
 else
     error('worker: unknown phase ' .. tostring(job.phase))
