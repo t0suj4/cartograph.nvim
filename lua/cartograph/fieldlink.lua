@@ -40,7 +40,7 @@ end
 
 -- `self.field = …` writes WITHIN a method's fn node → out[field] = { {line, method} }.
 -- Absolute lines (the file-parse is whole-file). Nested closures capture the same self.
-local function collect_writes(fn, src, method, out)
+local function collect_writes(fn, src, method, file, out)
     if not fn then return end
     local function walk(n)
         if n:type() == 'assignment_statement' then
@@ -52,7 +52,7 @@ local function collect_writes(fn, src, method, out)
                             if base and txt(base, src) == 'self' and fld then
                                 local f = txt(fld, src)
                                 out[f] = out[f] or {}
-                                out[f][#out[f] + 1] = { line = t:start() + 1, method = method }
+                                out[f][#out[f] + 1] = { line = t:start() + 1, method = method, file = file }
                             end
                         end
                     end
@@ -83,7 +83,8 @@ local function collect_reads(fn, src, out)
         if n:type() == 'dot_index_expression' and not inwrite then
             local base, fld = n:named_child(0), n:field('field')[1]
             if base and txt(base, src) == 'self' and fld then
-                out[#out + 1] = { field = txt(fld, src), line = n:start() + 1 }
+                local frow, fcol = fld:start() -- the field NAME position (0-based) for an oracle query
+                out[#out + 1] = { field = txt(fld, src), line = n:start() + 1, row = frow, col = fcol }
             end
         end
         for c in n:iter_children() do
@@ -148,7 +149,7 @@ function M.fields(store, fn_id)
     local cache, writes = {}, {}
     for _, m in ipairs(methods) do
         local fp = m.range and file_parse(store, m.file, cache)
-        if fp then collect_writes(fn_node_at(fp.root, m.range), fp.src, m.name, writes) end
+        if fp then collect_writes(fn_node_at(fp.root, m.range), fp.src, m.name, m.file, writes) end
     end
     -- READS: self.field in the focused method
     local reads = {}
@@ -160,7 +161,7 @@ function M.fields(store, fn_id)
         local defs = writes[r.field]
         if defs then
             nres = nres + 1
-            out[#out + 1] = { line = r.line, field = r.field, defs = defs }
+            out[#out + 1] = { line = r.line, field = r.field, defs = defs, row = r.row, col = r.col }
         end
     end
     table.sort(out, function (a, b) return a.line < b.line end)

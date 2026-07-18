@@ -421,6 +421,16 @@ function M.register()
         scratch(require('cartograph.fieldlink').report(store, id))
     end, { desc = 'cartograph: field/member linker (Track 3) — resolves the focused method\'s self.field READS to the self.field = … WRITE(s) on its class (own methods + extends ancestors), receiver-typed. Go-to-definition for a data member; a writeless read is left unresolved (sound-first, not the dead undefined-member lint)' })
 
+    -- ── field-harvest: the disagreement harvest — field resolutions vs lua-ls ─
+    cmd('CartographFieldHarvest', function ()
+        local store = live() if not store then return end
+        vim.notify('cartograph: harvesting field resolutions vs lua-ls (async)…',
+            vim.log.levels.INFO)
+        require('cartograph.fieldharvest').harvest(store, {}, function (stats, why)
+            scratch(require('cartograph.fieldharvest').report(stats, why))
+        end)
+    end, { desc = 'cartograph: DISAGREEMENT HARVEST — compares the field linker\'s self.field read→write resolutions to lua-ls go-to-definition over the loaded graph. Agree = confidence; a CONFLICT is a real bug on ONE side (the north-star success bar). Bounded-scope (lua-ls indexing) — best per-addon / per-file' })
+
     -- ── untangle MODULE: independent function clusters in a file (or a dir) ─
     cmd('CartographUntangleModule', function (o)
         local store = live() if not store then return end
