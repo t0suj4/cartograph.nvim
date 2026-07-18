@@ -19,7 +19,18 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 75 -- v75: RUBY R4 — INHERITANCE + MIXIN ancestor resolution. When a
+M.VERSION = 76 -- v76: RUBY R4 `super` KEYWORD follow-on. Bare `super` /
+               -- `super(args)` (its own grammar node, NOT captured by the calls
+               -- query) now emits a call resolved to the ANCESTOR's same-named
+               -- method — the enclosing def's name chased up C's ancestors
+               -- (resolve_ruby_ancestors superx path; chase already skips C's
+               -- own def). Instance super → superclass/include chain (p#m);
+               -- singleton super (def self.x) → superclass singleton chain
+               -- (p.m). HEDGED ~, additive (super wasn't a call before).
+               -- activesupport +22 resolved (141 super calls captured; the rest
+               -- = super-to-external-ancestor honest frontiers). +3 ruby_r4
+               -- super specs. c.superx call field.
+-- v75: RUBY R4 — INHERITANCE + MIXIN ancestor resolution. When a
                -- bare/self call keyed `C#m`/`C.m` (R2/R3) MISSES (the method is
                -- inherited), walk C's ancestors — superclass chain + include/
                -- prepend modules (instance) + extend modules (singleton) — for

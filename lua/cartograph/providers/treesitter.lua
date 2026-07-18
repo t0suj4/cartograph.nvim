@@ -1226,6 +1226,43 @@ local function ruby_ancestors(tsroot, src)
     return out
 end
 
+-- Ruby R4 `super` keyword: bare `super` / `super(args)` inside `C#foo` calls the
+-- ANCESTOR's `foo` (the enclosing method's own name), skipping C's definition.
+-- Returns super sites {node, member (enclosing def name), sing (singleton
+-- context), cls (enclosing class/module)}; resolve_ruby_ancestors chases the
+-- ancestor chain for `member` (its chase already looks at PARENTS, so C's own
+-- def is skipped). `super` is its own grammar node (bare → parent body_statement;
+-- `super(x)` → the method-child of a call) — NOT captured by the calls query.
+local function ruby_super_calls(tsroot, src)
+    local out = {}
+    local function walk(n)
+        if n:type() == 'super' then
+            local p, member, sing, cls = n:parent(), nil, false, nil
+            while p do
+                local t = p:type()
+                if (t == 'method' or t == 'singleton_method') and not member then
+                    local nm = p:field('name')[1]
+                    member = nm and node_text(nm, src)
+                    if t == 'singleton_method' then sing = true end
+                elseif t == 'singleton_class' then
+                    sing = true
+                elseif t == 'class' or t == 'module' then
+                    local nm = p:field('name')[1]
+                    cls = nm and node_text(nm, src):match('([%w_]+)%s*$')
+                    break
+                end
+                p = p:parent()
+            end
+            if member and cls and member:match('^[%a_]') then
+                out[#out + 1] = { node = n, member = member, sing = sing, cls = cls }
+            end
+        end
+        for c in n:iter_children() do walk(c) end
+    end
+    walk(tsroot)
+    return out
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -2528,6 +2565,9 @@ M.spec = {
         -- / extend) so a keyed `C#m`/`C.m` that misses walks the chain. See
         -- ruby_ancestors + resolve_ruby_ancestors.
         scan_ancestors = ruby_ancestors,
+        -- R4 `super` keyword: bare/paren'd super calls the ancestor's same-named
+        -- method. See ruby_super_calls + resolve_ruby_ancestors (superx path).
+        scan_super = ruby_super_calls,
         import_call = 'require_relative',
         resolve_import = function (mod, files, from)
             local dir = from and from:match('^(.*)/[^/]*$') or ''
@@ -4414,15 +4454,25 @@ local function resolve_ruby_ancestors(calls, anc, exact, addref, node_index)
     end
     local n = 0
     for _, c in ipairs(calls or {}) do
-        if not c.to and c.full and c.fn then
-            local cls, csep, member = c.full:match('^(%u[%w_]*)([#.])([%w_?!=]+)$')
+        if not c.to and c.fn then
             local fit
-            if cls and csep == '#' then
-                fit = chase(cls, member, inst, '#')
-            elseif cls and csep == '.' then
-                -- superclass singletons (p.m) then extend-modules (m#member)
-                fit = chase(cls, member, sings, '.')
-                if not fit then fit = chase(cls, member, singe, '#') end
+            if c.superx then
+                -- `super`: chase the enclosing method's name up the ancestors,
+                -- skipping C's own def (chase looks at PARENTS). instance
+                -- method → superclass/include chain (p#m); singleton → the
+                -- superclass singleton chain (p.m).
+                local sx = c.superx
+                if sx.sing then fit = chase(sx.cls, sx.member, sings, '.')
+                else fit = chase(sx.cls, sx.member, inst, '#') end
+            elseif c.full then
+                local cls, csep, member = c.full:match('^(%u[%w_]*)([#.])([%w_?!=]+)$')
+                if cls and csep == '#' then
+                    fit = chase(cls, member, inst, '#')
+                elseif cls and csep == '.' then
+                    -- superclass singletons (p.m) then extend-modules (m#member)
+                    fit = chase(cls, member, sings, '.')
+                    if not fit then fit = chase(cls, member, singe, '#') end
+                end
             end
             if fit then
                 c.to = fit.id; c.inferred = true; c.refused = nil
@@ -6777,6 +6827,22 @@ function M.extract(root, opts)
                     pending[#pending + 1] = { call = c, file = file, full = full,
                         at = pos_of(id), encl = encl and pos_of(encl) }
                 end
+            end
+        end
+        -- R4 `super` keyword: emit a call resolved by resolve_ruby_ancestors
+        -- (superx path) to the ANCESTOR's same-named method. full=nil so the
+        -- main loop leaves it unresolved (and sets c.fn); it never self-matches
+        -- the enclosing method.
+        if spec.scan_super then
+            for _, s in ipairs(spec.scan_super(tsroot, src)) do
+                local sp = pos_of(s.node)
+                local encl = in_function(s.node, spec, ifmemo)
+                local c = { callee = 'super', args = {}, argv = {}, file = file,
+                    line = sp.start.line, method = false, at = pos_of(s.node),
+                    superx = { cls = s.cls, member = s.member, sing = s.sing } }
+                calls[#calls + 1] = c
+                pending[#pending + 1] = { call = c, file = file, full = 'super',
+                    at = pos_of(s.node), encl = encl and pos_of(encl) }
             end
         end
     end

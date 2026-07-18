@@ -125,6 +125,65 @@ test('R4 soundness: two mixins defining the same method → ambiguous, unresolve
     vim.fn.delete(root, 'rf')
 end)
 
+test('R4 super: bare `super` resolves to the ancestor same-named method', function ()
+    if not ready() then skip 'no ruby parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 's1.rb', {
+        'class Base',
+        '  def process(x); x; end',
+        'end',
+        'class Derived < Base',
+        '  def process(x)',
+        '    super',              -- → Base#process
+        '  end',
+        'end',
+    })
+    local byname, calls = extract(root)
+    local c
+    for _, x in ipairs(calls) do if x.callee == 'super' then c = x end end
+    ok(c, '`super` captured as a call')
+    ok(c and c.to == byname['Base#process'].id, 'super → Base#process (ancestor, not self)')
+    ok(c and c.inferred, 'hedged (~)')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('R4 super: singleton `super` walks the superclass singleton chain', function ()
+    if not ready() then skip 'no ruby parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 's2.rb', {
+        'class Sub',
+        '  def self.attach; 1; end',
+        'end',
+        'class Log < Sub',
+        '  def self.attach',
+        '    super(1)',           -- → Sub.attach (singleton)
+        '  end',
+        'end',
+    })
+    local byname, calls = extract(root)
+    local c
+    for _, x in ipairs(calls) do if x.callee == 'super' then c = x end end
+    ok(c and c.to == byname['Sub.attach'].id, 'singleton super → Sub.attach')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('R4 super: an external ancestor leaves super an honest frontier', function ()
+    if not ready() then skip 'no ruby parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 's3.rb', {
+        'class Widget < ApplicationRecord',   -- ApplicationRecord not in corpus
+        '  def save',
+        '    super',
+        '  end',
+        'end',
+    })
+    local _, calls = extract(root)
+    local c
+    for _, x in ipairs(calls) do if x.callee == 'super' then c = x end end
+    ok(c and not c.to, 'super to an external ancestor stays unresolved (honest)')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('R4: resolves across files (reopened ancestor)', function ()
     if not ready() then skip 'no ruby parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')

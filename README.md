@@ -434,7 +434,8 @@ callers). Ariadne's thread, in text.
      methods), and `extend` modules (as singleton methods), for the nearest
      unique definition (`class Dog < Animal; def act; breathe; end` resolves
      `breathe` to `Animal#breathe`; `include Comparable`-style mixins resolve
-     the same way). Bare
+     the same way), and a bare `super` (or `super(args)`) resolves to that same
+     inherited method one level up. Bare
      calls with no parentheses (`save`, an attribute read) — which parse as a
      plain identifier, not a call — are recovered by applying Ruby's own
      var-vs-call rule: a bare name is a method call unless a local of that name

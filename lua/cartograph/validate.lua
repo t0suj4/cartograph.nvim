@@ -62,6 +62,7 @@ M.CALL_FIELDS = {
     qualifier = true, -- @Qualifier bean name (interface→impl narrowing)
     escalated = true, -- escalation-on-hedge: oracle-tried, still ~ (anti-thrash)
     bare = true, -- a bare no-paren call surfaced by scan_bare_calls (ruby)
+    superx = true, -- ruby `super`: {cls,member,sing} → ancestor's method (R4)
     conf = true, -- runtime-confirmed tier (session-live overlay)
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
 }
