@@ -19,7 +19,19 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 78 -- v78: RUBY R5b — `@ivar` constructor typing. Extends R5's
+M.VERSION = 79 -- v79: ZIG LANGUAGE SUPPORT (v1) — the 13th language. A spec
+               -- table in the procedural+struct+method family (like Go): `fn`
+               -- declarations (free + struct members), struct methods keyed
+               -- `T.method` from the enclosing `const T = struct` (qualify),
+               -- bare + field (`Foo.init`/`x.m`) calls, file-namespace scope,
+               -- `pub` = exported. NO new hooks — reuses the closed spec
+               -- contract ([[cartograph-modular-specs]]). Grammar via TSInstall
+               -- zig. Corpus = the self-hosted compiler (src/, 171 files):
+               -- 6138 fn + 2452 methods, 39.3% resolved. The receiver-typing
+               -- ARC (Type.method keying = Zig-R1, x.m instance typing = R5, and
+               -- @import module binding) is banked — mirrors the ruby arc,
+               -- deferred so it gets the same measured diff-validation.
+-- v78: RUBY R5b — `@ivar` constructor typing. Extends R5's
                -- additive ctor-typing to instance variables: `@x = C.new;
                -- @x.foo` → `C#foo` (own/inherited). Tiny reuse — ruby_ctor_binds
                -- also matches an instance_variable LHS, recv_local also returns

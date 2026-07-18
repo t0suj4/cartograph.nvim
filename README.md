@@ -47,8 +47,8 @@ specific adapters — framework entry points, FSM browsing, the live oracle,
 database links — are plain `setup{}` blocks; [`examples/`](examples/) has
 complete wirings to copy from.
 
-Twelve languages (lua, c, cpp, python, js, ts, php, ruby, java, go, rust,
-haskell, scheme) plus vue/svelte single-file components. Everything
+Thirteen languages (lua, c, cpp, python, js, ts, php, ruby, java, go, rust,
+haskell, scheme, zig) plus vue/svelte single-file components. Everything
 cross-file is name-matched and marked `~` unless an oracle proved it;
 ambiguity refuses to link rather than guess.
 
@@ -368,8 +368,10 @@ callers). Ariadne's thread, in text.
      with a unique-basename fallback for `-I` paths) and a df-lite, so the
      fn altitude, the lit altitude and the graph lints all work. Specs ship
      for **Lua, C, C++, Haskell, Scheme, PHP, JavaScript/TypeScript (incl.
-     React `.jsx`/`.tsx`), Python** — a new language is one spec table (queries
-     + a few hooks).
+     React `.jsx`/`.tsx`), Python, Ruby, Java, Go, Rust, Zig** — a new language
+     is one spec table (queries + a few hooks); Zig, the newest, slots into the
+     procedural+struct+method family (a `fn` is free or a struct member, keyed
+     `Type.method`) with no new machinery.
      TypeScript parses under its own tree-sitter grammar (a JS superset) for
      both extraction *and* the on-demand analysis lenses, but resolves under
      the JavaScript spec — so `.ts` and `.js` are one language family (the way

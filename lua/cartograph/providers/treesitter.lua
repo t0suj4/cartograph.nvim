@@ -3191,6 +3191,77 @@ M.spec = {
         end,
         litdata_types = { dictionary = true, list = true },
     },
+    -- Zig: the procedural+struct+method family (like Go/Rust). A `fn` is free
+    -- or a struct member; a struct is `const T = struct {…}` (anonymous struct
+    -- value bound to a const), so a member fn keys `T.method` from the enclosing
+    -- const's name. Calls are bare (`foo()`) or field (`Foo.init()`, `x.m()`,
+    -- `std.debug.print()`). v1 = functions + calls + struct-method keying; the
+    -- @import module binding + receiver typing (`x.m()`→T.m) are v2.
+    zig = {
+        exts = { 'zig' },
+        functions = [=[
+            (function_declaration name: (identifier) @name) @def
+        ]=],
+        calls = [=[
+            (call_expression function: (identifier) @name) @call
+            (call_expression
+                function: (field_expression member: (identifier) @name)) @call
+        ]=],
+        params_field = 'parameters',
+        body_field = 'body',
+        -- a fn nested in a struct_declaration is a member (of the enclosing
+        -- `const T = struct`); a top-level fn is free
+        is_method = function (_, def)
+            local p = def:parent()
+            while p do
+                local t = p:type()
+                if t == 'struct_declaration' then return true end
+                if t == 'source_file' then break end
+                p = p:parent()
+            end
+            return false
+        end,
+        -- member fn → T.method (T = the const the struct value is bound to)
+        qualify = function (name, defn, src)
+            local p = defn:parent()
+            while p do
+                local t = p:type()
+                if t == 'struct_declaration' then
+                    local vd = p:parent()
+                    if vd and vd:type() == 'variable_declaration' then
+                        for c in vd:iter_children() do
+                            if c:type() == 'identifier' then
+                                return node_text(c, src) .. '.' .. name
+                            end
+                        end
+                    end
+                    return name
+                end
+                if t == 'source_file' then break end
+                p = p:parent()
+            end
+            return name
+        end,
+        entry_names = { main = true },
+        -- a .zig file is a namespace (imported by @import path); bare names are
+        -- file-local, struct-qualified `T.method` cross files via the type name
+        scope = function (file, _) return file end,
+        -- `pub` = exported (visible through @import); no in-file caller says nothing
+        exported_def = function (defn, src)
+            return node_text(defn, src):match('^pub%f[%A]') ~= nil
+        end,
+        id_fn_refs = false,
+        -- Zig builtins are @-prefixed (their own node, not identifier calls);
+        -- these are common std/method verbs that must not absorb a project def
+        stdlib_names = { init = true, deinit = true, alloc = true, free = true,
+            create = true, destroy = true, append = true, print = true,
+            format = true, expect = true, expectEqual = true, len = true,
+            deref = true, ptr = true, items = true, slice = true, next = true,
+            reset = true, deinitialize = true, allocator = true, dupe = true,
+            writeAll = true, write = true, read = true, close = true,
+            toOwnedSlice = true, ensuretotal = true, get = true, put = true,
+            contains = true, count = true, clone = true, resize = true },
+    },
 }
 
 -- typescript is the javascript spec under another parser
@@ -4802,6 +4873,7 @@ local ATTACH = {
     go = { '^%s*//' },
     rust = { '^%s*//', '^%s*/%*', '^%s*%*', '^%s*#%[' },
     python = { '^%s*#', '^%s*@' },
+    zig = { '^%s*//' },
 }
 
 function M.attach_pats(file)

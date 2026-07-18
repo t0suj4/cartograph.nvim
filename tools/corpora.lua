@@ -141,6 +141,17 @@ return {
         lang = 'rust',
         notes = 'rust quick tier (100 files)',
     },
+    zig = {
+        root = HOME .. '/git/zig/src',
+        budget_mb = 3800, -- ~2x inline peak: the compiler files are enormous
+        repo = 'https://github.com/ziglang/zig',
+        rev = 'd5181a9c9bac',
+        expected = { refs = 18069, nodes = 9408 }, -- calibrated @ zig v1 (v79)
+        lang = 'zig',
+        notes = 'zig v1 (the self-hosted compiler, 171 files) — procedural+'
+            .. 'struct+method family; receiver-typing arc (Type.m keying / '
+            .. 'x.m instance typing / @import binding) banked, not built',
+    },
     python = {
         root = HOME .. '/git/django-oscar/src',
         repo = 'https://github.com/django-oscar/django-oscar',
