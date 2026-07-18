@@ -372,7 +372,16 @@ callers). Ariadne's thread, in text.
      language is one spec table (queries + a few hooks); the two newest slot in
      with no new machinery — Zig into the procedural+struct+method family (a
      `fn` is free or a struct member, keyed `Type.method`), Odin into the
-     C/procedural family (package + `proc` + struct, no methods).
+     C/procedural family (package + `proc` + struct, no methods). Zig also
+     carries **receiver typing**: a `recv.method()` call is keyed by the
+     receiver's declared type — a PascalCase receiver *is* the type (`Foo.init`),
+     and a lowercase receiver is typed from the enclosing fn's pointer parameter
+     (`fn f(sema: *Sema)` → `sema.x()` links to `Sema.x`). The definition side
+     mirrors it: a top-level `fn` with a pointer receiver (`fn fail(func: *Func)`)
+     keys `Func.fail` by that param's type — not the filename — so the
+     `const Self = @This()` aliasing idiom keys consistently on both sides,
+     and a bare-name fallback is refused for a typed key (an honest frontier,
+     never a promiscuous tail guess).
      TypeScript parses under its own tree-sitter grammar (a JS superset) for
      both extraction *and* the on-demand analysis lenses, but resolves under
      the JavaScript spec — so `.ts` and `.js` are one language family (the way

@@ -61,6 +61,58 @@ test('zig: a free call resolves to its function', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+test('zig-R5: a pointer-receiver method is keyed by its receiver type', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'foo.zig', {
+        'const Foo = @This();',
+        'pub fn greet(self: *Foo) void {}',    -- first param *Foo → Foo.greet
+        'pub fn run(self: *Foo) void {',
+        '    self.greet();',                    -- self:*Foo → keyed Foo.greet
+        '}',
+    })
+    local by, calls = extract(root)
+    ok(by['Foo.greet'], 'pointer-receiver method keyed Foo.greet')
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'greet' then hit = c end end
+    ok(hit and hit.to == by['Foo.greet'].id,
+        'self.greet() (self:*Foo) resolved to Foo.greet')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('zig-R5: a value-receiver method stays bare (not receiver-typed)', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'baz.zig', {
+        'const Baz = @This();',
+        'pub fn size(self: Baz) u32 { return 0; }', -- VALUE receiver → bare
+    })
+    local by = extract(root)
+    ok(by['size'], 'value-receiver method keyed bare `size`')
+    ok(not by['Baz.size'], 'value receiver is NOT keyed Baz.size')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('zig-R5: a PascalCase receiver keys the call by the type itself', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'pt.zig', {
+        'const Point = struct {',
+        '    pub fn make() Point { return .{}; }',  -- const-struct → Point.make
+        '};',
+        'pub fn build() void {',
+        '    _ = Point.make();',                     -- Point receiver → Point.make
+        '}',
+    })
+    local by, calls = extract(root)
+    ok(by['Point.make'], 'struct member keyed Point.make')
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'make' then hit = c end end
+    ok(hit and hit.to == by['Point.make'].id,
+        'Point.make() resolved to the type method')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('zig: pub fn is exported, plain fn is not', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')

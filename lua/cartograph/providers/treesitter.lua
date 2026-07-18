@@ -1298,6 +1298,114 @@ local function ruby_ctor_binds(tsroot, src)
     return out
 end
 
+-- Zig-R5 receiver typing. `fn m(self: *Foo, x: Bar) { self.a(); x.b() }` — a
+-- call `recv.method()` is typed by finding `recv` in the NEAREST enclosing
+-- function_declaration's parameter list and reading its declared type. The
+-- type is lexical + explicit, so this is sound and unambiguous — `self`
+-- resolves per-method (no file-level collision), and a miss is honest.
+-- zig_base_type peels *, ?, [], [N] wrappers to the base type identifier,
+-- returning it only when PascalCase (Zig convention: types are PascalCase,
+-- values camelCase — so `u32`/`usize`/`bool` builtins never key a struct).
+local function zig_base_type(node, src)
+    if not node then return nil end
+    local t = node:type()
+    if t == 'pointer_type' or t == 'optional_type'
+        or t == 'slice_type' or t == 'array_type' then
+        for c in node:iter_children() do
+            if c:named() then
+                local inner = zig_base_type(c, src)
+                if inner then return inner end
+            end
+        end
+        return nil
+    end
+    if t == 'identifier' then
+        local nm = node_text(node, src)
+        return nm:match('^%u') and nm or nil
+    end
+    return nil -- builtin_type / error_union / anonymous struct → not keyable
+end
+
+-- Def-side companion to zig_recv_type: the receiver type of a TOP-LEVEL fn is
+-- its first parameter's type, when that param is a POINTER to a PascalCase
+-- struct (`fn m(self: *T, ...)` — the Zig method convention; `x.m()` resolves
+-- `m` in x's type namespace passing x first). Keying the def `T.m` here meets
+-- the call `x.m()` (x:*T) keyed `T.m` on zig_recv_type's side, so `@This()`
+-- aliasing (`const Func = @This()`) is irrelevant: both use the type NAME as
+-- written in the receiver param. Gated to POINTER receivers (`self: *T`) on
+-- BOTH sides — symmetric, and measured the best config: value-receiver methods
+-- stay bare (keeping their same-file tail reach), which both resolves MORE
+-- (they'd otherwise strand on cross-module exact misses) and avoids keying the
+-- constructor's value first-param (`gpa: Allocator`) as a bogus method owner.
+-- Receiver-less (static) fns and non-struct first params stay bare.
+local function zig_method_owner(defn, src)
+    for c in defn:iter_children() do
+        if c:type() == 'parameters' then
+            for pc in c:iter_children() do
+                if pc:type() == 'parameter' then
+                    -- parameter = (identifier <name>) <type>; the receiver
+                    -- type is the second named child.
+                    local seen_name, tynode
+                    for cc in pc:iter_children() do
+                        if cc:named() then
+                            if not seen_name then seen_name = true
+                            else tynode = cc break end
+                        end
+                    end
+                    if tynode and tynode:type() == 'pointer_type' then
+                        return zig_base_type(tynode, src)
+                    end
+                    return nil -- first param isn't a pointer receiver
+                end
+            end
+            return nil -- no params → static/free fn
+        end
+    end
+end
+
+local function zig_recv_type(calln, recv, src)
+    local p = calln:parent()
+    while p do
+        local t = p:type()
+        if t == 'function_declaration' then
+            for c in p:iter_children() do
+                if c:type() == 'parameters' then
+                    for pc in c:iter_children() do
+                        if pc:type() == 'parameter' then
+                            local nm, tynode
+                            for cc in pc:iter_children() do
+                                if cc:named() then
+                                    if cc:type() == 'identifier' and not nm then
+                                        nm = node_text(cc, src)
+                                    elseif nm and not tynode then
+                                        tynode = cc
+                                    end
+                                end
+                            end
+                            if nm == recv then
+                                -- symmetric with zig_method_owner (def side):
+                                -- type ONLY pointer receivers (`recv: *T`). A
+                                -- value receiver (`mir: Mir`) is left bare so
+                                -- it takes the same-file tail path — otherwise
+                                -- a value-receiver call would key `T.method`
+                                -- and mis-match a DIFFERENT file's pointer-
+                                -- receiver `T` (same-named type, other module).
+                                if tynode and tynode:type() == 'pointer_type' then
+                                    return zig_base_type(tynode, src)
+                                end
+                                return nil
+                            end
+                        end
+                    end
+                end
+            end
+            return nil -- reached the fn; recv is not one of its params
+        end
+        if t == 'source_file' then return nil end
+        p = p:parent()
+    end
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -3240,7 +3348,43 @@ M.spec = {
                 if t == 'source_file' then break end
                 p = p:parent()
             end
+            -- R5 method keying: a top-level fn whose first param is a pointer
+            -- receiver (`fn fail(func: *Func, ...)`) is a method of that type →
+            -- key `Func.fail`. It lands in exact['Func.fail'] (so a receiver
+            -- call `func.fail()` resolves) AND in tail['fail'] (so same-file
+            -- bare `fail()` calls keep their file-local reach). The type is
+            -- taken from the receiver param (not the filename), so the
+            -- `const Func = @This()` alias pattern keys consistently with the
+            -- call side. Receiver-less / value-receiver fns stay bare.
+            local owner = zig_method_owner(defn, src)
+            if owner then return owner .. '.' .. name end
             return name
+        end,
+        -- R5 receiver typing (call side): `recv.method()` keys `Type.method`
+        -- exact. A PascalCase receiver IS the type (`Foo.init` → `Foo.init`); a
+        -- lowercase receiver is an instance typed from the enclosing fn's params
+        -- (`sema: *Sema` → `sema.x()` = `Sema.x`). The def side (qualify above +
+        -- struct methods) keys the same `Type.method`, so the two meet. Hedged
+        -- (~): dispatch is static-nearest; a comptime-generic call could differ.
+        qualify_call = function (calln, name, src)
+            if calln:type() ~= 'call_expression' then return nil end
+            local fe = calln:field('function')[1]
+            if not fe or fe:type() ~= 'field_expression' then return nil end
+            local obj = fe:field('object')[1]
+            if not obj or obj:type() ~= 'identifier' then return nil end
+            local recv = node_text(obj, src)
+            if recv:match('^%u') then -- PascalCase receiver = the type itself
+                return recv .. '.' .. name, { rule = 'type-recv' }
+            end
+            local ty = zig_recv_type(calln, recv, src)
+            if ty then return ty .. '.' .. name, { rule = 'recv-typed' } end
+            return nil
+        end,
+        -- a typed receiver key (`Type.method`) is exact-or-nothing: a miss is an
+        -- honest frontier (an external/std method, or file-as-struct not in the
+        -- corpus), NEVER a promiscuous tail guess onto some unrelated `X.method`.
+        exact_only_key = function (name)
+            return name:match('^%u[%w_]*%.') ~= nil
         end,
         entry_names = { main = true },
         -- a .zig file is a namespace (imported by @import path); bare names are
@@ -3260,7 +3404,11 @@ M.spec = {
             reset = true, deinitialize = true, allocator = true, dupe = true,
             writeAll = true, write = true, read = true, close = true,
             toOwnedSlice = true, ensuretotal = true, get = true, put = true,
-            contains = true, count = true, clone = true, resize = true },
+            contains = true, count = true, clone = true, resize = true,
+            -- std.io.Writer verbs — a `writer.writeInt()` names the std writer,
+            -- never a project method (kept out of the receiver-typed index)
+            writeInt = true, writeByte = true, writeByteNTimes = true,
+            writeStruct = true, flush = true },
     },
     -- Odin: C/procedural family — package + `proc` + struct, NO methods (procs
     -- are free). `foo :: proc(){}`, `T :: struct{}`; calls are bare `foo()` or

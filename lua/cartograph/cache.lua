@@ -19,7 +19,21 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 80 -- v80: ODIN LANGUAGE SUPPORT (v1) — the 14th language. C/
+M.VERSION = 81 -- v81: ZIG-R5 RECEIVER TYPING. A `recv.method()` call is keyed
+               -- `Type.method` from the receiver's declared type: a PascalCase
+               -- receiver IS the type (`Foo.init`), a lowercase receiver is an
+               -- instance typed from the enclosing fn's POINTER param
+               -- (`sema: *Sema` → `sema.x()` = `Sema.x`). The def side mirrors
+               -- it: a top-level fn with a pointer receiver first-param
+               -- (`fn fail(func: *Func)`) keys `Func.fail` (via first-param
+               -- type, NOT filename — so `const Func = @This()` aliasing keys
+               -- consistently). exact_only_key blocks promiscuous tail fallback
+               -- for `Type.method`. Measured 39.25%→40.68% on the compiler, but
+               -- the win is CORRECTNESS: 21.5k methods re-keyed bare→owning-type
+               -- + ~28 cross-file receiver fixes. Residual: cross-module
+               -- same-named types w/ value-receiver locals (Symbol/Tokenizer)
+               -- can mis-pick — next rung (value dual-key / module scoping).
+-- v80: ODIN LANGUAGE SUPPORT (v1) — the 14th language. C/
                -- procedural family: `proc` declarations (no methods — procs
                -- are free), `T :: struct`, package(dir) scope. NO new hooks.
                -- Grammar via TSInstall odin; corpus = the core stdlib (1279
