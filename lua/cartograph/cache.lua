@@ -19,7 +19,14 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 64 -- v64: JS/TS CTOR-TYPING V2 — `const o = new C(...)` binds o to
+M.VERSION = 65 -- v65: TS TYPE ALIASES & NAMESPACES (A1-tail remainder) —
+               -- `type Id = …` (ctype='type') and `namespace NS {}` (ctype=
+               -- 'namespace') extract as browse-only TYPE nodes, like interface/
+               -- enum. PURELY ADDITIVE (new .ts nodes, zero resolution change).
+               -- Namespace MEMBER qualification (NS.helper) banked; import type
+               -- already makes an import edge (the "region" is normal top-level
+               -- behavior, not a bug); decorators negligible (9/0) → banked.
+-- v64: JS/TS CTOR-TYPING V2 — `const o = new C(...)` binds o to
                -- class C (ctor_query on new_expression), so o.member resolves to
                -- C.member walking C's extends chain (resolve_local_ctor CUT 3:
                -- callee IS the class, elang-gated). `new C()` is precisely a C

@@ -2722,6 +2722,8 @@ M.spec.typescript.regime = M.spec.javascript.regime
 M.spec.typescript.interface = [=[
     (interface_declaration name: (type_identifier) @tsiface) @def
     (enum_declaration name: (identifier) @tsenum) @def
+    (type_alias_declaration name: (type_identifier) @tstype) @def
+    (internal_module name: (identifier) @tsns) @def
 ]=]
 -- CLASS INHERITANCE (pivot B2) → data.extends → resolve_super. The two grammars
 -- shape `extends` DIFFERENTLY, so each spec gets its own query: JS's class_heritage
@@ -5495,6 +5497,16 @@ function M.extract(root, opts)
                             table.insert(tail[tl], node)
                         end
                     end
+                elseif cat == 'tstype' or cat == 'tsns' then
+                    -- TS type alias (`type Id = …`) / namespace (`namespace NS {}`):
+                    -- a browse-only TYPE node (ctype excludes it from value
+                    -- resolution). Faithful representation; namespace MEMBER
+                    -- qualification (NS.helper) is a banked follow-on — the
+                    -- contents are still captured (bare) by the normal fn/class query.
+                    nodes[#nodes + 1] = { name = name, kind = 'var',
+                        id = uid(('%s::type:%s@%d'):format(file, name, sp.start.line)),
+                        file = file, range = sp, order = sp.start.line,
+                        torn = torn, ctype = cat == 'tstype' and 'type' or 'namespace' }
                 elseif cat == 'tsiface' or cat == 'tsenum' then
                     -- TS interface/enum (pivot A1-tail). The declaration itself
                     -- is a browse-only TYPE node (kind='var' + ctype), like a C

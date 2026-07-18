@@ -381,7 +381,9 @@ callers). Ariadne's thread, in text.
      `interface` and `enum` declarations extract as browse-only type nodes with
      their members (`Opts.run`, `Color.Red`) — faithful to the source, but kept
      out of value resolution (an interface method signature is a declaration,
-     not a callable), so they enrich the graph without inventing links.
+     not a callable), so they enrich the graph without inventing links. Type
+     aliases (`type Id = …`) and namespaces are captured the same browse-only
+     way, and `import type { … }` links to its module like any import.
      `class C extends B` records the inheritance edge, so `super.method()` and
      inherited static calls resolve to the nearest ancestor that defines the
      method (walking the chain, unique-or-refuse) — the same superclass
