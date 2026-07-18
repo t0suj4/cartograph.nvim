@@ -1277,7 +1277,12 @@ local function ruby_ctor_binds(tsroot, src)
         if n:type() == 'assignment' then
             local l = n:field('left')[1]
             local r = n:field('right')[1]
-            if l and l:type() == 'identifier' and r and r:type() == 'call' then
+            -- R5: a local `x = C.new`; R5b: an ivar `@x = C.new` (per-file keyed
+            -- by `@x`; a same-named ivar across two classes in one file → the
+            -- single-assignment gate drops it — conservative, no wrong type).
+            local lt = l and l:type()
+            if (lt == 'identifier' or lt == 'instance_variable')
+                and r and r:type() == 'call' then
                 local recv = r:field('receiver')[1]
                 local m = r:field('method')[1]
                 if recv and recv:type() == 'constant'
@@ -2603,7 +2608,11 @@ M.spec = {
         recv_local = function (calln, src)
             if calln:type() ~= 'call' then return nil end
             local r = calln:field('receiver')[1]
-            if r and r:type() == 'identifier' then return node_text(r, src) end
+            -- identifier (`x.foo`) or ivar (`@x.foo`, R5b) receiver
+            if r and (r:type() == 'identifier'
+                or r:type() == 'instance_variable') then
+                return node_text(r, src)
+            end
         end,
         -- R5 constructor bindings (`u = Const.new`) → data.ruby_ctor, consumed
         -- by resolve_ruby_ancestors' recv path. See ruby_ctor_binds.

@@ -19,7 +19,17 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 77 -- v77: RUBY R5 (RESCOPED, ADDITIVE) constructor/receiver typing.
+M.VERSION = 78 -- v78: RUBY R5b — `@ivar` constructor typing. Extends R5's
+               -- additive ctor-typing to instance variables: `@x = C.new;
+               -- @x.foo` → `C#foo` (own/inherited). Tiny reuse — ruby_ctor_binds
+               -- also matches an instance_variable LHS, recv_local also returns
+               -- ivar receivers; the existing recv path + single-assignment gate
+               -- + parallel merge all carry over (per-file `@x` key; a same-named
+               -- ivar across two classes in one file drops via the gate —
+               -- conservative). ADDITIVE, 0 losses: activesupport +3, discourse
+               -- app +35. +1 ruby_r5 ivar spec. R5b-pack (rails finder-typing:
+               -- @x=User.find→User#m, +60 discourse/app) + param/RBS typing banked.
+-- v77: RUBY R5 (RESCOPED, ADDITIVE) constructor/receiver typing.
                -- `x = Const.new; x.foo` → `Const#foo` (own or inherited via the
                -- R4 ancestor chase). THE RESCOPE that fixed the reverted R5:
                -- ADDITIVE, not exact-only — `full` stays BARE so the file-local

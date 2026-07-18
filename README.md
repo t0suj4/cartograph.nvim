@@ -438,7 +438,9 @@ callers). Ariadne's thread, in text.
      inherited method one level up. When a local is built by a constructor —
      `x = Account.new; x.freeze!` — its calls resolve to that class's method
      (own or inherited), which disambiguates a name shared by several classes;
-     rebinding the local drops the type, so it stays honest. Bare
+     rebinding the local drops the type, so it stays honest — and the same
+     applies to an instance variable set from a constructor (`@engine =
+     Engine.new` makes `@engine.rev` resolve to `Engine#rev`). Bare
      calls with no parentheses (`save`, an attribute read) — which parse as a
      plain identifier, not a call — are recovered by applying Ruby's own
      var-vs-call rule: a bare name is a method call unless a local of that name

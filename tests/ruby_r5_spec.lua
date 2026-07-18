@@ -103,6 +103,32 @@ test('R5 soundness: a rebound local is ambiguous → not ctor-resolved', functio
     vim.fn.delete(root, 'rf')
 end)
 
+test('R5b: an instance variable typed by `@x = C.new` resolves', function ()
+    if not ready() then skip 'no ruby parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'iv.rb', {
+        'class Engine',
+        '  def rev; 1; end',        -- Engine#rev
+        'end',
+        'class Motor',
+        '  def rev; 2; end',        -- ambiguous `rev`
+        'end',
+        'class Dashboard',
+        '  def initialize',
+        '    @engine = Engine.new',
+        '  end',
+        '  def redline',
+        '    @engine.rev',          -- R5b: @engine is Engine → Engine#rev
+        '  end',
+        'end',
+    })
+    local byname, calls = extract(root)
+    local c = recvcall(calls, '@engine', 'rev')
+    ok(c, 'the @ivar.foo call captured its receiver')
+    ok(c and c.to == byname['Engine#rev'].id, '@engine.rev → Engine#rev (ivar ctor-typed)')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('R5: resolves across files (class defined elsewhere)', function ()
     if not ready() then skip 'no ruby parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
