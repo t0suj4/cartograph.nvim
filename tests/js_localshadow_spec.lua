@@ -67,6 +67,34 @@ test('localshadow: const f = () => {} STILL resolves to its same-file fn (plain)
     vim.fn.delete(root, 'rf')
 end)
 
+test('localshadow: a DESTRUCTURED param shadows a global (never an AMD dep)', function ()
+    if not ready() then skip 'no javascript parser' end
+    -- `({ onFocus }) =>` — a destructured object param (React props); unlike a
+    -- positional param it is never an AMD dep, so it is gated like a localdecl
+    local root = extract({
+        ['hooks.js'] = 'export function onFocus() {}\n',  -- cross-file global
+        ['btn.js'] = 'const Button = ({ onFocus, label }) => { onFocus(); return label; };\n',
+    })
+    local c = call_named('onFocus')
+    ok(c, 'onFocus() call extracted')
+    ok(not c.to, 'destructured param onFocus did NOT match the cross-file global')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('localshadow: a POSITIONAL param still name-matches (AMD dep safety)', function ()
+    if not ready() then skip 'no javascript parser' end
+    -- an AMD `define([...], function(dep){ dep() })` dep is a positional param
+    -- whose global name-match is correct — must NOT be gated
+    local root = extract({
+        ['dep.js'] = 'export function widget() {}\n',
+        ['amd.js'] = 'function wrap(widget) { return widget(); }\n',  -- positional param
+    })
+    local c = call_named('widget')
+    ok(c and c.to and name_of(c.to) == 'widget',
+        'positional param widget() still resolves to the global (not gated)')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('localshadow: a genuine cross-file global (no local of that name) still resolves', function ()
     if not ready() then skip 'no javascript parser' end
     local root = extract({

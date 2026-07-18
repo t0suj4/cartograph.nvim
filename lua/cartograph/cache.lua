@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 67 -- v67: LOCAL-SHADOW FIX (from the TS harvest) — a JS/TS bare
+M.VERSION = 68 -- v68: LOCAL-SHADOW — DESTRUCTURED PARAMS. fn_locals also
+               -- captures destructured object/array PARAMS (`({onFocus}) =>`,
+               -- `([a,b]) =>`): unlike a POSITIONAL param (an AMD dep, ungated) a
+               -- destructured param is never AMD → unambiguously local, gated like
+               -- a localdecl. +20 shadow fixes on matrix-react-sdk (→93.06%); AMD
+               -- positional params + non-JS still byte-identical.
+-- v67: LOCAL-SHADOW FIX (from the TS harvest) — a JS/TS bare
                -- callee bound by an in-function const/let/var (incl. destructured
                -- `const [x,setX]=useState()` hook setters) with NO same-file def
                -- no longer name-matches a cross-file GLOBAL of that name — the

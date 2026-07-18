@@ -3010,7 +3010,6 @@ end
 local function fn_locals(def, spec, src)
     if not spec.local_decls then return nil end
     local body = spec.body_field and def:field(spec.body_field)[1]
-    if not body then return nil end
     local out, seen = {}, {}
     local function add(id)
         local t = node_text(id, src)
@@ -3041,7 +3040,26 @@ local function fn_locals(def, spec, src)
             end
         end
     end
-    walk(body)
+    if body then walk(body) end
+    -- DESTRUCTURED params (`({onFocus}) =>`, `([a,b]) =>`) bind local names too —
+    -- and unlike a POSITIONAL identifier param (which may be an AMD `define(…,
+    -- function(dep){})` dep whose global name-match is correct), a destructured
+    -- param is NEVER an AMD dep → unambiguously local, safe to gate. Positional
+    -- identifier params stay in node.params (fn_params, ungated).
+    local ps = spec.params_field and def:field(spec.params_field)[1]
+    if ps then
+        for _, c in inext, ps, -1 do
+            local ct = c:type()
+            if ct == 'object_pattern' or ct == 'array_pattern' then
+                binding_ids(c)
+            elseif ct == 'required_parameter' or ct == 'optional_parameter' then
+                for _, pc in inext, c, -1 do -- TS wraps the pattern
+                    local pt = pc:type()
+                    if pt == 'object_pattern' or pt == 'array_pattern' then binding_ids(pc) end
+                end
+            end
+        end
+    end
     return #out > 0 and out or nil
 end
 
