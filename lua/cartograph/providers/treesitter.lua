@@ -2697,6 +2697,28 @@ M.spec.typescript.interface = [=[
     (interface_declaration name: (type_identifier) @tsiface) @def
     (enum_declaration name: (identifier) @tsenum) @def
 ]=]
+-- CLASS INHERITANCE (pivot B2) → data.extends → resolve_super. The two grammars
+-- shape `extends` DIFFERENTLY, so each spec gets its own query: JS's class_heritage
+-- holds the superclass expression DIRECTLY; TS wraps it in an extends_clause. A
+-- dotted superclass (`extends ns.Base`) captures the member_expression's PROPERTY
+-- (the bare `Base` a class node is keyed by), so handle_super's name matches.
+-- A mixin-call superclass (`extends mix(Base)`) is deliberately NOT captured —
+-- not statically a named class. (class name = identifier in JS, type_identifier
+-- in TS.) implements/interface-extends are set-valued → the resolve_interface
+-- linker's territory, not this single-parent extends map.
+M.spec.javascript.super_query = [=[
+    (class_declaration name: (identifier) @child
+        (class_heritage (identifier) @parent))
+    (class_declaration name: (identifier) @child
+        (class_heritage (member_expression property: (property_identifier) @parent)))
+]=]
+M.spec.typescript.super_query = [=[
+    (class_declaration name: (type_identifier) @child
+        (class_heritage (extends_clause (identifier) @parent)))
+    (class_declaration name: (type_identifier) @child
+        (class_heritage (extends_clause
+            (member_expression property: (property_identifier) @parent))))
+]=]
 M.spec.rust.regime = { let_declaration = 'block' }
 M.spec.c.regime = { declaration = 'block' }
 M.spec.cpp.regime = { declaration = 'block' }
@@ -3089,7 +3111,7 @@ end
 -- Upgrade still-refused `Head::method` calls in place (addref + inferred);
 -- returns how many resolved. `exact` and `addref` come from whichever pass
 -- calls this (extract or relink) so it reads the CURRENT full node set.
-local function resolve_super(calls, extends, exact, addref)
+local function resolve_super(calls, extends, exact, addref, node_index)
     if not (extends and extends[1]) then return 0 end
     local super = build_super(extends)
     local n = 0
@@ -3099,6 +3121,16 @@ local function resolve_super(calls, extends, exact, addref)
             -- colon/dot methods). Captured so the ancestor lookup key reuses the
             -- SAME separator the def keys and this call use — one path, all langs.
             local head, sep, method = c.full:match('^([%w_]+)([:.]+)([%w_]+)$')
+            -- `super.m()` (JS/TS): the receiver IS the enclosing class's parent.
+            -- Rewrite head to the enclosing class (from the call's fn owner) so
+            -- the SAME ancestor walk resolves it — super[owner] is the parent,
+            -- and the loop then finds parent.m up the chain. Sound: `super`
+            -- unambiguously names the lexical parent; skip if the enclosing fn
+            -- isn't a class method (e.g. a nested callback → owner underivable).
+            if head == 'super' then
+                local fn = node_index and c.fn and node_index[c.fn]
+                head = fn and fn.name and fn.name:match('^(.+)[.:][%w_]+$') or nil
+            end
             if head and sep and super[head] then
                 local clang = elang_for(c.file)
                 local seen, cur, target = { [head] = true }, head, nil
@@ -6508,7 +6540,7 @@ function M.extract(root, opts)
     -- the nearest ancestor that defines it. Bounded; over the full graph.
     padd('resolve_setup', _prs)
     local _pr = pstart()
-    resolve_super(calls, data.extends, exact, addref)
+    resolve_super(calls, data.extends, exact, addref, node_index)
 
     -- module-alias: `alias.member` where alias = require('mod') → mod's member
     -- (rung-1 receiver resolution) — before the return rounds, so a resolved
@@ -6916,10 +6948,11 @@ function M.relink(data, touched)
     -- transitive parent::m over the full (merged/spliced) graph — mirrors
     -- extract's enrichment so the parallel and refresh paths resolve the
     -- same superclass chains the sequential path does
-    n = n + resolve_super(data.calls, data.extends, exact, addref)
-    -- node_index built BEFORE module-alias: its foreign-override reads c.to's file
+    -- node_index built BEFORE resolve_super (its super.m() owner lookup) and
+    -- module-alias (its foreign-override reads c.to's file)
     local node_index = {}
     for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
+    n = n + resolve_super(data.calls, data.extends, exact, addref, node_index)
     -- module-alias (rung-1 receiver resolution + binding-over-name-match), as extract
     n = n + resolve_module_alias(data.calls, data.edges, exact, tail, addref, node_index)
     -- and the return-type rounds, for the same parity (cross-chunk chains:

@@ -19,7 +19,16 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 60 -- v60: TS INTERFACES & ENUMS (pivot A1-tail) — interface/enum
+M.VERSION = 61 -- v61: JS/TS CLASS EXTENDS (pivot B2) — `class C extends B` now
+               -- emits a data.extends child→parent edge (js super_query on
+               -- class_heritage; ts on the extends_clause; dotted `ns.Base`
+               -- captures the tail). resolve_super consumes it: inherited static
+               -- calls `C.s()` AND `super.m()` (head rewritten to the enclosing
+               -- class via the call's fn owner) walk the chain to the nearest
+               -- ancestor defining the method. three.js: 397 extends edges,
+               -- +250 super.method resolutions, all ancestor-correct (0 off-chain).
+               -- Populates the inheritance graph B3 (this-typing) rides.
+-- v60: TS INTERFACES & ENUMS (pivot A1-tail) — interface/enum
                -- declarations now extract as browse-only TYPE nodes (kind='var'
                -- + ctype=interface/enum, like a C struct/enum: excluded from
                -- value resolution by the var_named gate), plus their members:

@@ -382,6 +382,10 @@ callers). Ariadne's thread, in text.
      their members (`Opts.run`, `Color.Red`) — faithful to the source, but kept
      out of value resolution (an interface method signature is a declaration,
      not a callable), so they enrich the graph without inventing links.
+     `class C extends B` records the inheritance edge, so `super.method()` and
+     inherited static calls resolve to the nearest ancestor that defines the
+     method (walking the chain, unique-or-refuse) — the same superclass
+     machinery PHP and Java use.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because
