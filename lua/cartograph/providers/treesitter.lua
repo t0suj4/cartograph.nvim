@@ -1564,6 +1564,14 @@ M.spec = {
             (pair key: (property_identifier) @name value: (function_expression) @def)
             (arguments (arrow_function) @adef)
             (arguments (function_expression) @adef)
+            (assignment_expression
+                left: (member_expression
+                    object: (member_expression property: (property_identifier) @_pp)) @name
+                right: (function_expression) @def (#eq? @_pp "prototype"))
+            (assignment_expression
+                left: (member_expression
+                    object: (member_expression property: (property_identifier) @_pp)) @name
+                right: (arrow_function) @def (#eq? @_pp "prototype"))
         ]=],
         calls = [=[
             (call_expression function: (identifier) @name) @call
@@ -1591,6 +1599,14 @@ M.spec = {
         -- Anonymous class expressions borrow their binding variable's name
         -- (`const C = class {…}`); a truly nameless class leaves methods bare.
         qualify = function (name, defn, src)
+            -- pre-ES6 prototype method (pivot B4): `X.prototype.m = function` is
+            -- captured with @name = the whole LHS `X.prototype.m`; collapse to the
+            -- class key `X.m` (the same shape B1 gives ES6 methods, so B3
+            -- this-typing / resolve_super treat a prototype "class" identically).
+            -- `A.B.prototype.m` → `A.B.m`. The query's #eq? "prototype" gate means
+            -- only genuine prototype assignments reach here in this form.
+            local powner, pmethod = name:match('^(.+)%.prototype%.([%w_]+)$')
+            if powner then return powner .. '.' .. pmethod end
             local body = defn:parent()
             if not (body and body:type() == 'class_body') then return name end
             local cls = body:parent()

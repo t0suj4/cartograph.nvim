@@ -392,6 +392,11 @@ callers). Ariadne's thread, in text.
      subclass can override), and only fires for a genuine object (a class with
      ≥2 methods) with a unique hit; a `this` inside a nested plain function
      isn't the class instance, so it's left unresolved rather than guessed.
+     Pre-ES6 prototype methods (`X.prototype.method = function`) are captured
+     too and keyed `X.method`, so a prototype "class" gets the same treatment as
+     an ES6 one — `this.method()` inside resolves the same way. Extending a
+     built-in prototype (`Function.prototype.overload = …`, MooTools-style) works
+     the same; a member assignment that isn't on a `.prototype.` is left alone.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

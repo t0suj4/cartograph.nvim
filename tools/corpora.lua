@@ -107,7 +107,7 @@ return {
         root = HOME .. '/git/hugo',
         repo = 'https://github.com/gohugoio/hugo',
         rev = '5a5f4a549522',
-        expected = { refs = 9568, nodes = 11707 }, -- +1 @ v59 js class-keying (embedded docs/assets/js: LRUCache.put now resolves)
+        expected = { refs = 9575, nodes = 11709 }, -- +7/+2 @ v63 B4 prototype methods (embedded HugoReload.prototype.reload); +1 @ v59 class-keying (LRUCache.put)
         lang = 'go',
         notes = 'go quick tier (901 files)',
     },
@@ -148,7 +148,7 @@ return {
         root = HOME .. '/git/mootools-core/Source',
         repo = 'https://github.com/mootools/mootools-core',
         rev = '187a16bae2d7',
-        expected = { refs = 390, nodes = 542 }, -- +anon callback fns @ v51 (df-strangler B; +99 #cb nodes)
+        expected = { refs = 399, nodes = 545 }, -- +9/+3 @ v63 B4 prototype methods (Function.prototype.overloadSetter/String.prototype.contains)
         lang = 'javascript',
         notes = 'js archaeology tier (29 files, frozen 2017) — prototype-'
             .. 'extension culture, string-keyed dispatch',

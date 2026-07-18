@@ -19,7 +19,17 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 62 -- v62: JS/TS THIS-TYPING (pivot B3) — `this.member()` inside a
+M.VERSION = 63 -- v63: JS/TS PROTOTYPE METHODS (pivot B4) — pre-ES6
+               -- `X.prototype.m = function` is captured (structural #eq?
+               -- "prototype" gate) and keyed `X.m` (qualify collapse), the same
+               -- shape B1 gives ES6 methods, so B3 this-typing / resolve_super
+               -- treat a prototype "class" identically. SOUND + GENERAL but
+               -- MEASURED ~0 reach on the current corpora (jquery/mootools/three/
+               -- prototype.js moved to ES6 classes / framework factories) → inert,
+               -- gate corpora byte-identical; correct for node-style / older JS.
+               -- Framework factories (Class.create / new Class / jQuery .fn
+               -- object-literal) BANKED as narrow per-adapter cuts (WoW lesson).
+-- v62: JS/TS THIS-TYPING (pivot B3) — `this.member()` inside a
                -- class method resolves to the enclosing class's member, walking
                -- the extends chain (B2) for inherited ones. `this` typed
                -- LEXICALLY from the method's `C.member` key (B1); ~-tier (JS this
