@@ -18,9 +18,15 @@ package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.pa
 local ts = require 'cartograph.providers.treesitter'
 
 local addon = arg[1]
-local show = arg[2] == '--show'
-if not addon then print('usage: dumpcompare <addon-dir> [--show]'); os.exit(2) end
-local dumpf = addon .. '/.luals-graph.json'
+local show, dumparg = false, nil
+for i = 2, #arg do
+    if arg[i] == '--show' then show = true
+    elseif arg[i]:match('^%-%-dump=') then dumparg = arg[i]:gsub('^%-%-dump=', '') end
+end
+if not addon then print('usage: dumpcompare <addon-dir> [--show] [--dump=<path>]'); os.exit(2) end
+-- --dump lets a git repo (read-only) keep its dump in scratch (lua-ls --graphout)
+-- rather than writing .luals-graph.json into the tree.
+local dumpf = dumparg or (addon .. '/.luals-graph.json')
 local fd = io.open(dumpf)
 if not fd then print('no dump: ' .. dumpf .. ' (needs the lua-ls graph-cli patch)'); os.exit(2) end
 local ls = vim.json.decode(fd:read('a')); fd:close()
