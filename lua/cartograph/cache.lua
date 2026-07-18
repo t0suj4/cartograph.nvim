@@ -19,7 +19,17 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 58 -- v58: LUA PARSE-ERROR RESILIENCE — lua defs are self-contained
+M.VERSION = 59 -- v59: JS/TS CLASS-KEYING (pivot B1) — ES6 `class C { m(){} }`
+               -- methods now carry their class as `C.m` (js `qualify` hook; JS
+               -- analog of lua `C:m` / php `C::m`). A method_definition is a class
+               -- member iff its parent is class_body (object-literal methods stay
+               -- bare); anon class exprs borrow the binding var name. `.` separator:
+               -- a `ClassName.m()` reference exact-matches; the tail index still
+               -- catches `x.m()`. SEPARATES the module-fn vs class-method namespaces
+               -- that bare-keying conflated — three.js +640 resolutions, 0 fabricated
+               -- (soundprobe OTHER=0). Non-JS byte-identical (js-only hook); jquery/
+               -- mootools identical (pre-ES6); synjs pure rename, answer-key PASS.
+-- v58: LUA PARSE-ERROR RESILIENCE — lua defs are self-contained
                -- (`function X.prototype:m` carries its own qualifier), so torn_by_node:
                -- tear only defs whose OWN subtree holds the error, not everything after
                -- the first error ROW. One invalid-escape string (`"[^\.]+"` at Waterfall-

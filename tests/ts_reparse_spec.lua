@@ -73,9 +73,10 @@ test('ts: detail pages a .ts method\'s call sites (analysis lens works on TS)', 
 
     local rid
     for _, n in ipairs(store.data.nodes) do
-        if n.name == 'render' then rid = n.id end
+        -- class-keyed (B1): the method carries its class → Widget.render
+        if n.name == 'Widget.render' then rid = n.id end
     end
-    ok(rid, 'render method extracted from .ts')
+    ok(rid, 'render method extracted from .ts (class-keyed as Widget.render)')
     local calls = detail.calls_of(store, rid)
     local seen = {}
     for _, c in ipairs(calls) do seen[c.full or c.callee] = true end

@@ -107,7 +107,7 @@ return {
         root = HOME .. '/git/hugo',
         repo = 'https://github.com/gohugoio/hugo',
         rev = '5a5f4a549522',
-        expected = { refs = 9567, nodes = 11707 }, -- +anon callback fns @ v51 (livereload/alpinejs; enclosing-chain wins)
+        expected = { refs = 9568, nodes = 11707 }, -- +1 @ v59 js class-keying (embedded docs/assets/js: LRUCache.put now resolves)
         lang = 'go',
         notes = 'go quick tier (901 files)',
     },
@@ -115,7 +115,7 @@ return {
         root = HOME .. '/git/ripgrep',
         repo = 'https://github.com/burntsushi/ripgrep',
         rev = '48b0c795f4fe',
-        expected = { refs = 2468, nodes = 3360 }, -- +13 @ v48 short-name honesty (same-file ov/m/e)
+        expected = { refs = 2593, nodes = 3360 }, -- +125 catch-up @ v59 re-gate: PRE-EXISTING v55 module-alias drift (NOT js class-keying — rust has no JS; baseline was last pinned @ v48, v55 never re-gated here)
         lang = 'rust',
         notes = 'rust quick tier (100 files)',
     },

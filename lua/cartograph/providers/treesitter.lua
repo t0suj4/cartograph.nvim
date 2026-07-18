@@ -1580,6 +1580,32 @@ M.spec = {
         fn_types = { function_declaration = true, method_definition = true,
             arrow_function = true, function_expression = true },
         is_method = function (_, def) return def:type() == 'method_definition' end,
+        -- ES6 methods carry their class: `class C { m(){} }` -> `C.m` (the JS
+        -- analog of lua `C:m` / php `C::m`). A method_definition is a class
+        -- member IFF its DIRECT parent is class_body — object-literal methods
+        -- (`{ m(){} }`, incl. ones nested inside a class method) parent an
+        -- `object`, so they stay bare, never falsely borrowing an outer class.
+        -- `.` separator: aligns the key with how methods are called (obj.m),
+        -- so a `ClassName.m()` reference exact-matches, while the tail index
+        -- ([%w_]+$ -> `m`) still catches the unqualified `x.m()` receiver calls.
+        -- Anonymous class expressions borrow their binding variable's name
+        -- (`const C = class {…}`); a truly nameless class leaves methods bare.
+        qualify = function (name, defn, src)
+            local body = defn:parent()
+            if not (body and body:type() == 'class_body') then return name end
+            local cls = body:parent()
+            if not cls then return name end
+            local nm = cls:field('name')[1]
+            local owner = nm and node_text(nm, src)
+            if not owner and cls:type() == 'class' then
+                local par = cls:parent() -- `const C = class {…}`
+                if par and par:type() == 'variable_declarator' then
+                    local vn = par:field('name')[1]
+                    owner = vn and node_text(vn, src)
+                end
+            end
+            return owner and (owner .. '.' .. name) or name
+        end,
         stdlib_prefixes = { 'console.', 'JSON.', 'Object.', 'Array.', 'Math.',
             'Promise.', 'window.', 'document.', 'chrome.' },
         -- the WORKSPACE PACKAGE (nearest package.json ancestor) scopes

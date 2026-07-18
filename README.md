@@ -374,6 +374,10 @@ callers). Ariadne's thread, in text.
      the JavaScript spec — so `.ts` and `.js` are one language family (the way
      TS imports JS under `allowJs`), while TS syntax (annotations, generics,
      interfaces) never errors a re-parse the way it would under the JS grammar.
+     ES6 class methods carry their class (`class C { m(){} }` → `C.m`, the JS
+     analog of Lua `C:m` / PHP `C::m`), so a `C.m()` reference links exactly and
+     the module-function namespace stops colliding with same-named methods —
+     object-literal methods stay bare (they belong to no class).
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because
