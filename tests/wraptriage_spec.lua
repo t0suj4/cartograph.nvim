@@ -59,3 +59,22 @@ test('wraptriage.classify does NOT fire for a name that was never reassigned', f
     local rs = wt.reassigns(SRC)
     eq(nil, wt.classify('neverReassigned', 'neverReassigned', 'wrap', rs))
 end)
+
+-- nested-patch: lua-ls followed a NESTED runtime reassignment (`X.m = function` inside a
+-- method body — the Skada :ImportProfile monkey-patch); cartograph kept the top-level def.
+-- Signalled by ls_nested=true (lua-ls's target is a cartograph non-top node of the same name).
+test('wraptriage.classify names the nested-patch class (cg→top-level, luals→nested reassignment)', function ()
+    -- no parse needed: classify is pure over the passed facts
+    eq('nested-patch', wt.classify('ReloadSettings', 'Skada:ReloadSettings',
+        'Skada.ReloadSettings', {}, true))
+end)
+
+-- NEGATIVE: the nested signal must not fire when the names differ (a real cross-slot conflict).
+test('wraptriage.classify does NOT nested-patch when the member names differ', function ()
+    eq(nil, wt.classify('ReloadSettings', 'Skada:ReloadSettings', 'Other:Unrelated', {}, true))
+end)
+
+-- NEGATIVE: no nested signal → the same inputs are not attributed.
+test('wraptriage.classify does NOT nested-patch without the ls_nested signal', function ()
+    eq(nil, wt.classify('ReloadSettings', 'Skada:ReloadSettings', 'Skada.ReloadSettings', {}, nil))
+end)

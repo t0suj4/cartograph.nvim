@@ -832,16 +832,27 @@ conflict is an error sign, a refutation a warning — right on the offending cal
 not only in a report. The confirmations upgrade the live graph in place, so the
 symbols pane shows `~`→proven the moment the oracle speaks.
 
-Not every disagreement is *ours* to fix. The **wrap/decorator idiom** — `local
-function f() … end; f = wrap(f, …)` — makes lua-ls follow value-flow to the
-*factory* (`wrap`), while cartograph keeps the delegating original; since `wrap`
-is identity in the production path (and a delegating profiler otherwise), the
-original is the correct, useful target and lua-ls's `→factory` is the imprecise
-side. `wraptriage.lua` **names that class** in the offline disagreement harvest
-(`tools/harvest_scan.lua`): it splits the conflict roster into *unexplained* (the
-real leads) and *wrap-passthrough* (attributed to lua-ls) — on the WoW corpus,
-68 of 144 conflicts are wrap-passthrough, leaving a sharper 76 to triage. Pure
-triage: it changes no resolution, only the accounting.
+Not every disagreement is *ours* to fix. Two conflict classes are lua-ls
+following a **reassignment** of the called name that cartograph correctly did
+not — it kept the name's own top-level, load-time def. `wraptriage.lua` **names
+them** in the offline disagreement harvest (`tools/harvest_scan.lua`), splitting
+the roster into *unexplained* (the real leads) and *attributed-to-lua-ls*:
+
+- **wrap-passthrough** — `local function f() … end; f = wrap(f, …)`: lua-ls
+  follows value-flow to the *factory* (`wrap`); since `wrap` is identity in the
+  production path (a delegating profiler otherwise), cartograph's original is the
+  correct target and lua-ls's `→factory` is imprecise.
+- **nested-patch** — `X.m = function … end` *inside a function body* (Skada's
+  one-shot `Skada.ReloadSettings` monkey-patch inside `:ImportProfile`): lua-ls
+  resolves to the nested runtime patch; cartograph keeps the top-level binding
+  where the call actually dispatches at load time.
+
+On the WoW corpus, 72 of 144 conflicts are attributed (68 wrap-passthrough + 4
+nested-patch), leaving a sharper 72 real leads. Pure triage — it changes no
+resolution, only the accounting. (The banked *cross-file* override arm was itself
+**refuted** by measurement: 0 genuine cases in 60 addons — the candidates are all
+per-file-local `private`/`lib` tables sharing a member name, which a cross-file
+last-write resolver would wrongly unify.)
 
 ## Reorder (statement commutativity)
 

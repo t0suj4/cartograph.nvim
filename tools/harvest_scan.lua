@@ -42,9 +42,10 @@ local function reassigns_for(dir, file)
     return rs
 end
 
-local T = { both = 0, agree = 0, conflict = 0, wrap_pt = 0, cg_only = 0, ls_only = 0, projects = 0, failed = 0 }
+local T = { both = 0, agree = 0, conflict = 0, wrap_pt = 0, nested_pt = 0,
+    cg_only = 0, ls_only = 0, projects = 0, failed = 0 }
 local roster = {} -- "addon\31member" -> { n, sample = {site, cg, ls} }
-local wrap_roster = {} -- same, for wrap-passthrough (attributed to lua-ls)
+local attr_roster = {} -- same, for conflicts ATTRIBUTED to lua-ls (wrap-passthrough / nested-patch)
 for i, dumpf in ipairs(dumps) do
     if i > maxdirs then break end
     local dir = vim.fn.fnamemodify(dumpf, ':h')
@@ -59,6 +60,12 @@ for i, dumpf in ipairs(dumps) do
         T.projects = T.projects + 1
         local lsto = {}
         for _, c in ipairs(ls.calls or {}) do if c.to then lsto[key(c)] = c.to end end
+        -- cartograph's NON-top fn/method defs, by id — a lua-ls target here is a runtime
+        -- reassignment (a nested monkey-patch) cartograph correctly did not follow.
+        local nontop = {}
+        for _, n in ipairs(cg.nodes or {}) do
+            if (n.kind == 'function' or n.kind == 'method') and not n.top then nontop[n.id] = true end
+        end
         local cgto = {}
         for _, c in ipairs(cg.calls or {}) do
             if c.to then
@@ -70,16 +77,18 @@ for i, dumpf in ipairs(dumps) do
                     else
                         T.conflict = T.conflict + 1
                         local m = (c.callee or c.full or '?')
-                        -- TRIAGE: is this the wrap/decorator idiom (cg→the delegating
-                        -- original, luals→the factory the name is reassigned from)? That
-                        -- class is lua-ls imprecision, NOT a cartograph-suspect conflict.
+                        -- TRIAGE: did lua-ls follow a REASSIGNMENT of the called name that
+                        -- cartograph correctly ignored? wrap-passthrough (luals→the factory
+                        -- the name is reassigned from) or nested-patch (luals→a nested runtime
+                        -- monkey-patch). Either is lua-ls's side, NOT a cartograph-suspect bug.
                         local verdict = wt.classify(c.callee or m, name_of(c.to),
-                            name_of(lt), reassigns_for(dir, c.file or ''))
-                        local into = (verdict == 'wrap-passthrough') and wrap_roster or roster
-                        if verdict == 'wrap-passthrough' then T.wrap_pt = T.wrap_pt + 1 end
+                            name_of(lt), reassigns_for(dir, c.file or ''), nontop[lt])
+                        local into = verdict and attr_roster or roster
+                        if verdict == 'wrap-passthrough' then T.wrap_pt = T.wrap_pt + 1
+                        elseif verdict == 'nested-patch' then T.nested_pt = T.nested_pt + 1 end
                         local rk = name .. '\31' .. m
                         local e = into[rk]
-                        if not e then e = { n = 0, name = name, member = m,
+                        if not e then e = { n = 0, name = name, member = m, class = verdict,
                             site = (c.file or '?') .. ':' .. tostring(c.line), cg = c.to, ls = lt }; into[rk] = e end
                         e.n = e.n + 1
                     end
@@ -92,14 +101,16 @@ end
 
 print(('harvest_scan %s — %d projects (%d dump-less/failed skipped)')
     :format(vim.fn.fnamemodify(root, ':t'), T.projects, T.failed))
-local unexplained = T.conflict - T.wrap_pt
+local attributed = T.wrap_pt + T.nested_pt
+local unexplained = T.conflict - attributed
 print(('calls resolved by BOTH: %d — %d agree, %d CONFLICT  (%.3f%% agreement)')
     :format(T.both, T.agree, T.conflict, 100 * T.agree / math.max(1, T.both)))
-print(('conflict triage: %d wrap-passthrough (lua-ls→factory, cartograph→the delegating')
-    :format(T.wrap_pt))
-print(('   original — attributed to lua-ls, NOT a cartograph bug) · %d unexplained (%.3f%%')
-    :format(unexplained, 100 * (T.agree + T.wrap_pt) / math.max(1, T.both)))
-print('   effective agreement counting wrap-passthrough as cartograph-correct)')
+print(('conflict triage: %d attributed to lua-ls (%d wrap-passthrough → factory, %d nested-patch')
+    :format(attributed, T.wrap_pt, T.nested_pt))
+print(('   → a runtime monkey-patch; cartograph kept the load-time binding) · %d unexplained')
+    :format(unexplained))
+print(('   effective agreement %.3f%% (attributed conflicts counted as cartograph-correct)')
+    :format(100 * (T.agree + attributed) / math.max(1, T.both)))
 print(('coverage: cartograph-only=%d  lua-ls-only=%d  (reach gaps, not conflicts)')
     :format(T.cg_only, T.ls_only))
 local function dump_roster(tbl, title)
@@ -108,9 +119,9 @@ local function dump_roster(tbl, title)
     table.sort(rk, function (a, b) return a.n > b.n end)
     print(('\n%s — %d distinct (addon, member) classes:'):format(title, #rk))
     for _, e in ipairs(rk) do
-        print(('  [%s] %s ×%d   %s\n      cartograph → %s\n      lua-ls     → %s')
-            :format(e.name, e.member, e.n, e.site, e.cg, e.ls))
+        print(('  [%s] %s ×%d%s   %s\n      cartograph → %s\n      lua-ls     → %s')
+            :format(e.name, e.member, e.n, e.class and (' {' .. e.class .. '}') or '', e.site, e.cg, e.ls))
     end
 end
 dump_roster(roster, 'UNEXPLAINED CONFLICT roster (triage as our bug or lua-ls\'s)')
-dump_roster(wrap_roster, 'WRAP-PASSTHROUGH roster (lua-ls imprecision, cartograph is correct)')
+dump_roster(attr_roster, 'ATTRIBUTED-TO-LUA-LS roster (followed a reassignment; cartograph correct)')

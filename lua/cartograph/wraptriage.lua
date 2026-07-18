@@ -45,23 +45,31 @@ function M.reassigns(src)
     return out
 end
 
---- Classify one cartograph-vs-lua-ls CONFLICT (both resolved, targets differ).
+--- Classify one cartograph-vs-lua-ls CONFLICT (both resolved, targets differ). Both classes
+--- are the SAME family — lua-ls followed a REASSIGNMENT of the called name that cartograph
+--- correctly did not (it kept the name's own top-level load-time def) — so they are lua-ls's
+--- side, not a cartograph-suspect bug:
+---   'wrap-passthrough'  lua-ls's target is the FACTORY the source reassigns the name from
+---                       (`callee = wrap(...)`; wrap is identity/delegating -> cg is correct).
+---   'nested-patch'      lua-ls's target is a NESTED (non-top) def of the same name — a runtime
+---                       monkey-patch inside a function body (Skada `Skada.ReloadSettings =
+---                       function` inside :ImportProfile); cartograph kept the top-level binding.
 --- @param callee string      the called name (c.callee / tail of c.full)
 --- @param cg_to_name string  NAME of cartograph's target node
 --- @param ls_to_name string  NAME of lua-ls's target node
---- @param reassigns table[]  M.reassigns of the call's file
---- @return string|nil 'wrap-passthrough' when this is the measured lua-ls-imprecision class:
----   cartograph kept the called name's OWN def (the delegating original) AND lua-ls's
----   target is exactly the FACTORY the source reassigns that name from (`callee = ls_to(...)`).
----   nil otherwise (a conflict this triage does not explain — left for other triage / real bug).
-function M.classify(callee, cg_to_name, ls_to_name, reassigns)
-    if not (callee and cg_to_name and ls_to_name and reassigns) then return nil end
+--- @param reassigns table[]  M.reassigns of the call's file (may be {} for the nested case)
+--- @param ls_nested boolean|nil  true iff lua-ls's target is a cartograph node that is NOT top-level
+--- @return string|nil the class, or nil (a conflict this triage does not explain — a real lead)
+function M.classify(callee, cg_to_name, ls_to_name, reassigns, ls_nested)
+    if not (callee and cg_to_name and ls_to_name) then return nil end
     local ct = tail(callee)
-    -- cartograph resolved to a def OF the called name (the original binding it kept)
+    -- cartograph resolved to a def OF the called name (the load-time binding it kept)
     if not ct or tail(cg_to_name) ~= ct then return nil end
     local lt = tail(ls_to_name)
-    for _, r in ipairs(reassigns) do
-        -- the called name is reassigned from a call to lua-ls's exact target (the factory)
+    -- nested-patch: lua-ls followed a runtime reassignment (a non-top def of the same name)
+    if lt == ct and ls_nested then return 'nested-patch' end
+    -- wrap-passthrough: lua-ls's target is the factory the name is reassigned from
+    for _, r in ipairs(reassigns or {}) do
         if tail(r.name) == ct and tail(r.factory) == lt then
             return 'wrap-passthrough'
         end
