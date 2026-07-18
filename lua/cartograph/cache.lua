@@ -19,7 +19,15 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 65 -- v65: TS TYPE ALIASES & NAMESPACES (A1-tail remainder) —
+M.VERSION = 66 -- v66: REACT .tsx/.jsx (pivot A3) — .tsx parses under the tsx
+               -- grammar (new `tsx` spec = typescript spec under the tsx parser),
+               -- .jsx under the JS grammar (JSX-capable). Both fold to the
+               -- javascript RESOLUTION family (elang_for) so .js/.jsx/.ts/.tsx are
+               -- one language; parse_lang_for keeps the real grammar per file. The
+               -- full JS/TS OOP arc (class-key/extends/this/proto/ctor) applies to
+               -- React components verbatim. matrix-react-sdk/src: 652→1312 modules
+               -- (the .tsx were skipped before). Inert on non-jsx/tsx corpora.
+-- v65: TS TYPE ALIASES & NAMESPACES (A1-tail remainder) —
                -- `type Id = …` (ctype='type') and `namespace NS {}` (ctype=
                -- 'namespace') extract as browse-only TYPE nodes, like interface/
                -- enum. PURELY ADDITIVE (new .ts nodes, zero resolution change).

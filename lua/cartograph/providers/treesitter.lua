@@ -1554,7 +1554,7 @@ M.spec = {
         end,
     },
     javascript = {
-        exts = { 'js', 'mjs', 'cjs' },
+        exts = { 'js', 'mjs', 'cjs', 'jsx' }, -- the JS grammar handles JSX
         functions = [=[
             (function_declaration name: (identifier) @name) @def
             (method_definition name: (property_identifier) @name) @def
@@ -2747,6 +2747,14 @@ M.spec.typescript.super_query = [=[
         (class_heritage (extends_clause
             (member_expression property: (property_identifier) @parent))))
 ]=]
+-- .tsx (React TS): the tsx grammar is typescript + JSX, so the typescript spec
+-- (all its queries/hooks) applies verbatim under another PARSER — the same
+-- "TS is the JS family under another grammar" move as typescript. Cloned AFTER
+-- typescript's interface/super_query are set so tsx inherits them; exts override
+-- to {tsx}. elang_for folds tsx → the javascript family (so .tsx↔.ts↔.js↔.jsx are
+-- one resolution language); parse_lang_for keeps the tsx grammar for parsing.
+M.spec.tsx = vim.tbl_extend('force', {}, M.spec.typescript)
+M.spec.tsx.exts = { 'tsx' }
 M.spec.rust.regime = { let_declaration = 'block' }
 M.spec.c.regime = { declaration = 'block' }
 M.spec.cpp.regime = { declaration = 'block' }
@@ -3064,7 +3072,12 @@ local function elang_for(file)
         lang, spec = 'javascript', M.spec.javascript
     else
         lang, spec = lang_for(file)
-        if lang == 'typescript' then lang, spec = 'javascript', M.spec.javascript end
+        -- typescript AND tsx fold to the javascript RESOLUTION family + spec (one
+        -- language across .js/.jsx/.ts/.tsx); the real PARSER differs per file
+        -- (parse_lang_for keeps typescript/tsx). .jsx is already 'javascript'.
+        if lang == 'typescript' or lang == 'tsx' then
+            lang, spec = 'javascript', M.spec.javascript
+        end
     end
     EXT_ELANG[ext] = { lang or false, spec or false }
     return lang, spec

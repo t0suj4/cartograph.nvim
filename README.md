@@ -367,8 +367,9 @@ callers). Ariadne's thread, in text.
      to link. Emits calls, literal data, imports (`require`/`#include`,
      with a unique-basename fallback for `-I` paths) and a df-lite, so the
      fn altitude, the lit altitude and the graph lints all work. Specs ship
-     for **Lua, C, C++, Haskell, Scheme, PHP, JavaScript/TypeScript,
-     Python** — a new language is one spec table (queries + a few hooks).
+     for **Lua, C, C++, Haskell, Scheme, PHP, JavaScript/TypeScript (incl.
+     React `.jsx`/`.tsx`), Python** — a new language is one spec table (queries
+     + a few hooks).
      TypeScript parses under its own tree-sitter grammar (a JS superset) for
      both extraction *and* the on-demand analysis lenses, but resolves under
      the JavaScript spec — so `.ts` and `.js` are one language family (the way
@@ -383,7 +384,10 @@ callers). Ariadne's thread, in text.
      out of value resolution (an interface method signature is a declaration,
      not a callable), so they enrich the graph without inventing links. Type
      aliases (`type Id = …`) and namespaces are captured the same browse-only
-     way, and `import type { … }` links to its module like any import.
+     way, and `import type { … }` links to its module like any import. React
+     `.tsx` parses under the tsx grammar and `.jsx` under the JS grammar (both
+     JSX-capable); the whole OOP treatment above applies to components unchanged,
+     since `.js`/`.jsx`/`.ts`/`.tsx` all resolve as one language family.
      `class C extends B` records the inheritance edge, so `super.method()` and
      inherited static calls resolve to the nearest ancestor that defines the
      method (walking the chain, unique-or-refuse) — the same superclass
