@@ -23,6 +23,17 @@ local dumps = vim.fn.glob(root .. '/*/.luals-graph.json', false, true)
 local function key(c) return (c.file or '?') .. '\31' .. tostring(c.line) .. '\31' .. (c.callee or c.full or '?') end
 -- the NAME of a node from its `file::name@line` id (name may be dotted; line may be -1)
 local function name_of(id) return id and id:match('::(.-)@%-?%d+$') end
+-- LINE-CONVENTION near-miss: same file + same full name, def line within ±1. A split-line
+-- assignment `X.field =\n function(...)` gets attributed to the function-keyword line by
+-- cartograph and the name line by lua-ls — the SAME def, off by one. Not a real disagreement,
+-- so it counts as AGREEMENT (full-name + full-file gated → can't collapse distinct defs; the
+-- only masked case would be two IDENTICALLY-named defs on adjacent lines, which is the same-file
+-- redefinition resolution already owns, not a harvest conflict). CensusPlus frame.AddMessage.
+local function same_def_pm1(a, b)
+    local af, an, al = a:match('^(.-)::(.+)@(%-?%d+)$')
+    local bf, bn2, bl = b:match('^(.-)::(.+)@(%-?%d+)$')
+    return af and af == bf and an == bn2 and math.abs(tonumber(al) - tonumber(bl)) <= 1
+end
 -- reassignment-to-call sites of a source file (for the wrap-passthrough triage), cached.
 -- cartograph's c.file may be repo-relative or a basename → try dir/file, else glob the basename.
 local reassign_cache = {}
@@ -43,7 +54,7 @@ local function reassigns_for(dir, file)
 end
 
 local T = { both = 0, agree = 0, conflict = 0, wrap_pt = 0, nested_pt = 0,
-    cg_only = 0, ls_only = 0, projects = 0, failed = 0 }
+    lineconv = 0, cg_only = 0, ls_only = 0, projects = 0, failed = 0 }
 local roster = {} -- "addon\31member" -> { n, sample = {site, cg, ls} }
 local attr_roster = {} -- same, for conflicts ATTRIBUTED to lua-ls (wrap-passthrough / nested-patch)
 for i, dumpf in ipairs(dumps) do
@@ -74,6 +85,8 @@ for i, dumpf in ipairs(dumps) do
                 if lt then
                     T.both = T.both + 1
                     if lt == c.to then T.agree = T.agree + 1
+                    elseif same_def_pm1(lt, c.to) then
+                        T.agree = T.agree + 1; T.lineconv = T.lineconv + 1 -- same def, ±1 line
                     else
                         T.conflict = T.conflict + 1
                         local m = (c.callee or c.full or '?')
@@ -105,6 +118,8 @@ local attributed = T.wrap_pt + T.nested_pt
 local unexplained = T.conflict - attributed
 print(('calls resolved by BOTH: %d — %d agree, %d CONFLICT  (%.3f%% agreement)')
     :format(T.both, T.agree, T.conflict, 100 * T.agree / math.max(1, T.both)))
+print(('  (of the agreements, %d were line-convention near-misses: same def, split-line def ±1)')
+    :format(T.lineconv))
 print(('conflict triage: %d attributed to lua-ls (%d wrap-passthrough → factory, %d nested-patch')
     :format(attributed, T.wrap_pt, T.nested_pt))
 print(('   → a runtime monkey-patch; cartograph kept the load-time binding) · %d unexplained')
