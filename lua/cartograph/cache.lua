@@ -19,7 +19,17 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 59 -- v59: JS/TS CLASS-KEYING (pivot B1) — ES6 `class C { m(){} }`
+M.VERSION = 60 -- v60: TS INTERFACES & ENUMS (pivot A1-tail) — interface/enum
+               -- declarations now extract as browse-only TYPE nodes (kind='var'
+               -- + ctype=interface/enum, like a C struct/enum: excluded from
+               -- value resolution by the var_named gate), plus their members:
+               -- interface method signatures = DECL methods `Iface.method`
+               -- (decl=true → excluded from the global index, never a call target,
+               -- like a C prototype); interface property signatures + enum members
+               -- = browse-only `Owner.member` vars (ctype field/enumMember).
+               -- PURELY ADDITIVE (new nodes on .ts only, zero resolution/edge
+               -- change) via a typescript-only `interface` query → handle_iface.
+-- v59: JS/TS CLASS-KEYING (pivot B1) — ES6 `class C { m(){} }`
                -- methods now carry their class as `C.m` (js `qualify` hook; JS
                -- analog of lua `C:m` / php `C::m`). A method_definition is a class
                -- member iff its parent is class_body (object-literal methods stay

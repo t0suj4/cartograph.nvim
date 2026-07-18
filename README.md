@@ -377,7 +377,11 @@ callers). Ariadne's thread, in text.
      ES6 class methods carry their class (`class C { m(){} }` → `C.m`, the JS
      analog of Lua `C:m` / PHP `C::m`), so a `C.m()` reference links exactly and
      the module-function namespace stops colliding with same-named methods —
-     object-literal methods stay bare (they belong to no class).
+     object-literal methods stay bare (they belong to no class). TypeScript
+     `interface` and `enum` declarations extract as browse-only type nodes with
+     their members (`Opts.run`, `Color.Red`) — faithful to the source, but kept
+     out of value resolution (an interface method signature is a declaration,
+     not a callable), so they enrich the graph without inventing links.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

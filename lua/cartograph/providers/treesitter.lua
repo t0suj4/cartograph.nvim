@@ -2687,6 +2687,16 @@ M.spec.lua.regime = { variable_declaration = 'block', local_declaration = 'block
     local_variable_declaration = 'block' }
 M.spec.javascript.regime = { lexical_declaration = 'block' } -- let/const; var = hoisted
 M.spec.typescript.regime = M.spec.javascript.regime
+-- TS-ONLY declarations (interface/enum) — added to the typescript spec ALONE:
+-- these node types don't exist in the JS grammar, so they can't live in the
+-- shared `functions` query (it must compile under both). Routed to handle_iface
+-- via the @tsiface/@tsenum catch-all capture (defn+cat, no @name → the
+-- handle_iface branch of the dispatch), which mints a browse-only TYPE node +
+-- its members. Concatenated into `combined` through the `interface` slot.
+M.spec.typescript.interface = [=[
+    (interface_declaration name: (type_identifier) @tsiface) @def
+    (enum_declaration name: (identifier) @tsenum) @def
+]=]
 M.spec.rust.regime = { let_declaration = 'block' }
 M.spec.c.regime = { declaration = 'block' }
 M.spec.cpp.regime = { declaration = 'block' }
@@ -5383,6 +5393,45 @@ function M.extract(root, opts)
                         if tl and tl ~= name then
                             tail[tl] = tail[tl] or {}
                             table.insert(tail[tl], node)
+                        end
+                    end
+                elseif cat == 'tsiface' or cat == 'tsenum' then
+                    -- TS interface/enum (pivot A1-tail). The declaration itself
+                    -- is a browse-only TYPE node (kind='var' + ctype), like a C
+                    -- struct/enum: ctype EXCLUDES it from value resolution (the
+                    -- lookups var_named gate), so this is purely ADDITIVE — no
+                    -- resolution edge changes. Then its members: interface method
+                    -- signatures are DECL methods keyed `Iface.method` (a
+                    -- signature, not an impl → decl=true, never indexed as a call
+                    -- target, like a C prototype); interface property signatures
+                    -- and enum members are browse-only `Owner.member` var nodes.
+                    local kindname = cat == 'tsiface' and 'interface' or 'enum'
+                    nodes[#nodes + 1] = { name = name, kind = 'var',
+                        id = uid(('%s::type:%s@%d'):format(file, name, sp.start.line)),
+                        file = file, range = sp, order = sp.start.line,
+                        torn = torn, ctype = kindname }
+                    local body = defn:field('body')[1]
+                    if body and not torn then
+                        for _, m in inext, body, -1 do
+                            local mt = m:type()
+                            local mn, mkind, mctype
+                            if cat == 'tsiface' and mt == 'method_signature' then
+                                mn, mkind = m:field('name')[1], 'method'
+                            elseif cat == 'tsiface' and mt == 'property_signature' then
+                                mn, mkind, mctype = m:field('name')[1], 'var', 'field'
+                            elseif cat == 'tsenum' and mt == 'property_identifier' then
+                                mn, mkind, mctype = m, 'var', 'enumMember'
+                            elseif cat == 'tsenum' and mt == 'enum_assignment' then
+                                mn, mkind, mctype = m:field('name')[1], 'var', 'enumMember'
+                            end
+                            if mn then
+                                local msp = pos_of(mn)
+                                local mname = name .. '.' .. node_text(mn, src):gsub('%s+', '')
+                                nodes[#nodes + 1] = { name = mname, kind = mkind,
+                                    id = uid(('%s::%s@%d'):format(file, mname, msp.start.line)),
+                                    file = file, range = msp, order = msp.start.line,
+                                    decl = mkind == 'method' or nil, ctype = mctype }
+                            end
                         end
                     end
                 else -- struct / union / enum / typedef / object macro
