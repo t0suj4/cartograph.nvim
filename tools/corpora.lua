@@ -99,7 +99,7 @@ return {
         root = HOME .. '/git/rails/activesupport/lib',
         repo = 'https://github.com/rails/rails',
         rev = 'ed0f92c5e779',
-        expected = { refs = 958, nodes = 2592 }, -- recalibrated @ R1 (v70)
+        expected = { refs = 1102, nodes = 2592 }, -- recalibrated @ R2 (v71)
         lang = 'ruby',
         notes = 'ruby quick tier (305 files)',
     },

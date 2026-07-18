@@ -19,7 +19,19 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 70 -- v70: RUBY R1 CONSTANT-RECEIVER KEYING. `Foo.bar`/`A::B.baz`
+M.VERSION = 71 -- v71: RUBY R2 IMPLICIT-SELF KEYING. A bare call (or `self.m`)
+               -- inside a method dispatches on self → the enclosing owner:
+               -- instance-method body → `Owner#m`, singleton context
+               -- (def self.x / class << self) → `Owner.m`, class-body DSL
+               -- left bare (R3). Corpus-wide (`#` joins the dotted-global
+               -- scope-crossers via spec.hash_qualified, ruby-only so JS
+               -- private `#field` is untouched); HEDGED `~` (subclass may
+               -- override); exact-or-nothing (inherited via mixin/superclass
+               -- = honest frontier → R4, never a tail-guess). activesupport
+               -- +158 (13.4→15.4%); discourse lib +859 (→14.9%), app +988
+               -- (→10.7%). 8 activesupport losses ALL inherited-method
+               -- (mixin/superclass) refusals, no wrong targets. +6 ruby_r2_spec.
+-- v70: RUBY R1 CONSTANT-RECEIVER KEYING. `Foo.bar`/`A::B.baz`
                -- key to the SINGLETON `Receiver.method` (qualify_call) and
                -- exact-match the class-method def; receiver evidence is
                -- exact-or-nothing (exact_only_key) — no promiscuous tail

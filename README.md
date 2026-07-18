@@ -424,9 +424,15 @@ callers). Ariadne's thread, in text.
      (Ruby classes reopen corpus-wide), but the receiver evidence is
      exact-or-nothing: `Foo.bar` with no such definition stays an honest
      frontier — inherited via a mixin/superclass, or external — and never
-     collides onto an unrelated `X#bar`. Bare and `self`/`@ivar`-receiver
-     calls remain file-scoped (Ruby's dynamic dispatch is unknowable beyond
-     the file without more evidence), so most stay honest frontiers by design.
+     collides onto an unrelated `X#bar`. A bare call (or `self.m`) inside a
+     method dispatches on `self` → the enclosing class: in an instance method
+     it keys `Owner#m`, in a class method (`def self.x` / `class << self`) it
+     keys `Owner.m`, and it resolves corpus-wide since classes reopen. These
+     wear `~` (a subclass can override the method) and are exact-or-nothing
+     too, so an inherited call stays a frontier rather than guessing. A bare
+     call at class-body level is left alone — that's DSL (`attr_accessor`,
+     `validates`), handled separately. `@ivar`-receiver calls remain
+     file-scoped for now (constructor typing is a later step).
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

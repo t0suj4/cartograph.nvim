@@ -2148,32 +2148,56 @@ M.spec = {
         -- `qualify` hook). `A::B::C.m` keys on the TAIL constant `C` (defs
         -- qualify by the innermost class name only). A constant explicitly
         -- NAMES the class, so the key legally crosses files (class reopening
-        -- is corpus-wide) via the dotted-global path in resolve(). identifier
-        -- / self / ivar receivers are R2/R5 — left bare here. `.new` is R1b
-        -- (needs constructor keying + callee preservation), not yet done.
+        -- is corpus-wide) via the dotted-global path in resolve(). `.new` is
+        -- R1b (needs constructor keying + callee preservation), not yet done.
+        --
+        -- R2 implicit-self keying: a bare call (no receiver) or explicit
+        -- `self.m` dispatches on `self`. In an INSTANCE method body self is
+        -- an instance → `Owner#m`; in a singleton context (`def self.x` /
+        -- `class << self`) self is the class → `Owner.m`; at pure class-body
+        -- level a bare call is class-level DSL (attr_accessor…) = R3, left
+        -- bare. Corpus-wide (classes reopen). HEDGED (~): the static owner
+        -- is the nearest definition, but dynamic dispatch can land on a
+        -- subclass override (the B3 position).
         qualify_call = function (calln, name, src)
             if calln:type() ~= 'call' then return nil end
             if name:find('.', 1, true) or name:find(':', 1, true) then
                 return nil
             end
             local recv = calln:field('receiver')[1]
-            if not recv then return nil end
-            local rt = recv:type()
-            local cn
-            if rt == 'constant' then
-                cn = node_text(recv, src)
-            elseif rt == 'scope_resolution' then
-                cn = node_text(recv, src):match('([%w_]+)%s*$')
-            else
-                return nil
+            local rt = recv and recv:type()
+            if rt == 'constant' or rt == 'scope_resolution' then
+                local cn = rt == 'constant' and node_text(recv, src)
+                    or node_text(recv, src):match('([%w_]+)%s*$')
+                if not cn or cn == '' then return nil end
+                if name == 'new' then return nil end -- R1b
+                return cn .. '.' .. name
             end
-            if not cn or cn == '' then return nil end
-            -- `.new` is the constructor: it dispatches to `#initialize`, not a
-            -- singleton `Receiver.new` — deferred to R1b (needs constructor
-            -- keying + callee preservation). Left bare here so it stays a
-            -- clean unresolved (`new` is stdlib), not a vocab refusal.
-            if name == 'new' then return nil end
-            return cn .. '.' .. name
+            if recv == nil or rt == 'self' then
+                local p, inst, owner = calln:parent(), nil, nil
+                while p do
+                    local t = p:type()
+                    if t == 'method' then
+                        if inst == nil then inst = true end
+                    elseif t == 'singleton_method'
+                        or t == 'singleton_class' then
+                        inst = false
+                    elseif t == 'class' or t == 'module' then
+                        local nn = p:field('name')[1]
+                        owner = nn and node_text(nn, src)
+                        break
+                    end
+                    p = p:parent()
+                end
+                -- inst==nil → a class-body call (no enclosing def): DSL, R3.
+                if not owner or inst == nil then return nil end
+                -- hedge = { rule } (the documented shape): the census groups
+                -- by it, and the edge caps at ~ (dynamic dispatch may hit a
+                -- subclass override of this self-method).
+                return owner .. (inst and '#' or '.') .. name,
+                    { rule = 'self-dispatch' }
+            end
+            return nil
         end,
         -- receiver evidence (a constant-named class) demands an EXACT match:
         -- `Foo.bar` with no `Foo.bar` def is an honest frontier (inherited via
@@ -2184,6 +2208,10 @@ M.spec = {
         exact_only_key = function (name)
             return name:match('^%u[%w_]*[.#]') ~= nil
         end,
+        -- `#` is ruby's instance-method separator (`Owner#m`): a qualified
+        -- name that, like `.`/`::`, legally crosses files (a reopened class
+        -- is corpus-wide). Gated so JS private-field `#priv` is untouched.
+        hash_qualified = true,
         import_call = 'require_relative',
         resolve_import = function (mod, files, from)
             local dir = from and from:match('^(.*)/[^/]*$') or ''
@@ -6487,6 +6515,8 @@ function M.extract(root, opts)
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
                 or name:find('::', 1, true) ~= nil
+                or (spec and spec.hash_qualified
+                    and name:find('#', 1, true) ~= nil)
             local fitset = {}
             for _, n in ipairs(cands) do
                 local fits
@@ -6541,6 +6571,8 @@ function M.extract(root, opts)
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
                 or name:find('::', 1, true) ~= nil
+                or (spec and spec.hash_qualified
+                    and name:find('#', 1, true) ~= nil)
             local fitset = {}
             for _, n in ipairs(tc) do
                 local fits
@@ -7095,6 +7127,8 @@ function M.relink(data, touched)
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
                 or name:find('::', 1, true) ~= nil
+                or (spec and spec.hash_qualified
+                    and name:find('#', 1, true) ~= nil)
             local fitset = {}
             for _, n in ipairs(cands) do
                 local fits
@@ -7149,6 +7183,8 @@ function M.relink(data, touched)
             local dotted = name:find('.', 1, true) ~= nil
                 or name:find('->', 1, true) ~= nil
                 or name:find('::', 1, true) ~= nil
+                or (spec and spec.hash_qualified
+                    and name:find('#', 1, true) ~= nil)
             local fitset = {}
             for _, n in ipairs(tc) do
                 local fits
