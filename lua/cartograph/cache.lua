@@ -19,7 +19,16 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 68 -- v68: LOCAL-SHADOW — DESTRUCTURED PARAMS. fn_locals also
+M.VERSION = 69 -- v69: CLASS FIELD-ARROWS + function()/()=>{} `this` SEMANTICS.
+               -- (1) `class C { m = () => {} }` / `private m = async () =>` field-
+               -- arrows are keyed C.m like methods (per-grammar `fields` query;
+               -- qualify unwraps the field def) → this.m() resolves. (2) node.arrow
+               -- marks arrow fns; B3 this-typing WALKS UP through arrows (which
+               -- inherit `this` lexically) to the establishing class member, but
+               -- STOPS at a regular function (which REBINDS this → dynamic, not
+               -- typed). matrix-react-sdk: +588 this/field resolutions, agreement
+               -- 93.06→93.90%, 0 new error class. Inert on pre-ES6/non-class JS.
+-- v68: LOCAL-SHADOW — DESTRUCTURED PARAMS. fn_locals also
                -- captures destructured object/array PARAMS (`({onFocus}) =>`,
                -- `([a,b]) =>`): unlike a POSITIONAL param (an AMD dep, ungated) a
                -- destructured param is never AMD → unambiguously local, gated like

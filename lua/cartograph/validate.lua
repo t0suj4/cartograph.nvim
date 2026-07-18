@@ -18,7 +18,7 @@ M.NODE_FIELDS = {
     id = true, name = true, kind = true, file = true, range = true,
     order = true,
     -- extraction facts
-    params = true, locals = true, torn = true, decl = true, macro = true, cbarg = true,
+    params = true, locals = true, arrow = true, torn = true, decl = true, macro = true, cbarg = true,
     unparsed = true, df = true, flow = true, data = true, ctype = true, ret = true,
     retclass = true, -- generic Class<T> return: arg index binding the return var
     entry = true, exported = true, effects = true, apertures = true,

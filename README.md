@@ -410,7 +410,12 @@ callers). Ariadne's thread, in text.
      destructured `const [x, setX] = useState()` hook setter) shadows any
      same-named global: with no same-file definition of its own it refuses
      rather than link to an unrelated cross-file function — while a
-     `const f = () => …` still resolves to its own binding.
+     `const f = () => …` still resolves to its own binding. Class field-arrows
+     (`onClick = () => …`, `private load = async () => …`) are keyed like methods,
+     so `this.onClick()` resolves the same way. And `this` is followed with real
+     scope semantics: inside a nested arrow it's the class instance (arrows
+     inherit `this`), but inside a nested `function () {}` it is rebound, so a
+     `this.method()` there is left unresolved rather than mis-typed.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

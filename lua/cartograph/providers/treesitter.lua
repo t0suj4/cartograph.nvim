@@ -1618,6 +1618,12 @@ M.spec = {
             local powner, pmethod = name:match('^(.+)%.prototype%.([%w_]+)$')
             if powner then return powner .. '.' .. pmethod end
             local body = defn:parent()
+            -- field-arrow (`class C { m = () => {} }`): the fn's parent is the
+            -- field def, whose parent is class_body — unwrap so C.m keys like a method.
+            if body and (body:type() == 'field_definition'
+                or body:type() == 'public_field_definition') then
+                body = body:parent()
+            end
             if not (body and body:type() == 'class_body') then return name end
             local cls = body:parent()
             if not cls then return name end
@@ -2751,6 +2757,20 @@ M.spec.typescript.super_query = [=[
         (class_heritage (extends_clause
             (member_expression property: (property_identifier) @parent))))
 ]=]
+-- CLASS FIELD-ARROWS: `class C { m = () => {} }` / `private m = async () => {}` —
+-- a field whose value is a function is a method in all but grammar (React class
+-- components + services define handlers this way, called via this.m()). Keyed
+-- `C.m` (qualify unwraps the field def to class_body), so B3 this-typing resolves
+-- them. Per-grammar: JS field_definition `property:`, TS public_field_definition
+-- `name:` (the query for one doesn't compile under the other → separate slots).
+M.spec.javascript.fields = [=[
+    (field_definition property: (property_identifier) @name value: (arrow_function) @def)
+    (field_definition property: (property_identifier) @name value: (function_expression) @def)
+]=]
+M.spec.typescript.fields = [=[
+    (public_field_definition name: (property_identifier) @name value: (arrow_function) @def)
+    (public_field_definition name: (property_identifier) @name value: (function_expression) @def)
+]=]
 -- .tsx (React TS): the tsx grammar is typescript + JSX, so the typescript spec
 -- (all its queries/hooks) applies verbatim under another PARSER — the same
 -- "TS is the JS family under another grammar" move as typescript. Cloned AFTER
@@ -3214,6 +3234,53 @@ local function chain_lookup(super, exact, C, member, clang)
         seen[par] = true; cur = par
     end
     return nil
+end
+
+-- parent_fn[id] = innermost ENCLOSING fn node — precomputed ONCE (stack over
+-- range-sorted fns, O(n log n)) so an enclosing-chain walk is a parent-link chase
+-- (O(nesting depth)), NOT an O(fns-in-file) scan per call (quadratic on minified
+-- JS). Shared by the B3 this-typing arrow-walk, the local-shadow gate, and
+-- resolve_local_callable. range is a TABLE at extract but a PACKED NUMBER after
+-- store.ingest (relink path) — read via atr, which handles both.
+local function build_parent_fn(node_index)
+    local parent_fn, byfile = {}, {}
+    for _, node in pairs(node_index) do
+        if (node.kind == 'function' or node.kind == 'method')
+            and node.file and node.range then
+            local l = byfile[node.file]; if not l then l = {}; byfile[node.file] = l end
+            l[#l + 1] = node
+        end
+    end
+    for _, fns in pairs(byfile) do
+        -- STRICT weak ordering (a<b and b<a must never both hold, else table.sort
+        -- garbles the array → inverted parents): asc start, OUTER (later end)
+        -- first, id as a stable tiebreak.
+        table.sort(fns, function (a, b)
+            local asl, bsl = atr.sl(a.range), atr.sl(b.range)
+            if asl ~= bsl then return asl < bsl end
+            local asc, bsc = atr.sc(a.range), atr.sc(b.range)
+            if asc ~= bsc then return asc < bsc end
+            local ael, bel = atr.el(a.range), atr.el(b.range)
+            if ael ~= bel then return ael > bel end
+            local aec, bec = atr.ec(a.range), atr.ec(b.range)
+            if aec ~= bec then return aec > bec end
+            return a.id < b.id
+        end)
+        local function le(fr, gr) -- f is inside g iff f.start <= g.end
+            local fl, gl = atr.sl(fr), atr.el(gr)
+            if fl ~= gl then return fl < gl end
+            return atr.sc(fr) <= atr.ec(gr)
+        end
+        local stack = {}
+        for _, f in ipairs(fns) do
+            while #stack > 0 and not le(f.range, stack[#stack].range) do
+                stack[#stack] = nil
+            end
+            if #stack > 0 then parent_fn[f.id] = stack[#stack] end
+            stack[#stack + 1] = f
+        end
+    end
+    return parent_fn
 end
 -- Upgrade still-refused `Head::method` calls in place (addref + inferred);
 -- returns how many resolved. `exact` and `addref` come from whichever pass
@@ -3793,16 +3860,32 @@ local function resolve_self(calls, node_index, extends, exact, addref)
         local owner = name:match('^(.+)%.[%w_]+$')
         if owner then dotcount[owner] = (dotcount[owner] or 0) + 1 end
     end
+    -- what class does `this` refer to at a call whose enclosing fn is `fnid`?
+    -- `this` in an ARROW is inherited lexically → walk up through arrows; `this`
+    -- in a REGULAR function is REBOUND at call time → stop (dynamic, don't type).
+    -- The establishing fn is the nearest class MEMBER (a method or field-arrow,
+    -- keyed `C.member` with C a genuine object owning >=2 methods) reached without
+    -- crossing a regular-function boundary. This is the function()/()=>{} `this`
+    -- semantics, made sound: `class C{ m(){ f(()=>this.x()) } }` types (arrow),
+    -- `class C{ m(){ function g(){ this.x() } } }` does NOT (g rebinds this).
+    local this_parent = build_parent_fn(node_index)
+    local function this_owner(fnid)
+        local cur = node_index[fnid]
+        while cur do
+            local owner = cur.name and cur.name:match('^(.+)%.[%w_]+$')
+            if owner and is_class[owner] and (dotcount[owner] or 0) >= 2 then
+                return owner -- a class member (method / field-arrow): this = C
+            end
+            if not cur.arrow then return nil end -- regular fn / top-level: this rebound
+            cur = this_parent[cur.id] -- arrow: inherit this from the enclosing fn
+        end
+    end
     for _, c in ipairs(calls or {}) do
         if not c.to and c.full and c.fn and node_index[c.fn]
             and elang_for(c.file) == 'javascript' then
             local member = c.full:match('^this%.([%w_]+)$')
-            local fn = node_index[c.fn]
-            -- owner = the enclosing class (a class method is keyed `C.member`); a
-            -- nested regular/arrow fn is not a class method → owner nil → skipped
-            -- (its `this` binding is not the lexical class — the sound omission).
-            local owner = member and fn.name and fn.name:match('^(.+)%.[%w_]+$')
-            if owner and is_class[owner] and (dotcount[owner] or 0) >= 2 then
+            local owner = member and this_owner(c.fn)
+            if owner then
                 local fit = chain_lookup(super, exact, owner, member, 'javascript')
                 if fit then
                     c.to = fit.id; c.inferred = true; c.refused = nil
@@ -4028,54 +4111,6 @@ end
 -- scope and called inside the callback is not in the callback's own params/df —
 -- walk the enclosing-fn chain (innermost→outermost, nearest binding wins). The
 -- fast path (immediate fn) covers the common case; ancestors only on a miss.
--- parent_fn[id] = innermost ENCLOSING fn node — precomputed ONCE (stack over
--- range-sorted fns, O(n log n)) so an enclosing-chain walk is a parent-link chase
--- (O(nesting depth)), NOT an O(fns-in-file) scan per call (quadratic on minified
--- JS). Shared by the local-shadow gate and resolve_local_callable.
-local function build_parent_fn(node_index)
-    local parent_fn, byfile = {}, {}
-    for _, node in pairs(node_index) do
-        if (node.kind == 'function' or node.kind == 'method')
-            and node.file and node.range then
-            local l = byfile[node.file]; if not l then l = {}; byfile[node.file] = l end
-            l[#l + 1] = node
-        end
-    end
-    -- range is a TABLE at extract but a PACKED NUMBER after store.ingest (relink
-    -- path) — read via atr, which handles both.
-    for _, fns in pairs(byfile) do
-        -- STRICT weak ordering (a<b and b<a must never both hold, else table.sort
-        -- garbles the array → inverted parents): asc start, OUTER (later end)
-        -- first, id as a stable tiebreak.
-        table.sort(fns, function (a, b)
-            local asl, bsl = atr.sl(a.range), atr.sl(b.range)
-            if asl ~= bsl then return asl < bsl end
-            local asc, bsc = atr.sc(a.range), atr.sc(b.range)
-            if asc ~= bsc then return asc < bsc end
-            local ael, bel = atr.el(a.range), atr.el(b.range)
-            if ael ~= bel then return ael > bel end
-            local aec, bec = atr.ec(a.range), atr.ec(b.range)
-            if aec ~= bec then return aec > bec end
-            return a.id < b.id
-        end)
-        -- f is inside g iff f.start <= g.end (position order)
-        local function le(fr, gr)
-            local fl, gl = atr.sl(fr), atr.el(gr)
-            if fl ~= gl then return fl < gl end
-            return atr.sc(fr) <= atr.ec(gr)
-        end
-        local stack = {}
-        for _, f in ipairs(fns) do
-            while #stack > 0 and not le(f.range, stack[#stack].range) do
-                stack[#stack] = nil
-            end
-            if #stack > 0 then parent_fn[f.id] = stack[#stack] end
-            stack[#stack + 1] = f
-        end
-    end
-    return parent_fn
-end
-
 -- is `callee` bound in fn's enclosing chain? 'higher-order' (a PARAM), 'local' (a
 -- local DECL), or nil (free — a genuine global candidate). THE LOCAL-SHADOW basis:
 -- a locally-bound bare callee must NOT name-match a global (the local shadows it).
@@ -5483,6 +5518,9 @@ function M.extract(root, opts)
                     range = sp, order = sp.start.line, params = params,
                     -- in-function local bindings (js family; local-shadow gate)
                     locals = not aname and fn_locals(defn, spec, src) or nil,
+                    -- an arrow inherits `this` lexically; a regular function
+                    -- rebinds it — the B3 this-typing walk needs to tell them apart
+                    arrow = defn:type() == 'arrow_function' or nil,
                     cbarg = isfield or nil,
                     -- unconditional module-load def (lua): a load-order sibling
                     -- for the reassignment-override resolver (resolve_reassign)
@@ -5706,7 +5744,8 @@ function M.extract(root, opts)
         if combined == nil then
             combined = table.concat({ spec.functions or '', spec.vars or '',
                 spec.interface or '', spec.super_query or '',
-                spec.ctor_query or '', spec.smt_query or '' }, '\n')
+                spec.ctor_query or '', spec.smt_query or '',
+                spec.fields or '' }, '\n')
             spec._defs_query = combined
         end
         local q = parse_query(lang, combined)
