@@ -929,6 +929,188 @@ local function toc_scope(file, _, root)
     return hit and seg or ''
 end
 
+-- Ruby bare-call capture (the "open ceiling"): a bare identifier `save` with
+-- no parens/args parses as a plain `identifier`, not a `call`, so the calls
+-- query never sees it — yet most idiomatic ruby method calls (attribute reads,
+-- `save`/`reload`/`params`) take this form. This scans identifiers in
+-- READ/expression positions and returns those that are METHOD CALLS, applying
+-- ruby's own var-vs-call rule: a bare name is a local-variable read iff a local
+-- of that name is bound in the enclosing method (param, block param, or
+-- assignment LHS) — otherwise it is a call on implicit self. Conservative
+-- toward SOUNDNESS: any same-named local anywhere in the enclosing method
+-- suppresses the call (never emit a call for what might be a var read). The
+-- caller keys survivors through qualify_call (R2 → Owner#m). Only identifiers
+-- inside a method body are considered (class-body bare calls are DSL = R3; the
+-- top level can't key).
+local RB_REJECT_PARENT = {
+    call = true, method = true, singleton_method = true, alias = true,
+    undef = true, scope_resolution = true, setter = true,
+    method_parameters = true, block_parameters = true, lambda_parameters = true,
+    keyword_parameter = true, optional_parameter = true, splat_parameter = true,
+    hash_splat_parameter = true, block_parameter = true, forward_parameter = true,
+    destructured_parameter = true,
+}
+    -- every node type that BINDS its identifier children as locals: params,
+    -- block/lambda params, rescue variables (`rescue => e`), for-loop vars, and
+    -- pattern-match captures. Over-marking a local only SUPPRESSES a bare call
+    -- (sound: never a false call); missing a binder would emit a var read as a
+    -- phantom call — so err toward listing more.
+    local RB_BIND_PARENT = {
+        method_parameters = true, block_parameters = true,
+        lambda_parameters = true, keyword_parameter = true,
+        optional_parameter = true, splat_parameter = true,
+        hash_splat_parameter = true, block_parameter = true,
+        destructured_parameter = true, exception_variable = true,
+        array_pattern = true, find_pattern = true, hash_pattern = true,
+        ['for'] = true,
+    }
+
+local function ruby_bare_calls(tsroot, src)
+    -- per-method local set (params + block/rescue/for/pattern binds + assignment
+    -- LHS in the whole method subtree), memoized by method node id.
+    local locals = {}
+    local function method_locals(mnode)
+        local key = mnode:id()
+        local set = locals[key]
+        if set then return set end
+        set = {}
+        locals[key] = set
+        local function harvest(n) -- all identifiers in a binding subtree
+            if n:type() == 'identifier' then set[node_text(n, src)] = true end
+            for c in n:iter_children() do harvest(c) end
+        end
+        local function scan(n)
+            local t = n:type()
+            if t == 'identifier' then
+                local pt = n:parent() and n:parent():type()
+                if pt and RB_BIND_PARENT[pt] then set[node_text(n, src)] = true end
+            elseif t == 'assignment' or t == 'operator_assignment' then
+                local l = n:field('left')[1]
+                local lt = l and l:type()
+                -- a plain / multiple / destructuring LHS binds; a call/setter/
+                -- element_reference LHS (`obj.x =`, `arr[i] =`) is a WRITE call,
+                -- not a binding — its identifiers are reads, leave them be
+                if lt == 'identifier' then
+                    set[node_text(l, src)] = true
+                elseif lt and (lt:find('assignment_list')
+                    or lt == 'destructured_left_assignment') then
+                    harvest(l)
+                end
+            end
+            for c in n:iter_children() do scan(c) end
+        end
+        local body = mnode:field('body')[1]
+        if body then scan(body) end
+        local params = mnode:field('parameters')[1]
+        if params then scan(params) end
+        return set
+    end
+
+    local out = {}
+    local function enclosing_method(n)
+        local p = n:parent()
+        while p do
+            local t = p:type()
+            if t == 'method' or t == 'singleton_method' then return p end
+            if t == 'class' or t == 'module' or t == 'singleton_class' then
+                -- reached a class/module body without a def: not in a method
+                -- (unless a singleton_class holds defs — keep walking past it)
+                if t == 'singleton_class' then p = p:parent()
+                else return nil end
+            else
+                p = p:parent()
+            end
+        end
+        return nil
+    end
+    local function walk(n)
+        if n:type() == 'identifier' then
+            local par = n:parent()
+            local pt = par and par:type()
+            local ok = pt and not RB_REJECT_PARENT[pt]
+            -- assignment/pair: keep only the read side (RHS / value), never
+            -- the binding (LHS / key)
+            if ok and (pt == 'assignment' or pt == 'operator_assignment') then
+                ok = par:field('left')[1] ~= n
+            elseif ok and pt == 'pair' then
+                ok = par:field('key')[1] ~= n
+            end
+            if ok then
+                local name = node_text(n, src)
+                -- method names only (lowercase / _; constants are `constant`
+                -- nodes, not identifiers, but guard anyway). `?`/`!`/`=` suffix
+                -- predicate/bang methods stay identifiers only with `?`/`!`.
+                if name:match('^[a-z_]') then
+                    local m = enclosing_method(n)
+                    if m and not method_locals(m)[name] then
+                        out[#out + 1] = { node = n, name = name }
+                    end
+                end
+            end
+        end
+        for c in n:iter_children() do walk(c) end
+    end
+    walk(tsroot)
+    return out
+end
+
+-- Ruby attr_* def-emitters: `attr_accessor :foo` DEFINES accessor methods with
+-- no `def` keyword, so nothing is extracted and every `foo` read is an
+-- unresolved frontier. This synthesizes the method nodes (`C#foo` reader,
+-- `C#foo=` writer) the DSL creates — base-ruby (Module#attr_*), the def-emitter
+-- mechanism the rails overlay pack will reuse for associations. Returns
+-- {name, node} per emitted method (node = the symbol, for go-to-def).
+local RB_ATTR = { attr_reader = 'r', attr_writer = 'w', attr_accessor = 'rw',
+    attr = 'r' }
+local function ruby_synth_defs(tsroot, src)
+    local out = {}
+    local function owner_kind(callnode)
+        local p, inst, owner = callnode:parent(), true, nil
+        while p do
+            local t = p:type()
+            if t == 'singleton_class' then inst = false
+            elseif t == 'class' or t == 'module' then
+                local nn = p:field('name')[1]
+                owner = nn and node_text(nn, src); break
+            end
+            p = p:parent()
+        end
+        return owner, inst
+    end
+    local function walk(n)
+        if n:type() == 'call' then
+            local m = n:field('method')[1]
+            local mode = m and RB_ATTR[node_text(m, src)]
+            local args = mode and n:field('arguments')[1]
+            if args then
+                local owner, inst = owner_kind(n)
+                if owner then
+                    local sep = inst and '#' or '.'
+                    for c in args:iter_children() do
+                        local sym
+                        if c:type() == 'simple_symbol' then
+                            sym = node_text(c, src):sub(2)
+                        elseif c:type() == 'string' then
+                            sym = node_text(c, src):gsub('[\'"]', '')
+                        end
+                        if sym and sym:match('^[%a_][%w_]*$') then
+                            if mode:find('r') then
+                                out[#out + 1] = { name = owner .. sep .. sym, node = c }
+                            end
+                            if mode:find('w') then
+                                out[#out + 1] = { name = owner .. sep .. sym .. '=', node = c }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        for ch in n:iter_children() do walk(ch) end
+    end
+    walk(tsroot)
+    return out
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -2160,7 +2342,10 @@ M.spec = {
         -- is the nearest definition, but dynamic dispatch can land on a
         -- subclass override (the B3 position).
         qualify_call = function (calln, name, src)
-            if calln:type() ~= 'call' then return nil end
+            local ct = calln:type()
+            -- `call` = paren'd/command/receiver call; `identifier` = a bare
+            -- no-paren call surfaced by scan_bare_calls (an implicit-self call).
+            if ct ~= 'call' and ct ~= 'identifier' then return nil end
             if name:find('.', 1, true) or name:find(':', 1, true) then
                 return nil
             end
@@ -2212,6 +2397,16 @@ M.spec = {
         -- name that, like `.`/`::`, legally crosses files (a reopened class
         -- is corpus-wide). Gated so JS private-field `#priv` is untouched.
         hash_qualified = true,
+        -- the "open ceiling" fix: surface bare no-paren calls (`save`, an
+        -- attribute read) that parse as `identifier`, not `call` — the calls
+        -- query can't see them. Returns {node,name} for identifiers that are
+        -- METHOD CALLS (var-vs-call resolved); the caller keys each through
+        -- qualify_call (R2 → Owner#m) and emits a call record.
+        scan_bare_calls = ruby_bare_calls,
+        -- attr_* DSL def-emitters: synthesize the accessor method nodes
+        -- `attr_accessor :foo` creates (`Owner#foo` / `Owner#foo=`) so calls
+        -- (esp. bare attribute reads) resolve. See ruby_synth_defs.
+        synth_defs = ruby_synth_defs,
         import_call = 'require_relative',
         resolve_import = function (mod, files, from)
             local dir = from and from:match('^(.*)/[^/]*$') or ''
@@ -5864,6 +6059,25 @@ function M.extract(root, opts)
                 end
             end
         end
+        -- synthetic defs (ruby attr_*): DSL calls that DEFINE accessor methods
+        -- with no `def` keyword. Emit them as real method nodes + register in
+        -- the exact/tail indexes so calls resolve to them.
+        if spec.synth_defs then
+            for _, sd in ipairs(spec.synth_defs(tsroot, src)) do
+                local sp = pos_of(sd.node)
+                local id = uid(('%s::%s@%d'):format(file, sd.name, sp.start.line))
+                local node = { id = id, name = sd.name, kind = 'method',
+                    file = file, range = sp, order = sp.start.line, synth = true }
+                nodes[#nodes + 1] = node
+                exact[sd.name] = exact[sd.name] or {}
+                table.insert(exact[sd.name], node)
+                local tl = sd.name:match('([%w_]+)$')
+                if tl and tl ~= sd.name then
+                    tail[tl] = tail[tl] or {}
+                    table.insert(tail[tl], node)
+                end
+            end
+        end
 
         -- regions: runs of top-level statements that aren't function defs
         do
@@ -6233,6 +6447,32 @@ function M.extract(root, opts)
                 end
             end
         end
+        -- bare no-paren calls (the open ceiling): identifiers that are
+        -- implicit-self method calls, keyed through qualify_call (R2 → Owner#m)
+        -- like any other call. No args (a bare call takes none), method=false.
+        if spec.scan_bare_calls then
+            for _, bc in ipairs(spec.scan_bare_calls(tsroot, src)) do
+                local id, name = bc.node, bc.name
+                if not (spec.call_skip or {})[name] then
+                    local full, qhedge = name, nil
+                    if spec.qualify_call then
+                        local qk, h = spec.qualify_call(id, name, src)
+                        full, qhedge = qk or name, h
+                    end
+                    local sp = pos_of(id)
+                    local encl = in_function(id, spec, ifmemo)
+                    local is_top = encl == nil
+                    if spec.is_top then is_top = spec.is_top(id, src) end
+                    local c = { callee = name, args = {}, argv = {},
+                        file = file, line = sp.start.line, method = false,
+                        full = full ~= name and full or nil, hedge = qhedge,
+                        at = pos_of(id), top = is_top or nil, bare = true }
+                    calls[#calls + 1] = c
+                    pending[#pending + 1] = { call = c, file = file, full = full,
+                        at = pos_of(id), encl = encl and pos_of(encl) }
+                end
+            end
+        end
     end
 
     local cunparsed = {}
@@ -6485,6 +6725,23 @@ function M.extract(root, opts)
             return nil, nil, { rule = 'vocab' }
         end
         if cands then
+            -- an explicit `def` overrides a synthesized accessor (ruby: a real
+            -- method beats attr_accessor). When both share this exact name, the
+            -- synth nodes are shadowed — drop them so the def resolves cleanly
+            -- instead of a false ambiguity.
+            do
+                local hasreal = false
+                for _, n in ipairs(cands) do
+                    if not n.synth then hasreal = true break end
+                end
+                if hasreal then
+                    local filt = {}
+                    for _, n in ipairs(cands) do
+                        if not n.synth then filt[#filt + 1] = n end
+                    end
+                    cands = filt
+                end
+            end
             -- same-file priority is a FILE-SCOPE assumption (lua locals, C
             -- statics); dynamically-dispatched defs (instance methods) don't
             -- get it — they link only when globally unique

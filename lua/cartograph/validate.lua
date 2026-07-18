@@ -26,6 +26,8 @@ M.NODE_FIELDS = {
                -- writes through (lua/js reference semantics; ~ to own params)
     top = true, -- unconditional module-load def (lua): a load-order sibling for
                 -- the reassignment-override resolver (resolve_reassign, v56)
+    synth = true, -- a synthetic def emitted from a DSL call (ruby attr_*),
+                  -- no `def` keyword in the source
     -- token provider (stack languages)
     effect = true, derived = true, echeck = true,
 }
@@ -59,6 +61,7 @@ M.CALL_FIELDS = {
     -- retrieval (LibStub("X")/:GetModule("Y")) resolves to (the registered table)
     qualifier = true, -- @Qualifier bean name (interface→impl narrowing)
     escalated = true, -- escalation-on-hedge: oracle-tried, still ~ (anti-thrash)
+    bare = true, -- a bare no-paren call surfaced by scan_bare_calls (ruby)
     conf = true, -- runtime-confirmed tier (session-live overlay)
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
 }

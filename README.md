@@ -429,9 +429,17 @@ callers). Ariadne's thread, in text.
      it keys `Owner#m`, in a class method (`def self.x` / `class << self`) it
      keys `Owner.m`, and it resolves corpus-wide since classes reopen. These
      wear `~` (a subclass can override the method) and are exact-or-nothing
-     too, so an inherited call stays a frontier rather than guessing. A bare
-     call at class-body level is left alone — that's DSL (`attr_accessor`,
-     `validates`), handled separately. `@ivar`-receiver calls remain
+     too, so an inherited call stays a frontier rather than guessing. Bare
+     calls with no parentheses (`save`, an attribute read) — which parse as a
+     plain identifier, not a call — are recovered by applying Ruby's own
+     var-vs-call rule: a bare name is a method call unless a local of that name
+     is bound in the enclosing method (a parameter, block/rescue/for/pattern
+     variable, or assignment target), in which case it's a variable read and
+     left alone. And `attr_accessor`/`attr_reader`/`attr_writer` are read as
+     method definitions: `attr_accessor :name` defines `Owner#name` and
+     `Owner#name=` (singleton accessors inside `class << self`), so a read of
+     the attribute resolves like any method — while an explicit `def name`
+     overrides the generated accessor. `@ivar`-receiver calls remain
      file-scoped for now (constructor typing is a later step).
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*

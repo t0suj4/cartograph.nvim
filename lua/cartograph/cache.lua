@@ -19,7 +19,23 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 71 -- v71: RUBY R2 IMPLICIT-SELF KEYING. A bare call (or `self.m`)
+M.VERSION = 72 -- v72: RUBY R3 = OPEN-CEILING (bare-call capture) + attr_*
+               -- DEF-EMITTERS. (1) scan_bare_calls surfaces bare no-paren
+               -- calls (`save`, attribute reads) that parse as `identifier`
+               -- not `call`, applying ruby's var-vs-call rule (a bare name is
+               -- a local read iff bound in the enclosing method: param, block/
+               -- rescue/for/pattern, or assignment LHS) — sound: never emits a
+               -- call for a var read. Survivors key via R2 (Owner#m). (2)
+               -- synth_defs emits attr_accessor/reader/writer as real method
+               -- nodes (Owner#foo reader / Owner#foo= writer; singleton in
+               -- class<<self), the def-emitter mechanism the rails pack reuses.
+               -- (3) resolve(): an explicit def shadows a synth accessor of the
+               -- same name (def beats attr_accessor). activesupport +274
+               -- (15.4→19.5%); discourse lib +2090 (→19.6%), app +2045
+               -- (→13.1%). Ceiling alone = 0 losses; attr_* = 6 tangled
+               -- singleton/instance precision losses (now honest frontiers, no
+               -- wrong edges). +9 ruby_bare/attr specs. Ruby-only.
+-- v71: RUBY R2 IMPLICIT-SELF KEYING. A bare call (or `self.m`)
                -- inside a method dispatches on self → the enclosing owner:
                -- instance-method body → `Owner#m`, singleton context
                -- (def self.x / class << self) → `Owner.m`, class-body DSL
