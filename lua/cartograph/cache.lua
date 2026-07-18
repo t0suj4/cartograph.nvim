@@ -19,7 +19,17 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 66 -- v66: REACT .tsx/.jsx (pivot A3) — .tsx parses under the tsx
+M.VERSION = 67 -- v67: LOCAL-SHADOW FIX (from the TS harvest) — a JS/TS bare
+               -- callee bound by an in-function const/let/var (incl. destructured
+               -- `const [x,setX]=useState()` hook setters) with NO same-file def
+               -- no longer name-matches a cross-file GLOBAL of that name — the
+               -- local shadows it → refused fn-value. fn_locals captures the
+               -- bindings (new node.locals field); the gate is localdecl-only with
+               -- a same-file-def escape (a `const f=()=>{}` still resolves plain),
+               -- so params (AMD `define(function(dep))`) + lua df-locals + non-JS
+               -- are untouched. matrix-react-sdk: 95 shadow bugs fixed, 0
+               -- regressions (agreement 91.97→92.87%).
+-- v66: REACT .tsx/.jsx (pivot A3) — .tsx parses under the tsx
                -- grammar (new `tsx` spec = typescript spec under the tsx parser),
                -- .jsx under the JS grammar (JSX-capable). Both fold to the
                -- javascript RESOLUTION family (elang_for) so .js/.jsx/.ts/.tsx are

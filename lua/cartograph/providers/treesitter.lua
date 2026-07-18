@@ -1632,6 +1632,10 @@ M.spec = {
             end
             return owner and (owner .. '.' .. name) or name
         end,
+        -- in-function local declarations, for fn_locals (the local-shadow gate);
+        -- df doesn't track JS locals so the destructured `const [x,setX]=…` hook
+        -- setters would name-match a global without this.
+        local_decls = { lexical_declaration = true, variable_declaration = true },
         stdlib_prefixes = { 'console.', 'JSON.', 'Object.', 'Array.', 'Math.',
             'Promise.', 'window.', 'document.', 'chrome.' },
         -- the WORKSPACE PACKAGE (nearest package.json ancestor) scopes
@@ -2997,6 +3001,50 @@ local function callable_arg(a, src)
     return nil
 end
 
+-- in-function LOCAL binding names (const/let/var, INCLUDING destructuring), for
+-- the local-shadow gate: a bare callee bound locally must not name-match a global
+-- (the local shadows it — Promise reject/resolve params are handled by fn.params;
+-- this covers `const [x, setX] = useState()` hook setters etc. that df does not
+-- track for the JS family). Opt-in via spec.local_decls; walks the body but STOPS
+-- at nested fns (their bindings are their own scope, not this one's).
+local function fn_locals(def, spec, src)
+    if not spec.local_decls then return nil end
+    local body = spec.body_field and def:field(spec.body_field)[1]
+    if not body then return nil end
+    local out, seen = {}, {}
+    local function add(id)
+        local t = node_text(id, src)
+        if t ~= '' and not seen[t] then seen[t] = true; out[#out + 1] = t end
+    end
+    local function binding_ids(n) -- identifier leaves of a binding pattern
+        local t = n:type()
+        if t == 'identifier' or t == 'shorthand_property_identifier_pattern' then add(n)
+        else
+            for _, c in inext, n, -1 do
+                if c:named() then binding_ids(c) end
+            end
+        end
+    end
+    local function walk(n)
+        for _, c in inext, n, -1 do
+            if c:named() then
+                local ct = c:type()
+                if spec.fn_types[ct] then -- nested fn: its own scope
+                elseif spec.local_decls[ct] then
+                    for _, d in inext, c, -1 do
+                        if d:type() == 'variable_declarator' then
+                            local nm = d:field('name')[1]
+                            if nm then binding_ids(nm) end
+                        end
+                    end
+                else walk(c) end
+            end
+        end
+    end
+    walk(body)
+    return #out > 0 and out or nil
+end
+
 local function fn_params(def, spec, src, method)
     local ps = spec.params_field and def:field(spec.params_field)[1]
     local out = method and { 'self' } or {}
@@ -3962,87 +4010,119 @@ end
 -- scope and called inside the callback is not in the callback's own params/df —
 -- walk the enclosing-fn chain (innermost→outermost, nearest binding wins). The
 -- fast path (immediate fn) covers the common case; ancestors only on a miss.
-local function resolve_local_callable(calls, node_index, exact, addref)
+-- parent_fn[id] = innermost ENCLOSING fn node — precomputed ONCE (stack over
+-- range-sorted fns, O(n log n)) so an enclosing-chain walk is a parent-link chase
+-- (O(nesting depth)), NOT an O(fns-in-file) scan per call (quadratic on minified
+-- JS). Shared by the local-shadow gate and resolve_local_callable.
+local function build_parent_fn(node_index)
+    local parent_fn, byfile = {}, {}
+    for _, node in pairs(node_index) do
+        if (node.kind == 'function' or node.kind == 'method')
+            and node.file and node.range then
+            local l = byfile[node.file]; if not l then l = {}; byfile[node.file] = l end
+            l[#l + 1] = node
+        end
+    end
+    -- range is a TABLE at extract but a PACKED NUMBER after store.ingest (relink
+    -- path) — read via atr, which handles both.
+    for _, fns in pairs(byfile) do
+        -- STRICT weak ordering (a<b and b<a must never both hold, else table.sort
+        -- garbles the array → inverted parents): asc start, OUTER (later end)
+        -- first, id as a stable tiebreak.
+        table.sort(fns, function (a, b)
+            local asl, bsl = atr.sl(a.range), atr.sl(b.range)
+            if asl ~= bsl then return asl < bsl end
+            local asc, bsc = atr.sc(a.range), atr.sc(b.range)
+            if asc ~= bsc then return asc < bsc end
+            local ael, bel = atr.el(a.range), atr.el(b.range)
+            if ael ~= bel then return ael > bel end
+            local aec, bec = atr.ec(a.range), atr.ec(b.range)
+            if aec ~= bec then return aec > bec end
+            return a.id < b.id
+        end)
+        -- f is inside g iff f.start <= g.end (position order)
+        local function le(fr, gr)
+            local fl, gl = atr.sl(fr), atr.el(gr)
+            if fl ~= gl then return fl < gl end
+            return atr.sc(fr) <= atr.ec(gr)
+        end
+        local stack = {}
+        for _, f in ipairs(fns) do
+            while #stack > 0 and not le(f.range, stack[#stack].range) do
+                stack[#stack] = nil
+            end
+            if #stack > 0 then parent_fn[f.id] = stack[#stack] end
+            stack[#stack + 1] = f
+        end
+    end
+    return parent_fn
+end
+
+-- is `callee` bound in fn's enclosing chain? 'higher-order' (a PARAM), 'local' (a
+-- local DECL), or nil (free — a genuine global candidate). THE LOCAL-SHADOW basis:
+-- a locally-bound bare callee must NOT name-match a global (the local shadows it).
+-- Reads fn.params + fn.locals (js-family in-function decls, incl. destructuring)
+-- + df.stmts (langs whose df tracks locals — lua). Nearest binding wins; walks
+-- captures across callback boundaries via parent_fn.
+-- 'higher-order' (a PARAM), 'localdecl' (a fn.locals binding — a JS const/let/var,
+-- incl. destructuring: a VALUE, never a resolvable fn def), 'local' (a df-tracked
+-- local — lua's `local f; function f() end` forward-decl, IS the same-file fn), or
+-- nil (free). The two local kinds are DISJOINT by language (js sets fn.locals + has
+-- no df locals; lua the reverse), so the check order is unambiguous.
+local function callee_binding(callee, fn, parent_fn)
+    local function hasp(f) for _, p in ipairs(f.params or {}) do if p == callee then return true end end end
+    local function hasdecl(f) for _, l in ipairs(f.locals or {}) do if l == callee then return true end end end
+    local function hasdf(f)
+        local df = f.df
+        if df then for _, st in ipairs(df.stmts) do
+            for _, d in ipairs(st.def or {}) do if d == callee then return true end end
+        end end
+    end
+    local f = fn
+    while f do
+        if hasp(f) then return 'higher-order' end
+        if hasdecl(f) then return 'localdecl' end
+        if hasdf(f) then return 'local' end
+        f = parent_fn and parent_fn[f.id]
+    end
+end
+
+-- the LOCAL-SHADOW gate: a bare callee is a shadow iff it's a JS/TS localdecl
+-- binding (const/let/var, incl. destructuring) AND no same-file fn/method of that
+-- name exists for it to legitimately BE. `const f = ()=>{}` HAS a same-file fn
+-- node → NOT a shadow, the main loop resolves it same-file (plain); `const
+-- [x,setX]=useState()` has none → a shadow, so a cross-file global name-match
+-- would be the bug → skip the match (resolve_local_callable refuses fn-value).
+-- Only 'localdecl' (not params: an AMD `define([…],function(dep){})` dep is a
+-- param whose global name-match is correct; not lua df-locals: unchanged).
+local function localdecl_shadow(callee, file, fn, parent_fn, exact)
+    if callee_binding(callee, fn, parent_fn) ~= 'localdecl' then return false end
+    for _, d in ipairs(exact[callee] or {}) do
+        if d.file == file and (d.kind == 'function' or d.kind == 'method') then
+            return false -- a same-file def exists → the main loop resolves it plain
+        end
+    end
+    return true
+end
+
+local function resolve_local_callable(calls, node_index, exact, addref, parent_fn)
     local n = 0
-    local function has_param(fn, name)
-        for _, p in ipairs(fn.params or {}) do if p == name then return true end end
-    end
-    local function has_local(fn, name)
-        local df = fn.df
-        if df then
-            for _, st in ipairs(df.stmts) do
-                for _, d in ipairs(st.def or {}) do if d == name then return true end end
-            end
-        end
-    end
-    -- parent_fn[id] = innermost ENCLOSING fn node — precomputed ONCE (stack over
-    -- range-sorted fns, O(n log n)) so the ancestor walk on a captured-callee
-    -- miss is a parent-link chase (O(nesting depth)), NOT an O(fns-in-file) scan
-    -- per call (quadratic on minified JS — thousands of fns per line).
-    local parent_fn
-    local function le(a, b) -- position a <= b (line,char)
-        return a.line < b.line or (a.line == b.line and a.char <= b.char)
-    end
-    local function build_parents()
-        parent_fn = {}
-        local byfile = {}
-        for _, node in pairs(node_index) do
-            if (node.kind == 'function' or node.kind == 'method')
-                and node.file and node.range then
-                local l = byfile[node.file]
-                if not l then l = {}; byfile[node.file] = l end
-                l[#l + 1] = node
-            end
-        end
-        for _, fns in pairs(byfile) do
-            -- STRICT weak ordering (a<b and b<a must never both hold, else
-            -- table.sort garbles the array → inverted parents): start asc, then
-            -- OUTER (strictly-later end) first, then id as a stable tiebreak.
-            table.sort(fns, function (a, b)
-                local as, bs = a.range.start, b.range.start
-                if as.line ~= bs.line then return as.line < bs.line end
-                if as.char ~= bs.char then return as.char < bs.char end
-                local ae, be = a.range['end'], b.range['end']
-                if ae.line ~= be.line then return ae.line > be.line end
-                if ae.char ~= be.char then return ae.char > be.char end
-                return a.id < b.id
-            end)
-            local stack = {}
-            for _, f in ipairs(fns) do
-                while #stack > 0 and not le(f.range.start, stack[#stack].range['end']) do
-                    stack[#stack] = nil
-                end
-                if #stack > 0 then parent_fn[f.id] = stack[#stack] end
-                stack[#stack + 1] = f
-            end
-        end
-    end
+    parent_fn = parent_fn or build_parent_fn(node_index)
     for _, c in ipairs(calls or {}) do
         if c.callee and not c.full and not c.dynamic and not c.to
             and not c.refused and c.fn then
             local fn = node_index[c.fn]
             if fn then
-                -- regime by nearest binding: a PARAM callee is higher-order, a
-                -- LOCAL df-def resolves-or-refuses. Immediate fn first, then the
-                -- enclosing chain (for captures across a callback boundary).
-                local regime
-                if has_param(fn, c.callee) then regime = 'higher-order'
-                elseif has_local(fn, c.callee) then regime = 'local'
-                else
-                    -- captured from an enclosing scope? chase the parent chain
-                    if not parent_fn then build_parents() end
-                    local f = parent_fn[fn.id]
-                    while f do
-                        if has_param(f, c.callee) then regime = 'higher-order'; break end
-                        if has_local(f, c.callee) then regime = 'local'; break end
-                        f = parent_fn[f.id]
-                    end
-                end
+                local regime = callee_binding(c.callee, fn, parent_fn)
                 if regime == 'higher-order' then
                     c.refused = { rule = 'higher-order' }
                     n = n + 1
-                elseif regime == 'local' then
-                    -- resolve to a UNIQUE same-file function/method def
+                elseif regime == 'local' or regime == 'localdecl' then
+                    -- resolve to the UNIQUE same-file function/method def the local
+                    -- names — a lua forward-decl (`local f; function f()`) or a JS
+                    -- `const f = function/arrow` binding IS that def. A binding to a
+                    -- non-fn value (destructured `const [x,setX]=useState()` hook
+                    -- setter, cross-file shadow) finds none → refused fn-value.
                     local hit, dup
                     for _, d in ipairs(exact[c.callee] or {}) do
                         if d.file == c.file
@@ -5383,6 +5463,8 @@ function M.extract(root, opts)
                 nodes[#nodes + 1] = { id = id, name = name,
                     kind = method and 'method' or 'function', file = file,
                     range = sp, order = sp.start.line, params = params,
+                    -- in-function local bindings (js family; local-shadow gate)
+                    locals = not aname and fn_locals(defn, spec, src) or nil,
                     cbarg = isfield or nil,
                     -- unconditional module-load def (lua): a load-order sibling
                     -- for the reassignment-override resolver (resolve_reassign)
@@ -6511,6 +6593,9 @@ function M.extract(root, opts)
             end
         end
     end
+    -- local-shadow gate: a bare callee bound in its enclosing fn (param or local
+    -- decl) must NOT name-match a corpus global — the local shadows it. Built once.
+    local parent_fn = build_parent_fn(node_index)
     for _, p in ipairs(pending) do
         -- typed-string SINKS (typed-strings v1): recover the sink arg —
         -- literal, literal-headed concat (PREFIX), or single-assignment
@@ -6584,7 +6669,24 @@ function M.extract(root, opts)
             target = resolve(p.indirect, p.file)
             inferred = false -- the literal IS the dispatch mechanism
         else
-            target, inferred, refused = resolve(p.full or p.call.callee, p.file)
+            -- local-shadow gate: a BARE callee bound in the enclosing fn (a param,
+            -- e.g. a Promise `reject`, or a local decl, e.g. a `const [x,setX]=…`
+            -- hook setter) is NOT a global — leave it for resolve_local_callable
+            -- (refuse higher-order / resolve the same-file local) instead of
+            -- name-matching a foreign global of the same name.
+            -- p.call.full (NOT p.full — that's the resolve KEY, = the callee for
+            -- bare calls); a bare call has no full receiver. Gate ONLY 'localdecl'
+            -- (a JS/TS const/let/var binding, incl. destructured hook setters): an
+            -- unambiguous local VALUE that shadows any global. NOT params — an AMD
+            -- `define([…], function(jQuery,…){})` dep is a param whose name-match
+            -- to the global IS correct; only a genuine callback param (reject) is a
+            -- false global, and the two are indistinguishable here (banked).
+            local from = not p.call.full and fn_at(p.file, p.at.start.line)
+            local shadowed = from and node_index[from]
+                and localdecl_shadow(p.call.callee, p.file, node_index[from], parent_fn, exact)
+            if not shadowed then
+                target, inferred, refused = resolve(p.full or p.call.callee, p.file)
+            end
         end
         if not target and not p.call.dynamic
             and type(p.call.traced) == 'string' then
@@ -6671,7 +6773,7 @@ function M.extract(root, opts)
 
     -- honesty: silent-dropped local/param callables → resolve or refuse (last,
     -- after every other call resolver, so it catches only the true residual)
-    resolve_local_callable(calls, node_index, exact, addref)
+    resolve_local_callable(calls, node_index, exact, addref, parent_fn)
     padd('resolve', _pr)
 
     -- use edges + function references (the id pass — factored so parallel
@@ -6977,6 +7079,12 @@ function M.relink(data, touched)
             end
         end
     end
+    -- node_index built BEFORE the resolve loop: the local-shadow gate + super.m()
+    -- owner lookup + module-alias foreign-override all read it.
+    local node_index = {}
+    for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
+    -- local-shadow gate (see extract): built once, shared with resolve_local_callable
+    local parent_fn = build_parent_fn(node_index)
     for _, c in ipairs(data.calls or {}) do
         -- dynamic calls stay frontiers UNLESS a literal-flow trace already
         -- named the callee (a parallel slice may know the literal but not
@@ -6989,6 +7097,11 @@ function M.relink(data, touched)
             elseif c.indirect then
                 target = resolve(c.indirect, c.file)
                 inferred = false
+            elseif not c.full and c.fn and node_index[c.fn]
+                and localdecl_shadow(c.callee, c.file, node_index[c.fn], parent_fn, exact) then
+                -- local-shadow gate (see extract): a JS/TS const/let/var-bound bare
+                -- callee with no same-file def is not a global — leave it for
+                -- resolve_local_callable (refuse fn-value) below
             else
                 target, inferred, refused = resolve(c.full or c.callee, c.file)
             end
@@ -7040,11 +7153,8 @@ function M.relink(data, touched)
     end
     -- transitive parent::m over the full (merged/spliced) graph — mirrors
     -- extract's enrichment so the parallel and refresh paths resolve the
-    -- same superclass chains the sequential path does
-    -- node_index built BEFORE resolve_super (its super.m() owner lookup) and
-    -- module-alias (its foreign-override reads c.to's file)
-    local node_index = {}
-    for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
+    -- same superclass chains the sequential path does (node_index built above,
+    -- before the resolve loop)
     n = n + resolve_super(data.calls, data.extends, exact, addref, node_index)
     -- module-alias (rung-1 receiver resolution + binding-over-name-match), as extract
     n = n + resolve_module_alias(data.calls, data.edges, exact, tail, addref, node_index)
@@ -7061,7 +7171,7 @@ function M.relink(data, touched)
     n = n + resolve_interface(data.calls, data.implements, data.beans, data.extends,
         exact, addref, JAVA_SERVICE_MARKERS)
     -- honesty pass, same parity as extract (silent local/param callables)
-    n = n + resolve_local_callable(data.calls, node_index, exact, addref)
+    n = n + resolve_local_callable(data.calls, node_index, exact, addref, parent_fn)
     return n + retn
 end
 
