@@ -1263,6 +1263,36 @@ local function ruby_super_calls(tsroot, src)
     return out
 end
 
+-- Ruby R5 (rescoped, ADDITIVE) constructor binding scan: `u = Const.new` types
+-- the local `u` to `Const`, so an unresolved `u.foo` resolves to `Const#foo`
+-- (own or inherited). Restricted to `.new` on a bare constant (sound — a
+-- constructor returns exactly an instance). Returns {var, cls}; a var assigned
+-- more than once in the file drops to ambiguous (the single-assignment gate at
+-- resolve time). This is the SAME scan the reverted exact-only R5 used — the
+-- rescope is purely in HOW it's consumed (additive, `full` kept bare, only
+-- unresolved calls), not in the typing.
+local function ruby_ctor_binds(tsroot, src)
+    local out = {}
+    local function walk(n)
+        if n:type() == 'assignment' then
+            local l = n:field('left')[1]
+            local r = n:field('right')[1]
+            if l and l:type() == 'identifier' and r and r:type() == 'call' then
+                local recv = r:field('receiver')[1]
+                local m = r:field('method')[1]
+                if recv and recv:type() == 'constant'
+                    and m and node_text(m, src) == 'new' then
+                    out[#out + 1] = { var = node_text(l, src),
+                        cls = node_text(recv, src) }
+                end
+            end
+        end
+        for c in n:iter_children() do walk(c) end
+    end
+    walk(tsroot)
+    return out
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -2568,6 +2598,16 @@ M.spec = {
         -- R4 `super` keyword: bare/paren'd super calls the ancestor's same-named
         -- method. See ruby_super_calls + resolve_ruby_ancestors (superx path).
         scan_super = ruby_super_calls,
+        -- R5 (additive) receiver-typing: the identifier-receiver local of a
+        -- `x.foo` call, stored as c.recv (full stays bare → heuristic intact).
+        recv_local = function (calln, src)
+            if calln:type() ~= 'call' then return nil end
+            local r = calln:field('receiver')[1]
+            if r and r:type() == 'identifier' then return node_text(r, src) end
+        end,
+        -- R5 constructor bindings (`u = Const.new`) → data.ruby_ctor, consumed
+        -- by resolve_ruby_ancestors' recv path. See ruby_ctor_binds.
+        scan_ctors = ruby_ctor_binds,
         import_call = 'require_relative',
         resolve_import = function (mod, files, from)
             local dir = from and from:match('^(.*)/[^/]*$') or ''
@@ -4415,8 +4455,14 @@ end
 -- definition. Recovers exactly the frontiers R2/R3 honestly declined. HEDGED
 -- (~): dynamic dispatch + Ruby's full MRO aren't modeled, this is the nearest
 -- static ancestor. `anc` = the edge list {c,p,mode} from ruby_ancestors.
-local function resolve_ruby_ancestors(calls, anc, exact, addref, node_index)
-    if not (anc and #anc > 0) then return 0 end
+-- ALSO does rescoped-R5 additive ctor-typing: an unresolved `x.foo` whose
+-- receiver `x` is `ctorbinds`-typed to C (from `x = C.new`, single-assignment)
+-- resolves to C#foo — C's own def, else up C's ancestors. ADDITIVE: only
+-- touches calls the file-local heuristic left unresolved (c.recv + not c.to).
+local function resolve_ruby_ancestors(calls, anc, exact, addref, node_index, ctorbinds)
+    local have_anc = anc and #anc > 0
+    if not (have_anc or (ctorbinds and next(ctorbinds))) then return 0 end
+    anc = anc or {}
     -- adjacency by mode: inst (p#m), sings (superclass p.m), singe (extend p#m)
     local inst, sings, singe = {}, {}, {}
     local function add(map, k, v) map[k] = map[k] or {}; map[k][#map[k] + 1] = v end
@@ -4452,11 +4498,31 @@ local function resolve_ruby_ancestors(calls, anc, exact, addref, node_index)
         end
         return nil
     end
+    -- the UNIQUE ruby def at an exact key (C's own def, before chasing up)
+    local function uniq(key)
+        local hit
+        for _, nd in ipairs(exact[key] or {}) do
+            if elang_for(nd.file) == 'ruby' then
+                if hit and hit.id ~= nd.id then return nil end
+                hit = nd
+            end
+        end
+        return hit
+    end
     local n = 0
     for _, c in ipairs(calls or {}) do
         if not c.to and c.fn then
             local fit
-            if c.superx then
+            if c.recv and ctorbinds then
+                -- rescoped R5: x.foo where x = C.new (single-assignment) →
+                -- C#foo (own), else C's ancestors. Additive (call was unresolved).
+                local fb = ctorbinds[c.file]
+                local b = fb and fb[c.recv]
+                if b and b.n == 1 and b.cls and c.callee then
+                    fit = uniq(b.cls .. '#' .. c.callee)
+                        or chase(b.cls, c.callee, inst, '#')
+                end
+            elseif c.superx then
                 -- `super`: chase the enclosing method's name up the ancestors,
                 -- skipping C's own def (chase looks at PARENTS). instance
                 -- method → superclass/include chain (p#m); singleton → the
@@ -6434,6 +6500,17 @@ function M.extract(root, opts)
                 ra[#ra + 1] = e
             end
         end
+        -- R5 ctor bindings (`u = Const.new`): per-file var→class, single-
+        -- assignment gated (a var bound twice → false = ambiguous, dropped).
+        if spec.scan_ctors then
+            data.ruby_ctor = data.ruby_ctor or {}
+            local fb = data.ruby_ctor[file] or {}
+            data.ruby_ctor[file] = fb
+            for _, cb in ipairs(spec.scan_ctors(tsroot, src)) do
+                if fb[cb.var] == nil then fb[cb.var] = { cls = cb.cls, n = 1 }
+                elseif fb[cb.var] then fb[cb.var].n = fb[cb.var].n + 1 end
+            end
+        end
 
         -- regions: runs of top-level statements that aren't function defs
         do
@@ -6791,6 +6868,10 @@ function M.extract(root, opts)
                         -- receiver field (resolve_interface narrows on it)
                         at = pos_of(namen), -- callee token range: relink
                         -- rebuilds edges at full fidelity, not line-anchored
+                        -- identifier receiver (`x.foo`): the local name, for
+                        -- ADDITIVE ctor-typing (rescoped R5). `full` stays bare
+                        -- so the file-local heuristic is untouched.
+                        recv = spec.recv_local and spec.recv_local(calln, src) or nil,
                         top = is_top or nil }
                     calls[#calls + 1] = c
                     local indirect = (spec.indirect_calls or {})[callee]
@@ -7539,7 +7620,7 @@ function M.extract(root, opts)
     -- obj:member where `local obj = C.new(...)` — constructor-typed locals
     -- resolved through C's extends chain (V2 receiver typing)
     resolve_local_ctor(calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
-    resolve_ruby_ancestors(calls, data.ruby_anc, exact, addref, node_index)
+    resolve_ruby_ancestors(calls, data.ruby_anc, exact, addref, node_index, data.ruby_ctor)
 
     -- interface→impl: redirect an interface-stub call `I::m` to its unique
     -- impl `C::m` — @stereotype bean (Spring DI) or unique implementer of a
@@ -7969,7 +8050,7 @@ function M.relink(data, touched)
     local retn = resolve_returns(data.calls, node_index, exact, addref)
     n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
     n = n + resolve_local_ctor(data.calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
-    n = n + resolve_ruby_ancestors(data.calls, data.ruby_anc, exact, addref, node_index)
+    n = n + resolve_ruby_ancestors(data.calls, data.ruby_anc, exact, addref, node_index, data.ruby_ctor)
     -- interface→impl (F1), same parity as extract
     n = n + resolve_interface(data.calls, data.implements, data.beans, data.extends,
         exact, addref, JAVA_SERVICE_MARKERS)

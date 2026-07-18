@@ -99,7 +99,7 @@ return {
         root = HOME .. '/git/rails/activesupport/lib',
         repo = 'https://github.com/rails/rails',
         rev = 'ed0f92c5e779',
-        expected = { refs = 1585, nodes = 2791 }, -- recalibrated @ R4-super (v76)
+        expected = { refs = 1587, nodes = 2791 }, -- recalibrated @ R5-additive (v77)
         lang = 'ruby',
         notes = 'ruby quick tier (305 files) — BASE ruby, no framework pack',
     },
@@ -107,7 +107,7 @@ return {
         root = HOME .. '/git/discourse/app/models',
         repo = 'https://github.com/discourse/discourse',
         rev = '28b003a38d82',
-        expected = { refs = 2573, nodes = 4916 }, -- recalibrated @ R4-super (v76)
+        expected = { refs = 2614, nodes = 4916 }, -- recalibrated @ R5-additive (v77)
         lang = 'ruby',
         packs = { 'rails' }, -- the rails overlay pack (assoc/delegate emitters
                              -- + ActiveRecord vocab) composed onto base ruby

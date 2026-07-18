@@ -222,6 +222,11 @@ local function merge_chunk(s, chunk)
     for _, x in ipairs(chunk.ruby_anc or {}) do
         if not seen[x.file] then acc.ruby_anc[#acc.ruby_anc + 1] = x end
     end
+    -- ruby_ctor (R5 ctor bindings): keyed BY FILE, per-file overlay
+    acc.ruby_ctor = acc.ruby_ctor or {}
+    for f, fb in pairs(chunk.ruby_ctor or {}) do
+        if not seen[f] then acc.ruby_ctor[f] = fb end
+    end
     -- ctorbinds / smtclasses: keyed BY FILE — per-file overlay, seen-guarded
     acc.ctorbinds = acc.ctorbinds or {}
     for f, fb in pairs(chunk.ctorbinds or {}) do

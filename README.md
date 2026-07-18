@@ -435,7 +435,10 @@ callers). Ariadne's thread, in text.
      unique definition (`class Dog < Animal; def act; breathe; end` resolves
      `breathe` to `Animal#breathe`; `include Comparable`-style mixins resolve
      the same way), and a bare `super` (or `super(args)`) resolves to that same
-     inherited method one level up. Bare
+     inherited method one level up. When a local is built by a constructor —
+     `x = Account.new; x.freeze!` — its calls resolve to that class's method
+     (own or inherited), which disambiguates a name shared by several classes;
+     rebinding the local drops the type, so it stays honest. Bare
      calls with no parentheses (`save`, an attribute read) — which parse as a
      plain identifier, not a call — are recovered by applying Ruby's own
      var-vs-call rule: a bare name is a method call unless a local of that name

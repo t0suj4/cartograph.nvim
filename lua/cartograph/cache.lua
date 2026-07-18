@@ -19,7 +19,19 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 76 -- v76: RUBY R4 `super` KEYWORD follow-on. Bare `super` /
+M.VERSION = 77 -- v77: RUBY R5 (RESCOPED, ADDITIVE) constructor/receiver typing.
+               -- `x = Const.new; x.foo` → `Const#foo` (own or inherited via the
+               -- R4 ancestor chase). THE RESCOPE that fixed the reverted R5:
+               -- ADDITIVE, not exact-only — `full` stays BARE so the file-local
+               -- heuristic is untouched; only UNRESOLVED `x.foo` (c.recv set,
+               -- not c.to) get ctor-typed, disambiguating where the heuristic
+               -- was ambiguous. Same ctor scan as the reverted R5 (ruby_ctor
+               -- binds, single-assignment gated) — the difference is purely in
+               -- CONSUMPTION. 0 losses (measured): activesupport +2, discourse
+               -- app +164 / lib +68 — vs the reverted exact-only R5's −163/−284.
+               -- Rides resolve_ruby_ancestors (recv path) + parallel merge
+               -- (acc.ruby_ctor). new c.recv call field; +4 ruby_r5 specs.
+-- v76: RUBY R4 `super` KEYWORD follow-on. Bare `super` /
                -- `super(args)` (its own grammar node, NOT captured by the calls
                -- query) now emits a call resolved to the ANCESTOR's same-named
                -- method — the enclosing def's name chased up C's ancestors

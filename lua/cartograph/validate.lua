@@ -63,6 +63,7 @@ M.CALL_FIELDS = {
     escalated = true, -- escalation-on-hedge: oracle-tried, still ~ (anti-thrash)
     bare = true, -- a bare no-paren call surfaced by scan_bare_calls (ruby)
     superx = true, -- ruby `super`: {cls,member,sing} → ancestor's method (R4)
+    recv = true, -- identifier-receiver local name (`x.foo`): additive ctor-typing (R5)
     conf = true, -- runtime-confirmed tier (session-live overlay)
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
 }
