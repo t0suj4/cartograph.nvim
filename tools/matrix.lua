@@ -52,7 +52,7 @@ local COLS = { 'counts', 'valid', 'mem', 'dfpar', 'fold', 'silent',
 -- the minutes-tier corpora (scale extracts); everything else is seconds
 local HEAVY = { server = true, v8 = true, sylius = true, ghost = true,
     blesh = true, gforth = true, openfirmware = true, bwipp = true,
-    zig = true }
+    zig = true, odin = true }
 
 -- ── args ────────────────────────────────────────────────────────────────
 local names, opts = {}, { save = false, row = false, quick = false, cols = nil }

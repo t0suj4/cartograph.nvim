@@ -152,6 +152,17 @@ return {
             .. 'struct+method family; receiver-typing arc (Type.m keying / '
             .. 'x.m instance typing / @import binding) banked, not built',
     },
+    odin = {
+        root = HOME .. '/git/odin/core',
+        budget_mb = 2000, -- ~2x inline peak
+        repo = 'https://github.com/odin-lang/Odin',
+        rev = '967c6046a624',
+        expected = { refs = 17182, nodes = 37121 }, -- calibrated @ odin v1 (v80)
+        lang = 'odin',
+        notes = 'odin v1 (the core stdlib, 1279 files) — C/procedural family, '
+            .. 'no methods; 15.7% (package-heavy — the package-qualified '
+            .. 'resolution arc, Odin-R1, is where it climbs; banked, not built)',
+    },
     python = {
         root = HOME .. '/git/django-oscar/src',
         repo = 'https://github.com/django-oscar/django-oscar',

@@ -19,7 +19,16 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 79 -- v79: ZIG LANGUAGE SUPPORT (v1) — the 13th language. A spec
+M.VERSION = 80 -- v80: ODIN LANGUAGE SUPPORT (v1) — the 14th language. C/
+               -- procedural family: `proc` declarations (no methods — procs
+               -- are free), `T :: struct`, package(dir) scope. NO new hooks.
+               -- Grammar via TSInstall odin; corpus = the core stdlib (1279
+               -- files): 32316 procs, 15.7% resolved — LOW because Odin is
+               -- heavily package-qualified (`fmt.println`) and v1 doesn't do
+               -- package keying; the package-qualified-resolution arc (Odin-R1:
+               -- package-aware qualify + `pkg.proc` keying + import-alias
+               -- binding) is where it climbs (banked). UFCS also banked.
+-- v79: ZIG LANGUAGE SUPPORT (v1) — the 13th language. A spec
                -- table in the procedural+struct+method family (like Go): `fn`
                -- declarations (free + struct members), struct methods keyed
                -- `T.method` from the enclosing `const T = struct` (qualify),

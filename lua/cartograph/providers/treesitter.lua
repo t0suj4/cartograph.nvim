@@ -3262,6 +3262,39 @@ M.spec = {
             toOwnedSlice = true, ensuretotal = true, get = true, put = true,
             contains = true, count = true, clone = true, resize = true },
     },
+    -- Odin: C/procedural family — package + `proc` + struct, NO methods (procs
+    -- are free). `foo :: proc(){}`, `T :: struct{}`; calls are bare `foo()` or
+    -- package `fmt.println()` (a member_expression wrapping the call). v1 =
+    -- procedures + calls + package(dir) scope; package-qualified keying
+    -- (Odin-R1) and UFCS (`x.foo()`→`foo(x)`) are banked.
+    odin = {
+        exts = { 'odin' },
+        functions = [=[
+            (procedure_declaration . (identifier) @name) @def
+        ]=],
+        calls = [=[
+            (call_expression function: (identifier) @name) @call
+        ]=],
+        -- Odin has no methods — every proc is free (UFCS is banked)
+        is_method = function () return false end,
+        -- a package IS a directory (all .odin in a dir share a namespace); bare
+        -- proc names resolve within it, like Go
+        scope = function (file, _)
+            return file:match('^(.*)/[^/]*$') or ''
+        end,
+        entry_names = { main = true },
+        id_fn_refs = false,
+        -- common core/builtin verbs — never absorbed by a project proc
+        stdlib_names = { len = true, cap = true, append = true, make = true,
+            new = true, delete = true, free = true, clone = true, copy = true,
+            print = true, println = true, printf = true, tprintf = true,
+            aprintf = true, format = true, panic = true, assert = true,
+            init = true, destroy = true, reserve = true, resize = true,
+            clear = true, contains = true, get = true, set = true,
+            has_key = true, size_of = true, len_of = true, type_of = true,
+            read = true, write = true, close = true, open = true, next = true,
+            string = true, clone_string = true, to_string = true },
+    },
 }
 
 -- typescript is the javascript spec under another parser
@@ -4874,6 +4907,7 @@ local ATTACH = {
     rust = { '^%s*//', '^%s*/%*', '^%s*%*', '^%s*#%[' },
     python = { '^%s*#', '^%s*@' },
     zig = { '^%s*//' },
+    odin = { '^%s*//' },
 }
 
 function M.attach_pats(file)
