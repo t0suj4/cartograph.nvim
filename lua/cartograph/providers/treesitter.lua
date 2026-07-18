@@ -3209,7 +3209,7 @@ end
 -- (~): a derived resolution via the alias binding (a single-assignment/reaching
 -- check would promote it, and rule out reassigned aliases — banked). Lua-only
 -- today (only lua's spec captures import_bind); js/php import forms come later.
-local function resolve_module_alias(calls, edges, exact, tail, addref)
+local function resolve_module_alias(calls, edges, exact, tail, addref, node_index)
     local amap = {} -- file -> { alias -> module-file }, from require binds
     for _, e in ipairs(edges or {}) do
         if e.kind == 'import' and e.bind and e.from and e.to then
@@ -3220,9 +3220,15 @@ local function resolve_module_alias(calls, edges, exact, tail, addref)
     if not next(amap) then return 0 end
     local n = 0
     for _, c in ipairs(calls or {}) do
-        if not c.to and c.refused and c.full then
-            -- receiver.member (lua dot/colon); a SINGLE segment before the member
-            -- (a bare alias, not a.b.c chain)
+        -- a require-alias `recv` (a SINGLE segment before member — not an a.b.c chain).
+        -- BINDING beats corpus name-match ([[cartograph-linker]] layer 1): `git.m` where
+        -- git=require("M") means M's export m, INDEPENDENT of what other files name their
+        -- locals. So resolve — or CORRECT a resolution that landed OUTSIDE M — to M's OWN
+        -- def, whenever M's file uniquely defines m. This kills the class where a FOREIGN
+        -- file's `alias.m = …` (a test mock / monkey-patch of the imported module) wrongly
+        -- wins over the module's real export. Re-exports (M lacks its own m → no fit) and
+        -- extensions (m added elsewhere, not in M → no fit) are untouched: no override fires.
+        if c.full then
             local recv, member = c.full:match('^([%w_]+)[.:]([%w_]+)$')
             local mod = recv and amap[c.file] and amap[c.file][recv]
             if mod then
@@ -3233,16 +3239,22 @@ local function resolve_module_alias(calls, edges, exact, tail, addref)
                         if fit and fit.id ~= nd.id then dup = true else fit = nd end
                     end
                 end
-                if fit and not dup then
-                    c.to = fit.id
-                    c.inferred = true
-                    c.refused = nil
-                    if c.fn then
-                        addref(c.fn, fit.id, c.at
-                            or { start = { line = c.line, char = 0 },
-                                ['end'] = { line = c.line, char = 0 } }, true)
+                if fit and not dup and fit.id ~= c.to then
+                    -- fill a refused call, OR correct a FOREIGN resolution (current target
+                    -- outside M) to M's own export. In-module resolutions are left alone.
+                    local cur = c.to and node_index and node_index[c.to]
+                    local foreign = cur ~= nil and cur.file ~= mod
+                    if (not c.to and c.refused) or foreign then
+                        c.to = fit.id
+                        c.inferred = true
+                        c.refused = nil
+                        if c.fn then
+                            addref(c.fn, fit.id, c.at
+                                or { start = { line = c.line, char = 0 },
+                                    ['end'] = { line = c.line, char = 0 } }, true)
+                        end
+                        n = n + 1
                     end
-                    n = n + 1
                 end
             end
         end
@@ -6279,7 +6291,7 @@ function M.extract(root, opts)
     -- module-alias: `alias.member` where alias = require('mod') → mod's member
     -- (rung-1 receiver resolution) — before the return rounds, so a resolved
     -- module call can be a determining call for a receiver-typed chain
-    resolve_module_alias(calls, data.edges, exact, tail, addref)
+    resolve_module_alias(calls, data.edges, exact, tail, addref, node_index)
 
     -- string-keyed registry (stage 3): LibStub("X")/:GetModule("Y") → the
     -- :NewLibrary/:NewModule-registered table, scoped to the addon (.toc).
@@ -6678,12 +6690,13 @@ function M.relink(data, touched)
     -- extract's enrichment so the parallel and refresh paths resolve the
     -- same superclass chains the sequential path does
     n = n + resolve_super(data.calls, data.extends, exact, addref)
-    -- module-alias (rung-1 receiver resolution), same parity as extract
-    n = n + resolve_module_alias(data.calls, data.edges, exact, tail, addref)
-    -- and the return-type rounds, for the same parity (cross-chunk chains:
-    -- a worker slice may hold the chain but not the determining target)
+    -- node_index built BEFORE module-alias: its foreign-override reads c.to's file
     local node_index = {}
     for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
+    -- module-alias (rung-1 receiver resolution + binding-over-name-match), as extract
+    n = n + resolve_module_alias(data.calls, data.edges, exact, tail, addref, node_index)
+    -- and the return-type rounds, for the same parity (cross-chunk chains:
+    -- a worker slice may hold the chain but not the determining target)
     -- string-keyed registry (stage 3), same parity as extract
     n = n + resolve_registry(data.calls, node_index, addref, scope_of, nil, exact)
     local retn = resolve_returns(data.calls, node_index, exact, addref)

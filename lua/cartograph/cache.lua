@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 54 -- v54: REGISTRY CLASS-OWNER FIX — a register line `local Lib,
+M.VERSION = 55 -- v55: MODULE-ALIAS BINDING-OVER-NAME-MATCH — a call `alias.m` where
+               -- alias=require("M") now resolves to M's OWN export m even when a
+               -- FOREIGN file's `alias.m = …` (a test mock / monkey-patch of the
+               -- imported module) had wrongly won the corpus name-match. resolve_
+               -- module_alias corrects a foreign resolution when M's file uniquely
+               -- defines m; re-exports (M lacks m) + extensions are untouched.
+-- v54: REGISTRY CLASS-OWNER FIX — a register line `local Lib,
                -- oldminor = :NewLibrary("X")` gives both vars start.char 0, so
                -- resolve_registry's leftmost-var tiebreak was a pairs()-order
                -- coin-flip (LibStub("AceConsole-3.0") could resolve to `oldminor`).
