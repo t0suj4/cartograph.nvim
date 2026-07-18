@@ -2090,13 +2090,20 @@ M.spec = {
             end
             return false
         end,
-        -- Owner#full_name (instance) / Owner.find_by_city (singleton)
+        -- Owner#full_name (instance) / Owner.find_by_city (singleton).
+        -- A plain `def m` inside `class << self` is a SINGLETON (class)
+        -- method — key it with `.`, not `#` (else `Owner.m` calls miss it
+        -- and tail-collide onto an unrelated `X#m`). Detected by a
+        -- singleton_class ancestor whose receiver is `self`.
         qualify = function (name, defn, src)
             local sep = defn:type() == 'singleton_method' and '.' or '#'
             local p = defn:parent()
             while p do
                 local t = p:type()
-                if t == 'class' or t == 'module' then
+                if t == 'singleton_class' then
+                    local v = p:field('value')[1]
+                    if v and node_text(v, src) == 'self' then sep = '.' end
+                elseif t == 'class' or t == 'module' then
                     local cn = p:field('name')[1]
                     return cn and (node_text(cn, src)
                         .. sep .. name) or name
@@ -2134,6 +2141,49 @@ M.spec = {
             flatten = true, compact = true, reduce = true, inject = true,
             title = true, body = true, value = true, type = true,
             status = true, message = true, errors = true, user = true },
+        -- R1 constant-receiver keying: `Foo.bar` / `A::B.baz` name a
+        -- SINGLETON (class/module) method of the receiver constant, so the
+        -- resolution key is `Receiver.method` — an exact match against the
+        -- singleton def (`def self.bar` in `class Foo` → `Foo.bar`, per the
+        -- `qualify` hook). `A::B::C.m` keys on the TAIL constant `C` (defs
+        -- qualify by the innermost class name only). A constant explicitly
+        -- NAMES the class, so the key legally crosses files (class reopening
+        -- is corpus-wide) via the dotted-global path in resolve(). identifier
+        -- / self / ivar receivers are R2/R5 — left bare here. `.new` is R1b
+        -- (needs constructor keying + callee preservation), not yet done.
+        qualify_call = function (calln, name, src)
+            if calln:type() ~= 'call' then return nil end
+            if name:find('.', 1, true) or name:find(':', 1, true) then
+                return nil
+            end
+            local recv = calln:field('receiver')[1]
+            if not recv then return nil end
+            local rt = recv:type()
+            local cn
+            if rt == 'constant' then
+                cn = node_text(recv, src)
+            elseif rt == 'scope_resolution' then
+                cn = node_text(recv, src):match('([%w_]+)%s*$')
+            else
+                return nil
+            end
+            if not cn or cn == '' then return nil end
+            -- `.new` is the constructor: it dispatches to `#initialize`, not a
+            -- singleton `Receiver.new` — deferred to R1b (needs constructor
+            -- keying + callee preservation). Left bare here so it stays a
+            -- clean unresolved (`new` is stdlib), not a vocab refusal.
+            if name == 'new' then return nil end
+            return cn .. '.' .. name
+        end,
+        -- receiver evidence (a constant-named class) demands an EXACT match:
+        -- `Foo.bar` with no `Foo.bar` def is an honest frontier (inherited via
+        -- mixin/superclass = R4, or external), NEVER a promiscuous tail guess
+        -- onto some unrelated `C#bar` (arc trap #1: bare tail-match is
+        -- promiscuous). The dotted-global exact path stays; only the tail
+        -- fallback is suppressed for these keys.
+        exact_only_key = function (name)
+            return name:match('^%u[%w_]*[.#]') ~= nil
+        end,
         import_call = 'require_relative',
         resolve_import = function (mod, files, from)
             local dir = from and from:match('^(.*)/[^/]*$') or ''
@@ -6465,6 +6515,11 @@ function M.extract(root, opts)
                 #fitset > 0 and fitset or cands)
         end
         if short then return nil end -- free short name: noise floor holds
+        -- receiver-evidence keys (ruby `Foo.bar`) are exact-or-nothing: an
+        -- exact miss is an honest frontier, never a promiscuous tail guess
+        if spec and spec.exact_only_key and spec.exact_only_key(name) then
+            return nil
+        end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
             if name:sub(1, #pre) == pre then return nil end
         end
@@ -7068,6 +7123,11 @@ function M.relink(data, touched)
                 #fitset > 0 and fitset or cands)
         end
         if short then return nil end -- free short name: noise floor holds
+        -- receiver-evidence keys (ruby `Foo.bar`) are exact-or-nothing: an
+        -- exact miss is an honest frontier, never a promiscuous tail guess
+        if spec and spec.exact_only_key and spec.exact_only_key(name) then
+            return nil
+        end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
             if name:sub(1, #pre) == pre then return nil end
         end

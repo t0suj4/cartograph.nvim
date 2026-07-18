@@ -416,6 +416,17 @@ callers). Ariadne's thread, in text.
      scope semantics: inside a nested arrow it's the class instance (arrows
      inherit `this`), but inside a nested `function () {}` it is rebound, so a
      `this.method()` there is left unresolved rather than mis-typed.
+     **Ruby** resolves class-method calls by their constant receiver:
+     `Foo.bar` / `A::B.baz` key to the singleton method `Foo.bar` and
+     exact-match the definition (`def self.bar`, or a `def bar` inside
+     `class << self` — both keyed `Foo.bar`, not the instance `Foo#bar`).
+     Because a constant names the class explicitly, the link crosses files
+     (Ruby classes reopen corpus-wide), but the receiver evidence is
+     exact-or-nothing: `Foo.bar` with no such definition stays an honest
+     frontier — inherited via a mixin/superclass, or external — and never
+     collides onto an unrelated `X#bar`. Bare and `self`/`@ivar`-receiver
+     calls remain file-scoped (Ruby's dynamic dispatch is unknowable beyond
+     the file without more evidence), so most stay honest frontiers by design.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

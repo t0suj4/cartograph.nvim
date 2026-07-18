@@ -19,7 +19,16 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 69 -- v69: CLASS FIELD-ARROWS + function()/()=>{} `this` SEMANTICS.
+M.VERSION = 70 -- v70: RUBY R1 CONSTANT-RECEIVER KEYING. `Foo.bar`/`A::B.baz`
+               -- key to the SINGLETON `Receiver.method` (qualify_call) and
+               -- exact-match the class-method def; receiver evidence is
+               -- exact-or-nothing (exact_only_key) — no promiscuous tail
+               -- collision onto an unrelated `X#bar` (arc trap #1). Def-side
+               -- fix: a `def m` inside `class << self` is keyed singleton
+               -- `Owner.m`, not instance `Owner#m`. rails/activesupport
+               -- +75 (12.5→13.4%); discourse app+lib +2851 resolved edges
+               -- (app 5.6→8.9%, lib 9.2→12.4%). Ruby-only (gated on the spec).
+-- v69: CLASS FIELD-ARROWS + function()/()=>{} `this` SEMANTICS.
                -- (1) `class C { m = () => {} }` / `private m = async () =>` field-
                -- arrows are keyed C.m like methods (per-grammar `fields` query;
                -- qualify unwraps the field def) → this.m() resolves. (2) node.arrow
