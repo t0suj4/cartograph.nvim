@@ -950,6 +950,13 @@ M.spec = {
         write_gate = { variable_list = true, dot_index_expression = true,
             bracket_index_expression = true },
         is_write = lua_is_write,
+        -- a lua def name is FULLY SELF-CONTAINED (`function X.prototype:m` carries its
+        -- own qualifier — no enclosing class block to truncate, unlike php/c). So tear
+        -- only defs whose OWN subtree holds the error, not everything after the first
+        -- error row: one invalid-escape string (`"[^\.]+"` at Waterfall-1.0.lua:370)
+        -- otherwise torns ~2000 downstream defs — measured 481 clean defs corpus-wide
+        -- torned to protect just 2 genuinely-in-error. Same rationale as bash.
+        torn_by_node = true,
         guards = LUA_GUARDS,
         scopes = LUA_SCOPES, -- lexical-first id pass (scope-model step 3)
         functions = [[

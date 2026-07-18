@@ -19,7 +19,15 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 57 -- v57: PROTOTYPE-OOP self-typing (GAP-2) — resolve_self now types self
+M.VERSION = 58 -- v58: LUA PARSE-ERROR RESILIENCE — lua defs are self-contained
+               -- (`function X.prototype:m` carries its own qualifier), so torn_by_node:
+               -- tear only defs whose OWN subtree holds the error, not everything after
+               -- the first error ROW. One invalid-escape string (`"[^\.]+"` at Waterfall-
+               -- 1.0.lua:370) otherwise torned ~2000 downstream defs → all its widget
+               -- prototypes invisible as call targets. Measured 481 clean defs recovered
+               -- corpus-wide (19 error-files) vs 2 genuinely-in-error kept torn. Fixes the
+               -- Baggins SetText/Clear harvest conflicts at their real (extraction) root.
+-- v57: PROTOTYPE-OOP self-typing (GAP-2) — resolve_self now types self
                -- to the FULL DOTTED owner (`Widget.prototype:Refresh` → `Widget.prototype`,
                -- was truncated to `Widget`) and OVERRIDES a FOREIGN promiscuous self:member
                -- match (all `Waterfall*.prototype:SetText` had landed on the unrelated
