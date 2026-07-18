@@ -19,7 +19,17 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 81 -- v81: ZIG-R5 RECEIVER TYPING. A `recv.method()` call is keyed
+M.VERSION = 82 -- v82: ZIG @import MODULE BINDING. `const Foo = @import("f.zig")`
+               -- binds Foo→that file (scan_imports emits an import edge with the
+               -- alias; resolve_import maps the .zig path relative to the
+               -- importer; std/builtin imports rejected). resolve_module_alias
+               -- then resolves `Foo.member()` to f.zig's export — binding beats
+               -- name-match. recv_local preserves the single-identifier receiver
+               -- so a LOWERCASE alias (`bar.run()`, which R5 leaves bare) is also
+               -- recognized. MEASURED +480 resolved, 0 lost, +17 CORRECTED —
+               -- incl. fixing R5's residual cross-module mis-picks (a `name` call
+               -- that hit Coff.Symbol now binds to the imported Elf/Symbol).
+-- v81: ZIG-R5 RECEIVER TYPING. A `recv.method()` call is keyed
                -- `Type.method` from the receiver's declared type: a PascalCase
                -- receiver IS the type (`Foo.init`), a lowercase receiver is an
                -- instance typed from the enclosing fn's POINTER param

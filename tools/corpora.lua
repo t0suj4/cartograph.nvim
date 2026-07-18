@@ -146,13 +146,14 @@ return {
         budget_mb = 3800, -- ~2x inline peak: the compiler files are enormous
         repo = 'https://github.com/ziglang/zig',
         rev = 'd5181a9c9bac',
-        expected = { refs = 19256, nodes = 9408 }, -- recalibrated @ zig-R5 (v81)
+        expected = { refs = 19973, nodes = 9408 }, -- recalibrated @ zig @import (v82)
         lang = 'zig',
-        notes = 'zig + R5 receiver typing (the self-hosted compiler, 171 files)'
-            .. ' — procedural+struct+method family; `recv.method()` keyed '
-            .. 'Type.method from the pointer receiver\'s declared type (40.7% '
-            .. 'resolved, methods keyed by owning type). Remaining: @import '
-            .. 'module binding + value-receiver/module-scope disambiguation',
+        notes = 'zig + R5 receiver typing + @import module binding (the '
+            .. 'self-hosted compiler, 171 files) — procedural+struct+method '
+            .. 'family; `recv.method()` keyed Type.method from the pointer '
+            .. 'receiver\'s type, and `const Foo=@import("f.zig")` binds '
+            .. 'Foo.member() to f.zig (41.5% resolved). Remaining: multi-level '
+            .. 'chains (Foo.Bar.baz) + value-receiver/module-scope disambiguation',
     },
     odin = {
         root = HOME .. '/git/odin/core',

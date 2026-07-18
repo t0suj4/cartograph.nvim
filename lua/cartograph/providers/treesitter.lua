@@ -1406,6 +1406,53 @@ local function zig_recv_type(calln, recv, src)
     end
 end
 
+-- Zig @import module binding: scan `const NAME = @import("path.zig")` binds so
+-- the module-alias pass (resolve_module_alias) can resolve `NAME.member()` to
+-- that file's export — binding beats name-match ([[cartograph-linker]] layer 1).
+-- Returns {alias, path} per bind; only `.zig` paths (a project file); std/
+-- builtin imports ("std", "builtin") are left for resolve_import to reject.
+-- A file-duplicated alias (two imports, same name) is dropped — ambiguous.
+local function zig_imports(tsroot, src)
+    local seen, dup = {}, {}
+    local function walk(n)
+        if n:type() == 'variable_declaration' then
+            local alias, bf
+            for c in n:iter_children() do
+                local t = c:type()
+                if t == 'identifier' and not alias then alias = node_text(c, src)
+                elseif t == 'builtin_function' then bf = c end
+            end
+            if alias and bf then
+                local bi, path
+                for c in bf:iter_children() do
+                    local t = c:type()
+                    if t == 'builtin_identifier' then bi = node_text(c, src)
+                    elseif t == 'arguments' then
+                        for a in c:iter_children() do
+                            if a:type() == 'string' then
+                                path = node_text(a, src):gsub('^["\']', '')
+                                    :gsub('["\']$', '')
+                                break
+                            end
+                        end
+                    end
+                end
+                if bi == '@import' and path then
+                    if seen[alias] and seen[alias] ~= path then dup[alias] = true
+                    else seen[alias] = path end
+                end
+            end
+        end
+        for c in n:iter_children() do walk(c) end
+    end
+    walk(tsroot)
+    local out = {}
+    for alias, path in pairs(seen) do
+        if not dup[alias] then out[#out + 1] = { alias = alias, path = path } end
+    end
+    return out
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -3409,6 +3456,35 @@ M.spec = {
             -- never a project method (kept out of the receiver-typed index)
             writeInt = true, writeByte = true, writeByteNTimes = true,
             writeStruct = true, flush = true },
+        -- @import module binding: `const Foo = @import("foo.zig")` binds Foo to
+        -- that file; a `Foo.member()` call then resolves to foo.zig's export via
+        -- resolve_module_alias (binding beats name-match). scan_imports collects
+        -- the binds; resolve_import maps a `.zig` path (relative to the importing
+        -- file) to a corpus file; recv_local preserves the single-identifier
+        -- receiver so a LOWERCASE alias (`const bar = @import(…); bar.run()`,
+        -- which R5 leaves bare) is still recognized by the alias pass.
+        scan_imports = zig_imports,
+        resolve_import = function (path, files, from)
+            if not path:match('%.zig$') then return nil end -- std/builtin → ext
+            local dir = from and from:match('^(.*)/[^/]*$') or ''
+            local rel = (dir ~= '' and dir .. '/' or '') .. path
+            rel = rel:gsub('/%./', '/')                 -- collapse /./
+            while rel:find('/[^/]+/%.%./') do           -- collapse a/../
+                rel = rel:gsub('/[^/]+/%.%./', '/', 1)
+            end
+            rel = rel:gsub('^%./', '')
+            while rel:find('^%.%./') do rel = rel:gsub('^%.%./', '') end
+            if files[rel] then return rel end
+        end,
+        recv_local = function (calln, src)
+            if calln:type() ~= 'call_expression' then return nil end
+            local fe = calln:field('function')[1]
+            if not fe or fe:type() ~= 'field_expression' then return nil end
+            local obj = fe:field('object')[1]
+            if obj and obj:type() == 'identifier' then
+                return node_text(obj, src)
+            end
+        end,
     },
     -- Odin: C/procedural family — package + `proc` + struct, NO methods (procs
     -- are free). `foo :: proc(){}`, `T :: struct{}`; calls are bare `foo()` or
@@ -4258,8 +4334,15 @@ local function resolve_module_alias(calls, edges, exact, tail, addref, node_inde
         -- file's `alias.m = …` (a test mock / monkey-patch of the imported module) wrongly
         -- wins over the module's real export. Re-exports (M lacks its own m → no fit) and
         -- extensions (m added elsewhere, not in M → no fit) are untouched: no override fires.
-        if c.full then
-            local recv, member = c.full:match('^([%w_]+)[.:]([%w_]+)$')
+        do
+            local recv, member = nil, nil
+            if c.full then recv, member = c.full:match('^([%w_]+)[.:]([%w_]+)$') end
+            -- fallback: the receiver preserved separately (zig field calls key
+            -- only the member into `full`, but recv_local kept the object) — so
+            -- a lowercase alias `bar.run()` is still recognized here.
+            if not recv and c.recv and c.callee then
+                recv, member = c.recv, c.callee
+            end
             local mod = recv and amap[c.file] and amap[c.file][recv]
             if mod then
                 -- the UNIQUE fn/method with this tail defined in the alias's module
@@ -4270,11 +4353,15 @@ local function resolve_module_alias(calls, edges, exact, tail, addref, node_inde
                     end
                 end
                 if fit and not dup and fit.id ~= c.to then
-                    -- fill a refused call, OR correct a FOREIGN resolution (current target
-                    -- outside M) to M's own export. In-module resolutions are left alone.
+                    -- fill an UNRESOLVED call (refused-with-candidates, or a
+                    -- clean exact-only refusal that leaves no refusal record —
+                    -- zig's `Foo.method` typed key), OR correct a FOREIGN
+                    -- resolution (current target outside M) to M's own export.
+                    -- In-module resolutions are left alone. Sound: gated on a
+                    -- UNIQUE fit in the bound module (the binding is authoritative).
                     local cur = c.to and node_index and node_index[c.to]
                     local foreign = cur ~= nil and cur.file ~= mod
-                    if (not c.to and c.refused) or foreign then
+                    if not c.to or foreign then
                         c.to = fit.id
                         c.inferred = true
                         c.refused = nil
@@ -7187,6 +7274,19 @@ function M.extract(root, opts)
                 calls[#calls + 1] = c
                 pending[#pending + 1] = { call = c, file = file, full = 'super',
                     at = pos_of(s.node), encl = encl and pos_of(encl) }
+            end
+        end
+        -- @import module binding: `const NAME = @import("f.zig")` is a
+        -- builtin_function (not a captured call), so scan for it and emit the
+        -- module edge with its alias — resolve_module_alias resolves the
+        -- `NAME.member()` calls against it (same edge shape as import_call).
+        if spec.scan_imports and spec.resolve_import then
+            for _, imp in ipairs(spec.scan_imports(tsroot, src)) do
+                local target = spec.resolve_import(imp.path, fileset, file, root)
+                if target and target ~= file then
+                    edges[#edges + 1] = { from = file, to = target,
+                        kind = 'import', bind = imp.alias, inferred = true }
+                end
             end
         end
     end

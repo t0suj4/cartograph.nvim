@@ -381,7 +381,12 @@ callers). Ariadne's thread, in text.
      keys `Func.fail` by that param's type — not the filename — so the
      `const Self = @This()` aliasing idiom keys consistently on both sides,
      and a bare-name fallback is refused for a typed key (an honest frontier,
-     never a promiscuous tail guess).
+     never a promiscuous tail guess). Zig **`@import` module binding** completes
+     the picture: `const Foo = @import("foo.zig")` binds `Foo` to that file, so a
+     `Foo.member()` call resolves to `foo.zig`'s export — binding beats
+     name-match, which also *corrects* the residual cross-module mis-picks (a
+     `name()` call that tail-matched an unrelated module now binds to the
+     imported one).
      TypeScript parses under its own tree-sitter grammar (a JS superset) for
      both extraction *and* the on-demand analysis lenses, but resolves under
      the JavaScript spec — so `.ts` and `.js` are one language family (the way

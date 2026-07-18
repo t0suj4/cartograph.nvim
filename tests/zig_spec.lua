@@ -113,6 +113,42 @@ test('zig-R5: a PascalCase receiver keys the call by the type itself', function 
     vim.fn.delete(root, 'rf')
 end)
 
+test('zig @import: a PascalCase alias resolves the member to the imported file', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'foo.zig', { 'pub fn make() void {}' })
+    write(root, 'main.zig', {
+        'const Foo = @import("foo.zig");',
+        'pub fn run() void {',
+        '    Foo.make();',                       -- Foo bound to foo.zig → make
+        '}',
+    })
+    local by, calls = extract(root)
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'make' then hit = c end end
+    ok(hit and hit.to == by['make'].id,
+        'Foo.make() resolved to foo.zig::make via the @import bind')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('zig @import: a lowercase alias resolves too (receiver preserved)', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'util.zig', { 'pub fn helper() void {}' })
+    write(root, 'app.zig', {
+        'const util = @import("util.zig");',
+        'pub fn go() void {',
+        '    util.helper();',                    -- lowercase alias → util.zig
+        '}',
+    })
+    local by, calls = extract(root)
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'helper' then hit = c end end
+    ok(hit and hit.to == by['helper'].id,
+        'util.helper() resolved to util.zig::helper via the lowercase @import bind')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('zig: pub fn is exported, plain fn is not', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
