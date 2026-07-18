@@ -369,6 +369,11 @@ callers). Ariadne's thread, in text.
      fn altitude, the lit altitude and the graph lints all work. Specs ship
      for **Lua, C, C++, Haskell, Scheme, PHP, JavaScript/TypeScript,
      Python** — a new language is one spec table (queries + a few hooks).
+     TypeScript parses under its own tree-sitter grammar (a JS superset) for
+     both extraction *and* the on-demand analysis lenses, but resolves under
+     the JavaScript spec — so `.ts` and `.js` are one language family (the way
+     TS imports JS under `allowJs`), while TS syntax (annotations, generics,
+     interfaces) never errors a re-parse the way it would under the JS grammar.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

@@ -2984,6 +2984,32 @@ local function elang_for(file)
     return lang, spec
 end
 
+-- the GRAMMAR to parse a file with. elang_for collapses typescript→javascript
+-- for the resolution FAMILY + spec (so .ts and .js resolve as ONE language —
+-- the way TS legally imports JS under allowJs, and the never-cross gate must
+-- treat a .ts↔.js edge as same-family). The PARSER must NOT collapse: TS
+-- syntax (annotations, interfaces, generics) ERRORS OUT under the JS grammar,
+-- blanking every on-demand re-parse lens (forms/detail/lens flow). So the
+-- resolution lang is javascript but the parse grammar stays typescript — the
+-- "TS is the JS spec under another PARSER" the elang_for comment describes.
+-- Extraction (lang_for, not elang_for) already parses .ts under typescript;
+-- this is the analysis-side counterpart. Containers keep elang_for's host
+-- grammar (their region trees are JS). Memoized by extension like elang_for.
+local EXT_PLANG = {}
+local function parse_lang_for(file)
+    local ext = file:match('%.([%w]+)$') or ''
+    local hit = EXT_PLANG[ext]
+    if hit ~= nil then return hit or nil end
+    local plang
+    if CONTAINERS[ext] then
+        plang = 'javascript'
+    else
+        plang = lang_for(file) -- the REAL registered grammar (typescript for .ts)
+    end
+    EXT_PLANG[ext] = plang or false
+    return plang
+end
+
 -- Transitive superclass resolution. `parent::m()` where the DIRECT parent
 -- only INHERITS m (no exact `Parent::m` def) tail-refuses across every
 -- class's m; walk the `extends` chain (data.extends: bare child->parent
@@ -3917,6 +3943,13 @@ function M.lang_of(file)
     return (elang_for(file))
 end
 
+-- the grammar a re-parse of `file` must use (typescript for .ts, not the
+-- javascript family lang) — see parse_lang_for. Callers that RE-PARSE for
+-- analysis (lens flow, forms) parse with this and resolve with lang_of's spec.
+function M.parse_lang(file)
+    return parse_lang_for(file)
+end
+
 -- a NEW file's obligatory first lines (extract-module creates files)
 function M.file_header(file)
     if elang_for(file) == 'php' then return { '<?php', '' } end
@@ -4004,7 +4037,8 @@ end
 --- branch = true when that sub-form has its own sub-forms (descend again).
 --- Recomputed on demand — nothing is cached in the graph.
 function M.forms(file, sr, sc, er, ec)
-    local lang, spec = elang_for(file)
+    local _, spec = elang_for(file)
+    local lang = parse_lang_for(file) -- TS parses under typescript, not js
     if not (lang and spec) then return {} end
     local fd = io.open(file, 'r')
     if not fd then return {} end
@@ -4117,7 +4151,8 @@ end
 --- detail items (a conditional's condition; a call's arguments). Same on-demand
 --- parse as M.forms; returns { {sr,sc,er,ec,text, items={...}}, ... }.
 function M.detail(file, sr, sc, er, ec)
-    local lang, spec = elang_for(file)
+    local _, spec = elang_for(file)
+    local lang = parse_lang_for(file) -- TS parses under typescript, not js
     if not (lang and spec) then return {} end
     local fd = io.open(file, 'r'); if not fd then return {} end
     local src = fd:read('a'); fd:close()

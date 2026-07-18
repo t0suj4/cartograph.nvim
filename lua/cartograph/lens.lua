@@ -23,8 +23,11 @@ local function build_flow(store, node)
     local ok, lines = pcall(vim.fn.readfile, store.abs(node.file))
     if not ok then return nil, 'cannot read ' .. node.file end
     local src = table.concat(lines, '\n')
-    local pok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
-    if not pok then return nil, 'no parser for ' .. lang end
+    -- resolve with the family spec (javascript) but PARSE with the real grammar
+    -- (typescript for .ts — TS syntax errors out under the JS grammar)
+    local plang = ts.parse_lang(node.file)
+    local pok, parser = pcall(vim.treesitter.get_string_parser, src, plang)
+    if not pok then return nil, 'no parser for ' .. tostring(plang) end
     local sl, target = atr.sl(node.range), nil
     local function rec(n)
         if FN[n:type()] and select(1, n:range()) == sl and not target then target = n end
