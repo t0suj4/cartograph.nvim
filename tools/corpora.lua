@@ -113,6 +113,18 @@ return {
                              -- + ActiveRecord vocab) composed onto base ruby
         notes = 'rails overlay pack (discourse app/models, 369 files)',
     },
+    rspec = {
+        root = HOME .. '/git/discourse/spec/models',
+        repo = 'https://github.com/discourse/discourse',
+        rev = '28b003a38d82',
+        expected = { refs = 13, nodes = 515 },
+        lang = 'ruby',
+        packs = { 'rails', 'rspec' }, -- MULTI-PACK composition (the de-risker):
+                                      -- rails + the rspec/factory_bot test-DSL
+        notes = 'rspec test-DSL pack + multi-pack composition (discourse '
+            .. 'spec/models, 196 files) — DSL is framework-refused; low '
+            .. 'resolution is honest (specs are framework-dominated)',
+    },
     go = {
         root = HOME .. '/git/hugo',
         repo = 'https://github.com/gohugoio/hugo',

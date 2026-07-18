@@ -446,7 +446,10 @@ callers). Ariadne's thread, in text.
      vocabulary (`save`/`where`/`find`/…, which a *non*-Rails project would
      resolve to its own methods) and reads `has_many`/`belongs_to`/`has_one`/
      `delegate` as method definitions (`has_many :comments` → `Model#comments`),
-     activated per-project so pure Ruby stays pure.
+     activated per-project so pure Ruby stays pure. Packs compose: an `rspec`
+     pack (RSpec + factory_bot verbs — `describe`/`it`/`let`/`expect`/…) stacks
+     on top of `rails` for a test suite, so framework DSL reads as framework and
+     a project method that happens to share a DSL name isn't mistaken for it.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

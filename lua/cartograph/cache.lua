@@ -19,7 +19,21 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 73 -- v73: RAILS OVERLAY PACK — the modularity milestone. First
+M.VERSION = 74 -- v74: RSPEC TEST-DSL PACK — the 2nd overlay pack, proving
+               -- MULTI-PACK composition (rails + rspec compose end-to-end on a
+               -- real corpus). v1 = VOCAB: RSpec + factory_bot DSL verbs
+               -- (describe/context/it/let/subject/expect/to/eq/allow/receive/
+               -- shared_examples/build_stubbed/…) declared framework vocab.
+               -- MEASURE-FIRST: impact is modest+honest — spec DSL calls were
+               -- ALREADY unresolved-external (not mis-bucketed), so the pack's
+               -- value = composition proof + correct model (a project method
+               -- named `subject`/`describe` no longer mis-matches), NOT a
+               -- resolution gain (specs are framework-dominated, 0.9% resolve).
+               -- New `rspec` corpus (discourse spec/models, packs rails+rspec).
+               -- The let/subject example-group def-emitters need a scoping model
+               -- (spec code = blocks not methods) = banked v2 (compose_spec
+               -- extension for pack-contributed scope/hooks). +3 ruby_rspec specs.
+-- v73: RAILS OVERLAY PACK — the modularity milestone. First
                -- framework/DSL pack composing onto a base language spec
                -- (M.packs + M.compose_spec: union stdlib_names, chain
                -- synth_defs via metatable; activated per-corpus opts.packs,

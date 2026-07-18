@@ -5653,6 +5653,41 @@ M.packs = {
             valid = true, present = true, blank = true, errors = true },
         synth_defs = ruby_rails_synth,
     },
+    -- the test-DSL pack (RSpec + factory_bot) — the second ruby pack, proving
+    -- MULTI-PACK composition (rails + rspec) and cleaning the spec-dir census
+    -- skew (measured: 45% of spec calls are DSL verbs, all "unresolved" without
+    -- it). v1 = VOCAB only: the DSL verbs become honest framework refusals. The
+    -- `let`/`subject`/`described_class` DEF-EMITTERS (which need an example-group
+    -- block scoping model — spec code is blocks, not methods) are a v2 sub-rung.
+    rspec = {
+        lang = 'ruby',
+        stdlib_names = {
+            -- structure + hooks
+            describe = true, context = true, it = true, specify = true,
+            example = true, before = true, after = true, around = true,
+            let = true, ['let!'] = true, subject = true, its = true,
+            described_class = true, xit = true, fit = true, pending = true,
+            skip = true,
+            -- expectations + matchers
+            expect = true, to = true, to_not = true, not_to = true,
+            eq = true, eql = true, equal = true, be = true, match = true,
+            include = true, contain_exactly = true, raise_error = true,
+            change = true, have_attributes = true, respond_to = true,
+            satisfy = true, start_with = true, end_with = true, be_within = true,
+            -- mocks / stubs
+            allow = true, receive = true, double = true, instance_double = true,
+            class_double = true, spy = true, have_received = true,
+            receive_messages = true, expect_any_instance_of = true,
+            allow_any_instance_of = true,
+            -- shared examples/context
+            shared_examples = true, shared_context = true,
+            it_behaves_like = true, it_should_behave_like = true,
+            include_examples = true, include_context = true,
+            -- factory_bot (build/create overlap the rails pack — union is fine)
+            build_stubbed = true, attributes_for = true, create_list = true,
+            build_list = true, create_pair = true, ['stub_const'] = true,
+        },
+    },
 }
 
 -- Build the effective spec for `lang` when overlay `packs` (a list of pack
