@@ -1041,6 +1041,17 @@ flagged — Lua's dynamic members (metatables, `rawset`, table loops) make a wri
 a poor signal of a defect, so the undefined-member lint stays off and only sound
 read→write links are reported.
 
+**Reassignment-override** is the value-flow side of resolution. A table slot written by
+more than one *unconditional top-level* def — `function T:m() … end` then `T.m = function
+… end`, the monkey-patch idiom — is, at runtime, the **last write in load order**; a call
+name-matched to a superseded def is redirected to the effective one (value-flow beats the
+separator/first-def match). It is sound-gated on load-order: a **branch-selected** slot
+(`if nLog then function kit:Debug … else … end`) has no last-write winner and is left
+exactly as name-matched — measuring the real corpus, that conditional shape is the common
+one and a naive "last wins" would be confidently wrong there, so it never fires. A runtime
+reassignment *inside* a function is not a load-order sibling either. The redirect wears the
+honest `~`; same-file only (a cross-file "override" is not a load-order fact).
+
 `:CartographExpr` reads one level deeper still. The flow rows know *which* names a
 statement defines and uses, but not the **shape** of the expression that computes them —
 the operator, the operands, the callee, whether it allocates. That structure is a small

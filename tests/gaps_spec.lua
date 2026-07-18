@@ -23,29 +23,9 @@ local function call(data, full)
     for _, c in ipairs(data.calls) do if c.full == full then return c end end
 end
 
--- GAP 1 — REASSIGNMENT-OVERRIDE. `T.m = function…` reassigns (overrides) `function
--- T:m` at load time; at runtime T:m() calls the OVERRIDE (last-in-load-order wins,
--- the Skada:ReloadSettings monkey-patch). lua-ls resolves to the override; cartograph
--- resolves to the original colon-def (separator/first-def match, no load-order model).
-local OVERRIDE_SRC = table.concat({
-    'local T = {}',                                  -- 1
-    'function T:doit() return 1 end',                -- 2  original
-    'local Old = T.doit',                            -- 3  (the monkey-patch idiom)
-    'T.doit = function(self) return Old(self)+1 end',-- 4  OVERRIDE — runtime-effective
-    'function T:run() return self.x end',            -- 5  (T a genuine object)
-    'local function use() return T:doit() end',      -- 6  T:doit → should be the override @4
-    'return { use = use }',                          -- 7
-}, '\n')
-
-test('GAP reassignment-override: T:m() resolves to the LAST def (the override), not the original', function ()
-    skip 'known gap: no load-order/last-write model — cartograph picks the colon-def, lua-ls the override'
-    if not ready() then return skip 'no lua parser' end
-    local data = extract_src(OVERRIDE_SRC)
-    local override = node(data, 'T.doit')            -- the @4 reassignment
-    local c = call(data, 'T:doit')
-    ok(c, 'T:doit call found')
-    eq(override, c.to)                                -- runtime-effective def, not T:doit@2
-end)
+-- (GAP 1 — REASSIGNMENT-OVERRIDE — is FIXED as of v56: resolve_reassign redirects a
+-- call to the last-in-load-order def of an unconditional top-level slot. Its live
+-- regression tests moved to reassign_spec.lua. [[graph-vm-type-resolution]].)
 
 -- GAP 2 — PROTOTYPE-OOP self-typing. self:m inside `X.prototype:method` should resolve
 -- to `X.prototype:m` (the same prototype's member). resolve_self truncates the dotted

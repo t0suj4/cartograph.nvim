@@ -2726,6 +2726,26 @@ local DEFAULT_FN_TYPES = { function_definition = true, function_declaration = tr
 -- answer at every ancestor visited: call sites in the same function stop
 -- one level up instead of re-walking to the root each time.
 local IF_PATH = {} -- scratch: ids visited this walk (single-threaded)
+-- UNCONDITIONAL TOP-LEVEL? a def node is a module-load statement that runs
+-- exactly once, in load order, iff its AST ancestry reaches the chunk root
+-- without passing through a `block` — every conditional/loop/function body (and
+-- a `do…end`) introduces a block, so any of them makes the def guarded/nested,
+-- NOT a load-order sibling. Consumed by resolve_reassign (the reassignment-
+-- override / value-flow resolver): a slot whose defs are all top-level HAS a
+-- last-write winner; a branch-selected def (DebugLib `if nLog then … else …`)
+-- does NOT, and must never redirect. Conservative: `do`-blocks read as guarded
+-- (sound — we skip a rare unconditional case rather than risk a false winner).
+local function toplevel_def(defn)
+    local a = defn:parent()
+    while a do
+        local t = a:type()
+        if t == 'block' then return false end
+        if t == 'chunk' then return true end
+        a = a:parent()
+    end
+    return false
+end
+
 local function in_function(n, spec, memo)
     local types = spec and spec.fn_types or DEFAULT_FN_TYPES
     local p = n:parent()
@@ -3256,6 +3276,69 @@ local function resolve_module_alias(calls, edges, exact, tail, addref, node_inde
                         n = n + 1
                     end
                 end
+            end
+        end
+    end
+    return n
+end
+
+-- REASSIGNMENT-OVERRIDE (value-flow resolution, [[cartograph-linker]] /
+-- [[graph-vm-type-resolution]]): a table slot `Owner.field` written by SEVERAL
+-- unconditional top-level defs is, at runtime, the LAST write in load order —
+-- the monkey-patch idiom `function T:m() … end; T.m = function(self) … end` calls
+-- the reassignment, not the colon-def. A call name-matched to a NON-last def of
+-- such a slot is REDIRECTED to the last (value-flow beats the separator/first-def
+-- name-match, generalizing v55's binding-beats-name-match). SOUND-GATED on
+-- node.top: fires ONLY when every participating def is an unconditional load-order
+-- sibling. A branch-selected slot (`if nLog then function kit:Debug … else … end`,
+-- the measured-dominant real case) has NO load-order winner and is left exactly as
+-- name-matched — no false redirect. Slot unifies `:`/`.` (T:m and T.m are one slot).
+-- Same-file only (the winner is keyed by file): a cross-file "override" is not a
+-- load-order fact. The redirect is marked inferred (~) — it is an inference.
+local function resolve_reassign(calls, node_index, addref)
+    local function slot_of(name)
+        local owner, _, field = name:match('^(.+)([:.])([%w_]+)$')
+        return owner and (owner .. '.' .. field) or nil
+    end
+    -- bucket top-level fn/method defs by (file, slot); a bucket with >=2 defs has
+    -- a winner = the max-order (last-in-load) def.
+    local byslot = {}
+    for _, nd in pairs(node_index) do
+        if nd.top and (nd.kind == 'function' or nd.kind == 'method') then
+            local slot = slot_of(nd.name)
+            if slot then
+                local k = (nd.file or '?') .. '\31' .. slot
+                byslot[k] = byslot[k] or {}
+                byslot[k][#byslot[k] + 1] = nd
+            end
+        end
+    end
+    local winner = {}
+    for k, defs in pairs(byslot) do
+        if #defs >= 2 then
+            local last = defs[1]
+            for i = 2, #defs do
+                if (defs[i].order or 0) > (last.order or 0) then last = defs[i] end
+            end
+            winner[k] = last
+        end
+    end
+    if not next(winner) then return 0 end
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        local tn = c.to and node_index[c.to]
+        if tn and tn.top and (tn.kind == 'function' or tn.kind == 'method') then
+            local slot = slot_of(tn.name)
+            local w = slot and winner[(tn.file or '?') .. '\31' .. slot]
+            if w and w.id ~= c.to then
+                c.to = w.id
+                c.inferred = true
+                if c.fn then
+                    addref(c.fn, w.id, c.at
+                        or { start = { line = c.line, char = 0 },
+                            ['end'] = { line = c.line, char = 0 } }, true)
+                end
+                n = n + 1
             end
         end
     end
@@ -5089,6 +5172,9 @@ function M.extract(root, opts)
                     kind = method and 'method' or 'function', file = file,
                     range = sp, order = sp.start.line, params = params,
                     cbarg = isfield or nil,
+                    -- unconditional module-load def (lua): a load-order sibling
+                    -- for the reassignment-override resolver (resolve_reassign)
+                    top = (lang == 'lua' and toplevel_def(defn)) or nil,
                     exported = exp,
                     torn = torn,
                     entry = (spec.entry_names or {})[name] or nil,
@@ -6298,6 +6384,11 @@ function M.extract(root, opts)
     -- constDefs folds k='local' keys here (const-fold's post-pass runs later)
     resolve_registry(calls, node_index, addref, scope_of, constDefs, exact)
 
+    -- reassignment-override: a call name-matched to a superseded def of a
+    -- monkey-patched slot → the last-in-load-order (runtime-effective) def.
+    -- Before the return rounds, so a corrected target feeds the receiver typing.
+    resolve_reassign(calls, node_index, addref)
+
     -- return-type rounds: settle the receiver-deferred calls (c.rt) now
     -- that plain + super resolution populated the determining calls
     local retn, retrounds = resolve_returns(calls, node_index, exact, addref)
@@ -6699,6 +6790,8 @@ function M.relink(data, touched)
     -- a worker slice may hold the chain but not the determining target)
     -- string-keyed registry (stage 3), same parity as extract
     n = n + resolve_registry(data.calls, node_index, addref, scope_of, nil, exact)
+    -- reassignment-override, same parity as extract (same-file slot fact)
+    n = n + resolve_reassign(data.calls, node_index, addref)
     local retn = resolve_returns(data.calls, node_index, exact, addref)
     n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
     n = n + resolve_local_ctor(data.calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)

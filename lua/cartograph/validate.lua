@@ -24,6 +24,8 @@ M.NODE_FIELDS = {
     entry = true, exported = true, effects = true, apertures = true,
     pw = true, -- param-write fact: sorted indexes of OWN params this fn
                -- writes through (lua/js reference semantics; ~ to own params)
+    top = true, -- unconditional module-load def (lua): a load-order sibling for
+                -- the reassignment-override resolver (resolve_reassign, v56)
     -- token provider (stack languages)
     effect = true, derived = true, echeck = true,
 }

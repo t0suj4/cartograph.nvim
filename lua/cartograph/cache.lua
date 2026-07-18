@@ -19,7 +19,16 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 55 -- v55: MODULE-ALIAS BINDING-OVER-NAME-MATCH — a call `alias.m` where
+M.VERSION = 56 -- v56: REASSIGNMENT-OVERRIDE (value-flow resolution) — a table slot
+               -- `Owner.field` written by >=2 UNCONDITIONAL top-level defs resolves
+               -- to the LAST-in-load-order (runtime-effective) def, not the first
+               -- separator/name match: the monkey-patch idiom `function T:m … end;
+               -- T.m = function … end` calls the reassignment. resolve_reassign,
+               -- gated on a new node.top marker (def reaches chunk with no `block`
+               -- ancestor). Branch-selected slots (`if X then function k:m … else …`)
+               -- have no load-order winner → left as name-matched (no false redirect).
+               -- New node field `top`; same-file resolution semantics change.
+-- v55: MODULE-ALIAS BINDING-OVER-NAME-MATCH — a call `alias.m` where
                -- alias=require("M") now resolves to M's OWN export m even when a
                -- FOREIGN file's `alias.m = …` (a test mock / monkey-patch of the
                -- imported module) had wrongly won the corpus name-match. resolve_
