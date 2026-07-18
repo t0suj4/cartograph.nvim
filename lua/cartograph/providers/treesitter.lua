@@ -3525,28 +3525,47 @@ local function resolve_self(calls, node_index, extends, exact, addref)
     -- ~89%-wrong lexical guess — it fires ONLY where call-site typing hedged, gated
     -- to multi-method owners, and the extends chain fixes the mixin misses that
     -- sank the naive form. ([[cartograph-linker]] V3 framework adapters)
+    -- colon-method count per FULL DOTTED owner: `Widget.prototype:m` counts for
+    -- owner `Widget.prototype`, NOT the first segment `Widget` — the prototype-OOP
+    -- idiom (Ace2 widgets: `X.prototype:method`) is a genuine object in its own
+    -- right, and truncating the owner made it invisible to the >=2 gate.
     local methodcount = {}
     for name in pairs(exact) do
-        local owner, sep = name:match('^([%w_]+)(:)')
-        if owner and sep then methodcount[owner] = (methodcount[owner] or 0) + 1 end
+        local owner = name:match('^(.+):[%w_]+$')
+        if owner then methodcount[owner] = (methodcount[owner] or 0) + 1 end
     end
     for _, c in ipairs(calls or {}) do
         -- ONLY methods with NO in-corpus call site (selft untouched = truly
         -- framework-invoked). A POISONED method (selft==false, called with an
         -- untypeable receiver) keeps V1's hedge — lexical self would be unsound
         -- there (the method IS invoked on an unknown receiver, maybe not M).
-        if not c.to and c.full and c.fn and node_index[c.fn] and selft[c.fn] == nil then
+        if c.full and c.fn and node_index[c.fn] and selft[c.fn] == nil then
             local member = c.full:match('^self[:.]([%w_]+)$')
             local fn = node_index[c.fn]
-            local owner = member and fn.name and fn.name:match('^([%w_]+)[:.]')
+            -- FULL dotted owner (`Widget.prototype:Refresh` → `Widget.prototype`),
+            -- so self is typed to the prototype and self:m resolves in ITS members.
+            local owner = member and fn.name and fn.name:match('^(.+)[:.][%w_]+$')
             if owner and (methodcount[owner] or 0) >= 2 then
                 local fit = chain_lookup(super, exact, owner, member, elang_for(c.file))
-                if fit then
-                    c.to = fit.id; c.inferred = true; c.refused = nil
-                    addref(c.fn, fit.id, c.at
-                        or { start = { line = c.line, char = 0 },
-                             ['end'] = { line = c.line, char = 0 } }, true)
-                    n = n + 1
+                -- FILL an unresolved call, OR OVERRIDE a FOREIGN promiscuous match:
+                -- the main resolve()'s member-name tail-match resolves `self:m` to an
+                -- UNRELATED same-named method when the owner truncated (all
+                -- `Waterfall*.prototype:SetText` landed on `FuBarPlugin:SetText`).
+                -- self IS `owner` here (a colon-method of a genuine object), so
+                -- owner's own m is definitively the target — receiver-type beats
+                -- name-match (generalizing v55/v56 to self-typing). MEASURED: the
+                -- override fires 0× on non-dotted owners (all already correct), so
+                -- it can't regress the correct self:member resolutions.
+                if fit and fit.id ~= c.to then
+                    local cur = c.to and node_index[c.to]
+                    local curowner = cur and cur.name and cur.name:match('^(.+)[:.][%w_]+$')
+                    if not c.to or (curowner ~= nil and curowner ~= owner) then
+                        c.to = fit.id; c.inferred = true; c.refused = nil
+                        addref(c.fn, fit.id, c.at
+                            or { start = { line = c.line, char = 0 },
+                                 ['end'] = { line = c.line, char = 0 } }, true)
+                        n = n + 1
+                    end
                 end
             end
         end

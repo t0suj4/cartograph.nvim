@@ -19,7 +19,15 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 56 -- v56: REASSIGNMENT-OVERRIDE (value-flow resolution) — a table slot
+M.VERSION = 57 -- v57: PROTOTYPE-OOP self-typing (GAP-2) — resolve_self now types self
+               -- to the FULL DOTTED owner (`Widget.prototype:Refresh` → `Widget.prototype`,
+               -- was truncated to `Widget`) and OVERRIDES a FOREIGN promiscuous self:member
+               -- match (all `Waterfall*.prototype:SetText` had landed on the unrelated
+               -- `FuBarPlugin:SetText`). Receiver-type beats name-match, gated on the
+               -- genuine-object contract (owner owns >=2 colon-methods). MEASURED zero
+               -- override on non-dotted owners (1104 already correct) → no regression of
+               -- correct self:member; corrects 20 + fills 37 dotted-owner sites.
+-- v56: REASSIGNMENT-OVERRIDE (value-flow resolution) — a table slot
                -- `Owner.field` written by >=2 UNCONDITIONAL top-level defs resolves
                -- to the LAST-in-load-order (runtime-effective) def, not the first
                -- separator/name match: the monkey-patch idiom `function T:m … end;

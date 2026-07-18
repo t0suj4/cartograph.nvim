@@ -1074,6 +1074,17 @@ one and a naive "last wins" would be confidently wrong there, so it never fires.
 reassignment *inside* a function is not a load-order sibling either. The redirect wears the
 honest `~`; same-file only (a cross-file "override" is not a load-order fact).
 
+**Prototype-OOP self-typing** is the same "receiver-type beats name-match" inversion, one
+level up. A method of a *dotted* owner — `Widget.prototype:Refresh`, or the nested-namespace
+`Addon.UIElementsLib._DropDownMenu:Toggle` — is a genuine object in its own right, but the
+owner used to truncate to its first segment (`Widget`), so `self:m` inside it fell to a
+promiscuous member-name match on an *unrelated* same-named def. Now `self` types to the full
+dotted owner, and `self:m` resolves to that owner's own member — **overriding** a foreign
+promiscuous match (every `Waterfall*.prototype:SetText` had wrongly landed on an unrelated
+`FuBarPlugin:SetText`). Gated on the genuine-object contract (the owner owns ≥2 colon-methods);
+measured to fire **zero** times on non-dotted owners — where the name-match is already right —
+so it corrects the prototype/nested-OO idiom without disturbing the resolutions that worked.
+
 `:CartographExpr` reads one level deeper still. The flow rows know *which* names a
 statement defines and uses, but not the **shape** of the expression that computes them —
 the operator, the operands, the callee, whether it allocates. That structure is a small

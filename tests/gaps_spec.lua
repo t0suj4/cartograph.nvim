@@ -27,28 +27,7 @@ end
 -- call to the last-in-load-order def of an unconditional top-level slot. Its live
 -- regression tests moved to reassign_spec.lua. [[graph-vm-type-resolution]].)
 
--- GAP 2 — PROTOTYPE-OOP self-typing. self:m inside `X.prototype:method` should resolve
--- to `X.prototype:m` (the same prototype's member). resolve_self truncates the dotted
--- owner to `X`, can't type self, and the call falls to a promiscuous member-name match
--- → an unrelated same-named def. (Fixing needs full-owner extraction AND a complete
--- resolve_self that doesn't lean on the promiscuous tail-match — [[cartograph-linker]].)
-local PROTO_SRC = table.concat({
-    'local Widget = {}',                                          -- 1
-    'Widget.prototype = {}',                                      -- 2
-    'function Widget.prototype:Clear() return 1 end',             -- 3  the RIGHT target
-    'function Widget.prototype:Refresh() return self:Clear() end',-- 4  self:Clear
-    'function Widget.prototype:Extra() return 2 end',             -- 5  (>=2 methods → object)
-    'local Other = {}',                                           -- 6
-    'function Other:Clear() return 9 end',                        -- 7  (forces the wrong pick)
-    'return { Widget = Widget }',                                 -- 8
-}, '\n')
-
-test('GAP prototype-OOP self:m resolves to the same prototype member, not an unrelated one', function ()
-    skip 'known gap: resolve_self truncates dotted owners + relies on the promiscuous self:member tail-match'
-    if not ready() then return skip 'no lua parser' end
-    local data = extract_src(PROTO_SRC)
-    local right = node(data, 'Widget.prototype:Clear')
-    local c = call(data, 'self:Clear')
-    ok(c, 'self:Clear call found')
-    eq(right, c.to)                                   -- Widget.prototype:Clear, NOT Other:Clear
-end)
+-- (GAP 2 — PROTOTYPE-OOP self-typing — is FIXED as of v57: resolve_self types self to the
+-- full dotted owner + overrides a foreign promiscuous self:member match. Its live regression
+-- tests moved to proto_oop_spec.lua. Both surfaced gaps are now closed; this file keeps the
+-- header as the pattern doc — add the next confident-wrong resolution here as a disabled spec.)
