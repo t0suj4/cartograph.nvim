@@ -787,11 +787,10 @@ local function gen_js_module(k, exports, fname, ans)
     w('}')
     ctx.calls[#ctx.calls + 1] = ('early%d'):format(k)
 
-    -- a class with a this-chain. `this.getv()` now types via B3 (this-typing:
-    -- `this` typed lexically to the enclosing class C%d, resolved through its
-    -- extends chain — [[cartograph-jsts-pivot]]); `obj.calc()` still REFUSES —
-    -- ctor-typed-local receiver (`const obj = new C%d`) is the JS V2 analog, NOT
-    -- built. The reviewed upgrade the earlier want='refused' getv encoded.
+    -- a class with a this-chain. `this.getv()` types via B3 (this-typing: `this`
+    -- typed lexically to the enclosing class C%d + extends chain); `obj.calc()`
+    -- types via V2 ctor-typing (`const obj = new C%d` → obj is a C%d instance,
+    -- obj.calc → C%d.calc) — [[cartograph-jsts-pivot]]. Both ~inferred.
     if chance(60) then
         w(('class C%d {'):format(k))
         indent = indent + 1
@@ -810,7 +809,8 @@ local function gen_js_module(k, exports, fname, ans)
         indent = indent + 1
         w(('const obj = new C%d(3)'):format(k))
         w('return obj.calc(2)')
-        expect('calc', { want = 'refused', rule = 'ambiguous' })
+        expect('calc', { want = 'to', target = ('C%d.calc'):format(k),
+            tier = '~' }) -- V2 ctor-typing: obj = new C%d → obj.calc → C%d.calc
         indent = indent - 1
         w('}')
         ctx.calls[#ctx.calls + 1] = ('usec%d'):format(k)

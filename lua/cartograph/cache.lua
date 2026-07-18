@@ -19,7 +19,14 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 63 -- v63: JS/TS PROTOTYPE METHODS (pivot B4) — pre-ES6
+M.VERSION = 64 -- v64: JS/TS CTOR-TYPING V2 — `const o = new C(...)` binds o to
+               -- class C (ctor_query on new_expression), so o.member resolves to
+               -- C.member walking C's extends chain (resolve_local_ctor CUT 3:
+               -- callee IS the class, elang-gated). `new C()` is precisely a C
+               -- instance → sound. three.js +695 (784 ctor-typed local.member
+               -- resolutions, 99.75% on the class chain). Closes the last JS
+               -- receiver-typing gap (the synjs obj.calc answer-key flips to →C.calc).
+-- v63: JS/TS PROTOTYPE METHODS (pivot B4) — pre-ES6
                -- `X.prototype.m = function` is captured (structural #eq?
                -- "prototype" gate) and keyed `X.m` (qualify collapse), the same
                -- shape B1 gives ES6 methods, so B3 this-typing / resolve_super

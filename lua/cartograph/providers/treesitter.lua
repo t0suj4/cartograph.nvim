@@ -1583,6 +1583,16 @@ M.spec = {
             (program (variable_declaration
                 (variable_declarator name: (identifier) @vname value: (_) @value) @vdef))
         ]=],
+        -- V2 ctor-typing: `const o = new C(...)` (ANYWHERE, incl. in-function)
+        -- binds o to class C; resolve_local_ctor types o.member → C.member. The
+        -- callee stored is the bare class C (not lua's `C.new` convention) → the
+        -- JS cut in resolve_local_ctor keys on is_class[callee] directly.
+        ctor_query = [=[
+            (variable_declarator name: (identifier) @cvar
+                value: (new_expression constructor: (identifier) @cctor))
+            (assignment_expression left: (identifier) @cvar
+                right: (new_expression constructor: (identifier) @cctor))
+        ]=],
         params_field = 'parameters',
         body_field = 'body',
         fn_types = { function_declaration = true, method_definition = true,
@@ -3778,6 +3788,12 @@ local function resolve_local_ctor(calls, node_index, ctorbinds, smtclasses, exte
                 -- CUT 1 (.new convention) then CUT 2 (callee fn's return-class)
                 local cls = b.callee:match('^([%w_]+)[.:]new$')
                 if not (cls and is_class[cls]) then cls = retclass[b.callee] end
+                -- CUT 3 (JS/TS): `const o = new C()` stores the bare class C as
+                -- the callee (no `.new`), so the callee IS the class. `new C()`
+                -- constructs exactly a C instance → o.member walks C's chain.
+                -- elang-gated so lua/php callable-class idioms are untouched.
+                if not (cls and is_class[cls]) and is_class[b.callee]
+                    and elang_for(c.file) == 'javascript' then cls = b.callee end
                 if cls and is_class[cls] then
                     local fit = chain_lookup(super, exact, cls, member, elang_for(c.file))
                     if fit then

@@ -246,7 +246,7 @@ return {
         root = HOME .. '/.cache/cartograph-tools/syn/js-g5-s1',
         synthetic = { lang = 'js', seed = 1, files = 8 },
         lang = 'javascript',
-        expected = { refs = 148, nodes = 283 }, -- +6 @ v62 B3 this-typing (this.getv → C.getv per class)
+        expected = { refs = 154, nodes = 283 }, -- +6 @ v64 V2 ctor-typing (obj=new C → obj.calc→C.calc); +6 @ v62 B3 this.getv
         notes = 'synthetic js (gen.lua g4 seed 1): hoisted fwd calls,'
             .. ' fn-value consts, let/var regimes, arrows, classes, ESM +'
             .. ' one CommonJS module, and min.js — a one-line minified'
