@@ -787,10 +787,11 @@ local function gen_js_module(k, exports, fname, ans)
     w('}')
     ctx.calls[#ctx.calls + 1] = ('early%d'):format(k)
 
-    -- a class with a this-chain. JS RECEIVER TYPING IS NOT BUILT (no V1/V2
-    -- analog — the wow residual's sibling): this.getv() and obj.calc() refuse
-    -- among the corpus-wide candidates — the sound CURRENT RUNG, encoded;
-    -- a js receiver-typing cut upgrades these expectations as reviewed edits
+    -- a class with a this-chain. `this.getv()` now types via B3 (this-typing:
+    -- `this` typed lexically to the enclosing class C%d, resolved through its
+    -- extends chain — [[cartograph-jsts-pivot]]); `obj.calc()` still REFUSES —
+    -- ctor-typed-local receiver (`const obj = new C%d`) is the JS V2 analog, NOT
+    -- built. The reviewed upgrade the earlier want='refused' getv encoded.
     if chance(60) then
         w(('class C%d {'):format(k))
         indent = indent + 1
@@ -799,7 +800,8 @@ local function gen_js_module(k, exports, fname, ans)
         w('calc(n) {'); emitted = emitted + 1
         indent = indent + 1
         w('return this.getv() + n')
-        expect('getv', { want = 'refused', rule = 'ambiguous' })
+        expect('getv', { want = 'to', target = ('C%d.getv'):format(k),
+            tier = '~' }) -- B3 this-typing → own-class C%d.getv (inferred)
         indent = indent - 1
         w('}')
         indent = indent - 1

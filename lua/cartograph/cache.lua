@@ -19,7 +19,17 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 61 -- v61: JS/TS CLASS EXTENDS (pivot B2) — `class C extends B` now
+M.VERSION = 62 -- v62: JS/TS THIS-TYPING (pivot B3) — `this.member()` inside a
+               -- class method resolves to the enclosing class's member, walking
+               -- the extends chain (B2) for inherited ones. `this` typed
+               -- LEXICALLY from the method's `C.member` key (B1); ~-tier (JS this
+               -- can be rebound / virtual dispatch → honest hedge). Gated to a
+               -- genuine object (owner owns >=2 methods) + unique chain hit; a
+               -- nested non-method fn's `this` has no class owner → skipped.
+               -- JS/TS only, independent of the lua self machinery. three.js:
+               -- +982 this.member resolutions (664 own / 318 inherited),
+               -- 99.85% on the enclosing class's own/ancestor chain.
+-- v61: JS/TS CLASS EXTENDS (pivot B2) — `class C extends B` now
                -- emits a data.extends child→parent edge (js super_query on
                -- class_heritage; ts on the extends_clause; dotted `ns.Base`
                -- captures the tail). resolve_super consumes it: inherited static

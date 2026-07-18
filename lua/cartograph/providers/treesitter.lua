@@ -3671,6 +3671,42 @@ local function resolve_self(calls, node_index, extends, exact, addref)
             end
         end
     end
+    -- B3: JS/TS `this.member()` typing (pivot B3, [[cartograph-jsts-pivot]]). `this`
+    -- inside a class method IS the instance; type it LEXICALLY to the enclosing
+    -- class (from the method's `C.member` key, B1) and resolve member through C's
+    -- extends chain (B2). Separate from the lua self machinery above: `this` is
+    -- never param-0 and JS methods called on instances get V1-poisoned, so this
+    -- block does NOT consult selft — it's an independent lexical pass. ~-tier
+    -- (honest: JS `this` can be rebound by detach/bind/arrow, and virtual dispatch
+    -- can pick a subclass override — chain_lookup returns the lexically-visible
+    -- definition, unique-or-hedge). Gated to a GENUINE object (owner owns >=2 dot-
+    -- methods) so a bare data-holder object doesn't seed a guess; JS/TS only.
+    local dotcount = {}
+    for name in pairs(exact) do
+        local owner = name:match('^(.+)%.[%w_]+$')
+        if owner then dotcount[owner] = (dotcount[owner] or 0) + 1 end
+    end
+    for _, c in ipairs(calls or {}) do
+        if not c.to and c.full and c.fn and node_index[c.fn]
+            and elang_for(c.file) == 'javascript' then
+            local member = c.full:match('^this%.([%w_]+)$')
+            local fn = node_index[c.fn]
+            -- owner = the enclosing class (a class method is keyed `C.member`); a
+            -- nested regular/arrow fn is not a class method → owner nil → skipped
+            -- (its `this` binding is not the lexical class — the sound omission).
+            local owner = member and fn.name and fn.name:match('^(.+)%.[%w_]+$')
+            if owner and is_class[owner] and (dotcount[owner] or 0) >= 2 then
+                local fit = chain_lookup(super, exact, owner, member, 'javascript')
+                if fit then
+                    c.to = fit.id; c.inferred = true; c.refused = nil
+                    addref(c.fn, fit.id, c.at
+                        or { start = { line = c.line, char = 0 },
+                             ['end'] = { line = c.line, char = 0 } }, true)
+                    n = n + 1
+                end
+            end
+        end
+    end
     return n
 end
 

@@ -385,7 +385,13 @@ callers). Ariadne's thread, in text.
      `class C extends B` records the inheritance edge, so `super.method()` and
      inherited static calls resolve to the nearest ancestor that defines the
      method (walking the chain, unique-or-refuse) — the same superclass
-     machinery PHP and Java use.
+     machinery PHP and Java use. And a `this.method()` call inside a class
+     method resolves to that class's member (own, or inherited via the chain),
+     typed lexically from the enclosing method — the JS/TS analog of Lua's
+     `self:method`. It wears the honest `~` (JS `this` can be rebound, and a
+     subclass can override), and only fires for a genuine object (a class with
+     ≥2 methods) with a unique hit; a `this` inside a nested plain function
+     isn't the class instance, so it's left unresolved rather than guessed.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because
