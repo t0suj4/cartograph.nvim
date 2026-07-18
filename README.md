@@ -428,8 +428,13 @@ callers). Ariadne's thread, in text.
      method dispatches on `self` → the enclosing class: in an instance method
      it keys `Owner#m`, in a class method (`def self.x` / `class << self`) it
      keys `Owner.m`, and it resolves corpus-wide since classes reopen. These
-     wear `~` (a subclass can override the method) and are exact-or-nothing
-     too, so an inherited call stays a frontier rather than guessing. Bare
+     wear `~` (a subclass can override the method) and are exact-or-nothing —
+     but when the method isn't defined on the class itself, its **ancestors**
+     are walked: the superclass chain, `include`/`prepend` modules (as instance
+     methods), and `extend` modules (as singleton methods), for the nearest
+     unique definition (`class Dog < Animal; def act; breathe; end` resolves
+     `breathe` to `Animal#breathe`; `include Comparable`-style mixins resolve
+     the same way). Bare
      calls with no parentheses (`save`, an attribute read) — which parse as a
      plain identifier, not a call — are recovered by applying Ruby's own
      var-vs-call rule: a bare name is a method call unless a local of that name

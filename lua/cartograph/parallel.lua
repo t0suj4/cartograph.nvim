@@ -216,6 +216,12 @@ local function merge_chunk(s, chunk)
     -- @Service names), accepted and left to the par gate to surface
     acc.beans = acc.beans or {}
     for cls, bn in pairs(chunk.beans or {}) do acc.beans[cls] = bn end
+    -- ruby_anc: inheritance/mixin ancestor edges (R4), file-tagged list, deduped
+    -- like extends — relink's resolve_ruby_ancestors consumes them
+    acc.ruby_anc = acc.ruby_anc or {}
+    for _, x in ipairs(chunk.ruby_anc or {}) do
+        if not seen[x.file] then acc.ruby_anc[#acc.ruby_anc + 1] = x end
+    end
     -- ctorbinds / smtclasses: keyed BY FILE — per-file overlay, seen-guarded
     acc.ctorbinds = acc.ctorbinds or {}
     for f, fb in pairs(chunk.ctorbinds or {}) do

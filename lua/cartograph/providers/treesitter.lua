@@ -1174,6 +1174,58 @@ local function ruby_rails_synth(tsroot, src)
     return out
 end
 
+-- Ruby R4 inheritance + mixin scan: the ancestor edges that recover R2/R3's
+-- inherited-method frontiers. `class C < D` → C inherits D's instance methods
+-- (D#m) and singleton methods (D.m). `include M` / `prepend M` → C gains M's
+-- INSTANCE methods (M#m). `extend M` → C gains M's instance methods as its own
+-- SINGLETON methods. Returns edges {c=child, p=parent, mode}: 'inst' (look up
+-- p#member), 'sings' (superclass singleton, look up p.member), 'singe' (extend
+-- module, look up p#member). resolve_ruby_ancestors walks these when a keyed
+-- `C#m`/`C.m` misses (nearest-ancestor, unique-or-skip, hedged ~).
+local function ruby_ancestors(tsroot, src)
+    local out = {}
+    local function tailc(node)
+        return node_text(node, src):match('([%w_]+)%s*$')
+    end
+    local function walk(n, cls)
+        local t = n:type()
+        local mine = cls
+        if t == 'class' then
+            local nm = n:field('name')[1]
+            mine = nm and tailc(nm)
+            local sc = n:field('superclass')[1]
+            if mine and sc then
+                local par = tailc(sc)
+                if par then
+                    out[#out + 1] = { c = mine, p = par, mode = 'inst' }
+                    out[#out + 1] = { c = mine, p = par, mode = 'sings' }
+                end
+            end
+        elseif t == 'module' then
+            local nm = n:field('name')[1]
+            mine = nm and tailc(nm)
+        elseif t == 'call' and cls then
+            local m = n:field('method')[1]
+            local mn = m and node_text(m, src)
+            if mn == 'include' or mn == 'prepend' or mn == 'extend' then
+                local a = n:field('arguments')[1]
+                if a then
+                    for ac in a:iter_children() do
+                        local at = ac:type()
+                        if at == 'constant' or at == 'scope_resolution' then
+                            out[#out + 1] = { c = cls, p = tailc(ac),
+                                mode = mn == 'extend' and 'singe' or 'inst' }
+                        end
+                    end
+                end
+            end
+        end
+        for ch in n:iter_children() do walk(ch, mine) end
+    end
+    walk(tsroot, nil)
+    return out
+end
+
 M.spec = {
     lua = {
         exts = { 'lua' },
@@ -2472,6 +2524,10 @@ M.spec = {
         -- `attr_accessor :foo` creates (`Owner#foo` / `Owner#foo=`) so calls
         -- (esp. bare attribute reads) resolve. See ruby_synth_defs.
         synth_defs = ruby_synth_defs,
+        -- R4 inheritance + mixins: ancestor edges (superclass / include / prepend
+        -- / extend) so a keyed `C#m`/`C.m` that misses walks the chain. See
+        -- ruby_ancestors + resolve_ruby_ancestors.
+        scan_ancestors = ruby_ancestors,
         import_call = 'require_relative',
         resolve_import = function (mod, files, from)
             local dir = from and from:match('^(.*)/[^/]*$') or ''
@@ -4306,6 +4362,74 @@ local function resolve_local_ctor(calls, node_index, ctorbinds, smtclasses, exte
                         n = n + 1
                     end
                 end
+            end
+        end
+    end
+    return n
+end
+
+-- Ruby R4 — inheritance + mixin ancestor resolution. When R2/R3 keyed a bare
+-- (or self) call `C#m` / `C.m` and it MISSED (the method is inherited, not
+-- defined on C), walk C's ancestors — superclass chain + include/prepend
+-- modules (instance) + extend modules (singleton) — for the nearest UNIQUE
+-- definition. Recovers exactly the frontiers R2/R3 honestly declined. HEDGED
+-- (~): dynamic dispatch + Ruby's full MRO aren't modeled, this is the nearest
+-- static ancestor. `anc` = the edge list {c,p,mode} from ruby_ancestors.
+local function resolve_ruby_ancestors(calls, anc, exact, addref, node_index)
+    if not (anc and #anc > 0) then return 0 end
+    -- adjacency by mode: inst (p#m), sings (superclass p.m), singe (extend p#m)
+    local inst, sings, singe = {}, {}, {}
+    local function add(map, k, v) map[k] = map[k] or {}; map[k][#map[k] + 1] = v end
+    for _, e in ipairs(anc) do
+        if e.mode == 'inst' then add(inst, e.c, e.p)
+        elseif e.mode == 'sings' then add(sings, e.c, e.p)
+        elseif e.mode == 'singe' then add(singe, e.c, e.p) end
+    end
+    -- nearest unique def of `member` up an adjacency chain, looking up
+    -- `parent .. sep .. member`. BFS (nearest first); >1 distinct at the same
+    -- frontier depth → ambiguous, give up (honest).
+    local function chase(start, member, adj, sep)
+        local seen, frontier = { [start] = true }, { start }
+        for _ = 1, SUPER_STEP_LIMIT do
+            local nextf, hit = {}, nil
+            for _, cur in ipairs(frontier) do
+                for _, p in ipairs(adj[cur] or {}) do
+                    if not seen[p] then
+                        seen[p] = true
+                        nextf[#nextf + 1] = p
+                        for _, nd in ipairs(exact[p .. sep .. member] or {}) do
+                            if elang_for(nd.file) == 'ruby' then
+                                if hit and hit.id ~= nd.id then return nil end
+                                hit = nd
+                            end
+                        end
+                    end
+                end
+            end
+            if hit then return hit end
+            if #nextf == 0 then break end
+            frontier = nextf
+        end
+        return nil
+    end
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        if not c.to and c.full and c.fn then
+            local cls, csep, member = c.full:match('^(%u[%w_]*)([#.])([%w_?!=]+)$')
+            local fit
+            if cls and csep == '#' then
+                fit = chase(cls, member, inst, '#')
+            elseif cls and csep == '.' then
+                -- superclass singletons (p.m) then extend-modules (m#member)
+                fit = chase(cls, member, sings, '.')
+                if not fit then fit = chase(cls, member, singe, '#') end
+            end
+            if fit then
+                c.to = fit.id; c.inferred = true; c.refused = nil
+                addref(c.fn, fit.id, c.at
+                    or { start = { line = c.line, char = 0 },
+                         ['end'] = { line = c.line, char = 0 } }, true)
+                n = n + 1
             end
         end
     end
@@ -6250,6 +6374,16 @@ function M.extract(root, opts)
                 end
             end
         end
+        -- R4 ancestor edges (ruby inheritance + mixins): collected corpus-wide
+        -- (classes reopen), consumed by resolve_ruby_ancestors.
+        if spec.scan_ancestors then
+            data.ruby_anc = data.ruby_anc or {}
+            local ra = data.ruby_anc
+            for _, e in ipairs(spec.scan_ancestors(tsroot, src)) do
+                e.file = file -- file-tagged so the parallel merge dedups it
+                ra[#ra + 1] = e
+            end
+        end
 
         -- regions: runs of top-level statements that aren't function defs
         do
@@ -7339,6 +7473,7 @@ function M.extract(root, opts)
     -- obj:member where `local obj = C.new(...)` — constructor-typed locals
     -- resolved through C's extends chain (V2 receiver typing)
     resolve_local_ctor(calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
+    resolve_ruby_ancestors(calls, data.ruby_anc, exact, addref, node_index)
 
     -- interface→impl: redirect an interface-stub call `I::m` to its unique
     -- impl `C::m` — @stereotype bean (Spring DI) or unique implementer of a
@@ -7768,6 +7903,7 @@ function M.relink(data, touched)
     local retn = resolve_returns(data.calls, node_index, exact, addref)
     n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
     n = n + resolve_local_ctor(data.calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
+    n = n + resolve_ruby_ancestors(data.calls, data.ruby_anc, exact, addref, node_index)
     -- interface→impl (F1), same parity as extract
     n = n + resolve_interface(data.calls, data.implements, data.beans, data.extends,
         exact, addref, JAVA_SERVICE_MARKERS)

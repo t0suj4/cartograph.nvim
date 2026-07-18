@@ -135,7 +135,7 @@ test('R2: a class-body-level bare call is NOT keyed (DSL = R3)', function ()
     vim.fn.delete(root, 'rf')
 end)
 
-test('R2 soundness: an inherited (mixin) method is an honest frontier, not tail-guessed', function ()
+test('R2→R4: an inherited (mixin) method keys to the enclosing class, then R4 resolves it', function ()
     if not ready() then skip 'no ruby parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     write(root, 'e.rb', {
@@ -147,14 +147,16 @@ test('R2 soundness: an inherited (mixin) method is an honest frontier, not tail-
         'class Service',
         '  include Helpers',
         '  def call',
-        '    guard(1)',          -- inherited via mixin: R4, not R2
+        '    guard(1)',          -- keyed Service#guard by R2; RESOLVED by R4 (mixin)
         '  end',
         'end',
     })
     local byname, calls = extract(root)
     ok(byname['Helpers#guard'], 'the mixin def exists as Helpers#guard')
     local c = find(calls, 'Service#guard')
-    ok(c, 'the call keyed to the enclosing class Service#guard')
-    ok(not (c and c.to), 'NOT resolved — Service#guard has no def; inherited-via-mixin is R4')
+    ok(c, 'R2 keyed the call to the enclosing class Service#guard')
+    -- R2 alone left this an honest frontier; R4 now walks the include chain
+    ok(c and c.to == byname['Helpers#guard'].id,
+        'R4 resolves the inherited mixin method Service#guard → Helpers#guard')
     vim.fn.delete(root, 'rf')
 end)

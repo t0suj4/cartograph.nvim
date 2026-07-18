@@ -19,7 +19,21 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 74 -- v74: RSPEC TEST-DSL PACK — the 2nd overlay pack, proving
+M.VERSION = 75 -- v75: RUBY R4 — INHERITANCE + MIXIN ancestor resolution. When a
+               -- bare/self call keyed `C#m`/`C.m` (R2/R3) MISSES (the method is
+               -- inherited), walk C's ancestors — superclass chain + include/
+               -- prepend modules (instance) + extend modules (singleton) — for
+               -- the nearest UNIQUE def (resolve_ruby_ancestors over ancestor
+               -- edges from ruby_ancestors; multi-parent, since mixins). HEDGED
+               -- ~ (nearest static ancestor; full MRO/dynamic dispatch
+               -- unmodeled), unique-or-skip. PURELY ADDITIVE (0 losses):
+               -- recovers exactly the frontiers R2/R3 declined. activesupport
+               -- +115 (19.6→20.9%), discourse/app +1051 (13.1→14.9%). The
+               -- CONTRAST to R5 (reverted, net-negative): R4 adds sound
+               -- resolutions without removing a heuristic. Ancestor edges ride
+               -- the parallel merge (acc.ruby_anc, file-deduped). +6 ruby_r4
+               -- specs; R2 mixin-frontier test updated (now R4-resolved).
+-- v74: RSPEC TEST-DSL PACK — the 2nd overlay pack, proving
                -- MULTI-PACK composition (rails + rspec compose end-to-end on a
                -- real corpus). v1 = VOCAB: RSpec + factory_bot DSL verbs
                -- (describe/context/it/let/subject/expect/to/eq/allow/receive/
