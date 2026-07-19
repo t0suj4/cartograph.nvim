@@ -71,6 +71,8 @@ M.CALL_FIELDS = {
     bare = true, -- a bare no-paren call surfaced by scan_bare_calls (ruby)
     superx = true, -- ruby `super`: {cls,member,sing} → ancestor's method (R4)
     recv = true, -- identifier-receiver local name (`x.foo`): additive ctor-typing (R5)
+    recvroot = true, -- leftmost id of a DEEP receiver chain (`std.mem.eql` → "std"):
+                     -- the std-alias disposition keys it (stdlib-profile deep-chain rung)
     chainty = true, -- multi-level chain `root.Type.method()`: the PascalCase
                     -- penultimate segment (the method's TYPE), for the additive
                     -- chain post-pass (resolve_chain_type, zig v84)

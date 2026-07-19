@@ -596,6 +596,27 @@ return {
                 return node_text(obj, src)
             end
         end,
+        -- the leftmost identifier of a DEEP receiver chain: `std.mem.eql()` →
+        -- "std" ([[cartograph-stdlib-profile]] deep-chain rung). Complements
+        -- recv_local — it fires ONLY when the receiver is itself a field
+        -- expression (multi-level), so a single-identifier receiver stays
+        -- recv_local's job and nothing is stored twice. Used by
+        -- resolve_std_alias to catch std written WITHOUT an alias
+        -- (`std.mem.eql`, not `const eql = std.mem.eql`). A chain rooted at a
+        -- call (`foo().bar.m()`) has no static root → nil (conservative).
+        recv_root = function (calln, src)
+            if calln:type() ~= 'call_expression' then return nil end
+            local fe = calln:field('function')[1]
+            if not fe or fe:type() ~= 'field_expression' then return nil end
+            local obj = fe:field('object')[1]
+            if not obj or obj:type() ~= 'field_expression' then return nil end
+            while obj and obj:type() == 'field_expression' do
+                obj = obj:field('object')[1]
+            end
+            if obj and obj:type() == 'identifier' then
+                return node_text(obj, src)
+            end
+        end,
         -- multi-level chain type: `root.Type.method()` — the segment right
         -- before the method (this field_expression's object's member). When
         -- PascalCase it names the method's TYPE namespace (`link.File.open` →

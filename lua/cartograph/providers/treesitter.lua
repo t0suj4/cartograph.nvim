@@ -1353,10 +1353,11 @@ local function resolve_std_alias(calls, stdaliases)
         if not c.to then
             local set = stdaliases[c.file]
             -- bare call: recv is nil, the name is the callee; receiver call:
-            -- the chain root is the receiver. Either way key the ROOT (never
-            -- the member) — `x.assert()` where x is a project alias must NOT
-            -- fire just because `assert` is elsewhere std-bound.
-            local root = c.recv or c.callee
+            -- the chain root is the receiver (recv = single-id `mem.eql`,
+            -- recvroot = deep chain `std.mem.eql` → "std"). Either way key the
+            -- ROOT (never the member) — `x.assert()` where x is a project alias
+            -- must NOT fire just because `assert` is elsewhere std-bound.
+            local root = c.recv or c.recvroot or c.callee
             if set and root and set[root] then
                 c.refused = nil
                 c.ext = EXT.stdalias
@@ -4396,6 +4397,10 @@ function M.extract(root, opts)
                         -- ADDITIVE ctor-typing (rescoped R5). `full` stays bare
                         -- so the file-local heuristic is untouched.
                         recv = spec.recv_local and spec.recv_local(calln, src) or nil,
+                        -- leftmost id of a DEEP receiver chain (`std.mem.eql` →
+                        -- "std") — complements recv (single-id only); the
+                        -- std-alias disposition keys either as the call root.
+                        recvroot = spec.recv_root and spec.recv_root(calln, src) or nil,
                         -- multi-level chain `root.Type.method()`: the PascalCase
                         -- segment right before the method (its type namespace),
                         -- persisted for the additive chain post-pass. Bare `full`

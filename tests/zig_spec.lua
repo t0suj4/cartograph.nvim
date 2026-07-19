@@ -323,6 +323,38 @@ test('zig std-alias: the binding is AUTHORITATIVE over a same-named project def'
     vim.fn.delete(root, 'rf')
 end)
 
+test('zig std-alias: a DEEP receiver chain `std.mem.eql()` is disposed via recv_root', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'd.zig', {
+        'const std = @import("std");',
+        'pub fn go(a: []const u8, b: []const u8) bool {',
+        '    return std.mem.eql(u8, a, b);',   -- deep chain, NO alias for eql
+        '}',
+    })
+    local _, calls = extract(root)
+    local why, c = why_of(calls, 'eql')
+    eq(why, 'std-alias')
+    ok(c and not c.recv and c.recvroot == 'std',
+        'deep chain: recv is nil (multi-level), recvroot is the leftmost id')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('zig std-alias: a DEEP chain rooted at a PROJECT name is NOT disposed', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'p.zig', {
+        'const std = @import("std");',
+        'const app = @import("app.zig");',      -- project, not std
+        'pub fn go() void { app.config.load(); }',
+    })
+    write(root, 'app.zig', { 'pub const config = struct { pub fn load() void {} }; ' })
+    local _, calls = extract(root)
+    ok(why_of(calls, 'load') ~= 'std-alias',
+        'project-rooted deep chain is not mislabeled std-alias')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('zig std-alias: a NON-std alias root is NOT disposed (soundness)', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')

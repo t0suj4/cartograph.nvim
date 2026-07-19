@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 91 -- v91: STD-ALIAS DISPOSITION ([[cartograph-stdlib-profile]] bucket A).
+M.VERSION = 92 -- v92: STD-ALIAS deep-chain rung ([[cartograph-stdlib-profile]]).
+               -- recv_root (zig) reads the leftmost id of a MULTI-level receiver
+               -- chain (`std.mem.eql()` → "std"), stored as c.recvroot; the
+               -- std-alias disposition keys c.recv or c.recvroot, so std written
+               -- WITHOUT an alias is caught too. Disposition-only (c.to held);
+               -- zig graphdiff moves, refs/nodes unchanged.
+               -- v91: STD-ALIAS DISPOSITION ([[cartograph-stdlib-profile]] bucket A).
                -- zig `const assert = std.debug.assert; assert()` — a per-file
                -- name-set bound to the stdlib (spec.std_aliases → data.stdaliases)
                -- lets resolve_std_alias relabel unresolved calls whose ROOT is

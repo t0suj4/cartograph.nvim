@@ -64,7 +64,7 @@ M.SLOTS = {
     -- local-inference rung lands here)
     chain_root = 'TYPES', chain_type = 'TYPES', scan_fields = 'TYPES',
     fields = 'TYPES', def_ret = 'TYPES', fn_types = 'TYPES',
-    recv_local = 'TYPES', litdata_types = 'TYPES',
+    recv_local = 'TYPES', recv_root = 'TYPES', litdata_types = 'TYPES',
     dynamic_callee_types = 'TYPES', smt_query = 'TYPES',
     -- local-type inference ([[cartograph-local-type-inference]]): local_ret
     -- captures a set-once local's determining call (→ c.rt), methodsep is the
