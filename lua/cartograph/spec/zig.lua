@@ -540,4 +540,44 @@ return {
             walk(tsroot)
             return out
         end,
+        -- declared RETURN TYPE of a fn def (the per-def summary n.ret feeds
+        -- local-type inference / return-typing, [[cartograph-local-type-inference]]).
+        -- Zig writes the return type in the signature: `fn f(...) RET { }` — the
+        -- named child after `parameters`, before the block. SYNTAX-read, not
+        -- inference: Self/@This() → the receiver's own type (zig_method_owner /
+        -- zig_value_owner); peel error-union/optional/pointer wrappers to a
+        -- keyable PascalCase payload; anything else (builtin, anon struct,
+        -- generic) → nil (honest — no keyable summary).
+        def_ret = function (defn, src)
+            local params_seen, rt
+            for c in defn:iter_children() do
+                local t = c:type()
+                if t == 'parameters' then params_seen = true
+                elseif params_seen and c:named() and t ~= 'block' then
+                    rt = c; break
+                end
+            end
+            if not rt then return nil end
+            local function resolve_rt(node, depth)
+                if not node or depth > 4 then return nil end
+                local txt = node_text(node, src)
+                if txt == 'Self' or txt == '@This()' then
+                    return zig_method_owner(defn, src) or zig_value_owner(defn, src)
+                end
+                local t = node:type()
+                if t == 'error_union_expression' or t == 'error_union'
+                    or t == 'optional_type' or t == 'pointer_type'
+                    or t == 'slice_type' or t == 'array_type' then
+                    for c in node:iter_children() do
+                        if c:named() then
+                            local r = resolve_rt(c, depth + 1)
+                            if r then return r end
+                        end
+                    end
+                    return nil
+                end
+                return zig_base_type(node, src)
+            end
+            return resolve_rt(rt, 0)
+        end,
 }
