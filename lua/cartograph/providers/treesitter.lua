@@ -29,8 +29,44 @@ M.EXT = {
     exact  = { disp = 'external', why = 'exact-key' }, -- exact-only key miss
     nodef  = { disp = 'external', why = 'no-def' },    -- no def anywhere
     short  = { disp = 'noise',    why = 'short' },      -- sub-3-char noise floor
+    stdlib = { disp = 'external', why = 'stdlib' },     -- an L2 environment-profile
+                                                        -- surface ([[cartograph-stdlib-profile]]):
+                                                        -- known external, version-keyed,
+                                                        -- refines no-def when a profile is active
 }
 local EXT = M.EXT
+
+-- L2 environment-profile activation ([[cartograph-stdlib-profile]] P2): a repo
+-- SHAPE (cartograph/shapes.lua) can imply a runtime profile (factorio-mod →
+-- lua-factorio). Resolved ONCE per extraction from the root; a factorio-shaped
+-- tree's Lua calls then classify to the `stdlib` disposition instead of a bare
+-- no-def. NB the shape detector is root-marker only for now (multi-mod trees are
+-- a known review item); a non-matching root → nil → behaviour unchanged.
+local _profile_mod = require 'cartograph.spec.profile'
+local _shapes_mod -- lazy (avoid a load cycle: shapes → config, never us)
+local function active_profile_for(root)
+    if type(root) ~= 'string' then return nil end
+    _shapes_mod = _shapes_mod or require 'cartograph.shapes'
+    for _, p in ipairs(_shapes_mod.probe(root)) do
+        if p.evidence and p.config and p.config.profile then
+            return _profile_mod.load(p.config.profile)
+        end
+    end
+    return nil
+end
+
+-- EXT.stdlib if the effective spec's active profile covers `name` (a bare free
+-- fn, or a call rooted at a profile namespace) — else nil (caller falls back to
+-- its own no-def). The nodef-position gate: project resolution has already
+-- failed here, so profile-labelling cannot shadow a real def.
+local function prof_ext(spec, name)
+    local prof = spec and spec._profile
+    if not prof then return nil end
+    if prof.free[name] then return EXT.stdlib end
+    local r = name:match('^([%w_]+)%.')
+    if r and prof.nsset and prof.nsset[r] then return EXT.stdlib end
+    return nil
+end
 
 -- P0 EXTRACTION PROFILER ([[cartograph-perf-cut]]): per-phase wall accumulators,
 -- gated on M.PROFILE so a normal run pays only a bool short-circuit (pstart
@@ -3409,15 +3445,22 @@ function M.extract(root, opts)
         if M.packs[pn] then active_packs[#active_packs + 1] = M.packs[pn] end
     end
     if #packnames > 0 then data.packs = packnames end
+    -- L2 env profile the repo shape implies (factorio-mod → lua-factorio); nil
+    -- for an unshaped root. Composed AFTER packs (base ⊕ L2 ⊕ L3), memoized/lang.
+    local active_profile = active_profile_for(root)
+    if active_profile then data.profile = active_profile.runtime end
     local composed_spec = {}
     local function eff_spec(lang, spec)
-        if #active_packs == 0 or not lang then return spec end
+        if not lang then return spec end
         local c = composed_spec[lang]
         if c == nil then
-            c = M.compose_spec(lang, spec, active_packs) or false
+            c = (#active_packs > 0 and M.compose_spec(lang, spec, active_packs)) or spec
+            if active_profile and lang == active_profile.lang then
+                c = setmetatable({ _profile = active_profile }, { __index = c })
+            end
             composed_spec[lang] = c
         end
-        return c or spec
+        return c
     end
 
     -- per-name def indexes for the resolution pass
@@ -4730,7 +4773,7 @@ function M.extract(root, opts)
         if spec and spec.literal_names then
             local ar = aperture_refusal(name, file)
             if ar then return nil, nil, ar end
-            return nil, nil, nil, EXT.nodef
+            return nil, nil, nil, prof_ext(spec, name) or EXT.nodef
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
@@ -4767,7 +4810,7 @@ function M.extract(root, opts)
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or tc)
         end
-        return nil, nil, nil, EXT.nodef
+        return nil, nil, nil, prof_ext(spec, name) or EXT.nodef
     end
     -- single-assignment literal flow: `$fn = 'compute'; $fn(3)` resolves —
     -- but ONLY when the variable has exactly one def in the function (two
@@ -5160,15 +5203,19 @@ function M.relink(data, touched)
     for _, pn in ipairs(data.packs or {}) do
         if M.packs[pn] then active_packs[#active_packs + 1] = M.packs[pn] end
     end
+    local active_profile = active_profile_for(data.root)
     local composed_spec = {}
     local function eff_spec(lang, spec)
-        if #active_packs == 0 or not lang then return spec end
+        if not lang then return spec end
         local c = composed_spec[lang]
         if c == nil then
-            c = M.compose_spec(lang, spec, active_packs) or false
+            c = (#active_packs > 0 and M.compose_spec(lang, spec, active_packs)) or spec
+            if active_profile and lang == active_profile.lang then
+                c = setmetatable({ _profile = active_profile }, { __index = c })
+            end
             composed_spec[lang] = c
         end
-        return c or spec
+        return c
     end
     local scope_cache = {}
     local function scope_of(f)
@@ -5342,7 +5389,7 @@ function M.relink(data, touched)
         if spec and spec.literal_names then
             local ar = aperture_refusal(name, file)
             if ar then return nil, nil, ar end
-            return nil, nil, nil, EXT.nodef
+            return nil, nil, nil, prof_ext(spec, name) or EXT.nodef
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
@@ -5379,7 +5426,7 @@ function M.relink(data, touched)
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or tc)
         end
-        return nil, nil, nil, EXT.nodef
+        return nil, nil, nil, prof_ext(spec, name) or EXT.nodef
     end
     local n = 0
     -- cbarg pre-scan, mirroring extract's: marks are resolution INPUT and

@@ -40,11 +40,19 @@ M.registry = {
                 return 'control.lua + data.lua at the root'
             end
         end,
-        config = { entrypoints = {
-            'control%.lua$', 'data%.lua$', 'settings%.lua$',
-            'data%-updates%.lua$', 'data%-final%-fixes%.lua$',
-            'settings%-updates%.lua$', 'settings%-final%-fixes%.lua$',
-        } },
+        config = {
+            entrypoints = {
+                'control%.lua$', 'data%.lua$', 'settings%.lua$',
+                'data%-updates%.lua$', 'data%-final%-fixes%.lua$',
+                'settings%-updates%.lua$', 'settings%-final%-fixes%.lua$',
+            },
+            -- the L2 environment profile this shape implies ([[cartograph-
+            -- stdlib-profile]]): a factorio-mod root runs Factorio's Lua, so its
+            -- stdlib/global calls classify to the `stdlib` disposition. Read by
+            -- the extractor (active_profile_for); apply()'s inert-preset
+            -- allowlist (entrypoints/exclude only) ignores it in the setup path.
+            profile = 'lua-factorio',
+        },
     },
     {
         name = 'nvim-plugin',
