@@ -372,9 +372,12 @@ end
 -- standard-library call regardless of any project def sharing the leaf (a
 -- file-scoped const shadows them). This is the SOUND activation the distilled
 -- free-set lacked (the type-precise revert): no curation, no profile — the
--- source declares it. Returns a per-file name-SET (the disposition pass keys the
--- call root against it). Ambiguous names (also bound to a non-std value in the
--- file) are dropped, like zig_imports.
+-- source declares it. Returns a per-file MAP name -> CANONICAL std path
+-- (`assert`→"std.debug.assert", `mem`→"std.mem", `h`→"std.Build.Cache.hasher_init"
+-- transitively) — the disposition pass keys the call root against it (a present
+-- value is truthy = membership) AND the mint pass rebuilds the symbol from it.
+-- Ambiguous names (also bound to a non-std value in the file) are dropped, like
+-- zig_imports.
 local function zig_std_aliases(tsroot, src)
     -- the leftmost identifier of a field-chain (std.debug.assert -> "std");
     -- a bare identifier RHS (const x = mem) returns its own text
@@ -398,10 +401,10 @@ local function zig_std_aliases(tsroot, src)
                 end
             end
         end
-        if bi == '@import' and (path == 'std' or path == 'builtin') then return true end
+        if bi == '@import' and (path == 'std' or path == 'builtin') then return path end
     end
 
-    local decls = {} -- ordered { name, root, imp }
+    local decls = {} -- ordered { name, root, rhs (chain text), imp (std/builtin) }
     local function walk(n)
         if n:type() == 'variable_declaration' then
             local name, value, eq = nil, nil, false
@@ -414,33 +417,37 @@ local function zig_std_aliases(tsroot, src)
             end
             if name and value then
                 decls[#decls + 1] = { name = name, root = chain_root(value),
-                    imp = std_import(value) }
+                    rhs = node_text(value, src):gsub('%s+', ''), imp = std_import(value) }
             end
         end
         for c in n:iter_children() do walk(c) end
     end
     walk(tsroot)
 
-    -- seed: names bound directly to @import("std"|"builtin")
-    local std = {}
-    for _, d in ipairs(decls) do if d.imp then std[d.name] = true end end
-    -- fixpoint: a decl whose chain-root is already std makes its name std
+    -- seed: names bound directly to @import("std"|"builtin") — path = the arg
+    local paths = {}
+    for _, d in ipairs(decls) do if d.imp then paths[d.name] = d.imp end end
+    -- fixpoint: a decl whose chain-root is already std gets the canonical path
+    -- of that root with the RHS's post-root suffix appended (std.mem → the
+    -- root "std" resolves to "std", suffix ".mem" → "std.mem").
     local changed = true
     while changed do
         changed = false
         for _, d in ipairs(decls) do
-            if not d.imp and d.root and std[d.root] and not std[d.name] then
-                std[d.name] = true; changed = true
+            if not d.imp and d.root and paths[d.root] and not paths[d.name] then
+                local suffix = d.rhs and d.rhs:sub(#d.root + 1) or ''
+                paths[d.name] = paths[d.root] .. suffix
+                changed = true
             end
         end
     end
     -- drop names that ALSO carry a non-std binding in the file (ambiguous)
     local other = {}
     for _, d in ipairs(decls) do
-        if not d.imp and not (d.root and std[d.root]) then other[d.name] = true end
+        if not d.imp and not (d.root and paths[d.root]) then other[d.name] = true end
     end
     local out = {}
-    for name in pairs(std) do if not other[name] then out[name] = true end end
+    for name, p in pairs(paths) do if not other[name] then out[name] = p end end
     return out
 end
 
@@ -616,6 +623,24 @@ return {
             if obj and obj:type() == 'identifier' then
                 return node_text(obj, src)
             end
+        end,
+        -- the full receiver-chain TEXT of a field call, ONLY when it is a pure
+        -- dotted identifier chain (`std.mem.eql` → "std.mem", `mem.eql` → "mem",
+        -- `Io.Dir.rename` → "Io.Dir"). nil if the receiver contains a call/index/
+        -- deref (no static path). The std-alias mint pass rebuilds the canonical
+        -- symbol as: alias-path(root) ++ (recvpath minus root) ++ "." ++ callee.
+        recv_path = function (calln, src)
+            if calln:type() ~= 'call_expression' then return nil end
+            local fe = calln:field('function')[1]
+            if not fe or fe:type() ~= 'field_expression' then return nil end
+            local obj = fe:field('object')[1]
+            if not obj then return nil end
+            -- pure identifier chain only: every node down the .object spine is a
+            -- field_expression, bottoming out at an identifier
+            local n = obj
+            while n and n:type() == 'field_expression' do n = n:field('object')[1] end
+            if not (n and n:type() == 'identifier') then return nil end
+            return (node_text(obj, src):gsub('%s+', ''))
         end,
         -- multi-level chain type: `root.Type.method()` — the segment right
         -- before the method (this field_expression's object's member). When

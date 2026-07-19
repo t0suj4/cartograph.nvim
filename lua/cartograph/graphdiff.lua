@@ -18,7 +18,7 @@ local M = {}
 -- re-baseline (roadmap P0.3), NOT a free change to fold into an additive bump.
 local function esig(e)
     return (e.proven and 'proven' or e.xlang and 'xlang'
-        or e.inferred and '~' or 'matched')
+        or e.stdlib and 'stdlib' or e.inferred and '~' or 'matched')
         .. (e.sideeffect and '!' or '')
 end
 

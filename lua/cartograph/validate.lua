@@ -10,7 +10,8 @@
 local M = {}
 
 M.NODE_KINDS = { module = true, ['function'] = true, method = true,
-    var = true, region = true }
+    var = true, region = true,
+    external = true } -- a minted stdlib symbol (no local def; file = 'zig-std')
 M.EDGE_KINDS = { ref = true, import = true, use = true, reg = true }
 
 M.NODE_FIELDS = {
@@ -34,6 +35,9 @@ M.NODE_FIELDS = {
                     -- alt_keys hook produced at extraction
     -- token provider (stack languages)
     effect = true, derived = true, echeck = true,
+    external = true, -- a MINTED external symbol (stdlib): no local def, file is
+                     -- the synthetic profile scheme (`zig-std`) — the target of a
+                     -- stdlib-tier resolution ([[cartograph-stdlib-profile]])
 }
 M.EDGE_FIELDS = {
     from = true, to = true, kind = true, at = true, atn = true,
@@ -41,6 +45,8 @@ M.EDGE_FIELDS = {
     -- trust tiers: type-inferred (graph-VM), oracle proven/xlang,
     -- runtime-confirmed (session-live overlay, self://loaded / MCP)
     tinf = true, proven = true, xlang = true, conf = true,
+    stdlib = true, -- stdlib tier: resolved to a minted external std node via an
+                   -- alias binding / env profile ([[cartograph-stdlib-profile]])
     bind = true, -- import edges: the local name the import binds (v8);
                  -- absent from the 17-corpus inventory until SE exercised it
     sideeffect = true, -- import edges: required for effect, no binding
@@ -73,6 +79,10 @@ M.CALL_FIELDS = {
     recv = true, -- identifier-receiver local name (`x.foo`): additive ctor-typing (R5)
     recvroot = true, -- leftmost id of a DEEP receiver chain (`std.mem.eql` → "std"):
                      -- the std-alias disposition keys it (stdlib-profile deep-chain rung)
+    recvpath = true, -- full receiver chain text (`std.mem.eql` → "std.mem"): the
+                     -- mint pass reconstructs the canonical std path from it
+    stdpath = true,  -- the reconstructed canonical std symbol (`std.mem.eql`): the
+                     -- mint pass keys the external node by it (stdlib resolution)
     chainty = true, -- multi-level chain `root.Type.method()`: the PascalCase
                     -- penultimate segment (the method's TYPE), for the additive
                     -- chain post-pass (resolve_chain_type, zig v84)

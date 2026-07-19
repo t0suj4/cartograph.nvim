@@ -25,6 +25,12 @@ M.LADDER = {
     { name = 'proven',    flag = 'proven' },   -- static proof / oracle
     { name = 'xlang',     flag = 'xlang' },    -- cross-language key
     { name = 'typed',     flag = 'tinf' },     -- graph-VM return-type summary
+    { name = 'stdlib',    flag = 'stdlib' },   -- external stdlib resolution: an
+                                               -- explicit `const X = std....` alias
+                                               -- (or an active env profile) names
+                                               -- the symbol — authoritative (above
+                                               -- name-match) but no local def
+                                               -- (below the static tiers)
     { name = 'inferred',  flag = 'inferred' }, -- ~ unique-name hypothesis
     { name = 'matched' },                      -- bare name match (fallback)
 }

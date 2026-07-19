@@ -146,7 +146,7 @@ return {
         budget_mb = 3800, -- ~2x inline peak: the compiler files are enormous
         repo = 'https://github.com/ziglang/zig',
         rev = 'd5181a9c9bac',
-        expected = { refs = 20404, nodes = 9408 }, -- +162 @ local-type-inference Z1b (v90): set-once `const x = f(); x.m()` → Ret.m (225 calls refused→to)
+        expected = { refs = 24134, nodes = 9768 }, -- +3730 refs/+360 nodes @ std-alias node-minting RESOLUTION (v93): std-aliased calls resolve to minted external std nodes (`zig-std::std.mem.eql`) at the stdlib tier. Prior: 20404/9408 @ v90 (Z1b local-type-inference, +162)
         lang = 'zig',
         notes = 'zig + R5 receiver typing + @import module binding + value-recv '
             .. 'dual-key + multi-level chain type + instance-chain field typing '

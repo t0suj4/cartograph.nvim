@@ -30,8 +30,13 @@ function M.take(data)
     local c = {
         nodes = { total = 0, by_kind = {}, unparsed = 0 },
         edges = { total = 0, by_kind = {},
-            ref = { confirmed = 0, proven = 0, xlang = 0, typed = 0,
-                inferred = 0, matched = 0 } },
+            -- one counter per ladder rung (derived, so a new tier — stdlib —
+            -- is covered without editing this init)
+            ref = (function ()
+                local r = {}
+                for _, rung in ipairs(tier.LADDER) do r[rung.name] = 0 end
+                return r
+            end)() },
         calls = { total = 0, resolved = 0, refused = 0, unresolved = 0,
             hedged = 0, rules = {},
             -- the "outside the corpus" bucket, no longer a silent lump:
@@ -98,17 +103,18 @@ end
 function M.report(data)
     local c = M.take(data)
     local ref = c.edges.ref
-    local reftotal = ref.confirmed + ref.proven + ref.xlang + ref.typed
-        + ref.inferred + ref.matched
+    local reftotal = 0
+    for _, v in pairs(ref) do reftotal = reftotal + v end
     local lines = {
         ('cartograph census — %s'):format(data.root or '?'),
         '',
         ('nodes %d: %s'):format(c.nodes.total, kind_line(c.nodes.by_kind)),
         ('edges %d: %s'):format(c.edges.total, kind_line(c.edges.by_kind)),
-        ('ref trust: confirmed %d (%s) · proven %d (%s) · xlang %d · typed %d (%s) · ~inferred %d (%s) · name-matched %d (%s)')
+        ('ref trust: confirmed %d (%s) · proven %d (%s) · xlang %d · typed %d (%s) · stdlib %d (%s) · ~inferred %d (%s) · name-matched %d (%s)')
             :format(ref.confirmed, pct(ref.confirmed, reftotal),
                 ref.proven, pct(ref.proven, reftotal), ref.xlang,
                 ref.typed, pct(ref.typed, reftotal),
+                ref.stdlib, pct(ref.stdlib, reftotal),
                 ref.inferred, pct(ref.inferred, reftotal),
                 ref.matched, pct(ref.matched, reftotal)),
         ('calls %d: resolved %d (%s) · refused %d (%s) · outside the corpus %d%s')

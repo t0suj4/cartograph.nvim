@@ -19,7 +19,15 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 92 -- v92: STD-ALIAS deep-chain rung ([[cartograph-stdlib-profile]]).
+M.VERSION = 93 -- v93: STD-ALIAS node-minting RESOLUTION face ([[cartograph-
+               -- stdlib-profile]]). mint_std_nodes turns the std-alias
+               -- disposition (c.stdpath) into a real resolution: one synthetic
+               -- EXTERNAL node per canonical std symbol (`zig-std::std.mem.eql`),
+               -- the call resolved to it, its ref edge stamped the `stdlib` tier
+               -- (tier.lua). refs+nodes RISE (external stdlib resolutions);
+               -- global+idempotent (inline extract + relink). LSP def/hover now
+               -- target a real node.
+               -- v92: STD-ALIAS deep-chain rung ([[cartograph-stdlib-profile]]).
                -- recv_root (zig) reads the leftmost id of a MULTI-level receiver
                -- chain (`std.mem.eql()` → "std"), stored as c.recvroot; the
                -- std-alias disposition keys c.recv or c.recvroot, so std written

@@ -242,6 +242,13 @@ local function merge_chunk(s, chunk)
     for f, fs in pairs(chunk.smtclasses or {}) do
         if not seen[f] then acc.smtclasses[f] = fs end
     end
+    -- std-alias name→path maps (zig): keyed BY FILE — the parent's relink reads
+    -- them so the std-alias disposition + node-minting run globally, matching
+    -- inline ([[cartograph-stdlib-profile]] resolution face)
+    acc.stdaliases = acc.stdaliases or {}
+    for f, m in pairs(chunk.stdaliases or {}) do
+        if not seen[f] then acc.stdaliases[f] = m end
+    end
     local new = {}
     for f, v in pairs(chunk.stamps or {}) do
         if not seen[f] then acc.stamps[f] = v end

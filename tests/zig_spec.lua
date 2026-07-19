@@ -280,13 +280,23 @@ test('zig: pub fn is exported, plain fn is not', function ()
     vim.fn.delete(root, 'rf')
 end)
 
-local function why_of(calls, callee)
-    for _, c in ipairs(calls) do
-        if c.callee == callee then return c.ext and c.ext.why, c end
-    end
+local tier = require 'cartograph.tier'
+local function call_of(calls, callee)
+    for _, c in ipairs(calls) do if c.callee == callee then return c end end
+end
+local function node_by_id(id)
+    for _, n in ipairs(store.data.nodes) do if n.id == id then return n end end
+end
+-- the minted std node a call resolved to (nil if it didn't resolve to one)
+local function std_target(calls, callee)
+    local c = call_of(calls, callee)
+    if not c or not c.to then return nil, c end
+    local nd = node_by_id(c.to)
+    if nd and nd.external and nd.file == 'zig-std' then return nd, c end
+    return nil, c
 end
 
-test('zig std-alias: bare `const assert = std.debug.assert; assert()` → std-alias face', function ()
+test('zig std-alias: bare + namespace calls RESOLVE to minted std nodes', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     write(root, 'a.zig', {
@@ -299,8 +309,28 @@ test('zig std-alias: bare `const assert = std.debug.assert; assert()` → std-al
         '}',
     })
     local _, calls = extract(root)
-    eq(why_of(calls, 'assert'), 'std-alias')
-    eq(why_of(calls, 'eql'), 'std-alias')
+    local an = std_target(calls, 'assert')
+    ok(an and an.name == 'std.debug.assert', 'assert() → node std.debug.assert')
+    local en = std_target(calls, 'eql')
+    ok(en and en.name == 'std.mem.eql', 'mem.eql() → node std.mem.eql')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('zig std-alias: the resolved ref edge carries the stdlib TIER', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'a.zig', {
+        'const std = @import("std");',
+        'const assert = std.debug.assert;',
+        'pub fn go(b: bool) void { assert(b); }',
+    })
+    local _, calls = extract(root)
+    local nd = std_target(calls, 'assert')
+    local e
+    for _, x in ipairs(store.data.edges) do
+        if x.kind == 'ref' and nd and x.to == nd.id then e = x end
+    end
+    ok(e and tier.of(e) == 'stdlib', 'ref edge to the std node is at the stdlib tier')
     vim.fn.delete(root, 'rf')
 end)
 
@@ -308,8 +338,8 @@ test('zig std-alias: the binding is AUTHORITATIVE over a same-named project def'
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     -- a project fn named `assert` exists in another file; the call site aliases
-    -- std's assert, so the const binding shadows it — the call must NOT resolve
-    -- to the project def, it is disposed std-alias.
+    -- std's assert, so the const binding shadows it — the call resolves to the
+    -- std node, NOT the project def.
     write(root, 'other.zig', { 'pub fn assert(b: bool) void { _ = b; }' })
     write(root, 'use.zig', {
         'const std = @import("std");',
@@ -317,13 +347,13 @@ test('zig std-alias: the binding is AUTHORITATIVE over a same-named project def'
         'pub fn go(b: bool) void { assert(b); }',
     })
     local _, calls = extract(root)
-    local why, c = why_of(calls, 'assert')
-    eq(why, 'std-alias')
-    ok(c and not c.to, 'std-aliased call did not resolve to the project assert')
+    local nd = std_target(calls, 'assert')
+    ok(nd and nd.name == 'std.debug.assert',
+        'std-aliased call resolved to the std node, not the project assert')
     vim.fn.delete(root, 'rf')
 end)
 
-test('zig std-alias: a DEEP receiver chain `std.mem.eql()` is disposed via recv_root', function ()
+test('zig std-alias: a DEEP receiver chain `std.mem.eql()` resolves via recv_root', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     write(root, 'd.zig', {
@@ -333,14 +363,14 @@ test('zig std-alias: a DEEP receiver chain `std.mem.eql()` is disposed via recv_
         '}',
     })
     local _, calls = extract(root)
-    local why, c = why_of(calls, 'eql')
-    eq(why, 'std-alias')
-    ok(c and not c.recv and c.recvroot == 'std',
-        'deep chain: recv is nil (multi-level), recvroot is the leftmost id')
+    local nd, c = std_target(calls, 'eql')
+    ok(nd and nd.name == 'std.mem.eql', 'deep chain std.mem.eql() → node std.mem.eql')
+    ok(c and not c.recv and c.recvroot == 'std' and c.recvpath == 'std.mem',
+        'deep chain: recv nil, recvroot "std", recvpath "std.mem"')
     vim.fn.delete(root, 'rf')
 end)
 
-test('zig std-alias: a DEEP chain rooted at a PROJECT name is NOT disposed', function ()
+test('zig std-alias: a DEEP chain rooted at a PROJECT name is NOT minted', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     write(root, 'p.zig', {
@@ -350,16 +380,16 @@ test('zig std-alias: a DEEP chain rooted at a PROJECT name is NOT disposed', fun
     })
     write(root, 'app.zig', { 'pub const config = struct { pub fn load() void {} }; ' })
     local _, calls = extract(root)
-    ok(why_of(calls, 'load') ~= 'std-alias',
-        'project-rooted deep chain is not mislabeled std-alias')
+    ok(std_target(calls, 'load') == nil,
+        'project-rooted deep chain did not resolve to a std node')
     vim.fn.delete(root, 'rf')
 end)
 
-test('zig std-alias: a NON-std alias root is NOT disposed (soundness)', function ()
+test('zig std-alias: a NON-std alias root is NOT minted (soundness)', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
-    -- `foo` is a project @import, not std → foo.bar() must stay a normal
-    -- (module-alias) resolution, never the std-alias face.
+    -- `foo` is a project @import, not std → foo.bar() must resolve normally
+    -- (module-alias) to the project def, never a std node.
     write(root, 'foo.zig', { 'pub fn bar() void {}' })
     write(root, 'main.zig', {
         'const std = @import("std");',
@@ -367,7 +397,7 @@ test('zig std-alias: a NON-std alias root is NOT disposed (soundness)', function
         'pub fn go() void { foo.bar(); }',
     })
     local _, calls = extract(root)
-    ok(why_of(calls, 'bar') ~= 'std-alias',
-        'project module-alias receiver is not mislabeled std-alias')
+    ok(std_target(calls, 'bar') == nil,
+        'project module-alias receiver did not resolve to a std node')
     vim.fn.delete(root, 'rf')
 end)

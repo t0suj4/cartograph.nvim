@@ -1337,36 +1337,104 @@ end
 -- ROOT name is bound to the standard library in its file (`const assert =
 -- std.debug.assert; assert()` / `const mem = std.mem; mem.eql()`) is a stdlib
 -- call — the const binding is authoritative and shadows any project def of the
--- same leaf. This is NOT a resolution (no c.to, no minted node — node minting is
--- the band/LSP face): it relabels an UNRESOLVED call (c.to == nil, whether a
--- bare no-def OR a refused-with-candidates name collision) to the std-alias
--- external face. Gate posture: a no-def → std-alias move is gate-NEUTRAL (both
--- key `unresolved` in graphdiff); a refused → std-alias move is the honest
--- correction the binding earns (the collision was never any of those project
--- cands). Runs LAST so it only speaks for what every resolver left unresolved.
--- Self-evidencing: needs no active profile and no curated free-set (the exact
--- soundness gap that reverted the profile's type-precise free-matching face).
+-- same leaf. Sets c.ext = std-alias AND reconstructs the CANONICAL symbol into
+-- c.stdpath (the mint pass turns that into a real resolution). Relabels an
+-- UNRESOLVED call (c.to == nil, whether a bare no-def OR a refused-with-cands
+-- name collision). Runs LAST so it only speaks for what every resolver left
+-- unresolved. Self-evidencing: needs no active profile and no curated free-set
+-- (the soundness gap that reverted the profile's type-precise free-match face).
 local function resolve_std_alias(calls, stdaliases)
     if not stdaliases or not next(stdaliases) then return 0 end
     local n = 0
     for _, c in ipairs(calls or {}) do
         if not c.to then
-            local set = stdaliases[c.file]
+            local paths = stdaliases[c.file]
             -- bare call: recv is nil, the name is the callee; receiver call:
             -- the chain root is the receiver (recv = single-id `mem.eql`,
             -- recvroot = deep chain `std.mem.eql` → "std"). Either way key the
             -- ROOT (never the member) — `x.assert()` where x is a project alias
             -- must NOT fire just because `assert` is elsewhere std-bound.
             local root = c.recv or c.recvroot or c.callee
-            if set and root and set[root] then
+            local base = paths and root and paths[root]
+            if base then
                 c.refused = nil
                 c.ext = EXT.stdalias
+                -- CANONICAL symbol: alias-path(root) ++ (receiver-chain minus
+                -- root) ++ "." ++ callee. A bare call (no receiver) IS the
+                -- aliased callable → the base path itself.
+                if c.recvpath and c.recvpath:sub(1, #root) == root then
+                    c.stdpath = base .. c.recvpath:sub(#root + 1) .. '.' .. c.callee
+                elseif c.recv then
+                    c.stdpath = base .. '.' .. c.callee
+                else
+                    c.stdpath = base
+                end
                 n = n + 1
             end
         end
     end
     return n
 end
+
+-- MINT the stdlib RESOLUTION face ([[cartograph-stdlib-profile]]): turn the
+-- std-alias disposition (c.stdpath) into a real RESOLUTION — one synthetic
+-- EXTERNAL node per canonical std symbol, the call resolved to it and its ref
+-- edge stamped the `stdlib` tier ([[cartograph-tier]]) so census/LSP treat it as
+-- resolved-but-external (go-to-def / hover target a real node; no local def =
+-- honest frontier). GLOBAL + IDEMPOTENT: runs once on the assembled graph
+-- (post-merge / post-idpass) and again on relink, reusing minted nodes/edges
+-- keyed by the canonical path — so re-runs and inline-vs-parallel agree (the
+-- node id is a deterministic function of the symbol). Never touches a call that
+-- already resolved to a project def (guarded by `not c.to`, which stdpath calls
+-- are by construction).
+local STD_FILE = 'zig-std'          -- synthetic file of a minted std node
+local STD_SCHEME = 'zig-std::'      -- deterministic id prefix (symbol-keyed)
+local function mint_std_nodes(data, node_index)
+    local calls = data.calls or {}
+    -- reuse existing minted nodes (idempotent re-run) keyed by canonical path
+    local bypath = {}
+    for _, nd in ipairs(data.nodes) do
+        if nd.external and nd.file == STD_FILE then bypath[nd.name] = nd end
+    end
+    -- existing stdlib ref edges: from\31to → edge (dedup + append occurrences)
+    local refkey = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.stdlib then refkey[e.from .. '\31' .. e.to] = e end
+    end
+    local resolved, minted = 0, 0
+    for _, c in ipairs(calls) do
+        if c.stdpath and not c.to then
+            local nd = bypath[c.stdpath]
+            if not nd then
+                nd = { id = STD_SCHEME .. c.stdpath, name = c.stdpath,
+                    kind = 'external', file = STD_FILE, external = true, order = -1,
+                    range = { start = { line = 0, char = 0 },
+                        ['end'] = { line = 0, char = 0 } } }
+                data.nodes[#data.nodes + 1] = nd
+                bypath[c.stdpath] = nd
+                if node_index then node_index[nd.id] = nd end
+                minted = minted + 1
+            end
+            c.to = nd.id
+            c.ext = nil
+            c.refused = nil
+            resolved = resolved + 1
+            if c.fn then
+                local k = c.fn .. '\31' .. nd.id
+                local e = refkey[k]
+                if not e then
+                    e = { from = c.fn, to = nd.id, kind = 'ref', at = {}, stdlib = true }
+                    refkey[k] = e
+                    data.edges[#data.edges + 1] = e
+                end
+                e.at[#e.at + 1] = c.at or { start = { line = c.line, char = 0 },
+                    ['end'] = { line = c.line, char = 0 } }
+            end
+        end
+    end
+    return resolved, minted
+end
+M.mint_std_nodes = mint_std_nodes
 
 -- INSTANCE-CHAIN FIELD TYPING ([[cartograph-zig-arc]]): an instance chain
 -- `root.field.method()` resolves when the root's TYPE is known (c.chainroot, a
@@ -4401,6 +4469,9 @@ function M.extract(root, opts)
                         -- "std") — complements recv (single-id only); the
                         -- std-alias disposition keys either as the call root.
                         recvroot = spec.recv_root and spec.recv_root(calln, src) or nil,
+                        -- full receiver-chain text (`std.mem.eql` → "std.mem"):
+                        -- the mint pass rebuilds the canonical std symbol from it.
+                        recvpath = spec.recv_path and spec.recv_path(calln, src) or nil,
                         -- multi-level chain `root.Type.method()`: the PascalCase
                         -- segment right before the method (its type namespace),
                         -- persisted for the additive chain post-pass. Bare `full`
@@ -5216,6 +5287,10 @@ function M.extract(root, opts)
             local buf = mentions[file]
             if buf then reduce_mentions(file, buf, L) end
         end
+        -- stdlib RESOLUTION face ([[cartograph-stdlib-profile]]): mint external
+        -- std nodes for std-aliased calls. Runs here for the INLINE full extract
+        -- (global, single data); the parallel PARENT does it in relink instead.
+        if data.stdaliases then mint_std_nodes(data, node_index) end
     else
         -- the parallel driver needs each slice's function extents AND
         -- mention buffers to run the reduce later (all decisions global)
@@ -5597,6 +5672,10 @@ function M.relink(data, touched)
     n = n + run_resolve_passes({ calls = data.calls, data = data, exact = exact,
         tail = tail, addref = addref, node_index = node_index,
         scope_of = scope_of, consts = nil, parent_fn = parent_fn })
+    -- stdlib RESOLUTION face: mint std nodes for std-aliased calls. GLOBAL here
+    -- (relink runs over the full merged graph → covers the parallel parent);
+    -- idempotent, so re-running on an incremental relink is safe.
+    if data.stdaliases then mint_std_nodes(data, node_index) end
     return n
 end
 
