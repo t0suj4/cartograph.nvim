@@ -372,7 +372,12 @@ callers). Ariadne's thread, in text.
      language is one spec table (queries + a few hooks); the two newest slot in
      with no new machinery — Zig into the procedural+struct+method family (a
      `fn` is free or a struct member, keyed `Type.method`), Odin into the
-     C/procedural family (package + `proc` + struct, no methods). Zig also
+     C/procedural family (package + `proc` + struct, no methods). Odin resolves
+     **package-qualified** calls: a proc in `package P` gains a `P.proc` key
+     (while keeping its bare key for same-package calls), and a `strings.to_lower()`
+     call keys `<package>.proc` through the import alias (the import path's last
+     segment) — so a call into another package's proc resolves to that package,
+     not a same-named proc elsewhere. Zig also
      carries **receiver typing**: a `recv.method()` call is keyed by the
      receiver's declared type — a PascalCase receiver *is* the type (`Foo.init`),
      and a lowercase receiver is typed from the enclosing fn's pointer parameter

@@ -19,7 +19,19 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 86 -- v86: ZIG LOCAL FIELD-ACCESS TYPING. A local `const x =
+M.VERSION = 87 -- v87: ODIN-R1 PACKAGE-QUALIFIED RESOLUTION. A proc in `package P`
+               -- gains a `P.proc` EXACT key (alt_keys, keeps the bare key so
+               -- same-package calls' dir-scoped reach is unchanged — dual-key,
+               -- NOT qualify, which would strand repeated procs on the tail
+               -- path). A `pkg.proc()` call (member_expression operand) keys
+               -- `<pkg>.proc` via the import alias/name (→ import path last
+               -- segment) or the file's own package; exact_only (a package is
+               -- explicit → miss = honest frontier, no bare-tail guess). Odin's
+               -- core IS the corpus, so these resolve. MEASURED 15.74→19.13%
+               -- (+5099, −159 all wrong-edge removals, 136 corrections). Torn
+               -- defs (post-parse-error, e.g. fmt.odin/io.odin ~L681) stay
+               -- unkeyed — a pre-existing grammar limit, out of scope.
+               -- v86: ZIG LOCAL FIELD-ACCESS TYPING. A local `const x =
                -- param.field; x.method()` is treated as the field chain
                -- `param.field.method()` — chain_root sees through the local
                -- binding (emits c.chainroot=type(param), c.chainfield=field), so

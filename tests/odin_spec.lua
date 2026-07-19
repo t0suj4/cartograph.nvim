@@ -1,7 +1,7 @@
 -- Odin language support (v1): the C/procedural family — package + `proc` +
 -- struct, NO methods (procs are free). `foo :: proc(){}`; calls resolve free
--- procs within the package (directory scope). Package-qualified resolution
--- (`fmt.println` = Odin-R1) and UFCS are a banked arc, not v1.
+-- procs within the package (directory scope), and package-qualified calls
+-- (`strings.to_lower` = Odin-R1) resolve cross-package. UFCS is still banked.
 
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
@@ -51,5 +51,29 @@ test('odin: a free call resolves within the package (directory)', function ()
     local hit
     for _, c in ipairs(calls) do if c.callee == 'helper' then hit = c end end
     ok(hit and hit.to == by['helper'].id, 'helper() resolved within the package')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('odin-R1: a package-qualified call resolves cross-package', function ()
+    if not ready() then skip 'no odin parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/strings', 'p')
+    vim.fn.mkdir(root .. '/app', 'p')
+    vim.fn.mkdir(root .. '/other', 'p')
+    write(root, 'strings/s.odin', { 'package strings', 'to_lower :: proc(x: int) {}' })
+    write(root, 'other/o.odin', { 'package other', 'to_lower :: proc(x: int) {}' }) -- collide → bare ambiguous
+    write(root, 'app/app.odin', {
+        'package app',
+        'import "core:strings"',
+        'go :: proc() { strings.to_lower(1) }', -- → strings.to_lower (not other's)
+    })
+    local by, calls = extract(root)
+    local tgt
+    for _, n in ipairs(store.data.nodes) do
+        if n.name == 'to_lower' and n.file:match('strings/') then tgt = n end
+    end
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'to_lower' then hit = c end end
+    ok(hit and tgt and hit.to == tgt.id,
+        'strings.to_lower() resolved to the strings package (not other), via R1')
     vim.fn.delete(root, 'rf')
 end)

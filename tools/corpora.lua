@@ -166,11 +166,14 @@ return {
         budget_mb = 2000, -- ~2x inline peak
         repo = 'https://github.com/odin-lang/Odin',
         rev = '967c6046a624',
-        expected = { refs = 17182, nodes = 37121 }, -- calibrated @ odin v1 (v80)
+        expected = { refs = 18638, nodes = 37121 }, -- recalibrated @ odin-R1 package-qualified (v87)
         lang = 'odin',
-        notes = 'odin v1 (the core stdlib, 1279 files) — C/procedural family, '
-            .. 'no methods; 15.7% (package-heavy — the package-qualified '
-            .. 'resolution arc, Odin-R1, is where it climbs; banked, not built)',
+        notes = 'odin v1 + R1 package-qualified resolution (the core stdlib, 1279 '
+            .. 'files) — C/procedural family, no methods; a proc in `package P` '
+            .. 'gains a P.proc key (dual-key, bare kept), and `pkg.proc()` calls '
+            .. 'resolve via the import alias/name → 19.1% (+5099 vs v1, core IS '
+            .. 'the corpus so std resolves). Remaining: torn defs post-parse-error '
+            .. '(fmt/io big files) + UFCS + package-path→dir resolution',
     },
     python = {
         root = HOME .. '/git/django-oscar/src',
