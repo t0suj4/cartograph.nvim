@@ -19,7 +19,15 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 90 -- v90: LOCAL TYPE INFERENCE Z1b ([[cartograph-local-type-inference]],
+M.VERSION = 91 -- v91: STD-ALIAS DISPOSITION ([[cartograph-stdlib-profile]] bucket A).
+               -- zig `const assert = std.debug.assert; assert()` — a per-file
+               -- name-set bound to the stdlib (spec.std_aliases → data.stdaliases)
+               -- lets resolve_std_alias relabel unresolved calls whose ROOT is
+               -- std-bound to the `std-alias` external face (self-evidencing: no
+               -- profile, no curated free-set). c.to unchanged (refs/nodes hold);
+               -- graphdiff structure moves on zig only (no-def/refused→unresolved-
+               -- with-std-alias-why). Additive schema field: data.stdaliases.
+               -- v90: LOCAL TYPE INFERENCE Z1b ([[cartograph-local-type-inference]],
                -- roadmap top lever). Zig `const x = C.init()/f(); x.m()` — a
                -- set-once local const typed by the callee's declared RETURN
                -- (def_ret → n.ret) → keyed Ret.m via the generalized

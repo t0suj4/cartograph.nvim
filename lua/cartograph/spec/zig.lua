@@ -361,6 +361,89 @@ local function zig_imports(tsroot, src)
     return out
 end
 
+-- Zig STD-ALIAS binding ([[cartograph-stdlib-profile]] bucket A, the 34% lever
+-- sized on tigerbeetle): names bound to the standard library via an explicit
+-- `const NAME = @import("std"|"builtin")` or a field-chain ROOTED at such a name
+-- (`const assert = std.debug.assert`, `const mem = std.mem`, `const pa =
+-- std.heap.page_allocator`). std is ALIAS-imported in real zig apps — it almost
+-- never appears as a literal `std.` receiver — so bare `assert()` / `mem.eql()`
+-- are the dominant unresolved shape. The binding is AUTHORITATIVE and SELF-
+-- EVIDENCING: the RHS literally names std, so a call whose ROOT is NAME is a
+-- standard-library call regardless of any project def sharing the leaf (a
+-- file-scoped const shadows them). This is the SOUND activation the distilled
+-- free-set lacked (the type-precise revert): no curation, no profile — the
+-- source declares it. Returns a per-file name-SET (the disposition pass keys the
+-- call root against it). Ambiguous names (also bound to a non-std value in the
+-- file) are dropped, like zig_imports.
+local function zig_std_aliases(tsroot, src)
+    -- the leftmost identifier of a field-chain (std.debug.assert -> "std");
+    -- a bare identifier RHS (const x = mem) returns its own text
+    local function chain_root(v)
+        while v and v:type() == 'field_expression' do v = v:field('object')[1] end
+        if v and v:type() == 'identifier' then return node_text(v, src) end
+    end
+    -- @import("std")/("builtin") on a builtin_function node -> the arg, else nil
+    local function std_import(v)
+        if not v or v:type() ~= 'builtin_function' then return nil end
+        local bi, path
+        for c in v:iter_children() do
+            local t = c:type()
+            if t == 'builtin_identifier' then bi = node_text(c, src)
+            elseif t == 'arguments' then
+                for a in c:iter_children() do
+                    if a:type() == 'string' then
+                        path = node_text(a, src):gsub('^["\']', ''):gsub('["\']$', '')
+                        break
+                    end
+                end
+            end
+        end
+        if bi == '@import' and (path == 'std' or path == 'builtin') then return true end
+    end
+
+    local decls = {} -- ordered { name, root, imp }
+    local function walk(n)
+        if n:type() == 'variable_declaration' then
+            local name, value, eq = nil, nil, false
+            for c in n:iter_children() do
+                local t = c:type()
+                if t == '=' then eq = true
+                elseif not eq and t == 'identifier' and not name then
+                    name = node_text(c, src)
+                elseif eq and not value and c:named() then value = c end
+            end
+            if name and value then
+                decls[#decls + 1] = { name = name, root = chain_root(value),
+                    imp = std_import(value) }
+            end
+        end
+        for c in n:iter_children() do walk(c) end
+    end
+    walk(tsroot)
+
+    -- seed: names bound directly to @import("std"|"builtin")
+    local std = {}
+    for _, d in ipairs(decls) do if d.imp then std[d.name] = true end end
+    -- fixpoint: a decl whose chain-root is already std makes its name std
+    local changed = true
+    while changed do
+        changed = false
+        for _, d in ipairs(decls) do
+            if not d.imp and d.root and std[d.root] and not std[d.name] then
+                std[d.name] = true; changed = true
+            end
+        end
+    end
+    -- drop names that ALSO carry a non-std binding in the file (ambiguous)
+    local other = {}
+    for _, d in ipairs(decls) do
+        if not d.imp and not (d.root and std[d.root]) then other[d.name] = true end
+    end
+    local out = {}
+    for name in pairs(std) do if not other[name] then out[name] = true end end
+    return out
+end
+
 return {
         exts = { 'zig' },
         functions = [=[
@@ -488,6 +571,10 @@ return {
         -- receiver so a LOWERCASE alias (`const bar = @import(…); bar.run()`,
         -- which R5 leaves bare) is still recognized by the alias pass.
         scan_imports = zig_imports,
+        -- std-alias binding: the per-file name-set bound to the standard library
+        -- (`const assert = std.debug.assert`) — resolve_std_alias dispositions a
+        -- call whose root is in this set to the std-alias external face.
+        std_aliases = zig_std_aliases,
         resolve_import = function (path, files, from)
             if not path:match('%.zig$') then return nil end -- std/builtin → ext
             local dir = from and from:match('^(.*)/[^/]*$') or ''

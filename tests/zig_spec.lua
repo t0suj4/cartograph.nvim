@@ -279,3 +279,63 @@ test('zig: pub fn is exported, plain fn is not', function ()
     ok(by['internal'] and by['internal'].exported == false, 'plain fn → not exported')
     vim.fn.delete(root, 'rf')
 end)
+
+local function why_of(calls, callee)
+    for _, c in ipairs(calls) do
+        if c.callee == callee then return c.ext and c.ext.why, c end
+    end
+end
+
+test('zig std-alias: bare `const assert = std.debug.assert; assert()` → std-alias face', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'a.zig', {
+        'const std = @import("std");',
+        'const assert = std.debug.assert;',   -- fn alias
+        'const mem = std.mem;',               -- namespace alias
+        'pub fn go(x: []const u8, y: []const u8) void {',
+        '    assert(x.len == y.len);',         -- bare std-alias call
+        '    _ = mem.eql(u8, x, y);',          -- namespace-alias receiver call
+        '}',
+    })
+    local _, calls = extract(root)
+    eq(why_of(calls, 'assert'), 'std-alias')
+    eq(why_of(calls, 'eql'), 'std-alias')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('zig std-alias: the binding is AUTHORITATIVE over a same-named project def', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- a project fn named `assert` exists in another file; the call site aliases
+    -- std's assert, so the const binding shadows it — the call must NOT resolve
+    -- to the project def, it is disposed std-alias.
+    write(root, 'other.zig', { 'pub fn assert(b: bool) void { _ = b; }' })
+    write(root, 'use.zig', {
+        'const std = @import("std");',
+        'const assert = std.debug.assert;',
+        'pub fn go(b: bool) void { assert(b); }',
+    })
+    local _, calls = extract(root)
+    local why, c = why_of(calls, 'assert')
+    eq(why, 'std-alias')
+    ok(c and not c.to, 'std-aliased call did not resolve to the project assert')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('zig std-alias: a NON-std alias root is NOT disposed (soundness)', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- `foo` is a project @import, not std → foo.bar() must stay a normal
+    -- (module-alias) resolution, never the std-alias face.
+    write(root, 'foo.zig', { 'pub fn bar() void {}' })
+    write(root, 'main.zig', {
+        'const std = @import("std");',
+        'const foo = @import("foo.zig");',
+        'pub fn go() void { foo.bar(); }',
+    })
+    local _, calls = extract(root)
+    ok(why_of(calls, 'bar') ~= 'std-alias',
+        'project module-alias receiver is not mislabeled std-alias')
+    vim.fn.delete(root, 'rf')
+end)

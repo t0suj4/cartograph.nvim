@@ -58,6 +58,7 @@ M.SLOTS = {
     resolve_import = 'IMPORTS', import_query = 'IMPORTS',
     import_call = 'IMPORTS', import_bind = 'IMPORTS', import_line = 'IMPORTS',
     import_pats = 'IMPORTS', import_call_like = 'IMPORTS', scan_imports = 'IMPORTS',
+    std_aliases = 'IMPORTS',        -- per-file names bound to the stdlib (std-alias disposition)
 
     -- TYPES: receiver / return / chain / field typing (the D-measurement's
     -- local-inference rung lands here)

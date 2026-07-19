@@ -33,6 +33,11 @@ M.EXT = {
                                                         -- surface ([[cartograph-stdlib-profile]]):
                                                         -- known external, version-keyed,
                                                         -- refines no-def when a profile is active
+    stdalias = { disp = 'external', why = 'std-alias' },-- a call whose root name is
+                                                        -- bound to the stdlib via an explicit
+                                                        -- `const X = std....` binding in its file
+                                                        -- (self-evidencing, needs no profile);
+                                                        -- shadows any project def of the leaf
 }
 local EXT = M.EXT
 
@@ -1328,6 +1333,40 @@ local function resolve_chain_type(calls, exact, addref, node_index)
     return n
 end
 
+-- Std-alias DISPOSITION ([[cartograph-stdlib-profile]] bucket A): a call whose
+-- ROOT name is bound to the standard library in its file (`const assert =
+-- std.debug.assert; assert()` / `const mem = std.mem; mem.eql()`) is a stdlib
+-- call — the const binding is authoritative and shadows any project def of the
+-- same leaf. This is NOT a resolution (no c.to, no minted node — node minting is
+-- the band/LSP face): it relabels an UNRESOLVED call (c.to == nil, whether a
+-- bare no-def OR a refused-with-candidates name collision) to the std-alias
+-- external face. Gate posture: a no-def → std-alias move is gate-NEUTRAL (both
+-- key `unresolved` in graphdiff); a refused → std-alias move is the honest
+-- correction the binding earns (the collision was never any of those project
+-- cands). Runs LAST so it only speaks for what every resolver left unresolved.
+-- Self-evidencing: needs no active profile and no curated free-set (the exact
+-- soundness gap that reverted the profile's type-precise free-matching face).
+local function resolve_std_alias(calls, stdaliases)
+    if not stdaliases or not next(stdaliases) then return 0 end
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        if not c.to then
+            local set = stdaliases[c.file]
+            -- bare call: recv is nil, the name is the callee; receiver call:
+            -- the chain root is the receiver. Either way key the ROOT (never
+            -- the member) — `x.assert()` where x is a project alias must NOT
+            -- fire just because `assert` is elsewhere std-bound.
+            local root = c.recv or c.callee
+            if set and root and set[root] then
+                c.refused = nil
+                c.ext = EXT.stdalias
+                n = n + 1
+            end
+        end
+    end
+    return n
+end
+
 -- INSTANCE-CHAIN FIELD TYPING ([[cartograph-zig-arc]]): an instance chain
 -- `root.field.method()` resolves when the root's TYPE is known (c.chainroot, a
 -- param type from extraction) AND that type's FIELD has a keyable type
@@ -2204,6 +2243,10 @@ local RESOLVE_PASSES = {
         return resolve_interface(x.calls, x.data.implements, x.data.beans, x.data.extends, x.exact, x.addref, javaspec._service_markers) end },
     { name = 'local_callable', run = function (x)
         return resolve_local_callable(x.calls, x.node_index, x.exact, x.addref, x.parent_fn) end },
+    -- DISPOSITION (not resolution): label std-aliased calls the resolvers left
+    -- unresolved. Last, so it only speaks for genuine no-defs / refusals.
+    { name = 'std_alias', run = function (x)
+        return resolve_std_alias(x.calls, x.data.stdaliases) end },
 }
 M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 
@@ -4424,6 +4467,16 @@ function M.extract(root, opts)
                     edges[#edges + 1] = { from = file, to = target,
                         kind = 'import', bind = imp.alias, inferred = true }
                 end
+            end
+        end
+        -- std-alias bindings (zig): a per-file name-set bound to the standard
+        -- library (`const assert = std.debug.assert`), consumed by the
+        -- resolve_std_alias disposition pass ([[cartograph-stdlib-profile]]).
+        if spec.std_aliases then
+            local set = spec.std_aliases(tsroot, src)
+            if next(set) then
+                data.stdaliases = data.stdaliases or {}
+                data.stdaliases[file] = set
             end
         end
         -- struct field types (zig): a file-tagged side-table typename→field→type
