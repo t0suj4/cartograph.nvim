@@ -1370,6 +1370,20 @@ nvim --headless -u NONE -l tools/gen.lua java --seed 7 --out /tmp/g  # just gene
 # negatives are the point: a lens that fires where it must not is a false positive
 # caught mechanically, not by eyeballing self. Exit 1 on any false pos/neg.
 nvim --headless -u NONE -l tools/syngate.lua
+# RUNTIME/CONFIRMED tier — the dispatch OBSERVER (the VM's runtime axis, the one
+# honesty rung lua-ls structurally can't reach). Runs a bounded cartograph
+# extraction under a call hook (JIT off so no traced call is invisible), maps
+# every observed (caller -> callee) dispatch back to static graph nodes
+# (self_oracle.resolve_fn), and feeds confirm.apply against cartograph's OWN
+# self graph. CONFIRM (an edge the graph has, seen live) + RECOVER (an edge
+# static REFUSED, seen live) — the latter is the product: it recovers the
+# spec-hook dynamic dispatch (spec.qualify_call / is_method / resolve_import,
+# function-valued table fields) that static resolution correctly refuses.
+# SOUND by confirm.lua's spec: observed ⊆ static, so it CONFIRMS + RECOVERS,
+# ABSENCE NEVER REFUTES; runtime facts are SAMPLES (counts vary run-to-run) —
+# a session-live overlay, never folded or cached.
+nvim --headless -u NONE -l tools/observe.lua          # workload defaults to synlua
+nvim --headless -u NONE -l tools/observe.lua bnw      # any lua corpus as the workload
 ```
 
 Three SYNTHETIC corpora are registered first-class in `tools/corpora.lua` —
