@@ -1293,55 +1293,6 @@ end
 -- type is lexical + explicit, so this is sound and unambiguous — `self`
 -- resolves per-method (no file-level collision), and a miss is honest.
 
--- Odin package-qualified resolution (R1). A .odin file declares `package P`; the
--- per-file context is its package name + import alias→package map. An import
--- `import "core:strings"` binds `strings` (the path's last segment = the package
--- name, Odin convention); `import s "core:strings"` binds the alias `s`→strings.
--- Computed per def/call — a scan of the source_file's TOP-LEVEL children only
--- (package_declaration + import_declarations), which is cheap (not a body walk).
--- Cached per FILE on src (deterministic: the source_file root — hence the
--- context — is the same for every node in a file). Takes ANY node and walks to
--- the source_file itself (robust), so a caller never poisons the cache with a
--- bad root. Cache is POSITIVE-ONLY (a package must be found) so a pathological
--- rootless node returns nil without evicting a good entry — the earlier
--- single-slot cache poisoned io.odin to 3/25 by caching a nil-root result; a
--- per-def recompute (no cache) was correct but O(defs×top-level) and too slow.
-local odin_ctx_src, odin_ctx_val
-local function odin_context(node, src)
-    if src == odin_ctx_src and odin_ctx_val then return odin_ctx_val end
-    local r = node
-    while r:parent() do r = r:parent() end -- absolute tree root (robust: a
-    -- premature `~= source_file` stop returned nil for some deep def nodes,
-    -- leaving big files like fmt.odin/io.odin only partially package-keyed)
-    local pkg, imports = nil, {}
-    if r then
-        for n in r:iter_children() do
-            local t = n:type()
-            if t == 'package_declaration' then
-                for c in n:iter_children() do
-                    if c:type() == 'identifier' then pkg = node_text(c, src); break end
-                end
-            elseif t == 'import_declaration' then
-                local alias, path
-                for c in n:iter_children() do
-                    if c:type() == 'identifier' then alias = node_text(c, src)
-                    elseif c:type() == 'string' then
-                        for cc in c:iter_children() do
-                            if cc:type() == 'string_content' then path = node_text(cc, src) end
-                        end
-                    end
-                end
-                if path then
-                    local pk = path:gsub('["\']', ''):match('([%w_]+)$')
-                    if pk then imports[alias or pk] = pk end
-                end
-            end
-        end
-    end
-    local ctx = { package = pkg, imports = imports }
-    if pkg then odin_ctx_src, odin_ctx_val = src, ctx end -- positive-only cache
-    return ctx
-end
 
 
 M.spec = {
@@ -2288,76 +2239,6 @@ M.spec = {
     -- package `fmt.println()` (a member_expression wrapping the call). v1 =
     -- procedures + calls + package(dir) scope; package-qualified keying
     -- (Odin-R1) and UFCS (`x.foo()`→`foo(x)`) are banked.
-    odin = {
-        exts = { 'odin' },
-        functions = [=[
-            (procedure_declaration . (identifier) @name) @def
-        ]=],
-        calls = [=[
-            (call_expression function: (identifier) @name) @call
-        ]=],
-        -- Odin has no methods — every proc is free (UFCS is banked)
-        is_method = function () return false end,
-        -- NODE-LOCAL tearing: a proc's key is `package.proc`, and the package
-        -- comes from the file-top `package` decl (before any parse error), so a
-        -- proc AFTER an error has lost no enclosing context. Tear only defs whose
-        -- OWN subtree errors — the Odin grammar errors in big stdlib files
-        -- (fmt.odin/io.odin ~L681) and the default (tear-everything-after) hid
-        -- the most-used procs (fmt.aprintf, io.write_rune). Like bash.
-        torn_by_node = true,
-        -- R1 package-qualified DEF keying: a proc in `package P` gains a `P.proc`
-        -- EXACT key (so a cross-package `P.proc()` call meets it) via alt_keys —
-        -- NOT qualify. qualify would MOVE the def off its bare key onto tail[proc],
-        -- and the tail path has no same-file priority, so same-package procs that
-        -- repeat across a package's files (`try_set` per platform file in
-        -- sys/info) went ambiguous → lost. alt_keys keeps the bare key intact
-        -- (same-file/scope reach unchanged, 0 regression) and ADDS P.proc.
-        alt_keys = function (name, defn, src)
-            local ctx = odin_context(defn, src)
-            return ctx.package and { ctx.package .. '.' .. name } or {}
-        end,
-        -- R1 CALL side: `op.proc()` parses as member_expression(op, call_expr(proc)).
-        -- Key `<pkg>.proc` where op is an import alias/name (→ the import path's
-        -- last segment) or the file's own package. A non-package operand (a local
-        -- var, i.e. UFCS `x.foo()`) → nil (left bare; UFCS is banked).
-        qualify_call = function (calln, name, src)
-            if calln:type() ~= 'call_expression' then return nil end
-            local me = calln:parent()
-            if not me or me:type() ~= 'member_expression' then return nil end
-            local op
-            for c in me:iter_children() do
-                if c:named() then op = c; break end -- operand = first named child
-            end
-            if not op or op:type() ~= 'identifier' then return nil end
-            local opn = node_text(op, src)
-            local ctx = odin_context(calln, src)
-            local pk = ctx.imports[opn] or (opn == ctx.package and ctx.package or nil)
-            if pk then return pk .. '.' .. name, { rule = 'pkg-qualified' } end
-            return nil
-        end,
-        -- a package-qualified key (`strings.contains`) is exact-or-nothing: the
-        -- package is explicit, so a miss is an honest frontier (external/nested/
-        -- vendored), never a promiscuous bare-tail guess. Bare calls (no dot) still
-        -- take the tail path (same-package reach).
-        exact_only_key = function (name) return name:find('.', 1, true) ~= nil end,
-        -- a package IS a directory (all .odin in a dir share a namespace); bare
-        -- proc names resolve within it, like Go
-        scope = function (file, _)
-            return file:match('^(.*)/[^/]*$') or ''
-        end,
-        entry_names = { main = true },
-        id_fn_refs = false,
-        -- common core/builtin verbs — never absorbed by a project proc
-        stdlib_names = { len = true, cap = true, append = true, make = true,
-            new = true, delete = true, free = true, clone = true, copy = true,
-            print = true, println = true, printf = true, tprintf = true,
-            aprintf = true, format = true, panic = true, assert = true,
-            init = true, destroy = true, reserve = true, resize = true,
-            clear = true, contains = true, get = true, set = true,
-            has_key = true, size_of = true, len_of = true, type_of = true,
-            read = true, write = true, close = true, open = true, next = true,
-            string = true, clone_string = true, to_string = true },
-    },
 }
 
 -- zig's spec (L0+L1) lives in its own module now — the first per-language
@@ -2376,6 +2257,7 @@ M.spec.haskell = require 'cartograph.spec.haskell'
 M.spec.rust = require 'cartograph.spec.rust'
 M.spec.python = require 'cartograph.spec.python'
 M.spec.bash = require 'cartograph.spec.bash'
+M.spec.odin = require 'cartograph.spec.odin' -- 11th module (moved via the move-set flow)
 
 -- typescript is the javascript spec under another parser
 M.spec.typescript = vim.tbl_extend('force', {}, M.spec.javascript)
