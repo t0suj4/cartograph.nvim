@@ -16,4 +16,27 @@ function M.node_text(n, src)
     return src:sub(select(3, n:start()) + 1, select(3, n:end_()))
 end
 
+-- indexed child iteration, replacing TSNode:iter_children() everywhere:
+-- iter_children allocates a TSTreeCursor userdata + a closure PER CALL —
+-- measured 2.7x slower and ~2x more transient garbage than indexed access.
+-- STATELESS iterator (zero alloc), same sequence as iter_children (ALL
+-- children, anonymous tokens included — existing named()/type() guards
+-- filter):  for _, c in tsutil.inext, node, -1 do ... end
+function M.inext(n, i)
+    i = i + 1
+    local c = n:child(i)
+    if c then return i, c end
+end
+
+-- a REFUSAL is a place: when resolution declines to pick, the call keeps the
+-- rule that refused and (capped, sorted — worker == inline) the candidate ids
+-- it refused between, so the browser can descend into the fork, not a dead end.
+function M.refusal(rule, list)
+    if not list or #list == 0 then return { rule = rule } end
+    local ids = {}
+    for i = 1, math.min(#list, 8) do ids[i] = list[i].id end
+    table.sort(ids)
+    return { rule = rule, cands = ids, n = #list }
+end
+
 return M
