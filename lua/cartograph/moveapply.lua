@@ -30,6 +30,23 @@ local function insert_point(lines)
     return last -- 0-based slot just after the last nonblank
 end
 
+-- a `var` moves only when MODULE-LEVEL: a function-local variable is lexically
+-- scoped, and lifting it to another file is meaningless (and unsound). Module-
+-- level = the var's range is not CONTAINED in any function/method node's range
+-- in the same file. (Enables moving module-level constant tables — the spec-
+-- module extraction case, [[cartograph-spec-layering]].)
+local function module_level(store, n)
+    local ns, ne = atr.sl(n.range), atr.el(n.range)
+    for _, f in ipairs(store.data.nodes or {}) do
+        if (f.kind == 'function' or f.kind == 'method')
+            and f.file == n.file and f.id ~= n.id and f.range
+            and atr.sl(f.range) <= ns and atr.el(f.range) >= ne then
+            return false
+        end
+    end
+    return true
+end
+
 -- the shared plan core: collect the staged symbols (kind gate, comment
 -- adhesion, cbarg disclosure), fold in the ImpactEngine's findings as
 -- disclosure hazards, stamp the touched set. Both verbs (move,
@@ -50,9 +67,17 @@ local function collect(store, ids, dest, plan)
     for _, id in ipairs(ids) do
         local n = store.node(id)
         if not n then return nil, 'staged symbol vanished: ' .. tostring(id) end
-        if n.kind ~= 'function' and n.kind ~= 'method' then
-            return nil, ('%s is a %s — only functions and methods move')
-                :format(n.name, n.kind)
+        if n.kind == 'var' then
+            -- module-level constants move (full-declaration range, incl multi-
+            -- line tables); function-local vars do not. References ride the
+            -- ImpactEngine like any symbol (disclosed, not silently rewritten).
+            if not module_level(store, n) then
+                return nil, ('%s is a function-local variable — only module-'
+                    .. 'level constants move'):format(n.name)
+            end
+        elseif n.kind ~= 'function' and n.kind ~= 'method' then
+            return nil, ('%s is a %s — only functions, methods, and module-'
+                .. 'level variables move'):format(n.name, n.kind)
         end
         if n.file == dest then
             return nil, n.name .. ' already lives in ' .. dest
