@@ -65,6 +65,16 @@ local function query_fields(spec)
     return out
 end
 
+-- ── 0. the spec CONTRACT: capability matrix + closed-contract check ──
+-- (corpus-independent, [[cartograph-spec-layering]]) — which capability groups
+-- each language fills (the "N cheap front-ends" metric) + a tripwire for any
+-- spec field not registered in the contract.
+do
+    local contract = require 'cartograph.spec.contract'
+    for _, l in ipairs(contract.matrix_report(ts.spec)) do print(l) end
+    print('')
+end
+
 -- ── 1. compile check: every lang × every query field (corpus-independent) ──
 local confirmed_stale = {}   -- { 'lang field: err' }
 local compiled = {}          -- lang -> { {field, query, captures={names}} }

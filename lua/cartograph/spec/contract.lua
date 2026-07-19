@@ -1,0 +1,157 @@
+-- THE SPEC CONTRACT ([[cartograph-spec-layering]] P1, step 1): the implicit
+-- language-spec interface made EXPLICIT and CLOSED. A spec (M.spec.<lang>) is a
+-- pile of fields the resolver reads; until now the contract was discovered by
+-- reading the 8.9k-line provider, and the singleton tail grew one field per
+-- language with no home (the 30-singleton drift). This registry names every
+-- field, groups it by the CAPABILITY it unlocks (the capability ladder), and —
+-- via M.audit + the contract_spec test — enforces that a spec may NOT introduce
+-- an UNREGISTERED field: a new language either fills an existing slot with
+-- cross-language semantics, or the field is added here (into a group, or QUIRKS
+-- with a generalization note). This is the closed-schema principle applied to
+-- the spec contract, and the basis for the CAPABILITY MATRIX (which groups a
+-- language fills = which engine capabilities it has — the charter's checkable
+-- "N cheap front-ends" metric). PURE DATA — zero behavior; the engine still
+-- reads M.spec directly. Physical spec-module extraction (spec/<lang>.lua) is a
+-- later step this registry defines the target of.
+
+local M = {}
+
+-- The capability ladder: groups in dependency order, each with what filling it
+-- unlocks. CORE is required; everything above CORE is optional capability.
+M.GROUPS = {
+    { name = 'CORE',      unlocks = 'defs / calls / bare-name resolution (the neutral schema)' },
+    { name = 'SCOPE&KEY', unlocks = 'scoped + keyed resolution, receiver keying, the stdlib gate' },
+    { name = 'IMPORTS',   unlocks = 'cross-file binding' },
+    { name = 'TYPES',     unlocks = 'receiver / return / chain / field typing' },
+    { name = 'EMITTERS',  unlocks = 'convention defs (accessors, ctors, ancestors, callbacks)' },
+    { name = 'ANALYSIS',  unlocks = 'flow / df / effects / write-axis / taint' },
+    { name = 'QUIRKS',    unlocks = 'nothing new — quarantined single-language shims (generalize or die)' },
+}
+
+-- field -> group. Grouped in source by capability; the comment IS the doc.
+-- Adding a language field that isn't here MUST fail contract_spec — register
+-- it (with a real cross-language slot) or quarantine it in QUIRKS with a note.
+M.SLOTS = {
+    -- CORE (required by every spec): the neutral-schema minimum
+    exts = 'CORE', functions = 'CORE', calls = 'CORE', is_method = 'CORE',
+    vars = 'CORE',                 -- variable-def capture
+    mention_types = 'CORE',        -- node types that count as call mentions
+    indirect_calls = 'CORE',       -- dispatch-through-value call forms
+
+    -- SCOPE&KEY: how names scope, qualify, key; the stdlib tail gate (until L2)
+    scope = 'SCOPE&KEY', scopes = 'SCOPE&KEY',
+    qualify = 'SCOPE&KEY', qualify_call = 'SCOPE&KEY',
+    alt_keys = 'SCOPE&KEY',        -- extra exact keys for one def (dual-key)
+    exact_only_key = 'SCOPE&KEY',  -- receiver-evidence keys: exact-or-nothing
+    exported_def = 'SCOPE&KEY',    -- visibility (pub/export) detection
+    local_decls = 'SCOPE&KEY',     -- in-fn local bindings (local-shadow gate)
+    id_fn_refs = 'SCOPE&KEY',      -- identifier arg = fn reference (callback)
+    dot_calls_are_methods = 'SCOPE&KEY',
+    hash_qualified = 'SCOPE&KEY',
+    qualified_scope_local = 'SCOPE&KEY',
+    literal_names = 'SCOPE&KEY',   -- literal-name langs (bash): no tail-match
+    stdlib_names = 'SCOPE&KEY',    -- the stdlib vocab gate (L2 profile succeeds it)
+    stdlib_prefixes = 'SCOPE&KEY', -- stdlib namespace-prefix gate
+
+    -- IMPORTS: cross-file binding (the 3-overlapping-mechanism family — a
+    -- consolidation candidate into one `imports` contract, spec-layering)
+    resolve_import = 'IMPORTS', import_query = 'IMPORTS',
+    import_call = 'IMPORTS', import_bind = 'IMPORTS', import_line = 'IMPORTS',
+    import_pats = 'IMPORTS', import_call_like = 'IMPORTS', scan_imports = 'IMPORTS',
+
+    -- TYPES: receiver / return / chain / field typing (the D-measurement's
+    -- local-inference rung lands here)
+    chain_root = 'TYPES', chain_type = 'TYPES', scan_fields = 'TYPES',
+    fields = 'TYPES', def_ret = 'TYPES', fn_types = 'TYPES',
+    recv_local = 'TYPES', litdata_types = 'TYPES',
+    dynamic_callee_types = 'TYPES', smt_query = 'TYPES',
+
+    -- EMITTERS: convention defs synthesized from the tree (the `scans` family —
+    -- one named-fact-stream slot when touched, spec-layering)
+    synth_defs = 'EMITTERS', cbarg_def = 'EMITTERS', cbarg_within = 'EMITTERS',
+    field_fn_cbarg = 'EMITTERS', scan_ctors = 'EMITTERS',
+    scan_ancestors = 'EMITTERS', scan_super = 'EMITTERS',
+    scan_bare_calls = 'EMITTERS', ctor_query = 'EMITTERS',
+    super_query = 'EMITTERS', iface_query = 'EMITTERS', interface = 'EMITTERS',
+    aperture_query = 'EMITTERS',
+
+    -- ANALYSIS: flow / df / effects semantics
+    is_write = 'ANALYSIS', write_gate = 'ANALYSIS', guards = 'ANALYSIS',
+    module_effects = 'ANALYSIS', dataflow = 'ANALYSIS', regime = 'ANALYSIS',
+    df_ids = 'ANALYSIS', merge_equations = 'ANALYSIS',
+    params_field = 'ANALYSIS', body_field = 'ANALYSIS',
+    string_sinks = 'ANALYSIS',
+
+    -- QUIRKS (quarantine): single-language shims. Rule — each carries a comment
+    -- naming its generalization candidate, or it shouldn't be here.
+    torn_by_node = 'QUIRKS',     -- node-local tearing after a parse error
+    toplevel_only = 'QUIRKS', toplevel_parent = 'QUIRKS', is_top = 'QUIRKS',
+    block_container = 'QUIRKS',  -- grammar shape → coarse-region container
+    block_skip = 'QUIRKS', call_skip = 'QUIRKS', call_skip_within = 'QUIRKS',
+    skip_call = 'QUIRKS',        -- parse-level call filters (grammar noise)
+    entry_names = 'QUIRKS',      -- entry points → belongs in L4 project overlay
+}
+
+-- The audit: classify a spec table's fields against the registry. Returns
+-- per-language { filled = {group -> true}, slots = {field -> true},
+-- unknown = {fields not in the registry} } — unknown ~= {} is a CLOSED-CONTRACT
+-- violation (a field the engine reads that this contract doesn't name).
+function M.audit(spec)
+    local out = {}
+    for lang, s in pairs(spec) do
+        local rec = { filled = {}, slots = {}, unknown = {} }
+        for field in pairs(s) do
+            -- skip `_`-prefixed keys: runtime memoization caches (e.g.
+            -- spec._defs_query, lazily compiled at extract) — implementation
+            -- detail, NOT authored contract claims. The closed contract governs
+            -- authored fields only.
+            if field:sub(1, 1) ~= '_' then
+                local g = M.SLOTS[field]
+                if g then
+                    rec.slots[field] = true
+                    rec.filled[g] = true
+                else
+                    rec.unknown[#rec.unknown + 1] = field
+                end
+            end
+        end
+        table.sort(rec.unknown)
+        out[lang] = rec
+    end
+    return out
+end
+
+-- The CAPABILITY MATRIX as report lines: language × capability group, ● filled
+-- / · empty. The measurable "N cheap front-ends" surface + a closed-contract
+-- tripwire (any unknown field is flagged loudly).
+function M.matrix_report(spec)
+    local audit = M.audit(spec)
+    local langs = {}
+    for l in pairs(audit) do langs[#langs + 1] = l end
+    table.sort(langs)
+    local hdr = { ('%-12s'):format('language') }
+    for _, g in ipairs(M.GROUPS) do hdr[#hdr + 1] = ('%-10s'):format(g.name) end
+    local lines = { 'spec capability matrix — group filled (● / ·):', '',
+        table.concat(hdr, ' ') }
+    local anyunknown = {}
+    for _, l in ipairs(langs) do
+        local rec = audit[l]
+        local row = { ('%-12s'):format(l) }
+        for _, g in ipairs(M.GROUPS) do
+            row[#row + 1] = ('%-10s'):format(rec.filled[g.name] and '●' or '·')
+        end
+        lines[#lines + 1] = table.concat(row, ' ')
+        if #rec.unknown > 0 then
+            anyunknown[#anyunknown + 1] = ('  %s: %s'):format(l,
+                table.concat(rec.unknown, ', '))
+        end
+    end
+    if #anyunknown > 0 then
+        lines[#lines + 1] = ''
+        lines[#lines + 1] = 'UNREGISTERED FIELDS (closed-contract violation — register or quarantine):'
+        for _, l in ipairs(anyunknown) do lines[#lines + 1] = l end
+    end
+    return lines
+end
+
+return M
