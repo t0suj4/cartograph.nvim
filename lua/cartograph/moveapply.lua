@@ -93,7 +93,8 @@ local function collect(store, ids, dest, plan)
         end
         plan.moves[#plan.moves + 1] = { id = id, name = n.name, file = n.file,
             lines = { s = s, e = atr.el(n.range) },
-            ref = store.ref_of(id) }
+            ref = store.ref_of(id),
+            mode = (plan.copy and plan.copy[id]) and 'copy' or 'move' }
         touched[n.file] = true
         if header then
             plan.hazards[#plan.hazards + 1] = ('the comment block above %s'
@@ -106,6 +107,23 @@ local function collect(store, ids, dest, plan)
                 .. ' rewritten'):format(n.name)
         end
     end
+    -- ORDERED review + valid dest layout: lay the move-set out in SOURCE order
+    -- (which compiles — deps precede dependents there), so the extracted module
+    -- is load-valid and the review reads top-to-bottom like the original.
+    table.sort(plan.moves, function (a, b)
+        if a.file ~= b.file then return a.file < b.file end
+        return a.lines.s < b.lines.s
+    end)
+    -- COPY entries duplicate a symbol into dest while leaving the original —
+    -- disclose it (the two copies drift independently).
+    for _, m in ipairs(plan.moves) do
+        if m.mode == 'copy' then
+            plan.hazards[#plan.hazards + 1] = ('%s is COPIED (the original stays'
+                .. ' in %s) — the two copies must be kept in sync by hand')
+                :format(m.name, m.file)
+        end
+    end
+
     -- the ImpactEngine's analysis: WRITE what is provably complete,
     -- disclose the rest. A caller site rewrites only when its token is
     -- exactly <srcAlias>.<name> (the alias its import BINDS) and a dest
@@ -141,7 +159,9 @@ local function collect(store, ids, dest, plan)
     local imports, rw_left = {}, {} -- per-file: planned import / leftovers
     for _, m in ipairs(plan.moves) do
         local tailname = m.name:match('([%w_]+)$')
-        for _, c in ipairs(store.calls_to[m.id] or {}) do
+        -- a COPY leaves the original in place, so its callers must NOT be
+        -- requalified — they keep resolving to the still-present source symbol.
+        for _, c in ipairs((m.mode ~= 'copy') and store.calls_to[m.id] or {}) do
             local F = c.file
             if F ~= dest and not (c.fn and in_move[c.fn]) then
                 local ls = file_lines(F)
@@ -239,18 +259,53 @@ end
 --- Build the EXTRACT-MODULE plan: the staged move-set leaves for a
 --- file that does not exist yet. The destination is created from a
 --- language header plus the moved text; its undo is deletion.
-function M.plan_extract(store, relpath)
+function M.plan_extract(store, relpath, opts)
     local ids = store.staged_ids()
     if #ids == 0 then
         return nil, 'nothing staged — dd cuts a function into the move-set'
     end
-    return M.plan_extract_ids(store, ids, relpath)
+    return M.plan_extract_ids(store, ids, relpath, opts)
+end
+
+--- Close a move-set: seed ids → the full self-contained cluster (seed + every
+--- PRIVATE same-file capture, transitively — the fixpoint of the capture
+--- analysis). A "private" capture is referenced only from within the move;
+--- SHARED captures (used by staying code too) are LEFT OUT — they are a
+--- require/copy decision, not something to silently swallow. The result is
+--- ordered by (file, source line) so the extracted module lays out deps before
+--- dependents (the source already compiles in that order). "Move X and
+--- everything it needs" as one call; the residual SHARED captures ride the
+--- eventual plan as hazards for the human to require-or-copy.
+function M.close_moveset(store, seed, dest)
+    local impact = require 'cartograph.impact'
+    local set, inset = {}, {}
+    for _, id in ipairs(seed or {}) do
+        if not inset[id] then inset[id] = true; set[#set + 1] = id end
+    end
+    for _ = 1, 200 do -- bounded fixpoint; the private-capture set only grows
+        local added = false
+        for _, c in ipairs(impact.compute(store, set, dest).captures or {}) do
+            if c.private and not inset[c.id] then
+                inset[c.id] = true; set[#set + 1] = c.id; added = true
+            end
+        end
+        if not added then break end
+    end
+    table.sort(set, function (a, b)
+        local na, nb = store.node(a), store.node(b)
+        if not (na and nb and na.range and nb.range) then
+            return tostring(a) < tostring(b)
+        end
+        if na.file ~= nb.file then return na.file < nb.file end
+        return atr.sl(na.range) < atr.sl(nb.range)
+    end)
+    return set
 end
 
 --- plan_extract from an EXPLICIT id set (not the staged move-set) — the seam the
 --- inter-untangle handoff uses to plan a function CLUSTER into a new module
 --- without touching the live staging. Read-only (builds a plan; apply mutates).
-function M.plan_extract_ids(store, ids, relpath)
+function M.plan_extract_ids(store, ids, relpath, opts)
     if not ids or #ids == 0 then return nil, 'no functions to extract' end
     relpath = (relpath or ''):gsub('^%s+', ''):gsub('%s+$', '')
     if relpath == '' then
@@ -273,6 +328,7 @@ function M.plan_extract_ids(store, ids, relpath)
         dest = relpath, creates = { [relpath] = true }, dest_at = 0,
         header = okp and ts.file_header(relpath) or {},
         moves = {}, hazards = {}, stamps = {}, touched = {},
+        copy = (opts and opts.copy) or {}, -- id set: leave the original, don't rewrite
     }
     if okp and ts.lang_of(relpath) == 'go' then
         plan.hazards[#plan.hazards + 1] = relpath
@@ -299,17 +355,21 @@ function M.apply(store, plan)
         return nil, 'the move-set changed since planning — re-run :CartographMove'
     end
     local txn = require 'cartograph.txn'
-    local refspecs = {}
+    -- every move-set entry's span is READ (to paste into dest), so all are
+    -- verified; but only MOVE entries DEPART the graph — a COPY leaves its
+    -- original in place, so it is not in the executed move set.
+    local refspecs, departed = {}, {}
     for _, m in ipairs(plan.moves) do
         refspecs[#refspecs + 1] = { id = m.id, name = m.name,
             ref = m.ref, what = 'move' }
+        if m.mode ~= 'copy' then departed[#departed + 1] = m.ref end
     end
     local bad = txn.verify(store, plan, refspecs)
     if bad then return nil, bad end
     -- consumed: the splice after the writes must not see a frozen graph
     store.clear_stage()
     return txn.execute(store, plan, {
-        moves = vim.tbl_map(function (m) return m.ref end, plan.moves),
+        moves = departed,
         dest = plan.dest,
     }, M.edits_for(plan))
 end
@@ -367,7 +427,8 @@ function M.edits_for(plan)
             -- through the shared editor
             local dels, reps, ins = {}, {}, {}
             for _, m in ipairs(plan.moves) do
-                if m.file == rel then dels[#dels + 1] = m.lines end
+                -- a COPY does not cut the original; only MOVE entries depart
+                if m.file == rel and m.mode ~= 'copy' then dels[#dels + 1] = m.lines end
             end
             for _, r in ipairs(plan.rewrites or {}) do
                 if r.file == rel then reps[#reps + 1] = r end

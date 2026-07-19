@@ -192,14 +192,31 @@ function M.compute(store, moveset, dest)
             consider(vu.to)
         end
     end
-    local capkeys = {}
+    local capkeys, caps = {}, {}
     for depid in pairs(captured) do capkeys[#capkeys + 1] = depid end
     table.sort(capkeys, function (a, b) return captured[a].name < captured[b].name end)
     for _, depid in ipairs(capkeys) do
         local c = captured[depid]
-        warn('capture', ('%s (file-local in %s) is referenced by the move-set'
-            .. ' but stays behind — move it too, or wire it into the extracted'
-            .. ' module'):format(c.name, c.file))
+        -- PRIVATE = every referrer travels with the move (all in `travels`) → it
+        -- is cluster-private, safe to pull in. SHARED = referenced by staying
+        -- code too → moving it would break the stayer; require or copy instead.
+        -- (Referrers may be nested nodes, hence the `travels` test, not the set.)
+        local private = true
+        for _, r in ipairs(store.usedby[depid] or {}) do
+            if not travels[r] then private = false; break end
+        end
+        if private and store.var_usedby then
+            for _, vu in ipairs(store.var_usedby[depid] or {}) do
+                if not travels[vu.from] then private = false; break end
+            end
+        end
+        caps[#caps + 1] = { id = depid, name = c.name, file = c.file, private = private }
+        warn('capture', private
+            and ('%s (file-local in %s, private to the move) is referenced but'
+                .. ' stays behind — add it to the move-set'):format(c.name, c.file)
+            or ('%s (file-local in %s, shared with staying code) is referenced'
+                .. ' — require it, or copy it into the extracted module')
+                :format(c.name, c.file))
     end
 
     return {
@@ -208,6 +225,7 @@ function M.compute(store, moveset, dest)
         requires_add = sorted_keys(add),
         dest_requires = dest_requires,
         hazards = hazards,
+        captures = caps, -- structured {id,name,file} — the move-set-closure seed
     }
 end
 

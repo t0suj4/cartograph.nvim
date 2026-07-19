@@ -33,7 +33,7 @@ local FIXTURE = table.concat({
     '    return scratch',
     'end',
     '',
-    'return { helper = helper, CFG = CFG }',
+    'return { helper = helper }', -- CFG is NOT re-exported: private to helper
 }, '\n')
 
 local function node_by(st, name, kind)
@@ -78,4 +78,44 @@ test('moveapply: functions still move (regression)', function ()
     ok(helper, 'helper captured')
     local plan = moveapply.plan_extract_ids(st, { helper.id }, 'sub/h.lua')
     ok(plan and #plan.moves >= 1, 'function extract-module still plans')
+end)
+
+test('moveapply: close_moveset pulls in a PRIVATE captured constant, ordered', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local helper = node_by(st, 'helper', 'function')
+    local cfg = node_by(st, 'CFG', 'var')
+    local set = moveapply.close_moveset(st, { helper.id }, 'sub/m.lua')
+    local has = {}
+    for _, id in ipairs(set) do has[id] = true end
+    ok(has[cfg.id], 'CFG (private, read only by helper) was pulled into the set')
+    -- ordered by source line: CFG (line 1) precedes helper (line ~6)
+    eq(cfg.id, set[1])
+end)
+
+test('moveapply: plan lays moves out in SOURCE order', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local helper = node_by(st, 'helper', 'function')
+    local cfg = node_by(st, 'CFG', 'var')
+    -- pass helper BEFORE cfg; the plan must still order them by source line
+    local plan = moveapply.plan_extract_ids(st, { helper.id, cfg.id }, 'sub/m.lua')
+    eq('CFG', plan.moves[1].name)   -- line 1
+    eq('helper', plan.moves[2].name) -- line ~6
+end)
+
+test('moveapply: COPY leaves the original + discloses duplication', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local helper = node_by(st, 'helper', 'function')
+    local cfg = node_by(st, 'CFG', 'var')
+    local plan = moveapply.plan_extract_ids(st, { helper.id, cfg.id }, 'sub/m.lua',
+        { copy = { [cfg.id] = true } })
+    local cfgmove
+    for _, m in ipairs(plan.moves) do if m.name == 'CFG' then cfgmove = m end end
+    eq('copy', cfgmove.mode)
+    eq('move', (function () for _, m in ipairs(plan.moves) do if m.name == 'helper' then return m.mode end end end)())
+    local dup = false
+    for _, h in ipairs(plan.hazards) do if h:find('CFG is COPIED') then dup = true end end
+    ok(dup, 'duplication disclosed')
 end)
