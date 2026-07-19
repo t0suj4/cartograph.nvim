@@ -68,6 +68,9 @@ M.CALL_FIELDS = {
     bare = true, -- a bare no-paren call surfaced by scan_bare_calls (ruby)
     superx = true, -- ruby `super`: {cls,member,sing} → ancestor's method (R4)
     recv = true, -- identifier-receiver local name (`x.foo`): additive ctor-typing (R5)
+    chainty = true, -- multi-level chain `root.Type.method()`: the PascalCase
+                    -- penultimate segment (the method's TYPE), for the additive
+                    -- chain post-pass (resolve_chain_type, zig v84)
     conf = true, -- runtime-confirmed tier (session-live overlay)
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
 }

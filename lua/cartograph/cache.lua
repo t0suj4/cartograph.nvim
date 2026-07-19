@@ -19,7 +19,17 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 83 -- v83: ZIG VALUE-RECEIVER DUAL-KEY. A top-level value-receiver
+M.VERSION = 84 -- v84: ZIG MULTI-LEVEL CHAIN TYPE. A chained call
+               -- `root.Type.method()` (e.g. `link.File.open`, `Mir.Memory.encode`)
+               -- names its method in the PascalCase segment right before it (the
+               -- type namespace), persisted as c.chainty. resolve_chain_type (an
+               -- ADDITIVE, unresolved-only post-pass) keys exact[Type.method] and
+               -- fills only the cross-file chains the bare-tail path left
+               -- unresolved (same-file chains already resolve; instance chains
+               -- `l.field.method` carry no chainty → untouched, need field-typing).
+               -- MEASURED +66 resolved (41.71→41.76%), 0 lost, 0 changed — purely
+               -- additive. c.chainty declared in validate.CALL_FIELDS.
+               -- v83: ZIG VALUE-RECEIVER DUAL-KEY. A top-level value-receiver
                -- method (`fn eql(self: Foo)` / `fn setExtra(symbol: Symbol)`)
                -- keeps its bare same-file reach AND gains a `Foo.eql` exact key
                -- (spec.alt_keys) so a POINTER-typed receiver call (`p.eql()`,

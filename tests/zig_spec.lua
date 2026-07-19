@@ -173,6 +173,47 @@ test('zig @import: a lowercase alias resolves too (receiver preserved)', functio
     vim.fn.delete(root, 'rf')
 end)
 
+test('zig chain: root.Type.method() resolves cross-file via the chain post-pass', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'lib.zig', {
+        'pub const Thing = struct {',
+        '    pub fn run(self: Thing) void { _ = self; }',
+        '};',
+        'pub const Other = struct {',
+        '    pub fn run(self: Other) void { _ = self; }',   -- same method, DIFFERENT type
+        '};',
+    })
+    write(root, 'main.zig', {
+        'const lib = @import("lib.zig");',
+        'pub fn go(t: lib.Thing) void {',
+        '    lib.Thing.run(t);',   -- chain: bare `run` is ambiguous, `Thing.run` is unique
+        '}',
+    })
+    local by, calls = extract(root)
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'run' then hit = c end end
+    ok(hit and hit.to == by['Thing.run'].id,
+        'lib.Thing.run(t) resolved to lib.zig::Thing.run via the chain type')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('zig chain: an instance chain (lowercase penult) carries no chainty', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'inst.zig', {
+        'pub fn go(x: anytype) void {',
+        '    x.data.process();',   -- lowercase penult `data` → field, not a type
+        '}',
+    })
+    local _, calls = extract(root)
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'process' then hit = c end end
+    ok(hit and not hit.chainty,
+        'x.data.process() (lowercase penult) is left for field-typing — no chainty')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('zig: pub fn is exported, plain fn is not', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')

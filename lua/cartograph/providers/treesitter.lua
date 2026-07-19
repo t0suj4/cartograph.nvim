@@ -3467,6 +3467,12 @@ M.spec = {
             local fe = calln:field('function')[1]
             if not fe or fe:type() ~= 'field_expression' then return nil end
             local obj = fe:field('object')[1]
+            -- a multi-level chain `root.Type.method()` (obj is itself a
+            -- field_expression) is NOT keyed here: it already resolves via the
+            -- bare-tail + same-file path, and diverting it to an exact-only
+            -- `Type.method` key LOSES those same-file hits on a miss. The
+            -- cross-file chains (bare tail refuses) are upgraded additively by
+            -- resolve_chain_type (a post-pass, unresolved-only).
             if not obj or obj:type() ~= 'identifier' then return nil end
             local recv = node_text(obj, src)
             if recv:match('^%u') then -- PascalCase receiver = the type itself
@@ -3532,6 +3538,24 @@ M.spec = {
             local obj = fe:field('object')[1]
             if obj and obj:type() == 'identifier' then
                 return node_text(obj, src)
+            end
+        end,
+        -- multi-level chain type: `root.Type.method()` — the segment right
+        -- before the method (this field_expression's object's member). When
+        -- PascalCase it names the method's TYPE namespace (`link.File.open` →
+        -- File), persisted as c.chainty for the additive chain post-pass
+        -- (resolve_chain_type). A lowercase penult (`l.air_instructions.items`)
+        -- is an instance field → left nil (needs field-type inference).
+        chain_type = function (calln, src)
+            if calln:type() ~= 'call_expression' then return nil end
+            local fe = calln:field('function')[1]
+            if not fe or fe:type() ~= 'field_expression' then return nil end
+            local obj = fe:field('object')[1]
+            if not obj or obj:type() ~= 'field_expression' then return nil end
+            local pmem = obj:field('member')[1]
+            if pmem and pmem:type() == 'identifier' then
+                local ty = node_text(pmem, src)
+                if ty:match('^%u') then return ty end
             end
         end,
     },
@@ -4422,6 +4446,42 @@ local function resolve_module_alias(calls, edges, exact, tail, addref, node_inde
                         n = n + 1
                     end
                 end
+            end
+        end
+    end
+    return n
+end
+
+-- MULTI-LEVEL CHAIN TYPE ([[cartograph-zig-arc]]): a chained call
+-- `root.Type.method()` names its method in the PascalCase segment right before
+-- it (c.chainty — a TYPE namespace, e.g. `link.File.open` → File). ADDITIVE and
+-- unresolved-only: same-file chains already resolve via the bare-tail path, so
+-- this only fills chains the tail LEFT UNRESOLVED (cross-file: bare `open` is
+-- ambiguous, but `File.open` is unique). Sound — the type is explicit in the
+-- source, keyed exact, and filled only on a UNIQUE fit (else left refused,
+-- honest). Instance chains (`l.field.method`, lowercase penult) carry no
+-- chainty → untouched (they need struct field-type inference, a separate arc).
+local function resolve_chain_type(calls, exact, addref, node_index)
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        if not c.to and c.chainty and c.callee then
+            local key = c.chainty .. '.' .. c.callee
+            local fit, dup = nil, false
+            for _, nd in ipairs(exact[key] or {}) do
+                if nd.kind == 'function' or nd.kind == 'method' then
+                    if fit and fit.id ~= nd.id then dup = true else fit = nd end
+                end
+            end
+            if fit and not dup then
+                c.to = fit.id
+                c.inferred = true
+                c.refused = nil
+                if c.fn then
+                    addref(c.fn, fit.id, c.at
+                        or { start = { line = c.line, char = 0 },
+                            ['end'] = { line = c.line, char = 0 } }, true)
+                end
+                n = n + 1
             end
         end
     end
@@ -7290,6 +7350,12 @@ function M.extract(root, opts)
                         -- ADDITIVE ctor-typing (rescoped R5). `full` stays bare
                         -- so the file-local heuristic is untouched.
                         recv = spec.recv_local and spec.recv_local(calln, src) or nil,
+                        -- multi-level chain `root.Type.method()`: the PascalCase
+                        -- segment right before the method (its type namespace),
+                        -- persisted for the additive chain post-pass. Bare `full`
+                        -- untouched, so the same-file tail path (which already
+                        -- resolves same-file chains) is unchanged.
+                        chainty = spec.chain_type and spec.chain_type(calln, src) or nil,
                         top = is_top or nil }
                     calls[#calls + 1] = c
                     local indirect = (spec.indirect_calls or {})[callee]
@@ -8028,6 +8094,9 @@ function M.extract(root, opts)
     -- (rung-1 receiver resolution) — before the return rounds, so a resolved
     -- module call can be a determining call for a receiver-typed chain
     resolve_module_alias(calls, data.edges, exact, tail, addref, node_index)
+    -- multi-level chain type: `root.Type.method()` → Type.method (additive,
+    -- fills only cross-file chains the bare-tail path left unresolved)
+    resolve_chain_type(calls, exact, addref, node_index)
 
     -- string-keyed registry (stage 3): LibStub("X")/:GetModule("Y") → the
     -- :NewLibrary/:NewModule-registered table, scoped to the addon (.toc).
@@ -8481,6 +8550,8 @@ function M.relink(data, touched)
     n = n + resolve_super(data.calls, data.extends, exact, addref, node_index)
     -- module-alias (rung-1 receiver resolution + binding-over-name-match), as extract
     n = n + resolve_module_alias(data.calls, data.edges, exact, tail, addref, node_index)
+    -- multi-level chain type (root.Type.method → Type.method), as extract
+    n = n + resolve_chain_type(data.calls, exact, addref, node_index)
     -- and the return-type rounds, for the same parity (cross-chunk chains:
     -- a worker slice may hold the chain but not the determining target)
     -- string-keyed registry (stage 3), same parity as extract

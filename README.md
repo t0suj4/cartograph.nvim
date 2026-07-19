@@ -393,7 +393,12 @@ callers). Ariadne's thread, in text.
      value-receiver method (unique cross-file → resolves; same-named across
      modules → honest ambiguous-refuse). The receiver signal (param named `self`
      or the lowercased type) dodges the constructor trap (`init(gpa: Allocator)`
-     is not a method of `Allocator`).
+     is not a method of `Allocator`). A multi-level chain
+     `root.Type.method()` (`link.File.open`, `Mir.Memory.encode`) resolves through
+     its PascalCase penultimate segment — the method's type namespace — via an
+     additive post-pass that fills only the cross-file chains the same-file tail
+     path left unresolved (an *instance* chain like `x.field.method()`, with a
+     lowercase penultimate, is left for struct field-type inference).
      TypeScript parses under its own tree-sitter grammar (a JS superset) for
      both extraction *and* the on-demand analysis lenses, but resolves under
      the JavaScript spec — so `.ts` and `.js` are one language family (the way
