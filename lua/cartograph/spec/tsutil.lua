@@ -39,4 +39,38 @@ function M.refusal(rule, list)
     return { rule = rule, cands = ids, n = #list }
 end
 
+-- ── guard substrate ──────────────────────────────────────────────────────
+-- Shared by the language `guards` specs (lua, php, …) AND the engine's generic
+-- guard machinery. Grammar-agnostic node predicates; each language's GUARDS
+-- table wires them into its own set-once/presence/absence tests. Lives here
+-- (not the engine) so a spec module can require them without a require cycle.
+
+-- whitespace-stripped node text, for the rare longer-span comparison fallback
+local function ntext(x, src) return (M.node_text(x, src):gsub('%s', '')) end
+
+-- text-equality of a node's source span against a target `chain` string,
+-- span-length-gated (most comparisons reject on a cheap byte-length check).
+-- A longer span falls back to whitespace-insensitive compare (format variance).
+function M.chain_eq(x, src, chain)
+    local d = select(3, x:end_()) - select(3, x:start())
+    if d < #chain then return false end
+    if d == #chain then return M.node_text(x, src) == chain end
+    return ntext(x, src) == chain -- longer: whitespace variance, rare
+end
+
+-- anonymous nodes' type() IS their literal text: no string extraction
+function M.optext_is(n, _, want)
+    for i = 0, n:child_count() - 1 do
+        local ch = n:child(i)
+        if not ch:named() and want[ch:type()] then return true end
+    end
+    return false
+end
+
+-- descend through parenthesized wrappers to the inner expression
+function M.unparen(n)
+    while n and n:type() == 'parenthesized_expression' do n = n:named_child(0) end
+    return n
+end
+
 return M
