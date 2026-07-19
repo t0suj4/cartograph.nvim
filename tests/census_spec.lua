@@ -61,3 +61,44 @@ test('census: the report ranks refusal rules by count', function ()
     ok(lines:find('m.lua:3 h'), 'sample site (1-based line)')
     ok(lines:find('frontier: 1 unparsed'), 'frontier counted')
 end)
+
+test('census: disp() gives every call exactly one total disposition', function ()
+    eq('resolved', census.disp({ to = 'g' }))
+    -- to wins over everything else present
+    eq('resolved', census.disp({ to = 'g', refused = { rule = 'x' } }))
+    local d, why = census.disp({ refused = { rule = 'ambiguous' } })
+    eq('refused', d); eq('ambiguous', why)
+    eq('dynamic', census.disp({ dynamic = true }))
+    d, why = census.disp({ ext = { disp = 'external', why = 'vocab' } })
+    eq('external', d); eq('vocab', why)
+    d, why = census.disp({ ext = { disp = 'noise', why = 'short' } })
+    eq('noise', d); eq('short', why)
+    d, why = census.disp({}) -- silent, untagged (indirect/traced)
+    eq('external', d); eq('unknown', why)
+end)
+
+test('census: the outside bucket breaks the silent lump down by gate', function ()
+    local c = census.take({
+        nodes = {}, edges = {},
+        calls = {
+            { to = 'g' },                                    -- resolved
+            { ext = { disp = 'external', why = 'vocab' } },  -- stdlib name
+            { ext = { disp = 'external', why = 'vocab' } },
+            { ext = { disp = 'external', why = 'no-def' } }, -- no def anywhere
+            { ext = { disp = 'noise', why = 'short' } },     -- noise floor
+            { dynamic = true },                              -- $fn()
+            {},                                              -- untagged
+        },
+    })
+    eq(6, c.calls.unresolved)
+    eq(2, c.calls.outside.by_why['vocab'])
+    eq(1, c.calls.outside.by_why['no-def'])
+    eq(1, c.calls.outside.by_why['short'])
+    eq(1, c.calls.outside.by_why['unknown'])
+    eq(1, c.calls.outside.by_disp['dynamic'])
+    eq(4, c.calls.outside.by_disp['external']) -- 2 vocab + no-def + unknown
+    eq(1, c.calls.outside.by_disp['noise'])
+    local lines = table.concat(census.report({ nodes = {}, edges = {},
+        calls = { { ext = { disp = 'external', why = 'vocab' } } } }), '\n')
+    ok(lines:find('outside by gate: vocab 1'), 'gate breakdown line')
+end)

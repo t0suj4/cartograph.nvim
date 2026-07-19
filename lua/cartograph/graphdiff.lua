@@ -8,7 +8,14 @@
 
 local M = {}
 
--- trust signature of an edge: which honesty tier it sits on (order-stable)
+-- trust signature of an edge for the structural diff: which honesty tier it
+-- sits on (order-stable). This is a deliberate COARSENING of the canonical
+-- ladder ([[cartograph.tier]]): it omits conf (runtime — never in a static
+-- extract) and tinf (typed) so the signature stays STABLE against the stored
+-- snapshot format, which predates those flags. Routing this through tier.of()
+-- — surfacing tinf/conf trust in the diff — is a real improvement, but it
+-- reddens every typed-bearing corpus and so is gated on a deliberate snapshot
+-- re-baseline (roadmap P0.3), NOT a free change to fold into an additive bump.
 local function esig(e)
     return (e.proven and 'proven' or e.xlang and 'xlang'
         or e.inferred and '~' or 'matched')

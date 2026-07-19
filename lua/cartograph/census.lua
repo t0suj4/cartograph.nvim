@@ -5,9 +5,25 @@
 -- for every oracle pass. take() is the programmatic face (the calibration
 -- flywheel reads counts, not prose); report() renders it.
 
+local tier = require 'cartograph.tier'
+
 local M = {}
 
 local SAMPLES = 3 -- example sites kept per refusal rule
+
+--- The TOTAL disposition of a call — exactly one of resolved / refused /
+--- dynamic / external / noise ([[cartograph-graph-improvements]] #1). Returns
+--- (disp, why): refused → why is the refusal rule; external / noise → why is
+--- the gate that placed it outside (vocab / prefix / exact-key / no-def /
+--- short); 'unknown' = a silent path not yet tagged (indirect / traced). This
+--- is the one reading the D-census + specaudit gap detection query against.
+function M.disp(call)
+    if call.to then return 'resolved' end
+    if call.refused then return 'refused', call.refused.rule end
+    if call.dynamic then return 'dynamic' end
+    if call.ext then return call.ext.disp, call.ext.why end
+    return 'external', 'unknown'
+end
 
 --- Structured counts over a neutral-schema data table.
 function M.take(data)
@@ -17,7 +33,10 @@ function M.take(data)
             ref = { confirmed = 0, proven = 0, xlang = 0, typed = 0,
                 inferred = 0, matched = 0 } },
         calls = { total = 0, resolved = 0, refused = 0, unresolved = 0,
-            hedged = 0, rules = {} },
+            hedged = 0, rules = {},
+            -- the "outside the corpus" bucket, no longer a silent lump:
+            -- by disposition (external/noise/dynamic) and by the gate (why)
+            outside = { by_disp = {}, by_why = {} } },
     }
     for _, n in ipairs(data.nodes or {}) do
         c.nodes.total = c.nodes.total + 1
@@ -28,10 +47,8 @@ function M.take(data)
         c.edges.total = c.edges.total + 1
         c.edges.by_kind[e.kind] = (c.edges.by_kind[e.kind] or 0) + 1
         if e.kind == 'ref' then
-            local tier = e.conf and 'confirmed' or e.proven and 'proven'
-                or e.xlang and 'xlang' or e.tinf and 'typed'
-                or e.inferred and 'inferred' or 'matched'
-            c.edges.ref[tier] = c.edges.ref[tier] + 1
+            local t = tier.of(e)
+            c.edges.ref[t] = c.edges.ref[t] + 1
         end
     end
     for _, call in ipairs(data.calls or {}) do
@@ -51,8 +68,13 @@ function M.take(data)
             end
         else
             -- no target, no refusal: a name the corpus simply doesn't define
-            -- (stdlib/vendor) — outside the graph, not a broken promise
+            -- (stdlib/vendor) — outside the graph, not a broken promise. The
+            -- resolver's disposition says WHICH gate placed it there.
             c.calls.unresolved = c.calls.unresolved + 1
+            local disp, why = M.disp(call)
+            local o = c.calls.outside
+            o.by_disp[disp] = (o.by_disp[disp] or 0) + 1
+            if why then o.by_why[why] = (o.by_why[why] or 0) + 1 end
         end
     end
     return c
@@ -96,6 +118,23 @@ function M.report(data)
                 c.calls.hedged > 0
                     and (' · hedged %d'):format(c.calls.hedged) or ''),
     }
+    if c.calls.unresolved > 0 then
+        -- the silent-gate hole, opened: which gate placed each call outside.
+        -- 'unknown' = the resolver didn't tag it (indirect/traced dispatch)
+        local order = { 'vocab', 'prefix', 'exact-key', 'no-def', 'short',
+            'unknown' }
+        local parts = {}
+        for _, w in ipairs(order) do
+            local n = c.calls.outside.by_why[w]
+            if n then parts[#parts + 1] = ('%s %d'):format(w, n) end
+        end
+        local dyn = c.calls.outside.by_disp.dynamic
+        if dyn then parts[#parts + 1] = ('dynamic %d'):format(dyn) end
+        if #parts > 0 then
+            lines[#lines + 1] = ('  outside by gate: %s')
+                :format(table.concat(parts, ' · '))
+        end
+    end
     if c.nodes.unparsed > 0 then
         lines[#lines + 1] = ('frontier: %d unparsed landing node(s)')
             :format(c.nodes.unparsed)

@@ -32,9 +32,12 @@ function M.slim(data)
     end
     for i, c in ipairs(data.calls or {}) do
         calls[i] = { file = c.file, line = c.line, callee = c.callee,
-            full = c.full, fn = c.fn, to = c.to,
+            full = c.full, fn = c.fn, to = c.to, dynamic = c.dynamic or nil,
             hedge = c.hedge and { rule = c.hedge.rule } or nil,
-            refused = c.refused and { rule = c.refused.rule, n = c.refused.n } or nil }
+            refused = c.refused and { rule = c.refused.rule, n = c.refused.n } or nil,
+            -- the call disposition ([[cartograph-graph-improvements]] #1) so
+            -- the D-census / specaudit gap query reads it off the snapshot
+            ext = c.ext and { disp = c.ext.disp, why = c.ext.why } or nil }
     end
     return { schema = data.schema, root = data.root, provider = data.provider,
         nodes = nodes, edges = edges, calls = calls }

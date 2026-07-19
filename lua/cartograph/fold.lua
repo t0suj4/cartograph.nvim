@@ -28,7 +28,11 @@ M.PRED_NAME = { [0] = 'ref', 'use', 'reg', 'import', 'refused' }
 -- the FLAGS column (u8/row): the honesty model, folded — and the VM's write
 -- medium ([[graph-vm-type-resolution]]). WITHOUT it a confident edge and a
 -- name-matched ~ hypothesis are indistinguishable, and invariant #3 (uniform
--- honesty) dies at the fold boundary. Layout, tier space RESERVED for the VM:
+-- honesty) dies at the fold boundary. This byte is the LOSSY projection of
+-- the canonical ladder ([[cartograph.tier]]): the upper rungs (proven/xlang/
+-- confirmed) collapse to "confident" here, the reserved bit awaits the VM
+-- runtime rung. tier.lua defines the ORDER; this defines the folded encoding.
+-- Layout, tier space RESERVED for the VM:
 --   bit 0 (0x01)  INFERRED  — the ~ tier (name-matched, not confident)
 --   bits 1-3      PREDICATE-SCOPED: refused rows carry the REFUSAL RULE
 --                 (M.RULE); use rows carry RW (1 read / 2 write / 3 both,

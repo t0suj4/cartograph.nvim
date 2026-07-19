@@ -56,6 +56,9 @@ M.CALL_FIELDS = {
     callee = true, full = true, file = true, line = true, at = true,
     fn = true, to = true, refused = true, inferred = true, args = true,
     argv = true, method = true, top = true, dynamic = true,
+    ext = true, -- call DISPOSITION {disp,why}: the resolver's tagged EXTERNAL/
+    -- NOISE outcome for a callee outside the graph, formerly a silent nil
+    -- ([[cartograph-graph-improvements]] #1)
     indirect = true, traced = true, strarg = true, hedge = true,
     rt = true, n = true, tinf = true, -- type-inferred tier (graph-VM)
     rtfull = true, -- c.full was SYNTHESIZED by the return-type rounds (not

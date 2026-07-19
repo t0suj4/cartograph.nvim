@@ -2,7 +2,9 @@
 -- RUN the code it analyzes (self://loaded, factorio MCP, a live server),
 -- observed dispatch is the SOUND reference static resolution only
 -- approximates — the honesty ladder's top rung, above even a static
--- oracle: name-matched(~) < type-inferred < proven(static) < CONFIRMED.
+-- oracle: name-matched(~) < type-inferred < proven(static) < CONFIRMED
+-- (the full ladder + its precedence live in [[cartograph.tier]]; this module
+-- PRODUCES the `conf` top rung, it doesn't re-derive the order).
 --
 -- Two escalating uses ([[graph-vm-type-resolution]]):
 --   * CONFIRM — an edge the graph already has, observed live → upgrade its

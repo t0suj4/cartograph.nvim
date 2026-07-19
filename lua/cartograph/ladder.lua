@@ -13,6 +13,11 @@
 
 local M = {}
 
+-- This is the CALL view of the ladder — a superset of the resolved-edge tiers
+-- ([[cartograph.tier]]) with the unresolved rungs (dynamic/refused/frontier)
+-- and a deliberate coarsening (xlang folds into 'proven' for this report,
+-- 'matched' reads as 'linked'). The resolved-edge ORDER matches tier.lua;
+-- only the presentation differs.
 -- 'typed': the graph-VM resolved this via a return-type summary — stronger
 -- than a bare unique-name ~ guess (it used type evidence), weaker than a
 -- plain same-scope link. The honesty ladder's middle rung.

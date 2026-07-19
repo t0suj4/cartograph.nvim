@@ -19,7 +19,18 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 88 -- v88: ODIN NODE-LOCAL TEARING (torn_by_node). A proc's key is
+M.VERSION = 89 -- v89: TOTAL CALL DISPOSITION ([[cartograph-graph-improvements]]
+               -- #1, roadmap P0.2). The resolver's SILENT nil returns are now
+               -- tagged `c.ext = {disp, why}`: a callee outside the graph is
+               -- EXTERNAL (vocab/prefix/exact-key/no-def) or NOISE (short),
+               -- and census.disp() derives the one total disposition per call
+               -- (resolved|refused|dynamic|external|noise). Additive — COUNTS
+               -- UNCHANGED (zig refs 20242, nodes 9408 held); the 40,242 zig
+               -- "unresolved" calls now decompose (vocab 13011 · no-def 14087
+               -- · short 12081 · exact-key 1063) as a census query, not the
+               -- D-bucketer's source regex. (n.src node provenance DEFERRED to
+               -- Z1's bump — distributed ~20-site sweep, no present consumer.)
+               -- v88: ODIN NODE-LOCAL TEARING (torn_by_node). A proc's key is
                -- `package.proc` and the package comes from the file-top `package`
                -- decl (before any parse error), so a proc after an error hasn't
                -- lost context — tear only defs whose OWN subtree errors, not

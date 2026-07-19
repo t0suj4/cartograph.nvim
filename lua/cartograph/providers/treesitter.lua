@@ -16,6 +16,22 @@ local flowmod = require 'cartograph.flow' -- df-strangler step 4: eager per-fn f
 local constfold = require 'cartograph.constfold' -- const-fold ladder step 1: same-file scalar-const index + argv fold (no cycle)
 local M = {}
 
+-- Call DISPOSITION reasons ([[cartograph-graph-improvements]] #1): the
+-- resolver's otherwise-SILENT nil returns become tagged. A callee outside the
+-- graph is EXTERNAL (with the gate that placed it there) or below the noise
+-- floor — a fact the resolver KNOWS and used to discard, forcing the D-census
+-- to reconstruct it by regexing source. Stamped on `c.ext` (see census.disp
+-- for the total disposition). Shared read-only literals — many calls point at
+-- the same table, so nothing may mutate them in place.
+M.EXT = {
+    vocab  = { disp = 'external', why = 'vocab' },     -- a stdlib_names word
+    prefix = { disp = 'external', why = 'prefix' },    -- a stdlib_prefixes head
+    exact  = { disp = 'external', why = 'exact-key' }, -- exact-only key miss
+    nodef  = { disp = 'external', why = 'no-def' },    -- no def anywhere
+    short  = { disp = 'noise',    why = 'short' },      -- sub-3-char noise floor
+}
+local EXT = M.EXT
+
 -- P0 EXTRACTION PROFILER ([[cartograph-perf-cut]]): per-phase wall accumulators,
 -- gated on M.PROFILE so a normal run pays only a bool short-circuit (pstart
 -- returns nil when off → padd is a nil no-op; the hot flow.build site never even
@@ -8031,7 +8047,7 @@ function M.extract(root, opts)
         local clang, spec = elang_for(file)
         spec = eff_spec(clang, spec) -- overlay pack (rails vocab in stdlib_names)
         local snames = spec and spec.stdlib_names or {}
-        if snames[name] then return nil end
+        if snames[name] then return nil, nil, nil, EXT.vocab end
         local cands = exact[name]
         -- the stdlib TAIL gate guards the fallbacks below; an exact match
         -- on a fully-qualified name (Engine::new) clears first. Literal-
@@ -8075,7 +8091,7 @@ function M.extract(root, opts)
             end
             if samedup then return nil, nil, refusal('samefile', samedup) end
             if same then return same, false end
-            if short then return nil end -- no same-file binder: noise floor
+            if short then return nil, nil, nil, EXT.short end -- no same-file binder: noise floor
             -- workspace-unique, but never across a scope boundary (rust
             -- crates: bare names cannot legally cross); dotted callees
             -- are method syntax and never match free functions
@@ -8118,14 +8134,14 @@ function M.extract(root, opts)
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or cands)
         end
-        if short then return nil end -- free short name: noise floor holds
+        if short then return nil, nil, nil, EXT.short end -- free short name: noise floor holds
         -- receiver-evidence keys (ruby `Foo.bar`) are exact-or-nothing: an
         -- exact miss is an honest frontier, never a promiscuous tail guess
         if spec and spec.exact_only_key and spec.exact_only_key(name) then
-            return nil
+            return nil, nil, nil, EXT.exact
         end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
-            if name:sub(1, #pre) == pre then return nil end
+            if name:sub(1, #pre) == pre then return nil, nil, nil, EXT.prefix end
         end
         -- literal-name languages never tail-match: a bash command names
         -- its function EXACTLY (slashes are just characters), so `split`
@@ -8136,7 +8152,7 @@ function M.extract(root, opts)
         if spec and spec.literal_names then
             local ar = aperture_refusal(name, file)
             if ar then return nil, nil, ar end
-            return nil
+            return nil, nil, nil, EXT.nodef
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
@@ -8173,7 +8189,7 @@ function M.extract(root, opts)
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or tc)
         end
-        return nil
+        return nil, nil, nil, EXT.nodef
     end
     -- single-assignment literal flow: `$fn = 'compute'; $fn(3)` resolves —
     -- but ONLY when the variable has exactly one def in the function (two
@@ -8370,7 +8386,7 @@ function M.extract(root, opts)
                 end
             end
         end
-        local target, inferred, refused
+        local target, inferred, refused, ext
         if p.call.dynamic then
             -- $fn(...): frontier — unless single-assignment literal flow
             -- pins the name down within the function
@@ -8403,7 +8419,7 @@ function M.extract(root, opts)
             local shadowed = from and node_index[from]
                 and localdecl_shadow(p.call.callee, p.file, node_index[from], parent_fn, exact)
             if not shadowed then
-                target, inferred, refused = resolve(p.full or p.call.callee, p.file)
+                target, inferred, refused, ext = resolve(p.full or p.call.callee, p.file)
             end
         end
         if not target and not p.call.dynamic
@@ -8425,6 +8441,10 @@ function M.extract(root, opts)
         else
             p.call.fn = fn_at(p.file, p.at.start.line)
             p.call.refused = refused
+            -- the resolver knew WHY it stayed silent (external/noise): keep it
+            -- ([[cartograph-graph-improvements]] #1). refused and ext are
+            -- mutually exclusive — a refusal has candidates, ext does not.
+            p.call.ext = not refused and ext or nil
         end
         -- callback pattern: an identifier argument naming a unique function
         for _, a in ipairs(p.call.argv) do
@@ -8696,7 +8716,7 @@ function M.relink(data, touched)
         local clang, spec = elang_for(file)
         spec = eff_spec(clang, spec) -- overlay pack (rails vocab in stdlib_names)
         local snames = spec and spec.stdlib_names or {}
-        if snames[name] then return nil end
+        if snames[name] then return nil, nil, nil, EXT.vocab end
         local cands = exact[name]
         -- the stdlib TAIL gate guards the fallbacks below; an exact match
         -- on a fully-qualified name (Engine::new) clears first. Literal-
@@ -8720,7 +8740,7 @@ function M.relink(data, touched)
             end
             if samedup then return nil, nil, refusal('samefile', samedup) end
             if same then return same, false end
-            if short then return nil end -- no same-file binder: noise floor
+            if short then return nil, nil, nil, EXT.short end -- no same-file binder: noise floor
             -- workspace-unique, but never across a scope boundary (rust
             -- crates: bare names cannot legally cross); dotted callees
             -- are method syntax and never match free functions
@@ -8763,14 +8783,14 @@ function M.relink(data, touched)
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or cands)
         end
-        if short then return nil end -- free short name: noise floor holds
+        if short then return nil, nil, nil, EXT.short end -- free short name: noise floor holds
         -- receiver-evidence keys (ruby `Foo.bar`) are exact-or-nothing: an
         -- exact miss is an honest frontier, never a promiscuous tail guess
         if spec and spec.exact_only_key and spec.exact_only_key(name) then
-            return nil
+            return nil, nil, nil, EXT.exact
         end
         for _, pre in ipairs(spec and spec.stdlib_prefixes or {}) do
-            if name:sub(1, #pre) == pre then return nil end
+            if name:sub(1, #pre) == pre then return nil, nil, nil, EXT.prefix end
         end
         -- literal-name languages never tail-match: a bash command names
         -- its function EXACTLY (slashes are just characters), so `split`
@@ -8781,7 +8801,7 @@ function M.relink(data, touched)
         if spec and spec.literal_names then
             local ar = aperture_refusal(name, file)
             if ar then return nil, nil, ar end
-            return nil
+            return nil, nil, nil, EXT.nodef
         end
         local tl = name:match('([%w_]+)$')
         local tc = tl and (tail[tl] or exact[tl])
@@ -8818,7 +8838,7 @@ function M.relink(data, touched)
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
                 #fitset > 0 and fitset or tc)
         end
-        return nil
+        return nil, nil, nil, EXT.nodef
     end
     local n = 0
     -- cbarg pre-scan, mirroring extract's: marks are resolution INPUT and
@@ -8850,7 +8870,7 @@ function M.relink(data, touched)
         -- named the callee (a parallel slice may know the literal but not
         -- have seen its target)
         if not c.to and (not c.dynamic or type(c.traced) == 'string') then
-            local target, inferred, refused
+            local target, inferred, refused, ext
             if type(c.traced) == 'string' then
                 target = resolve(c.traced, c.file)
                 inferred = false
@@ -8863,7 +8883,7 @@ function M.relink(data, touched)
                 -- callee with no same-file def is not a global — leave it for
                 -- resolve_local_callable (refuse fn-value) below
             else
-                target, inferred, refused = resolve(c.full or c.callee, c.file)
+                target, inferred, refused, ext = resolve(c.full or c.callee, c.file)
             end
             if target then
                 c.to = target.id
@@ -8873,6 +8893,7 @@ function M.relink(data, touched)
                 local hedged = inferred or c.hedge ~= nil
                 c.inferred = hedged or nil
                 c.refused = nil
+                c.ext = nil -- was external/noise, now resolved (re-link mutates)
                 if c.dynamic then c.dynamic = nil end -- pinned by the trace
                 n = n + 1
                 if touched then touched[c.file] = true end
@@ -8885,6 +8906,7 @@ function M.relink(data, touched)
                 -- the refusal recomputed against the CURRENT global
                 -- node set (a worker's slice-local refusal is stale)
                 c.refused = refused
+                c.ext = not refused and ext or nil -- else external/noise why
             end
         end
         -- callback-pattern mirror: an identifier argument naming a unique
