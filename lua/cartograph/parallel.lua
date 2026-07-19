@@ -222,6 +222,12 @@ local function merge_chunk(s, chunk)
     for _, x in ipairs(chunk.ruby_anc or {}) do
         if not seen[x.file] then acc.ruby_anc[#acc.ruby_anc + 1] = x end
     end
+    -- fieldtypes (zig struct field types): file-tagged list, deduped like
+    -- extends — relink's resolve_field_chain builds the typename→field→type map
+    acc.fieldtypes = acc.fieldtypes or {}
+    for _, x in ipairs(chunk.fieldtypes or {}) do
+        if not seen[x.file] then acc.fieldtypes[#acc.fieldtypes + 1] = x end
+    end
     -- ruby_ctor (R5 ctor bindings): keyed BY FILE, per-file overlay
     acc.ruby_ctor = acc.ruby_ctor or {}
     for f, fb in pairs(chunk.ruby_ctor or {}) do
@@ -552,6 +558,7 @@ function M.extract(root, o)
         reorder(acc.calls, function (c) return c.file end)
         reorder(acc.extends or {}, function (x) return x.file end)
         reorder(acc.implements or {}, function (x) return x.file end)
+        reorder(acc.fieldtypes or {}, function (x) return x.file end)
     end
 
     local failed = {}

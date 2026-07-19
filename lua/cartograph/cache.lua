@@ -19,7 +19,22 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 84 -- v84: ZIG MULTI-LEVEL CHAIN TYPE. A chained call
+M.VERSION = 85 -- v85: ZIG INSTANCE-CHAIN FIELD TYPING. An instance chain
+               -- `root.field.method()` resolves via struct field types: the
+               -- root's type (a param type, c.chainroot) → the field's type
+               -- (data.fieldtypes, scan_fields) → the method. FILE-BOUND, not
+               -- bare-name: the field type binds to a FILE (an @import alias in
+               -- the field's file, else a same-file local `const T = struct`) and
+               -- the method resolves IN that file (resolve_field_chain, additive
+               -- unresolved-only). Bare-name exact[T.method] was UNSOUND — same-
+               -- named types collide across subsystems (measured 25% wrong:
+               -- MachO's StringTable is link/, not the mingw one). MEASURED +23
+               -- (41.76→41.78%), 0 lost, 0 wrong; most of the 215 file-bound
+               -- resolutions duplicate the same-file tail. c.chainroot/chainfield
+               -- in validate.CALL_FIELDS; data.fieldtypes merged in parallel.lua.
+               -- The bulk of instance chains stay unresolved (local roots need
+               -- local type inference; generic fields need generics modelling).
+               -- v84: ZIG MULTI-LEVEL CHAIN TYPE. A chained call
                -- `root.Type.method()` (e.g. `link.File.open`, `Mir.Memory.encode`)
                -- names its method in the PascalCase segment right before it (the
                -- type namespace), persisted as c.chainty. resolve_chain_type (an

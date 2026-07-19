@@ -146,17 +146,19 @@ return {
         budget_mb = 3800, -- ~2x inline peak: the compiler files are enormous
         repo = 'https://github.com/ziglang/zig',
         rev = 'd5181a9c9bac',
-        expected = { refs = 20202, nodes = 9408 }, -- recalibrated @ zig multi-level chain (v84)
+        expected = { refs = 20225, nodes = 9408 }, -- recalibrated @ zig instance-chain field typing (v85)
         lang = 'zig',
         notes = 'zig + R5 receiver typing + @import module binding + value-recv '
-            .. 'dual-key + multi-level chain type (the self-hosted compiler, 171 '
-            .. 'files) — procedural+struct+method family; `recv.method()` keyed '
-            .. 'Type.method from the pointer receiver\'s type, `const Foo=@import'
-            .. '("f.zig")` binds Foo.member() to f.zig, a value-receiver method '
-            .. '(fn m(self: Foo)) gains a Foo.m dual key, and a chain '
-            .. '`root.Type.method()` resolves via its PascalCase penultimate type '
-            .. '(41.8% resolved). Remaining: instance chains (x.field.method) need '
-            .. 'struct field-type inference',
+            .. 'dual-key + multi-level chain type + instance-chain field typing '
+            .. '(the self-hosted compiler, 171 files) — procedural+struct+method '
+            .. 'family; `recv.method()` keyed Type.method from the pointer '
+            .. 'receiver\'s type, `const Foo=@import("f.zig")` binds Foo.member() '
+            .. 'to f.zig, a value-receiver method gains a Foo.m dual key, a chain '
+            .. '`root.Type.method()` resolves via its PascalCase penultimate type, '
+            .. 'and an instance chain `root.field.method()` resolves via struct '
+            .. 'field types (file-bound) (41.8% resolved). Remaining: instance-'
+            .. 'chain LOCAL roots need local type inference; generic fields need '
+            .. 'generics modelling',
     },
     odin = {
         root = HOME .. '/git/odin/core',

@@ -397,8 +397,14 @@ callers). Ariadne's thread, in text.
      `root.Type.method()` (`link.File.open`, `Mir.Memory.encode`) resolves through
      its PascalCase penultimate segment — the method's type namespace — via an
      additive post-pass that fills only the cross-file chains the same-file tail
-     path left unresolved (an *instance* chain like `x.field.method()`, with a
-     lowercase penultimate, is left for struct field-type inference).
+     path left unresolved. An *instance* chain `root.field.method()` (lowercase
+     penultimate) resolves through **struct field typing**: the root's type (a
+     parameter type) → the field's declared type → the method. The field type is
+     **file-bound** — an `@import` alias in the field's file, else a same-file
+     local `const T = struct` — and the method is resolved *in that file*, never
+     by bare name (same-named types collide across subsystems, so `MachO`'s
+     `StringTable` binds to `link/StringTable.zig`, not an unrelated one). A chain
+     whose root is a *local* (not a parameter) is left for local type inference.
      TypeScript parses under its own tree-sitter grammar (a JS superset) for
      both extraction *and* the on-demand analysis lenses, but resolves under
      the JavaScript spec — so `.ts` and `.js` are one language family (the way

@@ -214,6 +214,32 @@ test('zig chain: an instance chain (lowercase penult) carries no chainty', funct
     vim.fn.delete(root, 'rf')
 end)
 
+test('zig field chain: root.field.method() resolves via the field type, file-bound', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'thing.zig', { 'pub fn go(x: u32) void { _ = x; }' })
+    write(root, 'other.zig', { 'pub fn go(x: u32) void { _ = x; }' }) -- collide: bare `go` ambiguous
+    write(root, 'owner.zig', {
+        'const Thing = @import("thing.zig");',
+        'const Owner = struct {',
+        '    t: Thing,',
+        '    pub fn use(self: *Owner) void {',
+        '        self.t.go(1);', -- chain: Owner.t (Thing → thing.zig) . go
+        '    }',
+        '};',
+    })
+    local _, calls = extract(root)
+    local go_thing
+    for _, n in ipairs(store.data.nodes) do
+        if n.name == 'go' and n.file:match('thing%.zig$') then go_thing = n end
+    end
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'go' then hit = c end end
+    ok(hit and go_thing and hit.to == go_thing.id,
+        'self.t.go() resolved to thing.zig::go via the field type + @import bind (not other.zig)')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('zig: pub fn is exported, plain fn is not', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')

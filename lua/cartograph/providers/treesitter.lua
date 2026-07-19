@@ -1446,6 +1446,40 @@ local function zig_recv_type(calln, recv, src)
     end
 end
 
+-- The base TYPE of an identifier `name` declared as a parameter of node's
+-- enclosing function (ANY receiver form — value or pointer, unlike zig_recv_type
+-- which is pointer-only). Used to type an instance-chain ROOT (`analysis` in
+-- `analysis.air.extraData()`, from `fn f(analysis: *Analysis)`). `self` is a
+-- normal param (`fn m(self: *Foo)`), so it is covered too. Returns a PascalCase
+-- base or nil (a builtin/generic/unknown param type is not keyable).
+local function zig_ident_type(node, name, src)
+    local p = node:parent()
+    while p do
+        local t = p:type()
+        if t == 'function_declaration' then
+            for c in p:iter_children() do
+                if c:type() == 'parameters' then
+                    for pc in c:iter_children() do
+                        if pc:type() == 'parameter' then
+                            local pn, tynode
+                            for cc in pc:iter_children() do
+                                if cc:named() then
+                                    if not pn then pn = node_text(cc, src)
+                                    else tynode = cc break end
+                                end
+                            end
+                            if pn == name then return zig_base_type(tynode, src) end
+                        end
+                    end
+                end
+            end
+            return nil
+        end
+        if t == 'source_file' then return nil end
+        p = p:parent()
+    end
+end
+
 -- Zig @import module binding: scan `const NAME = @import("path.zig")` binds so
 -- the module-alias pass (resolve_module_alias) can resolve `NAME.member()` to
 -- that file's export — binding beats name-match ([[cartograph-linker]] layer 1).
@@ -3558,6 +3592,69 @@ M.spec = {
                 if ty:match('^%u') then return ty end
             end
         end,
+        -- instance chain `root.field.method()` (LOWERCASE penult = a struct
+        -- field, not a type). Returns (root TYPE, field name): the root's type
+        -- from the enclosing fn's params (`fn f(a: *Analysis)` → a → Analysis),
+        -- the field name verbatim (`air`). Persisted as c.chainroot / c.chainfield
+        -- so resolve_field_chain can look the field's type up in the global field
+        -- map and resolve the method on it. Root type unknown (a local, not a
+        -- param) → nil (needs local type inference, a separate arc).
+        chain_root = function (calln, src)
+            if calln:type() ~= 'call_expression' then return nil end
+            local fe = calln:field('function')[1]
+            if not fe or fe:type() ~= 'field_expression' then return nil end
+            local obj = fe:field('object')[1]
+            if not obj or obj:type() ~= 'field_expression' then return nil end
+            local penult = obj:field('member')[1]
+            local robj = obj:field('object')[1]
+            if not (penult and penult:type() == 'identifier'
+                and robj and robj:type() == 'identifier') then return nil end
+            local field = node_text(penult, src)
+            if field:match('^%u') then return nil end -- PascalCase → chain_type's job
+            local rt = zig_ident_type(calln, node_text(robj, src), src)
+            if rt then return rt, field end
+        end,
+        -- struct field types: `const T = struct { air: Air, count: u32, p: *Bar }`
+        -- → {typename=T, field, ftype} per field with a keyable (PascalCase, base-
+        -- peeled) type. Feeds data.fieldtypes; a generic/builtin field (u32,
+        -- std.MultiArrayList(x)) yields no base → skipped (not keyable).
+        scan_fields = function (tsroot, src)
+            local out = {}
+            local function walk(n)
+                if n:type() == 'struct_declaration' then
+                    local vd, tn = n:parent(), nil
+                    if vd and vd:type() == 'variable_declaration' then
+                        for c in vd:iter_children() do
+                            if c:type() == 'identifier' then
+                                tn = node_text(c, src) break
+                            end
+                        end
+                    end
+                    if tn then
+                        for c in n:iter_children() do
+                            if c:type() == 'container_field' then
+                                local fname, tynode
+                                for cc in c:iter_children() do
+                                    if cc:named() then
+                                        if not fname and cc:type() == 'identifier' then
+                                            fname = node_text(cc, src)
+                                        elseif fname and not tynode then tynode = cc end
+                                    end
+                                end
+                                local b = tynode and zig_base_type(tynode, src)
+                                if fname and b then
+                                    out[#out + 1] = { typename = tn,
+                                        field = fname, ftype = b }
+                                end
+                            end
+                        end
+                    end
+                end
+                for c in n:iter_children() do walk(c) end
+            end
+            walk(tsroot)
+            return out
+        end,
     },
     -- Odin: C/procedural family — package + `proc` + struct, NO methods (procs
     -- are free). `foo :: proc(){}`, `T :: struct{}`; calls are bare `foo()` or
@@ -4482,6 +4579,87 @@ local function resolve_chain_type(calls, exact, addref, node_index)
                             ['end'] = { line = c.line, char = 0 } }, true)
                 end
                 n = n + 1
+            end
+        end
+    end
+    return n
+end
+
+-- INSTANCE-CHAIN FIELD TYPING ([[cartograph-zig-arc]]): an instance chain
+-- `root.field.method()` resolves when the root's TYPE is known (c.chainroot, a
+-- param type from extraction) AND that type's FIELD has a keyable type
+-- (data.fieldtypes). FILE-BOUND, not bare-name: the field's type name is bound
+-- to a specific FILE — (A) an @import alias in the field-declaring file (`strtab:
+-- StringTable` where `const StringTable = @import("../StringTable.zig")` → that
+-- file), else (B) a same-file local `const T = struct` (the type has a method in
+-- the field's own file) — and the method is resolved as the UNIQUE fn/method IN
+-- THAT FILE. Bare-name exact[ftype.method] is UNSOUND: same-named types collide
+-- across subsystems (measured 25% wrong — MachO's StringTable is `link/`, not the
+-- unrelated mingw one). Binding to a file (resolve_module_alias's posture) kills
+-- that. ADDITIVE, unresolved-only. The bulk of instance chains stay unresolved —
+-- their root is a local (needs local type inference) or the field is a generic/
+-- builtin (needs generics modelling).
+local function resolve_field_chain(calls, fieldtypes, edges, exact, tail, addref, node_index)
+    if not (fieldtypes and fieldtypes[1]) then return 0 end
+    -- field map: typename -> field -> {ftype, file} (cross-file conflict on one
+    -- typename.field → false = ambiguous → skip)
+    local fm = {}
+    for _, f in ipairs(fieldtypes) do
+        local t = fm[f.typename]; if not t then t = {}; fm[f.typename] = t end
+        if t[f.field] == nil then t[f.field] = { ftype = f.ftype, file = f.file }
+        elseif t[f.field] and t[f.field].ftype ~= f.ftype then t[f.field] = false end
+    end
+    -- import alias map: file -> alias -> target file (the @import binding)
+    local amap = {}
+    for _, e in ipairs(edges or {}) do
+        if e.kind == 'import' and e.bind and e.from and e.to then
+            amap[e.from] = amap[e.from] or {}; amap[e.from][e.bind] = e.to
+        end
+    end
+    -- typefiles: type name -> set of files defining a method of it (`T.m` keys),
+    -- for the same-file-local binding
+    local typefiles = {}
+    for key, nds in pairs(exact) do
+        local ty = key:match('^([%w_]+)%.[%w_]+$')
+        if ty then
+            for _, nd in ipairs(nds) do
+                if nd.kind == 'function' or nd.kind == 'method' then
+                    typefiles[ty] = typefiles[ty] or {}; typefiles[ty][nd.file] = true
+                end
+            end
+        end
+    end
+    local n = 0
+    for _, c in ipairs(calls or {}) do
+        if not c.to and c.chainroot and c.chainfield and c.callee then
+            local byfield = fm[c.chainroot]
+            local fe = byfield and byfield[c.chainfield]
+            if fe then -- (false = ambiguous → skip)
+                -- bind the field's TYPE to a file, then resolve the method there
+                local tfile = amap[fe.file] and amap[fe.file][fe.ftype] -- (A) @import
+                if not tfile and typefiles[fe.ftype] and typefiles[fe.ftype][fe.file] then
+                    tfile = fe.file -- (B) same-file local type
+                end
+                if tfile then
+                    local fit, dup = nil, false
+                    for _, nd in ipairs(tail[c.callee] or exact[c.callee] or {}) do
+                        if nd.file == tfile
+                            and (nd.kind == 'function' or nd.kind == 'method') then
+                            if fit and fit.id ~= nd.id then dup = true else fit = nd end
+                        end
+                    end
+                    if fit and not dup then
+                        c.to = fit.id
+                        c.inferred = true
+                        c.refused = nil
+                        if c.fn then
+                            addref(c.fn, fit.id, c.at
+                                or { start = { line = c.line, char = 0 },
+                                    ['end'] = { line = c.line, char = 0 } }, true)
+                        end
+                        n = n + 1
+                    end
+                end
             end
         end
     end
@@ -7335,9 +7513,17 @@ function M.extract(root, opts)
                                 kind = 'import', inferred = true }
                         end
                     end
+                    -- instance chain `root.field.method()`: the root's TYPE and
+                    -- the field name (see chain_root) — resolve_field_chain looks
+                    -- the field's type up in the global field map.
+                    local chroot, chfield
+                    if spec.chain_root then
+                        chroot, chfield = spec.chain_root(calln, src)
+                    end
                     local c = { callee = callee, args = args, argv = argv,
                         file = file, line = sp.start.line, method = method,
                         full = full ~= callee and full or nil,
+                        chainroot = chroot, chainfield = chfield,
                         dynamic = dynamic,
                         hedge = qhedge, -- hedged qualification: edge gets ~
                         rt = qdefer, -- receiver typed by ANOTHER call's
@@ -7421,6 +7607,15 @@ function M.extract(root, opts)
                     edges[#edges + 1] = { from = file, to = target,
                         kind = 'import', bind = imp.alias, inferred = true }
                 end
+            end
+        end
+        -- struct field types (zig): a file-tagged side-table typename→field→type
+        -- for resolve_field_chain (instance chains `root.field.method()`)
+        if spec.scan_fields then
+            for _, f in ipairs(spec.scan_fields(tsroot, src)) do
+                data.fieldtypes = data.fieldtypes or {}
+                data.fieldtypes[#data.fieldtypes + 1] = { typename = f.typename,
+                    field = f.field, ftype = f.ftype, file = file }
             end
         end
     end
@@ -8097,6 +8292,9 @@ function M.extract(root, opts)
     -- multi-level chain type: `root.Type.method()` → Type.method (additive,
     -- fills only cross-file chains the bare-tail path left unresolved)
     resolve_chain_type(calls, exact, addref, node_index)
+    -- instance-chain field typing: `root.field.method()` via the root's type +
+    -- the field's type (data.fieldtypes) — additive, unresolved-only
+    resolve_field_chain(calls, data.fieldtypes, data.edges, exact, tail, addref, node_index)
 
     -- string-keyed registry (stage 3): LibStub("X")/:GetModule("Y") → the
     -- :NewLibrary/:NewModule-registered table, scoped to the addon (.toc).
@@ -8552,6 +8750,8 @@ function M.relink(data, touched)
     n = n + resolve_module_alias(data.calls, data.edges, exact, tail, addref, node_index)
     -- multi-level chain type (root.Type.method → Type.method), as extract
     n = n + resolve_chain_type(data.calls, exact, addref, node_index)
+    -- instance-chain field typing (root.field.method via field types), as extract
+    n = n + resolve_field_chain(data.calls, data.fieldtypes, data.edges, exact, tail, addref, node_index)
     -- and the return-type rounds, for the same parity (cross-chunk chains:
     -- a worker slice may hold the chain but not the determining target)
     -- string-keyed registry (stage 3), same parity as extract

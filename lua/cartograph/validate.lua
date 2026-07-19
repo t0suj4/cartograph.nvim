@@ -71,6 +71,9 @@ M.CALL_FIELDS = {
     chainty = true, -- multi-level chain `root.Type.method()`: the PascalCase
                     -- penultimate segment (the method's TYPE), for the additive
                     -- chain post-pass (resolve_chain_type, zig v84)
+    chainroot = true, -- instance chain `root.field.method()`: the root's TYPE
+    chainfield = true, -- ...and the field name — resolve_field_chain looks the
+                       -- field's type up in data.fieldtypes (zig v85)
     conf = true, -- runtime-confirmed tier (session-live overlay)
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
 }
