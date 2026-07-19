@@ -146,7 +146,7 @@ return {
         budget_mb = 3800, -- ~2x inline peak: the compiler files are enormous
         repo = 'https://github.com/ziglang/zig',
         rev = 'd5181a9c9bac',
-        expected = { refs = 20242, nodes = 9408 }, -- recalibrated @ zig local field-access typing (v86)
+        expected = { refs = 20404, nodes = 9408 }, -- +162 @ local-type-inference Z1b (v90): set-once `const x = f(); x.m()` → Ret.m (225 calls refused→to)
         lang = 'zig',
         notes = 'zig + R5 receiver typing + @import module binding + value-recv '
             .. 'dual-key + multi-level chain type + instance-chain field typing '

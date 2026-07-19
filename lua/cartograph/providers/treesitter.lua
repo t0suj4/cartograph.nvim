@@ -1990,11 +1990,17 @@ local function resolve_returns(calls, node_index, exact, addref)
                     end
                     ret = agree
                 end
-                -- a JDK return type dispatches into the stdlib: no project def
-                if ret and not javaspec._jdk_types[ret] then
-                    local clang = elang_for(c.file)
+                -- a JDK return type dispatches into the stdlib (java's stdlib
+                -- gate; other langs skip — their stdlib disposition handles it).
+                -- The method-key separator is per-language: java `::`, zig `.`
+                -- (spec.methodsep, default `::` so java stays identical).
+                local clang = ret and elang_for(c.file)
+                local jdk_gated = clang == 'java' and javaspec._jdk_types[ret]
+                if ret and not jdk_gated then
+                    local sep = (M.spec[clang] and M.spec[clang].methodsep) or '::'
+                    local rkey = ret .. sep .. c.callee
                     local fit, dup
-                    for _, node in ipairs(exact[ret .. '::' .. c.callee] or {}) do
+                    for _, node in ipairs(exact[rkey] or {}) do
                         if elang_for(node.file) == clang then
                             if fit then dup = true else fit = node end
                         end
@@ -2012,7 +2018,7 @@ local function resolve_returns(calls, node_index, exact, addref)
                         -- stdlib-gated callee to a qualified name, minting
                         -- edges inline never had; the par gate caught it)
                         if not c.full then
-                            c.full = ret .. '::' .. c.callee
+                            c.full = rkey
                             c.rtfull = true
                         end
                         c.inferred = true -- type INFERRED through a summary
@@ -4333,8 +4339,12 @@ function M.extract(root, opts)
                         chainroot = chroot, chainfield = chfield,
                         dynamic = dynamic,
                         hedge = qhedge, -- hedged qualification: edge gets ~
-                        rt = qdefer, -- receiver typed by ANOTHER call's
-                        -- return: the return-type rounds settle it
+                        rt = qdefer -- receiver typed by ANOTHER call's return:
+                        -- the return-type rounds settle it (java: qualify_call's
+                        -- defer). Z1b: a set-once local const bound to a call
+                        -- (`const x = C.init(); x.m()`) records the determining
+                        -- call's position via local_ret ([[cartograph-local-type-inference]]).
+                            or (spec.local_ret and spec.local_ret(calln, src)) or nil,
                         qualifier = qqual, -- @Qualifier bean name on the
                         -- receiver field (resolve_interface narrows on it)
                         at = pos_of(namen), -- callee token range: relink

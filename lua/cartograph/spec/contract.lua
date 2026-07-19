@@ -65,6 +65,10 @@ M.SLOTS = {
     fields = 'TYPES', def_ret = 'TYPES', fn_types = 'TYPES',
     recv_local = 'TYPES', litdata_types = 'TYPES',
     dynamic_callee_types = 'TYPES', smt_query = 'TYPES',
+    -- local-type inference ([[cartograph-local-type-inference]]): local_ret
+    -- captures a set-once local's determining call (→ c.rt), methodsep is the
+    -- return-typed method-key separator (Ret<sep>m) the generic pass reads.
+    local_ret = 'TYPES', methodsep = 'TYPES',
 
     -- EMITTERS: convention defs synthesized from the tree (the `scans` family —
     -- one named-fact-stream slot when touched, spec-layering)

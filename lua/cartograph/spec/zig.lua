@@ -250,6 +250,70 @@ local function zig_local_field(calln, name, src)
     end
 end
 
+-- Z1b return-type LOCAL inference ([[cartograph-local-type-inference]]): set-once
+-- local const bound to a CALL — `const x = C.init(...)` / `const x = f(...)` —
+-- typed by that call's declared return. Map: fn:id() → { localname → {r,c} of
+-- the callee's @name | false }. The {r,c} matches how extract keys the callee
+-- call (identifier, or field_expression member) so resolve_returns' callidx
+-- finds the determining call and reads its target's n.ret. CONST only (provably
+-- set-once; `var` can be reassigned → skip, sound). Redeclared → false.
+local function build_zig_ret_map(tsroot, src)
+    local map = {}
+    local function walk(n, curfn)
+        local t = n:type()
+        if t == 'function_declaration' then curfn = n end
+        if t == 'variable_declaration' and curfn
+            and node_text(n, src):match('^const%f[%W]') then
+            local nm, rhs, seen
+            for c in n:iter_children() do
+                if c:named() then
+                    if not seen and c:type() == 'identifier' then
+                        nm = node_text(c, src); seen = true
+                    elseif seen and not rhs then rhs = c end
+                end
+            end
+            if nm and rhs and rhs:type() == 'call_expression' then
+                local fe = rhs:field('function')[1]
+                local namenode
+                if fe and fe:type() == 'identifier' then namenode = fe
+                elseif fe and fe:type() == 'field_expression' then
+                    namenode = fe:field('member')[1]
+                end
+                if namenode then
+                    local fid = curfn:id()
+                    map[fid] = map[fid] or {}
+                    if map[fid][nm] == nil then
+                        local r, c = namenode:start()
+                        map[fid][nm] = { r = r, c = c }
+                    else map[fid][nm] = false end -- redeclared → ambiguous
+                end
+            end
+        end
+        for c in n:iter_children() do walk(c, curfn) end
+    end
+    walk(tsroot, nil)
+    return map
+end
+local zig_ret_src, zig_ret_map
+local function zig_local_retpos(calln, name, src)
+    if src ~= zig_ret_src then
+        local r = calln
+        while r:parent() do r = r:parent() end
+        zig_ret_map = build_zig_ret_map(r, src)
+        zig_ret_src = src
+    end
+    local p = calln:parent()
+    while p do
+        local t = p:type()
+        if t == 'function_declaration' then
+            local e = zig_ret_map[p:id()]
+            return (e and e[name]) or nil -- {r,c}, or nil (nil/false = no set-once call binding)
+        end
+        if t == 'source_file' then return nil end
+        p = p:parent()
+    end
+end
+
 -- Zig @import module binding: scan `const NAME = @import("path.zig")` binds so
 -- the module-alias pass (resolve_module_alias) can resolve `NAME.member()` to
 -- that file's export — binding beats name-match ([[cartograph-linker]] layer 1).
@@ -579,5 +643,24 @@ return {
                 return zig_base_type(node, src)
             end
             return resolve_rt(rt, 0)
+        end,
+        -- method-key separator for return-typed qualification (Ret<sep>method).
+        -- Zig keys `Type.method`; the generic resolve_returns defaults to '::'
+        -- (java), so this makes it build `Ret.method` for zig.
+        methodsep = '.',
+        -- Z1b: an unresolved `x.m()` whose receiver x is a set-once local const
+        -- bound to a CALL is typed by that call's declared return. Returns the
+        -- determining call's @name position as c.rt → the generic resolve_returns
+        -- reads its target's n.ret and keys Ret.m. x a param → nil (R5's job);
+        -- not a const-call binding → nil (honest frontier).
+        local_ret = function (calln, src)
+            if calln:type() ~= 'call_expression' then return nil end
+            local fe = calln:field('function')[1]
+            if not fe or fe:type() ~= 'field_expression' then return nil end
+            local obj = fe:field('object')[1]
+            if not (obj and obj:type() == 'identifier') then return nil end
+            local x = node_text(obj, src)
+            if zig_ident_type(calln, x, src) then return nil end -- param → R5
+            return zig_local_retpos(calln, x, src)
         end,
 }

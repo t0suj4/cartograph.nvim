@@ -19,7 +19,15 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 89 -- v89: TOTAL CALL DISPOSITION ([[cartograph-graph-improvements]]
+M.VERSION = 90 -- v90: LOCAL TYPE INFERENCE Z1b ([[cartograph-local-type-inference]],
+               -- roadmap top lever). Zig `const x = C.init()/f(); x.m()` — a
+               -- set-once local const typed by the callee's declared RETURN
+               -- (def_ret → n.ret) → keyed Ret.m via the generalized
+               -- resolve_returns (per-lang methodsep). +225 zig calls resolved
+               -- (refused→to), 0 regressions, 0 name-mismatches (the free
+               -- oracle: inferred method ∈ cands by construction). zig refs
+               -- 20242→20404. java (resolve_returns shared) byte-identical.
+               -- v89: TOTAL CALL DISPOSITION ([[cartograph-graph-improvements]]
                -- #1, roadmap P0.2). The resolver's SILENT nil returns are now
                -- tagged `c.ext = {disp, why}`: a callee outside the graph is
                -- EXTERNAL (vocab/prefix/exact-key/no-def) or NOISE (short),
