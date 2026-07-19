@@ -45,7 +45,7 @@ return {
         budget_mb = 1400, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/sylius/sylius',
         rev = '9b6799e2b884',
-        expected = { refs = 5595, nodes = 32160 }, -- calibrated @ 098c537
+        expected = { refs = 5605, nodes = 32213 }, -- recalib 2026-07-19: +53 nodes/+10 refs = JS/TS pivot (index.js webpack configs class-keyed SyliusShop._prepareWebpackConfig) + anon-fn #cb restructuring + 1 php fn-value honesty; php side stable
         lang = 'php',
         notes = 'php SCALE tier (4636 files) — symfony adapter territory',
     },
@@ -53,7 +53,7 @@ return {
         root = HOME .. '/git/grocy',
         repo = 'https://github.com/grocy/grocy',
         rev = '297cc5724441', -- PRE-FIX of #2259 (c415e2f) — the taint keystone
-        expected = { refs = 1088, nodes = 1317 }, -- calibrated @ taint rung 2
+        expected = { refs = 1241, nodes = 2497 }, -- recalib 2026-07-19: +1180 nodes = JS/TS pivot + anon-fn (public/viewjs/*.js: 1615 js nodes incl 1123 #cb callbacks); php side STABLE at 878 nodes (taint keystone unaffected — validated via reduced fixture in sinkflow_spec, not live corpus counts)
         lang = 'php',
         notes = 'the TAINT keystone (Slim/PSR-7 + LessQL): both poles ground-'
             .. 'truth-validated — rung-2 fires on GetProductStockLocations (the '
