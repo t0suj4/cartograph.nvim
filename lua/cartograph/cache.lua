@@ -19,7 +19,21 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 82 -- v82: ZIG @import MODULE BINDING. `const Foo = @import("f.zig")`
+M.VERSION = 83 -- v83: ZIG VALUE-RECEIVER DUAL-KEY. A top-level value-receiver
+               -- method (`fn eql(self: Foo)` / `fn setExtra(symbol: Symbol)`)
+               -- keeps its bare same-file reach AND gains a `Foo.eql` exact key
+               -- (spec.alt_keys) so a POINTER-typed receiver call (`p.eql()`,
+               -- p:*Foo) — which exact-only-refuses rather than fall back to
+               -- bare — finds its own value-recv method. Gated to a genuine
+               -- receiver (param named `self` or the lowercased type), which
+               -- dodges the constructor trap (`init(gpa: Allocator)`). Unique
+               -- cross-file → resolves; same-named across modules → honest
+               -- ambiguous-refuse; same-file → same-file priority. MEASURED
+               -- +227 resolved, 0 lost, 6 CORRECTED — the R5 residual
+               -- cross-module mis-picks (Tokenizer tapi/LdScript, Symbol.setExtra
+               -- MachO/Elf vs Coff, Atom.freeRelocs Elf/MachO) all flip to their
+               -- own file (41.71%).
+               -- v82: ZIG @import MODULE BINDING. `const Foo = @import("f.zig")`
                -- binds Foo→that file (scan_imports emits an import edge with the
                -- alias; resolve_import maps the .zig path relative to the
                -- importer; std/builtin imports rejected). resolve_module_alias

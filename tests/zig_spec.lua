@@ -80,16 +80,40 @@ test('zig-R5: a pointer-receiver method is keyed by its receiver type', function
     vim.fn.delete(root, 'rf')
 end)
 
-test('zig-R5: a value-receiver method stays bare (not receiver-typed)', function ()
+test('zig value-recv dual-key: a pointer caller finds a value-receiver method', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     write(root, 'baz.zig', {
         'const Baz = @This();',
-        'pub fn size(self: Baz) u32 { return 0; }', -- VALUE receiver → bare
+        'pub fn size(self: Baz) u32 { return 0; }',   -- VALUE receiver → bare `size`
+        'pub fn run(self: *Baz) u32 {',
+        '    return self.size();',                      -- self:*Baz keys Baz.size (exact-only)
+        '}',
     })
-    local by = extract(root)
-    ok(by['size'], 'value-receiver method keyed bare `size`')
-    ok(not by['Baz.size'], 'value receiver is NOT keyed Baz.size')
+    local by, calls = extract(root)
+    ok(by['size'], 'value-receiver method keeps its bare name `size`')
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'size' then hit = c end end
+    ok(hit and hit.to == by['size'].id,
+        'self.size() (self:*Baz) resolves to the value-recv method via the dual key')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('zig value-recv dual-key: a value arg is NOT a receiver (constructor trap)', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'w.zig', {
+        'const Allocator = @This();',
+        'pub fn build(gpa: Allocator) void {}',        -- gpa is an ARG, not a `self`/`allocator`
+        'pub fn use() void {',
+        '    Allocator.build();',                       -- PascalCase recv keys Allocator.build
+        '}',
+    })
+    local _, calls = extract(root)
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'build' then hit = c end end
+    ok(hit and not hit.to,
+        'build(gpa: Allocator) is NOT dual-keyed Allocator.build — gpa is an arg')
     vim.fn.delete(root, 'rf')
 end)
 

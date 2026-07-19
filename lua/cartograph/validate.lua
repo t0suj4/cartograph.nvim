@@ -28,6 +28,10 @@ M.NODE_FIELDS = {
                 -- the reassignment-override resolver (resolve_reassign, v56)
     synth = true, -- a synthetic def emitted from a DSL call (ruby attr_*),
                   -- no `def` keyword in the source
+    altkeys = true, -- extra EXACT resolver keys for one def (zig value-receiver
+                    -- dual-key, v83): persisted so the parallel/rebuild resolver
+                    -- (M.relink) re-derives the same keys the live-tree
+                    -- alt_keys hook produced at extraction
     -- token provider (stack languages)
     effect = true, derived = true, echeck = true,
 }

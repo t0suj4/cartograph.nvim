@@ -1363,6 +1363,46 @@ local function zig_method_owner(defn, src)
     end
 end
 
+-- Value-receiver dual-key (the sound half zig_method_owner leaves out). A
+-- top-level `fn eql(self: Foo, ...)` takes its receiver BY VALUE, so qualify
+-- keeps it bare (its same-file `eql()` reach). But a POINTER-typed caller
+-- (`p.eql()`, p:*Foo) keys `Foo.eql` exact — and exact-only refuses rather
+-- than fall back to bare, so today that call misses its own value-recv method.
+-- alt_keys adds the `Foo.eql` exact key IN ADDITION to the bare one: unique
+-- cross-file → resolves, same-named across modules → honest ambiguous-refuse,
+-- same-file → same-file priority picks it. Gated to a GENUINE receiver — the
+-- first param named `self` (the @This file-struct idiom; `Self` is never
+-- unique so those keys only ever resolve same-file) OR the lowercased type
+-- (`symbol: Symbol`) — which dodges the constructor trap (`init(gpa: Allocator)`
+-- keys nothing: gpa is neither `self` nor `allocator`... it's an arg, not a
+-- receiver). Value (identifier) type ONLY — pointers are zig_method_owner's.
+local function zig_value_owner(defn, src)
+    for c in defn:iter_children() do
+        if c:type() == 'parameters' then
+            for pc in c:iter_children() do
+                if pc:type() == 'parameter' then
+                    local nm, tynode
+                    for cc in pc:iter_children() do
+                        if cc:named() then
+                            if not nm then nm = node_text(cc, src)
+                            else tynode = cc break end
+                        end
+                    end
+                    if tynode and tynode:type() == 'identifier' then
+                        local ty = node_text(tynode, src)
+                        if ty:match('^%u') and nm
+                            and (nm == 'self' or nm == ty:lower()) then
+                            return ty
+                        end
+                    end
+                    return nil -- first param isn't a value receiver
+                end
+            end
+            return nil
+        end
+    end
+end
+
 local function zig_recv_type(calln, recv, src)
     local p = calln:parent()
     while p do
@@ -3406,6 +3446,15 @@ M.spec = {
             local owner = zig_method_owner(defn, src)
             if owner then return owner .. '.' .. name end
             return name
+        end,
+        -- value-receiver dual-key: a bare (value-receiver) top-level method also
+        -- gets a `Type.method` exact key so a pointer-typed receiver call finds
+        -- it (see zig_value_owner). Only bare names (top-level, non-pointer);
+        -- struct-nested / pointer-receiver defs already carry a dotted key.
+        alt_keys = function (name, defn, src)
+            if name:find('.', 1, true) then return {} end
+            local owner = zig_value_owner(defn, src)
+            return owner and { owner .. '.' .. name } or {}
         end,
         -- R5 receiver typing (call side): `recv.method()` keys `Type.method`
         -- exact. A PascalCase receiver IS the type (`Foo.init` → `Foo.init`); a
@@ -6597,6 +6646,25 @@ function M.extract(root, opts)
                         tail[tl] = tail[tl] or {}
                         table.insert(tail[tl], nodes[#nodes])
                     end
+                    -- extra EXACT keys for one def (zig value-receiver dual-key):
+                    -- the def keeps its bare same-file reach above AND gains a
+                    -- Type.method key so a pointer-typed cross-file receiver call
+                    -- can meet it. exact-only (no tail) — an alias key must not
+                    -- become a promiscuous tail target. PERSISTED on the node
+                    -- (n.altkeys) because alt_keys reads the live tree (defn/src),
+                    -- which is gone by relink — the parallel/rebuild resolver
+                    -- (M.relink) re-derives exact from n.name + n.altkeys, so
+                    -- inline and parallel stay identical (the `par` gate).
+                    if spec.alt_keys then
+                        local ak = spec.alt_keys(name, defn, src)
+                        if #ak > 0 then
+                            nodes[#nodes].altkeys = ak
+                            for _, k in ipairs(ak) do
+                                exact[k] = exact[k] or {}
+                                table.insert(exact[k], nodes[#nodes])
+                            end
+                        end
+                    end
                 end
                 ::fn_done::
             end
@@ -8123,6 +8191,15 @@ function M.relink(data, touched)
             if tl and tl ~= n.name then
                 tail[tl] = tail[tl] or {}
                 table.insert(tail[tl], n)
+            end
+            -- persisted extra exact keys (zig value-receiver dual-key): the
+            -- live-tree alt_keys ran at extraction; re-add them here so the
+            -- rebuild resolver matches the inline one (see the def-keying block)
+            if n.altkeys then
+                for _, k in ipairs(n.altkeys) do
+                    exact[k] = exact[k] or {}
+                    table.insert(exact[k], n)
+                end
             end
         end
     end

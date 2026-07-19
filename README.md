@@ -386,7 +386,14 @@ callers). Ariadne's thread, in text.
      `Foo.member()` call resolves to `foo.zig`'s export — binding beats
      name-match, which also *corrects* the residual cross-module mis-picks (a
      `name()` call that tail-matched an unrelated module now binds to the
-     imported one).
+     imported one). A value-receiver method (`fn setExtra(symbol: Symbol)`) is
+     **dual-keyed**: it keeps its bare same-file reach *and* gains a
+     `Symbol.setExtra` key, so a pointer-typed caller (`p.setExtra()`, `p: *Symbol`)
+     — which refuses rather than fall back to a bare guess — finds its own
+     value-receiver method (unique cross-file → resolves; same-named across
+     modules → honest ambiguous-refuse). The receiver signal (param named `self`
+     or the lowercased type) dodges the constructor trap (`init(gpa: Allocator)`
+     is not a method of `Allocator`).
      TypeScript parses under its own tree-sitter grammar (a JS superset) for
      both extraction *and* the on-demand analysis lenses, but resolves under
      the JavaScript spec — so `.ts` and `.js` are one language family (the way
