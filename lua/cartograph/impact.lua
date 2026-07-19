@@ -3,11 +3,12 @@
 -- references must be rewritten, what requires must be added, and what hazards
 -- the move carries. No UI, no edits applied here; this only *describes* the move.
 --
--- Deliberately honest about its limits: it computes what the current graph
--- supports (symbol refs, imports, module load-effects) and explicitly flags what
--- it does NOT yet analyze (local/upvalue capture) rather than pretending.
+-- It computes what the current graph supports (symbol refs, imports, module
+-- load-effects) AND file-local capture — a moved symbol (or a nested def that
+-- travels inside its text) referencing a same-file `local` that stays behind.
 
 local M = {}
+local atr = require 'cartograph.at'
 
 -- does `from` already `require` `to`?
 local function imports_already(store, from, to)
@@ -125,8 +126,80 @@ function M.compute(store, moveset, dest)
             end
         end
     end
-    if #moves > 0 then
-        info('scope', 'local/upvalue capture not yet analyzed — verify closures by hand')
+    -- FILE-LOCAL CAPTURE (was the blanket 'verify closures by hand'): a moved
+    -- symbol — or a NESTED def that travels inside its text (e.g. a `local
+    -- function walk` inside a moved helper) — references a same-file `local`
+    -- (helper or module-level constant) that stays behind. A Lua file-local is
+    -- invisible from the extracted module, so the move breaks unless that symbol
+    -- travels too (or is wired in by hand). Both edge kinds count: call/ref deps
+    -- (store.uses) AND variable reads (store.var_uses, e.g. a fn reading a const
+    -- table). Cross-file deps are handled by dest_requires above (requirable).
+    --
+    -- `travels` = the move-set PLUS every node contained in a moved symbol's
+    -- range (those move as text). A reference from any traveller to a same-file
+    -- symbol NOT in `travels` is a capture; a reference TO a traveller is fine.
+    local travels = {}
+    for _, id in ipairs(moveset) do travels[id] = true end
+    local ranges = {}
+    for _, id in ipairs(moveset) do
+        local mn = store.node(id)
+        if mn and mn.range then
+            ranges[#ranges + 1] = { file = mn.file,
+                s = atr.sl(mn.range), e = atr.el(mn.range) }
+        end
+    end
+    for _, n in ipairs(store.data.nodes or {}) do
+        if not travels[n.id] and n.range then
+            local ns, ne = atr.sl(n.range), atr.el(n.range)
+            for _, r in ipairs(ranges) do
+                if n.file == r.file and ns >= r.s and ne <= r.e then
+                    travels[n.id] = true; break
+                end
+            end
+        end
+    end
+    -- only MODULE-LEVEL file-locals are real captures: a nested local either
+    -- travels inside its enclosing def or is out of scope entirely — flagging
+    -- one is noise. Module-level = not contained in any fn/method range.
+    local fnranges = {}
+    for _, n in ipairs(store.data.nodes or {}) do
+        if (n.kind == 'function' or n.kind == 'method') and n.range then
+            fnranges[n.file] = fnranges[n.file] or {}
+            local t = fnranges[n.file]
+            t[#t + 1] = { s = atr.sl(n.range), e = atr.el(n.range), id = n.id }
+        end
+    end
+    local function module_level(dn)
+        if not dn.range then return false end
+        local s, e = atr.sl(dn.range), atr.el(dn.range)
+        for _, r in ipairs(fnranges[dn.file] or {}) do
+            if r.id ~= dn.id and s >= r.s and e <= r.e then return false end
+        end
+        return true
+    end
+    local captured = {} -- dep id -> { name, file } (deduped)
+    local function consider(depid)
+        if depid and not travels[depid] and not captured[depid] then
+            local dn = store.node(depid)
+            if dn and sources[dn.file] and module_level(dn) then -- true capture
+                captured[depid] = { name = dn.name, file = dn.file }
+            end
+        end
+    end
+    for tid in pairs(travels) do
+        for _, dep in ipairs(store.uses[tid] or {}) do consider(dep) end
+        for _, vu in ipairs(store.var_uses and store.var_uses[tid] or {}) do
+            consider(vu.to)
+        end
+    end
+    local capkeys = {}
+    for depid in pairs(captured) do capkeys[#capkeys + 1] = depid end
+    table.sort(capkeys, function (a, b) return captured[a].name < captured[b].name end)
+    for _, depid in ipairs(capkeys) do
+        local c = captured[depid]
+        warn('capture', ('%s (file-local in %s) is referenced by the move-set'
+            .. ' but stays behind — move it too, or wire it into the extracted'
+            .. ' module'):format(c.name, c.file))
     end
 
     return {
