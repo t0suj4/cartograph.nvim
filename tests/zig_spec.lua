@@ -240,6 +240,33 @@ test('zig field chain: root.field.method() resolves via the field type, file-bou
     vim.fn.delete(root, 'rf')
 end)
 
+test('zig local typing: const x = param.field; x.method() resolves via the field type', function ()
+    if not ready() then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'sema.zig', { 'pub fn typeOf(x: u32) void { _ = x; }' })
+    write(root, 'other.zig', { 'pub fn typeOf(x: u32) void { _ = x; }' }) -- collide → bare ambiguous
+    write(root, 'use.zig', {
+        'const Sema = @import("sema.zig");',
+        'const Analysis = struct {',
+        '    sema: Sema,',
+        '    pub fn run(self: *Analysis) void {',
+        '        const s = self.sema;', -- local s : Sema (from param self's field)
+        '        s.typeOf(1);',         -- s.typeOf() → Sema.typeOf@sema.zig (not other.zig)
+        '    }',
+        '};',
+    })
+    local _, calls = extract(root)
+    local tgt
+    for _, n in ipairs(store.data.nodes) do
+        if n.name == 'typeOf' and n.file:match('sema%.zig$') then tgt = n end
+    end
+    local hit
+    for _, c in ipairs(calls) do if c.callee == 'typeOf' then hit = c end end
+    ok(hit and tgt and hit.to == tgt.id,
+        'const s = self.sema; s.typeOf() resolved to sema.zig::typeOf via local field typing')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('zig: pub fn is exported, plain fn is not', function ()
     if not ready() then skip 'no zig parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')

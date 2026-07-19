@@ -146,7 +146,7 @@ return {
         budget_mb = 3800, -- ~2x inline peak: the compiler files are enormous
         repo = 'https://github.com/ziglang/zig',
         rev = 'd5181a9c9bac',
-        expected = { refs = 20225, nodes = 9408 }, -- recalibrated @ zig instance-chain field typing (v85)
+        expected = { refs = 20242, nodes = 9408 }, -- recalibrated @ zig local field-access typing (v86)
         lang = 'zig',
         notes = 'zig + R5 receiver typing + @import module binding + value-recv '
             .. 'dual-key + multi-level chain type + instance-chain field typing '
@@ -156,9 +156,10 @@ return {
             .. 'to f.zig, a value-receiver method gains a Foo.m dual key, a chain '
             .. '`root.Type.method()` resolves via its PascalCase penultimate type, '
             .. 'and an instance chain `root.field.method()` resolves via struct '
-            .. 'field types (file-bound) (41.8% resolved). Remaining: instance-'
-            .. 'chain LOCAL roots need local type inference; generic fields need '
-            .. 'generics modelling',
+            .. 'field types (file-bound), and a local `const x=param.field; '
+            .. 'x.method()` resolves via one hop of local type inference (41.8% '
+            .. 'resolved). Remaining: deeper local typing (call-return chains) + '
+            .. 'generic field types',
     },
     odin = {
         root = HOME .. '/git/odin/core',

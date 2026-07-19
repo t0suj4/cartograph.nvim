@@ -1480,6 +1480,70 @@ local function zig_ident_type(node, name, src)
     end
 end
 
+-- LOCAL FIELD-ACCESS TYPING (one hop): a local `const x = ROOT.field` where ROOT
+-- is a parameter of the enclosing fn. So a call `x.method()` is treated as the
+-- field chain `ROOT.field.method()` and resolved by resolve_field_chain (no new
+-- post-pass). The dominant local idiom (`const sema = …; sema.typeOf()`).
+-- PERF: the map is built ONCE PER FILE (a single traversal, fn-scoped) and cached
+-- on the src string — a per-call body walk was O(calls×body) and blew extraction
+-- from 90s to >400s. zig_local_field then does an O(depth) walk-up + O(1) lookup.
+-- Single-binding only: a name declared >1× in a fn → false (ambiguous, sound).
+local function build_zig_lf_map(tsroot, src)
+    local map = {} -- fn:id() -> { localname -> {ptype, field} | false }
+    local function walk(n, curfn)
+        local t = n:type()
+        if t == 'function_declaration' then curfn = n end
+        if t == 'variable_declaration' and curfn then
+            local nm, rhs, seen
+            for c in n:iter_children() do
+                if c:named() then
+                    if not seen and c:type() == 'identifier' then
+                        nm = node_text(c, src); seen = true
+                    elseif seen and not rhs then rhs = c end
+                end
+            end
+            if nm and rhs and rhs:type() == 'field_expression' then
+                local ro = rhs:field('object')[1]
+                local fld = rhs:field('member')[1]
+                if ro and ro:type() == 'identifier' and fld then
+                    local pt = zig_ident_type(rhs, node_text(ro, src), src)
+                    if pt then
+                        local fid = curfn:id()
+                        map[fid] = map[fid] or {}
+                        if map[fid][nm] == nil then
+                            map[fid][nm] = { ptype = pt, field = node_text(fld, src) }
+                        else map[fid][nm] = false end -- redeclared → ambiguous
+                    end
+                end
+            end
+        end
+        for c in n:iter_children() do walk(c, curfn) end
+    end
+    walk(tsroot, nil)
+    return map
+end
+local zig_lf_src, zig_lf_map
+local function zig_local_field(calln, name, src)
+    if src ~= zig_lf_src then
+        local r = calln
+        while r:parent() do r = r:parent() end
+        zig_lf_map = build_zig_lf_map(r, src)
+        zig_lf_src = src
+    end
+    local p = calln:parent()
+    while p do
+        local t = p:type()
+        if t == 'function_declaration' then
+            local e = zig_lf_map[p:id()]
+            local rec = e and e[name]
+            if rec then return rec.ptype, rec.field end
+            return nil
+        end
+        if t == 'source_file' then return nil end
+        p = p:parent()
+    end
+end
+
 -- Zig @import module binding: scan `const NAME = @import("path.zig")` binds so
 -- the module-alias pass (resolve_module_alias) can resolve `NAME.member()` to
 -- that file's export — binding beats name-match ([[cartograph-linker]] layer 1).
@@ -3604,15 +3668,29 @@ M.spec = {
             local fe = calln:field('function')[1]
             if not fe or fe:type() ~= 'field_expression' then return nil end
             local obj = fe:field('object')[1]
-            if not obj or obj:type() ~= 'field_expression' then return nil end
-            local penult = obj:field('member')[1]
-            local robj = obj:field('object')[1]
-            if not (penult and penult:type() == 'identifier'
-                and robj and robj:type() == 'identifier') then return nil end
-            local field = node_text(penult, src)
-            if field:match('^%u') then return nil end -- PascalCase → chain_type's job
-            local rt = zig_ident_type(calln, node_text(robj, src), src)
-            if rt then return rt, field end
+            if not obj then return nil end
+            if obj:type() == 'field_expression' then -- `root.field.method()`
+                local penult = obj:field('member')[1]
+                local robj = obj:field('object')[1]
+                if not (penult and penult:type() == 'identifier'
+                    and robj and robj:type() == 'identifier') then return nil end
+                local field = node_text(penult, src)
+                if field:match('^%u') then return nil end -- PascalCase → chain_type's job
+                local rt = zig_ident_type(calln, node_text(robj, src), src)
+                if rt then return rt, field end
+                return nil
+            end
+            -- LOCAL FIELD-ACCESS typing: `const x = P.field; x.method()` — x is a
+            -- local (NOT a param — params are qualify_call/R5's job), bound to a
+            -- param's field. Treat as the field chain `P.field.method` so
+            -- resolve_field_chain resolves it (the dominant `const sema=…; sema.x()`
+            -- idiom). obj is the bare receiver identifier here.
+            if obj:type() == 'identifier' then
+                local x = node_text(obj, src)
+                if zig_ident_type(calln, x, src) then return nil end -- x is a param → R5
+                local pt, field = zig_local_field(calln, x, src)
+                if pt and field then return pt, field end
+            end
         end,
         -- struct field types: `const T = struct { air: Air, count: u32, p: *Bar }`
         -- → {typename=T, field, ftype} per field with a keyable (PascalCase, base-

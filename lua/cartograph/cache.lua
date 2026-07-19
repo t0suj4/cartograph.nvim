@@ -19,7 +19,19 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 85 -- v85: ZIG INSTANCE-CHAIN FIELD TYPING. An instance chain
+M.VERSION = 86 -- v86: ZIG LOCAL FIELD-ACCESS TYPING. A local `const x =
+               -- param.field; x.method()` is treated as the field chain
+               -- `param.field.method()` — chain_root sees through the local
+               -- binding (emits c.chainroot=type(param), c.chainfield=field), so
+               -- the SHIPPED resolve_field_chain resolves it, no new post-pass.
+               -- The dominant local idiom (`const sema=…; sema.typeOf()`). PERF:
+               -- the per-fn local map is built ONCE PER FILE and cached on the src
+               -- string (a per-call body walk blew extraction 90s→400s+).
+               -- MEASURED +21 (41.78→41.80%), 0 lost, 0 wrong; the field-access
+               -- path is the real one (freecall/return path measured 0 — freecall
+               -- is only 525 vs 10.8k field-access locals). Most of the ~198
+               -- ceiling is same-file (already tail-resolved); +21 cross-file.
+               -- v85: ZIG INSTANCE-CHAIN FIELD TYPING. An instance chain
                -- `root.field.method()` resolves via struct field types: the
                -- root's type (a param type, c.chainroot) → the field's type
                -- (data.fieldtypes, scan_fields) → the method. FILE-BOUND, not

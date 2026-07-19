@@ -403,8 +403,11 @@ callers). Ariadne's thread, in text.
      **file-bound** — an `@import` alias in the field's file, else a same-file
      local `const T = struct` — and the method is resolved *in that file*, never
      by bare name (same-named types collide across subsystems, so `MachO`'s
-     `StringTable` binds to `link/StringTable.zig`, not an unrelated one). A chain
-     whose root is a *local* (not a parameter) is left for local type inference.
+     `StringTable` binds to `link/StringTable.zig`, not an unrelated one). One hop
+     of **local type inference** extends this: a local `const s = self.field; s.m()`
+     is typed through the field and resolved as if it were `self.field.m()` (the
+     per-file local map is built once and cached — the dominant `const sema = …;
+     sema.typeOf()` idiom). Deeper local typing (call-return chains) stays open.
      TypeScript parses under its own tree-sitter grammar (a JS superset) for
      both extraction *and* the on-demand analysis lenses, but resolves under
      the JavaScript spec — so `.ts` and `.js` are one language family (the way
