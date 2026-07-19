@@ -5598,6 +5598,63 @@ local function resolve_local_callable(calls, node_index, exact, addref, parent_f
     return n
 end
 
+-- THE RESOLUTION PIPELINE ([[cartograph-resolution-pipeline]]): the 12 post-
+-- passes as ONE ordered list, so extract and relink share it instead of hand-
+-- mirroring the sequence (two drivers kept in sync by hand was the standing
+-- drift hazard). Each pass adapts the shared ctx to its resolver's signature
+-- and returns the count it resolved. ORDER IS SEMANTIC (it used to live as
+-- prose at the call site): super/module_alias/chains/registry feed the
+-- receiver typing; `reassign` is a REWRITE stage (redirect a name-match to the
+-- load-order-effective def) placed BEFORE the return rounds so a corrected
+-- target feeds receiver typing; `returns` settles receiver-deferred calls once
+-- determining calls exist; the receiver passes (self/local_ctor/ruby) run
+-- next; `local_callable` is LAST — the honesty residual, catching only what
+-- every other resolver left silent. Additive / unresolved-only EXCEPT reassign
+-- (the one flagged rewrite). ctx = { calls, data, exact, tail, addref,
+-- node_index, scope_of, consts, parent_fn } — `data` carries the per-language
+-- fact tables. Z1 (local type inference) lands as a NEW ENTRY here, never a
+-- new inline arm.
+local RESOLVE_PASSES = {
+    { name = 'super', run = function (x)
+        return resolve_super(x.calls, x.data.extends, x.exact, x.addref, x.node_index) end },
+    { name = 'module_alias', run = function (x)
+        return resolve_module_alias(x.calls, x.data.edges, x.exact, x.tail, x.addref, x.node_index) end },
+    { name = 'chain_type', run = function (x)
+        return resolve_chain_type(x.calls, x.exact, x.addref, x.node_index) end },
+    { name = 'field_chain', run = function (x)
+        return resolve_field_chain(x.calls, x.data.fieldtypes, x.data.edges, x.exact, x.tail, x.addref, x.node_index) end },
+    { name = 'registry', run = function (x)
+        return resolve_registry(x.calls, x.node_index, x.addref, x.scope_of, x.consts, x.exact) end },
+    { name = 'reassign', run = function (x) -- REWRITE stage (see header)
+        return resolve_reassign(x.calls, x.node_index, x.addref) end },
+    { name = 'returns', run = function (x)
+        local retn, rounds = resolve_returns(x.calls, x.node_index, x.exact, x.addref)
+        x.ret_resolved, x.ret_rounds = retn, rounds
+        return retn end },
+    { name = 'self', run = function (x)
+        return resolve_self(x.calls, x.node_index, x.data.extends, x.exact, x.addref) end },
+    { name = 'local_ctor', run = function (x)
+        return resolve_local_ctor(x.calls, x.node_index, x.data.ctorbinds, x.data.smtclasses, x.data.extends, x.exact, x.addref) end },
+    { name = 'ruby_ancestors', run = function (x)
+        return resolve_ruby_ancestors(x.calls, x.data.ruby_anc, x.exact, x.addref, x.node_index, x.data.ruby_ctor) end },
+    { name = 'interface', run = function (x)
+        return resolve_interface(x.calls, x.data.implements, x.data.beans, x.data.extends, x.exact, x.addref, JAVA_SERVICE_MARKERS) end },
+    { name = 'local_callable', run = function (x)
+        return resolve_local_callable(x.calls, x.node_index, x.exact, x.addref, x.parent_fn) end },
+}
+M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
+
+-- run the pipeline over a ctx; returns the total count resolved. THE one place
+-- the pass order lives — extract runs it over the full call set, relink over
+-- the touched subset (ctx.consts differs: extract folds const keys, relink nil).
+local function run_resolve_passes(ctx)
+    local n = 0
+    for _, p in ipairs(RESOLVE_PASSES) do
+        n = n + (p.run(ctx) or 0)
+    end
+    return n
+end
+
 -- leading lines that BELONG to a def — comments, decorators,
 -- attributes, annotations: what must travel with its text when an
 -- edit verb moves it. Keyed by effective language.
@@ -8468,57 +8525,20 @@ function M.extract(root, opts)
         end
     end
 
-    -- transitive parent::m — for the refusals the direct-parent qualify
-    -- couldn't settle (parent only inherits m), walk the extends chain to
-    -- the nearest ancestor that defines it. Bounded; over the full graph.
     padd('resolve_setup', _prs)
     local _pr = pstart()
-    resolve_super(calls, data.extends, exact, addref, node_index)
-
-    -- module-alias: `alias.member` where alias = require('mod') → mod's member
-    -- (rung-1 receiver resolution) — before the return rounds, so a resolved
-    -- module call can be a determining call for a receiver-typed chain
-    resolve_module_alias(calls, data.edges, exact, tail, addref, node_index)
-    -- multi-level chain type: `root.Type.method()` → Type.method (additive,
-    -- fills only cross-file chains the bare-tail path left unresolved)
-    resolve_chain_type(calls, exact, addref, node_index)
-    -- instance-chain field typing: `root.field.method()` via the root's type +
-    -- the field's type (data.fieldtypes) — additive, unresolved-only
-    resolve_field_chain(calls, data.fieldtypes, data.edges, exact, tail, addref, node_index)
-
-    -- string-keyed registry (stage 3): LibStub("X")/:GetModule("Y") → the
-    -- :NewLibrary/:NewModule-registered table, scoped to the addon (.toc).
-    -- constDefs folds k='local' keys here (const-fold's post-pass runs later)
-    resolve_registry(calls, node_index, addref, scope_of, constDefs, exact)
-
-    -- reassignment-override: a call name-matched to a superseded def of a
-    -- monkey-patched slot → the last-in-load-order (runtime-effective) def.
-    -- Before the return rounds, so a corrected target feeds the receiver typing.
-    resolve_reassign(calls, node_index, addref)
-
-    -- return-type rounds: settle the receiver-deferred calls (c.rt) now
-    -- that plain + super resolution populated the determining calls
-    local retn, retrounds = resolve_returns(calls, node_index, exact, addref)
-    if retn > 0 then data.ret_resolved, data.ret_rounds = retn, retrounds end
-
-    -- self:member — type `self` from resolved call sites (backward), resolve
-    -- through the extends chain; hedge when undetermined (V1 receiver typing)
-    resolve_self(calls, node_index, data.extends, exact, addref)
-
-    -- obj:member where `local obj = C.new(...)` — constructor-typed locals
-    -- resolved through C's extends chain (V2 receiver typing)
-    resolve_local_ctor(calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
-    resolve_ruby_ancestors(calls, data.ruby_anc, exact, addref, node_index, data.ruby_ctor)
-
-    -- interface→impl: redirect an interface-stub call `I::m` to its unique
-    -- impl `C::m` — @stereotype bean (Spring DI) or unique implementer of a
-    -- service-locator marker interface (metasfresh Services.get) (F1)
-    resolve_interface(calls, data.implements, data.beans, data.extends, exact,
-        addref, JAVA_SERVICE_MARKERS)
-
-    -- honesty: silent-dropped local/param callables → resolve or refuse (last,
-    -- after every other call resolver, so it catches only the true residual)
-    resolve_local_callable(calls, node_index, exact, addref, parent_fn)
+    -- run THE RESOLUTION PIPELINE — the 12 post-passes, one ordered list shared
+    -- with relink ([[cartograph-resolution-pipeline]]). ctx.consts folds the
+    -- const-fold k='local' keys for the registry pass; ret_* carries the
+    -- return-round report back out.
+    local resolve_ctx = { calls = calls, data = data, exact = exact,
+        tail = tail, addref = addref, node_index = node_index,
+        scope_of = scope_of, consts = constDefs, parent_fn = parent_fn }
+    run_resolve_passes(resolve_ctx)
+    if (resolve_ctx.ret_resolved or 0) > 0 then
+        data.ret_resolved = resolve_ctx.ret_resolved
+        data.ret_rounds = resolve_ctx.ret_rounds
+    end
     padd('resolve', _pr)
 
     -- use edges + function references (the id pass — factored so parallel
@@ -8933,33 +8953,15 @@ function M.relink(data, touched)
             end
         end
     end
-    -- transitive parent::m over the full (merged/spliced) graph — mirrors
-    -- extract's enrichment so the parallel and refresh paths resolve the
-    -- same superclass chains the sequential path does (node_index built above,
-    -- before the resolve loop)
-    n = n + resolve_super(data.calls, data.extends, exact, addref, node_index)
-    -- module-alias (rung-1 receiver resolution + binding-over-name-match), as extract
-    n = n + resolve_module_alias(data.calls, data.edges, exact, tail, addref, node_index)
-    -- multi-level chain type (root.Type.method → Type.method), as extract
-    n = n + resolve_chain_type(data.calls, exact, addref, node_index)
-    -- instance-chain field typing (root.field.method via field types), as extract
-    n = n + resolve_field_chain(data.calls, data.fieldtypes, data.edges, exact, tail, addref, node_index)
-    -- and the return-type rounds, for the same parity (cross-chunk chains:
-    -- a worker slice may hold the chain but not the determining target)
-    -- string-keyed registry (stage 3), same parity as extract
-    n = n + resolve_registry(data.calls, node_index, addref, scope_of, nil, exact)
-    -- reassignment-override, same parity as extract (same-file slot fact)
-    n = n + resolve_reassign(data.calls, node_index, addref)
-    local retn = resolve_returns(data.calls, node_index, exact, addref)
-    n = n + resolve_self(data.calls, node_index, data.extends, exact, addref)
-    n = n + resolve_local_ctor(data.calls, node_index, data.ctorbinds, data.smtclasses, data.extends, exact, addref)
-    n = n + resolve_ruby_ancestors(data.calls, data.ruby_anc, exact, addref, node_index, data.ruby_ctor)
-    -- interface→impl (F1), same parity as extract
-    n = n + resolve_interface(data.calls, data.implements, data.beans, data.extends,
-        exact, addref, JAVA_SERVICE_MARKERS)
-    -- honesty pass, same parity as extract (silent local/param callables)
-    n = n + resolve_local_callable(data.calls, node_index, exact, addref, parent_fn)
-    return n + retn
+    -- run THE RESOLUTION PIPELINE over the full (merged/spliced) graph — the
+    -- SAME ordered list extract runs, no longer a hand-mirrored copy
+    -- ([[cartograph-resolution-pipeline]]): one list, two drivers. relink's ctx
+    -- passes consts=nil (const-fold keys are extract-only); node_index was
+    -- built above, before the resolve loop.
+    n = n + run_resolve_passes({ calls = data.calls, data = data, exact = exact,
+        tail = tail, addref = addref, node_index = node_index,
+        scope_of = scope_of, consts = nil, parent_fn = parent_fn })
+    return n
 end
 
 return M
