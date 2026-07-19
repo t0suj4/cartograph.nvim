@@ -1384,6 +1384,21 @@ nvim --headless -u NONE -l tools/syngate.lua
 # a session-live overlay, never folded or cached.
 nvim --headless -u NONE -l tools/observe.lua          # workload defaults to synlua
 nvim --headless -u NONE -l tools/observe.lua bnw      # any lua corpus as the workload
+
+# SPEC AUDIT (project-management action: the subject is cartograph's OWN
+# specs/packs, not user code) — M.spec + M.packs are hand-authored CLAIMS
+# (grammar node names, stdlib verbs, framework DSL vocab) and nothing else
+# checks them. Two tiers, never conflated: CONFIRMED stale = a query fails to
+# COMPILE against the grammar (the grammar is the oracle); SUSPECT stale = a
+# query capture / stdlib_names entry that never FIRES across the audited
+# corpora (unexercised ≠ nonexistent). Vocab firing is counted from gate
+# snapshots keyed by the FILE's language (mixed corpora exercise embedded
+# langs); pack vocab is audited only where the pack is ACTIVE; plus GAP
+# candidates (frequent plain-unresolved callees no vocab claims — where the
+# next pack comes from).
+nvim --headless -u NONE -l tools/specaudit.lua              # default corpus set
+nvim --headless -u NONE -l tools/specaudit.lua ruby rails   # explicit corpora
+nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no snapshot
 ```
 
 Three SYNTHETIC corpora are registered first-class in `tools/corpora.lua` —
