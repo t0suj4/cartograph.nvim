@@ -38,8 +38,11 @@ local M = {}
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
 M.EXPECTED = {
     -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 81, ['df-over-collects'] = 548,
-        ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- self analyzes its OWN new
+    self = { ['binding-as-use'] = 83, ['df-over-collects'] = 570,
+        ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- +2 binding-as-use/+22
+        -- df-over @ P0 tier+disposition (tier.lua/census.disp/EXT) + P1 pipeline
+        -- (RESOLVE_PASSES/run_resolve_passes) added to self; ferr=0, benign.
+        -- self analyzes its OWN new
         -- source each cut: +11 df-over @ v50 const-fold, +4/+1 @ v51 anon-fns/
         -- enclosing-chain, +1/+1 @ v52 resolve_registry, +1 binding-as-use/+3
         -- df-over @ untangle PDG INC 1-2, +2 @ INC 4, +1 binding-as-use @ extract
@@ -81,7 +84,11 @@ M.EXPECTED = {
     -- v51 anon-callback fns: their bodies (previously covered by NO fn) now get
     -- their own df/flow, surfacing catalogued closure-leak (df-over-collects) +
     -- pre-existing flow/dfreg diffs (OTHER) in now-covered code. ferr=0 (additive).
-    ghost = { ['df-over-collects'] = 6982, ['OTHER'] = 9, ['receiver'] = 1 },
+    -- recalib 2026-07-19: 6982→6986 (+4 df-over-collects) = v52-v88 JS/TS-pivot
+    -- closure-leak catch-up, never re-gated (matrix couldn't complete pre-P1;
+    -- dfpar is matrix-only). df/flow extraction untouched by P0/P1; ferr=0,
+    -- categories unchanged. Same prior-work debt as ghost's count recalib.
+    ghost = { ['df-over-collects'] = 6986, ['OTHER'] = 9, ['receiver'] = 1 },
     jquery = { ['df-over-collects'] = 12, ['OTHER'] = 2 },
     mootools = {}, -- perfect parity (js archaeology tier)
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
