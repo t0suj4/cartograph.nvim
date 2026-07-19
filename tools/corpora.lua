@@ -72,7 +72,7 @@ return {
         budget_mb = 1600, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/TryGhost/Ghost',
         rev = 'f7d7df8f9816',
-        expected = { refs = 21048, nodes = 39867 }, -- +anon callback fns @ v51 (df-strangler B; ~18.7k #cb nodes)
+        expected = { refs = 26171, nodes = 40608 }, -- recalib 2026-07-19 CATCH-UP: +5123 refs/+741 nodes = JS/TS-pivot class-keying (v59+) + anon-fn shipped since ghost's v51 pin but never re-gated here (perf-cut: full sweep couldn't complete). #cb anon-fn stable at 18840; ref growth = class-keying resolving more calls. VERIFIED independent of P0 disposition/P1 pipeline (both count-neutral — zig/ruby/libs held exactly). Prior: 21048/39867 @ v51 (~18.7k #cb)
         lang = 'javascript',
         notes = 'js SCALE tier (2134 files) — a real node webapp: express'
             .. ' routes + handlebars themes (parametric-files territory)',
@@ -223,7 +223,7 @@ return {
         root = HOME .. '/git/ble.sh',
         repo = 'https://github.com/akinomyoga/ble.sh.git',
         rev = '5d39ebe6db67',
-        expected = { refs = 5260, nodes = 5078 }, -- +28 @ v48 short-name honesty (memo f1..fA chains)
+        expected = { refs = 5260, nodes = 5081 }, -- recalib 2026-07-19: +3 nodes = anon-fn #cb + region in a .js helper (make/color.sample.gogh.js: forEach#cb, region) shipped since v48 but never re-gated; refs stable. VERIFIED independent of P0/P1 (count-neutral). Prior: 5078 @ v48 short-name honesty
         lang = 'bash',
         notes = 'bash SCALE tier (~420 files; a line editor written in bash —'
             .. ' eval-heavy, the aperture design\'s first real workout)',
