@@ -166,14 +166,16 @@ return {
         budget_mb = 2000, -- ~2x inline peak
         repo = 'https://github.com/odin-lang/Odin',
         rev = '967c6046a624',
-        expected = { refs = 18638, nodes = 37121 }, -- recalibrated @ odin-R1 package-qualified (v87)
+        expected = { refs = 19526, nodes = 37121 }, -- recalibrated @ odin node-local tearing (v88)
         lang = 'odin',
-        notes = 'odin v1 + R1 package-qualified resolution (the core stdlib, 1279 '
-            .. 'files) — C/procedural family, no methods; a proc in `package P` '
-            .. 'gains a P.proc key (dual-key, bare kept), and `pkg.proc()` calls '
-            .. 'resolve via the import alias/name → 19.1% (+5099 vs v1, core IS '
-            .. 'the corpus so std resolves). Remaining: torn defs post-parse-error '
-            .. '(fmt/io big files) + UFCS + package-path→dir resolution',
+        notes = 'odin v1 + R1 package-qualified + node-local tearing (the core '
+            .. 'stdlib, 1279 files) — C/procedural family, no methods; a proc in '
+            .. '`package P` gains a P.proc key (dual-key, bare kept), `pkg.proc()` '
+            .. 'calls resolve via the import alias/name, and torn_by_node keys '
+            .. 'clean-subtree defs after a parse error (the Odin grammar errors in '
+            .. 'fmt/io big files) → 20.6% (+7214 vs v1; core IS the corpus so std '
+            .. 'resolves). Remaining: package-path→dir (last-seg≠pkg for 141 dirs, '
+            .. 'mostly non-core) + UFCS + the grammar parse errors themselves',
     },
     python = {
         root = HOME .. '/git/django-oscar/src',

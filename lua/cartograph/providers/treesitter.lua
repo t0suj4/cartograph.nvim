@@ -3799,6 +3799,13 @@ M.spec = {
         ]=],
         -- Odin has no methods — every proc is free (UFCS is banked)
         is_method = function () return false end,
+        -- NODE-LOCAL tearing: a proc's key is `package.proc`, and the package
+        -- comes from the file-top `package` decl (before any parse error), so a
+        -- proc AFTER an error has lost no enclosing context. Tear only defs whose
+        -- OWN subtree errors — the Odin grammar errors in big stdlib files
+        -- (fmt.odin/io.odin ~L681) and the default (tear-everything-after) hid
+        -- the most-used procs (fmt.aprintf, io.write_rune). Like bash.
+        torn_by_node = true,
         -- R1 package-qualified DEF keying: a proc in `package P` gains a `P.proc`
         -- EXACT key (so a cross-package `P.proc()` call meets it) via alt_keys —
         -- NOT qualify. qualify would MOVE the def off its bare key onto tail[proc],

@@ -19,7 +19,19 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 87 -- v87: ODIN-R1 PACKAGE-QUALIFIED RESOLUTION. A proc in `package P`
+M.VERSION = 88 -- v88: ODIN NODE-LOCAL TEARING (torn_by_node). A proc's key is
+               -- `package.proc` and the package comes from the file-top `package`
+               -- decl (before any parse error), so a proc after an error hasn't
+               -- lost context — tear only defs whose OWN subtree errors, not
+               -- everything after the first error line. The Odin grammar errors
+               -- in big stdlib files (fmt.odin/io.odin ~L681); the default hid
+               -- the most-used procs (fmt.aprintf, io.write_rune, sys/linux).
+               -- MEASURED 19.13→20.56% (+2196 gained, 37 CORRECTIONS — platform
+               -- variants that had resolved to the WRONG OS now resolve to their
+               -- own file). −84 = big procs whose BODY spans the error (torn by
+               -- subtree, kept by whole-file); no wrong edges, conservative
+               -- refusals. Like bash/lua.
+               -- v87: ODIN-R1 PACKAGE-QUALIFIED RESOLUTION. A proc in `package P`
                -- gains a `P.proc` EXACT key (alt_keys, keeps the bare key so
                -- same-package calls' dir-scoped reach is unchanged — dual-key,
                -- NOT qualify, which would strand repeated procs on the tail
