@@ -156,6 +156,21 @@ local function run_row(name)
     local data, stats = bench.extract(name)
     local c = require('cartograph.census').take(data)
 
+    -- GRACEFUL DEGRADE (perf-cut P1 follow-on): a corpus whose extract alone
+    -- budgets ≳ 40% of this machine's RAM cannot safely DOUBLE-HOLD — the dfpar
+    -- legacy re-extract and the cache warm-load each transiently hold a 2nd
+    -- full copy alongside the inline `data` (~2× the ~5GB v8 extract ≈ 10GB,
+    -- over an 11GB ceiling → the OOM that ERR'd v8's row). Skip those two
+    -- columns with an honest note rather than OOM-killing the whole row; a
+    -- bigger machine (RAM scales the threshold) or --mem-mb headroom runs them.
+    -- 0.4 so v8 (budget 7500 on ~15 GB) triggers with margin; server (3000)
+    -- does not. v8's dfpar is uncalibrated (~) anyway, so the only real loss is
+    -- v8's cold==warm parity here.
+    local ram_mb = (vim.uv.get_total_memory() or (8 * 2 ^ 30)) / 2 ^ 20
+    local no_double_hold = corpus.budget_mb and corpus.budget_mb >= ram_mb * 0.4
+    local DH_NOTE = { 'skipped: extract too large to double-hold on this RAM'
+        .. ' (see --mem-mb / a bigger machine)' }
+
     if wanted('counts') then
         local expected = corpus.expected
         if not expected then
@@ -194,7 +209,9 @@ local function run_row(name)
     -- to flow.coarse would be circular. legacy_df builds the INDEPENDENT dfreg
     -- df (double walk, oracle-only), exactly like dfgate. Kept out of `data` so
     -- the mem column still measures the real single-walk production peak.
-    if wanted('dfpar') then
+    if wanted('dfpar') and no_double_hold then
+        cell('dfpar', '--', DH_NOTE)
+    elseif wanted('dfpar') then
         local dfp = dofile(here .. '/dfparity.lua')
         local ldata = bench.extract(name, { legacy_df = true })
         local r = dfp.check(ldata)
@@ -220,7 +237,9 @@ local function run_row(name)
     -- before the fold column: shards encode the RAW flow records — folding
     -- happens after ingest in the real lifecycle too (folded nodes carry
     -- closure-backed _flow accessors the codec rightly refuses)
-    if wanted('cache') then
+    if wanted('cache') and no_double_hold then
+        cell('cache', '--', DH_NOTE)
+    elseif wanted('cache') then
         if not data.stamps then
             cell('cache', '--') -- unstamped source: cache never persists it
         else
