@@ -1,7 +1,7 @@
 -- The MATRIX runner: corpus × invariant, one command, one grid.
 --
 --   nvim --headless -u NONE -l tools/matrix.lua [<corpus>...] [--quick]
---        [--cols a,b,c] [--save]
+--        [--cols a,b,c] [--save] [--jobs N] [--mem-mb M]
 --
 -- Every "these two computations must agree" claim the repo makes, swept
 -- across the corpus registry in ONE run — the push-time sweep that used to
@@ -38,7 +38,10 @@
 -- --row) — the same isolation discipline as one gate.lua run per corpus:
 -- no cross-corpus module state, and a per-row crash costs one row, not
 -- the sweep. The child prints one '@@MATRIX <json>' line; everything the
--- orchestrator renders comes from that.
+-- orchestrator renders comes from that. Rows run in a BOUNDED PARALLEL POOL
+-- (--jobs N, default 4): the sweep wall drops from Σ to ≈ Σ/JOBS + longest,
+-- making the full external sweep (v8 included) runnable in one command. The
+-- bound is for MEMORY — scale extracts peak multiple GB, so ≈JOBS run at once.
 
 local SELF = debug.getinfo(1, 'S').source:sub(2)
 local here = SELF:match('^(.*)/matrix%.lua$')
@@ -63,6 +66,12 @@ do
         if a == '--row' then opts.row = true
         elseif a == '--save' then opts.save = true
         elseif a == '--quick' then opts.quick = true
+        elseif a == '--jobs' then
+            i = i + 1
+            opts.jobs = tonumber(arg[i])
+        elseif a == '--mem-mb' then
+            i = i + 1
+            opts.mem_mb = tonumber(arg[i])
         elseif a == '--par-dump' then
             i = i + 1
             opts.pardump = arg[i]
@@ -498,18 +507,23 @@ local colnames = {}
 for _, col in ipairs(COLS) do
     if wanted(col) then colnames[#colnames + 1] = col end
 end
-say(('matrix: %d corpora × %s%s'):format(#names,
-    table.concat(colnames, ','), opts.save and '  [--save]' or ''))
+local JOBS = math.max(1, opts.jobs or 4) -- bounded parallel pool (see below)
+say(('matrix: %d corpora × %s%s  [jobs %d]'):format(#names,
+    table.concat(colnames, ','), opts.save and '  [--save]' or '', JOBS))
 
 local W = 14 -- corpus column width
 local head = { ('%-' .. W .. 's %7s'):format('corpus', 'wall') }
 for _, col in ipairs(colnames) do head[#head + 1] = ('%-6s'):format(col) end
 say(table.concat(head, ' '))
 
-local anyfail, anysoft = false, false
-local details = {}
-for _, name in ipairs(names) do
-    io.stdout:write(('%-' .. W .. 's '):format(name)); io.stdout:flush()
+-- BOUNDED PARALLEL POOL (perf-cut P1): the rows are already isolated child
+-- processes, so run up to JOBS of them at once instead of one-at-a-time — the
+-- sweep wall drops from Σ to ≈ (Σ / JOBS) + longest-single. BOUNDED because the
+-- scale corpora are MEMORY-heavy (v8 ~3.8 GB inline peak) and unbounded spawn
+-- OOMs/SIGTERMs; JOBS keeps ≈JOBS concurrent extracts. Tunable via --jobs on a
+-- bigger/smaller machine. Live per-corpus completion prints to STDERR; the grid
+-- renders in roster order once all rows land (deterministic output).
+local function build_cmd(name)
     local cmd = { vim.v.progpath, '--headless', '-u', 'NONE', '-l', SELF,
         name, '--row' }
     if opts.save then cmd[#cmd + 1] = '--save' end
@@ -517,9 +531,71 @@ for _, name in ipairs(names) do
         cmd[#cmd + 1] = '--cols'
         cmd[#cmd + 1] = table.concat(colnames, ',')
     end
-    local proc = vim.system(cmd, { text = true }):wait(3600 * 1000)
+    return cmd
+end
+
+-- launch HEAVY (long-pole) corpora first — longest-processing-time-first keeps
+-- the makespan ≈ the slowest single row instead of stranding v8 in the tail.
+-- (render order stays the roster order below; results are keyed by name.)
+local pending = {}
+for _, n in ipairs(names) do if HEAVY[n] then pending[#pending + 1] = n end end
+for _, n in ipairs(names) do if not HEAVY[n] then pending[#pending + 1] = n end end
+
+-- MEMORY-AWARE admission: the scale extracts peak multiple GB (v8's par/dfpar
+-- phase ~10 GB), so a flat JOBS count is NOT safe — two big corpora overlapping
+-- exhausts RAM and silently loses their rows (observed: server+v8 both ERR'd at
+-- jobs=4 flat, yet each passes solo). So gate on a memory budget too: admit a
+-- corpus only if the in-flight budget_mb sum leaves room; the biggest always
+-- runs via the running==0 escape. budget_mb (corpora.lua's ~2x-peak figure) is
+-- the relative weight. At 0.5×RAM the biggest (v8, budget 7500) runs SOLO — its
+-- real par/dfpar peak (~10 GB) is close to the machine ceiling, so nothing may
+-- share with it — while server(3000)+mids still co-run and v8/server never
+-- overlap (the pair that OOM'd). --mem-mb overrides.
+local total_mb = (vim.uv.get_total_memory() or (8 * 2 ^ 30)) / 2 ^ 20
+local MEM_BUDGET = opts.mem_mb or math.floor(total_mb * 0.5)
+local function weight(name) return (reg[name] and reg[name].budget_mb) or 500 end
+
+local procs = {} -- name -> raw vim.SystemCompleted (parsed after the pool drains)
+local running, finished, inflight_mb = 0, 0, 0
+local function launch(name)
+    running = running + 1
+    inflight_mb = inflight_mb + weight(name)
+    -- on_exit runs in a fast context: only stash the raw result + a stderr tick
+    -- (pure io/Lua, no vim API); all parsing/rendering happens after the wait
+    vim.system(build_cmd(name), { text = true }, function (proc)
+        procs[name] = proc
+        running = running - 1
+        inflight_mb = inflight_mb - weight(name)
+        finished = finished + 1
+        io.stderr:write(('  [%d/%d] %s\n'):format(finished, #names, name))
+    end)
+end
+-- pump: keep the pool full under BOTH the job count and the memory budget,
+-- scanning past a corpus that doesn't fit so it never head-of-line-blocks a
+-- smaller one behind it. Relaunches from the wait callback as slots/RAM free.
+vim.wait(3600 * 1000 * 4, function ()
+    while running < JOBS and #pending > 0 do
+        local pick
+        if running == 0 then
+            pick = 1 -- always run at least one, even if it alone exceeds budget
+        else
+            for i, name in ipairs(pending) do
+                if inflight_mb + weight(name) <= MEM_BUDGET then pick = i; break end
+            end
+        end
+        if not pick then break end -- nothing fits now; wait for a slot to free
+        launch(table.remove(pending, pick))
+    end
+    return finished >= #names
+end, 25)
+
+local anyfail, anysoft = false, false
+local details = {}
+for _, name in ipairs(names) do
+    io.stdout:write(('%-' .. W .. 's '):format(name)); io.stdout:flush()
+    local proc = procs[name]
     local res
-    for line in (proc.stdout or ''):gmatch('[^\n]+') do
+    for line in ((proc and proc.stdout) or ''):gmatch('[^\n]+') do
         local j = line:match('^@@MATRIX (.+)$')
         if j then
             local okj, t = pcall(vim.json.decode, j)
@@ -528,8 +604,8 @@ for _, name in ipairs(names) do
     end
     if not res then
         res = { corpus = name, err = ('row process failed (code %s)%s')
-            :format(tostring(proc.code),
-                proc.stderr and #proc.stderr > 0
+            :format(proc and tostring(proc.code) or 'no-proc',
+                proc and proc.stderr and #proc.stderr > 0
                     and ': ' .. proc.stderr:sub(-400) or '') }
     end
 
