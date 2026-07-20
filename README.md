@@ -1497,6 +1497,16 @@ callees by the gate that stopped them — the resolution work-list. And
 `tools/seammigrate.lua` enumerates any remaining raw wide-index reads with the
 Band accessor each should become — the migration work-list.
 
+Two **decision** tools answer "what's worth building." `tools/ablate.lua`
+[corpus] drops each resolution pass in turn, re-extracts, and reports the
+**net** resolution it loses — the marginal value `by_prov`'s gross credit
+can't show (gross − net = redundancy; net ≈ 0 across corpora = a de-fund
+candidate). `tools/levers.lua` [corpus] decomposes the *unresolved* calls by
+the gate that stopped them, groups those into strategic levers (stdlib-profile,
+pack/vocabulary, name-match, dispatch), and ranks them by the resolution points
+each would add if realized — the "where's the biggest win" call as data, per
+corpus (on zig it independently reproduces the ~50% std figure).
+
 `tools/corpora.lua` names the corpora and holds calibrated baselines as data;
 `tools/bench.lua` is the bootstrap + measurement discipline (timed runs, peak
 RSS via `/proc`, median-of-N); `tools/snapshot.lua` saves slim extracts
