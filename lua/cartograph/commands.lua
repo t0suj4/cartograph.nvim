@@ -133,6 +133,25 @@ function M.register()
     end, { bang = true,
         desc = 'cartograph: refresh the graph (current file; ! = whole project)' })
 
+    -- ── LSP read surface (T1 in-process) ────────────────────────────
+    -- attach a REAL LSP client to the current buffer, served from the open
+    -- graph — gd / gr / K / documentSymbol / workspaceSymbol answer from the
+    -- common core (cross-language, honesty-on-hover). Read-only.
+    cmd('CartographLspAttach', function ()
+        local store = live() if not store then return end
+        local id, why = require('cartograph.lsp').attach()
+        vim.notify(id and 'cartograph: LSP attached (client ' .. id .. ')'
+            or ('cartograph: LSP attach failed — ' .. tostring(why)),
+            id and vim.log.levels.INFO or vim.log.levels.WARN)
+    end, { desc = 'cartograph: attach the in-process LSP read surface to this buffer' })
+
+    cmd('CartographLspDetach', function ()
+        for _, c in ipairs(vim.lsp.get_clients({ name = 'cartograph' })) do
+            vim.lsp.stop_client(c.id)
+        end
+        vim.notify('cartograph: LSP detached', vim.log.levels.INFO)
+    end, { desc = 'cartograph: stop the in-process LSP read surface' })
+
     -- ── transactions ────────────────────────────────────────────────
     cmd('CartographMerge', function ()
         local st = live() if not st then return end

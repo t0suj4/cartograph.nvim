@@ -607,6 +607,24 @@ refresh (a transaction pins the graph it was planned against);
 project; `setup{ refresh = false }` disables. Dump-based graphs (lua-ls)
 say so instead of silently staling.
 
+### LSP read surface
+
+`:CartographLspAttach` starts an **in-process LSP server** on the current
+buffer, served from the open graph — a real client, so `gd` (definition),
+`gr` (references), `K` (hover), document symbols and workspace symbols all
+answer from the common core, across languages, with no extra process
+(`:CartographLspDetach` stops it). It is **read-only** — writes stay with the
+transaction family (`:CartographMove`/`Merge`/`Apply`).
+
+What makes it different is **honesty on hover**: every answer carries its
+epistemic tier. Definition is exact when the graph is sure (one location),
+offers the **candidate set** when a name is a navigable fork, and returns
+**nothing** — never a fabricated guess — at a frontier. Hover then says *why*:
+the tier (`matched` / `typed` / `proven` / `stdlib` / …), or for the
+unresolved, the refusal rule and how many candidates it saw. No per-language
+server explains what it doesn't know, or follows a call across a language
+boundary; this one does both because the graph already did.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:
