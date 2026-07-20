@@ -878,12 +878,35 @@ local function pop_live(stack)
     end
 end
 
---- <C-o> / <C-t>: return to the location of the previous pivot.
+--- Remember the CURRENT position as a band-boundary crossing, so a later back()
+--- returns here across a band switch (S2). Called before switching bands (open
+--- another root / :CartographSwitch). No-op with no active band (single-band).
+function M.record_crossing()
+    local session = require 'cartograph.session'
+    if not session.active then return end
+    session.push_crossing({ band = session.active, id = M.focused,
+        loc = M.loc_provider and M.loc_provider.get() or nil })
+end
+
+--- <C-o> / <C-t>: return to the previous pivot. Walks the active band's history
+--- first; when it is exhausted, crosses back to the band we came from (S2 —
+--- one continuous trail). Single-band: no crossings, so empty = a no-op.
 function M.back()
     local e = pop_live(M._nav_back)
-    if not e then return end
-    M._nav_fwd[#M._nav_fwd + 1] = snapshot()
-    restore(e)
+    if e then
+        M._nav_fwd[#M._nav_fwd + 1] = snapshot()
+        restore(e)
+        return
+    end
+    local session = require 'cartograph.session'
+    local cr = session.pop_crossing()
+    if not cr then return end
+    if cr.band ~= session.active and session.bands[cr.band] then
+        session.switch(cr.band)
+        M.redraw() -- repaint the panes for the band we crossed back into
+    end
+    if cr.id then M.set_focus(cr.id) end
+    if M.loc_provider and cr.loc then pcall(M.loc_provider.set, cr.loc) end
 end
 
 --- <C-i>: undo a back().

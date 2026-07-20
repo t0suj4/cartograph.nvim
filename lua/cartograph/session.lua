@@ -16,6 +16,16 @@ local store = require 'cartograph.store'
 
 local M = { bands = {}, active = nil }
 
+-- CROSS-BAND TRAIL (S2): the session's own back-stack of band-boundary crossings
+-- ({ band, id, loc } = where we were when we left a band). Per-band jumplists
+-- (store._nav_back, swapped by the lens) carry WITHIN-band history; when one is
+-- exhausted, store.back() pops a crossing here and returns to the band it came
+-- from — one continuous trail across bands ([[cartograph-multiband-session]]).
+-- Single-band never records a crossing, so back stays a no-op on empty.
+M.crossings = {}
+function M.push_crossing(rec) M.crossings[#M.crossings + 1] = rec end
+function M.pop_crossing() return table.remove(M.crossings) end
+
 -- a stable, unique band name from a root: the basename (scheme-stripped),
 -- uniquified against the registry.
 local function name_for(root)
@@ -105,6 +115,6 @@ function M.list()
 end
 
 --- Reset the whole session (tests, a clean :Cartograph on nothing).
-function M.reset() M.bands, M.active = {}, nil end
+function M.reset() M.bands, M.active, M.crossings = {}, nil, {} end
 
 return M

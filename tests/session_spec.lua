@@ -67,6 +67,37 @@ test('session: re-opening a root switches; owning routes by root containment', f
     eq(nil, session.switch_to_root('/proj/never'), 'an unregistered root is not a switch')
 end)
 
+test('session: back crosses bands after the local history is exhausted (S2)', function ()
+    session.reset()
+    -- band A: focus a1, pivot to a2 (a within-band history entry)
+    session.begin('/a'); store.ingest(graph('/a', 'a2'))
+    store.data.nodes[#store.data.nodes + 1] = { id = '/a::a1', name = 'a1',
+        kind = 'function', file = 'm.lua', range = R, order = 1 }
+    store.by_id['/a::a1'] = store.data.nodes[#store.data.nodes]
+    store.set_focus('/a::a1'); store.pivot('/a::a2')
+    eq('/a::a2', store.focused)
+    -- cross to band B (records the crossing at a2)
+    store.record_crossing(); session.begin('/b'); store.ingest(graph('/b', 'b1'))
+    store.set_focus('/b::b1')
+    eq('b', session.active)
+    -- back in B: B has no within-band history -> cross back to A at a2
+    store.back()
+    eq('a', session.active, 'crossed back into band A')
+    eq('/a::a2', store.focused, 'restored to where we left A')
+    -- back again: A's own history (a2 <- a1)
+    store.back()
+    eq('/a::a1', store.focused, 'then walks A\'s within-band history')
+end)
+
+test('nav: single-band back is unchanged — no crossings, empty is a no-op', function ()
+    session.reset()
+    store.ingest(graph('/solo', 'x'))
+    store.set_focus('/solo::x')
+    store.back() -- no history, no crossings
+    eq('/solo::x', store.focused)
+    eq(0, #session.crossings)
+end)
+
 test('session: close drops a band and re-activates a survivor', function ()
     session.reset()
     session.begin('/a'); store.ingest(graph('/a', 'aaa'))

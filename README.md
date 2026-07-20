@@ -650,8 +650,14 @@ together. The store is a lens on the *active* band; opening a new root freezes
 the current one into its record, and re-opening a known root switches back to it
 (no re-extraction). `:CartographBands` lists what's open, `:CartographSwitch
 <name>` flips the active band. A single-project session behaves exactly as
-before. (This is the foundation for cross-*project* navigation — following a
-call across a language or engine boundary into another band.)
+before.
+
+Navigation is **one continuous trail across bands**: `<C-o>` walks the current
+project's jump history and, when it runs out, crosses back into the project you
+came from — landing exactly where you left it. So `self://loaded` alongside a
+work corpus is `<C-o>`-navigable as a single session. (Following a call across a
+language or engine boundary *into* another band is the next step, once bands are
+linked.)
 
 ### Cross-language linking
 

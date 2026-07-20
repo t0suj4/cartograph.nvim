@@ -180,6 +180,7 @@ function M.register()
 
     cmd('CartographSwitch', function (o)
         local session = require 'cartograph.session'
+        require('cartograph.store').record_crossing() -- so <C-o> returns here
         local ok, why = session.switch(o.args)
         if not ok then
             return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)

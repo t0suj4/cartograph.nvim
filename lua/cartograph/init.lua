@@ -48,6 +48,7 @@ function M.open(dump_path, opts)
     -- ingest doesn't clobber it. Single-band sessions never switch, so the
     -- common path is unchanged.
     local session = require 'cartograph.session'
+    if session.active then store.record_crossing() end -- <C-o> returns to where we were
     local existing = session.by_root(target)
     if existing then
         session.switch(existing)
