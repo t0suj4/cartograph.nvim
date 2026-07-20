@@ -14,8 +14,10 @@ local argv = require 'cartograph.argv'
 local atr = require 'cartograph.at'
 
 local function var_by_name(store, name, no_data)
-    for _, n in pairs(store.by_id) do
-        if n.kind == 'var' and n.name == name and (no_data or n.data) then return n end
+    -- NAME axis (indexed) instead of a full by_id scan; node order is stable
+    for _, id in ipairs(store.topo():named(name)) do
+        local n = store.by_id[id]
+        if n and n.kind == 'var' and (no_data or n.data) then return n end
     end
 end
 

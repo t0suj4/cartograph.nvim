@@ -49,6 +49,14 @@ end
 -- tables — the derive logic exists exactly once.
 local function idx_node(T, n)
     T.by_id[n.id] = n
+    -- NAME axis (the LSP name→node index, [[cartograph-slice-api]]): every
+    -- named node, keyed by its bare name → id list (overloads/same-named
+    -- locals across files legitimately collide, so it's a list). Served
+    -- through Band:named so workspaceSymbol has one home, not a special.
+    if n.name then
+        T.by_name[n.name] = T.by_name[n.name] or {}
+        table.insert(T.by_name[n.name], n.id)
+    end
     if n.kind ~= 'module' then
         T.by_file[n.file] = T.by_file[n.file] or {}
         table.insert(T.by_file[n.file], n)
@@ -105,6 +113,7 @@ end
 -- reset every derived index to empty (full ingest starts here)
 local function reset_indexes()
     M.by_id, M.by_file, M.files = {}, {}, {}
+    M.by_name = {} -- NAME axis: node name -> id list (Band:named)
     M.calls_to, M.calls_by_fn = {}, {}
     M.uses, M.usedby, M.occ, M.edge_inferred = {}, {}, {}, {}
     M.edge_tinf = {}
@@ -210,7 +219,9 @@ end
 function M.topo()
     if M._topo_gen ~= M.generation then
         M._fold = require('cartograph.fold').build(M.data)
-        M._topo = require('cartograph.band').from_fold(M._fold)
+        -- pass the store as the identity/detail handle so the resident Band
+        -- answers the name/file/site axes too (topology folded, identity wide)
+        M._topo = require('cartograph.band').from_fold(M._fold, M)
         M._topo_gen = M.generation
     end
     return M._topo
@@ -311,7 +322,7 @@ end
 function M.audit()
     if not M.data then return nil, 'no graph' end
     if M.data.partial then return nil, 'streaming — audit after the stream settles' end
-    local T = { by_id = {}, by_file = {}, calls_to = {}, calls_by_fn = {},
+    local T = { by_id = {}, by_file = {}, by_name = {}, calls_to = {}, calls_by_fn = {},
         uses = {}, usedby = {}, occ = {}, edge_inferred = {}, edge_tinf = {},
         var_usedby = {}, var_uses = {}, imports_in = {}, imports_out = {},
         reg_by = {}, registers = {} }
@@ -324,6 +335,8 @@ function M.audit()
     audit_keyset(out, 'edge_inferred', M.edge_inferred, T.edge_inferred)
     local id = function (v) return v.id end
     audit_lists(out, 'by_file', M.by_file, T.by_file, id)
+    audit_lists(out, 'by_name', M.by_name, T.by_name) -- values are id strings
+
     audit_lists(out, 'uses', M.uses, T.uses)
     audit_lists(out, 'usedby', M.usedby, T.usedby)
     audit_lists(out, 'imports_out', M.imports_out, T.imports_out)
@@ -422,6 +435,10 @@ function M.frontier_evict(file)
     for _, n in ipairs(M.data.nodes) do
         if n.file == file and n.unparsed and n.kind ~= 'module' then
             M.by_id[n.id] = nil
+            local b = n.name and M.by_name[n.name] -- keep the NAME axis in sync
+            if b then
+                for i = #b, 1, -1 do if b[i] == n.id then table.remove(b, i) end end
+            end
         else
             keep[#keep + 1] = n
         end
@@ -772,6 +789,10 @@ function M.add_node(n)
     if M.by_id[n.id] then return n end
     table.insert(M.data.nodes, n)
     M.by_id[n.id] = n
+    if n.name then
+        M.by_name[n.name] = M.by_name[n.name] or {}
+        table.insert(M.by_name[n.name], n.id)
+    end
     M.by_file[n.file] = M.by_file[n.file] or {}
     table.insert(M.by_file[n.file], n)
     return n

@@ -52,6 +52,40 @@ function Band:gw(from, to) return self:_gw(from, to) end
 function Band:gp(from, to) return self:_gp(from, to) end
 function Band:flds(from, to) return self:_flds(from, to) end
 
+-- ── IDENTITY + DETAIL axes: name / file / call-site ──────────────────────
+-- These slice NODE IDENTITY (named/nodes_of) and CALL OUTCOMES (sites),
+-- which are representation-STABLE — the same regardless of whether topology
+-- is wide-store or folded — so both backends answer them off the same
+-- `_idx()` handle (the wide index the fold does not fold). This is where the
+-- LSP name→node index and the refresh/documentSymbol file unit live — one
+-- home on the seam, not a P1 special ([[cartograph-slice-api]] coverage). A
+-- backend with no identity handle (a bare fold, no store) returns empty.
+
+--- NAME axis: node ids whose bare name == `name` (a list — overloads and
+--- same-named locals across files collide). The LSP workspaceSymbol index.
+function Band:named(name)
+    local idx = self:_idx()
+    return (idx and idx.by_name[name]) or {}
+end
+
+--- FILE axis: the non-module node ids defined in `file` (the module node's
+--- id IS the file key). The refresh / documentSymbol unit.
+function Band:nodes_of(file)
+    local idx = self:_idx()
+    if not idx then return {} end
+    local out = {}
+    for _, n in ipairs(idx.by_file[file] or {}) do out[#out + 1] = n.id end
+    return out
+end
+
+--- CALL-SITE axis: the call rows made FROM function `id`, as outcomes
+--- (each row carries its resolution: c.to / c.refused / c.ext disposition).
+--- Tier-1 slice; the argv/witness detail is Tier-2 reconstruct off the row.
+function Band:sites(id)
+    local idx = self:_idx()
+    return (idx and idx.calls_by_fn[id]) or {}
+end
+
 -- ── store backend: the wide forward/backward index tables ────────────────
 local StoreBand = setmetatable({}, { __index = Band })
 StoreBand.__index = StoreBand
@@ -74,6 +108,7 @@ local function store_slice(store, spec, id)
     for i = 1, #raw do out[i] = raw[i][spec.k] end
     return out
 end
+function StoreBand:_idx() return self.store end
 function StoreBand:_fwd(id, kind) return store_slice(self.store, S_FWD[kind], id) end
 function StoreBand:_bwd(id, kind) return store_slice(self.store, S_BWD[kind], id) end
 function StoreBand:_tier(from, to)
@@ -118,6 +153,11 @@ end
 -- ── fold backend: the folded triple table's slices ───────────────────────
 local FoldBand = setmetatable({}, { __index = Band })
 FoldBand.__index = FoldBand
+
+-- the fold folds TOPOLOGY only; identity/detail (name/file/site) come from
+-- the wide index handle store.topo() passes alongside it (representation-
+-- stable — the fold never folded these). nil for a bare parity-test fold.
+function FoldBand:_idx() return self.idx end
 
 local fold_mod -- lazy: PRED table
 local function names_of(f, ints)
@@ -168,9 +208,12 @@ function FoldBand:_flds(from, to)
     return f:flds(s, o)
 end
 
-function M.from_fold(fold)
+--- `idx` (optional) = the wide identity/detail handle (the store) the
+--- resident topology view carries for the name/file/site axes; omit for a
+--- pure-topology fold Band (the parity tests).
+function M.from_fold(fold, idx)
     fold_mod = fold_mod or require 'cartograph.fold'
-    return setmetatable({ fold = fold }, FoldBand)
+    return setmetatable({ fold = fold, idx = idx }, FoldBand)
 end
 
 return M

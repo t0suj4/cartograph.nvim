@@ -88,3 +88,67 @@ test('band: sugar maps to the right predicate+direction', function ()
     eq({ 'other.lua' }, b:imports_out('m.lua'))
     eq({}, b:callers('iso'), 'isolated node: empty, not nil')
 end)
+
+-- identity/detail axes: node-identity by name/file and call outcomes by fn
+local IDATA = {
+    root = '/x',
+    nodes = {
+        node('f.lua', 'module'),
+        { id = 'f.lua::foo:1', name = 'foo', kind = 'function',
+            file = 'f.lua', range = R, order = 0 },
+        { id = 'g.lua::foo:1', name = 'foo', kind = 'function',
+            file = 'g.lua', range = R, order = 0 }, -- same NAME, other file
+        { id = 'f.lua::bar:2', name = 'bar', kind = 'function',
+            file = 'f.lua', range = R, order = 1 },
+    },
+    edges = {},
+    calls = {
+        { fn = 'f.lua::foo:1', callee = 'bar', file = 'f.lua', line = 3,
+            to = 'f.lua::bar:2' },
+        { fn = 'f.lua::foo:1', callee = 'mystery', file = 'f.lua', line = 4,
+            refused = { rule = 'ambiguous' } },
+    },
+}
+
+test('band: NAME axis — named(name) returns every node with that name', function ()
+    store.ingest(IDATA)
+    local bs = band.from_store(store)
+    local bf = band.from_fold(fold.build(IDATA), store) -- resident-shaped
+    eq({ 'f.lua::foo:1', 'g.lua::foo:1' }, sorted(bs:named('foo')))
+    eq({ 'f.lua::foo:1', 'g.lua::foo:1' }, sorted(bf:named('foo')),
+        'identity axis identical on both backends')
+    eq({ 'f.lua::bar:2' }, bs:named('bar'))
+    eq({}, bs:named('nope'), 'unknown name: empty, not nil')
+end)
+
+test('band: FILE axis — nodes_of(file) returns the file\'s non-module nodes', function ()
+    store.ingest(IDATA)
+    local bs = band.from_store(store)
+    local bf = band.from_fold(fold.build(IDATA), store)
+    eq({ 'f.lua::bar:2', 'f.lua::foo:1' }, sorted(bs:nodes_of('f.lua')))
+    eq({ 'f.lua::bar:2', 'f.lua::foo:1' }, sorted(bf:nodes_of('f.lua')))
+    eq({ 'g.lua::foo:1' }, bs:nodes_of('g.lua'))
+end)
+
+test('band: SITE axis — sites(fn) returns the fn\'s call rows as outcomes', function ()
+    store.ingest(IDATA)
+    local bs = band.from_store(store)
+    local rows = bs:sites('f.lua::foo:1')
+    eq(2, #rows)
+    -- one resolved, one refused — the outcome rides each row
+    local resolved, refused = 0, 0
+    for _, c in ipairs(rows) do
+        if c.to then resolved = resolved + 1 end
+        if c.refused then refused = refused + 1 end
+    end
+    eq(1, resolved); eq(1, refused)
+    eq({}, bs:sites('nobody'), 'no calls: empty, not nil')
+end)
+
+test('band: a pure-topology fold (no idx) yields empty identity axes', function ()
+    store.ingest(IDATA)
+    local bare = band.from_fold(fold.build(IDATA)) -- no store handle
+    eq({}, bare:named('foo'))
+    eq({}, bare:nodes_of('f.lua'))
+    eq({}, bare:sites('f.lua::foo:1'))
+end)

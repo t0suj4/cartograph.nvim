@@ -410,9 +410,10 @@ end
 -- treat its fan-in as plumbing. Marks node.access as a side effect.
 local function access_point_findings(store)
     local out = {}
+    local band = store.topo() -- fan-in through the resident Band, not raw usedby
     for _, n in ipairs(store.data.nodes) do
         if (n.kind == 'function' or n.kind == 'method') then
-            local callers = #(store.usedby[n.id] or {})
+            local callers = band:n_callers(n.id)
             local stmts = require('cartograph.df').count(n)
             local gettish = n.name:match('[Gg]et[%u_]?') or n.name:match('instance')
                 or n.name:match('current')
