@@ -152,6 +152,17 @@ function M.register()
         vim.notify('cartograph: LSP detached', vim.log.levels.INFO)
     end, { desc = 'cartograph: stop the in-process LSP read surface' })
 
+    -- cartograph on cartograph: the self-analysis dashboard (census + LSP
+    -- serving-consistency + lint incl. the Band seam-guard) in a scratch
+    -- buffer, and the in-process LSP attached so gd/gr/K work on this graph.
+    cmd('CartographDogfood', function ()
+        local store = live() if not store then return end
+        local lines = require('cartograph.dogfood').run(store)
+        local id = require('cartograph.lsp').attach()
+        if id then lines[#lines + 1] = ''; lines[#lines + 1] = ('LSP attached (client %d) — gd/gr/K on this graph'):format(id) end
+        scratch(lines)
+    end, { desc = 'cartograph: self-analysis dashboard + attach the LSP read surface' })
+
     -- ── transactions ────────────────────────────────────────────────
     cmd('CartographMerge', function ()
         local st = live() if not st then return end

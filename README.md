@@ -636,6 +636,12 @@ resolution record) and `cartograph/graphInfo`. Over the stdio host
 graph-aware lint as diagnostics on save. Measured against lua-ls on the same
 corpus it agrees **99.6–100%** where both resolve, and resolves more.
 
+`:CartographDogfood` turns all of this on the open project at once — a one-screen
+dashboard (resolution by tier, the LSP answering its own graph, the lint) with
+the read surface attached. Run headless, `nvim --headless -l tools/dogfood.lua`
+is a CI/pre-commit **fence**: it fails if any code reads the wide graph indexes
+raw instead of through the query seam.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:
