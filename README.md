@@ -1483,6 +1483,20 @@ in `dfgate self`. The check core is `tools/dfparity.lua`, shared with `dfgate`. 
 and seam rewriter (`--rw`/`--rwmod`/`--apply`, refusals printed as a review
 ledger).
 
+The **dogfood family** turns the tool on itself. `tools/dogfood.lua` is the
+one-screen self-check (resolution by tier, the LSP answering its own graph,
+lint) and the **seam-guard fence** — it exits non-zero if any code reads the
+wide graph indexes raw instead of through the Band. `tools/ratchet.lua` logs
+those numbers per run and prints the delta (`resolved -0.3%` is a regression you
+see immediately). `tools/conflicts.lua <corpus>` shows each cartograph-vs-lua-ls
+disagreement with source context and cartograph's tier, so a conflict is
+triageable in seconds (the charter's "a disagreement is a bug on one side").
+`tools/lspparity.lua <corpus>` is the serving acceptance number (consistency +
+parity vs a lua-ls dump). `tools/gaps.lua <root>` ranks a project's unresolved
+callees by the gate that stopped them — the resolution work-list. And
+`tools/seammigrate.lua` enumerates any remaining raw wide-index reads with the
+Band accessor each should become — the migration work-list.
+
 `tools/corpora.lua` names the corpora and holds calibrated baselines as data;
 `tools/bench.lua` is the bootstrap + measurement discipline (timed runs, peak
 RSS via `/proc`, median-of-N); `tools/snapshot.lua` saves slim extracts

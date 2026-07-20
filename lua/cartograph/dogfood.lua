@@ -104,6 +104,27 @@ function M.report(store)
     return out, { seam = seam_n, served = served, consistent = consistent }
 end
 
+--- The numeric record (the ratchet's fuel — [[cartograph-capabilities]]
+--- dogfood): resolution %, serving-consistency %, seam breaches, lint totals,
+--- by_prov. Pure over a store; the caller declares the seam.
+function M.metrics(store)
+    local c = census.take(store.data)
+    local served, consistent = serving_consistency(store)
+    local by_rule = {}
+    for _, f in ipairs(lint.run(store)) do by_rule[f.rule] = (by_rule[f.rule] or 0) + 1 end
+    local lint_total = 0
+    for _, v in pairs(by_rule) do lint_total = lint_total + v end
+    return {
+        nodes = c.nodes.total, calls = c.calls.total,
+        resolved = c.calls.resolved, refused = c.calls.refused, outside = c.calls.unresolved,
+        resolved_pct = c.calls.total > 0 and c.calls.resolved / c.calls.total * 100 or 0,
+        served = served, consistent = consistent,
+        serving_pct = served > 0 and consistent / served * 100 or 0,
+        seam = by_rule['seam-guard'] or 0,
+        lint_total = lint_total, lint = by_rule, by_prov = c.calls.by_prov,
+    }
+end
+
 --- Run the report on the OPEN graph with the Band seam declared (non-
 --- destructively — a user's own seams are preserved). Returns (lines, counts).
 function M.run(store)

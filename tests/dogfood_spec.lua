@@ -30,6 +30,17 @@ test('dogfood: run() reports the three sections + a seam count, non-destructivel
     eq(nil, require('cartograph.config').seams, 'config.seams restored (non-destructive)')
 end)
 
+test('dogfood: metrics() is the numeric record (the ratchet\'s fuel)', function ()
+    store.ingest(DATA)
+    require('cartograph.config').seams = nil
+    local m = dogfood.metrics(store)
+    eq(3, m.nodes); eq(1, m.calls)
+    eq(100, m.resolved_pct) -- the one call resolves
+    eq(0, m.seam)
+    ok(type(m.serving_pct) == 'number', 'serving is a number')
+    ok(m.by_prov ~= nil and m.lint ~= nil, 'by_prov + lint breakdown present')
+end)
+
 test('dogfood: the BAND_SEAM guards the wide index tables, not the whole-map form', function ()
     local pats = {}
     for _, p in ipairs(dogfood.BAND_SEAM.patterns) do pats[p] = true end
