@@ -347,8 +347,9 @@ function M.analyze_scope(store, files, opts)
     end
     local calls, states = 0, 0
     local edges = {}                                       -- kind-tagged, for communities
+    local band = store.topo()
     for k, node in ipairs(fns) do                          -- CALL edges (intra-scope)
-        for _, callee in ipairs(store.uses[node.id] or {}) do
+        for _, callee in ipairs(band:callees(node.id)) do
             if idx[callee] then edges[#edges + 1] = { k, idx[callee], kind = 'call' }; calls = calls + 1 end
         end
     end
@@ -389,7 +390,7 @@ function M.analyze_scope(store, files, opts)
         why[c][#why[c] + 1] = { fn = fns[k].name, line = line, reason = reason }
     end
     for k, node in ipairs(fns) do
-        for _, c in ipairs(store.calls_by_fn[node.id] or {}) do
+        for _, c in ipairs(store.topo():sites(node.id)) do
             local line = (c.line or 0) + 1
             if c.dynamic then
                 flag(k, line, 'dynamic dispatch (could reach any fn)')

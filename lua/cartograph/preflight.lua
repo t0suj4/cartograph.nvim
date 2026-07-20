@@ -33,9 +33,10 @@ function M.affected(store, changed)
     -- reverse cone over the call graph (usedby): who can observe a change
     local cone, work = {}, {}
     for id in pairs(fnset) do work[#work + 1] = id end
+    local band = store.topo()
     while #work > 0 do
         local id = table.remove(work)
-        for _, from in ipairs(store.usedby[id] or {}) do
+        for _, from in ipairs(band:callers(id)) do
             if not fnset[from] and not cone[from] then
                 cone[from] = true
                 work[#work + 1] = from
@@ -56,7 +57,7 @@ function M.affected(store, changed)
                 if not seen[cur] then
                     seen[cur] = true
                     if files[cur] then hit = true break end
-                    for _, to in ipairs(store.imports_out[cur] or {}) do
+                    for _, to in ipairs(store.topo():imports_out(cur)) do
                         w2[#w2 + 1] = to
                     end
                 end

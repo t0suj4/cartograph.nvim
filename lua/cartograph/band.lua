@@ -34,6 +34,7 @@ function Band:imports_in(id)   return self:_bwd(id, 'import') end
 
 -- counts (the cheap degree query — dead-code's actual need)
 function Band:n_callers(id)     return #self:callers(id) end
+function Band:n_callees(id)     return #self:callees(id) end
 function Band:n_registrants(id) return #self:registrants(id) end
 
 -- CERTAINTY: the honesty tier of a ref edge (from→to), the thing that must

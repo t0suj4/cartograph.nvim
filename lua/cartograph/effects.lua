@@ -341,7 +341,7 @@ function M.summaries(store)
         for _, fid in ipairs(members) do
             local caller = store.node(fid)
             local file = caller and caller.file
-            for _, c in ipairs(store.calls_by_fn[fid] or {}) do
+            for _, c in ipairs(store.topo():sites(fid)) do
                 local to = c.to
                 if to and con.comp[to] == ci then
                     -- intra-SCC: members share this summary already

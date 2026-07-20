@@ -48,7 +48,7 @@ local function context(store, fn_id)
     -- math.floor) whose field access is benign — a stable reference, not a mutable-table
     -- read, so reads_content exempts them (allocation is now structural via expr).
     local impure_line, callee_line, pure_module = {}, {}, {}
-    for _, c in ipairs((store.calls_by_fn and store.calls_by_fn[fn_id]) or {}) do
+    for _, c in ipairs(store.topo():sites(fn_id)) do
         local ln = (c.line or 0) + 1
         local ce = effects.call_effects(store, c, node.file)
         local pure = (next(ce.w) == nil) and not ce.hedges

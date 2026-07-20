@@ -267,14 +267,14 @@ local function render_files_tree(ctx)
         shown[file] = true
         file_row(ctx, file, depth)
         local kids = {}
-        for _, k in ipairs(store.imports_out[file] or {}) do kids[#kids + 1] = k end
+        for _, k in ipairs(store.topo():imports_out(file)) do kids[#kids + 1] = k end
         table.sort(kids)
         for _, k in ipairs(kids) do add(k, depth + 1) end
     end
     -- entry points first among the roots, then the accidental ones
     local roots = {}
     for _, f in ipairs(store.files) do
-        if not (store.imports_in[f] and #store.imports_in[f] > 0) then roots[#roots + 1] = f end
+        if #store.topo():imports_in(f) == 0 then roots[#roots + 1] = f end
     end
     table.sort(roots, function (a, b)
         local ea, eb = store.is_entrypoint(a), store.is_entrypoint(b)
@@ -472,7 +472,7 @@ local function render_callers(ctx, id)
         sites[#sites + 1] = { fn = id, name = node.name or id, short = selfshort,
             file = node.file, line = atr.sl(r), range = r, rec = true, internal = true }
     end
-    for _, from in ipairs(store.usedby[id] or {}) do
+    for _, from in ipairs(store.topo():callers(id)) do
         local fn = store.node(from)
         local inf = store.edge_inferred[from .. '\31' .. id]
         local rec = from == id or nil
@@ -1005,7 +1005,7 @@ local function render_fn(ctx, id)
     end
     -- who calls this function — descend on the row to see the call sites
     local ncall = 0
-    for _, from in ipairs(store.usedby[id] or {}) do
+    for _, from in ipairs(store.topo():callers(id)) do
         ncall = ncall + #(store.occurrences(from, id) or {})
     end
     ctx.lines[2] = ('↖ callers (%d)'):format(ncall)
@@ -1062,7 +1062,7 @@ local function render_fn(ctx, id)
         return best
     end
     local calls_at = {}
-    for _, c in ipairs(store.calls_by_fn[id] or {}) do
+    for _, c in ipairs(store.topo():sites(id)) do
         local best = stmt_of(c.line)
         if best then
             calls_at[best] = calls_at[best] or {}
@@ -1150,7 +1150,7 @@ local function render_block(ctx, key)
         ctx.marks[2] = { { 0, -1, 'CartographDim' } }
         return
     end
-    local calls = store.calls_by_fn[fnid] or {}
+    local calls = store.topo():sites(fnid)
     -- the earliest call whose head token lies within a form = the form's call
     local function primary(f)
         local best
@@ -1664,15 +1664,16 @@ function M.paint(id)
     if not id or M.view.level ~= 'file' then return end
 
     local uses1, uses2, rdep1, rdep2 = {}, {}, {}, {}
-    for _, t in ipairs(store.uses[id]   or {}) do uses1[t] = true end
-    for _, f in ipairs(store.usedby[id] or {}) do rdep1[f] = true end
+    local band = store.topo()
+    for _, t in ipairs(band:callees(id)) do uses1[t] = true end
+    for _, f in ipairs(band:callers(id)) do rdep1[f] = true end
     for t in pairs(uses1) do
-        for _, t2 in ipairs(store.uses[t] or {}) do
+        for _, t2 in ipairs(band:callees(t)) do
             if t2 ~= id and not uses1[t2] then uses2[t2] = true end
         end
     end
     for f in pairs(rdep1) do
-        for _, f2 in ipairs(store.usedby[f] or {}) do
+        for _, f2 in ipairs(band:callers(f)) do
             if f2 ~= id and not rdep1[f2] then rdep2[f2] = true end
         end
     end
@@ -1702,11 +1703,12 @@ function M.render_heat()
     if not M.buf or not vim.api.nvim_buf_is_valid(M.buf) then return end
     vim.api.nvim_buf_clear_namespace(M.buf, ns_heat, 0, -1)
     if not M.heat_on or M.view.level ~= 'file' then return end
+    local band = store.topo()
     for id, row in pairs(M.node_line) do
         local n = store.node(id)
         if n and STAGEABLE[n.kind] then
-            local fanin  = #(store.usedby[id] or {})
-            local fanout = #(store.uses[id] or {})
+            local fanin  = band:n_callers(id)
+            local fanout = band:n_callees(id)
             local exported = n.kind == 'method' or (n.name and n.name:find('%.') ~= nil)
             local r = heat.role(fanin, fanout, exported)
             local text = ('  in:%d out:%d%s'):format(fanin, fanout, r.tag ~= '' and ('  ◀ ' .. r.tag) or '')
@@ -1824,7 +1826,7 @@ function M.attach(win)
         local fnid, line, callee = (key or ''):match('^(.-)\31(%d+)\31(.*)$')
         if not fnid then return nil end
         line = tonumber(line)
-        for _, c in ipairs(store.calls_by_fn[fnid] or {}) do
+        for _, c in ipairs(store.topo():sites(fnid)) do
             if c.line == line and c.callee == callee and c.refused then return c end
         end
     end

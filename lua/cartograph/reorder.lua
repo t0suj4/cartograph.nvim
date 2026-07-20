@@ -58,7 +58,7 @@ function M.analyze(store, fn_id)
         end
     end
     -- call effects land on the statement containing the call site
-    for _, c in ipairs(store.calls_by_fn[fn_id] or {}) do
+    for _, c in ipairs(store.topo():sites(fn_id)) do
         local si = c.line and stmt_of(c.line)
         if si then
             local fx = effects.call_effects(store, c, node.file)

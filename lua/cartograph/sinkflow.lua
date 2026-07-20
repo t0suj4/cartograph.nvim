@@ -733,7 +733,7 @@ function M.reach_findings(store)
         if n.kind == 'function' or n.kind == 'method' then
             ids[#ids + 1] = n.id
             local adj = {}
-            for _, c in ipairs(store.calls_by_fn[n.id] or {}) do
+            for _, c in ipairs(store.topo():sites(n.id)) do
                 if c.to then adj[#adj + 1] = c.to end
             end
             calladj[n.id] = adj
@@ -753,7 +753,7 @@ function M.reach_findings(store)
             changed = false
             for _, fid in ipairs(con.members[ci]) do
                 local rec = info[fid]
-                for _, c in ipairs(rec and store.calls_by_fn[fid] or {}) do
+                for _, c in ipairs(rec and store.topo():sites(fid) or {}) do
                     local gsp = c.to and sp[c.to]
                     if gsp and next(gsp) then
                         local ac = rec.argclass[c.line]

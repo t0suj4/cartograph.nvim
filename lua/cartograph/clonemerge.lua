@@ -30,7 +30,7 @@ function M.twins(store, id)
     if not n then return {} end
     local function callees(x)
         local out = {}
-        for _, c in ipairs(store.calls_by_fn[x.id] or {}) do
+        for _, c in ipairs(store.topo():sites(x.id)) do
             out[#out + 1] = c.callee
         end
         return out
@@ -123,7 +123,7 @@ function M.plan(store, id)
         -- non-call references (the id pass's dispatch-table finds): they
         -- would still NAME the removed twin — disclosed, never rewritten
         local nonrefs = 0
-        for _, from in ipairs(store.usedby[t.id] or {}) do
+        for _, from in ipairs(store.topo():callers(t.id)) do
             local calls = 0
             for _, c in ipairs(store.calls_to[t.id] or {}) do
                 if c.fn == from then calls = calls + 1 end

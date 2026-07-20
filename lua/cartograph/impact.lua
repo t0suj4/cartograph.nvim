@@ -11,9 +11,9 @@ local M = {}
 local atr = require 'cartograph.at'
 
 -- does `from` already `require` `to`?
-local function imports_already(store, from, to)
-    for _, imp in ipairs(store.imports_in[to] or {}) do
-        if imp.from == from then return true end
+local function imports_already(band, from, to)
+    for _, f in ipairs(band:imports_in(to)) do
+        if f == from then return true end
     end
     return false
 end
@@ -30,6 +30,7 @@ end
 --- @param dest string?   destination file
 --- @return table plan
 function M.compute(store, moveset, dest)
+    local band = store.topo() -- topology through the resident Band, not raw indexes
     local in_move = {}
     for _, id in ipairs(moveset) do in_move[id] = true end
 
@@ -53,7 +54,7 @@ function M.compute(store, moveset, dest)
     local rw = {} -- file -> { name -> count }
     for _, id in ipairs(moveset) do
         local n = store.node(id)
-        for _, caller in ipairs(store.usedby[id] or {}) do
+        for _, caller in ipairs(band:callers(id)) do
             local cn = not in_move[caller] and store.node(caller)
             local cfile = cn and cn.file
             if n and cfile and cfile ~= dest then
@@ -78,7 +79,7 @@ function M.compute(store, moveset, dest)
     local add = {}
     if dest then
         for file in pairs(rewrite_files) do
-            if not imports_already(store, file, dest) then add[file] = true end
+            if not imports_already(band, file, dest) then add[file] = true end
         end
     end
 
@@ -86,10 +87,10 @@ function M.compute(store, moveset, dest)
     local dest_req = {}
     if dest then
         for _, id in ipairs(moveset) do
-            for _, dep in ipairs(store.uses[id] or {}) do
+            for _, dep in ipairs(band:callees(id)) do
                 local dn = not in_move[dep] and store.node(dep)
                 local dfile = dn and dn.file
-                if dfile and dfile ~= dest and not imports_already(store, dest, dfile) then
+                if dfile and dfile ~= dest and not imports_already(band, dest, dfile) then
                     dest_req[dfile] = true
                 end
             end
@@ -121,7 +122,7 @@ function M.compute(store, moveset, dest)
 
         -- cycle risk: dest would need to require a module that already requires dest
         for _, dfile in ipairs(dest_requires) do
-            if imports_already(store, dfile, dest) then
+            if imports_already(band, dfile, dest) then
                 warn('cycle', 'require cycle: ' .. dest .. ' <-> ' .. dfile)
             end
         end
@@ -187,10 +188,8 @@ function M.compute(store, moveset, dest)
         end
     end
     for tid in pairs(travels) do
-        for _, dep in ipairs(store.uses[tid] or {}) do consider(dep) end
-        for _, vu in ipairs(store.var_uses and store.var_uses[tid] or {}) do
-            consider(vu.to)
-        end
+        for _, dep in ipairs(band:callees(tid)) do consider(dep) end
+        for _, to in ipairs(band:var_uses(tid)) do consider(to) end
     end
     local capkeys, caps = {}, {}
     for depid in pairs(captured) do capkeys[#capkeys + 1] = depid end
@@ -202,12 +201,12 @@ function M.compute(store, moveset, dest)
         -- code too → moving it would break the stayer; require or copy instead.
         -- (Referrers may be nested nodes, hence the `travels` test, not the set.)
         local private = true
-        for _, r in ipairs(store.usedby[depid] or {}) do
+        for _, r in ipairs(band:callers(depid)) do
             if not travels[r] then private = false; break end
         end
-        if private and store.var_usedby then
-            for _, vu in ipairs(store.var_usedby[depid] or {}) do
-                if not travels[vu.from] then private = false; break end
+        if private then
+            for _, from in ipairs(band:var_used_by(depid)) do
+                if not travels[from] then private = false; break end
             end
         end
         caps[#caps + 1] = { id = depid, name = c.name, file = c.file, private = private }

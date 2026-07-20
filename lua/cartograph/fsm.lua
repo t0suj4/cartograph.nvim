@@ -239,8 +239,9 @@ function M.cone(store, ids)
         if id and not seen[id] then seen[id] = true; queue[#queue + 1] = id end
     end
     local i = 1
+    local band = store.topo()
     while queue[i] do
-        for _, to in ipairs(store.uses[queue[i]] or {}) do
+        for _, to in ipairs(band:callees(queue[i])) do
             if not seen[to] then seen[to] = true; queue[#queue + 1] = to end
         end
         i = i + 1

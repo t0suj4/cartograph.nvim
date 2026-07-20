@@ -60,7 +60,8 @@ function M.tally(store, id)
     local proven = proven_set(store)
     local out = { total = 0 }
     for _, r in ipairs(RUNGS) do out[r] = 0 end
-    local calls = id and (store.calls_by_fn[id] or {}) or (store.data.calls or {})
+    -- per-fn: the SITE axis (Band); whole-graph: the raw call array
+    local calls = id and store.topo():sites(id) or (store.data.calls or {})
     for _, c in ipairs(calls) do
         local r = rung_of(c, proven)
         out[r] = out[r] + 1

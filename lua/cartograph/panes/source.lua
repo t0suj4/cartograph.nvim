@@ -146,7 +146,7 @@ end
 function M.resolve_jump(node, file_line, col, cword)
     if not node then return nil end
     local byword
-    for _, to in ipairs(store.uses[node.id] or {}) do
+    for _, to in ipairs(store.topo():callees(node.id)) do
         for _, r in ipairs(store.occurrences(node.id, to) or {}) do
             if atr.sl(r) == file_line and col >= atr.sc(r)
                 and (atr.el(r) > file_line or col < atr.ec(r)) then
