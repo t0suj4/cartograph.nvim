@@ -67,8 +67,18 @@ while true do
     elseif id == nil then
         -- notification
         if method == 'exit' then break end
-        -- didOpen/didSave/didChange etc.: MVP serves the saved graph (honest-
-        -- stale); a didSave-driven splice is the P3 follow-up. Ignore quietly.
+        -- diagnostics are PUSH (T2 only — T1 lets diag.lua publish natively):
+        -- on open/save, publish the graph-aware lint for that file. (didChange
+        -- dirty-buffer re-extraction stays honest-stale — a later item.)
+        if method == 'textDocument/didOpen' or method == 'textDocument/didSave' then
+            local td = msg.params and msg.params.textDocument
+            if td and td.uri then
+                write_message {
+                    jsonrpc = '2.0', method = 'textDocument/publishDiagnostics',
+                    params = { uri = td.uri, diagnostics = lsp.diagnostics(store, td.uri) },
+                }
+            end
+        end
     else
         -- request
         local h = lsp.handlers[method]

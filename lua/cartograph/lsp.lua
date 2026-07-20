@@ -108,6 +108,10 @@ M.handlers['initialize'] = function ()
             documentSymbolProvider = true,
             hoverProvider = true,
             workspaceSymbolProvider = true,
+            callHierarchyProvider = true, -- the graph IS this, and it crosses languages
+            -- namespaced extensions (never mistaken for a standard method):
+            -- cartograph/why (the honesty record) + cartograph/graphInfo
+            experimental = { cartograph = { why = true, graphInfo = true } },
         },
         serverInfo = { name = 'cartograph' },
     }
@@ -252,6 +256,126 @@ M.handlers['workspace/symbol'] = function (store, params)
                     }
                 end
             end
+        end
+    end
+    return out
+end
+
+-- ── callHierarchy: the graph IS a call hierarchy, and it crosses languages ──
+-- (band:callers/callees walk the ref graph, which includes xlang edges — so a
+-- TS proxy's callers list its C++ handler's side, one continuous hierarchy no
+-- per-language server can produce). A CallHierarchyItem round-trips the node id
+-- in `data`, so incoming/outgoing skip position re-resolution.
+local function item_of(store, id)
+    local n = store.node(id)
+    if not navigable(n) or not SYMBOLKIND[n.kind] then return nil end
+    return {
+        name = n.name or id, kind = SYMBOLKIND[n.kind],
+        uri = uri_of(store, n.file), range = lsp_range(n.range),
+        selectionRange = lsp_range(n.range), data = { id = id },
+    }
+end
+
+-- the graph node the cursor names: the call's target if on a usage, else the
+-- def under it. Shared by callHierarchy prepare + cartograph/why.
+local function symbol_at(store, file, line, char)
+    local c = call_at(store, file, line, char)
+    if c and c.to then return c.to end
+    local n = node_at(store, file, line, char)
+    return n and n.id or nil
+end
+
+M.handlers['textDocument/prepareCallHierarchy'] = function (store, params)
+    local file = file_key(store, params.textDocument.uri)
+    local id = symbol_at(store, file, params.position.line, params.position.character)
+    local item = id and item_of(store, id)
+    return item and { item } or vim.NIL
+end
+
+local function item_id(params) return params.item and params.item.data and params.item.data.id end
+
+M.handlers['callHierarchy/incomingCalls'] = function (store, params)
+    local id = item_id(params); if not id then return {} end
+    local out = {}
+    for _, caller in ipairs(store.topo():callers(id)) do
+        local from = item_of(store, caller)
+        if from then
+            local ranges = {}
+            for _, r in ipairs(store.occurrences(caller, id) or {}) do ranges[#ranges + 1] = lsp_range(r) end
+            out[#out + 1] = { from = from, fromRanges = ranges }
+        end
+    end
+    return out
+end
+
+M.handlers['callHierarchy/outgoingCalls'] = function (store, params)
+    local id = item_id(params); if not id then return {} end
+    local out = {}
+    for _, callee in ipairs(store.topo():callees(id)) do
+        local to = item_of(store, callee)
+        if to then
+            local ranges = {} -- the sites WITHIN `id` where it calls `to`
+            for _, r in ipairs(store.occurrences(id, callee) or {}) do ranges[#ranges + 1] = lsp_range(r) end
+            out[#out + 1] = { to = to, fromRanges = ranges }
+        end
+    end
+    return out
+end
+
+-- ── cartograph/* — namespaced honesty/graph extensions (standard methods stay
+-- strictly standard; these carry what no standard method can express) ────────
+M.handlers['cartograph/why'] = function (store, params)
+    local file = file_key(store, params.textDocument.uri)
+    local p = params.position
+    local c = call_at(store, file, p.line, p.character)
+    if c then
+        if c.to then
+            return { kind = 'call', callee = c.callee,
+                status = c.hedge and 'hedged' or 'resolved', target = c.to,
+                tier = store.topo():tier(c.fn, c.to) or 'matched',
+                hedge = c.hedge and c.hedge.rule or nil, prov = c.prov }
+        elseif c.refused then
+            return { kind = 'call', callee = c.callee, status = 'refused',
+                rule = c.refused.rule,
+                candidates = (c.refused.cands and #c.refused.cands) or c.refused.n or 0,
+                witness = c.refused.witness }
+        end
+        return { kind = 'call', callee = c.callee, status = 'frontier' }
+    end
+    local n = node_at(store, file, p.line, p.character)
+    if n then return { kind = 'def', name = n.name, node = n.id, exported = n.exported or false } end
+    return vim.NIL
+end
+
+M.handlers['cartograph/graphInfo'] = function (store)
+    local d = store.data or {}
+    return {
+        root = d.root, provider = d.provider,
+        counts = { nodes = #(d.nodes or {}), edges = #(d.edges or {}), calls = #(d.calls or {}) },
+        cacheVersion = require('cartograph.cache').VERSION,
+    }
+end
+
+-- ── diagnostics (T2 push only — T1 lets diag.lua publish natively, so a shared
+-- handler would double-publish). A PURE helper the stdio host calls on
+-- didOpen/didSave; memoized per graph generation so per-file filtering is cheap.
+local LSP_SEV = { error = 1, warn = 2, info = 3, hint = 4 }
+local _diag = { gen = nil, findings = nil }
+--- LSP Diagnostic[] for one file (by uri), from the graph-aware lint.
+function M.diagnostics(store, uri)
+    if _diag.gen ~= store.generation then
+        _diag = { gen = store.generation, findings = require('cartograph.lint').run(store) }
+    end
+    local abs = store.abs(file_key(store, uri))
+    local out = {}
+    for _, f in ipairs(_diag.findings) do
+        if f.file == abs then
+            local L = math.max((f.line or 1) - 1, 0)
+            out[#out + 1] = {
+                range = { start = { line = L, character = 0 }, ['end'] = { line = L, character = 0 } },
+                severity = LSP_SEV[f.severity] or 2,
+                source = 'cartograph', code = f.rule, message = f.message,
+            }
         end
     end
     return out

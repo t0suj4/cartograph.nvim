@@ -152,6 +152,53 @@ test('lsp: handle() dispatches and rejects unknown methods', function ()
     ok(err and err:find('method not found'), err)
 end)
 
+test('lsp: prepareCallHierarchy names the symbol under the cursor', function ()
+    store.ingest(DATA)
+    local r = H('textDocument/prepareCallHierarchy', at('a.lua', 1, 5)) -- on the bar call
+    eq(1, #r); eq('bar', r[1].name); eq('a.lua::bar', r[1].data.id)
+    local d = H('textDocument/prepareCallHierarchy', at('a.lua', 5, 10)) -- on bar's def
+    eq('a.lua::bar', d[1].data.id)
+end)
+
+test('lsp: callHierarchy incoming/outgoing walk the call graph', function ()
+    store.ingest(DATA)
+    local inc = H('callHierarchy/incomingCalls', { item = { data = { id = 'a.lua::bar' } } })
+    eq(1, #inc); eq('foo', inc[1].from.name)
+    eq(1, inc[1].fromRanges[1].start.line) -- the call site inside foo, line 1
+    local out = H('callHierarchy/outgoingCalls', { item = { data = { id = 'a.lua::foo' } } })
+    eq(1, #out); eq('bar', out[1].to.name) -- foo -> bar (the use edge foo->v is not a call)
+end)
+
+test('lsp: cartograph/why is the honesty record, programmatic', function ()
+    store.ingest(DATA)
+    local resolved = H('cartograph/why', at('a.lua', 1, 5))
+    eq('resolved', resolved.status); eq('a.lua::bar', resolved.target); eq('matched', resolved.tier)
+    local refused = H('cartograph/why', at('a.lua', 2, 6))
+    eq('refused', refused.status); eq('ambiguous', refused.rule); eq(1, refused.candidates)
+    eq('frontier', H('cartograph/why', at('a.lua', 3, 6)).status)
+    local def = H('cartograph/why', at('a.lua', 5, 10))
+    eq('def', def.kind); eq('bar', def.name)
+end)
+
+test('lsp: cartograph/graphInfo carries the provenance header', function ()
+    store.ingest(DATA)
+    local g = H('cartograph/graphInfo', {})
+    eq('/x', g.root); eq(6, g.counts.nodes); eq(3, g.counts.calls)
+    ok(g.cacheVersion, 'cache version stamped')
+end)
+
+test('lsp: diagnostics maps the graph-aware lint per file (T2 push)', function ()
+    store.ingest(DATA)
+    -- foo has no callers, is not exported -> the dead-function lint fires on it
+    local diags = lsp.diagnostics(store, uri('a.lua'))
+    local dead
+    for _, d in ipairs(diags) do if d.code == 'dead-function' then dead = d end end
+    ok(dead, 'dead-function diagnostic present for foo')
+    eq('cartograph', dead.source)
+    eq(2, dead.severity) -- warn
+    eq(0, dead.range.start.line) -- foo's def line
+end)
+
 test('lsp: the T1 in-process server wrapper dispatches via callback', function ()
     store.ingest(DATA)
     local srv = lsp.make_server(store)(nil) -- cmd(dispatchers) -> server object
