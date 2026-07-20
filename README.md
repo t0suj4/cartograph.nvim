@@ -642,6 +642,17 @@ the read surface attached. Run headless, `nvim --headless -l tools/dogfood.lua`
 is a CI/pre-commit **fence**: it fails if any code reads the wide graph indexes
 raw instead of through the query seam.
 
+### Multiple projects at once
+
+`:Cartograph <root>` **adds** a band rather than replacing the current graph, so
+several projects — or `self://loaded` alongside a work corpus — stay resident
+together. The store is a lens on the *active* band; opening a new root freezes
+the current one into its record, and re-opening a known root switches back to it
+(no re-extraction). `:CartographBands` lists what's open, `:CartographSwitch
+<name>` flips the active band. A single-project session behaves exactly as
+before. (This is the foundation for cross-*project* navigation — following a
+call across a language or engine boundary into another band.)
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:

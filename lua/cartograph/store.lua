@@ -1274,4 +1274,42 @@ function M.stale(file)
     return now ~= s
 end
 
+-- ── the ACTIVE-BAND LENS (multi-band session, [[cartograph-multiband-session]]) ──
+-- The store singleton IS a lens on the ACTIVE band; session.lua swaps bands by
+-- capture()-ing this state and restore()-ing another's. Per-band = every DATA
+-- field on M EXCEPT (a) the session-global UI wiring — subscribers, producers,
+-- loc_provider belong to the lens, not a band, so they persist across swaps;
+-- (b) the generation-keyed CACHES — _topo/_fold/_ws_bfs are rebuilt on demand,
+-- and per-band generations can COLLIDE, so a swapped cache would be silently
+-- stale. Single-band sessions never call these, so the common path is
+-- byte-identical (the gating invariant).
+M.SESSION_GLOBAL = { _subs = true, _redraw_subs = true, _hl_subs = true,
+    _ctx_subs = true, _plan_subs = true, _fact_producers = true, loc_provider = true }
+M.BAND_TRANSIENT = { _topo = true, _fold = true, _topo_gen = true, _ws_bfs = true }
+
+--- Snapshot the active band's per-band state (shallow — each band owns distinct
+--- data/index tables, so sharing refs is correct; the caches are omitted and
+--- rebuild on demand).
+function M.capture()
+    local rec = {}
+    for k, v in pairs(M) do
+        if type(v) ~= 'function' and not M.SESSION_GLOBAL[k] and not M.BAND_TRANSIENT[k] then
+            rec[k] = v
+        end
+    end
+    return rec
+end
+
+--- Make the lens show `rec` (a captured band). Clears the current per-band
+--- fields first (so nothing bleeds from the outgoing band) — including the
+--- transient caches, which then rebuild from the restored data.
+function M.restore(rec)
+    local kill = {}
+    for k, v in pairs(M) do
+        if type(v) ~= 'function' and not M.SESSION_GLOBAL[k] then kill[#kill + 1] = k end
+    end
+    for _, k in ipairs(kill) do M[k] = nil end
+    for k, v in pairs(rec) do M[k] = v end
+end
+
 return M

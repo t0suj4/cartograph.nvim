@@ -163,6 +163,41 @@ function M.register()
         scratch(lines)
     end, { desc = 'cartograph: self-analysis dashboard + attach the LSP read surface' })
 
+    -- ── multi-band session ──────────────────────────────────────────
+    -- :Cartograph <root> ADDS a band (never clobbers); these list + switch.
+    cmd('CartographBands', function ()
+        local rows = require('cartograph.session').list()
+        if #rows == 0 then
+            return vim.notify('cartograph: no bands open', vim.log.levels.INFO)
+        end
+        local lines = { 'cartograph bands (● = active):' }
+        for _, b in ipairs(rows) do
+            lines[#lines + 1] = ('  %s %-16s %-8s %s'):format(
+                b.active and '●' or ' ', b.name, b.kind, b.root)
+        end
+        scratch(lines)
+    end, { desc = 'cartograph: list the open bands (multi-band session)' })
+
+    cmd('CartographSwitch', function (o)
+        local session = require 'cartograph.session'
+        local ok, why = session.switch(o.args)
+        if not ok then
+            return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)
+        end
+        -- repaint the cockpit for the now-active band (the lens was swapped);
+        -- the browser re-scopes off the restored focus, source/plan off redraw
+        local store = require 'cartograph.store'
+        pcall(require('cartograph.panes.symbols').render)
+        if store.focused and store.node(store.focused) then store.set_focus(store.focused) end
+        store.redraw()
+        vim.notify('cartograph: switched to ' .. o.args, vim.log.levels.INFO)
+    end, { nargs = 1, desc = 'cartograph: switch the active band',
+        complete = function ()
+            local names = {}
+            for _, b in ipairs(require('cartograph.session').list()) do names[#names + 1] = b.name end
+            return names
+        end })
+
     -- ── transactions ────────────────────────────────────────────────
     cmd('CartographMerge', function ()
         local st = live() if not st then return end

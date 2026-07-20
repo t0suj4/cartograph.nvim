@@ -42,6 +42,22 @@ function M.open(dump_path, opts)
     local mcp_name = target:match('^mcp://(.+)$')
     local self_which = target:match('^self://(.+)$')
 
+    -- SESSION (multi-band, [[cartograph-multiband-session]]): re-opening an
+    -- already-open root is a SWITCH — repoint the cockpit, no re-extract; a NEW
+    -- root ADDS a band, freezing the active one into its record so this open's
+    -- ingest doesn't clobber it. Single-band sessions never switch, so the
+    -- common path is unchanged.
+    local session = require 'cartograph.session'
+    local existing = session.by_root(target)
+    if existing then
+        session.switch(existing)
+        pcall(require('cartograph.panes.symbols').render)
+        if store.focused and store.node(store.focused) then store.set_focus(store.focused) end
+        store.redraw()
+        return store.data
+    end
+    session.begin(target)
+
     -- streaming shared by the cold (parallel), warm (cached) and self://
     -- opens: all show module stubs at once and fill the real graph in as it
     -- arrives (incrementally, via store.begin_stream/ingest_step), so none
