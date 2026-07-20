@@ -146,10 +146,45 @@ test('band: SITE axis — sites(fn) returns the fn\'s call rows as outcomes', fu
     eq({}, bs:sites('nobody'), 'no calls: empty, not nil')
 end)
 
+test('band: USE/REG detail slices return the full records (both backends)', function ()
+    local D = {
+        root = '/x',
+        nodes = { node('f'), node('g'), node('v', 'var'), node('h') },
+        edges = {
+            -- g writes v (rw=2), guarded (gw=2); f reads v (rw=1)
+            { from = 'g', to = 'v', kind = 'use', at = { R }, rw = 2, gw = 2 },
+            { from = 'f', to = 'v', kind = 'use', at = { R, R }, rw = 1 },
+            { from = 'h', to = 'g', kind = 'reg', at = { R } }, -- h registers g
+        },
+        calls = {},
+    }
+    store.ingest(D)
+    local bs = band.from_store(store)
+    local bf = band.from_fold(fold.build(D), store)
+    -- backward use records: who touches v, with the write axis + spans
+    for _, b in ipairs({ bs, bf }) do
+        local recs = b:var_used_by_detail('v')
+        eq(2, #recs)
+        local byfrom = {}
+        for _, u in ipairs(recs) do byfrom[u.from] = u end
+        eq(2, byfrom.g.rw); eq(2, byfrom.g.gw)          -- write, guarded
+        eq(1, byfrom.f.rw); eq(2, #byfrom.f.at)         -- read, two sites
+    end
+    -- forward use records: what g touches
+    eq('v', bs:var_uses_detail('g')[1].to)
+    -- reg records: who registers g, with the site span
+    eq('h', bs:registrants_detail('g')[1].from)
+    eq(1, #bf:registrants_detail('g')[1].at)
+    eq({}, bs:var_used_by_detail('nobody'), 'no edges: empty, not nil')
+    eq({}, bs:registrants_detail('nobody'))
+end)
+
 test('band: a pure-topology fold (no idx) yields empty identity axes', function ()
     store.ingest(IDATA)
     local bare = band.from_fold(fold.build(IDATA)) -- no store handle
     eq({}, bare:named('foo'))
     eq({}, bare:nodes_of('f.lua'))
     eq({}, bare:sites('f.lua::foo:1'))
+    eq({}, bare:var_used_by_detail('f.lua::foo:1'))
+    eq({}, bare:registrants_detail('f.lua::foo:1'))
 end)

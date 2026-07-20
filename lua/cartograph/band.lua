@@ -87,6 +87,34 @@ function Band:sites(id)
     return (idx and idx.calls_by_fn[id]) or {}
 end
 
+-- USE / REG record slices (Tier-2 reconstruct): the FULL edge records, not
+-- the bare id lists callees/var_uses/registrants return. A use record is
+-- { to|from, at, rw, gw, gp, flds }; a reg record { from, at }. The `at`
+-- occurrence spans the fold DROPS live only here, so — like sites/named —
+-- these are representation-stable, served off the wide `_idx()` handle
+-- (identical on both backends), and are the home for every reader that
+-- needs an edge's write-axis / guard / field facts / call-site ranges
+-- rather than just its endpoint ([[cartograph-slice-api]] Tier-2).
+
+--- Forward use records: the var reads/writes MADE BY `id` ({to, at, rw, …}).
+function Band:var_uses_detail(id)
+    local idx = self:_idx()
+    return (idx and idx.var_uses[id]) or {}
+end
+
+--- Backward use records: the readers/writers OF var `id` ({from, at, rw, …}).
+function Band:var_used_by_detail(id)
+    local idx = self:_idx()
+    return (idx and idx.var_usedby[id]) or {}
+end
+
+--- Reg records: the registrations that keep `id` alive ({from, at}) — who
+--- registers it, with the site spans (the alibi with its evidence).
+function Band:registrants_detail(id)
+    local idx = self:_idx()
+    return (idx and idx.reg_by[id]) or {}
+end
+
 -- ── store backend: the wide forward/backward index tables ────────────────
 local StoreBand = setmetatable({}, { __index = Band })
 StoreBand.__index = StoreBand

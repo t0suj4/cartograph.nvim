@@ -25,7 +25,7 @@ function M.analyze(store, fn_id)
     -- module-state vocabulary: name -> var id (~: name-matched, as the
     -- use edges themselves are)
     local varkey, edgeinfo = {}, {}
-    for _, u in ipairs(store.var_uses[fn_id] or {}) do
+    for _, u in ipairs(store.topo():var_uses_detail(fn_id)) do
         local vn = store.node(u.to)
         if vn and vn.name then
             varkey[vn.name] = u.to

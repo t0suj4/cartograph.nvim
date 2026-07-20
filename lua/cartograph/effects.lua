@@ -211,7 +211,7 @@ function M.call_writes(store, c)
     if not (c and c.to) then return out end
     local fn = store.node(c.to)
     local file = fn and fn.file
-    for _, u in ipairs(store.var_uses[c.to] or {}) do
+    for _, u in ipairs(store.topo():var_uses_detail(c.to)) do
         if u.rw and u.rw > 1 then
             out[#out + 1] = { var = u.to, verdict = M.verdict(u, c, file) }
         end
@@ -311,7 +311,7 @@ function M.summaries(store)
         -- DIRECT effects of every member
         for _, fid in ipairs(members) do
             local fnode = store.node(fid)
-            for _, u in ipairs(store.var_uses[fid] or {}) do
+            for _, u in ipairs(store.topo():var_uses_detail(fid)) do
                 if u.rw and u.rw >= 2 then
                     if u.gp then
                         -- gp is var-level: one dischargeable key

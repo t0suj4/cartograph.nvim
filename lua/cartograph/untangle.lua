@@ -356,7 +356,7 @@ function M.analyze_scope(store, files, opts)
     for _, v in ipairs(scope) do                           -- SHARED WRITTEN STATE
         if v.kind == 'var' then
             local written, touchers = false, {}
-            for _, u in ipairs(store.var_usedby[v.id] or {}) do
+            for _, u in ipairs(band:var_used_by_detail(v.id)) do
                 if u.rw and u.rw >= 2 then written = true end
                 if idx[u.from] then touchers[idx[u.from]] = true end
             end
@@ -411,7 +411,7 @@ function M.analyze_scope(store, files, opts)
     for _, v in ipairs(scope) do
         if v.kind == 'var' then
             local unk, touchers = false, {}
-            for _, u in ipairs(store.var_usedby[v.id] or {}) do
+            for _, u in ipairs(band:var_used_by_detail(v.id)) do
                 if u.rw == nil then unk = true end
                 if idx[u.from] then touchers[#touchers + 1] = idx[u.from] end
             end

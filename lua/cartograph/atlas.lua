@@ -26,7 +26,7 @@ M.LABELS = { 'const', 'dead', 'set-once', 'single-writer', 'multi-writer',
 function M.classify(store, id)
     local nr, nw, unk, gwmin = 0, 0, false, nil
     local writers = {}
-    for _, u in ipairs(store.var_usedby[id] or {}) do
+    for _, u in ipairs(store.topo():var_used_by_detail(id)) do
         local rw = u.rw
         if not rw then
             unk = true
@@ -100,8 +100,8 @@ end
 function M.fields(store, id, cache)
     local ts = require 'cartograph.providers.treesitter'
     local atr = require 'cartograph.at'
-    local uses = store.var_usedby[id]
-    if not uses or #uses == 0 then return nil, 'no uses' end
+    local uses = store.topo():var_used_by_detail(id)
+    if #uses == 0 then return nil, 'no uses' end
     cache = cache or {}
     local fields, whole = {}, { nr = 0, nw = 0 }
     for _, u in ipairs(uses) do

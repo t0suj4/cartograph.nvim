@@ -417,7 +417,7 @@ local function render_var(ctx, id)
     if not node then ctx.lines[1] = '(gone)'; return end
     local sites = {}
     local p1, p2 = (node.name or '') .. '.', (node.name or '') .. ':'
-    for _, u in ipairs(store.var_usedby[id] or {}) do
+    for _, u in ipairs(store.topo():var_used_by_detail(id)) do
         local fn = store.node(u.from)
         local member = fn and fn.name
             and (fn.name:sub(1, #p1) == p1 or fn.name:sub(1, #p2) == p2) or nil
@@ -545,7 +545,7 @@ end
 local function render_regfor(ctx, id)
     local node = store.node(id)
     if not node then ctx.lines[1] = '(gone)'; return end
-    local regs = store.reg_by and store.reg_by[id] or {}
+    local regs = store.topo():registrants_detail(id)
     local pre = ICON[node.kind] or 'ƒ'
     ctx.lines[1] = ('%s %s — registered by (%d)'):format(pre, node.name or '?', #regs)
     ctx.marks[1] = { { 0, #pre, 'CartographDim' },
@@ -577,7 +577,7 @@ local function render_tbl(ctx, id)
     ctx.lines[1] = ('· %s'):format(node.name or '?')
     ctx.marks[1] = { { 0, 1, 'CartographDim' }, { 1, -1, 'CartographTitle' } }
     local nsites = 0
-    for _, u in ipairs(store.var_usedby[id] or {}) do nsites = nsites + #u.at end
+    for _, u in ipairs(store.topo():var_used_by_detail(id)) do nsites = nsites + #u.at end
     ctx.lines[2] = ('↖ used by (%d)'):format(nsites)
     ctx.marks[2] = { { 0, -1, 'CartographSection' } }
     ctx.line_callers[2] = id
@@ -748,7 +748,7 @@ local function render_lit(ctx, key)
     ctx.marks[1] = { { 0, 1, 'CartographDim' }, { 1, -1, 'CartographTitle' } }
     if #path == 0 then -- usage sites one row away, as in the class-table view
         local nsites = 0
-        for _, u in ipairs(store.var_usedby[node.id] or {}) do nsites = nsites + #u.at end
+        for _, u in ipairs(store.topo():var_used_by_detail(node.id)) do nsites = nsites + #u.at end
         ctx.lines[2] = ('↖ used by (%d)'):format(nsites)
         ctx.marks[2] = { { 0, -1, 'CartographSection' } }
         ctx.line_callers[2] = node.id
@@ -804,7 +804,7 @@ local function render_occs(ctx, key)
     if not (en and fn) then ctx.lines[1] = '(gone)'; return end
     local ranges = {}
     if kind == 'var' then
-        for _, u in ipairs(store.var_usedby[entity] or {}) do
+        for _, u in ipairs(store.topo():var_used_by_detail(entity)) do
             if u.from == fnid then
                 for _, r in ipairs(u.at) do ranges[#ranges + 1] = r end
             end
@@ -1013,8 +1013,8 @@ local function render_fn(ctx, id)
     ctx.line_callers[2] = id
     -- the other half of the alibi: registrations (kept alive by a
     -- dispatch table / load-time data, not a call). Descend to see them.
-    local regs = store.reg_by and store.reg_by[id]
-    if regs and #regs > 0 then
+    local regs = store.topo():registrants_detail(id)
+    if #regs > 0 then
         ctx.lines[#ctx.lines + 1] = ('◆ registered by (%d)'):format(#regs)
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
         ctx.line_regfor[#ctx.lines] = id
@@ -1070,7 +1070,7 @@ local function render_fn(ctx, id)
         end
     end
     local vars_at = {}
-    for _, u in ipairs(store.var_uses[id] or {}) do
+    for _, u in ipairs(store.topo():var_uses_detail(id)) do
         local vn = store.node(u.to)
         if vn then
             for _, r in ipairs(u.at) do
@@ -1235,7 +1235,7 @@ local function render_detail(ctx)
                 for _, d in ipairs(s.def or {}) do locals[d] = true end
             end
         end
-        for _, u in ipairs(store.var_uses[fnid] or {}) do
+        for _, u in ipairs(store.topo():var_uses_detail(fnid)) do
             local vn = store.node(u.to)
             if vn and not locals[vn.name] then
                 for _, r in ipairs(u.at or {}) do
