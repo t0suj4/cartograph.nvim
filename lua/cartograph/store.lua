@@ -3,6 +3,8 @@
 -- interactions WRITE it. Keeping it tiny on purpose — it's what makes swappable
 -- layouts possible later without touching the panes.
 
+local tier = require 'cartograph.tier' -- canonical ladder (edge_tier index)
+
 local M = {
     data    = nil,   -- decoded dump (GraphProvider output, schema #1)
     focused = nil,   -- focused node id (drives the source pane)
@@ -95,6 +97,10 @@ local function idx_edge(T, e)
         T.occ[e.from .. '\31' .. e.to] = e.at
         if e.inferred then T.edge_inferred[e.from .. '\31' .. e.to] = true end
         if e.tinf then T.edge_tinf[e.from .. '\31' .. e.to] = true end
+        -- the FULL tier (Band:tier fidelity) — the canonical ladder name, so
+        -- the store backend surfaces proven/xlang/typed/stdlib, not the old
+        -- inferred/confident coarsening ([[cartograph.tier]])
+        T.edge_tier[e.from .. '\31' .. e.to] = tier.of(e)
     elseif e.kind == 'import' then
         T.imports_in[e.to] = T.imports_in[e.to] or {}
         table.insert(T.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
@@ -130,6 +136,7 @@ local function reset_indexes()
     M.calls_by_file, M.calls_by_prov = {}, {} -- FILE + PROV call axes
     M.uses, M.usedby, M.occ, M.edge_inferred = {}, {}, {}, {}
     M.edge_tinf = {}
+    M.edge_tier = {} -- ref-edge key -> canonical tier name (Band:tier / ref_tiers)
     M.cone, M._cone_set, M._cone_files = nil, nil, nil -- ids churn on re-ingest
     M._territory = nil
     M.marks = {} -- node marks (char -> id); ids churn, so reset with the graph
@@ -338,6 +345,7 @@ function M.audit()
     local T = { by_id = {}, by_file = {}, by_name = {}, calls_to = {}, calls_by_fn = {},
         calls_by_file = {}, calls_by_prov = {},
         uses = {}, usedby = {}, occ = {}, edge_inferred = {}, edge_tinf = {},
+        edge_tier = {},
         var_usedby = {}, var_uses = {}, imports_in = {}, imports_out = {},
         reg_by = {}, registers = {} }
     for _, n in ipairs(M.data.nodes or {}) do idx_node(T, n) end
@@ -347,6 +355,7 @@ function M.audit()
     audit_keyset(out, 'by_id', M.by_id, T.by_id)
     audit_keyset(out, 'occ', M.occ, T.occ)
     audit_keyset(out, 'edge_inferred', M.edge_inferred, T.edge_inferred)
+    audit_keyset(out, 'edge_tier', M.edge_tier, T.edge_tier)
     local id = function (v) return v.id end
     audit_lists(out, 'by_file', M.by_file, T.by_file, id)
     audit_lists(out, 'by_name', M.by_name, T.by_name) -- values are id strings
@@ -759,6 +768,7 @@ function M.add_edge(e)
         end
         M.occ[e.from .. '\31' .. e.to] = e.at -- raw, exactly as idx_edge derives it
         if e.inferred then M.edge_inferred[e.from .. '\31' .. e.to] = true end
+        M.edge_tier[e.from .. '\31' .. e.to] = tier.of(e)
     end
     return e
 end
@@ -777,6 +787,7 @@ function M.set_callers(to, callers)
             if u then for i = #u, 1, -1 do if u[i] == to then table.remove(u, i) end end end
             M.occ[e.from .. '\31' .. to] = nil
             M.edge_inferred[e.from .. '\31' .. to] = nil -- the ~ dies with the edge
+            M.edge_tier[e.from .. '\31' .. to] = nil
         else
             keep[#keep + 1] = e
             if e.kind == 'ref' and e.to == to and e.from ~= to then
@@ -795,6 +806,7 @@ function M.set_callers(to, callers)
             table.insert(M.usedby[to], c.from)
         end
         M.occ[c.from .. '\31' .. to] = c.at -- raw, exactly as idx_edge derives it
+        M.edge_tier[c.from .. '\31' .. to] = 'proven' -- oracle-resolved
     end
 end
 

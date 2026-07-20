@@ -37,10 +37,18 @@ function Band:n_callers(id)     return #self:callers(id) end
 function Band:n_callees(id)     return #self:callees(id) end
 function Band:n_registrants(id) return #self:registrants(id) end
 
--- CERTAINTY: the honesty tier of a ref edge (from→to), the thing that must
--- survive the representation swap — 'confident' | 'inferred' (~) | nil.
--- (Backends implement _tier; the sugar keeps the ref-graph default.)
+-- TIER: the honesty tier of a ref edge (from→to) as a CANONICAL LADDER name
+-- ([[cartograph.tier]]) — confirmed/proven/xlang/typed/stdlib/inferred/matched,
+-- or nil (no such edge). The full ladder on BOTH backends (the fold byte now
+-- carries the rank — the fold-fidelity gap is closed). (Backends implement
+-- _tier; the sugar keeps the ref-graph default.)
 function Band:tier(from, to) return self:_tier(from, to) end
+
+-- REF-TIER HISTOGRAM: { tiername -> count } over every resolved ref edge — the
+-- aggregate a census / scale reader needs without walking data.edges (the fold
+-- IS the edge representation). The fold-fidelity payoff: a full-ladder rollup,
+-- not the old inferred/confident coarsening. Both backends, parity-tested.
+function Band:ref_tiers() return self:_ref_tiers() end
 
 -- ACCESS MODE of a use edge (the write axis): 'read' | 'write' | 'both' |
 -- nil (no edge, or the language shipped no classifier — mode unknown)
@@ -157,14 +165,16 @@ function StoreBand:_idx() return self.store end
 function StoreBand:_fwd(id, kind) return store_slice(self.store, S_FWD[kind], id) end
 function StoreBand:_bwd(id, kind) return store_slice(self.store, S_BWD[kind], id) end
 function StoreBand:_tier(from, to)
-    local u = self.store.uses[from]
-    if not u then return nil end
-    local found = false
-    for i = 1, #u do if u[i] == to then found = true; break end end
-    if not found then return nil end
-    local k = from .. '\31' .. to
-    if self.store.edge_tinf and self.store.edge_tinf[k] then return 'type-inferred' end
-    return self.store.edge_inferred[k] and 'inferred' or 'confident'
+    -- the full canonical ladder, indexed at ingest (edge_tier = tier.of(e));
+    -- key absent = no such ref edge
+    return self.store.edge_tier[from .. '\31' .. to]
+end
+function StoreBand:_ref_tiers()
+    local out = {}
+    for _, name in pairs(self.store.edge_tier) do
+        out[name] = (out[name] or 0) + 1
+    end
+    return out
 end
 local RW_NAME = { 'read', 'write', 'both' }
 local function vurec(store, from, to)
@@ -228,6 +238,7 @@ function FoldBand:_tier(from, to)
     if not s or not o then return nil end
     return f:tier(s, o, fold_mod.PRED.ref)
 end
+function FoldBand:_ref_tiers() return self.fold:ref_tier_counts() end
 function FoldBand:_rw(from, to)
     local f = self.fold
     local s, o = f.it.get(from), f.it.get(to)

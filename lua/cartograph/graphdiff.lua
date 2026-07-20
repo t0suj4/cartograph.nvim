@@ -9,16 +9,17 @@
 local M = {}
 
 -- trust signature of an edge for the structural diff: which honesty tier it
--- sits on (order-stable). This is a deliberate COARSENING of the canonical
--- ladder ([[cartograph.tier]]): it omits conf (runtime — never in a static
--- extract) and tinf (typed) so the signature stays STABLE against the stored
--- snapshot format, which predates those flags. Routing this through tier.of()
--- — surfacing tinf/conf trust in the diff — is a real improvement, but it
--- reddens every typed-bearing corpus and so is gated on a deliberate snapshot
--- re-baseline (roadmap P0.3), NOT a free change to fold into an additive bump.
+-- sits on (order-stable), the FULL canonical ladder ([[cartograph.tier]]).
+-- The earlier coarsening (folding conf/tinf into 'matched') is GONE — the
+-- diff now surfaces typed/confirmed trust like the rest of the tool (invariant
+-- #3). Order mirrors tier.lua exactly; 'confirmed' never appears in a static
+-- extract (runtime tier), but is listed so a session-live snapshot diffs true.
+-- gd.diff applies this SYMMETRICALLY to both sides, so a current baseline
+-- stays green; only a baseline PREDATING a corpus's tinf edges needs one
+-- re-save (--save) — the deliberate re-baseline (roadmap P0.3).
 local function esig(e)
-    return (e.proven and 'proven' or e.xlang and 'xlang'
-        or e.stdlib and 'stdlib' or e.inferred and '~' or 'matched')
+    return (e.conf and 'confirmed' or e.proven and 'proven' or e.xlang and 'xlang'
+        or e.tinf and 'typed' or e.stdlib and 'stdlib' or e.inferred and '~' or 'matched')
         .. (e.sideeffect and '!' or '')
 end
 

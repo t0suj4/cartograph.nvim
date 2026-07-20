@@ -49,22 +49,34 @@ test('band: store and fold backends return identical slices', function ()
     end
 end)
 
-test('band: certainty tier survives, identical on both backends', function ()
+test('band: tier is the FULL canonical ladder, identical on both backends', function ()
     local D = {
         root = '/x',
-        nodes = { node('a'), node('b'), node('c') },
+        nodes = { node('a'), node('b'), node('c'), node('d'), node('e'), node('g') },
         edges = {
-            { from = 'a', to = 'b', kind = 'ref', at = { R } },
-            { from = 'a', to = 'c', kind = 'ref', inferred = true, at = { R } },
+            { from = 'a', to = 'b', kind = 'ref', at = { R } },                  -- matched
+            { from = 'a', to = 'c', kind = 'ref', inferred = true, at = { R } },  -- inferred
+            { from = 'a', to = 'd', kind = 'ref', proven = true, at = { R } },    -- proven
+            { from = 'a', to = 'e', kind = 'ref', tinf = true, at = { R } },      -- typed
+            { from = 'a', to = 'g', kind = 'ref', stdlib = true, at = { R } },    -- stdlib
         },
         calls = {},
     }
     store.ingest(D)
     local bs = band.from_store(store)
     local bf = band.from_fold(fold.build(D))
-    eq('confident', bs:tier('a', 'b')); eq('confident', bf:tier('a', 'b'))
-    eq('inferred', bs:tier('a', 'c')); eq('inferred', bf:tier('a', 'c'))
-    eq(nil, bs:tier('b', 'c')); eq(nil, bf:tier('b', 'c')) -- no such edge
+    for _, b in ipairs({ bs, bf }) do
+        eq('matched', b:tier('a', 'b'))
+        eq('inferred', b:tier('a', 'c'))
+        eq('proven', b:tier('a', 'd'))   -- the upper rungs no longer collapse
+        eq('typed', b:tier('a', 'e'))
+        eq('stdlib', b:tier('a', 'g'))
+        eq(nil, b:tier('b', 'c'))        -- no such edge
+    end
+    -- the ref-tier HISTOGRAM (aggregate), identical on both backends
+    local want = { matched = 1, inferred = 1, proven = 1, typed = 1, stdlib = 1 }
+    eq(want, bs:ref_tiers())
+    eq(want, bf:ref_tiers())
 end)
 
 test('band: the ref view excludes self-loops (both backends)', function ()

@@ -129,7 +129,7 @@ test('writes: gw/gp/flds survive the fold, both Band backends agree', function (
     eq(nil, bf:flds('c', 'v'))
     -- and the honesty tiers are undisturbed by the new bits
     local si, vi = f.it.get('a'), f.it.get('v')
-    eq('confident', f:tier(si, vi, fold.PRED.use), 'gw bits leave tier() intact')
+    eq(nil, f:tier(si, vi, fold.PRED.use), 'tier is ref-only; use-row bits never read as a tier')
     eq('write', bf:rw('a', 'v'), '...and rw intact')
 end)
 
@@ -166,7 +166,7 @@ test('writes: rw survives the fold, both Band backends agree', function ()
     eq(nil, bs:rw('r', 'w'), 'no such use edge')
     -- rw rides the rule region WITHOUT disturbing the honesty tiers
     local s, o = f.it.get('b'), f.it.get('v')
-    eq('confident', f:tier(s, o, fold.PRED.use), 'rw bits leave tier() intact')
+    eq(nil, f:tier(s, o, fold.PRED.use), 'tier is ref-only; use-row rw bits never read as a tier')
 end)
 
 test('writes: no classifier -> rw stays ABSENT, not read', function ()

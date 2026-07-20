@@ -18,6 +18,7 @@
 -- Predicate is a column; a per-kind query is a predicate-filtered slice.
 
 local csr = require 'cartograph.csr'
+local tier = require 'cartograph.tier'
 
 local M = {}
 
@@ -28,22 +29,24 @@ M.PRED_NAME = { [0] = 'ref', 'use', 'reg', 'import', 'refused' }
 -- the FLAGS column (u8/row): the honesty model, folded — and the VM's write
 -- medium ([[graph-vm-type-resolution]]). WITHOUT it a confident edge and a
 -- name-matched ~ hypothesis are indistinguishable, and invariant #3 (uniform
--- honesty) dies at the fold boundary. This byte is the LOSSY projection of
--- the canonical ladder ([[cartograph.tier]]): the upper rungs (proven/xlang/
--- confirmed) collapse to "confident" here, the reserved bit awaits the VM
--- runtime rung. tier.lua defines the ORDER; this defines the folded encoding.
--- Layout, tier space RESERVED for the VM:
---   bit 0 (0x01)  INFERRED  — the ~ tier (name-matched, not confident)
---   bits 1-3      PREDICATE-SCOPED: refused rows carry the REFUSAL RULE
---                 (M.RULE); use rows carry RW (1 read / 2 write / 3 both,
---                 0 = no classifier ran, mode unknown). Unambiguous by
---                 pred: a use row is never a refused row.
---   bit 4  (0x10) TYPE_INFERRED — the graph-VM resolved it via a return-type
---                 summary (the honesty ladder's middle rung, stronger than ~)
---   bit 5  RESERVED for the VM ladder (runtime-confirmed)
+-- honesty) dies at the fold boundary. This byte now carries the FULL canonical
+-- ladder ([[cartograph.tier]]) — the earlier lossy projection (upper rungs
+-- collapsed to "confident") is GONE: a ref row's bits 1-3 hold the tier RANK
+-- (1..7 = confirmed/proven/xlang/typed/stdlib/inferred/matched), so Band:tier
+-- returns the true ladder name on the fold as on the store (the fold-fidelity
+-- gap, closed). tier.lua defines the ORDER; this defines the folded encoding.
+-- Layout (bits 1-3 are PREDICATE-SCOPED, so no collision by row kind):
+--   bit 0 (0x01)  INFERRED — LEGACY, redundant with the ref rank (kept so any
+--                 external bit-0 reader still works); tier reads the rank now
+--   bits 1-3      PREDICATE-SCOPED: REF rows carry the TIER RANK (tier.RANK,
+--                 1..7); refused rows carry the REFUSAL RULE (M.RULE); use
+--                 rows carry RW (1 read / 2 write / 3 both, 0 = unclassified).
+--                 Unambiguous by pred — a row is exactly one kind.
+--   bit 4  (0x10) TYPE_INFERRED — LEGACY (subsumed by rank 'typed'); kept for
+--                 external readers, does not corrupt the rank read (16/2%8=0)
+--   bit 5  RESERVED for the VM ladder (runtime-confirmed beyond the rank)
 --   bits 6-7 PREDICATE-SCOPED: use rows carry GW (the guard chain: 1 some-
---                 unguarded / 2 all-guarded / 3 all-set-once); ref rows keep
---                 the provenance reservation
+--                 unguarded / 2 all-guarded / 3 all-set-once); ref rows free
 -- Side payloads (sparse, slot-keyed, carried through the subject sort):
 --   gpr  { slot -> ±param }  the param predicate (dischargeable writes)
 --   fldr { slot -> packed }  per-field facts: (u32 field-name id, u8 mode
@@ -143,20 +146,39 @@ function Fold:bytes()
     return cols + idx
 end
 
--- the certainty of a specific edge (subject→object via pred, 0-based ids):
--- 'confident' | 'inferred' | nil (no such edge). O(out-degree) point query.
+-- the tier of a specific edge (subject→object via pred, 0-based ids): the
+-- canonical ladder NAME ([[cartograph.tier]]) or nil (no such edge). Reads the
+-- rank from bits 1-3 of the ref row. O(out-degree) point query. (pred is
+-- always PRED.ref from Band:tier, so bits 1-3 are the rank, never rw/rule.)
 function Fold:tier(subj, obj, pred)
     local lo, hi = self:subj_span(subj)
     for r = lo, hi - 1 do
         if self.obj[r + 1] == obj and (not pred or self.pred[r + 1] == pred) then
-            local f = self.flag[r + 1]
-            if f >= M.FLAG.TYPE_INFERRED and f % 32 >= M.FLAG.TYPE_INFERRED then
-                return 'type-inferred'
-            end
-            return (f % 2 == 1) and 'inferred' or 'confident'
+            -- rank lives in bits 1-3 of a REF row only; a use/reg row's bits
+            -- 1-3 mean rw/rule — a tier is a ref-edge concept, so nil there
+            if self.pred[r + 1] ~= M.PRED.ref then return nil end
+            local rank = floor(self.flag[r + 1] / RULE_SHIFT) % 8
+            return rank > 0 and tier.LADDER[rank].name or nil
         end
     end
     return nil
+end
+
+-- tier HISTOGRAM over ALL ref rows: { tiername -> count } — the aggregate a
+-- fold-resident census/scale reader needs without walking data.edges (the
+-- fold IS the edge representation). One O(m) pass over the flag column.
+function Fold:ref_tier_counts()
+    local out, refp = {}, M.PRED.ref
+    for r = 1, self.m do
+        if self.pred[r] == refp then
+            local rank = floor(self.flag[r] / RULE_SHIFT) % 8
+            if rank > 0 then
+                local name = tier.LADDER[rank].name
+                out[name] = (out[name] or 0) + 1
+            end
+        end
+    end
+    return out
 end
 
 -- the access mode of a use edge subj→obj: 'read' | 'write' | 'both' | nil
@@ -261,6 +283,10 @@ function M.build(data)
             emit(e.from, p, e.to,
                 (e.inferred and M.FLAG.INFERRED or 0)
                 + (e.tinf and M.FLAG.TYPE_INFERRED or 0)
+                -- REF rows: the full tier RANK rides bits 1-3 (the canonical
+                -- ladder, folded — Band:tier's fidelity). use/refused rows use
+                -- the same region for rw/rule (disjoint by pred).
+                + (p == M.PRED.ref and tier.RANK[tier.of(e)] * RULE_SHIFT or 0)
                 -- the write axis rides the rule region on use rows;
                 -- the guard chain rides bits 6-7
                 + (p == M.PRED.use and e.rw and e.rw * RULE_SHIFT or 0)
