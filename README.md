@@ -625,6 +625,17 @@ unresolved, the refusal rule and how many candidates it saw. No per-language
 server explains what it doesn't know, or follows a call across a language
 boundary; this one does both because the graph already did.
 
+Beyond the basics it also serves **call hierarchy** (incoming/outgoing — which
+crosses languages, since the call graph does), **go-to-implementation** (an
+interface's concrete impls) and **go-to-type-definition** (the value's type
+node), **semantic tokens that tint each call by its resolution tier** (the
+honesty made visible — name-matched `~` calls shade differently from proven
+ones), and — for tools and agents — the namespaced `cartograph/why` (the full
+resolution record) and `cartograph/graphInfo`. Over the stdio host
+(`tools/lspserve.lua`) the same surface runs under any editor, and pushes the
+graph-aware lint as diagnostics on save. Measured against lua-ls on the same
+corpus it agrees **99.6–100%** where both resolve, and resolves more.
+
 ### Cross-language linking
 
 Engine boundaries dispatch by **string key**, and the key is the edge:

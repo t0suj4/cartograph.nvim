@@ -199,6 +199,55 @@ test('lsp: diagnostics maps the graph-aware lint per file (T2 push)', function (
     eq(0, dead.range.start.line) -- foo's def line
 end)
 
+-- a Java-flavored graph: interface Api{label}, Impl implements Api, make():Api
+local JDATA = {
+    root = '/j',
+    nodes = {
+        { id = 'Api.java', name = 'Api.java', kind = 'module', file = 'Api.java', range = rng(0, 0, 10, 0), order = 0 },
+        { id = 'Api.java::Api', name = 'Api', kind = 'function', file = 'Api.java', range = rng(0, 0, 2, 1), order = 0 },
+        { id = 'Api.java::Api::label', name = 'Api::label', kind = 'method', file = 'Api.java', range = rng(1, 4, 1, 20), order = 1 },
+        { id = 'Api.java::make', name = 'make', kind = 'function', file = 'Api.java', range = rng(4, 0, 6, 1), order = 2, ret = 'Api' },
+        { id = 'Impl.java', name = 'Impl.java', kind = 'module', file = 'Impl.java', range = rng(0, 0, 10, 0), order = 0 },
+        { id = 'Impl.java::Impl', name = 'Impl', kind = 'function', file = 'Impl.java', range = rng(0, 0, 5, 1), order = 0 },
+        { id = 'Impl.java::Impl::label', name = 'Impl::label', kind = 'method', file = 'Impl.java', range = rng(2, 4, 3, 5), order = 1 },
+    },
+    edges = {}, calls = {},
+    implements = { { iface = 'Api', child = 'Impl', file = 'Impl.java' } },
+}
+local function jat(f, l, ch) return { textDocument = { uri = vim.uri_from_fname('/j/' .. f) }, position = { line = l, character = ch } } end
+
+test('lsp: typeDefinition resolves the value\'s type node (n.ret)', function ()
+    store.ingest(JDATA)
+    local r = lsp.handlers['textDocument/typeDefinition'](store, jat('Api.java', 4, 2)) -- on make():Api
+    eq(1, #r)
+    eq(vim.uri_from_fname('/j/Api.java'), r[1].uri)
+    eq(0, r[1].range.start.line) -- the Api interface node
+end)
+
+test('lsp: implementation lists interface impls (class + method)', function ()
+    store.ingest(JDATA)
+    -- on the interface CLASS Api -> the Impl class
+    local cls = lsp.handlers['textDocument/implementation'](store, jat('Api.java', 0, 1))
+    eq(1, #cls); eq(vim.uri_from_fname('/j/Impl.java'), cls[1].uri)
+    -- on the interface METHOD Api::label -> Impl::label
+    local m = lsp.handlers['textDocument/implementation'](store, jat('Api.java', 1, 10))
+    eq(1, #m); eq(2, m[1].range.start.line) -- Impl::label's def line
+end)
+
+test('lsp: implementation is empty where there is no implements data', function ()
+    store.ingest(DATA) -- no data.implements
+    eq({}, lsp.handlers['textDocument/implementation'](store, at('a.lua', 5, 10)))
+end)
+
+test('lsp: semanticTokens tint resolved calls by their tier (delta-encoded)', function ()
+    store.ingest(DATA)
+    local r = lsp.handlers['textDocument/semanticTokens/full'](store,
+        { textDocument = { uri = uri('a.lua') } })
+    -- only the resolved foo->bar call (line 1, char 4-7); matched = last rung
+    local matched_bit = 2 ^ (#require('cartograph.tier').LADDER - 1)
+    eq({ 1, 4, 3, 0, matched_bit }, r.data)
+end)
+
 test('lsp: the T1 in-process server wrapper dispatches via callback', function ()
     store.ingest(DATA)
     local srv = lsp.make_server(store)(nil) -- cmd(dispatchers) -> server object

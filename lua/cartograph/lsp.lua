@@ -18,8 +18,19 @@
 --     unresolved, the refusal rule + candidate count.
 
 local atr = require 'cartograph.at'
+local tier = require 'cartograph.tier'
 
 local M = {}
+
+-- semanticTokens legend: ONE token type (a call), the TIER rides the modifier
+-- bitmask (the honest place for trust — like 'deprecated'/'readonly'). Order =
+-- the canonical ladder, so a theme colors matched/inferred/typed/… distinctly.
+local SEMTOK_MODS = {}
+local TIER_BIT = {}
+for i, rung in ipairs(tier.LADDER) do
+    SEMTOK_MODS[i] = rung.name
+    TIER_BIT[rung.name] = 2 ^ (i - 1)
+end
 
 -- LSP SymbolKind (subset we mint). Nodes without a navigable file are omitted.
 local SYMBOLKIND = {
@@ -109,6 +120,12 @@ M.handlers['initialize'] = function ()
             hoverProvider = true,
             workspaceSymbolProvider = true,
             callHierarchyProvider = true, -- the graph IS this, and it crosses languages
+            typeDefinitionProvider = true, -- the value's type node (n.ret / n.ctype)
+            implementationProvider = true, -- interface -> concrete impls (data.implements)
+            semanticTokensProvider = { -- TIER-COLORING: honesty made visible
+                legend = { tokenTypes = { 'function' }, tokenModifiers = SEMTOK_MODS },
+                full = true,
+            },
             -- namespaced extensions (never mistaken for a standard method):
             -- cartograph/why (the honesty record) + cartograph/graphInfo
             experimental = { cartograph = { why = true, graphInfo = true } },
@@ -354,6 +371,112 @@ M.handlers['cartograph/graphInfo'] = function (store)
         counts = { nodes = #(d.nodes or {}), edges = #(d.edges or {}), calls = #(d.calls or {}) },
         cacheVersion = require('cartograph.cache').VERSION,
     }
+end
+
+-- ── typeDefinition: the value's TYPE node (the receiver-typing payoff) ──────
+-- The type of the thing under the cursor: a call -> its target's return type
+-- (n.ret); a def -> its own return/declared type (n.ret/n.ctype). The type is
+-- a NAME; resolve it to project node(s) via the NAME axis. A stdlib/builtin
+-- type (String) has no node -> empty (honest), not a guess.
+M.handlers['textDocument/typeDefinition'] = function (store, params)
+    local file = file_key(store, params.textDocument.uri)
+    local p = params.position
+    local c = call_at(store, file, p.line, p.character)
+    local tn
+    if c and c.to then
+        local n = store.node(c.to); tn = n and n.ret
+    else
+        local n = node_at(store, file, p.line, p.character)
+        tn = n and (n.ret or n.ctype)
+    end
+    if not tn then return {} end
+    local out = {}
+    for _, id in ipairs(store.topo():named(tn)) do
+        local loc = location(store, id); if loc then out[#out + 1] = loc end
+    end
+    return out
+end
+
+-- ── implementation: the concrete impls behind an abstract reference ─────────
+-- Rides data.implements (iface -> child). On an interface CLASS -> its child
+-- classes; on an interface METHOD (Iface::m) -> the same-named member on each
+-- child. Empty where no implements data (honest — not every language dispatches
+-- through declared interfaces).
+-- the class of a member name: strip the trailing separator + member. [:.]+
+-- so Java's '::' (two chars) doesn't leave a dangling colon ('Impl::label' ->
+-- 'Impl', not 'Impl:'); works for '.' / ':' / '::'.
+local function class_of(name) return name and name:match('^(.-)[:.]+[%w_]+$') or nil end
+
+M.handlers['textDocument/implementation'] = function (store, params)
+    local file = file_key(store, params.textDocument.uri)
+    local p = params.position
+    local id = (function ()
+        local c = call_at(store, file, p.line, p.character)
+        if c and c.to then return c.to end
+        local n = node_at(store, file, p.line, p.character); return n and n.id
+    end)()
+    local n = id and store.node(id)
+    if not n then return {} end
+    local impls = store.data.implements or {}
+    local cls = class_of(n.name)               -- 'Iface' for 'Iface::m', else nil
+    local member = cls and n.name:match('[:%.]([%w_]+)$')
+    local out, seen = {}, {}
+    local function emit(nid)
+        if seen[nid] then return end
+        seen[nid] = true
+        local loc = location(store, nid); if loc then out[#out + 1] = loc end
+    end
+    if cls then                                 -- an interface METHOD
+        local children = {}
+        for _, e in ipairs(impls) do if e.iface == cls then children[e.child] = true end end
+        -- the same-named member on each child class (by_name is keyed by the
+        -- FULL name, so match class + member — as workspace/symbol scans it)
+        for name, ids in pairs(store.by_name or {}) do
+            if children[class_of(name)] and name:match('[:%.]([%w_]+)$') == member then
+                for _, mid in ipairs(ids) do emit(mid) end
+            end
+        end
+    else                                        -- an interface CLASS (or plain node)
+        for _, e in ipairs(impls) do
+            if e.iface == n.name then
+                for _, cid in ipairs(store.topo():named(e.child)) do emit(cid) end
+            end
+        end
+    end
+    return out
+end
+
+-- ── semanticTokens: TIER-COLORING — every resolved call site tinted by its
+-- resolution trust (matched/inferred/typed/proven/stdlib/…), the modifier
+-- bitmask carrying the tier. The uniform-honesty invariant, rendered: a theme
+-- can wash name-matched ~ calls a different shade than proven ones. Delta-
+-- encoded per the LSP wire (sorted by line, then char).
+M.handlers['textDocument/semanticTokens/full'] = function (store, params)
+    local file = file_key(store, params.textDocument.uri)
+    local toks = {}
+    for _, c in ipairs(store.topo():calls_of(file)) do
+        if c.to and c.at then
+            local line, char = atr.sl(c.at), atr.sc(c.at)
+            local len = atr.ec(c.at) - char
+            if atr.el(c.at) == line and len > 0 then -- single-line call-site span
+                local t = store.topo():tier(c.fn, c.to) or 'matched'
+                toks[#toks + 1] = { line = line, char = char, len = len, mod = TIER_BIT[t] or 0 }
+            end
+        end
+    end
+    table.sort(toks, function (a, b)
+        if a.line ~= b.line then return a.line < b.line end
+        return a.char < b.char
+    end)
+    local data, pl, pc = {}, 0, 0
+    for _, t in ipairs(toks) do
+        local dl = t.line - pl
+        local dc = dl == 0 and (t.char - pc) or t.char
+        data[#data + 1] = dl; data[#data + 1] = dc; data[#data + 1] = t.len
+        data[#data + 1] = 0; data[#data + 1] = t.mod -- tokenType 0 = 'function'
+        pl, pc = t.line, t.char
+    end
+    return { data = data }
 end
 
 -- ── diagnostics (T2 push only — T1 lets diag.lua publish natively, so a shared
