@@ -79,6 +79,22 @@ function Band:nodes_of(file)
     return out
 end
 
+--- FILE axis (calls): the call rows MADE FROM `file` (as outcomes) — the
+--- per-file refresh/LSP re-extraction unit, complementing nodes_of.
+function Band:calls_of(file)
+    local idx = self:_idx()
+    return (idx and idx.calls_by_file[file]) or {}
+end
+
+--- PROV axis: the resolved call rows a given resolution pass/pack landed
+--- (c.prov ∈ 'base' | <pass name> | 'stdlib'). Pass-value accounting —
+--- "what rides convention X" without an ablation run
+--- ([[cartograph-provenance-surfacing]]). Empty until resolution stamps prov.
+function Band:by_prov(prov)
+    local idx = self:_idx()
+    return (idx and idx.calls_by_prov[prov]) or {}
+end
+
 --- CALL-SITE axis: the call rows made FROM function `id`, as outcomes
 --- (each row carries its resolution: c.to / c.refused / c.ext disposition).
 --- Tier-1 slice; the argv/witness detail is Tier-2 reconstruct off the row.

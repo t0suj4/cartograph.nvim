@@ -90,6 +90,9 @@ M.CALL_FIELDS = {
     chainfield = true, -- ...and the field name — resolve_field_chain looks the
                        -- field's type up in data.fieldtypes (zig v85)
     conf = true, -- runtime-confirmed tier (session-live overlay)
+    prov = true, -- resolution PROVENANCE: which stage landed c.to ('base' /
+                 -- <pass name> / 'stdlib') — the by_prov axis ([[cartograph-
+                 -- provenance-surfacing]]); stamped by run_resolve_passes
     _av = true, _av0 = true, _avn = true, -- folded argv slice (post-ingest)
 }
 

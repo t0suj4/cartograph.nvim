@@ -105,9 +105,11 @@ local IDATA = {
     edges = {},
     calls = {
         { fn = 'f.lua::foo:1', callee = 'bar', file = 'f.lua', line = 3,
-            to = 'f.lua::bar:2' },
+            to = 'f.lua::bar:2', prov = 'base' },
         { fn = 'f.lua::foo:1', callee = 'mystery', file = 'f.lua', line = 4,
             refused = { rule = 'ambiguous' } },
+        { fn = 'g.lua::foo:1', callee = 'bar', file = 'g.lua', line = 5,
+            to = 'f.lua::bar:2', prov = 'returns' },
     },
 }
 
@@ -144,6 +146,27 @@ test('band: SITE axis — sites(fn) returns the fn\'s call rows as outcomes', fu
     end
     eq(1, resolved); eq(1, refused)
     eq({}, bs:sites('nobody'), 'no calls: empty, not nil')
+end)
+
+test('band: FILE axis — calls_of(file) returns the file\'s call rows', function ()
+    store.ingest(IDATA)
+    local bs = band.from_store(store)
+    local bf = band.from_fold(fold.build(IDATA), store)
+    eq(2, #bs:calls_of('f.lua'))          -- the resolved bar + the refused mystery
+    eq(2, #bf:calls_of('f.lua'), 'identical on both backends')
+    eq(1, #bs:calls_of('g.lua'))
+    eq({}, bs:calls_of('h.lua'), 'no calls: empty, not nil')
+end)
+
+test('band: PROV axis — by_prov(pass) slices resolutions by their stamp', function ()
+    store.ingest(IDATA)
+    local bs = band.from_store(store)
+    local bf = band.from_fold(fold.build(IDATA), store)
+    eq(1, #bs:by_prov('base'))            -- foo->bar rode base resolution
+    eq('f.lua::bar:2', bs:by_prov('base')[1].to)
+    eq(1, #bs:by_prov('returns'))         -- g's foo->bar rode the returns pass
+    eq(1, #bf:by_prov('returns'), 'identical on both backends')
+    eq({}, bs:by_prov('interface'), 'a pass that landed nothing: empty')
 end)
 
 test('band: USE/REG detail slices return the full records (both backends)', function ()
@@ -185,6 +208,8 @@ test('band: a pure-topology fold (no idx) yields empty identity axes', function 
     eq({}, bare:named('foo'))
     eq({}, bare:nodes_of('f.lua'))
     eq({}, bare:sites('f.lua::foo:1'))
+    eq({}, bare:calls_of('f.lua'))
+    eq({}, bare:by_prov('base'))
     eq({}, bare:var_used_by_detail('f.lua::foo:1'))
     eq({}, bare:registrants_detail('f.lua::foo:1'))
 end)

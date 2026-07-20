@@ -1418,6 +1418,7 @@ local function mint_std_nodes(data, node_index)
             c.to = nd.id
             c.ext = nil
             c.refused = nil
+            c.prov = 'stdlib' -- the by_prov axis: minted std resolution
             resolved = resolved + 1
             if c.fn then
                 local k = c.fn .. '\31' .. nd.id
@@ -2323,9 +2324,25 @@ M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 -- the pass order lives — extract runs it over the full call set, relink over
 -- the touched subset (ctx.consts differs: extract folds const keys, relink nil).
 local function run_resolve_passes(ctx)
+    local calls = ctx.calls or {}
+    -- PROVENANCE (the by_prov axis, [[cartograph-provenance-surfacing]]): stamp
+    -- c.prov = which stage landed the resolution. This is the pipeline memo's
+    -- "ablation = free attribution" — the ONE driver, so attribution is a diff
+    -- of the resolved set, no per-pass return-contract change. FIRST-resolver-
+    -- wins: anything already resolved when the pipeline starts rode the base
+    -- exact/name-match resolution ('base'); each pass then claims the calls it
+    -- newly resolves (c.to now set, prov still unstamped). A later REWRITE
+    -- (reassign) that retargets an already-attributed call does NOT re-stamp —
+    -- prov names who first linked it. (Minting stamps 'stdlib' at mint time.)
+    for _, c in ipairs(calls) do
+        if c.to and not c.prov then c.prov = 'base' end
+    end
     local n = 0
     for _, p in ipairs(RESOLVE_PASSES) do
         n = n + (p.run(ctx) or 0)
+        for _, c in ipairs(calls) do
+            if c.to and not c.prov then c.prov = p.name end
+        end
     end
     return n
 end

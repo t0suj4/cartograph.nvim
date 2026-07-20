@@ -39,6 +39,10 @@ function M.take(data)
             end)() },
         calls = { total = 0, resolved = 0, refused = 0, unresolved = 0,
             hedged = 0, rules = {},
+            -- PROV axis rollup: resolved calls by the stage that landed them
+            -- ('base' / <pass> / 'stdlib') — the calibration flywheel's
+            -- pass-value accounting ([[cartograph-provenance-surfacing]])
+            by_prov = {},
             -- the "outside the corpus" bucket, no longer a silent lump:
             -- by disposition (external/noise/dynamic) and by the gate (why)
             outside = { by_disp = {}, by_why = {} } },
@@ -61,6 +65,8 @@ function M.take(data)
         if call.hedge then c.calls.hedged = c.calls.hedged + 1 end
         if call.to then
             c.calls.resolved = c.calls.resolved + 1
+            local p = call.prov or 'unknown'
+            c.calls.by_prov[p] = (c.calls.by_prov[p] or 0) + 1
         elseif call.refused then
             c.calls.refused = c.calls.refused + 1
             local rule = call.refused.rule or '?'
@@ -124,6 +130,20 @@ function M.report(data)
                 c.calls.hedged > 0
                     and (' · hedged %d'):format(c.calls.hedged) or ''),
     }
+    -- resolved-by-stage (the calibration flywheel): base vs each pass/pack,
+    -- so "which convention earns its keep" is a census read, not an ablation.
+    if next(c.calls.by_prov) then
+        local provs = {}
+        for p in pairs(c.calls.by_prov) do provs[#provs + 1] = p end
+        table.sort(provs, function (a, b)
+            return c.calls.by_prov[a] > c.calls.by_prov[b]
+        end)
+        local parts = {}
+        for _, p in ipairs(provs) do
+            parts[#parts + 1] = ('%s %d'):format(p, c.calls.by_prov[p])
+        end
+        lines[#lines + 1] = ('  resolved by stage: %s'):format(table.concat(parts, ' · '))
+    end
     if c.calls.unresolved > 0 then
         -- the silent-gate hole, opened: which gate placed each call outside.
         -- 'unknown' = the resolver didn't tag it (indirect/traced dispatch)

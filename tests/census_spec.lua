@@ -20,7 +20,8 @@ local function data()
             { from = 'm', to = 'm2', kind = 'import' },
         },
         calls = {
-            { fn = 'f', callee = 'g', to = 'g', file = 'm.lua', line = 1 },
+            { fn = 'f', callee = 'g', to = 'g', file = 'm.lua', line = 1,
+                prov = 'base' },
             { fn = 'f', callee = 'h', file = 'm.lua', line = 2,
                 refused = { rule = 'ambiguous-name', n = 2 } },
             { fn = 'g', callee = 'h', file = 'm.lua', line = 5,
@@ -29,7 +30,7 @@ local function data()
                 refused = { rule = 'dynamic-key' } },
             { fn = 'g', callee = 'print', file = 'm.lua', line = 7 },
             { fn = 'g', callee = 'q', to = 'g', file = 'm.lua', line = 8,
-                hedge = { rule = 'shadow-walkout' } },
+                prov = 'self', hedge = { rule = 'shadow-walkout' } },
         },
     }
 end
@@ -51,6 +52,8 @@ test('census: counts by kind, tier, and rule', function ()
     eq(1, c.calls.hedged)
     eq(2, c.calls.rules['ambiguous-name'].n)
     eq(1, c.calls.rules['dynamic-key'].n)
+    eq(1, c.calls.by_prov['base'])   -- the PROV rollup: one base, one self-pass
+    eq(1, c.calls.by_prov['self'])
 end)
 
 test('census: the report ranks refusal rules by count', function ()

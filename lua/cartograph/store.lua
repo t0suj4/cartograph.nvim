@@ -71,6 +71,18 @@ local function idx_call(T, c)
         T.calls_by_fn[c.fn] = T.calls_by_fn[c.fn] or {}
         table.insert(T.calls_by_fn[c.fn], c)
     end
+    -- FILE axis (Band:calls_of): the call rows made from a file — the
+    -- refresh / LSP re-extraction unit
+    if c.file then
+        T.calls_by_file[c.file] = T.calls_by_file[c.file] or {}
+        table.insert(T.calls_by_file[c.file], c)
+    end
+    -- PROV axis (Band:by_prov): which resolution pass/pack landed this call —
+    -- pass-value accounting without ablation ([[cartograph-provenance-surfacing]])
+    if c.prov then
+        T.calls_by_prov[c.prov] = T.calls_by_prov[c.prov] or {}
+        table.insert(T.calls_by_prov[c.prov], c)
+    end
 end
 local function idx_edge(T, e)
     if e.kind == 'ref' then
@@ -115,6 +127,7 @@ local function reset_indexes()
     M.by_id, M.by_file, M.files = {}, {}, {}
     M.by_name = {} -- NAME axis: node name -> id list (Band:named)
     M.calls_to, M.calls_by_fn = {}, {}
+    M.calls_by_file, M.calls_by_prov = {}, {} -- FILE + PROV call axes
     M.uses, M.usedby, M.occ, M.edge_inferred = {}, {}, {}, {}
     M.edge_tinf = {}
     M.cone, M._cone_set, M._cone_files = nil, nil, nil -- ids churn on re-ingest
@@ -323,6 +336,7 @@ function M.audit()
     if not M.data then return nil, 'no graph' end
     if M.data.partial then return nil, 'streaming — audit after the stream settles' end
     local T = { by_id = {}, by_file = {}, by_name = {}, calls_to = {}, calls_by_fn = {},
+        calls_by_file = {}, calls_by_prov = {},
         uses = {}, usedby = {}, occ = {}, edge_inferred = {}, edge_tinf = {},
         var_usedby = {}, var_uses = {}, imports_in = {}, imports_out = {},
         reg_by = {}, registers = {} }
@@ -350,6 +364,8 @@ function M.audit()
     local site = function (c) return (c.file or '?') .. ':' .. tostring(c.line) end
     audit_lists(out, 'calls_to', M.calls_to, T.calls_to, site)
     audit_lists(out, 'calls_by_fn', M.calls_by_fn, T.calls_by_fn, site)
+    audit_lists(out, 'calls_by_file', M.calls_by_file, T.calls_by_file, site)
+    audit_lists(out, 'calls_by_prov', M.calls_by_prov, T.calls_by_prov, site)
     table.sort(out)
     return out
 end

@@ -19,7 +19,13 @@ local M = {}
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 93 -- v93: STD-ALIAS node-minting RESOLUTION face ([[cartograph-
+M.VERSION = 94 -- v94: resolution PROVENANCE (the by_prov axis, [[cartograph-
+               -- slice-api]] / [[cartograph-provenance-surfacing]]).
+               -- run_resolve_passes stamps c.prov = 'base' / <pass name> /
+               -- 'stdlib' (first-resolver-wins). New persisted call field →
+               -- gate-NEUTRAL (graphdiff coutcome/esig + counts ignore prov),
+               -- so no recalibration, but old caches lack the field → bump.
+               -- v93: STD-ALIAS node-minting RESOLUTION face ([[cartograph-
                -- stdlib-profile]]). mint_std_nodes turns the std-alias
                -- disposition (c.stdpath) into a real resolution: one synthetic
                -- EXTERNAL node per canonical std symbol (`zig-std::std.mem.eql`),
