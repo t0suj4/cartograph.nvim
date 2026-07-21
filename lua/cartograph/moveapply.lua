@@ -14,6 +14,7 @@
 
 local M = {}
 local atr = require 'cartograph.at'
+local callrec = require 'cartograph.callrec'
 
 -- where inserted code lands in dest: before a trailing `return M`-ish
 -- line (the lua module idiom), else after the last nonblank line.
@@ -162,7 +163,7 @@ local function collect(store, ids, dest, plan)
         -- a COPY leaves the original in place, so its callers must NOT be
         -- requalified — they keep resolving to the still-present source symbol.
         for _, c in ipairs((m.mode ~= 'copy') and store.calls_to[m.id] or {}) do
-            local F = c.file
+            local F = callrec.file(c)
             if F ~= dest and not (c.fn and in_move[c.fn]) then
                 local ls = file_lines(F)
                 local at = c.at

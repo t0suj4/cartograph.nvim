@@ -20,6 +20,7 @@ local M = {}
 local atr = require 'cartograph.at'
 
 local txn = require 'cartograph.txn'
+local callrec = require 'cartograph.callrec'
 local read_file, disk_stamp = txn.read_file, txn.disk_stamp
 
 --- Witness twins of `id`: same kind, equal behavior witness, elsewhere
@@ -106,18 +107,18 @@ function M.plan(store, id)
         -- exactly the twin's name; anything else is a hazard, not a write
         for _, c in ipairs(store.calls_to[t.id] or {}) do
             local at = c.at
-            local ls = file_lines(c.file)
+            local ls = file_lines(callrec.file(c))
             local token = at and ls and atr.oneline(at)
                 and (ls[atr.sl(at) + 1] or '')
                     :sub(atr.sc(at) + 1, atr.ec(at))
             if token == t.name then
-                plan.rewrites[#plan.rewrites + 1] = { file = c.file,
+                plan.rewrites[#plan.rewrites + 1] = { file = callrec.file(c),
                     at = at, from = t.name, to = survivor.name }
-                touched[c.file] = true
+                touched[callrec.file(c)] = true
             else
                 plan.hazards[#plan.hazards + 1] = ('%s:%d calls %s in a form'
                     .. " that isn't its bare name (%s) — rewrite it yourself")
-                    :format(c.file, c.line + 1, t.name, tostring(token or c.callee))
+                    :format(callrec.file(c), c.line + 1, t.name, tostring(token or c.callee))
             end
         end
         -- non-call references (the id pass's dispatch-table finds): they

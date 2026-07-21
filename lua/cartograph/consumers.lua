@@ -155,6 +155,9 @@ function Scan:taintof(expr)
         if k then return k end
         local base = self:taintof(expr:named_child(0))
         local bk = kindof(base)
+        -- a LISTMAP (`store.calls_to`, `calls_by_fn`: id -> a list of records)
+        -- yields a LIST when indexed; the for-in over THAT gives the record
+        if bk == 'listmap' and seg == '[]' then return 'list' end
         if (bk == 'list' or bk == 'any') and seg == '[]' then return 'elem' end
         if (bk == 'elem' or bk == 'any') and seg ~= '[]' then
             -- sub-shape / derived binding: carry the path prefix

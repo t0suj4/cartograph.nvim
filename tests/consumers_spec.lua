@@ -95,6 +95,17 @@ test('consumers: rooted producer scopes the taint; single-seg deref → stem1', 
     eq('c', stem1, 'single-segment stem1 = the record → rewrites to acc(c)')
 end)
 
+test('consumers: a LISTMAP producer yields records through map[id] → for-in', function ()
+    -- store.calls_to[id] is a map of call LISTS: indexing gives a list, the
+    -- for-in over it gives a call record (two hops from the rooted producer)
+    local src = 'for _, c in ipairs(store.calls_to[t.id] or {}) do local x = c.file end'
+    local r = consumers.scan(src, 'x.lua', { rooted = { ['store.calls_to'] = 'listmap' } })
+    local hit
+    for _, dr in ipairs(r.derefs) do if dr.path == 'file' then hit = dr end end
+    ok(hit, 'the call record reached through map[id] is tracked')
+    eq('c', hit.stem1, 'and rewrites as a record-field accessor')
+end)
+
 test('consumers: the escape frontier is honest and complete', function ()
     local r = consumers.scan(SRC, 'fix.lua', SPEC)
     eq({
