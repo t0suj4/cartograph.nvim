@@ -78,7 +78,9 @@ M.cache_max_diff = nil
 -- swap is behaviour-faithful (tools/callgate.lua gates callcols.view == records
 -- over every corpus) but the OWNER layer (fold/cache/argv/at) still reads raw
 -- records, so flipping this on is gated on the owner migration (tools/callmigrate.lua).
-M.callcols_store = false
+-- Env override CARTOGRAPH_CALLCOLS=1 flips it on for a whole run so the suite +
+-- gates validate the LIVE path without a setup{} call.
+M.callcols_store = vim.env.CARTOGRAPH_CALLCOLS == '1'
 
 -- parallel cold extraction: worker processes parse file slices while the
 -- browser opens immediately and fills in as chunks arrive. Kicks in at

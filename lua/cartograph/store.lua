@@ -164,6 +164,19 @@ function M.ingest(data)
     -- wire waits fast-only and is exempt — timers can't fire there.)
     M.generation = (M.generation or 0) + 1
     reset_indexes()
+    -- RE-INGEST SAFETY (brick 3): a prior ingest may have wrapped data.calls in
+    -- the columnar view (proxies), and refresh/tests re-ingest the same graph.
+    -- The folds (at/argv) + the install assume plain record tables, so
+    -- materialize any proxies back to records first (callrec.record handles both
+    -- — a shallow copy for records, a reconstruction for a proxy row). No-op cost
+    -- is one shallow copy per call, only when the flag is on.
+    if require('cartograph.config').callcols_store and data.calls and data.calls[1] then
+        local callrec = require 'cartograph.callrec'
+        local recs = {}
+        for i, c in ipairs(data.calls) do recs[i] = callrec.record(c) end
+        data.calls = recs
+        M._callcols = nil
+    end
     local seen = {}
     for _, n in ipairs(M.data.nodes) do
         idx_node(M, n)
@@ -222,11 +235,36 @@ function M.ingest(data)
     -- 0.8MB after a flush. Traces recompile in ms; the pinned garbage
     -- never collects on its own. Small graphs skip it (nothing pinned
     -- worth the re-warm).
+    -- RESIDENT COLUMNAR CALL-STORE (record-fold arc, brick 3, gated). AFTER the
+    -- detail folds (argv/at/df/flow own that data now), swap the call RECORD array
+    -- for callcols.view — the scalar identity/resolution fields ride u32 columns,
+    -- the post-fold detail (at/argv indices) rides the residual untouched. Runs
+    -- last so the columns capture the FINAL field state; rebuilds the call indexes
+    -- over the stable proxies so the record tables drop. Default off.
+    if require('cartograph.config').callcols_store then M._install_callcols() end
     if #M.data.nodes > 20000 and rawget(_G, 'jit') and jit.flush then
         jit.flush()
         collectgarbage(); collectgarbage()
     end
     return M.data
+end
+
+-- Install the columnar call-store over the finalized records (brick 3). callcols
+-- owns the SCALAR fields; the detail folds keep at/argv/df/flow, so the LIVE
+-- schema drops the `at` range (re-folding it would drop at.fold's index) and lets
+-- the post-fold detail ride the residual. Rebuilds the 4 call indexes over the
+-- stable proxy rows (view.rows[i] ↔ old data.calls[i]) so the records are freed.
+function M._install_callcols()
+    local callcols = require 'cartograph.callcols'
+    local seg = require 'cartograph.segment'
+    local syn = { strs = seg.CALL_SYNTACTIC.strs, ints = seg.CALL_SYNTACTIC.ints,
+        flags = seg.CALL_SYNTACTIC.flags, ranges = {} } -- detail folds own `at`
+    local view = callcols.view(M.data.calls or {}, syn, seg.CALL_RESOLUTION)
+    M.data.calls = view.rows
+    M._callcols = view
+    M.calls_to, M.calls_by_fn = {}, {}
+    M.calls_by_file, M.calls_by_prov = {}, {}
+    for _, c in ipairs(view.rows) do idx_call(M, c) end
 end
 
 -- The resident TOPOLOGY view: a fold-backed Band, built lazily on first

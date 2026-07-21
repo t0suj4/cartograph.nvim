@@ -125,7 +125,20 @@ test('store: incremental ingest_step == a full ingest of the same graph', functi
     }
     -- a comparable, identity-independent snapshot of the derived indexes
     local function keyset(t) local k = {} for x in pairs(t) do k[#k + 1] = tostring(x) end table.sort(k) return k end
-    local function idlist(list) local o = {} for _, x in ipairs(list) do o[#o + 1] = x.id or x.from or x.to or x end table.sort(o) return o end
+    -- a representation-agnostic key: a CALL row keys by its logical identity
+    -- (to/fn/callee) not object identity — so a record and a callcols proxy row
+    -- for the same call compare equal (brick 3). Nodes/edges key by id/from/to.
+    local function idlist(list)
+        local o = {}
+        for _, x in ipairs(list) do
+            if type(x) == 'table' and x.callee then
+                o[#o + 1] = tostring(x.to) .. '/' .. tostring(x.fn) .. '/' .. tostring(x.callee)
+            else
+                o[#o + 1] = x.id or x.from or x.to or x
+            end
+        end
+        table.sort(o); return o
+    end
     local function snap()
         local by_file = {}
         for f, l in pairs(store.by_file) do by_file[f] = idlist(l) end
