@@ -38,6 +38,23 @@ M.CALL_SCHEMA = {
     ranges = { 'at' },
 }
 
+-- TWO-PHASE split of the call schema (for the RESIDENT store, callcols.lua):
+-- SYNTACTIC fields are set at parse and never rewritten → immutable columns;
+-- RESOLUTION fields are written DURING resolution (c.to/prov/inferred/…) → a
+-- mutable overlay. (CALL_SCHEMA above stays the FULL post-resolution snapshot
+-- the wire/cache use — a save happens after resolution, so one segment is fine.)
+M.CALL_SYNTACTIC = {
+    strs = { 'file', 'callee', 'fn', 'full',
+        'recv', 'recvpath', 'recvroot', 'chainfield', 'chainroot', 'chainty' },
+    ints = { 'line' },
+    flags = { 'method' },
+    ranges = { 'at' },
+}
+M.CALL_RESOLUTION = {
+    strs = { 'to', 'prov', 'stdpath' },
+    flags = { 'inferred', 'tinf', 'rtfull', 'top' },
+}
+
 -- ── the COLUMNS intermediate ─────────────────────────────────────────────
 -- cols = { n, pool = {rank→string}, str = {field→{rank|0}}, int = {field→{v}},
 --          flag = {field→{bool}}, rng = {field→{pres,sl,sc,el,ec}} }

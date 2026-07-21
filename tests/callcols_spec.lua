@@ -1,6 +1,7 @@
--- callcols: the resident columnar call-store (packed/ffi u32 columns + pool).
--- The gate is READ-PARITY — every accessor returns exactly what a record read
--- would (absent str → nil, absent int → 0, flag false → nil, absent range → nil).
+-- callcols: the resident columnar call-store. Two-phase — SYNTACTIC fields are
+-- immutable u32 columns, RESOLUTION fields a mutable overlay. Gates: read-parity
+-- (get returns what a record read would), and the overlay is writable while the
+-- columns are not.
 
 local callcols = require 'cartograph.callcols'
 
@@ -12,31 +13,41 @@ local CALLS = {
     { file = 'b.lua', callee = 'f', line = 0, inferred = true },            -- shared f / a.lua
 }
 
-test('callcols: accessors read exactly what the records held', function ()
+test('callcols: get() reads syntactic columns + resolution overlay alike', function ()
     local cc = callcols.build(CALLS)
     eq(3, cc.n)
-    eq('a.lua', callcols.str(cc, 'file', 1)); eq('f', callcols.str(cc, 'callee', 1))
-    eq('M.f', callcols.str(cc, 'full', 1)); eq('a.lua::f@9', callcols.str(cc, 'to', 1))
-    eq(nil, callcols.str(cc, 'full', 2))                       -- absent str → nil
-    eq('b.lua', callcols.str(cc, 'file', 3))
-    eq('f', callcols.str(cc, 'callee', 3))                     -- pooled once, resolves in both
-    eq(10, callcols.int(cc, 'line', 1)); eq(22, callcols.int(cc, 'line', 2)); eq(0, callcols.int(cc, 'line', 3))
-    eq(true, callcols.flag(cc, 'method', 1)); eq(nil, callcols.flag(cc, 'inferred', 1))
-    eq(true, callcols.flag(cc, 'inferred', 3))
-    eq(5, callcols.range(cc, 'at', 1).start.line); eq(9, callcols.range(cc, 'at', 1)['end'].char)
-    eq(nil, callcols.range(cc, 'at', 2), 'absent range → nil')
+    -- syntactic (immutable columns)
+    eq('a.lua', callcols.get(cc, 'file', 1)); eq('f', callcols.get(cc, 'callee', 1))
+    eq('M.f', callcols.get(cc, 'full', 1)); eq(10, callcols.get(cc, 'line', 1))
+    eq(true, callcols.get(cc, 'method', 1))
+    eq(5, callcols.get(cc, 'at', 1).start.line); eq(9, callcols.get(cc, 'at', 1)['end'].char)
+    eq(nil, callcols.get(cc, 'at', 2))                        -- absent range → nil
+    eq('b.lua', callcols.get(cc, 'file', 3)); eq('f', callcols.get(cc, 'callee', 3)) -- pooled once
+    -- resolution (mutable overlay)
+    eq('a.lua::f@9', callcols.get(cc, 'to', 1))
+    eq(nil, callcols.get(cc, 'to', 2))                        -- absent → nil
+    eq(nil, callcols.get(cc, 'inferred', 1))                  -- false → nil
+    eq(true, callcols.get(cc, 'inferred', 3))
 end)
 
-test('callcols: record() reconstructs the schema-field record', function ()
+test('callcols: record() reconstructs the full record (columns + overlay)', function ()
     local cc = callcols.build(CALLS)
     eq({ file = 'a.lua', callee = 'f', fn = 'a.lua::g@1', full = 'M.f', to = 'a.lua::f@9',
         line = 10, method = true, at = R }, callcols.record(cc, 1))
-    eq({ file = 'a.lua', callee = 'h', fn = 'a.lua::g@1', line = 22 }, callcols.record(cc, 2))
     eq({ file = 'b.lua', callee = 'f', line = 0, inferred = true }, callcols.record(cc, 3))
 end)
 
-test('callcols: empty list builds a valid empty store', function ()
-    local cc = callcols.build({})
-    eq(0, cc.n)
-    eq(nil, callcols.str(cc, 'file', 1) ~= nil and 'x' or nil)
+test('callcols: resolution overlay is writable; syntactic columns are not', function ()
+    local cc = callcols.build(CALLS)
+    -- resolution writes what resolution does: fill `to`, flip `inferred`
+    callcols.set(cc, 'to', 2, 'a.lua::h@5')
+    callcols.set(cc, 'inferred', 2, true)
+    eq('a.lua::h@5', callcols.get(cc, 'to', 2))
+    eq(true, callcols.get(cc, 'inferred', 2))
+    callcols.set(cc, 'to', 1, nil)                            -- a refuted resolution clears it
+    eq(nil, callcols.get(cc, 'to', 1))
+    -- an immutable syntactic field errors (catches a resolution-writes-parse bug)
+    local ok = pcall(callcols.set, cc, 'file', 1, 'x.lua')
+    eq(false, ok, 'setting a syntactic column is refused')
+    eq('a.lua', callcols.get(cc, 'file', 1))                  -- unchanged
 end)

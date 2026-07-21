@@ -46,11 +46,14 @@ local function u32col(vals, n)
     end
 end
 
--- build a column store from a call-record list (over `schema`, default the call
--- scalar schema). Strings are pooled once; each str field is a rank column
--- (rank = pool id + 1, 0 = absent).
-function M.build(calls, schema)
-    schema = schema or segment.CALL_SCHEMA
+-- build a column store from a call-record list. `syn` = the SYNTACTIC schema →
+-- immutable u32 columns (the resident win); `res` = the RESOLUTION schema → a
+-- MUTABLE Lua-array overlay (resolution writes c.to/prov/inferred/… AFTER build,
+-- so those cannot be packed) — the two-phase split. Defaults: the call syntactic
+-- / resolution schemas. Strings pooled once; each str col is a rank (id+1, 0=absent).
+function M.build(calls, syn, res)
+    local schema = syn or segment.CALL_SYNTACTIC
+    res = res or segment.CALL_RESOLUTION
     local n = #calls
     local it = csr.interner()
     local cc = { n = n, schema = schema, str = {}, int = {}, rng = {} }
@@ -94,6 +97,22 @@ function M.build(calls, schema)
         cc.rng[rf] = { pres = u32col(p, n), sl = u32col(sl, n), sc = u32col(sc, n),
             el = u32col(el, n), ec = u32col(ec, n) }
     end
+    -- the MUTABLE resolution overlay: a plain Lua array per field (str value or
+    -- nil / flag true or nil), seeded from the calls and WRITABLE by resolution.
+    -- A field appearing here is looked up here first (M.get), so writes win.
+    cc.isflag = {}
+    for _, f in ipairs(schema.flags or {}) do cc.isflag[f] = true end
+    cc.res, cc.mut, cc.resf = res, {}, {}
+    for _, f in ipairs(res.strs or {}) do
+        local a = {}
+        for i = 1, n do local v = calls[i][f]; a[i] = type(v) == 'string' and v or nil end
+        cc.mut[f] = a; cc.resf[f] = true
+    end
+    for _, f in ipairs(res.flags or {}) do
+        local a = {}
+        for i = 1, n do a[i] = calls[i][f] and true or nil end
+        cc.mut[f] = a; cc.resf[f] = true
+    end
     return cc
 end
 
@@ -113,13 +132,34 @@ function M.range(cc, rf, i)
         ['end'] = { line = r.el(i), char = r.ec(i) } }
 end
 
--- reconstruct a call's schema-field record (for parity checks / a full read)
+-- generic read: an overlay (resolution) field wins, else the right column. The
+-- accessor a consumer calls — the same value a `c.field` record read gives.
+function M.get(cc, f, i)
+    if cc.resf[f] then return cc.mut[f][i] end
+    if cc.str[f] then return M.str(cc, f, i) end
+    if cc.int[f] then return M.int(cc, f, i) end
+    if cc.rng[f] then return M.range(cc, f, i) end
+    if cc.isflag and cc.isflag[f] then return M.flag(cc, f, i) end
+    return nil
+end
+
+-- WRITE a resolution-era field (the only mutable ones — the immutable syntactic
+-- columns error, catching a bug where resolution tries to rewrite a parse fact)
+function M.set(cc, f, i, v)
+    assert(cc.resf[f], 'callcols: field is not a mutable resolution field: ' .. tostring(f))
+    cc.mut[f][i] = v ~= nil and v or nil
+end
+
+-- reconstruct a call's full record (syntactic columns + resolution overlay) —
+-- for parity checks / a full read
 function M.record(cc, i)
     local s, out = cc.schema, {}
     for _, f in ipairs(s.strs) do out[f] = M.str(cc, f, i) end
     for _, f in ipairs(s.ints or {}) do out[f] = M.int(cc, f, i) end
     for _, f in ipairs(s.flags or {}) do if M.flag(cc, f, i) then out[f] = true end end
     for _, rf in ipairs(s.ranges or {}) do out[rf] = M.range(cc, rf, i) end
+    for _, f in ipairs(cc.res.strs or {}) do if cc.mut[f][i] then out[f] = cc.mut[f][i] end end
+    for _, f in ipairs(cc.res.flags or {}) do if cc.mut[f][i] then out[f] = true end end
     return out
 end
 
