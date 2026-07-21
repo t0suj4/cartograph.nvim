@@ -82,7 +82,7 @@ function M.attach(data)
     local by_full = {}   -- 'ns:name' (or bare) -> { reg, ... }
     local stats = { routes = 0, templates = 0, links = 0,
         unregistered = {}, unused = {}, duplicate = {} }
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if REGISTER[callrec.callee(c):match('([%w_]+)$') or ''] then
             local ls = file_lines(callrec.file(c))
             local text = ls and xlang.call_text(root, c, ls) or ''
@@ -196,7 +196,7 @@ function M.attach(data)
     walk('')
 
     -- ── reverse('name') lookups in code ──────────────────────────────────
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if LOOKUP[callrec.callee(c):match('([%w_]+)$') or ''] and callrec.fn(c)
             and argv.str(c, 1) ~= '' then
             link(callrec.fn(c), argv.str(c, 1), callrec.file(c), callrec.line(c))

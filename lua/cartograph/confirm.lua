@@ -49,7 +49,7 @@ function M.apply(data, observed)
     end
     -- carry the tier onto the calls (the ladder/census read c.conf); a
     -- resolved call whose (fn->to) was observed is confirmed
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if callrec.to(c) and callrec.fn(c) and observed[callrec.fn(c) .. '\31' .. callrec.to(c)] then
             callrec.set(c, 'conf', true)
         end
@@ -76,7 +76,7 @@ function M.diff(data, dispatch)
         table.sort(k); return k
     end
     local confirmed, recovered, findings = 0, 0, {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         local obs = callrec.fn(c) and dispatch[callrec.fn(c) .. '\31' .. (callrec.full(c) or callrec.callee(c) or '')]
         if obs then
             local rt = keys(obs)

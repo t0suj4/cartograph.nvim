@@ -168,7 +168,7 @@ function M.report(store)
     end
     -- the heaviest refusals: where resolving one fork buys the most
     local refs = {}
-    for _, c in ipairs(store.data.calls or {}) do
+    for _, c in callrec.each(store.data) do
         if not callrec.to(c) and not c.dynamic and c.refused
             and c.refused.cands and #c.refused.cands > 0 then
             refs[#refs + 1] = c

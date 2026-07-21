@@ -238,7 +238,7 @@ local function load_order_findings(store)
     local t = store.toc
     if not t then return {} end
     local out = {}
-    for _, c in ipairs(store.data.calls or {}) do
+    for _, c in callrec.each(store.data) do
         if c.top and callrec.to(c) then
             local callee = store.node(callrec.to(c))
             local ci = callee and t.index[callee.file]
@@ -286,7 +286,7 @@ local function load_order_findings(store)
             for _, d in ipairs(me.opt) do declared[d:lower()] = true end
             local own = {}
             for _, n in ipairs(store.data.nodes) do own[n.name or ''] = true end
-            for _, c in ipairs(store.data.calls or {}) do
+            for _, c in callrec.each(store.data) do
                 local who = c.top and not callrec.to(c) and not own[callrec.callee(c)] and sib[callrec.callee(c)]
                 if who and not declared[who:lower()] then
                     out[#out + 1] = { file = store.abs(callrec.file(c)), line = callrec.line(c) + 1,
@@ -303,7 +303,7 @@ end
 -- call_user_func). The graph knows what it can't see; so should you.
 local function dynamic_findings(store)
     local per, order = {}, {}
-    for _, c in ipairs(store.data.calls or {}) do
+    for _, c in callrec.each(store.data) do
         if (c.dynamic or ((callrec.callee(c) == 'call_user_func'
             or callrec.callee(c) == 'call_user_func_array') and not callrec.to(c))) then
             if not per[callrec.file(c)] then

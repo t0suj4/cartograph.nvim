@@ -34,7 +34,7 @@ M.BAND_SEAM = {
 -- math / call_at suspect (the value over a bare census).
 local function serving_consistency(store)
     local served, consistent, mis = 0, 0, {}
-    for _, c in ipairs(store.data.calls or {}) do
+    for _, c in callrec.each(store.data) do
         if callrec.to(c) and c.at then
             local n = store.node(callrec.to(c))
             if n and n.file and not n.external and n.range then

@@ -174,7 +174,7 @@ function M.registries(data, opts)
     local known = fn_names(data)
     local coop = require 'cartograph.coop' -- tick() chunks this off the main
     local by_verb = {}                     -- loop when run under coop.run; else no-op
-    for i, c in ipairs(data.calls or {}) do
+    for i, c in callrec.each(data) do
         if not c.dynamic then
             by_verb[callrec.callee(c)] = by_verb[callrec.callee(c)] or {}
             table.insert(by_verb[callrec.callee(c)], c)
@@ -288,7 +288,7 @@ function M.explain(data, verb, opts)
     local min_sites = opts and opts.min_sites or 2
     local known = fn_names(data)
     local by_verb = {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if not c.dynamic then
             by_verb[callrec.callee(c)] = by_verb[callrec.callee(c)] or {}
             table.insert(by_verb[callrec.callee(c)], c)
@@ -501,7 +501,7 @@ local function callee_index(data)
     local idx = CALLEE_IDX[data]
     if not idx then
         idx = {}
-        for i, c in ipairs(data.calls or {}) do
+        for i, c in callrec.each(data) do
             if callrec.callee(c) then
                 local b = idx[callrec.callee(c)]; if not b then b = {}; idx[callrec.callee(c)] = b end
                 b[#b + 1] = i
@@ -689,7 +689,7 @@ end
 function M.verb_pairs(data, opts)
     local min_sites = opts and opts.min_sites or 2
     local by_verb = {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if not c.dynamic then
             by_verb[callrec.callee(c)] = by_verb[callrec.callee(c)] or {}
             table.insert(by_verb[callrec.callee(c)], c)
@@ -991,7 +991,7 @@ end
 function M.clones(data, opts)
     local min_stmts = opts and opts.min_stmts or 3
     local callees = {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if callrec.fn(c) then
             callees[callrec.fn(c)] = callees[callrec.fn(c)] or {}
             table.insert(callees[callrec.fn(c)], callrec.callee(c))
@@ -1079,7 +1079,7 @@ function M.factories(data, opts)
     local min_sites = opts and opts.min_sites or 30
     local min_keys = opts and opts.min_keys or 10
     local by_verb = {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if not c.dynamic and not callrec.to(c) then
             by_verb[callrec.callee(c)] = by_verb[callrec.callee(c)] or {}
             table.insert(by_verb[callrec.callee(c)], c)
@@ -1114,7 +1114,7 @@ end
 --- eval and friends: the interpreter itself.
 function M.evals(data)
     local out = {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if EVAL_VERBS[callrec.callee(c)] and not callrec.to(c) then
             out[#out + 1] = c
         end

@@ -235,7 +235,7 @@ function M.link(data, bindings)
                     end
                 end
             end
-            for _, c in ipairs(data.calls or {}) do
+            for _, c in callrec.each(data) do
                 local match
                 if pin.callee then
                     match = callrec.file(c) == pin.file and callrec.callee(c) == pin.callee
@@ -272,7 +272,7 @@ function M.link(data, bindings)
     for _, b in ipairs(bindings) do
         coop.tick()
         local exports = {}
-        for ci, c in ipairs(data.calls or {}) do
+        for ci, c in callrec.each(data) do
             if ci % 8192 == 0 then coop.tick() end
             if verb_matches(c, b.export.verb) then
                 local key = logical_arg(c, b.export.name)
@@ -291,7 +291,7 @@ function M.link(data, bindings)
             end
         end
         if next(exports) then
-            for ci, c in ipairs(data.calls or {}) do
+            for ci, c in callrec.each(data) do
                 if ci % 8192 == 0 then coop.tick() end
                 local hs, key
                 if b.import.verb and verb_matches(c, b.import.verb) then

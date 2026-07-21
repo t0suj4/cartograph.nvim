@@ -45,4 +45,13 @@ function M.prov(c) return c.prov end
 -- escalate/xlang oracles) go through here so the swap needs no further edits.
 function M.set(c, field, v) c[field] = v end
 
+-- ITERATE a graph's calls — the iteration seam. A consumer writes
+--   for _, c in callrec.each(data) do … callrec.<field>(c) … end
+-- instead of `ipairs(data.calls)`, so it never assumes calls are an array of
+-- record TABLES. Now this is exactly ipairs over the record array; when
+-- data.calls becomes a callcols store (brick 3) this yields (i, row-handle) and
+-- the accessors read the columns — no consumer edit. (Owner/record-layer files
+-- that BUILD or fold the calls keep raw ipairs — they are the representation.)
+function M.each(data) return ipairs(data.calls or {}) end
+
 return M

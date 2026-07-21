@@ -105,7 +105,7 @@ function M.scan(data)
                 inferred = conf == 'content' or nil })
         end
     end
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         -- sink-typed first: the API contract said sql (CONFIDENT). A
         -- PREFIX may cut mid-token — drop the unfinished tail before
         -- mining, never guess it.

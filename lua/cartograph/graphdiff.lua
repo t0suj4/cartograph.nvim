@@ -53,7 +53,7 @@ local function edge_census(data)
 end
 local function call_census(data)
     local t = {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         local k = ckey(c)
         t[k] = t[k] or {}
         t[k][coutcome(c)] = (t[k][coutcome(c)] or 0) + 1

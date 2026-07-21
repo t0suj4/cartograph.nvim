@@ -164,7 +164,7 @@ function M.resolve_requires(data)
         if e.kind == 'import' then have[e.from .. '\31' .. e.to] = true end
     end
     local added = 0
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         local a1 = callrec.callee(c) == 'require' and callrec.file(c) and argv.str(c, 1)
         if a1 and a1 ~= '' then
             local key = mod2key[a1]
@@ -303,7 +303,7 @@ end
 --- never ran, or a guard fired) — the actionable finding.
 function M.registrations(data)
     local cmds, maps = {}, {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         local n = callrec.full(c) or callrec.callee(c) or ''
         local a1, a2 = argv.str(c, 1), argv.str(c, 2)
         if n:find('nvim_create_user_command', 1, true) and a1 ~= '' then

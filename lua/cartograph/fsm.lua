@@ -37,7 +37,7 @@ end
 function M.bindings(store, cfg)
     local verb = (cfg or {}).register or 'register_listener'
     local out = {}
-    for _, c in ipairs(store.data.calls or {}) do
+    for _, c in callrec.each(store.data) do
         if callrec.callee(c) == verb then
             local off = callrec.method(c) and 1 or 0
             local name = argv.str(c, 1 + off)

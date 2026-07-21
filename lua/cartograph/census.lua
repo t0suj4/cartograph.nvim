@@ -61,7 +61,7 @@ function M.take(data)
             c.edges.ref[t] = c.edges.ref[t] + 1
         end
     end
-    for _, call in ipairs(data.calls or {}) do
+    for _, call in callrec.each(data) do
         c.calls.total = c.calls.total + 1
         if call.hedge then c.calls.hedged = c.calls.hedged + 1 end
         if callrec.to(call) then

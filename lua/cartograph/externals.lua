@@ -56,7 +56,7 @@ end
 function M.surface(store)
     local s = { total = 0, resolved = 0, internal_multi = 0, cross_scope = 0,
         stdlib_tail = 0, external = 0, bases = {} }
-    for _, c in ipairs(store.data.calls or {}) do
+    for _, c in callrec.each(store.data) do
         s.total = s.total + 1
         if callrec.to(c) then
             s.resolved = s.resolved + 1

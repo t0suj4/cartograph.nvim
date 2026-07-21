@@ -41,7 +41,7 @@ end
 -- table (for reporting the other regimes).
 function M.saturated(data)
     local per = {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if callrec.fn(c) then
             local r = per[callrec.fn(c)]
             if not r then r = { p = 0, h = 0, rf = 0 }; per[callrec.fn(c)] = r end
@@ -66,7 +66,7 @@ end
 -- signal fired. Pass sat=nil to widen to the whole graph (general enrichment).
 function M.worklist(data, sat)
     local work = {}
-    for _, c in ipairs(data.calls or {}) do
+    for _, c in callrec.each(data) do
         if callrec.file(c) and callrec.file(c):match('%.lua$') and not c.dynamic and not c.escalated
             and (not sat or (callrec.fn(c) and sat[callrec.fn(c)])) then
             if (callrec.to(c) and c.inferred) or not callrec.to(c) then
@@ -126,7 +126,7 @@ local function prepare(data, opts)
     if gen ~= nil then
         if cache.gen ~= gen then cache = { gen = gen, keys = {} } end
         if next(cache.keys) then
-            for _, c in ipairs(data.calls or {}) do
+            for _, c in callrec.each(data) do
                 if cache.keys[keyof(c)] then callrec.set(c, 'escalated', true) end
             end
         end
