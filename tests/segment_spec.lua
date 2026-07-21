@@ -1,0 +1,53 @@
+-- Columnar record segment (segment.lua): the wire/cache form of a record list.
+-- The gate is EXACT round-trip of the declared fields (str present/absent, int,
+-- flags) — a segment must be faithful for the fields it carries, by construction.
+
+local segment = require 'cartograph.segment'
+
+local S = segment.CALL_SCHEMA
+
+test('segment: round-trips the call schema exactly', function ()
+    local calls = {
+        { file = 'a.lua', callee = 'f', fn = 'a.lua::g@1', full = 'M.f',
+            method = 'f', line = 10, dynamic = true, inferred = false },
+        { file = 'a.lua', callee = 'h', fn = 'a.lua::g@1', line = 22 }, -- sparse
+        { file = 'b.lua', callee = 'f', line = 0, inferred = true },     -- shared f/a.lua
+    }
+    local recs = segment.decode(segment.encode(calls, S), S)
+    eq(3, #recs)
+    -- present strings round-trip; absent stay nil
+    eq('a.lua', recs[1].file); eq('f', recs[1].callee); eq('M.f', recs[1].full)
+    eq(nil, recs[2].full); eq(nil, recs[2].method)   -- absent → nil
+    eq('b.lua', recs[3].file); eq('f', recs[3].callee) -- pooled once, both resolve
+    -- ints
+    eq(10, recs[1].line); eq(22, recs[2].line); eq(0, recs[3].line)
+    -- flags: truthy → true, false/absent → nil
+    eq(true, recs[1].dynamic); eq(nil, recs[1].inferred)
+    eq(nil, recs[2].dynamic); eq(true, recs[3].inferred)
+end)
+
+test('segment: identical strings pool to one entry (the wire win)', function ()
+    -- 100 calls in one file, same callee → the pool holds each string ONCE, so
+    -- the blob is far smaller than the naive per-record bytes
+    local calls = {}
+    for i = 1, 100 do
+        calls[i] = { file = 'same/long/path/to/file.lua', callee = 'commonName',
+            fn = 'same/long/path/to/file.lua::f@1', line = i }
+    end
+    local blob = segment.encode(calls, S)
+    local naive = 0
+    for _, c in ipairs(calls) do
+        naive = naive + #c.file + #c.callee + #c.fn + 2 -- ~per-record raw string bytes
+    end
+    ok(#blob < naive / 5, ('pooled blob %d << naive %d (>5x)'):format(#blob, naive))
+    -- and it still round-trips
+    local recs = segment.decode(blob, S)
+    eq('commonName', recs[50].callee); eq(50, recs[50].line)
+end)
+
+test('segment: empty list and empty schema fields are safe', function ()
+    eq(0, #segment.decode(segment.encode({}, S), S))
+    local only_str = { strs = { 'file' } }
+    local recs = segment.decode(segment.encode({ { file = 'x' }, {} }, only_str), only_str)
+    eq('x', recs[1].file); eq(nil, recs[2].file)
+end)
