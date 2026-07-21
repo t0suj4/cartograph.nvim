@@ -87,6 +87,9 @@ function Scan.new(src, file, spec)
         derefs = {},                 -- { line, col, path, via }
         escapes = {},                -- { line, col, kind, via, detail }
         seamed = {},                 -- { line, col, via, detail } — already migrated
+        helpers = {},                -- name -> { params = {…}, body } (same-file defs)
+        props = {},                  -- interproc worklist: { name, idx, kind }
+        deref_seen = {},             -- "line:col" dedup (a re-walked body re-visits)
     }, Scan)
 end
 
@@ -206,6 +209,9 @@ function Scan:use(node, taint, via)
         return
     end
     if climbed then
+        local seenkey = l .. ':' .. c
+        if self.deref_seen[seenkey] then return end -- re-walked body: one loc, one deref
+        self.deref_seen[seenkey] = true
         local d = { line = l, col = c, path = table.concat(path, '.'), via = via }
         if pre then
             d.pre = true -- prefix taint: the chain is PARTIAL, never rewrite
@@ -239,6 +245,22 @@ function Scan:use(node, taint, via)
         if self.bless[callee] then
             self.seamed[#self.seamed + 1] = { line = l, col = c,
                 via = via, detail = callee .. '()' }
+            return
+        end
+        -- INTERPROC 1-HOP: the WHOLE record (not a derived sub-value) passed to
+        -- a resolvable same-file helper → FOLLOW it (taint that helper's matching
+        -- param, resolve_params re-walks the body). Coverage no longer stops here.
+        if not esc and self.helpers[callee] then
+            local sl2, sc2 = cur:range()
+            local idx = 0
+            for ch in p:iter_children() do
+                if ch:named() then
+                    idx = idx + 1
+                    local cl, cc = ch:range()
+                    if cl == sl2 and cc == sc2 then break end
+                end
+            end
+            self.props[#self.props + 1] = { name = callee, idx = idx, kind = kindof(taint) }
             return
         end
         self.escapes[#self.escapes + 1] = { line = l, col = c, kind = esc or 'arg',
@@ -437,6 +459,58 @@ function Scan:walk(node, pending)
     end
 end
 
+-- PRE-PASS: index same-file function definitions by name → { params, body },
+-- so the interproc hop can resolve `f(c)` to f's body and taint param i. Keyed
+-- by the callee's LAST segment (`M.f`/`T:m` → `f`), matching callee_name; a
+-- name collision over-approximates (checklist honesty), same as the rest.
+function Scan:collect_helpers(node)
+    if node:type() == 'function_declaration' then
+        local nm = node:field('name')[1]
+        local key
+        if nm then
+            local nt = nm:type()
+            if nt == 'identifier' then key = node_text(nm, self.src)
+            elseif IDX[nt] or nt == 'method_index_expression' then
+                local seg = nm:named_child(nm:named_child_count() - 1)
+                key = seg and node_text(seg, self.src)
+            end
+        end
+        local body = node:field('body')[1]
+        if key and body and not self.helpers[key] then
+            local params = {}
+            local ps = node:field('parameters')[1]
+            if ps then
+                for ch in ps:iter_children() do
+                    if ch:named() and ch:type() == 'identifier' then
+                        params[#params + 1] = node_text(ch, self.src)
+                    end
+                end
+            end
+            self.helpers[key] = { params = params, body = body }
+        end
+    end
+    for ch in node:iter_children() do
+        if ch:named() then self:collect_helpers(ch) end
+    end
+end
+
+-- FIXPOINT over the interproc worklist: for each (helper, param i, kind) the
+-- walk recorded, re-walk the helper's body with param i tainted. New arg-hops
+-- inside extend the worklist; `seen` dedups (recursion/cycles terminate).
+function Scan:resolve_params()
+    local seen, i = {}, 1
+    while i <= #self.props do
+        local p = self.props[i]; i = i + 1
+        local key = p.name .. '|' .. p.idx .. '|' .. tostring(p.kind)
+        if not seen[key] then
+            seen[key] = true
+            local h = self.helpers[p.name]
+            local pname = h and h.params[p.idx]
+            if pname and h.body then self:walk(h.body, { [pname] = p.kind }) end
+        end
+    end
+end
+
 --- Scan one Lua source string. spec = { calls = {occurrences='list'},
 --- fields = {at='any'} }. Returns { seeds, derefs, escapes }.
 function M.scan(src, file, spec)
@@ -444,7 +518,9 @@ function M.scan(src, file, spec)
     if not ok or not parser then return nil, 'no lua parser' end
     local root = parser:parse()[1]:root()
     local s = Scan.new(src, file, spec)
-    s:walk(root)
+    s:collect_helpers(root)   -- index helpers first (defs may follow call sites)
+    s:walk(root)              -- main producer walk (records interproc worklist)
+    s:resolve_params()        -- follow the worklist into helper bodies
     return { file = file, seeds = s.seeds, derefs = s.derefs,
         escapes = s.escapes, seamed = s.seamed }
 end

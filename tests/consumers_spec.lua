@@ -95,6 +95,40 @@ test('consumers: rooted producer scopes the taint; single-seg deref → stem1', 
     eq('c', stem1, 'single-segment stem1 = the record → rewrites to acc(c)')
 end)
 
+test('consumers: interproc 1-hop — a record passed to a helper is followed', function ()
+    local src = table.concat({
+        'local function keyof(c) return c.file .. tostring(c.line) end',
+        'for _, c in ipairs(data.calls) do local k = keyof(c) end',
+    }, '\n')
+    local r = consumers.scan(src, 'x.lua', { rooted = { ['data.calls'] = 'list' } })
+    local byp = {}
+    for _, d in ipairs(r.derefs) do byp[d.path] = d end
+    ok(byp.file, 'c.file INSIDE keyof is tracked through the call hop')
+    ok(byp.line, 'c.line too')
+    eq('c', byp.file.stem1, 'and rewrites as a record-field accessor on the param')
+    for _, e in ipairs(r.escapes) do
+        ok(not (e.kind == 'arg' and (e.detail or ''):find('keyof')),
+           'the resolvable helper call is FOLLOWED, not an unresolved frontier')
+    end
+end)
+
+test('consumers: interproc hop terminates on recursion / unknown helpers', function ()
+    -- a recursive helper (cycle) and a call to an unresolved (cross-file) name
+    local src = table.concat({
+        'local function rec(c) if c.dynamic then return rec(c) end return c.file end',
+        'for _, c in ipairs(data.calls) do rec(c); external.helper(c) end',
+    }, '\n')
+    local r = consumers.scan(src, 'x.lua', { rooted = { ['data.calls'] = 'list' } })
+    local byp = {}
+    for _, d in ipairs(r.derefs) do byp[d.path] = d end
+    ok(byp.file, 'rec(c) resolved once; c.file tracked (no infinite loop)')
+    local ext
+    for _, e in ipairs(r.escapes) do
+        if (e.detail or ''):find('helper') then ext = true end
+    end
+    ok(ext, 'the unresolved external.helper(c) stays an honest frontier escape')
+end)
+
 test('consumers: a LISTMAP producer yields records through map[id] → for-in', function ()
     -- store.calls_to[id] is a map of call LISTS: indexing gives a list, the
     -- for-in over it gives a call record (two hops from the rooted producer)

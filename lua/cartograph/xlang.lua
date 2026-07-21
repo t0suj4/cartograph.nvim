@@ -55,7 +55,7 @@ end
 --- past the statement picks up the next definition as a phantom.
 function M.call_text(root, c, lines)
     if not lines then
-        local fd = io.open(root .. '/' .. c.file, 'r')
+        local fd = io.open(root .. '/' .. callrec.file(c), 'r')
         if not fd then return '' end
         lines = vim.split(fd:read('a'), '\n', { plain = true })
         fd:close()
@@ -183,12 +183,12 @@ function M.link(data, bindings)
     -- precise site range: the key literal on the call line, when findable
     local line_cache = {}
     local function key_range(c, key)
-        if line_cache[c.file] == nil then
-            local fd = io.open(data.root .. '/' .. c.file, 'r')
-            line_cache[c.file] = fd and vim.split(fd:read('a'), '\n', { plain = true }) or false
+        if line_cache[callrec.file(c)] == nil then
+            local fd = io.open(data.root .. '/' .. callrec.file(c), 'r')
+            line_cache[callrec.file(c)] = fd and vim.split(fd:read('a'), '\n', { plain = true }) or false
             if fd then fd:close() end
         end
-        local lines = line_cache[c.file]
+        local lines = line_cache[callrec.file(c)]
         for l = c.line, math.min(c.line + 3, lines and #lines - 1 or c.line) do
             local text = lines and lines[l + 1] or ''
             local s, e = text:find(key, 1, true)

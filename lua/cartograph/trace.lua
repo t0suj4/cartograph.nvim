@@ -1,3 +1,4 @@
+local callrec = require 'cartograph.callrec'
 -- Data tracing: where do a parameter's values come from? Pure logic over the
 -- store's call inventory (classified args), function params, and return
 -- summaries — the UI drives it incrementally, expanding one origin at a time.
@@ -13,7 +14,7 @@
 
 local M = {}
 
-local function site_of(call) return { file = call.file, line = call.line } end
+local function site_of(call) return { file = callrec.file(call), line = call.line } end
 
 --- Origins of parameter `i` of function `fn_id`: one entry per resolved call
 --- site (the classified i-th argument). Sites that pass nothing for the

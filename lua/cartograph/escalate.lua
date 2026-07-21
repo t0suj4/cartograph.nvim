@@ -32,7 +32,7 @@ local cache = { gen = nil, keys = {} }
 
 -- a stable identity for a call across re-ingests: site + name.
 local function keyof(c)
-    return (c.file or '?') .. '\31' .. tostring(c.line) .. '\31'
+    return (callrec.file(c) or '?') .. '\31' .. tostring(c.line) .. '\31'
         .. (c.callee or c.full or '?')
 end
 

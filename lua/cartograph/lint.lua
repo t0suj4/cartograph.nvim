@@ -82,7 +82,7 @@ M.listener_config = {
 local function listener_findings(store)
     local cfg, calls = M.listener_config, store.data.calls
     if not calls or #calls == 0 then return {} end
-    local function abs(c) return store.abs(c.file) end
+    local function abs(c) return store.abs(callrec.file(c)) end
     local function keyname(c, spec)
         local a = argv.str(c, spec.at + (c.method and 1 or 0))
         return (a and a ~= '') and a or nil
