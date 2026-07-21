@@ -18,6 +18,7 @@
 -- carry defaults the graph doesn't track — those stay 'may-write'.
 
 local argv = require 'cartograph.argv'
+local callrec = require 'cartograph.callrec'
 
 local M = {}
 
@@ -266,7 +267,7 @@ local function arg_target(store, c, i, caller)
     local a = argv.at(c, i)
     if not a then return 'opaque' end
     if a.k == 'local' and a.name then
-        for _, n in ipairs(store.by_file[c.file] or {}) do
+        for _, n in ipairs(store.by_file[callrec.file(c)] or {}) do
             if n.kind == 'var' and n.name == a.name then
                 return 'var', n.id
             end
@@ -375,7 +376,7 @@ function M.summaries(store)
                                 sum.pwx[x] = true
                             elseif kind == 'opaque' then
                                 s_hedge(sum, ('param-mutation via opaque arg -> %s @%s:%d')
-                                    :format(tn and tn.name or to, c.file or '?', c.line or 0))
+                                    :format(tn and tn.name or to, callrec.file(c) or '?', c.line or 0))
                             end
                         end
                     end
@@ -415,7 +416,7 @@ function M.summaries(store)
                                 sum.pwx[x] = true
                             elseif kind == 'opaque' then
                                 s_hedge(sum, ('%s on opaque arg @%s:%d')
-                                    :format(bname, c.file or '?', c.line or 0))
+                                    :format(bname, callrec.file(c) or '?', c.line or 0))
                             end
                         end
                         -- HIGHER-ORDER: the passed fn's summary is this
@@ -427,7 +428,7 @@ function M.summaries(store)
                             if not target and a
                                 and (a.k == 'local' or a.k == 'callable')
                                 and a.name then
-                                for _, fn2 in ipairs(store.by_file[c.file] or {}) do
+                                for _, fn2 in ipairs(store.by_file[callrec.file(c)] or {}) do
                                     if (fn2.kind == 'function' or fn2.kind == 'method')
                                         and fn2.name == a.name then
                                         target = fn2.id
@@ -445,11 +446,11 @@ function M.summaries(store)
                                 end
                                 if ts2.pwx then
                                     s_hedge(sum, ('callback %s mutates its params @%s:%d')
-                                        :format(a.name or '?', c.file or '?', c.line or 0))
+                                        :format(a.name or '?', callrec.file(c) or '?', c.line or 0))
                                 end
                             elseif a then
                                 s_hedge(sum, ('%s: callback effects unknown @%s:%d')
-                                    :format(bname, c.file or '?', c.line or 0))
+                                    :format(bname, callrec.file(c) or '?', c.line or 0))
                             end
                         end
                         -- sig.pure / sig.reads / sig.returns_arg: no hedge,
@@ -457,13 +458,13 @@ function M.summaries(store)
                     elseif c.refused then
                         s_hedge(sum, ('refused (%s): %s @%s:%d'):format(
                             c.refused.rule or '?', bname or '?',
-                            c.file or '?', c.line or 0))
+                            callrec.file(c) or '?', c.line or 0))
                     elseif not c.dynamic and bname then
                         s_hedge(sum, ('unresolved: %s @%s:%d'):format(
-                            bname, c.file or '?', c.line or 0))
+                            bname, callrec.file(c) or '?', c.line or 0))
                     else
                         s_hedge(sum, ('dynamic call @%s:%d'):format(
-                            c.file or '?', c.line or 0))
+                            callrec.file(c) or '?', c.line or 0))
                     end
                 end
             end

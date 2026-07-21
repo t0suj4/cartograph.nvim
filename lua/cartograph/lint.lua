@@ -347,7 +347,7 @@ local function greenspun_findings(store)
                 :format(f.verb, f.keys, f.sites, f.example or '?') }
     end
     for _, c in ipairs(g.evals(store.data)) do
-        out[#out + 1] = { file = store.abs(c.file), line = c.line + 1,
+        out[#out + 1] = { file = store.abs(callrec.file(c)), line = c.line + 1,
             message = ("the interpreter itself: %s()"):format(c.callee) }
     end
     return out

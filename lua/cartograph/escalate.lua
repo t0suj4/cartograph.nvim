@@ -195,7 +195,7 @@ end
 function M.report(f, name)
     name = name or function (id) return tostring(id) end
     local function site(c)
-        return ('%s:%d %s'):format((c.file or '?'):match('[^/]+$') or '?',
+        return ('%s:%d %s'):format((callrec.file(c) or '?'):match('[^/]+$') or '?',
             (c.line or 0) + 1, c.callee or c.full or '?')
     end
     local L = {
@@ -239,13 +239,13 @@ function M.diagnostics(f, abs, name)
     local out = {}
     local function col(c) return c.at and atr.sc(c.at) + 1 or 1 end
     for _, x in ipairs(f.conflict) do
-        out[#out + 1] = { file = abs(x.c.file), line = (x.c.line or 0) + 1,
+        out[#out + 1] = { file = abs(callrec.file(x.c)), line = (x.c.line or 0) + 1,
             col = col(x.c), severity = 'error', source = 'cartograph/escalate',
             message = ('escalation CONFLICT: static → %s, but lua-ls → %s'
                 .. ' — a bug on ONE side'):format(name(x.was), name(x.now)) }
     end
     for _, x in ipairs(f.refuted) do
-        out[#out + 1] = { file = abs(x.c.file), line = (x.c.line or 0) + 1,
+        out[#out + 1] = { file = abs(callrec.file(x.c)), line = (x.c.line or 0) + 1,
             col = col(x.c), severity = 'warn', source = 'cartograph/escalate',
             message = ('escalation: name-match to %s refuted by lua-ls'
                 .. ' (no such target) — resolver over-reach'):format(name(x.was)) }

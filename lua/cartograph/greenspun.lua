@@ -22,6 +22,7 @@ local M = {}
 local argv = require 'cartograph.argv'
 local df = require 'cartograph.df'
 local atr = require 'cartograph.at'
+local callrec = require 'cartograph.callrec'
 
 local EVAL_VERBS = {
     eval = true, exec = true, load = true, loadstring = true, dofile = true,
@@ -120,7 +121,7 @@ local function read_lines(root, file, cache)
     return cache[file]
 end
 local function deep_callable(root, c, cache)
-    local lines = read_lines(root, c.file, cache)
+    local lines = read_lines(root, callrec.file(c), cache)
     if not lines then return false end
     local text = require('cartograph.xlang').call_text(root, c, lines)
     for _, pat in ipairs(CALLABLE_PATS) do
@@ -132,7 +133,7 @@ end
 -- deep tier: a non-literal key built by concatenation yields a PREFIX
 -- family ('save_' . $type covers every key starting save_)
 local function deep_prefix(root, c, cache)
-    local lines = read_lines(root, c.file, cache)
+    local lines = read_lines(root, callrec.file(c), cache)
     if not lines then return nil end
     local text = require('cartograph.xlang').call_text(root, c, lines)
     return text:match([=[['"]([%w_%-]+)['"]%s*[%.%+]]=])
@@ -602,7 +603,7 @@ function M.audit(data, bindings, opts)
                         if near then
                             local c = disp_site[k]
                             out[#out + 1] = { severity = 'warn',
-                                file = data.root .. '/' .. c.file, line = c.line + 1,
+                                file = data.root .. '/' .. callrec.file(c), line = c.line + 1,
                                 message = ("'%s' is dispatched but never registered — did you mean '%s'?")
                                     :format(k, near) }
                         end
@@ -616,7 +617,7 @@ function M.audit(data, bindings, opts)
                             if near then
                                 local c = reg_site[k]
                                 out[#out + 1] = { severity = 'warn',
-                                    file = data.root .. '/' .. c.file, line = c.line + 1,
+                                    file = data.root .. '/' .. callrec.file(c), line = c.line + 1,
                                     message = ("'%s' is registered but never dispatched — did you mean '%s'?")
                                         :format(k, near) }
                             end
@@ -779,7 +780,7 @@ function M.pair_audit(data, vpairs)
                 if near or not acq_dyn then
                     local c = rel_sites[k]
                     out[#out + 1] = { severity = 'warn',
-                        file = data.root .. '/' .. c.file, line = c.line + 1,
+                        file = data.root .. '/' .. callrec.file(c), line = c.line + 1,
                         message = ("%s('%s') releases a key never acquired%s")
                             :format(pr.release.verb, k,
                                 near and (" — did you mean '" .. near .. "'?") or '') }
@@ -791,7 +792,7 @@ function M.pair_audit(data, vpairs)
                 if not rel[k] then
                     local c = acq_site[k]
                     out[#out + 1] = { severity = 'warn',
-                        file = data.root .. '/' .. c.file, line = c.line + 1,
+                        file = data.root .. '/' .. callrec.file(c), line = c.line + 1,
                         message = ("%s('%s') is never %sd — leak-prone")
                             :format(pr.acquire.verb, k, pr.release.verb) }
                 end

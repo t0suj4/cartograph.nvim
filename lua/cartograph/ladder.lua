@@ -183,7 +183,7 @@ function M.report(store)
         for i = 1, math.min(12, #refs) do
             local c = refs[i]
             lines[#lines + 1] = ('  %s:%d  %s  (%d candidates)')
-                :format(c.file, c.line + 1, c.callee, c.refused.n or 0)
+                :format(callrec.file(c), c.line + 1, c.callee, c.refused.n or 0)
         end
     end
     -- the receiver-typing WORK-LIST: which receivers, typed, dissolve the most

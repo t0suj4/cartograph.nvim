@@ -1,3 +1,4 @@
+local callrec = require 'cartograph.callrec'
 -- SINKFLOW — taint rung 0 ([[cartograph-taint-analysis]]): a DIVERGENT
 -- SQL-injection smell — one function string-concatenates a param into a
 -- query-shaped SINK WITHOUT sanitizing it, while a SIBLING concatenates the
@@ -321,7 +322,7 @@ function M.findings(store)
         local tok = why and c.prefix and c.prefix:match('([%w_]+)')
         local peer = tok and sanpeer[c.callee .. '\31' .. tok]
         if why and peer and peer ~= c.fn then
-            out[#out + 1] = { file = store.abs(c.file), line = c.line,
+            out[#out + 1] = { file = store.abs(callrec.file(c)), line = c.line,
                 message = ('possible SQL injection (~, sink unconfirmed): '
                     .. 'unsanitized param $%s concatenated into %s [%s] — peer '
                     .. '%s() sanitizes the same shape (defended the peer, not this one)')
@@ -606,7 +607,7 @@ function M.source_findings(store)
     end)
     local fs = {}
     for _, c in ipairs(out) do
-        fs[#fs + 1] = { file = store.abs(c.file), line = c.line,
+        fs[#fs + 1] = { file = store.abs(callrec.file(c)), line = c.line,
             message = ('possible SQL injection (~, sink unconfirmed): request '
                 .. 'input %s reaches SQL sink %s() with no sanitizer on the path')
                 :format(c.source, c.callee) }
@@ -765,7 +766,7 @@ function M.reach_findings(store)
                                     local key = fid .. '\31' .. c.line .. '\31' .. i
                                     if not seen[key] then
                                         seen[key] = true
-                                        findings[#findings + 1] = { file = c.file,
+                                        findings[#findings + 1] = { file = callrec.file(c),
                                             line = c.line, source = o, callee = c.callee }
                                     end
                                 elseif type(o) == 'number' and not sp[fid][o] then
