@@ -1234,4 +1234,10 @@ function M.open_async(root, cb)
     return true
 end
 
+-- exposed for the worker→parent IPC (parallel.lua): a worker packs its chunk's
+-- calls to a segment before shipping (smaller chunk file), the parent unpacks on
+-- receive — the same columnar codec as the disk cache, on the wire.
+M.pack_calls = pack_calls
+M.unpack_calls = unpack_calls
+
 return M

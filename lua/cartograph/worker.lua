@@ -64,6 +64,7 @@ do
     end
 end
 
+codec.pack_calls(out) -- calls → columnar segment (smaller chunk on the wire)
 local ofd = assert(io.open(job.out, 'wb'))
 ofd:write(codec.encode(out))
 ofd:close()

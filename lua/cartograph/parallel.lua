@@ -153,7 +153,9 @@ local function spawn(job, cb)
             if res.code == 0 then
                 local cfd = io.open(job.out, 'rb')
                 if cfd then
-                    chunk = require('cartograph.cache').decode(cfd:read('a'))
+                    local cache = require('cartograph.cache')
+                    chunk = cache.decode(cfd:read('a'))
+                    if chunk then cache.unpack_calls(chunk) end -- segment → calls
                     cfd:close()
                 end
             end
