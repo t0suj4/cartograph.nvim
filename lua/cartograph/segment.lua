@@ -12,8 +12,12 @@
 -- ints → varint columns; flags → one bit-packed byte per record (≤8 flags).
 -- Layout: uvarint n · pool(uvarint np, then len-prefixed strings in RANK order)
 --   · str columns · int columns · flag bytes. decode() needs the same schema.
--- This is the SYNTACTIC segment; resolution-era mutable fields (to/inferred/
--- refused) ride a separate phase-2 column ([[cartograph-record-fold-arc]] step 4).
+-- M.CALL_SCHEMA carries the full SCALAR field set (13 strings + line + 5 flags,
+-- empirically enumerated over zig∪self); the 7 TABLE fields (argv/at/refused/…)
+-- are detail carried by their own folds, not the segment. A producer pipeline
+-- (step 4) would split syntactic vs resolution-era into two phases, but the
+-- post-resolution cache/wire form is one scalar segment. Verify the field union
+-- per language before a cache swap ([[cartograph-record-fold-arc]] step 4).
 
 local reg = require 'cartograph.registry'
 local csr = require 'cartograph.csr'
@@ -22,12 +26,18 @@ local M = {}
 
 local char, byte, floor = string.char, string.byte, math.floor
 
--- the syntactic call-record segment schema (immutable fields; `to` is resolution-
--- era → not here). fn is the enclosing-fn node id, also syntactic.
+-- the call-record SCALAR schema (empirically the full scalar field set; the 7
+-- TABLE fields — args/argv/at/ext/hedge/refused/rt — are detail carried by their
+-- own folds (at/argv/refused), not the segment). Two-phase note: file/callee/fn/
+-- full/recv*/chain*/method/line are SYNTACTIC; to/prov/inferred/tinf/rtfull are
+-- resolution-era — a producer pipeline (step 4) fills them in a parallel column,
+-- but for the post-resolution cache/wire form they ride one scalar segment.
+-- (method/inferred/rtfull/tinf/top are BOOLEANS — flags, not strings.)
 M.CALL_SCHEMA = {
-    strs = { 'file', 'callee', 'fn', 'full', 'method' },
+    strs = { 'file', 'callee', 'fn', 'full', 'to', 'prov',
+        'recv', 'recvpath', 'recvroot', 'chainfield', 'chainroot', 'chainty', 'stdpath' },
     ints = { 'line' },
-    flags = { 'dynamic', 'inferred' },
+    flags = { 'method', 'inferred', 'tinf', 'rtfull', 'top' },
 }
 
 -- records (1-based list) + schema → a packed byte string
