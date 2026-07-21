@@ -62,6 +62,30 @@ test('segment: identical strings pool to one entry (the wire win)', function ()
     eq('commonName', recs[50].callee); eq(50, recs[50].line)
 end)
 
+test('segment: merge concats blobs == encode of the concatenation (⊤)', function ()
+    local R = { start = { line = 5, char = 2 }, ['end'] = { line = 5, char = 9 } }
+    local A = { { file = 'a.lua', callee = 'f', line = 1, at = R, method = true },
+                { file = 'a.lua', callee = 'g', line = 2 } }
+    local B = { { file = 'b.lua', callee = 'f', line = 3 },              -- 'f' shared across blobs
+                { file = 'b.lua', callee = 'h', line = 4, to = 'x', inferred = true } }
+    local merged = segment.merge({ segment.encode(A, S), segment.encode(B, S) }, S)
+    local cat = {}
+    for _, c in ipairs(A) do cat[#cat + 1] = c end
+    for _, c in ipairs(B) do cat[#cat + 1] = c end
+    -- ⊤: the merged blob is BYTE-IDENTICAL to encoding the concatenation
+    eq(segment.encode(cat, S), merged, 'merge(A,B) bytes == encode(A..B)')
+    -- and decodes to the concatenation (columns re-pooled, cross-blob string shared)
+    local recs = segment.decode(merged, S)
+    eq(4, #recs)
+    eq('a.lua', recs[1].file); eq('f', recs[1].callee); eq(5, recs[1].at.start.line)
+    eq('b.lua', recs[3].file); eq('f', recs[3].callee)   -- 'f' resolves in both halves
+    eq('x', recs[4].to); eq(true, recs[4].inferred)
+    -- three-way + single-blob merge
+    eq(segment.encode(cat, S), segment.merge(
+        { segment.encode(A, S), segment.encode({}, S), segment.encode(B, S) }, S),
+        'empty blob in the middle is a no-op')
+end)
+
 test('segment: empty list and empty schema fields are safe', function ()
     eq(0, #segment.decode(segment.encode({}, S), S))
     local only_str = { strs = { 'file' } }
