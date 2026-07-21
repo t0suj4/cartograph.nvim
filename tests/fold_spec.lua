@@ -212,6 +212,23 @@ test('fold.merge: order-independent and idempotent under a single chunk', functi
     eq(canon(ab), canon(ba))
 end)
 
+test('fold.merge: ⊤ shared-interner path skips the remap, same result', function ()
+    -- build both chunks against ONE shared interner → ids are already global,
+    -- so merge auto-detects the ⊤ path (pure column concat, no remap).
+    local shared = require('cartograph.csr').interner()
+    local fa = fold.build(CA, shared)
+    local fb = fold.build(CB, shared)
+    ok(fa.it == fb.it, 'the folds share the interner object (⊤ precondition)')
+    local top = fold.merge({ fa, fb })
+    local mono = fold.build(MONO)
+    eq(mono.n, top.n, 'same node count as the monolithic build')
+    eq(mono.m, top.m, 'same fact count')
+    eq(canon(mono), canon(top), '⊤ merge == monolithic build')
+    -- and identical to the ⊥ path (independent interners, remap on merge)
+    local bot = fold.merge({ fold.build(CA), fold.build(CB) })
+    eq(canon(bot), canon(top), '⊤ == ⊥ (the rung is invisible to the result)')
+end)
+
 test('fold.merge: field-record ids remap into the merged fname space', function ()
     -- fldr carries packed field-name ids relative to EACH fold's fnames; the
     -- merge must re-intern them or flds() reads the wrong names post-union.

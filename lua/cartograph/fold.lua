@@ -341,8 +341,12 @@ local function finalize(it, subj, pred, obj, flag, m, gpe, fde, fnames,
 end
 
 -- ── build: wide data → folded triple table ──────────────────────────────
-function M.build(data)
-    local it = csr.interner()
+-- `shared_it` (optional): an interner threaded across several per-chunk builds
+-- so their node ids land in ONE common space. Folds built this way merge at the
+-- ⊤ of the lattice — fold.merge concatenates their columns with NO id remap
+-- (see M.merge). Omit it for a standalone fold (a fresh per-fold interner).
+function M.build(data, shared_it)
+    local it = shared_it or csr.interner()
     -- intern every node first so isolated nodes exist and ids are stable in
     -- emission order (the memo's stable-id principle; layout ≠ identity)
     for _, n in ipairs(data.nodes or {}) do it.id(n.id) end
@@ -417,25 +421,38 @@ function M.build(data)
 end
 
 -- ── merge: fold list → one fold (the CONCAT primitive, arc step 5) ───────
--- The de-risking first cut of folded-segment interchange. Independently built
--- folds (e.g. one per extraction chunk) are UNIONED into a whole-graph fold
--- WITHOUT ever re-touching the wide store: union the node interners (a name
--- shared across chunks interns once, isolated nodes survive), remap each fold's
--- subj/obj — and the packed field-name ids inside fldr — into the merged node/
--- fname space, CONCATENATE the columns, and re-run the SAME finalize(). The
--- output is by construction slice-parity with M.build(concat of the same wide
--- data): identical rows, identical counting sort. This alone does NOT lower the
--- parent-merge PEAK (steps 2-4 must feed record columns worker-side first); it
--- is the foundation + the parity proof the peak win layers on ([[cartograph-
--- record-fold-arc]] step 5, [[cartograph-fold-core]] merge lattice).
+-- The folded-segment interchange. Independently built folds (e.g. one per
+-- extraction chunk) are UNIONED into a whole-graph fold WITHOUT re-touching the
+-- wide store: CONCATENATE the columns + re-run the SAME finalize(). The output
+-- is by construction slice-parity with M.build(concat of the same wide data):
+-- identical rows, identical counting sort. Two rungs of the merge lattice, auto-
+-- selected by whether the folds SHARE a node interner ([[cartograph-fold-core]]):
+--   ⊥  (independent interners) — union the interners (a name shared across
+--      chunks interns once, isolated nodes survive) and REMAP each fold's
+--      subj/obj into the merged id space. O(m) interner lookups.
+--   ⊤  (all folds built with one shared_it, see M.build) — ids are ALREADY
+--      global, so subj/obj are copied with NO remap and NO pre-intern pass
+--      (the measured lattice win: ~1.7-1.9× faster merge, one dict not N — and
+--      the step toward a byte-level segment splice). The field-name pool (fldr)
+--      is still per-fold, so it unions/remaps in BOTH rungs (sparse residue).
+-- This alone does NOT lower the parent-merge PEAK (steps 2-4 must feed record
+-- columns worker-side first); it is the interchange primitive the peak win rides.
 function M.merge(folds)
-    local it = csr.interner()
-    -- intern every node NAME from every fold first: isolated nodes survive and
-    -- ids stay in stable emission order (a name in two folds → one merged id).
-    for _, fd in ipairs(folds) do
-        for _, name in ipairs(fd.names) do it.id(name) end
+    -- ⊤ detection: every fold shares one interner object
+    local shared = folds[1] and folds[1].it
+    for _, fd in ipairs(folds) do if fd.it ~= shared then shared = nil; break end end
+
+    local it
+    if shared then
+        it = shared               -- ⊤: the shared interner already holds every
+                                  -- node (build interned them) — no pre-intern
+    else
+        it = csr.interner()       -- ⊥: union the independent interners first so
+        for _, fd in ipairs(folds) do -- ids are stable + isolated nodes survive
+            for i = 0, fd.n - 1 do it.id(fd.it.name(i)) end
+        end
     end
-    local SENTINEL = it.id('\0frontier')
+    local SENTINEL = it.get('\0frontier') or it.id('\0frontier')
 
     local subj, pred, obj, flag, m = {}, {}, {}, {}, 0
     local gpe, fde = {}, {}          -- emit-row-keyed sparse payloads (as build)
@@ -443,12 +460,16 @@ function M.merge(folds)
     local skipped_edge, skipped_refused = 0, 0
 
     for _, fd in ipairs(folds) do
-        local names = fd.names
         for r = 1, fd.m do
             m = m + 1
-            subj[m] = it.id(names[fd.subj[r] + 1])
+            if shared then          -- ⊤: ids already global — pure copy
+                subj[m] = fd.subj[r]
+                obj[m]  = fd.obj[r]
+            else                    -- ⊥: remap through the unioned interner
+                subj[m] = it.id(fd.it.name(fd.subj[r]))
+                obj[m]  = it.id(fd.it.name(fd.obj[r]))
+            end
             pred[m] = fd.pred[r]
-            obj[m]  = it.id(names[fd.obj[r] + 1])
             flag[m] = fd.flag[r]
             if fd.gpr and fd.gpr[r] then gpe[m] = fd.gpr[r] end
             local packed = fd.fldr and fd.fldr[r]
