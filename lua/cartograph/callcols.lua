@@ -163,4 +163,75 @@ function M.record(cc, i)
     return out
 end
 
+-- the set of fields this store's columns/overlay COVER (schema union). Any
+-- record field outside this rides the residual (M.view) — the honest coverage
+-- boundary the parity gate discloses.
+function M.covered(cc)
+    local set = {}
+    for _, f in ipairs(cc.schema.strs) do set[f] = true end
+    for _, f in ipairs(cc.schema.ints or {}) do set[f] = true end
+    for _, f in ipairs(cc.schema.flags or {}) do set[f] = true end
+    for _, rf in ipairs(cc.schema.ranges or {}) do set[rf] = true end
+    for _, f in ipairs(cc.res.strs or {}) do set[f] = true end
+    for _, f in ipairs(cc.res.flags or {}) do set[f] = true end
+    return set
+end
+
+-- ── the COMPAT ACCESS MODEL — a proxy row-handle ─────────────────────────
+-- brick 3's transparent path: a call becomes a proxy whose __index routes a
+-- COVERED field to its column/overlay and everything else to a per-row RESIDUAL
+-- table; __newindex routes a resolution write to the overlay (via M.set) and any
+-- other write to the residual. So a consumer that reads `c.file` (seamed) OR
+-- `c.strarg`/`c.at`/`c.argv` (not yet columnar) OR writes `c.to = …` (raw, e.g.
+-- xlang) works UNCHANGED — the columns carry what they cover, the residual the
+-- rest. This is the access model the micro-matrix ([[access-model]]) weighs
+-- against index-based; it is the safe default because it needs no consumer edit.
+local row_mt = {
+    __index = function (self, k)
+        local st = rawget(self, '__cc')
+        if st.cov[k] then return M.get(st.cc, k, st.i) end
+        local r = st.res
+        return r and r[k] or nil
+    end,
+    __newindex = function (self, k, v)
+        local st = rawget(self, '__cc')
+        if st.cc.resf[k] then M.set(st.cc, k, st.i, v); return end
+        -- a write to a covered IMMUTABLE (syntactic) column is a resolver bug —
+        -- surface it, same as M.set's assert (parse facts are never rewritten)
+        assert(not st.cov[k], 'callcols: write to immutable syntactic field: ' .. tostring(k))
+        local r = st.res
+        if not r then r = {}; st.res = r end
+        r[k] = v
+    end,
+}
+
+-- a proxy row-handle over store `cc` at index `i`, backed by `residual` (the
+-- per-row table of non-columnar fields, or nil). Cheap to mint; holds no data
+-- of its own beyond the (cc,i,residual) triple. `cov` (the covered-field set)
+-- may be passed in to avoid recomputing it per row (M.view does).
+function M.row(cc, i, residual, cov)
+    return setmetatable({ __cc = { cc = cc, i = i, res = residual, cov = cov or M.covered(cc) } }, row_mt)
+end
+
+-- a full DROP-IN VIEW of a call-record list: the columnar store + a residual
+-- table per row (record fields the columns don't cover — detail tables argv/at/
+-- refused, plus lang-specific marks) + a row-handle array. `data.calls = view.rows`
+-- is behaviourally identical to the record list (the parity gate's contract),
+-- while the heavy syntactic fields live in u32 columns. `keep` optionally holds
+-- extra covered fields out of the residual (unused today; the schema covers them).
+function M.view(calls, syn, res)
+    local cc = M.build(calls, syn, res)
+    local cov = M.covered(cc)
+    local residual, rows = {}, {}
+    for i = 1, #calls do
+        local extra
+        for k, v in pairs(calls[i]) do
+            if not cov[k] then extra = extra or {}; extra[k] = v end
+        end
+        residual[i] = extra
+        rows[i] = M.row(cc, i, extra, cov)
+    end
+    return { cc = cc, residual = residual, rows = rows, covered = cov }
+end
+
 return M

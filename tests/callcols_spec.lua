@@ -51,3 +51,52 @@ test('callcols: resolution overlay is writable; syntactic columns are not', func
     eq(false, ok, 'setting a syntactic column is refused')
     eq('a.lua', callcols.get(cc, 'file', 1))                  -- unchanged
 end)
+
+test('callcols: row() proxy reads columns + residual, transparently', function ()
+    -- a residual field (argv detail) rides a per-row table, not a column
+    local rec = { file = 'a.lua', callee = 'f', line = 10, method = true,
+        to = 'a.lua::f@9', argv = { { k = 'lit', v = 'x' } } }
+    local cc = callcols.build({ rec })
+    local c = callcols.row(cc, 1, { argv = rec.argv })
+    eq('a.lua', c.file)                    -- covered → column
+    eq('f', c.callee); eq(10, c.line); eq(true, c.method)
+    eq('a.lua::f@9', c.to)                 -- resolution overlay
+    eq(rec.argv, c.argv)                   -- residual → same table reference
+    eq(nil, c.nonesuch)                    -- absent → nil
+end)
+
+test('callcols: row() proxy routes writes (overlay vs residual vs immutable)', function ()
+    local cc = callcols.build({ { file = 'a.lua', callee = 'f', line = 1 } })
+    local resid = {}
+    local c = callcols.row(cc, 1, resid)
+    c.to = 'a.lua::f@9'                    -- resolution field → overlay
+    eq('a.lua::f@9', callcols.get(cc, 'to', 1))
+    c.strarg = { ty = 'sql' }              -- non-covered field → residual
+    eq('sql', resid.strarg.ty)
+    local ok = pcall(function () c.file = 'x.lua' end)  -- immutable syntactic → refused
+    eq(false, ok)
+    eq('a.lua', c.file)
+end)
+
+test('callcols: view() is a faithful drop-in for the record list', function ()
+    local R2 = { start = { line = 2, char = 0 }, ['end'] = { line = 2, char = 4 } }
+    local calls = {
+        { file = 'a.lua', callee = 'f', fn = 'a.lua::g@1', line = 3, method = false,
+            at = R2, to = 'a.lua::f@9', inferred = true, argv = { 1, 2 }, hedge = true },
+        { file = 'b.lua', callee = 'h', line = 7, refused = { 'x' } },
+    }
+    local v = callcols.view(calls)
+    for i, rec in ipairs(calls) do
+        for k, val in pairs(rec) do
+            -- flags compare by truthiness (false ≡ nil); else by value/reference
+            if k == 'method' or k == 'inferred' then
+                eq(not not val, not not v.rows[i][k])
+            else
+                eq(val, v.rows[i][k])
+            end
+        end
+    end
+    -- residual holds the non-columnar fields; columns hold the rest
+    eq(true, v.residual[1].argv ~= nil and v.residual[1].hedge ~= nil)
+    eq(nil, v.residual[1].file)            -- file is columnar, not residual
+end)

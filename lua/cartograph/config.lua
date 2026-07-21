@@ -71,6 +71,15 @@ M.exclude = {}
 M.cache = true
 M.cache_max_diff = nil
 
+-- RESIDENT columnar call-store (record-fold arc, brick 3). When true, store
+-- ingest replaces `data.calls` (the record-table array) with callcols.view —
+-- the heavy syntactic fields ride u32 columns, the rest a per-row residual, and
+-- callrec.each/get/set route through the proxy transparently. Default off: the
+-- swap is behaviour-faithful (tools/callgate.lua gates callcols.view == records
+-- over every corpus) but the OWNER layer (fold/cache/argv/at) still reads raw
+-- records, so flipping this on is gated on the owner migration (tools/callmigrate.lua).
+M.callcols_store = false
+
 -- parallel cold extraction: worker processes parse file slices while the
 -- browser opens immediately and fills in as chunks arrive. Kicks in at
 -- parallel_threshold files; workers defaults to cores-1 (capped at 8).
