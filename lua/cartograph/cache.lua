@@ -18,6 +18,7 @@
 local M = {}
 
 local segment = require 'cartograph.segment'
+local callrec = require 'cartograph.callrec'
 -- fields the call SEGMENT carries; everything else on a call rides the residual
 local CALL_SCALAR = {}
 for _, g in ipairs({ segment.CALL_SCHEMA.strs, segment.CALL_SCHEMA.ints,
@@ -834,7 +835,11 @@ local function build_shards(data, want)
             if s then s.edges[#s.edges + 1] = e end
         end
     end
-    for _, c in ipairs(data.calls or {}) do
+    for _, c0 in ipairs(data.calls or {}) do
+        -- a callcols proxy row (flag-on, post-ingest) cannot be packed directly:
+        -- pairs() over it yields its __cc backing (column closures) → unserializable.
+        -- Materialize it to a plain record first (no-op for a real record).
+        local c = rawget(c0, '__cc') and callrec.record(c0) or c0
         local s = shards[c.file]
         if s then s.calls[#s.calls + 1] = c end
     end
