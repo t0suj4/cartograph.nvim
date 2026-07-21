@@ -95,6 +95,30 @@ test('consumers: rooted producer scopes the taint; single-seg deref → stem1', 
     eq('c', stem1, 'single-segment stem1 = the record → rewrites to acc(c)')
 end)
 
+test('consumers: the seam guard fences a re-introduced raw read', function ()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir .. '/lua/cartograph', 'p')
+    local function probe(rel, body)
+        local fd = assert(io.open(dir .. '/' .. rel, 'w')); fd:write(body); fd:close()
+        return consumers.guard(dir, { rel })
+    end
+    -- a raw c.file read on a data.calls element in a CONSUMER file = breach
+    local b = probe('lua/cartograph/probe.lua',
+        'for _, c in ipairs(data.calls) do print(c.file) end')
+    eq(1, #b, 'raw c.file crept back → one breach')
+    eq('file', b[1].path)
+    -- routed through the accessor = clean (blessed, not a deref)
+    eq(0, #probe('lua/cartograph/probe.lua',
+        "local cr = require 'cartograph.callrec'\n"
+        .. 'for _, c in ipairs(data.calls) do print(cr.file(c)) end'),
+        'a seamed read is not a breach')
+    -- an OWNER file (store.lua) reading raw is ALLOWED — it owns the records
+    eq(0, #probe('lua/cartograph/store.lua',
+        'for _, c in ipairs(data.calls) do print(c.file) end'),
+        'owner files read raw by design')
+    vim.fn.delete(dir, 'rf')
+end)
+
 test('consumers: interproc 1-hop — a record passed to a helper is followed', function ()
     local src = table.concat({
         'local function keyof(c) return c.file .. tostring(c.line) end',

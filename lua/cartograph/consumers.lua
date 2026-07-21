@@ -557,4 +557,52 @@ function M.roster(root, files, spec)
         frontier = frontier, seamed = seamed }
 end
 
+-- ── the SEAM GUARD (record-fold arc step 2) ──────────────────────────────
+-- REPRESENTATION OWNERS: files that save/load/merge/validate/intern the RAW
+-- records (the producer side the fold swaps), so they read raw and are NOT
+-- seam breaches. Shared by the guard and the CLI rewriter.
+M.OWNERS = {
+    '^lua/cartograph/providers/', 'store%.lua$', 'fold%.lua$', 'csr%.lua$',
+    'argv%.lua$', 'detail%.lua$', 'at%.lua$', 'callrec%.lua$',
+    'cache%.lua$', 'refresh%.lua$', 'parallel%.lua$', 'validate%.lua$',
+    'refused%.lua$', 'consumers%.lua$',
+}
+
+-- the CALL-RECORD producer spec — every way a call record reaches a consumer
+-- (kept here so a seam sweep and its guard agree on what to track).
+M.CALL_PRODUCERS = {
+    rooted = { ['data.calls'] = 'list', ['store.data.calls'] = 'list',
+        ['store.calls_to'] = 'listmap' },
+    calls = { sites = 'list' }, -- store.topo():sites(fn) yields a call list
+}
+
+-- SEAMED call fields: field -> accessor. A field here is CLOSED — its readers
+-- all go through the accessor — so step 3 may fold it. The guard fails if a raw
+-- read of one reappears in a non-owner file (the fence that keeps it closed).
+M.SEAMED = { file = 'callrec.file' }
+
+local function is_owner(f)
+    for _, pat in ipairs(M.OWNERS) do if f:find(pat) then return true end end
+    return false
+end
+
+-- Guard the seamed fields over `files` (rel paths under root). Returns the list
+-- of BREACHES: raw derefs of a seamed field in a non-owner file. Empty = the
+-- seam holds (every seamed field is fully behind its accessor → foldable). A
+-- taint-based fence (not regex): only genuine call-record derefs count, so the
+-- overloaded `c.file` on an unrelated record is not a false breach.
+function M.guard(root, files)
+    local spec = { rooted = M.CALL_PRODUCERS.rooted, calls = M.CALL_PRODUCERS.calls,
+        bless = {} }
+    for field in pairs(M.SEAMED) do spec.bless[field] = true end
+    local r = M.roster(root, files, spec)
+    local breaches = {}
+    for _, s in ipairs(r.sites) do
+        if M.SEAMED[s.path] and not is_owner(s.file) then
+            breaches[#breaches + 1] = s
+        end
+    end
+    return breaches
+end
+
 return M

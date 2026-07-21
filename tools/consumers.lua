@@ -37,12 +37,8 @@ local consumers = require 'cartograph.consumers'
 
 local root, spec, full = nil, { calls = {}, fields = {}, rooted = {}, bless = {} }, false
 local rwmap, rwmod, rwbind, apply = nil, nil, nil, false
-local RWSKIP = { -- representation owners: they save/load/merge/validate/intern
-    -- the RAW records (the producer side the fold swaps), so they read raw
-    '^lua/cartograph/providers/', 'store%.lua$', 'fold%.lua$', 'csr%.lua$',
-    'argv%.lua$', 'detail%.lua$', 'at%.lua$',
-    'cache%.lua$', 'refresh%.lua$', 'parallel%.lua$', 'validate%.lua$', 'refused%.lua$',
-}
+local RWSKIP = consumers.OWNERS -- representation owners (single source: the
+                                -- module, shared with the seam guard)
 local i = 1
 while i <= #_G.arg do
     local a = _G.arg[i]
