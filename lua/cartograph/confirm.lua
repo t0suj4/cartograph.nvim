@@ -77,7 +77,7 @@ function M.diff(data, dispatch)
     end
     local confirmed, recovered, findings = 0, 0, {}
     for _, c in ipairs(data.calls or {}) do
-        local obs = c.fn and dispatch[c.fn .. '\31' .. (c.full or c.callee or '')]
+        local obs = c.fn and dispatch[c.fn .. '\31' .. (c.full or callrec.callee(c) or '')]
         if obs then
             local rt = keys(obs)
             local mono = #rt == 1
@@ -87,18 +87,18 @@ function M.diff(data, dispatch)
                 elseif mono then
                     -- static picked B, runtime only ever went to C — sound
                     findings[#findings + 1] = { kind = 'conflict',
-                        fn = c.fn, callee = c.callee, file = callrec.file(c),
+                        fn = c.fn, callee = callrec.callee(c), file = callrec.file(c),
                         line = c.line, static = c.to, runtime = rt }
                 else
                     findings[#findings + 1] = { kind = 'polymorphic',
-                        fn = c.fn, callee = c.callee, file = callrec.file(c),
+                        fn = c.fn, callee = callrec.callee(c), file = callrec.file(c),
                         line = c.line, static = c.to, runtime = rt }
                 end
             else
                 -- static refused/frontier; runtime resolved it
                 if mono then c.to, c.conf = rt[1], true end
                 findings[#findings + 1] = { kind = 'recovered',
-                    fn = c.fn, callee = c.callee, file = callrec.file(c),
+                    fn = c.fn, callee = callrec.callee(c), file = callrec.file(c),
                     line = c.line, static = nil, runtime = rt }
                 recovered = recovered + 1
             end

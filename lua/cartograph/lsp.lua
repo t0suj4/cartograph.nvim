@@ -19,6 +19,7 @@
 
 local atr = require 'cartograph.at'
 local tier = require 'cartograph.tier'
+local callrec = require 'cartograph.callrec'
 
 local M = {}
 
@@ -225,7 +226,7 @@ M.handlers['textDocument/hover'] = function (store, params)
             local t = store.topo():tier(c.fn, c.to) or 'matched'
             local where = navigable(n) and (n.file) or (n and n.external and 'stdlib') or '?'
             local lines = {
-                ('**%s** %s'):format(n and n.name or c.callee or '?', n and n.kind or ''),
+                ('**%s** %s'):format(n and n.name or callrec.callee(c) or '?', n and n.kind or ''),
                 ('tier: `%s`%s'):format(t, c.hedge and (' — ~ hedged: ' .. (c.hedge.rule or '?')) or ''),
                 ('_from %s_'):format(where),
             }
@@ -235,14 +236,14 @@ M.handlers['textDocument/hover'] = function (store, params)
             local r = c.refused
             local ncand = (r.cands and #r.cands) or r.n or 0
             return md {
-                ('**%s** — unresolved'):format(c.callee or '?'),
+                ('**%s** — unresolved'):format(callrec.callee(c) or '?'),
                 ('refused: `%s`%s'):format(r.rule or '?',
                     ncand > 0 and (' — ' .. ncand .. ' candidate(s)') or ''),
                 r.witness and ('_' .. tostring(r.witness) .. '_') or nil,
             }
         end
         return md {
-            ('**%s** — external frontier'):format(c.callee or c.full or '?'),
+            ('**%s** — external frontier'):format(callrec.callee(c) or c.full or '?'),
             '_no definition in the graph (stdlib / vendor / dynamic)_',
         }
     end
@@ -347,17 +348,17 @@ M.handlers['cartograph/why'] = function (store, params)
     local c = call_at(store, file, p.line, p.character)
     if c then
         if c.to then
-            return { kind = 'call', callee = c.callee,
+            return { kind = 'call', callee = callrec.callee(c),
                 status = c.hedge and 'hedged' or 'resolved', target = c.to,
                 tier = store.topo():tier(c.fn, c.to) or 'matched',
                 hedge = c.hedge and c.hedge.rule or nil, prov = c.prov }
         elseif c.refused then
-            return { kind = 'call', callee = c.callee, status = 'refused',
+            return { kind = 'call', callee = callrec.callee(c), status = 'refused',
                 rule = c.refused.rule,
                 candidates = (c.refused.cands and #c.refused.cands) or c.refused.n or 0,
                 witness = c.refused.witness }
         end
-        return { kind = 'call', callee = c.callee, status = 'frontier' }
+        return { kind = 'call', callee = callrec.callee(c), status = 'frontier' }
     end
     local n = node_at(store, file, p.line, p.character)
     if n then return { kind = 'def', name = n.name, node = n.id, exported = n.exported or false } end

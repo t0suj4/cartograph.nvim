@@ -33,7 +33,7 @@ local cache = { gen = nil, keys = {} }
 -- a stable identity for a call across re-ingests: site + name.
 local function keyof(c)
     return (callrec.file(c) or '?') .. '\31' .. tostring(c.line) .. '\31'
-        .. (c.callee or c.full or '?')
+        .. (callrec.callee(c) or c.full or '?')
 end
 
 -- hedge-saturated functions: ≥1 outgoing call, ZERO proven, ≥1 hedge (`~`).
@@ -196,7 +196,7 @@ function M.report(f, name)
     name = name or function (id) return tostring(id) end
     local function site(c)
         return ('%s:%d %s'):format((callrec.file(c) or '?'):match('[^/]+$') or '?',
-            (c.line or 0) + 1, c.callee or c.full or '?')
+            (c.line or 0) + 1, callrec.callee(c) or c.full or '?')
     end
     local L = {
         ('escalation: %d confirmed · %d recovered · %d refuted · %d CONFLICT'

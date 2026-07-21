@@ -579,7 +579,7 @@ M.CALL_PRODUCERS = {
 -- SEAMED call fields: field -> accessor. A field here is CLOSED — its readers
 -- all go through the accessor — so step 3 may fold it. The guard fails if a raw
 -- read of one reappears in a non-owner file (the fence that keeps it closed).
-M.SEAMED = { file = 'callrec.file' }
+M.SEAMED = { file = 'callrec.file', callee = 'callrec.callee' }
 
 local function is_owner(f)
     for _, pat in ipairs(M.OWNERS) do if f:find(pat) then return true end end

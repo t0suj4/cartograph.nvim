@@ -176,8 +176,8 @@ function M.registries(data, opts)
     local by_verb = {}                     -- loop when run under coop.run; else no-op
     for i, c in ipairs(data.calls or {}) do
         if not c.dynamic then
-            by_verb[c.callee] = by_verb[c.callee] or {}
-            table.insert(by_verb[c.callee], c)
+            by_verb[callrec.callee(c)] = by_verb[callrec.callee(c)] or {}
+            table.insert(by_verb[callrec.callee(c)], c)
         end
         if i % 8192 == 0 then coop.tick() end
     end
@@ -290,8 +290,8 @@ function M.explain(data, verb, opts)
     local by_verb = {}
     for _, c in ipairs(data.calls or {}) do
         if not c.dynamic then
-            by_verb[c.callee] = by_verb[c.callee] or {}
-            table.insert(by_verb[c.callee], c)
+            by_verb[callrec.callee(c)] = by_verb[callrec.callee(c)] or {}
+            table.insert(by_verb[callrec.callee(c)], c)
         end
     end
     local exports, import_of = {}, {}
@@ -502,11 +502,11 @@ local function callee_index(data)
     if not idx then
         idx = {}
         for i, c in ipairs(data.calls or {}) do
-            if c.callee then
-                local b = idx[c.callee]; if not b then b = {}; idx[c.callee] = b end
+            if callrec.callee(c) then
+                local b = idx[callrec.callee(c)]; if not b then b = {}; idx[callrec.callee(c)] = b end
                 b[#b + 1] = i
             end
-            if c.full and c.full ~= c.callee then
+            if c.full and c.full ~= callrec.callee(c) then
                 local b = idx[c.full]; if not b then b = {}; idx[c.full] = b end
                 b[#b + 1] = i
             end
@@ -554,7 +554,7 @@ function M.audit(data, bindings, opts)
             for v in pairs(ivs) do names[v] = true end
             for c in matching_calls(data, names) do
                 local shift = c.method and 1 or 0
-                if evs[c.callee] or (c.full and evs[c.full]) then
+                if evs[callrec.callee(c)] or (c.full and evs[c.full]) then
                     local k = argv.str(c, (b.export.name or 1) + shift)
                     if k and k ~= '' then
                         reg[k] = true
@@ -562,7 +562,7 @@ function M.audit(data, bindings, opts)
                     else
                         reg_dyn = true
                     end
-                elseif ivs[c.callee] or (c.full and ivs[c.full]) then
+                elseif ivs[callrec.callee(c)] or (c.full and ivs[c.full]) then
                     local k = argv.str(c, (b.import.name or 1) + shift)
                     if k and k ~= '' then
                         disp[k] = true
@@ -691,8 +691,8 @@ function M.verb_pairs(data, opts)
     local by_verb = {}
     for _, c in ipairs(data.calls or {}) do
         if not c.dynamic then
-            by_verb[c.callee] = by_verb[c.callee] or {}
-            table.insert(by_verb[c.callee], c)
+            by_verb[callrec.callee(c)] = by_verb[callrec.callee(c)] or {}
+            table.insert(by_verb[callrec.callee(c)], c)
         end
     end
     local out = {}
@@ -749,7 +749,7 @@ function M.pair_audit(data, vpairs)
         if pr.release.verb then names[pr.release.verb] = true end
         for c in matching_calls(data, names) do
             local shift = c.method and 1 or 0
-            if c.callee == pr.acquire.verb then
+            if callrec.callee(c) == pr.acquire.verb then
                 local k = argv.str(c, pr.acquire.key + shift)
                 if k and k ~= '' then
                     acq[k] = true
@@ -757,7 +757,7 @@ function M.pair_audit(data, vpairs)
                 else
                     acq_dyn = true
                 end
-            elseif c.callee == pr.release.verb then
+            elseif callrec.callee(c) == pr.release.verb then
                 if pr.release.key then
                     local k = argv.str(c, pr.release.key + shift)
                     if k and k ~= '' then
@@ -994,7 +994,7 @@ function M.clones(data, opts)
     for _, c in ipairs(data.calls or {}) do
         if c.fn then
             callees[c.fn] = callees[c.fn] or {}
-            table.insert(callees[c.fn], c.callee)
+            table.insert(callees[c.fn], callrec.callee(c))
         end
     end
     local groups = {}
@@ -1081,8 +1081,8 @@ function M.factories(data, opts)
     local by_verb = {}
     for _, c in ipairs(data.calls or {}) do
         if not c.dynamic and not c.to then
-            by_verb[c.callee] = by_verb[c.callee] or {}
-            table.insert(by_verb[c.callee], c)
+            by_verb[callrec.callee(c)] = by_verb[callrec.callee(c)] or {}
+            table.insert(by_verb[callrec.callee(c)], c)
         end
     end
     local out = {}
@@ -1115,7 +1115,7 @@ end
 function M.evals(data)
     local out = {}
     for _, c in ipairs(data.calls or {}) do
-        if EVAL_VERBS[c.callee] and not c.to then
+        if EVAL_VERBS[callrec.callee(c)] and not c.to then
             out[#out + 1] = c
         end
     end

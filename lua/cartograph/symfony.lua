@@ -315,7 +315,7 @@ function M.attach(data)
 
     -- ── php: generateUrl/redirectToRoute('name') ────────────────────────
     for _, c in ipairs(data.calls or {}) do
-        if LOOKUP[c.callee:match('([%w_]+)$') or ''] and c.fn
+        if LOOKUP[callrec.callee(c):match('([%w_]+)$') or ''] and c.fn
             and argv.str(c, 1) ~= '' then
             link(c.fn, argv.str(c, 1), callrec.file(c), c.line)
         end

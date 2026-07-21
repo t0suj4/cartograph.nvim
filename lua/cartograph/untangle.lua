@@ -27,6 +27,7 @@
 --   --               → un.extract_module(store, res, c, 'sub/dest.lua')
 
 local flowmod = require 'cartograph.flow'
+local callrec = require 'cartograph.callrec'
 
 local M = {}
 
@@ -404,16 +405,16 @@ function M.analyze_scope(store, files, opts)
             local line = (c.line or 0) + 1
             if c.dynamic then
                 flag(k, line, 'dynamic dispatch (could reach any fn)')
-            elseif not c.to and not c.refused and c.callee then
+            elseif not c.to and not c.refused and callrec.callee(c) then
                 -- SILENT unresolved (the resolver made no determination): could hide
                 -- an intra-scope edge. Name-matches an in-scope fn, OR a bracket-index
                 -- callee `t[k]()` = table dispatch (could reach any in-scope fn value).
                 -- `.`-qualified callees are left alone: those are stdlib/module calls
                 -- (table.insert, string.format) that can't target an in-scope local fn.
-                if idx_name[c.callee] then
-                    flag(k, line, ('unresolved call to in-scope `%s`'):format(c.callee))
-                elseif c.callee:find('%[') then
-                    flag(k, line, ('dynamic dispatch `%s` (could reach any fn)'):format(c.callee))
+                if idx_name[callrec.callee(c)] then
+                    flag(k, line, ('unresolved call to in-scope `%s`'):format(callrec.callee(c)))
+                elseif callrec.callee(c):find('%[') then
+                    flag(k, line, ('dynamic dispatch `%s` (could reach any fn)'):format(callrec.callee(c)))
                 end
             end
         end

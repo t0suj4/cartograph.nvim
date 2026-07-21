@@ -159,14 +159,23 @@ if rwmap and rwmod and rwbind then
             lines[ed.ext[1] + 1] = before .. ed.to .. after
             ne = ne + 1
         end
-        -- ensure the accessor module is required (after the last top require)
-        local has, last_req = false, 0
+        -- ensure the accessor module is required ABOVE its first use. Insert
+        -- before the first non-comment/blank line (top level) — which dominates
+        -- EVERY use, including a function DEFINED above the module's require
+        -- block that reads the field (xlang.verb_matches). BUGFIX 2026-07-21:
+        -- previously inserted after the LAST require, but a use in an earlier-
+        -- defined function preceded it → `nil global 'callrec'` at runtime
+        -- (16 spec failures). Top placement is always safe: a require never
+        -- depends on a preceding local.
+        local has, first_code = false, nil
         for j, ln in ipairs(lines) do
             if ln:find(rwmod:gsub('%W', '%%%0'), 1, false) then has = true break end
-            if j <= 60 and ln:match('^local [%w_]+%s*=%s*require') then last_req = j end
+            if not first_code and not ln:match('^%s*%-%-') and not ln:match('^%s*$') then
+                first_code = j
+            end
         end
         if not has then
-            table.insert(lines, last_req + 1,
+            table.insert(lines, first_code or 1,
                 ("local %s = require '%s'"):format(rwbind, rwmod))
             emit('  %s:+  local %s = require \'%s\'', f, rwbind, rwmod)
         end

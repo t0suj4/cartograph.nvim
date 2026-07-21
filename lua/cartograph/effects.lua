@@ -385,7 +385,7 @@ function M.summaries(store)
                 else
                     local lang = file and (file:match('%.lua$') and 'lua'
                         or file:match('%.php$') and 'php')
-                    local bname = c.full or c.callee
+                    local bname = c.full or callrec.callee(c)
                     local sig, grade
                     if lang and bname then
                         -- (explicit call: and/or would truncate the
@@ -512,7 +512,7 @@ function M.call_effects(store, c, caller_file)
     end
     local lang = caller_file and (caller_file:match('%.lua$') and 'lua'
         or caller_file:match('%.php$') and 'php')
-    local bname = c.full or c.callee
+    local bname = c.full or callrec.callee(c)
     local sig
     if lang and bname then sig = M.sig_of(lang, bname, c.method) end
     if sig then

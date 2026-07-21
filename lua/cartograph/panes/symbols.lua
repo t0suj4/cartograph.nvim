@@ -16,6 +16,7 @@ local heat   = require 'cartograph.heat'
 local config = require 'cartograph.config'
 local dfa    = require 'cartograph.df'
 local atr = require 'cartograph.at'
+local callrec = require 'cartograph.callrec'
 
 -- file level shows functions and BLOCKS (runs of top-level statements rolled
 -- up under their first line); the individual vars live one level down
@@ -1827,7 +1828,7 @@ function M.attach(win)
         if not fnid then return nil end
         line = tonumber(line)
         for _, c in ipairs(store.topo():sites(fnid)) do
-            if c.line == line and c.callee == callee and c.refused then return c end
+            if c.line == line and callrec.callee(c) == callee and c.refused then return c end
         end
     end
     local function view_loc()

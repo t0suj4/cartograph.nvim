@@ -165,7 +165,7 @@ function M.resolve_requires(data)
     end
     local added = 0
     for _, c in ipairs(data.calls or {}) do
-        local a1 = c.callee == 'require' and callrec.file(c) and argv.str(c, 1)
+        local a1 = callrec.callee(c) == 'require' and callrec.file(c) and argv.str(c, 1)
         if a1 and a1 ~= '' then
             local key = mod2key[a1]
             if key and key ~= callrec.file(c) and not have[callrec.file(c) .. '\31' .. key] then
@@ -304,7 +304,7 @@ end
 function M.registrations(data)
     local cmds, maps = {}, {}
     for _, c in ipairs(data.calls or {}) do
-        local n = c.full or c.callee or ''
+        local n = c.full or callrec.callee(c) or ''
         local a1, a2 = argv.str(c, 1), argv.str(c, 2)
         if n:find('nvim_create_user_command', 1, true) and a1 ~= '' then
             cmds[a1] = cmds[a1] or callrec.file(c)

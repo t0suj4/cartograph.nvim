@@ -289,8 +289,8 @@ end
 
 -- the `~`-tier sink hypothesis: returns the reason string, or nil
 local function sink_reason(c)
-    if is_sql_method(c.callee) then
-        return ("method '%s'"):format(c.callee)
+    if is_sql_method(callrec.callee(c)) then
+        return ("method '%s'"):format(callrec.callee(c))
     end
     local r = c.receiver and c.receiver:lower()
     if r and (r:find('database') or r:find('->db') or r:find('pdo')) then
@@ -308,7 +308,7 @@ function M.findings(store)
     for _, c in ipairs(cands) do
         if c.sanitized and c.prefix then
             local tok = c.prefix:match('([%w_]+)')
-            if tok then sanpeer[c.callee .. '\31' .. tok] = c.fn end
+            if tok then sanpeer[callrec.callee(c) .. '\31' .. tok] = c.fn end
         end
     end
     local out = {}
@@ -320,14 +320,14 @@ function M.findings(store)
         -- honest without inter-proc analysis.
         local why = not c.sanitized and sink_reason(c)
         local tok = why and c.prefix and c.prefix:match('([%w_]+)')
-        local peer = tok and sanpeer[c.callee .. '\31' .. tok]
+        local peer = tok and sanpeer[callrec.callee(c) .. '\31' .. tok]
         if why and peer and peer ~= c.fn then
             out[#out + 1] = { file = store.abs(callrec.file(c)), line = c.line,
                 message = ('possible SQL injection (~, sink unconfirmed): '
                     .. 'unsanitized param $%s concatenated into %s [%s] — peer '
                     .. '%s() sanitizes the same shape (defended the peer, not this one)')
-                    :format(c.param, c.callee ~= '?'
-                        and ('sink %s()'):format(c.callee) or 'a query', why, peer) }
+                    :format(c.param, callrec.callee(c) ~= '?'
+                        and ('sink %s()'):format(callrec.callee(c)) or 'a query', why, peer) }
         end
     end
     return out
@@ -610,7 +610,7 @@ function M.source_findings(store)
         fs[#fs + 1] = { file = store.abs(callrec.file(c)), line = c.line,
             message = ('possible SQL injection (~, sink unconfirmed): request '
                 .. 'input %s reaches SQL sink %s() with no sanitizer on the path')
-                :format(c.source, c.callee) }
+                :format(c.source, callrec.callee(c)) }
     end
     return fs
 end
@@ -758,7 +758,7 @@ function M.reach_findings(store)
                     local gsp = c.to and sp[c.to]
                     if gsp and next(gsp) then
                         local ac = rec.argclass[c.line]
-                            and rec.argclass[c.line][(c.callee or ''):lower()]
+                            and rec.argclass[c.line][(callrec.callee(c) or ''):lower()]
                         if ac then
                             for i in pairs(gsp) do
                                 local o = ac[i]
@@ -767,7 +767,7 @@ function M.reach_findings(store)
                                     if not seen[key] then
                                         seen[key] = true
                                         findings[#findings + 1] = { file = callrec.file(c),
-                                            line = c.line, source = o, callee = c.callee }
+                                            line = c.line, source = o, callee = callrec.callee(c) }
                                     end
                                 elseif type(o) == 'number' and not sp[fid][o] then
                                     sp[fid][o] = true; changed = true

@@ -32,7 +32,7 @@ function M.twins(store, id)
     local function callees(x)
         local out = {}
         for _, c in ipairs(store.topo():sites(x.id)) do
-            out[#out + 1] = c.callee
+            out[#out + 1] = callrec.callee(c)
         end
         return out
     end
@@ -118,7 +118,7 @@ function M.plan(store, id)
             else
                 plan.hazards[#plan.hazards + 1] = ('%s:%d calls %s in a form'
                     .. " that isn't its bare name (%s) — rewrite it yourself")
-                    :format(callrec.file(c), c.line + 1, t.name, tostring(token or c.callee))
+                    :format(callrec.file(c), c.line + 1, t.name, tostring(token or callrec.callee(c)))
             end
         end
         -- non-call references (the id pass's dispatch-table finds): they

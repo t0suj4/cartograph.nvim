@@ -91,17 +91,17 @@ local function listener_findings(store)
     local reg, reg_site, subL, sub_site, subDyn, unsubL, unsubDyn = {}, {}, {}, {}, false, {}, false
     local out = {}
     for _, c in ipairs(calls) do
-        if c.callee == cfg.register.verb then
+        if callrec.callee(c) == cfg.register.verb then
             local n = keyname(c, cfg.register)
             if n then reg[n] = true; reg_site[n] = reg_site[n] or c end
             if not c.top then
                 out[#out + 1] = { file = abs(c), line = c.line + 1,
                     message = ("listener '%s' is registered inside a function, not at load — may register after init"):format(n or '?') }
             end
-        elseif c.callee == cfg.subscribe.verb then
+        elseif callrec.callee(c) == cfg.subscribe.verb then
             local n = keyname(c, cfg.subscribe)
             if n then subL[n] = true; sub_site[n] = sub_site[n] or c else subDyn = true end
-        elseif c.callee == cfg.unsubscribe.verb then
+        elseif callrec.callee(c) == cfg.unsubscribe.verb then
             local n = keyname(c, cfg.unsubscribe)
             if n then unsubL[n] = true else unsubDyn = true end
         end
@@ -110,12 +110,12 @@ local function listener_findings(store)
 
     -- subscribe/unsubscribe to a name that's never registered -> runtime error
     for _, c in ipairs(calls) do
-        local spec = (c.callee == cfg.subscribe.verb and cfg.subscribe)
-            or (c.callee == cfg.unsubscribe.verb and cfg.unsubscribe) or nil
+        local spec = (callrec.callee(c) == cfg.subscribe.verb and cfg.subscribe)
+            or (callrec.callee(c) == cfg.unsubscribe.verb and cfg.unsubscribe) or nil
         local n = spec and keyname(c, spec)
         if n and not reg[n] then
             out[#out + 1] = { file = abs(c), line = c.line + 1,
-                message = ("%s to '%s', which is never registered (would error: 'Could not find listener')"):format(c.callee, n) }
+                message = ("%s to '%s', which is never registered (would error: 'Could not find listener')"):format(callrec.callee(c), n) }
         end
     end
     -- registered but never subscribed — suppressed if any dynamic subscribe could cover it
@@ -287,10 +287,10 @@ local function load_order_findings(store)
             local own = {}
             for _, n in ipairs(store.data.nodes) do own[n.name or ''] = true end
             for _, c in ipairs(store.data.calls or {}) do
-                local who = c.top and not c.to and not own[c.callee] and sib[c.callee]
+                local who = c.top and not c.to and not own[callrec.callee(c)] and sib[callrec.callee(c)]
                 if who and not declared[who:lower()] then
                     out[#out + 1] = { file = store.abs(callrec.file(c)), line = c.line + 1,
-                        message = ("load-time call to '%s', defined by addon '%s' — undeclared dependency: load order is not guaranteed"):format(c.callee, who) }
+                        message = ("load-time call to '%s', defined by addon '%s' — undeclared dependency: load order is not guaranteed"):format(callrec.callee(c), who) }
                 end
             end
         end
@@ -304,8 +304,8 @@ end
 local function dynamic_findings(store)
     local per, order = {}, {}
     for _, c in ipairs(store.data.calls or {}) do
-        if (c.dynamic or ((c.callee == 'call_user_func'
-            or c.callee == 'call_user_func_array') and not c.to)) then
+        if (c.dynamic or ((callrec.callee(c) == 'call_user_func'
+            or callrec.callee(c) == 'call_user_func_array') and not c.to)) then
             if not per[callrec.file(c)] then
                 per[callrec.file(c)] = { n = 0, line = c.line }
                 order[#order + 1] = callrec.file(c)
@@ -348,7 +348,7 @@ local function greenspun_findings(store)
     end
     for _, c in ipairs(g.evals(store.data)) do
         out[#out + 1] = { file = store.abs(callrec.file(c)), line = c.line + 1,
-            message = ("the interpreter itself: %s()"):format(c.callee) }
+            message = ("the interpreter itself: %s()"):format(callrec.callee(c)) }
     end
     return out
 end
@@ -658,9 +658,9 @@ local function silent_drop_findings(store)
     end
     for _, c in ipairs(calls) do
         if not c.to and not c.refused and not c.dynamic and not c.full
-            and c.fn and c.callee
-            and fn_locals(c.fn)[c.callee] then
-            local k = c.fn .. '\31' .. c.callee -- one finding per (fn, local)
+            and c.fn and callrec.callee(c)
+            and fn_locals(c.fn)[callrec.callee(c)] then
+            local k = c.fn .. '\31' .. callrec.callee(c) -- one finding per (fn, local)
             if not seen[k] then
                 seen[k] = true
                 local fn = store.node(c.fn)
@@ -668,7 +668,7 @@ local function silent_drop_findings(store)
                     file = fn and store.abs(fn.file) or (callrec.file(c) and store.abs(callrec.file(c))) or '',
                     line = c.at and at.sl(c.at) + 1 or ((c.line or 0) + 1),
                     message = ("call to local '%s' resolved to nothing and was not refused — a silent honesty gap (the local is a callable in scope: resolution neither linked it nor spoke a refusal)")
-                        :format(c.callee),
+                        :format(callrec.callee(c)),
                 }
             end
         end

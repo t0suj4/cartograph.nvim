@@ -10,6 +10,7 @@
 local flow = require 'cartograph.flow'
 local effects = require 'cartograph.effects'
 local expr = require 'cartograph.expr'
+local callrec = require 'cartograph.callrec'
 
 local M = {}
 
@@ -53,7 +54,7 @@ local function context(store, fn_id)
         local ce = effects.call_effects(store, c, node.file)
         local pure = (next(ce.w) == nil) and not ce.hedges
         if not pure then impure_line[ln] = true end
-        if c.callee then callee_line[ln] = callee_line[ln] or {}; callee_line[ln][c.callee] = pure end
+        if callrec.callee(c) then callee_line[ln] = callee_line[ln] or {}; callee_line[ln][callrec.callee(c)] = pure end
         if pure and c.full and c.full:find('%.') then
             -- the module receiver of a pure qualified call (`string` in string.format)
             -- is a STABLE reference, not a varying input — reads_content exempts a field

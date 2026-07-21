@@ -17,6 +17,7 @@
 
 local M = {}
 local argv = require 'cartograph.argv'
+local callrec = require 'cartograph.callrec'
 
 --- Pure: diff the live picture against the static model.
 --- live = { subscriptions = {name...}, states = {force -> state} }
@@ -30,7 +31,7 @@ function M.diff(store, model, live)
     local expected = {}
     local lc = require('cartograph.lint').listener_config
     for _, c in ipairs(store.data.calls or {}) do
-        if c.top and c.callee == lc.subscribe.verb then
+        if c.top and callrec.callee(c) == lc.subscribe.verb then
             local n = argv.str(c, lc.subscribe.at + (c.method and 1 or 0))
             if n and n ~= '' then expected[n] = true end
         end

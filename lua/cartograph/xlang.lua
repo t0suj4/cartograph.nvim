@@ -11,6 +11,9 @@
 
 local M = {}
 
+local callrec = require 'cartograph.callrec' -- used by verb_matches below (def'd
+                                             -- before the module's other requires)
+
 --- A binding declares one boundary. `export` names the registering verb and
 --- which (logical) arg is the key; `import` either names the sending verb
 --- (chrome.send) or `any_call = true` (the exported key becomes a callable
@@ -39,12 +42,11 @@ local function verb_matches(c, verb)
         end
         return false
     end
-    return c.callee == verb or c.full == verb
+    return callrec.callee(c) == verb or c.full == verb
         or (c.full and c.full:sub(-#verb - 1) == '.' .. verb)
 end
 
 local argv = require 'cartograph.argv'
-local callrec = require 'cartograph.callrec'
 
 local function logical_arg(c, i)
     local j = i + (c.method and 1 or 0)
@@ -236,7 +238,7 @@ function M.link(data, bindings)
             for _, c in ipairs(data.calls or {}) do
                 local match
                 if pin.callee then
-                    match = callrec.file(c) == pin.file and c.callee == pin.callee
+                    match = callrec.file(c) == pin.file and callrec.callee(c) == pin.callee
                         and (fnids and (c.fn and fnids[c.fn] or false)
                             or (not fnids and not c.fn)) -- fn-less = top level
                 else -- legacy line anchor
@@ -295,8 +297,8 @@ function M.link(data, bindings)
                 if b.import.verb and verb_matches(c, b.import.verb) then
                     key = logical_arg(c, b.import.name or 1)
                     hs = key and key ~= '' and exports[key]
-                elseif b.import.any_call and not c.to and exports[c.callee] then
-                    key = c.callee
+                elseif b.import.any_call and not c.to and exports[callrec.callee(c)] then
+                    key = callrec.callee(c)
                     hs = exports[key]
                 end
                 if hs then
