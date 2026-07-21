@@ -17,9 +17,58 @@
 
 local M = {}
 
+local segment = require 'cartograph.segment'
+-- fields the call SEGMENT carries; everything else on a call rides the residual
+local CALL_SCALAR = {}
+for _, g in ipairs({ segment.CALL_SCHEMA.strs, segment.CALL_SCHEMA.ints,
+    segment.CALL_SCHEMA.flags }) do
+    for _, f in ipairs(g) do CALL_SCALAR[f] = true end
+end
+
+-- pack a shard's calls → columnar segment (scalars) + residual (the non-scalar
+-- fields: detail tables argv/at/refused + any field the schema doesn't name),
+-- replacing shard.calls. LOSSLESS by construction — the residual carries
+-- whatever the segment doesn't. ~50% smaller call bytes ([[cartograph-record-
+-- fold-arc]] step 4); the raw detail tables still dominate the residual (step-4
+-- A folds those). Round-trip is graphdiff-empty (extraction unchanged).
+local function pack_calls(shard)
+    local calls = shard.calls
+    if not calls then return end
+    shard.callseg = segment.encode(calls, segment.CALL_SCHEMA)
+    local resid = {}
+    for i = 1, #calls do
+        local t = {}
+        for k, v in pairs(calls[i]) do if not CALL_SCALAR[k] then t[k] = v end end
+        resid[i] = t
+    end
+    shard.calltab = resid
+    shard.calls = nil
+end
+
+-- inverse (the load seam): reconstruct shard.calls from callseg + calltab
+local function unpack_calls(shard)
+    if not shard.callseg then return end
+    local recs = segment.decode(shard.callseg, segment.CALL_SCHEMA)
+    local tab = shard.calltab or {}
+    for i = 1, #recs do
+        local t = tab[i]
+        if t then for k, v in pairs(t) do recs[i][k] = v end end
+    end
+    shard.calls = recs
+    shard.callseg, shard.calltab = nil, nil
+end
+
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 94 -- v94: resolution PROVENANCE (the by_prov axis, [[cartograph-
+M.VERSION = 95 -- v95: CALL SEGMENT — a shard's calls persist as a COLUMNAR
+               -- segment (segment.lua: pooled strings + freq-varint) + a
+               -- residual of the non-scalar fields, instead of full record
+               -- tables. Cache-format change (old shards lack callseg) → bump;
+               -- LOSSLESS round-trip (graphdiff-empty), extraction UNCHANGED so
+               -- gate-neutral. ~50% smaller call bytes (self 1.8×, zig 2.2×;
+               -- the raw detail tables argv/at/refused stay in the residual —
+               -- step-4 A folds those too). [[cartograph-record-fold-arc]] step 4.
+               -- v94: resolution PROVENANCE (the by_prov axis, [[cartograph-
                -- slice-api]] / [[cartograph-provenance-surfacing]]).
                -- run_resolve_passes stamps c.prov = 'base' / <pass name> /
                -- 'stdlib' (first-resolver-wins). New persisted call field →
@@ -773,6 +822,7 @@ local function build_shards(data, want)
         local s = shards[c.file]
         if s then s.calls[#s.calls + 1] = c end
     end
+    for _, s in pairs(shards) do pack_calls(s) end -- calls → segment + residual
     return shards
 end
 
@@ -932,7 +982,10 @@ local function read_shard(dir, f, m)
     local st = vim.uv.fs_stat(path)
     if not (st and (not want or st.size == want)) then return nil end
     local s = read_decoded(path)
-    if type(s) == 'table' and type(s.nodes) == 'table' then return s end
+    if type(s) == 'table' and type(s.nodes) == 'table' then
+        unpack_calls(s) -- segment + residual → shard.calls
+        return s
+    end
     return nil
 end
 
