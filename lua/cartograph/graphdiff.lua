@@ -6,6 +6,8 @@
 -- sites changed" instead of trusting a total. Pure data in, report out; the
 -- verification half of extractor-change gates and refresh/splice testing.
 
+local callrec = require 'cartograph.callrec'
+
 local M = {}
 
 -- trust signature of an edge for the structural diff: which honesty tier it
@@ -29,8 +31,8 @@ local function ekey(e) return e.from .. ' -> ' .. e.to .. ' [' .. e.kind .. ']' 
 
 -- call identity = site; outcome = where resolution landed
 local function ckey(c)
-    return (c.file or '?') .. ':' .. tostring((c.line or 0) + 1)
-        .. ' ' .. (c.callee or c.full or '?')
+    return (callrec.file(c) or '?') .. ':' .. tostring((callrec.line(c) or 0) + 1)
+        .. ' ' .. (callrec.callee(c) or callrec.full(c) or '?')
 end
 local function coutcome(c)
     local hedge = c.hedge and (' hedged:' .. (c.hedge.rule or '?')) or ''

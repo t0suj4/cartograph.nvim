@@ -9,6 +9,7 @@ local census = require 'cartograph.census'
 local lint = require 'cartograph.lint'
 local lsp = require 'cartograph.lsp'
 local atr = require 'cartograph.at'
+local callrec = require 'cartograph.callrec'
 
 local M = {}
 
@@ -39,7 +40,7 @@ local function serving_consistency(store)
             if n and n.file and not n.external and n.range then
                 served = served + 1
                 local res = lsp.handle(store, 'textDocument/definition', {
-                    textDocument = { uri = vim.uri_from_fname(store.abs(c.file)) },
+                    textDocument = { uri = vim.uri_from_fname(store.abs(callrec.file(c))) },
                     position = { line = atr.sl(c.at), character = atr.sc(c.at) },
                 })
                 local wu, wl = vim.uri_from_fname(store.abs(n.file)), atr.sl(n.range)
@@ -49,8 +50,8 @@ local function serving_consistency(store)
                 end
                 if hit then consistent = consistent + 1
                 elseif #mis < 8 then
-                    mis[#mis + 1] = ('%s:%d %s'):format((c.file or '?'):gsub('.*/lua/', ''),
-                        (c.line or 0) + 1, c.callee or '?')
+                    mis[#mis + 1] = ('%s:%d %s'):format((callrec.file(c) or '?'):gsub('.*/lua/', ''),
+                        (callrec.line(c) or 0) + 1, callrec.callee(c) or '?')
                 end
             end
         end

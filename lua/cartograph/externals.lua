@@ -19,6 +19,8 @@
 -- aggregate — the reading says so). Recognized builtins/libraries are TAGGED
 -- (expected externals, not boundary surprises), extend KNOWN per language.
 
+local callrec = require 'cartograph.callrec'
+
 local M = {}
 
 -- recognized language builtins/libraries — a known external, not a boundary
@@ -66,7 +68,7 @@ function M.surface(store)
         else
             -- SILENT (c.to nil, c.refused nil) = external-unknown: the boundary.
             s.external = s.external + 1
-            local base, member = split(c.full or c.callee or '?')
+            local base, member = split(callrec.full(c) or callrec.callee(c) or '?')
             local e = s.bases[base]
             if not e then
                 e = { calls = 0, members = {}, files = {}, bare = 0,
@@ -76,7 +78,7 @@ function M.surface(store)
             e.calls = e.calls + 1
             if member then e.members[member] = (e.members[member] or 0) + 1
             else e.bare = e.bare + 1 end
-            if c.file then e.files[c.file] = true end
+            if callrec.file(c) then e.files[callrec.file(c)] = true end
         end
     end
     return s

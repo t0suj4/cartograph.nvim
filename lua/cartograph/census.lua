@@ -6,6 +6,7 @@
 -- flywheel reads counts, not prose); report() renders it.
 
 local tier = require 'cartograph.tier'
+local callrec = require 'cartograph.callrec'
 
 local M = {}
 
@@ -74,8 +75,8 @@ function M.take(data)
             if not r then r = { n = 0, sites = {} }; c.calls.rules[rule] = r end
             r.n = r.n + 1
             if #r.sites < SAMPLES then
-                r.sites[#r.sites + 1] = ('%s:%d %s'):format(call.file or '?',
-                    (call.line or 0) + 1, call.callee or call.full or '?')
+                r.sites[#r.sites + 1] = ('%s:%d %s'):format(callrec.file(call) or '?',
+                    (callrec.line(call) or 0) + 1, callrec.callee(call) or callrec.full(call) or '?')
             end
         else
             -- no target, no refusal: a name the corpus simply doesn't define
