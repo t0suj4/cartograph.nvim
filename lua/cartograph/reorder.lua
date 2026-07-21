@@ -9,6 +9,13 @@
 -- Statements with unresolvable effects are OPAQUE: listed with the hedge
 -- named, certified for nothing — reads through calls are not modeled
 -- (the report says so), so 'free' means free w.r.t. what IS modeled.
+--
+-- Use headless (READ-ONLY — verdicts, not an edit; :CartographReorder is the
+-- interactive face):
+--   local ro = require 'cartograph.reorder'
+--   local res = ro.analyze(store, fn_id)     -- per-pair verdicts + opaque hedges
+--   -- res says which statements commute; the actual move rides the txn layer
+--   for _, line in ipairs(ro.report(store, fn_id)) do print(line) end
 
 local dfa = require 'cartograph.df'
 local effects = require 'cartograph.effects'

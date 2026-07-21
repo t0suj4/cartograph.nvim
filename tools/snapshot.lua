@@ -8,6 +8,14 @@
 -- for the instruments, by construction.
 -- mpack on disk, tmp+rename write (a torn snapshot is a loud load error, not
 -- a silently wrong baseline).
+--
+-- Use from a headless driver (the CLI wrappers are tools/gate.lua and matrix):
+--   local snap = dofile('tools/snapshot.lua')
+--   snap.save(name, data, { corpus = name, rev = rev })  -- writes the SLIM baseline
+--   local base, meta = snap.load(name)                    -- nil if none saved yet
+--   -- diff a fresh extract against the baseline (both slim):
+--   local delta = require('cartograph.graphdiff').diff(base, snap.slim(data))
+--   -- snap.slim(data) alone yields the instrument-faithful projection
 
 local M = {}
 

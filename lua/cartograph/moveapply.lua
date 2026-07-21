@@ -11,6 +11,17 @@
 -- home, imports each side should gain — ride the plan as HAZARDS with
 -- counts and file names: the human finishes what the tool can prove
 -- but not spell.
+--
+-- Use headless (agent-drivable — plan → preview → verified apply, no cockpit;
+-- [[cartograph-apply-for-agent]]). The :CartographMove/Diff/Apply commands are
+-- the interactive face of this same sequence:
+--   local mv = require 'cartograph.moveapply'
+--   local set = mv.close_moveset(store, { seed_id }, 'sub/dest.lua') -- seed → deps
+--   local plan, err = mv.plan_extract_ids(store, set, 'sub/dest.lua')
+--   if not plan then return err end          -- refusal names the reason
+--   print(mv.preview(store, plan))           -- dry-run diff, no writes
+--   local ok, why = mv.apply(store, plan)    -- journalled; graph-PRESERVING witness
+--                                            -- (nil,reason if the move-set moved)
 
 local M = {}
 local atr = require 'cartograph.at'

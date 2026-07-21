@@ -10,6 +10,15 @@
 -- selection that cuts a control-structure body, or one containing a control
 -- escape. It cannot see non-local (table/global) state, so that risk is
 -- disclosed as a hazard rather than silently assumed away.
+--
+-- Use headless (plan → apply; :CartographExtractBlocks is the interactive face):
+--   local ex = require 'cartograph.extract'
+--   local p = ex.plan {                       -- pure: no file access
+--       df = fn_df, sel = { first = 4, last = 4 },  -- the selected line range
+--       fn_start = 1, body_end = 5, file_lines = lines, name = 'sum' }
+--   if not p.ok then return p.reason end      -- refusal names why (cuts a body, …)
+--   -- p.params / p.returns / p.new_fn / p.call — the computed shape
+--   local out_lines = ex.apply(p, lines)      -- splice new fn + call; the driver writes
 
 local M = {}
 

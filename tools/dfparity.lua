@@ -13,6 +13,14 @@
 -- residual budget: a one-sided regression (a fix in flow.du but not df, or vice
 -- versa) has the SAME set-shape as a flow-more-correct class, so only the COUNT
 -- moving is a reliable signal.
+--
+-- Use from a headless driver (over an already-extracted `data` table — no
+-- extraction/exit of its own; the CLI wrapper is tools/dfgate.lua):
+--   local dfp = dofile('tools/dfparity.lua')
+--   local r = dfp.check(data)              -- { cats, instances } — the census
+--   print(dfp.census(r.cats))             -- one-line labelled count
+--   local delta = dfp.diff(r.cats, dfp.EXPECTED[name])  -- {} = parity, else classes
+--   -- inspect one class: dfp.show_instances(r.instances[class] or {}, class)
 
 local ts = require 'cartograph.providers.treesitter'
 local flow = require 'cartograph.flow'

@@ -10,6 +10,14 @@
 -- UNPINNED (no rev): living corpora — their truth is a saved snapshot whose
 -- meta records the corpus rev at save time; the gate surfaces rev drift as
 -- context instead of failing.
+--
+-- Use from a headless driver (a pure data table — dofile and index by name):
+--   local corpora = dofile('tools/corpora.lua')
+--   local c = corpora.server            -- or corpora[name], nil if unknown
+--   -- c.root  = local checkout path (where it happens to live)
+--   -- c.repo/c.rev = the corpus IDENTITY (baselines hold only at this rev)
+--   -- c.expected = { refs, nodes } gate baseline (PINNED corpora only)
+--   for name, c in pairs(corpora) do ... end   -- iterate the registry
 
 local HOME = vim.env.HOME or os.getenv('HOME')
 

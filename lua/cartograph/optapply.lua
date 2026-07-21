@@ -14,6 +14,15 @@
 --   • parse-clean — the edited file re-parses with no ERROR node
 -- A graph-CHANGING edit (the recompute — and any call inside it — is removed) is REPORTED,
 -- not rejected: that is the whole point, and why move's graph-PRESERVING witness won't do.
+--
+-- Use headless (plan → preview → apply, or the run_* one-shot):
+--   local oa = require 'cartograph.optapply'
+--   local plan = oa.plan_cse(store, fn_id)   -- also plan_localize/plan_hoist/plan_pre
+--   local diff = oa.preview(store, plan)      -- dry-run difftext (no writes)
+--   local ok = oa.apply(store, plan)          -- span-CAS + parse-clean witness
+--   -- one-shot at a source site (what the cursor verbs call):
+--   oa.run_at(store, 'm.lua', 5)              -- plan+apply the opt at m.lua:5
+--   -- oa.report(store, fn_id) lists what's applyable without touching the file
 
 local optimize = require 'cartograph.optimize'
 local txn = require 'cartograph.txn'

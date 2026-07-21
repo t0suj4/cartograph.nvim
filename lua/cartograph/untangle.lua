@@ -15,6 +15,16 @@
 -- precise) instead of df's coarse first-def-wins `dep`. STILL data-deps only
 -- (comprehension, not yet a safety claim — control + anti/output + side-effect
 -- ordering are INC 2/3). It sits BESIDE analyze until the arc completes.
+--
+-- Use headless (analyze → safety check → extract plan; :CartographUntangle /
+-- UntangleModule are the interactive face):
+--   local un = require 'cartograph.untangle'
+--   local res = un.analyze_flow(flow)          -- concerns + interleave metrics
+--   if un.concern_safe(res, c) then            -- else un.why_unsafe(res)
+--       local plan = un.extract_plan(store, fn_id, res, c, 'name')  -- an extract.plan
+--   end                                        -- (plan.ok; feed to extract.apply)
+--   -- module scope: un.analyze_module(store, file) → un.module_safe(res, c)
+--   --               → un.extract_module(store, res, c, 'sub/dest.lua')
 
 local flowmod = require 'cartograph.flow'
 
