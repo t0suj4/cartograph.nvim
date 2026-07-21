@@ -15,14 +15,16 @@ test('callrec: accessors return the syntactic-immutable call fields', function (
     eq(12, cr.line(c))
 end)
 
-test('callrec: only the fold-candidate fields have accessors', function ()
-    -- the resolution-era MUTABLE fields (to/refused/conf/inferred) are
-    -- deliberately absent — they cannot fold into an immutable column
-    eq('function', type(cr.file))
-    eq(nil, cr.to, 'c.to is mutated post-ingest → not seamed')
-    eq(nil, cr.refused, 'c.refused is mutated post-ingest → not seamed')
+test('callrec: read accessors for scalar fields, incl. resolution-era', function ()
+    -- syntactic (immutable columns in callcols) + resolution-era READ accessors
+    -- (to/prov — read seam; they live in the callcols mutable overlay, writes
+    -- stay direct until the write brick)
+    eq('function', type(cr.file)); eq('function', type(cr.to)); eq('function', type(cr.prov))
+    eq('a', cr.to({ to = 'a' })); eq('base', cr.prov({ prov = 'base' }))
+    -- SUBTABLE / transient fields are NOT scalar read-accessors here (refused is
+    -- a table via refused.lua; conf is a transient confirm mark)
+    eq(nil, cr.refused)
     eq(nil, cr.conf)
-    eq(nil, cr.inferred)
 end)
 
 test('callrec: nil fields pass through as nil', function ()

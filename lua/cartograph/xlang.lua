@@ -42,14 +42,14 @@ local function verb_matches(c, verb)
         end
         return false
     end
-    return callrec.callee(c) == verb or c.full == verb
-        or (c.full and c.full:sub(-#verb - 1) == '.' .. verb)
+    return callrec.callee(c) == verb or callrec.full(c) == verb
+        or (callrec.full(c) and c.full:sub(-#verb - 1) == '.' .. verb)
 end
 
 local argv = require 'cartograph.argv'
 
 local function logical_arg(c, i)
-    local j = i + (c.method and 1 or 0)
+    local j = i + (callrec.method(c) and 1 or 0)
     return j <= argv.n(c) and argv.str(c, j) or nil
 end
 
@@ -63,7 +63,7 @@ function M.call_text(root, c, lines)
         fd:close()
     end
     local text, depth, opened = '', 0, false
-    for l = c.line + 1, math.min(c.line + 12, #lines) do
+    for l = callrec.line(c) + 1, math.min(callrec.line(c) + 12, #lines) do
         local chunk = lines[l]
         text = text .. chunk .. '\n'
         for ch in chunk:gmatch('[()]') do
@@ -84,7 +84,7 @@ end
 --- name (the &Class::Method inside base::BindRepeating spans lines).
 local function find_handler(c, root, exact, export)
     if export.fn then
-        local a = argv.at(c, export.fn + (c.method and 1 or 0))
+        local a = argv.at(c, export.fn + (callrec.method(c) and 1 or 0))
         if a then
             if a.k == 'func' and a.to then return a.to end
             local name = a.k == 'lit' and a.v or a.k == 'local' and a.name
@@ -191,7 +191,7 @@ function M.link(data, bindings)
             if fd then fd:close() end
         end
         local lines = line_cache[callrec.file(c)]
-        for l = c.line, math.min(c.line + 3, lines and #lines - 1 or c.line) do
+        for l = callrec.line(c), math.min(callrec.line(c) + 3, lines and #lines - 1 or callrec.line(c)) do
             local text = lines and lines[l + 1] or ''
             local s, e = text:find(key, 1, true)
             if s then
@@ -199,8 +199,8 @@ function M.link(data, bindings)
                     ['end'] = { line = l, char = e } }
             end
         end
-        return { start = { line = c.line, char = 0 },
-            ['end'] = { line = c.line, char = 0 } }
+        return { start = { line = callrec.line(c), char = 0 },
+            ['end'] = { line = callrec.line(c), char = 0 } }
     end
 
     local stats = { links = 0, exports = 0, unresolved = 0, pinned = 0 }
@@ -239,15 +239,15 @@ function M.link(data, bindings)
                 local match
                 if pin.callee then
                     match = callrec.file(c) == pin.file and callrec.callee(c) == pin.callee
-                        and (fnids and (c.fn and fnids[c.fn] or false)
-                            or (not fnids and not c.fn)) -- fn-less = top level
+                        and (fnids and (callrec.fn(c) and fnids[callrec.fn(c)] or false)
+                            or (not fnids and not callrec.fn(c))) -- fn-less = top level
                 else -- legacy line anchor
-                    match = callrec.file(c) == pin.file and c.line == pin.line - 1
+                    match = callrec.file(c) == pin.file and callrec.line(c) == pin.line - 1
                 end
                 if match then
                     c.to = target.id
                     c.dynamic = nil
-                    if c.fn then addref(c.fn, target.id,
+                    if callrec.fn(c) then addref(callrec.fn(c), target.id,
                         key_range(c, pin.to)) end
                     hit = hit + 1
                     stats.pinned = stats.pinned + 1
@@ -283,7 +283,7 @@ function M.link(data, bindings)
                         table.insert(exports[key], h)
                         stats.exports = stats.exports + 1
                         -- the registration itself references the handler
-                        if c.fn then addref(c.fn, h, key_range(c, key)) end
+                        if callrec.fn(c) then addref(callrec.fn(c), h, key_range(c, key)) end
                     else
                         stats.unresolved = stats.unresolved + 1
                     end
@@ -297,17 +297,17 @@ function M.link(data, bindings)
                 if b.import.verb and verb_matches(c, b.import.verb) then
                     key = logical_arg(c, b.import.name or 1)
                     hs = key and key ~= '' and exports[key]
-                elseif b.import.any_call and not c.to and exports[callrec.callee(c)] then
+                elseif b.import.any_call and not callrec.to(c) and exports[callrec.callee(c)] then
                     key = callrec.callee(c)
                     hs = exports[key]
                 end
                 if hs then
                     -- a single handler is a descend target; a fan-out keeps
                     -- c.to empty (edges carry it, callers views show sites)
-                    if #hs == 1 then c.to = c.to or hs[1] end
-                    if c.fn then
+                    if #hs == 1 then c.to = callrec.to(c) or hs[1] end
+                    if callrec.fn(c) then
                         for _, h in ipairs(hs) do
-                            addref(c.fn, h, key_range(c, key))
+                            addref(callrec.fn(c), h, key_range(c, key))
                         end
                     end
                     stats.links = stats.links + 1

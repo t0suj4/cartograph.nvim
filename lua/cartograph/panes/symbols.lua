@@ -1064,7 +1064,7 @@ local function render_fn(ctx, id)
     end
     local calls_at = {}
     for _, c in ipairs(store.topo():sites(id)) do
-        local best = stmt_of(c.line)
+        local best = stmt_of(callrec.line(c))
         if best then
             calls_at[best] = calls_at[best] or {}
             table.insert(calls_at[best], c)
@@ -1828,7 +1828,7 @@ function M.attach(win)
         if not fnid then return nil end
         line = tonumber(line)
         for _, c in ipairs(store.topo():sites(fnid)) do
-            if c.line == line and callrec.callee(c) == callee and c.refused then return c end
+            if callrec.line(c) == line and callrec.callee(c) == callee and c.refused then return c end
         end
     end
     local function view_loc()

@@ -92,7 +92,7 @@ function M.attach(data)
                 local full = ns and (ns .. ':' .. name) or name
                 by_full[full] = by_full[full] or {}
                 table.insert(by_full[full],
-                    { name = full, file = callrec.file(c), line = c.line })
+                    { name = full, file = callrec.file(c), line = callrec.line(c) })
             end
         end
     end
@@ -197,9 +197,9 @@ function M.attach(data)
 
     -- ── reverse('name') lookups in code ──────────────────────────────────
     for _, c in ipairs(data.calls or {}) do
-        if LOOKUP[callrec.callee(c):match('([%w_]+)$') or ''] and c.fn
+        if LOOKUP[callrec.callee(c):match('([%w_]+)$') or ''] and callrec.fn(c)
             and argv.str(c, 1) ~= '' then
-            link(c.fn, argv.str(c, 1), callrec.file(c), c.line)
+            link(callrec.fn(c), argv.str(c, 1), callrec.file(c), callrec.line(c))
         end
     end
 

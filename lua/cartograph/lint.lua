@@ -84,7 +84,7 @@ local function listener_findings(store)
     if not calls or #calls == 0 then return {} end
     local function abs(c) return store.abs(callrec.file(c)) end
     local function keyname(c, spec)
-        local a = argv.str(c, spec.at + (c.method and 1 or 0))
+        local a = argv.str(c, spec.at + (callrec.method(c) and 1 or 0))
         return (a and a ~= '') and a or nil
     end
 
@@ -95,7 +95,7 @@ local function listener_findings(store)
             local n = keyname(c, cfg.register)
             if n then reg[n] = true; reg_site[n] = reg_site[n] or c end
             if not c.top then
-                out[#out + 1] = { file = abs(c), line = c.line + 1,
+                out[#out + 1] = { file = abs(c), line = callrec.line(c) + 1,
                     message = ("listener '%s' is registered inside a function, not at load — may register after init"):format(n or '?') }
             end
         elseif callrec.callee(c) == cfg.subscribe.verb then
@@ -114,7 +114,7 @@ local function listener_findings(store)
             or (callrec.callee(c) == cfg.unsubscribe.verb and cfg.unsubscribe) or nil
         local n = spec and keyname(c, spec)
         if n and not reg[n] then
-            out[#out + 1] = { file = abs(c), line = c.line + 1,
+            out[#out + 1] = { file = abs(c), line = callrec.line(c) + 1,
                 message = ("%s to '%s', which is never registered (would error: 'Could not find listener')"):format(callrec.callee(c), n) }
         end
     end
@@ -167,8 +167,8 @@ local function swallowed_findings(store)
     -- vm-resolved calls by file:line, to find the getter behind a def site
     local resolved_at = {}
     for _, c in ipairs(calls) do
-        if c.to and not c.inferred then
-            local k = callrec.file(c) .. ':' .. c.line
+        if callrec.to(c) and not c.inferred then
+            local k = callrec.file(c) .. ':' .. callrec.line(c)
             resolved_at[k] = resolved_at[k] or {}
             table.insert(resolved_at[k], c)
         end
@@ -176,10 +176,10 @@ local function swallowed_findings(store)
 
     local sites = {}
     for _, c in ipairs(calls) do
-        local tn = c.inferred and c.to and store.node(c.to)
+        local tn = c.inferred and callrec.to(c) and store.node(callrec.to(c))
         local class = tn and class_of(tn.name)
         if class then
-            local recv = c.method and argv.at(c, 1)
+            local recv = callrec.method(c) and argv.at(c, 1)
             local file, line, fix, label
             if recv and recv.k == 'local' and recv.l then
                 file, line = callrec.file(c), recv.l
@@ -199,7 +199,7 @@ local function swallowed_findings(store)
                     label = '---@type ' .. class
                 end
             else
-                file, line = callrec.file(c), c.line -- receiver isn't a simple local: no fix offered
+                file, line = callrec.file(c), callrec.line(c) -- receiver isn't a simple local: no fix offered
             end
             local key = ('%s:%d:%s'):format(file, line, class)
             local s = sites[key]
@@ -239,12 +239,12 @@ local function load_order_findings(store)
     if not t then return {} end
     local out = {}
     for _, c in ipairs(store.data.calls or {}) do
-        if c.top and c.to then
-            local callee = store.node(c.to)
+        if c.top and callrec.to(c) then
+            local callee = store.node(callrec.to(c))
             local ci = callee and t.index[callee.file]
             local fi = t.index[callrec.file(c)]
             if ci and fi and ci > fi then
-                out[#out + 1] = { file = store.abs(callrec.file(c)), line = c.line + 1,
+                out[#out + 1] = { file = store.abs(callrec.file(c)), line = callrec.line(c) + 1,
                     message = ("load-time call to '%s', but %s loads later (#%d, this file is #%d)%s"):format(
                         callee.name, callee.file, ci, fi,
                         c.inferred and ' — name-matched' or '') }
@@ -287,9 +287,9 @@ local function load_order_findings(store)
             local own = {}
             for _, n in ipairs(store.data.nodes) do own[n.name or ''] = true end
             for _, c in ipairs(store.data.calls or {}) do
-                local who = c.top and not c.to and not own[callrec.callee(c)] and sib[callrec.callee(c)]
+                local who = c.top and not callrec.to(c) and not own[callrec.callee(c)] and sib[callrec.callee(c)]
                 if who and not declared[who:lower()] then
-                    out[#out + 1] = { file = store.abs(callrec.file(c)), line = c.line + 1,
+                    out[#out + 1] = { file = store.abs(callrec.file(c)), line = callrec.line(c) + 1,
                         message = ("load-time call to '%s', defined by addon '%s' — undeclared dependency: load order is not guaranteed"):format(callrec.callee(c), who) }
                 end
             end
@@ -305,13 +305,13 @@ local function dynamic_findings(store)
     local per, order = {}, {}
     for _, c in ipairs(store.data.calls or {}) do
         if (c.dynamic or ((callrec.callee(c) == 'call_user_func'
-            or callrec.callee(c) == 'call_user_func_array') and not c.to)) then
+            or callrec.callee(c) == 'call_user_func_array') and not callrec.to(c))) then
             if not per[callrec.file(c)] then
-                per[callrec.file(c)] = { n = 0, line = c.line }
+                per[callrec.file(c)] = { n = 0, line = callrec.line(c) }
                 order[#order + 1] = callrec.file(c)
             end
             per[callrec.file(c)].n = per[callrec.file(c)].n + 1
-            per[callrec.file(c)].line = math.min(per[callrec.file(c)].line, c.line)
+            per[callrec.file(c)].line = math.min(per[callrec.file(c)].line, callrec.line(c))
         end
     end
     local out = {}
@@ -657,16 +657,16 @@ local function silent_drop_findings(store)
         return s
     end
     for _, c in ipairs(calls) do
-        if not c.to and not c.refused and not c.dynamic and not c.full
-            and c.fn and callrec.callee(c)
-            and fn_locals(c.fn)[callrec.callee(c)] then
-            local k = c.fn .. '\31' .. callrec.callee(c) -- one finding per (fn, local)
+        if not callrec.to(c) and not c.refused and not c.dynamic and not callrec.full(c)
+            and callrec.fn(c) and callrec.callee(c)
+            and fn_locals(callrec.fn(c))[callrec.callee(c)] then
+            local k = callrec.fn(c) .. '\31' .. callrec.callee(c) -- one finding per (fn, local)
             if not seen[k] then
                 seen[k] = true
-                local fn = store.node(c.fn)
+                local fn = store.node(callrec.fn(c))
                 out[#out + 1] = {
                     file = fn and store.abs(fn.file) or (callrec.file(c) and store.abs(callrec.file(c))) or '',
-                    line = c.at and at.sl(c.at) + 1 or ((c.line or 0) + 1),
+                    line = c.at and at.sl(c.at) + 1 or ((callrec.line(c) or 0) + 1),
                     message = ("call to local '%s' resolved to nothing and was not refused — a silent honesty gap (the local is a callable in scope: resolution neither linked it nor spoke a refusal)")
                         :format(callrec.callee(c)),
                 }

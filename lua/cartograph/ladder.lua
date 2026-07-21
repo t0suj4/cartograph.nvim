@@ -31,9 +31,9 @@ M.RUNGS = RUNGS
 -- which rung a single call sits on. `edge_proven` = a set of
 -- "from\31to" the oracle/xlang marked proven (from store).
 local function rung_of(c, proven)
-    if c.to then
+    if callrec.to(c) then
         if c.conf then return 'confirmed' end -- observed live: sound top rung
-        if proven and c.fn and proven[c.fn .. '\31' .. c.to] then return 'proven' end
+        if proven and callrec.fn(c) and proven[callrec.fn(c) .. '\31' .. callrec.to(c)] then return 'proven' end
         if c.tinf then return 'typed' end
         return c.inferred and 'inferred' or 'linked'
     end
@@ -117,13 +117,13 @@ function M.narrowable(store)
     local W = { alias = 4, self = 3, ['local'] = 2, unknown = 1 } -- narrowability
     local agg = {}
     for _, c in ipairs(calls) do
-        if not c.to and not c.dynamic and c.refused and c.refused.rule == 'ambiguous'
-            and c.refused.cands and #c.refused.cands > 0 and c.full then
+        if not callrec.to(c) and not c.dynamic and c.refused and c.refused.rule == 'ambiguous'
+            and c.refused.cands and #c.refused.cands > 0 and callrec.full(c) then
             local recv, member = c.full:match('^([%w_]+)[.:]([%w_]+)$')
             if recv and member then
                 local class = (recv == 'self' or recv == 'this') and 'self'
                     or (alias[callrec.file(c)] and alias[callrec.file(c)][recv]) and 'alias'
-                    or (c.fn and fn_locals(c.fn)[recv]) and 'local'
+                    or (callrec.fn(c) and fn_locals(callrec.fn(c))[recv]) and 'local'
                     or 'unknown'
                 local key = callrec.file(c) .. '\31' .. recv .. '\31' .. class
                 local a = agg[key]
@@ -169,7 +169,7 @@ function M.report(store)
     -- the heaviest refusals: where resolving one fork buys the most
     local refs = {}
     for _, c in ipairs(store.data.calls or {}) do
-        if not c.to and not c.dynamic and c.refused
+        if not callrec.to(c) and not c.dynamic and c.refused
             and c.refused.cands and #c.refused.cands > 0 then
             refs[#refs + 1] = c
         end

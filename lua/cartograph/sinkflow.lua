@@ -735,7 +735,7 @@ function M.reach_findings(store)
             ids[#ids + 1] = n.id
             local adj = {}
             for _, c in ipairs(store.topo():sites(n.id)) do
-                if c.to then adj[#adj + 1] = c.to end
+                if callrec.to(c) then adj[#adj + 1] = callrec.to(c) end
             end
             calladj[n.id] = adj
         end
@@ -755,19 +755,19 @@ function M.reach_findings(store)
             for _, fid in ipairs(con.members[ci]) do
                 local rec = info[fid]
                 for _, c in ipairs(rec and store.topo():sites(fid) or {}) do
-                    local gsp = c.to and sp[c.to]
+                    local gsp = callrec.to(c) and sp[callrec.to(c)]
                     if gsp and next(gsp) then
-                        local ac = rec.argclass[c.line]
-                            and rec.argclass[c.line][(callrec.callee(c) or ''):lower()]
+                        local ac = rec.argclass[callrec.line(c)]
+                            and rec.argclass[callrec.line(c)][(callrec.callee(c) or ''):lower()]
                         if ac then
                             for i in pairs(gsp) do
                                 local o = ac[i]
                                 if type(o) == 'string' then
-                                    local key = fid .. '\31' .. c.line .. '\31' .. i
+                                    local key = fid .. '\31' .. callrec.line(c) .. '\31' .. i
                                     if not seen[key] then
                                         seen[key] = true
                                         findings[#findings + 1] = { file = callrec.file(c),
-                                            line = c.line, source = o, callee = callrec.callee(c) }
+                                            line = callrec.line(c), source = o, callee = callrec.callee(c) }
                                     end
                                 elseif type(o) == 'number' and not sp[fid][o] then
                                     sp[fid][o] = true; changed = true

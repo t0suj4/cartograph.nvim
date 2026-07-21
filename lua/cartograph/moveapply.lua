@@ -175,7 +175,7 @@ local function collect(store, ids, dest, plan)
         -- requalified — they keep resolving to the still-present source symbol.
         for _, c in ipairs((m.mode ~= 'copy') and store.calls_to[m.id] or {}) do
             local F = callrec.file(c)
-            if F ~= dest and not (c.fn and in_move[c.fn]) then
+            if F ~= dest and not (callrec.fn(c) and in_move[callrec.fn(c)]) then
                 local ls = file_lines(F)
                 local at = c.at
                 local token = at and ls and atr.oneline(at)

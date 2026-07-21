@@ -343,7 +343,7 @@ function M.summaries(store)
             local caller = store.node(fid)
             local file = caller and caller.file
             for _, c in ipairs(store.topo():sites(fid)) do
-                local to = c.to
+                local to = callrec.to(c)
                 if to and con.comp[to] == ci then
                     -- intra-SCC: members share this summary already
                 elseif to and sums[to] then
@@ -376,7 +376,7 @@ function M.summaries(store)
                                 sum.pwx[x] = true
                             elseif kind == 'opaque' then
                                 s_hedge(sum, ('param-mutation via opaque arg -> %s @%s:%d')
-                                    :format(tn and tn.name or to, callrec.file(c) or '?', c.line or 0))
+                                    :format(tn and tn.name or to, callrec.file(c) or '?', callrec.line(c) or 0))
                             end
                         end
                     end
@@ -385,12 +385,12 @@ function M.summaries(store)
                 else
                     local lang = file and (file:match('%.lua$') and 'lua'
                         or file:match('%.php$') and 'php')
-                    local bname = c.full or callrec.callee(c)
+                    local bname = callrec.full(c) or callrec.callee(c)
                     local sig, grade
                     if lang and bname then
                         -- (explicit call: and/or would truncate the
                         -- second return — the grade)
-                        sig, grade = M.sig_of(lang, bname, c.method)
+                        sig, grade = M.sig_of(lang, bname, callrec.method(c))
                     end
                     local asserted
                     if not sig and bname then
@@ -416,7 +416,7 @@ function M.summaries(store)
                                 sum.pwx[x] = true
                             elseif kind == 'opaque' then
                                 s_hedge(sum, ('%s on opaque arg @%s:%d')
-                                    :format(bname, callrec.file(c) or '?', c.line or 0))
+                                    :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))
                             end
                         end
                         -- HIGHER-ORDER: the passed fn's summary is this
@@ -446,11 +446,11 @@ function M.summaries(store)
                                 end
                                 if ts2.pwx then
                                     s_hedge(sum, ('callback %s mutates its params @%s:%d')
-                                        :format(a.name or '?', callrec.file(c) or '?', c.line or 0))
+                                        :format(a.name or '?', callrec.file(c) or '?', callrec.line(c) or 0))
                                 end
                             elseif a then
                                 s_hedge(sum, ('%s: callback effects unknown @%s:%d')
-                                    :format(bname, callrec.file(c) or '?', c.line or 0))
+                                    :format(bname, callrec.file(c) or '?', callrec.line(c) or 0))
                             end
                         end
                         -- sig.pure / sig.reads / sig.returns_arg: no hedge,
@@ -458,13 +458,13 @@ function M.summaries(store)
                     elseif c.refused then
                         s_hedge(sum, ('refused (%s): %s @%s:%d'):format(
                             c.refused.rule or '?', bname or '?',
-                            callrec.file(c) or '?', c.line or 0))
+                            callrec.file(c) or '?', callrec.line(c) or 0))
                     elseif not c.dynamic and bname then
                         s_hedge(sum, ('unresolved: %s @%s:%d'):format(
-                            bname, callrec.file(c) or '?', c.line or 0))
+                            bname, callrec.file(c) or '?', callrec.line(c) or 0))
                     else
                         s_hedge(sum, ('dynamic call @%s:%d'):format(
-                            callrec.file(c) or '?', c.line or 0))
+                            callrec.file(c) or '?', callrec.line(c) or 0))
                     end
                 end
             end

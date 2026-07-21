@@ -50,12 +50,12 @@ local function context(store, fn_id)
     -- read, so reads_content exempts them (allocation is now structural via expr).
     local impure_line, callee_line, pure_module = {}, {}, {}
     for _, c in ipairs(store.topo():sites(fn_id)) do
-        local ln = (c.line or 0) + 1
+        local ln = (callrec.line(c) or 0) + 1
         local ce = effects.call_effects(store, c, node.file)
         local pure = (next(ce.w) == nil) and not ce.hedges
         if not pure then impure_line[ln] = true end
         if callrec.callee(c) then callee_line[ln] = callee_line[ln] or {}; callee_line[ln][callrec.callee(c)] = pure end
-        if pure and c.full and c.full:find('%.') then
+        if pure and callrec.full(c) and c.full:find('%.') then
             -- the module receiver of a pure qualified call (`string` in string.format)
             -- is a STABLE reference, not a varying input — reads_content exempts a field
             -- whose base is this name; also keeps it from hedging invariance.

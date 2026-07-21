@@ -304,7 +304,7 @@ end
 function M.registrations(data)
     local cmds, maps = {}, {}
     for _, c in ipairs(data.calls or {}) do
-        local n = c.full or callrec.callee(c) or ''
+        local n = callrec.full(c) or callrec.callee(c) or ''
         local a1, a2 = argv.str(c, 1), argv.str(c, 2)
         if n:find('nvim_create_user_command', 1, true) and a1 ~= '' then
             cmds[a1] = cmds[a1] or callrec.file(c)

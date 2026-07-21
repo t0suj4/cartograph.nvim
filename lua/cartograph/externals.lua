@@ -58,7 +58,7 @@ function M.surface(store)
         stdlib_tail = 0, external = 0, bases = {} }
     for _, c in ipairs(store.data.calls or {}) do
         s.total = s.total + 1
-        if c.to then
+        if callrec.to(c) then
             s.resolved = s.resolved + 1
         elseif c.refused then
             local r = c.refused.rule

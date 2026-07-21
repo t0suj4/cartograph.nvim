@@ -36,7 +36,7 @@ local function ckey(c)
 end
 local function coutcome(c)
     local hedge = c.hedge and (' hedged:' .. (c.hedge.rule or '?')) or ''
-    if c.to then return 'to ' .. c.to .. hedge end
+    if callrec.to(c) then return 'to ' .. callrec.to(c) .. hedge end
     if c.refused then return 'refused (' .. (c.refused.rule or '?') .. ')' .. hedge end
     return 'unresolved' .. hedge
 end

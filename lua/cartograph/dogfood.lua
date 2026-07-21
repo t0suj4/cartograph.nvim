@@ -35,8 +35,8 @@ M.BAND_SEAM = {
 local function serving_consistency(store)
     local served, consistent, mis = 0, 0, {}
     for _, c in ipairs(store.data.calls or {}) do
-        if c.to and c.at then
-            local n = store.node(c.to)
+        if callrec.to(c) and c.at then
+            local n = store.node(callrec.to(c))
             if n and n.file and not n.external and n.range then
                 served = served + 1
                 local res = lsp.handle(store, 'textDocument/definition', {

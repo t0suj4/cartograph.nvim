@@ -50,7 +50,7 @@ function M.apply(data, observed)
     -- carry the tier onto the calls (the ladder/census read c.conf); a
     -- resolved call whose (fn->to) was observed is confirmed
     for _, c in ipairs(data.calls or {}) do
-        if c.to and c.fn and observed[c.fn .. '\31' .. c.to] then
+        if callrec.to(c) and callrec.fn(c) and observed[callrec.fn(c) .. '\31' .. callrec.to(c)] then
             c.conf = true
         end
     end
@@ -77,29 +77,29 @@ function M.diff(data, dispatch)
     end
     local confirmed, recovered, findings = 0, 0, {}
     for _, c in ipairs(data.calls or {}) do
-        local obs = c.fn and dispatch[c.fn .. '\31' .. (c.full or callrec.callee(c) or '')]
+        local obs = callrec.fn(c) and dispatch[callrec.fn(c) .. '\31' .. (callrec.full(c) or callrec.callee(c) or '')]
         if obs then
             local rt = keys(obs)
             local mono = #rt == 1
-            if c.to then
-                if obs[c.to] then
+            if callrec.to(c) then
+                if obs[callrec.to(c)] then
                     c.conf = true; confirmed = confirmed + 1
                 elseif mono then
                     -- static picked B, runtime only ever went to C — sound
                     findings[#findings + 1] = { kind = 'conflict',
-                        fn = c.fn, callee = callrec.callee(c), file = callrec.file(c),
-                        line = c.line, static = c.to, runtime = rt }
+                        fn = callrec.fn(c), callee = callrec.callee(c), file = callrec.file(c),
+                        line = callrec.line(c), static = callrec.to(c), runtime = rt }
                 else
                     findings[#findings + 1] = { kind = 'polymorphic',
-                        fn = c.fn, callee = callrec.callee(c), file = callrec.file(c),
-                        line = c.line, static = c.to, runtime = rt }
+                        fn = callrec.fn(c), callee = callrec.callee(c), file = callrec.file(c),
+                        line = callrec.line(c), static = callrec.to(c), runtime = rt }
                 end
             else
                 -- static refused/frontier; runtime resolved it
                 if mono then c.to, c.conf = rt[1], true end
                 findings[#findings + 1] = { kind = 'recovered',
-                    fn = c.fn, callee = callrec.callee(c), file = callrec.file(c),
-                    line = c.line, static = nil, runtime = rt }
+                    fn = callrec.fn(c), callee = callrec.callee(c), file = callrec.file(c),
+                    line = callrec.line(c), static = nil, runtime = rt }
                 recovered = recovered + 1
             end
         end

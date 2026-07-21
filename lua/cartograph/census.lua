@@ -19,7 +19,7 @@ local SAMPLES = 3 -- example sites kept per refusal rule
 --- short); 'unknown' = a silent path not yet tagged (indirect / traced). This
 --- is the one reading the D-census + specaudit gap detection query against.
 function M.disp(call)
-    if call.to then return 'resolved' end
+    if callrec.to(call) then return 'resolved' end
     if call.refused then return 'refused', call.refused.rule end
     if call.dynamic then return 'dynamic' end
     if call.ext then return call.ext.disp, call.ext.why end
@@ -64,9 +64,9 @@ function M.take(data)
     for _, call in ipairs(data.calls or {}) do
         c.calls.total = c.calls.total + 1
         if call.hedge then c.calls.hedged = c.calls.hedged + 1 end
-        if call.to then
+        if callrec.to(call) then
             c.calls.resolved = c.calls.resolved + 1
-            local p = call.prov or 'unknown'
+            local p = callrec.prov(call) or 'unknown'
             c.calls.by_prov[p] = (c.calls.by_prov[p] or 0) + 1
         elseif call.refused then
             c.calls.refused = c.calls.refused + 1

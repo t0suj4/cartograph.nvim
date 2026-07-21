@@ -118,7 +118,7 @@ function M.plan(store, id)
             else
                 plan.hazards[#plan.hazards + 1] = ('%s:%d calls %s in a form'
                     .. " that isn't its bare name (%s) — rewrite it yourself")
-                    :format(callrec.file(c), c.line + 1, t.name, tostring(token or callrec.callee(c)))
+                    :format(callrec.file(c), callrec.line(c) + 1, t.name, tostring(token or callrec.callee(c)))
             end
         end
         -- non-call references (the id pass's dispatch-table finds): they
@@ -127,7 +127,7 @@ function M.plan(store, id)
         for _, from in ipairs(store.topo():callers(t.id)) do
             local calls = 0
             for _, c in ipairs(store.calls_to[t.id] or {}) do
-                if c.fn == from then calls = calls + 1 end
+                if callrec.fn(c) == from then calls = calls + 1 end
             end
             local occs = #(store.occurrences(from, t.id) or {})
             if occs > calls then nonrefs = nonrefs + (occs - calls) end

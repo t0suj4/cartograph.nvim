@@ -39,7 +39,7 @@ function M.bindings(store, cfg)
     local out = {}
     for _, c in ipairs(store.data.calls or {}) do
         if callrec.callee(c) == verb then
-            local off = c.method and 1 or 0
+            local off = callrec.method(c) and 1 or 0
             local name = argv.str(c, 1 + off)
             if name and name ~= '' then
                 local hv = argv.at(c, 2 + off)

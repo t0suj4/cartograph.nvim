@@ -32,8 +32,8 @@ local cache = { gen = nil, keys = {} }
 
 -- a stable identity for a call across re-ingests: site + name.
 local function keyof(c)
-    return (callrec.file(c) or '?') .. '\31' .. tostring(c.line) .. '\31'
-        .. (callrec.callee(c) or c.full or '?')
+    return (callrec.file(c) or '?') .. '\31' .. tostring(callrec.line(c)) .. '\31'
+        .. (callrec.callee(c) or callrec.full(c) or '?')
 end
 
 -- hedge-saturated functions: ≥1 outgoing call, ZERO proven, ≥1 hedge (`~`).
@@ -42,10 +42,10 @@ end
 function M.saturated(data)
     local per = {}
     for _, c in ipairs(data.calls or {}) do
-        if c.fn then
-            local r = per[c.fn]
-            if not r then r = { p = 0, h = 0, rf = 0 }; per[c.fn] = r end
-            if c.to then
+        if callrec.fn(c) then
+            local r = per[callrec.fn(c)]
+            if not r then r = { p = 0, h = 0, rf = 0 }; per[callrec.fn(c)] = r end
+            if callrec.to(c) then
                 if c.inferred or c.tinf then r.h = r.h + 1 else r.p = r.p + 1 end
             else
                 r.rf = r.rf + 1
@@ -68,8 +68,8 @@ function M.worklist(data, sat)
     local work = {}
     for _, c in ipairs(data.calls or {}) do
         if callrec.file(c) and callrec.file(c):match('%.lua$') and not c.dynamic and not c.escalated
-            and (not sat or (c.fn and sat[c.fn])) then
-            if (c.to and c.inferred) or not c.to then
+            and (not sat or (callrec.fn(c) and sat[callrec.fn(c)])) then
+            if (callrec.to(c) and c.inferred) or not callrec.to(c) then
                 work[#work + 1] = c
             end
         end
@@ -239,13 +239,13 @@ function M.diagnostics(f, abs, name)
     local out = {}
     local function col(c) return c.at and atr.sc(c.at) + 1 or 1 end
     for _, x in ipairs(f.conflict) do
-        out[#out + 1] = { file = abs(callrec.file(x.c)), line = (x.c.line or 0) + 1,
+        out[#out + 1] = { file = abs(callrec.file(x.c)), line = (callrec.line(x.c) or 0) + 1,
             col = col(x.c), severity = 'error', source = 'cartograph/escalate',
             message = ('escalation CONFLICT: static → %s, but lua-ls → %s'
                 .. ' — a bug on ONE side'):format(name(x.was), name(x.now)) }
     end
     for _, x in ipairs(f.refuted) do
-        out[#out + 1] = { file = abs(callrec.file(x.c)), line = (x.c.line or 0) + 1,
+        out[#out + 1] = { file = abs(callrec.file(x.c)), line = (callrec.line(x.c) or 0) + 1,
             col = col(x.c), severity = 'warn', source = 'cartograph/escalate',
             message = ('escalation: name-match to %s refuted by lua-ls'
                 .. ' (no such target) — resolver over-reach'):format(name(x.was)) }

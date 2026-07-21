@@ -32,5 +32,11 @@ function M.method(c) return c.method end
 function M.file(c) return c.file end
 -- the 0-based line of the call site (syntactic, immutable scalar)
 function M.line(c) return c.line end
+-- the resolved target node id, or nil — RESOLUTION-ERA (written during resolve;
+-- read seam only, writes stay direct until the write brick). In callcols it
+-- lives in the mutable overlay.
+function M.to(c) return c.to end
+-- the resolver provenance ('base'/pass/'stdlib') — resolution-era
+function M.prov(c) return c.prov end
 
 return M

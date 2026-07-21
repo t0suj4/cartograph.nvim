@@ -14,7 +14,7 @@ local callrec = require 'cartograph.callrec'
 
 local M = {}
 
-local function site_of(call) return { file = callrec.file(call), line = call.line } end
+local function site_of(call) return { file = callrec.file(call), line = callrec.line(call) } end
 
 --- Origins of parameter `i` of function `fn_id`: one entry per resolved call
 --- site (the classified i-th argument). Sites that pass nothing for the
@@ -30,7 +30,7 @@ function M.origins(store, fn_id, i)
     for _, c in ipairs(calls) do
         out[#out + 1] = {
             v    = argv.at(c, i) or { k = 'absent' },
-            fn   = c.fn,
+            fn   = callrec.fn(c),
             site = site_of(c),
         }
     end

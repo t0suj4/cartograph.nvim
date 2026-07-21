@@ -17,6 +17,7 @@
 --   -- res says which statements commute; the actual move rides the txn layer
 --   for _, line in ipairs(ro.report(store, fn_id)) do print(line) end
 
+local callrec = require 'cartograph.callrec'
 local dfa = require 'cartograph.df'
 local effects = require 'cartograph.effects'
 
@@ -66,7 +67,7 @@ function M.analyze(store, fn_id)
     end
     -- call effects land on the statement containing the call site
     for _, c in ipairs(store.topo():sites(fn_id)) do
-        local si = c.line and stmt_of(c.line)
+        local si = callrec.line(c) and stmt_of(callrec.line(c))
         if si then
             local fx = effects.call_effects(store, c, node.file)
             local row = rows[si]

@@ -402,10 +402,10 @@ function M.analyze_scope(store, files, opts)
     end
     for k, node in ipairs(fns) do
         for _, c in ipairs(store.topo():sites(node.id)) do
-            local line = (c.line or 0) + 1
+            local line = (callrec.line(c) or 0) + 1
             if c.dynamic then
                 flag(k, line, 'dynamic dispatch (could reach any fn)')
-            elseif not c.to and not c.refused and callrec.callee(c) then
+            elseif not callrec.to(c) and not c.refused and callrec.callee(c) then
                 -- SILENT unresolved (the resolver made no determination): could hide
                 -- an intra-scope edge. Name-matches an in-scope fn, OR a bracket-index
                 -- callee `t[k]()` = table dispatch (could reach any in-scope fn value).
