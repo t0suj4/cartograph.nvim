@@ -1,4 +1,5 @@
 local callrec = require 'cartograph.callrec'
+local callcols = require 'cartograph.callcols'
 -- The epistemic ladder, as a readable distribution. Every call sits on
 -- a rung by HOW its target is known, and the ladder answers "how much
 -- of this can I trust" — for one function's outgoing calls, or the
@@ -166,12 +167,26 @@ function M.report(store)
             lines[#lines + 1] = ('  %5d  %s'):format(t[r], label[r])
         end
     end
-    -- the heaviest refusals: where resolving one fork buys the most
+    -- the heaviest refusals: where resolving one fork buys the most. INDEX FORM
+    -- (brick 3 step c): the hot collect reads to/dynamic/refused off the columns +
+    -- residual directly (no proxy dispatch); the cold top-12 reads its fields by
+    -- index via a small helper. refs holds the index + refusal, not the call.
+    local view = store.data._callcols
+    local cc, resid = view and view.cc, view and view.residual
+    local calls = store.data.calls or {}
+    local ncalls = cc and cc.n or #calls
+    local function field(i, f) if cc then return callcols.get(cc, f, i) else return calls[i][f] end end
     local refs = {}
-    for _, c in callrec.each(store.data) do
-        if not callrec.to(c) and not c.dynamic and c.refused
-            and c.refused.cands and #c.refused.cands > 0 then
-            refs[#refs + 1] = c
+    for i = 1, ncalls do
+        local to, dynamic, refused
+        if cc then
+            to, dynamic = callcols.get(cc, 'to', i), callcols.get(cc, 'dynamic', i)
+            local r = resid[i]; refused = r and r.refused
+        else
+            local c = calls[i]; to, dynamic, refused = c.to, c.dynamic, c.refused
+        end
+        if not to and not dynamic and refused and refused.cands and #refused.cands > 0 then
+            refs[#refs + 1] = { i = i, refused = refused }
         end
     end
     table.sort(refs, function (a, b)
@@ -180,10 +195,11 @@ function M.report(store)
     if #refs > 0 then
         lines[#lines + 1] = ''
         lines[#lines + 1] = 'heaviest refusals (descend a `?callee` in its fn to resolve):'
-        for i = 1, math.min(12, #refs) do
-            local c = refs[i]
+        for k = 1, math.min(12, #refs) do
+            local ref = refs[k]
             lines[#lines + 1] = ('  %s:%d  %s  (%d candidates)')
-                :format(callrec.file(c), c.line + 1, callrec.callee(c), c.refused.n or 0)
+                :format(field(ref.i, 'file'), field(ref.i, 'line') + 1,
+                    field(ref.i, 'callee'), ref.refused.n or 0)
         end
     end
     -- the receiver-typing WORK-LIST: which receivers, typed, dissolve the most

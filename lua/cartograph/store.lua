@@ -176,6 +176,7 @@ function M.ingest(data)
         for i, c in ipairs(data.calls) do recs[i] = callrec.record(c) end
         data.calls = recs
         M._callcols = nil
+        data._callcols = nil
     end
     local seen = {}
     for _, n in ipairs(M.data.nodes) do
@@ -262,6 +263,7 @@ function M._install_callcols()
     local view = callcols.view(M.data.calls or {}, syn, seg.CALL_RESOLUTION)
     M.data.calls = view.rows
     M._callcols = view
+    M.data._callcols = view -- reachable by pure data consumers (index-form reads)
     M.calls_to, M.calls_by_fn = {}, {}
     M.calls_by_file, M.calls_by_prov = {}, {}
     for _, c in ipairs(view.rows) do idx_call(M, c) end

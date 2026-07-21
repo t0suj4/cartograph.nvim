@@ -7,6 +7,7 @@
 
 local tier = require 'cartograph.tier'
 local callrec = require 'cartograph.callrec'
+local callcols = require 'cartograph.callcols'
 
 local M = {}
 
@@ -18,12 +19,18 @@ local SAMPLES = 3 -- example sites kept per refusal rule
 --- the gate that placed it outside (vocab / prefix / exact-key / no-def /
 --- short); 'unknown' = a silent path not yet tagged (indirect / traced). This
 --- is the one reading the D-census + specaudit gap detection query against.
-function M.disp(call)
-    if callrec.to(call) then return 'resolved' end
-    if call.refused then return 'refused', call.refused.rule end
-    if call.dynamic then return 'dynamic' end
-    if call.ext then return call.ext.disp, call.ext.why end
+-- the value-core: disposition from already-read field VALUES (so the record
+-- path and the index-form path in take() share ONE definition — no divergence).
+function M.disp_of(to, refused, dynamic, ext)
+    if to then return 'resolved' end
+    if refused then return 'refused', refused.rule end
+    if dynamic then return 'dynamic' end
+    if ext then return ext.disp, ext.why end
     return 'external', 'unknown'
+end
+
+function M.disp(call)
+    return M.disp_of(callrec.to(call), call.refused, call.dynamic, call.ext)
 end
 
 --- Structured counts over a neutral-schema data table.
@@ -61,29 +68,57 @@ function M.take(data)
             c.edges.ref[t] = c.edges.ref[t] + 1
         end
     end
-    for _, call in callrec.each(data) do
+    -- Hot loop, INDEX FORM (record-fold arc, brick 3 step c): when the columnar
+    -- store is live, read the fields DIRECTLY off the columns (callcols.get) +
+    -- residual, bypassing the per-field proxy __index dispatch — the matrix's
+    -- ~3x read win. A mode-branched READ PROLOGUE feeds ONE shared tally body, so
+    -- there is no duplicated accounting logic (only the read differs).
+    local view = data._callcols
+    local cc, resid = view and view.cc, view and view.residual
+    local calls = data.calls or {}
+    local ncalls = cc and cc.n or #calls
+    for i = 1, ncalls do
+        local to, prov, hedge, refused, dynamic, ext
+        if cc then
+            to = callcols.get(cc, 'to', i); prov = callcols.get(cc, 'prov', i)
+            dynamic = callcols.get(cc, 'dynamic', i)
+            local r = resid[i]
+            if r then hedge, refused, ext = r.hedge, r.refused, r.ext end
+        else
+            local call = calls[i]
+            to, prov, hedge = call.to, call.prov, call.hedge
+            refused, dynamic, ext = call.refused, call.dynamic, call.ext
+        end
         c.calls.total = c.calls.total + 1
-        if call.hedge then c.calls.hedged = c.calls.hedged + 1 end
-        if callrec.to(call) then
+        if hedge then c.calls.hedged = c.calls.hedged + 1 end
+        if to then
             c.calls.resolved = c.calls.resolved + 1
-            local p = callrec.prov(call) or 'unknown'
+            local p = prov or 'unknown'
             c.calls.by_prov[p] = (c.calls.by_prov[p] or 0) + 1
-        elseif call.refused then
+        elseif refused then
             c.calls.refused = c.calls.refused + 1
-            local rule = call.refused.rule or '?'
+            local rule = refused.rule or '?'
             local r = c.calls.rules[rule]
             if not r then r = { n = 0, sites = {} }; c.calls.rules[rule] = r end
             r.n = r.n + 1
             if #r.sites < SAMPLES then
-                r.sites[#r.sites + 1] = ('%s:%d %s'):format(callrec.file(call) or '?',
-                    (callrec.line(call) or 0) + 1, callrec.callee(call) or callrec.full(call) or '?')
+                local file, line, callee, full
+                if cc then
+                    file, line = callcols.get(cc, 'file', i), callcols.get(cc, 'line', i)
+                    callee, full = callcols.get(cc, 'callee', i), callcols.get(cc, 'full', i)
+                else
+                    local call = calls[i]
+                    file, line, callee, full = call.file, call.line, call.callee, call.full
+                end
+                r.sites[#r.sites + 1] = ('%s:%d %s'):format(file or '?',
+                    (line or 0) + 1, callee or full or '?')
             end
         else
             -- no target, no refusal: a name the corpus simply doesn't define
             -- (stdlib/vendor) — outside the graph, not a broken promise. The
             -- resolver's disposition says WHICH gate placed it there.
             c.calls.unresolved = c.calls.unresolved + 1
-            local disp, why = M.disp(call)
+            local disp, why = M.disp_of(to, refused, dynamic, ext)
             local o = c.calls.outside
             o.by_disp[disp] = (o.by_disp[disp] or 0) + 1
             if why then o.by_why[why] = (o.by_why[why] or 0) + 1 end
