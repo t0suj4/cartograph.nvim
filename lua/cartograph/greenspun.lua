@@ -23,6 +23,7 @@ local argv = require 'cartograph.argv'
 local df = require 'cartograph.df'
 local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
+local callcols = require 'cartograph.callcols'
 
 local EVAL_VERBS = {
     eval = true, exec = true, load = true, loadstring = true, dofile = true,
@@ -174,10 +175,23 @@ function M.registries(data, opts)
     local known = fn_names(data)
     local coop = require 'cartograph.coop' -- tick() chunks this off the main
     local by_verb = {}                     -- loop when run under coop.run; else no-op
-    for i, c in callrec.each(data) do
-        if not c.dynamic then
-            by_verb[callrec.callee(c)] = by_verb[callrec.callee(c)] or {}
-            table.insert(by_verb[callrec.callee(c)], c)
+    -- INDEX FORM (brick 3 step c): the discovery scan reads callee/dynamic off
+    -- the columns directly (was reading callee 3× per call through the proxy —
+    -- the dominant greenspun proxy tax). by_verb keeps the call object for the
+    -- downstream export/key analysis; only the scan read is columnarised.
+    local view = data._callcols
+    local cc = view and view.cc
+    local allcalls = data.calls or {}
+    local ncalls = cc and cc.n or #allcalls
+    for i = 1, ncalls do
+        local c = allcalls[i]
+        local dynamic, callee
+        if cc then dynamic, callee = callcols.get(cc, 'dynamic', i), callcols.get(cc, 'callee', i)
+        else dynamic, callee = c.dynamic, c.callee end
+        if not dynamic and callee then
+            local bv = by_verb[callee]
+            if not bv then bv = {}; by_verb[callee] = bv end
+            bv[#bv + 1] = c
         end
         if i % 8192 == 0 then coop.tick() end
     end
@@ -501,13 +515,23 @@ local function callee_index(data)
     local idx = CALLEE_IDX[data]
     if not idx then
         idx = {}
-        for i, c in callrec.each(data) do
-            if callrec.callee(c) then
-                local b = idx[callrec.callee(c)]; if not b then b = {}; idx[callrec.callee(c)] = b end
+        -- INDEX FORM (brick 3 step c): read callee/full off the columns once each
+        -- (was 2-3× per call through the proxy). The shared index behind
+        -- matching_calls → registry-audit / pair-audit.
+        local view = data._callcols
+        local cc = view and view.cc
+        local allcalls = data.calls or {}
+        local ncalls = cc and cc.n or #allcalls
+        for i = 1, ncalls do
+            local callee, full
+            if cc then callee, full = callcols.get(cc, 'callee', i), callcols.get(cc, 'full', i)
+            else local c = allcalls[i]; callee, full = c.callee, c.full end
+            if callee then
+                local b = idx[callee]; if not b then b = {}; idx[callee] = b end
                 b[#b + 1] = i
             end
-            if callrec.full(c) and callrec.full(c) ~= callrec.callee(c) then
-                local b = idx[callrec.full(c)]; if not b then b = {}; idx[callrec.full(c)] = b end
+            if full and full ~= callee then
+                local b = idx[full]; if not b then b = {}; idx[full] = b end
                 b[#b + 1] = i
             end
         end
