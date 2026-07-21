@@ -260,6 +260,86 @@ function Fold:string_bytes()
     return total
 end
 
+-- ── finalize: interned columns → sorted Fold (the SHARED tail) ───────────
+-- Both M.build (wide data → fold) and M.merge (fold list → fold) produce the
+-- same intermediate — a fresh interner `it` plus parallel 1-based columns
+-- subj/pred/obj/flag[1..m] over its node space, emit-row-keyed sparse payloads
+-- gpe/fde, and the field-name array fnames — then hand it here. finalize owns
+-- the O(n+m) counting sort (by-subject offsets + by-object transpose), the
+-- serialization freeze, and the Fold object. Keeping it single-sourced is what
+-- makes merge a CONCAT primitive: re-run the identical finalize on unioned
+-- columns and a merged fold is by construction slice-parity with a monolithic
+-- build of the same rows (the record-fold arc step-5 gate).
+local function finalize(it, subj, pred, obj, flag, m, gpe, fde, fnames,
+    SENTINEL, skipped_edge, skipped_refused)
+    local n = it.count()
+
+    -- by-subject: counting sort on subj → offsets + a stable grouping. We
+    -- sort the fact rows into subject order so a subject's rows are one
+    -- contiguous slice (offsets only). Keeps subj/pred/obj aligned.
+    local off = {}
+    for i = 0, n do off[i] = 0 end
+    for k = 1, m do off[subj[k] + 1] = off[subj[k] + 1] + 1 end
+    for i = 1, n do off[i] = off[i] + off[i - 1] end
+    local order, cur = {}, {}
+    for i = 0, n do cur[i] = off[i] end
+    for k = 1, m do
+        local u = subj[k]
+        order[cur[u] + 1] = k   -- 1-based fact row at 0-based slot cur[u]
+        cur[u] = cur[u] + 1
+    end
+    -- permute the columns into subject order (so subj_span reads directly);
+    -- the sparse payloads ride the same permutation, slot-keyed
+    local s2, p2, o2, f2 = {}, {}, {}, {}
+    local gpr, fldr
+    for slot = 1, m do
+        local k = order[slot]
+        s2[slot] = subj[k]; p2[slot] = pred[k]; o2[slot] = obj[k]; f2[slot] = flag[k]
+        local g = gpe[k]
+        if g then
+            if not gpr then gpr = {} end
+            gpr[slot] = g
+        end
+        local fd = fde[k]
+        if fd then
+            if not fldr then fldr = {} end
+            fldr[slot] = fd
+        end
+    end
+    subj, pred, obj, flag = s2, p2, o2, f2
+
+    -- by-object: transpose — offsets over obj + a permutation of rows
+    local ooff = {}
+    for i = 0, n do ooff[i] = 0 end
+    for k = 1, m do ooff[obj[k] + 1] = ooff[obj[k] + 1] + 1 end
+    for i = 1, n do ooff[i] = ooff[i] + ooff[i - 1] end
+    local perm, ocur = {}, {}
+    for i = 0, n do ocur[i] = ooff[i] end
+    for k = 1, m do
+        local v = obj[k]
+        perm[ocur[v] + 1] = k - 1  -- store 0-based fact row
+        ocur[v] = ocur[v] + 1
+    end
+
+    -- freeze offsets as u32 byte strings (serialization-native), with
+    -- closures over them; columns stay Lua arrays for now (the row explosion
+    -- the memo warns about is argv/statement detail, not these 3 columns)
+    local off_s = pack_u32_off(off, n + 1)
+    local ooff_s = pack_u32_off(ooff, n + 1)
+    local perm_s = pack_u32(perm, m)
+
+    return setmetatable({
+        n = n, m = m, it = it, names = it.list,
+        subj = subj, pred = pred, obj = obj, flag = flag,
+        gpr = gpr, fldr = fldr, fnames = fnames,
+        sentinel = SENTINEL,
+        skipped_edge = skipped_edge, skipped_refused = skipped_refused,
+        _so = u32_reader(off_s), _oo = u32_reader(ooff_s),
+        _perm = u32_reader(perm_s),
+        _off_s = off_s, _ooff_s = ooff_s, _perm_s = perm_s,
+    }, Fold)
+end
+
 -- ── build: wide data → folded triple table ──────────────────────────────
 function M.build(data)
     local it = csr.interner()
@@ -332,73 +412,76 @@ function M.build(data)
         end
     end
 
-    local n = it.count()
+    return finalize(it, subj, pred, obj, flag, m, gpe, fde, fnames,
+        SENTINEL, skipped_edge, skipped_refused)
+end
 
-    -- by-subject: counting sort on subj → offsets + a stable grouping. We
-    -- sort the fact rows into subject order so a subject's rows are one
-    -- contiguous slice (offsets only). Keeps subj/pred/obj aligned.
-    local off = {}
-    for i = 0, n do off[i] = 0 end
-    for k = 1, m do off[subj[k] + 1] = off[subj[k] + 1] + 1 end
-    for i = 1, n do off[i] = off[i] + off[i - 1] end
-    local order, cur = {}, {}
-    for i = 0, n do cur[i] = off[i] end
-    for k = 1, m do
-        local u = subj[k]
-        order[cur[u] + 1] = k   -- 1-based fact row at 0-based slot cur[u]
-        cur[u] = cur[u] + 1
+-- ── merge: fold list → one fold (the CONCAT primitive, arc step 5) ───────
+-- The de-risking first cut of folded-segment interchange. Independently built
+-- folds (e.g. one per extraction chunk) are UNIONED into a whole-graph fold
+-- WITHOUT ever re-touching the wide store: union the node interners (a name
+-- shared across chunks interns once, isolated nodes survive), remap each fold's
+-- subj/obj — and the packed field-name ids inside fldr — into the merged node/
+-- fname space, CONCATENATE the columns, and re-run the SAME finalize(). The
+-- output is by construction slice-parity with M.build(concat of the same wide
+-- data): identical rows, identical counting sort. This alone does NOT lower the
+-- parent-merge PEAK (steps 2-4 must feed record columns worker-side first); it
+-- is the foundation + the parity proof the peak win layers on ([[cartograph-
+-- record-fold-arc]] step 5, [[cartograph-fold-core]] merge lattice).
+function M.merge(folds)
+    local it = csr.interner()
+    -- intern every node NAME from every fold first: isolated nodes survive and
+    -- ids stay in stable emission order (a name in two folds → one merged id).
+    for _, fd in ipairs(folds) do
+        for _, name in ipairs(fd.names) do it.id(name) end
     end
-    -- permute the columns into subject order (so subj_span reads directly);
-    -- the sparse payloads ride the same permutation, slot-keyed
-    local s2, p2, o2, f2 = {}, {}, {}, {}
-    local gpr, fldr
-    for slot = 1, m do
-        local k = order[slot]
-        s2[slot] = subj[k]; p2[slot] = pred[k]; o2[slot] = obj[k]; f2[slot] = flag[k]
-        local g = gpe[k]
-        if g then
-            if not gpr then gpr = {} end
-            gpr[slot] = g
+    local SENTINEL = it.id('\0frontier')
+
+    local subj, pred, obj, flag, m = {}, {}, {}, {}, 0
+    local gpe, fde = {}, {}          -- emit-row-keyed sparse payloads (as build)
+    local fni, fnames = {}, {}       -- merged field-name intern
+    local skipped_edge, skipped_refused = 0, 0
+
+    for _, fd in ipairs(folds) do
+        local names = fd.names
+        for r = 1, fd.m do
+            m = m + 1
+            subj[m] = it.id(names[fd.subj[r] + 1])
+            pred[m] = fd.pred[r]
+            obj[m]  = it.id(names[fd.obj[r] + 1])
+            flag[m] = fd.flag[r]
+            if fd.gpr and fd.gpr[r] then gpe[m] = fd.gpr[r] end
+            local packed = fd.fldr and fd.fldr[r]
+            if packed then
+                -- re-pack the per-field records into the MERGED fname space:
+                -- each 5-byte record is LE-u32 fname-id + u8 mode; remap the id
+                local parts = {}
+                for i = 1, #packed, 5 do
+                    local a, b, c2, d, mode = byte(packed, i, i + 4)
+                    local fname = fd.fnames[a + b * 256 + c2 * 65536 + d * 16777216]
+                    local fid = fni[fname]
+                    if not fid then
+                        fid = #fnames + 1
+                        fnames[fid] = fname
+                        fni[fname] = fid
+                    end
+                    local lo = fid % 65536
+                    parts[#parts + 1] = char(lo % 256,
+                        (lo - lo % 256) / 256,
+                        (fid - lo) / 65536 % 256,
+                        (fid - fid % 16777216) / 16777216 % 256,
+                        mode % 256)
+                end
+                table.sort(parts) -- deterministic, as build
+                fde[m] = table.concat(parts)
+            end
         end
-        local fd = fde[k]
-        if fd then
-            if not fldr then fldr = {} end
-            fldr[slot] = fd
-        end
-    end
-    subj, pred, obj, flag = s2, p2, o2, f2
-
-    -- by-object: transpose — offsets over obj + a permutation of rows
-    local ooff = {}
-    for i = 0, n do ooff[i] = 0 end
-    for k = 1, m do ooff[obj[k] + 1] = ooff[obj[k] + 1] + 1 end
-    for i = 1, n do ooff[i] = ooff[i] + ooff[i - 1] end
-    local perm, ocur = {}, {}
-    for i = 0, n do ocur[i] = ooff[i] end
-    for k = 1, m do
-        local v = obj[k]
-        perm[ocur[v] + 1] = k - 1  -- store 0-based fact row
-        ocur[v] = ocur[v] + 1
+        skipped_edge = skipped_edge + (fd.skipped_edge or 0)
+        skipped_refused = skipped_refused + (fd.skipped_refused or 0)
     end
 
-    -- freeze offsets as u32 byte strings (serialization-native), with
-    -- closures over them; columns stay Lua arrays for now (the row explosion
-    -- the memo warns about is argv/statement detail, not these 3 columns)
-    local off_s = pack_u32_off(off, n + 1)
-    local ooff_s = pack_u32_off(ooff, n + 1)
-    local perm_s = pack_u32(perm, m)
-
-    local self = setmetatable({
-        n = n, m = m, it = it, names = it.list,
-        subj = subj, pred = pred, obj = obj, flag = flag,
-        gpr = gpr, fldr = fldr, fnames = fnames,
-        sentinel = SENTINEL,
-        skipped_edge = skipped_edge, skipped_refused = skipped_refused,
-        _so = u32_reader(off_s), _oo = u32_reader(ooff_s),
-        _perm = u32_reader(perm_s),
-        _off_s = off_s, _ooff_s = ooff_s, _perm_s = perm_s,
-    }, Fold)
-    return self
+    return finalize(it, subj, pred, obj, flag, m, gpe, fde, fnames,
+        SENTINEL, skipped_edge, skipped_refused)
 end
 
 return M

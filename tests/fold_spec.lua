@@ -124,3 +124,116 @@ test('fold: the flags column keeps tier and refusal rule', function ()
     eq({ 'aperture' }, f:refusals(A), "a's frontier rule preserved")
     eq({ 'ambiguous' }, f:refusals(B))
 end)
+
+-- ── merge: the concat primitive (record-fold arc step 5) ─────────────────
+-- Two chunks with OVERLAPPING-but-differently-ordered node sets (a,b in both;
+-- c only in B; iso/v/m.lua only in A) so the merge exercises interner union +
+-- id remap, not an identity map. The merged fold must be slice-parity with a
+-- monolithic build over the concatenated wide data.
+local CA = {
+    nodes = { node('m.lua', 'module'), node('a'), node('b'),
+        node('v', 'var'), node('iso') },
+    edges = {
+        { from = 'a', to = 'b', kind = 'ref', at = { R } },
+        { from = 'a', to = 'v', kind = 'use', rw = 2, at = { R } }, -- write
+        { from = 'm.lua', to = 'b', kind = 'reg', at = { R } },
+        { from = 'm.lua', to = 'other.lua', kind = 'import' },
+    },
+    calls = {
+        { callee = 'mystery', fn = 'a', file = 'm.lua', line = 2,
+            refused = { rule = 'ambiguous' } },
+    },
+}
+local CB = {
+    nodes = { node('c'), node('a'), node('b') },
+    edges = {
+        { from = 'a', to = 'c', kind = 'ref', inferred = true, at = { R } }, -- ~
+        { from = 'b', to = 'c', kind = 'ref', at = { R } },
+        { from = 'c', to = 'c', kind = 'ref', at = { R } },   -- self (recursion)
+    },
+    calls = {
+        { callee = 'y', fn = 'b', file = 'm.lua', line = 3,
+            refused = { rule = 'blocked' } },
+    },
+}
+local function concat(...)
+    local out = {}
+    for _, t in ipairs({ ... }) do
+        for _, x in ipairs(t) do out[#out + 1] = x end
+    end
+    return out
+end
+local MONO = {
+    nodes = concat(CA.nodes, CB.nodes),   -- a,b duplicated (interner dedups)
+    edges = concat(CA.edges, CB.edges),
+    calls = concat(CA.calls, CB.calls),
+}
+
+-- canonicalize a fold by NAME (id spaces differ across folds): every node's
+-- forward/backward slices per predicate + ref tiers + refusals + rw.
+local function canon(f)
+    local out = {}
+    for id0 = 0, f.n - 1 do
+        local rec = { fwd = {}, bwd = {}, tier = {}, rw = {}, refusals = {} }
+        for pname, p in pairs(fold.PRED) do
+            local fwd = {}
+            for _, o in ipairs(f:out(id0, p)) do fwd[#fwd + 1] = f.names[o + 1] end
+            table.sort(fwd); rec.fwd[pname] = fwd
+            local bwd = {}
+            for _, s in ipairs(f:incoming(id0, p)) do bwd[#bwd + 1] = f.names[s + 1] end
+            table.sort(bwd); rec.bwd[pname] = bwd
+        end
+        for _, o in ipairs(f:out(id0, fold.PRED.ref)) do
+            rec.tier[f.names[o + 1]] = f:tier(id0, o, fold.PRED.ref)
+        end
+        for _, o in ipairs(f:out(id0, fold.PRED.use)) do
+            rec.rw[f.names[o + 1]] = f:rw(id0, o)
+        end
+        rec.refusals = f:refusals(id0); table.sort(rec.refusals)
+        out[f.names[id0 + 1]] = rec
+    end
+    return out
+end
+
+test('fold.merge: slice-parity with a monolithic build of the concat', function ()
+    local merged = fold.merge({ fold.build(CA), fold.build(CB) })
+    local mono = fold.build(MONO)
+    eq(mono.n, merged.n, 'same node count (interner union)')
+    eq(mono.m, merged.m, 'same fact count (column concat)')
+    eq(canon(mono), canon(merged))
+end)
+
+test('fold.merge: order-independent and idempotent under a single chunk', function ()
+    -- a single-fold merge equals the fold itself; swapping chunk order is parity
+    local solo = fold.merge({ fold.build(CA) })
+    eq(canon(fold.build(CA)), canon(solo))
+    local ab = fold.merge({ fold.build(CA), fold.build(CB) })
+    local ba = fold.merge({ fold.build(CB), fold.build(CA) })
+    eq(canon(ab), canon(ba))
+end)
+
+test('fold.merge: field-record ids remap into the merged fname space', function ()
+    -- fldr carries packed field-name ids relative to EACH fold's fnames; the
+    -- merge must re-intern them or flds() reads the wrong names post-union.
+    local FA = {
+        nodes = { node('a'), node('t', 'var') },
+        edges = { { from = 'a', to = 't', kind = 'use',
+            flds = { x = 1, y = 2 }, at = { R } } },
+    }
+    local FB = {
+        nodes = { node('b'), node('u', 'var') },
+        edges = { { from = 'b', to = 'u', kind = 'use',
+            flds = { z = 3, x = 2 }, at = { R } } }, -- x shared name, diff mode
+    }
+    local merged = fold.merge({ fold.build(FA), fold.build(FB) })
+    local mono = fold.build({
+        nodes = concat(FA.nodes, FB.nodes),
+        edges = concat(FA.edges, FB.edges),
+    })
+    eq(mono:flds(mono.it.get('a'), mono.it.get('t')),
+        merged:flds(merged.it.get('a'), merged.it.get('t')))
+    eq(mono:flds(mono.it.get('b'), mono.it.get('u')),
+        merged:flds(merged.it.get('b'), merged.it.get('u')))
+    eq({ x = 1, y = 2 }, merged:flds(merged.it.get('a'), merged.it.get('t')))
+    eq({ z = 3, x = 2 }, merged:flds(merged.it.get('b'), merged.it.get('u')))
+end)
