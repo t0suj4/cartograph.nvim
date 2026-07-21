@@ -1,3 +1,4 @@
+local callrec = require 'cartograph.callrec'
 -- The epistemic ladder, as a readable distribution. Every call sits on
 -- a rung by HOW its target is known, and the ladder answers "how much
 -- of this can I trust" — for one function's outgoing calls, or the
@@ -121,12 +122,12 @@ function M.narrowable(store)
             local recv, member = c.full:match('^([%w_]+)[.:]([%w_]+)$')
             if recv and member then
                 local class = (recv == 'self' or recv == 'this') and 'self'
-                    or (alias[c.file] and alias[c.file][recv]) and 'alias'
+                    or (alias[callrec.file(c)] and alias[callrec.file(c)][recv]) and 'alias'
                     or (c.fn and fn_locals(c.fn)[recv]) and 'local'
                     or 'unknown'
-                local key = c.file .. '\31' .. recv .. '\31' .. class
+                local key = callrec.file(c) .. '\31' .. recv .. '\31' .. class
                 local a = agg[key]
-                if not a then a = { file = c.file, recv = recv, class = class,
+                if not a then a = { file = callrec.file(c), recv = recv, class = class,
                     calls = 0, members = {} }; agg[key] = a end
                 a.calls = a.calls + 1
                 a.members[member] = true

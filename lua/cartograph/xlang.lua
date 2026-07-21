@@ -44,6 +44,7 @@ local function verb_matches(c, verb)
 end
 
 local argv = require 'cartograph.argv'
+local callrec = require 'cartograph.callrec'
 
 local function logical_arg(c, i)
     local j = i + (c.method and 1 or 0)
@@ -235,11 +236,11 @@ function M.link(data, bindings)
             for _, c in ipairs(data.calls or {}) do
                 local match
                 if pin.callee then
-                    match = c.file == pin.file and c.callee == pin.callee
+                    match = callrec.file(c) == pin.file and c.callee == pin.callee
                         and (fnids and (c.fn and fnids[c.fn] or false)
                             or (not fnids and not c.fn)) -- fn-less = top level
                 else -- legacy line anchor
-                    match = c.file == pin.file and c.line == pin.line - 1
+                    match = callrec.file(c) == pin.file and c.line == pin.line - 1
                 end
                 if match then
                     c.to = target.id

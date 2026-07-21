@@ -76,6 +76,11 @@ function Scan.new(src, file, spec)
         src = src, file = file,
         calls = spec.calls or {},    -- callee name -> 'list'|'elem'
         fields = spec.fields or {},  -- field name  -> 'list'|'elem'|'any'
+        rooted = spec.rooted or {},  -- 'base.seg' -> kind: ROOTED field producer
+                                     -- (base text must match) — scopes the taint
+                                     -- to the real list (`data.calls`), killing
+                                     -- the bare-name over-approximation (`.calls`
+                                     -- on an unrelated counter record)
         bless = spec.bless or {},    -- accessor names: passing there = SEAMED
         frames = {},                 -- lexical scope stack: {name -> taint|false}
         seeds = 0,
@@ -83,6 +88,21 @@ function Scan.new(src, file, spec)
         escapes = {},                -- { line, col, kind, via, detail }
         seamed = {},                 -- { line, col, via, detail } — already migrated
     }, Scan)
+end
+
+-- kind of a field-producer index expr, honoring ROOTED specs (`base.seg`, the
+-- base text must match) BEFORE the bare-name match (any `.seg`). Rooting is
+-- what tells `data.calls` (a producer) from `counter.calls` (an unrelated field
+-- of the same name) — the over-approximation the bare spec can't avoid.
+function Scan:field_kind(idx, seg)
+    if next(self.rooted) then
+        local base = idx:named_child(0)
+        if base then
+            local rk = self.rooted[node_text(base, self.src):gsub('%s+', '') .. '.' .. seg]
+            if rk then return rk end
+        end
+    end
+    return self.fields[seg]
 end
 
 function Scan:lookup(name)
@@ -131,7 +151,7 @@ function Scan:taintof(expr)
     end
     if IDX[t] then
         local seg = index_segment(expr, self.src)
-        local k = self.fields[seg]
+        local k = self:field_kind(expr, seg)
         if k then return k end
         local base = self:taintof(expr:named_child(0))
         local bk = kindof(base)
@@ -186,14 +206,18 @@ function Scan:use(node, taint, via)
         local d = { line = l, col = c, path = table.concat(path, '.'), via = via }
         if pre then
             d.pre = true -- prefix taint: the chain is PARTIAL, never rewrite
-        elseif #chain >= 3 then
-            -- rewrite payload: full-chain extent + the stem (chain minus the
-            -- last two segments = the expression whose value the accessor
-            -- takes: `sites[1].start.line` -> ext of the whole, stem `sites[1]`
+        else
+            -- rewrite payload: full-chain extent + the STEM the accessor takes
+            -- (the expression before the last K path segments, for a K-segment
+            -- accessor suffix). Two arities are rewritable and we emit both:
+            --   1-seg — a RECORD FIELD accessor: `c.file` -> `cr.file(c)`
+            --           (stem1 = `c`, the whole chain minus the last segment)
+            --   2-seg — a SUB-PATH accessor: `r.start.line` -> `sl(r)`
+            --           (stem2 = `r`, the chain minus the last two segments)
             local top = chain[#chain]
-            local sl2, sc2, el2, ec2 = top:range()
-            d.ext = { sl2, sc2, el2, ec2 }
-            d.stem = node_text(chain[#chain - 2], src)
+            d.ext = { top:range() }
+            if #chain >= 2 then d.stem1 = node_text(chain[#chain - 1], src) end
+            if #chain >= 3 then d.stem2 = node_text(chain[#chain - 2], src) end
         end
         self.derefs[#self.derefs + 1] = d
         return
@@ -380,7 +404,7 @@ function Scan:walk(node, pending)
     if IDX[t] then
         -- a producer FIELD read in place: `u.at` / `c.at.start.line`
         local seg = index_segment(node, self.src)
-        local k = self.fields[seg]
+        local k = self:field_kind(node, seg)
         if k then
             self.seeds = self.seeds + 1
             self:use(node, k, 'field:' .. seg)
@@ -437,7 +461,7 @@ function M.roster(root, files, spec)
                     by_path[d.path] = (by_path[d.path] or 0) + 1
                     sites[#sites + 1] = { file = f, line = d.line, col = d.col,
                         path = d.path, via = d.via,
-                        ext = d.ext, stem = d.stem, pre = d.pre }
+                        ext = d.ext, stem1 = d.stem1, stem2 = d.stem2, pre = d.pre }
                 end
                 for _, e in ipairs(r.escapes) do
                     frontier[#frontier + 1] = { file = f, line = e.line, col = e.col,

@@ -70,15 +70,29 @@ end)
 test('consumers: deref rows carry the rewrite payload (ext + stem)', function ()
     local r = consumers.scan(SRC, 'fix.lua', SPEC)
     local byp = {}
-    for _, d in ipairs(r.derefs) do byp[d.path .. '|' .. (d.stem or '?')] = d end
+    for _, d in ipairs(r.derefs) do byp[d.path .. '|' .. (d.stem2 or '?')] = d end
     local d = byp['end.char|r']            -- r['end'].char
     ok(d and d.ext and d.ext[1] == d.ext[3], 'bracket-chain ext, single line')
-    ok(byp['[].start.line|sites[1]'], 'list-index stem is the indexed expr')
+    ok(byp['[].start.line|sites[1]'], 'list-index stem2 (2-seg) is the indexed expr')
     for _, x in ipairs(r.derefs) do
         if x.path == 'start.line' and x.via == 'var:pos' then
-            ok(x.pre and not x.stem, 'prefix-taint row marked pre, no stem: never rewritten')
+            ok(x.pre and not x.stem2, 'prefix-taint row marked pre, no stem: never rewritten')
         end
     end
+end)
+
+test('consumers: rooted producer scopes the taint; single-seg deref → stem1', function ()
+    local src = table.concat({
+        'for _, c in ipairs(data.calls) do local x = c.file end',
+        'for _, d in ipairs(counter.calls) do local z = d.file end',
+    }, '\n')
+    local r = consumers.scan(src, 'x.lua', { rooted = { ['data.calls'] = 'list' } })
+    local nfile, stem1
+    for _, dr in ipairs(r.derefs) do
+        if dr.path == 'file' then nfile = (nfile or 0) + 1; stem1 = dr.stem1 end
+    end
+    eq(1, nfile, 'rooted data.calls taints ONLY its own loop, not counter.calls')
+    eq('c', stem1, 'single-segment stem1 = the record → rewrites to acc(c)')
 end)
 
 test('consumers: the escape frontier is honest and complete', function ()

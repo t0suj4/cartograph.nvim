@@ -17,6 +17,7 @@
 local M = {}
 local argv = require 'cartograph.argv'
 local atr = require 'cartograph.at'
+local callrec = require 'cartograph.callrec'
 
 local MAXDEPTH = 5   -- table nesting we descend when snapshotting a value
 local MAXN     = 300 -- entries per table (dispatch tables can be large)
@@ -164,14 +165,14 @@ function M.resolve_requires(data)
     end
     local added = 0
     for _, c in ipairs(data.calls or {}) do
-        local a1 = c.callee == 'require' and c.file and argv.str(c, 1)
+        local a1 = c.callee == 'require' and callrec.file(c) and argv.str(c, 1)
         if a1 and a1 ~= '' then
             local key = mod2key[a1]
-            if key and key ~= c.file and not have[c.file .. '\31' .. key] then
-                data.edges[#data.edges + 1] = { from = c.file, to = key,
+            if key and key ~= callrec.file(c) and not have[callrec.file(c) .. '\31' .. key] then
+                data.edges[#data.edges + 1] = { from = callrec.file(c), to = key,
                     kind = 'import', proven = true, mod = a1,
                     at = c.at }
-                have[c.file .. '\31' .. key] = true
+                have[callrec.file(c) .. '\31' .. key] = true
                 added = added + 1
             end
         end
@@ -306,10 +307,10 @@ function M.registrations(data)
         local n = c.full or c.callee or ''
         local a1, a2 = argv.str(c, 1), argv.str(c, 2)
         if n:find('nvim_create_user_command', 1, true) and a1 ~= '' then
-            cmds[a1] = cmds[a1] or c.file
+            cmds[a1] = cmds[a1] or callrec.file(c)
         elseif n:find('keymap.set', 1, true) and a2 ~= '' then
             local mode = a1 ~= '' and a1 or 'n'
-            maps[mode .. '\31' .. norm_lhs(a2)] = { lhs = a2, mode = mode, file = c.file }
+            maps[mode .. '\31' .. norm_lhs(a2)] = { lhs = a2, mode = mode, file = callrec.file(c) }
         end
     end
     local live_cmd = vim.api.nvim_get_commands({})

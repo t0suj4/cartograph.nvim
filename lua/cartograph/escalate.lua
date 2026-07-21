@@ -17,6 +17,7 @@
 -- is the work-list; per-function saturation is the priority lens.
 
 local atr = require 'cartograph.at'
+local callrec = require 'cartograph.callrec'
 local M = {}
 
 -- ANTI-THRASH CACHE (generation-keyed). c.escalated marks a hedge the oracle
@@ -66,7 +67,7 @@ end
 function M.worklist(data, sat)
     local work = {}
     for _, c in ipairs(data.calls or {}) do
-        if c.file and c.file:match('%.lua$') and not c.dynamic and not c.escalated
+        if callrec.file(c) and callrec.file(c):match('%.lua$') and not c.dynamic and not c.escalated
             and (not sat or (c.fn and sat[c.fn])) then
             if (c.to and c.inferred) or not c.to then
                 work[#work + 1] = c

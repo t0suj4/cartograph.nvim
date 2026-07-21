@@ -7,33 +7,52 @@
 --       [--bless fn,fn,...] [--full] \
 --       [--rw suffix=acc,...] [--rwmod module:binding] [--apply]
 --
--- e.g. the at display seam, roster + planned rewrites (add --apply to write):
+-- A DOTTED --field is a ROOTED producer (`--field data.calls`): the taint is
+-- scoped to that exact base, so a same-named field on an unrelated record
+-- (`counter.calls`) is NOT tainted — the fix for name-match over-approximation.
+--
+-- e.g. the at display seam (2-segment sub-path accessors — stem is the range):
 --   nvim --headless -u NONE -l tools/consumers.lua . \
 --       --call occurrences --field at --bless sl,sc,el,ec,oneline \
 --       --rw start.line=sl,start.char=sc,end.line=el,end.char=ec \
 --       --rwmod cartograph.at:atr
 --
+-- e.g. the CALL-RECORD read seam (1-segment record-field accessors — stem is
+-- the record; record-fold arc step 2, [[cartograph-record-fold-arc]]):
+--   nvim --headless -u NONE -l tools/consumers.lua . \
+--       --field data.calls=list --field store.data.calls=list \
+--       --bless file,callee,full,method,line \
+--       --rw file=file,callee=callee,full=full,method=method,line=line \
+--       --rwmod cartograph.callrec:callrec --apply
+--
 -- The rewrite is deliberately narrow: a deref whose path ENDS in a mapped
--- two-segment suffix, with a physical chain (no prefix-taint partials),
--- single-line, in a file that doesn't OWN the representation (providers/,
--- store, fold, csr, argv, detail and the accessor module are skipped).
+-- suffix (1- OR 2-segment), physical chain (no prefix-taint partials), single-
+-- line, in a file that doesn't OWN the representation (providers/, store, fold,
+-- csr, argv, detail, cache, refresh, parallel, validate, refused, and the
+-- accessor module are skipped). INTERPROCEDURAL escapes (the record passed into
+-- a helper, `x.c.file`) are honest FRONTIER rows, not rewritten — hand residue.
 
 vim.opt.rtp:prepend('.')
 local consumers = require 'cartograph.consumers'
 
-local root, spec, full = nil, { calls = {}, fields = {}, bless = {} }, false
+local root, spec, full = nil, { calls = {}, fields = {}, rooted = {}, bless = {} }, false
 local rwmap, rwmod, rwbind, apply = nil, nil, nil, false
-local RWSKIP = { -- representation owners: the fold swaps their internals
+local RWSKIP = { -- representation owners: they save/load/merge/validate/intern
+    -- the RAW records (the producer side the fold swaps), so they read raw
     '^lua/cartograph/providers/', 'store%.lua$', 'fold%.lua$', 'csr%.lua$',
     'argv%.lua$', 'detail%.lua$', 'at%.lua$',
+    'cache%.lua$', 'refresh%.lua$', 'parallel%.lua$', 'validate%.lua$', 'refused%.lua$',
 }
 local i = 1
 while i <= #_G.arg do
     local a = _G.arg[i]
     if a == '--call' or a == '--field' then
         i = i + 1
-        local name, kind = _G.arg[i]:match('^([%w_]+)=?(%a*)$')
+        -- a dotted name (`data.calls`) = a ROOTED field producer: scope the
+        -- taint to that exact base, not any `.calls` (kills over-approximation)
+        local name, kind = _G.arg[i]:match('^([%w_.]+)=?(%a*)$')
         if a == '--call' then spec.calls[name] = kind ~= '' and kind or 'list'
+        elseif name:find('.', 1, true) then spec.rooted[name] = kind ~= '' and kind or 'list'
         else spec.fields[name] = kind ~= '' and kind or 'any' end
     elseif a == '--bless' then
         i = i + 1
@@ -50,7 +69,7 @@ while i <= #_G.arg do
     else root = a end
     i = i + 1
 end
-if not root or (not next(spec.calls) and not next(spec.fields)) then
+if not root or (not next(spec.calls) and not next(spec.fields) and not next(spec.rooted)) then
     print('usage: ... <root> [--call name[=kind]] [--field name[=kind]] [--full]')
     vim.cmd('cquit 1')
 end
@@ -101,22 +120,27 @@ end
 if rwmap and rwmod and rwbind then
     local edits, skipped = {}, {} -- edits[file] = { {ext, to} }
     for _, s in ipairs(r.sites) do
-        local suf = s.path:match('([%w_]+%.[%w_]+)$')
-        local acc = suf and rwmap[suf]
+        -- prefer a 2-segment suffix (sub-path accessor, stem2); fall back to a
+        -- 1-segment suffix (record-field accessor, stem1) — e.g. `c.file`
+        local suf2 = s.path:match('([%w_]+%.[%w_]+)$')
+        local suf1 = s.path:match('([%w_]+)$')
+        local acc, stem
+        if suf2 and rwmap[suf2] then acc, stem = rwmap[suf2], s.stem2
+        elseif suf1 and rwmap[suf1] then acc, stem = rwmap[suf1], s.stem1 end
         if acc then
             local skip
             for _, pat in ipairs(RWSKIP) do
                 if s.file:find(pat) then skip = 'owner file' break end
             end
             if not skip and s.pre then skip = 'prefix taint (partial chain)' end
-            if not skip and not (s.ext and s.stem) then skip = 'no extent' end
+            if not skip and not (s.ext and stem) then skip = 'no extent' end
             if not skip and s.ext[1] ~= s.ext[3] then skip = 'multi-line chain' end
             if skip then
                 skipped[#skipped + 1] = { s = s, why = skip }
             else
                 edits[s.file] = edits[s.file] or {}
                 table.insert(edits[s.file], { ext = s.ext,
-                    to = ('%s.%s(%s)'):format(rwbind, acc, s.stem) })
+                    to = ('%s.%s(%s)'):format(rwbind, acc, stem) })
             end
         end
     end

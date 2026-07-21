@@ -1,3 +1,4 @@
+local callrec = require 'cartograph.callrec'
 -- The CONFIRMED tier: runtime-observed ground truth. If cartograph can
 -- RUN the code it analyzes (self://loaded, factorio MCP, a live server),
 -- observed dispatch is the SOUND reference static resolution only
@@ -86,18 +87,18 @@ function M.diff(data, dispatch)
                 elseif mono then
                     -- static picked B, runtime only ever went to C — sound
                     findings[#findings + 1] = { kind = 'conflict',
-                        fn = c.fn, callee = c.callee, file = c.file,
+                        fn = c.fn, callee = c.callee, file = callrec.file(c),
                         line = c.line, static = c.to, runtime = rt }
                 else
                     findings[#findings + 1] = { kind = 'polymorphic',
-                        fn = c.fn, callee = c.callee, file = c.file,
+                        fn = c.fn, callee = c.callee, file = callrec.file(c),
                         line = c.line, static = c.to, runtime = rt }
                 end
             else
                 -- static refused/frontier; runtime resolved it
                 if mono then c.to, c.conf = rt[1], true end
                 findings[#findings + 1] = { kind = 'recovered',
-                    fn = c.fn, callee = c.callee, file = c.file,
+                    fn = c.fn, callee = c.callee, file = callrec.file(c),
                     line = c.line, static = nil, runtime = rt }
                 recovered = recovered + 1
             end

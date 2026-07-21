@@ -11,6 +11,7 @@
 local M = {}
 local argv = require 'cartograph.argv'
 local atr = require 'cartograph.at'
+local callrec = require 'cartograph.callrec'
 
 local function exported(n)
     if n.exported ~= nil then return n.exported end -- provider's verdict
@@ -167,7 +168,7 @@ local function swallowed_findings(store)
     local resolved_at = {}
     for _, c in ipairs(calls) do
         if c.to and not c.inferred then
-            local k = c.file .. ':' .. c.line
+            local k = callrec.file(c) .. ':' .. c.line
             resolved_at[k] = resolved_at[k] or {}
             table.insert(resolved_at[k], c)
         end
@@ -181,8 +182,8 @@ local function swallowed_findings(store)
             local recv = c.method and argv.at(c, 1)
             local file, line, fix, label
             if recv and recv.k == 'local' and recv.l then
-                file, line = c.file, recv.l
-                for _, g in ipairs(resolved_at[c.file .. ':' .. recv.l] or {}) do
+                file, line = callrec.file(c), recv.l
+                for _, g in ipairs(resolved_at[callrec.file(c) .. ':' .. recv.l] or {}) do
                     local gn = store.node(g.to)
                     if gn and class_of(gn.name) == class then
                         file, line = gn.file, atr.sl(gn.range)
@@ -198,7 +199,7 @@ local function swallowed_findings(store)
                     label = '---@type ' .. class
                 end
             else
-                file, line = c.file, c.line -- receiver isn't a simple local: no fix offered
+                file, line = callrec.file(c), c.line -- receiver isn't a simple local: no fix offered
             end
             local key = ('%s:%d:%s'):format(file, line, class)
             local s = sites[key]
@@ -241,9 +242,9 @@ local function load_order_findings(store)
         if c.top and c.to then
             local callee = store.node(c.to)
             local ci = callee and t.index[callee.file]
-            local fi = t.index[c.file]
+            local fi = t.index[callrec.file(c)]
             if ci and fi and ci > fi then
-                out[#out + 1] = { file = store.abs(c.file), line = c.line + 1,
+                out[#out + 1] = { file = store.abs(callrec.file(c)), line = c.line + 1,
                     message = ("load-time call to '%s', but %s loads later (#%d, this file is #%d)%s"):format(
                         callee.name, callee.file, ci, fi,
                         c.inferred and ' — name-matched' or '') }
@@ -288,7 +289,7 @@ local function load_order_findings(store)
             for _, c in ipairs(store.data.calls or {}) do
                 local who = c.top and not c.to and not own[c.callee] and sib[c.callee]
                 if who and not declared[who:lower()] then
-                    out[#out + 1] = { file = store.abs(c.file), line = c.line + 1,
+                    out[#out + 1] = { file = store.abs(callrec.file(c)), line = c.line + 1,
                         message = ("load-time call to '%s', defined by addon '%s' — undeclared dependency: load order is not guaranteed"):format(c.callee, who) }
                 end
             end
@@ -305,12 +306,12 @@ local function dynamic_findings(store)
     for _, c in ipairs(store.data.calls or {}) do
         if (c.dynamic or ((c.callee == 'call_user_func'
             or c.callee == 'call_user_func_array') and not c.to)) then
-            if not per[c.file] then
-                per[c.file] = { n = 0, line = c.line }
-                order[#order + 1] = c.file
+            if not per[callrec.file(c)] then
+                per[callrec.file(c)] = { n = 0, line = c.line }
+                order[#order + 1] = callrec.file(c)
             end
-            per[c.file].n = per[c.file].n + 1
-            per[c.file].line = math.min(per[c.file].line, c.line)
+            per[callrec.file(c)].n = per[callrec.file(c)].n + 1
+            per[callrec.file(c)].line = math.min(per[callrec.file(c)].line, c.line)
         end
     end
     local out = {}
@@ -664,7 +665,7 @@ local function silent_drop_findings(store)
                 seen[k] = true
                 local fn = store.node(c.fn)
                 out[#out + 1] = {
-                    file = fn and store.abs(fn.file) or (c.file and store.abs(c.file)) or '',
+                    file = fn and store.abs(fn.file) or (callrec.file(c) and store.abs(callrec.file(c))) or '',
                     line = c.at and at.sl(c.at) + 1 or ((c.line or 0) + 1),
                     message = ("call to local '%s' resolved to nothing and was not refused — a silent honesty gap (the local is a callable in scope: resolution neither linked it nor spoke a refusal)")
                         :format(c.callee),

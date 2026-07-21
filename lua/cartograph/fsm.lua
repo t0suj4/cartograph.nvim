@@ -12,6 +12,7 @@
 local M = {}
 local argv = require 'cartograph.argv'
 local atr = require 'cartograph.at'
+local callrec = require 'cartograph.callrec'
 
 local function var_by_name(store, name, no_data)
     -- NAME axis (indexed) instead of a full by_id scan; node order is stable
@@ -46,7 +47,7 @@ function M.bindings(store, cfg)
                 if hv and hv.k == 'func' and hv.to then
                     hid = store.node(hv.to) and hv.to -- inline fn, named by its key
                 elseif hv and hv.k == 'local' and hv.name then
-                    for _, n in ipairs(store.by_file[c.file] or {}) do
+                    for _, n in ipairs(store.by_file[callrec.file(c)] or {}) do
                         if n.kind == 'function' and n.name == hv.name then
                             hid = n.id
                             break

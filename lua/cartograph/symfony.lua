@@ -17,6 +17,7 @@
 
 local M = {}
 local argv = require 'cartograph.argv'
+local callrec = require 'cartograph.callrec'
 
 local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
 
@@ -316,7 +317,7 @@ function M.attach(data)
     for _, c in ipairs(data.calls or {}) do
         if LOOKUP[c.callee:match('([%w_]+)$') or ''] and c.fn
             and argv.str(c, 1) ~= '' then
-            link(c.fn, argv.str(c, 1), c.file, c.line)
+            link(c.fn, argv.str(c, 1), callrec.file(c), c.line)
         end
     end
 
