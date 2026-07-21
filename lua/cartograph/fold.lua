@@ -19,6 +19,7 @@
 
 local csr = require 'cartograph.csr'
 local tier = require 'cartograph.tier'
+local callcols = require 'cartograph.callcols'
 
 local M = {}
 
@@ -405,11 +406,25 @@ function M.build(data, shared_it)
     -- (top-level refusals have no subject to hang on — counted, not folded).
     -- The rule rides the flags nibble: an aperture frontier and an ambiguous
     -- one are DIFFERENT honesty, and the fold must keep the distinction.
-    for _, c in ipairs(data.calls or {}) do
-        if c.refused then
-            if c.fn then
-                local rule = M.RULE[c.refused.rule] or M.RULE.other
-                emit(c.fn, M.PRED.refused, '\0frontier', rule * RULE_SHIFT)
+    -- INDEX FORM (brick 3 step d): read refused off the residual + fn off its
+    -- column directly, skipping the per-call proxy dispatch (this loop touches
+    -- c.refused for EVERY call). fold OWNS the columnar rep, so it reads it raw.
+    local view = data._callcols
+    local cc, resid = view and view.cc, view and view.residual
+    local calls = data.calls or {}
+    local ncalls = cc and cc.n or #calls
+    for i = 1, ncalls do
+        local refused, fn
+        if cc then
+            local r = resid[i]; refused = r and r.refused
+            if refused then fn = callcols.get(cc, 'fn', i) end
+        else
+            local c = calls[i]; refused = c.refused; if refused then fn = c.fn end
+        end
+        if refused then
+            if fn then
+                local rule = M.RULE[refused.rule] or M.RULE.other
+                emit(fn, M.PRED.refused, '\0frontier', rule * RULE_SHIFT)
             else
                 skipped_refused = skipped_refused + 1
             end
