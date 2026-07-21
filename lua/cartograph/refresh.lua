@@ -16,6 +16,7 @@ local M = {}
 
 local refs = require 'cartograph.refs'
 local atr = require 'cartograph.at'
+local callrec = require 'cartograph.callrec'
 
 local function file_of(id)
     return id:match('^(.-)::') or id
@@ -184,16 +185,23 @@ function M.splice(data, rels, deleted)
     -- remap or reopen (to = nil -> relink retries against the new node set)
     local calls = {}
     for _, c in ipairs(data.calls or {}) do
-        if not (relset[c.file] or del[c.file]) then
-            if c.to and gone(c.to) then
-                c.to = remap[c.to]
-                dirty[c.file] = true
+        local file = callrec.file(c)
+        if not (relset[file] or del[file]) then
+            local to, fn = callrec.to(c), callrec.fn(c)
+            local remap_to = to and gone(to)
+            local remap_fn = fn and gone(fn)
+            if remap_to or remap_fn then
+                -- id remap must REBUILD, not mutate: fn is an immutable column
+                -- under the columnar store. Materialize an editable copy, remap
+                -- on it, and let the copy replace the call in the fresh list.
+                local nc = callrec.record(c)
+                if remap_to then nc.to = remap[to] end
+                if remap_fn then nc.fn = remap[fn] end
+                dirty[file] = true
+                calls[#calls + 1] = nc
+            else
+                calls[#calls + 1] = c
             end
-            if c.fn and gone(c.fn) then
-                c.fn = remap[c.fn]
-                dirty[c.file] = true
-            end
-            calls[#calls + 1] = c
         end
     end
     for _, c in ipairs(mini.calls or {}) do calls[#calls + 1] = c end

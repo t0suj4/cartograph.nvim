@@ -45,6 +45,26 @@ function M.prov(c) return c.prov end
 -- escalate/xlang oracles) go through here so the swap needs no further edits.
 function M.set(c, field, v) c[field] = v end
 
+-- MATERIALIZE a call to a plain, mutable record — the representation-agnostic
+-- "give me an editable copy" an OWNER needs when it must REBUILD rather than
+-- mutate an immutable column (refresh's id-remap) or ITERATE the whole field set
+-- (validate's whitelist check — pairs() over a proxy sees no fields). For the
+-- record representation this is a shallow copy; for a callcols proxy row it
+-- reconstructs from the columns + resolution overlay + residual. The copy is
+-- detached: writing it never touches the store (so a syntactic field is safe to
+-- set on the copy — the store is rebuilt from the copies, not mutated).
+function M.record(c)
+    local st = type(c) == 'table' and rawget(c, '__cc')
+    if st then -- a callcols proxy row: rebuild from columns + overlay + residual
+        local rec = require('cartograph.callcols').record(st.cc, st.i)
+        if st.res then for k, v in pairs(st.res) do rec[k] = v end end
+        return rec
+    end
+    local t = {}
+    for k, v in pairs(c) do t[k] = v end
+    return t
+end
+
 -- ITERATE a graph's calls — the iteration seam. A consumer writes
 --   for _, c in callrec.each(data) do … callrec.<field>(c) … end
 -- instead of `ipairs(data.calls)`, so it never assumes calls are an array of

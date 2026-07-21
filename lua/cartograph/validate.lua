@@ -9,6 +9,8 @@
 
 local M = {}
 
+local callrec = require 'cartograph.callrec'
+
 M.NODE_KINDS = { module = true, ['function'] = true, method = true,
     var = true, region = true,
     external = true } -- a minted stdlib symbol (no local def; file = 'zig-std')
@@ -196,7 +198,10 @@ function M.check(data)
             flag('call-dangling-to', ('%s -> %s'):format(
                 tostring(c.callee), tostring(c.to)))
         end
-        for k in pairs(c) do
+        -- the field-whitelist check iterates the materialized record: pairs()
+        -- over a callcols proxy row sees no fields (they live in columns), so
+        -- ask the seam for the full field set (a shallow copy when records).
+        for k in pairs(callrec.record(c)) do
             if not M.CALL_FIELDS[k] then
                 flag('call-field', ('%s on %s'):format(k, tostring(c.callee)))
             end

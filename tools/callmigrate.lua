@@ -47,6 +47,15 @@ end
 -- before store wraps them in the columnar view) → not a post-flip hazard.
 local function ingest(file) return file:find('providers/') ~= nil end
 
+-- the REPRESENTATION-SEAM files implement BOTH forms explicitly (callrec.record's
+-- record-branch pairs() runs only when c is NOT a proxy; callcols builds columns
+-- from raw records). Their raw-record handling is the primitive the proxy is
+-- built on, guarded by construction — exempt from the hazard scan (analogous to
+-- seamguard exempting the accessor OWNERS). Everything else is fenced.
+local function repr_owner(file)
+    return file:find('callrec%.lua$') ~= nil or file:find('callcols%.lua$') ~= nil
+end
+
 local hazards = {}          -- { file, line, kind, src, fix }
 local function haz(file, line, kind, src, fix)
     hazards[#hazards + 1] = { file = file, line = line, kind = kind,
@@ -72,8 +81,9 @@ for _, file in ipairs(rels()) do
             if v then localvars[v] = true end
         end
 
-        -- pass 2: hazard patterns over the (comment-stripped) code
-        for ln, line in ipairs(lines) do
+        -- pass 2: hazard patterns over the (comment-stripped) code (the
+        -- representation-seam files are the primitive, exempt)
+        for ln, line in ipairs(repr_owner(file) and {} or lines) do
             local code = line:gsub('%-%-.*$', '')
             -- iter: pairs/next over a call var (a proxy has no iterable fields)
             for fn2, v in code:gmatch('([%w_]-)pairs%(([%w_]+)%)') do

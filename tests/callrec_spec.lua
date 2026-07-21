@@ -33,3 +33,26 @@ test('callrec: nil fields pass through as nil', function ()
     eq(nil, cr.callee(c))
     eq(nil, cr.line(c))
 end)
+
+test('callrec: record() materializes a detached editable copy (record branch)', function ()
+    local c = { file = 'a.lua', callee = 'f', fn = 'a.lua::g@1', line = 10,
+        to = 'a.lua::f@9', argv = { 1, 2 } }
+    local rec = cr.record(c)
+    eq(c.file, rec.file); eq(c.fn, rec.fn); eq(c.to, rec.to); eq(c.argv, rec.argv)
+    rec.fn = 'x'                         -- editing the copy never touches the call
+    eq('a.lua::g@1', c.fn)
+    eq(true, rec ~= c)
+end)
+
+test('callrec: record() reconstructs a callcols proxy row (columns+overlay+residual)', function ()
+    local callcols = require 'cartograph.callcols'
+    local calls = { { file = 'a.lua', callee = 'f', fn = 'a.lua::g@1', line = 3,
+        to = 'a.lua::f@9', inferred = true, argv = { 'x' } } }
+    local v = callcols.view(calls)
+    local rec = cr.record(v.rows[1])     -- a proxy row, not a plain record
+    eq('a.lua', rec.file); eq('f', rec.callee); eq('a.lua::g@1', rec.fn)
+    eq(3, rec.line); eq('a.lua::f@9', rec.to); eq(true, rec.inferred)
+    eq(calls[1].argv, rec.argv)          -- residual field carried through
+    rec.fn = 'edited'                    -- detached: the store is untouched
+    eq('a.lua::g@1', callcols.get(v.cc, 'fn', 1))
+end)
