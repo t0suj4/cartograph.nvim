@@ -52,7 +52,9 @@ M.CALL_SYNTACTIC = {
 }
 M.CALL_RESOLUTION = {
     strs = { 'to', 'prov', 'stdpath' },
-    flags = { 'inferred', 'tinf', 'rtfull', 'top' },
+    -- conf/dynamic/escalated are post-ingest analysis marks (confirm/xlang/
+    -- escalate write them on the live store) → mutable overlay, not persisted
+    flags = { 'inferred', 'tinf', 'rtfull', 'top', 'conf', 'dynamic', 'escalated' },
 }
 
 -- ── the COLUMNS intermediate ─────────────────────────────────────────────

@@ -245,8 +245,8 @@ function M.link(data, bindings)
                     match = callrec.file(c) == pin.file and callrec.line(c) == pin.line - 1
                 end
                 if match then
-                    c.to = target.id
-                    c.dynamic = nil
+                    callrec.set(c, 'to', target.id)
+                    callrec.set(c, 'dynamic', nil)
                     if callrec.fn(c) then addref(callrec.fn(c), target.id,
                         key_range(c, pin.to)) end
                     hit = hit + 1

@@ -39,4 +39,10 @@ function M.to(c) return c.to end
 -- the resolver provenance ('base'/pass/'stdlib') — resolution-era
 function M.prov(c) return c.prov end
 
+-- WRITE a resolution-era field on a call — the write seam. On a record this is
+-- c[field] = v; when data.calls becomes a callcols store (brick 3) the row form
+-- routes to callcols.set (the mutable overlay). Post-ingest mutators (confirm/
+-- escalate/xlang oracles) go through here so the swap needs no further edits.
+function M.set(c, field, v) c[field] = v end
+
 return M

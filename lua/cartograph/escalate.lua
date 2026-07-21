@@ -106,7 +106,7 @@ function M.diff(snap, sat)
             elseif not c.to then
                 out.refuted[#out.refuted + 1] = { c = c, was = before.to, pri = pri }
             else                                         -- unchanged ~ : oracle silent
-                c.escalated = true
+                callrec.set(c, 'escalated', true)
                 out.stale = out.stale + 1
             end
         elseif not before.to then                        -- was refused
@@ -127,7 +127,7 @@ local function prepare(data, opts)
         if cache.gen ~= gen then cache = { gen = gen, keys = {} } end
         if next(cache.keys) then
             for _, c in ipairs(data.calls or {}) do
-                if cache.keys[keyof(c)] then c.escalated = true end
+                if cache.keys[keyof(c)] then callrec.set(c, 'escalated', true) end
             end
         end
     end
