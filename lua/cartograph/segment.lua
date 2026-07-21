@@ -38,6 +38,11 @@ M.CALL_SCHEMA = {
         'recv', 'recvpath', 'recvroot', 'chainfield', 'chainroot', 'chainty', 'stdpath' },
     ints = { 'line' },
     flags = { 'method', 'inferred', 'tinf', 'rtfull', 'top' },
+    -- ranges = {start={line,char},end={line,char}} tables → 4 coord columns +
+    -- a presence bit (the at.lua fold, applied to the wire). `at` is the biggest
+    -- residual field (MEASURED 5.2MB on zig calls); columnarizing it here pulls
+    -- it out of the raw-table residual. A non-table value stays in the residual.
+    ranges = { 'at' },
 }
 
 -- records (1-based list) + schema → a packed byte string
@@ -87,6 +92,21 @@ function M.encode(records, schema)
         end
         put(table.concat(fb))
     end
+    for _, rf in ipairs(schema.ranges or {}) do -- range: presence + 4 coord cols
+        local pres, sl, sc, el, ec = {}, {}, {}, {}, {}
+        for i = 1, n do
+            local r = records[i][rf]
+            if type(r) == 'table' and r.start and r['end'] then
+                pres[i] = 1
+                sl[i] = r.start.line or 0; sc[i] = r.start.char or 0
+                el[i] = r['end'].line or 0; ec[i] = r['end'].char or 0
+            else -- absent OR non-table (folded index): not carried; residual has it
+                pres[i], sl[i], sc[i], el[i], ec[i] = 0, 0, 0, 0, 0
+            end
+        end
+        put(reg.pack_varints(pres)); put(reg.pack_varints(sl)); put(reg.pack_varints(sc))
+        put(reg.pack_varints(el)); put(reg.pack_varints(ec))
+    end
     return table.concat(parts)
 end
 
@@ -119,6 +139,18 @@ function M.decode(blob, schema)
             for j, f in ipairs(schema.flags) do
                 if floor(b / 2 ^ (j - 1)) % 2 == 1 then recs[i][f] = true end
             end
+        end
+    end
+    local function col()  -- read n varints
+        local c = {}; for i = 1, n do c[i], pos = reg.read_uvarint(blob, pos) end; return c
+    end
+    for _, rf in ipairs(schema.ranges or {}) do
+        local pres, sl, sc, el, ec = col(), col(), col(), col(), col()
+        for i = 1, n do
+            if pres[i] == 1 then
+                recs[i][rf] = { start = { line = sl[i], char = sc[i] },
+                    ['end'] = { line = el[i], char = ec[i] } }
+            end -- pres 0 → nil here; a non-table value comes from the residual
         end
     end
     return recs

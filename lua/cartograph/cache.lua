@@ -24,6 +24,10 @@ for _, g in ipairs({ segment.CALL_SCHEMA.strs, segment.CALL_SCHEMA.ints,
     segment.CALL_SCHEMA.flags }) do
     for _, f in ipairs(g) do CALL_SCALAR[f] = true end
 end
+-- range fields the segment carries WHEN table-valued (a non-table value — a
+-- folded index — falls back to the residual, so both stay lossless)
+local CALL_RANGE = {}
+for _, f in ipairs(segment.CALL_SCHEMA.ranges or {}) do CALL_RANGE[f] = true end
 
 -- pack a shard's calls → columnar segment (scalars) + residual (the non-scalar
 -- fields: detail tables argv/at/refused + any field the schema doesn't name),
@@ -38,7 +42,13 @@ local function pack_calls(shard)
     local resid = {}
     for i = 1, #calls do
         local t = {}
-        for k, v in pairs(calls[i]) do if not CALL_SCALAR[k] then t[k] = v end end
+        for k, v in pairs(calls[i]) do
+            -- residual = non-scalar fields, EXCEPT a range the segment claims
+            -- (table-valued); a non-table range value stays here as fallback
+            if not CALL_SCALAR[k] and not (CALL_RANGE[k] and type(v) == 'table') then
+                t[k] = v
+            end
+        end
         resid[i] = t
     end
     shard.calltab = resid
@@ -60,7 +70,13 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 95 -- v95: CALL SEGMENT — a shard's calls persist as a COLUMNAR
+M.VERSION = 96 -- v96: CALL SEGMENT + RANGE columns — `at` (the biggest residual
+               -- field, 5.2MB on zig calls) folds into 4 coordinate columns in
+               -- the segment (segment.lua ranges) instead of a raw table in the
+               -- residual. Cache shrink 58%/69% (self/zig calls). Format change
+               -- over v95 (range columns added) → bump. Lossless (graphdiff-
+               -- empty), gate-neutral. [[cartograph-record-fold-arc]] step 4 (A).
+               -- v95: CALL SEGMENT — a shard's calls persist as a COLUMNAR
                -- segment (segment.lua: pooled strings + freq-varint) + a
                -- residual of the non-scalar fields, instead of full record
                -- tables. Cache-format change (old shards lack callseg) → bump;

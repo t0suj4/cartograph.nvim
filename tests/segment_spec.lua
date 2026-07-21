@@ -27,6 +27,20 @@ test('segment: round-trips the call schema exactly', function ()
     eq(nil, recs[2].method); eq(true, recs[3].inferred)
 end)
 
+test('segment: range fields round-trip as coordinate columns', function ()
+    local R = { start = { line = 5, char = 2 }, ['end'] = { line = 5, char = 9 } }
+    local calls = {
+        { file = 'a.lua', line = 1, at = R },
+        { file = 'a.lua', line = 2 },                 -- at absent → nil
+        { file = 'a.lua', line = 3, at = 42 },        -- non-table (folded) → not carried
+    }
+    local recs = segment.decode(segment.encode(calls, S), S)
+    eq(5, recs[1].at.start.line); eq(2, recs[1].at.start.char)
+    eq(5, recs[1].at['end'].line); eq(9, recs[1].at['end'].char)
+    eq(nil, recs[2].at, 'absent range → nil')
+    eq(nil, recs[3].at, 'non-table range not carried by the segment (residual fallback)')
+end)
+
 test('segment: identical strings pool to one entry (the wire win)', function ()
     -- 100 calls in one file, same callee → the pool holds each string ONCE, so
     -- the blob is far smaller than the naive per-record bytes
