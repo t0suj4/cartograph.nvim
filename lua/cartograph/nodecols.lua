@@ -49,10 +49,7 @@ function M.view(nodes) return callcols.view(nodes, M.NODE_SYN, M.NODE_RES) end
 
 -- reconstruct node i's full record (scalar columns + residual tables)
 function M.record(view, i)
-    local out = callcols.record(view.cc, i)
-    local resid = view.residual[i]
-    if resid then for k, v in pairs(resid) do out[k] = v end end
-    return out
+    return callcols.record_resid(view.cc, i, view.residual[i])
 end
 
 return M

@@ -34,10 +34,7 @@ function M.view(edges) return callcols.view(edges, M.EDGE_SYN, M.EDGE_RES) end
 
 -- reconstruct edge i's full record (scalar columns + residual)
 function M.record(view, i)
-    local out = callcols.record(view.cc, i)
-    local resid = view.residual[i]
-    if resid then for k, v in pairs(resid) do out[k] = v end end
-    return out
+    return callcols.record_resid(view.cc, i, view.residual[i])
 end
 
 return M

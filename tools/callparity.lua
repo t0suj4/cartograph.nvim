@@ -23,43 +23,17 @@
 
 local callcols = require 'cartograph.callcols'
 local segment = require 'cartograph.segment'
+local colparity = require 'cartograph.colparity'
 
 local M = {}
 
--- flag fields round-trip as truthiness, not identity: callcols documents
--- "flag false → nil", and a record may store an explicit `method = false`.
--- Both are falsy and every consumer tests `if callrec.<flag>(c)`, so nil and
--- false are the SAME value for a flag — comparing them by identity is a false
--- positive, not a faithfulness bug.
+-- flag fields round-trip as truthiness, not identity (a record may store explicit
+-- `method = false`; a column's false↔nil is the same value consumers test with
+-- `if callrec.<flag>(c)`). The veq/feq rules are the shared colparity core.
 local FLAG = {}
 for _, f in ipairs(segment.CALL_SYNTACTIC.flags or {}) do FLAG[f] = true end
 for _, f in ipairs(segment.CALL_RESOLUTION.flags or {}) do FLAG[f] = true end
-
--- deep value-equality restricted to the shapes a call field takes: scalars and
--- range tables ({start={line,char}, end={line,char}}). A residual field that is
--- some other table is compared by REFERENCE (the proxy returns the same table),
--- which is what a raw `c.field` read would also see.
-local function veq(a, b)
-    if a == b then return true end
-    if type(a) ~= 'table' or type(b) ~= 'table' then return false end
-    -- range-shaped deep compare (the only decomposed table the columns rebuild)
-    local function pt(p, q)
-        if p == q then return true end
-        if type(p) ~= 'table' or type(q) ~= 'table' then return false end
-        return p.line == q.line and p.char == q.char
-    end
-    if a.start or a['end'] or b.start or b['end'] then
-        return pt(a.start, b.start) and pt(a['end'], b['end'])
-    end
-    return false -- non-range tables must be reference-equal (handled by a==b)
-end
-
--- field-aware equality: a flag compares by truthiness (nil ≡ false), everything
--- else by value/range/reference.
-local function feq(field, a, b)
-    if FLAG[field] then return (not not a) == (not not b) end
-    return veq(a, b)
-end
+local feq = colparity.mkfeq(FLAG)
 
 --- Run the parity check over already-extracted `data`. Returns
 --- { n, mismatches = { {i, field, kind} }, residual = { [field] = rows },

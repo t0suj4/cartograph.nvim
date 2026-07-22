@@ -13,33 +13,17 @@ local here = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/nodegate%.lua$')
 local bench = dofile(here .. '/bench.lua')
 bench.bootstrap()
 local nodecols = require 'cartograph.nodecols'
+local colparity = require 'cartograph.colparity'
 
 local name = arg and arg[1]
 if not name then print('usage: nodegate <corpus>'); os.exit(2) end
 if not pcall(bench.corpus, name) then print('unknown corpus: ' .. name); os.exit(2) end
 
+-- flags compared by truthiness, scalars/ranges by value; the shared colparity core
 local FLAG = {}
 for _, f in ipairs(nodecols.NODE_SYN.flags) do FLAG[f] = true end
-
--- range-shaped deep compare, else reference/scalar equality (a residual table is
--- the SAME ref the proxy returns, so == holds — matching a raw n.field read).
-local function veq(a, b)
-    if a == b then return true end
-    if type(a) ~= 'table' or type(b) ~= 'table' then return false end
-    local function pt(p, q)
-        if p == q then return true end
-        if type(p) ~= 'table' or type(q) ~= 'table' then return false end
-        return p.line == q.line and p.char == q.char
-    end
-    if a.start or a['end'] or b.start or b['end'] then
-        return pt(a.start, b.start) and pt(a['end'], b['end'])
-    end
-    return false
-end
-local function feq(field, a, b)
-    if FLAG[field] then return (not not a) == (not not b) end
-    return veq(a, b)
-end
+for _, f in ipairs(nodecols.NODE_RES.flags or {}) do FLAG[f] = true end
+local feq = colparity.mkfeq(FLAG)
 
 local data = bench.extract(name)
 local nodes = data.nodes or {}

@@ -27,24 +27,19 @@ local M = {}
 M.SYN = segment.CALL_SYN_RESOLVE
 M.RES = segment.CALL_RES_RESOLVE
 
+-- the call-scalar read/write rules are SHARED with callcols (proxy_index/
+-- proxy_newindex over the same { cc, i, res, cov } backing); rescols only layers
+-- the `argv` special-case (served from the argv store; never replaced wholesale).
 local row_mt = {
     __index = function (self, key)
         local st = rawget(self, '__rc')
         if key == 'argv' then return argvcols.argv_of(st.av, st.i) end
-        if st.cov[key] then return callcols.get(st.cc, key, st.i) end
-        local r = st.res
-        if r then return r[key] end -- return r[key] directly (a residual false must survive)
+        return callcols.proxy_index(st, key)
     end,
     __newindex = function (self, key, v)
         local st = rawget(self, '__rc')
-        -- resolution never REPLACES an argv array (verified); mutations go
-        -- through the element handles. A wholesale write is a contract break.
         assert(key ~= 'argv', 'rescols: argv array replacement is unsupported')
-        if st.cc.resf[key] then callcols.set(st.cc, key, st.i, v); return end
-        assert(not st.cov[key], 'rescols: write to immutable syntactic field: ' .. tostring(key))
-        local r = st.res
-        if not r then r = {}; st.res = r end
-        r[key] = v
+        callcols.proxy_newindex(st, key, v)
     end,
 }
 
@@ -71,9 +66,7 @@ end
 
 -- reconstruct call i's full record (scalar columns + overlay + residual + argv)
 function M.record(view, i)
-    local out = callcols.record(view.cc, i)
-    local resid = view.residual[i]
-    if resid then for k, v in pairs(resid) do out[k] = v end end
+    local out = callcols.record_resid(view.cc, i, view.residual[i])
     local argv = argvcols.materialize(view.av, i)
     if argv then out.argv = argv end
     return out

@@ -306,25 +306,41 @@ end
 -- xlang) works UNCHANGED — the columns carry what they cover, the residual the
 -- rest. This is the access model the micro-matrix ([[access-model]]) weighs
 -- against index-based; it is the safe default because it needs no consumer edit.
+-- SHARED proxy dispatch over a backing `st` = { cc, i, res, cov } (the same shape
+-- callcols' __cc and rescols' __rc rows carry). ONE home for the read/write rules
+-- so a fix (e.g. the residual-FALSE preserve, the immutable-write assert) lands
+-- once, not per proxy — rescols' row_mt delegates here (with its argv special-case
+-- layered on top). A COVERED field routes to the column/overlay, else the residual.
+function M.proxy_index(st, k)
+    if st.cov[k] then return M.get(st.cc, k, st.i) end
+    local r = st.res
+    -- return r[k] directly — `r[k] or nil` would collapse a residual FALSE (a
+    -- tristate field like node exported/effects) to nil
+    if r then return r[k] end
+end
+function M.proxy_newindex(st, k, v)
+    if st.cc.resf[k] then M.set(st.cc, k, st.i, v); return end
+    -- a write to a covered IMMUTABLE (syntactic) column is a resolver bug —
+    -- surface it, same as M.set's assert (parse facts are never rewritten)
+    assert(not st.cov[k], 'callcols: write to immutable syntactic field: ' .. tostring(k))
+    local r = st.res
+    if not r then r = {}; st.res = r end
+    r[k] = v
+end
+
 local row_mt = {
-    __index = function (self, k)
-        local st = rawget(self, '__cc')
-        if st.cov[k] then return M.get(st.cc, k, st.i) end
-        local r = st.res
-        if r then return r[k] end -- NB: return r[k] directly — `r[k] or nil` would
-        -- collapse a residual FALSE (a tristate field like node exported/effects) to nil
-    end,
-    __newindex = function (self, k, v)
-        local st = rawget(self, '__cc')
-        if st.cc.resf[k] then M.set(st.cc, k, st.i, v); return end
-        -- a write to a covered IMMUTABLE (syntactic) column is a resolver bug —
-        -- surface it, same as M.set's assert (parse facts are never rewritten)
-        assert(not st.cov[k], 'callcols: write to immutable syntactic field: ' .. tostring(k))
-        local r = st.res
-        if not r then r = {}; st.res = r end
-        r[k] = v
-    end,
+    __index = function (self, k) return M.proxy_index(rawget(self, '__cc'), k) end,
+    __newindex = function (self, k, v) M.proxy_newindex(rawget(self, '__cc'), k, v) end,
 }
+
+-- reconstruct a call/node/edge record from its columns + a per-row RESIDUAL table
+-- (the record() body every columnar module shares: callcols.record + merge the
+-- residual). rescols adds argv on top; nodecols/edgecols use this verbatim.
+function M.record_resid(cc, i, resid)
+    local out = M.record(cc, i)
+    if resid then for k, v in pairs(resid) do out[k] = v end end
+    return out
+end
 
 -- a proxy row-handle over store `cc` at index `i`, backed by `residual` (the
 -- per-row table of non-columnar fields, or nil). Cheap to mint; holds no data
