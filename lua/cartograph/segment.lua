@@ -57,6 +57,27 @@ M.CALL_RESOLUTION = {
     flags = { 'inferred', 'tinf', 'rtfull', 'top', 'conf', 'dynamic', 'escalated' },
 }
 
+-- IN-RESOLUTION split (for rescols.lua, the resolution-phase columnar store —
+-- record-fold arc, the gitlab-peak lever). Resolution runs BEFORE ingest and
+-- mutates MORE than the post-resolution store above: resolve_returns REWRITES
+-- `full` (rtfull), so `full` moves to the MUTABLE side here — in CALL_SYNTACTIC
+-- (post-resolution) it is immutable because resolution is already done. The
+-- other resolution writes are either already resolution fields (to/inferred/…)
+-- or NON-scalar / id values (refused-table / ext / registry) that ride the
+-- residual (also mutable). The immutable columns are the true parse-fixed fields
+-- resolution only ever reads (verified by an exhaustive read/write surface map).
+M.CALL_SYN_RESOLVE = {
+    strs = { 'file', 'callee', 'fn',
+        'recv', 'recvpath', 'recvroot', 'chainfield', 'chainroot', 'chainty' },
+    ints = { 'line' },
+    flags = { 'method' },
+    ranges = { 'at' },
+}
+M.CALL_RES_RESOLVE = {
+    strs = { 'full', 'to', 'prov', 'stdpath' },
+    flags = { 'inferred', 'tinf', 'rtfull', 'top', 'conf', 'dynamic', 'escalated' },
+}
+
 -- ── the COLUMNS intermediate ─────────────────────────────────────────────
 -- cols = { n, pool = {rank→string}, str = {field→{rank|0}}, int = {field→{v}},
 --          flag = {field→{bool}}, rng = {field→{pres,sl,sc,el,ec}} }
