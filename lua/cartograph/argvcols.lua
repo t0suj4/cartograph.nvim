@@ -51,6 +51,44 @@ function M.build(calls)
     return { av = av, argof = argof, hadargv = hadargv, off = off, cnt = cnt }
 end
 
+-- ── STREAMING ACCUMULATOR (record-fold step 2) ────────────────────────────
+-- The argv twin of callcols.new_colacc: add() a call, flattening its argv
+-- elements into a growing element colacc (dropping the record), finalize() ONCE
+-- into the index-form store { av = {cc,covered,residual}, off, cnt, hadargv } —
+-- what the index accessors (argn/aget/aset) and materialize read (no proxy
+-- handles). finalize(callperm) reorders by the CALL permutation: it translates it
+-- into an ELEMENT permutation (each call's element slice moves as a block) so the
+-- flattened columns match building from the calls in that order.
+function M.new_acc()
+    local inner = callcols.new_colacc(M.ARGV_SYN, M.ARGV_RES, { residual = true })
+    local off, cnt, hadargv, k, i = {}, {}, {}, 0, 0
+    local a = {}
+    function a.add(rec)
+        i = i + 1
+        local argv = rec.argv
+        hadargv[i] = argv ~= nil
+        off[i] = k
+        local c = argv and #argv or 0
+        cnt[i] = c
+        for j = 1, c do k = k + 1; inner.add(argv[j]) end
+    end
+    function a.finalize(callperm)
+        local ncalls = i
+        local newoff, newcnt, newhad, eperm, kk = {}, {}, {}, {}, 0
+        for p = 1, ncalls do
+            local oc = callperm and callperm[p] or p
+            newhad[p] = hadargv[oc]
+            newoff[p] = kk
+            newcnt[p] = cnt[oc]
+            for j = 1, cnt[oc] do kk = kk + 1; eperm[kk] = off[oc] + j end
+        end
+        local cc, residual = inner.finalize(callperm and eperm or nil)
+        return { av = { cc = cc, covered = callcols.covered(cc), residual = residual },
+            off = newoff, cnt = newcnt, hadargv = newhad }
+    end
+    return a
+end
+
 -- the stable element-handle array for call i (what a `c.argv` read returns), or
 -- nil when the call had no argv field — matching the raw record exactly.
 function M.argv_of(store, i) return store.argof[i] end

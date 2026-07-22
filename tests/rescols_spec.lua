@@ -88,3 +88,39 @@ test('rescols: materialize reflects the resolution mutations', function ()
             { k = 'lit', v = 'x', kw = true } } },
         rescols.record(v, 1))
 end)
+
+-- STEP 2 (the parent-merge peak lever): the streaming accumulator folds chunks
+-- into columns and drops the records; finalize == build-from-whole (record-for-
+-- record, argv included) even with out-of-order batches, canonical reorder, and
+-- a demanded file's duplicate deduped away. tools/rescolacc.lua is the corpus gate.
+test('rescols: accumulator (out-of-order batches + reorder + dedup) == view', function ()
+    local cs = calls()
+    local ref = rescols.view(cs) -- reference: canonical order a.lua,a.lua,b.lua
+    -- file -> canonical rank (first appearance): a.lua=1, b.lua=2
+    local fileorder = { ['a.lua'] = 1, ['b.lua'] = 2 }
+    local acc = rescols.accumulator({ fileorder = fileorder })
+    acc.add({ cs[3] })          -- b.lua first (arrival ≠ canonical)
+    acc.add({ cs[1], cs[2] })   -- then a.lua's two calls
+    acc.add({ cs[3] })          -- duplicate b.lua file → deduped away
+    local store = acc.finalize()
+    eq(3, store.cc.n)           -- dedup: 3 rows, not 4
+    -- reorder put a.lua rows first, b.lua last — matching the view
+    eq(rescols.record(ref, 1), rescols.record(store, 1))
+    eq(rescols.record(ref, 2), rescols.record(store, 2))
+    eq(rescols.record(ref, 3), rescols.record(store, 3))
+end)
+
+test('rescols: accumulator store drives resolution writes (index-form drop-in)', function ()
+    local acc = rescols.accumulator()      -- no reorder (arrival == canonical)
+    acc.add(calls())
+    local store = acc.finalize()
+    local cv = require('cartograph.callview').of({ _callstore = store })
+    eq('f', cv.get(1, 'callee'))            -- immutable column read
+    eq('local', cv.aget(1, 1, 'k'))         -- columnar argv read
+    cv.set(1, 'to', 'a.lua::f@9')           -- overlay write
+    cv.set(2, 'refused', nil)               -- residual write (clears the table)
+    cv.aset(1, 1, 'k', 'func'); cv.aset(1, 1, 'up', true) -- argv upgrade in place
+    eq('a.lua::f@9', cv.get(1, 'to'))
+    eq(nil, cv.get(2, 'refused'))
+    eq('func', cv.aget(1, 1, 'k')); eq(true, cv.aget(1, 1, 'up'))
+end)

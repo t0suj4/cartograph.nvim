@@ -140,6 +140,131 @@ local function mflag_set(cc, f, i, v)
     if ok_ffi then cc.mflag[i - 1] = b elseif b > 0 then cc.mflag[i] = b else cc.mflag[i] = nil end
 end
 
+-- ── STREAMING ACCUMULATOR (record-fold step 2 — the parent-merge peak lever) ──
+-- Append records BATCH-BY-BATCH, dropping each batch after add(), and finalize
+-- ONCE into the same immutable store build() produces. The win: a caller folds a
+-- worker chunk's calls into COMPACT value arrays (ranks/ints/packed bits — dense,
+-- ~8-16 B/row/field) then frees the chunk's record tables (~500 B/record + argv
+-- subtables), so the parent never holds the full record array at the merge peak.
+-- finalize(perm) applies an optional CALL permutation (canonical reorder — the
+-- parent's chunks arrive out of order) before choosing widths, so the result is
+-- byte-identical to build() over the same rows in that order. opts.residual keeps
+-- a per-row residual (non-covered fields); opts.skip_argv drops `argv` from it
+-- (rescols serves argv from the argv store, matching rescols.view). A SEPARATE
+-- path from build() (not a refactor of it) — tools/rescolacc.lua gates the two
+-- equal, so build() stays untouched.
+function M.new_colacc(syn, res, opts)
+    local schema = syn or segment.CALL_SYNTACTIC
+    res = res or segment.CALL_RESOLUTION
+    local want_resid = opts and opts.residual
+    local skip_argv = opts and opts.skip_argv
+    local it = csr.interner()
+    local str = {}; for _, f in ipairs(schema.strs) do str[f] = {} end
+    local int = {}; for _, f in ipairs(schema.ints or {}) do int[f] = {} end
+    local hasflags = schema.flags and #schema.flags > 0
+    local flag = {}
+    local rng = {}
+    for _, rf in ipairs(schema.ranges or {}) do rng[rf] = { p = {}, sl = {}, sc = {}, el = {}, ec = {} } end
+    local res_it, res_rank = {}, {}
+    for _, f in ipairs(res.strs or {}) do res_it[f] = csr.interner(); res_rank[f] = {} end
+    local hasresflags = res.flags and #res.flags > 0
+    local resflag = {}
+    local cov
+    if want_resid then
+        cov = {}
+        for _, f in ipairs(schema.strs) do cov[f] = true end
+        for _, f in ipairs(schema.ints or {}) do cov[f] = true end
+        for _, f in ipairs(schema.flags or {}) do cov[f] = true end
+        for _, rf in ipairs(schema.ranges or {}) do cov[rf] = true end
+        for _, f in ipairs(res.strs or {}) do cov[f] = true end
+        for _, f in ipairs(res.flags or {}) do cov[f] = true end
+    end
+    local resid = {}
+    local n = 0
+    local acc = {}
+    function acc.add(rec)
+        n = n + 1
+        for _, f in ipairs(schema.strs) do
+            local v = rec[f]; str[f][n] = (type(v) == 'string') and it.id(v) + 1 or 0
+        end
+        for _, f in ipairs(schema.ints or {}) do int[f][n] = rec[f] or 0 end
+        if hasflags then
+            local b = 0
+            for j, f in ipairs(schema.flags) do if rec[f] then b = b + 2 ^ (j - 1) end end
+            flag[n] = b
+        end
+        for _, rf in ipairs(schema.ranges or {}) do
+            local r, c = rec[rf], rng[rf]
+            if type(r) == 'table' and r.start and r['end'] then
+                c.p[n] = 1; c.sl[n] = r.start.line or 0; c.sc[n] = r.start.char or 0
+                c.el[n] = r['end'].line or 0; c.ec[n] = r['end'].char or 0
+            else c.p[n], c.sl[n], c.sc[n], c.el[n], c.ec[n] = 0, 0, 0, 0, 0 end
+        end
+        for _, f in ipairs(res.strs or {}) do
+            local v = rec[f]; res_rank[f][n] = (type(v) == 'string') and res_it[f].id(v) + 1 or 0
+        end
+        if hasresflags then
+            local b = 0
+            for j, f in ipairs(res.flags) do if rec[f] then b = b + 2 ^ (j - 1) end end
+            resflag[n] = b
+        end
+        if want_resid then
+            local extra
+            for key, v in pairs(rec) do
+                if not cov[key] and not (skip_argv and key == 'argv') then
+                    extra = extra or {}; extra[key] = v
+                end
+            end
+            resid[n] = extra
+        end
+    end
+    function acc.count() return n end
+    function acc.finalize(perm)
+        local N = n
+        local function permd(arr)
+            if not perm then return arr end
+            local out = {}; for i = 1, N do out[i] = arr[perm[i]] end; return out
+        end
+        local cc = { n = N, schema = schema, str = {}, int = {}, rng = {} }
+        for _, f in ipairs(schema.strs) do cc.str[f] = widthcol(permd(str[f]), N) end
+        cc.pool = it.list
+        cc.intbias = {}
+        for _, f in ipairs(schema.ints or {}) do
+            local vals, mn = permd(int[f]), 0
+            for i = 1, N do if vals[i] < mn then mn = vals[i] end end
+            if mn < 0 then for i = 1, N do vals[i] = vals[i] - mn end end
+            cc.intbias[f] = mn; cc.int[f] = widthcol(vals, N)
+        end
+        if hasflags then cc.flagcol, cc.flags = widthcol(permd(flag), N), schema.flags end
+        for _, rf in ipairs(schema.ranges or {}) do
+            local c = rng[rf]
+            cc.rng[rf] = { pres = widthcol(permd(c.p), N), sl = widthcol(permd(c.sl), N),
+                sc = widthcol(permd(c.sc), N), el = widthcol(permd(c.el), N), ec = widthcol(permd(c.ec), N) }
+        end
+        cc.isflag = {}
+        for _, f in ipairs(schema.flags or {}) do cc.isflag[f] = true end
+        cc.res, cc.resf, cc.mutstr = res, {}, {}
+        for _, f in ipairs(res.strs or {}) do
+            local ranks, mx = permd(res_rank[f]), 0
+            for i = 1, N do if ranks[i] > mx then mx = ranks[i] end end
+            cc.mutstr[f] = mutstr_new(res_it[f], ranks, N, mx); cc.resf[f] = true
+        end
+        if hasresflags then
+            cc.mflagbit = {}
+            for j, f in ipairs(res.flags) do cc.mflagbit[f] = j - 1; cc.resf[f] = true end
+            local w = #res.flags <= 8 and 1 or 2
+            cc.mflag = ok_ffi and ffi_arr(w, N) or {}
+            local pf = permd(resflag)
+            for i = 1, N do
+                local b = pf[i] or 0
+                if ok_ffi then cc.mflag[i - 1] = b elseif b > 0 then cc.mflag[i] = b end
+            end
+        end
+        return cc, (want_resid and permd(resid) or nil)
+    end
+    return acc
+end
+
 -- build a column store from a call-record list. `syn` = the SYNTACTIC schema →
 -- immutable width columns (the resident win); `res` = the RESOLUTION schema → the
 -- MUTABLE columnar overlay above (resolution writes c.to/prov/inferred/… AFTER
