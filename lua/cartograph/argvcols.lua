@@ -55,6 +55,21 @@ end
 -- nil when the call had no argv field — matching the raw record exactly.
 function M.argv_of(store, i) return store.argof[i] end
 
+-- ── INDEX-FORM accessors (no per-element handles — the peak path) ─────────
+-- read/write call i's argv element j directly against the columns. (i,j) → the
+-- flat row off[i]+j; covered fields ride the columns/overlay, else the element
+-- residual. This is what index-form resolution uses instead of `c.argv[j].f`.
+function M.argn(store, i) return store.cnt[i] end
+function M.aget(store, i, j, f)
+    local r = store.off[i] + j
+    if store.av.covered[f] then return callcols.get(store.av.cc, f, r) end
+    local resid = store.av.residual[r]
+    return resid and resid[f] or nil
+end
+function M.aset(store, i, j, f, v)
+    callcols.set(store.av.cc, f, store.off[i] + j, v)
+end
+
 -- reconstruct call i's argv as a plain raw array (element tables), for a full
 -- materialize / parity check. nil when the call had no argv.
 function M.materialize(store, i)

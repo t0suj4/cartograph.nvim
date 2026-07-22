@@ -293,18 +293,49 @@ function M.audit(data)
             fname[n.name] = fname[n.name] == nil and n or false
         end
     end
+    -- CALL ACCESS is representation-neutral: INDEX-FORM over the columnar store
+    -- when the parent holds one (data._callstore, the record-fold peak path — no
+    -- record tables, no proxies), else raw records (the default). The body below
+    -- is written once against these accessors; the store path reads/writes the
+    -- columns + argv columns directly (rescols' immutable-assert guards a write to
+    -- a parse-fixed field). [[cartograph-record-fold-arc]]
+    local cn, cget, cset, argn, aget, aset
+    local store = data._callstore
+    if store then
+        local callcols = require 'cartograph.callcols'
+        local argvcols = require 'cartograph.argvcols'
+        local cc, cov, resid = store.cc, store.covered, store.residual
+        cn = cc.n
+        cget = function (i, f)
+            if cov[f] then return callcols.get(cc, f, i) end
+            local r = resid[i]; return r and r[f] or nil
+        end
+        cset = function (i, f, v) callcols.set(cc, f, i, v) end
+        argn = function (i) return argvcols.argn(store.av, i) end
+        aget = function (i, j, f) return argvcols.aget(store.av, i, j, f) end
+        aset = function (i, j, f, v) argvcols.aset(store.av, i, j, f, v) end
+    else
+        local calls = data.calls or {}
+        cn = #calls
+        cget = function (i, f) return calls[i][f] end
+        cset = function (i, f, v) calls[i][f] = v end
+        argn = function (i) local a = calls[i].argv; return a and #a or 0 end
+        aget = function (i, j, f) return calls[i].argv[j][f] end
+        aset = function (i, j, f, v) calls[i].argv[j][f] = v end
+    end
     local dispatched = {}
-    for _, c in ipairs(data.calls or {}) do
-        if not c.fn then
-            for _, a in ipairs(c.argv or {}) do
-                if (a.k == 'local' or a.up) and a.name then
-                    local u = fname[a.name]
+    for i = 1, cn do
+        if not cget(i, 'fn') then
+            for j = 1, argn(i) do
+                local ak, an = aget(i, j, 'k'), aget(i, j, 'name')
+                if (ak == 'local' or aget(i, j, 'up')) and an then
+                    local u = fname[an]
                     if u then dispatched[u.id] = true end
                 end
             end
         end
     end
-    for _, c in ipairs(data.calls or {}) do
+    for i = 1, cn do
         -- ANY resolution that leaned on uniqueness (name-match inferred,
         -- indirect literal, traced literal) is a batch-scoped hypothesis —
         -- even a SAME-FILE one, because the tail fallback and the
@@ -313,11 +344,13 @@ function M.audit(data)
         -- are same-file PRIORITY hits (plain calls, inferred=false) into
         -- UNDISPATCHED targets: those decisions never looked past their
         -- own file.
-        if c.to and (c.inferred or c.indirect or type(c.traced) == 'string'
-            or dispatched[c.to]) then
-            if c.fn then kill[c.fn .. '\31' .. c.to] = true end
-            c.to = nil
-            c.inferred = nil
+        local cto = cget(i, 'to')
+        if cto and (cget(i, 'inferred') or cget(i, 'indirect')
+            or type(cget(i, 'traced')) == 'string' or dispatched[cto]) then
+            local cfn = cget(i, 'fn')
+            if cfn then kill[cfn .. '\31' .. cto] = true end
+            cset(i, 'to', nil)
+            cset(i, 'inferred', nil)
             -- c.rt STAYS (file-scoped chain provenance the relink rounds
             -- re-derive from) — but the ROUNDS' side-writes do not: a kept
             -- tinf is a stale tier verdict, and a kept rounds-synthesized
@@ -325,25 +358,25 @@ function M.audit(data)
             -- stdlib-gated callee to a qualified name — the generic pass
             -- then minted same-file/unique edges inline never had, varying
             -- with slice boundaries (the par gate's nondeterminism)
-            c.tinf = nil
-            if c.rtfull then c.full, c.rtfull = nil, nil end
+            cset(i, 'tinf', nil)
+            if cget(i, 'rtfull') then cset(i, 'full', nil); cset(i, 'rtfull', nil) end
             dropped = dropped + 1
         end
-        for _, a in ipairs(c.argv or {}) do
-            if a.up then -- a resolution-pass upgrade: relink re-derives it,
-                -- and the edge the upgrade added dies with it
-                if c.fn and a.to then kill[c.fn .. '\31' .. a.to] = true end
-                a.k, a.to, a.up = 'local', nil, nil
+        for j = 1, argn(i) do
+            if aget(i, j, 'up') then -- a resolution-pass upgrade: relink re-derives
+                -- it, and the edge the upgrade added dies with it
+                local cfn, ato = cget(i, 'fn'), aget(i, j, 'to')
+                if cfn and ato then kill[cfn .. '\31' .. ato] = true end
+                aset(i, j, 'k', 'local'); aset(i, j, 'to', nil); aset(i, j, 'up', nil)
             end
         end
     end
     -- a killed (from, to) pair may also carry occurrences of NON-audited
     -- calls (a plain call to the same target): reopen those too, so
     -- relink rebuilds the pair's edge with every occurrence
-    for _, c in ipairs(data.calls or {}) do
-        if c.to and c.fn and kill[c.fn .. '\31' .. c.to] then
-            c.to = nil
-        end
+    for i = 1, cn do
+        local cto, cfn = cget(i, 'to'), cget(i, 'fn')
+        if cto and cfn and kill[cfn .. '\31' .. cto] then cset(i, 'to', nil) end
     end
     local edges = {}
     for _, e in ipairs(data.edges) do

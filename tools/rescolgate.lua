@@ -55,19 +55,32 @@ local function edge_tuple(e)
 end
 
 -- run the parent's resolution tail (audit -> relink) over a fresh extract, in
--- one of the two representations, and return the sorted product multisets.
-local function run(use_cols)
+-- one of three representations, and return the sorted product multisets:
+--   'rec'    raw records (the default path)
+--   'proxy'  audit + relink over rescols proxy rows (the compat shim)
+--   'index'  audit INDEX-FORM over the columnar store (data._callstore, no
+--            proxies — the peak path), then materialize + relink as usual
+local function run(mode)
     local data = bench.extract(name) -- fresh, deterministic; inline-resolved
     local view
-    if use_cols then
+    if mode == 'proxy' then
         view = rescols.view(data.calls)
         data.calls = view.rows
+        parallel.audit(data)
+    elseif mode == 'index' then
+        view = rescols.view(data.calls)
+        data._callstore = view -- audit reads/writes the columns index-form
+        parallel.audit(data)
+        local recs = {} -- materialize back for the (records) relink
+        for i = 1, #view.rows do recs[i] = rescols.record(view, i) end
+        data.calls, data._callstore = recs, nil
+        view = nil
+    else
+        parallel.audit(data)
     end
-    parallel.audit(data)
     ts.relink(data)
-    -- materialize the columnar calls back to plain records for a like-for-like read
     local calls = data.calls
-    if use_cols then
+    if view then -- proxy mode: materialize the columnar calls for a like-for-like read
         local recs = {}
         for i = 1, #view.rows do recs[i] = rescols.record(view, i) end
         calls = recs
@@ -79,11 +92,12 @@ local function run(use_cols)
     return { calls = ct, edges = et }
 end
 
-local rec = run(false)
-local col = run(true)
+local rec = run('rec')
+local col = run('proxy')
+local idx = run('index')
 
-print(('rescolgate %s — records %d calls / %d edges · columns %d calls / %d edges')
-    :format(name, #rec.calls, #rec.edges, #col.calls, #col.edges))
+print(('rescolgate %s — records %d calls / %d edges · proxy %d/%d · index-audit %d/%d')
+    :format(name, #rec.calls, #rec.edges, #col.calls, #col.edges, #idx.calls, #idx.edges))
 
 local fails = {}
 local function cmp(a, b, what)
@@ -99,8 +113,10 @@ local function cmp(a, b, what)
         end
     end
 end
-cmp(rec.calls, col.calls, 'call product')
-cmp(rec.edges, col.edges, 'ref/reg edge')
+cmp(rec.calls, col.calls, 'proxy call product')
+cmp(rec.edges, col.edges, 'proxy ref/reg edge')
+cmp(rec.calls, idx.calls, 'index-audit call product')
+cmp(rec.edges, idx.edges, 'index-audit ref/reg edge')
 
 if #fails > 0 then
     print('FAIL:')
