@@ -5432,6 +5432,60 @@ function M.extract(root, opts)
     return data
 end
 
+-- THE RESOLUTION INDEX (merging-strategies first cut, [[cartograph-merging-
+-- strategies]]): everything resolution needs to look a name/id up, derived PURELY
+-- from the node set — `exact`/`tail` (name & last-segment → fn/method nodes,
+-- torn/decl-filtered + zig altkeys), `node_index` (id → node), and the literal-
+-- name aperture facts (apertures/ns_pfx/global_witness). relink built these inline
+-- (the whole-graph merge peak = building this over the full node set + the edges);
+-- factoring it into ONE first-class object is the seam that lets the index be
+-- built compact/shared and resolution run somewhere OTHER than a central whole-
+-- graph pass (index-and-reduce, per-shard, on-demand). Behavior-frozen: same
+-- values relink built inline (node_index over ALL nodes is order-independent;
+-- exact/tail insertion order preserved; global_witness is a min). elang_for
+-- (module upvalue) supplies the literal-name disposition.
+local function build_index(nodes)
+    local exact, tail, node_index = {}, {}, {}
+    local apertures, ns_pfx, global_witness = {}, {}, nil
+    for _, n in ipairs(nodes) do
+        node_index[n.id] = n
+        if (n.kind == 'function' or n.kind == 'method') and not n.torn
+            and not n.decl then -- a prototype declaration is not a call target
+            exact[n.name] = exact[n.name] or {}
+            table.insert(exact[n.name], n)
+            local tl = n.name:match('([%w_]+)$')
+            if tl and tl ~= n.name then
+                tail[tl] = tail[tl] or {}
+                table.insert(tail[tl], n)
+            end
+            -- persisted extra exact keys (zig value-receiver dual-key)
+            if n.altkeys then
+                for _, k in ipairs(n.altkeys) do
+                    exact[k] = exact[k] or {}
+                    table.insert(exact[k], n)
+                end
+            end
+        end
+    end
+    for _, n in ipairs(nodes) do
+        if n.kind == 'module' and n.apertures then
+            apertures[n.file] = n.apertures
+            if not global_witness or n.file < global_witness.file then
+                global_witness = { file = n.file, line = n.apertures[1].line }
+            end
+        elseif n.kind == 'function' or n.kind == 'method' then
+            local pfx = n.name:match('^([^/#]+)[/#]')
+            if pfx then
+                local _, dsp = elang_for(n.file)
+                if dsp and dsp.literal_names then ns_pfx[pfx] = true end
+            end
+        end
+    end
+    return { exact = exact, tail = tail, node_index = node_index,
+        apertures = apertures, ns_pfx = ns_pfx, global_witness = global_witness }
+end
+M.build_index = build_index -- exposed as the seam a per-shard / on-demand resolver reuses
+
 --- Re-resolve name-matched links over a (possibly spliced) graph: every
 --- call lacking `to` gets another chance against the CURRENT node set,
 --- and its ref edge is added (deduped against existing edges). Mirrors
@@ -5473,43 +5527,12 @@ function M.relink(data, touched)
         end
         return scope_cache[f] or nil
     end
-    local exact, tail = {}, {}
-    for _, n in ipairs(data.nodes) do
-        if (n.kind == 'function' or n.kind == 'method') and not n.torn
-            and not n.decl then -- a prototype declaration is not a call target
-            exact[n.name] = exact[n.name] or {}
-            table.insert(exact[n.name], n)
-            local tl = n.name:match('([%w_]+)$')
-            if tl and tl ~= n.name then
-                tail[tl] = tail[tl] or {}
-                table.insert(tail[tl], n)
-            end
-            -- persisted extra exact keys (zig value-receiver dual-key): the
-            -- live-tree alt_keys ran at extraction; re-add them here so the
-            -- rebuild resolver matches the inline one (see the def-keying block)
-            if n.altkeys then
-                for _, k in ipairs(n.altkeys) do
-                    exact[k] = exact[k] or {}
-                    table.insert(exact[k], n)
-                end
-            end
-        end
-    end
-    local apertures, ns_pfx, global_witness = {}, {}, nil
-    for _, n in ipairs(data.nodes) do
-        if n.kind == 'module' and n.apertures then
-            apertures[n.file] = n.apertures
-            if not global_witness or n.file < global_witness.file then
-                global_witness = { file = n.file, line = n.apertures[1].line }
-            end
-        elseif n.kind == 'function' or n.kind == 'method' then
-            local pfx = n.name:match('^([^/#]+)[/#]')
-            if pfx then
-                local _, dsp = elang_for(n.file)
-                if dsp and dsp.literal_names then ns_pfx[pfx] = true end
-            end
-        end
-    end
+    -- THE INDEX (one first-class object; the merging-strategies seam). node_index
+    -- is available immediately (was built later inline — order-independent, so
+    -- earlier is equivalent).
+    local index = build_index(data.nodes)
+    local exact, tail, node_index = index.exact, index.tail, index.node_index
+    local apertures, ns_pfx, global_witness = index.apertures, index.ns_pfx, index.global_witness
     local function aperture_refusal(name, file)
         local pfx = name:match('^([^/#]+)[/#]')
         if not (pfx and ns_pfx[pfx]) then return nil end
@@ -5701,10 +5724,8 @@ function M.relink(data, touched)
             end
         end
     end
-    -- node_index built BEFORE the resolve loop: the local-shadow gate + super.m()
-    -- owner lookup + module-alias foreign-override all read it.
-    local node_index = {}
-    for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
+    -- node_index came from build_index above (the local-shadow gate + super.m()
+    -- owner lookup + module-alias foreign-override read it).
     -- local-shadow gate (see extract): built once, shared with resolve_local_callable
     local parent_fn = build_parent_fn(node_index)
     for i = 1, cv.n do
