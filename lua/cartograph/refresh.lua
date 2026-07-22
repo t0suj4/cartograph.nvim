@@ -170,9 +170,13 @@ function M.splice(data, rels, deleted)
             dirty[file_of(e.from)] = true -- remapped or dropped: either way
             local to2 = remap[e.to]       -- this from-file's shard changed
             if to2 then
-                e.to = to2
+                -- id remap must REBUILD, not mutate: `to` is an immutable column
+                -- under the columnar edge store. Materialize an editable copy
+                -- (no-op for a plain record), remap, append.
+                local ne = callrec.record(e)
+                ne.to = to2
                 stats.remapped = stats.remapped + 1
-                edges[#edges + 1] = e
+                edges[#edges + 1] = ne
             end
         else
             edges[#edges + 1] = e

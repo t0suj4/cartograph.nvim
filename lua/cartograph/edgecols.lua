@@ -20,10 +20,13 @@ local M = {}
 M.EDGE_SYN = {
     strs = { 'from', 'to', 'kind', 'bind' },
     ints = {}, -- gw/rw are sparse (0≡absent ambiguity) → residual; at is a LIST → residual
-    flags = { 'inferred', 'self', 'tinf' },
+    flags = { 'self' }, -- parse-fixed (from==to); inferred/tinf are resolution-written
     ranges = {},
 }
-M.EDGE_RES = { strs = {}, flags = {} }
+-- inferred/tinf are WRITTEN post-ingest by addref (refresh re-runs relink →
+-- e.inferred=nil / e.tinf=true on existing edges) → mutable overlay. `to` remap
+-- (refresh) REBUILDS the edge instead of mutating the immutable column.
+M.EDGE_RES = { strs = {}, flags = { 'inferred', 'tinf' } }
 
 -- a full drop-in view of an edge-record list: columnar scalars + a per-row
 -- residual (at/flds/gw/rw + lang marks) + proxy row-handles. Mirrors nodecols.view.

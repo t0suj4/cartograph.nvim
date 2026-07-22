@@ -164,19 +164,29 @@ function M.ingest(data)
     -- wire waits fast-only and is exempt — timers can't fire there.)
     M.generation = (M.generation or 0) + 1
     reset_indexes()
-    -- RE-INGEST SAFETY (brick 3): a prior ingest may have wrapped data.calls in
-    -- the columnar view (proxies), and refresh/tests re-ingest the same graph.
-    -- The folds (at/argv) + the install assume plain record tables, so
-    -- materialize any proxies back to records first (callrec.record handles both
-    -- — a shallow copy for records, a reconstruction for a proxy row). No-op cost
-    -- is one shallow copy per call, only when the flag is on.
-    if require('cartograph.config').callcols_store and data.calls and data.calls[1] then
+    -- RE-INGEST SAFETY (record-fold arc): a prior ingest may have wrapped
+    -- calls/nodes/edges in a columnar view (proxies), and refresh/tests re-ingest
+    -- the same graph. The folds + installs assume plain record tables, so
+    -- materialize any proxy list back to records first. callrec.record is
+    -- representation-generic (a shallow copy for a record; callcols.record over
+    -- the proxy's own schema + residual otherwise), so it dewraps call/node/edge
+    -- proxies alike. The check is one rawget on the first element — free on the
+    -- default (records) path.
+    do
         local callrec = require 'cartograph.callrec'
-        local recs = {}
-        for i, c in ipairs(data.calls) do recs[i] = callrec.record(c) end
-        data.calls = recs
-        M._callcols = nil
-        data._callcols = nil
+        local function dewrap(list)
+            if list and list[1] and rawget(list[1], '__cc') then
+                local recs = {}
+                for i = 1, #list do recs[i] = callrec.record(list[i]) end
+                return recs
+            end
+            return list
+        end
+        data.calls = dewrap(data.calls)
+        data.nodes = dewrap(data.nodes)
+        data.edges = dewrap(data.edges)
+        M._callcols, M._nodecols, M._edgecols = nil, nil, nil
+        data._callcols, data._nodecols, data._edgecols = nil, nil, nil
     end
     local seen = {}
     for _, n in ipairs(M.data.nodes) do
@@ -242,7 +252,12 @@ function M.ingest(data)
     -- the post-fold detail (at/argv indices) rides the residual untouched. Runs
     -- last so the columns capture the FINAL field state; rebuilds the call indexes
     -- over the stable proxies so the record tables drop. Default off.
-    if require('cartograph.config').callcols_store then M._install_callcols() end
+    do
+        local cfg = require 'cartograph.config'
+        if cfg.callcols_store then M._install_callcols() end
+        if cfg.nodecols_store then M._install_nodecols() end
+        if cfg.edgecols_store then M._install_edgecols() end
+    end
     if #M.data.nodes > 20000 and rawget(_G, 'jit') and jit.flush then
         jit.flush()
         collectgarbage(); collectgarbage()
@@ -267,6 +282,46 @@ function M._install_callcols()
     M.calls_to, M.calls_by_fn = {}, {}
     M.calls_by_file, M.calls_by_prov = {}, {}
     for _, c in ipairs(view.rows) do idx_call(M, c) end
+end
+
+-- Install the columnar NODE store (record-fold arc; the node twin of the call
+-- store above). Swaps data.nodes for nodecols.view and rebuilds the node indexes
+-- (by_id/by_file/by_name) over the proxies. Runs after the folds, like the call
+-- install; M.files is already built from the record files (same strings) so it
+-- stays valid. Default off (config.nodecols_store).
+function M._install_nodecols()
+    local callcols = require 'cartograph.callcols'
+    local nodecols = require 'cartograph.nodecols'
+    local s = nodecols.NODE_SYN
+    -- at.fold already folded n.range into a numeric index by now, so DROP the
+    -- range column (like _install_callcols drops `at`) — the folded index rides
+    -- the residual untouched and at.lua's accessors read it there.
+    local syn = { strs = s.strs, ints = s.ints, flags = s.flags, ranges = {} }
+    local view = callcols.view(M.data.nodes or {}, syn, nodecols.NODE_RES)
+    M.data.nodes = view.rows
+    M._nodecols = view
+    M.data._nodecols = view
+    M.by_id, M.by_file, M.by_name = {}, {}, {}
+    for _, n in ipairs(view.rows) do idx_node(M, n) end
+    for _, list in pairs(M.by_file) do
+        table.sort(list, function (a, b) return a.order < b.order end)
+    end
+end
+
+-- Install the columnar EDGE store. Swaps data.edges for edgecols.view and rebuilds
+-- every edge-derived index over the proxies. Default off (config.edgecols_store).
+function M._install_edgecols()
+    local edgecols = require 'cartograph.edgecols'
+    local view = edgecols.view(M.data.edges or {})
+    M.data.edges = view.rows
+    M._edgecols = view
+    M.data._edgecols = view
+    M.uses, M.usedby, M.occ, M.edge_inferred = {}, {}, {}, {}
+    M.edge_tinf, M.edge_tier = {}, {}
+    M.var_usedby, M.var_uses = {}, {}
+    M.imports_in, M.imports_out = {}, {}
+    M.reg_by, M.registers = {}, {}
+    for _, e in ipairs(view.rows) do idx_edge(M, e) end
 end
 
 -- The resident TOPOLOGY view: a fold-backed Band, built lazily on first

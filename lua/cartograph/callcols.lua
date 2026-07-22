@@ -302,7 +302,8 @@ local row_mt = {
         local st = rawget(self, '__cc')
         if st.cov[k] then return M.get(st.cc, k, st.i) end
         local r = st.res
-        return r and r[k] or nil
+        if r then return r[k] end -- NB: return r[k] directly — `r[k] or nil` would
+        -- collapse a residual FALSE (a tristate field like node exported/effects) to nil
     end,
     __newindex = function (self, k, v)
         local st = rawget(self, '__cc')

@@ -25,14 +25,21 @@ local M = {}
 -- NOTE: `order` is NOT columnarized — it is -1 for module/unparsed nodes, and the
 -- width columns are UNSIGNED (u8/u16 would wrap a negative). It rides the residual
 -- (raw int, faithful). A signed/biased int column is a follow-on if it matters.
+-- `exported` and `effects` are TRISTATE — some languages set them to explicit
+-- `false` (zig: a non-pub fn is exported=false), and consumers distinguish false
+-- (known-not) from nil (absent/unknown), reading them with strict `== false`. A
+-- single-bit flag column collapses false→nil, so they ride the residual (raw
+-- true/false/nil preserved). The columnar flags below are true-or-absent only.
 M.NODE_SYN = {
     strs = { 'id', 'name', 'kind', 'file', 'ctype', 'ret' },
     ints = {},
-    flags = { 'arrow', 'cbarg', 'decl', 'effects', 'entry', 'exported',
-        'macro', 'top', 'torn', 'unparsed' },
+    flags = { 'arrow', 'decl', 'entry', 'macro', 'top', 'torn', 'unparsed' },
     ranges = { 'range' },
 }
-M.NODE_RES = { strs = {}, flags = {} } -- no mutable node fields yet (foundation)
+-- `cbarg` (the dispatch mark) is WRITTEN post-ingest — relink's cbarg pre-scan
+-- sets it, and refresh re-runs relink on the live graph — so it rides the MUTABLE
+-- overlay (the two-phase split), unlike the parse-fixed flags above.
+M.NODE_RES = { strs = {}, flags = { 'cbarg' } }
 
 -- a full drop-in view of a node-record list: columnar scalars + a per-row residual
 -- (the table detail) + proxy row-handles. view.rows[i] reads identically to

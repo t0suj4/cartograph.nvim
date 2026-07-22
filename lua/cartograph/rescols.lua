@@ -33,7 +33,7 @@ local row_mt = {
         if key == 'argv' then return argvcols.argv_of(st.av, st.i) end
         if st.cov[key] then return callcols.get(st.cc, key, st.i) end
         local r = st.res
-        return r and r[key] or nil
+        if r then return r[key] end -- return r[key] directly (a residual false must survive)
     end,
     __newindex = function (self, key, v)
         local st = rawget(self, '__rc')

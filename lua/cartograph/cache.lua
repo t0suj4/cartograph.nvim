@@ -825,11 +825,16 @@ local function build_shards(data, want)
             stamp = data.stamps[f],
             names = data.names and data.names[f] or nil }
     end
-    for _, n in ipairs(data.nodes) do
+    -- node/edge proxies (nodecols/edgecols flag-on, post-ingest) materialize to
+    -- plain records first, same as calls below — pairs() over a proxy yields its
+    -- __cc backing (column closures), unserializable. No-op for real records.
+    for _, n0 in ipairs(data.nodes) do
+        local n = rawget(n0, '__cc') and callrec.record(n0) or n0
         local s = not synth[n.id] and shards[n.file]
         if s then s.nodes[#s.nodes + 1] = n end
     end
-    for _, e in ipairs(data.edges) do
+    for _, e0 in ipairs(data.edges) do
+        local e = rawget(e0, '__cc') and callrec.record(e0) or e0
         if not (synth[e.from] or synth[e.to]) then
             local s = shards[file_of(e.from)]
             if s then s.edges[#s.edges + 1] = e end

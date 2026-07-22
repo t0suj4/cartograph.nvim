@@ -36,22 +36,27 @@ local function call_tuples(data)
     return t
 end
 
--- ingest a FRESH extract under `flag`, return the derived products to compare
+-- ingest a FRESH extract under `flag`, return the derived products to compare.
+-- Toggles ALL THREE columnar stores (calls + nodes + edges) so this validates the
+-- whole columnar graph end to end: an identical census + call inventory with every
+-- consumer reading calls/nodes/edges through the proxy stores is behaviour proof.
 local function run(flag)
     config.callcols_store = flag
+    config.nodecols_store = flag
+    config.edgecols_store = flag
     local data = bench.extract(name)      -- fresh records each time (ingest mutates)
     store.ingest(data)
     return {
         census = table.concat(census.report(store.data), '\n'),
         tuples = call_tuples(store.data),
         ncalls = #(store.data.calls or {}),
-        wrapped = store._callcols ~= nil,
+        wrapped = store._callcols ~= nil and store._nodecols ~= nil and store._edgecols ~= nil,
     }
 end
 
 local off = run(false)
 local on = run(true)
-config.callcols_store = false
+config.callcols_store, config.nodecols_store, config.edgecols_store = false, false, false
 
 print(('callcolslive %s — %d calls (off) / %d calls (on), on.wrapped=%s')
     :format(name, off.ncalls, on.ncalls, tostring(on.wrapped)))

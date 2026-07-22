@@ -82,6 +82,15 @@ M.cache_max_diff = nil
 -- gates validate the LIVE path without a setup{} call.
 M.callcols_store = vim.env.CARTOGRAPH_CALLCOLS == '1'
 
+-- RESIDENT columnar NODE / EDGE stores (record-fold arc, the node/edge twins of
+-- callcols). Same contract: store ingest replaces data.nodes / data.edges with
+-- nodecols.view / edgecols.view and rebuilds their indexes over the proxies.
+-- Default off + gated independently so bring-up isolates failures (a covered-
+-- field write or a pairs() over a proxy asserts loudly — the discovery seam).
+-- Env CARTOGRAPH_NODECOLS=1 / CARTOGRAPH_EDGECOLS=1 for a whole run.
+M.nodecols_store = vim.env.CARTOGRAPH_NODECOLS == '1'
+M.edgecols_store = vim.env.CARTOGRAPH_EDGECOLS == '1'
+
 -- parallel cold extraction: worker processes parse file slices while the
 -- browser opens immediately and fills in as chunks arrive. Kicks in at
 -- parallel_threshold files; workers defaults to cores-1 (capped at 8).
