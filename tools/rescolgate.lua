@@ -60,6 +60,9 @@ end
 --   'proxy'  audit + relink over rescols proxy rows (the compat shim)
 --   'index'  audit INDEX-FORM over the columnar store (data._callstore, no
 --            proxies — the peak path), then materialize + relink as usual
+--   'relink' audit AND relink (base loop + the 13 resolve passes + mint) all
+--            INDEX-FORM — the store stays set through the WHOLE resolution tail,
+--            no records materialized until the final read (the full peak path)
 local function run(mode)
     local data = bench.extract(name) -- fresh, deterministic; inline-resolved
     local view
@@ -75,6 +78,11 @@ local function run(mode)
         for i = 1, #view.rows do recs[i] = rescols.record(view, i) end
         data.calls, data._callstore = recs, nil
         view = nil
+    elseif mode == 'relink' then
+        view = rescols.view(data.calls)
+        data._callstore = view -- STAYS set through relink → fully index-form
+        data.calls = view.rows -- safety net for any not-yet-converted record reader
+        parallel.audit(data)
     else
         parallel.audit(data)
     end
@@ -95,9 +103,11 @@ end
 local rec = run('rec')
 local col = run('proxy')
 local idx = run('index')
+local rlk = run('relink')
 
-print(('rescolgate %s — records %d calls / %d edges · proxy %d/%d · index-audit %d/%d')
-    :format(name, #rec.calls, #rec.edges, #col.calls, #col.edges, #idx.calls, #idx.edges))
+print(('rescolgate %s — records %d calls / %d edges · proxy %d/%d · index-audit %d/%d · index-relink %d/%d')
+    :format(name, #rec.calls, #rec.edges, #col.calls, #col.edges,
+        #idx.calls, #idx.edges, #rlk.calls, #rlk.edges))
 
 local fails = {}
 local function cmp(a, b, what)
@@ -117,6 +127,8 @@ cmp(rec.calls, col.calls, 'proxy call product')
 cmp(rec.edges, col.edges, 'proxy ref/reg edge')
 cmp(rec.calls, idx.calls, 'index-audit call product')
 cmp(rec.edges, idx.edges, 'index-audit ref/reg edge')
+cmp(rec.calls, rlk.calls, 'index-relink call product')
+cmp(rec.edges, rlk.edges, 'index-relink ref/reg edge')
 
 if #fails > 0 then
     print('FAIL:')

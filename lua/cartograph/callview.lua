@@ -27,9 +27,20 @@ function M.of(data)
             n = cc.n,
             get = function (i, f)
                 if cov[f] then return callcols.get(cc, f, i) end
-                local r = resid[i]; return r and r[f] or nil
+                -- `r[f]` directly (not `r and r[f] or nil`) so a residual FALSE
+                -- survives — the shared proxy_index rule, index-form
+                local r = resid[i]; if r then return r[f] end
             end,
-            set = function (i, f, v) callcols.set(cc, f, i, v) end,
+            -- mirror callcols.proxy_newindex: a mutable resolution field routes to
+            -- its column/overlay; a write to a covered IMMUTABLE (syntactic) column
+            -- is a resolver-partition bug (assert); anything else rides the residual
+            -- (refused/ext/stdpath/registry — tables/ids the schema doesn't cover)
+            set = function (i, f, v)
+                if cc.resf[f] then callcols.set(cc, f, i, v); return end
+                assert(not cov[f], 'callview: write to immutable syntactic field: ' .. tostring(f))
+                local r = resid[i]; if not r then r = {}; resid[i] = r end
+                r[f] = v
+            end,
             argn = function (i) return argvcols.argn(av, i) end,
             aget = function (i, j, f) return argvcols.aget(av, i, j, f) end,
             aset = function (i, j, f, v) argvcols.aset(av, i, j, f, v) end,

@@ -1014,16 +1014,19 @@ end
 -- Upgrade still-refused `Head::method` calls in place (addref + inferred);
 -- returns how many resolved. `exact` and `addref` come from whichever pass
 -- calls this (extract or relink) so it reads the CURRENT full node set.
-local function resolve_super(calls, extends, exact, addref, node_index)
+local function resolve_super(cv, extends, exact, addref, node_index)
     if not (extends and extends[1]) then return 0 end
     local super = build_super(extends)
+    local cget, cset = cv.get, cv.set
     local n = 0
-    for _, c in ipairs(calls or {}) do
-        if not c.to and c.refused and c.refused.cands and c.full then
+    for i = 1, cv.n do
+        local crefused, cfull = cget(i, 'refused'), cget(i, 'full')
+        if not cget(i, 'to') and crefused and crefused.cands and cfull then
             -- separator is language-relative: `::` (php/java), `:`/`.` (lua
             -- colon/dot methods). Captured so the ancestor lookup key reuses the
             -- SAME separator the def keys and this call use — one path, all langs.
-            local head, sep, method = c.full:match('^([%w_]+)([:.]+)([%w_]+)$')
+            local head, sep, method = cfull:match('^([%w_]+)([:.]+)([%w_]+)$')
+            local cfn = cget(i, 'fn')
             -- `super.m()` (JS/TS): the receiver IS the enclosing class's parent.
             -- Rewrite head to the enclosing class (from the call's fn owner) so
             -- the SAME ancestor walk resolves it — super[owner] is the parent,
@@ -1031,11 +1034,11 @@ local function resolve_super(calls, extends, exact, addref, node_index)
             -- unambiguously names the lexical parent; skip if the enclosing fn
             -- isn't a class method (e.g. a nested callback → owner underivable).
             if head == 'super' then
-                local fn = node_index and c.fn and node_index[c.fn]
+                local fn = node_index and cfn and node_index[cfn]
                 head = fn and fn.name and fn.name:match('^(.+)[.:][%w_]+$') or nil
             end
             if head and sep and super[head] then
-                local clang = elang_for(c.file)
+                local clang = elang_for(cget(i, 'file'))
                 local seen, cur, target = { [head] = true }, head, nil
                 for _ = 1, SUPER_STEP_LIMIT do
                     local par = super[cur]
@@ -1055,13 +1058,14 @@ local function resolve_super(calls, extends, exact, addref, node_index)
                     cur = par
                 end
                 if target then
-                    c.to = target.id
-                    c.inferred = true
-                    c.refused = nil
-                    if c.fn then
-                        addref(c.fn, target.id, c.at
-                            or { start = { line = c.line, char = 0 },
-                                ['end'] = { line = c.line, char = 0 } }, true)
+                    cset(i, 'to', target.id)
+                    cset(i, 'inferred', true)
+                    cset(i, 'refused', nil)
+                    if cfn then
+                        local cline = cget(i, 'line')
+                        addref(cfn, target.id, cget(i, 'at')
+                            or { start = { line = cline, char = 0 },
+                                ['end'] = { line = cline, char = 0 } }, true)
                     end
                     n = n + 1
                 end
@@ -1130,7 +1134,7 @@ end
 -- non-Spring Java) → gate (2) is inert, behaviour is exactly the bean gate —
 -- verified: `gate libs` (elasticsearch) stays identical. Bounded like
 -- resolve_super by the step limit + cycle guard.
-local function resolve_interface(calls, implements, beans, extends, exact, addref, markers)
+local function resolve_interface(cv, implements, beans, extends, exact, addref, markers)
     if not (implements and implements[1]) then return 0 end
     beans = beans or {}; markers = markers or {}
     local super = build_super(extends)
@@ -1182,10 +1186,12 @@ local function resolve_interface(calls, implements, beans, extends, exact, addre
         end
         if not changed then break end
     end
+    local cget, cset = cv.get, cv.set
     local n = 0
-    for _, c in ipairs(calls or {}) do
-        if c.full then
-            local head, sep, method = c.full:match('^([%w_]+)([:.]+)([%w_]+)$')
+    for i = 1, cv.n do
+        local cfull = cget(i, 'full')
+        if cfull then
+            local head, sep, method = cfull:match('^([%w_]+)([:.]+)([%w_]+)$')
             -- a service-marked interface draws from ALL implementers; otherwise
             -- only @stereotype beans are candidates
             local set = head and (svc[head] and allimpls[head] or beanimpls[head])
@@ -1195,25 +1201,28 @@ local function resolve_interface(calls, implements, beans, extends, exact, addre
                 -- @Qualifier narrows an ambiguous set to the named bean: the
                 -- impl whose bean name (explicit @Service("x"), else the
                 -- decapitalized class name) matches the receiver's qualifier
-                if cnt > 1 and c.qualifier then
+                local cqual = cget(i, 'qualifier')
+                if cnt > 1 and cqual then
                     for cls in pairs(set) do
                         local bn = beans[cls]
                         local name = (type(bn) == 'string' and bn)
                             or (cls:sub(1, 1):lower() .. cls:sub(2))
-                        if name == c.qualifier then only = cls; cnt = 1; break end
+                        if name == cqual then only = cls; cnt = 1; break end
                     end
                 end
                 if cnt == 1 then
                     local target = find_def(only, sep, method, super, exact,
-                        elang_for(c.file))
-                    if target and target.id ~= c.to then
-                        c.to = target.id
-                        c.inferred = true
-                        c.refused = nil
-                        if c.fn then
-                            addref(c.fn, target.id, c.at
-                                or { start = { line = c.line, char = 0 },
-                                    ['end'] = { line = c.line, char = 0 } }, true)
+                        elang_for(cget(i, 'file')))
+                    if target and target.id ~= cget(i, 'to') then
+                        cset(i, 'to', target.id)
+                        cset(i, 'inferred', true)
+                        cset(i, 'refused', nil)
+                        local cfn = cget(i, 'fn')
+                        if cfn then
+                            local cline = cget(i, 'line')
+                            addref(cfn, target.id, cget(i, 'at')
+                                or { start = { line = cline, char = 0 },
+                                    ['end'] = { line = cline, char = 0 } }, true)
                         end
                         n = n + 1
                     end
@@ -1233,7 +1242,7 @@ end
 -- (~): a derived resolution via the alias binding (a single-assignment/reaching
 -- check would promote it, and rule out reassigned aliases — banked). Lua-only
 -- today (only lua's spec captures import_bind); js/php import forms come later.
-local function resolve_module_alias(calls, edges, exact, tail, addref, node_index)
+local function resolve_module_alias(cv, edges, exact, tail, addref, node_index)
     local amap = {} -- file -> { alias -> module-file }, from require binds
     for _, e in ipairs(edges or {}) do
         if e.kind == 'import' and e.bind and e.from and e.to then
@@ -1242,8 +1251,9 @@ local function resolve_module_alias(calls, edges, exact, tail, addref, node_inde
         end
     end
     if not next(amap) then return 0 end
+    local cget, cset = cv.get, cv.set
     local n = 0
-    for _, c in ipairs(calls or {}) do
+    for i = 1, cv.n do
         -- a require-alias `recv` (a SINGLE segment before member — not an a.b.c chain).
         -- BINDING beats corpus name-match ([[cartograph-linker]] layer 1): `git.m` where
         -- git=require("M") means M's export m, INDEPENDENT of what other files name their
@@ -1253,15 +1263,17 @@ local function resolve_module_alias(calls, edges, exact, tail, addref, node_inde
         -- wins over the module's real export. Re-exports (M lacks its own m → no fit) and
         -- extensions (m added elsewhere, not in M → no fit) are untouched: no override fires.
         do
+            local cfull, cfile = cget(i, 'full'), cget(i, 'file')
             local recv, member = nil, nil
-            if c.full then recv, member = c.full:match('^([%w_]+)[.:]([%w_]+)$') end
+            if cfull then recv, member = cfull:match('^([%w_]+)[.:]([%w_]+)$') end
             -- fallback: the receiver preserved separately (zig field calls key
             -- only the member into `full`, but recv_local kept the object) — so
             -- a lowercase alias `bar.run()` is still recognized here.
-            if not recv and c.recv and c.callee then
-                recv, member = c.recv, c.callee
+            local crecv, ccallee = cget(i, 'recv'), cget(i, 'callee')
+            if not recv and crecv and ccallee then
+                recv, member = crecv, ccallee
             end
-            local mod = recv and amap[c.file] and amap[c.file][recv]
+            local mod = recv and amap[cfile] and amap[cfile][recv]
             if mod then
                 -- the UNIQUE fn/method with this tail defined in the alias's module
                 local fit, dup = nil, false
@@ -1270,23 +1282,26 @@ local function resolve_module_alias(calls, edges, exact, tail, addref, node_inde
                         if fit and fit.id ~= nd.id then dup = true else fit = nd end
                     end
                 end
-                if fit and not dup and fit.id ~= c.to then
+                local cto = cget(i, 'to')
+                if fit and not dup and fit.id ~= cto then
                     -- fill an UNRESOLVED call (refused-with-candidates, or a
                     -- clean exact-only refusal that leaves no refusal record —
                     -- zig's `Foo.method` typed key), OR correct a FOREIGN
                     -- resolution (current target outside M) to M's own export.
                     -- In-module resolutions are left alone. Sound: gated on a
                     -- UNIQUE fit in the bound module (the binding is authoritative).
-                    local cur = c.to and node_index and node_index[c.to]
+                    local cur = cto and node_index and node_index[cto]
                     local foreign = cur ~= nil and cur.file ~= mod
-                    if not c.to or foreign then
-                        c.to = fit.id
-                        c.inferred = true
-                        c.refused = nil
-                        if c.fn then
-                            addref(c.fn, fit.id, c.at
-                                or { start = { line = c.line, char = 0 },
-                                    ['end'] = { line = c.line, char = 0 } }, true)
+                    if not cto or foreign then
+                        cset(i, 'to', fit.id)
+                        cset(i, 'inferred', true)
+                        cset(i, 'refused', nil)
+                        local cfn = cget(i, 'fn')
+                        if cfn then
+                            local cline = cget(i, 'line')
+                            addref(cfn, fit.id, cget(i, 'at')
+                                or { start = { line = cline, char = 0 },
+                                    ['end'] = { line = cline, char = 0 } }, true)
                         end
                         n = n + 1
                     end
@@ -1306,11 +1321,13 @@ end
 -- source, keyed exact, and filled only on a UNIQUE fit (else left refused,
 -- honest). Instance chains (`l.field.method`, lowercase penult) carry no
 -- chainty → untouched (they need struct field-type inference, a separate arc).
-local function resolve_chain_type(calls, exact, addref, node_index)
+local function resolve_chain_type(cv, exact, addref, node_index)
+    local cget, cset = cv.get, cv.set
     local n = 0
-    for _, c in ipairs(calls or {}) do
-        if not c.to and c.chainty and c.callee then
-            local key = c.chainty .. '.' .. c.callee
+    for i = 1, cv.n do
+        local cchainty, ccallee = cget(i, 'chainty'), cget(i, 'callee')
+        if not cget(i, 'to') and cchainty and ccallee then
+            local key = cchainty .. '.' .. ccallee
             local fit, dup = nil, false
             for _, nd in ipairs(exact[key] or {}) do
                 if nd.kind == 'function' or nd.kind == 'method' then
@@ -1318,13 +1335,15 @@ local function resolve_chain_type(calls, exact, addref, node_index)
                 end
             end
             if fit and not dup then
-                c.to = fit.id
-                c.inferred = true
-                c.refused = nil
-                if c.fn then
-                    addref(c.fn, fit.id, c.at
-                        or { start = { line = c.line, char = 0 },
-                            ['end'] = { line = c.line, char = 0 } }, true)
+                cset(i, 'to', fit.id)
+                cset(i, 'inferred', true)
+                cset(i, 'refused', nil)
+                local cfn = cget(i, 'fn')
+                if cfn then
+                    local cline = cget(i, 'line')
+                    addref(cfn, fit.id, cget(i, 'at')
+                        or { start = { line = cline, char = 0 },
+                            ['end'] = { line = cline, char = 0 } }, true)
                 end
                 n = n + 1
             end
@@ -1343,31 +1362,35 @@ end
 -- name collision). Runs LAST so it only speaks for what every resolver left
 -- unresolved. Self-evidencing: needs no active profile and no curated free-set
 -- (the soundness gap that reverted the profile's type-precise free-match face).
-local function resolve_std_alias(calls, stdaliases)
+local function resolve_std_alias(cv, stdaliases)
     if not stdaliases or not next(stdaliases) then return 0 end
+    local cget, cset = cv.get, cv.set
     local n = 0
-    for _, c in ipairs(calls or {}) do
-        if not c.to then
-            local paths = stdaliases[c.file]
+    for i = 1, cv.n do
+        if not cget(i, 'to') then
+            local cfile, ccallee = cget(i, 'file'), cget(i, 'callee')
+            local paths = stdaliases[cfile]
             -- bare call: recv is nil, the name is the callee; receiver call:
             -- the chain root is the receiver (recv = single-id `mem.eql`,
             -- recvroot = deep chain `std.mem.eql` → "std"). Either way key the
             -- ROOT (never the member) — `x.assert()` where x is a project alias
             -- must NOT fire just because `assert` is elsewhere std-bound.
-            local root = c.recv or c.recvroot or c.callee
+            local crecv, crecvroot = cget(i, 'recv'), cget(i, 'recvroot')
+            local root = crecv or crecvroot or ccallee
             local base = paths and root and paths[root]
             if base then
-                c.refused = nil
-                c.ext = EXT.stdalias
+                cset(i, 'refused', nil)
+                cset(i, 'ext', EXT.stdalias)
                 -- CANONICAL symbol: alias-path(root) ++ (receiver-chain minus
                 -- root) ++ "." ++ callee. A bare call (no receiver) IS the
                 -- aliased callable → the base path itself.
-                if c.recvpath and c.recvpath:sub(1, #root) == root then
-                    c.stdpath = base .. c.recvpath:sub(#root + 1) .. '.' .. c.callee
-                elseif c.recv then
-                    c.stdpath = base .. '.' .. c.callee
+                local crecvpath = cget(i, 'recvpath')
+                if crecvpath and crecvpath:sub(1, #root) == root then
+                    cset(i, 'stdpath', base .. crecvpath:sub(#root + 1) .. '.' .. ccallee)
+                elseif crecv then
+                    cset(i, 'stdpath', base .. '.' .. ccallee)
                 else
-                    c.stdpath = base
+                    cset(i, 'stdpath', base)
                 end
                 n = n + 1
             end
@@ -1390,7 +1413,10 @@ end
 local STD_FILE = 'zig-std'          -- synthetic file of a minted std node
 local STD_SCHEME = 'zig-std::'      -- deterministic id prefix (symbol-keyed)
 local function mint_std_nodes(data, node_index)
-    local calls = data.calls or {}
+    -- INDEX-FORM over the columnar store when the parent holds one, else records
+    -- (the record-fold PEAK path — relink runs fully columnar with no records)
+    local cv = require('cartograph.callview').of(data)
+    local cget, cset = cv.get, cv.set
     -- reuse existing minted nodes (idempotent re-run) keyed by canonical path
     local bypath = {}
     for _, nd in ipairs(data.nodes) do
@@ -1402,34 +1428,37 @@ local function mint_std_nodes(data, node_index)
         if e.kind == 'ref' and e.stdlib then refkey[e.from .. '\31' .. e.to] = e end
     end
     local resolved, minted = 0, 0
-    for _, c in ipairs(calls) do
-        if c.stdpath and not c.to then
-            local nd = bypath[c.stdpath]
+    for i = 1, cv.n do
+        local cstdpath = cget(i, 'stdpath')
+        if cstdpath and not cget(i, 'to') then
+            local nd = bypath[cstdpath]
             if not nd then
-                nd = { id = STD_SCHEME .. c.stdpath, name = c.stdpath,
+                nd = { id = STD_SCHEME .. cstdpath, name = cstdpath,
                     kind = 'external', file = STD_FILE, external = true, order = -1,
                     range = { start = { line = 0, char = 0 },
                         ['end'] = { line = 0, char = 0 } } }
                 data.nodes[#data.nodes + 1] = nd
-                bypath[c.stdpath] = nd
+                bypath[cstdpath] = nd
                 if node_index then node_index[nd.id] = nd end
                 minted = minted + 1
             end
-            c.to = nd.id
-            c.ext = nil
-            c.refused = nil
-            c.prov = 'stdlib' -- the by_prov axis: minted std resolution
+            cset(i, 'to', nd.id)
+            cset(i, 'ext', nil)
+            cset(i, 'refused', nil)
+            cset(i, 'prov', 'stdlib') -- the by_prov axis: minted std resolution
             resolved = resolved + 1
-            if c.fn then
-                local k = c.fn .. '\31' .. nd.id
+            local cfn = cget(i, 'fn')
+            if cfn then
+                local k = cfn .. '\31' .. nd.id
                 local e = refkey[k]
                 if not e then
-                    e = { from = c.fn, to = nd.id, kind = 'ref', at = {}, stdlib = true }
+                    e = { from = cfn, to = nd.id, kind = 'ref', at = {}, stdlib = true }
                     refkey[k] = e
                     data.edges[#data.edges + 1] = e
                 end
-                e.at[#e.at + 1] = c.at or { start = { line = c.line, char = 0 },
-                    ['end'] = { line = c.line, char = 0 } }
+                local cline = cget(i, 'line')
+                e.at[#e.at + 1] = cget(i, 'at') or { start = { line = cline, char = 0 },
+                    ['end'] = { line = cline, char = 0 } }
             end
         end
     end
@@ -1451,7 +1480,7 @@ M.mint_std_nodes = mint_std_nodes
 -- that. ADDITIVE, unresolved-only. The bulk of instance chains stay unresolved —
 -- their root is a local (needs local type inference) or the field is a generic/
 -- builtin (needs generics modelling).
-local function resolve_field_chain(calls, fieldtypes, edges, exact, tail, addref, node_index)
+local function resolve_field_chain(cv, fieldtypes, edges, exact, tail, addref, node_index)
     if not (fieldtypes and fieldtypes[1]) then return 0 end
     -- field map: typename -> field -> {ftype, file} (cross-file conflict on one
     -- typename.field → false = ambiguous → skip)
@@ -1481,11 +1510,14 @@ local function resolve_field_chain(calls, fieldtypes, edges, exact, tail, addref
             end
         end
     end
+    local cget, cset = cv.get, cv.set
     local n = 0
-    for _, c in ipairs(calls or {}) do
-        if not c.to and c.chainroot and c.chainfield and c.callee then
-            local byfield = fm[c.chainroot]
-            local fe = byfield and byfield[c.chainfield]
+    for i = 1, cv.n do
+        local cchainroot, cchainfield, ccallee =
+            cget(i, 'chainroot'), cget(i, 'chainfield'), cget(i, 'callee')
+        if not cget(i, 'to') and cchainroot and cchainfield and ccallee then
+            local byfield = fm[cchainroot]
+            local fe = byfield and byfield[cchainfield]
             if fe then -- (false = ambiguous → skip)
                 -- bind the field's TYPE to a file, then resolve the method there
                 local tfile = amap[fe.file] and amap[fe.file][fe.ftype] -- (A) @import
@@ -1494,20 +1526,22 @@ local function resolve_field_chain(calls, fieldtypes, edges, exact, tail, addref
                 end
                 if tfile then
                     local fit, dup = nil, false
-                    for _, nd in ipairs(tail[c.callee] or exact[c.callee] or {}) do
+                    for _, nd in ipairs(tail[ccallee] or exact[ccallee] or {}) do
                         if nd.file == tfile
                             and (nd.kind == 'function' or nd.kind == 'method') then
                             if fit and fit.id ~= nd.id then dup = true else fit = nd end
                         end
                     end
                     if fit and not dup then
-                        c.to = fit.id
-                        c.inferred = true
-                        c.refused = nil
-                        if c.fn then
-                            addref(c.fn, fit.id, c.at
-                                or { start = { line = c.line, char = 0 },
-                                    ['end'] = { line = c.line, char = 0 } }, true)
+                        cset(i, 'to', fit.id)
+                        cset(i, 'inferred', true)
+                        cset(i, 'refused', nil)
+                        local cfn = cget(i, 'fn')
+                        if cfn then
+                            local cline = cget(i, 'line')
+                            addref(cfn, fit.id, cget(i, 'at')
+                                or { start = { line = cline, char = 0 },
+                                    ['end'] = { line = cline, char = 0 } }, true)
                         end
                         n = n + 1
                     end
@@ -1531,7 +1565,7 @@ end
 -- name-matched — no false redirect. Slot unifies `:`/`.` (T:m and T.m are one slot).
 -- Same-file only (the winner is keyed by file): a cross-file "override" is not a
 -- load-order fact. The redirect is marked inferred (~) — it is an inference.
-local function resolve_reassign(calls, node_index, addref)
+local function resolve_reassign(cv, node_index, addref)
     local function slot_of(name)
         local owner, _, field = name:match('^(.+)([:.])([%w_]+)$')
         return owner and (owner .. '.' .. field) or nil
@@ -1560,19 +1594,23 @@ local function resolve_reassign(calls, node_index, addref)
         end
     end
     if not next(winner) then return 0 end
+    local cget, cset = cv.get, cv.set
     local n = 0
-    for _, c in ipairs(calls or {}) do
-        local tn = c.to and node_index[c.to]
+    for i = 1, cv.n do
+        local cto = cget(i, 'to')
+        local tn = cto and node_index[cto]
         if tn and tn.top and (tn.kind == 'function' or tn.kind == 'method') then
             local slot = slot_of(tn.name)
             local w = slot and winner[(tn.file or '?') .. '\31' .. slot]
-            if w and w.id ~= c.to then
-                c.to = w.id
-                c.inferred = true
-                if c.fn then
-                    addref(c.fn, w.id, c.at
-                        or { start = { line = c.line, char = 0 },
-                            ['end'] = { line = c.line, char = 0 } }, true)
+            if w and w.id ~= cto then
+                cset(i, 'to', w.id)
+                cset(i, 'inferred', true)
+                local cfn = cget(i, 'fn')
+                if cfn then
+                    local cline = cget(i, 'line')
+                    addref(cfn, w.id, cget(i, 'at')
+                        or { start = { line = cline, char = 0 },
+                            ['end'] = { line = cline, char = 0 } }, true)
                 end
                 n = n + 1
             end
@@ -1596,7 +1634,8 @@ end
 -- corpus without these idioms (non-WoW) → no gate recalibration there.
 local REG_REGISTER = { NewLibrary = 'lib', NewModule = 'module', NewAddon = 'addon' }
 local REG_RETRIEVE = { GetLibrary = 'lib', GetModule = 'module', GetAddon = 'addon' }
-local function resolve_registry(calls, node_index, addref, scope_of, consts, exact)
+local function resolve_registry(cv, node_index, addref, scope_of, consts, exact)
+    local cget, cset = cv.get, cv.set
     -- class-owner set: a name that owns a method (`X:m`/`X.m` in exact). A register
     -- line `local Lib, oldminor = :NewLibrary(...)` gives BOTH vars start.char 0 (the
     -- extraction attributes them to the statement, not the identifier), so the
@@ -1612,22 +1651,28 @@ local function resolve_registry(calls, node_index, addref, scope_of, consts, exa
     -- the key as a STRING: a folded literal (k='lit', warm/relink argv) OR a
     -- k='local' whose name resolves to a same-file scalar-string const (the
     -- INITIAL extract runs before const-fold's post-pass, so fold the key here
-    -- from the same const index — `consts` is nil on relink where argv is folded)
-    local function keyof(a, file)
-        if not a then return nil end
-        if a.k == 'lit' then return a.v end
-        if a.k == 'local' and a.name and consts and consts[file] then
-            local v = consts[file][a.name]
-            return type(v) == 'string' and v or nil
+    -- from the same const index — `consts` is nil on relink where argv is folded).
+    -- Index-form: (call index ci, argv slot j) instead of the element table.
+    local function keyof(ci, j, file)
+        if j > cv.argn(ci) then return nil end
+        local ak = cv.aget(ci, j, 'k')
+        if ak == 'lit' then return cv.aget(ci, j, 'v') end
+        if ak == 'local' then
+            local aname = cv.aget(ci, j, 'name')
+            if aname and consts and consts[file] then
+                local v = consts[file][aname]
+                return type(v) == 'string' and v or nil
+            end
         end
     end
     -- the local a register call's result binds to = the registered table, found
     -- by (file, line): `local L = recv:NewLibrary("X")` puts L on the call's line
     local varAt
     local index, n = {}, 0
-    for _, c in ipairs(calls or {}) do
-        local kind = c.method and REG_REGISTER[c.callee]
-        local key = kind and keyof(c.argv and c.argv[2], c.file)
+    for i = 1, cv.n do
+        local cfile = cget(i, 'file')
+        local kind = cget(i, 'method') and REG_REGISTER[cget(i, 'callee')]
+        local key = kind and keyof(i, 2, cfile)
         if key then
             if not varAt then
                 varAt = {}
@@ -1647,9 +1692,9 @@ local function resolve_registry(calls, node_index, addref, scope_of, consts, exa
                     end
                 end
             end
-            local def = varAt[c.file .. '\0' .. c.line]
+            local def = varAt[cfile .. '\0' .. cget(i, 'line')]
             if def then
-                index[(scope_of(c.file) or '') .. '\0' .. kind .. '\0' .. key] = def
+                index[(scope_of(cfile) or '') .. '\0' .. kind .. '\0' .. key] = def
             end
         end
     end
@@ -1657,22 +1702,25 @@ local function resolve_registry(calls, node_index, addref, scope_of, consts, exa
     -- a retrieval RESOLVES TO the LibStub/Get* function as a normal call target;
     -- the registry link is about what it RETURNS (the registered table), so it
     -- rides ALONGSIDE c.to (additive ref edge + c.registry marker), not instead.
-    for _, c in ipairs(calls or {}) do
-        if not c.registry then
+    for i = 1, cv.n do
+        if not cget(i, 'registry') then
+            local cfile, ccallee = cget(i, 'file'), cget(i, 'callee')
             local kind, key
-            if c.method and REG_RETRIEVE[c.callee] then
-                kind, key = REG_RETRIEVE[c.callee], keyof(c.argv and c.argv[2], c.file)
-            elseif c.callee == 'LibStub' and not c.method then
-                kind, key = 'lib', keyof(c.argv and c.argv[1], c.file)
+            if cget(i, 'method') and REG_RETRIEVE[ccallee] then
+                kind, key = REG_RETRIEVE[ccallee], keyof(i, 2, cfile)
+            elseif ccallee == 'LibStub' and not cget(i, 'method') then
+                kind, key = 'lib', keyof(i, 1, cfile)
             end
             local def = kind and key
-                and index[(scope_of(c.file) or '') .. '\0' .. kind .. '\0' .. key]
+                and index[(scope_of(cfile) or '') .. '\0' .. kind .. '\0' .. key]
             -- the resolution FACT (c.registry) is recorded even at top level
             -- (c.fn nil — the common `local X = LibStub("Y")` module form); the
             -- navigable ref edge rides only when there's an enclosing fn `from`
-            if def and def.id ~= c.fn then
-                if c.fn and c.at then addref(c.fn, def.id, c.at, true) end
-                c.registry = def.id
+            local cfn = cget(i, 'fn')
+            if def and def.id ~= cfn then
+                local cat = cget(i, 'at')
+                if cfn and cat then addref(cfn, def.id, cat, true) end
+                cset(i, 'registry', def.id)
                 n = n + 1
             end
         end
@@ -1693,7 +1741,8 @@ end
 -- propagates to the methods it reaches via self:. Marked inferred (~) — a derived
 -- resolution (known limit: a local shadowing a class NAME could mis-seed; the ~
 -- tier is honest about it). Lua-shaped (self as an explicit param-0).
-local function resolve_self(calls, node_index, extends, exact, addref)
+local function resolve_self(cv, node_index, extends, exact, addref)
+    local cget, cset = cv.get, cv.set
     -- class-name set: any table T that owns a method (`T:x` / `T.x` in exact)
     local is_class = {}
     for name in pairs(exact) do
@@ -1719,32 +1768,36 @@ local function resolve_self(calls, node_index, extends, exact, addref)
     for round = 1, 6 do
         local progress = false
         -- (1) accumulate self-types from resolved method call sites (backward)
-        for _, c in ipairs(calls or {}) do
-            if c.to and c.full and node_index[c.to] and node_index[c.to].kind == 'method' then
-                local recv = c.full:match('^([%w_]+)[:.]')
+        for i = 1, cv.n do
+            local cto, cfull = cget(i, 'to'), cget(i, 'full')
+            if cto and cfull and node_index[cto] and node_index[cto].kind == 'method' then
+                local recv = cfull:match('^([%w_]+)[:.]')
+                local cfn = cget(i, 'fn')
                 if recv == 'self' then
-                    local CE = c.fn and selfclass(c.fn) -- enclosing method's self
-                    if CE then addtype(c.to, CE)
-                    elseif c.fn and selft[c.fn] == false then selft[c.to] = false end
+                    local CE = cfn and selfclass(cfn) -- enclosing method's self
+                    if CE then addtype(cto, CE)
+                    elseif cfn and selft[cfn] == false then selft[cto] = false end
                 elseif recv and is_class[recv] then
-                    addtype(c.to, recv)            -- literal class receiver
+                    addtype(cto, recv)            -- literal class receiver
                 elseif recv then
-                    selft[c.to] = false            -- untypeable receiver → hedge
+                    selft[cto] = false            -- untypeable receiver → hedge
                 end
             end
         end
         -- (2) resolve self:member calls whose enclosing method is typed to one class
-        for _, c in ipairs(calls or {}) do
-            if not c.to and c.full and c.fn then
-                local member = c.full:match('^self[:.]([%w_]+)$')
-                local C = member and selfclass(c.fn)
+        for i = 1, cv.n do
+            local cfull, cfn = cget(i, 'full'), cget(i, 'fn')
+            if not cget(i, 'to') and cfull and cfn then
+                local member = cfull:match('^self[:.]([%w_]+)$')
+                local C = member and selfclass(cfn)
                 if C then
-                    local fit = chain_lookup(super, exact, C, member, elang_for(c.file))
+                    local fit = chain_lookup(super, exact, C, member, elang_for(cget(i, 'file')))
                     if fit then
-                        c.to = fit.id; c.inferred = true; c.refused = nil
-                        addref(c.fn, fit.id, c.at
-                            or { start = { line = c.line, char = 0 },
-                                 ['end'] = { line = c.line, char = 0 } }, true)
+                        cset(i, 'to', fit.id); cset(i, 'inferred', true); cset(i, 'refused', nil)
+                        local cline = cget(i, 'line')
+                        addref(cfn, fit.id, cget(i, 'at')
+                            or { start = { line = cline, char = 0 },
+                                 ['end'] = { line = cline, char = 0 } }, true)
                         n = n + 1; progress = true
                     end
                 end
@@ -1770,19 +1823,20 @@ local function resolve_self(calls, node_index, extends, exact, addref)
         local owner = name:match('^(.+):[%w_]+$')
         if owner then methodcount[owner] = (methodcount[owner] or 0) + 1 end
     end
-    for _, c in ipairs(calls or {}) do
+    for i = 1, cv.n do
         -- ONLY methods with NO in-corpus call site (selft untouched = truly
         -- framework-invoked). A POISONED method (selft==false, called with an
         -- untypeable receiver) keeps V1's hedge — lexical self would be unsound
         -- there (the method IS invoked on an unknown receiver, maybe not M).
-        if c.full and c.fn and node_index[c.fn] and selft[c.fn] == nil then
-            local member = c.full:match('^self[:.]([%w_]+)$')
-            local fn = node_index[c.fn]
+        local cfull, cfn = cget(i, 'full'), cget(i, 'fn')
+        if cfull and cfn and node_index[cfn] and selft[cfn] == nil then
+            local member = cfull:match('^self[:.]([%w_]+)$')
+            local fn = node_index[cfn]
             -- FULL dotted owner (`Widget.prototype:Refresh` → `Widget.prototype`),
             -- so self is typed to the prototype and self:m resolves in ITS members.
             local owner = member and fn.name and fn.name:match('^(.+)[:.][%w_]+$')
             if owner and (methodcount[owner] or 0) >= 2 then
-                local fit = chain_lookup(super, exact, owner, member, elang_for(c.file))
+                local fit = chain_lookup(super, exact, owner, member, elang_for(cget(i, 'file')))
                 -- FILL an unresolved call, OR OVERRIDE a FOREIGN promiscuous match:
                 -- the main resolve()'s member-name tail-match resolves `self:m` to an
                 -- UNRELATED same-named method when the owner truncated (all
@@ -1792,14 +1846,16 @@ local function resolve_self(calls, node_index, extends, exact, addref)
                 -- name-match (generalizing v55/v56 to self-typing). MEASURED: the
                 -- override fires 0× on non-dotted owners (all already correct), so
                 -- it can't regress the correct self:member resolutions.
-                if fit and fit.id ~= c.to then
-                    local cur = c.to and node_index[c.to]
+                local cto = cget(i, 'to')
+                if fit and fit.id ~= cto then
+                    local cur = cto and node_index[cto]
                     local curowner = cur and cur.name and cur.name:match('^(.+)[:.][%w_]+$')
-                    if not c.to or (curowner ~= nil and curowner ~= owner) then
-                        c.to = fit.id; c.inferred = true; c.refused = nil
-                        addref(c.fn, fit.id, c.at
-                            or { start = { line = c.line, char = 0 },
-                                 ['end'] = { line = c.line, char = 0 } }, true)
+                    if not cto or (curowner ~= nil and curowner ~= owner) then
+                        cset(i, 'to', fit.id); cset(i, 'inferred', true); cset(i, 'refused', nil)
+                        local cline = cget(i, 'line')
+                        addref(cfn, fit.id, cget(i, 'at')
+                            or { start = { line = cline, char = 0 },
+                                 ['end'] = { line = cline, char = 0 } }, true)
                         n = n + 1
                     end
                 end
@@ -1841,18 +1897,20 @@ local function resolve_self(calls, node_index, extends, exact, addref)
             cur = this_parent[cur.id] -- arrow: inherit this from the enclosing fn
         end
     end
-    for _, c in ipairs(calls or {}) do
-        if not c.to and c.full and c.fn and node_index[c.fn]
-            and elang_for(c.file) == 'javascript' then
-            local member = c.full:match('^this%.([%w_]+)$')
-            local owner = member and this_owner(c.fn)
+    for i = 1, cv.n do
+        local cfull, cfn = cget(i, 'full'), cget(i, 'fn')
+        if not cget(i, 'to') and cfull and cfn and node_index[cfn]
+            and elang_for(cget(i, 'file')) == 'javascript' then
+            local member = cfull:match('^this%.([%w_]+)$')
+            local owner = member and this_owner(cfn)
             if owner then
                 local fit = chain_lookup(super, exact, owner, member, 'javascript')
                 if fit then
-                    c.to = fit.id; c.inferred = true; c.refused = nil
-                    addref(c.fn, fit.id, c.at
-                        or { start = { line = c.line, char = 0 },
-                             ['end'] = { line = c.line, char = 0 } }, true)
+                    cset(i, 'to', fit.id); cset(i, 'inferred', true); cset(i, 'refused', nil)
+                    local cline = cget(i, 'line')
+                    addref(cfn, fit.id, cget(i, 'at')
+                        or { start = { line = cline, char = 0 },
+                             ['end'] = { line = cline, char = 0 } }, true)
                     n = n + 1
                 end
             end
@@ -1875,7 +1933,7 @@ end
 -- SINGLE-ASSIGNMENT gated (n ~= 1 dropped — a rebind would change the type).
 -- Inferred (~): a reassignment to a non-ctor value escapes the count (cut 3 =
 -- reaching-verify the returned value IS the setmetatable'd one → promote ~→proven).
-local function resolve_local_ctor(calls, node_index, ctorbinds, smtclasses, extends, exact, addref)
+local function resolve_local_ctor(cv, node_index, ctorbinds, smtclasses, extends, exact, addref)
     if not (ctorbinds and next(ctorbinds)) then return 0 end
     local super = build_super(extends)
     local is_class = {}
@@ -1903,11 +1961,14 @@ local function resolve_local_ctor(calls, node_index, ctorbinds, smtclasses, exte
             end
         end
     end
+    local cget, cset = cv.get, cv.set
     local n = 0
-    for _, c in ipairs(calls or {}) do
-        if not c.to and c.full and c.fn then
-            local recv, member = c.full:match('^([%w_]+)[:.]([%w_]+)$')
-            local fb = recv and recv ~= 'self' and ctorbinds[c.file]
+    for i = 1, cv.n do
+        local cfull, cfn = cget(i, 'full'), cget(i, 'fn')
+        if not cget(i, 'to') and cfull and cfn then
+            local cfile = cget(i, 'file')
+            local recv, member = cfull:match('^([%w_]+)[:.]([%w_]+)$')
+            local fb = recv and recv ~= 'self' and ctorbinds[cfile]
             local b = fb and fb[recv]
             if b and b.n == 1 and b.callee then
                 -- CUT 1 (.new convention) then CUT 2 (callee fn's return-class)
@@ -1918,14 +1979,15 @@ local function resolve_local_ctor(calls, node_index, ctorbinds, smtclasses, exte
                 -- constructs exactly a C instance → o.member walks C's chain.
                 -- elang-gated so lua/php callable-class idioms are untouched.
                 if not (cls and is_class[cls]) and is_class[b.callee]
-                    and elang_for(c.file) == 'javascript' then cls = b.callee end
+                    and elang_for(cfile) == 'javascript' then cls = b.callee end
                 if cls and is_class[cls] then
-                    local fit = chain_lookup(super, exact, cls, member, elang_for(c.file))
+                    local fit = chain_lookup(super, exact, cls, member, elang_for(cfile))
                     if fit then
-                        c.to = fit.id; c.inferred = true; c.refused = nil
-                        addref(c.fn, fit.id, c.at
-                            or { start = { line = c.line, char = 0 },
-                                 ['end'] = { line = c.line, char = 0 } }, true)
+                        cset(i, 'to', fit.id); cset(i, 'inferred', true); cset(i, 'refused', nil)
+                        local cline = cget(i, 'line')
+                        addref(cfn, fit.id, cget(i, 'at')
+                            or { start = { line = cline, char = 0 },
+                                 ['end'] = { line = cline, char = 0 } }, true)
                         n = n + 1
                     end
                 end
@@ -1946,7 +2008,7 @@ end
 -- receiver `x` is `ctorbinds`-typed to C (from `x = C.new`, single-assignment)
 -- resolves to C#foo — C's own def, else up C's ancestors. ADDITIVE: only
 -- touches calls the file-local heuristic left unresolved (c.recv + not c.to).
-local function resolve_ruby_ancestors(calls, anc, exact, addref, node_index, ctorbinds)
+local function resolve_ruby_ancestors(cv, anc, exact, addref, node_index, ctorbinds)
     local have_anc = anc and #anc > 0
     if not (have_anc or (ctorbinds and next(ctorbinds))) then return 0 end
     anc = anc or {}
@@ -1996,29 +2058,33 @@ local function resolve_ruby_ancestors(calls, anc, exact, addref, node_index, cto
         end
         return hit
     end
+    local cget, cset = cv.get, cv.set
     local n = 0
-    for _, c in ipairs(calls or {}) do
-        if not c.to and c.fn then
+    for i = 1, cv.n do
+        local cfn = cget(i, 'fn')
+        if not cget(i, 'to') and cfn then
             local fit
-            if c.recv and ctorbinds then
+            local crecv, ccallee = cget(i, 'recv'), cget(i, 'callee')
+            local csuperx, cfull = cget(i, 'superx'), cget(i, 'full')
+            if crecv and ctorbinds then
                 -- rescoped R5: x.foo where x = C.new (single-assignment) →
                 -- C#foo (own), else C's ancestors. Additive (call was unresolved).
-                local fb = ctorbinds[c.file]
-                local b = fb and fb[c.recv]
-                if b and b.n == 1 and b.cls and c.callee then
-                    fit = uniq(b.cls .. '#' .. c.callee)
-                        or chase(b.cls, c.callee, inst, '#')
+                local fb = ctorbinds[cget(i, 'file')]
+                local b = fb and fb[crecv]
+                if b and b.n == 1 and b.cls and ccallee then
+                    fit = uniq(b.cls .. '#' .. ccallee)
+                        or chase(b.cls, ccallee, inst, '#')
                 end
-            elseif c.superx then
+            elseif csuperx then
                 -- `super`: chase the enclosing method's name up the ancestors,
                 -- skipping C's own def (chase looks at PARENTS). instance
                 -- method → superclass/include chain (p#m); singleton → the
                 -- superclass singleton chain (p.m).
-                local sx = c.superx
+                local sx = csuperx
                 if sx.sing then fit = chase(sx.cls, sx.member, sings, '.')
                 else fit = chase(sx.cls, sx.member, inst, '#') end
-            elseif c.full then
-                local cls, csep, member = c.full:match('^(%u[%w_]*)([#.])([%w_?!=]+)$')
+            elseif cfull then
+                local cls, csep, member = cfull:match('^(%u[%w_]*)([#.])([%w_?!=]+)$')
                 if cls and csep == '#' then
                     fit = chase(cls, member, inst, '#')
                 elseif cls and csep == '.' then
@@ -2028,10 +2094,11 @@ local function resolve_ruby_ancestors(calls, anc, exact, addref, node_index, cto
                 end
             end
             if fit then
-                c.to = fit.id; c.inferred = true; c.refused = nil
-                addref(c.fn, fit.id, c.at
-                    or { start = { line = c.line, char = 0 },
-                         ['end'] = { line = c.line, char = 0 } }, true)
+                cset(i, 'to', fit.id); cset(i, 'inferred', true); cset(i, 'refused', nil)
+                local cline = cget(i, 'line')
+                addref(cfn, fit.id, cget(i, 'at')
+                    or { start = { line = cline, char = 0 },
+                         ['end'] = { line = cline, char = 0 } }, true)
                 n = n + 1
             end
         end
@@ -2049,19 +2116,22 @@ end
 -- settle in ROUNDS — a().b().c() unlocks one link per pass: the
 -- types⇄call-graph mutual fixpoint in its smallest form. Round count is
 -- returned for the measurement protocol. Shared by extract and relink.
-local function resolve_returns(calls, node_index, exact, addref)
+local function resolve_returns(cv, node_index, exact, addref)
+    local cget, cset = cv.get, cv.set
     local callidx = {}
     -- the deferred WORKLIST: rounds iterate only the calls still carrying
     -- unresolved rt provenance, not the whole call array per round (which
-    -- profiled at ~2% of extract on server — 3 rounds x 240k calls)
+    -- profiled at ~2% of extract on server — 3 rounds x 240k calls). Both
+    -- callidx and the worklist hold call INDICES, not record handles (index-form).
     local deferred, dn = {}, 0
-    for _, c in ipairs(calls or {}) do
-        if c.at then
-            callidx[c.file .. '\31' .. atr.sl(c.at) .. '\31' .. atr.sc(c.at)] = c
+    for i = 1, cv.n do
+        local cat = cget(i, 'at')
+        if cat then
+            callidx[cget(i, 'file') .. '\31' .. atr.sl(cat) .. '\31' .. atr.sc(cat)] = i
         end
-        if c.rt and not c.to and c.callee then
+        if cget(i, 'rt') and not cget(i, 'to') and cget(i, 'callee') then
             dn = dn + 1
-            deferred[dn] = c
+            deferred[dn] = i
         end
     end
     local n, rounds = 0, 0
@@ -2069,30 +2139,34 @@ local function resolve_returns(calls, node_index, exact, addref)
         local progress = false
         rounds = rounds + 1
         local keep, kn = {}, 0
-        for i = 1, dn do
-            local c = deferred[i]
+        for di = 1, dn do
+            local ci = deferred[di]
             local settled = false
             do
-                local d = callidx[c.file .. '\31' .. c.rt.r .. '\31' .. c.rt.c]
-                local dnode = d and d.to and node_index[d.to]
+                local crt = cget(ci, 'rt')
+                local dci = callidx[cget(ci, 'file') .. '\31' .. crt.r .. '\31' .. crt.c]
+                local dto = dci and cget(dci, 'to')
+                local dnode = dto and node_index[dto]
                 local ret = dnode and dnode.ret
                 -- GENERIC Class<T> return: the determining call's target binds
                 -- its return type to a Class<T> parameter, so the concrete
                 -- return is the type its class-literal argument names
                 -- (Services.get(IFoo.class) → IFoo). Reads the call's own arg —
                 -- signature-driven, general to any `<T> T m(Class<T>)`.
-                if dnode and dnode.retclass and d.argv then
-                    local a = d.argv[dnode.retclass]
-                    if a and a.k == 'class' and a.v then ret = a.v end
+                if dnode and dnode.retclass and dci and cv.argn(dci) >= dnode.retclass then
+                    local ak = cv.aget(dci, dnode.retclass, 'k')
+                    local av = cv.aget(dci, dnode.retclass, 'v')
+                    if ak == 'class' and av then ret = av end
                 end
-                if not ret and d and d.refused and d.refused.cands
-                    and d.refused.n and d.refused.n <= #d.refused.cands then
+                local drefused = dci and cget(dci, 'refused')
+                if not ret and drefused and drefused.cands
+                    and drefused.n and drefused.n <= #drefused.cands then
                     -- overloads refuse the CALL, but when every candidate
                     -- declares the same return type, the TYPE is unambiguous
                     -- and the chain continues (untruncated cands only — a
                     -- capped list can't prove agreement)
                     local agree
-                    for _, id in ipairs(d.refused.cands) do
+                    for _, id in ipairs(drefused.cands) do
                         local r = node_index[id] and node_index[id].ret
                         if not r or (agree and r ~= agree) then agree = nil break end
                         agree = r
@@ -2103,11 +2177,12 @@ local function resolve_returns(calls, node_index, exact, addref)
                 -- gate; other langs skip — their stdlib disposition handles it).
                 -- The method-key separator is per-language: java `::`, zig `.`
                 -- (spec.methodsep, default `::` so java stays identical).
-                local clang = ret and elang_for(c.file)
+                local ccallee = cget(ci, 'callee')
+                local clang = ret and elang_for(cget(ci, 'file'))
                 local jdk_gated = clang == 'java' and javaspec._jdk_types[ret]
                 if ret and not jdk_gated then
                     local sep = (M.spec[clang] and M.spec[clang].methodsep) or '::'
-                    local rkey = ret .. sep .. c.callee
+                    local rkey = ret .. sep .. ccallee
                     local fit, dup
                     for _, node in ipairs(exact[rkey] or {}) do
                         if elang_for(node.file) == clang then
@@ -2115,7 +2190,7 @@ local function resolve_returns(calls, node_index, exact, addref)
                         end
                     end
                     if fit and not dup then
-                        c.to = fit.id
+                        cset(ci, 'to', fit.id)
                         -- a deferred chained call had no lexical qualification;
                         -- record the one the return type gives it, so a later
                         -- pass (resolve_interface) can act on it — e.g. redirect
@@ -2126,23 +2201,24 @@ local function resolve_returns(calls, node_index, exact, addref)
                         -- kept one changed relink's question from the bare
                         -- stdlib-gated callee to a qualified name, minting
                         -- edges inline never had; the par gate caught it)
-                        if not c.full then
-                            c.full = rkey
-                            c.rtfull = true
+                        if not cget(ci, 'full') then
+                            cset(ci, 'full', rkey)
+                            cset(ci, 'rtfull', true)
                         end
-                        c.inferred = true -- type INFERRED through a summary
-                        c.tinf = true -- the TYPE-INFERRED tier (the VM's own
+                        cset(ci, 'inferred', true) -- type INFERRED through a summary
+                        cset(ci, 'tinf', true) -- the TYPE-INFERRED tier (the VM's own
                         -- output: resolved via a return-type summary, a
                         -- stronger signal than a name-matched ~ guess; the
                         -- honesty ladder's middle rung). inferred STAYS so
                         -- the parallel audit still nulls + relink re-derives.
-                        c.refused = nil
+                        cset(ci, 'refused', nil)
                         -- c.rt STAYS: a worker settles chains slice-locally,
                         -- the parallel audit nulls every inferred resolution,
                         -- and relink must re-derive from the provenance
                         -- (idempotent — the `not c.to` guard skips settled
                         -- calls; name-ambiguous chains have no tail rescue)
-                        if c.fn then addref(c.fn, fit.id, c.at, true, true) end
+                        local cfn = cget(ci, 'fn')
+                        if cfn then addref(cfn, fit.id, cget(ci, 'at'), true, true) end
                         n = n + 1
                         progress = true
                         settled = true
@@ -2151,7 +2227,7 @@ local function resolve_returns(calls, node_index, exact, addref)
             end
             if not settled then
                 kn = kn + 1
-                keep[kn] = c
+                keep[kn] = ci
             end
         end
         deferred, dn = keep, kn
@@ -2229,17 +2305,19 @@ local function localdecl_shadow(callee, file, fn, parent_fn, exact)
     return true
 end
 
-local function resolve_local_callable(calls, node_index, exact, addref, parent_fn)
+local function resolve_local_callable(cv, node_index, exact, addref, parent_fn)
+    local cget, cset = cv.get, cv.set
     local n = 0
     parent_fn = parent_fn or build_parent_fn(node_index)
-    for _, c in ipairs(calls or {}) do
-        if c.callee and not c.full and not c.dynamic and not c.to
-            and not c.refused and c.fn then
-            local fn = node_index[c.fn]
+    for i = 1, cv.n do
+        local ccallee, cfn = cget(i, 'callee'), cget(i, 'fn')
+        if ccallee and not cget(i, 'full') and not cget(i, 'dynamic') and not cget(i, 'to')
+            and not cget(i, 'refused') and cfn then
+            local fn = node_index[cfn]
             if fn then
-                local regime = callee_binding(c.callee, fn, parent_fn)
+                local regime = callee_binding(ccallee, fn, parent_fn)
                 if regime == 'higher-order' then
-                    c.refused = { rule = 'higher-order' }
+                    cset(i, 'refused', { rule = 'higher-order' })
                     n = n + 1
                 elseif regime == 'local' or regime == 'localdecl' then
                     -- resolve to the UNIQUE same-file function/method def the local
@@ -2247,20 +2325,22 @@ local function resolve_local_callable(calls, node_index, exact, addref, parent_f
                     -- `const f = function/arrow` binding IS that def. A binding to a
                     -- non-fn value (destructured `const [x,setX]=useState()` hook
                     -- setter, cross-file shadow) finds none → refused fn-value.
+                    local cfile = cget(i, 'file')
                     local hit, dup
-                    for _, d in ipairs(exact[c.callee] or {}) do
-                        if d.file == c.file
+                    for _, d in ipairs(exact[ccallee] or {}) do
+                        if d.file == cfile
                             and (d.kind == 'function' or d.kind == 'method') then
                             if hit then dup = true; break end
                             hit = d
                         end
                     end
                     if hit and not dup then
-                        c.to = hit.id
-                        c.inferred = true
-                        if c.at then addref(c.fn, hit.id, c.at, true) end
+                        cset(i, 'to', hit.id)
+                        cset(i, 'inferred', true)
+                        local cat = cget(i, 'at')
+                        if cat then addref(cfn, hit.id, cat, true) end
                     else
-                        c.refused = { rule = 'fn-value' }
+                        cset(i, 'refused', { rule = 'fn-value' })
                     end
                     n = n + 1
                 end
@@ -2288,35 +2368,35 @@ end
 -- new inline arm.
 local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
-        return resolve_super(x.calls, x.data.extends, x.exact, x.addref, x.node_index) end },
+        return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
     { name = 'module_alias', run = function (x)
-        return resolve_module_alias(x.calls, x.data.edges, x.exact, x.tail, x.addref, x.node_index) end },
+        return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref, x.node_index) end },
     { name = 'chain_type', run = function (x)
-        return resolve_chain_type(x.calls, x.exact, x.addref, x.node_index) end },
+        return resolve_chain_type(x.cv, x.exact, x.addref, x.node_index) end },
     { name = 'field_chain', run = function (x)
-        return resolve_field_chain(x.calls, x.data.fieldtypes, x.data.edges, x.exact, x.tail, x.addref, x.node_index) end },
+        return resolve_field_chain(x.cv, x.data.fieldtypes, x.data.edges, x.exact, x.tail, x.addref, x.node_index) end },
     { name = 'registry', run = function (x)
-        return resolve_registry(x.calls, x.node_index, x.addref, x.scope_of, x.consts, x.exact) end },
+        return resolve_registry(x.cv, x.node_index, x.addref, x.scope_of, x.consts, x.exact) end },
     { name = 'reassign', run = function (x) -- REWRITE stage (see header)
-        return resolve_reassign(x.calls, x.node_index, x.addref) end },
+        return resolve_reassign(x.cv, x.node_index, x.addref) end },
     { name = 'returns', run = function (x)
-        local retn, rounds = resolve_returns(x.calls, x.node_index, x.exact, x.addref)
+        local retn, rounds = resolve_returns(x.cv, x.node_index, x.exact, x.addref)
         x.ret_resolved, x.ret_rounds = retn, rounds
         return retn end },
     { name = 'self', run = function (x)
-        return resolve_self(x.calls, x.node_index, x.data.extends, x.exact, x.addref) end },
+        return resolve_self(x.cv, x.node_index, x.data.extends, x.exact, x.addref) end },
     { name = 'local_ctor', run = function (x)
-        return resolve_local_ctor(x.calls, x.node_index, x.data.ctorbinds, x.data.smtclasses, x.data.extends, x.exact, x.addref) end },
+        return resolve_local_ctor(x.cv, x.node_index, x.data.ctorbinds, x.data.smtclasses, x.data.extends, x.exact, x.addref) end },
     { name = 'ruby_ancestors', run = function (x)
-        return resolve_ruby_ancestors(x.calls, x.data.ruby_anc, x.exact, x.addref, x.node_index, x.data.ruby_ctor) end },
+        return resolve_ruby_ancestors(x.cv, x.data.ruby_anc, x.exact, x.addref, x.node_index, x.data.ruby_ctor) end },
     { name = 'interface', run = function (x)
-        return resolve_interface(x.calls, x.data.implements, x.data.beans, x.data.extends, x.exact, x.addref, javaspec._service_markers) end },
+        return resolve_interface(x.cv, x.data.implements, x.data.beans, x.data.extends, x.exact, x.addref, javaspec._service_markers) end },
     { name = 'local_callable', run = function (x)
-        return resolve_local_callable(x.calls, x.node_index, x.exact, x.addref, x.parent_fn) end },
+        return resolve_local_callable(x.cv, x.node_index, x.exact, x.addref, x.parent_fn) end },
     -- DISPOSITION (not resolution): label std-aliased calls the resolvers left
     -- unresolved. Last, so it only speaks for genuine no-defs / refusals.
     { name = 'std_alias', run = function (x)
-        return resolve_std_alias(x.calls, x.data.stdaliases) end },
+        return resolve_std_alias(x.cv, x.data.stdaliases) end },
 }
 M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 
@@ -2324,7 +2404,14 @@ M.RESOLVE_PASSES = RESOLVE_PASSES -- exposed for ablation/attribution + the gate
 -- the pass order lives — extract runs it over the full call set, relink over
 -- the touched subset (ctx.consts differs: extract folds const keys, relink nil).
 local function run_resolve_passes(ctx)
-    local calls = ctx.calls or {}
+    -- CALL ACCESS is representation-neutral (callview, the record-fold PEAK arc):
+    -- INDEX-FORM over the columnar store when the parent holds one (ctx.data.
+    -- _callstore — no records, no proxies), else raw records (the default path,
+    -- byte-identical). Each pass reads/writes through this cv instead of an
+    -- `ipairs(calls)` over record handles. [[cartograph-record-fold-arc]]
+    local cv = require('cartograph.callview').of(ctx.data)
+    ctx.cv = cv
+    local cget, cset = cv.get, cv.set
     -- PROVENANCE (the by_prov axis, [[cartograph-provenance-surfacing]]): stamp
     -- c.prov = which stage landed the resolution. This is the pipeline memo's
     -- "ablation = free attribution" — the ONE driver, so attribution is a diff
@@ -2334,14 +2421,14 @@ local function run_resolve_passes(ctx)
     -- newly resolves (c.to now set, prov still unstamped). A later REWRITE
     -- (reassign) that retargets an already-attributed call does NOT re-stamp —
     -- prov names who first linked it. (Minting stamps 'stdlib' at mint time.)
-    for _, c in ipairs(calls) do
-        if c.to and not c.prov then c.prov = 'base' end
+    for i = 1, cv.n do
+        if cget(i, 'to') and not cget(i, 'prov') then cset(i, 'prov', 'base') end
     end
     local n = 0
     for _, p in ipairs(RESOLVE_PASSES) do
         n = n + (p.run(ctx) or 0)
-        for _, c in ipairs(calls) do
-            if c.to and not c.prov then c.prov = p.name end
+        for i = 1, cv.n do
+            if cget(i, 'to') and not cget(i, 'prov') then cset(i, 'prov', p.name) end
         end
     end
     return n
@@ -5589,16 +5676,23 @@ function M.relink(data, touched)
         return nil, nil, nil, prof_ext(spec, name) or EXT.nodef
     end
     local n = 0
+    -- CALL ACCESS is representation-neutral (callview, the record-fold PEAK arc):
+    -- relink's base resolve loop + the cbarg pre-scan + the pipeline (via ctx.cv)
+    -- read/write calls INDEX-FORM over the columnar store when the parent holds
+    -- one (data._callstore), else raw records. [[cartograph-record-fold-arc]]
+    local cv = require('cartograph.callview').of(data)
+    local cget, cset = cv.get, cv.set
     -- cbarg pre-scan, mirroring extract's: marks are resolution INPUT and
     -- must be complete before the pass (see extract; --parallel parity).
     -- An arg a WORKER already upgraded arrives as k='func' with a.up —
     -- it still testifies (skipping it hid the mark from relink while the
     -- inline pre-scan saw it: a tier flip the parity gate caught)
-    for _, c in ipairs(data.calls or {}) do
-        if not c.fn then
-            for _, a in ipairs(c.argv or {}) do
-                if (a.k == 'local' or (a.k == 'func' and a.up)) and a.name then
-                    local cands = exact[a.name]
+    for i = 1, cv.n do
+        if not cget(i, 'fn') then
+            for j = 1, cv.argn(i) do
+                local ak, aname = cv.aget(i, j, 'k'), cv.aget(i, j, 'name')
+                if (ak == 'local' or (ak == 'func' and cv.aget(i, j, 'up'))) and aname then
+                    local cands = exact[aname]
                     if cands and #cands == 1 and (cands[1].kind == 'function'
                         or cands[1].kind == 'method') then
                         cands[1].cbarg = true
@@ -5613,68 +5707,75 @@ function M.relink(data, touched)
     for _, nn in ipairs(data.nodes) do node_index[nn.id] = nn end
     -- local-shadow gate (see extract): built once, shared with resolve_local_callable
     local parent_fn = build_parent_fn(node_index)
-    for _, c in ipairs(data.calls or {}) do
+    for i = 1, cv.n do
+        local cfile = cget(i, 'file')
+        local cfn = cget(i, 'fn')
         -- dynamic calls stay frontiers UNLESS a literal-flow trace already
         -- named the callee (a parallel slice may know the literal but not
         -- have seen its target)
-        if not c.to and (not c.dynamic or type(c.traced) == 'string') then
+        local ctraced = cget(i, 'traced')
+        if not cget(i, 'to') and (not cget(i, 'dynamic') or type(ctraced) == 'string') then
             local target, inferred, refused, ext
-            if type(c.traced) == 'string' then
-                target = resolve(c.traced, c.file)
+            local cfull, ccallee = cget(i, 'full'), cget(i, 'callee')
+            if type(ctraced) == 'string' then
+                target = resolve(ctraced, cfile)
                 inferred = false
-            elseif c.indirect then
-                target = resolve(c.indirect, c.file)
+            elseif cget(i, 'indirect') then
+                target = resolve(cget(i, 'indirect'), cfile)
                 inferred = false
-            elseif not c.full and c.fn and node_index[c.fn]
-                and localdecl_shadow(c.callee, c.file, node_index[c.fn], parent_fn, exact) then
+            elseif not cfull and cfn and node_index[cfn]
+                and localdecl_shadow(ccallee, cfile, node_index[cfn], parent_fn, exact) then
                 -- local-shadow gate (see extract): a JS/TS const/let/var-bound bare
                 -- callee with no same-file def is not a global — leave it for
                 -- resolve_local_callable (refuse fn-value) below
             else
-                target, inferred, refused, ext = resolve(c.full or c.callee, c.file)
+                target, inferred, refused, ext = resolve(cfull or ccallee, cfile)
             end
             if target then
-                c.to = target.id
+                cset(i, 'to', target.id)
                 -- the ~ mark is part of the resolution, not decoration:
                 -- a relinked call must carry the same honesty as extract's
                 -- (including the hedged-qualification cap, see extract)
-                local hedged = inferred or c.hedge ~= nil
-                c.inferred = hedged or nil
-                c.refused = nil
-                c.ext = nil -- was external/noise, now resolved (re-link mutates)
-                if c.dynamic then c.dynamic = nil end -- pinned by the trace
+                local hedged = inferred or cget(i, 'hedge') ~= nil
+                cset(i, 'inferred', hedged or nil)
+                cset(i, 'refused', nil)
+                cset(i, 'ext', nil) -- was external/noise, now resolved (re-link mutates)
+                if cget(i, 'dynamic') then cset(i, 'dynamic', nil) end -- pinned by the trace
                 n = n + 1
-                if touched then touched[c.file] = true end
-                if c.fn then
-                    addref(c.fn, target.id, c.at
-                        or { start = { line = c.line, char = 0 },
-                            ['end'] = { line = c.line, char = 0 } }, hedged)
+                if touched then touched[cfile] = true end
+                if cfn then
+                    local cline = cget(i, 'line')
+                    addref(cfn, target.id, cget(i, 'at')
+                        or { start = { line = cline, char = 0 },
+                            ['end'] = { line = cline, char = 0 } }, hedged)
                 end
             else
                 -- the refusal recomputed against the CURRENT global
                 -- node set (a worker's slice-local refusal is stale)
-                c.refused = refused
-                c.ext = not refused and ext or nil -- else external/noise why
+                cset(i, 'refused', refused)
+                cset(i, 'ext', not refused and ext or nil) -- else external/noise why
             end
         end
         -- callback-pattern mirror: an identifier argument naming a unique
         -- function upgrades to a resolved 'func' arg (extract does this;
         -- without the mirror a splice or audit loses the upgrade)
-        for _, a in ipairs(c.argv or {}) do
-            if a.k == 'local' and a.name then
-                local t2 = resolve(a.name, c.file)
+        for j = 1, cv.argn(i) do
+            local ak, aname = cv.aget(i, j, 'k'), cv.aget(i, j, 'name')
+            if ak == 'local' and aname then
+                local t2 = resolve(aname, cfile)
                 if t2 and (t2.kind == 'function' or t2.kind == 'method') then
-                    a.k, a.to, a.up = 'func', t2.id, true
-                    if touched then touched[c.file] = true end
-                    if c.fn then
-                        addref(c.fn, t2.id,
-                            { start = { line = c.line, char = 0 },
-                                ['end'] = { line = c.line, char = 0 } }, true)
+                    cv.aset(i, j, 'k', 'func'); cv.aset(i, j, 'to', t2.id); cv.aset(i, j, 'up', true)
+                    if touched then touched[cfile] = true end
+                    local cline = cget(i, 'line')
+                    if cfn then
+                        addref(cfn, t2.id,
+                            { start = { line = cline, char = 0 },
+                                ['end'] = { line = cline, char = 0 } }, true)
                     else
                         -- the MARK happened in the pre-scan (see extract)
-                        addreg(c.file, t2.id,
-                            { start = { line = c.line, char = 0 },
-                                ['end'] = { line = c.line, char = 0 } })
+                        addreg(cfile, t2.id,
+                            { start = { line = cline, char = 0 },
+                                ['end'] = { line = cline, char = 0 } })
                         if touched then touched[t2.file] = true end
                     end
                 end
