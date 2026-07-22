@@ -73,11 +73,78 @@ local function widthcol(vals, n)
     end
 end
 
+-- ── MUTABLE columns (the resolution overlay) ──────────────────────────────
+-- Resolution writes to/full/prov/inferred/… AFTER build, so these can't be
+-- immutable columns. They are still COLUMNAR (the resident win) — ffi-backed,
+-- mutable in place — with a plain-Lua fallback (correct, no win) where ffi is
+-- absent. A str field grows a per-field interner as resolution mints new ids; if
+-- a rank overflows the column width it REBUILDS one width wider (rare — pools
+-- stay <65536 to ~59k calls). Flags pack into ONE bit column (bit j = flag j).
+local function width_for(mx) return mx < 256 and 1 or (mx < 65536 and 2 or 4) end
+local function ffi_arr(w, n)
+    local ct = (w == 1 and 'uint8_t[?]') or (w == 2 and 'uint16_t[?]') or 'uint32_t[?]'
+    return ffi.new(ct, n > 0 and n or 1)
+end
+
+-- mutable str column: { it, a, w, cap, n }. a = ffi width array (0-based) or,
+-- without ffi, a plain Lua rank array (1-based). rank = id+1 (0 = absent).
+local function mutstr_new(it, ranks, n, mx)
+    local w = width_for(mx)
+    local ms = { it = it, n = n, w = w, cap = 2 ^ (w * 8) }
+    if ok_ffi then
+        local a = ffi_arr(w, n)
+        for i = 1, n do a[i - 1] = ranks[i] end
+        ms.a = a
+    else
+        ms.a = ranks
+    end
+    return ms
+end
+local function mutstr_get(ms, i)
+    local r = ok_ffi and ms.a[i - 1] or ms.a[i]
+    if not r or r == 0 then return nil end
+    return ms.it.list[r]
+end
+local function mutstr_set(ms, i, v)
+    if v == nil then
+        if ok_ffi then ms.a[i - 1] = 0 else ms.a[i] = nil end
+        return
+    end
+    local rank = ms.it.id(v) + 1
+    if ok_ffi then
+        if rank >= ms.cap then -- REBUILD one width wider (rare)
+            local neww = width_for(rank)
+            local na = ffi_arr(neww, ms.n)
+            for k = 0, ms.n - 1 do na[k] = ms.a[k] end
+            ms.a, ms.w, ms.cap = na, neww, 2 ^ (neww * 8)
+        end
+        ms.a[i - 1] = rank
+    else
+        ms.a[i] = rank
+    end
+end
+
+-- mutable flag column: one bit-packed int per call (bit = mflagbit[f]); ffi
+-- u8/u16 (mutable in place) or a plain Lua int array. Fixed set → no rebuild.
+local function mflag_get(cc, f, i)
+    local idx = cc.mflagbit[f]
+    local b = (ok_ffi and cc.mflag[i - 1]) or cc.mflag[i] or 0
+    return floor(b / 2 ^ idx) % 2 == 1 or nil
+end
+local function mflag_set(cc, f, i, v)
+    local idx = cc.mflagbit[f]
+    local b = (ok_ffi and cc.mflag[i - 1]) or cc.mflag[i] or 0
+    local has = floor(b / 2 ^ idx) % 2 == 1
+    if v and not has then b = b + 2 ^ idx
+    elseif (not v) and has then b = b - 2 ^ idx end
+    if ok_ffi then cc.mflag[i - 1] = b elseif b > 0 then cc.mflag[i] = b else cc.mflag[i] = nil end
+end
+
 -- build a column store from a call-record list. `syn` = the SYNTACTIC schema →
--- immutable u32 columns (the resident win); `res` = the RESOLUTION schema → a
--- MUTABLE Lua-array overlay (resolution writes c.to/prov/inferred/… AFTER build,
--- so those cannot be packed) — the two-phase split. Defaults: the call syntactic
--- / resolution schemas. Strings pooled once; each str col is a rank (id+1, 0=absent).
+-- immutable width columns (the resident win); `res` = the RESOLUTION schema → the
+-- MUTABLE columnar overlay above (resolution writes c.to/prov/inferred/… AFTER
+-- build). Defaults: the call syntactic / resolution schemas. Strings pooled once;
+-- each str col is a rank (id+1, 0=absent).
 function M.build(calls, syn, res)
     local schema = syn or segment.CALL_SYNTACTIC
     res = res or segment.CALL_RESOLUTION
@@ -124,21 +191,33 @@ function M.build(calls, syn, res)
         cc.rng[rf] = { pres = widthcol(p, n), sl = widthcol(sl, n), sc = widthcol(sc, n),
             el = widthcol(el, n), ec = widthcol(ec, n) }
     end
-    -- the MUTABLE resolution overlay: a plain Lua array per field (str value or
-    -- nil / flag true or nil), seeded from the calls and WRITABLE by resolution.
-    -- A field appearing here is looked up here first (M.get), so writes win.
+    -- the MUTABLE resolution overlay (columnar — see the helpers above), seeded
+    -- from the calls and WRITABLE by resolution. A field here is looked up here
+    -- first (M.get), so writes win.
     cc.isflag = {}
     for _, f in ipairs(schema.flags or {}) do cc.isflag[f] = true end
-    cc.res, cc.mut, cc.resf = res, {}, {}
+    cc.res, cc.resf, cc.mutstr = res, {}, {}
     for _, f in ipairs(res.strs or {}) do
-        local a = {}
-        for i = 1, n do local v = calls[i][f]; a[i] = type(v) == 'string' and v or nil end
-        cc.mut[f] = a; cc.resf[f] = true
+        local it = csr.interner()
+        local ranks, mx = {}, 0
+        for i = 1, n do
+            local v = calls[i][f]
+            local r = (type(v) == 'string') and it.id(v) + 1 or 0
+            ranks[i] = r; if r > mx then mx = r end
+        end
+        cc.mutstr[f] = mutstr_new(it, ranks, n, mx)
+        cc.resf[f] = true
     end
-    for _, f in ipairs(res.flags or {}) do
-        local a = {}
-        for i = 1, n do a[i] = calls[i][f] and true or nil end
-        cc.mut[f] = a; cc.resf[f] = true
+    if res.flags and #res.flags > 0 then
+        cc.mflagbit = {}
+        for j, f in ipairs(res.flags) do cc.mflagbit[f] = j - 1; cc.resf[f] = true end
+        local w = #res.flags <= 8 and 1 or 2
+        cc.mflag = ok_ffi and ffi_arr(w, n) or {}
+        for i = 1, n do
+            local b = 0
+            for j, f in ipairs(res.flags) do if calls[i][f] then b = b + 2 ^ (j - 1) end end
+            if ok_ffi then cc.mflag[i - 1] = b elseif b > 0 then cc.mflag[i] = b end
+        end
     end
     return cc
 end
@@ -162,7 +241,11 @@ end
 -- generic read: an overlay (resolution) field wins, else the right column. The
 -- accessor a consumer calls — the same value a `c.field` record read gives.
 function M.get(cc, f, i)
-    if cc.resf[f] then return cc.mut[f][i] end
+    if cc.resf[f] then
+        local ms = cc.mutstr[f]
+        if ms then return mutstr_get(ms, i) end
+        return mflag_get(cc, f, i)
+    end
     if cc.str[f] then return M.str(cc, f, i) end
     if cc.int[f] then return M.int(cc, f, i) end
     if cc.rng[f] then return M.range(cc, f, i) end
@@ -174,7 +257,8 @@ end
 -- columns error, catching a bug where resolution tries to rewrite a parse fact)
 function M.set(cc, f, i, v)
     assert(cc.resf[f], 'callcols: field is not a mutable resolution field: ' .. tostring(f))
-    cc.mut[f][i] = v ~= nil and v or nil
+    local ms = cc.mutstr[f]
+    if ms then mutstr_set(ms, i, v) else mflag_set(cc, f, i, v) end
 end
 
 -- reconstruct a call's full record (syntactic columns + resolution overlay) —
@@ -185,8 +269,8 @@ function M.record(cc, i)
     for _, f in ipairs(s.ints or {}) do out[f] = M.int(cc, f, i) end
     for _, f in ipairs(s.flags or {}) do if M.flag(cc, f, i) then out[f] = true end end
     for _, rf in ipairs(s.ranges or {}) do out[rf] = M.range(cc, rf, i) end
-    for _, f in ipairs(cc.res.strs or {}) do if cc.mut[f][i] then out[f] = cc.mut[f][i] end end
-    for _, f in ipairs(cc.res.flags or {}) do if cc.mut[f][i] then out[f] = true end end
+    for _, f in ipairs(cc.res.strs or {}) do local v = mutstr_get(cc.mutstr[f], i); if v then out[f] = v end end
+    for _, f in ipairs(cc.res.flags or {}) do if mflag_get(cc, f, i) then out[f] = true end end
     return out
 end
 
