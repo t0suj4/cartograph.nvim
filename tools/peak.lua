@@ -58,7 +58,8 @@ local function run(label, fn, note)
         print(('  %-9s FAILED: %s'):format(label, tostring(data):gsub('%s+', ' '):sub(1, 80)))
         return
     end
-    ncalls, files = #(data.calls or {}), nfiles(data)
+    ncalls = data._callstore and data._callstore.cc.n or #(data.calls or {})
+    files = nfiles(data)
     local bound = stats.peak_is_window and '' or ' (lifetime bound)'
     print(('  %-9s peak %6.2f GB%s   wall %5.1fs   %s'):format(
         label, gb(stats.peak), bound, stats.wall, note))

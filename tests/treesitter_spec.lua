@@ -1170,6 +1170,13 @@ test('parallel extraction: identical graph to sequential', function ()
     par.BATCH = batch
     ok(got, 'parallel finished (' .. table.concat(notes, '; ') .. ')')
     eq(0, #notes) -- no failed batches
+    -- step 2-live (CARTOGRAPH_MERGECOLS): the parent hands back a columnar store
+    -- instead of call records (never materialized at the merge peak); the record-
+    -- based comparison below materializes it (== records by construction)
+    if got._callstore then
+        got.calls = require('cartograph.rescols').materialize(got._callstore)
+        got._callstore = nil
+    end
 
     -- node identity: same ids, exactly
     eq(#seq.nodes, #got.nodes)

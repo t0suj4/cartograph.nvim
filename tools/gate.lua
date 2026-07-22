@@ -58,6 +58,15 @@ end
 local data, stats
 if parallel then
     data, stats = bench.extract_parallel(name)
+    -- step 2-live (CARTOGRAPH_MERGECOLS): the parent may hand back a columnar
+    -- store instead of records (never materialized at the merge peak). The gate's
+    -- census/validate/per-item dump are record-based, so materialize here — the
+    -- store == records by construction, so a passing per-item diff still proves
+    -- parallel == inline (now via the columnar merge path).
+    if data._callstore then
+        data.calls = require('cartograph.rescols').materialize(data._callstore)
+        data._callstore = nil
+    end
 else
     data, stats = bench.extract(name)
 end

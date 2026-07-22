@@ -126,4 +126,14 @@ function M.record(view, i)
     return out
 end
 
+-- materialize a whole store back to a raw call-record array (for the record-based
+-- consumers the peak path defers to — store.ingest's folds, gate --parallel's
+-- census/dump). Called OUTSIDE the measured extract window, so the spike it makes
+-- (records + columns) is fine here; the win was during merge/audit/relink.
+function M.materialize(store)
+    local out = {}
+    for i = 1, store.cc.n do out[i] = M.record(store, i) end
+    return out
+end
+
 return M

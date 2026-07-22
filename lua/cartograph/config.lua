@@ -91,6 +91,14 @@ M.callcols_store = vim.env.CARTOGRAPH_CALLCOLS == '1'
 M.nodecols_store = vim.env.CARTOGRAPH_NODECOLS == '1'
 M.edgecols_store = vim.env.CARTOGRAPH_EDGECOLS == '1'
 
+-- record-fold PEAK arc, step 2-live: the parallel parent folds worker chunks
+-- into the columnar rescols store as they arrive (never building the full call-
+-- record array at the merge peak) and hands back data._callstore for index-form
+-- audit/relink. The record-based consumers (store.ingest, gate --parallel) that
+-- run OUTSIDE the measured extract window materialize it back. Env
+-- CARTOGRAPH_MERGECOLS=1. Default off (experimental; peak.lua --parallel measures it).
+M.merge_callstore = vim.env.CARTOGRAPH_MERGECOLS == '1'
+
 -- parallel cold extraction: worker processes parse file slices while the
 -- browser opens immediately and fills in as chunks arrive. Kicks in at
 -- parallel_threshold files; workers defaults to cores-1 (capped at 8).

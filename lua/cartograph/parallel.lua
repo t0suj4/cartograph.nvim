@@ -193,8 +193,15 @@ local function merge_chunk(s, chunk)
     for _, e in ipairs(chunk.edges or {}) do
         if not seen[file_of(e.from)] then acc.edges[#acc.edges + 1] = e end
     end
-    for _, c in ipairs(chunk.calls or {}) do
-        if not seen[c.file] then acc.calls[#acc.calls + 1] = c end
+    -- step 2-live: fold this chunk's calls into the columnar accumulator (its own
+    -- per-file dedup matches the `seen` check) and let the record tables be freed;
+    -- else the record path appends into acc.calls
+    if s.callacc then
+        s.callacc.add(chunk.calls or {})
+    else
+        for _, c in ipairs(chunk.calls or {}) do
+            if not seen[c.file] then acc.calls[#acc.calls + 1] = c end
+        end
     end
     -- OO extends pairs (for transitive parent::m resolution in relink):
     -- deduped by defining file, same as the rest of the slice's data
@@ -430,6 +437,22 @@ function M.extract(root, o)
         packs = o.packs, wmetrics = {} }
     M._session = s
 
+    -- record-fold PEAK arc, step 2-live (gated CARTOGRAPH_MERGECOLS): fold each
+    -- worker chunk's calls into the columnar rescols store as it arrives + drop
+    -- the chunk's records, so the parent never holds the full call-record array at
+    -- the merge peak. finalize() reorders to the fileset (canonical) order —
+    -- exactly what canonicalize() does for the record path. Batch/headless path
+    -- only (progressive fast-paint reads records, so it's disabled here); the
+    -- record consumers downstream (ingest / gate) materialize the store back.
+    do
+        local okcfg, cfg = pcall(require, 'cartograph.config')
+        if okcfg and cfg.merge_callstore then
+            local fidx = {}
+            for i, f in ipairs(files) do fidx[f] = i end
+            s.callacc = require('cartograph.rescols').accumulator({ fileorder = fidx })
+        end
+    end
+
     -- responsiveness telemetry: every synchronous main-loop block during the
     -- streaming open (a chunk merge, a progressive re-ingest) is recorded, so
     -- smoothness is a NUMBER (P90/P95/P99), not a vibe. Reported at completion
@@ -460,7 +483,9 @@ function M.extract(root, o)
     end
     local schedule_progressive
     local function run_progressive()
-        if s.phase ~= 1 or not dirty or not o.on_chunk then return end
+        -- step 2-live: the accumulator can't be read mid-stream (finalize-once), so
+        -- the progressive fast-paint is off under CARTOGRAPH_MERGECOLS (batch path)
+        if s.phase ~= 1 or not dirty or not o.on_chunk or s.callacc then return end
         dirty = false
         local t0 = vim.uv.hrtime()
         o.on_chunk(s.done, s.total, acc)
@@ -574,7 +599,9 @@ function M.extract(root, o)
         end
         reorder(acc.nodes, function (n) return n.file end)
         reorder(acc.edges, function (e) return file_of(e.from) end)
-        reorder(acc.calls, function (c) return c.file end)
+        -- step 2-live: the columnar accumulator reorders to the fileset order at
+        -- finalize (finish_phase1), so acc.calls isn't the source of truth here
+        if not s.callacc then reorder(acc.calls, function (c) return c.file end) end
         reorder(acc.extends or {}, function (x) return x.file end)
         reorder(acc.implements or {}, function (x) return x.file end)
         reorder(acc.fieldtypes or {}, function (x) return x.file end)
@@ -587,6 +614,9 @@ function M.extract(root, o)
                 fileset = files, skip_idpass = true, abs = abs, packs = o.packs }))
         end
         canonicalize()
+        -- step 2-live: finalize the columnar store (fileset-ordered) → audit +
+        -- relink run INDEX-FORM over it (1b), never materializing the records
+        if s.callacc then acc._callstore = s.callacc.finalize() end
         M.audit(acc)
         ts.relink(acc)
         phase2()

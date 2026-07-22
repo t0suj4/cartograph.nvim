@@ -173,6 +173,16 @@ function M.ingest(data)
     -- proxies alike. The check is one rawget on the first element — free on the
     -- default (records) path.
     do
+        -- record-fold PEAK arc step 2-live: the parallel parent may hand back a
+        -- columnar rescols store (data._callstore) instead of call records — it
+        -- never built them at the merge peak. ingest's folds (idx_call/argv/at/
+        -- refused) are record-based, so materialize once HERE (outside the measured
+        -- extract window). rescols.record == the records by construction (rescolacc/
+        -- rescolgate). A later step columnarizes ingest itself to skip this.
+        if data._callstore then
+            data.calls = require('cartograph.rescols').materialize(data._callstore)
+            data._callstore = nil
+        end
         local callrec = require 'cartograph.callrec'
         local function dewrap(list)
             if list and list[1] and rawget(list[1], '__cc') then
