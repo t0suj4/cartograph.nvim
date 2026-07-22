@@ -293,36 +293,13 @@ function M.audit(data)
             fname[n.name] = fname[n.name] == nil and n or false
         end
     end
-    -- CALL ACCESS is representation-neutral: INDEX-FORM over the columnar store
-    -- when the parent holds one (data._callstore, the record-fold peak path — no
-    -- record tables, no proxies), else raw records (the default). The body below
-    -- is written once against these accessors; the store path reads/writes the
-    -- columns + argv columns directly (rescols' immutable-assert guards a write to
-    -- a parse-fixed field). [[cartograph-record-fold-arc]]
-    local cn, cget, cset, argn, aget, aset
-    local store = data._callstore
-    if store then
-        local callcols = require 'cartograph.callcols'
-        local argvcols = require 'cartograph.argvcols'
-        local cc, cov, resid = store.cc, store.covered, store.residual
-        cn = cc.n
-        cget = function (i, f)
-            if cov[f] then return callcols.get(cc, f, i) end
-            local r = resid[i]; return r and r[f] or nil
-        end
-        cset = function (i, f, v) callcols.set(cc, f, i, v) end
-        argn = function (i) return argvcols.argn(store.av, i) end
-        aget = function (i, j, f) return argvcols.aget(store.av, i, j, f) end
-        aset = function (i, j, f, v) argvcols.aset(store.av, i, j, f, v) end
-    else
-        local calls = data.calls or {}
-        cn = #calls
-        cget = function (i, f) return calls[i][f] end
-        cset = function (i, f, v) calls[i][f] = v end
-        argn = function (i) local a = calls[i].argv; return a and #a or 0 end
-        aget = function (i, j, f) return calls[i].argv[j][f] end
-        aset = function (i, j, f, v) calls[i].argv[j][f] = v end
-    end
+    -- CALL ACCESS is representation-neutral (callview): INDEX-FORM over the
+    -- columnar store when the parent holds one (data._callstore, the record-fold
+    -- peak path — no record tables, no proxies), else raw records (the default).
+    -- The body below is written once against these accessors; rescols' immutable-
+    -- assert guards a write to a parse-fixed field. [[cartograph-record-fold-arc]]
+    local cv = require('cartograph.callview').of(data)
+    local cn, cget, cset, argn, aget, aset = cv.n, cv.get, cv.set, cv.argn, cv.aget, cv.aset
     local dispatched = {}
     for i = 1, cn do
         if not cget(i, 'fn') then
