@@ -160,9 +160,18 @@ function M.build(calls, syn, res)
         cc.str[f] = widthcol(ranks, n)
     end
     cc.pool = it.list -- pool[rank] = the string (rank = id + 1, list is 1-based)
+    -- int columns AUTO-BIAS: a field with negative values (e.g. node `order`,
+    -- which is -1 for module/unparsed nodes) shifts by -min so the width column
+    -- stays unsigned; M.int adds the bias back. Non-negative columns (line) get
+    -- bias 0 (no-op). The column must be DENSE (every row has the field) — a
+    -- sparse int would read the bias for absent rows, so sparse ints ride the
+    -- residual, not here.
+    cc.intbias = {}
     for _, f in ipairs(schema.ints or {}) do
-        local vals = {}
-        for i = 1, n do vals[i] = calls[i][f] or 0 end
+        local vals, mn = {}, 0
+        for i = 1, n do local v = calls[i][f] or 0; vals[i] = v; if v < mn then mn = v end end
+        if mn < 0 then for i = 1, n do vals[i] = vals[i] - mn end end
+        cc.intbias[f] = mn
         cc.int[f] = widthcol(vals, n)
     end
     if schema.flags and #schema.flags > 0 then
@@ -224,7 +233,7 @@ end
 
 -- ── field accessors (0 rank / absent → the record's falsy value) ──────────
 function M.str(cc, f, i) local r = cc.str[f](i); return r > 0 and cc.pool[r] or nil end
-function M.int(cc, f, i) return cc.int[f](i) end
+function M.int(cc, f, i) return cc.int[f](i) + (cc.intbias and cc.intbias[f] or 0) end
 function M.flag(cc, f, i)
     local j
     for k, name in ipairs(cc.flags) do if name == f then j = k break end end

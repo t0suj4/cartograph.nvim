@@ -22,9 +22,10 @@ local M = {}
 -- SCALAR node fields → immutable columns (the resident win). Everything else on a
 -- node (the detail TABLES df/flow/params/data/pw/locals + any lang-specific mark)
 -- rides the residual, reference-faithful. ctype/ret are rare (absent → nil).
--- NOTE: `order` is NOT columnarized — it is -1 for module/unparsed nodes, and the
--- width columns are UNSIGNED (u8/u16 would wrap a negative). It rides the residual
--- (raw int, faithful). A signed/biased int column is a follow-on if it matters.
+-- `order` IS columnarized (dense — every node has one; measured +191/+680 KB on
+-- self/zig vs riding the residual, because dropping the field lets many residual
+-- tables shed a hash-size tier). It is -1 for module/unparsed nodes, so callcols'
+-- int columns AUTO-BIAS (shift by -min) to stay unsigned — no node-specific hack.
 -- `exported` and `effects` are TRISTATE — some languages set them to explicit
 -- `false` (zig: a non-pub fn is exported=false), and consumers distinguish false
 -- (known-not) from nil (absent/unknown), reading them with strict `== false`. A
@@ -32,7 +33,7 @@ local M = {}
 -- true/false/nil preserved). The columnar flags below are true-or-absent only.
 M.NODE_SYN = {
     strs = { 'id', 'name', 'kind', 'file', 'ctype', 'ret' },
-    ints = {},
+    ints = { 'order' },
     flags = { 'arrow', 'decl', 'entry', 'macro', 'top', 'torn', 'unparsed' },
     ranges = { 'range' },
 }
