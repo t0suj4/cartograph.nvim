@@ -29,10 +29,6 @@ for _, a in ipairs(arg or {}) do
 end
 if #corpora == 0 then corpora = { 'jquery', 'ruby', 'self', 'libs' } end
 
--- str-rank field counts (each = one rank column, 4B→2B under u16)
-local N_CALL_STR = #segment.CALL_SYN_RESOLVE.strs + #segment.CALL_RES_RESOLVE.strs
-local N_ARGV_STR = #argvcols.ARGV_SYN.strs + #argvcols.ARGV_RES.strs
-
 local function kb()
     if rawget(_G, 'jit') and jit.flush then jit.flush() end
     collectgarbage(); collectgarbage()
@@ -78,18 +74,15 @@ for _, name in ipairs(corpora) do
     local b_c = kb()
     local ccall = callcols.build(calls, segment.CALL_SYN_RESOLVE, segment.CALL_RES_RESOLVE)
     local cargv = callcols.build(elems, argvcols.ARGV_SYN, argvcols.ARGV_RES)
-    local u32_kb = kb() - b_c
+    local cols_kb = kb() - b_c -- the SHIPPED store: per-column autoselected widthcol
     assert(#recs == n and ccall.n == n and cargv.n == nargv) -- hold alive across measures
-
-    -- u16 projection: every str rank column drops 4B→2B (2B saved per rank slot)
-    local u16_kb = u32_kb - ((n * N_CALL_STR + nargv * N_ARGV_STR) * 2) / 1024
 
     -- GROWTH: pool distinct + pool bytes → pool share of the columnar store
     local cp, cpb = pool_bytes(ccall); local ap, apb = pool_bytes(cargv)
     local pool_kb = (cpb + apb) / 1024
 
-    local row = { name = name, n = n, nargv = nargv, raw = raw_kb, u32 = u32_kb,
-        u16 = u16_kb, pool = cp + ap, poolpct = 100 * pool_kb / math.max(u32_kb, 1) }
+    local row = { name = name, n = n, nargv = nargv, raw = raw_kb, cols = cols_kb,
+        pool = cp + ap, poolpct = 100 * pool_kb / math.max(cols_kb, 1) }
 
     if do_time then
         recs = nil; collectgarbage()
@@ -113,14 +106,14 @@ end
 -- ── render ──────────────────────────────────────────────────────────────────
 print('rescolmatrix — in-resolution store: raw records+argv vs columns, by corpus size')
 print('')
-local hdr = ('  %-8s %8s %8s | %9s %9s %9s | %5s %5s | %8s %5s')
-    :format('corpus', 'calls', 'argv', 'raw KB', 'u32 KB', 'u16* KB', 'u32x', 'u16*x', 'pool#', 'pool%')
+local hdr = ('  %-8s %8s %8s | %9s %9s %6s | %8s %5s')
+    :format('corpus', 'calls', 'argv', 'raw KB', 'cols KB', 'colsx', 'pool#', 'pool%')
 print(hdr); print(('  '):rep(1) .. ('-'):rep(#hdr - 2))
 for _, r in ipairs(rows) do
     if r.err then print(('  %-8s  (unknown corpus)'):format(r.name))
     else
-        print(('  %-8s %8d %8d | %9.0f %9.0f %9.0f | %4.1fx %4.1fx | %8d %4.0f%%'):format(
-            r.name, r.n, r.nargv, r.raw, r.u32, r.u16, r.raw / r.u32, r.raw / r.u16, r.pool, r.poolpct))
+        print(('  %-8s %8d %8d | %9.0f %9.0f %5.1fx | %8d %4.0f%%'):format(
+            r.name, r.n, r.nargv, r.raw, r.cols, r.raw / r.cols, r.pool, r.poolpct))
     end
 end
 if do_time then
@@ -134,7 +127,8 @@ if do_time then
     end
 end
 print('')
-print('  u16* = projection (str-rank columns at 2B; pools <65536 so ranks fit — the')
-print('         banked width lever). u32 is the built store; pool is the SUB-LINEAR part,')
-print('         rank columns the LINEAR bulk (resident grows ~linearly, ~constant ratio).')
+print('  cols = the SHIPPED store: per-column width-autoselected fixed-width syntactic')
+print('         columns (u8/u16/u32 by max) + pooled strings + the resolution overlay.')
+print('         pool is the SUB-LINEAR part (Zipf); rank columns the LINEAR bulk, so')
+print('         resident grows ~linearly and the ratio is ~constant across scale.')
 vim.cmd('qall!')

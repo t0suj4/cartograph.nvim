@@ -1,12 +1,21 @@
 -- CALLCOLS — the RESIDENT columnar call-store (record-fold arc, the store-on-
 -- columns endgame). segment.lua is the WIRE form (varint, decode-on-read, small
--- on disk); this is the RESIDENT form (FIXED-WIDTH u32 columns, O(1) indexed
--- reads) — the fold's u32_reader model applied to call records. The encoding-
--- strategy MATRIX (measured) chose it: packed/ffi-u32 columns are BOTH far
--- smaller than record tables AND faster to read (records pay a 26-field hash
--- lookup per access + the per-table overhead; a column is one indexed read + a
--- pool deref). ffi arrays when available, packed byte-strings otherwise — same
--- getter interface (like csr.lua's two backends).
+-- on disk); this is the RESIDENT form (FIXED-WIDTH columns, O(1) indexed reads)
+-- — the fold's u32_reader model applied to call records. The encoding-strategy
+-- MATRIX (measured) chose it: packed/ffi columns are BOTH far smaller than record
+-- tables AND faster to read (records pay a 26-field hash lookup per access + the
+-- per-table overhead; a column is one indexed read + a pool deref). ffi arrays
+-- when available, packed byte-strings otherwise — same getter interface (like
+-- csr.lua's two backends).
+--
+-- Each column picks its NARROWEST fixed width (u8/u16/u32) from its own max value
+-- (widthcol): most columns are far under u32 — empty receiver/chain fields → u8,
+-- ranks/lines → u16 — so this is ~2.4× smaller than a flat u32 with the SAME O(1)
+-- getter (the width is private to the closure; consumers are width-agnostic). The
+-- columns are IMMUTABLE (built once from parse-fixed data + the resolution snapshot
+-- at build time), so the pool is complete and each width is FINAL — no upgrade
+-- path is needed here. The measurement is scoped to the RESIDENT store; the WIRE
+-- form (segment.lua) uses freq-ordered varint independently.
 --
 -- This first cut is a READ-ONLY snapshot over the segment schema's SCALAR fields
 -- (strs pooled → rank column, ints, flags bit-packed, ranges → coord columns).
@@ -23,22 +32,40 @@ local M = {}
 local ok_ffi, ffi = pcall(require, 'ffi')
 local char, byte, floor = string.char, string.byte, math.floor
 
--- a fixed-width u32 column over vals[1..n] → a getter col(i) (1-based). ffi
--- cdata (fastest) or a packed LE-u32 byte string + reader (any Lua). The getter
--- closes over the backing store, keeping it alive.
-local function u32col(vals, n)
+-- a fixed-width column over vals[1..n] (non-negative ints) → a getter col(i)
+-- (1-based). The width is chosen PER COLUMN from its max value: u8 (<256),
+-- u16 (<65536), else u32. ffi cdata (fastest) or a packed LE byte string +
+-- reader (any Lua) — same getter interface either way. The getter closes over
+-- the backing store (and its width), keeping it alive; consumers never see the
+-- width. Immutable column → the width is final at build.
+local function widthcol(vals, n)
+    local mx = 0
+    for i = 1, n do local v = vals[i]; if v > mx then mx = v end end
+    local w = mx < 256 and 1 or (mx < 65536 and 2 or 4)
     if ok_ffi then
-        local a = ffi.new('uint32_t[?]', n > 0 and n or 1)
+        local ctype = (w == 1 and 'uint8_t[?]') or (w == 2 and 'uint16_t[?]') or 'uint32_t[?]'
+        local a = ffi.new(ctype, n > 0 and n or 1)
         for i = 1, n do a[i - 1] = vals[i] end
         return function (i) return a[i - 1] end
     end
     local p = {}
-    for i = 1, n do
-        local x = vals[i]
-        p[i] = char(x % 256, floor(x / 256) % 256, floor(x / 65536) % 256,
-            floor(x / 16777216) % 256)
+    if w == 1 then
+        for i = 1, n do p[i] = char(vals[i] % 256) end
+    elseif w == 2 then
+        for i = 1, n do local x = vals[i]; p[i] = char(x % 256, floor(x / 256) % 256) end
+    else
+        for i = 1, n do
+            local x = vals[i]
+            p[i] = char(x % 256, floor(x / 256) % 256, floor(x / 65536) % 256,
+                floor(x / 16777216) % 256)
+        end
     end
     local s = table.concat(p)
+    if w == 1 then
+        return function (i) return byte(s, i) end
+    elseif w == 2 then
+        return function (i) local q = (i - 1) * 2 + 1; local a, b = byte(s, q, q + 1); return a + b * 256 end
+    end
     return function (i)
         local q = (i - 1) * 4 + 1
         local a, b, c, d = byte(s, q, q + 3)
@@ -63,13 +90,13 @@ function M.build(calls, syn, res)
             local v = calls[i][f]
             ranks[i] = (type(v) == 'string') and it.id(v) + 1 or 0
         end
-        cc.str[f] = u32col(ranks, n)
+        cc.str[f] = widthcol(ranks, n)
     end
     cc.pool = it.list -- pool[rank] = the string (rank = id + 1, list is 1-based)
     for _, f in ipairs(schema.ints or {}) do
         local vals = {}
         for i = 1, n do vals[i] = calls[i][f] or 0 end
-        cc.int[f] = u32col(vals, n)
+        cc.int[f] = widthcol(vals, n)
     end
     if schema.flags and #schema.flags > 0 then
         local vals = {}
@@ -80,7 +107,7 @@ function M.build(calls, syn, res)
             end
             vals[i] = b
         end
-        cc.flagcol, cc.flags = u32col(vals, n), schema.flags
+        cc.flagcol, cc.flags = widthcol(vals, n), schema.flags
     end
     for _, rf in ipairs(schema.ranges or {}) do
         local p, sl, sc, el, ec = {}, {}, {}, {}, {}
@@ -94,8 +121,8 @@ function M.build(calls, syn, res)
                 p[i], sl[i], sc[i], el[i], ec[i] = 0, 0, 0, 0, 0
             end
         end
-        cc.rng[rf] = { pres = u32col(p, n), sl = u32col(sl, n), sc = u32col(sc, n),
-            el = u32col(el, n), ec = u32col(ec, n) }
+        cc.rng[rf] = { pres = widthcol(p, n), sl = widthcol(sl, n), sc = widthcol(sc, n),
+            el = widthcol(el, n), ec = widthcol(ec, n) }
     end
     -- the MUTABLE resolution overlay: a plain Lua array per field (str value or
     -- nil / flag true or nil), seeded from the calls and WRITABLE by resolution.
