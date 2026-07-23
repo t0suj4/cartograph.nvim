@@ -22,25 +22,43 @@ local M = {}
 
 local char, byte, concat = string.char, string.byte, table.concat
 
--- LE-u32 packed column + 1-based getter (fixed width: views READ BY INDEX)
-local function pack_u32(arr, len)
+-- DYNAMIC-WIDTH packed column (u16 where values fit, u32 otherwise — matching
+-- flow/callcols; df was the fixed-u32 outlier, ~40-50% overhead on its name-id
+-- columns whose pools are < 65536). A column is plain data { s = byte-string, w = 2|4 },
+-- not a closure — so the folded store SERIALIZES (the cache round-trips the folded form).
+local function pack(arr, len, w)
     local parts = {}
-    for i = 1, len do
-        local v = arr[i]
-        local lo = v % 65536
-        parts[i] = char(lo % 256, (lo - lo % 256) / 256,
-            (v - v % 65536) / 65536 % 256, (v - v % 16777216) / 16777216 % 256)
+    if w == 2 then
+        for i = 1, len do local v = arr[i]; parts[i] = char(v % 256, (v - v % 256) / 256 % 256) end
+    else
+        for i = 1, len do
+            local v = arr[i]
+            local lo = v % 65536
+            parts[i] = char(lo % 256, (lo - lo % 256) / 256,
+                (v - v % 65536) / 65536 % 256, (v - v % 16777216) / 16777216 % 256)
+        end
     end
     return concat(parts)
 end
--- read a 1-based LE-u32 from a packed byte-string column. The plain-data twin of
--- the old getter CLOSURE — columns are now STRINGS (not closures over strings), so
--- the folded store SERIALIZES (the cache round-trips the folded form, not fat), and
--- the reader lives here once instead of one closure per column.
-local function rd(s, i)
+local function width_for(maxv) return maxv < 65536 and 2 or 4 end
+-- pack an array, auto-selecting width from its max value → { s, w }.
+local function packcol(arr, len)
+    local mx = 0
+    for i = 1, len do if arr[i] > mx then mx = arr[i] end end
+    local w = width_for(mx)
+    return { s = pack(arr, len, w), w = w }
+end
+-- read a 1-based value from a { s, w } column (u16 or u32). One reader, all columns.
+local function rd(c, i)
+    local s, w = c.s, c.w
+    if w == 2 then
+        local p = (i - 1) * 2 + 1
+        local a, b = byte(s, p, p + 1)
+        return a + b * 256
+    end
     local p = (i - 1) * 4 + 1
-    local a, b, c, d = byte(s, p, p + 3)
-    return a + b * 256 + c * 65536 + d * 16777216
+    local a, b, cc, d = byte(s, p, p + 3)
+    return a + b * 256 + cc * 65536 + d * 16777216
 end
 
 -- ── dual-mode accessors ──────────────────────────────────────────────────
@@ -191,14 +209,14 @@ function M.fold(data)
     -- over ONE interned names array (Lua interning made repeats free as
     -- refs; the id column makes them free as 4 BYTES)
     local packed = {
-        l = pack_u32(col.l, ns),
-        d0 = pack_u32(col.d0, ns + 1),
-        u0 = pack_u32(col.u0, ns),
-        p0 = pack_u32(col.p0, ns + 1),
-        nm = pack_u32(col.nm, nn),
-        depf = pack_u32(col.depf, np),
-        depv = pack_u32(col.depv, np),
-        inm = pack_u32(col.inm, ni),
+        l = packcol(col.l, ns),
+        d0 = packcol(col.d0, ns + 1),
+        u0 = packcol(col.u0, ns),
+        p0 = packcol(col.p0, ns + 1),
+        nm = packcol(col.nm, nn),
+        depf = packcol(col.depf, np),
+        depv = packcol(col.depv, np),
+        inm = packcol(col.inm, ni),
         names = col.names,
     }
     for _, node in ipairs(data.nodes or {}) do
