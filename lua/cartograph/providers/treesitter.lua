@@ -1411,9 +1411,12 @@ end
 -- node id is a deterministic function of the symbol). Never touches a call that
 -- already resolved to a project def (guarded by `not c.to`, which stdpath calls
 -- are by construction).
-local STD_FILE = 'zig-std'          -- synthetic file of a minted std node
-local STD_SCHEME = 'zig-std::'      -- deterministic id prefix (symbol-keyed)
-local function mint_std_nodes(data, node_index)
+-- generic external-node minting CORE, shared by the zig std-alias face and the
+-- L2 profile face. `pathfor(cget, i)` returns call i's canonical external symbol
+-- (or nil to skip); scheme/file namespace the minted nodes so distinct sources
+-- (zig-std vs ruby-rails vs …) never collide. GLOBAL + IDEMPOTENT (reuses nodes/
+-- edges keyed by path), guarded by `not c.to` (never clobbers a project def).
+local function mint_nodes(data, node_index, scheme, file, pathfor)
     -- INDEX-FORM over the columnar store when the parent holds one, else records
     -- (the record-fold PEAK path — relink runs fully columnar with no records)
     local cv = require('cartograph.callview').of(data)
@@ -1421,7 +1424,7 @@ local function mint_std_nodes(data, node_index)
     -- reuse existing minted nodes (idempotent re-run) keyed by canonical path
     local bypath = {}
     for _, nd in ipairs(data.nodes) do
-        if nd.external and nd.file == STD_FILE then bypath[nd.name] = nd end
+        if nd.external and nd.file == file then bypath[nd.name] = nd end
     end
     -- existing stdlib ref edges: from\31to → edge (dedup + append occurrences)
     local refkey = {}
@@ -1430,23 +1433,23 @@ local function mint_std_nodes(data, node_index)
     end
     local resolved, minted = 0, 0
     for i = 1, cv.n do
-        local cstdpath = cget(i, 'stdpath')
-        if cstdpath and not cget(i, 'to') then
-            local nd = bypath[cstdpath]
+        local path = (not cget(i, 'to')) and pathfor(cget, i)
+        if path then
+            local nd = bypath[path]
             if not nd then
-                nd = { id = STD_SCHEME .. cstdpath, name = cstdpath,
-                    kind = 'external', file = STD_FILE, external = true, order = -1,
+                nd = { id = scheme .. path, name = path,
+                    kind = 'external', file = file, external = true, order = -1,
                     range = { start = { line = 0, char = 0 },
                         ['end'] = { line = 0, char = 0 } } }
                 data.nodes[#data.nodes + 1] = nd
-                bypath[cstdpath] = nd
+                bypath[path] = nd
                 if node_index then node_index[nd.id] = nd end
                 minted = minted + 1
             end
             cset(i, 'to', nd.id)
             cset(i, 'ext', nil)
             cset(i, 'refused', nil)
-            cset(i, 'prov', 'stdlib') -- the by_prov axis: minted std resolution
+            cset(i, 'prov', 'stdlib') -- the by_prov axis: minted external resolution
             resolved = resolved + 1
             local cfn = cget(i, 'fn')
             if cfn then
@@ -1465,7 +1468,29 @@ local function mint_std_nodes(data, node_index)
     end
     return resolved, minted
 end
+local STD_FILE = 'zig-std'          -- synthetic file of a minted std node
+local STD_SCHEME = 'zig-std::'      -- deterministic id prefix (symbol-keyed)
+local function mint_std_nodes(data, node_index)
+    return mint_nodes(data, node_index, STD_SCHEME, STD_FILE,
+        function (cget, i) return cget(i, 'stdpath') end)
+end
 M.mint_std_nodes = mint_std_nodes
+
+-- PROFILE resolution face ([[cartograph-stdlib-profile]]): promote the L2 profile
+-- DISPOSITION (c.ext why='stdlib', set by prof_ext at the no-def fallback) into a
+-- real resolution — mint one `<runtime>::<callee>` external node per framework
+-- method, resolved at the `stdlib` tier so LSP def/hover target a node. OPT-IN per
+-- profile (`profile.mint`) so a disposition-only profile (lua-factorio) stays gate-
+-- neutral. The disposition already language-scoped the calls (prof_ext fires only
+-- for profile.lang files) and left c.to nil, so this never shadows a project def.
+local function mint_profile_nodes(data, node_index, profile)
+    return mint_nodes(data, node_index, profile.runtime .. '::', profile.runtime,
+        function (cget, i)
+            local e = cget(i, 'ext')
+            if type(e) == 'table' and e.why == 'stdlib' then return cget(i, 'callee') end
+        end)
+end
+M.mint_profile_nodes = mint_profile_nodes
 
 -- INSTANCE-CHAIN FIELD TYPING ([[cartograph-zig-arc]]): an instance chain
 -- `root.field.method()` resolves when the root's TYPE is known (c.chainroot, a
@@ -5437,6 +5462,11 @@ function M.extract(root, opts)
         -- std nodes for std-aliased calls. Runs here for the INLINE full extract
         -- (global, single data); the parallel PARENT does it in relink instead.
         if data.stdaliases then mint_std_nodes(data, node_index) end
+        -- profile resolution face: mint <runtime>::<method> nodes for a minting
+        -- profile's disposed framework calls (ruby-rails). Same inline-vs-relink split.
+        if active_profile and active_profile.mint then
+            mint_profile_nodes(data, node_index, active_profile)
+        end
     else
         -- the parallel driver needs each slice's function extents AND
         -- mention buffers to run the reduce later (all decisions global)
@@ -5624,6 +5654,9 @@ function M.relink(data, touched)
         if M.packs[pn] then active_packs[#active_packs + 1] = M.packs[pn] end
     end
     local active_profile = active_profile_for(data.root)
+    -- record the active profile on the parallel-parent result too (extract stamps
+    -- it inline; relink is the parallel path — keep the provenance field consistent)
+    if active_profile then data.profile = active_profile.runtime end
     local composed_spec = {}
     local function eff_spec(lang, spec)
         if not lang then return spec end
@@ -5938,6 +5971,11 @@ function M.relink(data, touched)
     -- (relink runs over the full merged graph → covers the parallel parent);
     -- idempotent, so re-running on an incremental relink is safe.
     if data.stdaliases then mint_std_nodes(data, node_index) end
+    -- profile resolution face: covers the parallel parent (relink recomputes
+    -- active_profile; data.profile isn't restamped here). Idempotent like above.
+    if active_profile and active_profile.mint then
+        mint_profile_nodes(data, node_index, active_profile)
+    end
     -- federated_resolve: cbarg marks the pre-scan added went to the light STUBS
     -- (node_index/exact are stubs); replay them onto the real graph nodes (the sole
     -- node mutation relink makes — the light index otherwise touches no node detail).

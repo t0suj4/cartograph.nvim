@@ -244,6 +244,12 @@ end
 return {
     schema = 1, runtime = 'ruby-rails', lang = 'ruby', version = 'rails-7',
     stamp = 'hand-authored',
+    -- mint=true: opt in to the RESOLUTION face — disposed framework calls become
+    -- resolved `ruby-rails::<method>` external nodes at the stdlib tier (LSP-
+    -- targetable). A disposition-only profile omits this (lua-factorio stays gate-
+    -- neutral). Ruby's bare-method dispatch makes the no-def framework call the
+    -- overwhelming reality, so minting the hand-curated surface is sound-at-tier.
+    mint = true,
     types = types, free = free, namespaces = namespaces, nsset = nsset,
     vocab = vocab,
 }

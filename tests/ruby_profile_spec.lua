@@ -36,7 +36,7 @@ test('ruby-rails profile: loads with the framework surface in `free`', function 
     ok(p.nsset['Rails'] and p.nsset['ActiveRecord'], 'namespaces cover Rails/ActiveRecord')
 end)
 
-test('ruby-rails profile: a Rails root activates it; framework calls → stdlib', function ()
+test('ruby-rails profile: a Rails root activates it; framework calls → minted stdlib nodes', function ()
     if not ready() then skip 'no ruby parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     -- the shape marker: config/application.rb makes this a Rails root
@@ -54,12 +54,22 @@ test('ruby-rails profile: a Rails root activates it; framework calls → stdlib'
     local data = ts.extract(root)
     eq('ruby-rails', data.profile) -- the profile activated via the rails shape
 
+    -- the RESOLUTION face (profile.mint): the disposition is promoted to a real
+    -- resolution — a minted `ruby-rails::<method>` external node at the stdlib tier
     local c1 = call_to(data, 'present?')
-    ok(c1 and not c1.to and type(c1.ext) == 'table' and c1.ext.why == 'stdlib',
-        'present? (no project def) → stdlib disposition')
+    ok(c1 and c1.to == 'ruby-rails::present?', 'present? resolves to a minted node')
     local c2 = call_to(data, 'belongs_to')
-    ok(c2 and not c2.to and type(c2.ext) == 'table' and c2.ext.why == 'stdlib',
-        'belongs_to class-macro → stdlib disposition')
+    ok(c2 and c2.to == 'ruby-rails::belongs_to', 'belongs_to class-macro resolves to a minted node')
+    -- the minted node exists, is external, and lives in the runtime's synthetic file
+    local byid = {}; for _, n in ipairs(data.nodes) do byid[n.id] = n end
+    local nd = byid['ruby-rails::present?']
+    ok(nd and nd.kind == 'external' and nd.file == 'ruby-rails', 'minted node is external @ ruby-rails')
+    -- the ref edge carries the stdlib tier flag
+    local stdlib_edge = false
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'ref' and e.to == 'ruby-rails::present?' and e.stdlib then stdlib_edge = true end
+    end
+    ok(stdlib_edge, 'the ref edge is stamped the stdlib tier')
 end)
 
 test('ruby-rails profile: a PROJECT def is not stolen by the profile (sound)', function ()
