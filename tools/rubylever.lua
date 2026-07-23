@@ -25,9 +25,17 @@ local finder_bindings = 0   -- calls that ARE a finder (x = Model.find style, cl
 
 local function bump(t, k) t[k] = (t[k] or 0) + 1 end
 
+local by_ext = {} -- unresolved calls' ext-disposition (c.ext.why) — what's already external
+local pred_uncovered = 0 -- unresolved ?/!-suffixed callees with NO ext disposition (profile gap)
 for _, c in ipairs(data.calls or {}) do
     if c.to then resolved = resolved + 1 else
         unresolved = unresolved + 1
+        local why = (type(c.ext) == 'table' and c.ext.why) or (c.ext and 'ext') or 'none'
+        bump(by_ext, why)
+        local cn = c.callee or ''
+        if (cn:sub(-1) == '?' or cn:sub(-1) == '!') and why == 'none' then
+            pred_uncovered = pred_uncovered + 1
+        end
         local recv = c.recv           -- ruby recv_local (lowercase local receiver)
         local rk = recv and 'local-recv' or (c.recv_const and 'const-recv' or 'bare/other')
         bump(by_recv, rk)
@@ -52,6 +60,9 @@ print(('rubylever %s — %d calls, %d resolved (%.1f%%), %d unresolved')
     :format(name, resolved + unresolved, resolved, 100 * resolved / (resolved + unresolved), unresolved))
 print('  unresolved by receiver shape:')
 for k, v in pairs(by_recv) do print(('    %-14s %d'):format(k, v)) end
+print('  unresolved by ext-disposition (what is ALREADY classified external):')
+for k, v in pairs(by_ext) do print(('    %-14s %d'):format(k, v)) end
+print(('  ?/!-predicate callees unresolved AND undisposed (a profile gap): %d'):format(pred_uncovered))
 print(('  ORM finder/relation call SITES (any recv): %d'):format(finder_bindings))
 print('  top unresolved callees WITH a local receiver (the receiver-typing lever):')
 for _, l in ipairs(top(recv_local_names, 20)) do print(l) end
