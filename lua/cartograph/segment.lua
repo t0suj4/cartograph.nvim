@@ -282,6 +282,31 @@ end
 function M.encode(records, schema) return write_cols(cols_of_records(records, schema), schema) end
 function M.decode(blob, schema) return records_of_cols(read_cols(blob, schema), schema) end
 
+-- STREAMING decode: build one record at a time from the (light) columnar intermediate
+-- and hand it to fn(i, rec) — the caller consumes + drops it, so the heavy full-record
+-- ARRAY is never materialized. Same record shape as M.decode. Used by the parent's
+-- rescols accumulator to fold a worker chunk's calls straight from its wire segment
+-- (segment → rescols direct), skipping the per-chunk record-array detour unpack_calls made.
+function M.decode_each(blob, schema, fn)
+    local cols = read_cols(blob, schema)
+    local n, pool = cols.n, cols.pool
+    for i = 1, n do
+        local rec = {}
+        for _, f in ipairs(schema.strs) do local c = cols.str[f][i]; if c > 0 then rec[f] = pool[c] end end
+        for _, f in ipairs(schema.ints or {}) do rec[f] = cols.int[f][i] end
+        for _, f in ipairs(schema.flags or {}) do if cols.flag[f][i] then rec[f] = true end end
+        for _, rf in ipairs(schema.ranges or {}) do
+            local r = cols.rng[rf]
+            if r.pres[i] == 1 then
+                rec[rf] = { start = { line = r.sl[i], char = r.sc[i] },
+                    ['end'] = { line = r.el[i], char = r.ec[i] } }
+            end
+        end
+        fn(i, rec)
+    end
+    return n
+end
+
 -- concat-merge a list of segment blobs into one, columns-only (no record
 -- materialization) — the ⊤ record merge. Result == encode(concat of records).
 function M.merge(blobs, schema)

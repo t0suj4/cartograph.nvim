@@ -156,9 +156,18 @@ local function spawn(job, cb)
                     local cache = require('cartograph.cache')
                     local raw = cfd:read('a')
                     chunk = cache.decode(raw)
-                    -- record the wire size (worker→parent IPC volume) — the fold-emit
-                    -- strategy's other axis alongside the merge peak
-                    if chunk then cache.unpack_calls(chunk); chunk._wire_bytes = #raw end
+                    if chunk then
+                        -- wire size (worker→parent IPC volume) — the fold-emit strategy's
+                        -- other axis alongside the merge peak
+                        chunk._wire_bytes = #raw
+                        -- merge_callstore folds calls straight from the segment
+                        -- (rescols.add_segment in merge_chunk), so LEAVE callseg/calltab
+                        -- on the chunk — never materialize the record array here. Otherwise
+                        -- the record path needs the calls, so unpack now.
+                        if not require('cartograph.config').merge_callstore then
+                            cache.unpack_calls(chunk) -- segment → calls
+                        end
+                    end
                     cfd:close()
                 end
             end
@@ -210,7 +219,11 @@ local function merge_chunk(s, chunk)
     -- per-file dedup matches the `seen` check) and let the record tables be freed;
     -- else the record path appends into acc.calls
     if s.callacc then
-        s.callacc.add(chunk.calls or {})
+        -- worker chunks arrive with the wire SEGMENT (callseg) still on them (spawn left it
+        -- for merge_callstore) → fold straight into columns, no record array. Demand/fallback
+        -- chunks are raw ts.extract output (chunk.calls, no callseg) → the record add().
+        if chunk.callseg then s.callacc.add_segment(chunk.callseg, chunk.calltab)
+        else s.callacc.add(chunk.calls or {}) end
     else
         for _, c in ipairs(chunk.calls or {}) do
             if not seen[c.file] then acc.calls[#acc.calls + 1] = c end

@@ -99,6 +99,26 @@ function M.accumulator(opts)
         -- exactly like parallel.merge_chunk's per-file `seen`
         for _, rec in ipairs(calls or {}) do seen[rec.file] = true end
     end
+    -- DIRECT segment → columns (worker fold-emit for calls, [[cartograph-thin-index]]):
+    -- fold a worker chunk's calls straight from its WIRE SEGMENT (callseg + calltab residual)
+    -- into the columns, one streamed record at a time — the parent never materializes the
+    -- chunk's full call-record array (the detour unpack_calls+add made). Behaviourally
+    -- identical to add() over unpack_calls's records: decode_each rebuilds the same scalar
+    -- record, the residual overlays the non-scalar fields, same per-file dedup.
+    function self.add_segment(callseg, calltab)
+        if not callseg then return end
+        local chunkfiles = {}
+        segment.decode_each(callseg, segment.CALL_SCHEMA, function (i, rec)
+            local t = calltab and calltab[i]
+            if t then for k, v in pairs(t) do rec[k] = v end end
+            chunkfiles[rec.file] = true
+            if not seen[rec.file] then
+                n = n + 1; files[n] = rec.file
+                cacc.add(rec); aacc.add(rec)
+            end
+        end)
+        for f in pairs(chunkfiles) do seen[f] = true end
+    end
     function self.finalize()
         local perm
         if fileorder then
