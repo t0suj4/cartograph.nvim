@@ -72,8 +72,14 @@ for _, call in ipairs(d2.calls or {}) do
         resolved_to_mint = resolved_to_mint + 1
     end
 end
+local owner_precise, name_only, sample = 0, 0, {}
 for _, n in ipairs(d2.nodes or {}) do
-    if n.external and n.file == 'ruby-rails' then minted_nodes = minted_nodes + 1 end
+    if n.external and n.file == 'ruby-rails' then
+        minted_nodes = minted_nodes + 1
+        if n.name:match('[#.]') then owner_precise = owner_precise + 1
+        else name_only = name_only + 1 end
+        if #sample < 10 then sample[#sample + 1] = n.name end
+    end
 end
 print(('(B) END-TO-END — discourse root, %d files'):format(#files))
 print(('  data.profile = %s'):format(tostring(d2.profile)))
@@ -81,5 +87,8 @@ print(('  census: %d calls, %.1f%% resolved'):format(c.calls.total,
     100 * c.calls.resolved / math.max(1, c.calls.total)))
 print(('  minted ruby-rails nodes: %d  ·  calls resolved to them: %d')
     :format(minted_nodes, resolved_to_mint))
+print(('  owner-precise nodes: %d (%.1f%%)  ·  name-only fallback: %d')
+    :format(owner_precise, 100 * owner_precise / math.max(1, minted_nodes), name_only))
+print('  sample: ' .. table.concat(sample, ' '))
 print(('  residual why=stdlib dispositions (unminted): %d'):format(stdlib_ext))
 print(('  stdlib-tier ref edges: %d'):format(c.edges and c.edges.ref and c.edges.ref.stdlib or 0))
