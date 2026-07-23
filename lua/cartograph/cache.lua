@@ -19,6 +19,8 @@ local M = {}
 
 local segment = require 'cartograph.segment'
 local callrec = require 'cartograph.callrec'
+local dfmod = require 'cartograph.df'    -- raw materializer for the disk boundary (df.get)
+local flowmod = require 'cartograph.flow' -- raw materializer for the disk boundary (flow.record)
 -- fields the call SEGMENT carries; everything else on a call rides the residual
 local CALL_SCALAR = {}
 for _, g in ipairs({ segment.CALL_SCHEMA.strs, segment.CALL_SCHEMA.ints,
@@ -71,7 +73,19 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 96 -- v96: CALL SEGMENT + RANGE columns — `at` (the biggest residual
+M.VERSION = 97 -- v97: RAW df/flow ON DISK (fat-record migration fix). P3 moved the
+               -- df/flow fold to extract-end (before cache.save), so shards serialized
+               -- the FOLDED form: every node's _df/_flow pointed at the ONE shared store,
+               -- and string.buffer.encode duplicated that store per node → the cache blew
+               -- to multi-GB (libs 14 GB, server 12 GB) and OOM'd on save. build_shards
+               -- now reconstructs the raw per-file df/flow record (to_raw → df.get/
+               -- flow.record) and drops the folded fields, restoring the pre-fold shard
+               -- shape (raw, compact, per-file). GRAPH-IDENTICAL (dual-mode accessors read
+               -- raw back; fold re-runs idempotently at ingest) — extraction unchanged, so
+               -- gate-neutral. Format change over v96 (old shards carry the bloated folded
+               -- form; a warm load would re-inflate it in memory) → bump invalidates them
+               -- so they cold-re-extract compact. [[cartograph-thin-index]] fix (A).
+               -- v96: CALL SEGMENT + RANGE columns — `at` (the biggest residual
                -- field, 5.2MB on zig calls) folds into 4 coordinate columns in
                -- the segment (segment.lua ranges) instead of a raw table in the
                -- residual. Cache shrink 58%/69% (self/zig calls). Format change
@@ -809,6 +823,29 @@ local function read_manifest(root)
     return nil, dir
 end
 
+-- df/flow are folded to ONE shared columnar store, referenced by every node
+-- (node._df / node._flow = the same store table). Serializing that per node would
+-- DUPLICATE the whole store into every shard — string.buffer.encode does not dedup
+-- shared table refs — which blew the cache to multi-GB (14 GB on libs) and OOM'd on
+-- save. So at the DISK boundary we reconstruct the raw, per-file-LOCAL df/flow record
+-- (df.get / flow.record, byte-identical to what extraction produced) and drop the
+-- folded fields: shards stay raw + compact + per-file, exactly the pre-fold cache shape,
+-- and dual-mode df/flow accessors read them straight back (fold re-runs at ingest,
+-- idempotent). This mirrors `at` (folded at ingest, raw on disk) — df/flow were the one
+-- fold that reached the save path. The in-memory graph keeps its folded store: to_raw
+-- COPIES a folded node, never mutates the live one.
+local FOLDED_FIELDS = { '_df', '_df0', '_dfn', '_dfi0', '_dfin',
+    '_flow', '_flow0', '_flown', '_flowp0', '_flowpn' }
+local function to_raw(n)
+    if not (n._df or n._flow) then return n end -- already raw (un-ingested / refresh nodes)
+    local out = {}
+    for k, v in pairs(n) do out[k] = v end
+    if n._df then out.df = dfmod.get(n) end
+    if n._flow then out.flow = flowmod.record(n) end
+    for _, k in ipairs(FOLDED_FIELDS) do out[k] = nil end
+    return out
+end
+
 -- bucket a graph into per-file shard tables (nil want = all files)
 local function build_shards(data, want)
     -- synthetic ids: never persisted (their edges either) — sql entities
@@ -829,7 +866,8 @@ local function build_shards(data, want)
     -- plain records first, same as calls below — pairs() over a proxy yields its
     -- __cc backing (column closures), unserializable. No-op for real records.
     for _, n0 in ipairs(data.nodes) do
-        local n = rawget(n0, '__cc') and callrec.record(n0) or n0
+        -- __cc proxy → plain record; folded df/flow → raw per-file record (to_raw)
+        local n = to_raw(rawget(n0, '__cc') and callrec.record(n0) or n0)
         local s = not synth[n.id] and shards[n.file]
         if s then s.nodes[#s.nodes + 1] = n end
     end
