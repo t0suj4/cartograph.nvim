@@ -63,3 +63,48 @@ test('bandlink: a name never crosses languages', function ()
     local id = bandlink.resolve_ref('Util.run', ci, idx, 'python', RUBY) -- ref is python, def is ruby
     eq(nil, id)
 end)
+
+-- ANCESTOR HOP (M.resolve over the const-path miss): an inherited/reopened method
+-- lives on a PARENT in another band; chase data.ruby_anc to it. WRONG stays 0.
+test('bandlink: ancestor hop resolves an INHERITED method to the parent\'s band', function ()
+    local ci, idx = fixture()
+    -- User#find is not on User (app) but on its parent ApplicationRecord (in lib)
+    idx.lib.exact['ApplicationRecord#find'] = { { id = 'af', kind = 'method', file = 'lib/ar.rb' } }
+    ci.ApplicationRecord = { lib = true }
+    local anc = bandlink.ancestry({ { c = 'User', p = 'ApplicationRecord', mode = 'inst' } })
+    -- const path alone misses; the hop recovers it
+    eq(nil, (bandlink.resolve_ref('User#find', ci, idx, 'ruby', RUBY)))
+    local id, why = bandlink.resolve('User#find', ci, idx, anc, 'ruby', RUBY)
+    eq('af', id); eq('ancestor', why)
+end)
+
+test('bandlink: ancestor hop is nearest-first (own def wins, no hop needed)', function ()
+    local ci, idx = fixture()
+    idx.app.exact['User#save'] = { { id = 's1', kind = 'method', file = 'app/user.rb' } }
+    idx.lib.exact['ApplicationRecord#save'] = { { id = 'as', kind = 'method', file = 'lib/ar.rb' } }
+    ci.ApplicationRecord = { lib = true }
+    local anc = bandlink.ancestry({ { c = 'User', p = 'ApplicationRecord', mode = 'inst' } })
+    local id, why = bandlink.resolve('User#save', ci, idx, anc, 'ruby', RUBY)
+    eq('s1', id); eq('const', why) -- User's OWN def, hop not taken
+end)
+
+test('bandlink: ancestor hop is honest — two distinct parents define it → no guess', function ()
+    local ci, idx = fixture()
+    idx.lib.exact['A#run'] = { { id = 'ra', kind = 'method', file = 'lib/a.rb' } }
+    idx.lib.exact['B#run'] = { { id = 'rb', kind = 'method', file = 'lib/b.rb' } }
+    ci.A = { lib = true }; ci.B = { lib = true }; ci.C = { app = true }
+    -- C mixes in A and B (same frontier depth), both define run → ambiguous, MISS
+    local anc = bandlink.ancestry({
+        { c = 'C', p = 'A', mode = 'inst' }, { c = 'C', p = 'B', mode = 'inst' } })
+    local id, why = bandlink.resolve('C#run', ci, idx, anc, 'ruby', RUBY)
+    eq(nil, id); eq('miss', why)
+end)
+
+test('bandlink: singleton (.) hop chases superclass singletons then extend modules', function ()
+    local ci, idx = fixture()
+    idx.lib.exact['Base.build'] = { { id = 'bb', kind = 'method', file = 'lib/base.rb' } }
+    ci.Base = { lib = true }; ci.Widget = { app = true }
+    local anc = bandlink.ancestry({ { c = 'Widget', p = 'Base', mode = 'sings' } })
+    local id, why = bandlink.resolve('Widget.build', ci, idx, anc, 'ruby', RUBY)
+    eq('bb', id); eq('ancestor', why)
+end)

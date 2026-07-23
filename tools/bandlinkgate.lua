@@ -2,13 +2,13 @@
 -- resolver (bandlink) reproduces whole-graph resolution WITHOUT a whole-graph index:
 -- for every cross-band resolution the whole graph found, does per-band + const->band
 -- linkage recover the SAME target? Verdicts:
---   MATCH — linkage found the same def whole-graph did (recall recovered)
+--   MATCH — linkage found the same def whole-graph did (recall recovered), split by
+--           path: const (owner-qualified exact) + ancestor (inherited/reopened hop)
 --   MISS  — whole-graph resolved it, linkage didn't (an honest frontier under
---           federation — reconstruct selectively; expected = the ancestor + bare bucket)
+--           federation — reconstruct selectively; the residual is the bare bucket)
 --   WRONG — linkage resolved to a DIFFERENT def (SOUNDNESS violation — MUST be 0)
 -- WRONG>0 fails the gate. MISS is the recall residual (reported, not a failure — it's
--- reconstructable per the invariant). This is F1's const-path cut; the ancestor hop
--- is the follow-on that turns MISS into MATCH.
+-- reconstructable per the invariant). const path + ancestor hop both run here.
 --
 --   nvim --headless -u NONE -l tools/bandlinkgate.lua <corpus>
 
@@ -27,11 +27,13 @@ local data = bench.extract(name)
 local band_of = ports.default_band_of(3)
 local surf = ports.surface(data, band_of)
 local idx = bandlink.indexes(data, band_of)
+local ancestry = bandlink.ancestry(data.ruby_anc)
 
 local node_index = {}
 for _, n in ipairs(data.nodes or {}) do node_index[n.id] = n end
 
 local match, miss, wrong, wrong_ex = 0, 0, 0, {}
+local by_path = {} -- MATCH split by resolution path (const / ancestor)
 local miss_why = {}
 for _, c in ipairs(data.calls or {}) do
     if c.to and c.file then
@@ -40,9 +42,10 @@ for _, c in ipairs(data.calls or {}) do
             local sb, tb = band_of(c.file), band_of(t.file)
             if sb ~= tb then -- a whole-graph cross-band resolution = the ground truth
                 local key = c.full or c.callee
-                local got, why = bandlink.resolve_ref(key, surf.const_index, idx, ts.lang_of(c.file), ts.lang_of)
+                local got, why = bandlink.resolve(key, surf.const_index, idx, ancestry, ts.lang_of(c.file), ts.lang_of)
                 if got == c.to then
                     match = match + 1
+                    by_path[why] = (by_path[why] or 0) + 1
                 elseif got == nil then
                     miss = miss + 1
                     miss_why[why] = (miss_why[why] or 0) + 1
@@ -62,6 +65,13 @@ print(('bandlinkgate %s — %d cross-band resolutions (ground truth)'):format(na
 print(('  MATCH %d (%.1f%%) · MISS %d (%.1f%%) · WRONG %d')
     :format(match, total > 0 and 100 * match / total or 0,
         miss, total > 0 and 100 * miss / total or 0, wrong))
+do
+    local ks = {}; for k in pairs(by_path) do ks[#ks + 1] = k end
+    table.sort(ks, function (a, b) return by_path[a] > by_path[b] end)
+    local parts = {}
+    for _, k in ipairs(ks) do parts[#parts + 1] = ('%s %d'):format(k, by_path[k]) end
+    if #parts > 0 then print('  match by path: ' .. table.concat(parts, ' · ')) end
+end
 do
     local ks = {}; for k in pairs(miss_why) do ks[#ks + 1] = k end
     table.sort(ks, function (a, b) return miss_why[a] > miss_why[b] end)
