@@ -13,6 +13,7 @@
 
 local atr = require 'cartograph.at' -- dual-mode range reads: relink/refresh re-run these paths over the FOLDED store
 local flowmod = require 'cartograph.flow' -- df-strangler step 4: eager per-fn fine flow rows, folded at ingest (flow requires nothing back → no cycle)
+local dfmod = require 'cartograph.df' -- fat-record migration: the DUAL-MODE df.stmts accessor (folded OR raw), so relink readers are fold-agnostic (df requires nothing → no cycle)
 local constfold = require 'cartograph.constfold' -- const-fold ladder step 1: same-file scalar-const index + argv fold (no cycle)
 local M = {}
 
@@ -2274,12 +2275,12 @@ local function callee_binding(callee, fn, parent_fn)
     local function hasdecl(f) for _, l in ipairs(f.locals or {}) do if l == callee then return true end end end
     local function hasdf(f)
         -- light path (F2 build_symtab): dfdef is the precomputed set of names df defines
-        -- — the only projection of df resolution reads. Falls back to the full df walk.
+        -- — the only projection of df resolution reads. Else the DUAL-MODE df accessor
+        -- (folded columns OR raw records — fold-agnostic; the fat-record migration).
         if f.dfdef then return f.dfdef[callee] == true end
-        local df = f.df
-        if df then for _, st in ipairs(df.stmts) do
+        for _, st in ipairs(dfmod.stmts(f)) do
             for _, d in ipairs(st.def or {}) do if d == callee then return true end end
-        end end
+        end
     end
     local f = fn
     while f do
@@ -5072,10 +5073,11 @@ function M.extract(root, opts)
         end
         local varname = p.full:match('^%$([%w_]+)$')
         if not (varname and fnid) then return nil end
-        local df = node_index[fnid] and node_index[fnid].df
-        if not df then return nil end
+        local fnode_n = node_index[fnid]
+        local stmts = fnode_n and dfmod.stmts(fnode_n) -- dual-mode df accessor
+        if not stmts then return nil end
         local defstmt, ndefs = nil, 0
-        for _, st in ipairs(df.stmts) do
+        for _, st in ipairs(stmts) do
             for _, d in ipairs(st.def) do
                 if d == varname then
                     ndefs = ndefs + 1
@@ -5104,10 +5106,11 @@ function M.extract(root, opts)
     local function flow_string(file, line0, varname)
         local fnid = fn_at(file, line0)
         if not (varname and fnid) then return nil end
-        local df = node_index[fnid] and node_index[fnid].df
-        if not df then return nil end
+        local fnode_n = node_index[fnid]
+        local stmts = fnode_n and dfmod.stmts(fnode_n) -- dual-mode df accessor
+        if not stmts then return nil end
         local ndefs = 0
-        for _, st in ipairs(df.stmts) do
+        for _, st in ipairs(stmts) do
             for _, d in ipairs(st.def) do
                 if d == varname then ndefs = ndefs + 1 end
             end
@@ -5510,11 +5513,9 @@ local function build_symtab(nodes)
         -- dfdef = the light NAME-SET df defines (the only df projection resolution reads
         -- — hasdf) — carried instead of the heavy df.stmts.
         local dfdef
-        if n.df then
-            for _, st in ipairs(n.df.stmts or {}) do
-                for _, d in ipairs(st.def or {}) do
-                    dfdef = dfdef or {}; dfdef[d] = true
-                end
+        for _, st in ipairs(dfmod.stmts(n)) do -- dual-mode: folded OR raw (fold-agnostic)
+            for _, d in ipairs(st.def or {}) do
+                dfdef = dfdef or {}; dfdef[d] = true
             end
         end
         local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name,
