@@ -18,9 +18,13 @@ local ports = require 'cartograph.ports'
 local M = {}
 
 -- per-band resolution index: build_index (treesitter) scoped to each band's nodes.
--- band -> { exact, tail, ... }. No whole-graph index is ever built.
-function M.indexes(data, band_of)
+-- band -> { exact, tail, ... }. No whole-graph index is ever built. `build` selects the
+-- index constructor — default build_index (full nodes); pass ts.build_symtab for the F2
+-- light SYMBOL-TABLE indirection (compact stubs, ~5-20% resident — the fan-out-free peak
+-- win). Resolution reads only id/kind/file, so both are resolution-equivalent (symtabgate).
+function M.indexes(data, band_of, build)
     local ts = require 'cartograph.providers.treesitter'
+    build = build or ts.build_index
     local by = {}
     for _, n in ipairs(data.nodes or {}) do
         if n.file then
@@ -30,7 +34,7 @@ function M.indexes(data, band_of)
         end
     end
     local idx = {}
-    for b, nodes in pairs(by) do idx[b] = ts.build_index(nodes) end
+    for b, nodes in pairs(by) do idx[b] = build(nodes) end
     return idx
 end
 
@@ -43,7 +47,9 @@ end
 -- WRONG cases the gate caught: StaleRequestException::setShard → a sibling setShard).
 local function find_exact(key, const_index, idx, clang, lang_of)
     local owner = ports.owner_of(key)
-    local cand = owner and const_index[owner]
+    -- only a real CONSTANT routes cross-band (Capitalized); a lowercase owner is a
+    -- module-alias/local receiver — routing it by name is unsound (ports.is_const).
+    local cand = owner and ports.is_const(owner) and const_index[owner]
     if not cand then return nil, false, false end
     local fit, dup = nil, false
     for b in pairs(cand) do
@@ -89,6 +95,29 @@ function M.ancestry(anc)
     return { inst = inst, sings = sings, singe = singe }
 end
 
+-- single-parent SUPERCLASS map (child const -> parent const) from data.extends (the
+-- {child, parent, file} edges the OO arcs emit for java/php/js). Mirrors treesitter's
+-- build_super EXACTLY: a name collision (two distinct parents for one child) sets
+-- `false` — the walk then stops there rather than guessing which parent to follow.
+function M.super_map(extends)
+    local super = {}
+    for _, e in ipairs(extends or {}) do
+        local prev = super[e.child]
+        if prev == nil then super[e.child] = e.parent
+        elseif prev ~= e.parent then super[e.child] = false end
+    end
+    return super
+end
+
+-- compose BOTH ancestor chains a cross-band ref might need: the ruby mixin/superclass
+-- adjacency (data.ruby_anc) + the single-parent OO superclass map (data.extends). One
+-- call so M.resolve's signature stays stable across languages.
+function M.chains(data)
+    local c = M.ancestry(data.ruby_anc)
+    c.super = M.super_map(data.extends)
+    return c
+end
+
 local STEP_LIMIT = 32 -- mirrors treesitter's SUPER_STEP_LIMIT (chain depth guard)
 
 -- nearest UNIQUE def of `member` up an adjacency chain from `start`, resolving each
@@ -121,27 +150,58 @@ local function chase(start, member, adj, sep, const_index, idx, clang, lang_of)
     return nil
 end
 
--- resolve a cross-band ref, const path FIRST then the ANCESTOR hop over the residual
--- miss. `ancestry` = M.ancestry(data.ruby_anc); pass nil to get pure const behavior.
--- Turns MISS (inherited/reopened: the method lives on a parent in ANOTHER band) into a
--- MATCH by chasing the owner's ancestors — instance calls up the inst chain (`#`),
--- singleton calls up the superclass singletons (`.`) then extend modules (`#`), exactly
--- as resolve_ruby_ancestors does in-graph. Returns (id, 'const'|'ancestor') or
--- (nil, why). Ruby-shaped owners only (single-segment capitalized const, `#`/`.` sep) —
--- the shape ruby_anc carries; anything else falls through to the const-path result.
-function M.resolve(key, const_index, idx, ancestry, clang, lang_of)
-    local id, why = M.resolve_ref(key, const_index, idx, clang, lang_of)
-    if id or why ~= 'miss' or not ancestry then return id, why end
-    local cls, csep, member = key:match('^(%u[%w_]*)([#.])([%w_?!=]+)$')
-    if not cls then return id, why end
-    local fit
-    if csep == '#' then
-        fit = chase(cls, member, ancestry.inst, '#', const_index, idx, clang, lang_of)
-    else -- '.' : superclass singletons (p.m) then extend-modules (p#m)
-        fit = chase(cls, member, ancestry.sings, '.', const_index, idx, clang, lang_of)
-            or chase(cls, member, ancestry.singe, '#', const_index, idx, clang, lang_of)
+-- LINEAR superclass walk (java/php/js `extends`): the single-parent analog of `chase`,
+-- mirroring resolve_super — start at the owner, follow super[cur] to the nearest parent
+-- that DEFINES `parent .. sep .. method`, resolved through the SAME find_exact const→band
+-- discipline (unique lang-fit or refuse). `sep` is the ref's OWN separator (`::` java/php,
+-- `.` js), reused for the parent key exactly as this call keys it. Returns the fit or nil.
+local function super_chase(head, sep, method, super, const_index, idx, clang, lang_of)
+    local seen, cur = { [head] = true }, head
+    for _ = 1, STEP_LIMIT do
+        local par = super[cur]
+        if not par or seen[par] then break end -- top of chain / collision (false) / cycle
+        seen[par] = true
+        local nd, dup = find_exact(par .. sep .. method, const_index, idx, clang, lang_of)
+        if dup then return nil end -- ambiguous where defined: refuse
+        if nd then return nd end
+        cur = par
     end
-    if fit then return fit.id, 'ancestor' end
+    return nil
+end
+
+-- resolve a cross-band ref, const path FIRST then the ANCESTOR hop over the residual
+-- miss. `chains` = M.chains(data) (ruby inst/sings/singe adjacency + the extends `super`
+-- map); pass nil to get pure const behavior. Turns MISS (inherited/reopened: the method
+-- lives on a parent in ANOTHER band) into a MATCH:
+--   RUBY (`#`/`.` owner)  — instance up the inst chain (`#`), singleton up the superclass
+--                            singletons (`.`) then extend modules (`#`), as resolve_ruby_ancestors.
+--   EXTENDS (`::`/`.`/`:` owner) — the single-parent superclass chain, as resolve_super.
+-- Returns (id, 'const'|'ancestor') or (nil, why). Each hop uses the const→band EXACT
+-- discipline + gives up on any ambiguity, so WRONG stays 0. A ref whose owner shape fits
+-- neither pattern falls through to the const-path result.
+function M.resolve(key, const_index, idx, chains, clang, lang_of)
+    local id, why = M.resolve_ref(key, const_index, idx, clang, lang_of)
+    if id or why ~= 'miss' or not chains then return id, why end
+    -- RUBY ancestor/mixin hop (single-segment capitalized const, `#`/`.` sep).
+    local cls, csep, member = key:match('^(%u[%w_]*)([#.])([%w_?!=]+)$')
+    if cls then
+        local fit
+        if csep == '#' then
+            fit = chase(cls, member, chains.inst, '#', const_index, idx, clang, lang_of)
+        else -- '.' : superclass singletons (p.m) then extend-modules (p#m)
+            fit = chase(cls, member, chains.sings, '.', const_index, idx, clang, lang_of)
+                or chase(cls, member, chains.singe, '#', const_index, idx, clang, lang_of)
+        end
+        if fit then return fit.id, 'ancestor' end
+    end
+    -- EXTENDS superclass hop (java/php `::`, js `.`/`:`; single-seg head, mirrors resolve_super).
+    if chains.super then
+        local head, sep2, meth = key:match('^([%w_]+)([:.]+)([%w_]+)$')
+        if head and head ~= 'super' then -- `super.m` needs the call's fn owner (absent here)
+            local fit = super_chase(head, sep2, meth, chains.super, const_index, idx, clang, lang_of)
+            if fit then return fit.id, 'ancestor' end
+        end
+    end
     return id, why
 end
 

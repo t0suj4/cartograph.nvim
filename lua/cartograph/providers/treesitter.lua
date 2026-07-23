@@ -5486,6 +5486,38 @@ local function build_index(nodes)
 end
 M.build_index = build_index -- exposed as the seam a per-shard / on-demand resolver reuses
 
+-- build_symtab — the LIGHT resolution index (federation F2 step 3, [[cartograph-band-
+-- federation]] / [[cartograph-consumer-federation]]). Same exact/tail keying as build_index,
+-- but each entry is a compact STUB {id, kind, file, name} — the fields cross-band resolution
+-- actually reads (bandlink/bandresolve touch id/kind/file(lang) only) — NOT the full node
+-- (flow/df = 69-90% of a node's bytes, analysis payload never read by resolution; measured by
+-- f2peak). This is the SYMBOL-TABLE INDIRECTION: hold this flat table, stream/defer the heavy
+-- detail. Resolution-equivalent to build_index (symtabgate proves f2gate verdicts identical);
+-- resident is ~5-20% of the full index (the fan-out-free peak win f2peak modelled).
+local function build_symtab(nodes)
+    local exact, tail = {}, {}
+    for _, n in ipairs(nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and not n.torn and not n.decl then
+            local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name }
+            exact[n.name] = exact[n.name] or {}
+            table.insert(exact[n.name], stub)
+            local tl = n.name:match('([%w_]+)$')
+            if tl and tl ~= n.name then
+                tail[tl] = tail[tl] or {}
+                table.insert(tail[tl], stub)
+            end
+            if n.altkeys then
+                for _, k in ipairs(n.altkeys) do
+                    exact[k] = exact[k] or {}
+                    table.insert(exact[k], stub)
+                end
+            end
+        end
+    end
+    return { exact = exact, tail = tail }
+end
+M.build_symtab = build_symtab -- the F2 light index; bandlink.indexes(data, band_of, build_symtab)
+
 --- Re-resolve name-matched links over a (possibly spliced) graph: every
 --- call lacking `to` gets another chance against the CURRENT node set,
 --- and its ref edge is added (deduped against existing edges). Mirrors
