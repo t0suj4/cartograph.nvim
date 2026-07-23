@@ -46,7 +46,25 @@ local full_fp, nfn = {}, 0
 for _, n in ipairs(store.data.nodes) do
     if n.file == F and (n.kind == 'function' or n.kind == 'method') then full_fp[n.id] = fp(n); nfn = nfn + 1 end
 end
-local full_untangle = untangle_of(store.node(probe))
+-- the wired df/flow cockpit verbs — each must produce the IDENTICAL report on the
+-- materialized index-only store as on full (a verb that secretly needs edges/calls, which
+-- index-only lacks, would diverge here — the catch)
+-- the DF/FLOW-LOCAL cockpit verbs — pure functions of df/flow, so faithful on the
+-- materialized index-only store. (untangle/reorder/untangle-module are NOT here: they read
+-- the effect/call graph — untangle's data+control+EFFECT PDG, reorder's call-commutativity,
+-- untangle-module's call-edge clustering — which index-only lacks; the gate proved they diverge.)
+local VERBS = {
+    { 'extract-blocks', function (id) return require('cartograph.untangle').report_blocks(store, id) end },
+    { 'optimize',      function (id) return require('cartograph.optimize').report(store, id) end },
+    { 'optimize-apply', function (id) return require('cartograph.optapply').report(store, id) end },
+    { 'narrow',        function (id) return require('cartograph.narrow').report(store, id) end },
+    { 'param-nil',     function (id) return require('cartograph.narrow').param_report(store, id) end },
+    { 'devirt',        function (id) return require('cartograph.narrow').devirt_report(store, id) end },
+    { 'branch-values', function (id) return require('cartograph.lens').report(store, id) end },
+}
+local function verb_out(fn, id) local ok, r = pcall(fn, id); return ok and ser(r) or ('ERR:' .. tostring(r)) end
+local full_reports = {}
+for _, v in ipairs(VERBS) do full_reports[v[1]] = verb_out(v[2], probe) end
 
 -- === index-only open, then materialize F's dataflow on demand ===
 require('cartograph').open_index_only(full.root)
@@ -61,15 +79,19 @@ for _, n in ipairs(store.data.nodes) do
         if fp(n) ~= full_fp[n.id] then diff = diff + 1; if #first < 4 then first[#first + 1] = n.id end end
     end
 end
-local mat_untangle = untangle_of(store.node(probe))
-local untangle_ok = mat_untangle == full_untangle
+local verb_diffs = {}
+for _, v in ipairs(VERBS) do
+    if verb_out(v[2], probe) ~= full_reports[v[1]] then verb_diffs[#verb_diffs + 1] = v[1] end
+end
+local untangle_ok = #verb_diffs == 0
 
 print(('dfmat %s — file %s (%d functions)'):format(name, F, nfn))
 print(('  index-only: df on probe before materialize = %d (expect 0); materialized = %s; after = %d')
     :format(before, tostring(filled), after))
 print(('  df/flow byte-identical vs full: %d of %d functions differ'):format(diff, nfn))
 for _, id in ipairs(first) do print('    differ: ' .. id) end
-print(('  consumer (untangle.analyze_flow) plan matches full: %s'):format(tostring(untangle_ok)))
+print(('  df/flow-local cockpit verbs (%d) match full: %s%s'):format(#VERBS,
+    tostring(untangle_ok), #verb_diffs > 0 and ('  DIVERGED: ' .. table.concat(verb_diffs, ', ')) or ''))
 
 if before == 0 and filled and after > 0 and diff == 0 and untangle_ok then
     print('OK — per-file df/flow materialization is byte-identical to full; the consumer plan matches')

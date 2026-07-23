@@ -24,6 +24,13 @@ local function live()
     return store
 end
 
+-- index-only: ensure a file's df/flow is materialized before a dataflow verb runs on it.
+-- df/flow are local, so this is byte-faithful (unlike calls); no-op on a full graph (the
+-- store guard sees df already present) or when not index-only. [[cartograph-thin-index]]
+local function mat_df(store, file)
+    if file and store.materialize_file_dataflow then store.materialize_file_dataflow(file) end
+end
+
 local function scratch(lines, ft)
     vim.cmd('botright new')
     local buf = vim.api.nvim_get_current_buf()
@@ -404,9 +411,6 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
-        -- index-only: fill this file's df/flow on demand (faithful — df/flow are local);
-        -- no-op on a full graph (guard sees df already present). [[cartograph-thin-index]]
-        if store.materialize_file_dataflow then store.materialize_file_dataflow(n.file) end
         scratch(require('cartograph.untangle').report(store, id))
     end, { desc = 'cartograph: independent concerns of the focused fn over the data+control+effect PDG, with the safe-to-split verdict and why-not breakdown (the untangle lens)' })
 
@@ -419,6 +423,7 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
+        mat_df(store, n.file)
         scratch(require('cartograph.untangle').report_blocks(store, id))
     end, { desc = 'cartograph: the focused fn\'s control sub-regions (loops/branches) as extract-into-helper candidates, with the (params)->(returns) interface and control-escape verdict — the linear-pipeline decomposition view' })
 
@@ -431,6 +436,7 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
+        mat_df(store, n.file)
         scratch(require('cartograph.optimize').report(store, id))
     end, { desc = 'cartograph: loop-invariant computations of the focused fn (LICM) — pure work whose inputs are all loop-invariant, hoistable above the loop; * = clean, ~ = aliasing/branch-hedged (the optimizing sibling of untangle)' })
 
@@ -455,6 +461,7 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
+        mat_df(store, n.file)
         scratch(require('cartograph.optapply').report(store, id))
     end, { desc = 'cartograph: DRY-RUN the CSE-reuse rewrite of the focused fn (optapply) — the diff an apply would write, txn-journaled + CAS/span/parse-verified; the headless apply verb is optapply.run/apply' })
 
@@ -467,6 +474,7 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
+        mat_df(store, n.file)
         scratch(require('cartograph.narrow').report(store, id))
     end, { desc = 'cartograph: branch-sensitive narrowing of the focused fn — where a guard (nil-check / truthiness) proves a variable non-nil in a region, over cfg.guards_over (the type sibling of const-fold)' })
 
@@ -479,6 +487,7 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
+        mat_df(store, n.file)
         scratch(require('cartograph.narrow').param_report(store, id))
     end, { desc = 'cartograph: inferred parameter-nilability of the focused fn (required / optional / unknown) vs its ---@param annotations — an unguarded deref of a param annotated nilable `?` is a real defect (the lua-ls disagreement oracle)' })
 
@@ -491,6 +500,7 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
+        mat_df(store, n.file)
         scratch(require('cartograph.narrow').devirt_report(store, id))
     end, { desc = 'cartograph: devirtualization of the focused fn — a method dispatch `recv:m()` whose receiver a guard narrows to a concrete type is a static-call candidate (string → stdlib target now, certified; other types → blocked on VM receiver typing). The devirt-gap consumer of the type/discriminant facts' })
 
@@ -547,6 +557,7 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
+        mat_df(store, n.file)
         scratch(require('cartograph.lens').report(store, id))
     end, { desc = 'cartograph: values LIVE through each CFG branch of the focused fn (~=hedged reaching) — the branch-value lens' })
 
