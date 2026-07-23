@@ -28,7 +28,9 @@ local char, byte, concat = string.char, string.byte, table.concat
 -- not a closure — so the folded store SERIALIZES (the cache round-trips the folded form).
 local function pack(arr, len, w)
     local parts = {}
-    if w == 2 then
+    if w == 1 then
+        for i = 1, len do parts[i] = char(arr[i] % 256) end
+    elseif w == 2 then
         for i = 1, len do local v = arr[i]; parts[i] = char(v % 256, (v - v % 256) / 256 % 256) end
     else
         for i = 1, len do
@@ -40,7 +42,8 @@ local function pack(arr, len, w)
     end
     return concat(parts)
 end
-local function width_for(maxv) return maxv < 65536 and 2 or 4 end
+-- 3-tier width (u8/u16/u32), matching callcols — df was 2-tier (missed u8 on small cols).
+local function width_for(maxv) return maxv < 256 and 1 or (maxv < 65536 and 2 or 4) end
 -- pack an array, auto-selecting width from its max value → { s, w }.
 local function packcol(arr, len)
     local mx = 0
@@ -51,6 +54,7 @@ end
 -- read a 1-based value from a { s, w } column (u16 or u32). One reader, all columns.
 local function rd(c, i)
     local s, w = c.s, c.w
+    if w == 1 then return byte(s, i) end
     if w == 2 then
         local p = (i - 1) * 2 + 1
         local a, b = byte(s, p, p + 1)

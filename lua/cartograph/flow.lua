@@ -1064,7 +1064,9 @@ local char, byte, concat = string.char, string.byte, table.concat
 -- is width-agnostic.
 local function pack(arr, len, w)
     local parts = {}
-    if w == 2 then
+    if w == 1 then
+        for i = 1, len do parts[i] = char(arr[i] % 256) end
+    elseif w == 2 then
         for i = 1, len do
             local v = arr[i]
             parts[i] = char(v % 256, (v - v % 256) / 256 % 256)
@@ -1084,6 +1086,7 @@ end
 -- store SERIALIZES (the cache round-trips the folded form). One reader, all columns.
 local function rd(c, i)
     local s, w = c.s, c.w
+    if w == 1 then return byte(s, i) end
     if w == 2 then
         local p = (i - 1) * 2 + 1
         local a, b = byte(s, p, p + 1)
@@ -1093,7 +1096,8 @@ local function rd(c, i)
     local a, b, cc, d = byte(s, p, p + 3)
     return a + b * 256 + cc * 65536 + d * 16777216
 end
-local function width_for(maxv) return maxv < 65536 and 2 or 4 end
+-- 3-tier width (u8/u16/u32), matching callcols — flow was 2-tier (missed u8 on small cols).
+local function width_for(maxv) return maxv < 256 and 1 or (maxv < 65536 and 2 or 4) end
 
 -- materialize one row from the columns (M.build-identical shape). The row's whole
 -- categorical descriptor is one `shape` id into col.shapes (a captured table with
@@ -1231,20 +1235,24 @@ function M.fold(data)
         end
     end
     col.d0[ns + 1] = nn -- sentinel: closes the last row's derived use count
-    -- per-column widths from the measured max: name-ids over #names, parent over
-    -- maxp, shape over #shapes; l and the nm-offsets (d0/u0) stay u32 (source
-    -- lines + global name-pool offsets both exceed u16 at scale).
+    -- per-column widths from the measured max (u8/u16/u32) — EVERY column, not just
+    -- some: l = source lines (u16 normally, u32 auto only for 65k+-line files), the
+    -- nm-offsets d0/u0 = global name-pool offsets (u32 at scale, u16 for small graphs).
+    local maxl = 0
+    for i = 1, ns do local v = col.l[i]; if v and v > maxl then maxl = v end end
     local nw = width_for(#col.names)
     local pw = width_for(maxp)
     local sw = width_for(#col.shapes)
     local cw = width_for(maxc) -- u16 normal; u32 only for extreme minified lines
+    local lw = width_for(maxl)
+    local ow = width_for(nn) -- d0/u0 index the nm pool (max = nn)
     local packed = {
         shape = { s = pack(col.shape, ns, sw), w = sw },
-        l = { s = pack(col.l, ns, 4), w = 4 },
+        l = { s = pack(col.l, ns, lw), w = lw },
         c = { s = pack(col.c, ns, cw), w = cw },
         parent = { s = pack(col.parent, ns, pw), w = pw },
-        d0 = { s = pack(col.d0, ns + 1, 4), w = 4 },
-        u0 = { s = pack(col.u0, ns, 4), w = 4 },
+        d0 = { s = pack(col.d0, ns + 1, ow), w = ow },
+        u0 = { s = pack(col.u0, ns, ow), w = ow },
         nm = { s = pack(col.nm, nn, nw), w = nw },
         pm = { s = pack(col.pm, np, nw), w = nw },
         names = col.names,
