@@ -3625,6 +3625,18 @@ function M.compose_spec(lang, base, packs)
     return composed
 end
 
+--- INDEX-ONLY front-end ([[cartograph-thin-index]]): the thin symbol index — parse +
+--- DEF nodes only (no calls, df, flow, mentions, or resolution). Reuses extract's own
+--- extract_defs, so the def set is byte-faithful to a full extract's; ~10x cheaper in
+--- time + memory (thinindex probe). LSP def/symbol/nav serve off this; calls/df/flow
+--- defer to on-demand full extraction. Returns a schema-1 graph with nodes only.
+function M.index_only(root, opts)
+    local o = { defs_only = true }
+    for k, v in pairs(opts or {}) do o[k] = v end
+    o.defs_only = true
+    return M.extract(root, o)
+end
+
 --- Extract a neutral-schema graph from a directory tree. Any file whose
 --- extension has a spec (and an available parser) participates.
 ---@param root string
@@ -3639,6 +3651,11 @@ function M.extract(root, opts)
         root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
     end
     local abs = (opts and opts.abs) or function (f) return root .. '/' .. f end
+    -- INDEX-ONLY front-end ([[cartograph-thin-index]] M.index_only): parse + DEF nodes
+    -- only — no per-def flow/df, no calls, no mentions/refs, no resolution. Yields the
+    -- thin symbol index (id/name/kind/file/range/exported/torn/decl/ret) the LSP/nav
+    -- def-and-symbol path needs; calls/df/flow defer to on-demand full extraction.
+    local defs_only = opts and opts.defs_only or nil
     local files, minified
     if opts and opts.files then
         -- explicit work list (parallel batches, demand extraction):
@@ -3847,8 +3864,11 @@ function M.extract(root, opts)
                 -- cfg mirrors df: method seeds 'self' exactly as df's fn_params
                 -- (`method and lang=='lua'`) so flow.params ≡ df params → coarse
                 -- parity is airtight. Keep only {stmts,params} (cfg is build-time).
+                -- flow/df are per-def dataflow — the bulk. defs_only skips them (the
+                -- symbol stub carries none); the declared-return summary (dret) stays,
+                -- it's a cheap signature read the index/summaries want.
                 local _pf = pstart()
-                local fl = spec.body_field and flowmod.build(defn, src, {
+                local fl = not defs_only and spec.body_field and flowmod.build(defn, src, {
                     pfield = spec.params_field, df_ids = spec.df_ids,
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 padd('flow.build', _pf)
@@ -3861,7 +3881,7 @@ function M.extract(root, opts)
                 -- rider below can build df independently (the oracle target).
                 local dfrec
                 local _pco = pstart()
-                if spec.dataflow then
+                if not defs_only and spec.dataflow then
                     dfrec = spec.dataflow(defn, spec, src, params)
                 elseif fl and not legacy_df then
                     local co, inputs = flowmod.coarse(fl)
@@ -4816,6 +4836,9 @@ function M.extract(root, opts)
             local _pd = pstart()
             extract_defs(file, lang, spec, src, tsroot, dfreg)
             padd('extract_defs', _pd) -- incl. flow.build (timed separately)
+            -- calls + mentions/refs are deferred entirely in the index-only front-end
+            -- (they, and the resolution they feed, are the bulk that defers on-demand)
+            if not defs_only then
             local _pc = pstart()
             extract_calls(file, lang, spec, src, tsroot)
             padd('extract_calls', _pc)
@@ -4832,6 +4855,7 @@ function M.extract(root, opts)
                 buf.parts, buf.nidx = nil, nil
                 mentions[file] = buf
             end
+            end -- if not defs_only (calls + mentions deferred)
         end
         ::next_file::
     end
@@ -5182,7 +5206,7 @@ function M.extract(root, opts)
     -- gate caught it (ghost/v8). Slice extracts skip the pre-scan; the
     -- audit's dispatched[] recompute + relink's own global pre-scan are
     -- the authoritative correction.
-    if not (opts and opts.skip_idpass) then
+    if not (opts and (opts.skip_idpass or opts.defs_only)) then
         for _, p in ipairs(pending) do
             if not fn_at(p.file, p.at.start.line) then
                 for _, a in ipairs(p.call.argv) do
@@ -5357,7 +5381,7 @@ function M.extract(root, opts)
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
     -- lookups; slice-local uniqueness is not global uniqueness)
-    if not (opts and opts.skip_idpass) then
+    if not (opts and (opts.skip_idpass or opts.defs_only)) then
         local fn_unique = {}
         for name, fns in pairs(exact) do
             if #fns == 1 then
@@ -5439,7 +5463,7 @@ function M.extract(root, opts)
     -- the folded columns are now serializable — P3a — so the cache round-trips the FOLDED
     -- form). SKIP for worker CHUNKS (skip_idpass): their per-chunk cols can't merge; the
     -- parallel PARENT folds the merged graph. Readers are fold-agnostic (P2), so unaffected.
-    if not (opts and opts.skip_idpass) then
+    if not (opts and (opts.skip_idpass or opts.defs_only)) then
         dfmod.fold(data)
         flowmod.fold(data)
     end
