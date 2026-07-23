@@ -177,14 +177,40 @@ function M.accumulator()
     return A
 end
 
--- fold the WHOLE graph (inline extract / ingest): add all nodes, finalize. Idempotent.
+-- fold the WHOLE graph (inline extract / ingest): add all nodes, finalize.
+-- Idempotent AND multi-store-safe via the data._dfcol guard: the FIRST fold folds every
+-- raw node into the whole-graph store (fallback/demand stragglers included) and stamps it;
+-- every later call is a true no-op, so refresh's fresh RAW nodes stay raw (read via the
+-- dual-mode accessors) rather than being re-folded onto a new store. In the worker-fold
+-- path data._dfcol starts nil, so this proceeds once (folds the raw stragglers, leaves the
+-- worker-folded nodes on their own per-chunk stores — add() skips any node with _df set).
 function M.fold(data)
-    if data._dfcol then return 0 end -- already folded
+    if data._dfcol then return 0 end -- already folded (whole-graph store)
     local a = M.accumulator()
     a.add(data.nodes or {})
     local packed, ns = a.finalize()
     data._dfcol = packed
     return ns
+end
+
+-- ── multi-store IPC: detach / attach (worker fold-emit, [[cartograph-thin-index]]) ──
+-- After a fold every folded node holds n._df = the ONE store (a ref). Serializing that
+-- per node DUPLICATES the store — string.buffer.encode does not dedup shared refs (the
+-- same bug fix A killed for the disk cache). So a worker that ships a FOLDED chunk DETACHes
+-- first: drop the per-node ref, keep the offsets (_df0/_dfn/_dfi0/_dfin), and let the store
+-- ride ONCE as data._dfcol. The parent ATTACHes on receipt — re-hangs that one store on
+-- every folded node — before any df read. A folded node is marked by _df0 (set even at 0
+-- stmts); raw / df-less nodes have none and are skipped, so both are no-ops on a raw chunk.
+function M.detach(data)
+    if not data._dfcol then return end
+    for _, n in ipairs(data.nodes or {}) do n._df = nil end
+end
+function M.attach(data)
+    local store = data._dfcol
+    if not store then return end
+    for _, n in ipairs(data.nodes or {}) do
+        if n._df0 ~= nil then n._df = store end
+    end
 end
 
 return M

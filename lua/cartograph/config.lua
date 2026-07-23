@@ -99,6 +99,17 @@ M.edgecols_store = vim.env.CARTOGRAPH_EDGECOLS == '1'
 -- CARTOGRAPH_MERGECOLS=1. Default off (experimental; peak.lua --parallel measures it).
 M.merge_callstore = vim.env.CARTOGRAPH_MERGECOLS == '1'
 
+-- WORKER FOLD-EMIT (fat-record peak, [[cartograph-thin-index]] fix B / multi-store collect):
+-- each worker FOLDS its own chunk's df/flow (in the worker process) and ships the columnar
+-- store ONCE (chunk._dfcol/_flowcol) with nodes detached, instead of shipping fat raw
+-- records for the PARENT to fold. The parent re-attaches (df/flow.attach) and COLLECTS —
+-- nodes keep per-chunk stores (reads resolve via each node's own n._df). Confines the df/flow
+-- fat to worker processes → the parent peak loses the whole fold transient; smaller IPC.
+-- Graph-identical (per-node stores; f2graphdet), bloat-safe on disk (fix A materializes raw).
+-- Env CARTOGRAPH_WORKERFOLD=1. Default off — the peak isn't binding, this is a MEASURED lever
+-- (peak.lua --parallel + f2determ/f2graphdet across the strategy matrix).
+M.merge_worker_fold = vim.env.CARTOGRAPH_WORKERFOLD == '1'
+
 -- FEDERATED RESOLVE (F2 step 3b, [[cartograph-band-federation]]): M.relink resolves off the
 -- LIGHT symbol table (ts.build_symtab — compact stubs {id,kind,file,name,ret,retclass,arrow,
 -- exported,cbarg}, none of flow/df) instead of the full-node build_index. The correctness

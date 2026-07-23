@@ -186,6 +186,12 @@ end
 -- arrived (a demanded file's queued copy lands later and must not
 -- duplicate); marks the chunk's files as arrived
 local function merge_chunk(s, chunk)
+    -- worker fold-emit ([[cartograph-thin-index]] multi-store collect): a folded chunk ships
+    -- its df/flow store ONCE (chunk._dfcol/_flowcol) with nodes detached; re-hang the store
+    -- on each node so df/flow reads resolve, then collect (the store rides on the nodes'
+    -- refs). No-op for raw chunks (demand/fallback carry no store).
+    if chunk._dfcol then require('cartograph.df').attach(chunk) end
+    if chunk._flowcol then require('cartograph.flow').attach(chunk) end
     local acc, seen = s.acc, s.arrived
     for _, n in ipairs(chunk.nodes or {}) do
         if not seen[n.file] then acc.nodes[#acc.nodes + 1] = n end
@@ -451,6 +457,11 @@ function M.extract(root, o)
             for i, f in ipairs(files) do fidx[f] = i end
             s.callacc = require('cartograph.rescols').accumulator({ fileorder = fidx })
         end
+        -- worker fold-emit: workers fold their own df/flow + ship the store once (the parent
+        -- collects, multi-store). Threaded into each parse job below. finish_phase1's
+        -- df/flow.fold then folds only the RAW stragglers (fallback/demand), leaving
+        -- worker-folded nodes on their per-chunk stores (the M.fold guard tweak).
+        s.foldstore = okcfg and cfg.merge_worker_fold or nil
     end
 
     -- responsiveness telemetry: every synchronous main-loop block during the
@@ -660,7 +671,8 @@ function M.extract(root, o)
         inflight = inflight + 1
         local t0 = vim.uv.hrtime()
         spawn({ phase = 'parse', root = root, files = b,
-            fileset = files, rtp = rtp, roots = o.roots, packs = o.packs },
+            fileset = files, rtp = rtp, roots = o.roots, packs = o.packs,
+            foldstore = s.foldstore }, -- worker folds df/flow + ships the store once
             function (chunk, res)
             local cb0 = vim.uv.hrtime()
             inflight = inflight - 1

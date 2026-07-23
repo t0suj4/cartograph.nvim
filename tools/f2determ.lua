@@ -48,6 +48,18 @@ local function store_bytes(st)
     return b
 end
 
+-- Total resident df/flow store bytes across ALL stores the graph holds — sums the DISTINCT
+-- stores reached via each node's own ref (n[field]) plus the whole-graph store (data[gfield]).
+-- In single-store mode that's one store; in multi-store (worker-fold collect) it's the sum of
+-- the per-chunk stores. Either way it's the true denominator for the duplication bound.
+local function resident_store_bytes(data, field, gfield)
+    local seen, total = {}, 0
+    local function acc(st) if st and not seen[st] then seen[st] = true; total = total + store_bytes(st) end end
+    acc(data[gfield])
+    for _, n in ipairs(data.nodes or {}) do acc(n[field]) end
+    return total
+end
+
 local function count_df(data)
     local nd, nf = 0, 0
     for _, n in ipairs(data.nodes or {}) do
@@ -86,8 +98,10 @@ local function run()
     local r = {
         hashes = hashes, total = total, biggest = biggest, shards = shards, root = root,
         df_nodes = nd, flow_nodes = nf,
-        df_store = store_bytes(data._dfcol),
-        flow_store = store_bytes(data._flcol or data._flowcol),
+        -- sum the DISTINCT stores (whole-graph data._dfcol OR per-chunk stores in worker-fold
+        -- mode) so the duplication bound is meaningful under any fold strategy
+        df_store = resident_store_bytes(data, '_df', '_dfcol'),
+        flow_store = resident_store_bytes(data, '_flow', '_flowcol'),
         nodes = #(data.nodes or {}),
     }
     return r

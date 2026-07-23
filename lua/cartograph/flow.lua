@@ -1240,14 +1240,35 @@ function M.accumulator()
     return A
 end
 
--- fold the WHOLE graph (inline extract / ingest): add all nodes, finalize. Idempotent.
+-- fold the WHOLE graph (inline extract / ingest): add all nodes, finalize.
+-- Idempotent + multi-store-safe via the data._flowcol guard (mirrors df.fold): first fold
+-- stamps the whole-graph store, later calls no-op (refresh's fresh raw nodes stay raw); in
+-- the worker-fold path data._flowcol starts nil so it folds only the raw stragglers, leaving
+-- worker-folded nodes on their per-chunk stores (add() skips any node with _flow set).
 function M.fold(data)
-    if data._flowcol then return 0 end
+    if data._flowcol then return 0 end -- already folded (whole-graph store)
     local a = M.accumulator()
     a.add(data.nodes or {})
     local packed, ns = a.finalize()
     data._flowcol = packed
     return ns
+end
+
+-- ── multi-store IPC: detach / attach (worker fold-emit, mirrors df.lua) ──
+-- A worker shipping a FOLDED chunk detaches the per-node _flow ref (keeps the offsets
+-- _flow0/_flown/_flowp0/_flowpn) so the store rides ONCE as data._flowcol, not duplicated
+-- per node; the parent re-attaches on receipt. A folded node is marked by _flow0; raw /
+-- flow-less nodes are skipped (no-op on a raw chunk).
+function M.detach(data)
+    if not data._flowcol then return end
+    for _, n in ipairs(data.nodes or {}) do n._flow = nil end
+end
+function M.attach(data)
+    local store = data._flowcol
+    if not store then return end
+    for _, n in ipairs(data.nodes or {}) do
+        if n._flow0 ~= nil then n._flow = store end
+    end
 end
 
 return M

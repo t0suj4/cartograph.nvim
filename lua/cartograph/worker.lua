@@ -41,6 +41,18 @@ if job.phase == 'parse' then
         files = job.files, fileset = job.fileset, skip_idpass = true,
         abs = abs, packs = job.packs, -- overlay packs (rails) apply in workers
     })
+    -- worker fold-emit ([[cartograph-thin-index]] multi-store collect): fold df/flow HERE,
+    -- in the worker process, then DETACH the per-node store refs — so the chunk ships the
+    -- columnar store ONCE (out._dfcol/_flowcol) with nodes carrying just offsets, instead
+    -- of fat raw records the parent must fold. Confines the fat to this process (parent
+    -- peak loses the fold transient) and shrinks the chunk on the wire. The parent
+    -- re-attaches (df/flow.attach) and collects. Gated by the parent (config.merge_worker_fold).
+    if job.foldstore then
+        require('cartograph.df').fold(out)
+        require('cartograph.flow').fold(out)
+        require('cartograph.df').detach(out)
+        require('cartograph.flow').detach(out)
+    end
 else
     error('worker: unknown phase ' .. tostring(job.phase))
 end
