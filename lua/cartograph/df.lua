@@ -20,50 +20,9 @@
 
 local M = {}
 
-local char, byte, concat = string.char, string.byte, table.concat
-
--- DYNAMIC-WIDTH packed column (u16 where values fit, u32 otherwise — matching
--- flow/callcols; df was the fixed-u32 outlier, ~40-50% overhead on its name-id
--- columns whose pools are < 65536). A column is plain data { s = byte-string, w = 2|4 },
--- not a closure — so the folded store SERIALIZES (the cache round-trips the folded form).
-local function pack(arr, len, w)
-    local parts = {}
-    if w == 1 then
-        for i = 1, len do parts[i] = char(arr[i] % 256) end
-    elseif w == 2 then
-        for i = 1, len do local v = arr[i]; parts[i] = char(v % 256, (v - v % 256) / 256 % 256) end
-    else
-        for i = 1, len do
-            local v = arr[i]
-            local lo = v % 65536
-            parts[i] = char(lo % 256, (lo - lo % 256) / 256,
-                (v - v % 65536) / 65536 % 256, (v - v % 16777216) / 16777216 % 256)
-        end
-    end
-    return concat(parts)
-end
--- 3-tier width (u8/u16/u32), matching callcols — df was 2-tier (missed u8 on small cols).
-local function width_for(maxv) return maxv < 256 and 1 or (maxv < 65536 and 2 or 4) end
--- pack an array, auto-selecting width from its max value → { s, w }.
-local function packcol(arr, len)
-    local mx = 0
-    for i = 1, len do if arr[i] > mx then mx = arr[i] end end
-    local w = width_for(mx)
-    return { s = pack(arr, len, w), w = w }
-end
--- read a 1-based value from a { s, w } column (u16 or u32). One reader, all columns.
-local function rd(c, i)
-    local s, w = c.s, c.w
-    if w == 1 then return byte(s, i) end
-    if w == 2 then
-        local p = (i - 1) * 2 + 1
-        local a, b = byte(s, p, p + 1)
-        return a + b * 256
-    end
-    local p = (i - 1) * 4 + 1
-    local a, b, cc, d = byte(s, p, p + 3)
-    return a + b * 256 + cc * 65536 + d * 16777216
-end
+-- shared serializable width columns (u8/u16/u32 { s, w }); flow uses the same module.
+local bytecol = require 'cartograph.bytecol'
+local packcol, rd = bytecol.packcol, bytecol.rd
 
 -- ── dual-mode accessors ──────────────────────────────────────────────────
 
@@ -90,23 +49,6 @@ function M.count(n)
     return (n.df and n.df.stmts) and #n.df.stmts or 0
 end
 
--- materialize one statement view from the columns (raw-identical shape).
--- Counts are DERIVED (the end-derivation lesson): defs then uses pack
--- contiguously per stmt, so def count = u0[g] - d0[g] and use count =
--- d0[g+1] - u0[g] (sentinel rows close the last stmt); dep likewise.
-local function stmt_view(col, g)
-    local nms = col.names
-    local st = { l = rd(col.l, g), def = {}, use = {}, dep = {} }
-    local b, e = rd(col.d0, g), rd(col.u0, g)
-    for j = 1, e - b do st.def[j] = nms[rd(col.nm, b + j)] end
-    b, e = e, rd(col.d0, g + 1)
-    for j = 1, e - b do st.use[j] = nms[rd(col.nm, b + j)] end
-    b, e = rd(col.p0, g), rd(col.p0, g + 1)
-    for j = 1, e - b do
-        st.dep[j] = { from = rd(col.depf, b + j), var = nms[rd(col.depv, b + j)] }
-    end
-    return st
-end
 
 -- the statement list for a node (empty when none), for ipairs iteration.
 -- Folded nodes materialize views FRESH per call (transient, raw-shaped).

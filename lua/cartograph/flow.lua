@@ -1056,48 +1056,13 @@ end
 -- flow.cfg downstream — so cfg is not folded. This is why fold + its future
 -- extraction-fusion carry no VERSION dependency on the cfg seam.
 
-local char, byte, concat = string.char, string.byte, table.concat
+local concat = table.concat
 
--- LE packed column at the given BYTE width (2 or 4) + a matching 1-based getter.
--- Width is chosen per column at fold time from the measured max value: u16 while
--- it fits (< 65536), else u32. The getter captures its own width, so materialize
--- is width-agnostic.
-local function pack(arr, len, w)
-    local parts = {}
-    if w == 1 then
-        for i = 1, len do parts[i] = char(arr[i] % 256) end
-    elseif w == 2 then
-        for i = 1, len do
-            local v = arr[i]
-            parts[i] = char(v % 256, (v - v % 256) / 256 % 256)
-        end
-    else
-        for i = 1, len do
-            local v = arr[i]
-            local lo = v % 65536
-            parts[i] = char(lo % 256, (lo - lo % 256) / 256,
-                (v - v % 65536) / 65536 % 256, (v - v % 16777216) / 16777216 % 256)
-        end
-    end
-    return concat(parts)
-end
--- read a 1-based value from a packed column c = { s = byte-string, w = width(2|4) }.
--- Plain data (a string + a width), not a closure over the string — so the folded
--- store SERIALIZES (the cache round-trips the folded form). One reader, all columns.
-local function rd(c, i)
-    local s, w = c.s, c.w
-    if w == 1 then return byte(s, i) end
-    if w == 2 then
-        local p = (i - 1) * 2 + 1
-        local a, b = byte(s, p, p + 1)
-        return a + b * 256
-    end
-    local p = (i - 1) * 4 + 1
-    local a, b, cc, d = byte(s, p, p + 3)
-    return a + b * 256 + cc * 65536 + d * 16777216
-end
--- 3-tier width (u8/u16/u32), matching callcols — flow was 2-tier (missed u8 on small cols).
-local function width_for(maxv) return maxv < 256 and 1 or (maxv < 65536 and 2 or 4) end
+-- shared serializable width columns (u8/u16/u32 { s, w }); df.lua uses the same module.
+-- flow keeps its own per-column width choices at fold time (some from a pool size rather
+-- than the array max), so it calls pack/width_for directly rather than packcol.
+local bytecol = require 'cartograph.bytecol'
+local pack, width_for, rd = bytecol.pack, bytecol.width_for, bytecol.rd
 
 -- materialize one row from the columns (M.build-identical shape). The row's whole
 -- categorical descriptor is one `shape` id into col.shapes (a captured table with
