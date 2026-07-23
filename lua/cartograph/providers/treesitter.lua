@@ -3656,6 +3656,12 @@ function M.extract(root, opts)
     -- thin symbol index (id/name/kind/file/range/exported/torn/decl/ret) the LSP/nav
     -- def-and-symbol path needs; calls/df/flow defer to on-demand full extraction.
     local defs_only = opts and opts.defs_only or nil
+    -- DATAFLOW-ONLY ([[cartograph-thin-index]] on-demand materialization): defs + per-def
+    -- df/flow, but NO calls, mentions, or resolution. df/flow are LOCAL (per-function), so a
+    -- file's df/flow extracted alone is byte-faithful to a full extract's — used to fill a
+    -- file's dataflow on demand (analysis/refactoring verbs) over the resident def index,
+    -- without the whole-graph relink calls would need. (defs_only skips df/flow; this keeps it.)
+    local dataflow_only = opts and opts.dataflow_only or nil
     local files, minified
     if opts and opts.files then
         -- explicit work list (parallel batches, demand extraction):
@@ -4836,9 +4842,9 @@ function M.extract(root, opts)
             local _pd = pstart()
             extract_defs(file, lang, spec, src, tsroot, dfreg)
             padd('extract_defs', _pd) -- incl. flow.build (timed separately)
-            -- calls + mentions/refs are deferred entirely in the index-only front-end
-            -- (they, and the resolution they feed, are the bulk that defers on-demand)
-            if not defs_only then
+            -- calls + mentions/refs are deferred entirely in the index-only / dataflow-only
+            -- front-ends (they, and the resolution they feed, are the bulk that defers on-demand)
+            if not (defs_only or dataflow_only) then
             local _pc = pstart()
             extract_calls(file, lang, spec, src, tsroot)
             padd('extract_calls', _pc)
@@ -5206,7 +5212,7 @@ function M.extract(root, opts)
     -- gate caught it (ghost/v8). Slice extracts skip the pre-scan; the
     -- audit's dispatched[] recompute + relink's own global pre-scan are
     -- the authoritative correction.
-    if not (opts and (opts.skip_idpass or opts.defs_only)) then
+    if not (opts and (opts.skip_idpass or opts.defs_only or opts.dataflow_only)) then
         for _, p in ipairs(pending) do
             if not fn_at(p.file, p.at.start.line) then
                 for _, a in ipairs(p.call.argv) do
@@ -5381,7 +5387,7 @@ function M.extract(root, opts)
     -- use edges + function references (the id pass — factored so parallel
     -- extraction can run it in workers against PARENT-built global
     -- lookups; slice-local uniqueness is not global uniqueness)
-    if not (opts and (opts.skip_idpass or opts.defs_only)) then
+    if not (opts and (opts.skip_idpass or opts.defs_only or opts.dataflow_only)) then
         local fn_unique = {}
         for name, fns in pairs(exact) do
             if #fns == 1 then
@@ -5463,7 +5469,7 @@ function M.extract(root, opts)
     -- the folded columns are now serializable — P3a — so the cache round-trips the FOLDED
     -- form). SKIP for worker CHUNKS (skip_idpass): their per-chunk cols can't merge; the
     -- parallel PARENT folds the merged graph. Readers are fold-agnostic (P2), so unaffected.
-    if not (opts and (opts.skip_idpass or opts.defs_only)) then
+    if not (opts and (opts.skip_idpass or opts.defs_only or opts.dataflow_only)) then
         dfmod.fold(data)
         flowmod.fold(data)
     end

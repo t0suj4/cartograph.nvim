@@ -1,0 +1,80 @@
+-- dfmat — gate ON-DEMAND DATAFLOW materialization ([[cartograph-thin-index]]). df/flow are
+-- LOCAL, so a file's dataflow materialized alone must be BYTE-IDENTICAL to a full extract's.
+-- Gate: open index-only (no df/flow), materialize file F's dataflow, and check (a) every F
+-- function's df.get + flow.record deep-equals the full extract's, and (b) a consumer
+-- (untangle.analyze_flow) produces the identical plan on the materialized function vs full.
+--
+--   nvim --headless -u NONE -l tools/dfmat.lua [corpus]   (default: jquery)
+
+local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
+vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
+pcall(vim.treesitter.language.add, 'lua')
+package.path = repo .. '/tools/?.lua;' .. repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
+local bench = require 'bench'
+local store = require 'cartograph.store'
+local df = require 'cartograph.df'
+local flow = require 'cartograph.flow'
+local untangle = require 'cartograph.untangle'
+
+local name = arg[1] or 'jquery'
+
+-- canonical serialize (sorted keys) — order-independent structural equality
+local function ser(v)
+    if type(v) ~= 'table' then return tostring(v) end
+    local keys = {}
+    for k in pairs(v) do keys[#keys + 1] = k end
+    table.sort(keys, function (a, b) return tostring(a) < tostring(b) end)
+    local parts = {}
+    for _, k in ipairs(keys) do parts[#parts + 1] = tostring(k) .. '=' .. ser(v[k]) end
+    return '{' .. table.concat(parts, ',') .. '}'
+end
+local function fp(n) return ser(df.get(n)) .. '\31' .. ser(flow.record(n)) end
+local function untangle_of(n)
+    local ok, res = pcall(untangle.analyze_flow, flow.record(n))
+    return ok and ser(res) or ('ERR:' .. tostring(res))
+end
+
+-- === full extract: capture F's per-node df/flow fingerprints + a probe untangle plan ===
+local full = bench.extract(name)
+store.ingest(full)
+local F, probe
+for _, n in ipairs(store.data.nodes) do
+    if (n.kind == 'function' or n.kind == 'method') and df.count(n) > 0 then F = n.file; probe = n.id; break end
+end
+assert(F, 'no function with df in ' .. name)
+local full_fp, nfn = {}, 0
+for _, n in ipairs(store.data.nodes) do
+    if n.file == F and (n.kind == 'function' or n.kind == 'method') then full_fp[n.id] = fp(n); nfn = nfn + 1 end
+end
+local full_untangle = untangle_of(store.node(probe))
+
+-- === index-only open, then materialize F's dataflow on demand ===
+require('cartograph').open_index_only(full.root)
+local before = df.count(store.node(probe))               -- expect 0 (index-only: no df/flow)
+local filled = store.materialize_file_dataflow(F)
+local after = df.count(store.node(probe))
+
+-- === compare df/flow byte-identical + the consumer plan ===
+local diff, first = 0, {}
+for _, n in ipairs(store.data.nodes) do
+    if n.file == F and (n.kind == 'function' or n.kind == 'method') then
+        if fp(n) ~= full_fp[n.id] then diff = diff + 1; if #first < 4 then first[#first + 1] = n.id end end
+    end
+end
+local mat_untangle = untangle_of(store.node(probe))
+local untangle_ok = mat_untangle == full_untangle
+
+print(('dfmat %s — file %s (%d functions)'):format(name, F, nfn))
+print(('  index-only: df on probe before materialize = %d (expect 0); materialized = %s; after = %d')
+    :format(before, tostring(filled), after))
+print(('  df/flow byte-identical vs full: %d of %d functions differ'):format(diff, nfn))
+for _, id in ipairs(first) do print('    differ: ' .. id) end
+print(('  consumer (untangle.analyze_flow) plan matches full: %s'):format(tostring(untangle_ok)))
+
+if before == 0 and filled and after > 0 and diff == 0 and untangle_ok then
+    print('OK — per-file df/flow materialization is byte-identical to full; the consumer plan matches')
+    vim.cmd('qall!')
+else
+    print('FAIL — materialized dataflow diverges from full, or the consumer plan differs')
+    vim.cmd('cquit 1')
+end

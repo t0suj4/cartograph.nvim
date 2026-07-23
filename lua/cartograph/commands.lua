@@ -404,6 +404,9 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
+        -- index-only: fill this file's df/flow on demand (faithful — df/flow are local);
+        -- no-op on a full graph (guard sees df already present). [[cartograph-thin-index]]
+        if store.materialize_file_dataflow then store.materialize_file_dataflow(n.file) end
         scratch(require('cartograph.untangle').report(store, id))
     end, { desc = 'cartograph: independent concerns of the focused fn over the data+control+effect PDG, with the safe-to-split verdict and why-not breakdown (the untangle lens)' })
 

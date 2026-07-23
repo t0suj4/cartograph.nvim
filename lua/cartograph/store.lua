@@ -334,6 +334,38 @@ function M._install_edgecols()
     for _, e in ipairs(view.rows) do idx_edge(M, e) end
 end
 
+--- ON-DEMAND DATAFLOW MATERIALIZATION ([[cartograph-thin-index]]): fill in one file's df/flow
+--- from source, over the resident (index-only) def index. df/flow are LOCAL (per-function), so a
+--- file's dataflow extracted alone is BYTE-FAITHFUL to a full extract's — unlike CALL
+--- materialization (a whole-graph relink fixpoint that over-resolves). Re-extracts F
+--- dataflow-only (defs + df/flow, NO calls/mentions/resolution) and copies raw df/flow onto the
+--- resident def nodes by id. Idempotent per file; no edges added, so topology/generation are
+--- untouched. Lets the analysis/refactoring verbs run at full RAW-record speed on a bounded
+--- per-file working set without holding every file's df/flow resident. Returns true iff it filled.
+function M.materialize_file_dataflow(rel)
+    M._df_materialized = M._df_materialized or {}
+    if M._df_materialized[rel] then return false end
+    -- already present (full graph, or a prior fold)? then nothing to do
+    for _, rn in ipairs(M.data.nodes or {}) do
+        if rn.file == rel and (rn.kind == 'function' or rn.kind == 'method') then
+            if rn.df or rn._df or rn.flow or rn._flow then M._df_materialized[rel] = true; return false end
+            break
+        end
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local sub = ts.extract(M.data.root, { files = { rel }, fileset = { rel }, dataflow_only = true })
+    local byid = {}
+    for _, n in ipairs(sub.nodes or {}) do if n.df or n.flow then byid[n.id] = n end end
+    for _, rn in ipairs(M.data.nodes or {}) do
+        if rn.file == rel then
+            local sn = byid[rn.id]
+            if sn then rn.df, rn.flow = sn.df, sn.flow end
+        end
+    end
+    M._df_materialized[rel] = true
+    return true
+end
+
 -- The resident TOPOLOGY view: a fold-backed Band, built lazily on first
 -- query and cached until the next ingest (generation-keyed). This is rung
 -- (c) — the fold becomes the resident representation consumers read
