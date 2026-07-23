@@ -43,6 +43,17 @@ function M.owner_of(name)
         or name:match('^(.+)%.[%w_?!=]+$')
 end
 
+-- is `owner` a cross-band CONSTANT (a class/module the constant→band linkage can route
+-- on), vs a lowercase module-alias / local receiver? Constants are Capitalized across the
+-- languages that HAVE cross-band constants (Ruby/Java/JS/Zig/Python/C#); a lowercase
+-- owner (lua `cache.path` where `cache` = require(...)) is an import-binding, NOT a
+-- constant — routing it by name is unsound (it grabbed a literal `cache.path` in another
+-- band over the alias's true target). Gated on the LAST path segment (`Foo::Bar` → Bar).
+function M.is_const(owner)
+    local last = owner and owner:match('([%w_]+)$')
+    return last ~= nil and last:match('^%u') ~= nil
+end
+
 -- build the port surface over a RESOLVED graph. band_of : file -> band id.
 -- Returns {
 --   bands = { [band] = {
