@@ -221,10 +221,25 @@ local NAMESPACES = {
     'Regexp', 'Random', 'ObjectSpace', 'GC', 'Process', 'Signal', 'Enumerator',
 }
 
+-- CANONICAL OWNER priority (highest first): a method that appears in several
+-- owners takes the FIRST one here as its canonical owner — tuned so universals →
+-- Object, collections → Enumerable, AR query → Relation, persistence →
+-- Persistence, class macros → ActiveRecord::Base. The owner-precise minting face
+-- keys `ruby-rails::Owner#member` off this ([[cartograph-stdlib-profile]]).
+local OWNER_ORDER = {
+    'ActiveRecord::Base', 'ActiveRecord::Persistence', 'ActiveRecord::Relation',
+    'ActionController::Base', 'ActionView::Helpers', 'Rails',
+    'Object', 'Enumerable', 'Time', 'Numeric', 'String', 'Array', 'Hash',
+}
+-- owners whose members are class/singleton methods → emit `.` (else `#` instance).
+-- The AR class-body DSL (belongs_to/validates/scope) are class macros.
+local CLASS_LEVEL = { ['ActiveRecord::Base'] = true }
+
 -- derived flat projections (built once): free (the prof_ext bless set) unions the
 -- Kernel bares AND every SURFACE member name (ruby dispatch is by member name at
--- the no-def fallback); vocab = free ∪ members; nsset = namespace roots.
-local free, namespaces, nsset, vocab, types = {}, {}, {}, {}, {}
+-- the no-def fallback); vocab = free ∪ members; nsset = namespace roots; canon =
+-- member → canonical `Owner<sep>member` path for the owner-precise mint face.
+local free, namespaces, nsset, vocab, types, canon = {}, {}, {}, {}, {}, {}
 for n in pairs(FREE_KERNEL) do free[n] = {}; vocab[n] = true end
 for owner, members in pairs(SURFACE) do
     local mt = {}
@@ -234,6 +249,20 @@ for owner, members in pairs(SURFACE) do
         vocab[m] = true
     end
     types[owner] = { members = mt }
+end
+-- canonical owner: walk OWNER_ORDER (priority), first owner containing a method wins
+for _, owner in ipairs(OWNER_ORDER) do
+    local members = SURFACE[owner]
+    if members then
+        local sep = CLASS_LEVEL[owner] and '.' or '#'
+        for m in pairs(members) do
+            if not canon[m] then canon[m] = owner .. sep .. m end
+        end
+    end
+end
+-- Kernel free functions (not in a SURFACE owner) canonicalize to Kernel#<m>
+for m in pairs(FREE_KERNEL) do
+    if not canon[m] then canon[m] = 'Kernel#' .. m end
 end
 for _, ns in ipairs(NAMESPACES) do
     namespaces[#namespaces + 1] = ns
@@ -251,5 +280,5 @@ return {
     -- overwhelming reality, so minting the hand-curated surface is sound-at-tier.
     mint = true,
     types = types, free = free, namespaces = namespaces, nsset = nsset,
-    vocab = vocab,
+    vocab = vocab, canon = canon,
 }

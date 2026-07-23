@@ -55,19 +55,21 @@ test('ruby-rails profile: a Rails root activates it; framework calls → minted 
     eq('ruby-rails', data.profile) -- the profile activated via the rails shape
 
     -- the RESOLUTION face (profile.mint): the disposition is promoted to a real
-    -- resolution — a minted `ruby-rails::<method>` external node at the stdlib tier
+    -- resolution — a minted OWNER-PRECISE `ruby-rails::Owner#member` node at the
+    -- stdlib tier (present? → Object#present?; belongs_to → the AR::Base class macro)
     local c1 = call_to(data, 'present?')
-    ok(c1 and c1.to == 'ruby-rails::present?', 'present? resolves to a minted node')
+    ok(c1 and c1.to == 'ruby-rails::Object#present?', 'present? → Object#present? minted node')
     local c2 = call_to(data, 'belongs_to')
-    ok(c2 and c2.to == 'ruby-rails::belongs_to', 'belongs_to class-macro resolves to a minted node')
+    ok(c2 and c2.to == 'ruby-rails::ActiveRecord::Base.belongs_to',
+        'belongs_to → the AR::Base class-macro node (dot sep)')
     -- the minted node exists, is external, and lives in the runtime's synthetic file
     local byid = {}; for _, n in ipairs(data.nodes) do byid[n.id] = n end
-    local nd = byid['ruby-rails::present?']
+    local nd = byid['ruby-rails::Object#present?']
     ok(nd and nd.kind == 'external' and nd.file == 'ruby-rails', 'minted node is external @ ruby-rails')
     -- the ref edge carries the stdlib tier flag
     local stdlib_edge = false
     for _, e in ipairs(data.edges) do
-        if e.kind == 'ref' and e.to == 'ruby-rails::present?' and e.stdlib then stdlib_edge = true end
+        if e.kind == 'ref' and e.to == 'ruby-rails::Object#present?' and e.stdlib then stdlib_edge = true end
     end
     ok(stdlib_edge, 'the ref edge is stamped the stdlib tier')
 end)

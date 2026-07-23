@@ -1484,10 +1484,16 @@ M.mint_std_nodes = mint_std_nodes
 -- neutral. The disposition already language-scoped the calls (prof_ext fires only
 -- for profile.lang files) and left c.to nil, so this never shadows a project def.
 local function mint_profile_nodes(data, node_index, profile)
+    local canon = profile.canon or {}
     return mint_nodes(data, node_index, profile.runtime .. '::', profile.runtime,
         function (cget, i)
             local e = cget(i, 'ext')
-            if type(e) == 'table' and e.why == 'stdlib' then return cget(i, 'callee') end
+            if type(e) == 'table' and e.why == 'stdlib' then
+                local callee = cget(i, 'callee')
+                -- OWNER-PRECISE ([[cartograph-stdlib-profile]]): the canonical
+                -- `Owner#member` path (else the bare method name if uncatalogued).
+                return callee and (canon[callee] or callee) or nil
+            end
         end)
 end
 M.mint_profile_nodes = mint_profile_nodes
