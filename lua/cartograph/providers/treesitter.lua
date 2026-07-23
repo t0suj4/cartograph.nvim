@@ -3634,7 +3634,13 @@ function M.index_only(root, opts)
     local o = { defs_only = true }
     for k, v in pairs(opts or {}) do o[k] = v end
     o.defs_only = true
-    return M.extract(root, o)
+    local data = M.extract(root, o)
+    -- HONESTY MARKER ([[cartograph-thin-index]]): this graph has NO call graph / effect
+    -- PDG (calls were never built). Whole-graph verbs (untangle/reorder/references/call-
+    -- hierarchy) read it and refuse rather than serve a degraded/empty answer that reads
+    -- as "none". A full :Cartograph open ingests fresh data without the marker → clears it.
+    data.index_only = true
+    return data
 end
 
 --- Extract a neutral-schema graph from a directory tree. Any file whose

@@ -31,6 +31,21 @@ local function mat_df(store, file)
     if file and store.materialize_file_dataflow then store.materialize_file_dataflow(file) end
 end
 
+-- index-only honesty ([[cartograph-thin-index]]): a verb that needs the WHOLE-GRAPH call
+-- fixpoint (call graph / effect PDG) can't run on the thin index — calls were never built.
+-- Refuse with a pointer to the full open rather than produce a degraded/empty answer that
+-- reads as a real "none" (the uniform-honesty invariant). df/flow-local verbs are exempt:
+-- their inputs materialize per-file (mat_df). Returns the store, or nil after notifying.
+local function whole_graph(store)
+    if store.is_index_only and store.is_index_only() then
+        vim.notify(('cartograph: this needs the call graph — index-only mode has none.'
+            .. ' Run :Cartograph %s for the full graph'):format(store.data.root or '<dir>'),
+            vim.log.levels.WARN)
+        return nil
+    end
+    return store
+end
+
 local function scratch(lines, ft)
     vim.cmd('botright new')
     local buf = vim.api.nvim_get_current_buf()
@@ -393,6 +408,7 @@ function M.register()
     -- ── safe-reorder: which of the focused fn's statements commute ───
     cmd('CartographReorder', function ()
         local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
         local id = store.focused
         local n = id and store.node(id)
         if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
@@ -405,6 +421,7 @@ function M.register()
     -- ── untangle: the focused fn's independent CONCERNS over the full PDG ─
     cmd('CartographUntangle', function ()
         local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
         local id = store.focused
         local n = id and store.node(id)
         if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
@@ -529,6 +546,7 @@ function M.register()
     -- ── untangle MODULE: independent function clusters in a file (or a dir) ─
     cmd('CartographUntangleModule', function (o)
         local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
         local u = require 'cartograph.untangle'
         local arg = o.args ~= '' and o.args or nil
         if arg then -- a directory scope (god-package): cluster across its files

@@ -21,10 +21,13 @@ end
 --- Open a directory in INDEX-ONLY mode ([[cartograph-thin-index]]): the thin symbol
 --- index — parse + DEF nodes only (no calls/df/flow), ~5-9x cheaper. Ingests it so the
 --- Tier-0 LSP/nav path serves off it (workspace/symbol, documentSymbol, definition-on-a-
---- def, symbol hover — measured identical to a full open); the calls-dependent surface
---- (references, call hierarchy, definition-from-a-call-site, semantic tokens) is honestly
---- EMPTY until a full :Cartograph open. Sync (the thin index is fast — no parallel/cache
---- streaming). Attach the reader with :CartographLspAttach afterward.
+--- def, symbol hover — measured identical to a full open). The calls-dependent surface is
+--- honestly WITHHELD, not faked: the LSP server doesn't advertise references / call-
+--- hierarchy (so a client can't render an empty answer as an authoritative "none"), and
+--- the whole-graph cockpit verbs (:CartographUntangle / Reorder / UntangleModule) refuse
+--- with a pointer to the full open. df/flow-LOCAL verbs still work (per-file materialize).
+--- Sync (the thin index is fast — no parallel/cache streaming). Attach with
+--- :CartographLspAttach; a full :Cartograph open + re-attach restores every surface.
 ---@param root string?  directory (default cwd)
 ---@param opts table?
 function M.open_index_only(root, opts)

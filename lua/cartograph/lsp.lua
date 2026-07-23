@@ -111,16 +111,23 @@ end
 -- ── handlers ──────────────────────────────────────────────────────────────
 M.handlers = {}
 
-M.handlers['initialize'] = function ()
+M.handlers['initialize'] = function (store)
+    -- INDEX-ONLY honesty ([[cartograph-thin-index]]): the thin index has NO call graph, so
+    -- references and call-hierarchy would answer EMPTY — which a client renders as an
+    -- authoritative "no references / no callers", a fabricated negative. Don't advertise
+    -- them: capability negotiation is the honest place for "not served here", so `gr` /
+    -- call-hierarchy report unsupported instead of a false empty. definition still serves
+    -- go-to-def-on-a-def (Tier-0 faithful); a full :Cartograph open + re-attach restores all.
+    local calls = not (store and store.is_index_only and store.is_index_only())
     return {
         capabilities = {
             positionEncoding = 'utf-8',
             definitionProvider = true,
-            referencesProvider = true,
+            referencesProvider = calls,
             documentSymbolProvider = true,
             hoverProvider = true,
             workspaceSymbolProvider = true,
-            callHierarchyProvider = true, -- the graph IS this, and it crosses languages
+            callHierarchyProvider = calls, -- the graph IS this, and it crosses languages
             typeDefinitionProvider = true, -- the value's type node (n.ret / n.ctype)
             implementationProvider = true, -- interface -> concrete impls (data.implements)
             semanticTokensProvider = { -- TIER-COLORING: honesty made visible

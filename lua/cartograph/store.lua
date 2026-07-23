@@ -366,6 +366,15 @@ function M.materialize_file_dataflow(rel)
     return true
 end
 
+--- HONESTY ([[cartograph-thin-index]]): true when the open graph is the THIN index —
+--- defs only, no call graph / effect PDG. df/flow are LOCAL so they materialize on demand
+--- (materialize_file_dataflow), but calls are an irreducibly whole-graph fixpoint that
+--- index-only never ran. Whole-graph verbs consult this and refuse rather than serve a
+--- degraded/empty answer. A full :Cartograph open ingests fresh data → the marker is gone.
+function M.is_index_only()
+    return (M.data and M.data.index_only == true) or false
+end
+
 -- The resident TOPOLOGY view: a fold-backed Band, built lazily on first
 -- query and cached until the next ingest (generation-keyed). This is rung
 -- (c) — the fold becomes the resident representation consumers read
