@@ -41,3 +41,21 @@ test('build_symtab: entries are STUBS — resolution fields only, no flow/df', f
     eq(nil, stub.flow) -- the heavy analysis payload is NOT carried
     eq(nil, stub.df)
 end)
+
+test('build_symtab: df is carried as the LIGHT dfdef name-set, not the heavy df', function ()
+    -- df.stmts[].def[] names → dfdef set (what callee_binding.hasdf reads); df itself excluded
+    local ns = { { id = 'q', kind = 'function', file = 'q.lua', name = 'Q.run',
+        df = { stmts = { { def = { 'x', 'helper' } }, { def = { 'y' } } } } } }
+    local st = ts.build_symtab(ns)
+    local stub = st.exact['Q.run'][1]
+    eq(nil, stub.df)
+    eq(true, stub.dfdef.helper); eq(true, stub.dfdef.x); eq(true, stub.dfdef.y)
+    eq(nil, stub.dfdef.absent)
+end)
+
+test('build_symtab: node_index covers EVERY node (modules too), exact/tail only defs', function ()
+    local st = ts.build_symtab(nodes())
+    eq('e', st.node_index['e'].id)   -- the module node IS in node_index (relink looks up by id)
+    eq('c', st.node_index['c'].id)   -- torn node too
+    eq(nil, st.exact['M'])           -- but NOT resolvable via exact
+end)

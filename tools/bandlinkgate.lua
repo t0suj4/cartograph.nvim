@@ -27,7 +27,7 @@ local data = bench.extract(name)
 local band_of = ports.default_band_of(3)
 local surf = ports.surface(data, band_of)
 local idx = bandlink.indexes(data, band_of)
-local ancestry = bandlink.ancestry(data.ruby_anc)
+local chains = bandlink.chains(data) -- ruby ruby_anc adjacency + extends super map
 
 local node_index = {}
 for _, n in ipairs(data.nodes or {}) do node_index[n.id] = n end
@@ -42,7 +42,7 @@ for _, c in ipairs(data.calls or {}) do
             local sb, tb = band_of(c.file), band_of(t.file)
             if sb ~= tb then -- a whole-graph cross-band resolution = the ground truth
                 local key = c.full or c.callee
-                local got, why = bandlink.resolve(key, surf.const_index, idx, ancestry, ts.lang_of(c.file), ts.lang_of)
+                local got, why = bandlink.resolve(key, surf.const_index, idx, chains, ts.lang_of(c.file), ts.lang_of)
                 if got == c.to then
                     match = match + 1
                     by_path[why] = (by_path[why] or 0) + 1

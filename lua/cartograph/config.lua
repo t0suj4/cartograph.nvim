@@ -99,6 +99,14 @@ M.edgecols_store = vim.env.CARTOGRAPH_EDGECOLS == '1'
 -- CARTOGRAPH_MERGECOLS=1. Default off (experimental; peak.lua --parallel measures it).
 M.merge_callstore = vim.env.CARTOGRAPH_MERGECOLS == '1'
 
+-- FEDERATED RESOLVE (F2 step 3b, [[cartograph-band-federation]]): M.relink resolves off the
+-- LIGHT symbol table (ts.build_symtab — compact stubs {id,kind,file,name,ret,retclass,arrow,
+-- exported,cbarg}, none of flow/df) instead of the full-node build_index. The correctness
+-- milestone: resolution reads only light fields (audited), so the graph must be per-item
+-- IDENTICAL (gate --parallel is the oracle). Env CARTOGRAPH_FEDERATED=1. Default off — the
+-- peak DROP needs detail streamed off residency (step 3c); this proves resolution is faithful.
+M.federated_resolve = vim.env.CARTOGRAPH_FEDERATED == '1'
+
 -- parallel cold extraction: worker processes parse file slices while the
 -- browser opens immediately and fills in as chunks arrive. Kicks in at
 -- parallel_threshold files; workers defaults to cores-1 (capped at 8).

@@ -2273,6 +2273,9 @@ local function callee_binding(callee, fn, parent_fn)
     local function hasp(f) for _, p in ipairs(f.params or {}) do if p == callee then return true end end end
     local function hasdecl(f) for _, l in ipairs(f.locals or {}) do if l == callee then return true end end end
     local function hasdf(f)
+        -- light path (F2 build_symtab): dfdef is the precomputed set of names df defines
+        -- — the only projection of df resolution reads. Falls back to the full df walk.
+        if f.dfdef then return f.dfdef[callee] == true end
         local df = f.df
         if df then for _, st in ipairs(df.stmts) do
             for _, d in ipairs(st.def or {}) do if d == callee then return true end end
@@ -5495,10 +5498,31 @@ M.build_index = build_index -- exposed as the seam a per-shard / on-demand resol
 -- detail. Resolution-equivalent to build_index (symtabgate proves f2gate verdicts identical);
 -- resident is ~5-20% of the full index (the fan-out-free peak win f2peak modelled).
 local function build_symtab(nodes)
-    local exact, tail = {}, {}
+    local exact, tail, node_index = {}, {}, {}
+    local apertures, ns_pfx, global_witness = {}, {}, nil
     for _, n in ipairs(nodes) do
+        -- node_index covers EVERY node (mirrors build_index — call targets / enclosing fns
+        -- are looked up by id regardless of kind/torn/decl). The resolution read-set (audited
+        -- off M.relink): id/kind/file/name + ret/retclass/arrow/exported/cbarg; NOT flow/df
+        -- (the analysis payload). exact/tail/node_index alias the SAME stub so a cbarg write
+        -- via exact is visible via node_index (relink mutates cbarg in-pass).
+        -- params/locals/dfdef feed callee_binding (the local-shadow / fn-value gate).
+        -- dfdef = the light NAME-SET df defines (the only df projection resolution reads
+        -- — hasdf) — carried instead of the heavy df.stmts.
+        local dfdef
+        if n.df then
+            for _, st in ipairs(n.df.stmts or {}) do
+                for _, d in ipairs(st.def or {}) do
+                    dfdef = dfdef or {}; dfdef[d] = true
+                end
+            end
+        end
+        local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name,
+            ret = n.ret, retclass = n.retclass, arrow = n.arrow,
+            exported = n.exported, cbarg = n.cbarg,
+            params = n.params, locals = n.locals, dfdef = dfdef }
+        node_index[n.id] = stub
         if (n.kind == 'function' or n.kind == 'method') and not n.torn and not n.decl then
-            local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name }
             exact[n.name] = exact[n.name] or {}
             table.insert(exact[n.name], stub)
             local tl = n.name:match('([%w_]+)$')
@@ -5514,9 +5538,26 @@ local function build_symtab(nodes)
             end
         end
     end
-    return { exact = exact, tail = tail }
+    -- aux tables relink also reads (light): apertures (literal-name langs), ns_pfx, witness.
+    -- non-def nodes aren't in node_index (resolution never looks them up by id).
+    for _, n in ipairs(nodes) do
+        if n.kind == 'module' and n.apertures then
+            apertures[n.file] = n.apertures
+            if not global_witness or n.file < global_witness.file then
+                global_witness = { file = n.file, line = n.apertures[1].line }
+            end
+        elseif n.kind == 'function' or n.kind == 'method' then
+            local pfx = n.name:match('^([^/#]+)[/#]')
+            if pfx then
+                local _, dsp = elang_for(n.file)
+                if dsp and dsp.literal_names then ns_pfx[pfx] = true end
+            end
+        end
+    end
+    return { exact = exact, tail = tail, node_index = node_index,
+        apertures = apertures, ns_pfx = ns_pfx, global_witness = global_witness }
 end
-M.build_symtab = build_symtab -- the F2 light index; bandlink.indexes(data, band_of, build_symtab)
+M.build_symtab = build_symtab -- the F2 light index (drop-in for build_index's resolution reads)
 
 --- Re-resolve name-matched links over a (possibly spliced) graph: every
 --- call lacking `to` gets another chance against the CURRENT node set,
@@ -5561,8 +5602,12 @@ function M.relink(data, touched)
     end
     -- THE INDEX (one first-class object; the merging-strategies seam). node_index
     -- is available immediately (was built later inline — order-independent, so
-    -- earlier is equivalent).
-    local index = build_index(data.nodes)
+    -- earlier is equivalent). federated_resolve (F2 step 3b, default off): resolution
+    -- runs off the LIGHT symbol table (stubs, no flow/df) instead of full nodes —
+    -- the correctness milestone (gate --parallel per-item IDENTITY is the oracle);
+    -- the peak drop lands once detail is streamed off residency (step 3c).
+    local index = (require('cartograph.config').federated_resolve and build_symtab
+        or build_index)(data.nodes)
     local exact, tail, node_index = index.exact, index.tail, index.node_index
     local apertures, ns_pfx, global_witness = index.apertures, index.ns_pfx, index.global_witness
     local function aperture_refusal(name, file)
@@ -5847,6 +5892,15 @@ function M.relink(data, touched)
     -- (relink runs over the full merged graph → covers the parallel parent);
     -- idempotent, so re-running on an incremental relink is safe.
     if data.stdaliases then mint_std_nodes(data, node_index) end
+    -- federated_resolve: cbarg marks the pre-scan added went to the light STUBS
+    -- (node_index/exact are stubs); replay them onto the real graph nodes (the sole
+    -- node mutation relink makes — the light index otherwise touches no node detail).
+    if require('cartograph.config').federated_resolve then
+        for _, gn in ipairs(data.nodes) do
+            local s = node_index[gn.id]
+            if s and s.cbarg then gn.cbarg = true end
+        end
+    end
     return n
 end
 

@@ -108,3 +108,39 @@ test('bandlink: singleton (.) hop chases superclass singletons then extend modul
     local id, why = bandlink.resolve('Widget.build', ci, idx, anc, 'ruby', RUBY)
     eq('bb', id); eq('ancestor', why)
 end)
+
+-- EXTENDS HOP (java/php/js) — the single-parent superclass chain (data.extends), the
+-- cross-band analog of resolve_super. Owner-key miss on `Class::m` → walk to the parent
+-- that defines it, in another band, via the SAME const->band exact discipline.
+local JAVA = function () return 'java' end
+test('bandlink: extends hop resolves an inherited java method (::) to the superclass band', function ()
+    local ci, idx = fixture()
+    idx.lib.exact['Base::run'] = { { id = 'br', kind = 'method', file = 'lib/Base.java' } }
+    ci.Base = { lib = true }; ci.Impl = { app = true }
+    local ch = bandlink.chains({ extends = { { child = 'Impl', parent = 'Base', file = 'app/Impl.java' } } })
+    eq(nil, (bandlink.resolve_ref('Impl::run', ci, idx, 'java', JAVA)))
+    local id, why = bandlink.resolve('Impl::run', ci, idx, ch, 'java', JAVA)
+    eq('br', id); eq('ancestor', why)
+end)
+
+test('bandlink: extends hop walks a TRANSITIVE chain to the nearest definer', function ()
+    local ci, idx = fixture()
+    idx.lib.exact['Grand::run'] = { { id = 'gr', kind = 'method', file = 'lib/Grand.java' } }
+    ci.Grand = { lib = true }; ci.Mid = { lib = true }; ci.Leaf = { app = true }
+    -- Leaf -> Mid -> Grand; only Grand defines run
+    local ch = bandlink.chains({ extends = {
+        { child = 'Leaf', parent = 'Mid', file = 'a' }, { child = 'Mid', parent = 'Grand', file = 'b' } } })
+    local id, why = bandlink.resolve('Leaf::run', ci, idx, ch, 'java', JAVA)
+    eq('gr', id); eq('ancestor', why)
+end)
+
+test('bandlink: extends collision (two distinct parents) stops the walk — no guess', function ()
+    local ci, idx = fixture()
+    idx.lib.exact['P1::run'] = { { id = 'p1', kind = 'method', file = 'lib/P1.java' } }
+    ci.P1 = { lib = true }; ci.C = { app = true }
+    -- C declared with two different parents across files → build_super sets false
+    local ch = bandlink.chains({ extends = {
+        { child = 'C', parent = 'P1', file = 'a' }, { child = 'C', parent = 'P2', file = 'b' } } })
+    local id, why = bandlink.resolve('C::run', ci, idx, ch, 'java', JAVA)
+    eq(nil, id); eq('miss', why)
+end)
