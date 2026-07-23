@@ -46,8 +46,10 @@ local function nfiles(data)
 end
 local function gb(bytes) return bytes / 1e9 end
 
-print(('peak %s%s'):format(target:gsub('.*/', ''),
-    box_gb and (' — box RAM %.1f GB'):format(box_gb) or ''))
+local wfold = require('cartograph.config').merge_worker_fold
+print(('peak %s%s%s'):format(target:gsub('.*/', ''),
+    box_gb and (' — box RAM %.1f GB'):format(box_gb) or '',
+    wfold and '  [strategy: WORKER-FOLD]' or '  [strategy: parent-fold (default)]'))
 
 local files, ncalls
 local function run(label, fn, note)
@@ -63,6 +65,9 @@ local function run(label, fn, note)
     local bound = stats.peak_is_window and '' or ' (lifetime bound)'
     print(('  %-9s peak %6.2f GB%s   wall %5.1fs   %s'):format(
         label, gb(stats.peak), bound, stats.wall, note))
+    if data._ipc_bytes then
+        print(('            IPC worker→parent wire: %.1f MB'):format(data._ipc_bytes / 1e6))
+    end
     return stats
 end
 

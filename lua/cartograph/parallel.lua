@@ -154,8 +154,11 @@ local function spawn(job, cb)
                 local cfd = io.open(job.out, 'rb')
                 if cfd then
                     local cache = require('cartograph.cache')
-                    chunk = cache.decode(cfd:read('a'))
-                    if chunk then cache.unpack_calls(chunk) end -- segment → calls
+                    local raw = cfd:read('a')
+                    chunk = cache.decode(raw)
+                    -- record the wire size (worker→parent IPC volume) — the fold-emit
+                    -- strategy's other axis alongside the merge peak
+                    if chunk then cache.unpack_calls(chunk); chunk._wire_bytes = #raw end
                     cfd:close()
                 end
             end
@@ -175,6 +178,10 @@ end
 -- telemetry, never graph data) and record it with the parent-measured
 -- turnaround, so spawn overhead = dt - wall is a number per slice
 local function take_metrics(s, chunk, dt_ms)
+    if chunk and chunk._wire_bytes then -- IPC volume (worker→parent), any chunk
+        s.ipc_bytes = (s.ipc_bytes or 0) + chunk._wire_bytes
+        chunk._wire_bytes = nil
+    end
     local m = chunk and chunk._metrics
     if not m then return end
     chunk._metrics = nil
@@ -636,6 +643,7 @@ function M.extract(root, o)
         -- inline extract's fold-at-production). Serializable folded cols (P3a); idempotent at ingest.
         require('cartograph.df').fold(acc)
         require('cartograph.flow').fold(acc)
+        acc._ipc_bytes = s.ipc_bytes or 0 -- total worker→parent wire volume (telemetry)
     end
     -- parse cost ≈ file size; one cheap stat pass so slices can be shaped by
     -- WORK, not count (sizes span thousands-fold across a loaded session)

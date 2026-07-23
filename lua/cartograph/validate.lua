@@ -40,6 +40,14 @@ M.NODE_FIELDS = {
     external = true, -- a MINTED external symbol (stdlib): no local def, file is
                      -- the synthetic profile scheme (`zig-std`) — the target of a
                      -- stdlib-tier resolution ([[cartograph-stdlib-profile]])
+    -- folded df slice (df.fold — post-ingest / extract-end / worker-fold): _df = the
+    -- columnar store ref, _df0/_dfn = stmt slice, _dfi0/_dfin = inputs slice. Replaces
+    -- the raw `df` record on a folded node (the `df`/`flow` raw fields above stay allowed
+    -- for un-ingested / refresh nodes — dual-mode).
+    _df = true, _df0 = true, _dfn = true, _dfi0 = true, _dfin = true,
+    -- folded flow slice (flow.fold, same lifecycle): _flow = store ref, _flow0/_flown =
+    -- row slice, _flowp0/_flowpn = params slice.
+    _flow = true, _flow0 = true, _flown = true, _flowp0 = true, _flowpn = true,
 }
 M.EDGE_FIELDS = {
     from = true, to = true, kind = true, at = true, atn = true,
