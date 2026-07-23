@@ -1,5 +1,5 @@
 local callrec = require 'cartograph.callrec'
-local callcols = require 'cartograph.callcols'
+local callview = require 'cartograph.callview' -- neutral call accessor (columns/resident/raw)
 -- The epistemic ladder, as a readable distribution. Every call sits on
 -- a rung by HOW its target is known, and the ladder answers "how much
 -- of this can I trust" — for one function's outgoing calls, or the
@@ -96,7 +96,6 @@ end
 ---   local  = receiver is a local/param of the enclosing fn (reaching / VM tinf)
 ---   unknown= a free receiver (hardest)
 function M.narrowable(store)
-    local calls = store.data.calls or {}
     local alias = {} -- file -> { require-bound alias name -> true }
     for _, e in ipairs(store.data.edges or {}) do
         if e.kind == 'import' and e.bind and e.from then
@@ -116,19 +115,23 @@ function M.narrowable(store)
         locals[id] = s; return s
     end
     local W = { alias = 4, self = 3, ['local'] = 2, unknown = 1 } -- narrowability
+    local cv = callview.of(store.data) -- index-form: columns/resident/raw, neutral
     local agg = {}
-    for _, c in ipairs(calls) do
-        if not callrec.to(c) and not c.dynamic and c.refused and c.refused.rule == 'ambiguous'
-            and c.refused.cands and #c.refused.cands > 0 and callrec.full(c) then
-            local recv, member = c.full:match('^([%w_]+)[.:]([%w_]+)$')
+    for i = 1, cv.n do
+        local to, dynamic, refused, full =
+            cv.get(i, 'to'), cv.get(i, 'dynamic'), cv.get(i, 'refused'), cv.get(i, 'full')
+        if not to and not dynamic and refused and refused.rule == 'ambiguous'
+            and refused.cands and #refused.cands > 0 and full then
+            local recv, member = full:match('^([%w_]+)[.:]([%w_]+)$')
             if recv and member then
+                local file, fn = cv.get(i, 'file'), cv.get(i, 'fn')
                 local class = (recv == 'self' or recv == 'this') and 'self'
-                    or (alias[callrec.file(c)] and alias[callrec.file(c)][recv]) and 'alias'
-                    or (callrec.fn(c) and fn_locals(callrec.fn(c))[recv]) and 'local'
+                    or (alias[file] and alias[file][recv]) and 'alias'
+                    or (fn and fn_locals(fn)[recv]) and 'local'
                     or 'unknown'
-                local key = callrec.file(c) .. '\31' .. recv .. '\31' .. class
+                local key = file .. '\31' .. recv .. '\31' .. class
                 local a = agg[key]
-                if not a then a = { file = callrec.file(c), recv = recv, class = class,
+                if not a then a = { file = file, recv = recv, class = class,
                     calls = 0, members = {} }; agg[key] = a end
                 a.calls = a.calls + 1
                 a.members[member] = true
@@ -144,7 +147,12 @@ function M.narrowable(store)
     end
     table.sort(out, function (x, y)
         if x.score ~= y.score then return x.score > y.score end
-        return x.calls > y.calls
+        if x.calls ~= y.calls then return x.calls > y.calls end
+        -- STABLE tiebreak (file/recv/class = the agg key, unique per entry): the report
+        -- is representation-independent + run-to-run deterministic, not pairs()-order luck
+        if x.file ~= y.file then return x.file < y.file end
+        if x.recv ~= y.recv then return x.recv < y.recv end
+        return x.class < y.class
     end)
     return out
 end
@@ -167,30 +175,21 @@ function M.report(store)
             lines[#lines + 1] = ('  %5d  %s'):format(t[r], label[r])
         end
     end
-    -- the heaviest refusals: where resolving one fork buys the most. INDEX FORM
-    -- (brick 3 step c): the hot collect reads to/dynamic/refused off the columns +
-    -- residual directly (no proxy dispatch); the cold top-12 reads its fields by
-    -- index via a small helper. refs holds the index + refusal, not the call.
-    local view = store.data._callcols
-    local cc, resid = view and view.cc, view and view.residual
-    local calls = store.data.calls or {}
-    local ncalls = cc and cc.n or #calls
-    local function field(i, f) if cc then return callcols.get(cc, f, i) else return calls[i][f] end end
+    -- the heaviest refusals: where resolving one fork buys the most. INDEX FORM via
+    -- callview (columns/residual when the store is columnar, raw records otherwise) — no
+    -- proxy dispatch; refs holds the index + refusal, not the call.
+    local cv = callview.of(store.data)
     local refs = {}
-    for i = 1, ncalls do
-        local to, dynamic, refused
-        if cc then
-            to, dynamic = callcols.get(cc, 'to', i), callcols.get(cc, 'dynamic', i)
-            local r = resid[i]; refused = r and r.refused
-        else
-            local c = calls[i]; to, dynamic, refused = c.to, c.dynamic, c.refused
-        end
+    for i = 1, cv.n do
+        local to, dynamic, refused = cv.get(i, 'to'), cv.get(i, 'dynamic'), cv.get(i, 'refused')
         if not to and not dynamic and refused and refused.cands and #refused.cands > 0 then
             refs[#refs + 1] = { i = i, refused = refused }
         end
     end
     table.sort(refs, function (a, b)
-        return (a.refused.n or 0) > (b.refused.n or 0)
+        local an, bn = a.refused.n or 0, b.refused.n or 0
+        if an ~= bn then return an > bn end
+        return a.i < b.i -- STABLE tiebreak by call index (deterministic across reps)
     end)
     if #refs > 0 then
         lines[#lines + 1] = ''
@@ -198,8 +197,8 @@ function M.report(store)
         for k = 1, math.min(12, #refs) do
             local ref = refs[k]
             lines[#lines + 1] = ('  %s:%d  %s  (%d candidates)')
-                :format(field(ref.i, 'file'), field(ref.i, 'line') + 1,
-                    field(ref.i, 'callee'), ref.refused.n or 0)
+                :format(cv.get(ref.i, 'file'), cv.get(ref.i, 'line') + 1,
+                    cv.get(ref.i, 'callee'), ref.refused.n or 0)
         end
     end
     -- the receiver-typing WORK-LIST: which receivers, typed, dissolve the most
