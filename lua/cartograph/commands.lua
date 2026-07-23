@@ -137,6 +137,22 @@ function M.register()
     -- attach a REAL LSP client to the current buffer, served from the open
     -- graph — gd / gr / K / documentSymbol / workspaceSymbol answer from the
     -- common core (cross-language, honesty-on-hover). Read-only.
+    -- INDEX-ONLY open ([[cartograph-thin-index]]): the thin symbol index for cheap
+    -- LSP/nav (workspace/symbol, documentSymbol, definition-on-a-def, hover). Calls-
+    -- dependent features are honestly empty until a full :Cartograph open.
+    cmd('CartographIndexOnly', function (o)
+        local root = (o.args ~= '' and o.args) or vim.fn.getcwd()
+        local ok, err = pcall(require('cartograph').open_index_only, root)
+        if not ok then
+            vim.notify('cartograph: ' .. tostring(err), vim.log.levels.ERROR)
+            return
+        end
+        local store = require 'cartograph.store'
+        vim.notify(('cartograph: index-only — %d symbols indexed (:CartographLspAttach for nav)')
+            :format(#(store.data.nodes or {})), vim.log.levels.INFO)
+    end, { nargs = '?', complete = 'dir',
+        desc = 'cartograph: open a directory in index-only mode (thin symbol index for LSP/nav)' })
+
     cmd('CartographLspAttach', function ()
         local store = live() if not store then return end
         local id, why = require('cartograph.lsp').attach()

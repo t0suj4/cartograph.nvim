@@ -18,6 +18,27 @@ function M.setup(opts)
     require('cartograph.config').apply(opts)
 end
 
+--- Open a directory in INDEX-ONLY mode ([[cartograph-thin-index]]): the thin symbol
+--- index — parse + DEF nodes only (no calls/df/flow), ~5-9x cheaper. Ingests it so the
+--- Tier-0 LSP/nav path serves off it (workspace/symbol, documentSymbol, definition-on-a-
+--- def, symbol hover — measured identical to a full open); the calls-dependent surface
+--- (references, call hierarchy, definition-from-a-call-site, semantic tokens) is honestly
+--- EMPTY until a full :Cartograph open. Sync (the thin index is fast — no parallel/cache
+--- streaming). Attach the reader with :CartographLspAttach afterward.
+---@param root string?  directory (default cwd)
+---@param opts table?
+function M.open_index_only(root, opts)
+    root = vim.fn.expand(root or vim.fn.getcwd())
+    local store = require 'cartograph.store'
+    if store.data and (next(store.moveset or {}) or store.txn) then
+        error('cartograph: staged changes pending — apply or clear them first', 0)
+    end
+    local data = require('cartograph.providers.treesitter').index_only(root, opts)
+    store.ingest(data)
+    require('cartograph.commands').register() -- idempotent; make :Cartograph* live
+    return store.data
+end
+
 --- Open the cockpit on a graph dump (neutral-schema JSON produced by the
 --- provider). ONE hardcoded layout for now: symbols left, source right.
 ---@param dump_path string
