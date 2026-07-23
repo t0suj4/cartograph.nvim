@@ -1079,19 +1079,19 @@ local function pack(arr, len, w)
     end
     return concat(parts)
 end
-local function getter(s, w)
+-- read a 1-based value from a packed column c = { s = byte-string, w = width(2|4) }.
+-- Plain data (a string + a width), not a closure over the string — so the folded
+-- store SERIALIZES (the cache round-trips the folded form). One reader, all columns.
+local function rd(c, i)
+    local s, w = c.s, c.w
     if w == 2 then
-        return function (i)
-            local p = (i - 1) * 2 + 1
-            local a, b = byte(s, p, p + 1)
-            return a + b * 256
-        end
+        local p = (i - 1) * 2 + 1
+        local a, b = byte(s, p, p + 1)
+        return a + b * 256
     end
-    return function (i)
-        local p = (i - 1) * 4 + 1
-        local a, b, c, d = byte(s, p, p + 3)
-        return a + b * 256 + c * 65536 + d * 16777216
-    end
+    local p = (i - 1) * 4 + 1
+    local a, b, cc, d = byte(s, p, p + 3)
+    return a + b * 256 + cc * 65536 + d * 16777216
 end
 local function width_for(maxv) return maxv < 65536 and 2 or 4 end
 
@@ -1103,16 +1103,16 @@ local function width_for(maxv) return maxv < 65536 and 2 or 4 end
 -- derivation: use start = def end = u0[g], use end = d0[g+1]).
 local function row_view(col, g)
     local nms = col.names
-    local d = col.shapes[col.shape(g)]
-    local s = { l = col.l(g), c = col.c(g), parent = col.parent(g), def = {}, use = {},
+    local d = col.shapes[rd(col.shape, g)]
+    local s = { l = rd(col.l, g), c = rd(col.c, g), parent = rd(col.parent, g), def = {}, use = {},
         kind = d.kind, pol = d.pol, t = d.t,
         regime = d.regime, const = d.const, suspend = d.suspend,
         label = col.labels[g], -- sparse (control-transfer): nil for the vast majority
         rmw = col.rmw and col.rmw[g] or nil } -- sparse (read-modify-write reads)
-    local b, e = col.d0(g), col.u0(g)
-    for j = 1, e - b do s.def[j] = nms[col.nm(b + j)] end
-    b, e = e, col.d0(g + 1)
-    for j = 1, e - b do s.use[j] = nms[col.nm(b + j)] end
+    local b, e = rd(col.d0, g), rd(col.u0, g)
+    for j = 1, e - b do s.def[j] = nms[rd(col.nm, b + j)] end
+    b, e = e, rd(col.d0, g + 1)
+    for j = 1, e - b do s.use[j] = nms[rd(col.nm, b + j)] end
     return s
 end
 
@@ -1159,7 +1159,7 @@ function M.record(n)
     local col = n._flow
     if col then
         local params = {}
-        for i = 1, n._flowpn do params[i] = col.names[col.pm(n._flowp0 + i)] end
+        for i = 1, n._flowpn do params[i] = col.names[rd(col.pm, n._flowp0 + i)] end
         return { stmts = M.rows(n), params = params }
     end
     return n.flow
@@ -1239,14 +1239,14 @@ function M.fold(data)
     local sw = width_for(#col.shapes)
     local cw = width_for(maxc) -- u16 normal; u32 only for extreme minified lines
     local packed = {
-        shape = getter(pack(col.shape, ns, sw), sw),
-        l = getter(pack(col.l, ns, 4), 4),
-        c = getter(pack(col.c, ns, cw), cw),
-        parent = getter(pack(col.parent, ns, pw), pw),
-        d0 = getter(pack(col.d0, ns + 1, 4), 4),
-        u0 = getter(pack(col.u0, ns, 4), 4),
-        nm = getter(pack(col.nm, nn, nw), nw),
-        pm = getter(pack(col.pm, np, nw), nw),
+        shape = { s = pack(col.shape, ns, sw), w = sw },
+        l = { s = pack(col.l, ns, 4), w = 4 },
+        c = { s = pack(col.c, ns, cw), w = cw },
+        parent = { s = pack(col.parent, ns, pw), w = pw },
+        d0 = { s = pack(col.d0, ns + 1, 4), w = 4 },
+        u0 = { s = pack(col.u0, ns, 4), w = 4 },
+        nm = { s = pack(col.nm, nn, nw), w = nw },
+        pm = { s = pack(col.pm, np, nw), w = nw },
         names = col.names,
         shapes = col.shapes,
         labels = col.labels, -- sparse map (global-row → label), passed through

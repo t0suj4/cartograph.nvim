@@ -33,12 +33,14 @@ local function pack_u32(arr, len)
     end
     return concat(parts)
 end
-local function getter(s)
-    return function (i)
-        local p = (i - 1) * 4 + 1
-        local a, b, c, d = byte(s, p, p + 3)
-        return a + b * 256 + c * 65536 + d * 16777216
-    end
+-- read a 1-based LE-u32 from a packed byte-string column. The plain-data twin of
+-- the old getter CLOSURE — columns are now STRINGS (not closures over strings), so
+-- the folded store SERIALIZES (the cache round-trips the folded form, not fat), and
+-- the reader lives here once instead of one closure per column.
+local function rd(s, i)
+    local p = (i - 1) * 4 + 1
+    local a, b, c, d = byte(s, p, p + 3)
+    return a + b * 256 + c * 65536 + d * 16777216
 end
 
 -- ── dual-mode accessors ──────────────────────────────────────────────────
@@ -72,14 +74,14 @@ end
 -- d0[g+1] - u0[g] (sentinel rows close the last stmt); dep likewise.
 local function stmt_view(col, g)
     local nms = col.names
-    local st = { l = col.l(g), def = {}, use = {}, dep = {} }
-    local b, e = col.d0(g), col.u0(g)
-    for j = 1, e - b do st.def[j] = nms[col.nm(b + j)] end
-    b, e = e, col.d0(g + 1)
-    for j = 1, e - b do st.use[j] = nms[col.nm(b + j)] end
-    b, e = col.p0(g), col.p0(g + 1)
+    local st = { l = rd(col.l, g), def = {}, use = {}, dep = {} }
+    local b, e = rd(col.d0, g), rd(col.u0, g)
+    for j = 1, e - b do st.def[j] = nms[rd(col.nm, b + j)] end
+    b, e = e, rd(col.d0, g + 1)
+    for j = 1, e - b do st.use[j] = nms[rd(col.nm, b + j)] end
+    b, e = rd(col.p0, g), rd(col.p0, g + 1)
     for j = 1, e - b do
-        st.dep[j] = { from = col.depf(b + j), var = nms[col.depv(b + j)] }
+        st.dep[j] = { from = rd(col.depf, b + j), var = nms[rd(col.depv, b + j)] }
     end
     return st
 end
@@ -95,18 +97,18 @@ function M.stmts(n)
         local out = {}
         local nms = col.names
         local g = n._df0
-        local d1 = col.d0(g + 1)
-        local p1 = col.p0(g + 1)
+        local d1 = rd(col.d0, g + 1)
+        local p1 = rd(col.p0, g + 1)
         for i = 1, n._dfn do
             g = g + 1
             local d0, p0 = d1, p1
-            d1, p1 = col.d0(g + 1), col.p0(g + 1)
-            local st = { l = col.l(g), def = {}, use = {}, dep = {} }
-            local u0 = col.u0(g)
-            for j = 1, u0 - d0 do st.def[j] = nms[col.nm(d0 + j)] end
-            for j = 1, d1 - u0 do st.use[j] = nms[col.nm(u0 + j)] end
+            d1, p1 = rd(col.d0, g + 1), rd(col.p0, g + 1)
+            local st = { l = rd(col.l, g), def = {}, use = {}, dep = {} }
+            local u0 = rd(col.u0, g)
+            for j = 1, u0 - d0 do st.def[j] = nms[rd(col.nm, d0 + j)] end
+            for j = 1, d1 - u0 do st.use[j] = nms[rd(col.nm, u0 + j)] end
             for j = 1, p1 - p0 do
-                st.dep[j] = { from = col.depf(p0 + j), var = nms[col.depv(p0 + j)] }
+                st.dep[j] = { from = rd(col.depf, p0 + j), var = nms[rd(col.depv, p0 + j)] }
             end
             out[i] = st
         end
@@ -122,7 +124,7 @@ function M.get(n)
     local col = n._df
     if col then
         local inputs = {}
-        for i = 1, n._dfin do inputs[i] = col.names[col.inm(n._dfi0 + i)] end
+        for i = 1, n._dfin do inputs[i] = col.names[rd(col.inm, n._dfi0 + i)] end
         return { inputs = inputs, stmts = M.stmts(n) }
     end
     return n.df
@@ -189,14 +191,14 @@ function M.fold(data)
     -- over ONE interned names array (Lua interning made repeats free as
     -- refs; the id column makes them free as 4 BYTES)
     local packed = {
-        l = getter(pack_u32(col.l, ns)),
-        d0 = getter(pack_u32(col.d0, ns + 1)),
-        u0 = getter(pack_u32(col.u0, ns)),
-        p0 = getter(pack_u32(col.p0, ns + 1)),
-        nm = getter(pack_u32(col.nm, nn)),
-        depf = getter(pack_u32(col.depf, np)),
-        depv = getter(pack_u32(col.depv, np)),
-        inm = getter(pack_u32(col.inm, ni)),
+        l = pack_u32(col.l, ns),
+        d0 = pack_u32(col.d0, ns + 1),
+        u0 = pack_u32(col.u0, ns),
+        p0 = pack_u32(col.p0, ns + 1),
+        nm = pack_u32(col.nm, nn),
+        depf = pack_u32(col.depf, np),
+        depv = pack_u32(col.depv, np),
+        inm = pack_u32(col.inm, ni),
         names = col.names,
     }
     for _, node in ipairs(data.nodes or {}) do

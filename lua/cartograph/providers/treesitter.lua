@@ -5434,6 +5434,15 @@ function M.extract(root, opts)
     local _pcf = pstart()
     constfold.fold(calls, constDefs)
     padd('constfold', _pcf)
+    -- fat-record migration P3: fold df/flow at PRODUCTION so the fat records never persist
+    -- past extraction (ingest's fold becomes an idempotent no-op via data._dfcol/_flowcol;
+    -- the folded columns are now serializable — P3a — so the cache round-trips the FOLDED
+    -- form). SKIP for worker CHUNKS (skip_idpass): their per-chunk cols can't merge; the
+    -- parallel PARENT folds the merged graph. Readers are fold-agnostic (P2), so unaffected.
+    if not (opts and opts.skip_idpass) then
+        dfmod.fold(data)
+        flowmod.fold(data)
+    end
     if M.PROFILE then padd('total', prof._t0); data.prof = prof end
     return data
 end

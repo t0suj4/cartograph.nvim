@@ -620,6 +620,11 @@ function M.extract(root, o)
         M.audit(acc)
         ts.relink(acc)
         phase2()
+        -- fat-record migration P3: workers send FAT df/flow (per-chunk cols can't merge);
+        -- the PARENT folds the merged graph so the returned acc is off fat records (matching
+        -- inline extract's fold-at-production). Serializable folded cols (P3a); idempotent at ingest.
+        require('cartograph.df').fold(acc)
+        require('cartograph.flow').fold(acc)
     end
     -- parse cost ≈ file size; one cheap stat pass so slices can be shaped by
     -- WORK, not count (sizes span thousands-fold across a loaded session)
