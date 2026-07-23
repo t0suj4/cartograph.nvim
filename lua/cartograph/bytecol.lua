@@ -35,9 +35,11 @@ function M.pack(arr, len, w)
 end
 
 -- pack an array auto-selecting its width from the array's own max → { s, w }.
+-- w=0 = an ALL-ZERO column: store nothing (s = ''); rd returns 0 (correct — all values ARE 0).
 function M.packcol(arr, len)
     local mx = 0
     for i = 1, len do if arr[i] > mx then mx = arr[i] end end
+    if mx == 0 then return { s = '', w = 0 } end
     local w = M.width_for(mx)
     return { s = M.pack(arr, len, w), w = w }
 end
@@ -45,6 +47,7 @@ end
 -- read a 1-based value from a { s, w } column.
 function M.rd(c, i)
     local s, w = c.s, c.w
+    if w == 0 then return 0 end
     if w == 1 then return byte(s, i) end
     if w == 2 then
         local p = (i - 1) * 2 + 1

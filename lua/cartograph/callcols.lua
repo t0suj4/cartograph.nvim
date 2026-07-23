@@ -41,6 +41,11 @@ local char, byte, floor = string.char, string.byte, math.floor
 local function widthcol(vals, n)
     local mx = 0
     for i = 1, n do local v = vals[i]; if v > mx then mx = v end end
+    -- w=0: an ALL-ZERO column (every value 0 — a str field absent on every call, e.g. the
+    -- receiver/chain fields on non-zig langs) stores NOTHING; the getter returns 0 (rank
+    -- 0 = absent). Correct by construction (all values ARE 0). Saves n bytes/column — 7
+    -- all-zero cols × 240k calls ≈ 1.6 MB on server. Immutable columns only (built final).
+    if mx == 0 then return function () return 0 end end
     local w = mx < 256 and 1 or (mx < 65536 and 2 or 4)
     if ok_ffi then
         local ctype = (w == 1 and 'uint8_t[?]') or (w == 2 and 'uint16_t[?]') or 'uint32_t[?]'
