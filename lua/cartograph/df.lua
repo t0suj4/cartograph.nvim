@@ -102,8 +102,13 @@ end
 -- stmt (end-derivation, the at-fold lesson). Pools: nm (def+use names),
 -- depf/depv (LOCAL stmt index + var name), inm (per-node inputs). Name
 -- "interning" is Lua's own string interning: columns hold refs.
-function M.fold(data)
-    if data._dfcol then return 0 end -- already folded (idempotent)
+-- The fold as an ACCUMULATOR: add(nodes) folds a batch of nodes' df into the growing
+-- columnar state; finalize() packs it and stamps _df on the folded nodes. M.fold is
+-- add(all-nodes)+finalize (whole-graph, inline/ingest); the PARALLEL merge calls add() per
+-- CHUNK so the parent never holds all the fat df at once (the merge-peak lever). Byte-
+-- identical to one whole-graph fold: ONE shared interner + monotone global offsets, so
+-- chunk order is the only difference and the fileset-ordered merge fixes that.
+function M.accumulator()
     local col = {
         l = {}, d0 = {}, u0 = {}, p0 = {},
         nm = {}, depf = {}, depv = {}, inm = {},
@@ -120,54 +125,64 @@ function M.fold(data)
         return i
     end
     local ns, nn, np, ni = 0, 0, 0, 0
-    for _, node in ipairs(data.nodes or {}) do
-        local df = node.df
-        if df and df.stmts and not node._df then
-            local s0 = ns
-            for _, st in ipairs(df.stmts) do
-                ns = ns + 1
-                col.l[ns] = st.l
-                col.d0[ns] = nn
-                for _, d in ipairs(st.def) do nn = nn + 1; col.nm[nn] = id(d) end
-                col.u0[ns] = nn
-                for _, u in ipairs(st.use) do nn = nn + 1; col.nm[nn] = id(u) end
-                col.p0[ns] = np
-                for _, dp in ipairs(st.dep or {}) do
-                    np = np + 1
-                    col.depf[np] = dp.from
-                    col.depv[np] = id(dp.var)
+    local folded = {} -- nodes folded here → stamp _df at finalize
+    local A = {}
+    function A.add(nodes)
+        for _, node in ipairs(nodes or {}) do
+            local df = node.df
+            if df and df.stmts and not node._df then
+                local s0 = ns
+                for _, st in ipairs(df.stmts) do
+                    ns = ns + 1
+                    col.l[ns] = st.l
+                    col.d0[ns] = nn
+                    for _, d in ipairs(st.def) do nn = nn + 1; col.nm[nn] = id(d) end
+                    col.u0[ns] = nn
+                    for _, u in ipairs(st.use) do nn = nn + 1; col.nm[nn] = id(u) end
+                    col.p0[ns] = np
+                    for _, dp in ipairs(st.dep or {}) do
+                        np = np + 1
+                        col.depf[np] = dp.from
+                        col.depv[np] = id(dp.var)
+                    end
                 end
+                local i0 = ni
+                for _, x in ipairs(df.inputs or {}) do
+                    ni = ni + 1
+                    col.inm[ni] = id(x)
+                end
+                node._df0, node._dfn = s0, ns - s0
+                node._dfi0, node._dfin = i0, ni - i0
+                node.df = nil -- the nested record, gone
+                folded[#folded + 1] = node
             end
-            local i0 = ni
-            for _, x in ipairs(df.inputs or {}) do
-                ni = ni + 1
-                col.inm[ni] = id(x)
-            end
-            node._df = col
-            node._df0, node._dfn = s0, ns - s0
-            node._dfi0, node._dfin = i0, ni - i0
-            node.df = nil -- the nested record, gone
         end
     end
-    -- sentinels: close the last stmt's derived counts
-    col.d0[ns + 1], col.p0[ns + 1] = nn, np
-    -- pack: number arrays -> LE-u32 byte strings; name pools -> id columns
-    -- over ONE interned names array (Lua interning made repeats free as
-    -- refs; the id column makes them free as 4 BYTES)
-    local packed = {
-        l = packcol(col.l, ns),
-        d0 = packcol(col.d0, ns + 1),
-        u0 = packcol(col.u0, ns),
-        p0 = packcol(col.p0, ns + 1),
-        nm = packcol(col.nm, nn),
-        depf = packcol(col.depf, np),
-        depv = packcol(col.depv, np),
-        inm = packcol(col.inm, ni),
-        names = col.names,
-    }
-    for _, node in ipairs(data.nodes or {}) do
-        if node._df == col then node._df = packed end
+    function A.finalize()
+        col.d0[ns + 1], col.p0[ns + 1] = nn, np -- sentinels close the last stmt's counts
+        local packed = {
+            l = packcol(col.l, ns),
+            d0 = packcol(col.d0, ns + 1),
+            u0 = packcol(col.u0, ns),
+            p0 = packcol(col.p0, ns + 1),
+            nm = packcol(col.nm, nn),
+            depf = packcol(col.depf, np),
+            depv = packcol(col.depv, np),
+            inm = packcol(col.inm, ni),
+            names = col.names,
+        }
+        for _, node in ipairs(folded) do node._df = packed end
+        return packed, ns
     end
+    return A
+end
+
+-- fold the WHOLE graph (inline extract / ingest): add all nodes, finalize. Idempotent.
+function M.fold(data)
+    if data._dfcol then return 0 end -- already folded
+    local a = M.accumulator()
+    a.add(data.nodes or {})
+    local packed, ns = a.finalize()
     data._dfcol = packed
     return ns
 end

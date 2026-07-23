@@ -1137,8 +1137,12 @@ end
 --- fold every node's `.flow` record into one columnar store; drop the records.
 --- Idempotent (a second call no-ops via data._flowcol). Mirrors df.fold's
 --- lifecycle: run at ingest, AFTER raw records are encoded to shards.
-function M.fold(data)
-    if data._flowcol then return 0 end
+-- The fold as an ACCUMULATOR (mirrors df.accumulator): add(nodes) folds a batch of nodes'
+-- flow rows into the growing columnar state; finalize() packs it + stamps _flow. M.fold =
+-- add(all)+finalize (whole-graph); the PARALLEL merge calls add() per CHUNK so the parent
+-- never holds all the fat flow at once (the merge-peak lever). Byte-identical to one whole-
+-- graph fold: shared interners (var names + shapes) + monotone global offsets.
+function M.accumulator()
     local col = {
         shape = {}, l = {}, c = {}, parent = {},
         d0 = {}, u0 = {}, nm = {}, pm = {}, names = {}, shapes = {},
@@ -1172,62 +1176,76 @@ function M.fold(data)
         return i
     end
     local ns, nn, np, maxp, maxc = 0, 0, 0, 0, 0
-    for _, node in ipairs(data.nodes or {}) do
-        local fl = node.flow
-        if fl and fl.stmts and not node._flow then
-            local s0 = ns
-            for _, s in ipairs(fl.stmts) do
-                ns = ns + 1
-                col.shape[ns] = shape_of(s)
-                col.l[ns] = s.l
-                col.c[ns] = s.c
-                if s.label then col.labels[ns] = s.label end
-                if s.rmw then col.rmw[ns] = s.rmw end
-                col.parent[ns] = s.parent
-                if s.parent > maxp then maxp = s.parent end
-                if s.c > maxc then maxc = s.c end
-                col.d0[ns] = nn
-                for _, d in ipairs(s.def) do nn = nn + 1; col.nm[nn] = id(d) end
-                col.u0[ns] = nn
-                for _, u in ipairs(s.use) do nn = nn + 1; col.nm[nn] = id(u) end
+    local folded = {} -- nodes folded here → stamp _flow at finalize
+    local A = {}
+    function A.add(nodes)
+        for _, node in ipairs(nodes or {}) do
+            local fl = node.flow
+            if fl and fl.stmts and not node._flow then
+                local s0 = ns
+                for _, s in ipairs(fl.stmts) do
+                    ns = ns + 1
+                    col.shape[ns] = shape_of(s)
+                    col.l[ns] = s.l
+                    col.c[ns] = s.c
+                    if s.label then col.labels[ns] = s.label end
+                    if s.rmw then col.rmw[ns] = s.rmw end
+                    col.parent[ns] = s.parent
+                    if s.parent > maxp then maxp = s.parent end
+                    if s.c > maxc then maxc = s.c end
+                    col.d0[ns] = nn
+                    for _, d in ipairs(s.def) do nn = nn + 1; col.nm[nn] = id(d) end
+                    col.u0[ns] = nn
+                    for _, u in ipairs(s.use) do nn = nn + 1; col.nm[nn] = id(u) end
+                end
+                local p0 = np
+                for _, p in ipairs(fl.params or {}) do np = np + 1; col.pm[np] = id(p) end
+                node._flow0, node._flown = s0, ns - s0
+                node._flowp0, node._flowpn = p0, np - p0
+                node.flow = nil
+                folded[#folded + 1] = node
             end
-            local p0 = np
-            for _, p in ipairs(fl.params or {}) do np = np + 1; col.pm[np] = id(p) end
-            node._flow = col
-            node._flow0, node._flown = s0, ns - s0
-            node._flowp0, node._flowpn = p0, np - p0
-            node.flow = nil
         end
     end
-    col.d0[ns + 1] = nn -- sentinel: closes the last row's derived use count
-    -- per-column widths from the measured max (u8/u16/u32) — EVERY column, not just
-    -- some: l = source lines (u16 normally, u32 auto only for 65k+-line files), the
-    -- nm-offsets d0/u0 = global name-pool offsets (u32 at scale, u16 for small graphs).
-    local maxl = 0
-    for i = 1, ns do local v = col.l[i]; if v and v > maxl then maxl = v end end
-    local nw = width_for(#col.names)
-    local pw = width_for(maxp)
-    local sw = width_for(#col.shapes)
-    local cw = width_for(maxc) -- u16 normal; u32 only for extreme minified lines
-    local lw = width_for(maxl)
-    local ow = width_for(nn) -- d0/u0 index the nm pool (max = nn)
-    local packed = {
-        shape = { s = pack(col.shape, ns, sw), w = sw },
-        l = { s = pack(col.l, ns, lw), w = lw },
-        c = { s = pack(col.c, ns, cw), w = cw },
-        parent = { s = pack(col.parent, ns, pw), w = pw },
-        d0 = { s = pack(col.d0, ns + 1, ow), w = ow },
-        u0 = { s = pack(col.u0, ns, ow), w = ow },
-        nm = { s = pack(col.nm, nn, nw), w = nw },
-        pm = { s = pack(col.pm, np, nw), w = nw },
-        names = col.names,
-        shapes = col.shapes,
-        labels = col.labels, -- sparse map (global-row → label), passed through
-        rmw = col.rmw, -- sparse map (global-row → {name,…}), passed through
-    }
-    for _, node in ipairs(data.nodes or {}) do
-        if node._flow == col then node._flow = packed end
+    function A.finalize()
+        col.d0[ns + 1] = nn -- sentinel: closes the last row's derived use count
+        -- per-column widths from the measured max (u8/u16/u32) — EVERY column: l = source
+        -- lines (u16 normally, u32 auto only for 65k+-line files), the nm-offsets d0/u0 =
+        -- global name-pool offsets (u32 at scale, u16 for small graphs).
+        local maxl = 0
+        for i = 1, ns do local v = col.l[i]; if v and v > maxl then maxl = v end end
+        local nw = width_for(#col.names)
+        local pw = width_for(maxp)
+        local sw = width_for(#col.shapes)
+        local cw = width_for(maxc) -- u16 normal; u32 only for extreme minified lines
+        local lw = width_for(maxl)
+        local ow = width_for(nn) -- d0/u0 index the nm pool (max = nn)
+        local packed = {
+            shape = { s = pack(col.shape, ns, sw), w = sw },
+            l = { s = pack(col.l, ns, lw), w = lw },
+            c = { s = pack(col.c, ns, cw), w = cw },
+            parent = { s = pack(col.parent, ns, pw), w = pw },
+            d0 = { s = pack(col.d0, ns + 1, ow), w = ow },
+            u0 = { s = pack(col.u0, ns, ow), w = ow },
+            nm = { s = pack(col.nm, nn, nw), w = nw },
+            pm = { s = pack(col.pm, np, nw), w = nw },
+            names = col.names,
+            shapes = col.shapes,
+            labels = col.labels, -- sparse map (global-row → label), passed through
+            rmw = col.rmw, -- sparse map (global-row → {name,…}), passed through
+        }
+        for _, node in ipairs(folded) do node._flow = packed end
+        return packed, ns
     end
+    return A
+end
+
+-- fold the WHOLE graph (inline extract / ingest): add all nodes, finalize. Idempotent.
+function M.fold(data)
+    if data._flowcol then return 0 end
+    local a = M.accumulator()
+    a.add(data.nodes or {})
+    local packed, ns = a.finalize()
     data._flowcol = packed
     return ns
 end
