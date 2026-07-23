@@ -63,14 +63,23 @@ local d2 = ts.extract(root, { files = files, fileset = (function ()
     local s = {} for _, f in ipairs(files) do s[f] = true end return s end)(), packs = { 'rails' } })
 local census = require 'cartograph.census'
 local c = census.take(d2)
-local stdlib_ext = 0
+local stdlib_ext, minted_nodes, resolved_to_mint = 0, 0, 0
 for _, call in ipairs(d2.calls or {}) do
     if not call.to and type(call.ext) == 'table' and call.ext.why == 'stdlib' then
         stdlib_ext = stdlib_ext + 1
     end
+    if call.to and tostring(call.to):sub(1, 12) == 'ruby-rails::' then
+        resolved_to_mint = resolved_to_mint + 1
+    end
+end
+for _, n in ipairs(d2.nodes or {}) do
+    if n.external and n.file == 'ruby-rails' then minted_nodes = minted_nodes + 1 end
 end
 print(('(B) END-TO-END — discourse root, %d files'):format(#files))
 print(('  data.profile = %s'):format(tostring(d2.profile)))
-print(('  calls disposed why=stdlib (prof_ext fired): %d'):format(stdlib_ext))
 print(('  census: %d calls, %.1f%% resolved'):format(c.calls.total,
     100 * c.calls.resolved / math.max(1, c.calls.total)))
+print(('  minted ruby-rails nodes: %d  ·  calls resolved to them: %d')
+    :format(minted_nodes, resolved_to_mint))
+print(('  residual why=stdlib dispositions (unminted): %d'):format(stdlib_ext))
+print(('  stdlib-tier ref edges: %d'):format(c.edges and c.edges.ref and c.edges.ref.stdlib or 0))
