@@ -98,9 +98,17 @@ M.registry = {
                 return 'config/application.rb'
             end
         end,
-        config = { entrypoints = {
-            '^config%.ru$', 'config/application%.rb$', '^Rakefile$',
-        } },
+        config = {
+            entrypoints = {
+                '^config%.ru$', 'config/application%.rb$', '^Rakefile$',
+            },
+            -- the L2 environment profile a Rails root implies ([[cartograph-
+            -- stdlib-profile]]): app code runs on Ruby core + ActiveSupport +
+            -- ActiveRecord/ActionController, so its framework method calls
+            -- classify to the `stdlib` disposition. Read by active_profile_for
+            -- in the extractor; apply()'s inert allowlist ignores it.
+            profile = 'ruby-rails',
+        },
     },
     {
         name = 'symfony',
