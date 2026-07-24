@@ -413,6 +413,10 @@ test('zig-std profile: carries distilled signatures + a source-root hint', funct
         'sigs carries std.mem.eql')
     ok(p.sigs['std.mem.eql'].sig:find('bool', 1, true), 'the signature shows the bool return type')
     ok(p.sigs['std.debug.assert'], 'sigs carries the highest-frequency call std.debug.assert')
+    -- the hybrid coverage shapes ([[cartograph-stdlib-profile]] tail): a NESTED module
+    -- (std.fs.path via a recursive @import walk) and an in-file `pub const` ALIAS.
+    ok(p.sigs['std.fs.path.basename'], 'nested-module sig std.fs.path.basename (recursive module map)')
+    ok(p.sigs['std.mem.indexOfScalar'], 'aliased sig std.mem.indexOfScalar (pub const = local fn)')
     eq('zig', p.sig_kind)                    -- the hover provenance label (NOT "RBS")
     ok(p.sig_root, 'a source-root hint rides along for go-to-def')
 end)

@@ -44,21 +44,54 @@ local function is_ctor(m)
 end
 
 -- ── signature distillation (nav-time hover enrichment, READ-SIDE) ────────────
--- Zig: a `std.<module>.<fn>` -> {sig,file,line} map for the free top-level public
--- fns of std's directly-reexported modules, keyed to MATCH the minted
--- `zig-std::std.<module>.<fn>` node id ([[cartograph-stdlib-profile]]). The raw
+-- Zig: a `std.<module-path>.<fn>` -> {sig,file,line} map keyed to MATCH the minted
+-- `zig-std::std.<module-path>.<fn>` node id ([[cartograph-stdlib-profile]]). The raw
 -- native signature `(params) RET` + source location come straight from source.
 -- HOVER-ONLY (lsp.profile_sig): the disposition/vocab surface (types/free/vocab)
 -- is untouched, so NO extraction/version change — the gate corpora stay identical.
--- Deep type-method chains + type constructors stay uncovered = honest frontier.
-local function zig_module_map(root) -- 'mem.zig' -> module 'mem'  (=> std.mem)
-    local map, fd = {}, io.open(root .. '/std.zig', 'r')
-    if not fd then return map end
-    for line in fd:lines() do
-        local mod, file = line:match('^pub const ([%w_]+) = @import%("([%w_/%.]+%.zig)"%)')
-        if mod and file then map[file] = mod end
+--
+-- Coverage is a HYBRID of three source shapes (measured — [[cartograph-stdlib-profile]]):
+--   (fn) EXTRACTED pub fns keyed by their file's module path (the extractor sees
+--        `pub inline fn` etc. that a `^pub fn` regex would miss — writeInt/readInt);
+--   (B)  RECURSIVE module map: follow `pub const <x> = @import("...")` from std.zig
+--        (BFS → shortest path wins) so NESTED modules resolve (std.fs.path.basename)
+--        AND file-imported types get their methods (std.heap.ArenaAllocator.init);
+--   (A)  in-file `pub const <alias> = <localfn>;` → the local fn's sig (indexOfScalar).
+-- Cross-namespace aliases (`pub const warn = default.warn`), member re-exports
+-- (`@import(f).Member`), and struct-nested pub fns stay uncovered = honest frontier.
+local function zig_norm(p) -- collapse a/b/../c -> a/c
+    local parts = {}
+    for seg in p:gmatch('[^/]+') do
+        if seg == '..' then parts[#parts] = nil elseif seg ~= '.' then parts[#parts + 1] = seg end
     end
-    fd:close(); return map
+    return table.concat(parts, '/')
+end
+-- (B) recursive module map: relfile -> dotted module path (no `std.` prefix). BFS
+-- from std.zig so the SHORTEST module path wins (std.mem, not a deep re-export).
+local function zig_module_map(root)
+    local map, queue, qi = {}, { { file = 'std.zig', prefix = '' } }, 1
+    local function imports_of(relfile)
+        local fd = io.open(root .. '/' .. relfile, 'r'); if not fd then return {} end
+        local dir, out = relfile:match('^(.*)/') or '', {}
+        for line in fd:lines() do
+            local name, imp = line:match('pub const ([%w_]+)%s*=%s*@import%("([%w_%./]-%.zig)"%)')
+            if name and imp then
+                out[#out + 1] = { name = name, target = zig_norm((dir ~= '' and dir .. '/' or '') .. imp) }
+            end
+        end
+        fd:close(); return out
+    end
+    while qi <= #queue do
+        local cur = queue[qi]; qi = qi + 1
+        for _, it in ipairs(imports_of(cur.file)) do
+            if map[it.target] == nil and it.target ~= 'std.zig' then
+                local mod = (cur.prefix ~= '' and cur.prefix .. '.' or '') .. it.name
+                map[it.target] = mod
+                queue[#queue + 1] = { file = it.target, prefix = mod }
+            end
+        end
+    end
+    return map
 end
 local function zig_read_sig(root, relfile, startline0, name) -- native "(params) RET"
     local fd = io.open(root .. '/' .. relfile, 'r'); if not fd then return nil end
@@ -74,20 +107,45 @@ local function zig_read_sig(root, relfile, startline0, name) -- native "(params)
     local ret = (tail or ''):gsub('%s+$', '')
     return params .. (ret ~= '' and (' ' .. ret) or '')
 end
+-- (A) in-file local aliases: `pub const X = Y;` where Y is a bare identifier.
+local function zig_aliases(root, relfile)
+    local fd = io.open(root .. '/' .. relfile, 'r'); if not fd then return {} end
+    local out = {}
+    for line in fd:lines() do
+        local a, tgt = line:match('^pub const ([%w_]+)%s*=%s*([%w_]+)%s*;')
+        if a and tgt then out[a] = tgt end
+    end
+    fd:close(); return out
+end
 local function zig_sigs(rt, data)
     local mmap = zig_module_map(rt.std_root)
     local sigs, n = {}, 0
+    -- (fn) extracted pub fns, keyed by the file's module path; also index per-module
+    -- local name -> sig so (A) aliases can resolve within the same file.
+    local bymod = {} -- mod -> { localname -> {sig,file,line} }
     for _, nd in ipairs(data.nodes) do
         if nd.kind == 'function' and nd.exported and mmap[nd.file] then
             local base = nd.name:gsub('%b()', '') -- generic-erase
-            if not base:find('%.') then           -- free top-level fn (no type owner)
+            if not base:find('%.') then           -- a fn defined at this file's top (no type owner)
                 local sl = nd.range and nd.range.start and nd.range.start.line
                 local sig = zig_read_sig(rt.std_root, nd.file, sl, base)
                 if sig then
-                    sigs['std.' .. mmap[nd.file] .. '.' .. base] =
-                        { sig = sig, file = nd.file, line = (sl or 0) + 1 }
+                    local rec = { sig = sig, file = nd.file, line = (sl or 0) + 1 }
+                    local mod = mmap[nd.file]
+                    sigs['std.' .. mod .. '.' .. base] = rec
+                    bymod[mod] = bymod[mod] or {}; bymod[mod][base] = rec
                     n = n + 1
                 end
+            end
+        end
+    end
+    -- (A) resolve in-file aliases to a local fn's sig (share the target's location)
+    for relfile, mod in pairs(mmap) do
+        local local_sigs = bymod[mod]
+        if local_sigs then
+            for alias, tgt in pairs(zig_aliases(rt.std_root, relfile)) do
+                local key = 'std.' .. mod .. '.' .. alias
+                if local_sigs[tgt] and not sigs[key] then sigs[key] = local_sigs[tgt]; n = n + 1 end
             end
         end
     end
