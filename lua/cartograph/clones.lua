@@ -572,7 +572,7 @@ end
 --- identify→PROPOSE close — a suggestion, not an auto-write: synthesizing the helper's
 --- source and threading the parameters through both call sites (with visibility/scope
 --- correctness) is a verified transaction of its own, deliberately NOT done here. [[cartograph-record-fold-arc]]
-function M.extract_proposal(pair)
+function M.extract_proposal(pair, store)
     local a = M.analyze_pair(pair)
     if a.kind == 'exact' then
         return { ('%s are an EXACT clone after anti-unification (the near-distance was'
@@ -603,6 +603,23 @@ function M.extract_proposal(pair)
     L[#L + 1] = ('  → introduce a helper carrying the %d shared statement(s) with the above')
         :format(pair.shared)
     L[#L + 1] = '    leaves as parameters, then replace each body with a call passing its filling.'
+    -- body-safety gate (prereq #3): can each whole body be lifted into a same-scope
+    -- helper? (top-level, no vararg/recursion, free reads visible to the helper)
+    if store then
+        local un = require 'cartograph.untangle'
+        local va, vb = un.body_extractable(store, pair.a.id), un.body_extractable(store, pair.b.id)
+        local xfile = pair.a.file ~= pair.b.file
+        if va.ok and vb.ok and not xfile then
+            L[#L + 1] = '  body-safe: both bodies are cleanly liftable (top-level, no vararg/recursion).'
+        else
+            L[#L + 1] = '  ⚠ body lift is NOT yet clean (the parameterization is sound; the mechanical lift is gated):'
+            if xfile then
+                L[#L + 1] = '      cross-file — the helper needs a shared home + require wiring in both.'
+            end
+            if not va.ok then L[#L + 1] = ('      %s: %s'):format(pair.a.name, va.reason) end
+            if not vb.ok then L[#L + 1] = ('      %s: %s'):format(pair.b.name, vb.reason) end
+        end
+    end
     L[#L + 1] = '  (proposal only — review the scaffold; the write is not auto-applied.)'
     return L
 end

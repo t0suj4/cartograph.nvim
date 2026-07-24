@@ -237,3 +237,43 @@ test('clones: an inserted statement makes the pair structural (needs a human)', 
     ok(clones.extract_proposal(p)[1]:find('structurally'), 'the proposal declines with a reason')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── body-extractability verdict (untangle.body_extractable, prereq #3) ───────
+
+local function fn_id(name)
+    for _, n in ipairs(store.data.nodes) do
+        if n.name == name and (n.kind == 'function' or n.kind == 'method') then return n.id end
+    end
+end
+
+test('clones: a top-level clean body is extractable', function ()
+    local root = proj { ['a.lua'] = fn('clean', 'x', '  local y = trim(x)\n  return upper(y)') }
+    local v = require('cartograph.untangle').body_extractable(store, fn_id('clean'))
+    ok(v.ok, 'a top-level fn with only module/global free reads is liftable')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a NESTED body is not extractable (upvalue capture risk)', function ()
+    local root = proj { ['a.lua'] =
+        'local function outer(a)\n  local cap = a * 2\n'
+        .. '  local function inner(b)\n    local y = trim(b)\n    return y + cap\n  end\n'
+        .. '  return inner\nend\nreturn outer\n' }
+    local v = require('cartograph.untangle').body_extractable(store, fn_id('inner'))
+    ok(not v.ok and v.nested, 'a nested function is flagged (may capture enclosing upvalues)')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a vararg body is not extractable (would need ... forwarded)', function ()
+    local root = proj { ['a.lua'] = fn('va', '...', '  local n = select("#", ...)\n  return n + 1') }
+    local v = require('cartograph.untangle').body_extractable(store, fn_id('va'))
+    ok(not v.ok and v.vararg, 'a body using ... is flagged')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a self-recursive body is not extractable (helper name differs)', function ()
+    local root = proj { ['a.lua'] =
+        fn('fac', 'n', '  if n <= 1 then return 1 end\n  return n * fac(n - 1)') }
+    local v = require('cartograph.untangle').body_extractable(store, fn_id('fac'))
+    ok(not v.ok and v.recursive, 'a self-recursive body is flagged')
+    vim.fn.delete(root, 'rf')
+end)

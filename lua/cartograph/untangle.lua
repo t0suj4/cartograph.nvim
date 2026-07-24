@@ -881,6 +881,75 @@ function M.extract_candidates(store, fn_id)
     return out
 end
 
+local at_mod = require 'cartograph.at'
+-- outer range contains inner range (inclusive endpoints)
+local function range_contains(outer, inner)
+    if not (outer and inner) then return false end
+    if at_mod.sl(outer) > at_mod.sl(inner) or at_mod.el(outer) < at_mod.el(inner) then return false end
+    if at_mod.sl(outer) == at_mod.sl(inner) and at_mod.sc(outer) > at_mod.sc(inner) then return false end
+    if at_mod.el(outer) == at_mod.el(inner) and at_mod.ec(outer) < at_mod.ec(inner) then return false end
+    return true
+end
+
+--- Whole-body extraction verdict: is fn_id's ENTIRE body safe to lift into a
+--- same-scope helper (the near-clone extract-helper target, [[cartograph-record-fold-arc]]
+--- prereq #3)? A whole body is far safer than a mid-function block (extract_candidates):
+--- `return` is PRESERVED (the helper returns, the caller `return helper(…)`s) and there
+--- is no enclosing control to escape to — so break/continue/goto/return are NOT hazards.
+--- The real hazards are: (a) NESTING — an enclosing function means the body may read
+--- enclosing-scope upvalues a module-level helper can't see; (b) VARARG `...` — the
+--- helper would need it forwarded; (c) SELF-RECURSION — the helper's name differs. A
+--- top-level function with none of these is cleanly liftable: its free reads are module/
+--- global names a same-scope helper also sees.
+--- @return table { ok:boolean, reason:string?, params:string[]?, method:boolean?, <flag>? }
+function M.body_extractable(store, fn_id)
+    local node = store.node and store.node(fn_id)
+    if not node then return { ok = false, reason = 'no such function' } end
+    if node.kind ~= 'function' and node.kind ~= 'method' then
+        return { ok = false, reason = 'not a function' }
+    end
+    -- (a) nesting: another function in the same file strictly enclosing this one
+    for _, m in ipairs(store.data.nodes) do
+        if (m.kind == 'function' or m.kind == 'method') and m.id ~= fn_id
+            and m.file == node.file and range_contains(m.range, node.range) then
+            return { ok = false, nested = true,
+                reason = 'nested in another function (may capture enclosing upvalues)' }
+        end
+    end
+    local expr = require 'cartograph.expr'
+    local eo = expr.of(store, fn_id)
+    if not eo then return { ok = false, reason = 'no analyzable body' } end
+    -- (b) vararg + (c) self-recursion, by walking the body's expression IR
+    local short = (node.name or ''):match('[%w_]+$')
+    local vararg, recursive = false, false
+    local function scan(e)
+        if not e then return end
+        expr.walk(e, function (x)
+            if x.k == 'vararg' then vararg = true
+            elseif x.k == 'call' and x.f and x.f.k == 'name' and short and x.f.n == short then
+                recursive = true
+            end
+        end)
+    end
+    for _, s in ipairs(eo.fl.stmts or {}) do
+        local e = s.expr
+        if e then
+            for _, x in ipairs(e.lhs or {}) do scan(x) end
+            for _, x in ipairs(e.rhs or {}) do scan(x) end
+            scan(e.cond)
+        end
+    end
+    if vararg then
+        return { ok = false, vararg = true,
+            reason = 'body uses vararg ... (a helper would need it forwarded)' }
+    end
+    if recursive then
+        return { ok = false, recursive = true,
+            reason = 'body is self-recursive (the helper name would differ)' }
+    end
+    return { ok = true, params = eo.fl.params or {}, method = node.kind == 'method' }
+end
+
 --- The lens surface (:CartographExtractBlocks): the focused fn's control blocks as
 --- extraction candidates, in source order, indented by nesting. Each line gives
 --- the interface `(params) -> (returns)` and a verdict: `*` sweet spot (clean,

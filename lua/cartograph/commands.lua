@@ -636,8 +636,8 @@ function M.register()
             return vim.notify(('cartograph: %s has no near-clone within edit distance 2')
                 :format(n.name), vim.log.levels.INFO)
         end
-        scratch(clones.extract_proposal(best))
-    end, { desc = 'cartograph: propose the parameterized helper the focused function and its nearest near-clone could factor into — the anti-unified template with the differing leaves as parameters. A reviewable scaffold (the write is not auto-applied). Companion to :CartographMerge for the near-clone case' })
+        scratch(clones.extract_proposal(best, store))
+    end, { desc = 'cartograph: propose the parameterized helper the focused function and its nearest near-clone could factor into — the anti-unified template with the differing leaves as parameters, plus a body-safety verdict (is the whole body cleanly liftable?). A reviewable scaffold (the write is not auto-applied). Companion to :CartographMerge for the near-clone case' })
 
     -- ── derived-index integrity: the Log/View rule, executable ───────
     cmd('CartographAudit', function ()
