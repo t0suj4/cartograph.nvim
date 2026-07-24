@@ -586,6 +586,20 @@ function M.register()
         scratch(require('cartograph.census').report(store.data))
     end, { desc = 'cartograph: epistemic census — edge trust tiers + refusals by rule (the analyzer work-list)' })
 
+    -- ── exact-structural clones: duplication the extract/merge can remove ──
+    cmd('CartographClones', function (o)
+        local store = live() if not store then return end
+        local nfns = 0
+        for _, n in ipairs(store.data.nodes) do
+            if n.kind == 'function' or n.kind == 'method' then nfns = nfns + 1 end
+        end
+        vim.notify(('cartograph: scanning %d functions for exact-structural clones…')
+            :format(nfns), vim.log.levels.INFO)
+        local groups = require('cartograph.clones').exact(store,
+            { min_rows = o.count ~= -1 and o.count or 3 })
+        scratch(require('cartograph.clones').report(groups))
+    end, { count = -1, desc = 'cartograph: exact-structural clone groups (alpha-invariant on locals; expr-IR keyed). Focus a group member + :CartographMerge to remove it. [count] = min statements (default 3)' })
+
     -- ── derived-index integrity: the Log/View rule, executable ───────
     cmd('CartographAudit', function ()
         local store = live() if not store then return end

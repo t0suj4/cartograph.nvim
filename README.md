@@ -297,6 +297,22 @@ files moved on since; `:CartographTxnClear` abandons a staged plan.
 The journal (`state dir`, human-readable JSON) is the substrate every
 future verb — move, extract-module, remote edits — reuses.
 
+`:CartographMerge` needs you to *find* a clone first. `:CartographClones`
+is the finder: it groups every function by an **exact-structural** key —
+the per-statement shape read from the same expression IR that powers
+`:CartographExpr`, made **alpha-invariant** by renaming a function's own
+locals (its params and dataflow-defined names) to positional slots, while
+keeping callees, globals, operators, field names, and literals verbatim.
+So a copy that only renamed its variables is one group (`sorted` and
+`sorted_keys` collapse), but a copy that calls a different function or uses
+a different operator is *not* — the discriminating tokens stay in the key,
+so it needs no "shared-callee" heuristic to suppress coincidences. Focus a
+group member, `:CartographMerge`, and the duplication is gone. Run it
+repo-wide (including tests, where copy-pasted fixtures live) headless with
+`nvim -l tools/clones.lua`. This is the exact tier of the clone ladder; a
+near-clone tier (copies that differ by a statement or two, via AST
+anti-unification) is the banked next step on the same substrate.
+
 ### The working set
 
 Mark what you're working on; dive freely; come back. In the symbols list:
