@@ -106,30 +106,60 @@ function M.signature(eo)
     return ('p%d|%s'):format(nparams, table.concat(keys, '\n')), #keys
 end
 
---- Exact-structural clone GROUPS across the store's functions. Returns a list of groups,
---- each { nrows = N, [1..] = {id, name, file, line} }, sorted by (size desc, nrows desc).
---- opts.min_rows (default 3) filters trivial bodies; opts.on_progress(done,total) optional.
-function M.exact(store, opts)
-    local min_rows = (opts and opts.min_rows) or 3
-    local groups = {}
+-- The per-fn key index is the costly part of clone detection (one expr.of per function
+-- ~5ms → seconds repo-wide). Build it ONCE and cache by store.generation so every tier
+-- (exact / block / near) and every focused/repeat query is instant after the first build
+-- — the interactivity pattern ([[cartograph-interactive-analysis]]: amortize costly
+-- analysis so the on-demand path is cheap). Generation bumps on any graph change (store
+-- ingest) → sound eviction. Floored at 2 rows (a 0-1 stmt body can't be any tier's clone);
+-- each tier applies its own min_rows over the cached fns. Each fn record carries keys +
+-- lines + the row exprs (near anti-unifier) + locals + nparams + def line.
+local index_cache
+local INDEX_FLOOR = 2
+
+local function build_index(store)
+    if index_cache and index_cache.gen == store.generation then
+        return index_cache.fns, index_cache.post
+    end
     local fns = {}
     for _, n in ipairs(store.data.nodes) do
         if (n.kind == 'function' or n.kind == 'method') and n.file then
-            fns[#fns + 1] = n
-        end
-    end
-    for i, n in ipairs(fns) do
-        local ok, eo = pcall(expr.of, store, n.id)
-        if ok and eo then
-            local sig, nrows = M.signature(eo)
-            if sig and nrows >= min_rows then
-                local g = groups[sig]
-                if not g then g = { nrows = nrows }; groups[sig] = g end
-                g[#g + 1] = { id = n.id, name = n.name, file = n.file,
-                    line = n.range and (at.sl(n.range) + 1) or 0 }
+            local ok, eo = pcall(expr.of, store, n.id)
+            if ok and eo then
+                local keys, lines, nparams, exprs, locals = fn_row_keys(eo)
+                if keys and #keys >= INDEX_FLOOR then
+                    fns[#fns + 1] = { id = n.id, name = n.name, file = n.file,
+                        keys = keys, lines = lines, exprs = exprs, locals = locals,
+                        nparams = nparams, line = n.range and (at.sl(n.range) + 1) or 0 }
+                end
             end
         end
-        if opts and opts.on_progress then opts.on_progress(i, #fns) end
+    end
+    local post = {} -- inverted index of row-keys (key → fn indices)
+    for i, f in ipairs(fns) do
+        local seen = {}
+        for _, k in ipairs(f.keys) do
+            if not seen[k] then seen[k] = true; post[k] = post[k] or {}; post[k][#post[k] + 1] = i end
+        end
+    end
+    index_cache = { gen = store.generation, fns = fns, post = post }
+    return fns, post
+end
+
+--- Exact-structural clone GROUPS across the store's functions. Returns a list of groups,
+--- each { nrows = N, [1..] = {id, name, file, line} }, sorted by (size desc, nrows desc).
+--- opts.min_rows (default 3) filters trivial bodies. Rides the generation-cached index.
+function M.exact(store, opts)
+    local min_rows = (opts and opts.min_rows) or 3
+    local groups = {}
+    local fns = build_index(store)
+    for _, f in ipairs(fns) do
+        if #f.keys >= min_rows then
+            local sig = ('p%d|%s'):format(f.nparams or 0, table.concat(f.keys, '\n'))
+            local g = groups[sig]
+            if not g then g = { nrows = #f.keys }; groups[sig] = g end
+            g[#g + 1] = { id = f.id, name = f.name, file = f.file, line = f.line }
+        end
     end
     local out = {}
     for _, g in pairs(groups) do
@@ -349,43 +379,6 @@ local function align(a, b)
     return d[la][lb], ops
 end
 
--- The per-fn key index is the costly part of near-clone detection (one expr.of per
--- function ~5ms → seconds repo-wide). Cache it by store.generation + min_rows so a
--- focused query (near_of) and repeat scans are instant after the first build — the
--- interactivity pattern ([[cartograph-interactive-analysis]]: amortize costly analysis
--- so the on-demand path is cheap). Generation bumps on any graph change → sound eviction.
-local index_cache
-
-local function build_index(store, min_rows)
-    if index_cache and index_cache.gen == store.generation
-        and index_cache.min_rows == min_rows then
-        return index_cache.fns, index_cache.post
-    end
-    local fns = {}
-    for _, n in ipairs(store.data.nodes) do
-        if (n.kind == 'function' or n.kind == 'method') and n.file then
-            local ok, eo = pcall(expr.of, store, n.id)
-            if ok and eo then
-                local keys, lines, _, exprs, locals = fn_row_keys(eo)
-                if keys and #keys >= min_rows then
-                    fns[#fns + 1] = { id = n.id, name = n.name, file = n.file,
-                        keys = keys, lines = lines, exprs = exprs, locals = locals }
-                end
-            end
-        end
-    end
-    -- inverted index of distinctive row-keys (key → fn indices)
-    local post = {}
-    for i, f in ipairs(fns) do
-        local seen = {}
-        for _, k in ipairs(f.keys) do
-            if not seen[k] then seen[k] = true; post[k] = post[k] or {}; post[k][#post[k] + 1] = i end
-        end
-    end
-    index_cache = { gen = store.generation, min_rows = min_rows, fns = fns, post = post }
-    return fns, post
-end
-
 -- align one candidate pair; return a near-clone record or nil
 local function try_pair(fns, i, j, max_dist, min_rows)
     local fa, fb = fns[i], fns[j]
@@ -413,7 +406,7 @@ function M.near(store, opts)
     local max_dist = (opts and opts.max_dist) or 2
     local min_rows = (opts and opts.min_rows) or 6
     local min_shared = (opts and opts.min_shared) or 3
-    local fns, post = build_index(store, min_rows)
+    local fns, post = build_index(store)
     -- candidate pairs = those sharing ≥ min_shared distinctive keys
     local shared = {}
     for _, list in pairs(post) do
@@ -444,7 +437,7 @@ function M.near_of(store, fn_id, opts)
     local max_dist = (opts and opts.max_dist) or 2
     local min_rows = (opts and opts.min_rows) or 6
     local min_shared = (opts and opts.min_shared) or 3
-    local fns, post = build_index(store, min_rows)
+    local fns, post = build_index(store)
     local fi
     for i, f in ipairs(fns) do if f.id == fn_id then fi = i; break end end
     if not fi then return {} end
@@ -715,6 +708,58 @@ function M.report(groups)
         end
     end
     return L
+end
+
+--- Clone findings as an IN-BUFFER diagnostic list (the interactive surface, [[cartograph-
+--- interactive-analysis]]): each finding lands ON the code it concerns, and — crucially —
+--- a value-hole finding sits at the hole's exact column (the expr-IR leaf range), so
+--- `]d`/`[d` and the quickfix jump straight to the substitution site. Findings are
+--- { file (rel), line (1-based), col?, severity, message } — the caller resolves abs.
+--- Covers EXACT clones (a merge target) and NEAR-clone functions + their holes (an
+--- extract-helper target). Block clones are omitted (function/hole findings are the
+--- actionable ones; blocks stay a report). Rides the generation-cached index.
+function M.findings(store, opts)
+    local out = {}
+    -- exact clones: one info finding per member (the whole group is mergeable)
+    for _, g in ipairs(M.exact(store, opts)) do
+        local names = {}
+        for _, m in ipairs(g) do names[#names + 1] = m.name end
+        local label = table.concat(names, ', ')
+        for _, m in ipairs(g) do
+            out[#out + 1] = { file = m.file, line = m.line, severity = 'info',
+                message = ('exact clone (%d copies: %s) — :CartographMerge folds them')
+                    :format(#g, label) }
+        end
+    end
+    -- near clones: a function-level finding per endpoint, plus a hole finding at each
+    -- value-hole's leaf column (the jump target for the extract-helper rewrite)
+    for _, p in ipairs(M.near(store, opts)) do
+        local a = M.analyze_pair(p)
+        local sev = (a.kind == 'value' or a.kind == 'exact') and 'info' or 'hint'
+        local action = a.kind == 'structural' and 'extract by hand' or ':CartographExtractHelper'
+        for _, s in ipairs({ { f = p.a, other = p.b.name }, { f = p.b, other = p.a.name } }) do
+            out[#out + 1] = { file = s.f.file, line = s.f.lines[1] or 0, severity = sev,
+                message = ('near-clone of %s — %s, %d edit(s) · %s')
+                    :format(s.other, a.kind, p.dist, action) }
+        end
+        if a.kind == 'value' then
+            for _, h in ipairs(a.holes) do
+                if h.at_a then
+                    out[#out + 1] = { file = p.a.file, line = at.sl(h.at_a) + 1,
+                        col = at.sc(h.at_a) + 1, severity = 'hint',
+                        message = ('clone hole (%s): %s ⇄ %s — a parameter of the shared helper')
+                            :format(h.kind, tostring(h.a), tostring(h.b)) }
+                end
+                if h.at_b then
+                    out[#out + 1] = { file = p.b.file, line = at.sl(h.at_b) + 1,
+                        col = at.sc(h.at_b) + 1, severity = 'hint',
+                        message = ('clone hole (%s): %s ⇄ %s — a parameter of the shared helper')
+                            :format(h.kind, tostring(h.b), tostring(h.a)) }
+                end
+            end
+        end
+    end
+    return out
 end
 
 return M

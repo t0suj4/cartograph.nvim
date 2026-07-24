@@ -638,6 +638,27 @@ function M.register()
         scratch(clones.extract_proposal(best, store))
     end, { desc = 'cartograph: propose the parameterized helper the focused function and its nearest near-clone could factor into — the anti-unified template with the differing leaves as parameters, plus a body-safety verdict (is the whole body cleanly liftable?). A reviewable scaffold (the write is not auto-applied). Companion to :CartographMerge for the near-clone case' })
 
+    -- ── clone findings as in-buffer signs (the interactive surface) ──
+    cmd('CartographClonesSigns', function ()
+        local store = live() if not store then return end
+        vim.notify('cartograph: scanning for clones (exact + near)…', vim.log.levels.INFO)
+        local pub = {}
+        for _, f in ipairs(require('cartograph.clones').findings(store)) do
+            local file = f.file
+            if file and file:sub(1, 1) ~= '/' then file = store.abs(file) end
+            pub[#pub + 1] = { file = file, line = f.line, col = f.col,
+                severity = f.severity, message = ('[clone] %s'):format(f.message) }
+        end
+        local n = require('cartograph.diag').publish(pub, 'clones')
+        vim.notify(('cartograph: %d clone finding(s) on in-buffer signs — ]d / :CartographClonesSignsClear')
+            :format(n), vim.log.levels.INFO)
+    end, { desc = 'cartograph: publish clone findings as in-buffer signs — exact clones (:CartographMerge) + near-clone functions and their value holes, the hole signs sitting at the exact substitution column so ]d jumps to it. The interactive companion to the clone reports' })
+
+    cmd('CartographClonesSignsClear', function ()
+        require('cartograph.diag').clear('clones')
+        vim.notify('cartograph: cleared in-buffer clone signs', vim.log.levels.INFO)
+    end, { desc = 'cartograph: clear the in-buffer clone signs' })
+
     -- ── derived-index integrity: the Log/View rule, executable ───────
     cmd('CartographAudit', function ()
         local store = live() if not store then return end

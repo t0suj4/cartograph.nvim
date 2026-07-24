@@ -277,3 +277,48 @@ test('clones: a self-recursive body is not extractable (helper name differs)', f
     ok(not v.ok and v.recursive, 'a self-recursive body is flagged')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── in-buffer findings surface (M.findings — the interactive diagnostic list) ──
+
+test('clones: findings place a value hole at its exact substitution column', function ()
+    -- one/two are a value near-clone differing at foo⇄bar; the hole finding must sit
+    -- at foo/bar's column so ]d / the quickfix jump straight to the rewrite site
+    local body_a = '  local a = load(src)\n  local b = trim(a)\n  local c = foo(b)\n'
+        .. '  local d = wrap(c)\n  persist(d)\n  return d'
+    local body_b = '  local p = load(input)\n  local q = trim(p)\n  local r = bar(q)\n'
+        .. '  local s = wrap(r)\n  persist(s)\n  return s'
+    local root = proj {
+        ['a.lua'] = fn('one', 'src', body_a),
+        ['b.lua'] = fn('two', 'input', body_b),
+    }
+    local at = require 'cartograph.at'
+    local hole
+    for _, f in ipairs(clones.findings(store, { min_rows = 5 })) do
+        if f.message:find('clone hole') then hole = f; break end
+    end
+    ok(hole, 'a value near-clone produces a hole finding')
+    ok(hole and hole.col, 'the hole finding carries a column (the jump target)')
+    -- the finding sits on the row that calls foo/bar, at foo/bar's column
+    if hole then
+        local abs = hole.file:sub(1, 1) == '/' and hole.file or store.abs(hole.file)
+        local line = vim.fn.readfile(abs)[hole.line]
+        local tok = line:sub(hole.col, hole.col + 2)
+        ok(tok == 'foo' or tok == 'bar', 'the sign lands on the diverging token, got «' .. tok .. '»')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: findings mark an exact clone as a merge target', function ()
+    local body = '  local a = load(x)\n  local b = trim(a)\n  local c = wrap(b)\n  return c'
+    local root = proj {
+        ['a.lua'] = fn('one', 'x', body),
+        ['b.lua'] = fn('two', 'y', (body:gsub('%(x%)', '(y)'))),
+    }
+    local hit
+    for _, f in ipairs(clones.findings(store, { min_rows = 3 })) do
+        if f.message:find('exact clone') then hit = f; break end
+    end
+    ok(hit, 'an exact clone yields a finding')
+    ok(hit and hit.message:find('CartographMerge'), 'it points at the merge action')
+    vim.fn.delete(root, 'rf')
+end)

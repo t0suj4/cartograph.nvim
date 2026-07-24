@@ -355,6 +355,17 @@ directly. The proposal is a reviewable scaffold, not an auto-write:
 synthesizing the helper and threading its parameters through both call sites,
 with visibility and scope kept correct, is a verified transaction of its own.
 
+`:CartographClonesSigns` lands all of this *on the code* rather than in a
+report: exact clones and near-clone functions become in-buffer signs, and each
+value hole becomes a sign at its **exact substitution column** — so `]d` walks
+you from one rewrite site to the next, and the quickfix list is the work queue.
+The costly per-function index behind every tier is built once and cached by
+graph generation, so a focused query (`:CartographExtractHelper` on the function
+under the cursor) is instant after the first scan rather than re-reading the
+whole graph. Both clone reports are honest about their own confidence: the block
+tier marks short runs as likely-coincidental, and the near-clone count is stated
+as a lower bound, since a copy that inserts a local can drift past the matcher.
+
 ### The working set
 
 Mark what you're working on; dive freely; come back. In the symbols list:
