@@ -76,7 +76,7 @@ local PAREN = { parenthesized_expression = true }
 local UNWRAP = { expression_list = true, variable_list = true }
 
 -- ── the recursive harvest: a TS node → a schema expr ─────────────────────────
-local build
+local build, build_core
 
 -- OPERAND nodes = named, non-COMMENT children. Comments are named children, so a
 -- `--` between operands of a multi-line expression would otherwise shift
@@ -118,7 +118,13 @@ local function call_parts(node)
     return callee, args
 end
 
-function build(node, src)
+-- build_core produces the schema node; `build` (below) wraps it to stamp `.at`
+-- (the source byte-range) on every node — the enabler for source-precise consumers
+-- (clone-extraction hole substitution, refactoring). `.at` is a plain range table
+-- { start={line,char}, end={line,char} } (0-based rows, as at.sl/sc/el/ec read); the
+-- coordinates are FILE-ABSOLUTE because expr.of parses the whole file. The IR is rebuilt
+-- on demand (never folded/persisted) so this is additive — no cache/VERSION impact.
+function build_core(node, src)
     if not node then return { k = '?', t = '<nil>', kids = {} } end
     local t = node:type()
     if PAREN[t] then return build(node:named_child(0), src) end
@@ -185,6 +191,17 @@ function build(node, src)
         if c:named() and c:type() ~= 'comment' then kids[#kids + 1] = build(c, src) end
     end
     return { k = '?', t = t, kids = kids }
+end
+
+-- stamp the source range on every node built (see build_core's note). A node built
+-- from no TS node (build(nil)) has no range → `.at` stays nil.
+function build(node, src)
+    local e = build_core(node, src)
+    if node and type(e) == 'table' then
+        local sr, sc, er, ec = node:range()
+        e.at = { start = { line = sr, char = sc }, ['end'] = { line = er, char = ec } }
+    end
+    return e
 end
 M.build = build
 

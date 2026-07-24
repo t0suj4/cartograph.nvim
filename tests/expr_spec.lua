@@ -79,6 +79,31 @@ test('expr: harvest builds bin / call / field / index / table / literals', funct
     eq('call', e5.k); ok(e5.method, 'o:m is a method call'); eq('lit', e5.a[1].k)
 end)
 
+test('expr: every node carries a source range (.at) that spans its own text', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local at = require 'cartograph.at'
+    local lines = {
+        'local function f(a, b)',
+        '  local y = trim(a) + 1',
+        '  return y',
+        'end',
+    }
+    local fl = build_expr_flow(lines)
+    local function span(e)
+        local sl, sc, el, ec = at.sl(e.at), at.sc(e.at), at.el(e.at), at.ec(e.at)
+        if sl == el then return (lines[sl + 1] or ''):sub(sc + 1, ec) end
+        return '<multiline>'
+    end
+    local rhs = row_at(fl, 2).expr.rhs[1] -- trim(a) + 1
+    ok(rhs.at, 'the bin node has a range')
+    eq('trim(a) + 1', span(rhs), 'the bin node spans the whole rhs')
+    eq('call', rhs.l.k)
+    eq('trim(a)', span(rhs.l), 'the call sub-node spans just the call')
+    eq('trim', span(rhs.l.f), 'the callee name leaf spans exactly the token')
+    eq('a', span(rhs.l.a[1]), 'the argument name leaf spans exactly the token')
+    eq('1', span(rhs.r), 'the literal leaf spans exactly the token')
+end)
+
 test('expr: an unmapped construct becomes `?` but still exposes its names', function ()
     if not ready('lua') then skip 'no lua parser' end
     -- a numeric for header clause is not modeled → `?`, but its names survive

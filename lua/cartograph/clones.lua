@@ -426,19 +426,27 @@ local function anti_unify(e1, e2, la, lb, holes)
     local k = e1.k
     if k == 'lit' then
         if e1.ty == e2.ty and tostring(e1.v) == tostring(e2.v) then return true end
-        holes[#holes + 1] = { kind = 'literal', a = tostring(e1.v), b = tostring(e2.v) }
+        -- at_a/at_b (the source span of the diverging leaf, from the expr-IR ranges)
+        -- are the exact substitution sites a future extract-helper transaction rewrites.
+        holes[#holes + 1] = { kind = 'literal', a = tostring(e1.v), b = tostring(e2.v),
+            at_a = e1.at, at_b = e2.at }
         return true
     elseif k == 'name' then
         if e1.n == e2.n then return true end
         local l1, l2 = is_local(e1.n, la), is_local(e2.n, lb)
         if l1 and l2 then return true end -- both locals: alpha-equivalent, no hole
         if not l1 and not l2 then
-            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n }; return true
+            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n, at_a = e1.at, at_b = e2.at }
+            return true
         end
         holes[#holes + 1] = { kind = 'struct' }; return false -- local vs global
     elseif k == 'field' then
         local ok = anti_unify(e1.b, e2.b, la, lb, holes)
-        if e1.n ~= e2.n then holes[#holes + 1] = { kind = 'field', a = e1.n, b = e2.n } end
+        -- a field-NAME hole lifts as the whole field ACCESS (a value param): e1/e2 ARE
+        -- the field nodes, so e1.at/e2.at span `base.name` — the value to pass.
+        if e1.n ~= e2.n then
+            holes[#holes + 1] = { kind = 'field', a = e1.n, b = e2.n, at_a = e1.at, at_b = e2.at }
+        end
         return ok
     elseif k == 'index' then
         local o1 = anti_unify(e1.b, e2.b, la, lb, holes)
@@ -585,6 +593,12 @@ function M.extract_proposal(pair)
     for i, h in ipairs(a.holes) do
         L[#L + 1] = ('    p%d (%s):  %s  in %s   /   %s  in %s')
             :format(i, h.kind, tostring(h.a), pair.a.name, tostring(h.b), pair.b.name)
+        -- the substitution SITE, from the expr-IR leaf range — where the rewrite lands
+        if h.at_a and h.at_b then
+            L[#L + 1] = ('         at %s:%d:%d  /  %s:%d:%d'):format(
+                pair.a.file, at.sl(h.at_a) + 1, at.sc(h.at_a) + 1,
+                pair.b.file, at.sl(h.at_b) + 1, at.sc(h.at_b) + 1)
+        end
     end
     L[#L + 1] = ('  → introduce a helper carrying the %d shared statement(s) with the above')
         :format(pair.shared)

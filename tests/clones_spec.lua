@@ -199,6 +199,23 @@ test('clones: anti-unification classifies a leaf-value hole as a parameter', fun
     -- the proposal names it
     local prop = clones.extract_proposal(p)
     ok(prop[1]:find('extraction proposal'), 'a value pair yields an extraction proposal')
+    -- the hole carries the source SPAN of the diverging leaf in each copy (from the
+    -- expr-IR ranges) — the exact substitution site a future extract transaction rewrites
+    local at = require 'cartograph.at'
+    local h = a.holes[1]
+    ok(h.at_a and h.at_b, 'the hole carries a range in each copy')
+    local function span(f_id, r)
+        local n = store.node(f_id)
+        local lines = store.content(n)
+        return (lines[at.sl(r) + 1] or ''):sub(at.sc(r) + 1, at.ec(r))
+    end
+    local ida, idb
+    for _, nn in ipairs(store.data.nodes) do
+        if nn.name == 'one' then ida = nn.id elseif nn.name == 'two' then idb = nn.id end
+    end
+    local sa, sb = span(ida, h.at_a), span(idb, h.at_b)
+    ok((sa == 'foo' and sb == 'bar') or (sa == 'bar' and sb == 'foo'),
+        'the hole ranges span exactly the diverging tokens (foo / bar), got ' .. sa .. ' / ' .. sb)
     vim.fn.delete(root, 'rf')
 end)
 
