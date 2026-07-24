@@ -177,6 +177,41 @@ test('clones: bodies too far apart are not near-clones', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+test('clones: relative-local naming survives an inserted local (insertion-stable)', function ()
+    -- `two` inserts `local extra = tap(q)` mid-body; under function-global slot numbering
+    -- every later local drifts and the pair inflates past max_dist. Relative-local
+    -- alignment counts it as ONE edit (the inserted row) and still finds the near-clone.
+    local body_a = '  local a = load(src)\n  local b = trim(a)\n  local c = wrap(b)\n'
+        .. '  local d = mark(c)\n  persist(d)\n  return d'
+    local body_b = '  local a = load(src)\n  local extra = tap(a)\n  local b = trim(a)\n'
+        .. '  local c = wrap(b)\n  local d = mark(c)\n  persist(d)\n  return d'
+    local root = proj {
+        ['a.lua'] = fn('one', 'src', body_a),
+        ['b.lua'] = fn('two', 'src', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 2, min_rows = 5, min_shared = 2 }), 'one', 'two')
+    ok(p, 'the inserted-local near-clone is found (not lost to slot drift)')
+    ok(p and p.dist <= 2, 'the distance reflects the single insertion, not cascaded drift')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: relative alignment stays sound — inconsistent locals are not a clone', function ()
+    -- same coarse shape, but the roles of the two locals are SWAPPED between copies
+    -- (a↔b). Locals-abstracted these look identical; the bijection-consistency guard
+    -- must reject the match (no consistent renaming), so they are NOT a near-clone.
+    local body_a = '  local a = src\n  local b = other\n  push(a)\n  push(b)\n  push(a)\n  return b'
+    local body_b = '  local a = src\n  local b = other\n  push(b)\n  push(a)\n  push(b)\n  return a'
+    local root = proj {
+        ['a.lua'] = fn('one', 'src', body_a),
+        ['b.lua'] = fn('two', 'src', body_b),
+    }
+    -- distance-0 (exact) is excluded anyway; the point is the guard doesn't fabricate a
+    -- spurious distance-0 "clone" out of an inconsistent local bijection
+    local p = near_pair(clones.near(store, { max_dist = 3, min_rows = 4, min_shared = 1 }), 'one', 'two')
+    ok(not p or p.dist >= 1, 'a role-swap is never reported as a zero-edit clone')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ── anti-unification: refine holes into parameters, propose the helper ───────
 
 test('clones: anti-unification classifies a leaf-value hole as a parameter', function ()

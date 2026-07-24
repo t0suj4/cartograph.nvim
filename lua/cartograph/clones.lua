@@ -379,13 +379,100 @@ local function align(a, b)
     return d[la][lb], ops
 end
 
--- align one candidate pair; return a near-clone record or nil
+-- RELATIVE-LOCAL canon: every local → 'L' (so the row shape is independent of how many
+-- locals were introduced before it — insertion-stable, unlike the function-global slot
+-- numbering, which drifts when a near-clone inserts a local used downstream). Callees,
+-- globals, fields, operators, and literals are kept verbatim. `acc` collects the local
+-- NAMES in a fixed traversal order so the alignment can later check a consistent local
+-- bijection (the soundness guard — see align_relative). [[cartograph-record-fold-arc]]
+local function rcanon(e, locals, acc)
+    if not e then return '_' end
+    local k = e.k
+    if k == 'name' then
+        if locals[e.n] then acc[#acc + 1] = e.n; return 'L' end
+        return 'N' .. e.n
+    end
+    if k == 'lit' then return 'L' .. (e.ty or '') .. ':' .. tostring(e.v) end
+    if k == 'field' then return (e.method and 'M' or 'F') .. rcanon(e.b, locals, acc) .. '.' .. e.n end
+    if k == 'index' then return 'I' .. rcanon(e.b, locals, acc) .. '[' .. rcanon(e.i, locals, acc) .. ']' end
+    if k == 'call' then
+        local p = {}
+        for _, a in ipairs(e.a or {}) do p[#p + 1] = rcanon(a, locals, acc) end
+        return 'C' .. rcanon(e.f, locals, acc) .. '(' .. table.concat(p, ',') .. ')'
+    end
+    if k == 'un' then return 'U' .. (e.op or '') .. rcanon(e.e, locals, acc) end
+    if k == 'bin' then
+        return 'B' .. (e.op or '') .. '(' .. rcanon(e.l, locals, acc) .. ',' .. rcanon(e.r, locals, acc) .. ')'
+    end
+    if k == 'table' then return 'T' end
+    if k == 'fn' then return 'Fn' end
+    if k == 'vararg' then return 'V' end
+    local p = {}
+    for _, c in ipairs(e.kids or {}) do p[#p + 1] = rcanon(c, locals, acc) end
+    return '?' .. (e.t or '') .. '(' .. table.concat(p, ',') .. ')'
+end
+
+-- (relative row-keys, per-row local-name sequences) for a fn, memoized on its index entry
+local function rel_keys(f)
+    if f._rk then return f._rk, f._rseq end
+    local keys, seqs = {}, {}
+    for i, e in ipairs(f.exprs or {}) do
+        local acc = {}
+        if e then
+            local function seq(list)
+                local p = {}
+                for _, x in ipairs(list or {}) do p[#p + 1] = rcanon(x, f.locals, acc) end
+                return table.concat(p, ',')
+            end
+            keys[i] = seq(e.lhs) .. '=' .. seq(e.rhs) .. (e.cond and (';C:' .. rcanon(e.cond, f.locals, acc)) or '')
+        else
+            keys[i] = '~'
+        end
+        seqs[i] = acc
+    end
+    f._rk, f._rseq = keys, seqs
+    return keys, seqs
+end
+
+-- align two fns on RELATIVE keys, then verify matched rows admit a CONSISTENT local
+-- bijection; a matched row whose locals conflict is reclassified as a difference (sound —
+-- rejects coarse over-matches). Returns (distance, ops, consistent_match_count).
+local function align_relative(fa, fb)
+    local ak, aseq = rel_keys(fa)
+    local bk, bseq = rel_keys(fb)
+    local dist, ops = align(ak, bk)
+    local mapAB, mapBA = {}, {}
+    local nmatch, extra = 0, 0
+    for _, o in ipairs(ops) do
+        if o.op == 'match' then
+            local sa, sb = aseq[o.i], bseq[o.j]
+            local ok = #sa == #sb
+            if ok then
+                for p = 1, #sa do
+                    local la, lb = sa[p], sb[p]
+                    if (mapAB[la] and mapAB[la] ~= lb) or (mapBA[lb] and mapBA[lb] ~= la) then
+                        ok = false; break
+                    end
+                end
+            end
+            if ok then
+                for p = 1, #sa do mapAB[sa[p]] = sb[p]; mapBA[sb[p]] = sa[p] end
+                nmatch = nmatch + 1
+            else
+                o.op = 'sub'; extra = extra + 1 -- an inconsistent match IS a real difference
+            end
+        end
+    end
+    return dist + extra, ops, nmatch
+end
+
+-- align one candidate pair; return a near-clone record or nil. Uses relative-local
+-- alignment: insertion-stable + bijection-consistent, so a near-clone that inserts a
+-- local (which drifted the function-global slots) is found without over-matching.
 local function try_pair(fns, i, j, max_dist, min_rows)
     local fa, fb = fns[i], fns[j]
-    local dist, ops = align(fa.keys, fb.keys)
+    local dist, ops, nmatch = align_relative(fa, fb)
     if dist < 1 or dist > max_dist then return nil end
-    local nmatch = 0
-    for _, o in ipairs(ops) do if o.op == 'match' then nmatch = nmatch + 1 end end
     if nmatch < min_rows then return nil end
     return { dist = dist, shared = nmatch, a = fa, b = fb, ops = ops }
 end
@@ -398,6 +485,24 @@ local function sort_pairs(out)
     return out
 end
 
+-- inverted index over RELATIVE row-keys (locals abstracted) — the candidate index for
+-- near-clone pairing, so an insertion-drifted pair still shares distinctive keys. Memoized
+-- alongside the generation-cached fn index (rebuilds when build_index does).
+local rel_post_cache
+local function rel_post(store, fns)
+    if rel_post_cache and rel_post_cache.gen == store.generation then return rel_post_cache.post end
+    local post = {}
+    for i, f in ipairs(fns) do
+        local ks = rel_keys(f)
+        local seen = {}
+        for _, k in ipairs(ks) do
+            if not seen[k] then seen[k] = true; post[k] = post[k] or {}; post[k][#post[k] + 1] = i end
+        end
+    end
+    rel_post_cache = { gen = store.generation, post = post }
+    return post
+end
+
 --- Near-clone PAIRS across the store's functions. Returns a list of pairs, each
 --- { dist, shared, a = {name,file,id,lines,keys}, b = {…}, ops }, sorted by
 --- (shared desc, dist asc). opts.max_dist (default 2), opts.min_rows (default 6),
@@ -405,8 +510,9 @@ end
 function M.near(store, opts)
     local max_dist = (opts and opts.max_dist) or 2
     local min_rows = (opts and opts.min_rows) or 6
-    local min_shared = (opts and opts.min_shared) or 3
-    local fns, post = build_index(store)
+    local min_shared = (opts and opts.min_shared) or 2
+    local fns = build_index(store)
+    local post = rel_post(store, fns)
     -- candidate pairs = those sharing ≥ min_shared distinctive keys
     local shared = {}
     for _, list in pairs(post) do
@@ -436,14 +542,15 @@ end
 function M.near_of(store, fn_id, opts)
     local max_dist = (opts and opts.max_dist) or 2
     local min_rows = (opts and opts.min_rows) or 6
-    local min_shared = (opts and opts.min_shared) or 3
-    local fns, post = build_index(store)
+    local min_shared = (opts and opts.min_shared) or 2
+    local fns = build_index(store)
+    local post = rel_post(store, fns)
     local fi
     for i, f in ipairs(fns) do if f.id == fn_id then fi = i; break end end
     if not fi then return {} end
     -- partners = functions sharing the focus's distinctive keys, counted
     local cnt, fseen = {}, {}
-    for _, k in ipairs(fns[fi].keys) do
+    for _, k in ipairs((rel_keys(fns[fi]))) do
         if not fseen[k] then
             fseen[k] = true
             local list = post[k]
@@ -599,13 +706,14 @@ end
 --- (hole) source lines — the parameters the two copies would factor into.
 function M.near_report(pairs_, store)
     if #pairs_ == 0 then return { 'near-clones: none' } end
-    -- HONESTY: this is a LOWER BOUND. The row keys use function-global slot numbering,
-    -- so a near-clone that inserts a local used by many later rows drifts out of
-    -- alignment and is missed (an honest under-report, never a false match). So the
-    -- count is "at least N", not "exactly N".
-    local L = { ('near-clones — at least %d pair(s) (lower bound)'):format(#pairs_),
-        '(row sequences differing by ≤ max_dist edits; matched rows = shared template, differing rows = holes/params)',
-        '(lower bound: pairs that insert a local used downstream can drift out of alignment and be missed)', '' }
+    -- HONESTY: still a mild LOWER BOUND. Alignment now uses RELATIVE-local naming (locals
+    -- abstracted + a bijection-consistency guard), so an inserted local no longer drifts a
+    -- pair out of alignment — the main under-report is fixed. Residuals: a for-loop binder
+    -- isn't a df-def (stays a literal name), and a pair differing ONLY by local reordering
+    -- is left to the exact tier. Never a false match (the consistency guard).
+    local L = { ('near-clones — at least %d pair(s)'):format(#pairs_),
+        '(row sequences differing by ≤ max_dist edits; relative-local aligned, bijection-consistent)',
+        '(matched rows = shared template, differing rows = holes/params; mild lower bound — see loop-binder residual)', '' }
     local srccache = {}
     local function srcline(f, ln)
         local lines = srccache[f.file]
