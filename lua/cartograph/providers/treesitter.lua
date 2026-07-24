@@ -3700,9 +3700,11 @@ function M.index_only(root, opts)
     o.defs_only = true
     local data = M.extract(root, o)
     -- HONESTY MARKER ([[cartograph-thin-index]]): this graph has NO call graph / effect
-    -- PDG (calls were never built). Whole-graph verbs (untangle/reorder/references/call-
-    -- hierarchy) read it and refuse rather than serve a degraded/empty answer that reads
-    -- as "none". A full :Cartograph open ingests fresh data without the marker → clears it.
+    -- PDG (calls were never built). Whole-graph verbs — untangle/reorder/references/call-
+    -- hierarchy AND the call-graph SUMMARIES (census/ladder/externals/escalate) — read it
+    -- and refuse (commands.whole_graph) rather than serve a degraded/empty answer that reads
+    -- as "none" (e.g. census "nodes 0", ladder "0 calls", externals "0 external"). A full
+    -- :Cartograph open ingests fresh data without the marker → clears it.
     data.index_only = true
     return data
 end

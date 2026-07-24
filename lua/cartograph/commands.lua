@@ -582,6 +582,7 @@ function M.register()
     -- ── the honesty census: how well is this graph actually resolved ─
     cmd('CartographCensus', function ()
         local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
         scratch(require('cartograph.census').report(store.data))
     end, { desc = 'cartograph: epistemic census — edge trust tiers + refusals by rule (the analyzer work-list)' })
 
@@ -605,6 +606,7 @@ function M.register()
     -- ── escalation-on-hedge: confirm the ~ hotspots vs lua-ls ────────
     cmd('CartographEscalate', function (o)
         local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
         local esc = require 'cartograph.escalate'
         vim.notify('cartograph: escalating hedge-saturated fns to lua-ls…',
             vim.log.levels.INFO)
@@ -686,6 +688,7 @@ function M.register()
     -- ── the epistemic ladder: how much of the graph is trustworthy ──
     cmd('CartographLadder', function ()
         local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
         scratch(require('cartograph.ladder').report(store))
     end, { desc = 'cartograph: the call graph\'s epistemic distribution + heaviest refusals' })
 
@@ -693,6 +696,7 @@ function M.register()
     --    shape inferred backward from usage (the boundary map + write-side seed)
     cmd('CartographExternals', function ()
         local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
         scratch(require('cartograph.externals').report(store))
     end, { desc = 'cartograph: the external boundary — unresolved names + their used-shape (~)' })
 
