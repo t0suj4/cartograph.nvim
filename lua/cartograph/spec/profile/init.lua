@@ -34,4 +34,24 @@ function M.load(runtime)
     return prof
 end
 
+--- A content-identity STAMP of the artifact(s) backing a profile — the file
+--- mtime+size of the hand `.lua` module and/or the distilled `.mpack` blob (both
+--- if present; the same files load() consults). ANY edit to a profile artifact
+--- changes it, so a cached graph whose resolution used the profile can be
+--- invalidated ([[cartograph-repo-shapes]] stamping gap: profiles are re-derived
+--- but never stamped). Returns a stable string, or nil when no artifact exists
+--- (an unknown runtime). Cheap: two fs_stat calls, no read/decode. NOTE: a hand
+--- profile that internally loads ANOTHER runtime's .mpack (ruby-rails → ruby-core)
+--- is not transitively covered — only its direct artifact; documented limit.
+function M.stamp_of(runtime)
+    local parts = {}
+    for _, ext in ipairs({ 'lua', 'mpack' }) do
+        local st = vim.uv.fs_stat(DIR .. '/' .. runtime .. '.' .. ext)
+        if st then
+            parts[#parts + 1] = ('%s:%d:%d'):format(ext, st.mtime.sec, st.size)
+        end
+    end
+    return #parts > 0 and table.concat(parts, '|') or nil
+end
+
 return M

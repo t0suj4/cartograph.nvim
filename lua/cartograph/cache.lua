@@ -73,7 +73,14 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 99 -- v99: UP-DIRECTION shape/profile activation ([[cartograph-repo-shapes]]).
+M.VERSION = 100 -- v100: PROFILE IDENTITY in the manifest ([[cartograph-repo-shapes]] stamping
+               -- gap). manifest_of persists packs + profile + profile_stamp (artifact mtime/size);
+               -- read_manifest re-derives the root's CURRENT profile identity and invalidates the
+               -- cache on mismatch (shape/registry change activates a different profile, or the
+               -- profile .mpack/.lua was edited); empty_data restores packs+profile so a refresh on
+               -- a warm graph relinks with the same context. EXTRACTION-NEUTRAL (graph identical,
+               -- gates unchanged) — manifest FORMAT change → bump so old manifests re-save clean.
+               -- v99: UP-DIRECTION shape/profile activation ([[cartograph-repo-shapes]]).
                -- active_profile_for now walks ancestors (bounded, .git-stopped) so a sub-root
                -- INSIDE a shaped repo inherits its L2 profile — discourse/app/models activates
                -- the ruby-rails profile whose config/application.rb marker is two levels up.
@@ -826,11 +833,36 @@ local function write_manifest(dir, m)
     return pcall(vim.uv.fs_rename, tmp, dir .. '/manifest.bin')
 end
 
+-- The active L2 profile IDENTITY for a root: (name, artifact-stamp). Derived the
+-- SAME way extraction derives it — shapes.profile_for's bounded ancestor walk
+-- (UP-direction, [[cartograph-repo-shapes]]) — so read_manifest can detect when a
+-- cached graph's resolution no longer matches: the shape/registry now activates a
+-- DIFFERENT profile (or none), or the profile ARTIFACT was edited (stamp changes).
+-- Lazy pcall-require (shapes needs only config; no cache cycle). nil,nil = no
+-- profile (the common case — most roots), which matches a profileless manifest.
+local function profile_id(nroot)
+    local ok_s, shapes = pcall(require, 'cartograph.shapes')
+    if not ok_s then return nil, nil end
+    local pf = shapes.profile_for(nroot)
+    if not pf then return nil, nil end
+    local ok_p, profmod = pcall(require, 'cartograph.spec.profile')
+    local stamp = ok_p and profmod.stamp_of and profmod.stamp_of(pf.profile) or nil
+    return pf.profile, stamp
+end
+
 local function read_manifest(root)
     local dir, nroot = M.path(root)
     local m = read_decoded(dir .. '/manifest.bin')
     if type(m) == 'table' and m.version == M.VERSION and m.root == nroot
         and type(m.stamps) == 'table' then
+        -- PROFILE IDENTITY gate: the profile the root activates NOW (name + artifact
+        -- stamp) must equal what this cache was built with, else its minted/disposed
+        -- resolution is stale ([[cartograph-repo-shapes]] stamping gap). A mismatch
+        -- = a clean cache miss → cold re-extract. Profileless roots: nil == nil.
+        local cur_prof, cur_stamp = profile_id(nroot)
+        if m.profile ~= cur_prof or m.profile_stamp ~= cur_stamp then
+            return nil, dir
+        end
         return m, dir
     end
     return nil, dir
@@ -904,10 +936,20 @@ local function build_shards(data, want)
 end
 
 local function manifest_of(data, sizes)
+    -- profile identity: name + artifact stamp (computed here from the name, so a
+    -- producer only has to set data.profile). read_manifest re-derives the CURRENT
+    -- identity for the root and invalidates on mismatch. packs are persisted so a
+    -- warm-loaded graph carries them into a later refresh's relink (they were lost).
+    local profile_stamp
+    if data.profile then
+        local ok, profmod = pcall(require, 'cartograph.spec.profile')
+        profile_stamp = ok and profmod.stamp_of and profmod.stamp_of(data.profile) or nil
+    end
     return { version = M.VERSION, root = data.root, schema = data.schema,
         provider = data.provider, -- which source: dispatch key for diff/refresh
         stamps = data.stamps, unparsed = data.unparsed,
         capabilities = data.capabilities, no_parser = data.no_parser,
+        packs = data.packs, profile = data.profile, profile_stamp = profile_stamp,
         sizes = sizes } -- per-shard byte lengths: truncation detector
 end
 
@@ -1048,6 +1090,9 @@ local function empty_data(m)
     return { schema = m.schema or 1, root = m.root,
         provider = m.provider or 'treesitter', capabilities = m.capabilities,
         no_parser = m.no_parser, stamps = m.stamps,
+        -- restore the activation context so a refresh on a warm graph relinks with
+        -- the SAME packs/profile it was built with (empty_data dropped both before)
+        packs = m.packs, profile = m.profile,
         nodes = {}, edges = {}, calls = {}, names = {} }
 end
 
