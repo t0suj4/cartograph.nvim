@@ -196,6 +196,10 @@ test('lint null-deref: an unguarded nullable deref flags; guards/param/new do no
         'void param(Mesh *m) {',
         '    m->use();',                   -- param: no nullable-return def
         '}',
+        'void throwing() {',
+        '    Mesh *m = getMeshNoCreate();',  -- throwing variant, not nullable
+        '    m->use();',
+        '}',
         'void newed() {',
         '    Mesh *m = new Mesh();',       -- non-nullable source
         '    m->use();',

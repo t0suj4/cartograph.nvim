@@ -27,9 +27,12 @@ local M = {}
 
 -- nullable-RETURN heuristic: a call whose callee tail matches RETURNS a
 -- possibly-NULL pointer. Extensible (config.nullable_returns adds names/patterns).
--- Defaults cover the irrlicht/luanti "*NoEx / *NoCreate / emerge*" convention
--- (the NoEx suffix literally means "no exception, NULL on miss").
-local DEFAULT_NULLABLE = { 'NoEx$', 'NoCreate', '^emergeBlock$', '^emerge' }
+-- The luanti/irrlicht convention is the **NoEx suffix** = "no exception, NULL on
+-- miss" — DELIBERATELY NOT bare `NoCreate`: `getBlockNoCreate` (no Ex) THROWS
+-- InvalidPositionException (caught by a surrounding try/catch), so its result is
+-- non-null where dereferenced — scale-testing on map.cpp caught that as the FP
+-- class. `emergeBlock` also returns NULL on failure (callers null-check it).
+local DEFAULT_NULLABLE = { 'NoEx$', '^emergeBlock$' }
 local function nullable_call(callee, extra)
     for _, pat in ipairs(DEFAULT_NULLABLE) do if callee:find(pat) then return true end end
     for _, pat in ipairs(extra or {}) do if callee:find(pat) then return true end end
