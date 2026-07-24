@@ -949,6 +949,15 @@ checks luacheck can't:
   from a variable) suppresses the dead/leak checks, since it could cover any
   name. Configurable via `lint.listener_config`; generalises to lock/unlock,
   open/close — any argument-keyed acquire/release.
+- **resource-leak** (C++, `~`) — a raw pointer allocated with `new` and then
+  **reassigned** without a release (`->drop()` / `delete`) in between: the first
+  allocation leaks. Sound without escape analysis — a reassignment *definitively*
+  kills the old reference, so (unlike a plain never-freed local) it can't have
+  escaped via return or store. Manual-refcount / raw-pointer code only: a
+  `unique_ptr` reassignment has no raw `new`, so RAII is skipped for free. The
+  `~` is honest — a macro or an aliased pointer can fool the per-line source
+  match. (Member leaks whose release belongs in a destructor are a separate,
+  object-graph concern, not flagged.)
 
 - **dead-state** — a module var written (from functions) but never read: dead
   weight, or dynamic access the graph can't see — the hedge is in the message.

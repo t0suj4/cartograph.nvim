@@ -128,3 +128,44 @@ test('ladder: narrowable-refusal classifies receivers and ranks the work-list', 
     eq('alias', nb[1].class)
     ok(nb[1].score >= nb[#nb].score, 'sorted by descending score')
 end)
+
+-- resource-leak (manual-pair regime, [[cartograph-resource-pairing]]): a raw
+-- `p = new T()` reassigned with no release leaks; a released/RAII one does not.
+-- Integration test — real cpp extraction (flow def-positions + source scan).
+local ts = require 'cartograph.providers.treesitter'
+local function cpp_ready()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.language.add, 'cpp')
+end
+
+test('lint resource-leak: a reassigned raw `new` with no drop leaks; released/RAII do not', function ()
+    if not cpp_ready() then skip 'no cpp parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/leak.cpp', 'w'))
+    fd:write(table.concat({
+        'void bug() {',                       -- L1
+        '    Mesh *m = new Mesh();',           -- L2 acquire
+        '    m = transform(m);',               -- L3 reassign, NO release -> LEAK
+        '    use(m);',                         -- L4
+        '}',
+        'void released() {',                   -- L6
+        '    Mesh *m = new Mesh();',           -- L7 acquire
+        '    m->drop();',                      -- L8 released
+        '    m = transform(m);',               -- L9 reassign after release -> no leak
+        '}',
+        'void raii() {',                       -- L11
+        '    std::unique_ptr<Mesh> p = make();', -- L12 no raw new
+        '    p = transform(p);',               -- L13 reassign -> no leak (RAII)
+        '}',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local f = lint.run(store, only('resource-leak'))
+    local msg = table.concat(messages(f), '\n')
+    eq(1, #f)
+    ok(msg:match("'m'") and msg:match('line 2'), 'the bug()-fn leak is flagged (acquired L2)')
+    ok(not msg:match('line 7'), 'the released `new` (L7, drop before reassign) is NOT flagged')
+    ok(not msg:match("'p'"), 'the RAII unique_ptr reassign is NOT flagged')
+    vim.fn.delete(root, 'rf')
+end)

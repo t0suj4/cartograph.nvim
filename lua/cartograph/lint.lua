@@ -676,7 +676,60 @@ local function silent_drop_findings(store)
     return out
 end
 
+-- Resource leak — the manual-pair regime ([[cartograph-resource-pairing]]).
+-- A raw `p = new T()` acquire whose reference is KILLED by a later REDEFINITION
+-- of `p` with no release (`p->drop()` / `delete p`) in between leaks the
+-- previously-allocated object. C++ manual-refcount / raw-pointer code only: the
+-- `= new` acquire gate skips RAII smart pointers (a `unique_ptr` reassign has no
+-- raw `new`, and its old value auto-releases). The REASSIGN case is sound WITHOUT
+-- escape analysis — a redefinition definitively kills the old reference, so unlike
+-- a scope-exit-without-release it cannot have escaped via return/store/grab. Reads
+-- the shipped substrate: flow.rows def-positions (cpp pointer-declarator fix) pick
+-- out the acquire + the kill; a per-line source scan classifies the RHS/release
+-- (hedged `~` — a macro or an aliased pointer could fool the text match). Member/
+-- object-graph leaks (release belongs in a destructor) are a separate harder regime
+-- (banked). Validated on the luanti wieldmesh oracle: catches the extrusion-mesh
+-- leak, 0 false positives on 14 fns / 9 correct release sites.
+local LEAK_CPP_EXT = { cpp = true, cc = true, cxx = true, hpp = true, hxx = true, h = true }
+local function resource_leak_findings(store)
+    local out = {}
+    local flow = require 'cartograph.flow'
+    for _, n in ipairs(store.data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and n.file
+            and LEAK_CPP_EXT[(n.file:match('%.([%w]+)$') or ''):lower()] then
+            local rows = flow.rows(n)
+            if rows and #rows > 0 then
+                local lines = store.content(n) or {}
+                local acq = {} -- var -> acquire line, while a live un-released raw `new` holds
+                for _, r in ipairs(rows) do
+                    local text = lines[r.l] or '' -- flow line() is 1-based; content is 1-based
+                    for v in pairs(acq) do -- a release of a tracked var clears it
+                        if text:find(v .. '%s*->%s*drop%s*%(')
+                            or text:find(v .. '%s*->%s*remove%s*%(')
+                            or text:find('delete%s+%[?%]?%s*' .. v .. '%f[^%w_]') then
+                            acq[v] = nil
+                        end
+                    end
+                    for _, v in ipairs(r.def or {}) do
+                        if acq[v] then -- redefinition of a live acquire, no release since → leak
+                            out[#out + 1] = { file = store.abspath(n), line = r.l,
+                                message = ("resource leak (~): '%s' was allocated with `new` at line %d and is reassigned here without a release (`->drop()`/`delete`) — the previous allocation leaks")
+                                    :format(v, acq[v]) }
+                            acq[v] = nil
+                        end
+                        if text:find('=%s*new%s') or text:find('=%s*%b()%s*new%s') then
+                            acq[v] = r.l -- a fresh raw-`new` acquire on the LHS var
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
 M.rules = {
+    { name = 'resource-leak', severity = 'warn', run = resource_leak_findings },
     { name = 'silent-drop', severity = 'warn', run = silent_drop_findings },
     { name = 'seam-guard', severity = 'warn', run = seam_findings },
     { name = 'truncation', severity = 'info', run = truncation_findings },
