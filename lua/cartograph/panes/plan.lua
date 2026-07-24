@@ -53,6 +53,12 @@ function M.render()
                 lines[#lines + 1] = ('  writes %d requalification(s) + %d import line(s)')
                     :format(#(t.rewrites or {}), #(t.imports_add or {}))
             end
+        elseif t.verb == 'reorder' then
+            lines[#lines + 1] = hl(marks, #lines,
+                ('REORDER  move L%d before L%d in %s    :CartographDiff · :CartographApply · :CartographTxnClear')
+                    :format(t.from_line, t.to_line, t.fn or '?'), 'Title')
+            lines[#lines + 1] = ('  %s — statement move, verified behavior-neutral by the commute verdict')
+                :format(t.file)
         elseif t.verb == 'extract-helper' then
             lines[#lines + 1] = hl(marks, #lines,
                 ('EXTRACT-HELPER  %s / %s → %s(%d param%s)    :CartographDiff · :CartographApply · :CartographTxnClear')

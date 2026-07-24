@@ -1195,6 +1195,18 @@ for nothing, with the hedge named. The report's header carries its own
 disclaimer: reads through calls are not modeled. Built entirely from the write
 axis (`rw`/`gw`/`gp`), the effect summaries, and the signature packs.
 
+`:CartographReorderApply <from> <to>` is the write side: it moves the statement
+at one line to before another, **only when the verdict certifies it**. Moving a
+statement inverts its order with each one it crosses, so the move is
+behavior-preserving exactly when it has no modeled relationship — dataflow
+dependency or state/world conflict — with any crossed statement, and crosses
+nothing opaque (an unresolved effect it can't reason about). It refuses with the
+specific barrier named (*"the move would cross #3, which has a dataflow dep
+(local a) with it"*), and otherwise stages the one-line move as a transaction
+you review with `:CartographDiff` and commit with `:CartographApply` — journaled,
+span-checked, and re-parsed before it lands. This is the one analysis in the
+cockpit that had stayed read-only; now the commute verdict has an editor.
+
 ## Untangle (independent concerns + safe-to-split)
 
 `:CartographUntangle` partitions the focused function into independent
