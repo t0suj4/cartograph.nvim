@@ -24,6 +24,12 @@ M.clangd_compile_commands = nil
 M.luals = true
 M.luals_bin = nil
 
+-- go-to-def into an environment profile's source (RBS/stdlib): overrides the
+-- root the profile's distilled symbol locations are relative to. nil = use the
+-- artifact's baked root hint; when neither resolves to a readable file, go-to-def
+-- on a minted profile symbol is an honest frontier (never a fabricated location).
+M.rbs_root = nil
+
 -- cross-language bindings (string-key dispatch boundaries); nil = the
 -- defaults in cartograph/xlang.lua (chromium WebUI, guile gsubr,
 -- lua_register). Add your own: { export = { verb, name = argN },

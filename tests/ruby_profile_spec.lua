@@ -39,6 +39,46 @@ test('ruby-rails profile: loads with the framework surface in `free`', function 
     eq('Module#attr_reader', p.canon['attr_reader']) -- RBS-corrected (was hand Kernel#)
     eq('Object#dup', p.canon['dup'])                 -- RBS-corrected (BasicObject/Object)
     eq('ActiveRecord::Base.belongs_to', p.canon['belongs_to']) -- Rails owner preserved
+    -- nav-time enrichment payload: RBS signatures + a source-root hint ride along
+    ok(p.sigs and type(p.sigs['Object#dup']) == 'table' and p.sigs['Object#dup'].sig,
+        'the profile carries the RBS signature for Object#dup')
+    ok(p.sig_root, 'the profile carries an RBS source-root hint')
+end)
+
+test('ruby-rails profile: LSP hover shows the RBS signature of a minted symbol', function ()
+    if not ready() then skip 'no ruby parser' end
+    local store = require 'cartograph.store'
+    local lsp = require 'cartograph.lsp'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'config/application.rb', { 'module Demo; end' })
+    write(root, 'app/models/widget.rb', {
+        'class Widget < ApplicationRecord',
+        '  def pick(arr)',
+        '    arr.values_at(0, 1)',   -- values_at → minted Array#values_at (core, sig'd);
+        '  end',                     -- not in base stdlib_names, so it reaches prof_ext → stdlib → mint
+        'end',
+    })
+    local data = ts.extract(root)
+    store.ingest(data)
+    -- the `values_at` call, resolved to the minted core node carrying an RBS sig
+    local c
+    for _, cc in ipairs(data.calls or {}) do
+        if cc.callee == 'values_at' and cc.to == 'ruby-rails::Array#values_at' then c = cc; break end
+    end
+    ok(c, 'values_at resolved to the minted Array#values_at node')
+    -- cursor inside the `values_at` occurrence on line 2 (`    arr.values_at(0, 1)`)
+    local params = {
+        textDocument = { uri = vim.uri_from_fname(root .. '/' .. c.file) },
+        position = { line = 2, character = 10 },
+    }
+    local h = lsp.handlers['textDocument/hover'](store, params)
+    local val = h and h.contents and h.contents.value or ''
+    ok(val:find('RBS', 1, true), 'hover carries the RBS provenance')
+    ok(val:find('->', 1, true), 'hover shows the declared signature (has a -> return)')
+    -- go-to-def jumps into the .rbs source (the local rbs checkout exists here)
+    local defs = lsp.handlers['textDocument/definition'](store, params)
+    ok(type(defs) == 'table' and defs[1] and defs[1].uri:find('%.rbs$'),
+        'go-to-def resolves the minted symbol into its RBS source file')
 end)
 
 test('ruby-rails profile: a Rails root activates it; framework calls → minted stdlib nodes', function ()

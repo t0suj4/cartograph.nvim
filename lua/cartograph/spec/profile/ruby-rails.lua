@@ -277,6 +277,7 @@ local RAILS_OWNERS = {
     ['ActionView::Helpers'] = true, ['Rails'] = true,
 }
 local core = require('cartograph.spec.profile').load('ruby-core')
+local sigs, sig_root
 if core and core.canon then
     for m, path in pairs(canon) do
         local my_owner = path:match('^(.-)[#.]')
@@ -284,6 +285,11 @@ if core and core.canon then
             canon[m] = core.canon[m]
         end
     end
+    -- nav-time enrichment ([[cartograph-stdlib-profile]]): the RBS signatures +
+    -- locations ride on the profile for LSP hover/go-to-def to look up by the minted
+    -- node's Owner#member path — read-side only, never baked into the graph.
+    sigs = core.sigs
+    sig_root = core.stamp and core.stamp.root
 end
 for _, ns in ipairs(NAMESPACES) do
     namespaces[#namespaces + 1] = ns
@@ -301,5 +307,5 @@ return {
     -- overwhelming reality, so minting the hand-curated surface is sound-at-tier.
     mint = true,
     types = types, free = free, namespaces = namespaces, nsset = nsset,
-    vocab = vocab, canon = canon,
+    vocab = vocab, canon = canon, sigs = sigs, sig_root = sig_root,
 }

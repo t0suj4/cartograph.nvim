@@ -83,7 +83,9 @@ end
 
 local artifact = {
     schema = 1, runtime = 'ruby-core', lang = 'ruby', version = version,
-    stamp = { input_kind = 'export', origin = RBS, version = version },
+    -- root = the gem dir sigs[].file is relative to (nav-time go-to-def joins it;
+    -- a HINT resolved at nav time — config override wins, absent → honest frontier)
+    stamp = { input_kind = 'export', origin = RBS, root = RBS_ROOT, version = version },
     canon = canon, sigs = sigs,
 }
 local blob = vim.mpack.encode(artifact)

@@ -85,6 +85,36 @@ local function location(store, id)
     return { uri = uri_of(store, n.file), range = lsp_range(n.range) }
 end
 
+-- RBS/profile ENRICHMENT ([[cartograph-stdlib-profile]]): a minted external node
+-- `<runtime>::Owner#member` carries no real location, but its environment profile
+-- may hold a distilled signature + source location. Looked up READ-SIDE (never
+-- baked into the graph → deterministic). Returns { sig, file, line, runtime,
+-- version, root } or nil.
+local function profile_sig(node)
+    if not (node and node.external and node.id) then return nil end
+    local rt, path = node.id:match('^([%w%-]+)::(.+)$')
+    if not rt then return nil end
+    local prof = require('cartograph.spec.profile').load(rt)
+    local s = prof and prof.sigs and prof.sigs[path]
+    if not s then return nil end
+    return { sig = s.sig, file = s.file, line = s.line,
+        runtime = rt, version = prof.version, root = prof.sig_root }
+end
+
+-- the profile symbol's REAL source Location, resolved AT NAV TIME (config override
+-- wins, else the artifact's baked root hint; absent file → nil = honest frontier,
+-- never a fabricated location). Keeps the location out of the graph.
+local function rbs_location(node)
+    local ps = profile_sig(node)
+    if not (ps and ps.file and ps.line) then return nil end
+    local root = require('cartograph.config').rbs_root or ps.root
+    if not root then return nil end
+    local full = root .. '/' .. ps.file
+    if vim.fn.filereadable(full) ~= 1 then return nil end
+    local at = { line = math.max(0, ps.line - 1), character = 0 }
+    return { uri = vim.uri_from_fname(full), range = { start = at, ['end'] = at } }
+end
+
 -- ── position -> fact ──────────────────────────────────────────────────────
 -- the call whose call-site span covers (line,char) — the cursor sits on a
 -- REFERENCE (a usage). Scans the file's calls (Band FILE axis).
@@ -150,7 +180,11 @@ M.handlers['textDocument/definition'] = function (store, params)
     if c then
         if c.to then -- resolved (incl. hedged: one Location, the hedge shows on hover)
             local loc = location(store, c.to)
-            return loc and { loc } or {}
+            if loc then return { loc } end
+            -- a minted profile symbol: jump into its RBS source if a checkout is
+            -- resolvable (nav-time), else an honest empty (frontier, never faked)
+            local rbs = rbs_location(store.node(c.to))
+            return rbs and { rbs } or {}
         end
         if c.refused and c.refused.cands then -- a navigable fork: the candidate set
             local out = {}
@@ -237,6 +271,12 @@ M.handlers['textDocument/hover'] = function (store, params)
                 ('tier: `%s`%s'):format(t, c.hedge and (' — ~ hedged: ' .. (c.hedge.rule or '?')) or ''),
                 ('_from %s_'):format(where),
             }
+            -- RBS enrichment: the real declared signature for a minted profile symbol
+            local ps = profile_sig(n)
+            if ps and ps.sig then
+                lines[#lines + 1] = ('`%s: %s`'):format(n.name, ps.sig)
+                lines[#lines + 1] = ('_%s · RBS %s_'):format(ps.runtime, ps.version or '?')
+            end
             return md(lines)
         end
         if c.refused then
