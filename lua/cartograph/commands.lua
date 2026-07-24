@@ -669,6 +669,26 @@ function M.register()
             plan.nparams == 1 and '' or 's'), vim.log.levels.INFO)
     end, { desc = 'cartograph: stage the VERIFIED extract-helper transaction for the focused function and its nearest near-clone — synthesizes the shared parameterized helper and rewrites both bodies to tail-call it. Constrained to the sound subset (same-file, value-parameterizable, body-safe, Lua); refuses otherwise. Review :CartographDiff, commit :CartographApply (parses-clean + CAS + journal gated)' })
 
+    -- ── refactor-neutrality: certify a move/extract changed no behavior ──
+    cmd('CartographNeutralitySnapshot', function ()
+        local store = live() if not store then return end
+        local n = require('cartograph.neutrality').snapshot(store)
+        vim.notify(('cartograph: neutrality baseline captured — %d function witness(es).'
+            .. ' Do the refactor, then :CartographNeutralityCheck'):format(n),
+            vim.log.levels.INFO)
+    end, { desc = 'cartograph: capture the current per-function behavior witnesses (df shape + params + callees) as a baseline, to later certify a move/extract refactor changed no behavior' })
+
+    cmd('CartographNeutralityCheck', function ()
+        local store = live() if not store then return end
+        local cmp, why = require('cartograph.neutrality').check(store)
+        if not cmp then return vim.notify('cartograph: ' .. why, vim.log.levels.WARN) end
+        scratch(require('cartograph.neutrality').report(cmp))
+        if #cmp.drifted > 0 then
+            vim.notify(('cartograph: %d function(s) DRIFTED (body changed) since the baseline')
+                :format(#cmp.drifted), vim.log.levels.WARN)
+        end
+    end, { desc = 'cartograph: diff the current per-function behavior witnesses against the baseline snapshot — neutral = a pure move (witness unchanged), DRIFTED = the body changed (a rewrite). Certifies a relocation was behavior-neutral; honestly flags a rewrite. Companion to :CartographMove / :CartographExtractModule' })
+
     -- ── clone findings as in-buffer signs (the interactive surface) ──
     cmd('CartographClonesSigns', function ()
         local store = live() if not store then return end
