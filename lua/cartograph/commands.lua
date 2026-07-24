@@ -670,7 +670,7 @@ function M.register()
             plan.a.name, plan.b.name, plan.helper, plan.nparams,
             plan.nparams == 1 and '' or 's',
             plan.xfile and (' in NEW ' .. plan.create.file) or ''), vim.log.levels.INFO)
-    end, { nargs = '?', complete = 'file', desc = 'cartograph: stage the VERIFIED extract-helper transaction for the focused function and its nearest near-clone — synthesizes the shared parameterized helper and rewrites both bodies to tail-call it. Same-file needs no arg; a CROSS-FILE pair takes a destination module path (a new .lua) for the shared helper + require wiring. Constrained to the sound subset (value-parameterizable, body-safe, globals-only for cross-file, Lua); refuses otherwise. Review :CartographDiff, commit :CartographApply' })
+    end, { nargs = '?', complete = 'file', desc = 'cartograph: stage the VERIFIED extract-helper transaction for the focused function and its nearest near-clone — synthesizes the shared parameterized helper and rewrites both bodies to tail-call it. Same-file needs no arg; a CROSS-FILE pair takes a destination module path (a new .lua) for the shared helper + require wiring. Constrained to the sound subset (value-parameterizable, body-safe, globals-only for cross-file; Lua or JavaScript, same-file for JS); refuses otherwise. Review :CartographDiff, commit :CartographApply' })
 
     -- ── refactor-neutrality: certify a move/extract changed no behavior ──
     cmd('CartographNeutralitySnapshot', function ()

@@ -19,8 +19,10 @@
 --     no self-recursion. CROSS-FILE additionally requires every FREE READ to be a global
 --     (not a source-file local — that would break on the move).
 --   • The rewrite is a TAIL CALL (`return helper(…)`), preserving every return.
--- HARD CONSTRAINTS (refuse with a reason otherwise): Lua, equal param count, single-line
--- holes inside the body, a clean multi-line body, a free helper name.
+-- HARD CONSTRAINTS (refuse with a reason otherwise): a supported language (Lua, or
+-- JavaScript same-file — see EXTRACT), equal param count, single-line holes inside the
+-- body, a clean multi-line body, a free helper name. The only language-specific part is
+-- the SYNTHESIS syntax (EXTRACT table); the analysis + gates are language-agnostic.
 
 local M = {}
 
@@ -30,6 +32,49 @@ local txn = require 'cartograph.txn'
 local at = require 'cartograph.at'
 
 local function indent_of(line) return (line or ''):match('^%s*') or '' end
+
+-- Per-language SYNTHESIS syntax — the only language-specific part of the transaction
+-- (the body span, hole substitution, params, and gates are all language-agnostic). Each
+-- entry: parse (grammar for the parses-clean gate); local_helper(name, params, body,
+-- indent) → the same-file helper's lines; ret(callee, args) → the delegating statement
+-- (no indent — the caller prepends it); def_pat(name) → a same-file parse-check substring;
+-- module(name, params, body) + member_pat(name) → cross-file module member form (nil =
+-- cross-file unsupported for this language, e.g. no module wiring in its spec yet).
+local EXTRACT = {
+    lua = {
+        parse = 'lua',
+        local_helper = function (name, ps, body, ind)
+            local out = { ind .. ('local function %s(%s)'):format(name, ps) }
+            for _, l in ipairs(body) do out[#out + 1] = l end
+            out[#out + 1] = ind .. 'end'; out[#out + 1] = ''
+            return out
+        end,
+        ret = function (callee, args) return ('return %s(%s)'):format(callee, args) end,
+        def_pat = function (name) return ('local function %s('):format(name) end,
+        module = function (name, ps, body)
+            local out = { 'local M = {}', '', ('function M.%s(%s)'):format(name, ps) }
+            for _, l in ipairs(body) do out[#out + 1] = l end
+            out[#out + 1] = 'end'; out[#out + 1] = ''; out[#out + 1] = 'return M'; out[#out + 1] = ''
+            return out
+        end,
+        member_pat = function (name) return ('function M.%s('):format(name) end,
+    },
+    javascript = {
+        parse = 'javascript',
+        local_helper = function (name, ps, body, ind)
+            local out = { ind .. ('function %s(%s) {'):format(name, ps) }
+            for _, l in ipairs(body) do out[#out + 1] = l end
+            out[#out + 1] = ind .. '}'; out[#out + 1] = ''
+            return out
+        end,
+        ret = function (callee, args) return ('return %s(%s);'):format(callee, args) end,
+        def_pat = function (name) return ('function %s('):format(name) end,
+        module = nil, -- no JS module/import wiring in the spec yet → cross-file refused
+    },
+}
+local FILE_LANG = { lua = 'lua', js = 'javascript', jsx = 'javascript',
+    cjs = 'javascript', mjs = 'javascript' }
+local function lang_of(file) return FILE_LANG[(file:match('%.(%w+)$') or ''):lower()] end
 
 -- a fresh helper name not already a function/method in the given files
 local function fresh_name(store, files, base)
@@ -58,8 +103,8 @@ local function file_locals(store, file)
     return s
 end
 
-local function parses_clean(text)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, text, 'lua')
+local function parses_clean(text, lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, text, lang)
     if not ok or not parser then return false end
     return not parser:parse()[1]:root():has_error()
 end
@@ -95,9 +140,11 @@ function M.plan(store, pair, opts)
     if not (pair and pair.a and pair.b) then return nil, 'no near-clone pair' end
     local a, b = pair.a, pair.b
     local xfile = a.file ~= b.file
-    if not (a.file:match('%.lua$') and b.file:match('%.lua$')) then
-        return nil, 'only Lua is supported for now'
+    local lang = lang_of(a.file)
+    if not (lang and lang == lang_of(b.file)) then
+        return nil, 'both functions must be in one supported language (Lua, JavaScript)'
     end
+    local syn = EXTRACT[lang]
     local analysis = clones.analyze_pair(pair)
     if analysis.kind ~= 'value' then
         return nil, ('not value-parameterizable (%s) — nothing to lift cleanly'):format(analysis.kind)
@@ -114,6 +161,9 @@ function M.plan(store, pair, opts)
     local dest, alias, require_line
     local hazards = {}
     if xfile then
+        if not syn.module then
+            return nil, ('cross-file extraction is not supported for %s yet (no module wiring)'):format(lang)
+        end
         dest = opts and opts.dest
         if not dest then
             return nil, 'cross-file: pass a destination module path (:CartographExtractHelperApply <dir/name.lua>)'
@@ -195,12 +245,12 @@ function M.plan(store, pair, opts)
         local args = {}
         for _, p in ipairs(params) do args[#args + 1] = p end
         for _, p in ipairs(analysis.holes) do args[#args + 1] = span_text(src, p[sites_key][1]) end
-        return body_indent .. ('return %s(%s)'):format(callee, table.concat(args, ', '))
+        return body_indent .. syn.ret(callee, table.concat(args, ', '))
     end
 
     local plan = {
         verb = 'extract-helper', generation = store.generation,
-        helper = hname, nparams = #hp, xfile = xfile,
+        helper = hname, nparams = #hp, xfile = xfile, lang = lang,
         files = {}, hazards = hazards,
         a = { id = a.id, name = a.name, ref = store.ref_of(a.id), file = a.file },
         b = { id = b.id, name = b.name, ref = store.ref_of(b.id), file = b.file },
@@ -209,10 +259,7 @@ function M.plan(store, pair, opts)
     if not xfile then
         -- helper as a local before the earlier copy; both bodies → return helper(…)
         local sig_indent = indent_of(lines_a[a_sig + 1])
-        local helper = { sig_indent .. ('local function %s(%s)'):format(hname, table.concat(hparams, ', ')) }
-        for _, l in ipairs(body) do helper[#helper + 1] = l end
-        helper[#helper + 1] = sig_indent .. 'end'
-        helper[#helper + 1] = ''
+        local helper = syn.local_helper(hname, table.concat(hparams, ', '), body, sig_indent)
         plan.files[a.file] = { ops = {
             { from0b = math.min(a_sig, b_sig), to0b = math.min(a_sig, b_sig) - 1, new = helper },
             { from0b = a_open, to0b = a_close, new = { call_line(hname, va.params, 'sites_a', lines_a) } },
@@ -220,10 +267,8 @@ function M.plan(store, pair, opts)
         } }
         plan.touched = { a.file }
     else
-        -- new module holding M.<hname>; each caller gains a require + a delegating body
-        local mod = { 'local M = {}', '', ('function M.%s(%s)'):format(hname, table.concat(hparams, ', ')) }
-        for _, l in ipairs(body) do mod[#mod + 1] = l end
-        mod[#mod + 1] = 'end'; mod[#mod + 1] = ''; mod[#mod + 1] = 'return M'; mod[#mod + 1] = ''
+        -- new module holding the helper as a member; each caller gains a require + a body
+        local mod = syn.module(hname, table.concat(hparams, ', '), body)
         plan.create = { file = dest, lines = mod }
         plan.creates = { [dest] = true }
         plan.helper_call = alias .. '.' .. hname
@@ -283,16 +328,16 @@ function M.apply(store, plan)
     local bad = txn.verify(store, plan, refspecs)
     if bad then return nil, bad end
     -- synthesis gates: every touched/created file parses, and the helper + both calls exist
+    local syn = EXTRACT[plan.lang]
     local _, after = M.preview(store, plan)
     if not after then return nil, 'preview failed' end
     local defsite = plan.xfile and plan.create.file or plan.a.file
     for _, rel in ipairs(plan.touched) do
-        if not parses_clean(after[rel] or '') then
+        if not parses_clean(after[rel] or '', syn.parse) then
             return nil, ('the synthesized %s does not parse — refusing (a synthesis bug, not your code)'):format(rel)
         end
     end
-    local defpat = plan.xfile and ('function M.%s('):format(plan.helper)
-        or ('local function %s('):format(plan.helper)
+    local defpat = plan.xfile and syn.member_pat(plan.helper) or syn.def_pat(plan.helper)
     if not (after[defsite] or ''):find(defpat, 1, true) then
         return nil, 'the helper definition is missing from the result — refusing'
     end

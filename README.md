@@ -371,7 +371,11 @@ body reads only globals, never a local of its old file (which wouldn't follow it
 across), and refuses if it would. What stays out of the safe subset — a differing
 statement rather than a differing leaf, a nested or vararg or recursive body, a
 body that depends on file-locals it can't take along — is refused with a reason,
-leaving the reviewable scaffold as the fallback.
+leaving the reviewable scaffold as the fallback. Only the *synthesis* is
+language-specific (the helper's declaration, the delegating call, the parse
+check): the analysis and every gate are language-agnostic, so the transaction
+works for Lua and — same-file — JavaScript, and a new language is a small table
+of syntax rather than a new implementation.
 
 `:CartographClonesSigns` lands all of this *on the code* rather than in a
 report: exact clones and near-clone functions become in-buffer signs, and each

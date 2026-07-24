@@ -9,6 +9,13 @@ local store = require 'cartograph.store'
 local clones = require 'cartograph.clones'
 local cx = require 'cartograph.cloneextract'
 
+-- make a tree-sitter grammar available (JS is not built in); skip a test if absent
+local function ready(lang)
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.language.add, lang)
+end
+
 local function proj(files)
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     for name, src in pairs(files) do
@@ -204,6 +211,62 @@ test('extract-helper: a self-recursive body is refused', function ()
     if pair then
         local plan, why = cx.plan(store, pair)
         ok(not plan and why:find('recursive'), 'a self-recursive body is refused')
+    else ok(true, '(no pair — fine)') end
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ── non-Lua (JavaScript) synthesis ───────────────────────────────────────────
+
+local JS_A = 'function fmtA(x) {\n  const y = prep(x);\n  const z = norm(y);\n'
+    .. '  const w = encode(z, \'json\');\n  const o = wrap(w);\n  return o;\n}\n'
+local JS_B = 'function fmtB(a) {\n  const b = prep(a);\n  const c = norm(b);\n'
+    .. '  const d = encode(c, \'yaml\');\n  const e = wrap(d);\n  return e;\n}\n'
+
+test('extract-helper: a JavaScript same-file pair synthesizes JS-syntax helper + wrappers', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local root = proj { ['m.js'] = JS_A .. '\n' .. JS_B }
+    local plan, why = cx.plan(store, xpair('fmtA'))
+    ok(plan, 'a JS pair plans: ' .. tostring(why))
+    if plan then
+        eq('javascript', plan.lang, 'the plan carries the JS language')
+        local _, after = cx.preview(store, plan)
+        local text = after[plan.a.file]
+        -- JS braces + semicolons, not Lua function...end
+        ok(text:find('function ' .. plan.helper .. '(x, hp1) {', 1, true), 'JS helper opens with a brace')
+        ok(text:find('const w = encode(z, hp1);', 1, true), 'the hole is parameterized in the JS body')
+        ok(text:find(('return %s(x, \'json\');'):format(plan.helper), 1, true), 'fmtA delegates (JS semicolon)')
+        ok(text:find(('return %s(a, \'yaml\');'):format(plan.helper), 1, true), 'fmtB delegates')
+        local pr = vim.treesitter.get_string_parser(text, 'javascript'):parse()[1]:root()
+        ok(not pr:has_error(), 'the synthesized JS parses clean')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: a JavaScript apply writes a parsing file', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local root = proj { ['m.js'] = JS_A .. '\n' .. JS_B }
+    local plan = cx.plan(store, xpair('fmtA'))
+    ok(plan, 'planned')
+    if plan then
+        store.set_txn(plan)
+        local entry, why = cx.apply(store, plan)
+        ok(entry, 'JS apply succeeds: ' .. tostring(why))
+        local written = table.concat(vim.fn.readfile(root .. '/m.js'), '\n')
+        local pr = vim.treesitter.get_string_parser(written, 'javascript'):parse()[1]:root()
+        ok(not pr:has_error(), 'the written JS parses clean')
+        eq(3, select(2, written:gsub(plan.helper .. '%(', '')), 'helper appears 3× (def + 2 calls)')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: cross-file JS is refused (no module wiring yet)', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local root = proj { ['a.js'] = JS_A, ['b.js'] = JS_B }
+    -- fmtA/fmtB are in different files; JS has no module wiring → refuse
+    local pa = clones.near_of(store, fn_id('fmtA'), { max_dist = 2, min_rows = 4, min_shared = 2 })[1]
+    if pa then
+        local plan, why = cx.plan(store, pa, { dest = 'shared.js' })
+        ok(not plan and why:find('cross%-file'), 'cross-file JS is refused with a reason')
     else ok(true, '(no pair — fine)') end
     vim.fn.delete(root, 'rf')
 end)
