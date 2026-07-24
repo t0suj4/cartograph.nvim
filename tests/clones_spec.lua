@@ -80,3 +80,47 @@ test('clones: a unique function forms no group; report is honest on empty', func
     ok(clones.report({})[1]:find('none'), 'empty report says none')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── block/window tier ───────────────────────────────────────────────────────
+
+-- does any block group contain a member whose name matches `name`?
+local function block_has(groups, name)
+    for _, g in ipairs(groups) do
+        for _, m in ipairs(g) do
+            if m.name == name then return g end
+        end
+    end
+    return nil
+end
+
+test('clones: a shared statement BLOCK inside two different functions is found', function ()
+    -- two functions with distinct heads but an identical 5-statement middle+tail
+    -- (the block-tier target the whole-function tier is blind to). Locals renamed
+    -- (a/b/c → p/q/r; the param src → items) — the block still matches. The block
+    -- uses only proper `local` declarations (real df-defs), not loop binders.
+    local mid1 = '  local a = compute(src)\n  local b = a + offset\n'
+        .. '  local c = wrap(b)\n  persist(c)\n  return c'
+    local mid2 = '  local p = compute(items)\n  local q = p + offset\n'
+        .. '  local r = wrap(q)\n  persist(r)\n  return r'
+    local root = proj {
+        ['a.lua'] = fn('alpha', 'src', '  log("alpha")\n' .. mid1),
+        ['b.lua'] = fn('beta', 'items', '  banner()\n  setup(items)\n' .. mid2),
+    }
+    local groups = clones.blocks(store, { min_len = 4 })
+    local g = block_has(groups, 'alpha')
+    ok(g, 'the shared block is detected in alpha')
+    ok(g and block_has(groups, 'beta') == g, 'alpha and beta share the same block group')
+    ok(g and g.len >= 5, 'the block is reported at its full (>=5) length, not the seed length')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: functions with no shared block yield no block group', function ()
+    local root = proj {
+        ['a.lua'] = fn('one', 'a', '  local x = a + 1\n  local y = x * 2\n  local z = y - 3\n  return z'),
+        ['b.lua'] = fn('two', 'b', '  send(b)\n  flush()\n  local r = recv()\n  return decode(r)'),
+    }
+    ok(not block_has(clones.blocks(store, { min_len = 4 }), 'one'),
+        'unrelated bodies share no block')
+    ok(clones.blocks_report({})[1]:find('none'), 'empty block report says none')
+    vim.fn.delete(root, 'rf')
+end)

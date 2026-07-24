@@ -309,9 +309,23 @@ a different operator is *not* — the discriminating tokens stay in the key,
 so it needs no "shared-callee" heuristic to suppress coincidences. Focus a
 group member, `:CartographMerge`, and the duplication is gone. Run it
 repo-wide (including tests, where copy-pasted fixtures live) headless with
-`nvim -l tools/clones.lua`. This is the exact tier of the clone ladder; a
-near-clone tier (copies that differ by a statement or two, via AST
-anti-unification) is the banked next step on the same substrate.
+`nvim -l tools/clones.lua`.
+
+`:CartographBlockClones` is the second tier: a clone need not be a whole
+function. It finds **contiguous statement runs** duplicated across — or
+within — functions, which the whole-function tier is blind to. It seeds on a
+window of statements, extends each match maximally so a long shared run is
+reported once at its true length, and alpha-canonicalizes each window
+*locally* (slots renumbered per window) so a block matches regardless of what
+locals its surrounding function happened to introduce first. On this very
+codebase it surfaces a 67-statement block shared between the extractor's and
+the relinker's name-resolution loops — a copy that a text diff misses because
+the two have drifted in comments and whitespace, but whose *statement shape*
+is identical. Run it with `nvim -l tools/clones.lua --blocks`. This is the
+exact/block pair of the clone ladder; a near-clone tier (copies that differ by
+a statement or two, via AST anti-unification — where the generalized template
+*is* the shared helper and its holes are the parameters) is the banked next
+step on the same substrate.
 
 ### The working set
 
