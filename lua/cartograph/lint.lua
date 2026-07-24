@@ -728,6 +728,74 @@ local function resource_leak_findings(store)
     return out
 end
 
+-- Member leak — the OBJECT-GRAPH regime of resource-pairing
+-- ([[cartograph-resource-pairing]], the class-lifetime sibling of the intra-fn
+-- reassign leak). A pointer MEMBER `m_x = new T()` acquired somewhere but with NO
+-- release (`delete m_x` / `m_x->drop()`) ANYWHERE in the program leaks for the
+-- object's lifetime (the release belongs in the destructor or a cleanup). Whole-
+-- program: accumulate acquires + frees across every C++ file, then flag members
+-- acquired-but-never-freed. Keyed GLOBALLY by member name = SOUND-CONSERVATIVE on
+-- the free side: a name freed in ANY class excludes it (a safe false-negative on a
+-- collision, never a false-positive). Hedged (~): OWNERSHIP-TRANSFER is not modeled
+-- — a member handed to another object (a setter/ctor arg that takes ownership) is
+-- freed by that owner, not this class, so it can be a false positive; the finding
+-- is a review candidate, not a definite leak. `m_` member convention (irrlicht/
+-- luanti); raw `= new` only (a unique_ptr member is `.reset(new…)`, auto-released).
+-- Validated on luanti: recovers BOTH member-leak oracles (m_mapper ebe7b3153,
+-- m_minimap_mapblock 88a6b9f52), 6 candidates whole-codebase (56 freed excluded).
+local function member_leak_findings(store)
+    local acquired, freed = {}, {} -- member name -> {file,line} first acquire / freed-anywhere
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'module' and n.file and LEAK_CPP_EXT[(n.file:match('%.([%w]+)$') or ''):lower()] then
+            local lines = store.content({ file = n.file })
+            if lines then
+                local src = table.concat(lines, '\n')
+                local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'cpp')
+                if okp and parser then
+                    local root = parser:parse()[1]:root()
+                    local function txt(t) return vim.treesitter.get_node_text(t, src) end
+                    local function walk(t)
+                        local ty = t:type()
+                        if ty == 'assignment_expression' then
+                            local l, r = t:field('left')[1], t:field('right')[1]
+                            if l and r and r:type() == 'new_expression' then
+                                -- a member LHS: bare `m_x` or `this->m_x`
+                                local nm = txt(l):match('^m_[%w_]+$') or txt(l):match('->%s*(m_[%w_]+)$')
+                                if nm and not acquired[nm] then
+                                    acquired[nm] = { file = n.file, line = (select(1, t:range())) + 1 }
+                                end
+                            end
+                        elseif ty == 'delete_expression' then
+                            local nm = txt(t):match('m_[%w_]+'); if nm then freed[nm] = true end
+                        elseif ty == 'call_expression' then
+                            local f = t:field('function')[1]
+                            if f and f:type() == 'field_expression' then
+                                local base = f:field('argument')[1]
+                                local mem = txt(f:field('field')[1])
+                                if base and (mem == 'drop' or mem == 'remove') then
+                                    local nm = txt(base):match('^m_[%w_]+$')
+                                    if nm then freed[nm] = true end
+                                end
+                            end
+                        end
+                        for c in t:iter_children() do walk(c) end
+                    end
+                    walk(root)
+                end
+            end
+        end
+    end
+    local out = {}
+    for m, a in pairs(acquired) do
+        if not freed[m] then
+            out[#out + 1] = { file = store.abs(a.file), line = a.line,
+                message = ("possible member leak (~): '%s' is assigned `new` here but never released (`delete`/`->drop()`) anywhere — a class-lifetime leak unless ownership transfers to another object"):format(m) }
+        end
+    end
+    table.sort(out, function (x, y) return (x.file .. x.line) < (y.file .. y.line) end)
+    return out
+end
+
 -- Null dereference — the reverse-guards_over reading ([[cartograph-nil-flow]] N1,
 -- [[cartograph-luanti-corpus]] oracle). A deref `p->x` whose base was assigned from
 -- a NULLABLE-returning call (`p = m->getBlockNoCreateNoEx(...)`) and is NOT narrowed
@@ -765,6 +833,7 @@ end
 
 M.rules = {
     { name = 'resource-leak', severity = 'warn', run = resource_leak_findings },
+    { name = 'member-leak', severity = 'warn', run = member_leak_findings },
     { name = 'null-deref', severity = 'warn', run = null_deref_findings },
     { name = 'silent-drop', severity = 'warn', run = silent_drop_findings },
     { name = 'seam-guard', severity = 'warn', run = seam_findings },

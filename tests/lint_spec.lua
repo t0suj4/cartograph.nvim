@@ -212,3 +212,28 @@ test('lint null-deref: an unguarded nullable deref flags; guards/param/new do no
     ok(f[1].message:match("'m'") and f[1].line == 3, 'only the unguarded nullable deref in bug() flags')
     vim.fn.delete(root, 'rf')
 end)
+
+test('lint member-leak: a member new`d and never freed flags; delete/drop elsewhere excludes', function ()
+    if not cpp_ready() then skip 'no cpp parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/c.cpp', 'w'))
+    fd:write(table.concat({
+        'void A::init() {',
+        '    m_leaked = new Thing();',    -- never freed -> FLAG (line 2)
+        '    m_deleted = new Thing();',   -- freed by delete below
+        '    m_dropped = new Ref();',     -- freed by drop below
+        '}',
+        'A::~A() {',
+        '    delete m_deleted;',
+        '    m_dropped->drop();',
+        '}',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local f = lint.run(store, only('member-leak'))
+    local msg = table.concat(messages(f), '\n')
+    eq(1, #f)
+    ok(msg:match("'m_leaked'") and f[1].line == 2, 'only the never-freed member flags')
+    ok(not msg:match('m_deleted') and not msg:match('m_dropped'), 'delete/drop members excluded')
+    vim.fn.delete(root, 'rf')
+end)

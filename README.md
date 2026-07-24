@@ -958,6 +958,16 @@ checks luacheck can't:
   `~` is honest — a macro or an aliased pointer can fool the per-line source
   match. (Member leaks whose release belongs in a destructor are a separate,
   object-graph concern, not flagged.)
+- **member-leak** (C++, `~`) — the class-lifetime sibling: a pointer **member**
+  `m_x = new T()` acquired somewhere but **never released** (`delete m_x` /
+  `m_x->drop()`) anywhere in the program — a leak for the object's lifetime (the
+  release belongs in the destructor or a cleanup). Whole-program, and *sound on
+  the free side*: a member name freed in any class is excluded (a name collision
+  costs a missed report, never a false one). The `~` is honest about the other
+  side — **ownership transfer** isn't modelled, so a member handed to another
+  object that takes ownership can be a false positive; the finding is a review
+  candidate. (`m_` member convention; raw `= new` only — a `unique_ptr` member
+  auto-releases.)
 - **null-deref** (C++, `~`) — a pointer assigned from a **nullable-returning**
   call (the irrlicht/luanti `…NoEx` / `emergeBlock` convention) and then
   dereferenced (`p->x`) with no null-guard in between: it can crash if the call
