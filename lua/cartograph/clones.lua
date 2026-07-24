@@ -572,12 +572,23 @@ function M.analyze_pair(pair)
     end
     local structural = insdel > 0
     for _, h in ipairs(holes) do if h.kind == 'struct' then structural = true end end
-    -- dedupe value holes by (kind, a, b) — one parameter per distinct varying leaf
-    local params, seen = {}, {}
+    -- group value holes by (kind, a, b) — one PARAMETER per distinct varying leaf, but
+    -- collect EVERY occurrence's range (sites_a/sites_b) so a leaf that appears more than
+    -- once in the body is substituted at all its sites (the extract transaction needs this;
+    -- a single-site dedup would leave later occurrences un-parameterized — unsound). at_a/
+    -- at_b stay as the FIRST site, for display.
+    local params, bykey = {}, {}
     for _, h in ipairs(holes) do
         if h.kind ~= 'struct' then
             local key = h.kind .. '\31' .. tostring(h.a) .. '\31' .. tostring(h.b)
-            if not seen[key] then seen[key] = true; params[#params + 1] = h end
+            local p = bykey[key]
+            if not p then
+                p = { kind = h.kind, a = h.a, b = h.b, at_a = h.at_a, at_b = h.at_b,
+                    sites_a = {}, sites_b = {} }
+                bykey[key] = p; params[#params + 1] = p
+            end
+            if h.at_a then p.sites_a[#p.sites_a + 1] = h.at_a end
+            if h.at_b then p.sites_b[#p.sites_b + 1] = h.at_b end
         end
     end
     local kind = structural and 'structural' or (#params == 0 and 'exact' or 'value')

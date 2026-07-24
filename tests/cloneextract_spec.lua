@@ -1,0 +1,143 @@
+-- The verified extract-helper transaction ([[cartograph-record-fold-arc]] prereq #4):
+-- factor a value-parameterizable, same-file, body-safe near-clone pair into a shared
+-- parameterized helper, with the txn contract + a parses-clean synthesis gate. These
+-- tests exercise the happy path (correct synthesis, actually written & parsing) and the
+-- refusal gates (the sound subset's constraints).
+
+local ts = require 'cartograph.providers.treesitter'
+local store = require 'cartograph.store'
+local clones = require 'cartograph.clones'
+local cx = require 'cartograph.cloneextract'
+
+local function proj(files)
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for name, src in pairs(files) do
+        local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(src); fd:close()
+    end
+    store.ingest(ts.extract(root))
+    return root
+end
+local function fn_id(name)
+    for _, n in ipairs(store.data.nodes) do
+        if n.name == name and (n.kind == 'function' or n.kind == 'method') then return n.id end
+    end
+end
+local NEAR = { max_dist = 2, min_rows = 4, min_shared = 3 }
+local function pair_of(name)
+    return clones.near_of(store, fn_id(name), NEAR)[1]
+end
+
+test('extract-helper: a same-file value pair synthesizes a correct helper + wrappers', function ()
+    local root = proj { ['m.lua'] =
+        'local M = {}\n\nlocal function fmt_a(x)\n  local y = prep(x)\n  local z = norm(y)\n'
+        .. '  local w = encode(z, \'json\')\n  local o = wrap(w)\n  return o\nend\n\n'
+        .. 'local function fmt_b(a)\n  local b = prep(a)\n  local c = norm(b)\n'
+        .. '  local d = encode(c, \'yaml\')\n  local e = wrap(d)\n  return e\nend\n\nreturn M\n' }
+    local plan, why = cx.plan(store, pair_of('fmt_a'))
+    ok(plan, 'a same-file value pair plans: ' .. tostring(why))
+    if plan then
+        local _, after = cx.preview(store, plan)
+        local text = after[plan.file]
+        -- the shared body moved into the helper with the literal lifted to a parameter
+        ok(text:find('local function ' .. plan.helper .. '(x, hp1)', 1, true),
+            'helper signature carries the original param + the hole param')
+        ok(text:find('encode(z, hp1)', 1, true), 'the hole is parameterized in the helper body')
+        -- both copies became tail-call wrappers passing their own filling
+        ok(text:find(('return %s(x, \'json\')'):format(plan.helper), 1, true), 'fmt_a passes its filling')
+        ok(text:find(('return %s(a, \'yaml\')'):format(plan.helper), 1, true), 'fmt_b passes its filling')
+        -- and it parses
+        local pr = vim.treesitter.get_string_parser(text, 'lua'):parse()[1]:root()
+        ok(not pr:has_error(), 'the synthesized file parses clean')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: a leaf recurring twice is parameterized at BOTH sites', function ()
+    local root = proj { ['m.lua'] =
+        'local M = {}\n\nlocal function g_a(x)\n  local a = start(x)\n  local b = tag(a, \'red\')\n'
+        .. '  local c = mix(b)\n  local d = paint(c, \'red\')\n  local e = wrap(d)\n  return e\nend\n\n'
+        .. 'local function g_b(y)\n  local a = start(y)\n  local b = tag(a, \'blue\')\n'
+        .. '  local c = mix(b)\n  local d = paint(c, \'blue\')\n  local e = wrap(d)\n  return e\nend\n\nreturn M\n' }
+    local plan = cx.plan(store, pair_of('g_a'))
+    ok(plan, 'the multi-occurrence pair plans')
+    if plan then
+        local _, after = cx.preview(store, plan)
+        local text = after[plan.file]
+        -- both 'red' occurrences in g_a's body became hp1 (no bare 'red' left in the helper)
+        local helper_body = text:match('local function ' .. plan.helper .. '.-\nend')
+        ok(helper_body and helper_body:find('tag(a, hp1)', 1, true)
+            and helper_body:find('paint(c, hp1)', 1, true),
+            'both sites of the recurring leaf are parameterized')
+        ok(helper_body and not helper_body:find('\'red\'', 1, true),
+            'no un-parameterized occurrence remains')
+        ok(text:find(('return %s(x, \'red\')'):format(plan.helper), 1, true),
+            'the wrapper passes the filling once')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: the write is journaled, parses, and both wrappers call the helper', function ()
+    local root = proj { ['m.lua'] =
+        'local M = {}\n\nlocal function fmt_a(x)\n  local y = prep(x)\n  local z = norm(y)\n'
+        .. '  local w = encode(z, \'json\')\n  local o = wrap(w)\n  return o\nend\n\n'
+        .. 'local function fmt_b(a)\n  local b = prep(a)\n  local c = norm(b)\n'
+        .. '  local d = encode(c, \'yaml\')\n  local e = wrap(d)\n  return e\nend\n\nreturn M\n' }
+    local plan = cx.plan(store, pair_of('fmt_a'))
+    ok(plan, 'planned')
+    if plan then
+        store.set_txn(plan)
+        local entry, why = cx.apply(store, plan)
+        ok(entry, 'apply succeeds: ' .. tostring(why))
+        local written = table.concat(vim.fn.readfile(root .. '/m.lua'), '\n')
+        ok(written:find('local function ' .. plan.helper .. '(', 1, true), 'helper written to disk')
+        eq(3, select(2, written:gsub(plan.helper .. '%(', '')), 'helper appears 3× (1 def + 2 calls)')
+        local pr = vim.treesitter.get_string_parser(written, 'lua'):parse()[1]:root()
+        ok(not pr:has_error(), 'the written file parses clean')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ── refusal gates (the sound subset) ─────────────────────────────────────────
+
+test('extract-helper: a cross-file pair is refused', function ()
+    local root = proj {
+        ['a.lua'] = 'local function find(x)\n  local c = cfg().alpha\n  local h = home(c)\n'
+            .. '  local p = join(h, x)\n  return exists(p)\nend\nreturn find\n',
+        ['b.lua'] = 'local function find(x)\n  local c = cfg().beta\n  local h = home(c)\n'
+            .. '  local p = join(h, x)\n  return exists(p)\nend\nreturn find\n',
+    }
+    local pair = pair_of('find')
+    if pair then
+        local plan, why = cx.plan(store, pair)
+        ok(not plan and why:find('cross%-file'), 'cross-file is refused with a reason')
+    else ok(true, '(no pair found — vacuously fine)') end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: a structural pair (inserted statement) is refused', function ()
+    local root = proj { ['m.lua'] =
+        'local M = {}\n\nlocal function p_a(x)\n  local y = prep(x)\n  local z = norm(y)\n'
+        .. '  local w = wrap(z)\n  return w\nend\n\n'
+        .. 'local function p_b(a)\n  local b = prep(a)\n  local c = norm(b)\n  validate(c)\n'
+        .. '  local d = wrap(c)\n  return d\nend\n\nreturn M\n' }
+    local pair = pair_of('p_a')
+    if pair then
+        local plan, why = cx.plan(store, pair)
+        ok(not plan and why:find('value%-parameterizable'), 'a structural pair is refused')
+    else ok(true, '(no pair — fine)') end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: a self-recursive body is refused', function ()
+    local root = proj { ['m.lua'] =
+        'local M = {}\n\nlocal function r_a(n)\n  local y = base(n, \'x\')\n  local z = step(y)\n'
+        .. '  local w = r_a(z)\n  return w\nend\n\n'
+        .. 'local function r_b(n)\n  local y = base(n, \'y\')\n  local z = step(y)\n'
+        .. '  local w = r_b(z)\n  return w\nend\n\nreturn M\n' }
+    local pair = pair_of('r_a')
+    if pair then
+        local plan, why = cx.plan(store, pair)
+        ok(not plan and why:find('recursive'), 'a self-recursive body is refused')
+    else ok(true, '(no pair — fine)') end
+    vim.fn.delete(root, 'rf')
+end)

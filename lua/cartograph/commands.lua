@@ -62,8 +62,10 @@ end
 
 local function txn_module()
     local st = require 'cartograph.store'
-    return (st.txn.verb == 'move' or st.txn.verb == 'extract-module')
-        and 'cartograph.moveapply' or 'cartograph.clonemerge'
+    local v = st.txn.verb
+    if v == 'move' or v == 'extract-module' then return 'cartograph.moveapply' end
+    if v == 'extract-helper' then return 'cartograph.cloneextract' end
+    return 'cartograph.clonemerge'
 end
 
 local function cmd(name, fn, opts)
@@ -637,6 +639,35 @@ function M.register()
         end
         scratch(clones.extract_proposal(best, store))
     end, { desc = 'cartograph: propose the parameterized helper the focused function and its nearest near-clone could factor into — the anti-unified template with the differing leaves as parameters, plus a body-safety verdict (is the whole body cleanly liftable?). A reviewable scaffold (the write is not auto-applied). Companion to :CartographMerge for the near-clone case' })
+
+    -- ── extract-helper APPLY: stage the transaction (verified auto-write) ──
+    cmd('CartographExtractHelperApply', function ()
+        local store = live() if not store then return end
+        if store.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first', vim.log.levels.WARN)
+        end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
+        end
+        local best = require('cartograph.clones').near_of(store, id, { max_dist = 2 })[1]
+        if not best then
+            return vim.notify(('cartograph: %s has no near-clone within edit distance 2')
+                :format(n.name), vim.log.levels.INFO)
+        end
+        local plan, why = require('cartograph.cloneextract').plan(store, best)
+        if not plan then
+            return vim.notify('cartograph: cannot extract — ' .. tostring(why)
+                .. ' (see :CartographExtractHelper for the scaffold)', vim.log.levels.WARN)
+        end
+        store.set_txn(plan)
+        vim.notify(('cartograph: extract-helper staged — %s / %s → %s(%d param%s).'
+            .. ' Review with :CartographDiff, then :CartographApply'):format(
+            plan.a.name, plan.b.name, plan.helper, plan.nparams,
+            plan.nparams == 1 and '' or 's'), vim.log.levels.INFO)
+    end, { desc = 'cartograph: stage the VERIFIED extract-helper transaction for the focused function and its nearest near-clone — synthesizes the shared parameterized helper and rewrites both bodies to tail-call it. Constrained to the sound subset (same-file, value-parameterizable, body-safe, Lua); refuses otherwise. Review :CartographDiff, commit :CartographApply (parses-clean + CAS + journal gated)' })
 
     -- ── clone findings as in-buffer signs (the interactive surface) ──
     cmd('CartographClonesSigns', function ()

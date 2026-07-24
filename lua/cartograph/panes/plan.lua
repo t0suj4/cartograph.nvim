@@ -53,6 +53,15 @@ function M.render()
                 lines[#lines + 1] = ('  writes %d requalification(s) + %d import line(s)')
                     :format(#(t.rewrites or {}), #(t.imports_add or {}))
             end
+        elseif t.verb == 'extract-helper' then
+            lines[#lines + 1] = hl(marks, #lines,
+                ('EXTRACT-HELPER  %s / %s → %s(%d param%s)    :CartographDiff · :CartographApply · :CartographTxnClear')
+                    :format(t.a.name, t.b.name, t.helper, t.nparams,
+                        t.nparams == 1 and '' or 's'), 'Title')
+            lines[#lines + 1] = ('  %s   %s'):format(t.a.name, t.file)
+            lines[#lines + 1] = ('  %s   %s'):format(t.b.name, t.file)
+            lines[#lines + 1] = ('  synthesizes a shared helper; both bodies become tail-calls;'
+                .. ' touches %d file(s)'):format(#t.touched)
         else
             lines[#lines + 1] = hl(marks, #lines,
                 ('MERGE  %d clone(s) → %s    :CartographDiff · :CartographApply · :CartographTxnClear')
@@ -64,7 +73,7 @@ function M.render()
             lines[#lines + 1] = ('  rewrites %d call site(s); touches %d file(s)')
                 :format(#t.rewrites, #t.touched)
         end
-        for _, h in ipairs(t.hazards) do
+        for _, h in ipairs(t.hazards or {}) do
             lines[#lines + 1] = hl(marks, #lines, '  ⚠ ' .. h, 'DiagnosticWarn')
         end
         set_lines(M.buf, lines)

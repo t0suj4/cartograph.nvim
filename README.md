@@ -351,9 +351,20 @@ flagged *structural* and left to a human, because a value parameter can't
 capture it. And if anti-unification finds no real divergence at all (the
 edit-distance came from renamed locals the function-global pass couldn't see
 through), the pair is really an exact clone and `:CartographMerge` applies
-directly. The proposal is a reviewable scaffold, not an auto-write:
-synthesizing the helper and threading its parameters through both call sites,
-with visibility and scope kept correct, is a verified transaction of its own.
+directly. And for the cleanest case — a same-file, value-parameterizable pair
+whose bodies are both safe to lift — `:CartographExtractHelperApply` does the
+write: it synthesizes the shared helper (the template with each varying leaf as
+a parameter), rewrites both bodies to *tail-call* it passing their own filling,
+and stages it as a transaction you review with `:CartographDiff` and commit with
+`:CartographApply`. The tail call is what makes it sound — the whole body moves
+into the helper, so every return (count, values, early exits) is preserved
+exactly. It rides the same journal-and-verify contract as the move and merge
+refactors, and adds a synthesis gate of its own: the result must parse cleanly
+and actually contain the helper and both call sites, or the apply refuses. It is
+deliberately narrow — cross-file pairs (which need shared-module wiring), a
+differing statement rather than a differing leaf, a nested or vararg or recursive
+body, all fall outside the provably-safe subset and are refused with a reason,
+leaving the reviewable scaffold as the fallback.
 
 `:CartographClonesSigns` lands all of this *on the code* rather than in a
 report: exact clones and near-clone functions become in-buffer signs, and each
