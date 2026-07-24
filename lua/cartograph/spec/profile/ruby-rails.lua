@@ -291,6 +291,12 @@ if core and core.canon then
     sigs = core.sigs
     sig_root = core.stamp and core.stamp.root
 end
+-- Rails RBS signatures (gem_rbs_collection) keyed BY MEMBER NAME — Rails' RBS
+-- owners are deep internal modules, not the profile's recognizable coarse owners,
+-- so hover looks these up by member (the node keeps its own owner in the id) and
+-- shows the RBS owner as provenance. Locations are relative to the rails source root.
+local rails_sigs = core and core.rails_sigs
+local rails_root = core and core.stamp and core.stamp.rails_source
 for _, ns in ipairs(NAMESPACES) do
     namespaces[#namespaces + 1] = ns
     nsset[ns] = true
@@ -308,4 +314,5 @@ return {
     mint = true,
     types = types, free = free, namespaces = namespaces, nsset = nsset,
     vocab = vocab, canon = canon, sigs = sigs, sig_root = sig_root,
+    rails_sigs = rails_sigs, rails_root = rails_root,
 }

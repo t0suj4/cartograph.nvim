@@ -81,6 +81,34 @@ test('ruby-rails profile: LSP hover shows the RBS signature of a minted symbol',
         'go-to-def resolves the minted symbol into its RBS source file')
 end)
 
+test('ruby-rails profile: hover shows the Rails RBS signature (gem_rbs_collection)', function ()
+    if not ready() then skip 'no ruby parser' end
+    local p = profmod.load('ruby-rails')
+    if not (p.rails_sigs and p.rails_sigs['belongs_to']) then
+        skip 'no Rails RBS in the artifact (gem_rbs_collection not distilled)'
+    end
+    local store = require 'cartograph.store'
+    local lsp = require 'cartograph.lsp'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'config/application.rb', { 'module Demo; end' })
+    write(root, 'app/models/widget.rb', {
+        'class Widget < ApplicationRecord',
+        '  belongs_to :account',
+        'end',
+    })
+    local data = ts.extract(root); store.ingest(data)
+    local c = call_to(data, 'belongs_to')
+    ok(c and c.to == 'ruby-rails::ActiveRecord::Base.belongs_to', 'belongs_to minted')
+    local h = lsp.handlers['textDocument/hover'](store, {
+        textDocument = { uri = vim.uri_from_fname(root .. '/' .. c.file) },
+        position = { line = 1, character = 4 }, -- inside `  belongs_to :account`
+    })
+    local val = h and h.contents and h.contents.value or ''
+    ok(val:find('RBS', 1, true), 'hover shows RBS provenance')
+    ok(val:find('->', 1, true), 'hover shows the Rails declared signature')
+    ok(val:find('ActiveRecord', 1, true), 'hover names the RBS defining module')
+end)
+
 test('ruby-rails profile: a Rails root activates it; framework calls → minted stdlib nodes', function ()
     if not ready() then skip 'no ruby parser' end
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
