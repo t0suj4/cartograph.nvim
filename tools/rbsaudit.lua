@@ -111,3 +111,59 @@ print('  --- owner-differs (mine vs RBS) ---')
 for _, l in ipairs(differ_list) do print('    ' .. l) end
 print('  --- sample absent (expect Rails/AS verbs; a CORE name here = typo) ---')
 print('    ' .. table.concat(absent_list, ' '))
+
+-- ── Rails face: hand Rails surface vs gem_rbs_collection (rails_sigs) ─────────
+-- The free-answer-key check for the FRAMEWORK half of the surface. rails_sigs is
+-- the RBS for the AR/ActionController/ActionView gems (member-keyed). This keeps
+-- the hand curation RBS-INFORMED without DERIVING from it — deriving is measured-
+-- negative ([[cartograph-stdlib-profile]]): RBS owners are deep internal modules,
+-- so the hand COARSE-owner map is the sound source; RBS's role is this audit +
+-- hover sigs. Actionable output = the HAND-ONLY list (verify real Rails method vs
+-- a typo/stale name), since those are the entries no ground truth backs.
+local RAILS_OWNERS = {
+    ['ActiveRecord::Base'] = true, ['ActiveRecord::Persistence'] = true,
+    ['ActiveRecord::Relation'] = true, ['ActionController::Base'] = true,
+    ['ActionView::Helpers'] = true, ['Rails'] = true,
+}
+local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
+local rails_sigs = prof.rails_sigs
+print('')
+if not (rails_sigs and next(rails_sigs)) then
+    print('rbsaudit(rails): no rails_sigs in the artifact (gem_rbs_collection not '
+        .. 'distilled) — skipping the framework face')
+    return
+end
+-- hand Rails members = canon entries whose coarse owner is a RAILS owner; also
+-- note every member the profile already blesses in `free` (dispositions covered).
+local hand_rails = {}
+for m, path in pairs(prof.canon or {}) do
+    if RAILS_OWNERS[path:match('^(.-)[#.]')] then hand_rails[m] = true end
+end
+local confirmed, hand_only = 0, {}
+for m in pairs(hand_rails) do
+    if rails_sigs[m] then confirmed = confirmed + 1 else hand_only[#hand_only + 1] = m end
+end
+-- RBS-only = RBS Rails methods the hand surface omits; split by whether the
+-- profile already disposes the name (in `free`) — a name absent from `free` would
+-- be a genuine disposition gap (expect ZERO: ruby's core surface covers them).
+local rbs_only, rbs_only_gap = 0, {}
+for m in pairs(rails_sigs) do
+    if not hand_rails[m] then
+        rbs_only = rbs_only + 1
+        if not (prof.free and prof.free[m]) then rbs_only_gap[#rbs_only_gap + 1] = m end
+    end
+end
+table.sort(hand_only); table.sort(rbs_only_gap)
+print(('rbsaudit(rails) — %d hand Rails members vs %d gem_rbs_collection members')
+    :format(count(hand_rails), count(rails_sigs)))
+print(('  confirmed (hand ∩ RBS):            %d  (%.0f%% — RBS backs the curation)')
+    :format(confirmed, count(hand_rails) > 0 and 100 * confirmed / count(hand_rails) or 0))
+print(('  HAND-ONLY (RBS lacks → VERIFY):    %d  (real Rails method vs typo/stale)')
+    :format(#hand_only))
+print('    ' .. table.concat(hand_only, ' '))
+print(('  RBS-only (not hand-listed):        %d  (already disposed via core owners;')
+    :format(rbs_only))
+print(('    owner-precision-only, receiver typing would disambiguate = measured-negative)'))
+print(('  RBS-only DISPOSITION GAPS (name absent from `free` = a real hole): %d')
+    :format(#rbs_only_gap))
+if #rbs_only_gap > 0 then print('    ' .. table.concat(rbs_only_gap, ' ', 1, math.min(40, #rbs_only_gap))) end
