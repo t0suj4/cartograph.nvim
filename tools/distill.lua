@@ -43,6 +43,57 @@ local function is_ctor(m)
         or m:match('^from%u') ~= nil
 end
 
+-- ── signature distillation (nav-time hover enrichment, READ-SIDE) ────────────
+-- Zig: a `std.<module>.<fn>` -> {sig,file,line} map for the free top-level public
+-- fns of std's directly-reexported modules, keyed to MATCH the minted
+-- `zig-std::std.<module>.<fn>` node id ([[cartograph-stdlib-profile]]). The raw
+-- native signature `(params) RET` + source location come straight from source.
+-- HOVER-ONLY (lsp.profile_sig): the disposition/vocab surface (types/free/vocab)
+-- is untouched, so NO extraction/version change — the gate corpora stay identical.
+-- Deep type-method chains + type constructors stay uncovered = honest frontier.
+local function zig_module_map(root) -- 'mem.zig' -> module 'mem'  (=> std.mem)
+    local map, fd = {}, io.open(root .. '/std.zig', 'r')
+    if not fd then return map end
+    for line in fd:lines() do
+        local mod, file = line:match('^pub const ([%w_]+) = @import%("([%w_/%.]+%.zig)"%)')
+        if mod and file then map[file] = mod end
+    end
+    fd:close(); return map
+end
+local function zig_read_sig(root, relfile, startline0, name) -- native "(params) RET"
+    local fd = io.open(root .. '/' .. relfile, 'r'); if not fd then return nil end
+    local lines = {}; for l in fd:lines() do lines[#lines + 1] = l end; fd:close()
+    local from, esc, buf = (startline0 or 0) + 1, name:gsub('(%W)', '%%%1'), {}
+    for j = from, math.min(#lines, from + 60) do
+        buf[#buf + 1] = lines[j]
+        if lines[j]:find('{') and table.concat(buf):find('fn%s+' .. esc) then break end
+    end
+    local text = table.concat(buf, ' '):gsub('%s+', ' ')
+    local params, tail = text:match('fn%s+' .. esc .. '%s*(%b())%s*([^{]*)')
+    if not params then return nil end
+    local ret = (tail or ''):gsub('%s+$', '')
+    return params .. (ret ~= '' and (' ' .. ret) or '')
+end
+local function zig_sigs(rt, data)
+    local mmap = zig_module_map(rt.std_root)
+    local sigs, n = {}, 0
+    for _, nd in ipairs(data.nodes) do
+        if nd.kind == 'function' and nd.exported and mmap[nd.file] then
+            local base = nd.name:gsub('%b()', '') -- generic-erase
+            if not base:find('%.') then           -- free top-level fn (no type owner)
+                local sl = nd.range and nd.range.start and nd.range.start.line
+                local sig = zig_read_sig(rt.std_root, nd.file, sl, base)
+                if sig then
+                    sigs['std.' .. mmap[nd.file] .. '.' .. base] =
+                        { sig = sig, file = nd.file, line = (sl or 0) + 1 }
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return sigs, n
+end
+
 local function distill(rt)
     io.write(('distill %s: extracting %s ...\n'):format(rt.runtime, rt.std_root))
     local t0 = vim.loop.hrtime()
@@ -76,14 +127,20 @@ local function distill(rt)
     for _ in pairs(free) do n_free = n_free + 1 end
     for _ in pairs(vocab) do n_vocab = n_vocab + 1 end
 
+    -- nav-time hover signatures (read-side; does NOT touch the disposition surface)
+    local sigs, n_sig = nil, 0
+    if rt.lang == 'zig' then sigs, n_sig = zig_sigs(rt, data) end
+
     local profile = {
         schema = 1, runtime = rt.runtime, lang = rt.lang,
         version = git_rev(rt.version_root), stamp = iso(),
         types = types, free = free, namespaces = {}, vocab = vocab,
+        sigs = sigs, sig_root = sigs and rt.std_root or nil,
+        sig_kind = sigs and 'zig' or nil,
     }
     return profile, {
         types = n_types, members = n_members, ctors = n_ctors,
-        free = n_free, vocab = n_vocab,
+        free = n_free, vocab = n_vocab, sigs = n_sig,
     }
 end
 
@@ -136,8 +193,8 @@ local path = write_profile(profile)
 io.write('\n=== profile coverage ===\n')
 io.write(('  runtime=%s version=%s lang=%s\n'):format(
     profile.runtime, profile.version, profile.lang))
-io.write(('  types=%d  members=%d  ctors=%d  free=%d  vocab=%d\n'):format(
-    stats.types, stats.members, stats.ctors, stats.free, stats.vocab))
+io.write(('  types=%d  members=%d  ctors=%d  free=%d  vocab=%d  sigs=%d\n'):format(
+    stats.types, stats.members, stats.ctors, stats.free, stats.vocab, stats.sigs or 0))
 -- top types by member count
 local ranked = {}
 for T, t in pairs(profile.types) do

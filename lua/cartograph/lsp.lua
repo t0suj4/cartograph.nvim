@@ -100,7 +100,7 @@ local function profile_sig(node)
     local s = prof.sigs and prof.sigs[path]
     if s then
         return { sig = s.sig, file = s.file, line = s.line, root = prof.sig_root,
-            runtime = rt, version = prof.version }
+            runtime = rt, version = prof.version, kind = prof.sig_kind }
     end
     -- Rails (framework) sig: keyed by MEMBER NAME (its RBS owner is a deep internal
     -- module ≠ the node's coarse owner), with that owner shown as provenance
@@ -108,7 +108,7 @@ local function profile_sig(node)
     local rs = member and prof.rails_sigs and prof.rails_sigs[member]
     if rs then
         return { sig = rs.sig, file = rs.file, line = rs.line, root = prof.rails_root,
-            runtime = rt, version = prof.version, owner = rs.owner }
+            runtime = rt, version = prof.version, owner = rs.owner, kind = prof.sig_kind }
     end
     return nil
 end
@@ -287,9 +287,10 @@ M.handlers['textDocument/hover'] = function (store, params)
             local ps = profile_sig(n)
             if ps and ps.sig then
                 lines[#lines + 1] = ('`%s: %s`'):format(n.name, ps.sig)
-                -- a Rails framework sig carries its RBS defining module as provenance
+                -- a framework sig carries its defining module as provenance; the
+                -- signature-source KIND is per-profile (RBS for ruby, `zig` for zig std)
                 local prov = ps.owner and (ps.runtime .. ' · ' .. ps.owner) or ps.runtime
-                lines[#lines + 1] = ('_%s · RBS %s_'):format(prov, ps.version or '?')
+                lines[#lines + 1] = ('_%s · %s %s_'):format(prov, ps.kind or 'RBS', ps.version or '?')
             end
             return md(lines)
         end

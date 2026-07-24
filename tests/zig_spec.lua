@@ -401,3 +401,42 @@ test('zig std-alias: a NON-std alias root is NOT minted (soundness)', function (
         'project module-alias receiver did not resolve to a std node')
     vim.fn.delete(root, 'rf')
 end)
+
+-- The zig-std profile now carries distilled `std.<module>.<fn>` SIGNATURES
+-- ([[cartograph-stdlib-profile]]): the same distill→sigs→hover machinery built
+-- for ruby RBS, generalized to zig std. HOVER-ONLY (read-side) — the disposition
+-- surface (types/free/vocab) is untouched, so extraction/gates are unchanged.
+test('zig-std profile: carries distilled signatures + a source-root hint', function ()
+    local p = require('cartograph.spec.profile').load('zig-std')
+    ok(p and p.schema == 1, 'zig-std profile loads')
+    ok(p.sigs and type(p.sigs['std.mem.eql']) == 'table' and p.sigs['std.mem.eql'].sig,
+        'sigs carries std.mem.eql')
+    ok(p.sigs['std.mem.eql'].sig:find('bool', 1, true), 'the signature shows the bool return type')
+    ok(p.sigs['std.debug.assert'], 'sigs carries the highest-frequency call std.debug.assert')
+    eq('zig', p.sig_kind)                    -- the hover provenance label (NOT "RBS")
+    ok(p.sig_root, 'a source-root hint rides along for go-to-def')
+end)
+
+test('zig-std profile: LSP hover shows the distilled signature of a minted std node', function ()
+    if not ready() then skip 'no zig parser' end
+    local lsp = require 'cartograph.lsp'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'd.zig', {
+        'const std = @import("std");',
+        'pub fn go(a: []const u8, b: []const u8) bool {',
+        '    return std.mem.eql(u8, a, b);',   -- minted zig-std::std.mem.eql
+        '}',
+    })
+    local _, calls = extract(root)
+    local nd = std_target(calls, 'eql')
+    ok(nd and nd.name == 'std.mem.eql', 'eql resolved to the minted std.mem.eql node')
+    -- hover on `eql` in `    return std.mem.eql(u8, a, b);` (line 2, cols 19-21)
+    local h = lsp.handlers['textDocument/hover'](store, {
+        textDocument = { uri = vim.uri_from_fname(root .. '/d.zig') },
+        position = { line = 2, character = 19 },
+    })
+    local val = h and h.contents and h.contents.value or ''
+    ok(val:find('comptime T: type', 1, true), 'hover shows the real zig signature (comptime params)')
+    ok(val:find('· zig ', 1, true), 'provenance labels the signature source as `zig`, not RBS')
+    vim.fn.delete(root, 'rf')
+end)
