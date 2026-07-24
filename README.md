@@ -510,6 +510,14 @@ callers). Ariadne's thread, in text.
      pack (RSpec + factory_bot verbs — `describe`/`it`/`let`/`expect`/…) stacks
      on top of `rails` for a test suite, so framework DSL reads as framework and
      a project method that happens to share a DSL name isn't mistaken for it.
+     Framework calls with no project definition (`where`, `present?`,
+     `belongs_to`, …) are recovered as external framework nodes (an
+     `ActiveRecord::Relation#where` you can hover and jump to) by the matching
+     **environment profile**, which activates automatically from the project's
+     shape — and the shape is found even when you open a *sub-directory* of the
+     app (analyzing `app/models/` alone still sees the Rails marker two levels
+     up, bounded by the repository root), so the same enrichment applies whether
+     you open the whole app or one folder.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

@@ -115,23 +115,25 @@ return {
         root = HOME .. '/git/discourse/app/models',
         repo = 'https://github.com/discourse/discourse',
         rev = '28b003a38d82',
-        expected = { refs = 2642, nodes = 4916 }, -- recalib @ R5b-more rails ORM-finder typing (v98): +27 refs = AR finder-typed receivers (x=Model.find_by; x.foo → Model#foo), all hedged (~), 0 loss. Prior 2615 @ R5b-ivar (v78)
+        expected = { refs = 7479, nodes = 5201 }, -- recalib @ UP-direction profile activation (v99): +4837 refs/+285 nodes = the ruby-rails profile now activates via ancestor-probing (config/application.rb 2 levels up in discourse/) → framework surface MINTS (ActiveRecord/ActiveSupport/ActionView), 0 edges removed, 0 project defs stolen (find yields to 5 project defs). Prior 2642 @ R5b-more (v98, pack-only, profile not activated on the subdir root)
         lang = 'ruby',
         packs = { 'rails' }, -- the rails overlay pack (assoc/delegate emitters
-                             -- + ActiveRecord vocab) composed onto base ruby
-        notes = 'rails overlay pack (discourse app/models, 369 files)',
+                             -- + ActiveRecord vocab); the ruby-rails PROFILE also
+                             -- activates via UP-probing (discourse/config/application.rb)
+        notes = 'rails overlay pack + UP-activated ruby-rails profile (discourse app/models, 369 files)',
     },
     rspec = {
         root = HOME .. '/git/discourse/spec/models',
         repo = 'https://github.com/discourse/discourse',
         rev = '28b003a38d82',
-        expected = { refs = 13, nodes = 515 },
+        expected = { refs = 151, nodes = 689 }, -- recalib @ UP-direction profile activation (v99): +138 refs/+174 nodes = ruby-rails profile UP-activates here too (also under discourse/). Prior 13/515 @ pack-only. DSL verbs still framework-refused; the lift is framework method minting
         lang = 'ruby',
         packs = { 'rails', 'rspec' }, -- MULTI-PACK composition (the de-risker):
                                       -- rails + the rspec/factory_bot test-DSL
-        notes = 'rspec test-DSL pack + multi-pack composition (discourse '
-            .. 'spec/models, 196 files) — DSL is framework-refused; low '
-            .. 'resolution is honest (specs are framework-dominated)',
+                                      -- + UP-activated ruby-rails profile
+        notes = 'rspec test-DSL pack + multi-pack composition + UP-activated '
+            .. 'ruby-rails profile (discourse spec/models, 196 files) — DSL is '
+            .. 'framework-refused; framework methods now mint via the profile',
     },
     go = {
         root = HOME .. '/git/hugo',

@@ -276,6 +276,39 @@ function M.probe(root)
     return out
 end
 
+--- The L2 environment profile a root implies, searched UP the ancestor chain
+--- ([[cartograph-repo-shapes]] UP direction). An extraction root INSIDE a shaped
+--- repo — e.g. `discourse/app/models` under a Rails app whose `config/
+--- application.rb` marker is two levels up — inherits the shape's profile: root-
+--- only probing cannot see the marker even in principle. Walks parents probing
+--- each dir, NEAREST match wins, and stops AFTER the repo boundary (a dir
+--- carrying `.git`) or at a small level cap — so it never wanders past the
+--- project into an unrelated parent (a framework-SOURCE repo like rails/
+--- activesupport has no app `config/application.rb`, so it correctly does not
+--- activate). Returns { profile, dir, name, evidence, inherited } or nil.
+--- DISPOSITION-tier: a profile only affects files of its own language, so a
+--- cross-language ancestor match is inert (eff_spec wraps it per-lang).
+function M.profile_for(root)
+    if type(root) ~= 'string' then return nil end
+    -- setup{ shapes = false } disables all shape activation (the disable knob)
+    local ok, cfg = pcall(require, 'cartograph.config')
+    if ok and cfg and cfg.shapes == false then return nil end
+    local dir, levels = root, 0
+    while dir and dir ~= '' and levels <= 5 do
+        for _, p in ipairs(M.probe(dir)) do
+            if p.evidence and p.config and p.config.profile then
+                return { profile = p.config.profile, dir = dir, name = p.name,
+                    evidence = p.evidence, inherited = dir ~= root }
+            end
+        end
+        if has(dir, '.git') then break end -- probe the repo root, then halt
+        local parent = dir:match('^(.*)/[^/]+$')
+        if not parent or parent == dir then break end
+        dir, levels = parent, levels + 1
+    end
+    return nil
+end
+
 -- what THIS module added to config (per key): stripped before the next
 -- root's presets apply, so one project's shape never leaks into another
 M._added = {}
@@ -333,13 +366,24 @@ function M.explain(root)
         if p.evidence then
             lines[#lines + 1] = ('  ✓ %-14s %s'):format(p.name, p.evidence)
             for key, val in pairs(p.config or {}) do
+                -- list values (entrypoints/exclude) join; scalars (profile) print as-is
+                local shown = type(val) == 'table' and table.concat(val, '  ')
+                    or tostring(val)
                 lines[#lines + 1] = ('      %s%s: %s'):format(
-                    cfg.user_set[key] and '(user setup{} wins) ' or '',
-                    key, table.concat(val, '  '))
+                    cfg.user_set[key] and '(user setup{} wins) ' or '', key, shown)
             end
         else
             lines[#lines + 1] = ('  · %-14s no marker'):format(p.name)
         end
+    end
+    -- UP-direction ([[cartograph-repo-shapes]]): a profile inherited from an
+    -- ancestor shape (the extraction root is INSIDE a shaped repo) — root-only
+    -- probing above cannot show it, so name it explicitly.
+    local pf = M.profile_for(root)
+    if pf and pf.inherited then
+        lines[#lines + 1] = ''
+        lines[#lines + 1] = ('  ↑ profile %s inherited from %s @ %s')
+            :format(pf.profile, pf.name, pf.dir)
     end
     lines[#lines + 1] = ''
     lines[#lines + 1] = 'presets are inert hints (entry points, excludes) —'

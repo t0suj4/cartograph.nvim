@@ -73,7 +73,14 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 98 -- v98: RAILS ORM-FINDER receiver typing ([[cartograph-ruby-arc]] R5b-more).
+M.VERSION = 99 -- v99: UP-DIRECTION shape/profile activation ([[cartograph-repo-shapes]]).
+               -- active_profile_for now walks ancestors (bounded, .git-stopped) so a sub-root
+               -- INSIDE a shaped repo inherits its L2 profile — discourse/app/models activates
+               -- the ruby-rails profile whose config/application.rb marker is two levels up.
+               -- Extraction-behavior change on subdir-scoped rails corpora (rails/rspec now MINT
+               -- the framework surface); framework-SOURCE repos (activesupport/lib) correctly stay
+               -- inactive (no app marker). → bump + gate re-save (rails/rspec); base ruby unchanged.
+               -- v98: RAILS ORM-FINDER receiver typing ([[cartograph-ruby-arc]] R5b-more).
                -- The rails pack's ctor_finders extends the R5 ctor-bind scan to Active-
                -- Record class finders that return a model instance (`x = User.find_by;
                -- x.foo` → User#foo), riding the existing recv-path resolution. Extraction-

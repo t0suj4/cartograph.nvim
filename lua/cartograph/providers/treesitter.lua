@@ -53,11 +53,12 @@ local _shapes_mod -- lazy (avoid a load cycle: shapes → config, never us)
 local function active_profile_for(root)
     if type(root) ~= 'string' then return nil end
     _shapes_mod = _shapes_mod or require 'cartograph.shapes'
-    for _, p in ipairs(_shapes_mod.probe(root)) do
-        if p.evidence and p.config and p.config.profile then
-            return _profile_mod.load(p.config.profile)
-        end
-    end
+    -- UP-direction ([[cartograph-repo-shapes]]): a sub-root inside a shaped repo
+    -- (discourse/app/models under a Rails app) inherits its L2 profile — root-
+    -- only probing can't see a marker two levels up. Bounded ancestor walk,
+    -- .git-boundary-stopped, so a framework-SOURCE repo never false-activates.
+    local pf = _shapes_mod.profile_for(root)
+    if pf then return _profile_mod.load(pf.profile) end
     return nil
 end
 
