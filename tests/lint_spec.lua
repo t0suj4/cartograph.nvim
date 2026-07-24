@@ -169,3 +169,42 @@ test('lint resource-leak: a reassigned raw `new` with no drop leaks; released/RA
     ok(not msg:match("'p'"), 'the RAII unique_ptr reassign is NOT flagged')
     vim.fn.delete(root, 'rf')
 end)
+
+test('lint null-deref: an unguarded nullable deref flags; guards/param/new do not', function ()
+    if not cpp_ready() then skip 'no cpp parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/nd.cpp', 'w'))
+    fd:write(table.concat({
+        'void bug() {',
+        '    Mesh *m = getThingNoEx();',   -- nullable, unguarded -> FLAG (line 3)
+        '    m->use();',
+        '}',
+        'void guarded_if() {',
+        '    Mesh *m = getThingNoEx();',
+        '    if (m) m->use();',            -- guarded
+        '}',
+        'void guarded_early() {',
+        '    Mesh *m = getThingNoEx();',
+        '    if (!m) return;',             -- early-exit (braceless)
+        '    m->use();',
+        '}',
+        'void guarded_assert() {',
+        '    Mesh *m = getThingNoEx();',
+        '    assert(m != NULL);',          -- assert-narrowed
+        '    m->use();',
+        '}',
+        'void param(Mesh *m) {',
+        '    m->use();',                   -- param: no nullable-return def
+        '}',
+        'void newed() {',
+        '    Mesh *m = new Mesh();',       -- non-nullable source
+        '    m->use();',
+        '}',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+    local f = lint.run(store, only('null-deref'))
+    eq(1, #f)
+    ok(f[1].message:match("'m'") and f[1].line == 3, 'only the unguarded nullable deref in bug() flags')
+    vim.fn.delete(root, 'rf')
+end)

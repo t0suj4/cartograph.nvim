@@ -728,8 +728,44 @@ local function resource_leak_findings(store)
     return out
 end
 
+-- Null dereference — the reverse-guards_over reading ([[cartograph-nil-flow]] N1,
+-- [[cartograph-luanti-corpus]] oracle). A deref `p->x` whose base was assigned from
+-- a NULLABLE-returning call (`p = m->getBlockNoCreateNoEx(...)`) and is NOT narrowed
+-- non-nil by a dominating guard (`if(p)` / `if(!p) return|continue` / `assert(p)`)
+-- can crash. The nullness seed is PER-DEF (nilflow tracks the last assignment in tree
+-- order), so a `p` param — which has no nullable-return def — never fires: the fix for
+-- the name-global seed that gave 50:1 FP in the probe. Hedged (~): the nullable-return
+-- set is a name heuristic and tree-order tracking isn't branch-merge precise. Validated
+-- on the luanti environment.cpp oracle (fix 67997af67): flags the unguarded emergeBlock
+-- deref, 0 FP across the file (params, if(block), assert, `if(!block) continue` all excl).
+local function null_deref_findings(store)
+    local nilflow = require 'cartograph.nilflow'
+    local files, out, seen = {}, {}, {}
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'module' and n.file and LEAK_CPP_EXT[(n.file:match('%.([%w]+)$') or ''):lower()] then
+            files[n.file] = true
+        end
+    end
+    for file in pairs(files) do
+        local lines = store.content({ file = file })
+        if lines then
+            for _, d in ipairs(nilflow.null_derefs(table.concat(lines, '\n'))) do
+                local k = file .. '\31' .. (d.fn or '') .. '\31' .. d.var -- one finding per (fn,var)
+                if not seen[k] then
+                    seen[k] = true
+                    out[#out + 1] = { file = store.abs(file), line = d.line,
+                        message = ("possible null dereference (~): '%s' was assigned from a nullable-returning call and is dereferenced here with no null-guard (`if`/`assert`) — can crash if the call returned null")
+                            :format(d.var) }
+                end
+            end
+        end
+    end
+    return out
+end
+
 M.rules = {
     { name = 'resource-leak', severity = 'warn', run = resource_leak_findings },
+    { name = 'null-deref', severity = 'warn', run = null_deref_findings },
     { name = 'silent-drop', severity = 'warn', run = silent_drop_findings },
     { name = 'seam-guard', severity = 'warn', run = seam_findings },
     { name = 'truncation', severity = 'info', run = truncation_findings },

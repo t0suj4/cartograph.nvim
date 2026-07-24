@@ -958,6 +958,15 @@ checks luacheck can't:
   `~` is honest — a macro or an aliased pointer can fool the per-line source
   match. (Member leaks whose release belongs in a destructor are a separate,
   object-graph concern, not flagged.)
+- **null-deref** (C++, `~`) — a pointer assigned from a **nullable-returning**
+  call (the irrlicht/luanti `…NoEx` / `emergeBlock` convention) and then
+  dereferenced (`p->x`) with no null-guard in between: it can crash if the call
+  returned null. The guard can be an `if (p)`, an early-exit `if (!p) return;`
+  (even braceless), or an `assert(p)` — all recognized via the CFG's dominating-
+  guard walk run *in reverse* (a guard proves *safe*; its absence flags *danger*).
+  The nullness is tracked **per assignment**, so a plain `MeshBlock *p` parameter
+  — which was never assigned a nullable return — is never flagged. The `~` is
+  honest: the nullable-returning set is a name heuristic.
 
 - **dead-state** — a module var written (from functions) but never read: dead
   weight, or dynamic access the graph can't see — the hedge is in the message.

@@ -133,6 +133,10 @@ end
 -- a non-terminating `if` is not mistaken for a guard-clause → no over-suppress)
 local function terminates(body, src)
     if not body then return false end
+    -- a BRACELESS single-statement body (`if(!p) continue;`) IS the terminating
+    -- statement itself, not a block whose last child terminates — check it directly
+    -- (else early-exit guards without braces are silently missed, [[cartograph-nil-flow]]).
+    if TERM[body:type()] then return true end
     local last
     for c in body:iter_children() do if c:named() then last = c end end
     if not last then return false end
