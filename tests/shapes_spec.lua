@@ -165,6 +165,30 @@ test('shapes.profile_for: a markerless tree yields no profile', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+-- S2 ([[cartograph-repo-shapes]]): shape-activated PACKS, same UP-walk as profiles.
+test('shapes.packs_for: a Rails sub-root inherits the pack from the ancestor shape', function ()
+    local root = mkroot({ ['config/application.rb'] = 'module A; end',
+        ['.git/HEAD'] = 'ref: x', ['app/models/post.rb'] = 'class Post; end' })
+    eq({ 'rails' }, shapes.packs_for(root .. '/app/models'))
+    eq({ 'rails' }, shapes.packs_for(root)) -- and at the root itself
+    vim.fn.delete(root, 'rf')
+end)
+
+test('shapes.packs_for: the .git boundary fences a framework-source parent', function ()
+    -- outer carries the app marker; inner is its own repo (.git) with none — a
+    -- framework-source layout. Walking up from inner must NOT reach outer's marker.
+    local outer = mkroot({ ['config/application.rb'] = 'module A; end',
+        ['inner/.git/HEAD'] = 'ref: x', ['inner/lib/x.rb'] = 'class X; end' })
+    eq({}, shapes.packs_for(outer .. '/inner/lib'))
+    vim.fn.delete(outer, 'rf')
+end)
+
+test('shapes.packs_for: a markerless tree activates no pack', function ()
+    local root = mkroot({ ['lib/x.rb'] = 'class X; end' })
+    eq({}, shapes.packs_for(root .. '/lib'))
+    vim.fn.delete(root, 'rf')
+end)
+
 test('shapes: the explainer shows hits, misses and overrides', function ()
     local root = mkroot({ ['manage.py'] = '' })
     local blob = table.concat(shapes.explain(root), '\n')

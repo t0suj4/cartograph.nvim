@@ -440,6 +440,13 @@ function M.extract(root, o)
         root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
         files, minified = ts.list_files(root)
     end
+    -- S2 ([[cartograph-repo-shapes]]): default packs from the project shape ONCE
+    -- here (not per worker) when none were given — every worker + the parent relink
+    -- then shares one explicit list, no divergence. Explicit o.packs (incl. {})
+    -- DISPOSES. A multi-root (self://) corpus has no single shape root → skip.
+    if o.packs == nil and not o.roots then
+        o.packs = require('cartograph.shapes').packs_for(root)
+    end
     local nw = math.min(o.workers or M.default_workers(),
         math.max(1, math.ceil(#files / M.BATCH)))
     if nw < 2 then

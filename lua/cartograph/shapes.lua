@@ -108,6 +108,14 @@ M.registry = {
             -- classify to the `stdlib` disposition. Read by active_profile_for
             -- in the extractor; apply()'s inert allowlist ignores it.
             profile = 'ruby-rails',
+            -- S2 ([[cartograph-repo-shapes]]): the overlay PACK a Rails app
+            -- implies — ActiveRecord assoc/delegate def-emitters + the ORM-finder
+            -- receiver typing. Defaulted from this shape (UP-walk, packs_for) when
+            -- no explicit packs are given, so opening a Rails app (or a sub-dir of
+            -- one) auto-activates the pack alongside the profile. The
+            -- `config/application.rb` MARKER is APP-shaped evidence → a framework-
+            -- SOURCE repo (rails/activesupport, no such marker) never activates it.
+            packs = { 'rails' },
         },
     },
     {
@@ -276,37 +284,71 @@ function M.probe(root)
     return out
 end
 
+-- The bounded ancestor chain to probe for an UP-direction claim: root first,
+-- then parents, stopping AFTER the repo boundary (a dir carrying `.git`) or at a
+-- small level cap — so a claim never wanders past the project into an unrelated
+-- parent (a framework-SOURCE repo like rails/activesupport carries no app
+-- `config/application.rb`, so it correctly contributes nothing). Shared by
+-- profile_for (NEAREST wins) and packs_for (UNION). ([[cartograph-repo-shapes]] UP)
+local function ancestor_dirs(root)
+    local out, dir, levels = {}, root, 0
+    while dir and dir ~= '' and levels <= 5 do
+        out[#out + 1] = dir
+        if has(dir, '.git') then break end -- probe the repo root, then halt
+        local parent = dir:match('^(.*)/[^/]+$')
+        if not parent or parent == dir then break end
+        dir, levels = parent, levels + 1
+    end
+    return out
+end
+
+local function shapes_disabled()
+    local ok, cfg = pcall(require, 'cartograph.config')
+    return ok and cfg and cfg.shapes == false
+end
+
 --- The L2 environment profile a root implies, searched UP the ancestor chain
 --- ([[cartograph-repo-shapes]] UP direction). An extraction root INSIDE a shaped
 --- repo — e.g. `discourse/app/models` under a Rails app whose `config/
 --- application.rb` marker is two levels up — inherits the shape's profile: root-
---- only probing cannot see the marker even in principle. Walks parents probing
---- each dir, NEAREST match wins, and stops AFTER the repo boundary (a dir
---- carrying `.git`) or at a small level cap — so it never wanders past the
---- project into an unrelated parent (a framework-SOURCE repo like rails/
---- activesupport has no app `config/application.rb`, so it correctly does not
---- activate). Returns { profile, dir, name, evidence, inherited } or nil.
---- DISPOSITION-tier: a profile only affects files of its own language, so a
---- cross-language ancestor match is inert (eff_spec wraps it per-lang).
+--- only probing cannot see the marker even in principle. NEAREST match wins.
+--- Returns { profile, dir, name, evidence, inherited } or nil. DISPOSITION-tier:
+--- a profile only affects files of its own language, so a cross-language ancestor
+--- match is inert (eff_spec wraps it per-lang).
 function M.profile_for(root)
-    if type(root) ~= 'string' then return nil end
-    -- setup{ shapes = false } disables all shape activation (the disable knob)
-    local ok, cfg = pcall(require, 'cartograph.config')
-    if ok and cfg and cfg.shapes == false then return nil end
-    local dir, levels = root, 0
-    while dir and dir ~= '' and levels <= 5 do
+    if type(root) ~= 'string' or shapes_disabled() then return nil end
+    for _, dir in ipairs(ancestor_dirs(root)) do
         for _, p in ipairs(M.probe(dir)) do
             if p.evidence and p.config and p.config.profile then
                 return { profile = p.config.profile, dir = dir, name = p.name,
                     evidence = p.evidence, inherited = dir ~= root }
             end
         end
-        if has(dir, '.git') then break end -- probe the repo root, then halt
-        local parent = dir:match('^(.*)/[^/]+$')
-        if not parent or parent == dir then break end
-        dir, levels = parent, levels + 1
     end
     return nil
+end
+
+--- The overlay PACKS a root implies, from shape evidence, searched UP the same
+--- bounded ancestor chain (S2 shape-activated packs, [[cartograph-repo-shapes]]).
+--- UNION across matched shapes (compose_spec is additive). Activation is gated on
+--- APP-shaped evidence (the rails shape's `config/application.rb` marker), so a
+--- framework-SOURCE repo (no app marker) contributes nothing — the design's
+--- false-positive fence. Returns a list (possibly empty). EXTRACTION-tier: a pack
+--- changes the graph (synth defs), so this only DEFAULTS when no explicit packs
+--- were given; explicit opts.packs (incl. {}) DISPOSES (the doctrine).
+function M.packs_for(root)
+    if type(root) ~= 'string' or shapes_disabled() then return {} end
+    local seen, out = {}, {}
+    for _, dir in ipairs(ancestor_dirs(root)) do
+        for _, p in ipairs(M.probe(dir)) do
+            if p.evidence and p.config and p.config.packs then
+                for _, pk in ipairs(p.config.packs) do
+                    if not seen[pk] then seen[pk] = true; out[#out + 1] = pk end
+                end
+            end
+        end
+    end
+    return out
 end
 
 -- what THIS module added to config (per key): stripped before the next

@@ -499,8 +499,11 @@ callers). Ariadne's thread, in text.
      not in it: the `rails` pack adds the ActiveRecord/ActionController
      vocabulary (`save`/`where`/`find`/…, which a *non*-Rails project would
      resolve to its own methods) and reads `has_many`/`belongs_to`/`has_one`/
-     `delegate` as method definitions (`has_many :comments` → `Model#comments`),
-     activated per-project so pure Ruby stays pure. The pack also extends
+     `delegate` as method definitions (`has_many :comments` → `Model#comments`).
+     It **activates automatically** from the project's shape — a Rails app marker
+     (`config/application.rb`) switches the pack on with no configuration, while a
+     pure-Ruby project (or the Rails framework's own source, which has no app
+     marker) stays pure; an explicit `setup{}` always overrides. The pack also extends
      constructor typing to ActiveRecord **finders** that return a model
      instance — `user = User.find_by(email: e); user.suspend!` types `user` as
      `User` (→ `User#suspend!`), just as `.new` does — while relation-returning
@@ -513,8 +516,8 @@ callers). Ariadne's thread, in text.
      Framework calls with no project definition (`where`, `present?`,
      `belongs_to`, …) are recovered as external framework nodes (an
      `ActiveRecord::Relation#where` you can hover and jump to) by the matching
-     **environment profile**, which activates automatically from the project's
-     shape — and the shape is found even when you open a *sub-directory* of the
+     **environment profile**, which activates from the same project shape as the
+     pack — and the shape is found even when you open a *sub-directory* of the
      app (analyzing `app/models/` alone still sees the Rails marker two levels
      up, bounded by the repository root), so the same enrichment applies whether
      you open the whole app or one folder.

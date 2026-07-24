@@ -3758,7 +3758,15 @@ function M.extract(root, opts)
     -- overlay packs (rails): compose the pack's vocab + def-emitters onto the
     -- base spec per language. Stored on data.packs so relink/refresh re-apply
     -- the same. `eff_spec` wraps a base spec with the composition (memoized).
-    local packnames = (opts and opts.packs) or {}
+    -- S2 ([[cartograph-repo-shapes]]): with NO explicit packs, DEFAULT from the
+    -- project shape (packs_for's UP-walk) — opening a Rails app (or a sub-dir)
+    -- auto-activates the pack. Explicit opts.packs DISPOSES, incl. an explicit
+    -- `{}` (packless) — so nil (absent) triggers detection, {} does not.
+    local packnames = opts and opts.packs
+    if packnames == nil then
+        _shapes_mod = _shapes_mod or require 'cartograph.shapes'
+        packnames = _shapes_mod.packs_for(root)
+    end
     local active_packs = {}
     for _, pn in ipairs(packnames) do
         if M.packs[pn] then active_packs[#active_packs + 1] = M.packs[pn] end

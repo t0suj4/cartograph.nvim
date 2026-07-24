@@ -73,7 +73,12 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 100 -- v100: PROFILE IDENTITY in the manifest ([[cartograph-repo-shapes]] stamping
+M.VERSION = 101 -- v101: S2 SHAPE-ACTIVATED PACKS ([[cartograph-repo-shapes]]). With no explicit
+               -- packs, ts.extract/parallel default them from the project shape (shapes.packs_for
+               -- UP-walk) — a Rails app (or a sub-dir of one) auto-activates the `rails` pack, so a
+               -- root cached packless pre-S2 is stale. Extraction-behavior change for DEFAULTED
+               -- rails-shaped roots only (gate corpora pass explicit packs → counts unchanged) → bump.
+               -- v100: PROFILE IDENTITY in the manifest ([[cartograph-repo-shapes]] stamping
                -- gap). manifest_of persists packs + profile + profile_stamp (artifact mtime/size);
                -- read_manifest re-derives the root's CURRENT profile identity and invalidates the
                -- cache on mismatch (shape/registry change activates a different profile, or the

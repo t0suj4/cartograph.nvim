@@ -178,6 +178,25 @@ test('rails pack: a Relation verb (where) does NOT finder-type (returns a Relati
     vim.fn.delete(root, 'rf')
 end)
 
+test('rails pack S2: a config/application.rb root auto-activates the pack (no explicit packs)', function ()
+    if not ready() then skip 'no ruby parser' end
+    -- a real app SHAPE: config/application.rb marker + a model with has_many
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/config', 'p'); vim.fn.mkdir(root .. '/app/models', 'p')
+    write(root, 'config/application.rb', { 'module App; class Application; end; end' })
+    write(root, 'app/models/post.rb', {
+        'class Post < ApplicationRecord', '  has_many :comments', 'end' })
+    -- NO explicit packs → the shape defaults {rails} (packs_for UP-walk)
+    local detected = {}
+    for _, n in ipairs(ts.extract(root).nodes) do detected[n.name] = n end
+    ok(detected['Post#comments'], 'auto-activated: has_many synth def present without configuring packs')
+    -- explicit packless DISPOSES (the doctrine): {} wins over detection
+    local disposed = {}
+    for _, n in ipairs(ts.extract(root, { packs = {} }).nodes) do disposed[n.name] = n end
+    ok(not disposed['Post#comments'], 'explicit packs={} disposes → pack NOT activated')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('rails pack: compose_spec unions ctor_finders onto the base (none in base)', function ()
     local base = { lang = 'ruby', stdlib_names = { each = true } }
     local pack = { lang = 'ruby', ctor_finders = { find_by = true } }

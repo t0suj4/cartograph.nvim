@@ -109,7 +109,11 @@ return {
         rev = 'ed0f92c5e779',
         expected = { refs = 1590, nodes = 2791 }, -- recalibrated @ R5b-ivar (v78)
         lang = 'ruby',
-        notes = 'ruby quick tier (305 files) — BASE ruby, no framework pack',
+        packs = {}, -- EXPLICIT packless (S2 belt+braces, [[cartograph-repo-shapes]]):
+                    -- activesupport/lib is framework SOURCE, not an app — it detects
+                    -- packless anyway (no config/application.rb ancestor), but the
+                    -- explicit {} guarantees no shape-defaulting ever activates a pack
+        notes = 'ruby quick tier (305 files) — BASE ruby, no framework pack (explicit packless)',
     },
     rails = {
         root = HOME .. '/git/discourse/app/models',
