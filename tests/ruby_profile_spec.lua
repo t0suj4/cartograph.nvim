@@ -94,6 +94,9 @@ test('ruby-rails profile: a Rails root activates it; framework calls → minted 
         '  def ready?',
         '    title.present? && subtitle.blank?',
         '  end',
+        '  def names',
+        '    parts.map { |p| p }',   -- map: a base-ruby stdlib_names VOCAB word
+        '  end',
         'end',
     })
     local data = ts.extract(root)
@@ -107,6 +110,10 @@ test('ruby-rails profile: a Rails root activates it; framework calls → minted 
     local c2 = call_to(data, 'belongs_to')
     ok(c2 and c2.to == 'ruby-rails::ActiveRecord::Base.belongs_to',
         'belongs_to → the AR::Base class-macro node (dot sep)')
+    -- a stdlib_names VOCAB method (map) is now minted too (routed through minting),
+    -- owner-precise via the profile canon (map → Enumerable#map)
+    local c3 = call_to(data, 'map')
+    ok(c3 and c3.to == 'ruby-rails::Enumerable#map', 'vocab `map` → Enumerable#map minted node')
     -- the minted node exists, is external, and lives in the runtime's synthetic file
     local byid = {}; for _, n in ipairs(data.nodes) do byid[n.id] = n end
     local nd = byid['ruby-rails::Object#present?']

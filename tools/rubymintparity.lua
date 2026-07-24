@@ -31,6 +31,9 @@ for i = 1, N do
         '  def ready?',
         '    title.present? && subtitle.blank? && owner.persisted?',
         '  end',
+        '  def act',
+        '    save && items.each { |x| x }',  -- save/each: stdlib_names VOCAB → now minted
+        '  end',
         'end',
     })
 end

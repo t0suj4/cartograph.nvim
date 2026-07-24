@@ -1488,12 +1488,19 @@ local function mint_profile_nodes(data, node_index, profile)
     return mint_nodes(data, node_index, profile.runtime .. '::', profile.runtime,
         function (cget, i)
             local e = cget(i, 'ext')
-            if type(e) == 'table' and e.why == 'stdlib' then
-                local callee = cget(i, 'callee')
-                -- OWNER-PRECISE ([[cartograph-stdlib-profile]]): the canonical
-                -- `Owner#member` path (else the bare method name if uncatalogued).
-                return callee and (canon[callee] or callee) or nil
-            end
+            if type(e) ~= 'table' then return nil end
+            local callee = cget(i, 'callee')
+            if not callee then return nil end
+            -- prof_ext disposition (no-def framework method the profile covers):
+            -- OWNER-PRECISE canonical `Owner#member` path, else the bare name.
+            if e.why == 'stdlib' then return canon[callee] or callee end
+            -- stdlib_names VOCAB: a DECLARED framework name (base ruby + rails pack —
+            -- e.g. the primary AR verbs find/where/save/create dispatched to vocab
+            -- before prof_ext). Mint it too, but ONLY when the profile knows its owner
+            -- (canon) — so generic domain-name vocab (name/id/value) that isn't a
+            -- curated profile method stays unminted, not over-claimed at the tier.
+            if e.why == 'vocab' and canon[callee] then return canon[callee] end
+            return nil
         end)
 end
 M.mint_profile_nodes = mint_profile_nodes
