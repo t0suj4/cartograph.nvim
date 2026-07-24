@@ -58,10 +58,15 @@ function M.render()
                 ('EXTRACT-HELPER  %s / %s → %s(%d param%s)    :CartographDiff · :CartographApply · :CartographTxnClear')
                     :format(t.a.name, t.b.name, t.helper, t.nparams,
                         t.nparams == 1 and '' or 's'), 'Title')
-            lines[#lines + 1] = ('  %s   %s'):format(t.a.name, t.file)
-            lines[#lines + 1] = ('  %s   %s'):format(t.b.name, t.file)
-            lines[#lines + 1] = ('  synthesizes a shared helper; both bodies become tail-calls;'
-                .. ' touches %d file(s)'):format(#t.touched)
+            lines[#lines + 1] = ('  %s   %s'):format(t.a.name, t.a.file)
+            lines[#lines + 1] = ('  %s   %s'):format(t.b.name, t.b.file)
+            if t.xfile then
+                lines[#lines + 1] = ('  → NEW module %s (M.%s) + require wiring in both;'
+                    .. ' touches %d file(s)'):format(t.create.file, t.helper, #t.touched)
+            else
+                lines[#lines + 1] = ('  synthesizes a shared helper; both bodies become'
+                    .. ' tail-calls; touches %d file(s)'):format(#t.touched)
+            end
         else
             lines[#lines + 1] = hl(marks, #lines,
                 ('MERGE  %d clone(s) → %s    :CartographDiff · :CartographApply · :CartographTxnClear')

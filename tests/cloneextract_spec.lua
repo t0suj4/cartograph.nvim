@@ -26,6 +26,10 @@ local NEAR = { max_dist = 2, min_rows = 4, min_shared = 3 }
 local function pair_of(name)
     return clones.near_of(store, fn_id(name), NEAR)[1]
 end
+-- the cross-file fixtures are smaller (4-stmt bodies, one differing) — a looser gate
+local function xpair(name)
+    return clones.near_of(store, fn_id(name), { max_dist = 2, min_rows = 3, min_shared = 2 })[1]
+end
 
 test('extract-helper: a same-file value pair synthesizes a correct helper + wrappers', function ()
     local root = proj { ['m.lua'] =
@@ -37,7 +41,7 @@ test('extract-helper: a same-file value pair synthesizes a correct helper + wrap
     ok(plan, 'a same-file value pair plans: ' .. tostring(why))
     if plan then
         local _, after = cx.preview(store, plan)
-        local text = after[plan.file]
+        local text = after[plan.a.file]
         -- the shared body moved into the helper with the literal lifted to a parameter
         ok(text:find('local function ' .. plan.helper .. '(x, hp1)', 1, true),
             'helper signature carries the original param + the hole param')
@@ -62,7 +66,7 @@ test('extract-helper: a leaf recurring twice is parameterized at BOTH sites', fu
     ok(plan, 'the multi-occurrence pair plans')
     if plan then
         local _, after = cx.preview(store, plan)
-        local text = after[plan.file]
+        local text = after[plan.a.file]
         -- both 'red' occurrences in g_a's body became hp1 (no bare 'red' left in the helper)
         local helper_body = text:match('local function ' .. plan.helper .. '.-\nend')
         ok(helper_body and helper_body:find('tag(a, hp1)', 1, true)
@@ -99,21 +103,6 @@ end)
 
 -- ── refusal gates (the sound subset) ─────────────────────────────────────────
 
-test('extract-helper: a cross-file pair is refused', function ()
-    local root = proj {
-        ['a.lua'] = 'local function find(x)\n  local c = cfg().alpha\n  local h = home(c)\n'
-            .. '  local p = join(h, x)\n  return exists(p)\nend\nreturn find\n',
-        ['b.lua'] = 'local function find(x)\n  local c = cfg().beta\n  local h = home(c)\n'
-            .. '  local p = join(h, x)\n  return exists(p)\nend\nreturn find\n',
-    }
-    local pair = pair_of('find')
-    if pair then
-        local plan, why = cx.plan(store, pair)
-        ok(not plan and why:find('cross%-file'), 'cross-file is refused with a reason')
-    else ok(true, '(no pair found — vacuously fine)') end
-    vim.fn.delete(root, 'rf')
-end)
-
 test('extract-helper: a structural pair (inserted statement) is refused', function ()
     local root = proj { ['m.lua'] =
         'local M = {}\n\nlocal function p_a(x)\n  local y = prep(x)\n  local z = norm(y)\n'
@@ -124,6 +113,83 @@ test('extract-helper: a structural pair (inserted statement) is refused', functi
     if pair then
         local plan, why = cx.plan(store, pair)
         ok(not plan and why:find('value%-parameterizable'), 'a structural pair is refused')
+    else ok(true, '(no pair — fine)') end
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ── cross-file extraction (new shared module + require wiring) ───────────────
+
+local CF_A = 'local function find(x)\n  local base = cfg().alpha\n  local h = home(base)\n'
+    .. '  local p = join(h, x)\n  return exists(p)\nend\nreturn find\n'
+local CF_B = 'local function find(x)\n  local base = cfg().beta\n  local h = home(base)\n'
+    .. '  local p = join(h, x)\n  return exists(p)\nend\nreturn find\n'
+
+test('extract-helper: a cross-file pair extracts into a NEW shared module + requires', function ()
+    local root = proj { ['a.lua'] = CF_A, ['b.lua'] = CF_B }
+    local plan, why = cx.plan(store, xpair('find'), { dest = 'shared.lua' })
+    ok(plan, 'cross-file plans with a dest: ' .. tostring(why))
+    if plan then
+        ok(plan.xfile and plan.create and plan.create.file == 'shared.lua', 'a new module is created')
+        eq(3, #plan.touched, 'touches both callers + the new module')
+        local _, after = cx.preview(store, plan)
+        -- the module holds the shared body as a member, the field lifted to hp1
+        local mod = after['shared.lua']
+        ok(mod:find('function M.' .. plan.helper .. '(x, hp1)', 1, true), 'helper is a module member')
+        ok(mod:find('local base = hp1', 1, true), 'the differing leaf became the parameter')
+        ok(mod:find('return M', 1, true), 'the module returns its table')
+        -- both callers require it and delegate their own filling
+        for _, side in ipairs({ { f = 'a.lua', fill = 'alpha' }, { f = 'b.lua', fill = 'beta' } }) do
+            ok(after[side.f]:find("require 'shared'", 1, true), side.f .. ' gains the require')
+            ok(after[side.f]:find(('return %s(x, cfg().%s)'):format(plan.helper_call, side.fill), 1, true),
+                side.f .. ' delegates with its filling')
+        end
+        -- the require-path guess rides as a hazard (honest)
+        ok(#plan.hazards >= 1 and plan.hazards[1]:find('require path'), 'the require path is flagged to verify')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: cross-file apply writes all three files, each parsing', function ()
+    local root = proj { ['a.lua'] = CF_A, ['b.lua'] = CF_B }
+    local plan = cx.plan(store, xpair('find'), { dest = 'shared.lua' })
+    ok(plan, 'planned')
+    if plan then
+        store.set_txn(plan)
+        local entry, why = cx.apply(store, plan)
+        ok(entry, 'cross-file apply succeeds: ' .. tostring(why))
+        for _, f in ipairs({ 'shared.lua', 'a.lua', 'b.lua' }) do
+            local t = table.concat(vim.fn.readfile(root .. '/' .. f), '\n')
+            local pr = vim.treesitter.get_string_parser(t, 'lua'):parse()[1]:root()
+            ok(not pr:has_error(), f .. ' parses clean after the write')
+        end
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: cross-file is refused when a body reads a file-local', function ()
+    -- `find` reads `helper` which is a top-level local of a.lua → not movable cross-file
+    local root = proj {
+        ['a.lua'] = 'local function helper(z) return z end\n'
+            .. 'local function find(x)\n  local base = cfg().alpha\n  local h = helper(base)\n'
+            .. '  local p = join(h, x)\n  return exists(p)\nend\nreturn find\n',
+        ['b.lua'] = 'local function helper(z) return z end\n'
+            .. 'local function find(x)\n  local base = cfg().beta\n  local h = helper(base)\n'
+            .. '  local p = join(h, x)\n  return exists(p)\nend\nreturn find\n',
+    }
+    local pair = xpair('find')
+    if pair then
+        local plan, why = cx.plan(store, pair, { dest = 'shared.lua' })
+        ok(not plan and why:find('file%-local'), 'a file-local dependency blocks the cross-file move')
+    else ok(true, '(no pair — fine)') end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: cross-file without a destination refuses asking for one', function ()
+    local root = proj { ['a.lua'] = CF_A, ['b.lua'] = CF_B }
+    local pair = xpair('find')
+    if pair then
+        local plan, why = cx.plan(store, pair) -- no dest
+        ok(not plan and why:find('destination'), 'cross-file needs a destination module')
     else ok(true, '(no pair — fine)') end
     vim.fn.delete(root, 'rf')
 end)

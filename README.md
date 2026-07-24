@@ -360,10 +360,17 @@ and stages it as a transaction you review with `:CartographDiff` and commit with
 into the helper, so every return (count, values, early exits) is preserved
 exactly. It rides the same journal-and-verify contract as the move and merge
 refactors, and adds a synthesis gate of its own: the result must parse cleanly
-and actually contain the helper and both call sites, or the apply refuses. It is
-deliberately narrow — cross-file pairs (which need shared-module wiring), a
-differing statement rather than a differing leaf, a nested or vararg or recursive
-body, all fall outside the provably-safe subset and are refused with a reason,
+and actually contain the helper and both call sites, or the apply refuses. When
+the two copies live in **different files**, pass a destination module path and it
+does the cross-file version: the helper becomes a member of a new shared module,
+and each copy's file gains a `require` of it and a delegating body. That last
+step needs one thing the tool can't be sure of — that the require path it writes
+actually resolves under your project's package layout — so it rides as a hazard
+to verify rather than a silent claim. A cross-file move also has to check the
+body reads only globals, never a local of its old file (which wouldn't follow it
+across), and refuses if it would. What stays out of the safe subset — a differing
+statement rather than a differing leaf, a nested or vararg or recursive body, a
+body that depends on file-locals it can't take along — is refused with a reason,
 leaving the reviewable scaffold as the fallback.
 
 `:CartographClonesSigns` lands all of this *on the code* rather than in a

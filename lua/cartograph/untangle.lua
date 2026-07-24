@@ -947,7 +947,22 @@ function M.body_extractable(store, fn_id)
         return { ok = false, recursive = true,
             reason = 'body is self-recursive (the helper name would differ)' }
     end
-    return { ok = true, params = eo.fl.params or {}, method = node.kind == 'method' }
+    -- FREE READS = names used in the body that are neither params nor defined inside it.
+    -- For a same-scope helper these are module/global names (harmless); a CROSS-FILE move
+    -- must additionally check none is a source-file local (that would break on the move) —
+    -- the caller does that against the file's top-level defs.
+    local pset, dset = {}, {}
+    for _, p in ipairs(eo.fl.params or {}) do pset[p] = true end
+    for _, s in ipairs(eo.fl.stmts or {}) do
+        for _, d in ipairs(s.def or {}) do dset[d] = true end
+    end
+    local reads = {}
+    for _, s in ipairs(eo.fl.stmts or {}) do
+        for _, u in ipairs(s.use or {}) do
+            if not pset[u] and not dset[u] then reads[u] = true end
+        end
+    end
+    return { ok = true, params = eo.fl.params or {}, method = node.kind == 'method', reads = reads }
 end
 
 --- The lens surface (:CartographExtractBlocks): the focused fn's control blocks as

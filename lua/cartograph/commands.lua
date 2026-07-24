@@ -641,7 +641,7 @@ function M.register()
     end, { desc = 'cartograph: propose the parameterized helper the focused function and its nearest near-clone could factor into — the anti-unified template with the differing leaves as parameters, plus a body-safety verdict (is the whole body cleanly liftable?). A reviewable scaffold (the write is not auto-applied). Companion to :CartographMerge for the near-clone case' })
 
     -- ── extract-helper APPLY: stage the transaction (verified auto-write) ──
-    cmd('CartographExtractHelperApply', function ()
+    cmd('CartographExtractHelperApply', function (o)
         local store = live() if not store then return end
         if store.txn then
             return vim.notify('cartograph: a transaction is already staged'
@@ -657,17 +657,20 @@ function M.register()
             return vim.notify(('cartograph: %s has no near-clone within edit distance 2')
                 :format(n.name), vim.log.levels.INFO)
         end
-        local plan, why = require('cartograph.cloneextract').plan(store, best)
+        -- an arg is the destination module for a CROSS-FILE pair (a new .lua)
+        local dest = o.args ~= '' and o.args or nil
+        local plan, why = require('cartograph.cloneextract').plan(store, best, { dest = dest })
         if not plan then
             return vim.notify('cartograph: cannot extract — ' .. tostring(why)
                 .. ' (see :CartographExtractHelper for the scaffold)', vim.log.levels.WARN)
         end
         store.set_txn(plan)
-        vim.notify(('cartograph: extract-helper staged — %s / %s → %s(%d param%s).'
+        vim.notify(('cartograph: extract-helper staged — %s / %s → %s(%d param%s)%s.'
             .. ' Review with :CartographDiff, then :CartographApply'):format(
             plan.a.name, plan.b.name, plan.helper, plan.nparams,
-            plan.nparams == 1 and '' or 's'), vim.log.levels.INFO)
-    end, { desc = 'cartograph: stage the VERIFIED extract-helper transaction for the focused function and its nearest near-clone — synthesizes the shared parameterized helper and rewrites both bodies to tail-call it. Constrained to the sound subset (same-file, value-parameterizable, body-safe, Lua); refuses otherwise. Review :CartographDiff, commit :CartographApply (parses-clean + CAS + journal gated)' })
+            plan.nparams == 1 and '' or 's',
+            plan.xfile and (' in NEW ' .. plan.create.file) or ''), vim.log.levels.INFO)
+    end, { nargs = '?', complete = 'file', desc = 'cartograph: stage the VERIFIED extract-helper transaction for the focused function and its nearest near-clone — synthesizes the shared parameterized helper and rewrites both bodies to tail-call it. Same-file needs no arg; a CROSS-FILE pair takes a destination module path (a new .lua) for the shared helper + require wiring. Constrained to the sound subset (value-parameterizable, body-safe, globals-only for cross-file, Lua); refuses otherwise. Review :CartographDiff, commit :CartographApply' })
 
     -- ── refactor-neutrality: certify a move/extract changed no behavior ──
     cmd('CartographNeutralitySnapshot', function ()
