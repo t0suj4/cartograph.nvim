@@ -1485,12 +1485,18 @@ M.mint_std_nodes = mint_std_nodes
 -- for profile.lang files) and left c.to nil, so this never shadows a project def.
 local function mint_profile_nodes(data, node_index, profile)
     local canon = profile.canon or {}
+    -- a profile MAY supply its own receiver-aware mapper (factorio: a
+    -- `<global>.<method>` call → the documented `Class::method`, read from c.full);
+    -- when present it OWNS the mint decision. Otherwise the default member-canon
+    -- path applies (ruby: dispatch-by-member-name → canonical `Owner#member`).
+    local mint_path = profile.mint_path
     return mint_nodes(data, node_index, profile.runtime .. '::', profile.runtime,
         function (cget, i)
             local e = cget(i, 'ext')
             if type(e) ~= 'table' then return nil end
             local callee = cget(i, 'callee')
             if not callee then return nil end
+            if mint_path then return mint_path(callee, cget(i, 'full'), e.why) end
             -- prof_ext disposition (no-def framework method the profile covers):
             -- OWNER-PRECISE canonical `Owner#member` path, else the bare name.
             if e.why == 'stdlib' then return canon[callee] or callee end

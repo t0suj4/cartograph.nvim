@@ -73,9 +73,44 @@ for T, t in pairs(TYPES) do
     for m in pairs(t.members) do vocab[m] = true end
 end
 
+-- RUNTIME-API ENRICHMENT ([[cartograph-stdlib-profile]] input adapter): load the
+-- distilled runtime-api.json artifact (tools/factoriodistill.lua, version-keyed +
+-- checked in → deterministic). It supplies the OWNER-PRECISE minting map for the 9
+-- GLOBAL objects (game.print → LuaGameScript::print) + hover sigs. Missing artifact
+-- → the profile stays disposition-only (graceful, gate-neutral like before).
+local api = require('cartograph.spec.profile').load('lua-factorio-api')
+local mint, mint_path, sigs, sig_kind, api_version
+if api and api.global2class and api.members then
+    local g2c, members, free_fns = api.global2class, api.members, api.free or {}
+    mint, sig_kind, api_version = true, 'factorio', api.version
+    sigs = {} -- one hover table: method sigs (Class::method) + free-fn sigs (name)
+    for k, v in pairs(api.sigs or {}) do sigs[k] = v end
+    for k, v in pairs(api.free_sigs or {}) do sigs[k] = v end
+    -- receiver-namespace-aware mint mapper (the factorio minting shape, distinct
+    -- from ruby's member-only canon): a profile-disposed `<global>.<method>` call
+    -- resolves to the documented class's method (owner-precise, `Class::method`);
+    -- a bare free fn resolves to its own name; anything else (receiver-typed method,
+    -- deep chain) → nil = honest frontier (no receiver typing for dynamic langs).
+    mint_path = function (callee, full, why)
+        if why ~= 'stdlib' then return nil end
+        if full then -- a dotted `<global>.<method>` call → the documented class method
+            local recv, m = full:match('^([%w_]+)%.([%w_]+)$')
+            if recv and g2c[recv] and members[g2c[recv] .. '::' .. m] then
+                return g2c[recv] .. '::' .. m
+            end
+            if full:find('%.') then return nil end -- other dotted (receiver-typed / deep) = frontier
+        end
+        -- a bare free function (log / table_size / localised_print; full is nil)
+        if free_fns[callee] then return callee end
+        return nil
+    end
+end
+
 return {
-    schema = 1, runtime = 'lua-factorio', lang = 'lua', version = '2.0',
-    stamp = 'hand-authored',
+    schema = 1, runtime = 'lua-factorio', lang = 'lua',
+    version = api_version or '2.0', stamp = 'hand-authored',
     types = TYPES, free = free, namespaces = namespaces, nsset = nsset,
     vocab = vocab,
+    -- minting + nav-time enrichment (present only when the api artifact loaded)
+    mint = mint, mint_path = mint_path, sigs = sigs, sig_kind = sig_kind,
 }
