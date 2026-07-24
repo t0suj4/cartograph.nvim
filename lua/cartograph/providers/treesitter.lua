@@ -1728,11 +1728,11 @@ local function resolve_registry(cv, node_index, addref, scope_of, consts, exact)
                         -- owner (the lib table owns methods; a sibling `oldminor`
                         -- owns nothing), then the leftmost by start.char. Fixes the
                         -- char-0 tie where the returned-minor could win the toss.
-                        local vk = nd.file .. '\0' .. nd.range.start.line
+                        local vk = nd.file .. '\0' .. atr.sl(nd.range)
                         local cur = varAt[vk]
                         local ndc, curc = is_class[nd.name], cur and is_class[cur.name]
                         if not cur or (ndc and not curc)
-                            or (ndc == curc and nd.range.start.char < cur.range.start.char) then
+                            or (ndc == curc and atr.sc(nd.range) < atr.sc(cur.range)) then
                             varAt[vk] = nd
                         end
                     end
@@ -1996,7 +1996,7 @@ local function resolve_local_ctor(cv, node_index, ctorbinds, smtclasses, extends
         for _, nd in pairs(node_index or {}) do
             if (nd.kind == 'function' or nd.kind == 'method') and nd.name and nd.range
                 and smtclasses[nd.file] then
-                local s, en = nd.range.start.line, nd.range['end'].line
+                local s, en = atr.sl(nd.range), atr.el(nd.range)
                 local one, amb
                 for _, sm in ipairs(smtclasses[nd.file]) do
                     if sm.line >= s and sm.line <= en then
