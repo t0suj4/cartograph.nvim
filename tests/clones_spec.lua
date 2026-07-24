@@ -124,3 +124,55 @@ test('clones: functions with no shared block yield no block group', function ()
     ok(clones.blocks_report({})[1]:find('none'), 'empty block report says none')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── near-clone tier ──────────────────────────────────────────────────────────
+
+-- the near-clone pair (if any) whose two members' names are exactly {n1, n2}
+local function near_pair(pairs_, n1, n2)
+    for _, p in ipairs(pairs_) do
+        local nm = { [p.a.name] = true, [p.b.name] = true }
+        if nm[n1] and nm[n2] then return p end
+    end
+    return nil
+end
+
+test('clones: two bodies differing by ONE statement are a near-clone (1 hole)', function ()
+    -- identical but for a single substituted row (foo→bar) — distance 1, the rest template
+    local body_a = '  local a = load(src)\n  local b = trim(a)\n  local c = foo(b)\n'
+        .. '  local d = wrap(c)\n  persist(d)\n  return d'
+    local body_b = '  local p = load(input)\n  local q = trim(p)\n  local r = bar(q)\n'
+        .. '  local s = wrap(r)\n  persist(s)\n  return s'
+    local root = proj {
+        ['a.lua'] = fn('one', 'src', body_a),
+        ['b.lua'] = fn('two', 'input', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 2, min_rows = 5, min_shared = 2 }), 'one', 'two')
+    ok(p, 'one and two are a near-clone')
+    ok(p and p.dist == 1, 'exactly one edit (the foo→bar hole)')
+    ok(p and p.shared >= 5, 'the rest is a shared template')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: an exact clone is NOT reported as a near-clone (distance 0 excluded)', function ()
+    local body = '  local a = load(src)\n  local b = trim(a)\n  local c = wrap(b)\n'
+        .. '  persist(c)\n  return c'
+    local root = proj {
+        ['a.lua'] = fn('one', 'src', body),
+        ['b.lua'] = fn('two', 'input', (body:gsub('src', 'input'))),
+    }
+    local near = clones.near(store, { max_dist = 2, min_rows = 5, min_shared = 2 })
+    ok(not near_pair(near, 'one', 'two'), 'a distance-0 pair is an exact clone, not near')
+    ok(clones.near_report({})[1]:find('none'), 'empty near report says none')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: bodies too far apart are not near-clones', function ()
+    local root = proj {
+        ['a.lua'] = fn('one', 'a', '  local x = a + 1\n  local y = x * 2\n  local z = y - 3\n'
+            .. '  local w = z / 4\n  return w'),
+        ['b.lua'] = fn('two', 'b', '  send(b)\n  flush()\n  wait()\n  local r = recv()\n  return decode(r)'),
+    }
+    ok(not near_pair(clones.near(store, { max_dist = 2, min_rows = 4, min_shared = 1 }), 'one', 'two'),
+        'unrelated bodies exceed max_dist → not a near-clone')
+    vim.fn.delete(root, 'rf')
+end)

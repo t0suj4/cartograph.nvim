@@ -75,24 +75,33 @@ local function row_key(row, locals, slots, ctr)
     return key
 end
 
---- The alpha-invariant structural signature of a function's body: (nparams, {row_key…}).
---- `eo` is the result of expr.of(store, id). Returns (sig_string, nrows) or nil when the
---- body has no harvestable rows.
-function M.signature(eo)
+-- the alpha-invariant per-row canonical keys of a function body, with a SHARED
+-- function-global slot map (a local is one slot everywhere). Returns (keys, lines,
+-- nparams) or nil. Shared by signature (function tier) and the near-clone tier.
+local function fn_row_keys(eo)
     local stmts = eo and eo.fl and eo.fl.stmts
     if not stmts or #stmts == 0 then return nil end
-    -- locals = params ∪ every df-def name across the body
     local locals = {}
     for _, p in ipairs(eo.fl.params or {}) do locals[p] = true end
     for _, s in ipairs(stmts) do
         for _, d in ipairs(s.def or {}) do locals[d] = true end
     end
     local slots, ctr = {}, { n = 0 }
-    local keys = {}
+    local keys, lines = {}, {}
     for _, s in ipairs(stmts) do
         keys[#keys + 1] = s.expr and row_key(s.expr, locals, slots, ctr) or '~'
+        lines[#lines + 1] = s.l
     end
-    return ('p%d|%s'):format(#(eo.fl.params or {}), table.concat(keys, '\n')), #stmts
+    return keys, lines, #(eo.fl.params or {})
+end
+
+--- The alpha-invariant structural signature of a function's body: (nparams, {row_key…}).
+--- `eo` is the result of expr.of(store, id). Returns (sig_string, nrows) or nil when the
+--- body has no harvestable rows.
+function M.signature(eo)
+    local keys, _, nparams = fn_row_keys(eo)
+    if not keys then return nil end
+    return ('p%d|%s'):format(nparams, table.concat(keys, '\n')), #keys
 end
 
 --- Exact-structural clone GROUPS across the store's functions. Returns a list of groups,
@@ -273,6 +282,154 @@ function M.blocks_report(groups)
         L[#L + 1] = ('■ %d copies, %d-statement block:'):format(#g, g.len)
         for _, m in ipairs(g) do
             L[#L + 1] = ('    %s  %s:%d-%d'):format(m.name, m.file, m.from_line, m.to_line)
+        end
+    end
+    return L
+end
+
+-- ── near-clone tier (AST anti-unification over row sequences) ────────────────
+-- Two functions are NEAR-clones when their canonical row-key sequences differ by
+-- only a few edits (Levenshtein ≤ opts.max_dist). The alignment IS the anti-unifier:
+-- the matched rows are the shared TEMPLATE, and each substituted / inserted / deleted
+-- row is a HOLE — a parameter of the helper the two copies could factor into. Distance
+-- 0 is an exact clone (M.exact owns it); this tier reports distance 1..max_dist.
+--
+-- Candidate pairs come from a shared-distinctive-key inverted index (a key present in
+-- ≤ POST_CAP functions is distinctive; a pair sharing ≥ opts.min_shared of them is a
+-- candidate), so we run the O(n·m) alignment only on the handful of real candidates,
+-- never on all C(nfns,2) pairs. LIMITATION (documented, sound — like the block tier):
+-- the row keys use function-global slots, so a near-clone that INSERTS a local used by
+-- many later rows renumbers the slots and drifts out of alignment — an honest
+-- under-report, never a false merge. Relative (position-independent) local naming is
+-- the banked precision refinement.
+local POST_CAP = 30
+
+-- Levenshtein distance + backtrace over two arrays of atomic row-keys.
+-- Returns (dist, ops) where ops is the alignment [{op, i, j}] in forward order
+-- (op ∈ match|sub|del|ins; i indexes a, j indexes b).
+local function align(a, b)
+    local la, lb = #a, #b
+    local d = {}
+    for i = 0, la do d[i] = { [0] = i } end
+    for j = 0, lb do d[0][j] = j end
+    for i = 1, la do
+        for j = 1, lb do
+            local cost = (a[i] == b[j]) and 0 or 1
+            local del, ins, sub = d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost
+            d[i][j] = math.min(del, ins, sub)
+        end
+    end
+    local ops, i, j = {}, la, lb
+    while i > 0 or j > 0 do
+        if i > 0 and j > 0 and a[i] == b[j] and d[i][j] == d[i - 1][j - 1] then
+            ops[#ops + 1] = { op = 'match', i = i, j = j }; i = i - 1; j = j - 1
+        elseif i > 0 and j > 0 and d[i][j] == d[i - 1][j - 1] + 1 then
+            ops[#ops + 1] = { op = 'sub', i = i, j = j }; i = i - 1; j = j - 1
+        elseif i > 0 and d[i][j] == d[i - 1][j] + 1 then
+            ops[#ops + 1] = { op = 'del', i = i }; i = i - 1
+        else
+            ops[#ops + 1] = { op = 'ins', j = j }; j = j - 1
+        end
+    end
+    for x = 1, math.floor(#ops / 2) do ops[x], ops[#ops - x + 1] = ops[#ops - x + 1], ops[x] end
+    return d[la][lb], ops
+end
+
+--- Near-clone PAIRS across the store's functions. Returns a list of pairs, each
+--- { dist, shared, a = {name,file,id,lines,keys}, b = {…}, ops }, sorted by
+--- (shared desc, dist asc). opts.max_dist (default 2), opts.min_rows (default 6),
+--- opts.min_shared (default 3).
+function M.near(store, opts)
+    local max_dist = (opts and opts.max_dist) or 2
+    local min_rows = (opts and opts.min_rows) or 6
+    local min_shared = (opts and opts.min_shared) or 3
+    -- 1. per-fn canonical row-key lists
+    local fns = {}
+    for _, n in ipairs(store.data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and n.file then
+            local ok, eo = pcall(expr.of, store, n.id)
+            if ok and eo then
+                local keys, lines = fn_row_keys(eo)
+                if keys and #keys >= min_rows then
+                    fns[#fns + 1] = { id = n.id, name = n.name, file = n.file,
+                        keys = keys, lines = lines }
+                end
+            end
+        end
+    end
+    -- 2. inverted index of distinctive row-keys → candidate pairs
+    local post = {}
+    for i, f in ipairs(fns) do
+        local seen = {}
+        for _, k in ipairs(f.keys) do
+            if not seen[k] then seen[k] = true; post[k] = post[k] or {}; post[k][#post[k] + 1] = i end
+        end
+    end
+    local shared = {} -- packed pair key → count of shared distinctive keys
+    for _, list in pairs(post) do
+        if #list >= 2 and #list <= POST_CAP then
+            for x = 1, #list do
+                for y = x + 1, #list do
+                    local pk = list[x] * 1000000 + list[y]
+                    shared[pk] = (shared[pk] or 0) + 1
+                end
+            end
+        end
+    end
+    -- 3. align each candidate pair, keep near-clones (distance 1..max_dist)
+    local out = {}
+    for pk, cnt in pairs(shared) do
+        if cnt >= min_shared then
+            local fa, fb = fns[math.floor(pk / 1000000)], fns[pk % 1000000]
+            local dist, ops = align(fa.keys, fb.keys)
+            if dist >= 1 and dist <= max_dist then
+                local nmatch = 0
+                for _, o in ipairs(ops) do if o.op == 'match' then nmatch = nmatch + 1 end end
+                if nmatch >= min_rows then
+                    out[#out + 1] = { dist = dist, shared = nmatch, a = fa, b = fb, ops = ops }
+                end
+            end
+        end
+    end
+    table.sort(out, function (x, y)
+        if x.shared ~= y.shared then return x.shared > y.shared end
+        return x.dist < y.dist
+    end)
+    return out
+end
+
+--- Human-readable report for M.near pairs. `store` is used to show the differing
+--- (hole) source lines — the parameters the two copies would factor into.
+function M.near_report(pairs_, store)
+    if #pairs_ == 0 then return { 'near-clones: none' } end
+    local L = { ('near-clones — %d pair(s)'):format(#pairs_),
+        '(row sequences differing by ≤ max_dist edits; matched rows = shared template, differing rows = holes/params)', '' }
+    local srccache = {}
+    local function srcline(f, ln)
+        local lines = srccache[f.file]
+        if lines == nil then
+            local n = store and store.node and store.node(f.id)
+            lines = (n and store.content and store.content(n)) or false
+            srccache[f.file] = lines
+        end
+        if not lines then return '' end
+        -- store.content is the whole file 1-based; trim to a short preview
+        local s = lines[ln]
+        return s and (s:gsub('^%s+', ''):sub(1, 68)) or ''
+    end
+    for _, p in ipairs(pairs_) do
+        L[#L + 1] = ('■ %d edit(s), %d shared statement(s):'):format(p.dist, p.shared)
+        L[#L + 1] = ('    %s  %s:%d'):format(p.a.name, p.a.file, p.a.lines[1] or 0)
+        L[#L + 1] = ('    %s  %s:%d'):format(p.b.name, p.b.file, p.b.lines[1] or 0)
+        for _, o in ipairs(p.ops) do
+            if o.op == 'sub' then
+                L[#L + 1] = ('      hole: %s:%d  «%s»'):format(p.a.file, p.a.lines[o.i], srcline(p.a, p.a.lines[o.i]))
+                L[#L + 1] = ('            %s:%d  «%s»'):format(p.b.file, p.b.lines[o.j], srcline(p.b, p.b.lines[o.j]))
+            elseif o.op == 'del' then
+                L[#L + 1] = ('      only in %s: %d  «%s»'):format(p.a.name, p.a.lines[o.i], srcline(p.a, p.a.lines[o.i]))
+            elseif o.op == 'ins' then
+                L[#L + 1] = ('      only in %s: %d  «%s»'):format(p.b.name, p.b.lines[o.j], srcline(p.b, p.b.lines[o.j]))
+            end
         end
     end
     return L

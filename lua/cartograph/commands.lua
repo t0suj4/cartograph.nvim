@@ -609,6 +609,15 @@ function M.register()
         scratch(require('cartograph.clones').blocks_report(groups))
     end, { count = -1, desc = 'cartograph: block-structural clone groups — contiguous statement runs duplicated across/within functions (a clone INSIDE a function, which :CartographClones\' whole-function tier is blind to). Ranked by block length. [count] = min statements (default 6)' })
 
+    -- ── near-clones: functions differing by a few edits (anti-unification) ──
+    cmd('CartographNearClones', function (o)
+        local store = live() if not store then return end
+        vim.notify('cartograph: scanning for near-clones (anti-unification)…', vim.log.levels.INFO)
+        local pairs_ = require('cartograph.clones').near(store,
+            { max_dist = o.count ~= -1 and o.count or 2 })
+        scratch(require('cartograph.clones').near_report(pairs_, store))
+    end, { count = -1, desc = 'cartograph: near-clone pairs — functions whose statement sequences differ by only a few edits. The matched rows are the shared template, the differing rows are the holes (parameters of the helper the copies could factor into). [count] = max edit distance (default 2)' })
+
     -- ── derived-index integrity: the Log/View rule, executable ───────
     cmd('CartographAudit', function ()
         local store = live() if not store then return end

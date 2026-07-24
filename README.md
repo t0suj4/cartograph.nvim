@@ -321,11 +321,21 @@ locals its surrounding function happened to introduce first. On this very
 codebase it surfaces a 67-statement block shared between the extractor's and
 the relinker's name-resolution loops — a copy that a text diff misses because
 the two have drifted in comments and whitespace, but whose *statement shape*
-is identical. Run it with `nvim -l tools/clones.lua --blocks`. This is the
-exact/block pair of the clone ladder; a near-clone tier (copies that differ by
-a statement or two, via AST anti-unification — where the generalized template
-*is* the shared helper and its holes are the parameters) is the banked next
-step on the same substrate.
+is identical. Run it with `nvim -l tools/clones.lua --blocks`.
+
+`:CartographNearClones` is the third tier — for copies that are *almost*
+identical. It finds functions whose statement sequences differ by only a few
+edits, aligning the two with an edit-distance backtrace: the matched rows are
+the shared **template**, and each substituted, inserted, or deleted row is a
+**hole** — a parameter of the helper the two copies could factor into. It's
+the anti-unifier read as a refactoring: the report points at each hole's source
+line, so `find_bin` in the clangd and lua-ls providers shows up as one edit —
+the config key `clangd_bin` vs `luals_bin` — which is exactly the argument the
+merged helper would take. Candidates come from a shared-distinctive-statement
+index, so the pairwise alignment runs only on real leads, not every pair of
+functions. Run it with `nvim -l tools/clones.lua --near`. Exact, block, and
+near are the three tiers of the clone ladder; all three key off the same
+expression IR, differing only in how much divergence they tolerate.
 
 ### The working set
 
