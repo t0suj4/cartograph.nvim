@@ -176,3 +176,47 @@ test('clones: bodies too far apart are not near-clones', function ()
         'unrelated bodies exceed max_dist → not a near-clone')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── anti-unification: refine holes into parameters, propose the helper ───────
+
+test('clones: anti-unification classifies a leaf-value hole as a parameter', function ()
+    -- one/two differ only at the callee foo⇄bar (both globals) → value-parameterizable
+    local body_a = '  local a = load(src)\n  local b = trim(a)\n  local c = foo(b)\n'
+        .. '  local d = wrap(c)\n  persist(d)\n  return d'
+    local body_b = '  local p = load(input)\n  local q = trim(p)\n  local r = bar(q)\n'
+        .. '  local s = wrap(r)\n  persist(s)\n  return s'
+    local root = proj {
+        ['a.lua'] = fn('one', 'src', body_a),
+        ['b.lua'] = fn('two', 'input', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 2, min_rows = 5, min_shared = 2 }), 'one', 'two')
+    ok(p, 'the pair is found')
+    local a = p and clones.analyze_pair(p)
+    ok(a and a.kind == 'value', 'a leaf-only divergence is value-parameterizable')
+    ok(a and #a.holes == 1 and a.holes[1].kind == 'name', 'one name parameter')
+    ok(a and ((a.holes[1].a == 'foo' and a.holes[1].b == 'bar')
+        or (a.holes[1].a == 'bar' and a.holes[1].b == 'foo')), 'the parameter is foo ⇄ bar')
+    -- the proposal names it
+    local prop = clones.extract_proposal(p)
+    ok(prop[1]:find('extraction proposal'), 'a value pair yields an extraction proposal')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: an inserted statement makes the pair structural (needs a human)', function ()
+    -- identical body, but `two` inserts an extra statement → an ins edit → structural
+    local body_a = '  local a = load(src)\n  local b = trim(a)\n  local c = wrap(b)\n'
+        .. '  persist(c)\n  return c'
+    local body_b = '  local p = load(input)\n  local q = trim(p)\n  validate(q)\n'
+        .. '  local r = wrap(q)\n  persist(r)\n  return r'
+    local root = proj {
+        ['a.lua'] = fn('one', 'src', body_a),
+        ['b.lua'] = fn('two', 'input', body_b),
+    }
+    local p = near_pair(clones.near(store, { max_dist = 2, min_rows = 5, min_shared = 2 }), 'one', 'two')
+    ok(p, 'the pair is found (within max_dist)')
+    local a = p and clones.analyze_pair(p)
+    ok(a and a.kind == 'structural', 'an inserted statement is not a clean value-parameterization')
+    ok(a and a.insdel >= 1, 'the insert is accounted')
+    ok(clones.extract_proposal(p)[1]:find('structurally'), 'the proposal declines with a reason')
+    vim.fn.delete(root, 'rf')
+end)

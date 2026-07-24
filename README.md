@@ -337,6 +337,24 @@ functions. Run it with `nvim -l tools/clones.lua --near`. Exact, block, and
 near are the three tiers of the clone ladder; all three key off the same
 expression IR, differing only in how much divergence they tolerate.
 
+A near-clone's holes are described at statement granularity, but whether they
+are a *clean parameter* is a finer question, and `:CartographExtractHelper`
+answers it by **anti-unifying** the differing rows — descending both
+expression trees in lockstep to the divergent leaf. If every divergence is a
+leaf value — a callee name, a literal, a field — the pair is
+*value-parameterizable*: the report proposes the helper the two copies factor
+into, with each varying leaf named as a parameter (the `find_bin` pair in the
+clangd and lua-ls providers reduces to one field parameter, `clangd_bin` vs
+`luals_bin`). If a divergence is a shape difference — a different arity, an
+inserted statement, a local where the other has a field access — the pair is
+flagged *structural* and left to a human, because a value parameter can't
+capture it. And if anti-unification finds no real divergence at all (the
+edit-distance came from renamed locals the function-global pass couldn't see
+through), the pair is really an exact clone and `:CartographMerge` applies
+directly. The proposal is a reviewable scaffold, not an auto-write:
+synthesizing the helper and threading its parameters through both call sites,
+with visibility and scope kept correct, is a verified transaction of its own.
+
 ### The working set
 
 Mark what you're working on; dive freely; come back. In the symbols list:

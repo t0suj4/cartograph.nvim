@@ -77,7 +77,8 @@ end
 
 -- the alpha-invariant per-row canonical keys of a function body, with a SHARED
 -- function-global slot map (a local is one slot everywhere). Returns (keys, lines,
--- nparams) or nil. Shared by signature (function tier) and the near-clone tier.
+-- nparams, exprs, locals) or nil — exprs/locals feed the near-clone anti-unifier.
+-- Shared by signature (function tier) and the near-clone tier.
 local function fn_row_keys(eo)
     local stmts = eo and eo.fl and eo.fl.stmts
     if not stmts or #stmts == 0 then return nil end
@@ -87,12 +88,13 @@ local function fn_row_keys(eo)
         for _, d in ipairs(s.def or {}) do locals[d] = true end
     end
     local slots, ctr = {}, { n = 0 }
-    local keys, lines = {}, {}
+    local keys, lines, exprs = {}, {}, {}
     for _, s in ipairs(stmts) do
         keys[#keys + 1] = s.expr and row_key(s.expr, locals, slots, ctr) or '~'
         lines[#lines + 1] = s.l
+        exprs[#exprs + 1] = s.expr
     end
-    return keys, lines, #(eo.fl.params or {})
+    return keys, lines, #(eo.fl.params or {}), exprs, locals
 end
 
 --- The alpha-invariant structural signature of a function's body: (nparams, {row_key…}).
@@ -349,10 +351,10 @@ function M.near(store, opts)
         if (n.kind == 'function' or n.kind == 'method') and n.file then
             local ok, eo = pcall(expr.of, store, n.id)
             if ok and eo then
-                local keys, lines = fn_row_keys(eo)
+                local keys, lines, _, exprs, locals = fn_row_keys(eo)
                 if keys and #keys >= min_rows then
                     fns[#fns + 1] = { id = n.id, name = n.name, file = n.file,
-                        keys = keys, lines = lines }
+                        keys = keys, lines = lines, exprs = exprs, locals = locals }
                 end
             end
         end
@@ -398,6 +400,118 @@ function M.near(store, opts)
     return out
 end
 
+-- ── anti-unification: refine a near-clone's holes into typed parameters ───────
+-- The banked identify→perform close: a near-clone's TEMPLATE is the helper the two
+-- copies could factor into, and its HOLES are the helper's parameters. M.near reports
+-- holes at ROW granularity (a whole differing statement); anti_unify_row descends the
+-- two rows' expression trees in lockstep to pinpoint the DIVERGENT LEAF and classify it:
+--   value hole (lit / global-name / field / operator) — a clean parameter, extractable;
+--   struct hole (different node kind or arity, or a local-vs-global mismatch) — NOT a
+--     value parameter (the shapes differ), so the pair is not a clean auto-extraction.
+-- Two local names differing is NOT a hole (alpha-equivalent — the copies just renamed).
+
+local function is_local(n, locals) return locals and locals[n] or false end
+
+-- "nameA / nameB" for a pair, for report headers
+local function p_name(pair) return ('%s / %s'):format(pair.a.name, pair.b.name) end
+
+-- descend e1,e2 in lockstep; append {kind,a,b} per divergence to `holes`.
+-- returns true iff structurally alignable (no struct hole below here).
+local function anti_unify(e1, e2, la, lb, holes)
+    if e1 == nil and e2 == nil then return true end
+    if e1 == nil or e2 == nil then
+        holes[#holes + 1] = { kind = 'struct' }; return false
+    end
+    if e1.k ~= e2.k then holes[#holes + 1] = { kind = 'struct' }; return false end
+    local k = e1.k
+    if k == 'lit' then
+        if e1.ty == e2.ty and tostring(e1.v) == tostring(e2.v) then return true end
+        holes[#holes + 1] = { kind = 'literal', a = tostring(e1.v), b = tostring(e2.v) }
+        return true
+    elseif k == 'name' then
+        if e1.n == e2.n then return true end
+        local l1, l2 = is_local(e1.n, la), is_local(e2.n, lb)
+        if l1 and l2 then return true end -- both locals: alpha-equivalent, no hole
+        if not l1 and not l2 then
+            holes[#holes + 1] = { kind = 'name', a = e1.n, b = e2.n }; return true
+        end
+        holes[#holes + 1] = { kind = 'struct' }; return false -- local vs global
+    elseif k == 'field' then
+        local ok = anti_unify(e1.b, e2.b, la, lb, holes)
+        if e1.n ~= e2.n then holes[#holes + 1] = { kind = 'field', a = e1.n, b = e2.n } end
+        return ok
+    elseif k == 'index' then
+        local o1 = anti_unify(e1.b, e2.b, la, lb, holes)
+        return anti_unify(e1.i, e2.i, la, lb, holes) and o1
+    elseif k == 'call' then
+        if #(e1.a or {}) ~= #(e2.a or {}) then holes[#holes + 1] = { kind = 'struct' }; return false end
+        local ok = anti_unify(e1.f, e2.f, la, lb, holes)
+        for i = 1, #(e1.a or {}) do ok = anti_unify(e1.a[i], e2.a[i], la, lb, holes) and ok end
+        return ok
+    elseif k == 'un' then
+        if e1.op ~= e2.op then holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op } end
+        return anti_unify(e1.e, e2.e, la, lb, holes)
+    elseif k == 'bin' then
+        if e1.op ~= e2.op then holes[#holes + 1] = { kind = 'operator', a = e1.op, b = e2.op } end
+        local o1 = anti_unify(e1.l, e2.l, la, lb, holes)
+        return anti_unify(e1.r, e2.r, la, lb, holes) and o1
+    else -- table / fn / vararg / ? fallback: compare kid lists
+        local k1, k2 = e1.kids or {}, e2.kids or {}
+        if #k1 ~= #k2 then
+            if #k1 > 0 or #k2 > 0 then holes[#holes + 1] = { kind = 'struct' }; return false end
+            return true
+        end
+        local ok = true
+        for i = 1, #k1 do ok = anti_unify(k1[i], k2[i], la, lb, holes) and ok end
+        return ok
+    end
+end
+
+-- anti-unify two whole rows ({lhs, rhs, cond}); lists of differing length are structural.
+local function anti_unify_row(r1, r2, la, lb, holes)
+    if not r1 or not r2 then holes[#holes + 1] = { kind = 'struct' }; return false end
+    if #(r1.lhs or {}) ~= #(r2.lhs or {}) or #(r1.rhs or {}) ~= #(r2.rhs or {}) then
+        holes[#holes + 1] = { kind = 'struct' }; return false
+    end
+    local ok = true
+    for i = 1, #(r1.lhs or {}) do ok = anti_unify(r1.lhs[i], r2.lhs[i], la, lb, holes) and ok end
+    for i = 1, #(r1.rhs or {}) do ok = anti_unify(r1.rhs[i], r2.rhs[i], la, lb, holes) and ok end
+    if r1.cond or r2.cond then ok = anti_unify(r1.cond, r2.cond, la, lb, holes) and ok end
+    return ok
+end
+
+--- Anti-unify a near-clone pair (from M.near) into an extraction analysis:
+--- { kind = 'value'|'structural'|'exact', holes = {…}, insdel = N }.
+---   value      — every divergence is a leaf value (lit/name/field/op); the holes are
+---                the parameters of the helper the two copies factor into. EXTRACTABLE.
+---   exact      — no real divergence survived anti-unification (the near-distance came
+---                from alpha-renaming the function-global slot pass couldn't see through);
+---                the pair is actually an EXACT clone → :CartographMerge applies directly.
+---   structural — a shape difference or an inserted/deleted statement; not a clean
+---                value-parameterization (a callback/restructure, left to the human).
+function M.analyze_pair(pair)
+    local holes, insdel = {}, 0
+    for _, o in ipairs(pair.ops) do
+        if o.op == 'sub' then
+            anti_unify_row(pair.a.exprs[o.i], pair.b.exprs[o.j], pair.a.locals, pair.b.locals, holes)
+        elseif o.op == 'ins' or o.op == 'del' then
+            insdel = insdel + 1
+        end
+    end
+    local structural = insdel > 0
+    for _, h in ipairs(holes) do if h.kind == 'struct' then structural = true end end
+    -- dedupe value holes by (kind, a, b) — one parameter per distinct varying leaf
+    local params, seen = {}, {}
+    for _, h in ipairs(holes) do
+        if h.kind ~= 'struct' then
+            local key = h.kind .. '\31' .. tostring(h.a) .. '\31' .. tostring(h.b)
+            if not seen[key] then seen[key] = true; params[#params + 1] = h end
+        end
+    end
+    local kind = structural and 'structural' or (#params == 0 and 'exact' or 'value')
+    return { kind = kind, holes = params, insdel = insdel }
+end
+
 --- Human-readable report for M.near pairs. `store` is used to show the differing
 --- (hole) source lines — the parameters the two copies would factor into.
 function M.near_report(pairs_, store)
@@ -417,14 +531,23 @@ function M.near_report(pairs_, store)
         local s = lines[ln]
         return s and (s:gsub('^%s+', ''):sub(1, 68)) or ''
     end
+    local TAG = { value = 'value-parameterizable', exact = 'EXACT (mergeable directly)',
+        structural = 'structural (needs a human)' }
     for _, p in ipairs(pairs_) do
-        L[#L + 1] = ('■ %d edit(s), %d shared statement(s):'):format(p.dist, p.shared)
+        local a = M.analyze_pair(p)
+        L[#L + 1] = ('■ %d edit(s), %d shared statement(s) — %s:')
+            :format(p.dist, p.shared, TAG[a.kind])
         L[#L + 1] = ('    %s  %s:%d'):format(p.a.name, p.a.file, p.a.lines[1] or 0)
         L[#L + 1] = ('    %s  %s:%d'):format(p.b.name, p.b.file, p.b.lines[1] or 0)
+        -- the refined holes (the helper's parameters), anti-unified to the leaf
+        for _, h in ipairs(a.holes) do
+            L[#L + 1] = ('      param (%s): %s  ⇄  %s'):format(h.kind, tostring(h.a), tostring(h.b))
+        end
+        -- the raw differing rows (source), for the ins/del and structural cases
         for _, o in ipairs(p.ops) do
-            if o.op == 'sub' then
-                L[#L + 1] = ('      hole: %s:%d  «%s»'):format(p.a.file, p.a.lines[o.i], srcline(p.a, p.a.lines[o.i]))
-                L[#L + 1] = ('            %s:%d  «%s»'):format(p.b.file, p.b.lines[o.j], srcline(p.b, p.b.lines[o.j]))
+            if o.op == 'sub' and a.kind == 'structural' then
+                L[#L + 1] = ('      differs: %s:%d  «%s»'):format(p.a.file, p.a.lines[o.i], srcline(p.a, p.a.lines[o.i]))
+                L[#L + 1] = ('               %s:%d  «%s»'):format(p.b.file, p.b.lines[o.j], srcline(p.b, p.b.lines[o.j]))
             elseif o.op == 'del' then
                 L[#L + 1] = ('      only in %s: %d  «%s»'):format(p.a.name, p.a.lines[o.i], srcline(p.a, p.a.lines[o.i]))
             elseif o.op == 'ins' then
@@ -432,6 +555,41 @@ function M.near_report(pairs_, store)
             end
         end
     end
+    return L
+end
+
+--- An extraction PROPOSAL for a value-parameterizable near-clone pair: the reviewable
+--- scaffold for the helper the two copies factor into. Returns report lines, or a single
+--- line explaining why the pair isn't a clean value-parameterization. This is the
+--- identify→PROPOSE close — a suggestion, not an auto-write: synthesizing the helper's
+--- source and threading the parameters through both call sites (with visibility/scope
+--- correctness) is a verified transaction of its own, deliberately NOT done here. [[cartograph-record-fold-arc]]
+function M.extract_proposal(pair)
+    local a = M.analyze_pair(pair)
+    if a.kind == 'exact' then
+        return { ('%s are an EXACT clone after anti-unification (the near-distance was'
+            .. ' alpha-renaming) — :CartographMerge applies directly.'):format(p_name(pair)) }
+    elseif a.kind == 'structural' then
+        return { ('%s differ structurally (%d inserted/deleted statement(s) and/or a shape'
+            .. ' change) — not a clean value-parameterization; extract by hand.')
+            :format(p_name(pair), a.insdel) }
+    end
+    local L = {
+        ('helper extraction proposal — %s'):format(p_name(pair)),
+        ('  value-parameterizable: %d shared statement(s), %d parameter(s)')
+            :format(pair.shared, #a.holes),
+        ('  copies: %s:%d  and  %s:%d'):format(pair.a.file, pair.a.lines[1] or 0,
+            pair.b.file, pair.b.lines[1] or 0),
+        '  parameters (the varying leaves — one per hole):',
+    }
+    for i, h in ipairs(a.holes) do
+        L[#L + 1] = ('    p%d (%s):  %s  in %s   /   %s  in %s')
+            :format(i, h.kind, tostring(h.a), pair.a.name, tostring(h.b), pair.b.name)
+    end
+    L[#L + 1] = ('  → introduce a helper carrying the %d shared statement(s) with the above')
+        :format(pair.shared)
+    L[#L + 1] = '    leaves as parameters, then replace each body with a call passing its filling.'
+    L[#L + 1] = '  (proposal only — review the scaffold; the write is not auto-applied.)'
     return L
 end
 

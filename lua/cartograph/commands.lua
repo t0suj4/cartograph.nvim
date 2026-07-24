@@ -618,6 +618,27 @@ function M.register()
         scratch(require('cartograph.clones').near_report(pairs_, store))
     end, { count = -1, desc = 'cartograph: near-clone pairs — functions whose statement sequences differ by only a few edits. The matched rows are the shared template, the differing rows are the holes (parameters of the helper the copies could factor into). [count] = max edit distance (default 2)' })
 
+    -- ── extract-helper proposal: the focused fn's best near-clone → a helper ──
+    cmd('CartographExtractHelper', function ()
+        local store = live() if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
+        end
+        local clones = require 'cartograph.clones'
+        -- the focused fn's best near-clone partner (most shared statements)
+        local best
+        for _, p in ipairs(clones.near(store, { max_dist = 2 })) do
+            if p.a.id == id or p.b.id == id then best = p; break end -- near() is shared-desc sorted
+        end
+        if not best then
+            return vim.notify(('cartograph: %s has no near-clone within edit distance 2')
+                :format(n.name), vim.log.levels.INFO)
+        end
+        scratch(clones.extract_proposal(best))
+    end, { desc = 'cartograph: propose the parameterized helper the focused function and its nearest near-clone could factor into — the anti-unified template with the differing leaves as parameters. A reviewable scaffold (the write is not auto-applied). Companion to :CartographMerge for the near-clone case' })
+
     -- ── derived-index integrity: the Log/View rule, executable ───────
     cmd('CartographAudit', function ()
         local store = live() if not store then return end
