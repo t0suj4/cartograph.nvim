@@ -78,7 +78,7 @@ local function map_of(node)
 end
 
 -- the top-level sequence of a document: stream > document > block_node > seq
-local function top_sequence(tree)
+local function top_sequence_extracted(tree, hp1)
     local n = tree
     for _, want in ipairs({ 'document', 'block_node' }) do
         local nx
@@ -88,21 +88,16 @@ local function top_sequence(tree)
         n = nx
         if not n then return nil end
     end
-    return seq_of(n)
+    return hp1(n)
+end
+
+local function top_sequence(tree)
+    return top_sequence_extracted(tree, seq_of)
 end
 
 -- the top-level mapping of a document (defaults/main.yml, vars/main.yml)
 local function top_mapping(tree)
-    local n = tree
-    for _, want in ipairs({ 'document', 'block_node' }) do
-        local nx
-        for c in n:iter_children() do
-            if c:type() == want then nx = c; break end
-        end
-        n = nx
-        if not n then return nil end
-    end
-    return map_of(n)
+    return top_sequence_extracted(tree, map_of)
 end
 
 -- (key_string, value_node) of a block_mapping_pair
