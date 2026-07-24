@@ -128,12 +128,20 @@ local function rbs_location(node)
 end
 
 -- ── position -> fact ──────────────────────────────────────────────────────
--- the call whose call-site span covers (line,char) — the cursor sits on a
--- REFERENCE (a usage). Scans the file's calls (Band FILE axis).
+-- the INNERMOST call whose call-site span covers (line,char) — the cursor sits
+-- on a REFERENCE (a usage). Scans the file's calls (Band FILE axis). Method
+-- chains (`store.topo():calls_of(f)`, `atr.sl(c.at)`) overlap: the outer call's
+-- span also covers the inner call's start, so — mirroring node_at — the SMALLEST
+-- covering span wins, else definition at an inner call's position would answer the
+-- outer call's target (the dogfood serving gap). ([[cartograph-lsp-surface]])
 local function call_at(store, file, line, char)
+    local best
     for _, c in ipairs(store.topo():calls_of(file)) do
-        if contains(c.at, line, char) then return c end
+        if contains(c.at, line, char) then
+            if not best or range_size(c.at) < range_size(best.at) then best = c end
+        end
     end
+    return best
 end
 
 -- the innermost node whose range covers (line,char) — the cursor sits on / in

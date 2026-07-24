@@ -39,9 +39,18 @@ local function serving_consistency(store)
             local n = store.node(callrec.to(c))
             if n and n.file and not n.external and n.range then
                 served = served + 1
+                -- probe the CALLEE-NAME column, not the span start: a method
+                -- call's `at` spans the whole receiver chain (`store.topo():m` →
+                -- name field), so chained calls share a start column and the span
+                -- start lands on the receiver, not the method — an innermost-wins
+                -- call_at then serves the inner call there (correctly for a cursor,
+                -- but this metric means to probe THIS call). The callee name is the
+                -- tail of the `at` span, so its start is (end-line, end-col − #name).
+                local callee = callrec.callee(c) or ''
                 local res = lsp.handle(store, 'textDocument/definition', {
                     textDocument = { uri = vim.uri_from_fname(store.abs(callrec.file(c))) },
-                    position = { line = atr.sl(c.at), character = atr.sc(c.at) },
+                    position = { line = atr.el(c.at),
+                        character = math.max(0, atr.ec(c.at) - #callee) },
                 })
                 local wu, wl = vim.uri_from_fname(store.abs(n.file)), atr.sl(n.range)
                 local hit = false

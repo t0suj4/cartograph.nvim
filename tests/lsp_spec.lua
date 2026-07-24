@@ -74,6 +74,41 @@ test('lsp: definition on a def name -> the def itself', function ()
     eq(5, r[1].range.start.line)
 end)
 
+-- call_at INNERMOST ([[cartograph-lsp-surface]]): a method chain
+-- `recv():outer()` produces overlapping call spans that SHARE a start column
+-- (the outer call's `at` spans the whole receiver chain). The SMALLEST covering
+-- span must win, so definition lands on the call under the cursor, not an outer
+-- call that merely encloses the position. (Dogfood serving 97.4% -> 100%.)
+test('lsp: definition on a method chain resolves the innermost call under the cursor', function ()
+    local D = {
+        root = '/x',
+        nodes = {
+            { id = 'm.lua', name = 'm.lua', kind = 'module', file = 'm.lua', range = rng(0, 0, 20, 0), order = 0 },
+            fn('m.lua', 'caller', rng(10, 0, 10, 30)),
+            fn('m.lua', 'inner', rng(1, 0, 2, 3)),
+            fn('m.lua', 'outer', rng(4, 0, 5, 3)),
+        },
+        edges = {},
+        calls = {
+            -- `x:inner():outer()` on line 10: inner span [4,10), outer span
+            -- [4,24) — both START at col 4; outer ENCLOSES inner.
+            { fn = 'm.lua::caller', callee = 'inner', file = 'm.lua', line = 10,
+                to = 'm.lua::inner', at = rng(10, 4, 10, 10) },
+            { fn = 'm.lua::caller', callee = 'outer', file = 'm.lua', line = 10,
+                to = 'm.lua::outer', at = rng(10, 4, 10, 24) },
+        },
+    }
+    store.ingest(D)
+    -- col 6: inside inner AND outer → smallest span wins → inner (def line 1)
+    local ri = H('textDocument/definition', at('m.lua', 10, 6))
+    eq(1, #ri)
+    eq(1, ri[1].range.start.line)
+    -- col 15: past inner's end (10), inside outer only → outer (def line 4)
+    local ro = H('textDocument/definition', at('m.lua', 10, 15))
+    eq(1, #ro)
+    eq(4, ro[1].range.start.line)
+end)
+
 test('lsp: documentSymbol -> the file\'s navigable nodes with kinds', function ()
     store.ingest(DATA)
     local syms = H('textDocument/documentSymbol', { textDocument = { uri = uri('a.lua') } })
