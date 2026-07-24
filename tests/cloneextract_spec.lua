@@ -270,3 +270,72 @@ test('extract-helper: cross-file JS is refused (no module wiring yet)', function
     else ok(true, '(no pair — fine)') end
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── Factorio phase-awareness (cross-phase free-read gate) ────────────────────
+
+-- a body differing only at a literal, reading `read_global` — parameterized as `phase`
+local function fac_handle(lit, read_global)
+    return ('local function handle(x)\n  local n = prep(x)\n  local z = norm(n)\n'
+        .. '  %s(\'%s\')\n  return wrap(z)\nend\nreturn handle\n'):format(read_global, lit)
+end
+local function xpair_at(name, file)
+    for _, n in ipairs(store.data.nodes) do
+        if n.name == name and n.file == file then
+            return clones.near_of(store, n.id, { max_dist = 2, min_rows = 3, min_shared = 2 })[1]
+        end
+    end
+end
+
+test('extract-helper: a CROSS-PHASE move reading a phase-bound global is refused', function ()
+    -- rt.lua (runtime cone via control.lua) + dt.lua (data cone via data.lua): a near-clone
+    -- reading `game` (runtime-only). A shared home spans both phases → not phase-safe.
+    local root = proj {
+        ['control.lua'] = "require('rt')\n",
+        ['data.lua'] = "require('dt')\n",
+        ['rt.lua'] = fac_handle('rt', 'game.print'),
+        ['dt.lua'] = fac_handle('dt', 'game.print'),
+    }
+    local p = xpair_at('handle', 'rt.lua')
+    ok(p, 'the cross-phase pair is found')
+    if p then
+        local plan, why = cx.plan(store, p, { dest = 'shared.lua' })
+        ok(not plan and why:find('phase%-bound'), 'a phase-bound global blocks the cross-phase move: ' .. tostring(why))
+        ok(why:find('game'), 'the offending global is named')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: a phase-agnostic cross-phase move is allowed', function ()
+    -- same cross-phase pair, but the body reads only pure globals (no game/data) → the
+    -- shared-helper case that IS sound across phases (like SE's shared.lua)
+    local root = proj {
+        ['control.lua'] = "require('rt')\n",
+        ['data.lua'] = "require('dt')\n",
+        ['rt.lua'] = fac_handle('rt', 'log'),
+        ['dt.lua'] = fac_handle('dt', 'log'),
+    }
+    local p = xpair_at('handle', 'rt.lua')
+    ok(p, 'the pair is found')
+    if p then
+        local plan, why = cx.plan(store, p, { dest = 'shared.lua' })
+        ok(plan, 'a pure body extracts across phases: ' .. tostring(why))
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('extract-helper: a SAME-PHASE cross-file move may read that phase global', function ()
+    -- r1.lua + r2.lua both in the runtime cone → the shared home loads only at runtime,
+    -- so a `game` read is fine
+    local root = proj {
+        ['control.lua'] = "require('r1')\nrequire('r2')\n",
+        ['r1.lua'] = fac_handle('a', 'game.print'),
+        ['r2.lua'] = fac_handle('b', 'game.print'),
+    }
+    local p = xpair_at('handle', 'r1.lua')
+    ok(p, 'the same-phase pair is found')
+    if p then
+        local plan, why = cx.plan(store, p, { dest = 'shared.lua' })
+        ok(plan, 'a runtime-only home may carry a runtime global: ' .. tostring(why))
+    end
+    vim.fn.delete(root, 'rf')
+end)

@@ -17,7 +17,10 @@
 --     source range → it lifts to a parameter.
 --   • BODY-EXTRACTABLE (untangle.body_extractable) for BOTH copies: top-level, no vararg,
 --     no self-recursion. CROSS-FILE additionally requires every FREE READ to be a global
---     (not a source-file local — that would break on the move).
+--     (not a source-file local — that would break on the move), and — on a FACTORIO project
+--     — that no free read is a phase-bound global (data / game / script / …) unless every
+--     destination phase is that global's own (else the shared home loads into a phase where
+--     the global doesn't exist; phase = entry-cone reachability, see phases_of).
 --   • The rewrite is a TAIL CALL (`return helper(…)`), preserving every return.
 -- HARD CONSTRAINTS (refuse with a reason otherwise): a supported language (Lua, or
 -- JavaScript same-file — see EXTRACT), equal param count, single-line holes inside the
@@ -103,6 +106,53 @@ local function file_locals(store, file)
     return s
 end
 
+-- ── Factorio phase awareness ([[cartograph-cross-project]]) ─────────────────
+-- Factorio globals are PHASE-SCOPED: `data` exists only in the data stage; game/script/
+-- rendering/rcon/commands only at runtime (control.lua). A cross-file helper home is
+-- required from both copies' files, so it loads in the UNION of their phases — a body that
+-- reads a phase-bound global is only safe if every destination phase is that global's own.
+local ENTRY_PHASE = { ['control.lua'] = 'runtime',
+    ['data.lua'] = 'data', ['data-updates.lua'] = 'data', ['data-final-fixes.lua'] = 'data',
+    ['settings.lua'] = 'settings', ['settings-updates.lua'] = 'settings',
+    ['settings-final-fixes.lua'] = 'settings' }
+-- the UNAMBIGUOUS phase-bound globals (broadly-available names — settings/mods/remote —
+-- are left out to avoid over-refusing; the sound-conservative core).
+local PHASE_GLOBAL = { data = 'data', game = 'runtime', script = 'runtime',
+    rendering = 'runtime', rcon = 'runtime', commands = 'runtime' }
+
+-- Phase membership by entry-cone reachability over the import graph. Returns
+-- (true, file → {phase=true}) when the project has phase entries at the mod root, else
+-- false. A file reachable from >1 phase's entry is in all of them (a shared helper).
+local function phases_of(store)
+    local byid, adj = {}, {}
+    for _, n in ipairs(store.data.nodes) do byid[n.id] = n end
+    for _, e in ipairs(store.data.edges or {}) do
+        if e.kind == 'import' then
+            local ff = byid[e.from] and byid[e.from].file
+            local tf = byid[e.to] and byid[e.to].file
+            if ff and tf then adj[ff] = adj[ff] or {}; adj[ff][tf] = true end
+        end
+    end
+    local entries, any = {}, false
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'module' and n.file and not n.file:find('/') then
+            local ph = ENTRY_PHASE[n.file:match('[^/]+$') or n.file]
+            if ph then entries[#entries + 1] = { f = n.file, ph = ph }; any = true end
+        end
+    end
+    if not any then return false end
+    local phaseset = {}
+    for _, ent in ipairs(entries) do
+        local seen, q, qi = { [ent.f] = true }, { ent.f }, 1
+        while qi <= #q do
+            local f = q[qi]; qi = qi + 1
+            phaseset[f] = phaseset[f] or {}; phaseset[f][ent.ph] = true
+            for tf in pairs(adj[f] or {}) do if not seen[tf] then seen[tf] = true; q[#q + 1] = tf end end
+        end
+    end
+    return true, phaseset
+end
+
 local function parses_clean(text, lang)
     local ok, parser = pcall(vim.treesitter.get_string_parser, text, lang)
     if not ok or not parser then return false end
@@ -179,6 +229,30 @@ function M.plan(store, pair, opts)
                 if loc[r] then
                     return nil, ('%s reads file-local `%s` — cannot move it to another module')
                         :format(side.n, r)
+                end
+            end
+        end
+        -- PHASE gate (Factorio): the shared home loads in the UNION of the two files'
+        -- phases, so a phase-bound global read is safe only if every destination phase is
+        -- that global's own. Non-Factorio projects have no phase entries → a no-op.
+        local found, phaseset = phases_of(store)
+        if found then
+            local dest_ph, phlist = {}, {}
+            for _, f in ipairs({ a.file, b.file }) do
+                for p in pairs(phaseset[f] or {}) do
+                    if not dest_ph[p] then dest_ph[p] = true; phlist[#phlist + 1] = p end
+                end
+            end
+            table.sort(phlist)
+            local nph = #phlist
+            for _, side in ipairs({ { v = va, n = a.name }, { v = vb, n = b.name } }) do
+                for r in pairs(side.v.reads or {}) do
+                    local pg = PHASE_GLOBAL[r]
+                    if pg and not (nph == 1 and dest_ph[pg]) then
+                        return nil, ('%s reads phase-bound global `%s` (%s phase), but the'
+                            .. ' shared module would load across phases {%s} — not phase-safe')
+                            :format(side.n, r, pg, table.concat(phlist, ', '))
+                    end
                 end
             end
         end
