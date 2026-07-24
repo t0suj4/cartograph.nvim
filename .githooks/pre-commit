@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# cartograph pre-commit fence ([[cartograph-shipping-checklist]] / bench:
+# "the seam fence only fences if it runs"). Two gates, both fast (~22s total):
+#
+#   1. dogfood — the BAND SEAM-GUARD (a raw wide-index read outside band.lua/
+#      store.lua fails the commit) + the self-serving / lint dashboard.
+#   2. the full spec suite (tests/run.sh).
+#
+# Checked in under .githooks/ and activated per-clone with
+#   git config core.hooksPath .githooks
+# (tools/install-hooks.sh does this). Bypass a single commit with
+#   git commit --no-verify
+# for a WIP checkpoint — the same gates guard the eventual push.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+NVIM="${NVIM:-nvim}"
+
+if ! command -v "$NVIM" >/dev/null 2>&1; then
+    echo "[pre-commit] $NVIM not found — skipping (set NVIM= or --no-verify)"; exit 0
+fi
+
+fail=0
+step () { # label, cmd...
+    local label="$1"; shift
+    printf '[pre-commit] %-28s ' "$label …"
+    local out
+    if out="$("$@" 2>&1)"; then
+        echo ok
+    else
+        echo FAIL
+        printf '%s\n' "$out" | tail -30
+        fail=1
+    fi
+}
+
+step "dogfood seam fence" "$NVIM" --headless -u NONE -l tools/dogfood.lua
+step "spec suite" bash tests/run.sh
+
+if [ "$fail" -ne 0 ]; then
+    echo "[pre-commit] blocked — fix the above, or 'git commit --no-verify' to bypass"
+    exit 1
+fi
+echo "[pre-commit] clean"
