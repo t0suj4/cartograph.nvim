@@ -278,10 +278,22 @@ end
 --- Human-readable report lines for M.blocks groups.
 function M.blocks_report(groups)
     if #groups == 0 then return { 'block-structural clones: none' } end
-    local L = { ('block-structural clones — %d group(s)'):format(#groups),
-        '(contiguous statement runs shared across/within functions; window-local alpha-invariance)', '' }
+    -- CONFIDENCE TIER (honesty): block matching is looser than whole-function, so a
+    -- SHORT shared run is often coincidental structural rhyme (a guard+loop+return
+    -- shape two unrelated functions happen to share). Measured on this codebase, blocks
+    -- ≥ SOLID_BLOCK statements are the stable real-duplication signal; shorter ones are
+    -- marked `~` (worth a glance, likely coincidence). Groups are already length-sorted.
+    local SOLID_BLOCK = 10
+    local solid = 0
+    for _, g in ipairs(groups) do if g.len >= SOLID_BLOCK then solid = solid + 1 end end
+    local L = {
+        ('block-structural clones — %d group(s) (%d solid ≥%d stmts, %d shorter ~)')
+            :format(#groups, solid, SOLID_BLOCK, #groups - solid),
+        '(contiguous statement runs shared across/within functions; window-local alpha-invariance)',
+        '(* = solid; ~ = short block, likely coincidental structural rhyme — glance, don\'t trust)', '' }
     for _, g in ipairs(groups) do
-        L[#L + 1] = ('■ %d copies, %d-statement block:'):format(#g, g.len)
+        local mark = g.len >= SOLID_BLOCK and '*' or '~'
+        L[#L + 1] = ('%s %d copies, %d-statement block:'):format(mark, #g, g.len)
         for _, m in ipairs(g) do
             L[#L + 1] = ('    %s  %s:%d-%d'):format(m.name, m.file, m.from_line, m.to_line)
         end
@@ -337,15 +349,18 @@ local function align(a, b)
     return d[la][lb], ops
 end
 
---- Near-clone PAIRS across the store's functions. Returns a list of pairs, each
---- { dist, shared, a = {name,file,id,lines,keys}, b = {…}, ops }, sorted by
---- (shared desc, dist asc). opts.max_dist (default 2), opts.min_rows (default 6),
---- opts.min_shared (default 3).
-function M.near(store, opts)
-    local max_dist = (opts and opts.max_dist) or 2
-    local min_rows = (opts and opts.min_rows) or 6
-    local min_shared = (opts and opts.min_shared) or 3
-    -- 1. per-fn canonical row-key lists
+-- The per-fn key index is the costly part of near-clone detection (one expr.of per
+-- function ~5ms → seconds repo-wide). Cache it by store.generation + min_rows so a
+-- focused query (near_of) and repeat scans are instant after the first build — the
+-- interactivity pattern ([[cartograph-interactive-analysis]]: amortize costly analysis
+-- so the on-demand path is cheap). Generation bumps on any graph change → sound eviction.
+local index_cache
+
+local function build_index(store, min_rows)
+    if index_cache and index_cache.gen == store.generation
+        and index_cache.min_rows == min_rows then
+        return index_cache.fns, index_cache.post
+    end
     local fns = {}
     for _, n in ipairs(store.data.nodes) do
         if (n.kind == 'function' or n.kind == 'method') and n.file then
@@ -359,7 +374,7 @@ function M.near(store, opts)
             end
         end
     end
-    -- 2. inverted index of distinctive row-keys → candidate pairs
+    -- inverted index of distinctive row-keys (key → fn indices)
     local post = {}
     for i, f in ipairs(fns) do
         local seen = {}
@@ -367,7 +382,40 @@ function M.near(store, opts)
             if not seen[k] then seen[k] = true; post[k] = post[k] or {}; post[k][#post[k] + 1] = i end
         end
     end
-    local shared = {} -- packed pair key → count of shared distinctive keys
+    index_cache = { gen = store.generation, min_rows = min_rows, fns = fns, post = post }
+    return fns, post
+end
+
+-- align one candidate pair; return a near-clone record or nil
+local function try_pair(fns, i, j, max_dist, min_rows)
+    local fa, fb = fns[i], fns[j]
+    local dist, ops = align(fa.keys, fb.keys)
+    if dist < 1 or dist > max_dist then return nil end
+    local nmatch = 0
+    for _, o in ipairs(ops) do if o.op == 'match' then nmatch = nmatch + 1 end end
+    if nmatch < min_rows then return nil end
+    return { dist = dist, shared = nmatch, a = fa, b = fb, ops = ops }
+end
+
+local function sort_pairs(out)
+    table.sort(out, function (x, y)
+        if x.shared ~= y.shared then return x.shared > y.shared end
+        return x.dist < y.dist
+    end)
+    return out
+end
+
+--- Near-clone PAIRS across the store's functions. Returns a list of pairs, each
+--- { dist, shared, a = {name,file,id,lines,keys}, b = {…}, ops }, sorted by
+--- (shared desc, dist asc). opts.max_dist (default 2), opts.min_rows (default 6),
+--- opts.min_shared (default 3). The per-fn index is generation-cached (see build_index).
+function M.near(store, opts)
+    local max_dist = (opts and opts.max_dist) or 2
+    local min_rows = (opts and opts.min_rows) or 6
+    local min_shared = (opts and opts.min_shared) or 3
+    local fns, post = build_index(store, min_rows)
+    -- candidate pairs = those sharing ≥ min_shared distinctive keys
+    local shared = {}
     for _, list in pairs(post) do
         if #list >= 2 and #list <= POST_CAP then
             for x = 1, #list do
@@ -378,26 +426,49 @@ function M.near(store, opts)
             end
         end
     end
-    -- 3. align each candidate pair, keep near-clones (distance 1..max_dist)
     local out = {}
     for pk, cnt in pairs(shared) do
         if cnt >= min_shared then
-            local fa, fb = fns[math.floor(pk / 1000000)], fns[pk % 1000000]
-            local dist, ops = align(fa.keys, fb.keys)
-            if dist >= 1 and dist <= max_dist then
-                local nmatch = 0
-                for _, o in ipairs(ops) do if o.op == 'match' then nmatch = nmatch + 1 end end
-                if nmatch >= min_rows then
-                    out[#out + 1] = { dist = dist, shared = nmatch, a = fa, b = fb, ops = ops }
+            local p = try_pair(fns, math.floor(pk / 1000000), pk % 1000000, max_dist, min_rows)
+            if p then out[#out + 1] = p end
+        end
+    end
+    return sort_pairs(out)
+end
+
+--- Near-clone pairs INVOLVING one focused function only — the interactive-scoped query
+--- (:CartographExtractHelper). Enumerates just the focus's candidate partners (functions
+--- sharing its distinctive statements) instead of all C(nfns,2) pairs. The costly index
+--- is generation-cached, so after the first build this is instant.
+function M.near_of(store, fn_id, opts)
+    local max_dist = (opts and opts.max_dist) or 2
+    local min_rows = (opts and opts.min_rows) or 6
+    local min_shared = (opts and opts.min_shared) or 3
+    local fns, post = build_index(store, min_rows)
+    local fi
+    for i, f in ipairs(fns) do if f.id == fn_id then fi = i; break end end
+    if not fi then return {} end
+    -- partners = functions sharing the focus's distinctive keys, counted
+    local cnt, fseen = {}, {}
+    for _, k in ipairs(fns[fi].keys) do
+        if not fseen[k] then
+            fseen[k] = true
+            local list = post[k]
+            if list and #list <= POST_CAP then
+                for _, j in ipairs(list) do
+                    if j ~= fi then cnt[j] = (cnt[j] or 0) + 1 end
                 end
             end
         end
     end
-    table.sort(out, function (x, y)
-        if x.shared ~= y.shared then return x.shared > y.shared end
-        return x.dist < y.dist
-    end)
-    return out
+    local out = {}
+    for j, c in pairs(cnt) do
+        if c >= min_shared then
+            local p = try_pair(fns, math.min(fi, j), math.max(fi, j), max_dist, min_rows)
+            if p then out[#out + 1] = p end
+        end
+    end
+    return sort_pairs(out)
 end
 
 -- ── anti-unification: refine a near-clone's holes into typed parameters ───────
@@ -524,8 +595,13 @@ end
 --- (hole) source lines — the parameters the two copies would factor into.
 function M.near_report(pairs_, store)
     if #pairs_ == 0 then return { 'near-clones: none' } end
-    local L = { ('near-clones — %d pair(s)'):format(#pairs_),
-        '(row sequences differing by ≤ max_dist edits; matched rows = shared template, differing rows = holes/params)', '' }
+    -- HONESTY: this is a LOWER BOUND. The row keys use function-global slot numbering,
+    -- so a near-clone that inserts a local used by many later rows drifts out of
+    -- alignment and is missed (an honest under-report, never a false match). So the
+    -- count is "at least N", not "exactly N".
+    local L = { ('near-clones — at least %d pair(s) (lower bound)'):format(#pairs_),
+        '(row sequences differing by ≤ max_dist edits; matched rows = shared template, differing rows = holes/params)',
+        '(lower bound: pairs that insert a local used downstream can drift out of alignment and be missed)', '' }
     local srccache = {}
     local function srcline(f, ln)
         local lines = srccache[f.file]

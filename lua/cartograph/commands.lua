@@ -627,11 +627,10 @@ function M.register()
             return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
         end
         local clones = require 'cartograph.clones'
-        -- the focused fn's best near-clone partner (most shared statements)
-        local best
-        for _, p in ipairs(clones.near(store, { max_dist = 2 })) do
-            if p.a.id == id or p.b.id == id then best = p; break end -- near() is shared-desc sorted
-        end
+        -- the focused fn's best near-clone partner (most shared statements). near_of
+        -- enumerates only the focus's candidate partners (not all pairs), over a
+        -- generation-cached index — the interactive-scoped query.
+        local best = clones.near_of(store, id, { max_dist = 2 })[1]
         if not best then
             return vim.notify(('cartograph: %s has no near-clone within edit distance 2')
                 :format(n.name), vim.log.levels.INFO)
