@@ -34,6 +34,11 @@ test('ruby-rails profile: loads with the framework surface in `free`', function 
         ok(p.free[n], 'free blesses ' .. n)
     end
     ok(p.nsset['Rails'] and p.nsset['ActiveRecord'], 'namespaces cover Rails/ActiveRecord')
+    -- canonical owners: RBS ground truth for CORE methods (ruby-core.mpack), hand-
+    -- authored for Rails methods core RBS can't see ([[cartograph-stdlib-profile]])
+    eq('Module#attr_reader', p.canon['attr_reader']) -- RBS-corrected (was hand Kernel#)
+    eq('Object#dup', p.canon['dup'])                 -- RBS-corrected (BasicObject/Object)
+    eq('ActiveRecord::Base.belongs_to', p.canon['belongs_to']) -- Rails owner preserved
 end)
 
 test('ruby-rails profile: a Rails root activates it; framework calls → minted stdlib nodes', function ()

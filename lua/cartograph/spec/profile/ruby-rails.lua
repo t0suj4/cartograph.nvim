@@ -264,6 +264,27 @@ end
 for m in pairs(FREE_KERNEL) do
     if not canon[m] then canon[m] = 'Kernel#' .. m end
 end
+
+-- RBS GROUND TRUTH ([[cartograph-stdlib-profile]] RBS enrichment): override the
+-- hand-authored canonical owner with the RBS defining owner for CORE-owned methods
+-- (ruby-core.mpack, distilled by tools/rbsdistill.lua, version-keyed + checked in →
+-- deterministic). Only override methods whose hand owner is a CORE class — a Rails
+-- owner (AR/ActionController/ActionView/Rails) is a framework-context choice core
+-- RBS can't see, so it stands. Missing artifact → hand-authored owners (graceful).
+local RAILS_OWNERS = {
+    ['ActiveRecord::Base'] = true, ['ActiveRecord::Persistence'] = true,
+    ['ActiveRecord::Relation'] = true, ['ActionController::Base'] = true,
+    ['ActionView::Helpers'] = true, ['Rails'] = true,
+}
+local core = require('cartograph.spec.profile').load('ruby-core')
+if core and core.canon then
+    for m, path in pairs(canon) do
+        local my_owner = path:match('^(.-)[#.]')
+        if not RAILS_OWNERS[my_owner] and core.canon[m] then
+            canon[m] = core.canon[m]
+        end
+    end
+end
 for _, ns in ipairs(NAMESPACES) do
     namespaces[#namespaces + 1] = ns
     nsset[ns] = true
