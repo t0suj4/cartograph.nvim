@@ -36,7 +36,18 @@ function M.open_index_only(root, opts)
     if store.data and (next(store.moveset or {}) or store.txn) then
         error('cartograph: staged changes pending — apply or clear them first', 0)
     end
-    local data = require('cartograph.providers.treesitter').index_only(root, opts)
+    -- WARM SYMBOL SERVING ([[cartograph-thin-index]]): reuse the persisted def shards
+    -- instead of re-parsing when the tree is unchanged (~15x). A subtree slice bypasses
+    -- the cache (a slice would poison the full-tree entry — same rule as the full open).
+    local cache = require 'cartograph.cache'
+    local sliced = opts and opts.subdirs
+    local data, note
+    if not sliced then data, note = cache.open_index_only(root) end
+    if note then vim.notify('cartograph: ' .. note, vim.log.levels.INFO) end
+    if not data then
+        data = require('cartograph.providers.treesitter').index_only(root, opts)
+        if not sliced then cache.save_bg(data) end -- persist the thin index for next time
+    end
     store.ingest(data)
     require('cartograph.commands').register() -- idempotent; make :Cartograph* live
     return store.data

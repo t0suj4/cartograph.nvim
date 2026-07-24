@@ -955,6 +955,11 @@ local function manifest_of(data, sizes)
         stamps = data.stamps, unparsed = data.unparsed,
         capabilities = data.capabilities, no_parser = data.no_parser,
         packs = data.packs, profile = data.profile, profile_stamp = profile_stamp,
+        -- INDEX-ONLY marker ([[cartograph-thin-index]] warm serving): a thin cache
+        -- (defs only, no call graph) MUST stay marked across the round-trip so a warm
+        -- reopen still reports is_index_only() — else the honesty guards (LSP caps
+        -- withheld, whole-graph verbs refused) silently lapse. Full caches lack it (nil).
+        index_only = data.index_only,
         sizes = sizes } -- per-shard byte lengths: truncation detector
 end
 
@@ -1098,6 +1103,8 @@ local function empty_data(m)
         -- restore the activation context so a refresh on a warm graph relinks with
         -- the SAME packs/profile it was built with (empty_data dropped both before)
         packs = m.packs, profile = m.profile,
+        -- carry the thin-index marker back so is_index_only() holds on a warm reopen
+        index_only = m.index_only,
         nodes = {}, edges = {}, calls = {}, names = {} }
 end
 
@@ -1301,12 +1308,41 @@ function M.open(root)
     if require('cartograph.config').cache == false then return nil end
     local m, changed, deleted = warm_decision(root)
     if not m then return nil, changed end -- changed carries the note (or nil)
+    -- a FULL open must never consume a thin (index-only) cache: it has no call
+    -- graph, so finish() would serve a complete-looking graph with 0 calls. Treat
+    -- it as a miss → cold full extract (which overwrites the thin cache).
+    if m.index_only then return nil end
     -- committed to warm: NOW read the shards. Corrupted ones cost exactly
     -- their own file — they join the changed set and re-extract.
     local data, bad = M.load(root)
     if not data then return nil end
     local note = finalize_warm(data, bad, changed, deleted,
         vim.tbl_count(m.stamps), 'warm open')
+    return data, note
+end
+
+--- Warm-open the INDEX-ONLY cache for `root` ([[cartograph-thin-index]] warm symbol
+--- serving): reuse the persisted def shards instead of re-parsing the tree (~15x on an
+--- unchanged repo). Deliberately CONSERVATIVE — serves warm ONLY from an index_only
+--- cache with a CLEAN diff (zero changed/deleted files). A full cache is rejected (it is
+--- heavier than the thin-index contract, and the caller wants the cheap symbol index),
+--- and ANY change falls back to a cold defs-only re-index. This is because finalize_warm
+--- splices changes through refresh.splice, which re-extracts AND relinks FULL — that would
+--- pollute the thin graph with a call graph and defeat the point; a per-file defs-only,
+--- relink-free incremental splice is the banked refinement. Returns (data, note) or nil.
+function M.open_index_only(root)
+    if require('cartograph.config').cache == false then return nil end
+    local m, changed, deleted = warm_decision(root)
+    if not m or not m.index_only then return nil end -- no thin cache / it's a full one → cold
+    if (#changed > 0) or (deleted and #deleted > 0) then
+        return nil, ('%d changed / %d deleted since the last index — cold re-index')
+            :format(#changed, deleted and #deleted or 0)
+    end
+    local data, bad = M.load(root)
+    if not data then return nil end
+    if bad and #bad > 0 then return nil end -- a corrupted shard would splice FULL → go cold
+    local note = finalize_warm(data, bad, changed, deleted,
+        vim.tbl_count(m.stamps), 'warm index-only open')
     return data, note
 end
 
@@ -1320,6 +1356,7 @@ function M.warm_streamable(root)
     if cfg.parallel == false then return false end
     local m = read_manifest(root)
     if not m then return false end
+    if m.index_only then return false end -- a thin cache never drives a full streamed open
     if not (m.provider == 'treesitter' or not m.provider) then return false end
     return vim.tbl_count(m.stamps) >= (cfg.parallel_threshold or 300)
 end
