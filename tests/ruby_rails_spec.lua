@@ -100,6 +100,97 @@ test('rails pack: ActiveRecord verbs are framework vocab (refused, not project d
     vim.fn.delete(root, 'rf')
 end)
 
+-- R5b-more: ActiveRecord FINDER receiver typing. `x = Model.find_by(...); x.foo`
+-- types x as Model → Model#foo, riding the R5 ctor-bind path. Pack-activated
+-- (ctor_finders) and additive (only unresolved calls). Uses a name defined on TWO
+-- classes so the file-local heuristic is ambiguous and the finder type disambiguates.
+local function recvcall(calls, recv, callee)
+    for _, c in ipairs(calls) do
+        if c.recv == recv and c.callee == callee then return c end
+    end
+end
+
+test('rails pack: a finder-typed local resolves (find_by → instance method)', function ()
+    if not ready() then skip 'no ruby parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'svc.rb', {
+        'class Account',
+        '  def suspend!; 1; end',      -- Account#suspend!
+        'end',
+        'class Ledger',
+        '  def suspend!; 2; end',      -- ambiguous suspend! → heuristic gives up
+        'end',
+        'def run(id)',
+        '  acct = Account.find_by(id: id)',
+        '  acct.suspend!',             -- finder-typed: acct is Account → Account#suspend!
+        'end',
+    })
+    local by, data = names(root, { 'rails' })
+    local c = recvcall(data.calls, 'acct', 'suspend!')
+    ok(c, 'the x.foo call captured its receiver (c.recv)')
+    ok(c and c.to == by['Account#suspend!'].id,
+        'acct.suspend! → Account#suspend! (finder-typed, disambiguated)')
+    ok(c and c.inferred, 'hedged (~)')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('rails pack: finder typing is pack-gated (base ruby does NOT type find_by)', function ()
+    if not ready() then skip 'no ruby parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'svc.rb', {
+        'class Account',
+        '  def suspend!; 1; end',
+        'end',
+        'class Ledger',
+        '  def suspend!; 2; end',
+        'end',
+        'def run(id)',
+        '  acct = Account.find_by(id: id)',
+        '  acct.suspend!',
+        'end',
+    })
+    local _, without = names(root, nil)
+    local c = recvcall(without.calls, 'acct', 'suspend!')
+    ok(c and not c.to,
+        'WITHOUT pack: find_by is not a ctor-finder → acct stays untyped (honest)')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('rails pack: a Relation verb (where) does NOT finder-type (returns a Relation)', function ()
+    if not ready() then skip 'no ruby parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'svc.rb', {
+        'class Account',
+        '  def suspend!; 1; end',
+        'end',
+        'class Ledger',
+        '  def suspend!; 2; end',
+        'end',
+        'def run',
+        '  rel = Account.where(active: true)',  -- Relation, NOT an Account instance
+        '  rel.suspend!',                       -- must NOT type rel as Account
+        'end',
+    })
+    local _, data = names(root, { 'rails' })
+    local c = recvcall(data.calls, 'rel', 'suspend!')
+    ok(c and not c.to,
+        'where is not a finder → rel stays untyped (no false Account#suspend!)')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('rails pack: compose_spec unions ctor_finders onto the base (none in base)', function ()
+    local base = { lang = 'ruby', stdlib_names = { each = true } }
+    local pack = { lang = 'ruby', ctor_finders = { find_by = true } }
+    local composed = ts.compose_spec('ruby', base, { pack })
+    ok(composed.ctor_finders and composed.ctor_finders.find_by,
+        'pack ctor_finders present on the composed spec')
+    ok(base.ctor_finders == nil, 'base is not mutated (pure)')
+    -- a ruby base with NO pack finders → composition leaves ctor_finders absent
+    local composed2 = ts.compose_spec('ruby', base, { { lang = 'ruby', stdlib_names = {} } })
+    ok(composed2 and composed2.ctor_finders == nil,
+        'a pack without ctor_finders adds none (pure Ruby stays .new-only)')
+end)
+
 test('rails pack: compose_spec unions vocab and chains def-emitters (pure)', function ()
     local base = { lang = 'ruby', stdlib_names = { each = true },
         synth_defs = function () return { { name = 'A#x' } } end }

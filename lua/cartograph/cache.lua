@@ -73,7 +73,13 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 97 -- v97: RAW df/flow ON DISK (fat-record migration fix). P3 moved the
+M.VERSION = 98 -- v98: RAILS ORM-FINDER receiver typing ([[cartograph-ruby-arc]] R5b-more).
+               -- The rails pack's ctor_finders extends the R5 ctor-bind scan to Active-
+               -- Record class finders that return a model instance (`x = User.find_by;
+               -- x.foo` → User#foo), riding the existing recv-path resolution. Extraction-
+               -- behavior change on rails-pack corpora only (+40 refs on rails, base ruby
+               -- unaffected — finders are a pack input) → bump + gate re-save (rails/rspec).
+               -- v97: RAW df/flow ON DISK (fat-record migration fix). P3 moved the
                -- df/flow fold to extract-end (before cache.save), so shards serialized
                -- the FOLDED form: every node's _df/_flow pointed at the ONE shared store,
                -- and string.buffer.encode duplicated that store per node → the cache blew

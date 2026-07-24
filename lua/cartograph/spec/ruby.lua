@@ -287,7 +287,18 @@ end
 -- resolve time). This is the SAME scan the reverted exact-only R5 used — the
 -- rescope is purely in HOW it's consumed (additive, `full` kept bare, only
 -- unresolved calls), not in the typing.
-local function ruby_ctor_binds(tsroot, src)
+--
+-- R5b-more ([[cartograph-ruby-arc]]): `finders` (a set, threaded from the RAILS
+-- pack's ctor_finders — nil for pure Ruby) extends the typing to ActiveRecord
+-- class FINDERS that return a model instance (`u = User.find/find_by/find_or_*`).
+-- SAME shape as `.new` (the receiver is the constant, the result is an instance
+-- of it), so it rides the identical bind/gate/resolve machinery. DELIBERATELY a
+-- pack input, not base ruby: `find_by` is only instance-returning under Active-
+-- Record — a pure-Ruby project must not assume it. Relation-returning verbs
+-- (where/all/order) are NOT finders (they yield a Relation, not an instance);
+-- generic first/last/take are excluded too (measured: 0 wins, collection over-
+-- reach risk — ormfinder probe 2026-07-24).
+local function ruby_ctor_binds(tsroot, src, finders)
     local out = {}
     local function walk(n)
         if n:type() == 'assignment' then
@@ -301,10 +312,12 @@ local function ruby_ctor_binds(tsroot, src)
                 and r and r:type() == 'call' then
                 local recv = r:field('receiver')[1]
                 local m = r:field('method')[1]
-                if recv and recv:type() == 'constant'
-                    and m and node_text(m, src) == 'new' then
-                    out[#out + 1] = { var = node_text(l, src),
-                        cls = node_text(recv, src) }
+                if recv and recv:type() == 'constant' and m then
+                    local mn = node_text(m, src)
+                    if mn == 'new' or (finders and finders[mn]) then
+                        out[#out + 1] = { var = node_text(l, src),
+                            cls = node_text(recv, src) }
+                    end
                 end
             end
         end

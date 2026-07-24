@@ -3599,6 +3599,16 @@ M.packs = {
             params = true, render = true, perform = true, process = true,
             valid = true, present = true, blank = true, errors = true },
         synth_defs = ruby_rails_synth,
+        -- R5b-more receiver typing ([[cartograph-ruby-arc]]): ActiveRecord class
+        -- FINDERS that return a model INSTANCE. `x = User.find(id); x.foo` types
+        -- x as User (→ User#foo), riding the R5 ctor-bind path (spec.ctor_finders
+        -- threaded into ruby_ctor_binds). ONLY instance-returning finders —
+        -- where/all/order return a Relation (NOT an instance), and generic
+        -- first/last/take are collection methods on any receiver (measured 0
+        -- wins, over-reach risk). Measured +40 sound / 0 loss on the rails corpus.
+        ctor_finders = { find = true, find_by = true, ['find_by!'] = true,
+            find_or_create_by = true, ['find_or_create_by!'] = true,
+            find_or_initialize_by = true, find_sole_by = true },
     },
     -- the test-DSL pack (RSpec + factory_bot) — the second ruby pack, proving
     -- MULTI-PACK composition (rails + rspec) and cleaning the spec-dir census
@@ -3652,11 +3662,20 @@ function M.compose_spec(lang, base, packs)
     local sn = {}
     for k in pairs(base.stdlib_names or {}) do sn[k] = true end
     local synths = base.synth_defs and { base.synth_defs } or {}
+    -- ctor_finders (rails R5b-more): union the packs' instance-returning finder
+    -- sets onto the base's (base ruby has none → pure-Ruby stays `.new`-only).
+    local cf, cf_any = {}, base.ctor_finders ~= nil
+    for k in pairs(base.ctor_finders or {}) do cf[k] = true end
     for _, p in ipairs(applicable) do
         for k in pairs(p.stdlib_names or {}) do sn[k] = true end
         if p.synth_defs then synths[#synths + 1] = p.synth_defs end
+        if p.ctor_finders then
+            cf_any = true
+            for k in pairs(p.ctor_finders) do cf[k] = true end
+        end
     end
     composed.stdlib_names = sn
+    if cf_any then composed.ctor_finders = cf end
     if #synths > 0 then
         composed.synth_defs = function (tsroot, src)
             local all = {}
@@ -4267,11 +4286,13 @@ function M.extract(root, opts)
         end
         -- R5 ctor bindings (`u = Const.new`): per-file var→class, single-
         -- assignment gated (a var bound twice → false = ambiguous, dropped).
+        -- spec.ctor_finders (rails pack, R5b-more) extends the scan to AR finders
+        -- (`u = User.find_by`) — same bind/gate/resolve path as `.new`.
         if spec.scan_ctors then
             data.ruby_ctor = data.ruby_ctor or {}
             local fb = data.ruby_ctor[file] or {}
             data.ruby_ctor[file] = fb
-            for _, cb in ipairs(spec.scan_ctors(tsroot, src)) do
+            for _, cb in ipairs(spec.scan_ctors(tsroot, src, spec.ctor_finders)) do
                 if fb[cb.var] == nil then fb[cb.var] = { cls = cb.cls, n = 1 }
                 elseif fb[cb.var] then fb[cb.var].n = fb[cb.var].n + 1 end
             end

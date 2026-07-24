@@ -115,7 +115,7 @@ return {
         root = HOME .. '/git/discourse/app/models',
         repo = 'https://github.com/discourse/discourse',
         rev = '28b003a38d82',
-        expected = { refs = 2615, nodes = 4916 }, -- recalibrated @ R5b-ivar (v78)
+        expected = { refs = 2642, nodes = 4916 }, -- recalib @ R5b-more rails ORM-finder typing (v98): +27 refs = AR finder-typed receivers (x=Model.find_by; x.foo → Model#foo), all hedged (~), 0 loss. Prior 2615 @ R5b-ivar (v78)
         lang = 'ruby',
         packs = { 'rails' }, -- the rails overlay pack (assoc/delegate emitters
                              -- + ActiveRecord vocab) composed onto base ruby

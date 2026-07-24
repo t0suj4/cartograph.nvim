@@ -500,7 +500,13 @@ callers). Ariadne's thread, in text.
      vocabulary (`save`/`where`/`find`/…, which a *non*-Rails project would
      resolve to its own methods) and reads `has_many`/`belongs_to`/`has_one`/
      `delegate` as method definitions (`has_many :comments` → `Model#comments`),
-     activated per-project so pure Ruby stays pure. Packs compose: an `rspec`
+     activated per-project so pure Ruby stays pure. The pack also extends
+     constructor typing to ActiveRecord **finders** that return a model
+     instance — `user = User.find_by(email: e); user.suspend!` types `user` as
+     `User` (→ `User#suspend!`), just as `.new` does — while relation-returning
+     verbs (`where`/`all`/`order`) are left untyped (they yield a `Relation`,
+     not an instance). This is a pack input: only ActiveRecord makes `find_by`
+     instance-returning, so pure Ruby never assumes it. Packs compose: an `rspec`
      pack (RSpec + factory_bot verbs — `describe`/`it`/`let`/`expect`/…) stacks
      on top of `rails` for a test suite, so framework DSL reads as framework and
      a project method that happens to share a DSL name isn't mistaken for it.
