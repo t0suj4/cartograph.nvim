@@ -146,6 +146,22 @@ function M.register(H)
         scratch(require('cartograph.versionfloor').report(store))
     end, { desc = 'cartograph: the version floor as an ATTRIBUTED SET — which language version this code needs and WHY (the feature and the site holding it up) — plus the downgrade ladder, pricing each older target in sites-to-fix. A LOWER bound: syntax only, stdlib version gates not modelled' })
 
+    -- ── PORTABILITY: the external surface scored against a target runtime.
+    --    Needs the whole graph — the surface IS the unresolved calls, so on the
+    --    thin index "provided by nothing" would be an artefact of no call graph.
+    cmd('CartographPortability', function (o)
+        local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
+        local runtime = o.fargs[1]
+        if not runtime then
+            return vim.notify('cartograph: :CartographPortability <runtime> —'
+                .. ' e.g. ruby-rails, zig-std, lua-factorio', vim.log.levels.WARN)
+        end
+        scratch(require('cartograph.portability').report(store, runtime))
+    end, { nargs = '?', complete = function ()
+        return require('cartograph.portability').runtimes()
+    end, desc = 'cartograph: score the external surface against a target environment profile — which names it PROVIDES and which are not in it (candidate porting work, with call counts). Not-in-profile is not "missing": a dependency may supply it' })
+
     -- ── the EXTERNAL SURFACE: names used but defined nowhere here, with the
     --    shape inferred backward from usage (the boundary map + write-side seed)
     cmd('CartographExternals', function ()

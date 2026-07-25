@@ -1229,6 +1229,36 @@ than an empty list that reads as "nothing passes here".
 It needs the whole graph, since the rows *are* call sites — on the thin index it
 refuses instead of showing an honest-looking zero.
 
+## Portability (will it run there, and where does it break)
+
+`:CartographPortability <runtime>` scores the **external surface** — what the code
+uses but doesn't define — against a target environment, and buckets each name:
+
+```
+portability — ruby-rails rails-7: 528 of 2485 external name(s) provided
+  the profile claims 1734 symbols; a verdict is only as good as that
+  NOT IN ruby-rails (candidate porting work, most-used first):
+    DB.exec                      122 call(s)  about.rb
+    Jobs.enqueue                  63 call(s)  category.rb
+    DiscourseEvent.trigger        56 call(s)  category.rb
+  provided by ruby-rails: 528 name(s)
+    I18n.t                       302 call(s)  via vocab
+```
+
+The verb is small because it's one intersection: `externals.lua` already computes
+what the code doesn't define, and every environment profile already declares what
+a runtime provides. **No `<runtime>-provides` sets had to be authored** — a
+profile *is* a provides set, so every distilled artifact that ships is already a
+target, and `runtimes()` derives the list rather than hardcoding it. Run the same
+codebase against different profiles and the diff is the porting work.
+
+It's the easiest verb here to overstate, so: the bucket is **NOT-IN-PROFILE**,
+never "missing" — a dependency may supply the name, or the artifact may be
+partial, and cartograph cannot tell which. The profile's own symbol count is
+printed next to the verdict so a thin artifact can be discounted, and a profile
+for a *different language* is refused outright rather than marking every name
+unprovided and looking catastrophic.
+
 ## Version floor (what this code needs — and what older costs)
 
 `:CartographVersionFloor` answers "which language version does this actually

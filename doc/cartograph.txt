@@ -121,6 +121,17 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               receiver's type. A stdlib name the project
                               also defines resolves there instead, so the
                               hedged tier under-reports and says so
+  :CartographPortability {runtime}
+                              score the external surface against a target
+                              environment profile (tab-completes the ones
+                              that ship): which names it PROVIDES, and
+                              which are NOT IN it, with call counts — the
+                              candidate porting work. "Not in the profile"
+                              is NOT "missing": a dependency may supply
+                              it, or the artifact may be partial, so the
+                              profile's own size is printed with the
+                              verdict. A profile for another language is
+                              refused rather than scored
   :CartographExternals        the external boundary — unresolved names
                               and the shape each use implies (~)
   :CartographEscalate[!]      escalate hedge-saturated fns to lua-ls
