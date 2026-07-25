@@ -143,6 +143,12 @@ local function reset_indexes()
     M.var_usedby, M.var_uses = {}, {}
     M.imports_in, M.imports_out = {}, {}
     M.reg_by, M.registers = {}, {}
+    -- ON-DEMAND MATERIALIZATION LEDGERS: these say "file F's df/flow (or calls) are
+    -- already in THIS graph", so a new graph invalidates them. Surviving an ingest
+    -- meant opening project B silently skipped materialization for any path project A
+    -- had already materialized — a same-relative-path collision that reads as "this
+    -- file has no calls". Caught by demandcalls_spec's second test.
+    M._df_materialized, M._calls_materialized = {}, {}
 end
 
 function M.ingest(data)
@@ -364,6 +370,112 @@ function M.materialize_file_dataflow(rel)
     end
     M._df_materialized[rel] = true
     return true
+end
+
+--- ON-DEMAND CALL MATERIALIZATION ([[cartograph-merging-strategies]], the calls half
+--- of index-and-reduce). The sibling of materialize_file_dataflow, and a strictly
+--- harder problem: df/flow are LOCAL, so a file's dataflow extracted alone is
+--- byte-faithful, while calls need RESOLUTION, and resolution is where cross-file
+--- evidence lives.
+---
+--- HOW IT AVOIDS THE FILE CUT. Extracting one file alone resolves its calls against
+--- an index built from that file's nodes only — the unsound horizontal slice
+--- ([[cartograph-merging-strategies]] step 2: a repo-ambiguous name looks unique in
+--- the slice). So the batch's cross-file hypotheses are NULLED by parallel.audit
+--- (which also recomputes the global dispatch core), the raw calls are spliced into
+--- the resident graph, and RELINK re-derives them against the resident def index —
+--- which on the thin index is COMPLETE, since index_only carries every file's defs.
+--- The only calls relink then sees are the materialized ones, so this is a scoped
+--- resolve without refactoring relink's loop out from under the critical path.
+---
+--- WHAT STAYS UNSOUND, measured rather than guessed (tools/demandcalls.lua): ruby
+--- 4139/4139 and lua 680/680 sites reproduce the full graph exactly, but rust gives
+--- 8967/8971 — 4 calls that demand RESOLVES and the full graph REFUSES. Over-
+--- claiming, from the one direction a partial graph should never manage.
+---
+--- THE CARRIER IS `resolve_self`'s POISON, and it took ruling out everything else:
+--- node sets are identical (3360 = 3360, no minted nodes), every per-language fact
+--- table is identical, cbarg marks are 0 in both, the id pass is irrelevant, and
+--- relink is exact on a full graph (clear all 6318 rust refusals and it re-derives
+--- 6318, every rule matching). Per-pass instrumentation then named it: the `self`
+--- pass overrides a `vocab` refusal, and only on the demand graph. In resolve_self,
+---     elseif recv then selft[cto] = false   -- untypeable receiver → hedge
+--- means a call ANYWHERE with an untypeable receiver POISONS that method id, and
+--- poison makes selfclass() return nil so `self.member` stays unresolved. The full
+--- call set poisons `PartialErrorBuilder::push`; one file's calls do not.
+---
+--- SO THE DEGRADATION IS ANTI-MONOTONE: more resident calls means more poison means
+--- FEWER resolutions, so the LESS you materialize the more you over-claim. That is
+--- the opposite of graceful, and it is why this is a soundness limit and not a
+--- quality one. It is bounded, though: all 4 land at the HEDGED (`~`, inferred) tier,
+--- never as a confirmed resolution — 3 stamped prov=`self`, 1 prov=`base`.
+---
+--- THE FIX, not yet built: the poison set is one boolean per method id derived from
+--- ALL calls' receivers — a small global fact, exactly the shape of the file->scope
+--- table, which should be PRECOMPUTED ONCE and consulted rather than re-derived from
+--- a partial call set. Same lesson as scopes: narrow the output, never the evidence.
+--- Until then a demand consumer must treat `~`-tier calls as unverified here.
+---
+--- Does NOT clear the index_only marker: one file's calls is not a call graph, and
+--- whole-graph verbs must keep refusing. Idempotent per file. Returns true iff it
+--- materialized.
+function M.materialize_file_calls(rel)
+    M._calls_materialized = M._calls_materialized or {}
+    if M._calls_materialized[rel] then return false end
+    -- already present (a full graph)? nothing to do
+    for _, c in ipairs((M.data or {}).calls or {}) do
+        local f = require('cartograph.callrec').file(c)
+        if f == rel then M._calls_materialized[rel] = true; return false end
+    end
+    -- THE FILE'S OWN DATAFLOW FIRST, and this was a measured bug, not caution:
+    -- resolution reads it. `resolve_local_callable` (the last pass, the honesty
+    -- residual) refuses a callee bound to a function VALUE, and that binding lives
+    -- in df/flow — which the thin index does not carry. Splicing only the calls left
+    -- those refusals underived: the full graph reported `fn-value` refusals that the
+    -- demand graph silently did not (measured on ruby's jdom.rb, 5 of 473 sites).
+    -- Local, so it is byte-faithful, and idempotent.
+    M.materialize_file_dataflow(rel)
+    local ts = require 'cartograph.providers.treesitter'
+    local sub = ts.extract(M.data.root, { files = { rel }, fileset = { rel },
+        skip_idpass = true, packs = M.data.packs })
+    -- NULL EVERY RESOLUTION THE SUB-BATCH MADE, same-file ones included. parallel.
+    -- audit is the near-miss here: it keeps same-file links, which is right for a
+    -- worker slice (the slice saw the whole file, and the parent's relink is the
+    -- expensive part) but wrong here, because relink only reconsiders calls with NO
+    -- target — so a same-file link minted against a ONE-FILE index rides through
+    -- unexamined. Measured: 4 rust calls (`self.push`, `self.is_none`, `self.build`)
+    -- resolved at ~ in the demand graph that the full graph REFUSES as stdlib vocab
+    -- or ambiguous. Over-claiming, from the one direction a partial graph should
+    -- never manage. So the sub-batch contributes SITES ONLY, and every disposition
+    -- is relink's, derived against the resident (complete) def index.
+    local calls = M.data.calls or {}
+    local added = 0
+    for _, c in ipairs(sub.calls or {}) do
+        c.to, c.inferred, c.refused, c.ext = nil, nil, nil, nil
+        calls[#calls + 1] = c
+        added = added + 1
+    end
+    M.data.calls = calls
+    if added > 0 then
+        ts.relink(M.data, {})
+        M.ingest(M.data) -- rebuild the indexes over the new calls/edges
+    end
+    -- AFTER the ingest, which resets the ledgers by design (a new graph invalidates
+    -- them) and cannot tell its own caller's re-ingest from a fresh open. Both flags
+    -- are only a cache hint — the data now carries the calls and the df, so both
+    -- functions' own early-outs would reach the same verdict by scanning.
+    M._df_materialized[rel] = true
+    M._calls_materialized[rel] = true
+    return added > 0
+end
+
+--- Which files have had their calls materialized — so a report can say "calls exist
+--- for these files ONLY" instead of implying a whole call graph.
+function M.calls_materialized()
+    local out = {}
+    for f in pairs(M._calls_materialized or {}) do out[#out + 1] = f end
+    table.sort(out)
+    return out
 end
 
 --- HONESTY ([[cartograph-thin-index]]): true when the open graph is the THIN index —
