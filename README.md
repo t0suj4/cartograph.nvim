@@ -1195,12 +1195,15 @@ for nothing, with the hedge named. The report's header carries its own
 disclaimer: reads through calls are not modeled. Built entirely from the write
 axis (`rw`/`gw`/`gp`), the effect summaries, and the signature packs.
 
-`:CartographReorderApply <from> <to>` is the write side: it moves the statement
-at one line to before another, **only when the verdict certifies it**. Moving a
-statement inverts its order with each one it crosses, so the move is
-behavior-preserving exactly when it has no modeled relationship — dataflow
+`:CartographReorderApply <from> [<through>] <to>` is the write side: it moves the
+statement at one line — or the contiguous **block** `<from>..<through>` — to
+before another, **only when the verdict certifies it**. Moving a statement (or
+block) inverts its order with each one it crosses, so it is behavior-preserving
+exactly when *every* moved statement has no modeled relationship — dataflow
 dependency or state/world conflict — with any crossed statement, and crosses
-nothing opaque (an unresolved effect it can't reason about). It refuses with the
+nothing opaque (an unresolved effect it can't reason about). A block moves as a
+unit, so its internal order is preserved automatically and only the block↔crossed
+relationships are checked. It refuses with the
 specific barrier named (*"the move would cross #3, which has a dataflow dep
 (local a) with it"*), and otherwise stages the one-line move as a transaction
 you review with `:CartographDiff` and commit with `:CartographApply` — journaled,

@@ -55,8 +55,10 @@ function M.render()
             end
         elseif t.verb == 'reorder' then
             lines[#lines + 1] = hl(marks, #lines,
-                ('REORDER  move L%d before L%d in %s    :CartographDiff · :CartographApply · :CartographTxnClear')
-                    :format(t.from_line, t.to_line, t.fn or '?'), 'Title')
+                ('REORDER  move %d statement(s) (L%d%s) before L%d in %s    :CartographDiff · :CartographApply · :CartographTxnClear')
+                    :format(t.nstmts or 1, t.from_line,
+                        (t.through_line and t.through_line ~= t.from_line) and ('..L' .. t.through_line) or '',
+                        t.to_line, t.fn or '?'), 'Title')
             lines[#lines + 1] = ('  %s — statement move, verified behavior-neutral by the commute verdict')
                 :format(t.file)
         elseif t.verb == 'extract-helper' then

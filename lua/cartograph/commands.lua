@@ -433,20 +433,26 @@ function M.register()
         if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
             return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
         end
-        local from, to = o.fargs[1] and tonumber(o.fargs[1]), o.fargs[2] and tonumber(o.fargs[2])
+        -- <from> <to>  (single statement)  |  <from> <through> <to>  (block)
+        local n1 = o.fargs[1] and tonumber(o.fargs[1])
+        local n2 = o.fargs[2] and tonumber(o.fargs[2])
+        local n3 = o.fargs[3] and tonumber(o.fargs[3])
+        local from, through, to
+        if n3 then from, through, to = n1, n2, n3
+        elseif n2 then from, to = n1, n2 end
         if not (from and to) then
-            return vim.notify('cartograph: :CartographReorderApply <from-line> <to-line>'
-                .. ' (move the statement at from-line to before to-line)', vim.log.levels.WARN)
+            return vim.notify('cartograph: :CartographReorderApply <from> [<through>] <to>'
+                .. ' (move the statement/block at <from>[..<through>] to before <to>)', vim.log.levels.WARN)
         end
-        local plan, why = require('cartograph.reorder').plan_move(store, id, from, to)
+        local plan, why = require('cartograph.reorder').plan_move(store, id, from, to, through)
         if not plan then
             return vim.notify('cartograph: cannot reorder — ' .. tostring(why), vim.log.levels.WARN)
         end
         store.set_txn(plan)
-        vim.notify(('cartograph: reorder staged — move L%d before L%d in %s.'
+        vim.notify(('cartograph: reorder staged — move %d statement(s) (L%d%s) before L%d in %s.'
             .. ' Review with :CartographDiff, then :CartographApply'):format(
-            from, to, plan.fn), vim.log.levels.INFO)
-    end, { nargs = '*', desc = 'cartograph: stage a VERIFIED statement reorder in the focused fn — move the statement at <from-line> to before <to-line>. Certified behavior-preserving by the commute verdict (refuses if the move crosses a dataflow dep, a state/world conflict, or an opaque statement). Review :CartographDiff, commit :CartographApply' })
+            plan.nstmts, from, through and ('..L' .. through) or '', to, plan.fn), vim.log.levels.INFO)
+    end, { nargs = '*', desc = 'cartograph: stage a VERIFIED statement reorder in the focused fn — move the statement at <from> (or the block <from>..<through>) to before <to>. Certified behavior-preserving by the commute verdict (refuses if it crosses a dataflow dep, a state/world conflict, or an opaque statement). Review :CartographDiff, commit :CartographApply' })
 
     -- ── untangle: the focused fn's independent CONCERNS over the full PDG ─
     cmd('CartographUntangle', function ()

@@ -62,6 +62,40 @@ test('reorder-apply: a move crossing an opaque statement is refused', function (
     vim.fn.delete(root, 'rf')
 end)
 
+test('reorder-apply: a BLOCK of statements moves as a unit when it commutes', function ()
+    -- a, b (independent of d) then d, then the dependent c. Move the block [a, b] (L2-L3)
+    -- down to before `return` (L6), crossing d (L4) — a,b commute with d → certified.
+    local root = proj('local function f(x, y)\n  local a = x + 1\n  local b = y * 2\n'
+        .. '  local d = x - y\n  local c = a + b + d\n  return c\nend\nreturn f\n')
+    -- L4 is `local d`; move block L2..L3 (a,b) to before L5 (`local c`) — crosses d
+    local plan, why = ro.plan_move(store, fn_id('f'), 2, 5, 3)
+    ok(plan, 'the block move is certified: ' .. tostring(why))
+    if plan then
+        eq(2, plan.nstmts, 'a two-statement block')
+        local _, after = ro.preview(store, plan)
+        local lines = vim.split(after[plan.file], '\n', { plain = true })
+        eq('  local d = x - y', lines[2], 'd moved up to line 2')
+        eq('  local a = x + 1', lines[3], 'the a/b block followed, order preserved')
+        eq('  local b = y * 2', lines[4], 'b keeps its position within the block')
+        local pr = vim.treesitter.get_string_parser(after[plan.file], 'lua'):parse()[1]:root()
+        ok(not pr:has_error(), 'the reordered file parses clean')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('reorder-apply: a block move is refused if ANY block statement is bound to a crossed one', function ()
+    -- block [a, c] where c uses b; moving it past b would invert c and b → refuse
+    local root = proj('local function f(x, y)\n  local a = x + 1\n  local b = y * 2\n'
+        .. '  local c = b + 1\n  return a + c\nend\nreturn f\n')
+    -- can't form a clean [a..c] block that excludes b (b is between); move block L2..L4? that includes b.
+    -- instead: move block [b, c] (L3-L4) up before a (L2) — fine (no dep with a); then try
+    -- moving [c] alone up past b (dep) — refused (covered). Here assert the block [a] .. no.
+    -- Move block L4..L4 (c) up before L3 (b): c uses b → refused.
+    local plan, why = ro.plan_move(store, fn_id('f'), 4, 3, 4)
+    ok(not plan and why:find('dataflow dep'), 'a block whose member depends on a crossed statement is refused: ' .. tostring(why))
+    vim.fn.delete(root, 'rf')
+end)
+
 test('reorder-apply: the write is journaled and the result parses', function ()
     local root = proj(PURE)
     local plan = ro.plan_move(store, fn_id('f'), 3, 2)

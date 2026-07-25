@@ -242,82 +242,96 @@ end
 --- starting at `to_line` (1-based). Returns a txn plan, or (nil, reason) if the move
 --- crosses a dependency, a state/world conflict, or an opaque statement — i.e. can't be
 --- certified behavior-preserving.
-function M.plan_move(store, fn_id, from_line, to_line)
+--- `through_line` (optional) makes it a BLOCK move: the contiguous run of statements from
+--- `from_line` through `through_line` moves as a unit. The block's internal order is
+--- preserved (only the block↔crossed relationships matter), so it is sound iff EVERY block
+--- statement commutes with EVERY crossed statement and nothing opaque is crossed or in the
+--- block. Each block statement must be single-line (multi-line refused; same first-cut limit).
+function M.plan_move(store, fn_id, from_line, to_line, through_line)
     local m, why = M.analyze(store, fn_id)
     if not m then return nil, why end
     local rows = m.stmts
-    local p, q
-    for i, r in ipairs(rows) do
-        if r.l == from_line then p = i end
-        if r.l == to_line then q = i end
+    through_line = through_line or from_line
+    local p, r, q
+    for i, row in ipairs(rows) do
+        if row.l == from_line then p = i end
+        if row.l == through_line then r = i end
+        if row.l == to_line then q = i end
     end
     if not p then return nil, 'no statement starts at line ' .. from_line end
+    if not r then return nil, 'no statement starts at line ' .. through_line end
+    if r < p then return nil, 'the block end is before its start' end
     if not q then
-        -- allow "to end": to_line past the last statement
         if to_line > rows[#rows].l then q = #rows + 1 else return nil, 'no statement at line ' .. to_line end
     end
-    if q == p or q == p + 1 then return nil, 'that is already the statement\'s position' end
+    if q >= p and q <= r + 1 then return nil, 'that is already the block\'s position' end
 
+    local inblock = {}
+    for i = p, r do inblock[i] = true end
     local opaque = {}
     for _, i in ipairs(m.opaque) do opaque[i] = true end
-    if opaque[p] then return nil, ('#%d has unresolved effects (opaque) — cannot certify a move'):format(p) end
+    for i = p, r do
+        if opaque[i] then return nil, ('#%d has unresolved effects (opaque) — cannot certify the move'):format(i) end
+    end
 
-    -- the crossed set: statements strictly between the old and new position
+    -- the crossed set: statements strictly between the block and the new position
     local passed = {}
-    if q > p then for t = p + 1, q - 1 do passed[#passed + 1] = t end
+    if q > r then for t = r + 1, q - 1 do passed[#passed + 1] = t end
     else for t = q, p - 1 do passed[#passed + 1] = t end end
 
-    -- any modeled relationship between p and a crossed statement blocks the move
-    local rel = {} -- crossed index → reason
-    for _, d in ipairs(m.deps) do
-        if d[1] == p then rel[d[2]] = rel[d[2]] or ('a dataflow dep (%s)'):format(d[3])
-        elseif d[2] == p then rel[d[1]] = rel[d[1]] or ('a dataflow dep (%s)'):format(d[3]) end
+    -- any modeled relationship between a BLOCK statement and a crossed statement blocks it
+    local rel = {}
+    local function note(a, b, why2)
+        if inblock[a] and not inblock[b] then rel[b] = rel[b] or why2
+        elseif inblock[b] and not inblock[a] then rel[a] = rel[a] or why2 end
     end
-    for _, c in ipairs(m.conflicts) do
-        if c[1] == p then rel[c[2]] = rel[c[2]] or ('a %s conflict (%s)'):format(c[3], c[4])
-        elseif c[2] == p then rel[c[1]] = rel[c[1]] or ('a %s conflict (%s)'):format(c[3], c[4]) end
-    end
+    for _, d in ipairs(m.deps) do note(d[1], d[2], ('a dataflow dep (%s)'):format(d[3])) end
+    for _, c in ipairs(m.conflicts) do note(c[1], c[2], ('a %s conflict (%s)'):format(c[3], c[4])) end
     for _, t in ipairs(passed) do
-        if opaque[t] then
-            return nil, ('the move would cross #%d, whose effects are opaque'):format(t)
-        end
-        if rel[t] then
-            return nil, ('the move would cross #%d, which has %s with it'):format(t, rel[t])
-        end
+        if opaque[t] then return nil, ('the move would cross #%d, whose effects are opaque'):format(t) end
+        if rel[t] then return nil, ('the move would cross #%d, which has %s with a block statement'):format(t, rel[t]) end
     end
 
-    local src0, sw = single_line(store, fn_id, rows, from_line)
-    if not src0 then return nil, sw end
-    local dst_line1 = (q <= #rows) and rows[q].l or (at.el(m.node.range)) -- q==#rows+1 → fn `end` line (1b = el+1); insert before it
+    -- each block statement must be a single exclusive source line
+    for i = p, r do
+        local _, sw = single_line(store, fn_id, rows, rows[i].l)
+        if sw then return nil, ('#%d: %s'):format(i, sw) end
+    end
+    local src_s0, src_e0 = from_line - 1, through_line - 1
+    local dst_line1 = (q <= #rows) and rows[q].l or at.el(m.node.range) -- fn `end` line
     local dst0 = dst_line1 - 1
+    if dst0 >= src_s0 and dst0 <= src_e0 + 1 then return nil, 'the block cannot move into itself' end
 
     local root = store.data.root
     local rel_file = m.node.file
     local text = require('cartograph.txn').read_file(root, rel_file)
     if not text then return nil, 'cannot read ' .. rel_file end
-    local line_text = vim.split(text, '\n', { plain = true })[src0 + 1]
+    local flines = vim.split(text, '\n', { plain = true })
+    local src_lines = {}
+    for i = src_s0, src_e0 do src_lines[#src_lines + 1] = flines[i + 1] end
 
     return {
         verb = 'reorder', generation = store.generation,
         file = rel_file, fn = m.node.name,
-        src0 = src0, dst0 = dst0, line_text = line_text,
-        from_line = from_line, to_line = to_line,
+        src_s0 = src_s0, src_e0 = src_e0, dst0 = dst0, src_lines = src_lines,
+        from_line = from_line, to_line = to_line, through_line = through_line,
+        nstmts = r - p + 1,
         ref = store.ref_of(fn_id), fn_id = fn_id,
         touched = { rel_file },
         stamps = { [rel_file] = require('cartograph.txn').disk_stamp(root, rel_file) },
     }
 end
 
---- The edit callback: cut the source line and re-insert it before the destination line.
+--- The edit callback: cut the source line range and re-insert it before the destination.
 function M.edits_for(plan)
     return function (rel, before)
         if rel ~= plan.file then return before end
         local lines = vim.split(before, '\n', { plain = true })
-        local text = lines[plan.src0 + 1]
-        table.remove(lines, plan.src0 + 1)
-        -- destination index after the removal: unchanged if dst is above src, else -1
-        local ins0 = plan.dst0 < plan.src0 and plan.dst0 or plan.dst0 - 1
-        table.insert(lines, ins0 + 1, text)
+        for _ = plan.src_s0, plan.src_e0 do table.remove(lines, plan.src_s0 + 1) end
+        -- destination index after the removal: shift down by the block size if it was above
+        local removed = plan.src_e0 - plan.src_s0 + 1
+        local ins0 = plan.dst0 <= plan.src_s0 and plan.dst0 or plan.dst0 - removed
+        for i = #plan.src_lines, 1, -1 do table.insert(lines, ins0 + 1, plan.src_lines[i]) end
         return table.concat(lines, '\n')
     end
 end
@@ -331,11 +345,15 @@ function M.apply(store, plan)
     if next(store.moveset or {}) then return nil, 'a move-set is staged — apply or clear it first' end
     local bad = txn.verify(store, plan, { { id = plan.fn_id, name = plan.fn, ref = plan.ref, what = 'function' } })
     if bad then return nil, bad end
-    -- the moved line must still be exactly what we planned (CAS on the span), and the
-    -- result must parse cleanly (a body-changing edit, like optapply)
+    -- the moved lines must still be exactly what we planned (span CAS), and the result must
+    -- parse cleanly (a body-changing edit, like optapply)
     local before, after = M.preview(store, plan)
-    local cur = before and before[plan.file] and vim.split(before[plan.file], '\n', { plain = true })[plan.src0 + 1]
-    if cur ~= plan.line_text then return nil, 'the source line changed since planning — re-plan' end
+    local bl = before and before[plan.file] and vim.split(before[plan.file], '\n', { plain = true })
+    for i, want in ipairs(plan.src_lines) do
+        if not bl or bl[plan.src_s0 + i] ~= want then
+            return nil, 'the source lines changed since planning — re-plan'
+        end
+    end
     -- parse-clean on the result (a body-changing edit). Grammar from the file ext; if the
     -- grammar isn't available the sound commute verdict + span-CAS still hold, so skip.
     local text = after and after[plan.file]
