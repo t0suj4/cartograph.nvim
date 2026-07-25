@@ -20,8 +20,6 @@ local ok_ffi, ffi = pcall(require, 'ffi')
 M.have_ffi = ok_ffi
 M.default_backend = ok_ffi and 'ffi' or 'string'
 
-local byte, char, floor = string.byte, string.char, math.floor
-
 -- ── interner: opaque key → 0-based int id ────────────────────────────────
 function M.interner()
     local map, list, n = {}, {}, 0
@@ -38,25 +36,10 @@ function M.interner()
     }
 end
 
--- pack a 0-based Lua int array [0..len-1] into a little-endian u32 byte string
-local function pack_u32(arr, len)
-    local parts = {}
-    for i = 0, len - 1 do
-        local x = arr[i]
-        parts[i + 1] = char(x % 256, floor(x / 256) % 256,
-            floor(x / 65536) % 256, floor(x / 16777216) % 256)
-    end
-    return table.concat(parts)
-end
-
--- a 0-based u32 reader over a packed byte string
-local function string_getter(s)
-    return function (i)
-        local p = i * 4 + 1
-        local a, b, c, d = byte(s, p, p + 3)
-        return a + b * 256 + c * 65536 + d * 16777216
-    end
-end
+-- 0-based LE-u32 pack + reader, shared with the other folded stores (bytecol):
+-- the string backend's offsets/neighbours are read by 0-based node/slot index.
+local bytecol = require 'cartograph.bytecol'
+local pack_u32, string_getter = bytecol.pack_u32_0, bytecol.reader_u32_0
 
 -- ── CSR object ───────────────────────────────────────────────────────────
 local CSR = {}

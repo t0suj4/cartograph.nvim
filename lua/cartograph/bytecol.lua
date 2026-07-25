@@ -59,4 +59,43 @@ function M.rd(c, i)
     return a + b * 256 + c2 * 65536 + d * 16777216
 end
 
+-- ── fixed-width u32 columns (single width, SPECIALISED reader) ───────────────
+-- For folded stores that keep one u32 column and want a reader with NO per-read
+-- width branch: at.lua's range coords (1-based index) and the CSR / triple-store
+-- offsets & permutations (0-based index). The bytes are identical to
+-- M.pack(.,.,4) / M.rd(.,4) — these variants only fix the width and the index
+-- base, so the hot getter is a tight closure instead of a dispatch.
+
+-- 1-based: pack arr[1..len] → LE u32 bytes (M.pack at width 4).
+function M.pack_u32(arr, len) return M.pack(arr, len, 4) end
+
+-- 1-based u32 reader over packed bytes: reader(i) → arr[i].
+function M.reader_u32(s)
+    return function (i)
+        local p = (i - 1) * 4 + 1
+        local a, b, c, d = byte(s, p, p + 3)
+        return a + b * 256 + c * 65536 + d * 16777216
+    end
+end
+
+-- 0-based: pack arr[0..len-1] → LE u32 bytes.
+function M.pack_u32_0(arr, len)
+    local parts = {}
+    for i = 0, len - 1 do
+        local x = arr[i]
+        parts[i + 1] = char(x % 256, (x - x % 256) / 256 % 256,
+            (x - x % 65536) / 65536 % 256, (x - x % 16777216) / 16777216 % 256)
+    end
+    return concat(parts)
+end
+
+-- 0-based u32 reader over packed bytes: reader(i) → arr[i].
+function M.reader_u32_0(s)
+    return function (i)
+        local p = i * 4 + 1
+        local a, b, c, d = byte(s, p, p + 3)
+        return a + b * 256 + c * 65536 + d * 16777216
+    end
+end
+
 return M

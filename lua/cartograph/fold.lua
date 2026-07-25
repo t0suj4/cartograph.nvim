@@ -63,33 +63,12 @@ local RULE_SHIFT = 2 -- rule occupies bits 1-3 → value * 2
 
 local floor, char, byte = math.floor, string.char, string.byte
 
-local function pack_u32(arr, len) -- 1-based arr[1..len] → LE u32 bytes
-    local parts = {}
-    for i = 1, len do
-        local x = arr[i]
-        parts[i] = char(x % 256, floor(x / 256) % 256,
-            floor(x / 65536) % 256, floor(x / 16777216) % 256)
-    end
-    return table.concat(parts)
-end
-
--- 0-based offset array [0..len-1] → LE u32 bytes, and its reader
-local function pack_u32_off(arr, len)
-    local parts = {}
-    for i = 0, len - 1 do
-        local x = arr[i]
-        parts[i + 1] = char(x % 256, floor(x / 256) % 256,
-            floor(x / 65536) % 256, floor(x / 16777216) % 256)
-    end
-    return table.concat(parts)
-end
-local function u32_reader(s)
-    return function (i)
-        local p = i * 4 + 1
-        local a, b, c, d = byte(s, p, p + 3)
-        return a + b * 256 + c * 65536 + d * 16777216
-    end
-end
+-- LE-u32 pack/read shared with the other folded stores (bytecol): perm is
+-- 1-based (a Lua array), off/ooff are 0-based node offsets, and all three are
+-- read by 0-based fact-row / node index.
+local bytecol = require 'cartograph.bytecol'
+local pack_u32, pack_u32_off, u32_reader =
+    bytecol.pack_u32, bytecol.pack_u32_0, bytecol.reader_u32_0
 
 local Fold = {}
 Fold.__index = Fold
