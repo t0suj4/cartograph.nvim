@@ -402,6 +402,27 @@ function M.register()
     end, { desc = 'cartograph: check the RUNNING system against the static model (MCP oracle)' })
 
     -- ── safe-reorder: which of the focused fn's statements commute ───
+    -- A JUMPABLE lens: each statement / constraint row carries a source line, and
+    -- <CR> reveals it in the source pane (or opens the file when no cockpit pane
+    -- is live) — so the verdicts read against the code they judge.
+    local function reorder_reveal(store, m, spec)
+        if not (spec and spec.l0 and m and m.node) then return end
+        local src = require 'cartograph.panes.source'
+        local file, l0 = m.node.file, spec.l0
+        if src.buf and vim.api.nvim_buf_is_valid(src.buf)
+            and src.win_top and vim.api.nvim_win_is_valid(src.win_top) then
+            src.highlight { file = file, ranges = { {
+                start = { line = l0, char = 0 }, ['end'] = { line = l0 + 1, char = 0 } } } }
+            pcall(vim.api.nvim_set_current_win, src.win_top)
+        else
+            vim.cmd('tab drop ' .. vim.fn.fnameescape(store.abs(file)))
+            pcall(vim.api.nvim_win_set_cursor, 0, { l0 + 1, 0 })
+        end
+        if spec.peer then
+            vim.notify(('cartograph: #%d — ordering constraint with #%d')
+                :format(spec.i, spec.peer), vim.log.levels.INFO)
+        end
+    end
     cmd('CartographReorder', function ()
         local store = live() if not store then return end
         store = whole_graph(store) if not store then return end
@@ -411,8 +432,14 @@ function M.register()
             return vim.notify('cartograph: focus a function first',
                 vim.log.levels.WARN)
         end
-        scratch(require('cartograph.reorder').report(store, id))
-    end, { desc = 'cartograph: statement commutativity of the focused fn — deps, conflicts, freely-movable (the cockpit reorder view)' })
+        local lines, at, m = require('cartograph.reorder').lens(store, id)
+        local buf = scratch(lines)
+        if m then
+            vim.keymap.set('n', '<CR>', function ()
+                reorder_reveal(store, m, at[vim.api.nvim_win_get_cursor(0)[1]])
+            end, { buffer = buf, desc = 'cartograph: reveal this statement in the source pane' })
+        end
+    end, { desc = 'cartograph: statement commutativity of the focused fn — deps, conflicts, freely-movable (the cockpit reorder view; <CR> reveals a statement in the source)' })
 
     -- ── reorder APPLY: move a statement, verified against the commute verdict ──
     cmd('CartographReorderApply', function (o)

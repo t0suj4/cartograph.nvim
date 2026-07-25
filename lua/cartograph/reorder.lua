@@ -145,11 +145,17 @@ function M.analyze(store, fn_id)
         free = free, opaque = opaque }
 end
 
---- Render the model as report lines (the scratch-buffer surface).
-function M.report(store, fn_id)
+--- The interactive LENS: render the model as report lines AND a per-row jump map.
+--- Returns (lines, at, m) where at[row1] = { l0, i[, peer] } for the rows that
+--- point at a source statement — a statement row jumps to its own line, an
+--- ordering-constraint row (`#i → #j` / `#i ⚡ #j`) jumps to its first participant
+--- #i (with `peer` = the second). :CartographReorder binds <CR> over `at`.
+function M.lens(store, fn_id)
     local m, why = M.analyze(store, fn_id)
-    if not m then return { 'reorder: ' .. why } end
-    local L = {}
+    if not m then return { 'reorder: ' .. why }, {}, nil end
+    local L, at = {}, {}
+    -- l0 of a statement index (row.l is 1-based)
+    local function l0_of(i) return m.stmts[i] and (m.stmts[i].l - 1) end
     L[#L + 1] = ('reorder: %s — %d statements (reads through calls not modeled)')
         :format(m.node.name or fn_id, #m.stmts)
     L[#L + 1] = ''
@@ -170,18 +176,21 @@ function M.report(store, fn_id)
         L[#L + 1] = ('  #%-3d L%-5d %s%s'):format(row.i, row.l,
             #fx > 0 and table.concat(fx, '  ') or '·',
             row.hedges and ('  ~ ' .. row.hedges[1]) or '')
+        at[#L] = { l0 = row.l - 1, i = row.i }
     end
     if #m.deps + #m.conflicts > 0 then
         L[#L + 1] = ''
         L[#L + 1] = 'ordering constraints:'
         for _, d in ipairs(m.deps) do
             L[#L + 1] = ('  #%d → #%d   %s'):format(d[1], d[2], d[3])
+            at[#L] = { l0 = l0_of(d[1]), i = d[1], peer = d[2] }
         end
         for _, c in ipairs(m.conflicts) do
             local name = c[4]
             local vn = store.node(name)
             L[#L + 1] = ('  #%d ⚡ #%d  %s: %s'):format(c[1], c[2], c[3],
                 (vn and vn.name) or name)
+            at[#L] = { l0 = l0_of(c[1]), i = c[1], peer = c[2] }
         end
     end
     if #m.free > 0 then
@@ -193,7 +202,15 @@ function M.report(store, fn_id)
         L[#L + 1] = 'opaque (unresolved effects — certify nothing): #'
             .. table.concat(m.opaque, ', #')
     end
-    return L
+    L[#L + 1] = ''
+    L[#L + 1] = '<CR> = reveal the statement in the source pane'
+        .. '  ·  :CartographReorderApply <from> [<through>] <to> to move'
+    return L, at, m
+end
+
+--- Render the model as report lines only (the read-only face; jump map dropped).
+function M.report(store, fn_id)
+    return (M.lens(store, fn_id))
 end
 
 -- ── the APPLY side: move ONE statement, verified against the commute verdict ──

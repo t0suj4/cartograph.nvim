@@ -67,4 +67,25 @@ test('reorder: deps, conflicts, set-once excuse, free, opaque', function ()
     local lines = reorder.report(store, id)
     ok(lines[1]:find('reads through calls not modeled', 1, true),
         'the disclaimer is IN the report')
+
+    -- the LENS carries a per-row jump map: statement rows point at their own
+    -- source line, constraint rows at their first participant
+    local llines, at, lm = reorder.lens(store, id)
+    ok(lm and lm.node, 'the lens hands back the analyzed model')
+    -- find the row for statement #1 (`local a = x + 1`, file line 8 → l0 7)
+    local stmt1
+    for r, spec in pairs(at) do
+        if spec.i == 1 and not spec.peer then stmt1 = { r = r, spec = spec } end
+    end
+    ok(stmt1, 'statement #1 has a jumpable row')
+    if stmt1 then
+        eq(7, stmt1.spec.l0, 'statement #1 jumps to its own 0-based source line')
+        ok(llines[stmt1.r]:find('#1', 1, true), 'the mapped row IS the #1 line')
+    end
+    -- the dep constraint row (#1 → #2) jumps to #1 and names #2 as its peer
+    local depr
+    for _, spec in pairs(at) do
+        if spec.i == 1 and spec.peer == 2 then depr = spec end
+    end
+    ok(depr and depr.l0 == 7, 'the #1→#2 constraint row jumps to #1 with peer #2')
 end)
