@@ -24,6 +24,19 @@ local function find_bin()
     end
 end
 
+-- The innermost function/method node whose range contains `line` (0-based), from
+-- a { file -> {nodes} } map; ties broken by the latest start (deepest nesting).
+-- Shared by the batch resolvers (a local by_file) and the session resolver
+-- (sess.by_file) — pass whichever map.
+local function node_at(by_file, file, line)
+    local best
+    for _, n in ipairs(by_file[file] or {}) do
+        if atr.sl(n.range) <= line and line <= atr.el(n.range)
+            and (not best or atr.sl(n.range) >= atr.sl(best.range)) then best = n end
+    end
+    return best
+end
+
 -- the directory holding compile_commands.json — clangd's cross-file eyes
 -- (include paths, defines, -std). Explicit config wins; else the project
 -- root and the usual CMake build dirs. Returns the DIR (for
@@ -164,16 +177,6 @@ function M.enrich(data, opts)
         end
     end
     if #fn_nodes == 0 then return nil, 'no functions to resolve' end
-    local function node_at(file, line)
-        local best
-        for _, n in ipairs(by_file[file] or {}) do
-            if atr.sl(n.range) <= line and line <= atr.el(n.range)
-                and (not best or atr.sl(n.range) >= atr.sl(best.range)) then
-                best = n
-            end
-        end
-        return best
-    end
 
     local indexing, index_done = false, false
     local client_id = vim.lsp.start({
@@ -231,7 +234,7 @@ function M.enrich(data, opts)
                 for _, inc in ipairs(calls.result) do
                     local ffile = vim.uri_to_fname(inc.from.uri)
                         :sub(#root + 2)
-                    local from = node_at(ffile, inc.from.selectionRange.start.line)
+                    local from = node_at(by_file, ffile, inc.from.selectionRange.start.line)
                     if from then
                         local at = {}
                         for _, r in ipairs(inc.fromRanges or {}) do
@@ -303,16 +306,6 @@ function M.enrich_async(data, opts, on_done)
         end
     end
     if #fn_nodes == 0 then return done(nil, 'no functions to resolve') end
-    local function node_at(file, line)
-        local best
-        for _, n in ipairs(by_file[file] or {}) do
-            if atr.sl(n.range) <= line and line <= atr.el(n.range)
-                and (not best or atr.sl(n.range) >= atr.sl(best.range)) then
-                best = n
-            end
-        end
-        return best
-    end
 
     local files = {}
     for f in pairs(by_file) do files[#files + 1] = f end
@@ -354,7 +347,7 @@ function M.enrich_async(data, opts, on_done)
                                 answered[n.id] = {}
                                 for _, inc in ipairs(calls) do
                                     local ffile = vim.uri_to_fname(inc.from.uri):sub(#root + 2)
-                                    local from = node_at(ffile, inc.from.selectionRange.start.line)
+                                    local from = node_at(by_file, ffile, inc.from.selectionRange.start.line)
                                     if from then
                                         local at = {}
                                         for _, r in ipairs(inc.fromRanges or {}) do
@@ -445,15 +438,6 @@ function M.start_session(data, opts)
     return sess
 end
 
-local function sess_node_at(sess, file, line)
-    local best
-    for _, n in ipairs(sess.by_file[file] or {}) do
-        if atr.sl(n.range) <= line and line <= atr.el(n.range)
-            and (not best or atr.sl(n.range) >= atr.sl(best.range)) then best = n end
-    end
-    return best
-end
-
 --- Resolve the callers of node `n` (a function/method) on demand; calls
 --- on_edges({ {from=id, at=ranges}, ... }) with the proven callers. Cached so
 --- a re-focus is free; a query that can't be sent yet (server still starting)
@@ -488,7 +472,7 @@ function M.resolve_focused(n, on_edges)
                     local edges = {}
                     for _, inc in ipairs(calls or {}) do
                         local ffile = vim.uri_to_fname(inc.from.uri):sub(#root + 2)
-                        local from = sess_node_at(sess, ffile, inc.from.selectionRange.start.line)
+                        local from = node_at(sess.by_file, ffile, inc.from.selectionRange.start.line)
                         if from then
                             local at = {}
                             for _, r in ipairs(inc.fromRanges or {}) do
