@@ -3709,6 +3709,23 @@ local function spec_overlay(active_packs, active_profile)
     end
 end
 
+-- A namespace-aperture refusal resolver: if `name` is prefixed by a registered
+-- namespace (ns_pfx) and something conjures that namespace — a per-file aperture,
+-- else the global witness — the ref is refused with that witness; nil = no
+-- aperture story (stay silent). extract and relink build the same resolver over
+-- their own ns_pfx / apertures / global_witness (all final by construction time).
+local function aperture_refuser(ns_pfx, apertures, global_witness)
+    return function (name, file)
+        local pfx = name:match('^([^/#]+)[/#]')
+        if not (pfx and ns_pfx[pfx]) then return nil end
+        local w = apertures[file]
+            and { file = file, line = apertures[file][1].line }
+            or global_witness
+        if not w then return nil end
+        return { rule = 'aperture', witness = w.file .. ':' .. (w.line + 1) }
+    end
+end
+
 --- INDEX-ONLY front-end ([[cartograph-thin-index]]): the thin symbol index — parse +
 --- DEF nodes only (no calls, df, flow, mentions, or resolution). Reuses extract's own
 --- extract_defs, so the def set is byte-faithful to a full extract's; ~10x cheaper in
@@ -5015,15 +5032,7 @@ function M.extract(root, opts)
             end
         end
     end
-    local function aperture_refusal(name, file)
-        local pfx = name:match('^([^/#]+)[/#]')
-        if not (pfx and ns_pfx[pfx]) then return nil end
-        local w = apertures[file]
-            and { file = file, line = apertures[file][1].line }
-            or global_witness
-        if not w then return nil end -- nothing conjures: stay silent
-        return { rule = 'aperture', witness = w.file .. ':' .. (w.line + 1) }
-    end
+    local aperture_refusal = aperture_refuser(ns_pfx, apertures, global_witness)
     local function resolve(name, file)
         -- 1-2 char names are shadow-bait for WORKSPACE matching (pattern
         -- vars, loop counters — noise-dominated in every language), but a
@@ -5736,15 +5745,7 @@ function M.relink(data, touched)
         or build_index)(data.nodes)
     local exact, tail, node_index = index.exact, index.tail, index.node_index
     local apertures, ns_pfx, global_witness = index.apertures, index.ns_pfx, index.global_witness
-    local function aperture_refusal(name, file)
-        local pfx = name:match('^([^/#]+)[/#]')
-        if not (pfx and ns_pfx[pfx]) then return nil end
-        local w = apertures[file]
-            and { file = file, line = apertures[file][1].line }
-            or global_witness
-        if not w then return nil end
-        return { rule = 'aperture', witness = w.file .. ':' .. (w.line + 1) }
-    end
+    local aperture_refusal = aperture_refuser(ns_pfx, apertures, global_witness)
     local refEdge, regEdge = {}, {}
     for _, e in ipairs(data.edges) do
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e
