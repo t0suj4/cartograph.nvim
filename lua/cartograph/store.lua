@@ -148,7 +148,7 @@ local function reset_indexes()
     -- meant opening project B silently skipped materialization for any path project A
     -- had already materialized — a same-relative-path collision that reads as "this
     -- file has no calls". Caught by demandcalls_spec's second test.
-    M._df_materialized, M._calls_materialized = {}, {}
+    M._df_materialized, M._calls_materialized, M._idpass_materialized = {}, {}, {}
 end
 
 function M.ingest(data)
@@ -476,29 +476,7 @@ function M.materialize_file_calls(rel)
         -- is persisted, since a cold thin open has no calls to derive a map from. The
         -- cache validates it against the stamp set it was derived from and returns nil
         -- if the corpus moved, so a stale map can never be seeded.
-        local seed = M._selft_map
-        if not seed and M.data.stamps then
-            seed = require('cartograph.cache').load_selft(M.data.root, M.data.stamps)
-            M._selft_map = seed -- reuse across this session's materializations
-        end
-        M.data.selft_seed = seed
-        ts.relink(M.data, {})
-        M.data.selft_seed = nil -- never persist a resolution input onto the graph
-        if not seed then
-            -- NOTHING TO CARRY: withdraw what this pass landed rather than ship an
-            -- over-claim. Under-resolution is the safe direction — it refuses where
-            -- the whole graph might have resolved, never the reverse — and the rule
-            -- names the reason instead of fabricating the refusal the oracle gave.
-            local withdrawn = 0
-            for _, c in ipairs(M.data.calls or {}) do
-                if c.prov == 'self' and c.to then
-                    c.to, c.inferred = nil, nil
-                    c.refused = { rule = 'partial-callset' }
-                    withdrawn = withdrawn + 1
-                end
-            end
-            M._selft_withdrawn = (M._selft_withdrawn or 0) + withdrawn
-        end
+        M.resolve_resident()
         M.ingest(M.data) -- rebuild the indexes over the new calls/edges
     end
     -- AFTER the ingest, which resets the ledgers by design (a new graph invalidates
@@ -508,6 +486,122 @@ function M.materialize_file_calls(rel)
     M._df_materialized[rel] = true
     M._calls_materialized[rel] = true
     return added > 0
+end
+
+--- RE-RESOLVE the resident call set, carrying the whole-graph self-type map when one is
+--- available. Shared by both materializers because RESOLUTION INPUTS ARRIVE OUT OF
+--- ORDER in a demand graph: the id pass mints cbarg/dispatch marks, and extract's own
+--- comment says marks "are resolution INPUT and must be complete before the pass". A
+--- demand session cannot make them complete first — it does not know which files are
+--- coming — so any newly arrived marks must re-resolve what is already resident.
+--- Measured: skipping this left 2 calls divergent with calls-then-idpass and 5 with
+--- idpass-then-calls, i.e. no per-file ordering fixes it; re-resolving does.
+function M.resolve_resident()
+    if not (M.data and M.data.calls and #M.data.calls > 0) then return false end
+    -- the map: session first, then the PERSISTED one — the whole reason it is
+    -- persisted, since a cold thin open has no calls to derive a map from. The cache
+    -- validates it against the stamp set it was derived from and returns nil if the
+    -- corpus moved, so a stale map can never be seeded.
+    local seed = M._selft_map
+    if not seed and M.data.stamps then
+        seed = require('cartograph.cache').load_selft(M.data.root, M.data.stamps)
+        M._selft_map = seed -- reuse across this session's materializations
+    end
+    M.data.selft_seed = seed
+    require('cartograph.providers.treesitter').relink(M.data, {})
+    M.data.selft_seed = nil -- never persist a resolution input onto the graph
+    if not seed then
+        -- NOTHING TO CARRY: withdraw what resolve_self landed rather than ship an
+        -- over-claim. Under-resolution is the safe direction — it refuses where the
+        -- whole graph might have resolved, never the reverse — and the rule names the
+        -- reason instead of fabricating the refusal the oracle gave.
+        local withdrawn = 0
+        for _, c in ipairs(M.data.calls or {}) do
+            if c.prov == 'self' and c.to then
+                c.to, c.inferred = nil, nil
+                c.refused = { rule = 'partial-callset' }
+                withdrawn = withdrawn + 1
+            end
+        end
+        M._selft_withdrawn = (M._selft_withdrawn or 0) + withdrawn
+    end
+    return true
+end
+
+--- ON-DEMAND ID-PASS MATERIALIZATION ([[cartograph-merging-strategies]]). The third
+--- and last artifact `index_only` defers, and the one that made a thin index diverge
+--- from a full graph even after every file's calls were materialized: convergence
+--- measured nodes 0 / calls 0 / edges 164, and the 164 were the ENTIRE id-pass layer —
+--- 132 `use` edges and 32 `reg`, 100% of each. One skipped pass, three missing
+--- artifacts: `use`/`reg` edges, the cbarg marks, and data.names (the mention index),
+--- which is why :CartographMentions could not work on a thin index either.
+---
+--- WHY IT IS BYTE-FAITHFUL where a naive slice would not be: the id pass resolves each
+--- mention against fn_unique / var_named / scopes, and those come from M.lookups over
+--- the RESIDENT def index — complete on the thin index. Only `fn_ranges` is per-file,
+--- and it is derived from the resident nodes. So this is a name-keyed cut, not the
+--- file-keyed one that breaks uniqueness ([[cartograph-merging-strategies]] step 2).
+---
+--- Mirrors refresh's own call site (the standalone id_pass path) rather than inventing
+--- one, including its skip of fn-less files, which the sequential path also skips.
+--- Idempotent per file. Returns true iff it materialized.
+---
+--- WHAT THIS CLOSES AND WHAT IT DOES NOT. With calls AND the id pass materialized for
+--- every file of a 20-file corpus, and the self-type map carried: nodes 0, EDGES 0 (was
+--- 164), calls 3 of ~700 divergent — one target MOVE (`kw`, a module-level bare name
+--- with two same-named defs in different files, landing on lua-factorio where a full
+--- extract lands on ruby-rails) and two `inferred` tier flips.
+---
+--- That residual is ORDER-DEPENDENT: materializing in reverse file order drops the two
+--- tier flips and keeps only the move. It is NOT the documented extract-vs-relink
+--- asymmetry (ctx.consts) — a plain relink of the same full graph moves 0 targets and
+--- flips 0 tiers. So the cause is that calls ARRIVE INCREMENTALLY and resolution is not
+--- invariant to that: the likely carrier (not yet proven) is that resolution READS
+--- data.edges — resolve_module_alias takes it directly — and each relink mints ref
+--- edges that the next one then sees, so N relinks over a growing call set are not the
+--- same as one relink over all of it. Until that is settled, a fully materialized thin
+--- index is EQUIVALENT ON EDGES AND NODES and ~99.6% equivalent on call dispositions.
+function M.materialize_file_idpass(rel)
+    M._idpass_materialized = M._idpass_materialized or {}
+    if M._idpass_materialized[rel] then return false end
+    -- the provider must HAVE an id pass: a non-parsed substrate (a DB introspector, the
+    -- token provider) has no identifier mentions to reduce, and caps() takes the graph
+    if not M.data then return false end
+    local caps = require('cartograph.source').caps(M.data)
+    if not caps.idpass then return false end
+    local atr = require 'cartograph.at'
+    local ranges = {}
+    for _, n in ipairs((M.data or {}).nodes or {}) do
+        if n.file == rel and (n.kind == 'function' or n.kind == 'method') then
+            ranges[#ranges + 1] = { s = atr.sl(n.range), e = atr.el(n.range), id = n.id }
+        end
+    end
+    -- an fn-less file yields nothing and is not an error: mentions are attributed to an
+    -- enclosing function, so there is nowhere to hang them (the sequential path skips
+    -- these identically). Mark it done so we do not re-parse it on every ask.
+    if #ranges == 0 then M._idpass_materialized[rel] = true; return false end
+    local ts = require 'cartograph.providers.treesitter'
+    local L = ts.lookups(M.data.nodes, M.data.root) -- COMPLETE: uniqueness is global
+    L.fn_ranges = { [rel] = ranges }
+    ts.merge_idpass(M.data, ts.id_pass(M.data.root, { rel }, L, M.data.abs), nil)
+    -- the marks this just minted are RESOLUTION INPUT, so anything already resolved was
+    -- resolved without them (see resolve_resident). No-op when no calls are resident.
+    M.resolve_resident()
+    M.ingest(M.data)
+    -- AFTER the ingest, which resets the ledgers by design and cannot distinguish its
+    -- caller's re-ingest from a fresh open (the same trap materialize_file_calls hit)
+    M._idpass_materialized[rel] = true
+    return true
+end
+
+--- Which files have had their id pass materialized. The mention index is built by this
+--- pass, so on a thin index `data.names` covers only THESE files — a consumer reporting
+--- "which files mention N" must disclose that, or a partial answer reads as complete.
+function M.idpass_materialized()
+    local out = {}
+    for f in pairs(M._idpass_materialized or {}) do out[#out + 1] = f end
+    table.sort(out)
+    return out
 end
 
 --- THE CARRIED SELF-TYPE MAP (the poison set, [[cartograph-merging-strategies]]).

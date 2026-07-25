@@ -168,6 +168,50 @@ test('poison set: with no map to carry, demand WITHDRAWS what resolve_self lande
     ok((store._selft_withdrawn or 0) >= 0, 'withdrawal counter is maintained')
 end)
 
+test('id pass: materializing it supplies the use/reg edges the thin index lacks', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = corpus()
+    local full = ts.extract(root)
+    local want = {}
+    for _, e in ipairs(full.edges or {}) do
+        if e.kind == 'use' or e.kind == 'reg' then want[e.kind] = (want[e.kind] or 0) + 1 end
+    end
+    store.ingest(ts.index_only(root))
+    local function count(kind)
+        local n = 0
+        for _, e in ipairs(store.data.edges or {}) do if e.kind == kind then n = n + 1 end end
+        return n
+    end
+    -- the thin index runs no id pass, so the whole layer is absent (not degraded)
+    eq(0, count('use'))
+    for _, f in ipairs({ 'lib.lua', 'caller.lua' }) do store.materialize_file_idpass(f) end
+    if (want.use or 0) > 0 then
+        ok(count('use') > 0, 'use edges materialized (' .. count('use') .. ')')
+    end
+end)
+
+test('id pass: it fills the mention index, so :CartographMentions can work on a thin index', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    store.ingest(ts.index_only(corpus()))
+    -- the retraction repaired: the thin index HAS no mention index, and this is what
+    -- gives it one — per file, so coverage is partial and must be disclosed by callers
+    ok(not store.has_mention_index(), 'absent before')
+    store.materialize_file_idpass('caller.lua')
+    ok(store.has_mention_index(), 'present after')
+    eq('caller.lua', table.concat(store.idpass_materialized(), ','))
+end)
+
+test('id pass: idempotent, and fn-less files are marked done rather than re-parsed', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    put(root, 'novfn.lua', 'return { k = 1 }')      -- no function defs at all
+    store.ingest(ts.index_only(root))
+    -- no fn ranges → nothing to attribute mentions to → false, but marked done
+    ok(not store.materialize_file_idpass('novfn.lua'), 'fn-less file materializes nothing')
+    eq('novfn.lua', table.concat(store.idpass_materialized(), ','))
+    ok(not store.materialize_file_idpass('novfn.lua'), 'and is not retried')
+end)
+
 test('demand calls: sites match a full extract\'s for that file', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = corpus()
