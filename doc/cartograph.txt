@@ -109,6 +109,38 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
   :CartographLadder           the call graph's epistemic distribution
                               (proven / linked / ~ / dynamic / refused /
                               frontier) + the heaviest refusals to resolve
+  :CartographMentions [name]  which files MENTION a name — the word under
+                              the cursor by default. Reads the mention
+                              index (each file's identifier set, recorded
+                              by the id pass) rather than the call graph,
+                              so it still answers where RESOLUTION
+                              REFUSED: a refused call tells you nothing
+                              about the target but still tells you the
+                              name occurs. REFUSES when the graph has no
+                              mention index — the THIN INDEX has none,
+                              since index_only skips the pass that builds
+                              it — rather than reporting zero mentions,
+                              which would be a fabricated negative.
+                              NAME-LEVEL EVIDENCE, never
+                              references: a mention is an identifier
+                              OCCURRENCE, and nothing here claims two
+                              files name the same thing — the report says
+                              how many defs share the spelling, because
+                              that is what decides whether the evidence
+                              means anything. Per FILE, never per line:
+                              the index interns each name once per file,
+                              so a per-site answer does not exist at this
+                              altitude and is not invented. SCOPE-
+                              CONFINED to the asking file's resolution
+                              scope, the same cut resolution makes — so
+                              the list is the candidate set a resolver
+                              would consider, not every file sharing a
+                              spelling. When a call graph IS present the
+                              resolved subset is marked as a SUBSET (`=`
+                              resolved, `~` mention only), leaving the
+                              residual visible instead of hidden; on the
+                              thin index that subset reads "unavailable",
+                              never "none".
   :CartographVersionFloor     which language version this code NEEDS, as
                               an attributed SET: the feature and site
                               holding the floor up, not a bare number.

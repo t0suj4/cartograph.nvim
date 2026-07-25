@@ -1348,6 +1348,32 @@ printed next to the verdict so a thin artifact can be discounted, and a profile
 for a *different language* is refused outright rather than marking every name
 unprovided and looking catastrophic.
 
+## Mentions (name-level evidence, where resolution refused)
+
+`:CartographMentions [name]` — the word under the cursor by default — answers
+"which files mention this name" from the **mention index**: the identifier set the
+id pass records per file. It reads no call graph, so it still answers where
+*resolution* refused. A refused call tells you nothing about its target, but it
+still tells you the name occurs.
+
+The honesty is the feature, because a list of files that mention a name is easy to
+mistake for references:
+
+- a mention is an identifier **occurrence** — nothing claims two files name the
+  same thing, so the report states how many defs share the spelling, since that is
+  what decides whether the evidence means anything;
+- **per file, never per line** — the index interns each name once per file, so a
+  per-site answer does not exist at this altitude and is not invented;
+- **scope-confined** to the asking file's resolution scope, the same cut resolution
+  makes, so the list is the candidate set a resolver would consider rather than
+  every file sharing a spelling;
+- when a call graph is present the **resolved subset is marked as a subset** (`=`
+  resolved, `~` mention only), leaving the residual visible instead of hidden.
+
+On a graph with **no** mention index it *refuses*. The thin index has none —
+`index_only` skips the pass that builds it — and reporting "0 files mention it"
+there would be a fabricated negative: the answer is unknown, not none.
+
 ## Version floor (what this code needs — and what older costs)
 
 `:CartographVersionFloor` answers "which language version does this actually

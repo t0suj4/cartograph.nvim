@@ -146,6 +146,31 @@ function M.register(H)
         scratch(require('cartograph.versionfloor').report(store))
     end, { desc = 'cartograph: the version floor as an ATTRIBUTED SET — which language version this code needs and WHY (the feature and the site holding it up) — plus the downgrade ladder, pricing each older target in sites-to-fix. A LOWER bound: syntax only, stdlib version gates not modelled' })
 
+    -- ── NAME-LEVEL EVIDENCE: which files mention a name, off the mention
+    --    postings. Deliberately NO whole_graph guard: it needs the mention index,
+    --    not the call graph, so it still answers where resolution REFUSED — and a
+    --    refused call still tells you the name occurs. It never claims to BE
+    --    references: the report states what a mention is, and shows the resolved
+    --    subset AS a subset when a call graph exists. On a graph with no mention
+    --    index (the thin index — index_only skips the pass that builds it) it
+    --    REFUSES rather than reporting zero mentions.
+    cmd('CartographMentions', function (o)
+        local store = live() if not store then return end
+        -- <cword> by default: the vim idiom, no new keybinding for this
+        local name = o.fargs[1] or vim.fn.expand('<cword>')
+        -- the asking file confines the answer, exactly as resolution would. Buffer
+        -- path -> graph-relative key by the root prefix (the open.lua idiom; there
+        -- is no store.rel). Nil when the buffer is outside the graph or carries no
+        -- mention index — confine by nothing rather than by the wrong scope.
+        local from
+        local abs, root = vim.api.nvim_buf_get_name(0), (store.data or {}).root
+        if root and abs:sub(1, #root + 1) == root .. '/' then
+            from = abs:sub(#root + 2)
+        end
+        if from and not ((store.data or {}).names or {})[from] then from = nil end
+        scratch(require('cartograph.mentions').report(store, name, from))
+    end, { nargs = '?', desc = 'cartograph: which files MENTION a name (default: the word under the cursor), from the mention index — so it still answers where RESOLUTION refused, since a refused call still tells you the name occurs. Scope-confined to the asking file\'s resolution scope, and split into its resolved subset when a call graph exists. Name-level evidence, never references: a mention is an identifier occurrence, not a claim that two files name the same thing. REFUSES on a graph with no mention index (the thin index) rather than reporting zero' })
+
     -- ── THE CODE'S OWN PROFILE: the symmetric inverse of an environment one.
     --    Unifies porting, version floor and the dependency manifest into one
     --    requirement set, so all three are set algebra over the same currency.

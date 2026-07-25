@@ -1581,9 +1581,22 @@ function M.mentioning_in_scan(name, from)
     return out
 end
 
+--- Is there a mention index at all? An EMPTY result from M.mentioning is ambiguous
+--- on its own — it means either "no file mentions this name" or "this graph has no
+--- mention index to consult", and those are opposite claims. Callers that surface
+--- the answer to a human MUST check this first and refuse rather than report zero.
+---
+--- The index is absent on: the THIN INDEX (index_only sets defs_only, which skips
+--- the collect pass that builds it — measured 0 files vs a full extract's 20 on the
+--- same tree), graphs predating the cache field, and languages opting out
+--- (spec.name_index = false).
+function M.has_mention_index()
+    return next((M.data or {}).names or {}) ~= nil
+end
+
 --- Files whose identifier mention-index contains `name` (the id pass
---- records each file's identifier set). Empty when the graph predates
---- the index or the file's language opted out (spec.name_index = false).
+--- records each file's identifier set). Empty when no file mentions it OR when
+--- there is no index — see M.has_mention_index before reporting an empty result.
 --- A postings lookup, not a corpus scan; M.mentioning_scan is the oracle.
 function M.mentioning(name)
     local px = M.postings()
