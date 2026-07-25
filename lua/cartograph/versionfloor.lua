@@ -531,6 +531,108 @@ function M.group(facts)
     return by, ids
 end
 
+-- ── constant- and import-shaped removals (TREE-detected) ───────────────────
+-- The call gate cannot see these: `Fixnum` is a constant, `$SAFE` a global,
+-- `import distutils` a statement. Node type plus exact node TEXT, both read off
+-- the real grammar. `mod` matches a module path at a dot boundary, so
+-- `distutils.core` counts while a project's `distutils_helpers` does not.
+M.REMOVED_SYNTAX = {
+    ruby = {
+        { id = 'Fixnum', v = '3.2', desc = 'Fixnum constant', node = 'constant', text = 'Fixnum' },
+        { id = 'Bignum', v = '3.2', desc = 'Bignum constant', node = 'constant', text = 'Bignum' },
+        { id = 'Random::DEFAULT', v = '3.2', desc = 'Random::DEFAULT',
+            node = 'scope_resolution', text = 'Random::DEFAULT' },
+        { id = '$SAFE', v = '3.0', desc = '$SAFE special global',
+            node = 'global_variable', text = '$SAFE' },
+    },
+    python = {
+        { id = 'distutils', v = '3.12', desc = 'the distutils module',
+            node = 'dotted_name', mod = 'distutils' },
+        { id = 'imp', v = '3.12', desc = 'the imp module', node = 'dotted_name', mod = 'imp' },
+        { id = 'collections.Mapping', v = '3.10', desc = 'collections ABC aliases',
+            node = 'attribute', text = 'collections.Mapping' },
+        { id = 'collections.MutableMapping', v = '3.10', desc = 'collections ABC aliases',
+            node = 'attribute', text = 'collections.MutableMapping' },
+        { id = 'collections.Sequence', v = '3.10', desc = 'collections ABC aliases',
+            node = 'attribute', text = 'collections.Sequence' },
+        { id = 'collections.Iterable', v = '3.10', desc = 'collections ABC aliases',
+            node = 'attribute', text = 'collections.Iterable' },
+    },
+}
+
+--- Names the PROJECT itself defines, so its own `Fixnum` is never counted as the
+--- removed one. A ruby class shows up in the graph as `Fixnum#method`, never as a
+--- bare `Fixnum` node, so class heads are recovered from qualified names too.
+function M.defined_names(store)
+    local out = {}
+    for nm in pairs((store or {}).by_name or {}) do
+        out[nm] = true
+        local head = nm:match('^([%w_:]+)[#%.]')
+        if head then out[head] = true end
+    end
+    return out
+end
+
+--- Tree-detected removals across the graph's files. CERTAIN in the sense that the
+--- token is really there, but still skipped when the project defines that name.
+function M.removed_syntax_facts(store)
+    local ts = require 'cartograph.providers.treesitter'
+    local ext2lang = {}
+    for lang in pairs(M.REMOVED_SYNTAX) do
+        local sp = ts.spec[lang]
+        for _, e in ipairs((sp and sp.exts) or {}) do ext2lang[e] = lang end
+    end
+    local defined = M.defined_names(store)
+    local pernode, order = {}, {}
+    for _, n in ipairs((store.data or {}).nodes or {}) do
+        local f = n.file
+        local ext = f and f:match('%.([%w]+)$')
+        if f and not pernode[f] and ext and ext2lang[ext:lower()] then
+            pernode[f] = n
+            order[#order + 1] = f
+        end
+    end
+    table.sort(order)
+    local out = {}
+    for _, file in ipairs(order) do
+        local lang = ext2lang[file:match('%.([%w]+)$'):lower()]
+        local lines = store.content(pernode[file])
+        local src = lines and table.concat(lines, '\n')
+        -- NOT `local ok, parser = src and pcall(...)`: an `and` expression is
+        -- adjusted to ONE value, so parser would always be nil
+        local ok, parser = false, nil
+        if src then ok, parser = pcall(vim.treesitter.get_string_parser, src, lang) end
+        local trees = ok and parser and parser:parse()
+        local root = trees and trees[1] and trees[1]:root()
+        if root then
+            local bynode = {}
+            for _, e in ipairs(M.REMOVED_SYNTAX[lang]) do
+                bynode[e.node] = bynode[e.node] or {}
+                table.insert(bynode[e.node], e)
+            end
+            local function walk(n)
+                local cands = bynode[n:type()]
+                if cands then
+                    local txt = vim.treesitter.get_node_text(n, src) or ''
+                    for _, e in ipairs(cands) do
+                        local hit = (e.text and txt == e.text)
+                            or (e.mod and (txt == e.mod or txt:sub(1, #e.mod + 1) == e.mod .. '.'))
+                        if hit and not defined[e.id] and not defined[txt] then
+                            local l = n:range()
+                            out[#out + 1] = { id = 'gone:' .. e.id, v = e.v,
+                                desc = e.desc, tier = 'certain', file = file,
+                                lang = lang, line = l }
+                        end
+                    end
+                end
+                for c in n:iter_children() do walk(c) end
+            end
+            walk(root)
+        end
+    end
+    return out
+end
+
 --- The gate a CALL matches. The qualified form comes first and it matters: the
 --- extractor records `callee` as the TAIL (`escape`) and the receiver-qualified
 --- name in `full` (`URI.escape`), so a dotted key can only ever match via `full`.
@@ -639,6 +741,11 @@ function M.report(store)
         table.insert(hedged[k], f)
     end
     for _, f in ipairs(M.removal_facts(store)) do
+        local k = M.scale_key(f.lang or langs[1])
+        gone[k] = gone[k] or {}
+        table.insert(gone[k], f)
+    end
+    for _, f in ipairs(M.removed_syntax_facts(store)) do
         local k = M.scale_key(f.lang or langs[1])
         gone[k] = gone[k] or {}
         table.insert(gone[k], f)
@@ -782,6 +889,14 @@ function M.report(store)
             L[#L + 1] = '  no ceiling table for this scale — ECMAScript does not remove'
             L[#L + 1] = '  features, so there is no upper bound to compute — which is'
             L[#L + 1] = '  not the same claim as "unbounded"'
+        else
+            -- silence would be ambiguous: "we looked and found nothing" reads the
+            -- same as "we never looked". Say which.
+            local n = 0
+            for _, t in ipairs({ M.REMOVED, M.REMOVED_SYNTAX }) do
+                for _ in pairs(t[scalelangs[k][1]] or {}) do n = n + 1 end
+            end
+            L[#L + 1] = ('  no ceiling in evidence — %d known removals were checked for'):format(n)
         end
         L[#L + 1] = ''
     end

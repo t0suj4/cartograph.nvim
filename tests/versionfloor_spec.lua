@@ -495,3 +495,75 @@ test('versionfloor: a scale with no ceiling table says so, and claims no bound',
         'and the absence is not dressed up as an upper bound')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── constant- and import-shaped removals (tree-detected) ───────────────────
+-- The call gate cannot see these: Fixnum is a constant, $SAFE a global,
+-- `import distutils` a statement. Node type + exact text, with the project's own
+-- definitions excluded.
+
+test('versionfloor: ruby constants and globals removed later are found', function ()
+    if not ready() then skip('no ruby parser') end
+    local store, root = rb_store(
+        'class A\n  def go\n    x = Fixnum\n    r = Random::DEFAULT\n    $SAFE = 1\n  end\nend')
+    local byid = {}
+    for _, f in ipairs(vf.removed_syntax_facts(store)) do byid[f.id] = f end
+    ok(byid['gone:Fixnum'], 'a constant')
+    eq('3.2', byid['gone:Fixnum'].v, 'gone in 3.2')
+    ok(byid['gone:Random::DEFAULT'], 'a scope resolution')
+    ok(byid['gone:$SAFE'], 'a special global')
+    eq('3.0', byid['gone:$SAFE'].v, '$SAFE stopped being special in 3.0')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: the project\'s OWN Fixnum is not the removed one', function ()
+    if not ready() then skip('no ruby parser') end
+    -- a class the project defines shows up as `Fixnum#method` in the graph, so
+    -- the class head has to be recovered for this check to work at all
+    local store, root = rb_store(
+        'class Fixnum\n  def go; end\nend\nclass B\n  def use; Fixnum; end\nend')
+    eq(0, #vf.removed_syntax_facts(store),
+        'a project-defined constant is its own, never the removed builtin')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: python removed imports and ABC aliases', function ()
+    local py = pcall(vim.treesitter.get_string_parser, '', 'python')
+    if not py then skip('no python parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'c.py', { 'import distutils', 'from distutils.core import setup',
+        'import imp', 'def f(x):', '    return isinstance(x, collections.Mapping)' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local vs = {}
+    for _, f in ipairs(vf.removed_syntax_facts(store)) do vs[f.id] = f.v end
+    eq('3.12', vs['gone:distutils'], 'a removed module, via import AND from-import')
+    eq('3.12', vs['gone:imp'], 'and another')
+    eq('3.10', vs['gone:collections.Mapping'], 'an ABC alias moved to collections.abc')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: a module path matches at a DOT boundary only', function ()
+    local py = pcall(vim.treesitter.get_string_parser, '', 'python')
+    if not py then skip('no python parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- distutils_helpers merely STARTS with the removed module's name
+    write(root, 'd.py', { 'import distutils_helpers' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    eq(0, #vf.removed_syntax_facts(store),
+        'a longer identifier sharing the prefix is a different module')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: a tree-detected removal reaches the CEILING in the report', function ()
+    if not ready() then skip('no ruby parser') end
+    local store, root = rb_store('class A\n  def go(x) x&.to_s end\n  def c; Fixnum; end\nend')
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('CEILING 3.2', 1, true), 'the constant sets the ceiling')
+    ok(text:find('supported range: [2.3, 3.2)', 1, true), 'and closes the range')
+    vim.fn.delete(root, 'rf')
+end)

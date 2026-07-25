@@ -1358,6 +1358,19 @@ reader to compute — 3.1 syntax plus a name removed in 3.0 gives:
   single version satisfies both ends. One of the two sites has to change.
 ```
 
+Removals come in two shapes and need two mechanisms. Method-shaped ones
+(`Object#taint`, `time.clock`) go through the same disposition gate as the stdlib
+tier. Constant- and import-shaped ones can't — `Fixnum` is a constant, `$SAFE` a
+global, `import distutils` a statement — so those are detected in the tree by node
+type and exact text, with the project's own definitions excluded: if a codebase
+defines `class Fixnum`, its references are to *that*, not to the removed builtin.
+Module paths match at a dot boundary, so `distutils.core` counts and
+`distutils_helpers` doesn't.
+
+When nothing turns up, the report says *"no ceiling in evidence — 12 known
+removals were checked for"* rather than staying silent, because silence reads the
+same whether we looked or not.
+
 The hedges point in opposite directions and that's the useful part: a wrong floor
 fact makes the floor too **high**, a wrong removal makes the ceiling too **low**.
 Both narrow the interval and neither widens it, so the reported range errs
