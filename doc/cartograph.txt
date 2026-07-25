@@ -132,6 +132,13 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
                               on its class (own methods + extends
                               ancestors). A writeless read stays
                               unresolved
+  :CartographTrace [n]        where parameter [n] (default 1) gets its
+                              values: one row per resolved call site,
+                              |cartograph-keys| descend takes the next
+                              hop, pivot reveals the site. `▸` has a
+                              next hop, `~` is a frontier that says why
+                              it stops (field/global aliasing, a dynamic
+                              call, varargs), `·` is an answer
   :CartographBranchValues     the values live through each CFG branch
                               (~ = hedged reaching)
   :CartographNarrow           where a guard proves a variable non-nil in

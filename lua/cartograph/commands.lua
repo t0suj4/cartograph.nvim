@@ -405,10 +405,11 @@ function M.register()
     -- A JUMPABLE lens: each statement / constraint row carries a source line, and
     -- <CR> reveals it in the source pane (or opens the file when no cockpit pane
     -- is live) — so the verdicts read against the code they judge.
-    local function reorder_reveal(store, m, spec)
-        if not (spec and spec.l0 and m and m.node) then return end
+    -- Reveal ONE line in the def pane, falling back to a tab drop when no
+    -- cockpit pane is live. Shared by every jumpable lens (reorder, trace).
+    local function reveal_at(store, file, l0)
+        if not (file and l0) then return end
         local src = require 'cartograph.panes.source'
-        local file, l0 = m.node.file, spec.l0
         if src.buf and vim.api.nvim_buf_is_valid(src.buf)
             and src.win_top and vim.api.nvim_win_is_valid(src.win_top) then
             src.highlight { file = file, ranges = { {
@@ -418,6 +419,10 @@ function M.register()
             vim.cmd('tab drop ' .. vim.fn.fnameescape(store.abs(file)))
             pcall(vim.api.nvim_win_set_cursor, 0, { l0 + 1, 0 })
         end
+    end
+    local function reorder_reveal(store, m, spec)
+        if not (spec and spec.l0 and m and m.node) then return end
+        reveal_at(store, m.node.file, spec.l0)
         if spec.peer then
             vim.notify(('cartograph: #%d — ordering constraint with #%d')
                 :format(spec.i, spec.peer), vim.log.levels.INFO)
@@ -585,6 +590,86 @@ function M.register()
         mat_df(store, n.file)
         scratch(require('cartograph.narrow').param_report(store, id))
     end, { desc = 'cartograph: inferred parameter-nilability of the focused fn (required / optional / unknown) vs its ---@param annotations — an unguarded deref of a param annotated nilable `?` is a real defect (the lua-ls disagreement oracle)' })
+
+    -- ── trace: where does a parameter's values come from? ─────────────────
+    -- A jumpable lens over trace.lua's incremental API: one row per resolved
+    -- call site, descend to take the next hop. Needs the whole graph — the
+    -- rows ARE call sites, so on the thin index an empty answer would read as
+    -- an honest "nothing passes here" when the calls were simply never built.
+    cmd('CartographTrace', function (o)
+        local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first',
+                vim.log.levels.WARN)
+        end
+        local i = tonumber(o.fargs[1] or '1')
+        local params = n.params or {}
+        if not i or i < 1 then
+            return vim.notify('cartograph: :CartographTrace [n] — the parameter'
+                .. ' position to trace (default 1)', vim.log.levels.WARN)
+        end
+        if #params > 0 and i > #params then
+            return vim.notify(('cartograph: %s takes %d parameter(s) (%s)')
+                :format(n.name or id, #params, table.concat(params, ', ')),
+                vim.log.levels.WARN)
+        end
+        local trace = require 'cartograph.trace'
+        mat_df(store, n.file)
+        local lines, at = trace.lens(store, id, i)
+        local buf = scratch(lines)
+        local keys = require('cartograph.config').keys
+        if keys.pivot then
+            vim.keymap.set('n', keys.pivot, function ()
+                local e = at[vim.api.nvim_win_get_cursor(0)[1]]
+                local s = e and e.origin.site
+                if s then reveal_at(store, s.file, s.line or 0) end
+            end, { buffer = buf,
+                desc = 'cartograph: reveal where this value flows from' })
+        end
+        -- descend = take the next hop, spliced in under the row. A frontier
+        -- says WHY it stops rather than silently doing nothing.
+        if keys.descend then
+            vim.keymap.set('n', keys.descend, function ()
+                local row = vim.api.nvim_win_get_cursor(0)[1]
+                local e = at[row]
+                if not e then return end
+                if e.done then
+                    return vim.notify('cartograph: already expanded',
+                        vim.log.levels.INFO)
+                end
+                if e.origin.site then mat_df(store, e.origin.site.file) end
+                local kids, why = trace.expand(store, e.origin)
+                if not kids or #kids == 0 then
+                    e.done = true
+                    return vim.notify('cartograph: frontier — '
+                        .. tostring(why or 'nothing further'), vim.log.levels.INFO)
+                end
+                e.done = true
+                local new = {}
+                for _, k in ipairs(kids) do
+                    new[#new + 1] = (trace.row(store, k, e.depth + 1))
+                end
+                vim.bo[buf].modifiable = true
+                vim.api.nvim_buf_set_lines(buf, row, row, false, new)
+                vim.bo[buf].modifiable = false
+                -- shift the map past the insertion, then register the new rows
+                local moved = {}
+                for r, v in pairs(at) do
+                    moved[r > row and r + #new or r] = v
+                end
+                for j, k in ipairs(kids) do
+                    moved[row + j] = { origin = k, depth = e.depth + 1 }
+                end
+                at = moved
+                pcall(vim.api.nvim_win_set_height, 0,
+                    math.min(vim.api.nvim_buf_line_count(buf) + 1, 20))
+            end, { buffer = buf,
+                desc = 'cartograph: expand this origin one hop' })
+        end
+    end, { nargs = '?', desc = 'cartograph: trace where parameter [n] of the focused fn gets its values — one row per resolved call site, descend to take the next hop; a frontier (field/global aliasing, dynamic call, vararg) says why it stops' })
 
     -- ── devirt: dispatch sites the narrowing facts can turn static ────────
     cmd('CartographDevirt', function ()

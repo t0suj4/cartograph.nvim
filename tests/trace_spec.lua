@@ -146,3 +146,46 @@ test('trace: shadow disambiguation — a shadowed local traces its OWN defs', fu
     eq(1, outer[1].site.line) -- the `local mode = "outer"` row
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── the LENS: the surface :CartographTrace renders ─────────────────────────
+-- Formatting lives with the analysis (as in reorder.lens), so it is testable
+-- without a cockpit: rows carry the jump map the command binds <CR>/l over.
+
+test('trace.lens: a row per call site, with the jump map', function ()
+    graph({ fn(F, 'f', { params = { 'a', 'b' } }) },
+        { call(F, { { k = 'lit', v = 1 }, { k = 'lit', v = 'x' } }, { line = 3 }),
+          call(F, { { k = 'lit', v = 2 }, { k = 'lit', v = 'y' } }, { line = 7 }) })
+    local lines, at = trace.lens(store, F, 2)
+    ok(lines[1]:find("parameter 2 'b'", 1, true), 'header names the parameter: ' .. lines[1])
+    ok(lines[1]:find('2 origins', 1, true), 'header counts the origins')
+    local rows = 0
+    for r, e in pairs(at) do
+        rows = rows + 1
+        eq(0, e.depth, 'a top-level origin is depth 0')
+        ok(lines[r]:find(tostring(e.origin.site.line + 1), 1, true),
+            'the row shows its 1-based site line')
+    end
+    eq(2, rows, 'one jumpable row per call site')
+end)
+
+test('trace.lens: an unresolved-callee param says so instead of showing zero', function ()
+    graph({ fn(F, 'f', { params = { 'a' } }) }, {})
+    local lines, at, note = trace.lens(store, F, 1)
+    eq(0, #vim.tbl_keys(at), 'no rows to jump to')
+    ok(note and note:find('dynamic dispatch', 1, true),
+        'the note explains WHY there are none (not a bare "0")')
+    ok(lines[#lines]:find('dynamic dispatch', 1, true), 'and it is rendered')
+end)
+
+test('trace.row: marks expandable vs frontier vs answer', function ()
+    graph({ fn(F, 'f', { params = { 'a' } }), fn(G, 'g', { params = { 'p' } }) },
+        { call(F, { { k = 'lit', v = 1 } }, { line = 3 }) })
+    local lit = trace.row(store, { v = { k = 'lit', v = 1 }, site = { file = 'm.lua', line = 2 } }, 0)
+    ok(lit:find('·', 1, true), 'a literal is an answer: ' .. lit)
+    local fld = trace.row(store, { v = { k = 'field', path = 'o.x' }, site = { file = 'm.lua', line = 2 } }, 0)
+    ok(fld:find('~', 1, true), 'a field is an honest frontier: ' .. fld)
+    local par = trace.row(store, { v = { k = 'param', name = 'p', i = 1 }, fn = G, site = { file = 'm.lua', line = 2 } }, 1)
+    ok(par:find('▸', 1, true), 'a param has a next hop: ' .. par)
+    ok(par:find('  in g', 1, true), 'and names its owning function')
+    ok(par:match('^    '), 'depth 1 indents two levels')
+end)

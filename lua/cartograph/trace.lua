@@ -267,4 +267,42 @@ end
 
 M.short = short
 
+--- One rendered row: indent, an expandability mark, the description, and the
+--- site the value flows from. `▸` = expandable (M.expand has a next hop),
+--- `~` = an honest frontier (aliasing / dynamic / vararg), `·` = an answer.
+--- Returns (text, expandable).
+function M.row(store, origin, depth)
+    local text, expandable, class = M.describe(store, origin)
+    local site = origin.site
+    local loc = (site and site.file)
+        and ('%s:%d'):format(site.file, (site.line or 0) + 1) or ''
+    local owner = origin.fn and short(store, origin.fn) or nil
+    return ('%s%s %-40s %s%s'):format(('  '):rep(depth + 1),
+        expandable and '▸' or (class == 'dim' and '~' or '·'),
+        text, loc, owner and ('  in %s'):format(owner) or ''), expandable
+end
+
+--- The trace LENS: where parameter `i` of `fn_id` gets its values, one row per
+--- resolved call site. Returns (lines, at, note), at[row] = {origin, depth} for
+--- each row that names an origin — the caller binds reveal/expand over it and
+--- splices M.row()s in as the user descends. Formatting lives here with the
+--- analysis; buffer mechanics stay in the command layer.
+function M.lens(store, fn_id, i)
+    local n = store.node(fn_id)
+    local pname = (n and n.params or {})[i]
+    local origins, note = M.origins(store, fn_id, i)
+    local L, at = {}, {}
+    L[#L + 1] = ('trace: %s — parameter %d%s — %d origin%s'):format(
+        short(store, fn_id), i, pname and (" '" .. pname .. "'") or '',
+        #origins, #origins == 1 and '' or 's')
+    L[#L + 1] = '  ▸ expandable  ·  ~ frontier (nothing further, honestly)'
+    L[#L + 1] = ''
+    if note then L[#L + 1] = '  ' .. note end
+    for _, o in ipairs(origins) do
+        L[#L + 1] = (M.row(store, o, 0))
+        at[#L] = { origin = o, depth = 0 }
+    end
+    return L, at, note
+end
+
 return M

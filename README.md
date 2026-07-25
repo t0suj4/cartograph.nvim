@@ -1198,6 +1198,25 @@ resolution, only the accounting. (The banked *cross-file* override arm was itsel
 per-file-local `private`/`lib` tables sharing a member name, which a cross-file
 last-write resolver would wrongly unify.)
 
+## Trace (where a parameter's values come from)
+
+`:CartographTrace [n]` answers "what actually reaches this argument?" for
+parameter `n` of the focused function: one row per **resolved call site**, with
+the classified value each one passes. Descend (`l`) takes the next hop and
+splices it in under the row; pivot (`<CR>`) reveals the site in the source pane.
+
+Expansion composes because every hop is another origin: a value that is itself a
+parameter walks *up* the call graph, a local expands to its dataflow defs, a call
+expands through the target's return summaries. Each row wears what it is — `▸`
+has a next hop, `·` is an answer (a literal, or `(not passed — nil here)` where a
+call omits the argument entirely), and `~` is a **frontier that says why it
+stops**: a field or global (aliasing), a dynamic call, varargs. It never guesses
+past one; a function with no resolved callers reports *why* it has none rather
+than an empty list that reads as "nothing passes here".
+
+It needs the whole graph, since the rows *are* call sites — on the thin index it
+refuses instead of showing an honest-looking zero.
+
 ## Reorder (statement commutativity)
 
 `:CartographReorder` reports, for the focused function, which statements can
