@@ -121,6 +121,16 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               receiver's type. A stdlib name the project
                               also defines resolves there instead, so the
                               hedged tier under-reports and says so
+  :CartographRequires         the code's OWN profile — the inverse of an
+                              environment one, in the same currency: the
+                              external names it needs plus its version
+                              floor, as ONE requirement set. Over that
+                              set: the TIGHTEST ENVIRONMENT (shipped
+                              profiles ranked by coverage) and the
+                              DEPENDENCY MANIFEST (the set grouped by who
+                              provides each name). Coverage, never a
+                              verdict; an artifact that cannot answer
+                              name queries says so instead of scoring 0%
   :CartographPortability {runtime}
                               score the external surface against a target
                               environment profile (tab-completes the ones

@@ -96,3 +96,81 @@ test('portability: the report buckets, and never says "missing"', function ()
     ok(text:find('claims %d+ symbols'), 'the profile size is disclosed')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── the SYMMETRIC INVERSION: the code has a profile too ────────────────────
+-- One requirement set, three questions over it. What needs pinning is that the
+-- set really is shared (so the three answers cannot disagree) and that coverage
+-- is never dressed up as a verdict.
+
+local function ruby_store(lines)
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'a.rb', lines)
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    return store, root
+end
+
+test('portability: requires() carries BOTH halves — names and version', function ()
+    if not ready() then skip('no ruby parser') end
+    local store, root = ruby_store { 'class A', '  def go(h)', '    I18n.t("x")',
+        '    Wombat.frob(1)', '    h.then { |x| x }', '  end', '  def opts(x) = {x:}', 'end' }
+    local req = require('cartograph.portability').requires(store)
+    ok(req.names['I18n.t'], 'the name surface is there')
+    ok(req.names['Wombat.frob'], 'including the unknown ones')
+    ok(req.total >= 2, 'counted')
+    eq('3.1', req.floor, 'and the VERSION half rides in the same set ({x:} is 3.1)')
+    ok(req.langs.ruby, 'with the languages it spans')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: audit and requires agree, because it is ONE set', function ()
+    if not ready() then skip('no ruby parser') end
+    local port = require 'cartograph.portability'
+    local store, root = ruby_store { 'class A', '  def go', '    I18n.t("x")',
+        '    Wombat.frob(1)', '  end', 'end' }
+    local req = port.requires(store)
+    local res = port.audit(store, 'ruby-rails')
+    eq(req.total, res.provided + res.unknown,
+        'the audit scores exactly the requirement set — no third walk to drift')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: rank() discloses an unrankable artifact instead of 0%', function ()
+    if not ready() then skip('no ruby parser') end
+    local port = require 'cartograph.portability'
+    local store, root = ruby_store { 'class A', '  def go', '    I18n.t("x")', '  end', 'end' }
+    local ranked = port.rank(store)
+    local byname = {}
+    for _, r in ipairs(ranked) do byname[r.runtime] = r end
+    ok(byname['ruby-rails'] and byname['ruby-rails'].queryable,
+        'a vocab profile is name-queryable')
+    -- ruby-core is RBS-derived: signature keys only, so it cannot answer name
+    -- queries and must not be scored as though it provides nothing
+    if byname['ruby-core'] then
+        eq(false, byname['ruby-core'].queryable,
+            'a signature-keyed artifact is flagged, not blamed')
+        eq('ruby-rails', ranked[1].runtime, 'and it never ranks as the tightest fit')
+    end
+    local text = table.concat(port.requires_report(store), '\n')
+    ok(text:find('not rankable', 1, true), 'the report says so in words: ' .. text:sub(1, 40))
+    ok(text:find('coverage is not a verdict', 1, true), 'and refuses the stronger reading')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: manifest groups by provider and never calls the rest missing', function ()
+    if not ready() then skip('no ruby parser') end
+    local port = require 'cartograph.portability'
+    local store, root = ruby_store { 'class A', '  def go', '    I18n.t("x")',
+        '    Wombat.frob(1)', '  end', 'end' }
+    local groups, unclaimed = port.manifest(store)
+    ok(groups['ruby-rails'], 'a provided name is grouped under its provider')
+    local names = {}
+    for _, u in ipairs(unclaimed) do names[u.name] = true end
+    ok(names['Wombat.frob'], 'and an unclaimed one is in its own bucket')
+    local text = table.concat(port.requires_report(store), '\n')
+    ok(text:find('claimed by no profile', 1, true), 'labelled by what is KNOWN, not by a verdict')
+    ok(text:find('third%-party dependency'), 'with the likely explanation, not an accusation')
+    vim.fn.delete(root, 'rf')
+end)

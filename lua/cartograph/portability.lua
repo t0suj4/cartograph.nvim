@@ -76,6 +76,17 @@ function M.runtimes()
     return out
 end
 
+--- Can this artifact answer a NAME query at all? An RBS-derived profile is keyed
+--- by signature (`String#chomp`), so asking it about a callee name matches almost
+--- nothing — and a resulting "0% covered" would read as a claim about the RUNTIME
+--- when it is a fact about the ARTIFACT. Ranking says so instead.
+function M.name_queryable(prof)
+    for _, field in ipairs({ 'vocab', 'free', 'nsset', 'namespaces' }) do
+        if next(prof[field] or {}) ~= nil then return true end
+    end
+    return false
+end
+
 --- How many symbols the profile actually claims — the weight of any verdict.
 function M.profile_size(prof)
     local n = 0
@@ -83,6 +94,132 @@ function M.profile_size(prof)
         for _ in pairs(prof[field] or {}) do n = n + 1 end
     end
     return n
+end
+
+--- THE SYMMETRIC INVERSION ([[cartograph-portability-lever]] keystone): the code
+--- has a profile too. An environment profile says what it PROVIDES; this derives
+--- what the code REQUIRES, in the same currency — so every question downstream
+--- is set algebra over the two:
+---   portability to T      = requires.names ⊆ T.provides
+---   version floor         = max of requires.features
+---   tightest environment  = the smallest T that covers requires.names  (M.rank)
+---   dependency manifest   = requires.names grouped by WHO provides them (M.manifest)
+--- Returns { names = {name -> calls}, where = {name -> file}, langs = set,
+--- features = {version facts}, floor, total }.
+function M.requires(store)
+    local externals = require 'cartograph.externals'
+    local s = externals.surface(store)
+    local r = { names = {}, where = {}, langs = {}, total = 0 }
+    for base, e in pairs(s.bases) do
+        local first
+        for f in pairs(e.files) do
+            if not first or f < first then first = f end
+        end
+        local function add(name, n)
+            r.names[name] = (r.names[name] or 0) + n
+            r.where[name] = r.where[name] or first
+        end
+        -- a bare call names the base itself; members name base.member. Both can
+        -- occur for one base (`Foo()` and `Foo.bar()`), so neither is exclusive.
+        if e.bare > 0 or next(e.members) == nil then add(base, e.bare > 0 and e.bare or e.calls) end
+        for m, n in pairs(e.members) do add(base .. '.' .. m, n) end
+    end
+    for _ in pairs(r.names) do r.total = r.total + 1 end
+    -- the VERSION half of the same requirement set
+    local ts = require 'cartograph.providers.treesitter'
+    local ext2lang = {}
+    for lang, sp in pairs(ts.spec) do
+        for _, e in ipairs(sp.exts or {}) do ext2lang[e] = lang end
+    end
+    for _, n in ipairs((store.data or {}).nodes or {}) do
+        local e = n.file and n.file:match('%.([%w]+)$')
+        local l = e and ext2lang[e:lower()]
+        if l then r.langs[l] = true end
+    end
+    local vf = require 'cartograph.versionfloor'
+    r.features = vf.facts(store)
+    for _, f in ipairs(r.features) do
+        if not r.floor or vf.older(r.floor, f.v) then r.floor = f.v end
+    end
+    r.scale = nil
+    for l in pairs(r.langs) do
+        if vf.SCALE[l] then r.scale = vf.SCALE[l] end
+    end
+    return r
+end
+
+--- Rank every shipped profile of a matching language by how much of the code's
+--- requirement set it covers — the "tightest environment" query. COVERAGE, not a
+--- verdict: a profile covering everything is not proof the code runs there, only
+--- that this boundary holds no counter-evidence.
+function M.rank(store)
+    local pm = require 'cartograph.spec.profile'
+    local req = M.requires(store)
+    local out = {}
+    for _, runtime in ipairs(M.runtimes()) do
+        local prof = pm.load(runtime)
+        if prof and (not prof.lang or req.langs[prof.lang]) then
+            local hit, miss = 0, 0
+            for name in pairs(req.names) do
+                if M.provides(prof, name)
+                    or M.provides(prof, name:match('([%w_]+[!?]?)$') or '') then
+                    hit = hit + 1
+                else
+                    miss = miss + 1
+                end
+            end
+            out[#out + 1] = { runtime = runtime, size = M.profile_size(prof),
+                provided = hit, unknown = miss, queryable = M.name_queryable(prof),
+                pct = (hit + miss) > 0 and (hit / (hit + miss) * 100) or 0 }
+        end
+    end
+    -- best coverage first; on a tie the SMALLER profile is the tighter fit
+    table.sort(out, function (a, b)
+        -- a non-queryable artifact is not "worst", it is UNRANKABLE: sink it so
+        -- it never reads as the tightest or the loosest fit
+        if a.queryable ~= b.queryable then return a.queryable end
+        if math.abs(a.pct - b.pct) > 0.001 then return a.pct > b.pct end
+        return a.size < b.size
+    end)
+    return out, req
+end
+
+--- Group the requirement set by WHO provides it — the dependency manifest. A name
+--- no shipped profile claims is left in its own bucket, NOT called external: it
+--- is most often a sibling module or a third-party dependency.
+function M.manifest(store)
+    local pm = require 'cartograph.spec.profile'
+    local req = M.requires(store)
+    local profs = {}
+    for _, runtime in ipairs(M.runtimes()) do
+        local p = pm.load(runtime)
+        if p and (not p.lang or req.langs[p.lang]) then
+            profs[#profs + 1] = { runtime = runtime, prof = p }
+        end
+    end
+    local groups, unclaimed = {}, {}
+    for name, calls in pairs(req.names) do
+        local owners = {}
+        for _, e in ipairs(profs) do
+            if M.provides(e.prof, name)
+                or M.provides(e.prof, name:match('([%w_]+[!?]?)$') or '') then
+                owners[#owners + 1] = e.runtime
+            end
+        end
+        if #owners == 0 then
+            unclaimed[#unclaimed + 1] = { name = name, calls = calls }
+        else
+            local key = table.concat(owners, '+')
+            groups[key] = groups[key] or { names = 0, calls = 0 }
+            groups[key].names = groups[key].names + 1
+            groups[key].calls = groups[key].calls + calls
+        end
+    end
+    table.sort(unclaimed, function (a, b)
+        if a.calls ~= b.calls then return a.calls > b.calls end
+        return a.name < b.name
+    end)
+    return groups, unclaimed, req
 end
 
 --- Audit the open graph against a target runtime profile.
@@ -113,30 +250,17 @@ function M.audit(store, runtime)
         return nil, ('%s is a %s profile, but this graph is %s — nothing to compare')
             :format(runtime, prof.lang, table.concat(got, '/'))
     end
-    local externals = require 'cartograph.externals'
-    local s = externals.surface(store)
+    -- one requirement set, scored against this profile: the audit is now just
+    -- `requires ∩ provides`, which is what the keystone says it should be
+    local req = M.requires(store)
     local res = { runtime = runtime, lang = prof.lang, version = prof.version,
         size = M.profile_size(prof), provided = 0, unknown = 0, entries = {} }
-    for base, e in pairs(s.bases) do
-        -- score the base, then each member under it: a provided namespace
-        -- covers its members, an unprovided one may still have provided members
-        local why = M.provides(prof, base)
-        local names = {}
-        if next(e.members) == nil then
-            names[base] = e.calls
-        else
-            for m, n in pairs(e.members) do names[base .. '.' .. m] = n end
-        end
-        for name, n in pairs(names) do
-            local w = why or M.provides(prof, name)
-                or M.provides(prof, name:match('([%w_]+[!?]?)$') or '')
-            local files = {}
-            for f in pairs(e.files) do files[#files + 1] = f end
-            table.sort(files)
-            res.entries[#res.entries + 1] = { name = name, calls = n,
-                provided = w ~= nil, why = w, files = files }
-            if w then res.provided = res.provided + 1 else res.unknown = res.unknown + 1 end
-        end
+    for name, n in pairs(req.names) do
+        local w = M.provides(prof, name)
+            or M.provides(prof, name:match('([%w_]+[!?]?)$') or '')
+        res.entries[#res.entries + 1] = { name = name, calls = n,
+            provided = w ~= nil, why = w, files = { req.where[name] } }
+        if w then res.provided = res.provided + 1 else res.unknown = res.unknown + 1 end
     end
     table.sort(res.entries, function (a, b)
         if a.provided ~= b.provided then return not a.provided end -- unknown first
@@ -186,6 +310,58 @@ function M.report(store, runtime, opts)
     end
     if res.provided > 1 then
         L[#L + 1] = ('    … and %d more'):format(res.provided - 1)
+    end
+    return L
+end
+
+--- The code's OWN profile as a report: what it requires, which shipped
+--- environment covers most of it, and where each requirement comes from.
+function M.requires_report(store)
+    local ranked, req = M.rank(store)
+    local groups, unclaimed = M.manifest(store)
+    local langs = {}
+    for l in pairs(req.langs) do langs[#langs + 1] = l end
+    table.sort(langs)
+    local L = {}
+    L[#L + 1] = ("this code REQUIRES — %s: %d external name(s)%s"):format(
+        table.concat(langs, '/'), req.total,
+        req.floor and (', version floor ' .. (req.scale and (req.scale .. ' ') or '')
+            .. req.floor) or '')
+    L[#L + 1] = '  the inverse of an environment profile: the same currency, other'
+    L[#L + 1] = '  direction, so the questions below are set algebra over the two.'
+    L[#L + 1] = ''
+    L[#L + 1] = '  TIGHTEST ENVIRONMENT — shipped profiles by coverage of that set:'
+    if #ranked == 0 then
+        L[#L + 1] = '    (no shipped profile targets this language)'
+    end
+    for _, r in ipairs(ranked) do
+        if r.queryable then
+            L[#L + 1] = ('    %-16s %5.1f%% covered  (%d of %d; profile claims %d)')
+                :format(r.runtime, r.pct, r.provided, r.provided + r.unknown, r.size)
+        else
+            L[#L + 1] = ('    %-16s   not rankable — signature-keyed artifact (%d'
+                .. ' sigs), no name surface to query'):format(r.runtime, r.size)
+        end
+    end
+    if #ranked > 0 then
+        L[#L + 1] = '    coverage is not a verdict: full coverage means this boundary'
+        L[#L + 1] = '    holds no counter-evidence, not that the code runs there.'
+    end
+    L[#L + 1] = ''
+    L[#L + 1] = '  DEPENDENCY MANIFEST — the requirement set grouped by who provides it:'
+    local keys = {}
+    for k in pairs(groups) do keys[#keys + 1] = k end
+    table.sort(keys, function (a, b) return groups[a].names > groups[b].names end)
+    for _, k in ipairs(keys) do
+        L[#L + 1] = ('    %-28s %4d name(s), %5d call(s)'):format(k,
+            groups[k].names, groups[k].calls)
+    end
+    L[#L + 1] = ('    %-28s %4d name(s)'):format('claimed by no profile', #unclaimed)
+    L[#L + 1] = '      — most often a sibling module or a third-party dependency,'
+    L[#L + 1] = '        NOT evidence that anything is missing. Top by call volume:'
+    for i = 1, math.min(10, #unclaimed) do
+        L[#L + 1] = ('        %-34s %4d call(s)'):format(unclaimed[i].name,
+            unclaimed[i].calls)
     end
     return L
 end

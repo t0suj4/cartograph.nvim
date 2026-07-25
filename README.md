@@ -1229,6 +1229,35 @@ than an empty list that reads as "nothing passes here".
 It needs the whole graph, since the rows *are* call sites — on the thin index it
 refuses instead of showing an honest-looking zero.
 
+## What this code requires (one set, three questions)
+
+An environment profile says what it *provides*. `:CartographRequires` derives the
+inverse — what the code **requires**, in the same currency — and then porting,
+version and dependencies are all set algebra over that one set:
+
+```
+this code REQUIRES — ruby: 2485 external name(s), version floor 3.1
+  TIGHTEST ENVIRONMENT — shipped profiles by coverage of that set:
+    ruby-rails        21.2% covered  (528 of 2485; profile claims 1734)
+    ruby-core          not rankable — signature-keyed artifact (302 sigs)
+  DEPENDENCY MANIFEST — the requirement set grouped by who provides it:
+    ruby-rails                    527 name(s),  1501 call(s)
+    claimed by no profile        1957 name(s)
+        id                                  500 call(s)
+        DB.exec                             122 call(s)
+```
+
+Both halves of the requirement live in one place — the external names *and* the
+version floor — which is what stops the three answers from drifting apart: the
+portability audit scores exactly this set rather than walking the graph again.
+
+Two honesty rules do the work. **Coverage is not a verdict**: full coverage means
+this boundary holds no counter-evidence, not that the code runs there. And an
+artifact that *cannot answer name queries* says so instead of scoring 0% — the
+RBS-derived `ruby-core` profile is keyed by signature (`String#chomp`), so a 0%
+would read as a claim about CRuby when it is a fact about the artifact. It is
+sunk from the ranking rather than reported as the loosest fit.
+
 ## Portability (will it run there, and where does it break)
 
 `:CartographPortability <runtime>` scores the **external surface** — what the code

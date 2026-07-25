@@ -146,6 +146,15 @@ function M.register(H)
         scratch(require('cartograph.versionfloor').report(store))
     end, { desc = 'cartograph: the version floor as an ATTRIBUTED SET — which language version this code needs and WHY (the feature and the site holding it up) — plus the downgrade ladder, pricing each older target in sites-to-fix. A LOWER bound: syntax only, stdlib version gates not modelled' })
 
+    -- ── THE CODE'S OWN PROFILE: the symmetric inverse of an environment one.
+    --    Unifies porting, version floor and the dependency manifest into one
+    --    requirement set, so all three are set algebra over the same currency.
+    cmd('CartographRequires', function ()
+        local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
+        scratch(require('cartograph.portability').requires_report(store))
+    end, { desc = 'cartograph: the code\'s OWN profile — what it REQUIRES (external names + version floor), which shipped environment covers most of that set (tightest environment), and the requirement set grouped by who provides it (dependency manifest). Coverage, never a verdict' })
+
     -- ── PORTABILITY: the external surface scored against a target runtime.
     --    Needs the whole graph — the surface IS the unresolved calls, so on the
     --    thin index "provided by nothing" would be an artefact of no call graph.
