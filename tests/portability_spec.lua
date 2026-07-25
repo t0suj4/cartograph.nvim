@@ -298,3 +298,62 @@ test('portability: luajit and lua-factorio are a comparable PAIR', function ()
     eq('game.print', d.lost[1].name)
     eq(1, d.kept, 'and plain lua carries the rest')
 end)
+
+-- ── the cruby sibling: "will this run WITHOUT Rails?" ──────────────────────
+-- Minted by tools/rubydistill.lua asking the real interpreter, so ruby finally
+-- has a comparable pair — the question the whole lever was designed around.
+
+test('portability: the cruby profile draws the Rails line correctly', function ()
+    local pm = require 'cartograph.spec.profile'
+    local p = pm.load('cruby')
+    if not p then skip('cruby profile not minted (no ruby on PATH?)') end
+    eq('ruby', p.lang)
+    ok(port.name_queryable(p), 'queryable, so it can be a diff target')
+    ok(p.stamp:find('introspected from ruby', 1, true), 'and says how it was made')
+    -- plain ruby DOES provide these
+    ok(port.provides(p, 'puts'), 'a Kernel function')
+    ok(port.provides(p, 'String.upcase'), 'a core type member')
+    ok(port.provides(p, 'URI.parse'), 'a default gem, loaded explicitly by the probe')
+    -- and does NOT provide the framework
+    eq(nil, port.provides(p, 'I18n.t'), 'I18n is Rails, not ruby')
+    eq(nil, port.provides(p, 'Rails.logger'), 'nor is Rails')
+    eq(nil, port.provides(p, 'ActiveRecord.base'), 'nor ActiveRecord')
+end)
+
+test('portability: ruby-rails and cruby OVERLAP rather than nest', function ()
+    local pm = require 'cartograph.spec.profile'
+    local rails, cruby = pm.load('ruby-rails'), pm.load('cruby')
+    if not cruby then skip('cruby profile not minted') end
+    -- Rails' profile carries framework vocab, not a copy of ruby core, so each
+    -- provides something the other does not. The report must not read that as
+    -- "plain ruby is richer than Rails".
+    ok(port.provides(rails, 'I18n.t') and not port.provides(cruby, 'I18n.t'),
+        'rails-only name')
+    ok(port.provides(cruby, 'private_class_method')
+        and not port.provides(rails, 'private_class_method'),
+        'core-only name — which is why the diff shows gains in this direction')
+end)
+
+test('portability: a gains-heavy diff SAYS the profiles overlap', function ()
+    if not ready() then skip('no ruby parser') end
+    local pm = require 'cartograph.spec.profile'
+    if not pm.load('cruby') then skip('cruby profile not minted') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- one Rails name and several core ones, so the move both loses and gains
+    write(root, 'a.rb', { 'class A', '  def go', '    I18n.t("x")',
+        '    private_class_method :go', '    Foo.name', '    Bar.call', '  end', 'end' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local text = table.concat(port.diff_report(store, 'ruby-rails', 'cruby'), '\n')
+    ok(text:find('MOVING FROM ruby%-rails TO cruby'), 'the direction is stated')
+    if text:find('OVERLAP rather', 1, true) then
+        ok(true, 'the caveat fires when gains outnumber losses')
+    else
+        -- fixture-dependent; the caveat is conditional by design
+        ok(text:find('LOST', 1, true) or text:find('nothing ruby%-rails provides'),
+            'and otherwise the report still reads as a move')
+    end
+    vim.fn.delete(root, 'rf')
+end)

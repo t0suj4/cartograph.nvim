@@ -1313,14 +1313,33 @@ Those 58 names *are* what ties the mod to Factorio. "0 gained" is the sanity
 check: `lua-factorio` is a superset of plain Lua, so a move to LuaJIT can only
 lose.
 
-That pair exists because of `tools/luadistill.lua`, which mints the `luajit`
-profile by **introspecting the interpreter** — `for k in pairs(string)` measures
-the runtime that will actually execute the code, where a hand-typed list would
-only claim. nvim's own additions are excluded by name, since a profile called
+The same move on Ruby answers the question the lever was designed around — *will
+this run without Rails?* On discourse's models:
+
+```
+portability — MOVING FROM ruby-rails TO cruby
+  17 name(s) LOST, 55 gained, 47 provided by both
+    I18n.t         302 call(s)      Rails.logger    31 call(s)
+    Rails.env       18 call(s)      Rails.root      12 call(s)
+```
+
+Note the 55 *gains*: `ruby-rails` carries framework vocabulary, not a copy of Ruby
+core, so each profile provides names the other doesn't. These two **overlap rather
+than nest** — unlike `lua-factorio ⊇ luajit` — and the report says so when gains
+outnumber losses, rather than letting it read as "plain Ruby is richer than Rails".
+
+Both pairs exist because of two distillers — `tools/luadistill.lua`, which mints
+the `luajit`
+profile by **introspecting the interpreter** it runs inside, and
+`tools/rubydistill.lua`, which asks the `ruby` on PATH the same way (177 free
+functions, 143 namespaces, 2,024 typed members from 3.2.3, plus the default gems
+so `URI.parse` isn't wrongly reported as unavailable). `for k in pairs(string)`
+measures the runtime that will actually execute the code, where a hand-typed list
+would only claim. nvim's own additions are excluded by name, since a profile called
 `luajit` must not quietly promise `vim`, and the stamp records which LuaJIT it
-saw. A move still needs two name-queryable profiles for one language, so the
-Ruby side stays blocked until an `mruby` or `opal` provides-set is distilled from
-a real source.
+saw. A move still needs two name-queryable profiles for one language — satisfied now for
+Lua and Ruby, while a JS pair awaits a second profile (a `node` introspection
+would work the same way).
 
 It's the easiest verb here to overstate, so: the bucket is **NOT-IN-PROFILE**,
 never "missing" — a dependency may supply the name, or the artifact may be
@@ -1966,6 +1985,10 @@ nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no sn
 # needs: two name-queryable profiles for one language.
 nvim --headless -u NONE -l tools/luadistill.lua          # writes the .mpack
 nvim --headless -u NONE -l tools/luadistill.lua --show    # print, write nothing
+# and the same move for ruby: ask the interpreter on PATH, load the DEFAULT GEMS
+# (so URI.parse isn't wrongly reported absent), and record which were loaded.
+# Gives ruby-rails a sibling => "will this run without Rails?" is answerable.
+nvim --headless -u NONE -l tools/rubydistill.lua
 
 # DOC AUDIT — the same action pointed at our own USER DOCUMENTATION, which
 # drifts for the same reason (hand-authored claims about a surface that grows

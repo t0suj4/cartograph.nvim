@@ -365,6 +365,14 @@ function M.diff_report(store, from, to, opts)
     if #res.gained > 0 then
         L[#L + 1] = ''
         L[#L + 1] = ('  GAINED — %s provides these and %s did not:'):format(res.to, res.from)
+        if #res.gained > #res.lost then
+            -- lua-factorio ⊇ luajit, so that move only loses. ruby-rails does NOT
+            -- contain plain ruby core, so it gains — read that as the profiles
+            -- covering different ground, not as the target being richer.
+            L[#L + 1] = '    (more gained than lost: these two profiles OVERLAP rather'
+            L[#L + 1] = '    than nest, so this is a coverage difference between the'
+            L[#L + 1] = '    artifacts — not evidence that the target is richer)'
+        end
         for i = 1, math.min(5, #res.gained) do
             L[#L + 1] = ('    %-34s %4d call(s)'):format(res.gained[i].name, res.gained[i].calls)
         end
