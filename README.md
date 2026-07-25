@@ -1274,6 +1274,13 @@ portability — ruby-rails rails-7: 528 of 2485 external name(s) provided
     I18n.t                       302 call(s)  via vocab
 ```
 
+A dotted name needs its **root** provided, not just its tail — `print` is a
+LuaJIT base function but `game.print` is Factorio's API, and matching on the tail
+would have hidden the single most important dependency. That costs some true
+positives where a receiver's type is unknown (`user.save` under Rails), and that
+is the safe direction: under-claiming over-reports the work, while over-claiming
+would *hide* a blocker.
+
 The verb is small because it's one intersection: `externals.lua` already computes
 what the code doesn't define, and every environment profile already declares what
 a runtime provides. **No `<runtime>-provides` sets had to be authored** — a
@@ -1293,12 +1300,27 @@ portability — MOVING FROM rich TO lean
 
 Both audits score the *same* requirement set, so nothing can drift between the
 two sides, and the diff is directional — `a → b` losing a name is `b → a` gaining
-it. One honest limitation: a move needs two name-queryable profiles **for the same
-language**, and no shipped pair qualifies today (`ruby-rails`, `zig-std` and
-`lua-factorio` are three languages; `ruby-core` is signature-keyed). So the
-mechanism refuses clearly rather than reporting everything as lost, and becomes
-useful the moment a sibling profile lands — an `mruby` or `opal` provides-set,
-which is exactly what the original design asked for.
+it. On a real Factorio mod, moving to plain LuaJIT:
+
+```
+portability — MOVING FROM lua-factorio TO luajit
+  58 name(s) LOST, 0 gained, 48 provided by both, 669 by neither
+    util.by_pixel     470 call(s)      data.extend       318 call(s)
+    serpent.line       23 call(s)      util.mul_shift      8 call(s)
+```
+
+Those 58 names *are* what ties the mod to Factorio. "0 gained" is the sanity
+check: `lua-factorio` is a superset of plain Lua, so a move to LuaJIT can only
+lose.
+
+That pair exists because of `tools/luadistill.lua`, which mints the `luajit`
+profile by **introspecting the interpreter** — `for k in pairs(string)` measures
+the runtime that will actually execute the code, where a hand-typed list would
+only claim. nvim's own additions are excluded by name, since a profile called
+`luajit` must not quietly promise `vim`, and the stamp records which LuaJIT it
+saw. A move still needs two name-queryable profiles for one language, so the
+Ruby side stays blocked until an `mruby` or `opal` provides-set is distilled from
+a real source.
 
 It's the easiest verb here to overstate, so: the bucket is **NOT-IN-PROFILE**,
 never "missing" — a dependency may supply the name, or the artifact may be
@@ -1935,6 +1957,15 @@ nvim --headless -u NONE -l tools/observe.lua bnw      # any lua corpus as the wo
 nvim --headless -u NONE -l tools/specaudit.lua              # default corpus set
 nvim --headless -u NONE -l tools/specaudit.lua ruby rails   # explicit corpora
 nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no snapshot
+
+# LUA PROFILE — mint the `luajit` L2 profile by INTROSPECTING this interpreter,
+# rather than transcribing a manual: `for k in pairs(string)` measures the runtime
+# that will execute the code. nvim's own additions are excluded by name (a profile
+# called luajit must not promise `vim`) and the stamp records which LuaJIT it saw.
+# Gives lua-factorio a comparable SIBLING, which is what the portability move-diff
+# needs: two name-queryable profiles for one language.
+nvim --headless -u NONE -l tools/luadistill.lua          # writes the .mpack
+nvim --headless -u NONE -l tools/luadistill.lua --show    # print, write nothing
 
 # DOC AUDIT — the same action pointed at our own USER DOCUMENTATION, which
 # drifts for the same reason (hand-authored claims about a surface that grows

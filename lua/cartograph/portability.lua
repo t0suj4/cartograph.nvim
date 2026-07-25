@@ -59,7 +59,13 @@ function M.provides(prof, name)
             end
             return 'type ' .. root
         end
-        if prof.vocab and prof.vocab[rest] then return 'vocab' end
+        -- NO tail-only fallback. `game.print` must not count as provided by
+        -- LuaJIT merely because `print` is a base function: for a DOTTED name the
+        -- profile has to provide the ROOT, or it does not provide the name.
+        -- Dropping this cost some true positives where a receiver's type is
+        -- unknown (`user.save` under rails), and that is the safe direction —
+        -- claiming something is provided when it is not would HIDE a blocker,
+        -- while under-claiming only over-reports the work.
     end
     return nil
 end
@@ -169,8 +175,7 @@ function M.rank(store)
         if prof and (not prof.lang or req.langs[prof.lang]) then
             local hit, miss = 0, 0
             for name in pairs(req.names) do
-                if M.provides(prof, name)
-                    or M.provides(prof, name:match('([%w_]+[!?]?)$') or '') then
+                if M.provides(prof, name) then
                     hit = hit + 1
                 else
                     miss = miss + 1
@@ -209,8 +214,7 @@ function M.manifest(store)
     for name, calls in pairs(req.names) do
         local owners = {}
         for _, e in ipairs(profs) do
-            if M.provides(e.prof, name)
-                or M.provides(e.prof, name:match('([%w_]+[!?]?)$') or '') then
+            if M.provides(e.prof, name) then
                 owners[#owners + 1] = e.runtime
             end
         end
@@ -265,7 +269,6 @@ function M.audit(store, runtime)
         size = M.profile_size(prof), provided = 0, unknown = 0, entries = {} }
     for name, n in pairs(req.names) do
         local w = M.provides(prof, name)
-            or M.provides(prof, name:match('([%w_]+[!?]?)$') or '')
         res.entries[#res.entries + 1] = { name = name, calls = n,
             provided = w ~= nil, why = w, files = { req.where[name] } }
         if w then res.provided = res.provided + 1 else res.unknown = res.unknown + 1 end

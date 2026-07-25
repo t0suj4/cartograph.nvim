@@ -245,3 +245,56 @@ test('portability: a diff against a signature-keyed profile is REFUSED', functio
         'and it says why: ' .. tostring(err))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── the luajit sibling profile, and the root requirement it forced ──────────
+-- Minted by tools/luadistill.lua INTROSPECTING the interpreter, which is why it
+-- is sound: `for k in pairs(string)` measures the runtime that will execute the
+-- code, where a hand-typed list would only claim.
+
+test('portability: the luajit profile ships and is name-queryable', function ()
+    local pm = require 'cartograph.spec.profile'
+    local p = pm.load('luajit')
+    ok(p, 'the distilled artifact loads')
+    eq('lua', p.lang, 'it is a lua profile, so it pairs with lua-factorio')
+    ok(port.name_queryable(p), 'and it can answer name queries, unlike ruby-core')
+    ok(p.stamp and p.stamp:find('introspected', 1, true),
+        'the stamp records HOW it was made: ' .. tostring(p.stamp))
+    ok(p.vocab['pairs'], 'a base function')
+    ok(p.nsset['string'] and p.nsset['table'], 'the standard namespaces')
+    eq(nil, p.vocab['vim'], 'and nvim additions are excluded — it must not promise vim')
+end)
+
+test('portability: a DOTTED name needs its ROOT provided, not just its tail', function ()
+    local pm = require 'cartograph.spec.profile'
+    local lj = pm.load('luajit')
+    ok(port.provides(lj, 'string.format'), 'a real namespace member resolves')
+    ok(port.provides(lj, 'pairs'), 'and a base function')
+    -- `print` IS a luajit base function, but `game.print` is Factorio's API: a
+    -- tail-only match would have hidden the single most important dependency
+    eq(nil, port.provides(lj, 'game.print'),
+        'a tail match must not make an unknown root look provided')
+    eq(nil, port.provides(lj, 'script.on_event'), 'nor this one')
+    -- and the sibling profile DOES provide it, which is the whole point of the pair
+    ok(port.provides(pm.load('lua-factorio'), 'game.print'),
+        'the factorio profile provides what plain luajit cannot')
+end)
+
+test('portability: luajit and lua-factorio are a comparable PAIR', function ()
+    local pm = require 'cartograph.spec.profile'
+    local a, b = pm.load('lua-factorio'), pm.load('luajit')
+    eq(a.lang, b.lang, 'same language')
+    ok(port.name_queryable(a) and port.name_queryable(b), 'both queryable')
+    -- so a move between them is scoreable, which no shipped pair was before
+    local audits = {
+        { runtime = 'lua-factorio', entries = {
+            { name = 'game.print', calls = 5, provided = port.provides(a, 'game.print') ~= nil },
+            { name = 'string.format', calls = 2, provided = port.provides(a, 'string.format') ~= nil } } },
+        { runtime = 'luajit', entries = {
+            { name = 'game.print', calls = 5, provided = port.provides(b, 'game.print') ~= nil },
+            { name = 'string.format', calls = 2, provided = port.provides(b, 'string.format') ~= nil } } },
+    }
+    local d = port.diff_entries(audits[1], audits[2])
+    eq(1, #d.lost, 'the factorio-only name is the porting work')
+    eq('game.print', d.lost[1].name)
+    eq(1, d.kept, 'and plain lua carries the rest')
+end)
