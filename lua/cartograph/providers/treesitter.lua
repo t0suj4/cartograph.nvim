@@ -3726,6 +3726,27 @@ local function aperture_refuser(ns_pfx, apertures, global_witness)
     end
 end
 
+-- A ref-edge adder: dedups (from,to) 'ref' edges through `refEdge` and appends
+-- each new one to `edges`; a re-add accumulates the occurrence range in e.at and
+-- upgrades tiers (a confirmed ref clears `inferred`; `tinf` is upgrade-only).
+-- extract and relink share this over their own refEdge + edge list (data.edges,
+-- which extract aliases as a local `edges`).
+local function ref_adder(refEdge, edges)
+    return function (from, to, at, inferred, tinf)
+        local k = from .. '\31' .. to
+        local e = refEdge[k]
+        if not e then
+            e = { from = from, to = to, kind = 'ref', at = {},
+                self = (from == to) or nil, inferred = inferred or nil }
+            refEdge[k] = e
+            edges[#edges + 1] = e
+        end
+        if not inferred then e.inferred = nil end
+        if tinf then e.tinf = true end -- type-inferred tier (upgrade-only)
+        e.at[#e.at + 1] = at
+    end
+end
+
 --- INDEX-ONLY front-end ([[cartograph-thin-index]]): the thin symbol index — parse +
 --- DEF nodes only (no calls, df, flow, mentions, or resolution). Reuses extract's own
 --- extract_defs, so the def set is byte-faithful to a full extract's; ~10x cheaper in
@@ -4985,19 +5006,7 @@ function M.extract(root, opts)
         return scope_cache[f] or nil
     end
     local refEdge = {}
-    local function addref(from, to, at, inferred, tinf)
-        local k = from .. '\31' .. to
-        local e = refEdge[k]
-        if not e then
-            e = { from = from, to = to, kind = 'ref', at = {},
-                self = (from == to) or nil, inferred = inferred or nil }
-            refEdge[k] = e
-            edges[#edges + 1] = e
-        end
-        if not inferred then e.inferred = nil end
-        if tinf then e.tinf = true end -- type-inferred tier (upgrade-only)
-        e.at[#e.at + 1] = at
-    end
+    local addref = ref_adder(refEdge, edges)
     -- a REGISTRATION edge: fn passed as data at load time (a callback
     -- list, an operations table) is kept alive by its module — an alibi
     local regEdge = {}
@@ -5751,19 +5760,7 @@ function M.relink(data, touched)
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e
         elseif e.kind == 'reg' then regEdge[e.from .. '\31' .. e.to] = e end
     end
-    local function addref(from, to, at, inferred, tinf)
-        local k = from .. '\31' .. to
-        local e = refEdge[k]
-        if not e then
-            e = { from = from, to = to, kind = 'ref', at = {},
-                self = (from == to) or nil, inferred = inferred or nil }
-            refEdge[k] = e
-            data.edges[#data.edges + 1] = e
-        end
-        if not inferred then e.inferred = nil end
-        if tinf then e.tinf = true end -- type-inferred tier (upgrade-only)
-        e.at[#e.at + 1] = at
-    end
+    local addref = ref_adder(refEdge, data.edges)
     local function addreg(from, to, at)
         local k = from .. '\31' .. to
         if regEdge[k] then return end -- already registered from this module
