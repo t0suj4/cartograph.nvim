@@ -567,3 +567,67 @@ test('versionfloor: a tree-detected removal reaches the CEILING in the report', 
     ok(text:find('supported range: [2.3, 3.2)', 1, true), 'and closes the range')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── BEHAVIOUR CHANGES: a boundary INSIDE the range ─────────────────────────
+-- A removal bounds the range; a change SPLITS it. So the fact is CONDITIONAL: it
+-- only matters when the supported range straddles the boundary. Reporting these
+-- unconditionally would be noise, and that conditionality is what these pin.
+
+test('versionfloor: a change the range STRADDLES is a hazard', function ()
+    if not ready() then skip('no ruby parser') end
+    -- floor 2.3 (safe-nav), ceiling 3.2 (taint), change at 3.0 (&:sym)
+    local store, root = rb_store('class A\n  def a(x) x&.to_s end\n'
+        .. '  def b(l) l.map(&:upcase) end\n  def c(o) o.taint end\nend')
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('BEHAVIOUR SPLITS INSIDE THE RANGE [2.3, 3.2)', 1, true),
+        'the split is reported with the range it sits in')
+    ok(text:find('Symbol#to_proc returns a lambda', 1, true), 'and the responsible construct')
+    ok(text:find('either side of that', 1, true),
+        'explaining that it is a split, not a bound')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: the SAME change behind the floor is NOT a hazard', function ()
+    if not ready() then skip('no ruby parser') end
+    -- identical &:sym use, but floor 3.1 means always on the new behaviour
+    local store, root = rb_store('class A\n  def o(x) = {x:}\n'
+        .. '  def b(l) l.map(&:upcase) end\nend')
+    local text = table.concat(vf.report(store), '\n')
+    eq(nil, text:find('BEHAVIOUR SPLITS', 1, true),
+        'no hazard: the range never reaches the old behaviour')
+    ok(text:find('OUTSIDE the range', 1, true),
+        'but the evidence is still disclosed rather than dropped')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: change_facts finds both call- and tree-shaped changes', function ()
+    if not ready() then skip('no ruby parser') end
+    local store, root = rb_store('class A\n  def g; Dir.glob("*.rb"); end\n'
+        .. '  def b(l) l.map(&:upcase) end\n  def d(**o) foo(**o) end\nend')
+    local ids = {}
+    for _, f in ipairs(vf.change_facts(store)) do ids[f.id] = f end
+    ok(ids['changed:Dir.glob'], 'a call-shaped change (Dir.glob ordering)')
+    ok(ids['changed:symbol-to-proc'], 'a tree-shaped one via a test predicate')
+    ok(ids['changed:kwargs-split'], 'and one matched on the node type alone')
+    eq('3.0', ids['changed:kwargs-split'].v, 'the 2.7/3.0 keyword split')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: syntax_facts supports all four entry shapes', function ()
+    if not ready() then skip('no ruby parser') end
+    -- text / mod / test / bare-node — one scanner, or a new table shape silently
+    -- matches nothing (which is how the change table first came up empty)
+    local shapes = { text = false, mod = false, test = false, bare = false }
+    for _, e in ipairs(vf.REMOVED_SYNTAX.ruby) do
+        if e.text then shapes.text = true end
+    end
+    for _, e in ipairs(vf.REMOVED_SYNTAX.python) do
+        if e.mod then shapes.mod = true end
+    end
+    for _, e in ipairs(vf.CHANGED_SYNTAX.ruby) do
+        if e.test then shapes.test = true end
+        if not (e.text or e.mod or e.test) then shapes.bare = true end
+    end
+    eq({ text = true, mod = true, test = true, bare = true }, shapes,
+        'every shape is actually in use, so the scanner cannot regress unnoticed')
+end)

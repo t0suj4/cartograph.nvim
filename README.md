@@ -1379,6 +1379,30 @@ conservative at both ends. Deprecated-but-present names are deliberately absent 
 no ceiling table at all, since it doesn't remove features; the report says so
 rather than implying an unbounded upper end.
 
+### A behaviour change is a split, not a bound
+
+A removal *bounds* the range. A behaviour change **splits** it — the same code
+does two different things either side of the boundary — so the fact is
+**conditional on the range**:
+
+```
+version floor — ruby: 2.3        ⚠ CEILING 3.2 → range [2.3, 3.2)
+⚡ BEHAVIOUR SPLITS INSIDE THE RANGE [2.3, 3.2):
+    3.0  &:sym — Symbol#to_proc returns a lambda since 3.0   1  a.rb:3
+    The SAME code does different things either side of that version.
+```
+
+The identical `&:upcase`, in a codebase whose floor is already 3.1, produces *no*
+hazard — you are always on the new behaviour — and the report says so
+(`1 behaviour change(s) found but OUTSIDE the range`) rather than dropping the
+evidence or crying wolf. Reporting these unconditionally would be pure noise:
+discourse's floor is 3.1, so all three of its 3.0-era changes are correctly
+outside its range.
+
+Shipping now: `Dir.glob` result ordering (sorted since 3.0), `&:sym` returning a
+lambda (3.0), the 2.7→3.0 keyword-argument separation via `**opts`, and
+`asyncio.get_event_loop` with no running loop (3.10).
+
 ### Declared vs computed — the project's own answer key
 
 A project *declares* a floor in a real artifact; this *computes* one from the

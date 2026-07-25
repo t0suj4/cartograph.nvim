@@ -560,6 +560,68 @@ M.REMOVED_SYNTAX = {
     },
 }
 
+-- ── BEHAVIOUR CHANGES: a boundary INSIDE the range, not an end of it ───────
+-- A removal bounds the range; a behaviour change SPLITS it. The same code does
+-- two different things either side of the boundary, so the fact only matters when
+-- the supported range actually STRADDLES it: at floor 3.1 a change in 3.0 is
+-- behind you and nothing to warn about. That conditionality is the whole point —
+-- reporting these unconditionally would be noise.
+M.CHANGED = {
+    ruby = {
+        ['Dir.glob'] = { v = '3.0', desc = 'Dir.glob result order (sorted since 3.0)' },
+    },
+    python = {
+        ['asyncio.get_event_loop'] = { v = '3.10',
+            desc = 'asyncio.get_event_loop with no running loop' },
+    },
+}
+
+M.CHANGED_SYNTAX = {
+    ruby = {
+        { id = 'symbol-to-proc', v = '3.0', node = 'block_argument',
+            desc = '&:sym — Symbol#to_proc returns a lambda since 3.0',
+            test = function (n)
+                for c in n:iter_children() do
+                    if c:named() and c:type() == 'simple_symbol' then return true end
+                end
+                return false
+            end },
+        { id = 'kwargs-split', v = '3.0', node = 'hash_splat_argument',
+            desc = '**opts — the 2.7/3.0 keyword-argument separation' },
+    },
+}
+
+--- Behaviour-change facts: call-shaped through the same disposition gate, plus
+--- tree-shaped ones. Whether any of them MATTERS is decided by the range.
+function M.change_facts(store)
+    local census = require 'cartograph.census'
+    local callrec = require 'cartograph.callrec'
+    local ts = require 'cartograph.providers.treesitter'
+    local ext2lang = {}
+    for lang in pairs(M.CHANGED) do
+        local sp = ts.spec[lang]
+        for _, e in ipairs((sp and sp.exts) or {}) do ext2lang[e] = lang end
+    end
+    local out = {}
+    for _, c in callrec.each(store.data or {}) do
+        local file = callrec.file(c)
+        local ext = file and file:match('%.([%w]+)$')
+        local lang = ext and ext2lang[ext:lower()]
+        if lang then
+            local hit, key = M.gate_of(lang, c, M.CHANGED)
+            if hit and census.disp(c) == 'external' then
+                out[#out + 1] = { id = 'changed:' .. key, v = hit.v,
+                    desc = hit.desc .. ' (~ name-matched)', tier = 'inferred',
+                    file = file, lang = lang, line = callrec.line(c) or 0 }
+            end
+        end
+    end
+    for _, f in ipairs(M.syntax_facts(store, M.CHANGED_SYNTAX, 'changed:')) do
+        out[#out + 1] = f
+    end
+    return out
+end
+
 --- Names the PROJECT itself defines, so its own `Fixnum` is never counted as the
 --- removed one. A ruby class shows up in the graph as `Fixnum#method`, never as a
 --- bare `Fixnum` node, so class heads are recovered from qualified names too.
@@ -573,12 +635,14 @@ function M.defined_names(store)
     return out
 end
 
---- Tree-detected removals across the graph's files. CERTAIN in the sense that the
---- token is really there, but still skipped when the project defines that name.
-function M.removed_syntax_facts(store)
+--- Tree-detected facts from a node/text table (M.REMOVED_SYNTAX or
+--- M.CHANGED_SYNTAX). CERTAIN in the sense that the token is really there, but
+--- still skipped when the project defines that name. One implementation, because
+--- removals and behaviour changes differ only in what the version MEANS.
+function M.syntax_facts(store, which, prefix)
     local ts = require 'cartograph.providers.treesitter'
     local ext2lang = {}
-    for lang in pairs(M.REMOVED_SYNTAX) do
+    for lang in pairs(which) do
         local sp = ts.spec[lang]
         for _, e in ipairs((sp and sp.exts) or {}) do ext2lang[e] = lang end
     end
@@ -606,7 +670,7 @@ function M.removed_syntax_facts(store)
         local root = trees and trees[1] and trees[1]:root()
         if root then
             local bynode = {}
-            for _, e in ipairs(M.REMOVED_SYNTAX[lang]) do
+            for _, e in ipairs(which[lang]) do
                 bynode[e.node] = bynode[e.node] or {}
                 table.insert(bynode[e.node], e)
             end
@@ -615,11 +679,22 @@ function M.removed_syntax_facts(store)
                 if cands then
                     local txt = vim.treesitter.get_node_text(n, src) or ''
                     for _, e in ipairs(cands) do
-                        local hit = (e.text and txt == e.text)
-                            or (e.mod and (txt == e.mod or txt:sub(1, #e.mod + 1) == e.mod .. '.'))
+                        -- three entry shapes: exact TEXT, a module path (dot
+                        -- boundary), a structural TEST, or the node type alone
+                        local hit
+                        if e.text then
+                            hit = txt == e.text
+                        elseif e.mod then
+                            hit = txt == e.mod
+                                or txt:sub(1, #e.mod + 1) == e.mod .. '.'
+                        elseif e.test then
+                            hit = e.test(n, src) and true or false
+                        else
+                            hit = true
+                        end
                         if hit and not defined[e.id] and not defined[txt] then
                             local l = n:range()
-                            out[#out + 1] = { id = 'gone:' .. e.id, v = e.v,
+                            out[#out + 1] = { id = prefix .. e.id, v = e.v,
                                 desc = e.desc, tier = 'certain', file = file,
                                 lang = lang, line = l }
                         end
@@ -633,13 +708,18 @@ function M.removed_syntax_facts(store)
     return out
 end
 
+--- Tree-detected REMOVALS (the ceiling's second mechanism).
+function M.removed_syntax_facts(store)
+    return M.syntax_facts(store, M.REMOVED_SYNTAX, 'gone:')
+end
+
 --- The gate a CALL matches. The qualified form comes first and it matters: the
 --- extractor records `callee` as the TAIL (`escape`) and the receiver-qualified
 --- name in `full` (`URI.escape`), so a dotted key can only ever match via `full`.
 --- Every dotted key in these tables was silently dead until this was measured —
 --- and the ordering is also what keeps `CGI.escape` from matching a table entry
 --- written for `URI.escape`.
-local function gate_of(lang, c, which)
+function M.gate_of(lang, c, which)
     local callrec = require 'cartograph.callrec'
     local hit, key = M.gate_for(lang, callrec.full(c), which)
     if hit then return hit, key end
@@ -666,7 +746,7 @@ function M.call_facts(store)
         if lang then
             -- key by the TABLE ENTRY, not the callee: `a.match?` and `b.match?`
             -- are the same gated method and must group as one row
-            local hit, key = gate_of(lang, c, M.STDLIB)
+            local hit, key = M.gate_of(lang, c, M.STDLIB)
             -- `external` = resolved to NOTHING here. resolved/refused/dynamic all
             -- mean the project (or an unseeable dispatch) owns the name.
             if hit and census.disp(c) == 'external' then
@@ -697,7 +777,7 @@ function M.removal_facts(store)
         local ext = file and file:match('%.([%w]+)$')
         local lang = ext and ext2lang[ext:lower()]
         if lang then
-            local hit, key = gate_of(lang, c, M.REMOVED)
+            local hit, key = M.gate_of(lang, c, M.REMOVED)
             if hit and census.disp(c) == 'external' then
                 out[#out + 1] = { id = 'removed:' .. key, v = hit.v,
                     desc = hit.desc .. ' (~ name-matched)', tier = 'inferred',
@@ -749,6 +829,12 @@ function M.report(store)
         local k = M.scale_key(f.lang or langs[1])
         gone[k] = gone[k] or {}
         table.insert(gone[k], f)
+    end
+    local split = {}
+    for _, f in ipairs(M.change_facts(store)) do
+        local k = M.scale_key(f.lang or langs[1])
+        split[k] = split[k] or {}
+        table.insert(split[k], f)
     end
     table.sort(order)
 
@@ -897,6 +983,42 @@ function M.report(store)
                 for _ in pairs(t[scalelangs[k][1]] or {}) do n = n + 1 end
             end
             L[#L + 1] = ('  no ceiling in evidence — %d known removals were checked for'):format(n)
+        end
+        -- BEHAVIOUR CHANGES: only those the supported range actually straddles.
+        -- A change at C matters when you can run BOTH below and at/above it.
+        local cby, cids = M.group(split[k] or {})
+        if #cids > 0 then
+            local ceiling
+            for _, id in ipairs(rids) do
+                if not ceiling or M.older(rby[id].v, ceiling) then ceiling = rby[id].v end
+            end
+            local straddling, behind = {}, 0
+            for _, id in ipairs(cids) do
+                local c = cby[id].v
+                local above_floor = (not floor) or M.older(floor, c)
+                local below_ceil = (not ceiling) or M.older(c, ceiling)
+                if above_floor and below_ceil then
+                    straddling[#straddling + 1] = id
+                else
+                    behind = behind + 1
+                end
+            end
+            if #straddling > 0 then
+                L[#L + 1] = ('  ⚡ BEHAVIOUR SPLITS INSIDE THE RANGE [%s, %s):')
+                    :format(floor or '?', ceiling or 'unbounded')
+                for _, id in ipairs(straddling) do
+                    local g = cby[id]
+                    L[#L + 1] = ('    %-5s %-34s %3d  %s%s'):format(g.v, g.desc, g.n, g.site,
+                        g.n > 1 and (' (+%d more)'):format(g.n - 1) or '')
+                end
+                L[#L + 1] = '    The SAME code does different things either side of that'
+                L[#L + 1] = '    version. Supporting both means these sites must work under'
+                L[#L + 1] = '    each behaviour — a change is not a bound, it is a split.'
+            end
+            if behind > 0 then
+                L[#L + 1] = ('  %d behaviour change(s) found but OUTSIDE the range —'):format(behind)
+                L[#L + 1] = '    always on one side of them, so nothing to reconcile'
+            end
         end
         L[#L + 1] = ''
     end
