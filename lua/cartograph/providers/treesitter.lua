@@ -3466,17 +3466,51 @@ end
 
 --- Global name lookups for the standalone id pass, from a full node set.
 --- Used by the parallel driver (phase 2) and refresh (changed files).
-function M.lookups(nodes, root)
+--- The global lookups the id pass / mention reduce resolve against.
+---
+--- NARROWING (`narrow`, index-and-reduce step 2, [[cartograph-merging-strategies]]):
+--- a demand query touches a handful of names, and holding the whole corpus's
+--- fn_unique/var_named resident to answer it is the cost the thin index exists to
+--- avoid. `narrow = { names = <set>, files = <set> }` restricts the RESULT to
+--- those names — identical, for every name in the set, to the unnarrowed build.
+---
+--- The invariant, and it is the whole reason this is a name filter and not a file
+--- filter: NARROW THE OUTPUT, NEVER THE EVIDENCE.
+---
+---   · fn_unique is a CORPUS-WIDE uniqueness claim (count[name] == 1). Filter the
+---     nodes by FILE and count undercounts, so a name that is ambiguous across the
+---     repo looks unique in the slice and resolves to the wrong def — the ghost/v8
+---     bug the parity gate caught, and why a worker slice's "unique" is a batch
+---     artifact (see the pre-scan note in extract). Filter by NAME and every
+---     bearer of a retained name is still counted, so count is exact.
+---   · scopes: `sp.scope(f, fileset, root)` walks UP through `fileset` for a crate
+---     root (rust lib.rs/main.rs). Narrowing that fileset erases roots, so two
+---     files in different crates would compare equal and cross-crate matches would
+---     stop being refused. So `narrow` limits WHICH files get a scope computed —
+---     the retained candidates plus the caller's own files, since the reduce
+---     compares scopes[candidate.file] against scopes[mention.file] — while the
+---     fileset it is computed AGAINST stays the complete module roster.
+---
+--- That roster is why the module nodes must stay resident wholesale under any
+--- future demand loading of `nodes`: one node per file, and the scope evidence
+--- depends on all of them.
+---@param nodes table
+---@param root string
+---@param narrow table|nil  { names = set, files = set } — nil = the whole corpus
+function M.lookups(nodes, root, narrow)
+    local want = narrow and narrow.names or nil
     local count = {}
     for _, n in ipairs(nodes) do
-        if (n.kind == 'function' or n.kind == 'method') and not n.torn
+        if (not want or want[n.name])
+            and (n.kind == 'function' or n.kind == 'method') and not n.torn
             and not n.decl then -- a prototype declaration is not a call target
             count[n.name] = (count[n.name] or 0) + 1
         end
     end
     local fn_unique, var_named = {}, {}
     for _, n in ipairs(nodes) do
-        if n.torn then -- beyond a parse error: never name-matched
+        if want and not want[n.name] then -- outside the narrowed name set
+        elseif n.torn then -- beyond a parse error: never name-matched
         elseif (n.kind == 'function' or n.kind == 'method')
             and not n.decl and count[n.name] == 1 then
             fn_unique[n.name] = { id = n.id, file = n.file,
@@ -3494,11 +3528,25 @@ function M.lookups(nodes, root)
     for _, n in ipairs(nodes) do
         if n.kind == 'module' then fileset[n.file] = true end
     end
+    -- which files need one (see the header): the retained candidates' files, so
+    -- the reduce can compare a candidate's scope, plus the caller's own files,
+    -- whose mentions are the other side of that comparison
+    local only
+    if narrow then
+        only = {}
+        for _, e in pairs(fn_unique) do only[e.file] = true end
+        for _, lst in pairs(var_named) do
+            for _, e in ipairs(lst) do only[e.file] = true end
+        end
+        for f in pairs(narrow.files or {}) do only[f] = true end
+    end
     for f in pairs(fileset) do
-        local _, sp = elang_for(f)
-        if sp and sp.scope then
-            scopes[f] = sp.scope(f, fileset, root)
-            any = true
+        if not only or only[f] then
+            local _, sp = elang_for(f)
+            if sp and sp.scope then
+                scopes[f] = sp.scope(f, fileset, root) -- fileset stays COMPLETE
+                any = true
+            end
         end
     end
     return { fn_unique = fn_unique, var_named = var_named,
