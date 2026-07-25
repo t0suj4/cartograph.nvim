@@ -93,6 +93,43 @@ M.FEATURES = {
     },
 }
 
+-- ── version-gated STDLIB calls (the second, WEAKER evidence tier) ──────────
+-- Syntax is certain: `{x:}` in the tree IS 3.1 syntax. A stdlib call is not —
+-- `x.tally` is 2.7 only if `x` is an Enumerable, and Ruby will not tell us. So
+-- these facts are INFERRED (`~`) and reported apart from the certain floor.
+--
+-- The soundness gate is the graph's own disposition: a name here counts ONLY
+-- when the call resolved to NOTHING in the project (census disposition
+-- `external`). If the project defines `except`, that call resolves to the
+-- project's method and is not a stdlib use at all. What remains uncertain is a
+-- receiver from outside the corpus (a gem's class with a same-named method) —
+-- which is exactly why the tier is hedged rather than asserted.
+--
+-- Keys with a dot match the WHOLE callee (`Data.define`); bare keys match the
+-- last segment. `define` alone would collide with every project builder.
+M.STDLIB = {
+    ruby = {
+        ['dig']              = { v = '2.3', desc = 'Hash/Array#dig' },
+        ['sum']              = { v = '2.4', desc = 'Enumerable#sum' },
+        ['digits']           = { v = '2.4', desc = 'Integer#digits' },
+        ['transform_values'] = { v = '2.4', desc = 'Hash#transform_values' },
+        ['match?']           = { v = '2.4', desc = 'Regexp/String#match?' },
+        ['clamp']            = { v = '2.4', desc = 'Comparable#clamp' },
+        ['transform_keys']   = { v = '2.5', desc = 'Hash#transform_keys' },
+        ['delete_prefix']    = { v = '2.5', desc = 'String#delete_prefix' },
+        ['delete_suffix']    = { v = '2.5', desc = 'String#delete_suffix' },
+        ['yield_self']       = { v = '2.5', desc = 'Kernel#yield_self' },
+        ['then']             = { v = '2.6', desc = 'Kernel#then' },
+        ['tally']            = { v = '2.7', desc = 'Enumerable#tally' },
+        ['filter_map']       = { v = '2.7', desc = 'Enumerable#filter_map' },
+        ['intersection']     = { v = '2.7', desc = 'Array#intersection' },
+        ['difference']       = { v = '2.7', desc = 'Array#difference' },
+        ['except']           = { v = '3.0', desc = 'Hash#except' },
+        ['intersect?']       = { v = '3.1', desc = 'Array#intersect?' },
+        ['Data.define']      = { v = '3.2', desc = 'Data.define' },
+    },
+}
+
 --- Version compare over dotted numeric parts. Returns true when a < b.
 function M.older(a, b)
     local pa, pb = vim.split(a, '.', { plain = true }), vim.split(b, '.', { plain = true })
@@ -178,6 +215,63 @@ function M.facts(store)
     return facts, stats
 end
 
+--- Group facts by id → { v, desc, n, site }, plus the ids newest-version-first.
+--- Shared by both tiers so they read identically in the report.
+function M.group(facts)
+    local by, ids = {}, {}
+    for _, f in ipairs(facts or {}) do
+        local g = by[f.id]
+        if not g then
+            g = { v = f.v, desc = f.desc, n = 0,
+                site = ('%s:%d'):format(f.file or '?', (f.line or 0) + 1) }
+            by[f.id] = g
+            ids[#ids + 1] = f.id
+        end
+        g.n = g.n + 1
+    end
+    table.sort(ids, function (a, b)
+        if by[a].v ~= by[b].v then return M.older(by[b].v, by[a].v) end
+        return a < b
+    end)
+    return by, ids
+end
+
+--- Version-gated stdlib CALLS in the open graph, as hedged facts. Counted only
+--- where the call resolved to nothing in the project, so a project method that
+--- happens to share a stdlib name is never mistaken for one.
+function M.call_facts(store)
+    local census = require 'cartograph.census'
+    local callrec = require 'cartograph.callrec'
+    local ts = require 'cartograph.providers.treesitter'
+    local ext2lang = {}
+    for lang in pairs(M.STDLIB) do
+        local s = ts.spec[lang]
+        for _, e in ipairs((s and s.exts) or {}) do ext2lang[e] = lang end
+    end
+    local out = {}
+    for _, c in callrec.each(store.data or {}) do
+        local file = callrec.file(c)
+        local ext = file and file:match('%.([%w]+)$')
+        local tbl = ext and ext2lang[ext:lower()] and M.STDLIB[ext2lang[ext:lower()]]
+        if tbl then
+            local callee = callrec.callee(c) or ''
+            local tail = callee:match('([%w_]+[!?]?)$') or ''
+            -- key by the TABLE ENTRY, not the callee: `a.match?` and `b.match?`
+            -- are the same gated method and must group as one row
+            local key = tbl[callee] and callee or (tbl[tail] and tail)
+            local hit = key and tbl[key]
+            -- `external` = resolved to NOTHING here. resolved/refused/dynamic all
+            -- mean the project (or an unseeable dispatch) owns the name.
+            if hit and census.disp(c) == 'external' then
+                out[#out + 1] = { id = 'stdlib:' .. key, v = hit.v,
+                    desc = hit.desc .. ' (~ name-matched)', tier = 'inferred',
+                    file = file, line = callrec.line(c) or 0 }
+            end
+        end
+    end
+    return out
+end
+
 --- The report: the floor, the attributed set that holds it up, and the
 --- downgrade ladder priced per older target.
 function M.report(store)
@@ -190,29 +284,21 @@ function M.report(store)
         return { 'version floor: no file here belongs to a language with a'
             .. ' feature table (covered: ' .. table.concat(vim.tbl_keys(M.FEATURES), ' ') .. ')' }
     end
-    -- group by feature id: count + the first site, so the set is readable
-    local by, ids = {}, {}
-    for _, f in ipairs(facts) do
-        local g = by[f.id]
-        if not g then
-            g = { v = f.v, desc = f.desc, n = 0, site = ('%s:%d'):format(f.file, f.line + 1) }
-            by[f.id] = g
-            ids[#ids + 1] = f.id
-        end
-        g.n = g.n + 1
-    end
-    table.sort(ids, function (a, b)
-        if by[a].v ~= by[b].v then return M.older(by[b].v, by[a].v) end
-        return a < b
-    end)
+    local by, ids = M.group(facts)
     local floor
     for _, id in ipairs(ids) do
         if not floor or M.older(floor, by[id].v) then floor = by[id].v end
     end
+    -- the WEAKER tier, kept apart: name-matched stdlib calls (see M.STDLIB)
+    local hby, hids = M.group(M.call_facts(store))
+    local hfloor
+    for _, id in ipairs(hids) do
+        if not hfloor or M.older(hfloor, hby[id].v) then hfloor = hby[id].v end
+    end
     L[#L + 1] = ('version floor — %s: %s'):format(table.concat(langs, '/'),
         floor or 'nothing version-gated found')
-    L[#L + 1] = '  a LOWER bound, from SYNTAX only: version-gated stdlib calls are not'
-    L[#L + 1] = '  modelled, so this says "needs at least" — never "runs on".'
+    L[#L + 1] = '  CERTAIN, from syntax: a LOWER bound, so it says "needs at least"'
+    L[#L + 1] = '  — never "runs on". The ladder below is the definite worklist.'
     L[#L + 1] = ''
     if #ids == 0 then
         L[#L + 1] = ('  no version-gated syntax in %d file(s)'):format(stats.files)
@@ -248,6 +334,24 @@ function M.report(store)
         for _, id in ipairs(ids) do all = all + by[id].n end
         L[#L + 1] = ('    below %-5s fix %d site(s) (all of them)')
             :format(targets[#targets], all)
+    end
+    -- The hedged tier, deliberately NOT folded into the floor or the ladder: a
+    -- stdlib name match cannot see its receiver's type, so it is evidence to
+    -- CHECK, not work to do. Folding it in would launder a ~ into a fact.
+    if #hids > 0 then
+        L[#L + 1] = ''
+        local raises = hfloor and (not floor or M.older(floor, hfloor))
+        L[#L + 1] = ('  ~ %s stdlib name matches (unresolved here — receiver type unknown):')
+            :format(raises and ('WOULD RAISE the floor to ' .. hfloor .. ' —') or 'consistent with the floor —')
+        for _, id in ipairs(hids) do
+            local g = hby[id]
+            L[#L + 1] = ('    %-5s %-34s %3d  %s%s'):format(g.v, g.desc, g.n, g.site,
+                g.n > 1 and (' (+%d more)'):format(g.n - 1) or '')
+        end
+        L[#L + 1] = '    verify these before trusting a target below ' .. hfloor
+            .. '; a gem class with the same method name would look identical'
+        L[#L + 1] = '    and this tier UNDER-reports: a stdlib name the project also'
+        L[#L + 1] = '    defines resolves there instead, so it is absent from this list'
     end
     L[#L + 1] = ''
     L[#L + 1] = ('  scanned %d file(s)%s'):format(stats.files,

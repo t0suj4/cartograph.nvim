@@ -1254,12 +1254,30 @@ Rungs appear only at observed feature versions, which is where the cost actually
 changes — "to 3.0" would cost the same 153 as "to 2.7", so pricing it separately
 would add a line and no information.
 
-Two honesty properties, both tested. It is a **lower** bound drawn from **syntax
-only**: version-gated stdlib calls (`Hash#except` → 3.0) are not modelled, so the
-report says "needs at least" and never "runs on". And detection is over the
-**tree**, not the text — `&.` inside a string or a comment is not a feature use,
-which a regex would get wrong. A file that cannot be read or parsed is counted as
-UNKNOWN rather than folded into a clean result.
+Version-gated **stdlib calls** (`Enumerable#tally` → 2.7, `Hash#except` → 3.0)
+ride underneath as a second, deliberately weaker tier:
+
+```
+  ~ consistent with the floor — stdlib name matches (receiver type unknown):
+    2.4  Regexp/String#match? (~ name-matched)   5  theme_field.rb:472 (+4 more)
+```
+
+They are kept **out** of the floor and out of the ladder, because a name match
+cannot see its receiver's type — `x.tally` is 2.7 only if `x` is an Enumerable,
+and Ruby won't say. Folding a `~` into a fact is exactly the laundering this
+separation prevents; when the hedged tier *would* raise the floor, the report says
+so conditionally instead. What keeps the tier sound is the graph's own
+disposition: a gated name counts only where the call resolved to **nothing** in
+the project, so a project method that happens to be called `except` is attributed
+to the project. The cost of that soundness is under-reporting — a stdlib name the
+project also defines disappears from the list — and the report discloses that
+rather than letting the absence read as evidence.
+
+Three honesty properties, all tested. The floor is a **lower** bound from
+**syntax only**, so it says "needs at least" and never "runs on". Detection is
+over the **tree**, not the text — `&.` inside a string or a comment is not a
+feature use, which a regex would get wrong. And a file that cannot be read or
+parsed is counted as UNKNOWN rather than folded into a clean result.
 
 Ruby ships the first feature table (10 features, 2.3 → 3.1). The table is
 per-language, small, and additive — each entry is a node type plus an optional

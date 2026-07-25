@@ -114,8 +114,13 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               holding the floor up, not a bare number.
                               Plus the DOWNGRADE LADDER — what supporting
                               each older version would cost, in sites to
-                              fix. A LOWER bound: syntax only, so it says
-                              "needs at least", never "runs on"
+                              fix. TWO TIERS, never mixed: the floor and
+                              the ladder are CERTAIN (syntax in the tree),
+                              while version-gated stdlib CALLS ride below
+                              as `~` — a name match can't see its
+                              receiver's type. A stdlib name the project
+                              also defines resolves there instead, so the
+                              hedged tier under-reports and says so
   :CartographExternals        the external boundary — unresolved names
                               and the shape each use implies (~)
   :CartographEscalate[!]      escalate hedge-saturated fns to lua-ls

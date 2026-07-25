@@ -106,3 +106,59 @@ test('versionfloor: a file it cannot read counts as UNKNOWN, not as clean', func
     ok(text:find('UNKNOWN, not clean', 1, true),
         'an unreadable file is disclosed, never folded into a clean result: ' .. text)
 end)
+
+-- ── the stdlib tier: weaker evidence, kept apart from the certain floor ────
+-- A stdlib name match cannot see its receiver's type, so it is evidence to
+-- CHECK rather than work to do. The gate that keeps it sound is the graph's own
+-- disposition: if the PROJECT defines the name, the call resolves there and is
+-- not a stdlib use at all.
+
+local function ruby_graph(files)
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for name, lines in pairs(files) do write(root, name, lines) end
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    return store, root
+end
+
+test('versionfloor stdlib: an unresolved gated call is a HEDGED fact', function ()
+    if not ready() then skip('no ruby parser') end
+    local store, root = ruby_graph { ['a.rb'] = { 'class A', '  def c(e) e.tally end', 'end' } }
+    local facts = vf.call_facts(store)
+    eq(1, #facts, 'one gated call found')
+    eq('2.7', facts[1].v, 'Enumerable#tally is 2.7')
+    eq('inferred', facts[1].tier, 'and it is INFERRED, not certain')
+    ok(facts[1].desc:find('~', 1, true), 'the description carries the hedge mark')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor stdlib: a name the PROJECT defines is not a stdlib use', function ()
+    if not ready() then skip('no ruby parser') end
+    -- `except` is Hash#except (3.0) — but here the project defines it, so the
+    -- call resolves to the project method and must NOT raise the floor
+    local store, root = ruby_graph {
+        ['b.rb'] = { 'class B', '  def except(k) k end', '  def use(o) o.except(:z) end', 'end' },
+    }
+    local hits = {}
+    for _, f in ipairs(vf.call_facts(store)) do hits[#hits + 1] = f.desc end
+    eq({}, hits, 'a project-defined name is attributed to the project, never to the stdlib')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor stdlib: the hedged tier never enters the floor or the ladder', function ()
+    if not ready() then skip('no ruby parser') end
+    -- syntax says 2.3 (safe-nav); a stdlib match says 3.0. The FLOOR must stay
+    -- 2.3 — folding a ~ into a fact is the failure this separation prevents.
+    local store, root = ruby_graph {
+        ['c.rb'] = { 'class C', '  def a(x) x&.to_s end', '  def b(h) h.except(:k) end', 'end' },
+    }
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('version floor — ruby: 2.3', 1, true),
+        'the certain floor is syntax-only: ' .. text:sub(1, 70))
+    ok(text:find('WOULD RAISE the floor to 3.0', 1, true),
+        'the stronger possibility is surfaced, separately and conditionally')
+    ok(text:find('UNDER%-reports'), 'and the tier discloses that it under-reports')
+    vim.fn.delete(root, 'rf')
+end)
