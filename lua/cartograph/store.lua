@@ -1441,20 +1441,22 @@ M.register_fact {
 --- `p[#p] ~= i` guard holds it locally for one comparison. Correct regardless of
 --- the producer's order, since i only ever grows.
 ---@param names table|nil  file -> `\31`-framed identifier set (data.names)
----@return table  { post = name -> {file index}, files = {file}, n_files = integer }
+---@return table  { post = name -> {file index}, files = {file}, index = file -> i,
+---                 n_files = integer }
 function M.build_postings(names)
     local files, nf = {}, 0
     for f in pairs(names or {}) do nf = nf + 1; files[nf] = f end
     table.sort(files)
-    local post = {}
+    local post, index = {}, {}
     for i = 1, nf do
+        index[files[i]] = i
         for nme in (names[files[i]]):gmatch('[^\31]+') do
             local p = post[nme]
             if not p then post[nme] = { i }
             elseif p[#p] ~= i then p[#p + 1] = i end
         end
     end
-    return { post = post, files = files, n_files = nf }
+    return { post = post, files = files, index = index, n_files = nf }
 end
 
 --- The resident postings, built lazily on first query and cached until the next
@@ -1466,6 +1468,117 @@ function M.postings()
         M._post_gen = M.generation
     end
     return M._post
+end
+
+--- THE SCOPE PARTITION: file -> resolution scope, the same map the id pass /
+--- mention reduce confine their matches by. Not carried on the graph, so it is
+--- computed on demand from the module roster and cached generation-keyed — the
+--- same on-demand-materialization shape as materialize_file_dataflow, and it uses
+--- step 2's narrowing to ask for ONLY the scope half (`names = {}` empties the
+--- name-keyed tables; `files` = the whole roster keeps every scope).
+--- nil when no parsed language has a resolution boundary — then nothing is
+--- confined, exactly as the reduce behaves with L.scopes nil.
+function M.scopes()
+    if M._scopes_gen ~= M.generation then
+        M._scopes = nil
+        if M.data and M.data.nodes then
+            local roster = {}
+            for _, n in ipairs(M.data.nodes) do
+                if n.kind == 'module' then roster[n.file] = true end
+            end
+            M._scopes = M.data.scopes
+                or require('cartograph.providers.treesitter')
+                    .lookups(M.data.nodes, M.data.root,
+                        { names = {}, files = roster }).scopes
+        end
+        M._scopes_gen = M.generation
+    end
+    return M._scopes
+end
+
+--- SCOPE-KEYED CANDIDATES (index-and-reduce step 3): attach the scope axis to a
+--- postings object. PURE, like build_postings — a caller with its own graph can
+--- pair its own postings with its own scope map.
+---
+--- WHY an axis and not a (scope, name) KEY TABLE, which is the obvious design: the
+--- cost this saves is LOADING candidate files (each one's mention buffer), not
+--- scanning the index. Filtering 4648 integers down to 82 is microseconds, while
+--- loading 4648 files is the thing that makes a demand query unaffordable. So one
+--- parallel array of interned scope ids — bounded by the DISTINCT scope count,
+--- measured 3 (ghost) to 393 (server) — buys the same candidate reduction as a
+--- second index that would have roughly doubled the postings.
+---
+--- Scope ids, not scope strings, so the per-file cost is one integer; id 0 means
+--- "no scope", which must compare EQUAL to another no-scope file because that is
+--- what the reduce does (nil ~= nil is false, so it does not drop).
+---@param px table  a build_postings result
+---@param scopes table|nil  file -> scope (M.scopes())
+function M.scope_axis(px, scopes)
+    if px.fscope or px.no_scopes then return px end
+    if not scopes then px.no_scopes = true; return px end
+    local sid, fscope, n = {}, {}, 0
+    for i = 1, px.n_files do
+        local sc = scopes[px.files[i]]
+        if sc == nil then
+            fscope[i] = 0
+        else
+            local id = sid[sc]
+            if not id then n = n + 1; id = n; sid[sc] = id end
+            fscope[i] = id
+        end
+    end
+    px.sid, px.fscope, px.n_scopes = sid, fscope, n
+    return px
+end
+
+--- Files mentioning `name` that could resolve AGAINST `from` — the postings list
+--- confined to `from`'s scope. This is not an approximation of M.mentioning: it
+--- pre-applies the cut the reduce makes anyway (a candidate whose scope differs
+--- from the mention's is dropped — treesitter's id pass, `L.scopes[u.file] ~=
+--- L.scopes[file]`), so the same candidates survive, just without loading the ones
+--- that were always going to be discarded.
+---
+--- MEASURED reduction in candidates per mention (mean -> mean): server 494 -> 8.5,
+--- ruby 16.9 -> 1.0 (its scope IS the file, so resolution never leaves it), go
+--- 38.9 -> 2.7. On javascript it is 1.0x — `package.json` boundaries put ghost's
+--- 1930 files in THREE scopes, so scope buys nothing there and the plain name
+--- remains the only key. That is a property of the partition, not of this axis.
+function M.mentioning_in(name, from)
+    local px = M.scope_axis(M.postings(), M.scopes())
+    if px.no_scopes then return M.mentioning(name) end -- nothing to confine by
+    local p = px.post[name]
+    if not p then return {} end
+    -- `from`'s own scope id: via the index when it is an indexed file, else
+    -- straight off the scope map (a file may hold no eligible mentions yet still
+    -- have a scope). An id of -1 = a scope no indexed file shares → no candidate.
+    local want
+    local i0 = px.index[from]
+    if i0 then
+        want = px.fscope[i0]
+    else
+        local sc = (M.scopes() or {})[from]
+        want = (sc == nil) and 0 or (px.sid[sc] or -1)
+    end
+    local out, files, fscope = {}, px.files, px.fscope
+    for k = 1, #p do
+        local i = p[k]
+        if fscope[i] == want then out[#out + 1] = files[i] end
+    end
+    return out
+end
+
+--- The DIRECT-comparison reference for mentioning_in, the oracle its gate runs
+--- against. Deliberately a different mechanism — string equality over the scope
+--- map, no interning, no index, no parallel array — so the differential tests the
+--- id machinery rather than restating it.
+function M.mentioning_in_scan(name, from)
+    local scopes = M.scopes()
+    if not scopes then return M.mentioning(name) end
+    local out = {}
+    for _, f in ipairs(M.mentioning(name)) do
+        if scopes[f] == scopes[from] then out[#out + 1] = f end
+    end
+    return out
 end
 
 --- Files whose identifier mention-index contains `name` (the id pass
@@ -1517,14 +1630,14 @@ end
 -- capture()-ing this state and restore()-ing another's. Per-band = every DATA
 -- field on M EXCEPT (a) the session-global UI wiring — subscribers, producers,
 -- loc_provider belong to the lens, not a band, so they persist across swaps;
--- (b) the generation-keyed CACHES — _topo/_fold/_ws_bfs/_post are rebuilt on demand,
+-- (b) the generation-keyed CACHES — _topo/_fold/_ws_bfs/_post/_scopes are rebuilt on demand,
 -- and per-band generations can COLLIDE, so a swapped cache would be silently
 -- stale. Single-band sessions never call these, so the common path is
 -- byte-identical (the gating invariant).
 M.SESSION_GLOBAL = { _subs = true, _redraw_subs = true, _hl_subs = true,
     _ctx_subs = true, _plan_subs = true, _fact_producers = true, loc_provider = true }
 M.BAND_TRANSIENT = { _topo = true, _fold = true, _topo_gen = true, _ws_bfs = true,
-    _post = true, _post_gen = true }
+    _post = true, _post_gen = true, _scopes = true, _scopes_gen = true }
 
 --- Snapshot the active band's per-band state (shallow — each band owns distinct
 --- data/index tables, so sharing refs is correct; the caches are omitted and
