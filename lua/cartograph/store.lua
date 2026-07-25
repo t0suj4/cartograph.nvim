@@ -1415,10 +1415,79 @@ M.register_fact {
     end,
 }
 
+--- THE MENTION POSTINGS ([[cartograph-merging-strategies]] index-and-reduce):
+--- the INVERSE of data.names. The id pass already records, per file, that file's
+--- eligible identifier set (`\31`-framed, sorted) and the cache persists it in
+--- each per-file shard — so the INDEX half of index-and-reduce is on disk
+--- already. What was missing is the direction a query wants: data.names answers
+--- "does file F mention N", while every caller asks "which files mention N", and
+--- got a linear scan over every file's name string. This inverts it ONCE.
+---
+--- PURE (reads no store state) so a caller holding its own graph — refresh,
+--- mid-cycle, after it has dropped the changed files from data.names — can build
+--- one over that table instead of the resident one.
+---
+--- Files are INDICES into the returned `files` array, not path strings: a name in
+--- K files costs K integers rather than K string references, and since the array
+--- is built over SORTED keys and filled in ascending order, every posting list is
+--- already ascending — so mentioning() returns files sorted with no sort of its
+--- own, matching the scan's contract exactly.
+---
+--- DEDUPE is DEFENSIVE, not load-bearing: the producer INTERNS each name into a
+--- per-file pool (treesitter's `nidx`, so occurrences share one slot), which makes
+--- every file's list distinct already — measured 0 repeated names across the
+--- plugin's own 423 indexed files. But the scan contract is "each file at most
+--- once", and that must not depend on an invariant two modules away, so the
+--- `p[#p] ~= i` guard holds it locally for one comparison. Correct regardless of
+--- the producer's order, since i only ever grows.
+---@param names table|nil  file -> `\31`-framed identifier set (data.names)
+---@return table  { post = name -> {file index}, files = {file}, n_files = integer }
+function M.build_postings(names)
+    local files, nf = {}, 0
+    for f in pairs(names or {}) do nf = nf + 1; files[nf] = f end
+    table.sort(files)
+    local post = {}
+    for i = 1, nf do
+        for nme in (names[files[i]]):gmatch('[^\31]+') do
+            local p = post[nme]
+            if not p then post[nme] = { i }
+            elseif p[#p] ~= i then p[#p + 1] = i end
+        end
+    end
+    return { post = post, files = files, n_files = nf }
+end
+
+--- The resident postings, built lazily on first query and cached until the next
+--- ingest (generation-keyed, like M.topo) — so a streaming ingest pays nothing
+--- until the graph settles and something asks.
+function M.postings()
+    if M._post_gen ~= M.generation then
+        M._post = M.build_postings(M.data and M.data.names)
+        M._post_gen = M.generation
+    end
+    return M._post
+end
+
 --- Files whose identifier mention-index contains `name` (the id pass
 --- records each file's identifier set). Empty when the graph predates
 --- the index or the file's language opted out (spec.name_index = false).
+--- A postings lookup, not a corpus scan; M.mentioning_scan is the oracle.
 function M.mentioning(name)
+    local px = M.postings()
+    local p = px.post[name]
+    if not p then return {} end
+    local out, files = {}, px.files
+    for k = 1, #p do out[k] = files[p[k]] end
+    return out
+end
+
+--- The pre-postings LINEAR SCAN, retained as the reference oracle for the
+--- postings differential gate (tests/postings_spec, tools/postings.lua): a
+--- differential test needs the previous answer to be RUNNABLE, not
+--- re-implemented inside the spec — a re-implementation only ever falsifies
+--- itself. Not a query path: O(files) per call, which is why M.mentioning
+--- stopped using it.
+function M.mentioning_scan(name)
     local out = {}
     local needle = '\31' .. name .. '\31'
     for f, s in pairs((M.data and M.data.names) or {}) do
@@ -1448,13 +1517,14 @@ end
 -- capture()-ing this state and restore()-ing another's. Per-band = every DATA
 -- field on M EXCEPT (a) the session-global UI wiring — subscribers, producers,
 -- loc_provider belong to the lens, not a band, so they persist across swaps;
--- (b) the generation-keyed CACHES — _topo/_fold/_ws_bfs are rebuilt on demand,
+-- (b) the generation-keyed CACHES — _topo/_fold/_ws_bfs/_post are rebuilt on demand,
 -- and per-band generations can COLLIDE, so a swapped cache would be silently
 -- stale. Single-band sessions never call these, so the common path is
 -- byte-identical (the gating invariant).
 M.SESSION_GLOBAL = { _subs = true, _redraw_subs = true, _hl_subs = true,
     _ctx_subs = true, _plan_subs = true, _fact_producers = true, loc_provider = true }
-M.BAND_TRANSIENT = { _topo = true, _fold = true, _topo_gen = true, _ws_bfs = true }
+M.BAND_TRANSIENT = { _topo = true, _fold = true, _topo_gen = true, _ws_bfs = true,
+    _post = true, _post_gen = true }
 
 --- Snapshot the active band's per-band state (shallow — each band owns distinct
 --- data/index tables, so sharing refs is correct; the caches are omitted and
