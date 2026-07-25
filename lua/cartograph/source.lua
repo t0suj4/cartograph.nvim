@@ -38,6 +38,14 @@ function M.caps(data)
         idpass  = (p and p.idpass) or false,
         fs      = not (data.root or ''):match('^%w+://'),
         sample  = data.fetched_at ~= nil and not stamps,
+        -- per-site calls: a provider may AGGREGATE call sites into reference
+        -- edges instead of recording them one by one — the token provider does,
+        -- because a Forth word mention IS a reference and nothing more, and it
+        -- declares `capabilities.calls = 'aggregated'`. A verb answering FROM
+        -- call records must then say THAT, rather than present its empty result
+        -- as "nothing calls this": attributing an absence to the wrong cause is
+        -- precisely what the honesty vocabulary forbids.
+        per_site_calls = (data.capabilities or {}).calls ~= 'aggregated',
     }
 end
 

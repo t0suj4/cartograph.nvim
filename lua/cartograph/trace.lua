@@ -23,6 +23,15 @@ local function site_of(call) return { file = callrec.file(call), line = callrec.
 function M.origins(store, fn_id, i)
     local calls = store.calls_to[fn_id]
     if not calls or #calls == 0 then
+        -- WHY there are none depends on what the provider records. A graph that
+        -- aggregates call sites into reference edges has none to find, which is
+        -- a different fact from "nothing calls this" — so ask the capability
+        -- before naming a cause.
+        if not require('cartograph.source').caps(store.data or {}).per_site_calls then
+            return {}, 'this graph AGGREGATES call sites into reference edges'
+                .. ' (capabilities.calls = aggregated) — there are no per-site'
+                .. ' records to trace. The references themselves are in the browser'
+        end
         return {}, 'no resolved call sites — dynamic dispatch (event handler?) or dead'
     end
     local argv = require 'cartograph.argv'

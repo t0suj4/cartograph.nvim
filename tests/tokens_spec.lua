@@ -269,3 +269,45 @@ test('a token graph ingests, and declares that its calls are aggregated', functi
     eq({ 'double', 'quad' }, words, 'words are browsable nodes after ingest')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── attributing an ABSENCE needs the capability ────────────────────────────
+-- A graph that aggregates call sites into reference edges has no per-site
+-- records to find. Reporting that as "nothing calls this" would blame the code
+-- for a property of the provider — the one thing the honesty vocabulary bans.
+
+test('caps: an aggregated-calls graph reports per_site_calls = false', function ()
+    local root = tree { ['core.fs'] = ': double dup + ;\n: quad double double ;\n' }
+    local data = tok.extract(root, { files = { 'core.fs' } })
+    eq(false, require('cartograph.source').caps(data).per_site_calls,
+        'the token provider aggregates, and the capability layer says so')
+    -- and a graph that says nothing about calls keeps per-site semantics
+    eq(true, require('cartograph.source').caps({ root = '/x' }).per_site_calls,
+        'silence means per-site, so every existing provider is unaffected')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('trace: names the AGGREGATION, not "dynamic dispatch or dead"', function ()
+    local root = tree { ['core.fs'] = ': double dup + ;\n: quad double double ;\n' }
+    local store = require 'cartograph.store'
+    store.ingest(tok.extract(root, { files = { 'core.fs' } }))
+    local id
+    for k, n in pairs(store.by_id) do if n.name == 'quad' then id = k end end
+    ok(id, 'found the word')
+    local origins, note = require('cartograph.trace').origins(store, id, 1)
+    eq(0, #origins, 'no per-site origins exist')
+    ok(note and note:find('aggregat', 1, true),
+        'the note blames the provider shape: ' .. tostring(note))
+    ok(not (note or ''):find('dead', 1, true),
+        'and does NOT guess "dynamic dispatch or dead", which would be false here')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('ladder: discloses that its call count is not the whole structure', function ()
+    local root = tree { ['core.fs'] = ': double dup + ;\n: quad double double ;\n' }
+    local store = require 'cartograph.store'
+    store.ingest(tok.extract(root, { files = { 'core.fs' } }))
+    local lines = table.concat(require('cartograph.ladder').report(store), '\n')
+    ok(lines:find('aggregates references into edges', 1, true),
+        'the ladder says why its count understates the graph')
+    vim.fn.delete(root, 'rf')
+end)

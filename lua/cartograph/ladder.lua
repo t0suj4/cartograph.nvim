@@ -162,6 +162,15 @@ end
 function M.report(store)
     local t = M.tally(store)
     local lines = { ('epistemic ladder — %d calls'):format(t.total) }
+    -- a ladder over call records understates a graph whose provider aggregates
+    -- them into reference edges: say so, so the count is not read as the whole
+    -- call structure ([[cartograph-stack-languages]])
+    if not require('cartograph.source').caps(store.data or {}).per_site_calls then
+        lines[#lines + 1] = '  NOTE: this graph aggregates references into edges'
+            .. ' (capabilities.calls = aggregated) —'
+        lines[#lines + 1] = '  only true call records are laddered below;'
+            .. ' word-to-word references are not among them'
+    end
     local label = { confirmed = 'confirmed (observed live at runtime)',
         proven = 'proven (oracle / cross-language)',
         linked = 'linked (same scope, plain)',
