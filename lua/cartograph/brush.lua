@@ -28,10 +28,7 @@ local DEFAULTS = {
 M.defaults = DEFAULTS
 
 local function withdefaults(opts)
-    local o = {}
-    for k, v in pairs(DEFAULTS) do o[k] = v end
-    for k, v in pairs(opts or {}) do o[k] = v end
-    return o
+    return require('cartograph.util').defaults(DEFAULTS, opts)
 end
 
 --- One grid character -> a corpse kind (or nil for empty). ' ' and '.' are

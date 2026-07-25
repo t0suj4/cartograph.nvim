@@ -53,16 +53,7 @@ function M.attach(data)
     end
 
     local root = data.root
-    local lines_cache = {}
-    local function file_lines(rel)
-        if lines_cache[rel] == nil then
-            local fd = io.open(root .. '/' .. rel, 'r')
-            lines_cache[rel] = fd
-                and vim.split(fd:read('a'), '\n', { plain = true }) or false
-            if fd then fd:close() end
-        end
-        return lines_cache[rel]
-    end
+    local file_lines = require('cartograph.util').file_reader(root)
 
     -- name -> {method nodes}: controller resolution, ambiguity-aware
     local byname = {}
