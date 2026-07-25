@@ -53,6 +53,12 @@ function M.render()
                 lines[#lines + 1] = ('  writes %d requalification(s) + %d import line(s)')
                     :format(#(t.rewrites or {}), #(t.imports_add or {}))
             end
+        elseif t.verb == 'hoist-closure' then
+            lines[#lines + 1] = hl(marks, #lines,
+                ('HOIST-CLOSURE  lift %s out of %s → module scope    :CartographDiff · :CartographApply · :CartographTxnClear')
+                    :format(t.name, t.anchor or '?'), 'Title')
+            lines[#lines + 1] = ('  %s — captures nothing from the enclosing fn (verified)')
+                :format(t.file)
         elseif t.verb == 'reorder' then
             lines[#lines + 1] = hl(marks, #lines,
                 ('REORDER  move %d statement(s) (L%d%s) before L%d in %s    :CartographDiff · :CartographApply · :CartographTxnClear')

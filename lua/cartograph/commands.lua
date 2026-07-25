@@ -66,6 +66,7 @@ local function txn_module()
     if v == 'move' or v == 'extract-module' then return 'cartograph.moveapply' end
     if v == 'extract-helper' then return 'cartograph.cloneextract' end
     if v == 'reorder' then return 'cartograph.reorder' end
+    if v == 'hoist-closure' then return 'cartograph.hoistclosure' end
     return 'cartograph.clonemerge'
 end
 
@@ -453,6 +454,28 @@ function M.register()
             .. ' Review with :CartographDiff, then :CartographApply'):format(
             plan.nstmts, from, through and ('..L' .. through) or '', to, plan.fn), vim.log.levels.INFO)
     end, { nargs = '*', desc = 'cartograph: stage a VERIFIED statement reorder in the focused fn — move the statement at <from> (or the block <from>..<through>) to before <to>. Certified behavior-preserving by the commute verdict (refuses if it crosses a dataflow dep, a state/world conflict, or an opaque statement). Review :CartographDiff, commit :CartographApply' })
+
+    -- ── hoist-closure: lift the focused nested closure to module scope ──
+    cmd('CartographHoistClosure', function ()
+        local store = live() if not store then return end
+        if store.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first', vim.log.levels.WARN)
+        end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a nested function first', vim.log.levels.WARN)
+        end
+        local plan, why = require('cartograph.hoistclosure').plan(store, id)
+        if not plan then
+            return vim.notify('cartograph: cannot hoist — ' .. tostring(why), vim.log.levels.WARN)
+        end
+        store.set_txn(plan)
+        vim.notify(('cartograph: hoist staged — lift `%s` out of %s to module scope.'
+            .. ' Review with :CartographDiff, then :CartographApply'):format(
+            plan.name, plan.anchor), vim.log.levels.INFO)
+    end, { desc = 'cartograph: stage lifting the focused NESTED closure to module scope — sound only when it captures nothing from its enclosing function(s) (every free read is module-level or global). Refuses a capture with the variable named (parameterize it via :CartographExtractHelperApply first). Review :CartographDiff, commit :CartographApply' })
 
     -- ── untangle: the focused fn's independent CONCERNS over the full PDG ─
     cmd('CartographUntangle', function ()

@@ -1210,6 +1210,20 @@ you review with `:CartographDiff` and commit with `:CartographApply` — journal
 span-checked, and re-parsed before it lands. This is the one analysis in the
 cockpit that had stayed read-only; now the commute verdict has an editor.
 
+`:CartographHoistClosure` is the decomposition verb for the other direction —
+pulling a nested `local function` *out* of a bloated one to module scope. It is
+the exact inverse of the extract-helper's nested check: a closure can be lifted
+only when it **captures nothing** from its enclosing function — every name it
+reads must resolve to a module-level definition or a global, never an enclosing
+local or parameter (which would become nil once the function moves out). A
+capture is refused with the variable named (*"captures enclosing local `cap` —
+parameterize it first"*), pointing you at the extract-helper as the way to turn
+that capture into an argument. When it is clean, the closure is cut, de-indented,
+and re-inserted above its former host — its name follows it, so the existing
+calls still resolve — staged as a transaction, parse-checked before it lands. A
+name that would collide with an existing module-level definition is refused
+rather than silently shadowed.
+
 ## Untangle (independent concerns + safe-to-split)
 
 `:CartographUntangle` partitions the focused function into independent
