@@ -138,6 +138,14 @@ function M.register(H)
         scratch(require('cartograph.ladder').report(store))
     end, { desc = 'cartograph: the call graph\'s epistemic distribution + heaviest refusals' })
 
+    -- ── the VERSION FLOOR: which language version this code needs, and what
+    --    supporting an older one would cost. Re-reads and re-parses files, so
+    --    it needs no call graph — deliberately NO whole_graph guard.
+    cmd('CartographVersionFloor', function ()
+        local store = live() if not store then return end
+        scratch(require('cartograph.versionfloor').report(store))
+    end, { desc = 'cartograph: the version floor as an ATTRIBUTED SET — which language version this code needs and WHY (the feature and the site holding it up) — plus the downgrade ladder, pricing each older target in sites-to-fix. A LOWER bound: syntax only, stdlib version gates not modelled' })
+
     -- ── the EXTERNAL SURFACE: names used but defined nowhere here, with the
     --    shape inferred backward from usage (the boundary map + write-side seed)
     cmd('CartographExternals', function ()

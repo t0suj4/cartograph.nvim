@@ -35,9 +35,17 @@ test('commands: register() asks for the whole surface, with no duplicates', func
         byname[n] = true
     end
     eq({}, dupes, 'no command is registered twice')
-    -- the count is the contract: if a group is unwired this drops, and if a new
-    -- verb lands without a doc entry the doc audit catches THAT instead
-    eq(69, #seen, 'all 69 global commands registered')
+    -- The expectation is DERIVED from the group files, not hardcoded: adding a
+    -- verb then needs no edit here, while an unwired group still fails loudly —
+    -- its file keeps its cmd() calls, so the files claim more than register()
+    -- delivers. (A hardcoded count also caught it, but churned on every verb.)
+    local claimed = 0
+    for _, f in ipairs(vim.fn.globpath(GROUP_DIR, '*.lua', false, true)) do
+        claimed = claimed + select(2, table.concat(vim.fn.readfile(f), '\n')
+            :gsub("cmd%('Cartograph", ''))
+    end
+    ok(claimed > 60, 'the group files were actually read (' .. claimed .. ')')
+    eq(claimed, #seen, 'every command the group files define is registered')
     for _, must in ipairs({ 'CartographLint', 'CartographApply', 'CartographTrace',
         'CartographCanvasStop', 'CartographIndexOnly', 'CartographClones',
         'CartographNeutralityCheck', 'CartographJournal', 'CartographTerritory' }) do

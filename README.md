@@ -1229,6 +1229,43 @@ than an empty list that reads as "nothing passes here".
 It needs the whole graph, since the rows *are* call sites — on the thin index it
 refuses instead of showing an honest-looking zero.
 
+## Version floor (what this code needs — and what older costs)
+
+`:CartographVersionFloor` answers "which language version does this actually
+require, and why". The floor is a *consequence*, so the report leads with the
+**attributed set** rather than a number — the feature and the site holding it up:
+
+```
+version floor — ruby: 3.1            held up by 153 site(s) at 3.1
+  3.1  {x:} hash value shorthand     150  about.rb:124 (+149 more)
+  3.1  def f(&) anonymous block        3  concerns/reviewable_action_builder.rb:71
+  2.7  ... argument forwarding         1  problem_check.rb:11
+  2.3  &. safe navigation            266  about.rb:64 (+265 more)
+
+  downgrade ladder — sites to fix per older target:
+    to 2.7   fix 153 site(s)
+    to 2.3   fix 156 site(s)
+    below 2.3   fix 667 site(s) (all of them)
+```
+
+That ladder is the backwards-compatibility half: a floor is usually held up by a
+*few* high-version sites, so each rung is the exact edit cost to widen support.
+Rungs appear only at observed feature versions, which is where the cost actually
+changes — "to 3.0" would cost the same 153 as "to 2.7", so pricing it separately
+would add a line and no information.
+
+Two honesty properties, both tested. It is a **lower** bound drawn from **syntax
+only**: version-gated stdlib calls (`Hash#except` → 3.0) are not modelled, so the
+report says "needs at least" and never "runs on". And detection is over the
+**tree**, not the text — `&.` inside a string or a comment is not a feature use,
+which a regex would get wrong. A file that cannot be read or parsed is counted as
+UNKNOWN rather than folded into a clean result.
+
+Ruby ships the first feature table (10 features, 2.3 → 3.1). The table is
+per-language, small, and additive — each entry is a node type plus an optional
+structural predicate, and the spec asserts every entry fires on its own snippet,
+because a wrong node type detects nothing *silently*.
+
 ## Reorder (statement commutativity)
 
 `:CartographReorder` reports, for the focused function, which statements can

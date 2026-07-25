@@ -109,6 +109,13 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
   :CartographLadder           the call graph's epistemic distribution
                               (proven / linked / ~ / dynamic / refused /
                               frontier) + the heaviest refusals to resolve
+  :CartographVersionFloor     which language version this code NEEDS, as
+                              an attributed SET: the feature and site
+                              holding the floor up, not a bare number.
+                              Plus the DOWNGRADE LADDER — what supporting
+                              each older version would cost, in sites to
+                              fix. A LOWER bound: syntax only, so it says
+                              "needs at least", never "runs on"
   :CartographExternals        the external boundary — unresolved names
                               and the shape each use implies (~)
   :CartographEscalate[!]      escalate hedge-saturated fns to lua-ls
