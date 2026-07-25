@@ -47,10 +47,10 @@ specific adapters — framework entry points, FSM browsing, the live oracle,
 database links — are plain `setup{}` blocks; [`examples/`](examples/) has
 complete wirings to copy from.
 
-Fourteen languages (lua, c, cpp, python, js, ts, php, ruby, java, go, rust,
-haskell, scheme, zig, odin) plus vue/svelte single-file components. Everything
-cross-file is name-matched and marked `~` unless an oracle proved it;
-ambiguity refuses to link rather than guess.
+Sixteen languages (lua, c, cpp, python, js, ts, php, ruby, java, go, rust,
+haskell, scheme, zig, odin, bash) plus vue/svelte single-file components.
+Everything cross-file is name-matched and marked `~` unless an oracle proved
+it; ambiguity refuses to link rather than guess.
 
 ## Why
 
@@ -1513,6 +1513,16 @@ with in-memory graphs via `store.ingest`; the extractor's load-time `effects`
 detection is covered by a golden test that runs the real `--graph` CLI over
 `tests/fixtures/effects` (self-skips if the CLI isn't installed).
 
+The same gates ride a **pre-commit fence** — `.githooks/pre-commit` runs the
+doc audit, the dogfood seam guard and the suite, cheapest first. It is checked
+in but inert in a fresh clone until git is pointed at it:
+
+```sh
+tools/install-hooks.sh      # git config core.hooksPath .githooks
+```
+
+`git commit --no-verify` bypasses it for a WIP checkpoint.
+
 ## Tools (dev bench)
 
 `tools/` is measurement tooling for working ON cartograph — outside the
@@ -1616,6 +1626,22 @@ nvim --headless -u NONE -l tools/observe.lua bnw      # any lua corpus as the wo
 nvim --headless -u NONE -l tools/specaudit.lua              # default corpus set
 nvim --headless -u NONE -l tools/specaudit.lua ruby rails   # explicit corpora
 nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no snapshot
+
+# DOC AUDIT — the same action pointed at our own USER DOCUMENTATION, which
+# drifts for the same reason (hand-authored claims about a surface that grows
+# every session). Three oracles, never conflated: the REGISTRY (proof — the
+# commands that actually exist, captured by intercepting registration while
+# sourcing plugin/, because nvim_get_commands() mangles multibyte descs); a
+# SOURCE SCAN (evidence — pane-local commands don't exist until their pane is
+# built, so they're read as text); the SPEC ROSTER (proof — ts.spec vs the
+# language count each doc sentence claims). Two tiers: CONFIRMED DRIFT = the
+# doc states something FALSE (a :Cartograph name that no longer exists, a
+# language count contradicting its own list), always fatal; UNDOCUMENTED = a
+# real command the helpdoc never names, a coverage gap that rides a RATCHET
+# (may shrink, never grow). The helpdoc is held to complete coverage; README
+# is prose, checked only for dead names and the roster claim.
+nvim --headless -u NONE -l tools/docaudit.lua           # audit
+nvim --headless -u NONE -l tools/docaudit.lua --emit    # + paste-ready help lines
 ```
 
 Three SYNTHETIC corpora are registered first-class in `tools/corpora.lua` —

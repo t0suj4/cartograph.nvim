@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # cartograph pre-commit fence ([[cartograph-shipping-checklist]] / bench:
-# "the seam fence only fences if it runs"). Two gates, both fast (~22s total):
+# "the seam fence only fences if it runs"). Three gates, CHEAPEST FIRST so a
+# failure costs 70ms rather than 22s (~22s total when all three pass):
 #
-#   1. dogfood — the BAND SEAM-GUARD (a raw wide-index read outside band.lua/
+#   1. docaudit — the DOC FENCE: a :Cartograph name our own docs still claim
+#      but nothing registers, a language count that contradicts the spec
+#      roster, or a GROWING helpdoc coverage gap (the ratchet) fails the commit.
+#   2. dogfood — the BAND SEAM-GUARD (a raw wide-index read outside band.lua/
 #      store.lua fails the commit) + the self-serving / lint dashboard.
-#   2. the full spec suite (tests/run.sh).
+#   3. the full spec suite (tests/run.sh).
 #
 # Checked in under .githooks/ and activated per-clone with
 #   git config core.hooksPath .githooks
@@ -33,6 +37,7 @@ step () { # label, cmd...
     fi
 }
 
+step "doc audit" "$NVIM" --headless -u NONE -l tools/docaudit.lua
 step "dogfood seam fence" "$NVIM" --headless -u NONE -l tools/dogfood.lua
 step "spec suite" bash tests/run.sh
 
