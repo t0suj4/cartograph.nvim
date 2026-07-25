@@ -14,11 +14,6 @@ local function ready()
     return pcall(vim.treesitter.language.add, 'ruby')
 end
 
-local function write(root, name, lines)
-    local fd = assert(io.open(root .. '/' .. name, 'w'))
-    fd:write(table.concat(lines, '\n')); fd:close()
-end
-
 local function callstate(root, callee, packs)
     local data = ts.extract(root, { packs = packs })
     for _, c in ipairs(data.calls) do

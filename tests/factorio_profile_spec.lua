@@ -14,10 +14,6 @@ local function ready()
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     return pcall(vim.treesitter.language.add, 'lua')
 end
-local function write(root, name, lines)
-    local fd = assert(io.open(root .. '/' .. name, 'w'))
-    fd:write(table.concat(lines, '\n')); fd:close()
-end
 local function call_to(data, callee)
     for _, c in ipairs(data.calls or {}) do if c.callee == callee then return c end end
 end

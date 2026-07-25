@@ -13,15 +13,6 @@ local function ready(lang)
     return pcall(vim.treesitter.language.add, lang)
 end
 
-local function mkroot(name, src)
-    local root = vim.fn.tempname()
-    vim.fn.mkdir(root, 'p')
-    local fd = assert(io.open(root .. '/' .. name, 'w'))
-    fd:write(src)
-    fd:close()
-    return root
-end
-
 local function gw_of(data, fn_name, var_name)
     local byid = {}
     for _, n in ipairs(data.nodes) do byid[n.id] = n end

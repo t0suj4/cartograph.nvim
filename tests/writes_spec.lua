@@ -12,15 +12,6 @@ local function ready(lang)
     return pcall(vim.treesitter.language.add, lang)
 end
 
-local function mkroot(name, src)
-    local root = vim.fn.tempname()
-    vim.fn.mkdir(root, 'p')
-    local fd = assert(io.open(root .. '/' .. name, 'w'))
-    fd:write(src)
-    fd:close()
-    return root
-end
-
 -- rw of the use edge fn_name -> var_name, plus a missing-edge guard
 local function rw_of(data, fn_name, var_name)
     local byid = {}

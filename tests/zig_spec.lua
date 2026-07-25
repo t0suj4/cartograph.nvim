@@ -12,11 +12,6 @@ local function ready()
     return pcall(vim.treesitter.language.add, 'zig')
 end
 
-local function write(root, name, lines)
-    local fd = assert(io.open(root .. '/' .. name, 'w'))
-    fd:write(table.concat(lines, '\n')); fd:close()
-end
-
 local function extract(root)
     store.ingest(ts.extract(root))
     local byname, calls = {}, {}

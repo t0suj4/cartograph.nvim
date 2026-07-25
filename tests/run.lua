@@ -20,6 +20,26 @@ end
 -- skip the current test (sentinel table so the runner can tell it apart)
 function _G.skip(msg) error({ __skip = true, msg = msg }, 0) end
 
+-- shared fixture writer: `write(root, name, lines)` writes a table of lines to a file.
+-- Was copy-pasted byte-identically across ~10 spec files; hoisted here (a spec that needs
+-- a different `write` still declares its own local, which shadows this). A specfile-local
+-- `write` always wins — this only fills in for specs that had the identical copy.
+function _G.write(root, name, lines)
+    local fd = assert(io.open(root .. '/' .. name, 'w'))
+    fd:write(table.concat(lines, '\n')); fd:close()
+end
+
+-- shared fixture: `mkroot(name, src)` makes a temp dir with one file (src = a string) and
+-- returns the dir. Also copy-pasted identically; same shadowing rule as `write`.
+function _G.mkroot(name, src)
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/' .. name, 'w'))
+    fd:write(src)
+    fd:close()
+    return root
+end
+
 -- load every spec — or only $SPEC (comma list of basenames: the
 -- preflight's test-selection hook; the full suite still guards the push)
 local only
