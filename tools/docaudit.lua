@@ -26,6 +26,13 @@
 --     marked with a trailing ~, `(unbound)` for a field defaulting to false.
 --     Keep the shape or the audit stops seeing it (and the coverage gate fires).
 --     README's key mentions are PROSE and are not checked — they can still rot.
+--   CONFIG OPTIONS (evidence) — config.lua scanned as TEXT for `M.<field> =`,
+--     versus the option table the CONFIGURATION section publishes. Text and not
+--     a require BECAUSE an option defaulting to nil (`M.pins = nil`) creates no
+--     table key: a runtime `cfg[f] ~= nil` test calls five real options missing.
+--   TARGET SCHEMES (evidence) — the `x://` prefixes init.lua dispatches, versus
+--     those the PROVIDERS section offers. Both directions: an accepted target
+--     must be documented, and a documented one must still be accepted.
 --
 -- Two tiers of finding, never conflated:
 --   CONFIRMED DRIFT — the doc states something FALSE: a :Cartograph name that
@@ -181,26 +188,58 @@ local function roster_claim(s)
     end
 end
 
--- ── 4b. the KEYS table the helpdoc publishes ────────────────────────────────
--- Rows inside |cartograph-keys| up to the next section rule. A trailing ~ marks
--- a column header, not a binding; continuation lines are indented past the
--- field column and so never match.
-local cfgkeys = require('cartograph.config').keys
-local keyclaim = {}
-do
-    local inside = false
+-- ── 4b. the TABLES the helpdoc publishes ────────────────────────────────────
+-- Rows of `  <field> <value> …` between a tag and the next section rule. A
+-- trailing ~ marks a column header, not a row; continuation lines are indented
+-- past the field column and so never match.
+local function doc_rows(tag)
+    local rows, inside = {}, false
     for i, line in ipairs(HELP.lines) do
-        if line:find('*cartograph-keys*', 1, true) then
+        if line:find('*' .. tag .. '*', 1, true) then
             inside = true
         elseif inside and line:match('^====') then
             break
         elseif inside and not line:match('~%s*$') then
-            local field, claimed = line:match('^  (%a[%w_]*)%s+(%S+)')
-            if field and not keyclaim[field] then
-                keyclaim[field] = { key = claimed, line = i }
+            local field, val = line:match('^  (%a[%w_]*)%s+(%S+)')
+            if field and not rows[field] then
+                rows[field] = { val = val, line = i }
             end
         end
     end
+    return rows
+end
+
+local function section_text(tag)
+    local out, inside = {}, false
+    for _, line in ipairs(HELP.lines) do
+        if line:find('*' .. tag .. '*', 1, true) then
+            inside = true
+        elseif inside and line:match('^====') then
+            break
+        elseif inside then
+            out[#out + 1] = line
+        end
+    end
+    return table.concat(out, '\n')
+end
+
+local cfgkeys = require('cartograph.config').keys
+local keyclaim = doc_rows('cartograph-keys')
+local optclaim = doc_rows('cartograph-config')
+
+-- config.lua is scanned as TEXT, never required, for the option registry: an
+-- option whose default is nil (`M.pins = nil`) creates NO table key, so a
+-- runtime `cfg[field] ~= nil` test calls five real options missing. The
+-- assignment is the registry; the value is not.
+local cfgopt, schemes = {}, {}
+for _, line in ipairs(vim.fn.readfile(REPO .. '/lua/cartograph/config.lua')) do
+    local f = line:match('^M%.([%w_]+)%s*=')
+    if f then cfgopt[f] = true end
+end
+-- The target schemes :Cartograph accepts, from the one file that dispatches
+-- them. Evidence tier: a scheme matched anywhere else is invisible here.
+for _, line in ipairs(vim.fn.readfile(REPO .. '/lua/cartograph/init.lua')) do
+    for s in line:gmatch("target:match%('%^(%a+)://") do schemes[s] = true end
 end
 
 -- ── 5. report ──────────────────────────────────────────────────────────────
@@ -215,22 +254,48 @@ for _, field in ipairs(sortedkeys(keyclaim)) do
     if actual == nil then
         drift('doc/cartograph.txt:%d publishes keys.%s — no such setup field',
             c.line, field)
-    elseif c.key == '(unbound)' then
+    elseif c.val == '(unbound)' then
         if actual ~= false then
             drift('doc/cartograph.txt:%d calls keys.%s unbound, but it defaults to %s',
                 c.line, field, tostring(actual))
         end
     elseif actual == false then
         drift('doc/cartograph.txt:%d teaches keys.%s = %s, but it is UNBOUND by default',
-            c.line, field, c.key)
-    elseif actual ~= c.key then
+            c.line, field, c.val)
+    elseif actual ~= c.val then
         drift('doc/cartograph.txt:%d teaches keys.%s = %s, but the default is %s',
-            c.line, field, c.key, tostring(actual))
+            c.line, field, c.val, tostring(actual))
     end
 end
 local keygap = {}
 for _, field in ipairs(sortedkeys(cfgkeys)) do
     if not keyclaim[field] then keygap[#keygap + 1] = field end
+end
+
+-- Every option the CONFIGURATION table publishes must be a real setup field.
+-- No coverage gate in this direction: that table is explicitly the subset you
+-- are most likely to want, not the full 30-odd.
+for _, field in ipairs(sortedkeys(optclaim)) do
+    if not cfgopt[field] then
+        drift('doc/cartograph.txt:%d publishes setup{ %s = … } — no such config option',
+            optclaim[field].line, field)
+    end
+end
+
+-- Every target scheme :Cartograph accepts must be documented as a provider,
+-- and every scheme the PROVIDERS section names must still be accepted.
+local provtext = section_text('cartograph-providers')
+for _, s in ipairs(sortedkeys(schemes)) do
+    if not provtext:find(s .. '://', 1, true) then
+        drift('doc/cartograph.txt: |cartograph-providers| never documents the %s:// target',
+            s)
+    end
+end
+for s in provtext:gmatch('(%a+)://') do
+    if not schemes[s] then
+        drift('doc/cartograph.txt: |cartograph-providers| offers %s:// — :Cartograph does not accept it',
+            s)
+    end
 end
 
 for _, s in ipairs({ HELP, READ }) do

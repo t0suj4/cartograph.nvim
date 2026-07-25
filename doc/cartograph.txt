@@ -50,6 +50,7 @@ No setup call is required. Open a project: >
     :Cartograph ~/src/proj   " any directory
     :Cartograph dump.json    " a pre-extracted graph dump
     :Cartograph mcp://name   " a graph served over MCP (setup{ mcp = ... })
+    :Cartograph self://loaded " this nvim's own loaded plugins as a graph
 <
 The layout is symbols (left) | source | plan bar (bottom). In the symbols
 pane: `l` descends, `h` ascends, `<CR>` pivots. Hover previews; movement
@@ -374,23 +375,40 @@ HAZARDS: disclosed with counts, yours to finish.
 ==============================================================================
 7. CONFIGURATION                                            *cartograph-config*
 
-setup() is optional; every field has a default. Highlights: >
+setup() is optional; every field has a default: >
 
     require('cartograph').setup {
-      keys        = { ... },        -- remap anything
-      entrypoints = { 'main%.lua$' }, -- files expected to have no importer
-      exclude     = { 'warpc' },    -- extra vendored dir NAMES to skip
-      cache       = true,           -- per-file shard cache, warm opens
-      parallel    = true,           -- worker processes for cold opens
-      refresh     = true,           -- re-extract on save, splice in
-      pins        = { ... },        -- human dispatch declarations
-      bindings    = { ... },        -- cross-language string-key dispatch
-      mcp         = { name = { cmd = {...} } }, -- graph servers
-      db          = { source = 'pg' }, -- link sql:: entities to live tables
-      fsm         = { ... },        -- state-machine adapter
+      cache   = false,
+      exclude = { 'warpc' },
+      mcp     = { game = { cmd = { 'my-mcp-server' } } },
     }
 <
-See lua/cartograph/config.lua — each field is documented where it lives.
+The options most worth knowing about. Each name below is checked to be a real
+setup field (tools/docaudit.lua); the full set — around thirty, the rest being
+tuning knobs — is documented where it lives, in lua/cartograph/config.lua, one
+comment per field.
+
+  option        what it sets ~
+  keys          remap any binding — see |cartograph-keys|
+  entrypoints   path patterns for files EXPECTED to have no importer, so
+                they classify 'entry' (▶) instead of 'orphan' (○)
+  exclude       extra vendored directory NAMES to skip
+  cache         per-file shard cache; warm opens
+  parallel      worker processes for cold opens
+  refresh       re-extract a file on save and splice it into the graph
+  shapes        project-shape presets — see below
+  discover      registry auto-discovery (Greenspun detection)
+  unparsed      keep minified bundles as opaque frontier modules
+  pins          human dispatch declarations: name the target of a
+                dynamic call site the analysis cannot resolve
+  bindings      cross-language string-key dispatch boundaries
+  clangd        the clangd oracle for C/C++ (proves call edges)
+  luals         the lua-language-server oracle for Lua
+  profile       environment profiles: distilled stdlib/RBS signatures
+  mcp           graph servers, { name = { cmd = {...} } }
+  db            link sql:: entities to live tables
+  fsm           the state-machine adapter
+  factorio      the Factorio projection surface
 
 PROJECT SHAPES: marker files at the root (info.json + control.lua,
 manage.py, package.json, wp-settings.php, …) preset what they honestly
@@ -413,8 +431,17 @@ the non-inert configuration belongs.
   dump          a neutral-schema JSON file (e.g. the lua-ls --graph CLI).
   mcp://name    a server tool returning the neutral schema; stamped
                 sources cache like local files, stampless ones re-fetch.
+  self://loaded the RUNNING nvim as one corpus: every loaded plugin's
+                runtimepath unioned under a synthetic root, so a require
+                from your config into a plugin — or plugin into plugin —
+                resolves in a single graph. A session-scoped SAMPLE, not
+                cached: the next launch may load a different set.
   clangd        an ORACLE over the cpp skeleton: call edges proven via
                 callHierarchy, only answered functions upgraded.
+
+The prefixed targets listed here are checked against the ones :Cartograph
+actually accepts (tools/docaudit.lua), so this list cannot offer a target that
+does not work, nor omit one that does.
 
 ==============================================================================
 9. HEALTH                                                   *cartograph-health*
