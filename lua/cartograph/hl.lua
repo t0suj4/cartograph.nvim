@@ -11,20 +11,29 @@ M.CONCERN = {
 
 local HUES = { 0x9ece6a, 0x7dcfff, 0xff9e64, 0xbb9af7, 0x2ac3de, 0xf7768e }
 
+--- Blend a 0xRRGGBB `hue` over a 0xRRGGBB `bg` at `alpha`, as a '#rrggbb' string.
+--- Pure — the colour math shared by every concern / relationship tint (callers
+--- resolve the real Normal bg once, then pass it in). See M.normal_bg.
+function M.blend(hue, bg, alpha)
+    local function ch(c, n) return math.floor(c / n) % 256 end
+    local r = math.floor(ch(hue, 65536) * alpha + ch(bg, 65536) * (1 - alpha) + 0.5)
+    local g = math.floor(ch(hue, 256) * alpha + ch(bg, 256) * (1 - alpha) + 0.5)
+    local b = math.floor((hue % 256) * alpha + (bg % 256) * (1 - alpha) + 0.5)
+    return string.format('#%02x%02x%02x', r, g, b)
+end
+
+--- The real Normal background as a 0xRRGGBB number (a tokyonight-ish default
+--- when the colorscheme leaves it unset), so tints track the colorscheme.
+function M.normal_bg()
+    return vim.api.nvim_get_hl(0, { name = 'Normal', link = false }).bg or 0x222436
+end
+
 --- Define the concern groups by blending each hue over the real Normal bg, so
 --- the bands track the colorscheme. Idempotent; safe to call on ColorScheme.
 function M.setup()
-    local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
-    local bg = normal.bg or 0x222436
-    local function blend(hue, alpha)
-        local function ch(c, n) return math.floor(c / n) % 256 end
-        local r = math.floor(ch(hue, 65536) * alpha + ch(bg, 65536) * (1 - alpha) + 0.5)
-        local g = math.floor(ch(hue, 256) * alpha + ch(bg, 256) * (1 - alpha) + 0.5)
-        local b = math.floor((hue % 256) * alpha + (bg % 256) * (1 - alpha) + 0.5)
-        return string.format('#%02x%02x%02x', r, g, b)
-    end
+    local bg = M.normal_bg()
     for i, hue in ipairs(HUES) do
-        vim.api.nvim_set_hl(0, M.CONCERN[i], { bg = blend(hue, 0.16) })
+        vim.api.nvim_set_hl(0, M.CONCERN[i], { bg = M.blend(hue, bg, 0.16) })
     end
 end
 

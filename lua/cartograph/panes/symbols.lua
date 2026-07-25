@@ -95,20 +95,13 @@ end
 -- is a whole-line background blended over the real Normal bg so it tracks the
 -- colorscheme rather than fighting it.
 local function hl_setup()
-    local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
-    local bg = normal.bg or 0x222436
-    local function blend(hue, alpha)
-        local function ch(c, n) return math.floor(c / n) % 256 end
-        local r = math.floor(ch(hue, 65536) * alpha + ch(bg, 65536) * (1 - alpha) + 0.5)
-        local g = math.floor(ch(hue, 256) * alpha + ch(bg, 256) * (1 - alpha) + 0.5)
-        local b = math.floor((hue % 256) * alpha + (bg % 256) * (1 - alpha) + 0.5)
-        return string.format('#%02x%02x%02x', r, g, b)
-    end
+    local hl = require 'cartograph.hl'
+    local bg = hl.normal_bg()
     local GREEN, AMBER = 0x9ece6a, 0xff9e64
-    vim.api.nvim_set_hl(0, 'CartographDep1',  { bg = blend(GREEN, 0.24) })
-    vim.api.nvim_set_hl(0, 'CartographDep2',  { bg = blend(GREEN, 0.11) })
-    vim.api.nvim_set_hl(0, 'CartographRdep1', { bg = blend(AMBER, 0.24) })
-    vim.api.nvim_set_hl(0, 'CartographRdep2', { bg = blend(AMBER, 0.11) })
+    vim.api.nvim_set_hl(0, 'CartographDep1',  { bg = hl.blend(GREEN, bg, 0.24) })
+    vim.api.nvim_set_hl(0, 'CartographDep2',  { bg = hl.blend(GREEN, bg, 0.11) })
+    vim.api.nvim_set_hl(0, 'CartographRdep1', { bg = hl.blend(AMBER, bg, 0.24) })
+    vim.api.nvim_set_hl(0, 'CartographRdep2', { bg = hl.blend(AMBER, bg, 0.11) })
 end
 
 -- ── per-level renderers (fill ctx.lines/marks/vnums/signs + row mappings) ────
