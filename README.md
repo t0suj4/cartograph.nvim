@@ -1338,6 +1338,46 @@ over the **tree**, not the text — `&.` inside a string or a comment is not a
 feature use, which a regex would get wrong. And a file that cannot be read or
 parsed is counted as UNKNOWN rather than folded into a clean result.
 
+### Declared vs computed — the project's own answer key
+
+A project *declares* a floor in a real artifact; this *computes* one from the
+code. Comparing them is a free bug-finder, and the two directions are
+deliberately **not** symmetric:
+
+- **computed newer than declared → BROKEN PROMISE.** Positive evidence (a
+  feature, at a site) that the declaration is a lie. On `ruby-lsp`, whose gemspec
+  declares `>= 3.0`: *"but this needs 3.1 — because of `{x:}` hash shorthand at
+  test/fixtures/hash_literal_omitted_values.rb:3"*.
+- **computed older than declared → nothing.** Reported as "no detected feature
+  needs past 2.3" and explicitly labelled *not a finding*, because our floor is a
+  lower bound and an undetected gate may well justify the declaration.
+
+That `ruby-lsp` case also shows the finding qualifying itself: every site holding
+the floor up is under `test/fixtures/`, which a gem usually doesn't ship, so the
+report says so and tells you to check reachability rather than asserting a defect.
+
+Declarations are read from each ecosystem's real artifact — `*.gemspec`
+`required_ruby_version`, a `Gemfile` `ruby` directive, `pyproject.toml`
+`requires-python`, `setup.py` `python_requires`, and `tsconfig.json` `target`
+(which *is* the ECMAScript scale). `ESNext` is treated as known-but-open-ended,
+which is not the same as absent.
+
+### Scales are never mixed
+
+A mixed repo declares more than one floor and has more than one *ruler*, so the
+report sections per scale:
+
+```
+2 version scales here (ECMAScript, ruby) — reported SEPARATELY: a max()
+across different rulers would be a meaningless number.
+version floor — javascript/typescript: ECMAScript 2022
+version floor — ruby: 3.1
+```
+
+This was a real bug, caught on `ruby-lsp`: with one `max()` the Ruby code reported
+"floor 2022", because 2022 > 3.1 numerically. Ruby 3.1, Python 3.8 and ECMAScript
+2022 are three different scales and comparing across them is meaningless.
+
 Three tables ship: **Ruby** (10 syntax features 2.3 → 3.1, 18 gated methods),
 **Python** (11 features 3.3 → 3.12, 9 gated methods) and the **JS family** (13
 features ES2015 → ES2022, 6 gated methods, one table serving

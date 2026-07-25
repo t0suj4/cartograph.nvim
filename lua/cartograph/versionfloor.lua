@@ -196,6 +196,14 @@ M.FEATURES.javascript, M.FEATURES.typescript, M.FEATURES.tsx = ES, ES, ES
 --- language version number and should not read as one.
 M.SCALE = { javascript = 'ECMAScript', typescript = 'ECMAScript', tsx = 'ECMAScript' }
 
+--- WHICH SCALE a language's versions are measured in. Facts may only be compared
+--- inside one scale: ruby 3.1, python 3.8 and ECMAScript 2022 are three different
+--- rulers, and a max() across them is a meaningless number. Found the hard way —
+--- a mixed ruby+typescript project reported "floor 2022" because 2022 > 3.1.
+function M.scale_key(lang)
+    return M.SCALE[lang] or lang
+end
+
 -- ── version-gated STDLIB calls (the second, WEAKER evidence tier) ──────────
 -- Syntax is certain: `{x:}` in the tree IS 3.1 syntax. A stdlib call is not —
 -- `x.tally` is 2.7 only if `x` is an Enumerable, and Ruby will not tell us. So
@@ -343,6 +351,7 @@ function M.facts(store)
             stats.files = stats.files + 1
             for _, f in ipairs(got) do
                 f.file = file
+                f.lang = lang   -- a fact belongs to a SCALE, via its language
                 facts[#facts + 1] = f
             end
         else
@@ -351,6 +360,115 @@ function M.facts(store)
         end
     end
     return facts, stats
+end
+
+-- Paths a package usually does NOT ship. Used only to QUALIFY a finding, never
+-- to drop one: the floor is computed over every scanned file, so evidence that
+-- lives solely in a test fixture may not reach a user of the package. Found on
+-- ruby-lsp, whose 3.1 syntax sits in test/fixtures/ deliberately.
+local function unshipped(path)
+    return path:match('^tests?/') ~= nil or path:match('^spec/') ~= nil
+        or path:match('/fixtures?/') ~= nil or path:match('^features/') ~= nil
+end
+
+-- ── DECLARED vs COMPUTED: the checkable invariant ──────────────────────────
+-- A project DECLARES a floor in a real artifact; this module COMPUTES one from
+-- the code. Comparing them is a free bug-finder, because the declaration is a
+-- ground-truth answer key — the same shape as `@param` vs inferred nilability.
+--
+-- The two directions are NOT symmetric, and that asymmetry is the whole point:
+--   computed NEWER than declared  → a BROKEN PROMISE, and we hold positive
+--     evidence for it (a feature, at a site). Sound to report as a defect: the
+--     declaration says it runs somewhere it provably cannot.
+--   computed OLDER than declared  → only a HINT. Our floor is a LOWER bound, so
+--     an undetected feature may justify the declaration. Never asserted as
+--     needless — reported as "no evidence for", which is what we actually know.
+local ES_ALIAS = { es3 = '1999', es5 = '2009', es6 = '2015', es7 = '2016',
+    es2015 = '2015', esnext = nil, latest = nil }
+
+--- Every floor a project DECLARES, tagged with the SCALE it speaks for. A mixed
+--- repo declares more than one (ruby-lsp has a gemspec AND a tsconfig), so this
+--- returns a list — taking only the first would compare a ruby declaration
+--- against an ECMAScript floor.
+--- Each: { source, raw, v, scale } — v is nil for an open-ended declaration
+--- (ESNext), which is known-but-unusable and distinct from absent.
+function M.declarations(root)
+    local out = {}
+    local function read(rel)
+        local fd = io.open(root .. '/' .. rel, 'r')
+        if not fd then return nil end
+        local s2 = fd:read('a'); fd:close()
+        return s2
+    end
+    for _, g in ipairs(vim.fn.globpath(root, '*.gemspec', false, true)) do
+        local body = read(vim.fn.fnamemodify(g, ':t'))
+        local raw = body and body:match('required_ruby_version%s*=%s*["\']([^"\']+)["\']')
+        if raw then
+            out[#out + 1] = { source = vim.fn.fnamemodify(g, ':t'), raw = raw,
+                v = raw:match('(%d[%d%.]*)'), scale = 'ruby' }
+            break
+        end
+    end
+    if #out == 0 then
+        local gf = read('Gemfile')
+        local grb = gf and gf:match('\nruby%s+["\']([^"\']+)["\']')
+        if grb then
+            out[#out + 1] = { source = 'Gemfile', raw = grb,
+                v = grb:match('(%d[%d%.]*)'), scale = 'ruby' }
+        end
+    end
+    local py = read('pyproject.toml')
+    local pyr = py and py:match('requires%-python%s*=%s*["\']([^"\']+)["\']')
+    if pyr then
+        out[#out + 1] = { source = 'pyproject.toml', raw = pyr,
+            v = pyr:match('(%d[%d%.]*)'), scale = 'python' }
+    else
+        local sp = read('setup.py')
+        local spr = sp and sp:match('python_requires%s*=%s*["\']([^"\']+)["\']')
+        if spr then
+            out[#out + 1] = { source = 'setup.py', raw = spr,
+                v = spr:match('(%d[%d%.]*)'), scale = 'python' }
+        end
+    end
+    local tsc = read('tsconfig.json')
+    local tgt = tsc and tsc:match('"target"%s*:%s*"([^"]+)"')
+    if tgt then
+        local low = tgt:lower()
+        local v = ES_ALIAS[low]
+        if v == nil and low:match('^es%d%d%d%d$') then v = low:sub(3) end
+        out[#out + 1] = { source = 'tsconfig.json', raw = tgt, v = v,
+            scale = 'ECMAScript' }
+    end
+    return out
+end
+
+--- The declaration for one scale, or nil.
+function M.declared(root, scale)
+    for _, d in ipairs(M.declarations(root)) do
+        if not scale or d.scale == scale then return d end
+    end
+    return nil
+end
+
+--- Compare the declared floor with the computed one.
+--- Returns { verdict, declared, computed, holders } where verdict is
+--- 'broken' | 'no-evidence' | 'consistent' | 'undeclared' | 'open-ended'.
+function M.invariant(store, computed, holders, scale)
+    local root = (store.data or {}).root
+    if not root or root:match('^%w+://') then return { verdict = 'undeclared' } end
+    local d = M.declared(root, scale)
+    if not d then return { verdict = 'undeclared' } end
+    if not d.v then
+        return { verdict = 'open-ended', declared = d }
+    end
+    if not computed then return { verdict = 'undeclared', declared = d } end
+    if M.older(d.v, computed) then
+        return { verdict = 'broken', declared = d, computed = computed, holders = holders }
+    end
+    if M.older(computed, d.v) then
+        return { verdict = 'no-evidence', declared = d, computed = computed }
+    end
+    return { verdict = 'consistent', declared = d, computed = computed }
 end
 
 --- Group facts by id → { v, desc, n, site }, plus the ids newest-version-first.
@@ -401,102 +519,159 @@ function M.call_facts(store)
             if hit and census.disp(c) == 'external' then
                 out[#out + 1] = { id = 'stdlib:' .. key, v = hit.v,
                     desc = hit.desc .. ' (~ name-matched)', tier = 'inferred',
-                    file = file, line = callrec.line(c) or 0 }
+                    file = file, lang = lang, line = callrec.line(c) or 0 }
             end
         end
     end
     return out
 end
 
---- The report: the floor, the attributed set that holds it up, and the
---- downgrade ladder priced per older target.
+--- The report: per SCALE, the floor, the attributed set holding it up, the
+--- downgrade ladder, the declared-vs-computed invariant, then the hedged tier.
+--- One section per scale, never one number across scales: ruby 3.1, python 3.8
+--- and ECMAScript 2022 are three different rulers.
 function M.report(store)
     local facts, stats = M.facts(store)
     local langs = {}
     for l in pairs(stats.langs) do langs[#langs + 1] = l end
     table.sort(langs)
-    local L = {}
     if #langs == 0 then
         return { 'version floor: no file here belongs to a language with a'
-            .. ' feature table (covered: ' .. table.concat(vim.tbl_keys(M.FEATURES), ' ') .. ')' }
+            .. ' feature table (covered: '
+            .. table.concat(vim.tbl_keys(M.FEATURES), ' ') .. ')' }
     end
-    local by, ids = M.group(facts)
-    local floor
-    for _, id in ipairs(ids) do
-        if not floor or M.older(floor, by[id].v) then floor = by[id].v end
-    end
-    -- the WEAKER tier, kept apart: name-matched stdlib calls (see M.STDLIB)
-    local hby, hids = M.group(M.call_facts(store))
-    local hfloor
-    for _, id in ipairs(hids) do
-        if not hfloor or M.older(hfloor, hby[id].v) then hfloor = hby[id].v end
-    end
-    -- an ECMAScript year is not a language version number: name the scale
-    local scale = M.SCALE[langs[1]]
+    -- partition every fact by the SCALE its language is measured in
+    local byscale, order, scalelangs = {}, {}, {}
     for _, l in ipairs(langs) do
-        if M.SCALE[l] ~= scale then scale = nil break end
+        local k = M.scale_key(l)
+        if not byscale[k] then byscale[k] = {}; order[#order + 1] = k; scalelangs[k] = {} end
+        table.insert(scalelangs[k], l)
     end
-    L[#L + 1] = ('version floor — %s: %s%s'):format(table.concat(langs, '/'),
-        (scale and floor) and (scale .. ' ') or '',
-        floor or 'nothing version-gated found')
-    L[#L + 1] = '  CERTAIN, from syntax: a LOWER bound, so it says "needs at least"'
-    L[#L + 1] = '  — never "runs on". The ladder below is the definite worklist.'
-    L[#L + 1] = ''
-    if #ids == 0 then
-        L[#L + 1] = ('  no version-gated syntax in %d file(s)'):format(stats.files)
-    else
-        local holders = 0
-        for _, id in ipairs(ids) do
-            if by[id].v == floor then holders = holders + by[id].n end
-        end
-        L[#L + 1] = ('  held up by %d site(s) at %s:'):format(holders, floor)
-        for _, id in ipairs(ids) do
-            local g = by[id]
-            L[#L + 1] = ('    %-5s %-34s %3d  %s%s'):format(g.v, g.desc, g.n, g.site,
-                g.n > 1 and (' (+%d more)'):format(g.n - 1) or '')
-        end
-        -- the ladder: to support target V, every fact NEWER than V must be fixed
-        local targets, seen = {}, {}
-        for _, id in ipairs(ids) do
-            local v = by[id].v
-            if not seen[v] then seen[v] = true; targets[#targets + 1] = v end
-        end
+    for _, f in ipairs(facts) do
+        local k = M.scale_key(f.lang or langs[1])
+        byscale[k] = byscale[k] or {}
+        table.insert(byscale[k], f)
+    end
+    local hedged = {}
+    for _, f in ipairs(M.call_facts(store)) do
+        local k = M.scale_key(f.lang or langs[1])
+        hedged[k] = hedged[k] or {}
+        table.insert(hedged[k], f)
+    end
+    table.sort(order)
+
+    local L = {}
+    if #order > 1 then
+        L[#L + 1] = ('%d version scales here (%s) — reported SEPARATELY: a max()')
+            :format(#order, table.concat(order, ', '))
+        L[#L + 1] = 'across different rulers would be a meaningless number.'
         L[#L + 1] = ''
-        L[#L + 1] = '  downgrade ladder — sites to fix per older target:'
-        for _, t in ipairs(targets) do
-            if t ~= floor then
-                local cost = 0
-                for _, id in ipairs(ids) do
-                    if M.older(t, by[id].v) then cost = cost + by[id].n end
+    end
+    for _, k in ipairs(order) do
+        local by, ids = M.group(byscale[k] or {})
+        local floor
+        for _, id in ipairs(ids) do
+            if not floor or M.older(floor, by[id].v) then floor = by[id].v end
+        end
+        local named = (M.SCALE[scalelangs[k][1]] and (k .. ' ') or '')
+        L[#L + 1] = ('version floor — %s: %s%s'):format(
+            table.concat(scalelangs[k], '/'), named,
+            floor or 'nothing version-gated found')
+        L[#L + 1] = '  CERTAIN, from syntax: a LOWER bound, so it says "needs at least"'
+        L[#L + 1] = '  — never "runs on". The ladder below is the definite worklist.'
+        if #ids == 0 then
+            L[#L + 1] = ('  no version-gated syntax found'):format()
+        else
+            local holders, hnames = 0, {}
+            for _, id in ipairs(ids) do
+                if by[id].v == floor then
+                    holders = holders + by[id].n
+                    hnames[#hnames + 1] = ('%s at %s'):format(by[id].desc, by[id].site)
                 end
-                L[#L + 1] = ('    to %-5s fix %d site(s)'):format(t, cost)
+            end
+            L[#L + 1] = ('  held up by %d site(s) at %s:'):format(holders, floor)
+            for _, id in ipairs(ids) do
+                local g = by[id]
+                L[#L + 1] = ('    %-5s %-34s %3d  %s%s'):format(g.v, g.desc, g.n, g.site,
+                    g.n > 1 and (' (+%d more)'):format(g.n - 1) or '')
+            end
+            local targets, seen = {}, {}
+            for _, id in ipairs(ids) do
+                local v = by[id].v
+                if not seen[v] then seen[v] = true; targets[#targets + 1] = v end
+            end
+            L[#L + 1] = '  downgrade ladder — sites to fix per older target:'
+            for _, t in ipairs(targets) do
+                if t ~= floor then
+                    local cost = 0
+                    for _, id in ipairs(ids) do
+                        if M.older(t, by[id].v) then cost = cost + by[id].n end
+                    end
+                    L[#L + 1] = ('    to %-6s fix %d site(s)'):format(t, cost)
+                end
+            end
+            local all = 0
+            for _, id in ipairs(ids) do all = all + by[id].n end
+            L[#L + 1] = ('    below %-6s fix %d site(s) (all of them)')
+                :format(targets[#targets], all)
+            -- the project's own declaration, as an answer key for THIS scale
+            local inv = M.invariant(store, floor, hnames, k)
+            local d = inv.declared
+            if inv.verdict == 'broken' then
+                L[#L + 1] = ('  ⚠ BROKEN PROMISE — %s declares %s, but this needs %s')
+                    :format(d.source, d.raw, inv.computed)
+                for _, h in ipairs(inv.holders or {}) do
+                    L[#L + 1] = '      because of ' .. h
+                end
+                local all_test = #(inv.holders or {}) > 0
+                for _, h in ipairs(inv.holders or {}) do
+                    if not unshipped(h:match('at ([^:]+)') or '') then all_test = false end
+                end
+                if all_test then
+                    L[#L + 1] = '    But every site above is under a test/fixture path,'
+                    L[#L + 1] = '    which a package often does not ship — the floor spans'
+                    L[#L + 1] = '    EVERY scanned file. Check reachability before calling'
+                    L[#L + 1] = '    this a defect.'
+                else
+                    L[#L + 1] = '    A user on the declared version cannot run those sites.'
+                    L[#L + 1] = '    The evidence is positive, so it is a defect in the code'
+                    L[#L + 1] = '    or in the declaration.'
+                end
+            elseif inv.verdict == 'no-evidence' then
+                L[#L + 1] = ('  %s declares %s; no detected feature needs past %s')
+                    :format(d.source, d.raw, inv.computed)
+                L[#L + 1] = '    NOT a finding: this floor is a lower bound, so an'
+                L[#L + 1] = '    undetected gate may well justify the declaration.'
+            elseif inv.verdict == 'consistent' then
+                L[#L + 1] = ('  ✓ %s declares %s, and the computed floor agrees')
+                    :format(d.source, d.raw)
+            elseif inv.verdict == 'open-ended' then
+                L[#L + 1] = ('  %s declares %s — open-ended, nothing to check')
+                    :format(d.source, d.raw)
             end
         end
-        local all = 0
-        for _, id in ipairs(ids) do all = all + by[id].n end
-        L[#L + 1] = ('    below %-5s fix %d site(s) (all of them)')
-            :format(targets[#targets], all)
-    end
-    -- The hedged tier, deliberately NOT folded into the floor or the ladder: a
-    -- stdlib name match cannot see its receiver's type, so it is evidence to
-    -- CHECK, not work to do. Folding it in would launder a ~ into a fact.
-    if #hids > 0 then
-        L[#L + 1] = ''
-        local raises = hfloor and (not floor or M.older(floor, hfloor))
-        L[#L + 1] = ('  ~ %s stdlib name matches (unresolved here — receiver type unknown):')
-            :format(raises and ('WOULD RAISE the floor to ' .. hfloor .. ' —') or 'consistent with the floor —')
-        for _, id in ipairs(hids) do
-            local g = hby[id]
-            L[#L + 1] = ('    %-5s %-34s %3d  %s%s'):format(g.v, g.desc, g.n, g.site,
-                g.n > 1 and (' (+%d more)'):format(g.n - 1) or '')
+        local hby, hids = M.group(hedged[k] or {})
+        if #hids > 0 then
+            local hfloor
+            for _, id in ipairs(hids) do
+                if not hfloor or M.older(hfloor, hby[id].v) then hfloor = hby[id].v end
+            end
+            local raises = hfloor and (not floor or M.older(floor, hfloor))
+            L[#L + 1] = ('  ~ %s stdlib name matches (receiver type unknown):'):format(
+                raises and ('WOULD RAISE the floor to ' .. hfloor .. ' —')
+                    or 'consistent with the floor —')
+            for _, id in ipairs(hids) do
+                local g = hby[id]
+                L[#L + 1] = ('    %-5s %-34s %3d  %s%s'):format(g.v, g.desc, g.n, g.site,
+                    g.n > 1 and (' (+%d more)'):format(g.n - 1) or '')
+            end
+            L[#L + 1] = '    verify these before trusting an older target; and this tier'
+            L[#L + 1] = '    UNDER-reports — a stdlib name the project also defines'
+            L[#L + 1] = '    resolves there instead, so it is absent from this list'
         end
-        L[#L + 1] = '    verify these before trusting a target below ' .. hfloor
-            .. '; a gem class with the same method name would look identical'
-        L[#L + 1] = '    and this tier UNDER-reports: a stdlib name the project also'
-        L[#L + 1] = '    defines resolves there instead, so it is absent from this list'
+        L[#L + 1] = ''
     end
-    L[#L + 1] = ''
-    L[#L + 1] = ('  scanned %d file(s)%s'):format(stats.files,
+    L[#L + 1] = ('scanned %d file(s)%s'):format(stats.files,
         stats.unknown > 0
             and (('; %d could not be read (%s) — counted as UNKNOWN, not clean')
                 :format(stats.unknown, stats.why or '?'))

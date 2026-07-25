@@ -120,7 +120,16 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               as `~` — a name match can't see its
                               receiver's type. A stdlib name the project
                               also defines resolves there instead, so the
-                              hedged tier under-reports and says so
+                              hedged tier under-reports and says so.
+                              Compares the floor against what the project
+                              DECLARES (gemspec / Gemfile / pyproject /
+                              setup.py / tsconfig target): computed newer
+                              than declared is a BROKEN PROMISE with the
+                              site named; computed older is explicitly
+                              NOT a finding, since the floor is a lower
+                              bound. One section PER SCALE — ruby 3.1 and
+                              ECMAScript 2022 are different rulers and
+                              are never maxed together
   :CartographRequires         the code's OWN profile — the inverse of an
                               environment one, in the same currency: the
                               external names it needs plus its version

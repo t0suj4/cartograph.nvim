@@ -88,9 +88,11 @@ test('versionfloor: the report gives floor, attribution and a priced ladder', fu
     ok(text:find('{x:} hash value shorthand', 1, true), 'the responsible FEATURE is named')
     ok(text:find('a.rb:2', 1, true), 'with its site')
     -- the ladder prices each older target by everything NEWER than it
-    ok(text:find('to 3.0   fix 1 site', 1, true), 'to 3.0 costs the single 3.1 site')
-    ok(text:find('to 2.7   fix 4 site', 1, true), 'to 2.7 also costs the three 3.0 sites')
-    ok(text:find('to 2.3   fix 5 site', 1, true), 'to 2.3 adds the 2.7 site')
+    -- whitespace-tolerant: the version column widened for 4-digit ES years, and
+    -- pinning the exact padding made this fail on a pure formatting change
+    ok(text:find('to 3%.0%s+fix 1 site'), 'to 3.0 costs the single 3.1 site')
+    ok(text:find('to 2%.7%s+fix 4 site'), 'to 2.7 also costs the three 3.0 sites')
+    ok(text:find('to 2%.3%s+fix 5 site'), 'to 2.3 adds the 2.7 site')
     vim.fn.delete(root, 'rf')
 end)
 
@@ -311,5 +313,107 @@ test('versionfloor: the ECMAScript scale is named in the report header', functio
     local text = table.concat(vf.report(store), '\n')
     ok(text:find('ECMAScript 2020', 1, true),
         'the header names the scale: ' .. text:sub(1, 70))
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ── DECLARED vs COMPUTED: the project's own artifact as an answer key ───────
+-- The two directions are NOT symmetric and that is the design: computed-newer is
+-- a defect backed by positive evidence, computed-older is only an absence of
+-- evidence. Formats below are copied from real files on disk, not invented.
+
+local function decl_root(files)
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for name, lines in pairs(files) do write(root, name, lines) end
+    return root
+end
+
+test('versionfloor: declarations() reads each ecosystem\'s real format', function ()
+    local root = decl_root {
+        ['x.gemspec'] = { 'Gem::Specification.new do |s|',
+            '  s.required_ruby_version = ">= 3.0"', 'end' },
+        ['pyproject.toml'] = { '[project]', 'requires-python = ">=3.8"' },
+        ['tsconfig.json'] = { '{ "compilerOptions": { "target": "ES2022" } }' },
+    }
+    local ds = {}
+    for _, d in ipairs(vf.declarations(root)) do ds[d.scale] = d end
+    eq('3.0', ds.ruby.v, 'gemspec required_ruby_version')
+    eq('3.8', ds.python.v, 'pyproject requires-python')
+    eq('2022', ds.ECMAScript.v, 'a tsconfig target IS the ECMAScript scale')
+    eq('ruby', ds.ruby.scale, 'each declaration knows which ruler it speaks')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: a Gemfile ruby directive is the fallback declaration', function ()
+    local root = decl_root { ['Gemfile'] = { 'source "https://rubygems.org"', 'ruby "~> 3.4"' } }
+    local d = vf.declared(root, 'ruby')
+    eq('3.4', d.v, 'the pessimistic operator still pins a floor')
+    eq('Gemfile', d.source)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: an open-ended target is known-but-unusable, not absent', function ()
+    local root = decl_root { ['tsconfig.json'] = { '{ "compilerOptions": { "target": "ESNext" } }' } }
+    local d = vf.declared(root, 'ECMAScript')
+    ok(d, 'the declaration is FOUND')
+    eq(nil, d.v, 'but carries no comparable version')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: computed NEWER than declared is a broken promise', function ()
+    if not ready() then skip('no ruby parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = decl_root {
+        ['x.gemspec'] = { 'Gem::Specification.new do |s|',
+            '  s.required_ruby_version = ">= 2.6"', 'end' },
+        ['lib.rb'] = { 'class A', '  def opts(x) = {x:}', 'end' },
+    }
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local inv = vf.invariant(store, '3.1', { '{x:} at lib.rb:2' }, 'ruby')
+    eq('broken', inv.verdict, 'declared 2.6, needs 3.1')
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('BROKEN PROMISE', 1, true), 'and the report leads with it')
+    ok(text:find('because of', 1, true), 'naming the responsible feature and site')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: computed OLDER than declared is NOT asserted as needless', function ()
+    if not ready() then skip('no ruby parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = decl_root {
+        ['x.gemspec'] = { 'Gem::Specification.new do |s|',
+            '  s.required_ruby_version = ">= 3.2"', 'end' },
+        ['lib.rb'] = { 'class A', '  def old(a) a&.to_s end', 'end' },
+    }
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local inv = vf.invariant(store, '2.3', {}, 'ruby')
+    eq('no-evidence', inv.verdict, 'the verdict names the absence, not a defect')
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('NOT a finding', 1, true),
+        'because our floor is a lower bound, an undetected gate may justify it')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: scales are reported SEPARATELY, never maxed together', function ()
+    if not ready() then skip('no ruby parser') end
+    local ok_ts = pcall(vim.treesitter.get_string_parser, '', 'typescript')
+    if not ok_ts then skip('no typescript parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    -- ruby 3.1 syntax and ES2020 syntax in one repo: 2020 > 3.1 numerically, so
+    -- a single max() would report "floor 2020" for the ruby code too
+    local root = decl_root {
+        ['a.rb'] = { 'class A', '  def opts(x) = {x:}', 'end' },
+        ['b.ts'] = { 'export const f = (a: any) => a?.b' },
+    }
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('2 version scales', 1, true), 'the split is announced: ' .. text:sub(1, 60))
+    ok(text:find('version floor — ruby: 3%.1'), 'ruby keeps its own ruler')
+    ok(text:find('ECMAScript 2020', 1, true), 'and the JS family keeps its own')
     vim.fn.delete(root, 'rf')
 end)
