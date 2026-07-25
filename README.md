@@ -1279,19 +1279,33 @@ over the **tree**, not the text — `&.` inside a string or a comment is not a
 feature use, which a regex would get wrong. And a file that cannot be read or
 parsed is counted as UNKNOWN rather than folded into a clean result.
 
-Two tables ship: **Ruby** (10 syntax features 2.3 → 3.1, 18 gated methods) and
-**Python** (11 features 3.3 → 3.12, 9 gated methods). A table is per-language,
-small and additive — each entry is a node type plus an optional structural
-predicate — and adding one needs no engine change, since the languages a report
-covers are derived from the tables themselves.
+Three tables ship: **Ruby** (10 syntax features 2.3 → 3.1, 18 gated methods),
+**Python** (11 features 3.3 → 3.12, 9 gated methods) and the **JS family** (13
+features ES2015 → ES2022, 6 gated methods, one table serving
+`.js/.mjs/.cjs/.jsx/.ts/.tsx`). A table is per-language, small and additive —
+each entry is a node type plus an optional structural predicate — and adding one
+needs no engine change, since the languages a report covers are derived from the
+tables themselves.
+
+The JS family also fixes the scale, since **ECMAScript years and TypeScript
+versions are different axes** — `max(ES2020, 4.9)` is meaningless. So the table
+carries ES years only, TS-version syntax like `satisfies` is deliberately absent
+rather than folded into a nonsense number, and the report names the scale
+(`ECMAScript 2020`) so a year never reads as a language version.
 
 Two guards keep a table from rotting. Every feature entry must fire on its own
 snippet, because a wrong node type detects nothing *silently* rather than
 loudly. And every stdlib key must be reachable through the lookup, so a dotted
-key the extractor never produces in that form can't sit there dead. The
-predicates earn their place on real ambiguity: `[*a, *b]` and `f(*args)` are both
-`list_splat`, and only the one inside a literal is PEP 448, so the 3.5 entry
-tests its parent — otherwise every call in the codebase would raise the floor.
+key the extractor never produces in that form can't sit there dead.
+
+The predicates earn their place on real ambiguity. `[*a, *b]` and `f(*args)` are
+both `list_splat`, and only the one inside a literal is PEP 448, so the 3.5 entry
+tests its parent — otherwise every call in the codebase would raise the floor. A
+`#private` member is `field_definition` in the JavaScript grammar but
+`public_field_definition` in the TypeScript one, so that detector keys on
+`private_property_identifier`, which exists in both — keying on the field node
+would have silently covered only half the family, and the spec runs the shared
+table against *both* grammars for exactly that reason.
 
 On django-oscar (483 files) that reads: floor **3.8, held up by a single walrus
 operator**, with 3.6 costing one fix and 3.5 costing ten.

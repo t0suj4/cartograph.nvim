@@ -238,3 +238,78 @@ test('versionfloor: gate_for does not match a bare tail against a dotted key', f
     ok(vf.gate_for('ruby', 'Data.define'), 'and fires on it')
     ok(vf.gate_for('ruby', 'h.except'), 'a bare gate matches on the tail')
 end)
+
+-- ── the JS family: ONE table, two grammars, the ECMAScript scale ───────────
+-- The interesting risk here is not the features, it is that javascript and
+-- typescript are DIFFERENT grammars sharing one table: a private class member is
+-- `field_definition` in one and `public_field_definition` in the other, so a
+-- detector keyed on the field node would silently cover only half the family.
+
+local JS_SNIPPETS = {
+    ['arrow-function']    = 'const f = (x) => x',
+    ['class']             = 'class A {}',
+    ['template-string']   = 'const s = `hi ${n}`',
+    ['exponent']          = 'const y = 2 ** 8',
+    ['await']             = 'async function f() { await g() }',
+    ['object-spread']     = 'const o = { ...a, b: 1 }',
+    ['optional-catch']    = 'try { f() } catch { g() }',
+    ['optional-chain']    = 'const v = a?.b',
+    ['nullish']           = 'const v = a ?? b',
+    ['logical-assign']    = 'a ??= 1',
+    ['numeric-separator'] = 'const n = 1_000_000',
+    ['private-field']     = 'class A { #x = 1 }',
+    ['static-block']      = 'class A { static { this.x = 1 } }',
+}
+
+local function js_ready(lang)
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.get_string_parser, '', lang)
+end
+
+test('versionfloor: the ES table fires under BOTH the js and ts grammars', function ()
+    for _, lang in ipairs({ 'javascript', 'typescript' }) do
+        if not js_ready(lang) then skip('no ' .. lang .. ' parser') end
+        local missing = {}
+        for _, f in ipairs(vf.FEATURES[lang]) do
+            local snip = JS_SNIPPETS[f.id]
+            if not snip then
+                missing[#missing + 1] = f.id .. ' (no snippet)'
+            elseif not ids(vf.scan(lang, snip))[f.id] then
+                missing[#missing + 1] = f.id .. ' (never fired under ' .. lang .. ')'
+            end
+        end
+        eq({}, missing, 'every ES entry must fire under ' .. lang)
+    end
+end)
+
+test('versionfloor: the js family shares one table object', function ()
+    ok(vf.FEATURES.javascript == vf.FEATURES.typescript
+        and vf.FEATURES.typescript == vf.FEATURES.tsx,
+        'one table serves .js/.mjs/.cjs/.jsx/.ts/.tsx — no drift between them')
+    eq('ECMAScript', vf.SCALE.javascript, 'and the scale is named, so 2021 is not read as a version')
+end)
+
+test('versionfloor: ES detectors reject the near-misses', function ()
+    if not js_ready('javascript') then skip('no javascript parser') end
+    eq(false, ids(vf.scan('javascript', 'try { f() } catch (e) { g() }'))['optional-catch'] or false,
+        'catch WITH a binding is not the 2019 feature')
+    eq(false, ids(vf.scan('javascript', 'const n = 1000'))['numeric-separator'] or false,
+        'a plain number has no separator')
+    eq(0, #vf.scan('javascript', 'const s = "a?.b ?? c"'),
+        'operators inside a string are text, not syntax')
+end)
+
+test('versionfloor: the ECMAScript scale is named in the report header', function ()
+    if not js_ready('javascript') then skip('no javascript parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'a.js', { 'export const f = (a) => a?.b ?? 0' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('ECMAScript 2020', 1, true),
+        'the header names the scale: ' .. text:sub(1, 70))
+    vim.fn.delete(root, 'rf')
+end)

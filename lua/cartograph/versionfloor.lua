@@ -138,6 +138,64 @@ M.FEATURES = {
     },
 }
 
+-- ── the JS family: ONE table on the ECMAScript-year scale ──────────────────
+-- Shared by javascript/typescript/tsx, which is why the private-field detector
+-- keys on `private_property_identifier` (present in BOTH grammars) rather than
+-- the field node — that is `field_definition` in javascript and
+-- `public_field_definition` in typescript, so keying on it would silently cover
+-- only half the family.
+--
+-- ECMAScript years ONLY. TypeScript's own versions (`satisfies` → TS 4.9) are a
+-- DIFFERENT axis: max(ES2020, 4.9) is meaningless, so they are deliberately
+-- absent rather than folded into a nonsense scale.
+local ES = {
+    { id = 'arrow-function', v = '2015', desc = 'arrow function', node = 'arrow_function' },
+    { id = 'class', v = '2015', desc = 'class declaration', node = 'class_declaration' },
+    { id = 'template-string', v = '2015', desc = 'template string', node = 'template_string' },
+    { id = 'exponent', v = '2016', desc = '** exponentiation',
+        node = 'binary_expression', test = function (n) return anon(n, '**') end },
+    { id = 'await', v = '2017', desc = 'async/await', node = 'await_expression' },
+    { id = 'object-spread', v = '2018', desc = '{...a} object spread',
+        node = 'spread_element',
+        test = function (n)
+            local p = n:parent()
+            return p ~= nil and p:type() == 'object'
+        end },
+    { id = 'optional-catch', v = '2019', desc = 'catch {} without a binding',
+        node = 'catch_clause',
+        test = function (n)
+            for c in n:iter_children() do
+                if c:named() and c:type() ~= 'statement_block' then return false end
+            end
+            return true
+        end },
+    { id = 'optional-chain', v = '2020', desc = '?. optional chaining',
+        node = 'optional_chain' },
+    { id = 'nullish', v = '2020', desc = '?? nullish coalescing',
+        node = 'binary_expression', test = function (n) return anon(n, '??') end },
+    { id = 'logical-assign', v = '2021', desc = '??= ||= &&= logical assignment',
+        node = 'augmented_assignment_expression',
+        test = function (n)
+            return anon(n, '??=') or anon(n, '||=') or anon(n, '&&=')
+        end },
+    { id = 'numeric-separator', v = '2021', desc = '1_000 numeric separator',
+        node = 'number',
+        -- no distinctive node exists; the check is on the NUMBER token's own
+        -- text, so it still cannot fire inside a string or a comment
+        test = function (n, src)
+            return (vim.treesitter.get_node_text(n, src) or ''):find('_', 1, true) ~= nil
+        end },
+    { id = 'private-field', v = '2022', desc = '#private class member',
+        node = 'private_property_identifier' },
+    { id = 'static-block', v = '2022', desc = 'static {} initialisation block',
+        node = 'class_static_block' },
+}
+M.FEATURES.javascript, M.FEATURES.typescript, M.FEATURES.tsx = ES, ES, ES
+
+--- Version-scale name per language, for the header: an ECMAScript year is not a
+--- language version number and should not read as one.
+M.SCALE = { javascript = 'ECMAScript', typescript = 'ECMAScript', tsx = 'ECMAScript' }
+
 -- ── version-gated STDLIB calls (the second, WEAKER evidence tier) ──────────
 -- Syntax is certain: `{x:}` in the tree IS 3.1 syntax. A stdlib call is not —
 -- `x.tally` is 2.7 only if `x` is an Enumerable, and Ruby will not tell us. So
@@ -173,6 +231,14 @@ M.STDLIB = {
         ['intersect?']       = { v = '3.1', desc = 'Array#intersect?' },
         ['Data.define']      = { v = '3.2', desc = 'Data.define' },
     },
+    javascript = {
+        ['Object.entries']     = { v = '2017', desc = 'Object.entries' },
+        ['Object.fromEntries'] = { v = '2019', desc = 'Object.fromEntries' },
+        ['flat']               = { v = '2019', desc = 'Array#flat' },
+        ['flatMap']            = { v = '2019', desc = 'Array#flatMap' },
+        ['replaceAll']         = { v = '2021', desc = 'String#replaceAll' },
+        ['at']                 = { v = '2022', desc = 'Array/String#at' },
+    },
     python = {
         ['subprocess.run']   = { v = '3.5', desc = 'subprocess.run' },
         ['os.fspath']        = { v = '3.6', desc = 'os.fspath' },
@@ -185,6 +251,8 @@ M.STDLIB = {
         ['itertools.pairwise'] = { v = '3.10', desc = 'itertools.pairwise' },
     },
 }
+-- the same ECMAScript gates apply to the whole js family
+M.STDLIB.typescript, M.STDLIB.tsx = M.STDLIB.javascript, M.STDLIB.javascript
 
 --- The gate a callee matches, if any: the WHOLE callee first (`math.prod`), then
 --- its last segment (`tally`). Exposed as the lookup seam so the spec can assert
@@ -363,7 +431,13 @@ function M.report(store)
     for _, id in ipairs(hids) do
         if not hfloor or M.older(hfloor, hby[id].v) then hfloor = hby[id].v end
     end
-    L[#L + 1] = ('version floor — %s: %s'):format(table.concat(langs, '/'),
+    -- an ECMAScript year is not a language version number: name the scale
+    local scale = M.SCALE[langs[1]]
+    for _, l in ipairs(langs) do
+        if M.SCALE[l] ~= scale then scale = nil break end
+    end
+    L[#L + 1] = ('version floor — %s: %s%s'):format(table.concat(langs, '/'),
+        (scale and floor) and (scale .. ' ') or '',
         floor or 'nothing version-gated found')
     L[#L + 1] = '  CERTAIN, from syntax: a LOWER bound, so it says "needs at least"'
     L[#L + 1] = '  — never "runs on". The ladder below is the definite worklist.'
