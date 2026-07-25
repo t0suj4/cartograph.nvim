@@ -15,8 +15,11 @@
 -- move certified behavior-preserving by the verdict, riding the txn layer.
 --   local ro = require 'cartograph.reorder'
 --   local res = ro.analyze(store, fn_id)              -- per-pair verdicts + opaque hedges
---   local plan = ro.plan_move(store, fn_id, from, to) -- or (nil, why) if uncertifiable
+--   local plan = ro.plan_move(store, fn_id, from, to[, through]) -- or (nil, why)
 --   ro.apply(store, plan)                             -- journaled, CAS + parse-clean gated
+-- A move handles a single statement or a contiguous block (`through`), and each statement
+-- may be MULTI-LINE — its full source span (a continuation, or a control body + `end`) is
+-- carried, via block_span's range-to-next-statement extent.
 
 local callrec = require 'cartograph.callrec'
 local dfa = require 'cartograph.df'
@@ -204,38 +207,20 @@ end
 
 local at = require 'cartograph.at'
 
--- the 0-based source line of the statement at model-row `l1` (1-based), iff it occupies
--- exactly one line and shares that line with no other statement. Returns line0 or nil,why.
-local function single_line(store, fn_id, rows, l1)
-    -- another statement on the same line → not exclusively movable
-    local shared = 0
-    for _, r in ipairs(rows) do if r.l == l1 then shared = shared + 1 end end
-    if shared ~= 1 then return nil, 'the line holds more than one statement' end
-    -- multi-line? use the expr-IR ranges of the aligned row
-    local eo = require('cartograph.expr').of(store, fn_id)
-    local row = eo and eo.fl and eo.fl.stmts
-    if not row then return nil, 'no expression IR' end
-    local expr = require 'cartograph.expr'
-    local minl, maxl
-    for _, s in ipairs(row) do
-        if s.l == l1 and s.expr then
-            local function scan(e)
-                expr.walk(e, function (x)
-                    if x.at then
-                        local sl, el = at.sl(x.at), at.el(x.at)
-                        minl = minl and math.min(minl, sl) or sl
-                        maxl = maxl and math.max(maxl, el) or el
-                    end
-                end)
-            end
-            for _, x in ipairs(s.expr.lhs or {}) do scan(x) end
-            for _, x in ipairs(s.expr.rhs or {}) do scan(x) end
-            scan(s.expr.cond)
-        end
-    end
-    if not minl then return l1 - 1 end -- no expr ranges (e.g. bare `return`) → trust .l
-    if minl ~= maxl then return nil, 'the statement spans multiple lines' end
-    return minl
+-- The 0-based source line range a statement/block occupies. A df row's statement runs from
+-- its own start line to just before the NEXT statement's start (or the fn body's end for
+-- the last) — this captures a MULTI-LINE simple statement's continuation AND a control
+-- structure's body + `end` (which the flow model keeps as a single row), tightly enough
+-- that only interstitial blank/comment lines are carried along (behavior-preserving). Rows
+-- are line-ordered and index-contiguous, so [rows[p].l .. end0(r)] holds exactly the block.
+-- end0(i) = the line before the next statement (or before the fn's `end`).
+local function block_span(rows, node, p, r)
+    if p > 1 and rows[p - 1].l == rows[p].l then return nil, 'the block start shares a line with the previous statement' end
+    if r < #rows and rows[r + 1].l == rows[r].l then return nil, 'the block end shares a line with the next statement' end
+    local start0 = rows[p].l - 1
+    local end0 = rows[r + 1] and (rows[r + 1].l - 2) or (at.el(node.range) - 1)
+    if end0 < start0 then return nil, 'empty statement span' end
+    return start0, end0
 end
 
 --- Plan a reorder: move the statement starting at `from_line` to just before the statement
@@ -292,13 +277,10 @@ function M.plan_move(store, fn_id, from_line, to_line, through_line)
         if rel[t] then return nil, ('the move would cross #%d, which has %s with a block statement'):format(t, rel[t]) end
     end
 
-    -- each block statement must be a single exclusive source line
-    for i = p, r do
-        local _, sw = single_line(store, fn_id, rows, rows[i].l)
-        if sw then return nil, ('#%d: %s'):format(i, sw) end
-    end
-    local src_s0, src_e0 = from_line - 1, through_line - 1
-    local dst_line1 = (q <= #rows) and rows[q].l or at.el(m.node.range) -- fn `end` line
+    -- the block's source span (multi-line statements + control `end` handled)
+    local src_s0, src_e0, sw = block_span(rows, m.node, p, r)
+    if not src_s0 then return nil, sw end
+    local dst_line1 = (q <= #rows) and rows[q].l or (at.el(m.node.range)) -- fn `end` line
     local dst0 = dst_line1 - 1
     if dst0 >= src_s0 and dst0 <= src_e0 + 1 then return nil, 'the block cannot move into itself' end
 

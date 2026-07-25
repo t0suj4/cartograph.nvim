@@ -96,6 +96,28 @@ test('reorder-apply: a block move is refused if ANY block statement is bound to 
     vim.fn.delete(root, 'rf')
 end)
 
+test('reorder-apply: a MULTI-LINE statement moves as its whole span', function ()
+    -- `local a = x + y + 1` spans 3 lines; the old single-line gate refused it.
+    local root = proj('local function f(x, y)\n  local a = x\n    + y\n    + 1\n'
+        .. '  local b = y * 2\n  return b\nend\nreturn f\n')
+    -- move the multi-line a (L2..L4) down before `return` (L6), crossing b (L5)
+    local plan, why = ro.plan_move(store, fn_id('f'), 2, 6)
+    ok(plan, 'a multi-line statement move is certified: ' .. tostring(why))
+    if plan then
+        eq(1, plan.src_s0, 'span starts at 0-based line 1 (= source line 2)')
+        eq(3, plan.src_e0, 'span ends at 0-based line 3 (= source line 4) — the whole 3-line statement')
+        local _, after = ro.preview(store, plan)
+        local lines = vim.split(after[plan.file], '\n', { plain = true })
+        eq('  local b = y * 2', lines[2], 'b moved up')
+        eq('  local a = x', lines[3], 'the multi-line statement follows, intact…')
+        eq('    + y', lines[4], '…line 2 of it…')
+        eq('    + 1', lines[5], '…and line 3')
+        local pr = vim.treesitter.get_string_parser(after[plan.file], 'lua'):parse()[1]:root()
+        ok(not pr:has_error(), 'the result parses clean')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('reorder-apply: the write is journaled and the result parses', function ()
     local root = proj(PURE)
     local plan = ro.plan_move(store, fn_id('f'), 3, 2)
