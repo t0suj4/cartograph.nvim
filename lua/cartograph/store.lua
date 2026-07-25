@@ -278,6 +278,12 @@ function M.ingest(data)
         jit.flush()
         collectgarbage(); collectgarbage()
     end
+    -- CARRY-FORWARD: keep the whole-graph self-type map this graph's resolution
+    -- produced, so a later demand materialization borrows it instead of re-deriving it
+    -- from a partial call set (which over-claims — see materialize_file_calls). Guarded
+    -- on graph identity and on NOT being a partial graph, so it never captures the
+    -- unsound answer or another corpus's.
+    M.capture_selft()
     return M.data
 end
 
@@ -410,11 +416,18 @@ end
 --- quality one. It is bounded, though: all 4 land at the HEDGED (`~`, inferred) tier,
 --- never as a confirmed resolution — 3 stamped prov=`self`, 1 prov=`base`.
 ---
---- THE FIX, not yet built: the poison set is one boolean per method id derived from
---- ALL calls' receivers — a small global fact, exactly the shape of the file->scope
---- table, which should be PRECOMPUTED ONCE and consulted rather than re-derived from
---- a partial call set. Same lesson as scopes: narrow the output, never the evidence.
---- Until then a demand consumer must treat `~`-tier calls as unverified here.
+--- THE FIX, now built: CARRY the whole-graph self-type map (M.selft_map / the
+--- `selft_seed` resolve_self accepts) instead of re-deriving it from a partial call
+--- set. Same lesson as scopes — narrow the output, never the evidence. With the map
+--- carried, rust goes 8967/8971 -> 8971/8971 EXACT, and ruby/lua stay exact.
+---
+--- WITHOUT a carried map (a cold thin index: the map comes from resolved calls, so a
+--- graph with no calls cannot derive it) this WITHDRAWS the resolutions resolve_self
+--- landed, refusing them with rule `partial-callset`. Measured on rust: 60 under-
+--- resolutions and no over-claims from that pass. Under-resolution is the safe
+--- direction — it refuses where the whole graph might have resolved, never the
+--- reverse — and one prov=`base` over-resolution remains outside this pass's reach,
+--- so a cold demand graph is still not substitutable. Carried, it is.
 ---
 --- Does NOT clear the index_only marker: one file's calls is not a call graph, and
 --- whole-graph verbs must keep refusing. Idempotent per file. Returns true iff it
@@ -457,7 +470,27 @@ function M.materialize_file_calls(rel)
     end
     M.data.calls = calls
     if added > 0 then
+        -- CARRY the whole-graph self-type map if one was captured, so resolve_self
+        -- cannot read this partial call set's missing poison as licence to type.
+        local seed = M._selft_map
+        M.data.selft_seed = seed
         ts.relink(M.data, {})
+        M.data.selft_seed = nil -- never persist a resolution input onto the graph
+        if not seed then
+            -- NOTHING TO CARRY: withdraw what this pass landed rather than ship an
+            -- over-claim. Under-resolution is the safe direction — it refuses where
+            -- the whole graph might have resolved, never the reverse — and the rule
+            -- names the reason instead of fabricating the refusal the oracle gave.
+            local withdrawn = 0
+            for _, c in ipairs(M.data.calls or {}) do
+                if c.prov == 'self' and c.to then
+                    c.to, c.inferred = nil, nil
+                    c.refused = { rule = 'partial-callset' }
+                    withdrawn = withdrawn + 1
+                end
+            end
+            M._selft_withdrawn = (M._selft_withdrawn or 0) + withdrawn
+        end
         M.ingest(M.data) -- rebuild the indexes over the new calls/edges
     end
     -- AFTER the ingest, which resets the ledgers by design (a new graph invalidates
@@ -467,6 +500,39 @@ function M.materialize_file_calls(rel)
     M._df_materialized[rel] = true
     M._calls_materialized[rel] = true
     return added > 0
+end
+
+--- THE CARRIED SELF-TYPE MAP (the poison set, [[cartograph-merging-strategies]]).
+--- resolve_self reads ABSENCE as evidence twice over — an unpoisoned method id gets
+--- self-typed, an untouched one gets typed lexically — so a partial call set
+--- over-claims, anti-monotonically. This is the whole-graph answer, captured so a
+--- demand graph can borrow it instead of re-deriving it from calls it does not have.
+---
+--- IT IS A CARRY-FORWARD ARTIFACT, and that bound is the honest part: the map is
+--- derived from RESOLVED CALLS, so a cold thin index cannot compute it — there are no
+--- calls to compute it from. It exists only once some whole-graph pass has run (a full
+--- open in this session, or a persisted one later). Without it, demand materialization
+--- WITHDRAWS the resolutions this pass landed rather than shipping over-claims.
+---@param map table|nil  a captured map; nil to read the current one
+function M.selft_map(map)
+    if map ~= nil then M._selft_map = map end
+    return M._selft_map
+end
+
+--- Capture the map the provider just computed, after a WHOLE-GRAPH resolution. Called
+--- where a full graph is ingested; a partial (demand) run must never overwrite it with
+--- its own thinner answer, which is exactly the value being guarded against.
+function M.capture_selft()
+    if M.is_index_only() then return false end -- partial: its map is the unsound one
+    local ts = package.loaded['cartograph.providers.treesitter']
+    local m = ts and ts._selft
+    if not m or not next(m) then return false end
+    -- IDENTITY CHECK: the map must describe THIS graph. The provider is a module, so
+    -- its last map may belong to another corpus opened in the same process, and a
+    -- stale self-type map is worse than none — it types against foreign classes.
+    if ts._selft_root ~= (M.data or {}).root then return false end
+    M._selft_map = m
+    return true
 end
 
 --- Which files have had their calls materialized — so a report can say "calls exist

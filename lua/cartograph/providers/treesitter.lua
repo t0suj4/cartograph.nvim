@@ -1787,7 +1787,21 @@ end
 -- propagates to the methods it reaches via self:. Marked inferred (~) — a derived
 -- resolution (known limit: a local shadowing a class NAME could mis-seed; the ~
 -- tier is honest about it). Lua-shaped (self as an explicit param-0).
-local function resolve_self(cv, node_index, extends, exact, addref)
+--- THE SELF-TYPE MAP (`selft`) IS GLOBAL EVIDENCE, and `seed` is how a PARTIAL call
+--- set borrows the whole-graph version of it ([[cartograph-merging-strategies]], the
+--- calls half). Two of this pass's conditions read ABSENCE as positive evidence, so
+--- both misfire when call sites are merely not resident:
+---   · selft[mid] == false (POISONED — called somewhere with an untypeable receiver)
+---     gates V1/V2. Fewer resident calls means less poison, so MORE self-typing.
+---   · selft[cfn] == nil (UNTOUCHED — no in-corpus call site at all, hence framework-
+---     invoked) gates the V3 lexical tier. Fewer resident calls means more ids look
+---     untouched, so MORE lexical typing.
+--- Both err toward over-claiming, and ANTI-monotonically: the less you materialize the
+--- more you assert. Measured on rust — 4 calls resolved at ~ that a full graph refuses.
+--- `seed` (nil on every whole-graph path, so extract and relink are unchanged) starts
+--- the map from a full graph's outcome, making the pass behave as if it had seen every
+--- call site. M._selft exposes the computed map so it can be captured and carried.
+local function resolve_self(cv, node_index, extends, exact, addref, seed)
     local cget, cset = cv.get, cv.set
     -- class-name set: any table T that owns a method (`T:x` / `T.x` in exact)
     local is_class = {}
@@ -1798,6 +1812,16 @@ local function resolve_self(cv, node_index, extends, exact, addref)
     if not next(is_class) then return 0 end
     local super = build_super(extends)
     local selft = {}    -- method-id -> { [class]=true } accumulator, or false=poisoned
+    -- borrow a whole-graph outcome when one was carried in (COPIED, so the seed stays
+    -- reusable across materializations and this run cannot mutate a shared artifact)
+    for mid, v in pairs(seed or {}) do
+        if v == false then selft[mid] = false
+        else
+            local s = {}
+            for c in pairs(v) do s[c] = true end
+            selft[mid] = s
+        end
+    end
     local function addtype(mid, C)
         if selft[mid] == false then return end
         selft[mid] = selft[mid] or {}
@@ -1962,6 +1986,9 @@ local function resolve_self(cv, node_index, extends, exact, addref)
             end
         end
     end
+    -- publish the map so a whole-graph run can be CARRIED to a partial one (see the
+    -- header). Read-only for consumers; a fresh run overwrites it.
+    M._selft = selft
     return n
 end
 
@@ -2433,7 +2460,16 @@ local RESOLVE_PASSES = {
         x.ret_resolved, x.ret_rounds = retn, rounds
         return retn end },
     { name = 'self', run = function (x)
-        return resolve_self(x.cv, x.node_index, x.data.extends, x.exact, x.addref) end },
+        -- data.selft_seed: a whole-graph self-type map carried into a PARTIAL call set
+        -- (demand materialization). nil on every whole-graph path, so extract/relink
+        -- are byte-identical — the gates are the proof.
+        local r = resolve_self(x.cv, x.node_index, x.data.extends, x.exact, x.addref,
+            x.data.selft_seed)
+        -- STAMP the map with the graph it describes. Without this, a consumer could
+        -- carry a map left over from a DIFFERENT corpus in the same process — a stale
+        -- self-type map is worse than none, since it types against foreign classes.
+        M._selft_root = x.data.root
+        return r end },
     { name = 'local_ctor', run = function (x)
         return resolve_local_ctor(x.cv, x.node_index, x.data.ctorbinds, x.data.smtclasses, x.data.extends, x.exact, x.addref) end },
     { name = 'ruby_ancestors', run = function (x)

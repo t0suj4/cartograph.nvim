@@ -84,7 +84,24 @@ for i = 1, math.min(nfiles, #cand) do
 end
 
 -- === the DEMAND graph: thin index + per-file call materialization ===
+-- CARRY MODE (arg 3): `carry` seeds the whole-graph self-type map (the poison set)
+-- before materializing, which is how a demand graph avoids reading its own missing
+-- poison as licence to self-type. `nocarry` clears it, so the run measures the
+-- fallback — withdrawing what resolve_self landed rather than over-claiming.
+local mode = arg[3] or 'carry'
+-- read the map straight off the provider: the full extract above just resolved this
+-- root, and taking it here avoids ingesting the ORACLE graph (ingest folds/wraps it,
+-- and it must stay exactly as extract produced it to be a fair comparison)
+local carried = (ts._selft_root == root) and ts._selft or nil
 store.ingest(ts.index_only(root))
+if mode == 'carry' then
+    store.selft_map(carried)
+    if not carried then print('demandcalls: WARNING no map was captured to carry') end
+elseif mode == 'nocarry' then
+    store._selft_map = nil -- exercise the withdrawal fallback
+else
+    print('demandcalls: mode must be carry|nocarry'); vim.cmd('cquit 2'); return
+end
 if not store.is_index_only() then
     print('demandcalls: expected a thin index'); vim.cmd('cquit 1'); return
 end
@@ -173,6 +190,9 @@ end
 
 local function pc(n) return stats.sites > 0 and (n / stats.sites) * 100 or 0 end
 print(('demandcalls %s'):format(name))
+print(('  MODE      %s (self-type map %s)'):format(mode,
+    mode == 'carry' and (carried and 'CARRIED from the full graph' or 'MISSING')
+        or 'deliberately absent'))
 print(('  corpus    %d files with calls · materialized %d · %.0f ms')
     :format(#cand, #pick, t_mat))
 print(('  thin index started with %d calls; now %d')

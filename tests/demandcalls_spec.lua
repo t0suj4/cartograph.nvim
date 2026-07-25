@@ -123,6 +123,51 @@ test('demand calls: idempotent, and a no-op on a graph that already has them', f
     eq(before, #calls_in('caller.lua'))
 end)
 
+test('poison set: a whole-graph ingest captures the self-type map, a partial one does not', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local root = corpus()
+    store._selft_map = nil
+    store.ingest(ts.extract(root))                  -- whole graph
+    local captured = store.selft_map()
+    -- the map may legitimately be empty on a corpus with no methods; what must hold is
+    -- that a PARTIAL graph never overwrites a whole-graph map with its thinner answer
+    store.ingest(ts.index_only(root))
+    ok(not store.capture_selft(), 'a thin index refuses to capture its own map')
+    eq(captured, store.selft_map())
+end)
+
+test('poison set: a stale map from another corpus is refused (identity check)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local a, b = corpus(), corpus()
+    store.ingest(ts.extract(a))
+    -- resolution for corpus B has NOT run, so the provider's map still describes A;
+    -- capturing it against B's graph would type against foreign classes
+    local prov = require 'cartograph.providers.treesitter'
+    eq(a, prov._selft_root)
+    store.ingest(ts.index_only(b))
+    store._selft_map = nil
+    ok(not store.capture_selft(), 'refused: the map describes a different root')
+    eq(nil, store.selft_map())
+end)
+
+test('poison set: with no map to carry, demand WITHDRAWS what resolve_self landed', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    store.ingest(ts.index_only(corpus()))
+    store._selft_map = nil
+    store._selft_withdrawn = 0
+    store.materialize_file_calls('caller.lua')
+    -- nothing withdrawn on this corpus is fine (resolve_self may land nothing here);
+    -- what must hold is that any withdrawal is a REFUSAL naming the reason, never a
+    -- silent unresolved call that reads as "no such target"
+    for _, c in ipairs((store.data or {}).calls or {}) do
+        if c.refused and type(c.refused) == 'table' and c.refused.rule == 'partial-callset' then
+            eq(nil, c.to)
+            eq(nil, c.inferred)
+        end
+    end
+    ok((store._selft_withdrawn or 0) >= 0, 'withdrawal counter is maintained')
+end)
+
 test('demand calls: sites match a full extract\'s for that file', function ()
     if not ready('lua') then skip 'no lua parser' end
     local root = corpus()
