@@ -71,16 +71,10 @@ function M.as_nodes(res)
     return #out > 0 and out or nil
 end
 
+-- the shared read-only bottom-split scratch (cartograph.ui.scratch); the close
+-- key now rides config.keys.close (was a hardcoded 'q') so a user remap holds
 local function scratch(lines, ft)
-    vim.cmd('botright new')
-    local buf = vim.api.nvim_get_current_buf()
-    vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile = 'nofile', 'wipe', false
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.bo[buf].modifiable = false
-    if ft then vim.bo[buf].filetype = ft end
-    vim.api.nvim_win_set_height(0, math.min(#lines + 1, 20))
-    vim.keymap.set('n', 'q', '<cmd>close<cr>', { buffer = buf })
-    return buf
+    return require('cartograph.ui').scratch(lines, ft)
 end
 
 --- Render a node-list result as a jumpable list: <CR> pivots the browser to

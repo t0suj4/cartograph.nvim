@@ -46,18 +46,10 @@ local function whole_graph(store)
     return store
 end
 
+-- the shared read-only bottom-split scratch (cartograph.ui.scratch); required
+-- at call time to keep this module's top level lean (loads during startup)
 local function scratch(lines, ft)
-    vim.cmd('botright new')
-    local buf = vim.api.nvim_get_current_buf()
-    vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile
-        = 'nofile', 'wipe', false
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.bo[buf].modifiable = false
-    if ft then vim.bo[buf].filetype = ft end
-    vim.api.nvim_win_set_height(0, math.min(#lines + 1, 20))
-    vim.keymap.set('n', require('cartograph.config').keys.close,
-        '<cmd>close<cr>', { buffer = buf })
-    return buf
+    return require('cartograph.ui').scratch(lines, ft)
 end
 
 local function txn_module()
