@@ -3689,6 +3689,26 @@ function M.compose_spec(lang, base, packs)
     return composed
 end
 
+-- A memoized spec-overlay resolver: eff_spec(lang, spec) applies the active pack
+-- composition (base ⊕ packs) and the L2 profile overlay (base ⊕ L2), once per
+-- lang. extract and relink build the SAME thing over their own active_packs /
+-- active_profile — this is that shared closure, memo per call (fresh per builder).
+local function spec_overlay(active_packs, active_profile)
+    local composed_spec = {}
+    return function (lang, spec)
+        if not lang then return spec end
+        local c = composed_spec[lang]
+        if c == nil then
+            c = (#active_packs > 0 and M.compose_spec(lang, spec, active_packs)) or spec
+            if active_profile and lang == active_profile.lang then
+                c = setmetatable({ _profile = active_profile }, { __index = c })
+            end
+            composed_spec[lang] = c
+        end
+        return c
+    end
+end
+
 --- INDEX-ONLY front-end ([[cartograph-thin-index]]): the thin symbol index — parse +
 --- DEF nodes only (no calls, df, flow, mentions, or resolution). Reuses extract's own
 --- extract_defs, so the def set is byte-faithful to a full extract's; ~10x cheaper in
@@ -3778,19 +3798,7 @@ function M.extract(root, opts)
     -- for an unshaped root. Composed AFTER packs (base ⊕ L2 ⊕ L3), memoized/lang.
     local active_profile = active_profile_for(root)
     if active_profile then data.profile = active_profile.runtime end
-    local composed_spec = {}
-    local function eff_spec(lang, spec)
-        if not lang then return spec end
-        local c = composed_spec[lang]
-        if c == nil then
-            c = (#active_packs > 0 and M.compose_spec(lang, spec, active_packs)) or spec
-            if active_profile and lang == active_profile.lang then
-                c = setmetatable({ _profile = active_profile }, { __index = c })
-            end
-            composed_spec[lang] = c
-        end
-        return c
-    end
+    local eff_spec = spec_overlay(active_packs, active_profile)
 
     -- per-name def indexes for the resolution pass
     local exact, tail = {}, {} -- name -> {fn node,...}; last segment -> {...}
@@ -5708,19 +5716,7 @@ function M.relink(data, touched)
     -- record the active profile on the parallel-parent result too (extract stamps
     -- it inline; relink is the parallel path — keep the provenance field consistent)
     if active_profile then data.profile = active_profile.runtime end
-    local composed_spec = {}
-    local function eff_spec(lang, spec)
-        if not lang then return spec end
-        local c = composed_spec[lang]
-        if c == nil then
-            c = (#active_packs > 0 and M.compose_spec(lang, spec, active_packs)) or spec
-            if active_profile and lang == active_profile.lang then
-                c = setmetatable({ _profile = active_profile }, { __index = c })
-            end
-            composed_spec[lang] = c
-        end
-        return c
-    end
+    local eff_spec = spec_overlay(active_packs, active_profile)
     local scope_cache = {}
     local function scope_of(f)
         if scope_cache[f] == nil then
