@@ -6,6 +6,15 @@ CONTENTS                                                  *cartograph-contents*
   1. Introduction ........................... |cartograph-introduction|
   2. Quickstart ............................. |cartograph-quickstart|
   3. Commands ............................... |cartograph-commands|
+       opening and sessions ................. |cartograph-cmd-open|
+       navigating and overlays .............. |cartograph-cmd-nav|
+       honesty and resolution ............... |cartograph-cmd-honesty|
+       analysing the focused function ....... |cartograph-cmd-analysis|
+       lint ................................. |cartograph-cmd-lint|
+       clones ............................... |cartograph-cmd-clones|
+       refactoring .......................... |cartograph-cmd-refactor|
+       transactions ......................... |cartograph-cmd-txn|
+       outward .............................. |cartograph-cmd-outward|
   4. Keys ................................... |cartograph-keys|
   5. Transactions ........................... |cartograph-transactions|
   6. Honesty vocabulary ..................... |cartograph-honesty|
@@ -57,30 +66,203 @@ file row sets the destination, then >
 ==============================================================================
 3. COMMANDS                                               *cartograph-commands*
 
-All commands exist at startup; those that need an open graph say so.
+All commands exist at startup; those that need an open graph say so. Two are
+PANE-LOCAL — they exist only in the buffer they act on, and say which.
+
+OPENING AND SESSIONS                                      *cartograph-cmd-open*
 
   :Cartograph [target]        open the cockpit (dir | dump | mcp://name)
-  :CartographMerge            stage merging the focused function's clones
-  :CartographMove             stage the cut/paste move-set as a transaction
+  :CartographIndexOnly [dir]  open in index-only mode: a thin symbol
+                              index for LSP and navigation, no analysis
+  :CartographRefresh[!]       re-extract current file (! = whole project)
+  :CartographBands            list the open bands (multi-band session)
+  :CartographSwitch {band}    switch the active band
+  :CartographSelf             declared vs live registrations (the
+                              self:// oracle)
+  :CartographLspAttach        attach the in-process LSP read surface to
+                              this buffer
+  :CartographLspDetach        stop the in-process LSP read surface
+
+NAVIGATING AND OVERLAYS                                    *cartograph-cmd-nav*
+
+  :CartographCone [depth]     reachability cone on the cursor node
+                              (in = ancestors, out = descendants)
+  :CartographTerritory        territory overlay — partition the graph by
+                              which entry points reach each node
+  :CartographSpines           the tree structures hiding in the graph
+                              (call-dominator + subsystem)
+  :CartographHeat             toggle the hub/heat overlay: fan-in/out
+                              and role (symbols pane only)
+  :CartographMark             toggle the cursor row in the working set
+  :CartographWorkingSet       open the working-set view
+  :CartographWorkspace        open the workspace — ad-hoc Lua against
+                              the loaded graph; a returned node list is
+                              browsable
+  :CartographEval {lua}       evaluate Lua against the graph
+                              (store/spines/territory/… in scope)
+
+HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
+
+  :CartographCensus           epistemic census — edge trust tiers and
+                              refusals by rule (the analyzer work-list)
+  :CartographLadder           the call graph's epistemic distribution
+                              (proven / linked / ~ / dynamic / refused /
+                              frontier) + the heaviest refusals to resolve
+  :CartographExternals        the external boundary — unresolved names
+                              and the shape each use implies (~)
+  :CartographEscalate[!]      escalate hedge-saturated fns to lua-ls
+                              (async): confirmed / CONFLICT / refuted /
+                              recovered. ! = the whole graph
+  :CartographFieldHarvest     disagreement harvest — our self.field
+                              read→write links vs lua-ls go-to-definition.
+                              A CONFLICT is a real bug on ONE side
+  :CartographAudit            diff the live indexes against a fresh
+                              derive (catches in-place writer drift)
+  :CartographDogfood          the self-analysis dashboard, with the LSP
+                              read surface attached
+  :CartographDiscover[!] [verb]
+                              explain registry auto-discovery (! deep tier)
+  :CartographShapes           explain project-shape detection for this root
+
+ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
+
+  :CartographFields           field/member linker — resolve this
+                              method's self.field reads to the write(s)
+                              on its class (own methods + extends
+                              ancestors). A writeless read stays
+                              unresolved
+  :CartographBranchValues     the values live through each CFG branch
+                              (~ = hedged reaching)
+  :CartographNarrow           where a guard proves a variable non-nil in
+                              a region (branch-sensitive narrowing)
+  :CartographParamNil         inferred parameter nilability (required /
+                              optional / unknown) against the ---@param
+                              annotations; an unguarded deref of a
+                              nilable `?` param is a real defect
+  :CartographDevirt           method dispatches whose receiver a guard
+                              narrows to a concrete type — the
+                              static-call candidates
+  :CartographExpr             expression lints: self-compare, duplicated
+                              operand, bool-comparison, self-assignment,
+                              pseudo-ternary, constant condition,
+                              concat-in-loop, duplicated condition
+  :CartographReorder          statement commutativity: deps, conflicts,
+                              freely-movable rows. <CR> reveals the
+                              statement in the source pane
+  :CartographOptimize         loop-invariant computations (LICM): pure
+                              work hoistable above the loop. * = clean,
+                              ~ = aliasing- or branch-hedged
+  :CartographUntangle         independent concerns over the
+                              data+control+effect PDG, with the
+                              safe-to-split verdict and its why-not
+  :CartographUntangleModule [dir]
+                              independent function clusters in this file
+                              — or a directory, for god-package scope —
+                              over call + shared-written-state edges
+  :CartographExtractBlocks    this function's control sub-regions
+                              (loops/branches) as helper candidates,
+                              each with its (params)->(returns)
+                              interface and control-escape verdict
+
+LINT                                                      *cartograph-cmd-lint*
+
+  :CartographLint             graph-aware lint -> quickfix
+  :CartographLintFix          apply the current quickfix entry's annotation
+  :CartographLintSigns        publish lint findings as in-buffer signs
+  :CartographLintClear        clear the in-buffer lint signs
+
+CLONES                                                  *cartograph-cmd-clones*
+
+  :CartographClones [count]   exact-structural clone groups
+                              (alpha-invariant on locals). [count] = min
+                              statements, default 3
+  :CartographBlockClones [count]
+                              contiguous statement runs duplicated
+                              across OR WITHIN functions — the tier a
+                              whole-function census is blind to.
+                              [count] = min statements, default 6
+  :CartographNearClones [count]
+                              functions whose statement sequences differ
+                              by only a few edits: the matched rows are
+                              the shared template, the differing rows
+                              are the holes. [count] = max edit
+                              distance, default 2
+  :CartographClonesSigns      publish clone findings as in-buffer signs,
+                              each hole sign sitting at its exact
+                              substitution column so ]d jumps to it
+  :CartographClonesSignsClear clear the in-buffer clone signs
+
+REFACTORING                                           *cartograph-cmd-refactor*
+
+Each of these STAGES a transaction and writes nothing: review with
+:CartographDiff, commit with :CartographApply (|cartograph-cmd-txn|). What a
+verb refuses is as load-bearing as what it writes — see
+|cartograph-transactions|.
+
+  :CartographMerge            merge the focused function's clones
+  :CartographMove             the cut/paste move-set (dd cuts a row, p
+                              on a file row sets the destination)
   :CartographExtractModule {path}
-                              stage extracting the move-set into a NEW file
+                              extract the move-set into a NEW file
+  :'<,'>CartographExtract {name}
+                              extract the selected lines into a function
+                              (source pane only)
+  :CartographExtractHelper    propose the parameterized helper this
+                              function and its nearest near-clone could
+                              factor into — the anti-unified template
+                              plus a body-safety verdict. A scaffold to
+                              read; nothing is staged
+  :CartographExtractHelperApply [path]
+                              stage that helper for real. A same-file
+                              pair needs no argument; a CROSS-FILE pair
+                              takes a destination module path. Held to
+                              the sound subset; refuses outside it
+  :CartographHoistClosure     lift the focused NESTED closure to module
+                              scope — sound only when it captures
+                              nothing. Refuses a capture, naming the
+                              variable
+  :CartographReorderApply {from} [through] {to}
+                              move statement {from} — or the block
+                              {from}..{through} — to before {to}, if the
+                              commute verdict certifies it
+  :CartographOptimizeApply    dry-run the CSE-reuse rewrite: the exact
+                              diff an apply would write, journaled and
+                              CAS/span/parse-verified
+  :CartographNeutralitySnapshot
+                              capture the per-function behavior
+                              witnesses (df shape + params + callees) as
+                              a baseline
+  :CartographNeutralityCheck  diff the witnesses against that baseline —
+                              neutral = a pure move, DRIFTED = the body
+                              changed. Certifies a relocation; honestly
+                              flags a rewrite
+
+TRANSACTIONS                                               *cartograph-cmd-txn*
+
   :CartographDiff             the unified diff the staged txn would write
   :CartographApply            verify late-bound, journal, write, splice
   :CartographTxnClear         abandon the staged transaction (writes nothing)
   :CartographUndo             roll back the last applied txn, byte-exact
   :CartographRedo             re-apply the most recently undone txn
   :CartographJournal          browse applied/undone txns; <CR> = entry diff
-  :CartographRefresh[!]       re-extract current file (! = whole project)
-  :CartographLint             graph-aware lint -> quickfix
-  :CartographLintFix          apply the current quickfix entry's annotation
-  :CartographDiscover[!] [verb]
-                              explain registry auto-discovery (! deep tier)
-  :CartographShapes           explain project-shape detection for this root
-  :CartographLadder           the call graph's epistemic distribution
-                              (proven / linked / ~ / dynamic / refused /
-                              frontier) + the heaviest refusals to resolve
-  :CartographStates           browse the configured/detected state machine
+
+OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
+
   :CartographLive             diff the RUNNING system (MCP) vs the graph
+  :CartographStates           browse the configured/detected state machine
+  :CartographCompileCommands[!] [dir]
+                              generate compile_commands.json (cmake or
+                              meson configure; ! allows a full bear build)
+  :CartographProject[!]       project the current view into Factorio
+                              (! = live, reproject on navigation)
+  :CartographProjectStatus    the projection's honesty state
+                              (synced / stale / drift)
+  :CartographProjectStop      stop the live Factorio projection
+  :CartographBrush [file]     paint the current buffer (or a file) into
+                              Factorio as biter corpses
+  :CartographCanvas           serve a browser canvas that paints into
+                              Factorio
+  :CartographCanvasStop       stop the live web canvas
 
 ==============================================================================
 4. KEYS                                                       *cartograph-keys*

@@ -40,8 +40,10 @@ local REPO = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 package.path = REPO .. '/lua/?.lua;' .. REPO .. '/lua/?/init.lua;' .. package.path
 
 -- The UNDOCUMENTED ratchet: how many registered commands doc/cartograph.txt is
--- still allowed to omit. Lower it as you document; never raise it.
-local FLOOR = 53
+-- still allowed to omit. Lower it as you document; never raise it. At 0 the
+-- helpdoc is COMPLETE and stays that way — a new command must be documented in
+-- the commit that adds it, or this fence blocks that commit.
+local FLOOR = 0
 
 local EMIT = false
 for _, a in ipairs(arg or {}) do
