@@ -262,14 +262,53 @@ M.STDLIB = {
 -- the same ECMAScript gates apply to the whole js family
 M.STDLIB.typescript, M.STDLIB.tsx = M.STDLIB.javascript, M.STDLIB.javascript
 
+-- ── the CEILING: what a NEWER version takes away ───────────────────────────
+-- A floor answers "how old can I go"; the mirror is "how new breaks me". Tag a
+-- feature with a `removed-in` as well as an introduced-in and the version
+-- dimension becomes a supported RANGE [floor, ceiling) — cross-version support is
+-- the whole interval, not one end of it.
+--
+-- Call- and constant-shaped rather than syntax, so these ride the same
+-- disposition-gated machinery as M.STDLIB: a name counts only where it resolved
+-- to NOTHING in the project. The hedge points the OTHER WAY from the floor's,
+-- which is worth stating plainly: a wrong floor fact makes the floor too HIGH,
+-- a wrong removal makes the ceiling too LOW. Both NARROW the range and neither
+-- widens it, so the reported interval errs conservative at both ends.
+--
+-- Deprecated-but-present names are deliberately ABSENT (File.exists? still
+-- works): a deprecation is not a removal, and listing one would invent a ceiling.
+M.REMOVED = {
+    ruby = {
+        ['URI.escape']       = { v = '3.0', desc = 'URI.escape' },
+        ['URI.unescape']     = { v = '3.0', desc = 'URI.unescape' },
+        ['Thread.exclusive'] = { v = '3.0', desc = 'Thread.exclusive' },
+        ['taint']            = { v = '3.2', desc = 'Object#taint' },
+        ['untaint']          = { v = '3.2', desc = 'Object#untaint' },
+        ['tainted?']         = { v = '3.2', desc = 'Object#tainted?' },
+        ['trust']            = { v = '3.2', desc = 'Object#trust' },
+        ['untrust']          = { v = '3.2', desc = 'Object#untrust' },
+    },
+    python = {
+        ['time.clock']         = { v = '3.8', desc = 'time.clock' },
+        ['fractions.gcd']      = { v = '3.9', desc = 'fractions.gcd' },
+        ['asyncio.coroutine']  = { v = '3.11', desc = '@asyncio.coroutine' },
+        ['inspect.getargspec'] = { v = '3.11', desc = 'inspect.getargspec' },
+        ['assertEquals']       = { v = '3.12', desc = 'unittest assertEquals alias' },
+        ['assertNotEquals']    = { v = '3.12', desc = 'unittest assertNotEquals alias' },
+    },
+    -- ECMAScript gets NO table on purpose: it does not remove things (backward
+    -- compatibility is the language's whole strategy), so a ceiling table here
+    -- would invent a bound. The absence is reported as an absence.
+}
+
 --- The gate a callee matches, if any: the WHOLE callee first (`math.prod`), then
 --- its last segment (`tally`). Exposed as the lookup seam so the spec can assert
 --- every table entry is reachable — a dotted key that the extractor never
 --- produces in that form would otherwise sit there dead forever.
 --- Returns (entry, key) or nil.
-function M.gate_for(lang, callee)
-    local tbl = M.STDLIB[lang]
-    if not (tbl and callee) then return nil end
+function M.gate_for(lang, callee, which)
+    local tbl = (which or M.STDLIB)[lang]
+    if not (tbl and callee and callee ~= '') then return nil end
     if tbl[callee] then return tbl[callee], callee end
     local tail = callee:match('([%w_]+[!?]?)$')
     if tail and tbl[tail] then return tbl[tail], tail end
@@ -492,6 +531,19 @@ function M.group(facts)
     return by, ids
 end
 
+--- The gate a CALL matches. The qualified form comes first and it matters: the
+--- extractor records `callee` as the TAIL (`escape`) and the receiver-qualified
+--- name in `full` (`URI.escape`), so a dotted key can only ever match via `full`.
+--- Every dotted key in these tables was silently dead until this was measured —
+--- and the ordering is also what keeps `CGI.escape` from matching a table entry
+--- written for `URI.escape`.
+local function gate_of(lang, c, which)
+    local callrec = require 'cartograph.callrec'
+    local hit, key = M.gate_for(lang, callrec.full(c), which)
+    if hit then return hit, key end
+    return M.gate_for(lang, callrec.callee(c) or '', which)
+end
+
 --- Version-gated stdlib CALLS in the open graph, as hedged facts. Counted only
 --- where the call resolved to nothing in the project, so a project method that
 --- happens to share a stdlib name is never mistaken for one.
@@ -510,14 +562,42 @@ function M.call_facts(store)
         local ext = file and file:match('%.([%w]+)$')
         local lang = ext and ext2lang[ext:lower()]
         if lang then
-            local callee = callrec.callee(c) or ''
             -- key by the TABLE ENTRY, not the callee: `a.match?` and `b.match?`
             -- are the same gated method and must group as one row
-            local hit, key = M.gate_for(lang, callee)
+            local hit, key = gate_of(lang, c, M.STDLIB)
             -- `external` = resolved to NOTHING here. resolved/refused/dynamic all
             -- mean the project (or an unseeable dispatch) owns the name.
             if hit and census.disp(c) == 'external' then
                 out[#out + 1] = { id = 'stdlib:' .. key, v = hit.v,
+                    desc = hit.desc .. ' (~ name-matched)', tier = 'inferred',
+                    file = file, lang = lang, line = callrec.line(c) or 0 }
+            end
+        end
+    end
+    return out
+end
+
+--- Names this code uses that a NEWER version REMOVES — the ceiling facts. Same
+--- disposition gate as the stdlib tier (a project-defined name resolves there and
+--- is not a removal), same hedge, opposite direction.
+function M.removal_facts(store)
+    local census = require 'cartograph.census'
+    local callrec = require 'cartograph.callrec'
+    local ts = require 'cartograph.providers.treesitter'
+    local ext2lang = {}
+    for lang in pairs(M.REMOVED) do
+        local sp = ts.spec[lang]
+        for _, e in ipairs((sp and sp.exts) or {}) do ext2lang[e] = lang end
+    end
+    local out = {}
+    for _, c in callrec.each(store.data or {}) do
+        local file = callrec.file(c)
+        local ext = file and file:match('%.([%w]+)$')
+        local lang = ext and ext2lang[ext:lower()]
+        if lang then
+            local hit, key = gate_of(lang, c, M.REMOVED)
+            if hit and census.disp(c) == 'external' then
+                out[#out + 1] = { id = 'removed:' .. key, v = hit.v,
                     desc = hit.desc .. ' (~ name-matched)', tier = 'inferred',
                     file = file, lang = lang, line = callrec.line(c) or 0 }
             end
@@ -552,11 +632,16 @@ function M.report(store)
         byscale[k] = byscale[k] or {}
         table.insert(byscale[k], f)
     end
-    local hedged = {}
+    local hedged, gone = {}, {}
     for _, f in ipairs(M.call_facts(store)) do
         local k = M.scale_key(f.lang or langs[1])
         hedged[k] = hedged[k] or {}
         table.insert(hedged[k], f)
+    end
+    for _, f in ipairs(M.removal_facts(store)) do
+        local k = M.scale_key(f.lang or langs[1])
+        gone[k] = gone[k] or {}
+        table.insert(gone[k], f)
     end
     table.sort(order)
 
@@ -668,6 +753,35 @@ function M.report(store)
             L[#L + 1] = '    verify these before trusting an older target; and this tier'
             L[#L + 1] = '    UNDER-reports — a stdlib name the project also defines'
             L[#L + 1] = '    resolves there instead, so it is absent from this list'
+        end
+        -- the CEILING and therefore the supported RANGE
+        local rby, rids = M.group(gone[k] or {})
+        if #rids > 0 then
+            local ceiling
+            for _, id in ipairs(rids) do
+                if not ceiling or M.older(rby[id].v, ceiling) then ceiling = rby[id].v end
+            end
+            L[#L + 1] = ('  ⚠ CEILING %s — the first version that REMOVES something used here:')
+                :format(ceiling)
+            for _, id in ipairs(rids) do
+                local g = rby[id]
+                L[#L + 1] = ('    %-5s %-34s %3d  %s%s'):format(g.v, g.desc, g.n, g.site,
+                    g.n > 1 and (' (+%d more)'):format(g.n - 1) or '')
+            end
+            if floor and not M.older(floor, ceiling) then
+                L[#L + 1] = ('    ✗ NO VERSION WORKS: the floor (%s) is not below the')
+                    :format(floor)
+                L[#L + 1] = '      ceiling, so no single version satisfies both ends.'
+                L[#L + 1] = '      One of the two sites has to change.'
+            else
+                L[#L + 1] = ('    supported range: [%s, %s)'):format(floor or '?', ceiling)
+            end
+            L[#L + 1] = '    ~ name-matched like the tier above. A wrong removal makes the'
+            L[#L + 1] = '    ceiling too LOW, never too high, so the range errs narrow.'
+        elseif M.REMOVED[scalelangs[k][1]] == nil then
+            L[#L + 1] = '  no ceiling table for this scale — ECMAScript does not remove'
+            L[#L + 1] = '  features, so there is no upper bound to compute — which is'
+            L[#L + 1] = '  not the same claim as "unbounded"'
         end
         L[#L + 1] = ''
     end

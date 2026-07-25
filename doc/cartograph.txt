@@ -129,7 +129,11 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               NOT a finding, since the floor is a lower
                               bound. One section PER SCALE — ruby 3.1 and
                               ECMAScript 2022 are different rulers and
-                              are never maxed together
+                              are never maxed together. The answer is a
+                              RANGE: a name a later version REMOVED gives
+                              a CEILING, so the report ends at
+                              [floor, ceiling) — and says NO VERSION
+                              WORKS outright when the two ends cross
   :CartographRequires         the code's OWN profile — the inverse of an
                               environment one, in the same currency: the
                               external names it needs plus its version

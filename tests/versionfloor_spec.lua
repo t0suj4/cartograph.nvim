@@ -219,19 +219,24 @@ test('versionfloor: a plain string is not an f-string', function ()
 end)
 
 -- ── the stdlib tables must stay REACHABLE ──────────────────────────────────
-test('versionfloor: every STDLIB key is reachable through gate_for', function ()
+test('versionfloor: every STDLIB and REMOVED key is reachable through gate_for', function ()
     local dead = {}
-    for lang, tbl in pairs(vf.STDLIB) do
+    local tables = { STDLIB = vf.STDLIB, REMOVED = vf.REMOVED }
+    for which, byLang in pairs(tables) do
+    for lang, tbl in pairs(byLang) do
         for key in pairs(tbl) do
-            -- a dotted key must match as a WHOLE callee; a bare key as a tail
+            -- a dotted key is only ever reachable via the QUALIFIED form, which
+            -- the extractor puts in `full` — proven by measurement, since every
+            -- dotted key was silently dead while only `callee` was consulted
             local probe = key:find('%.') and key or ('recv.' .. key)
-            local hit, matched = vf.gate_for(lang, probe)
+            local hit, matched = vf.gate_for(lang, probe, byLang)
             if not hit or matched ~= key then
-                dead[#dead + 1] = lang .. ':' .. key
+                dead[#dead + 1] = which .. ' ' .. lang .. ':' .. key
             end
         end
     end
-    eq({}, dead, 'a key no callee form can ever match would sit in the table dead')
+    end
+    eq({}, dead, 'a key no call form can ever match would sit in the table dead')
 end)
 
 test('versionfloor: gate_for does not match a bare tail against a dotted key', function ()
@@ -415,5 +420,78 @@ test('versionfloor: scales are reported SEPARATELY, never maxed together', funct
     ok(text:find('2 version scales', 1, true), 'the split is announced: ' .. text:sub(1, 60))
     ok(text:find('version floor — ruby: 3%.1'), 'ruby keeps its own ruler')
     ok(text:find('ECMAScript 2020', 1, true), 'and the JS family keeps its own')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ── the CEILING: what a NEWER version takes away ───────────────────────────
+-- Floor answers "how old can I go"; this answers "how new breaks me", so the
+-- version dimension is a RANGE. The hedges point opposite ways and both NARROW
+-- the interval, which is the property worth pinning.
+
+local function rb_store(src)
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'a.rb', { src })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    return store, root
+end
+
+test('versionfloor: a removed name gives a ceiling and a supported range', function ()
+    if not ready() then skip('no ruby parser') end
+    local store, root = rb_store(
+        'class A\n  def go(x) x&.to_s end\n  def t(o) o.taint end\nend')
+    local facts = vf.removal_facts(store)
+    eq(1, #facts, 'one removal found')
+    eq('3.2', facts[1].v, 'Object#taint is gone in 3.2')
+    eq('inferred', facts[1].tier, 'hedged, like every name match')
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('CEILING 3.2', 1, true), 'the ceiling is named')
+    ok(text:find('supported range: [2.3, 3.2)', 1, true),
+        'and the floor plus ceiling make a RANGE: ' .. text:sub(1, 40))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: floor at or above ceiling means NO version works', function ()
+    if not ready() then skip('no ruby parser') end
+    -- 3.1 syntax and a name removed in 3.0 cannot both be satisfied
+    local store, root = rb_store(
+        'class A\n  def opts(x) = {x:}\n  def u(s) URI.escape(s) end\nend')
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('NO VERSION WORKS', 1, true),
+        'the contradiction is stated, not left for the reader to compute')
+    ok(text:find('One of the two sites has to change', 1, true), 'with the way out')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: a dotted key matches the QUALIFIED form, not a bare tail', function ()
+    if not ready() then skip('no ruby parser') end
+    -- the extractor records callee as the TAIL and the qualified name in `full`,
+    -- so URI.escape can only match via full — and CGI.escape must NOT match the
+    -- entry written for URI.escape, though both have the tail `escape`
+    local store, root = rb_store(
+        'class A\n  def u(s) URI.escape(s) end\n  def ok(s) CGI.escape(s) end\nend')
+    local descs = {}
+    for _, f in ipairs(vf.removal_facts(store)) do descs[#descs + 1] = f.desc end
+    eq(1, #descs, 'exactly one of the two escapes is a removal')
+    ok(descs[1]:find('URI.escape', 1, true), 'and it is the URI one: ' .. descs[1])
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: a scale with no ceiling table says so, and claims no bound', function ()
+    local js = pcall(vim.treesitter.get_string_parser, '', 'javascript')
+    if not js then skip('no javascript parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'a.js', { 'export const f = (a) => a?.b' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local text = table.concat(vf.report(store), '\n')
+    ok(text:find('no ceiling table for this scale', 1, true),
+        'ECMAScript does not remove features, so no bound is computed')
+    ok(text:find('not the same claim as "unbounded"', 1, true),
+        'and the absence is not dressed up as an upper bound')
     vim.fn.delete(root, 'rf')
 end)

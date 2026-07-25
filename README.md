@@ -1338,6 +1338,34 @@ over the **tree**, not the text — `&.` inside a string or a comment is not a
 feature use, which a regex would get wrong. And a file that cannot be read or
 parsed is counted as UNKNOWN rather than folded into a clean result.
 
+### The version is a RANGE, not a floor
+
+A floor answers "how old can I go". The mirror is "how new breaks me" — names a
+later version **removed** — so the real answer is an interval:
+
+```
+version floor — ruby: 2.3        held up by &. safe navigation at a.rb:2
+⚠ CEILING 3.2 — the first version that REMOVES something used here:
+    3.2  Object#taint (~ name-matched)   1  a.rb:3
+    supported range: [2.3, 3.2)
+```
+
+And when the two ends cross, that's stated outright rather than left for the
+reader to compute — 3.1 syntax plus a name removed in 3.0 gives:
+
+```
+✗ NO VERSION WORKS: the floor (3.1) is not below the ceiling, so no
+  single version satisfies both ends. One of the two sites has to change.
+```
+
+The hedges point in opposite directions and that's the useful part: a wrong floor
+fact makes the floor too **high**, a wrong removal makes the ceiling too **low**.
+Both narrow the interval and neither widens it, so the reported range errs
+conservative at both ends. Deprecated-but-present names are deliberately absent —
+`File.exists?` still works, and listing it would invent a ceiling. ECMAScript gets
+no ceiling table at all, since it doesn't remove features; the report says so
+rather than implying an unbounded upper end.
+
 ### Declared vs computed — the project's own answer key
 
 A project *declares* a floor in a real artifact; this *computes* one from the
