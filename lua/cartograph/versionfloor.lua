@@ -55,6 +55,8 @@ local function under(n, types)
 end
 
 local BLOCKS = { block = true, do_block = true }
+-- python literal containers: `[*a]` is PEP 448 (3.5), `f(*a)` is not
+local LITERALS = { list = true, set = true, tuple = true, dictionary = true }
 
 -- ── the per-language feature tables ────────────────────────────────────────
 -- Each entry: { id, v (version introduced), desc, node (tree-sitter type),
@@ -90,6 +92,49 @@ M.FEATURES = {
             node = 'pair', test = function (n) return named_count(n) == 1 end },
         { id = 'anon-block-param', v = '3.1', desc = 'def f(&) anonymous block parameter',
             node = 'block_parameter', test = function (n) return named_count(n) == 0 end },
+    },
+    python = {
+        { id = 'yield-from', v = '3.3', desc = 'yield from',
+            node = 'yield', test = function (n) return anon(n, 'from') end },
+        { id = 'await', v = '3.5', desc = 'await expression', node = 'await' },
+        -- PEP 448 unpacking in a LITERAL is 3.5; `f(*args)` is ancient, so the
+        -- literal ancestor is what makes this a version fact rather than noise
+        { id = 'literal-unpack', v = '3.5', desc = '[*a, *b] unpacking in a literal',
+            node = 'list_splat',
+            test = function (n)
+                local p = n:parent()
+                return p ~= nil and LITERALS[p:type()] == true
+            end },
+        { id = 'fstring', v = '3.6', desc = 'f-string interpolation',
+            node = 'interpolation' },
+        { id = 'var-annotation', v = '3.6', desc = 'x: int = 1 variable annotation',
+            node = 'assignment',
+            test = function (n)
+                for c in n:iter_children() do
+                    if c:named() and c:type() == 'type' then return true end
+                end
+                return false
+            end },
+        { id = 'walrus', v = '3.8', desc = ':= assignment expression',
+            node = 'named_expression' },
+        { id = 'positional-only', v = '3.8', desc = 'def f(a, /, b) positional-only',
+            node = 'positional_separator' },
+        { id = 'match-statement', v = '3.10', desc = 'match/case statement',
+            node = 'match_statement' },
+        { id = 'union-type', v = '3.10', desc = 'X | Y union in an annotation',
+            node = 'type',
+            test = function (n)
+                for c in n:iter_children() do
+                    if c:named() and c:type() == 'binary_operator' and anon(c, '|') then
+                        return true
+                    end
+                end
+                return false
+            end },
+        { id = 'except-star', v = '3.11', desc = 'except* exception group',
+            node = 'except_group_clause' },
+        { id = 'type-parameter', v = '3.12', desc = 'def f[T]() type parameter',
+            node = 'type_parameter' },
     },
 }
 
@@ -128,7 +173,32 @@ M.STDLIB = {
         ['intersect?']       = { v = '3.1', desc = 'Array#intersect?' },
         ['Data.define']      = { v = '3.2', desc = 'Data.define' },
     },
+    python = {
+        ['subprocess.run']   = { v = '3.5', desc = 'subprocess.run' },
+        ['os.fspath']        = { v = '3.6', desc = 'os.fspath' },
+        ['asyncio.run']      = { v = '3.7', desc = 'asyncio.run' },
+        ['fromisoformat']    = { v = '3.7', desc = 'datetime.fromisoformat' },
+        ['math.prod']        = { v = '3.8', desc = 'math.prod' },
+        ['removeprefix']     = { v = '3.9', desc = 'str.removeprefix' },
+        ['removesuffix']     = { v = '3.9', desc = 'str.removesuffix' },
+        ['functools.cache']  = { v = '3.9', desc = 'functools.cache' },
+        ['itertools.pairwise'] = { v = '3.10', desc = 'itertools.pairwise' },
+    },
 }
+
+--- The gate a callee matches, if any: the WHOLE callee first (`math.prod`), then
+--- its last segment (`tally`). Exposed as the lookup seam so the spec can assert
+--- every table entry is reachable — a dotted key that the extractor never
+--- produces in that form would otherwise sit there dead forever.
+--- Returns (entry, key) or nil.
+function M.gate_for(lang, callee)
+    local tbl = M.STDLIB[lang]
+    if not (tbl and callee) then return nil end
+    if tbl[callee] then return tbl[callee], callee end
+    local tail = callee:match('([%w_]+[!?]?)$')
+    if tail and tbl[tail] then return tbl[tail], tail end
+    return nil
+end
 
 --- Version compare over dotted numeric parts. Returns true when a < b.
 function M.older(a, b)
@@ -252,14 +322,12 @@ function M.call_facts(store)
     for _, c in callrec.each(store.data or {}) do
         local file = callrec.file(c)
         local ext = file and file:match('%.([%w]+)$')
-        local tbl = ext and ext2lang[ext:lower()] and M.STDLIB[ext2lang[ext:lower()]]
-        if tbl then
+        local lang = ext and ext2lang[ext:lower()]
+        if lang then
             local callee = callrec.callee(c) or ''
-            local tail = callee:match('([%w_]+[!?]?)$') or ''
             -- key by the TABLE ENTRY, not the callee: `a.match?` and `b.match?`
             -- are the same gated method and must group as one row
-            local key = tbl[callee] and callee or (tbl[tail] and tail)
-            local hit = key and tbl[key]
+            local hit, key = M.gate_for(lang, callee)
             -- `external` = resolved to NOTHING here. resolved/refused/dynamic all
             -- mean the project (or an unseeable dispatch) owns the name.
             if hit and census.disp(c) == 'external' then

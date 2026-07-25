@@ -162,3 +162,79 @@ test('versionfloor stdlib: the hedged tier never enters the floor or the ladder'
     ok(text:find('UNDER%-reports'), 'and the tier discloses that it under-reports')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── PYTHON: the second language table ──────────────────────────────────────
+-- The mechanism generalised for free (tables keyed by language, extensions read
+-- off the spec), so what needs asserting is the same thing as for ruby: that no
+-- entry is silently dead, and that a lookalike is not counted.
+
+local PY_SNIPPETS = {
+    ['yield-from']      = 'def g():\n    yield from h()',
+    ['await']           = 'async def f():\n    await g()',
+    ['literal-unpack']  = 'a = [*b, *c]',
+    ['fstring']         = 'x = f"hi {name}"',
+    ['var-annotation']  = 'x: int = 1',
+    ['walrus']          = 'if (n := f()):\n    pass',
+    ['positional-only'] = 'def f(a, /, b):\n    pass',
+    ['match-statement'] = 'match x:\n    case 1:\n        pass',
+    ['union-type']      = 'def f(a: int | str):\n    pass',
+    ['except-star']     = 'try:\n    pass\nexcept* TypeError:\n    pass',
+    ['type-parameter']  = 'def f[T](x: T) -> T:\n    return x',
+}
+
+local function py_ready()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.get_string_parser, '', 'python')
+end
+
+test('versionfloor: EVERY python table entry fires on its own snippet', function ()
+    if not py_ready() then skip('no python parser') end
+    local missing = {}
+    for _, f in ipairs(vf.FEATURES.python) do
+        local snip = PY_SNIPPETS[f.id]
+        if not snip then
+            missing[#missing + 1] = f.id .. ' (no snippet in this spec)'
+        elseif not ids(vf.scan('python', snip))[f.id] then
+            missing[#missing + 1] = f.id .. ' (detector never fired)'
+        end
+    end
+    eq({}, missing, 'a python detector with a wrong node type fires never, silently')
+end)
+
+test('versionfloor: f(*args) is NOT literal unpacking (the 3.5 false positive)', function ()
+    if not py_ready() then skip('no python parser') end
+    -- both are `list_splat`; only the one inside a LITERAL is PEP 448
+    eq(false, ids(vf.scan('python', 'f(*args)\n'))['literal-unpack'] or false,
+        'call unpacking is ancient and must not raise the floor to 3.5')
+    eq(true, ids(vf.scan('python', 'a = [*b]\n'))['literal-unpack'] or false,
+        'literal unpacking still counts')
+end)
+
+test('versionfloor: a plain string is not an f-string', function ()
+    if not py_ready() then skip('no python parser') end
+    eq(0, #vf.scan('python', 'x = "hi {name}"\n'), 'braces in a plain string are just braces')
+end)
+
+-- ── the stdlib tables must stay REACHABLE ──────────────────────────────────
+test('versionfloor: every STDLIB key is reachable through gate_for', function ()
+    local dead = {}
+    for lang, tbl in pairs(vf.STDLIB) do
+        for key in pairs(tbl) do
+            -- a dotted key must match as a WHOLE callee; a bare key as a tail
+            local probe = key:find('%.') and key or ('recv.' .. key)
+            local hit, matched = vf.gate_for(lang, probe)
+            if not hit or matched ~= key then
+                dead[#dead + 1] = lang .. ':' .. key
+            end
+        end
+    end
+    eq({}, dead, 'a key no callee form can ever match would sit in the table dead')
+end)
+
+test('versionfloor: gate_for does not match a bare tail against a dotted key', function ()
+    -- `Data.define` must NOT fire for every project `define` call
+    eq(nil, vf.gate_for('ruby', 'thing.define'), 'a dotted gate needs its full callee')
+    ok(vf.gate_for('ruby', 'Data.define'), 'and fires on it')
+    ok(vf.gate_for('ruby', 'h.except'), 'a bare gate matches on the tail')
+end)

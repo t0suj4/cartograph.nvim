@@ -1279,10 +1279,22 @@ over the **tree**, not the text — `&.` inside a string or a comment is not a
 feature use, which a regex would get wrong. And a file that cannot be read or
 parsed is counted as UNKNOWN rather than folded into a clean result.
 
-Ruby ships the first feature table (10 features, 2.3 → 3.1). The table is
-per-language, small, and additive — each entry is a node type plus an optional
-structural predicate, and the spec asserts every entry fires on its own snippet,
-because a wrong node type detects nothing *silently*.
+Two tables ship: **Ruby** (10 syntax features 2.3 → 3.1, 18 gated methods) and
+**Python** (11 features 3.3 → 3.12, 9 gated methods). A table is per-language,
+small and additive — each entry is a node type plus an optional structural
+predicate — and adding one needs no engine change, since the languages a report
+covers are derived from the tables themselves.
+
+Two guards keep a table from rotting. Every feature entry must fire on its own
+snippet, because a wrong node type detects nothing *silently* rather than
+loudly. And every stdlib key must be reachable through the lookup, so a dotted
+key the extractor never produces in that form can't sit there dead. The
+predicates earn their place on real ambiguity: `[*a, *b]` and `f(*args)` are both
+`list_splat`, and only the one inside a literal is PEP 448, so the 3.5 entry
+tests its parent — otherwise every call in the codebase would raise the floor.
+
+On django-oscar (483 files) that reads: floor **3.8, held up by a single walrus
+operator**, with 3.6 costing one fix and 3.5 costing ten.
 
 ## Reorder (statement commutativity)
 
