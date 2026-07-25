@@ -148,7 +148,7 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               provides each name). Coverage, never a
                               verdict; an artifact that cannot answer
                               name queries says so instead of scoring 0%
-  :CartographPortability {runtime}
+  :CartographPortability {runtime} [{to-runtime}]
                               score the external surface against a target
                               environment profile (tab-completes the ones
                               that ship): which names it PROVIDES, and
@@ -158,7 +158,14 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               it, or the artifact may be partial, so the
                               profile's own size is printed with the
                               verdict. A profile for another language is
-                              refused rather than scored
+                              refused rather than scored. With TWO
+                              runtimes it diffs the MOVE from the first to
+                              the second: the names whose status changes
+                              ARE the porting work. Needs two profiles for
+                              the SAME language that can answer name
+                              queries — no shipped pair qualifies yet, and
+                              it refuses clearly rather than reporting
+                              everything as lost
   :CartographExternals        the external boundary — unresolved names
                               and the shape each use implies (~)
   :CartographEscalate[!]      escalate hedge-saturated fns to lua-ls

@@ -174,3 +174,74 @@ test('portability: manifest groups by provider and never calls the rest missing'
     ok(text:find('third%-party dependency'), 'with the likely explanation, not an accusation')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── MOVING between environments: the A-to-B diff ───────────────────────────
+-- The names whose status CHANGES are the porting work. The comparison is tested
+-- through diff_entries, which takes two audit results and touches no disk — so
+-- it needs no invented profile artifact, which matters because no two SHIPPED
+-- profiles are comparable yet (three languages, and ruby-core has no name
+-- surface).
+
+local function audit_of(runtime, entries)
+    return { runtime = runtime, entries = entries }
+end
+
+test('portability: the diff names what a move LOSES and GAINS', function ()
+    local a = audit_of('rich', {
+        { name = 'I18n.t', calls = 10, provided = true, why = 'vocab' },
+        { name = 'Rails.logger', calls = 4, provided = true, why = 'namespace' },
+        { name = 'Wombat.frob', calls = 2, provided = false },
+        { name = 'Only.inB', calls = 7, provided = false },
+    })
+    local b = audit_of('lean', {
+        { name = 'I18n.t', calls = 10, provided = true },
+        { name = 'Rails.logger', calls = 4, provided = false },
+        { name = 'Wombat.frob', calls = 2, provided = false },
+        { name = 'Only.inB', calls = 7, provided = true },
+    })
+    local d = require('cartograph.portability').diff_entries(a, b)
+    eq(1, #d.lost, 'one name the target does not provide')
+    eq('Rails.logger', d.lost[1].name, 'and it is named')
+    eq(1, #d.gained, 'one the target adds')
+    eq('Only.inB', d.gained[1].name)
+    eq(1, d.kept, 'one provided by both')
+    eq(1, d.neither, 'and one by neither — every name is accounted for')
+end)
+
+test('portability: the diff is DIRECTIONAL', function ()
+    local port = require 'cartograph.portability'
+    local a = audit_of('a', { { name = 'x', calls = 1, provided = true } })
+    local b = audit_of('b', { { name = 'x', calls = 1, provided = false } })
+    eq(1, #port.diff_entries(a, b).lost, 'a -> b loses x')
+    eq(0, #port.diff_entries(b, a).lost, 'b -> a does not')
+    eq(1, #port.diff_entries(b, a).gained, 'it gains it instead')
+end)
+
+test('portability: lost names are ranked by call volume', function ()
+    local a = audit_of('a', {
+        { name = 'rare', calls = 1, provided = true },
+        { name = 'hot', calls = 99, provided = true },
+    })
+    local b = audit_of('b', {
+        { name = 'rare', calls = 1, provided = false },
+        { name = 'hot', calls = 99, provided = false },
+    })
+    local d = require('cartograph.portability').diff_entries(a, b)
+    eq('hot', d.lost[1].name, 'the heaviest breakage leads')
+end)
+
+test('portability: a diff against a signature-keyed profile is REFUSED', function ()
+    if not ready() then skip('no ruby parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'a.rb', { 'class A', '  def go; I18n.t("x"); end', 'end' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    -- ruby-core cannot answer name queries, so a diff would call EVERYTHING lost
+    local res, err = require('cartograph.portability').diff(store, 'ruby-rails', 'ruby-core')
+    eq(nil, res, 'refused rather than scored')
+    ok(err and err:find('no name surface', 1, true),
+        'and it says why: ' .. tostring(err))
+    vim.fn.delete(root, 'rf')
+end)

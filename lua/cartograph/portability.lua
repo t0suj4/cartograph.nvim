@@ -12,6 +12,14 @@
 -- artifacts that already ship and any new distilled profile becomes a target for
 -- free.
 --
+-- The A-to-B DIFF (M.diff) is built, but note what it needs: TWO name-queryable
+-- profiles for the SAME language. No shipped pair qualifies today — ruby-rails,
+-- zig-std and lua-factorio are three different languages, and ruby-core is
+-- signature-keyed — so the move report cannot be demonstrated on the artifacts in
+-- the tree. It becomes useful the moment a sibling profile lands (an mruby or
+-- opal provides-set, which is what the original design asked for). The mechanism
+-- refuses clearly rather than producing a meaningless "everything is lost".
+--
 -- HONESTY — a portability claim is easy to overstate, so:
 --   · Buckets are PROVIDED and NOT-IN-PROFILE. Never "missing": a name absent
 --     from a profile may be supplied by a dependency (a gem, an npm package) or
@@ -268,6 +276,100 @@ function M.audit(store, runtime)
         return a.name < b.name
     end)
     return res
+end
+
+--- MOVING between environments: audit the SAME requirement set under two
+--- profiles and diff the outcomes. The names whose status changes are the porting
+--- work — which is why this is small: requires() already guarantees both sides
+--- score the same set, so nothing can drift between them.
+--- Returns (result, err); result = { from, to, lost, gained, kept, neither }.
+function M.diff(store, from, to)
+    local a, erra = M.audit(store, from)
+    if not a then return nil, erra end
+    local b, errb = M.audit(store, to)
+    if not b then return nil, errb end
+    local pm = require 'cartograph.spec.profile'
+    for _, rt in ipairs({ from, to }) do
+        local prof = pm.load(rt)
+        if prof and not M.name_queryable(prof) then
+            return nil, ('%s is a signature-keyed artifact with no name surface —'
+                .. ' a diff against it would call everything lost'):format(rt)
+        end
+    end
+    local res = M.diff_entries(a, b)
+    res.size_from, res.size_to = M.profile_size(pm.load(from)), M.profile_size(pm.load(to))
+    return res
+end
+
+--- The pure comparison of two audit results — the whole semantic of a move, with
+--- no disk in it, so it is testable without inventing profile artifacts. Both
+--- audits score the SAME requirement set, so a name present in one and absent
+--- from the other is a genuine status change rather than a set mismatch.
+function M.diff_entries(a, b)
+    local bystatus = {}
+    for _, e in ipairs(b.entries) do bystatus[e.name] = e.provided end
+    local res = { from = a.runtime, to = b.runtime, lost = {}, gained = {},
+        kept = 0, neither = 0 }
+    for _, e in ipairs(a.entries) do
+        local inB = bystatus[e.name]
+        if e.provided and not inB then
+            res.lost[#res.lost + 1] = { name = e.name, calls = e.calls, why = e.why,
+                file = e.files and e.files[1] }
+        elseif not e.provided and inB then
+            res.gained[#res.gained + 1] = { name = e.name, calls = e.calls }
+        elseif e.provided then
+            res.kept = res.kept + 1
+        else
+            res.neither = res.neither + 1
+        end
+    end
+    local function bycalls(x, y)
+        if x.calls ~= y.calls then return x.calls > y.calls end
+        return x.name < y.name
+    end
+    table.sort(res.lost, bycalls)
+    table.sort(res.gained, bycalls)
+    return res
+end
+
+--- The diff as lines. Direction matters and the wording says so.
+function M.diff_report(store, from, to, opts)
+    local res, err = M.diff(store, from, to)
+    if not res then return { 'portability: ' .. err } end
+    local cap = (opts and opts.cap) or 20
+    local L = {}
+    L[#L + 1] = ('portability — MOVING FROM %s TO %s'):format(res.from, res.to)
+    L[#L + 1] = ('  %d name(s) LOST, %d gained, %d provided by both, %d by neither')
+        :format(#res.lost, #res.gained, res.kept, res.neither)
+    L[#L + 1] = ('  profiles claim %d and %d symbols — a thin target inflates "lost"')
+        :format(res.size_from, res.size_to)
+    L[#L + 1] = ''
+    if #res.lost == 0 then
+        L[#L + 1] = ('  nothing %s provides is absent from %s'):format(res.from, res.to)
+    else
+        L[#L + 1] = ('  LOST — %s provides these, %s does not (the porting work):')
+            :format(res.from, res.to)
+        for i = 1, math.min(cap, #res.lost) do
+            local e = res.lost[i]
+            L[#L + 1] = ('    %-34s %4d call(s)  %s'):format(e.name, e.calls, e.file or '')
+        end
+        if #res.lost > cap then
+            L[#L + 1] = ('    … +%d more'):format(#res.lost - cap)
+        end
+        L[#L + 1] = '  Still NOT "missing": the target artifact may simply be thinner,'
+        L[#L + 1] = '  and a dependency may supply the name in either environment.'
+    end
+    if #res.gained > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('  GAINED — %s provides these and %s did not:'):format(res.to, res.from)
+        for i = 1, math.min(5, #res.gained) do
+            L[#L + 1] = ('    %-34s %4d call(s)'):format(res.gained[i].name, res.gained[i].calls)
+        end
+        if #res.gained > 5 then
+            L[#L + 1] = ('    … +%d more'):format(#res.gained - 5)
+        end
+    end
+    return L
 end
 
 --- Display lines. `opts.cap` limits the not-in-profile list (default 25).

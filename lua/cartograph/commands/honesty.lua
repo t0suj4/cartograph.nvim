@@ -161,15 +161,18 @@ function M.register(H)
     cmd('CartographPortability', function (o)
         local store = live() if not store then return end
         store = whole_graph(store) if not store then return end
-        local runtime = o.fargs[1]
-        if not runtime then
-            return vim.notify('cartograph: :CartographPortability <runtime> —'
-                .. ' e.g. ruby-rails, zig-std, lua-factorio', vim.log.levels.WARN)
+        local from, to = o.fargs[1], o.fargs[2]
+        if not from then
+            return vim.notify('cartograph: :CartographPortability <runtime>'
+                .. ' [<to-runtime>] — one target audits against it, two diff the'
+                .. ' MOVE from the first to the second', vim.log.levels.WARN)
         end
-        scratch(require('cartograph.portability').report(store, runtime))
-    end, { nargs = '?', complete = function ()
+        local port = require 'cartograph.portability'
+        -- two targets = the MOVE between them; direction matters
+        scratch(to and port.diff_report(store, from, to) or port.report(store, from))
+    end, { nargs = '*', complete = function ()
         return require('cartograph.portability').runtimes()
-    end, desc = 'cartograph: score the external surface against a target environment profile — which names it PROVIDES and which are not in it (candidate porting work, with call counts). Not-in-profile is not "missing": a dependency may supply it' })
+    end, desc = 'cartograph: score the external surface against a target environment profile — which names it PROVIDES and which are not in it (candidate porting work, with call counts). With TWO targets, diff the MOVE from the first to the second: the names that change status ARE the work. Not-in-profile is not "missing": a dependency may supply it' })
 
     -- ── the EXTERNAL SURFACE: names used but defined nowhere here, with the
     --    shape inferred backward from usage (the boundary map + write-side seed)

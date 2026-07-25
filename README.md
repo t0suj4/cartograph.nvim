@@ -1281,6 +1281,25 @@ profile *is* a provides set, so every distilled artifact that ships is already a
 target, and `runtimes()` derives the list rather than hardcoding it. Run the same
 codebase against different profiles and the diff is the porting work.
 
+With **two** targets it diffs the move instead — the names whose status changes
+*are* the porting work:
+
+```
+portability — MOVING FROM rich TO lean
+  1 name(s) LOST, 1 gained, 1 provided by both, 1 by neither
+  LOST — rich provides these, lean does not (the porting work):
+    Rails.logger    4 call(s)
+```
+
+Both audits score the *same* requirement set, so nothing can drift between the
+two sides, and the diff is directional — `a → b` losing a name is `b → a` gaining
+it. One honest limitation: a move needs two name-queryable profiles **for the same
+language**, and no shipped pair qualifies today (`ruby-rails`, `zig-std` and
+`lua-factorio` are three languages; `ruby-core` is signature-keyed). So the
+mechanism refuses clearly rather than reporting everything as lost, and becomes
+useful the moment a sibling profile lands — an `mruby` or `opal` provides-set,
+which is exactly what the original design asked for.
+
 It's the easiest verb here to overstate, so: the bucket is **NOT-IN-PROFILE**,
 never "missing" — a dependency may supply the name, or the artifact may be
 partial, and cartograph cannot tell which. The profile's own symbol count is
