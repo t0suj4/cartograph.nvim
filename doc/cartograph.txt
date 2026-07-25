@@ -267,19 +267,67 @@ OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
 ==============================================================================
 4. KEYS                                                       *cartograph-keys*
 
-Every binding is remappable — pass any subset: >
+Every binding is remappable. The FIELD column is the name to pass to setup —
+any subset, and `false` unbinds one entirely: >
 
-    require('cartograph').setup { keys = { descend = '<Right>' } }
+    require('cartograph').setup {
+      keys = { descend = '<Right>', close = false },  -- false unbinds
+    }
 <
-Defaults (see lua/cartograph/config.lua for the full table):
+Defaults assume qwerty and reuse standard vim idioms (tags, jumplist, gf).
+This table is checked against lua/cartograph/config.lua by tools/docaudit.lua,
+so it cannot drift from the code.
 
-  navigation      <CR> pivot · <C-]> jump to callee · <C-o>/<C-t> back
-                  <C-i> forward · gf open real file · h/l ascend/descend
-                  gr trace a parameter's origins · <Tab> cycle lens
-  staging         dd cut · d (visual) cut selection · p paste = destination
-                  u unstage last
-  working set     m mark · M set view · ]w / [w cycle members
-  panes           q close
+NAVIGATION ~
+  field         default   what it does ~
+  pivot         <CR>      re-root on / expand this entry
+  jump          <C-]>     source: go to the callee under the cursor
+  back          <C-o>     jumplist back
+  back_alt      <C-t>     also back, where <C-o> is already taken
+  forward       <C-i>     jumplist forward
+  open_file     gf        open the real file at this entry
+  ascend        h         symbols: zoom out (function -> file -> tree)
+  descend       l         symbols: zoom in
+  down          j         symbols: next row; at a block's last row it
+                          steps OUT to the parent
+  up            k         symbols: previous row, mirrored upward
+  cycle         <Tab>     cycle this altitude's lens / files view mode
+  cycle_back    <S-Tab>   cycle it the other way
+  close         q         close a pane
+
+STAGING (symbols pane) ~
+  field         default   what it does ~
+  cut           dd        cut this row into the move-set
+  cut_visual    d         cut the visual selection
+  paste         p         on a file row: set the destination
+  unstage       u         unstage the last cut
+
+NODE MARKS (symbols pane) ~
+  field         default   what it does ~
+  set_mark      m         remember the node under the cursor, m{a-z}
+  goto_mark     `         pivot to a remembered node, `{a-z}
+
+Marks are the one working-set-adjacent thing that IS a vim idiom, so they keep
+the key: the meaning matches vim exactly, but they are keyed by NODE, not line.
+
+UNBOUND BY DEFAULT                                    *cartograph-keys-unbound*
+
+A graph operation with no vim idiom behind it does not squat on a vim key — `m`
+already marks, `M` is already middle-of-screen. These ship as COMMANDS and stay
+unbound until you ask for them:
+
+  field         default   what it does ~
+  mark          (unbound) toggle this row in the working set, which is
+                          what :CartographMark does
+  set_view      (unbound) the working-set altitude (:CartographWorkingSet)
+  set_next      (unbound) next working-set member
+  set_prev      (unbound) previous working-set member
+  cone_in       (unbound) cone: what REACHES this (:CartographCone)
+  cone_out      (unbound) cone: what this REACHES
+>
+    require('cartograph').setup { keys = { mark = ',m', set_view = ',M',
+      set_next = ']w', set_prev = '[w', cone_in = ',c', cone_out = ',C' } }
+<
 
 ==============================================================================
 5. TRANSACTIONS                                       *cartograph-transactions*

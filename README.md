@@ -390,14 +390,28 @@ as a lower bound, since a copy that inserts a local can drift past the matcher.
 
 ### The working set
 
-Mark what you're working on; dive freely; come back. In the symbols list:
+Mark what you're working on; dive freely; come back. These ship as **commands**,
+**unbound by default**: a graph operation with no vim idiom behind it doesn't
+squat on a vim key (`m` already marks, `M` is middle-of-screen). The `keys.`
+name after each is what to bind if you want it on a key.
 
-- `m` — toggle the symbol under the cursor in the **working set** (● in
-  the gutter; files containing members carry ● at the files level).
-- `M` — the working-set altitude: your members grouped by file, with the
-  cursor on the **last-visited member** — the way back from a code dive.
-  `l` dives back in, `h` returns the way you came.
-- `]w` / `[w` — cycle through members (conscious pivots: `<C-o>` undoes).
+- `:CartographMark` (`keys.mark`) — toggle the symbol under the cursor in the
+  **working set** (● in the gutter; files containing members carry ● at the
+  files level).
+- `:CartographWorkingSet` (`keys.set_view`) — the working-set altitude: your
+  members grouped by file, with the cursor on the **last-visited member** — the
+  way back from a code dive. `l` dives back in, `h` returns the way you came.
+- `keys.set_next` / `keys.set_prev` — cycle through members (conscious pivots:
+  `<C-o>` undoes).
+
+```lua
+require('cartograph').setup {
+  keys = { mark = ',m', set_view = ',M', set_next = ']w', set_prev = '[w' },
+}
+```
+
+The full default table, and everything else that is deliberately unbound, is in
+`:h cartograph-keys`.
 
 Membership is held as **refs**, not ids: it survives refresh (a member
 follows its function through line shifts, and renames with a note),

@@ -20,6 +20,12 @@
 --     literal string is invisible to it.
 --   SPEC ROSTER (proof) — ts.spec's keys, versus the language count and name
 --     list each doc sentence claims.
+--   CONFIG.KEYS (proof) — the default binding table, versus the field/default
+--     table the helpdoc's KEYS section publishes. That section is therefore a
+--     MACHINE-CHECKED TABLE: `  <field> <default> <text>` rows, a column header
+--     marked with a trailing ~, `(unbound)` for a field defaulting to false.
+--     Keep the shape or the audit stops seeing it (and the coverage gate fires).
+--     README's key mentions are PROSE and are not checked — they can still rot.
 --
 -- Two tiers of finding, never conflated:
 --   CONFIRMED DRIFT — the doc states something FALSE: a :Cartograph name that
@@ -44,6 +50,8 @@ package.path = REPO .. '/lua/?.lua;' .. REPO .. '/lua/?/init.lua;' .. package.pa
 -- helpdoc is COMPLETE and stays that way — a new command must be documented in
 -- the commit that adds it, or this fence blocks that commit.
 local FLOOR = 0
+-- The same ratchet for config.keys fields missing from the KEYS table.
+local KEYS_FLOOR = 0
 
 local EMIT = false
 for _, a in ipairs(arg or {}) do
@@ -173,9 +181,57 @@ local function roster_claim(s)
     end
 end
 
+-- ── 4b. the KEYS table the helpdoc publishes ────────────────────────────────
+-- Rows inside |cartograph-keys| up to the next section rule. A trailing ~ marks
+-- a column header, not a binding; continuation lines are indented past the
+-- field column and so never match.
+local cfgkeys = require('cartograph.config').keys
+local keyclaim = {}
+do
+    local inside = false
+    for i, line in ipairs(HELP.lines) do
+        if line:find('*cartograph-keys*', 1, true) then
+            inside = true
+        elseif inside and line:match('^====') then
+            break
+        elseif inside and not line:match('~%s*$') then
+            local field, claimed = line:match('^  (%a[%w_]*)%s+(%S+)')
+            if field and not keyclaim[field] then
+                keyclaim[field] = { key = claimed, line = i }
+            end
+        end
+    end
+end
+
 -- ── 5. report ──────────────────────────────────────────────────────────────
 local confirmed = {}   -- doc states something FALSE
 local function drift(fmt, ...) confirmed[#confirmed + 1] = fmt:format(...) end
+
+-- A binding the doc publishes must BE the default. Teaching a key that does
+-- nothing (or that another feature owns) is the same class of lie as naming a
+-- command that no longer exists.
+for _, field in ipairs(sortedkeys(keyclaim)) do
+    local c, actual = keyclaim[field], cfgkeys[field]
+    if actual == nil then
+        drift('doc/cartograph.txt:%d publishes keys.%s — no such setup field',
+            c.line, field)
+    elseif c.key == '(unbound)' then
+        if actual ~= false then
+            drift('doc/cartograph.txt:%d calls keys.%s unbound, but it defaults to %s',
+                c.line, field, tostring(actual))
+        end
+    elseif actual == false then
+        drift('doc/cartograph.txt:%d teaches keys.%s = %s, but it is UNBOUND by default',
+            c.line, field, c.key)
+    elseif actual ~= c.key then
+        drift('doc/cartograph.txt:%d teaches keys.%s = %s, but the default is %s',
+            c.line, field, c.key, tostring(actual))
+    end
+end
+local keygap = {}
+for _, field in ipairs(sortedkeys(cfgkeys)) do
+    if not keyclaim[field] then keygap[#keygap + 1] = field end
+end
 
 for _, s in ipairs({ HELP, READ }) do
     for _, name in ipairs(sortedkeys(s.at)) do
@@ -260,6 +316,15 @@ if #nowhere > 0 then
     print('  ' .. table.concat(nowhere, ' '))
 end
 
+print('')
+print(('== KEYS: config.keys fields missing from the |cartograph-keys| table (ratchet: %d) ==')
+    :format(KEYS_FLOOR))
+if #keygap == 0 then
+    print(('  (none — all %d fields published)'):format(#sortedkeys(cfgkeys)))
+else
+    print('  ' .. table.concat(keygap, ' '))
+end
+
 if #unseen > 0 then
     print('')
     print('== INTERNAL: live commands the intercept did not see (blind path) ==')
@@ -316,6 +381,11 @@ end
 if #undoc > FLOOR then
     print(('docaudit: FAIL — %d undocumented commands, ratchet allows %d')
         :format(#undoc, FLOOR))
+    os.exit(1)
+end
+if #keygap > KEYS_FLOOR then
+    print(('docaudit: FAIL — %d keys fields unpublished, ratchet allows %d')
+        :format(#keygap, KEYS_FLOOR))
     os.exit(1)
 end
 if #undoc < FLOOR then
