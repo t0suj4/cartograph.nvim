@@ -211,3 +211,61 @@ test('tokens: load-order walk — shadowing, islands, checker callees', function
     eq('ok', byid['user.fs::go@0'].echeck,
         'checker resolves callees through the walk')
 end)
+
+-- ── WIRING: the token provider is reachable from an :Cartograph open ───────
+-- It produced correct graphs for a long while with nothing routing to it, so
+-- these cover the seam rather than the tokenizer: one file walk classifies both
+-- providers' files, and a token graph survives store.ingest.
+
+local ts = require 'cartograph.providers.treesitter'
+
+local function tree(files)
+    local root = vim.fn.tempname()
+    for rel, src in pairs(files) do
+        local dir = (root .. '/' .. rel):match('^(.*)/[^/]+$')
+        vim.fn.mkdir(dir, 'p')
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(src); fd:close()
+    end
+    return root
+end
+
+test('list_files: stack-language files come back separately from ts files', function ()
+    local root = tree {
+        ['core.fs']     = ': double dup + ;\n',
+        ['sub/main.fs'] = ': main double ;\n',
+        ['art.ps']      = '/box { 4 2 rectfill } def\n',
+        ['build.lua']   = 'local M = {}\nreturn M\n',
+    }
+    local tsf, _, tok = ts.list_files(root)
+    eq({ 'build.lua' }, tsf, 'tree-sitter claims only what it has a grammar for')
+    eq({ 'art.ps', 'core.fs', 'sub/main.fs' }, tok, 'the dialects come back third, sorted')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('list_files: the token list inherits the walk\'s exclusions', function ()
+    local root = tree {
+        ['core.fs'] = ': double dup + ;\n',
+        ['node_modules/vendored.fs'] = ': junk ;\n',
+        ['vendor/also.fs'] = ': junk2 ;\n',
+    }
+    local _, _, tok = ts.list_files(root)
+    eq({ 'core.fs' }, tok, 'vendored dirs are skipped for dialects too, not just for ts')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('a token graph ingests, and declares that its calls are aggregated', function ()
+    local root = tree { ['core.fs'] = ': double dup + ;\n: quad double double ;\n' }
+    local data = tok.extract(root, { files = { 'core.fs' } })
+    eq('tokens', data.provider, 'the graph carries its own provider identity')
+    eq('aggregated', (data.capabilities or {}).calls,
+        'and says calls are aggregated — the reason this is not merged into a ts graph')
+    local store = require 'cartograph.store'
+    store.ingest(data)
+    local words = {}
+    for _, n in pairs(store.by_id) do
+        if n.kind == 'function' then words[#words + 1] = n.name end
+    end
+    table.sort(words)
+    eq({ 'double', 'quad' }, words, 'words are browsable nodes after ingest')
+    vim.fn.delete(root, 'rf')
+end)

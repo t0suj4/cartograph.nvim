@@ -645,6 +645,18 @@ callers). Ariadne's thread, in text.
      and Lua registry fields are dynamically dispatched (not dead);
      `main` is an entry point; stdlib vocabularies (`string.format`,
      `.size()`, scheme's `apply`) never name-match a project definition.
+   - **tokens** (stack languages: Forth, PostScript): these cannot have a
+     faithful grammar *even in principle* — Forth's parsing words rewrite the
+     syntax at runtime — so the graph comes from token-level convention
+     instead: definer words give defs, literal-name mentions give references,
+     load order binds them (nearest-preceding, which *is* Forth's redefinition
+     semantics). A root of these opens through it automatically; the file walk
+     is tree-sitter's, so the same exclusions apply. Word mentions are ref
+     **edges**, not call sites, and the graph says so
+     (`capabilities.calls = aggregated`) — which is also why a **mixed** root
+     opens through tree-sitter and *discloses* how many dialect files it left
+     out rather than folding them in under a promise that doesn't hold for
+     them. One root, one provider identity.
    - **self** (`:Cartograph self://loaded`): the RUNNING nvim as a graph.
      `nvim_list_runtime_paths()` is the loaded-plugin roster — a plugin
      joins the runtimepath exactly when it loads, so this is

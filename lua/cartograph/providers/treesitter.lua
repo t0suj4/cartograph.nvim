@@ -2791,8 +2791,13 @@ local EXCLUDE_DIRS = { node_modules = true, vendor = true, dist = true,
     deps = true, third_party = true, thirdparty = true, external = true }
 
 local function list_files(root, subdirs)
-    local out, minified = {}, {}
+    local out, minified, tokens = {}, {}, {}
     local seen_real = {} -- external symlink targets already walked (cycles/dups)
+    -- stack languages (forth/postscript) can't have a faithful grammar even in
+    -- principle, so they're a SEPARATE provider — but they share this walk, and
+    -- with it every exclusion rule. Third return, disjoint from `out` by
+    -- extension: a file no spec claims, that a dialect does.
+    local dialect_of = require('cartograph.providers.tokens').dialect_of
     local function in_scope(rel)
         if not subdirs then return true end
         for _, p in ipairs(subdirs) do
@@ -2847,6 +2852,8 @@ local function list_files(root, subdirs)
                     if not ex then rec(r) end
                 elseif (lang_for(r) or container_for(r)) and want(r) then
                     out[#out + 1] = r
+                elseif dialect_of(r) and want(r) then
+                    tokens[#tokens + 1] = r
                 end
             end
         end
@@ -2854,9 +2861,12 @@ local function list_files(root, subdirs)
     rec('')
     table.sort(out)
     table.sort(minified)
-    return out, minified
+    table.sort(tokens)
+    return out, minified, tokens
 end
--- the cache diffs the tree with the same walk/exclusion rules extraction uses
+-- the cache diffs the tree with the same walk/exclusion rules extraction uses.
+-- Third return = the stack-language files, for the token provider; every
+-- existing caller keeps at most two, so it costs them nothing.
 function M.list_files(root, subdirs) return list_files(root, subdirs) end
 
 -- ── mentions: collect (phase 1, tree live) + reduce (lookups ready) ──────

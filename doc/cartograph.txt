@@ -443,6 +443,16 @@ the non-inert configuration belongs.
                 from your config into a plugin — or plugin into plugin —
                 resolves in a single graph. A session-scoped SAMPLE, not
                 cached: the next launch may load a different set.
+  tokens        stack languages (Forth, PostScript), which cannot have a
+                faithful grammar even in principle — Forth's parsing
+                words rewrite the syntax at runtime. Defs come from
+                definer words; word mentions are ref EDGES, not call
+                sites (`capabilities.calls` = aggregated). A root of
+                these opens through it automatically. A MIXED root opens
+                through tree-sitter and says how many dialect files it
+                left out: the two providers promise different things
+                about calls, so they are not merged into one graph.
+                Saving a dialect file does not re-extract it.
   clangd        an ORACLE over the cpp skeleton: call edges proven via
                 callHierarchy, only answered functions upgraded.
 

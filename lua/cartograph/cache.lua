@@ -73,7 +73,12 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 101 -- v101: S2 SHAPE-ACTIVATED PACKS ([[cartograph-repo-shapes]]). With no explicit
+M.VERSION = 102 -- v102: STACK-LANGUAGE ROOTS now open through the token provider
+               -- ([[cartograph-stack-languages]]). A forth/postscript root previously extracted to
+               -- an EMPTY tree-sitter graph, and that empty graph CACHES — so without a bump the
+               -- warm path would keep serving "0 nodes" and the new provider would never run. Only
+               -- affects roots that were empty anyway; every tree-sitter root's output is unchanged.
+               -- v101: S2 SHAPE-ACTIVATED PACKS ([[cartograph-repo-shapes]]). With no explicit
                -- packs, ts.extract/parallel default them from the project shape (shapes.packs_for
                -- UP-walk) — a Rails app (or a sub-dir of one) auto-activates the `rails` pack, so a
                -- root cached packless pre-S2 is stale. Extraction-behavior change for DEFAULTED

@@ -72,6 +72,12 @@ local function dialect_of(name)
     return one and M.ext_dialect[one:lower()]
 end
 
+--- Which dialect (if any) claims this filename. Exposed because the tree-sitter
+--- provider's file walk asks it: ONE walk then classifies BOTH providers' file
+--- sets, and ours inherits that walk's exclusions (vendored dirs, the
+--- config.exclude names, the symlink rules) instead of rolling its own.
+M.dialect_of = dialect_of
+
 -- ── tokenizers ─────────────────────────────────────────────────────────
 -- Both return { {t=, l=, c=}, ... } (0-based line, byte col). Comments
 -- and string CONTENTS are dropped here; stack-effect comments are a v2

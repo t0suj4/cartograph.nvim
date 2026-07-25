@@ -406,8 +406,36 @@ function M.open(dump_path, opts)
             finish(data)
         else
             local ts = require 'cartograph.providers.treesitter'
+            -- ONE walk, both providers' file sets. Stack languages (forth,
+            -- postscript) are a SEPARATE provider, not a merge: `provider` and
+            -- `capabilities` are whole-graph claims — the token provider
+            -- AGGREGATES word mentions into ref edges and says so
+            -- (capabilities.calls='aggregated'), so folding its files into a
+            -- tree-sitter graph would smear that claim over files it isn't true
+            -- of. One root, one provider identity.
+            local tsfiles, _, tokfiles = ts.list_files(target, opts and opts.subdirs)
+            if #tokfiles > 0 and #tsfiles == 0 then
+                local data2 = require('cartograph.providers.tokens')
+                    .extract(target, { files = tokfiles })
+                require('cartograph.cache').save_bg(data2)
+                finish(data2)
+                vim.notify(('cartograph: %d stack-language file(s) via the token'
+                    .. ' provider — word mentions are ref EDGES, not call sites'
+                    .. ' (capabilities.calls = aggregated), and a save does not'
+                    .. ' re-extract'):format(#tokfiles), vim.log.levels.INFO)
+            else
+            -- a MIXED root opens as tree-sitter; the dialect files stay out
+            -- rather than ride in under a claim that doesn't hold for them.
+            -- Disclosed, never silent.
+            if #tokfiles > 0 then
+                vim.notify(('cartograph: %d forth/postscript file(s) are NOT in'
+                    .. ' this graph — a mixed root opens through tree-sitter, and'
+                    .. ' the two providers make different promises about calls.'
+                    .. ' Open that subtree on its own to browse them')
+                    :format(#tokfiles), vim.log.levels.WARN)
+            end
             local files = not (opts and opts.subdirs) and cfg.parallel ~= false
-                and ts.list_files(target) or {}
+                and tsfiles or {}
             if #files >= (cfg.parallel_threshold or 300) then
                 -- streaming cold open: the browser opens NOW on module
                 -- stubs; worker chunks fill the graph in as they land
@@ -445,6 +473,7 @@ function M.open(dump_path, opts)
                 end
                 finish(data)
             end
+            end -- tree-sitter root (vs the token-provider root above)
         end
     else
         store.load(target)
