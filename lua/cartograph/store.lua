@@ -470,9 +470,17 @@ function M.materialize_file_calls(rel)
     end
     M.data.calls = calls
     if added > 0 then
-        -- CARRY the whole-graph self-type map if one was captured, so resolve_self
-        -- cannot read this partial call set's missing poison as licence to type.
+        -- CARRY the whole-graph self-type map if one is available, so resolve_self
+        -- cannot read this partial call set's missing poison as licence to type. In
+        -- session first; failing that, the PERSISTED one — which is the whole reason it
+        -- is persisted, since a cold thin open has no calls to derive a map from. The
+        -- cache validates it against the stamp set it was derived from and returns nil
+        -- if the corpus moved, so a stale map can never be seeded.
         local seed = M._selft_map
+        if not seed and M.data.stamps then
+            seed = require('cartograph.cache').load_selft(M.data.root, M.data.stamps)
+            M._selft_map = seed -- reuse across this session's materializations
+        end
         M.data.selft_seed = seed
         ts.relink(M.data, {})
         M.data.selft_seed = nil -- never persist a resolution input onto the graph

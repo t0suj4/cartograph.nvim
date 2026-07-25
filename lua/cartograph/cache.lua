@@ -968,6 +968,89 @@ local function manifest_of(data, sizes)
         sizes = sizes } -- per-shard byte lengths: truncation detector
 end
 
+-- ── THE SELF-TYPE MAP, as a persisted side file ─────────────────────────────
+-- ([[cartograph-merging-strategies]], the calls half.) resolve_self's map is derived
+-- from RESOLVED CALLS, so a cold thin index cannot compute one — persisting a
+-- whole-graph map is the ONLY way a demand open can have it, which makes this
+-- load-bearing rather than an optimisation.
+--
+-- A SIDE FILE, not a manifest field: the manifest is read on EVERY open and is the
+-- commit point, while this map reaches 360 KB (wow). Paying that read when nothing
+-- will ask for the map taxes the common path; lazily loaded, it costs nothing until a
+-- materialization asks.
+--
+-- VALIDITY IS A STAMP DIGEST, not the cache version alone. The map names method ids
+-- and classes from one corpus STATE; if a file changed, a stale map types against
+-- classes that may have moved or gone — worse than no map, since it yields confident
+-- wrong receivers instead of an honest refusal. The digest covers the exact stamp set
+-- the map was derived from, and any drift discards it.
+local SELFT_FILE = 'selft.bin'
+
+local function stamp_digest(stamps)
+    local fs = {}
+    for f in pairs(stamps or {}) do fs[#fs + 1] = f end
+    table.sort(fs)
+    local parts = {}
+    for i = 1, #fs do
+        local s = stamps[fs[i]]
+        parts[#parts + 1] = fs[i] .. '\31' .. (type(s) == 'table'
+            and ((s.mtime or '?') .. ':' .. (s.size or '?')) or tostring(s))
+    end
+    return vim.fn.sha256(table.concat(parts, '\30'))
+end
+
+--- Persist a whole-graph self-type map for `root`. No-op without a map or stamps.
+--- The flat form encodes a poisoned entry as `false` and a typed one as a SORTED class
+--- array, so the blob is deterministic — a set's pairs() order is not.
+function M.save_selft(root, map, stamps)
+    if require('cartograph.config').cache == false then return false end
+    if not (root and map and next(map) and stamps and next(stamps)) then return false end
+    local flat = {}
+    for id, v in pairs(map) do
+        if v == false then flat[id] = false
+        else
+            local a = {}
+            for c in pairs(v) do a[#a + 1] = c end
+            table.sort(a)
+            flat[id] = a
+        end
+    end
+    local dir = M.path(root)
+    vim.fn.mkdir(dir, 'p')
+    local blob = vim.mpack.encode({ version = M.VERSION,
+        digest = stamp_digest(stamps), map = flat })
+    -- the manifest's temp-then-rename discipline, for the same reason: a half-written
+    -- map must never be readable, because a truncated one decodes into a PARTIAL map,
+    -- which is exactly the unsound input this artifact exists to prevent
+    local tmp = dir .. '/selft.tmp'
+    local fd = io.open(tmp, 'wb')
+    if not fd then return false end
+    fd:write(blob)
+    fd:close()
+    return (pcall(vim.uv.fs_rename, tmp, dir .. '/' .. SELFT_FILE)) and true or false
+end
+
+--- Load it back, or nil when absent / from another cache version / derived from a
+--- different corpus state. Rehydrates class arrays into sets, the shape resolve_self
+--- seeds from.
+function M.load_selft(root, stamps)
+    local rec = read_decoded(M.path(root) .. '/' .. SELFT_FILE)
+    if type(rec) ~= 'table' or rec.version ~= M.VERSION or type(rec.map) ~= 'table' then
+        return nil
+    end
+    if rec.digest ~= stamp_digest(stamps) then return nil end -- the corpus moved
+    local out = {}
+    for id, v in pairs(rec.map) do
+        if v == false then out[id] = false
+        else
+            local s = {}
+            for _, c in ipairs(v) do s[c] = true end
+            out[id] = s
+        end
+    end
+    return out
+end
+
 --- Sweep shard files the manifest no longer references. Deletion is a
 --- TOMBSTONE BY OMISSION: load() reads only manifest-referenced shards,
 --- so garbage is inert — reclaiming it is never on the hot path.
@@ -978,7 +1061,11 @@ function M.gc(root, opts)
         M._gc_pending[root] = nil
         local m, dir = read_manifest(root)
         if not m then return 0 end
-        local keep = { ['manifest.bin'] = true, ['manifest.tmp'] = true }
+        -- the self-type map is manifest-INDEPENDENT: it must outlive a thin re-save,
+        -- which is the entire point, since a partial graph never produces one. So the
+        -- sweep must not read "unreferenced" as "garbage" for this file.
+        local keep = { ['manifest.bin'] = true, ['manifest.tmp'] = true,
+            [SELFT_FILE] = true, ['selft.tmp'] = true }
         for f in pairs(m.stamps) do keep[fkey(f)] = true end
         local removed = 0
         local it = vim.uv.fs_scandir(dir)
@@ -1035,6 +1122,14 @@ function M.save(data, dirty)
                 vim.log.levels.WARN)
         end
         sizes[f] = n
+    end
+    -- the SELF-TYPE MAP, before the manifest and only from a WHOLE graph: a partial
+    -- graph's map is the unsound one this artifact exists to displace, so a thin save
+    -- must leave any existing map untouched rather than overwrite it with its own.
+    if not data.index_only then
+        local st = package.loaded['cartograph.store']
+        local map = st and st.selft_map and st.selft_map()
+        if map then M.save_selft(data.root, map, data.stamps) end
     end
     -- manifest LAST: the commit point (any skew re-splices at next diff)
     write_manifest(dir, manifest_of(data, sizes))
