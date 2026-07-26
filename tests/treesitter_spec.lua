@@ -40,8 +40,16 @@ test('treesitter: C project — nodes, calls, includes, df-lite', function ()
     end
     ok(byname.helper and byname.helper.kind == 'function', 'helper found')
     ok(byname.main and byname.main.entry, 'main is an entry point')
-    ok(byname.dispatched and byname.dispatched.cbarg,
-        'dispatch-table reference marks the fn dynamically dispatched')
+    -- a dispatch-table reference is a `reg` EDGE from the referencing module.
+    -- It used to ALSO flag the node cbarg; that flag conflated this class with
+    -- two unrelated ones and fed the same-file tier gate asymmetrically, so the
+    -- edge is now the single carrier (see reduce_mentions).
+    local dispreg
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'reg' and byname.dispatched
+            and e.to == byname.dispatched.id then dispreg = e end
+    end
+    ok(dispreg, 'dispatch-table reference registers the fn from its module')
     ok(byname.counter and byname.counter.kind == 'var', 'top-level var')
 
     -- cross-file call: main -> helper, name-matched (honest ~)
@@ -2460,9 +2468,15 @@ test('sfc containers: script regions, template calls, handler cbarg', function (
     end
     ok(linked, 'template call resolves to the script fn')
     ok(linked and not linked.fn, 'template call has no enclosing fn')
-    -- bare handlers (@click="onCopy", onclick={bump}): registered, not dead
-    ok(byname.onCopy and byname.onCopy.cbarg, 'vue bare handler cbarg')
-    ok(byname.bump and byname.bump.cbarg, 'svelte handler cbarg')
+    -- bare handlers (@click="onCopy", onclick={bump}): registered, not dead —
+    -- carried by the `reg` edge from the containing component (the cbarg flag
+    -- that used to duplicate it is gone; see reduce_mentions)
+    local regfrom = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'reg' then regfrom[e.to] = e.from end
+    end
+    eq('App.vue', byname.onCopy and regfrom[byname.onCopy.id])
+    eq('Board.svelte', byname.bump and regfrom[byname.bump.id])
     -- imports: component -> component, and SFC script -> plain ts
     ok(vim.tbl_contains(store.imports_out['App.vue'] or {}, 'Widget.vue'),
         'vue -> vue import')
@@ -3378,8 +3392,8 @@ test('registration edges: a dispatch table is a descendable alibi', function ()
     end
     local hs = byname('handle_start')
     ok(hs, 'handler found')
-    -- kept alive: reg edge from the module, and the cbarg flag
-    ok(store.node(hs).cbarg, 'flagged registered (not dead)')
+    -- kept alive by the reg edge from the module — the ONE carrier of the claim
+    -- (a duplicate cbarg flag used to ride along; see reduce_mentions)
     ok(store.reg_by[hs] and #store.reg_by[hs] > 0, 'registered-by recorded')
     eq('mod.lua', store.reg_by[hs][1].from)
     -- the reverse alibi: the module registers both handlers
@@ -3394,6 +3408,67 @@ test('registration edges: a dispatch table is a descendable alibi', function ()
         dead[f.message] = true
     end
     for m in pairs(dead) do ok(not m:match('handle_start'), m) end
+end)
+
+-- The tier this pins was wrong for as long as it went unwatched, and it was
+-- wrong ASYMMETRICALLY: extract resolved before the id pass flagged the
+-- registry mention, relink read the flag off the ingested node, and only an
+-- accident (comparing demand-materialized calls against a full extract's)
+-- exposed it. tools/resolveparity is the corpus-scale ratchet; this is the
+-- shape, in the suite, where a regression would be attributable.
+test('registry mentions do not dispatch-mark: same tier from either driver', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    -- the Lua module idiom: both fns exported through `return {...}`, so BOTH are
+    -- mentioned at module level outside call position — and one is named again from
+    -- another file's registry literal
+    put('util.lua', 'local function alpha(x) return x + 1 end\n'
+        .. 'local function beta(x) return alpha(x) * 2 end\n'
+        .. 'return { alpha = alpha, beta = beta }\n')
+    put('reg.lua', 'local registry = { beta }\nreturn { registry = registry }\n')
+
+    local data = ts.extract(root)
+    local function site()
+        for _, c in ipairs(data.calls) do
+            if c.callee == 'alpha' and c.file == 'util.lua' then return c end
+        end
+    end
+    local c = site()
+    ok(c, 'the intra-file call is there')
+    -- THE CLAIM: a direct call to a same-file local fn is CONFIRMED. Being listed in
+    -- the module's own export table is not dynamic dispatch, so it must not hedge.
+    ok(c.to and not c.inferred, 'same-file call confirmed, not hedged by the export table')
+    -- the registry reference still lands, as an EDGE (the only carrier now)
+    local regged = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'reg' then regged[e.to] = true end
+    end
+    local beta
+    for _, n in ipairs(data.nodes) do if n.name == 'beta' then beta = n end end
+    ok(beta and regged[beta.id], 'the registry literal registers beta')
+    -- ... and NOT as a node flag that resolution would read back
+    for _, n in ipairs(data.nodes) do
+        ok(not n.cbarg, 'no dispatch flag from a registry mention: ' .. n.id)
+    end
+
+    -- THE PARITY HALF: clear every disposition and let the OTHER driver decide.
+    -- (Clearing matters — relink's base loop only reconsiders calls whose `to` is
+    -- nil, so relinking without it measures nothing.)
+    local was = { to = c.to, inferred = c.inferred }
+    for _, cc in ipairs(data.calls) do
+        cc.to, cc.inferred, cc.refused, cc.ext, cc.prov = nil, nil, nil, nil, nil
+    end
+    ts.relink(data, {})
+    local now = site()
+    eq(was.to, now.to)
+    eq(was.inferred, now.inferred)
+    vim.fn.delete(root, 'rf')
 end)
 
 test('ladder: the epistemic distribution and refusal ranking', function ()

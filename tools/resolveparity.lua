@@ -31,12 +31,20 @@ local callrec = require 'cartograph.callrec'
 
 -- known divergence, by corpus name (the ratchet). Measured 2026-07-26 with a
 -- FILE-QUALIFIED site key — the numbers I first reported (6 / 7 / 0) came from a key
--- without the file and were inflated by cross-file comparisons. There is ONE real
--- asymmetry, not the three I thought: cbarg marks that the id pass mints AFTER
--- resolution, so extract takes the same-file CONFIRMED tier where relink, whose marks
--- are complete up front, hedges. All 5 are `tier`; no corpus has a `target` divergence.
+-- without the file and were inflated by cross-file comparisons. There was ONE real
+-- asymmetry, not the three I thought: the id pass's REGISTRY cbarg marks, minted AFTER
+-- resolution, so extract took the same-file CONFIRMED tier where relink, reading the
+-- marks off the ingested node, hedged. All 5 were `tier`; no corpus ever had a `target`
+-- divergence.
+--
+-- NOW ZERO EVERYWHERE, and fixed in extract's favour: a direct same-file call to a
+-- local fn is confirmed, and that fn also appearing in the module's `return {...}`
+-- export table does not make the call dynamic. The registry class no longer flags the
+-- node at all — the `reg` edge already carried it (cache v103). Hedging both sides
+-- instead was tried first and MEASURED WORSE: lua-spec lost 5 confirmed calls and 4
+-- matched ref edges, i.e. the two drivers agreed on the wrong answer.
 local FLOOR = {
-    ['lua-spec'] = 5,   -- cbarg marks minted post-resolution by the id pass
+    ['lua-spec'] = 0,
     ruby = 0,
     rust = 0,
 }

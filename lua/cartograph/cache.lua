@@ -73,7 +73,23 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 102 -- v102: STACK-LANGUAGE ROOTS now open through the token provider
+M.VERSION = 103 -- v103: THE REGISTRY MARK IS THE `reg` EDGE, not a node flag
+               -- ([[cartograph-merging-strategies]]). The id pass used to flag a fn `cbarg`
+               -- when a module-level mention put it in a dispatch table — the same branch that
+               -- mints the `reg` edge, so the flag was a redundant copy. It was also harmful:
+               -- cbarg gates the same-file CONFIRMED tier, and being a NODE field it was
+               -- indistinguishable from the two classes that legitimately feed that gate (a
+               -- table-field def; a callback argument). Because the id pass runs AFTER
+               -- resolution, extract resolved before the flag existed and confirmed, while
+               -- relink read it off the ingested node and hedged — the entire extract-vs-relink
+               -- divergence tools/resolveparity measures (lua-spec 5 → 0). Extract was the side
+               -- that was RIGHT, so the class is simply no longer fed to resolution.
+               -- Extraction output: nodes that carried ONLY this class lose `cbarg` (lua-spec
+               -- 107 → 87; rust/ruby unchanged). Tiers, edges and calls are byte-identical
+               -- (three gate corpora per-item identical) — but a v102 cache holds the flags on
+               -- disk, and a warm open would feed them straight back into resolution and
+               -- resurrect the asymmetry. Hence the bump.
+               -- v102: STACK-LANGUAGE ROOTS now open through the token provider
                -- ([[cartograph-stack-languages]]). A forth/postscript root previously extracted to
                -- an EMPTY tree-sitter graph, and that empty graph CACHES — so without a bump the
                -- warm path would keep serving "0 nodes" and the new provider would never run. Only

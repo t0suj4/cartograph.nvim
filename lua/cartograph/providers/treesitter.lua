@@ -3351,8 +3351,25 @@ local function reduce_mentions(file, buf, L)
                     -- referenced from top-level DATA (a dispatch table /
                     -- registry): the fn is kept alive, and the reference is
                     -- a REGISTRATION edge from this module — an alibi you
-                    -- can descend into
-                    L.mark_cbarg(u)
+                    -- can descend into.
+                    -- This used to ALSO set the node's cbarg mark. It no longer
+                    -- does: the `reg` edge below is minted from the same branch,
+                    -- so the flag was a strictly redundant copy of an edge —
+                    -- and being a node field it was INDISTINGUISHABLE from the
+                    -- two cbarg classes that mean something else (a table-field
+                    -- def; a callback argument). That mattered because cbarg
+                    -- gates the same-file CONFIRMED tier while this pass runs
+                    -- AFTER resolution: extract resolved before the mark existed
+                    -- and confirmed, relink read it off the ingested node and
+                    -- hedged — the whole extract-vs-relink divergence
+                    -- tools/resolveparity measures. Extract was the one that was
+                    -- RIGHT (`local function f` called directly from the same
+                    -- file is confirmed; appearing in the module's `return {...}`
+                    -- export table does not make that call dynamic), so the cure
+                    -- is to stop feeding this class to resolution at all.
+                    -- Consumers that want "referenced from data" ask the edge:
+                    -- band:registrants(id) / :n_registrants(id).
+                    -- [[cartograph-merging-strategies]]
                     local rk = file .. '\31' .. u.id
                     local e = regEdge[rk]
                     if not e then
@@ -3456,8 +3473,9 @@ end
 -- The id pass: identifier occurrences naming a known top-level var (same
 -- file, or unique across the workspace) or — outside call position — a
 -- unique function (dispatch tables, registry values). A top-level
--- function reference marks the target dynamically dispatched (cbarg): a
--- dispatch-table entry is not dead code. Takes SUPPLIED lookups because
+-- function reference becomes a `reg` edge, which is what says a
+-- dispatch-table entry is not dead code (it used to also flag the node
+-- cbarg; see reduce_mentions for why that stopped). Takes SUPPLIED lookups because
 -- every decision is corpus-global: slice-local uniqueness is not global
 -- uniqueness. This standalone form (read + parse + collect + reduce) is
 -- the REFRESH path; the fused extract collects during phase 1 and only
@@ -3465,7 +3483,7 @@ end
 -- L = { fn_unique = name -> {id,file,line,node?} (globally unique fns),
 --       var_named = name -> { {id,file,line}, ... } (top-level vars),
 --       fn_ranges = file -> { {s,e,id}, ... },
---       addref(from,to,at,inferred), adduse(edge), mark_cbarg(entry),
+--       addref(from,to,at,inferred), adduse(edge),
 --       add_names(file, packed)? — per-file identifier NAME SET (the
 --       mention index: \31-separated, sorted; ≥3 chars, stdlib excluded),
 --       recorded while we're iterating every identifier anyway. This is
@@ -3590,15 +3608,12 @@ function M.lookups(nodes, root, narrow)
 end
 
 --- Fold a standalone id-pass result into a graph: ref pairs dedup into
---- existing edges (like addref), cbarg marks apply. Shared by refresh
---- and the parallel driver.
+--- existing edges (like addref). Shared by refresh and the parallel driver.
 function M.merge_idpass(data, out, touched)
     local refEdge = {}
     for _, e in ipairs(data.edges) do
         if e.kind == 'ref' then refEdge[e.from .. '\31' .. e.to] = e end
     end
-    local byid = {}
-    for _, n in ipairs(data.nodes) do byid[n.id] = n end
     for _, e in ipairs(out.edges or {}) do
         local k = e.kind == 'ref' and (e.from .. '\31' .. e.to)
         local ex = k and refEdge[k]
@@ -3613,12 +3628,6 @@ function M.merge_idpass(data, out, touched)
             touched[e.from:match('^(.-)::') or e.from] = true
         end
     end
-    for _, id in ipairs(out.cbarg or {}) do
-        if byid[id] then
-            byid[id].cbarg = true
-            if touched then touched[byid[id].file] = true end
-        end
-    end
     if out.names then
         data.names = data.names or {}
         for f, s in pairs(out.names) do data.names[f] = s end
@@ -3626,10 +3635,10 @@ function M.merge_idpass(data, out, touched)
 end
 
 --- Standalone id pass over `files` with global lookups (parallel phase
---- 2, run inside a worker). Returns { edges = {...}, cbarg = {id, ...} }.
+--- 2, run inside a worker). Returns { edges = {...}, names = {...} }.
 local function idpass_sink(lookups)
-    local out = { edges = {}, cbarg = {}, names = {} }
-    local refEdge, seen_cb = {}, {}
+    local out = { edges = {}, names = {} }
+    local refEdge = {}
     local L = {
         fn_unique = lookups.fn_unique,
         var_named = lookups.var_named,
@@ -3649,12 +3658,6 @@ local function idpass_sink(lookups)
             e.at[#e.at + 1] = at
         end,
         adduse = function (e) out.edges[#out.edges + 1] = e end,
-        mark_cbarg = function (u)
-            if not seen_cb[u.id] then
-                seen_cb[u.id] = true
-                out.cbarg[#out.cbarg + 1] = u.id
-            end
-        end,
     }
     return L, out
 end
@@ -5622,7 +5625,6 @@ function M.extract(root, opts)
             scopes = seq_any and seq_scopes or nil,
             addref = addref,
             adduse = function (e) edges[#edges + 1] = e end,
-            mark_cbarg = function (u) u.node.cbarg = true end,
             add_names = function (f, s) data.names[f] = s end,
         }
         for _, file in ipairs(files) do

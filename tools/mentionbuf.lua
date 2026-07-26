@@ -1,16 +1,18 @@
--- mentionbuf — SIZE the per-file mention buffers, the retention that unblocks the one
--- real extract-vs-relink asymmetry ([[cartograph-merging-strategies]]).
+-- mentionbuf — SIZE the per-file mention buffers, i.e. price KEEPING them past
+-- extraction ([[cartograph-merging-strategies]]).
 --
--- WHY IT MATTERS: cbarg/dispatch marks are RESOLUTION INPUT, and the criterion that
--- mints them is a replay of these buffers. extract has them (it just replays too late);
--- relink does NOT — parallel's finalize() drops acc.mentions, and refresh never had
--- them. So no amount of reordering fixes relink without retaining the buffers.
---
--- I measured retention as a NO-GO in step 1 of this arc, for ONE consumer (refresh's
--- candidate scan, where a 280 ms build served three lookups). The calculus differs now:
---   1. the dispatch set — the only way to make relink's marks complete;
---   2. the thin-index mention index (data.names, use/reg edges) without a re-parse;
---   3. the postings, which today rebuild from data.names.
+-- WRITTEN FOR A MOTIVE THAT NO LONGER APPLIES: I built this to justify retention as the
+-- only way to give relink the id pass's cbarg marks up front, on the theory that the
+-- extract-vs-relink divergence needed relink to see them. It did not — the divergence
+-- was one field answering three questions, and the registry class simply stopped being
+-- resolution input (cache v103). Feeding both drivers the replayed marks instead was
+-- built and MEASURED WORSE (lua-spec lost 5 confirmed calls). The numbers below stand;
+-- the reason to want them is now only:
+--   1. the thin-index mention index (data.names, use/reg edges) without a re-parse;
+--   2. the postings, which today rebuild from data.names.
+-- Both are query-side, so neither is urgent — retention was a NO-GO in step 1 of this
+-- arc for refresh's candidate scan (a 280 ms build serving three lookups), and nothing
+-- since has produced the REPEATED-query consumer that would pay for it.
 -- Retention costs nothing to COMPUTE (phase 1 already produces the buffers, already
 -- packed for a process boundary). What it costs is BYTES, and that is what this reports.
 --

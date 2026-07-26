@@ -113,7 +113,11 @@ local function collect(store, ids, dest, plan)
                 .. ' touches the top of %s (file header) — left behind')
                 :format(n.name, n.file)
         end
-        if n.cbarg then
+        -- "referenced from data" is the `reg` EDGE's claim, so ask the edge.
+        -- This used to read n.cbarg, which conflates three classes — a
+        -- table-field def and a callback argument are neither of them a
+        -- registry reference, so the hazard fired on defs it did not describe.
+        if store.topo():n_registrants(id) > 0 then
             plan.hazards[#plan.hazards + 1] = ('%s is referenced from data'
                 .. ' (dispatch table / registry) — those references are NOT'
                 .. ' rewritten'):format(n.name)

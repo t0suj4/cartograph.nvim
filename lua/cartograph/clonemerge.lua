@@ -98,7 +98,9 @@ function M.plan(store, id)
             ref = store.ref_of(t.id),
         }
         touched[t.file] = true
-        if t.cbarg then
+        -- the `reg` edge IS "referenced from data" (see moveapply: n.cbarg
+        -- conflated this with table-field defs and callback args)
+        if store.topo():n_registrants(t.id) > 0 then
             plan.hazards[#plan.hazards + 1] = ('%s is referenced from data'
                 .. ' (dispatch table / registry) — those references are NOT'
                 .. ' rewritten'):format(t.name)
