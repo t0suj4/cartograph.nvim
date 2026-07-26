@@ -15,6 +15,7 @@ local atr = require 'cartograph.at' -- dual-mode range reads: relink/refresh re-
 local flowmod = require 'cartograph.flow' -- df-strangler step 4: eager per-fn fine flow rows, folded at ingest (flow requires nothing back → no cycle)
 local dfmod = require 'cartograph.df' -- fat-record migration: the DUAL-MODE df.stmts accessor (folded OR raw), so relink readers are fold-agnostic (df requires nothing → no cycle)
 local constfold = require 'cartograph.constfold' -- const-fold ladder step 1: same-file scalar-const index + argv fold (no cycle)
+local transport = require 'cartograph.transport' -- WHERE bytes come from: the list/stamp/read contract, disk today (transport requires nothing back → no cycle)
 local M = {}
 
 -- Call DISPOSITION reasons ([[cartograph-graph-improvements]] #1): the
@@ -2646,9 +2647,8 @@ function M.forms(file, sr, sc, er, ec)
     local _, spec = elang_for(file)
     local lang = parse_lang_for(file) -- TS parses under typescript, not js
     if not (lang and spec) then return {} end
-    local fd = io.open(file, 'r')
-    if not fd then return {} end
-    local src = fd:read('a'); fd:close()
+    local src = transport.read(file)
+    if not src then return {} end
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
     if not ok then return {} end
     local tree = parser:parse()[1]
@@ -2760,8 +2760,7 @@ function M.detail(file, sr, sc, er, ec)
     local _, spec = elang_for(file)
     local lang = parse_lang_for(file) -- TS parses under typescript, not js
     if not (lang and spec) then return {} end
-    local fd = io.open(file, 'r'); if not fd then return {} end
-    local src = fd:read('a'); fd:close()
+    local src = transport.read(file); if not src then return {} end
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
     if not ok then return {} end
     local tree = parser:parse()[1]; if not tree then return {} end
@@ -2849,10 +2848,9 @@ local function list_files(root, subdirs)
         return in_scope(rel)
     end
     local function rec(rel)
-        local it = vim.uv.fs_scandir(rel == '' and root or (root .. '/' .. rel))
-        while it do
-            local name, t = vim.uv.fs_scandir_next(it)
-            if not name then break end
+        -- transport.dir yields nothing for an unreadable container, which is
+        -- what the old `while it do` guard did for a nil scandir handle
+        for name, t in transport.dir(rel == '' and root or (root .. '/' .. rel)) do
             if name:sub(1, 1) ~= '.' then
                 local r = rel == '' and name or (rel .. '/' .. name)
                 if t == 'link' then
@@ -2863,10 +2861,10 @@ local function list_files(root, subdirs)
                     -- path is walked normally, and following both would
                     -- duplicate every file under two keys.
                     local p = root .. '/' .. r
-                    local st = vim.uv.fs_stat(p)
+                    local st = transport.stat(p)
                     if st and st.type == 'directory' then
-                        local rp = vim.uv.fs_realpath(p)
-                        local rootrp = vim.uv.fs_realpath(root)
+                        local rp = transport.realpath(p)
+                        local rootrp = transport.realpath(root)
                         if rp and rootrp
                             and rp:sub(1, #rootrp + 1) ~= rootrp .. '/' then
                             if not seen_real[rp] then
@@ -3498,9 +3496,7 @@ local function id_pass(root, files, L, abs)
             local lang, spec = lang_for(file)
             local clang = container_for(file)
             if clang then lang, spec = 'javascript', M.spec.javascript end
-            local fd = io.open(abs(file), 'r')
-            local src = fd and fd:read('a')
-            if fd then fd:close() end
+            local src = transport.read(abs(file))
             local okp, parser = pcall(vim.treesitter.get_string_parser,
                 src or '', clang or lang)
             if src and okp then
@@ -3973,11 +3969,8 @@ function M.extract(root, opts)
     end
 
     local function stamp(file)
-        local st = vim.uv.fs_stat(abs(file))
-        if st then
-            data.stamps[file] = ('%d:%d:%d')
-                :format(st.mtime.sec, st.mtime.nsec, st.size)
-        end
+        local s = transport.stamp(abs(file))
+        if s then data.stamps[file] = s end
     end
 
     -- defs: functions, top-level vars, blocks, imports — one TREE at
@@ -5006,9 +4999,7 @@ function M.extract(root, opts)
     end
 
     for _, file in ipairs(files) do
-        local fd = io.open(abs(file), 'r')
-        local src = fd and fd:read('a')
-        if fd then fd:close() end
+        local src = transport.read(abs(file))
         if not src then goto next_file end
         local clang = container_for(file)
         if clang then
@@ -5328,9 +5319,9 @@ function M.extract(root, opts)
         end
         if ndefs ~= 1 or not defstmt then return nil end
         if src_cache[p.file] == nil then
-            local fd = io.open(abs(p.file), 'r')
-            src_cache[p.file] = fd and vim.split(fd:read('a'), '\n', { plain = true }) or false
-            if fd then fd:close() end
+            -- `or false` is the "tried and failed" sentinel, distinct from the
+            -- nil that means "not tried yet"
+            src_cache[p.file] = transport.lines(abs(p.file)) or false
         end
         local line = src_cache[p.file] and src_cache[p.file][defstmt.l] or ''
         local lit = line:match('%$' .. varname .. [=[%s*=%s*['"]([%w_:\]+)['"]]=])
@@ -5363,10 +5354,7 @@ function M.extract(root, opts)
             if r.id == fnid then fnrow = r.s break end
         end
         if src_cache[file] == nil then
-            local fd = io.open(abs(file), 'r')
-            src_cache[file] = fd
-                and vim.split(fd:read('a'), '\n', { plain = true }) or false
-            if fd then fd:close() end
+            src_cache[file] = transport.lines(abs(file)) or false
         end
         -- the assignment may sit NESTED inside its statement (an
         -- if-guard) and `.=` appends may follow it — appends PRESERVE the
