@@ -248,56 +248,107 @@ local factorio_mods = validity.memo { name = 'factorio-mods', epoch = 'extract',
     return map
 end }
 
--- nvim-plugin REPO SHAPE (a 3rd per-root detector, still EMBEDDED INLINE beside
--- factorio_mods/toc_scope — the scattered cluster the resolution-health
--- analyzer's rule 3 [scattered-special-case finder] should detect as one
--- missing-abstraction; see [[cartograph-cross-project]] repo shapes).
--- STATUS: the abstraction now EXISTS — spec/ecosystem/ is that axis, and
--- factorio's half of the cluster has moved into it (identity + manifest name are
--- declared there, no longer restated here). These two are the remaining collapse:
--- a wow-addon ecosystem (manifest = <Addon>/<Addon>.toc) and an nvim-plugin one
--- (package root = lua/). Deliberately NOT moved in the same change — both feed
--- resolution BOUNDARIES that the wow and self corpora exercise, so they want
--- their own gate run. An nvim
--- plugin puts its package under `lua/` (`require 'foo.bar'` → lua/foo/bar.lua), so
--- `lua/` is the package root. MARKER-GATED (fires only when a lua/ layout is
--- present), NOT the reverted blind dir-relative guess. Memoized per root.
+-- CLUSTER RESOLVED. This was three per-root detectors inline here —
+-- factorio_mods / toc_scope / nvim_lua_root — which the comment that used to live
+-- at this spot called "one missing-abstraction" for the resolution-health
+-- analyzer's scattered-special-case rule to find ([[cartograph-cross-project]]
+-- repo shapes). All three are now DECLARED ecosystems under spec/ecosystem/, and
+-- what remains here is the mechanism that consults them.
+--
+-- Reading the code is what showed they belonged together: toc_scope was never
+-- WoW-specific — it tested `.toc` OR factorio's `info.json`, so it was already the
+-- package-boundary question with both answers hardcoded. The functions below now
+-- ask that question of whatever is declared, and a fourth ecosystem participates
+-- by declaring a marker rather than by editing this file.
+--
+-- The three are genuinely different ANSWERS, which is the point of one axis:
+--   factorio  a fixed manifest name, per-package boundary, __mod__/path requires
+--   wow       a manifest named for its own directory, per-package boundary, no
+--             require at all (load order via the .toc)
+--   nvim      no manifest — a package ROOT (`lua/`) that dotted requires resolve
+--             from, and NO per-package boundary (a tree of plugins is a multi-root
+--             corpus instead)
+-- the nvim-plugin PACKAGE ROOT, from its declared ecosystem rather than a literal
+-- here: `require 'foo.bar'` reaches <package_root>/foo/bar.lua. MARKER-GATED — it
+-- fires only when that layout is actually present, because stock Lua's require is
+-- package.path-based and resolving relative to the requiring file is the guess that
+-- was tried and reverted.
+local PKGROOT, NVIMIDX = (function ()
+    local e = require('cartograph.spec.ecosystem').load('lua-nvim')
+    if not e then return nil, nil end
+    return e.package_root, (e.require_form or {}).index
+end)()
+
 local nvim_lua_root = validity.memo { name = 'nvim-lua-root', epoch = 'extract',
     compute = function (root, files)
+        if not PKGROOT then return false end
+        local pat = '^' .. PKGROOT:gsub('%p', '%%%0') .. '/.+%.lua$'
         for f in pairs(files) do
-            if f:match('^lua/.+%.lua$') then return true end
+            if f:match(pat) then return true end
         end
         return false
     end }
 
--- WoW-addon boundary detection, memoized per (root, top segment): an
--- addon tree is <root>/<Addon>/<Addon>.toc (or any *.toc in the dir).
--- keyed per (root, top segment): the same epoch, a composite slot key
-local toc_hit = validity.memo { name = 'toc-dir', epoch = 'extract',
+-- IS THIS TOP-LEVEL DIRECTORY A PACKAGE? — asked over every DECLARED ecosystem
+-- that says its packages form a resolution boundary, instead of over two markers
+-- inlined here. Reading the code this replaced is what showed the shape: it tested
+-- `.toc` OR factorio's `info.json`, i.e. it was already this question with both
+-- answers hardcoded. A new ecosystem now participates by declaring a marker.
+--
+-- THREE MARKER SHAPES, because packages really are identified three ways:
+--   manifest                 a fixed filename        (factorio: info.json)
+--   manifest_named_after_dir named for its own dir   (wow: Bagnon/Bagnon.toc)
+--   manifest_ext             any file of that type   (wow: a variant .toc)
+-- Memoized per (root, segment) on the extract epoch: one scandir per directory at
+-- worst, which matters on a 353-addon / 2.27M-line tree.
+local BOUNDED = (function ()
+    local out = {}
+    local ecomod = require 'cartograph.spec.ecosystem'
+    for _, name in ipairs(ecomod.names()) do
+        local e = ecomod.load(name)
+        if e and e.lang == 'lua' and (e.boundary or {}).per_package
+            and e.identity then
+            out[#out + 1] = e.identity
+        end
+    end
+    return out
+end)()
+
+local pkg_dir = validity.memo { name = 'package-dir', epoch = 'extract',
     compute = function (_, dir, seg)
-        local hit = vim.uv.fs_stat(dir .. '/' .. seg .. '.toc') ~= nil
-            -- factorio mods folder: the package MANIFEST is the marker. The
-            -- name comes from the ecosystem spec, not a second literal — this was
-            -- the duplicate copy of the fact that made the cluster below a
-            -- scattering rather than three unrelated detectors.
-            or (IDENT ~= nil
-                and vim.uv.fs_stat(dir .. '/' .. IDENT.manifest) ~= nil)
-        if not hit then
+        local need_scan = false
+        for _, ident in ipairs(BOUNDED) do
+            if ident.manifest
+                and vim.uv.fs_stat(dir .. '/' .. ident.manifest) ~= nil then
+                return true
+            end
+            if ident.manifest_named_after_dir and vim.uv.fs_stat(
+                dir .. '/' .. seg .. ident.manifest_named_after_dir) ~= nil then
+                return true
+            end
+            if ident.manifest_ext then need_scan = true end
+        end
+        -- the extension fallback costs a scandir, so it runs only if some declared
+        -- ecosystem actually asks for one, and only after the cheap stats missed
+        if need_scan then
             local it = vim.uv.fs_scandir(dir)
             while it do
                 local name = vim.uv.fs_scandir_next(it)
                 if not name then break end
-                if name:sub(-4) == '.toc' then hit = true break end
+                for _, ident in ipairs(BOUNDED) do
+                    local ext = ident.manifest_ext
+                    if ext and name:sub(-#ext) == ext then return true end
+                end
             end
         end
-        return hit
+        return false
     end }
 
 local function toc_scope(file, _, root)
     local seg = file:match('^([^/]+)/')
     -- multi-root corpora (self://) pass a table root: never an addon tree
     if not seg or type(root) ~= 'string' then return '' end
-    local hit = toc_hit(root .. '\31' .. seg, root .. '/' .. seg, seg)
+    local hit = pkg_dir(root .. '\31' .. seg, root .. '/' .. seg, seg)
     return hit and seg or ''
 end
 
@@ -415,8 +466,14 @@ return {
         -- nvim-plugin repo shape: the package lives under lua/ (require
         -- 'foo.bar' → lua/foo/bar.lua) — marker-gated, so a non-nvim corpus
         -- without a lua/ layout is unaffected
-        if type(root) == 'string' and nvim_lua_root(root, files) then
-            for _, cand in ipairs({ 'lua/' .. slashed .. '.lua', 'lua/' .. slashed .. '/init.lua' }) do
+        if type(root) == 'string' and PKGROOT and nvim_lua_root(root, files) then
+            -- the ROOT and the index filename both come from the declaration; the
+            -- literal 'lua/' used to sit here as a second copy of package_root,
+            -- which the rule-consumption audit cannot catch (the field IS read —
+            -- just somewhere else)
+            local pre = PKGROOT .. '/'
+            for _, cand in ipairs({ pre .. slashed .. '.lua',
+                pre .. slashed .. '/' .. (NVIMIDX or 'init.lua') }) do
                 if files[cand] then return cand end
             end
         end

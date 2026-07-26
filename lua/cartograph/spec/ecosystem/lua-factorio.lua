@@ -106,6 +106,14 @@ return {
         notes = { authoritative = 'the manifest, never the filename' },
     },
 
+    -- ── the resolution boundary ──────────────────────────────────────────────
+    -- A package directory is its own resolution scope, exactly as for WoW addons:
+    -- a mods folder holds many independent packages that may define the same names.
+    -- This was implicit before — the shared boundary test hardcoded `info.json`
+    -- alongside `.toc` — and dropping it from the declaration was caught
+    -- immediately by `factorio: info.json dirs are scope boundaries too`.
+    boundary = { per_package = true },
+
     -- the URI SCHEME a roster of this ecosystem carries as its root. Declared
     -- because it is load-bearing evidence, not decoration: spec/lua.lua applies
     -- Factorio require semantics only to a corpus that IS one, and "any labelled
@@ -146,7 +154,6 @@ return {
     -- lives here so reaching OUTSIDE the corpus does not restate it.
     require_form = {
         pattern = '^__([%w%-_]+)__[./](.+)$', -- 1 = package name, 2 = path
-        dotted_ok = true,                     -- '.' separators mean '/'
         exts = { '', '.lua' },
         index = 'init.lua',
         notes = { crosses_packages = 'a bare require("x") is package-LOCAL;'

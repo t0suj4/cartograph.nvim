@@ -339,3 +339,125 @@ test('ecosystem roster: a missing directory is a clear refusal, not a crash',
     eq(nil, r)
     ok(tostring(why):match('not a directory') ~= nil, 'says why: ' .. tostring(why))
 end)
+
+-- ── the cluster, collapsed ───────────────────────────────────────────────────
+-- spec/lua.lua:252 named factorio_mods / toc_scope / nvim_lua_root as "one
+-- missing-abstraction". All three are now declared ecosystems. Reading the code
+-- showed why they belonged together: toc_scope was never WoW-specific — it tested
+-- `.toc` OR factorio's `info.json`, i.e. it was already the package-boundary
+-- question with both answers inlined.
+
+test('ecosystem: all three lua ecosystems are declared', function ()
+    local names = {}
+    for _, n in ipairs(eco.names()) do names[n] = true end
+    ok(names['lua-factorio'], 'factorio')
+    ok(names['lua-wow'], 'wow addons')
+    ok(names['lua-nvim'], 'nvim plugins')
+end)
+
+-- THREE MARKER SHAPES, because packages really are identified three ways. Pinning
+-- them separately is what lets the shared boundary test loop instead of branching.
+test('ecosystem: the marker SHAPES differ per ecosystem, and each is declared',
+    function ()
+    local fac, wow = eco.load('lua-factorio'), eco.load('lua-wow')
+    -- a FIXED filename
+    eq('info.json', fac.identity.manifest)
+    -- ... named after its own directory (Bagnon/Bagnon.toc)
+    eq('.toc', wow.identity.manifest_named_after_dir)
+    -- ... or any file of that type (a variant toc)
+    eq('.toc', wow.identity.manifest_ext)
+    -- and WoW takes the package name from the directory, having no id inside
+    eq('directory', wow.identity.name_from)
+end)
+
+-- the BOUNDARY is the fact the wow spec exists for: 353 addons vendor their own
+-- copies of the same libraries, so a name unique inside one addon is 353-way
+-- ambiguous across the tree.
+test('ecosystem: per-package boundaries are declared, not inferred', function ()
+    eq(true, eco.load('lua-wow').boundary.per_package)
+    eq(true, eco.load('lua-factorio').boundary.per_package)
+    -- an nvim plugin is ONE package: a tree of them is a multi-root corpus
+    -- instead, which is a different mechanism that already exists
+    eq(false, eco.load('lua-nvim').boundary.per_package)
+end)
+
+test('ecosystem: nvim declares a package ROOT rather than a boundary', function ()
+    local nv = eco.load('lua-nvim')
+    eq('lua', nv.package_root)
+    eq('init.lua', nv.require_form.index)
+    -- and NOT a `dotted_ok`: that a '.' separates path segments is a property of
+    -- LUA's require, true for every ecosystem here, so declaring it per-ecosystem
+    -- put a language fact on the wrong axis. The rule-consumption audit surfaced
+    -- that by reporting it permanently UNREAD.
+    eq(nil, nv.require_form.dotted_ok)
+    eq(nil, eco.load('lua-factorio').require_form.dotted_ok)
+    -- no manifest at all: the marker is the layout
+    eq(nil, nv.identity)
+end)
+
+-- the collapse must be BEHAVIOUR-PRESERVING, and the boundary test is the part
+-- with teeth: it runs per top-level directory on a 353-addon tree. Both marker
+-- kinds must still mark.
+test('ecosystem: a .toc dir and a manifest dir are BOTH boundaries', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname()
+    local function w(rel, text)
+        local dir = rel:match('^(.*)/[^/]*$')
+        if dir then vim.fn.mkdir(root .. '/' .. dir, 'p') end
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close()
+    end
+    -- an addon marked by <Addon>/<Addon>.toc, and a package marked by a manifest.
+    -- Both define `helper`, so a cross-boundary match would be ambiguous — the
+    -- boundary is what keeps each call inside its own package.
+    w('AddonA/AddonA.toc', '## Interface: 100000\nmain.lua\n')
+    w('AddonA/main.lua', 'local function helper() return 1 end\n'
+        .. 'function AddonA_go() return helper() end\n')
+    w('ModB/info.json', '{"name":"ModB","version":"1.0"}')
+    w('ModB/main.lua', 'local function helper() return 2 end\n'
+        .. 'function ModB_go() return helper() end\n')
+    local data = ts.extract(root)
+    -- each `helper` call resolves INSIDE its own package, not ambiguously
+    local hits = {}
+    for _, c in ipairs(data.calls or {}) do
+        if c.callee == 'helper' and c.to then
+            hits[c.file] = c.to
+        end
+    end
+    ok(tostring(hits['AddonA/main.lua']):match('^AddonA/') ~= nil,
+        'the .toc addon resolved within itself: ' .. tostring(hits['AddonA/main.lua']))
+    ok(tostring(hits['ModB/main.lua']):match('^ModB/') ~= nil,
+        'the manifest package resolved within itself: ' .. tostring(hits['ModB/main.lua']))
+    vim.fn.delete(root, 'rf')
+end)
+
+-- a VARIANT toc (named for something other than its directory) still marks, which
+-- is the manifest_ext fallback and the reason it costs a scandir
+test('ecosystem: a variant .toc name still marks the directory', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname()
+    local function w(rel, text)
+        local dir = rel:match('^(.*)/[^/]*$')
+        if dir then vim.fn.mkdir(root .. '/' .. dir, 'p') end
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close()
+    end
+    w('Bagnon/Bagnon-Mainline.toc', '## Interface: 110000\nmain.lua\n')
+    w('Bagnon/main.lua', 'local function helper() return 1 end\n'
+        .. 'function Bagnon_go() return helper() end\n')
+    w('Other/Other.toc', '## Interface: 110000\nmain.lua\n')
+    w('Other/main.lua', 'local function helper() return 2 end\n'
+        .. 'function Other_go() return helper() end\n')
+    local data = ts.extract(root)
+    local to
+    for _, c in ipairs(data.calls or {}) do
+        if c.callee == 'helper' and c.file == 'Bagnon/main.lua' then to = c.to end
+    end
+    ok(tostring(to):match('^Bagnon/') ~= nil,
+        'a variant toc still bounds its directory: ' .. tostring(to))
+    vim.fn.delete(root, 'rf')
+end)
