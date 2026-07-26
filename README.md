@@ -512,7 +512,17 @@ callers). Ariadne's thread, in text.
      `Foo.member()` call resolves to `foo.zig`'s export — binding beats
      name-match, which also *corrects* the residual cross-module mis-picks (a
      `name()` call that tail-matched an unrelated module now binds to the
-     imported one). A value-receiver method (`fn setExtra(symbol: Symbol)`) is
+     imported one). That correction had a blind spot worth naming, because it
+     silently withheld work rather than getting anything wrong: the two name
+     indexes were consulted as `tail[m] or exact[m]`, which picks an index by
+     whether the *qualified* list is empty **anywhere in the corpus** instead of
+     whether it answers for this module — so as soon as any file defined
+     `<anything>.m`, a module's own **bare** `m` became invisible and the
+     correction stopped firing. Consulting `exact` as a fallback recovered 47
+     calls on zig and 290 on ghost, with 174 further calls redirected off a
+     foreign namesake and onto the module the `require` actually binds
+     (`indexnow.listen()`, `registry.registerHelper()` — that last one had been
+     resolving to a *test* file's export). Nothing was lost on either. A value-receiver method (`fn setExtra(symbol: Symbol)`) is
      **dual-keyed**: it keeps its bare same-file reach *and* gains a
      `Symbol.setExtra` key, so a pointer-typed caller (`p.setExtra()`, `p: *Symbol`)
      — which refuses rather than fall back to a bare guess — finds its own

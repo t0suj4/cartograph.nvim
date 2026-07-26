@@ -1247,6 +1247,41 @@ local function resolve_interface(cv, implements, beans, extends, exact, addref, 
     return n
 end
 
+--- The UNIQUE fn/method named `key` defined in `file` — the shared question behind two
+--- passes that both had it subtly wrong. Returns (fit, dup).
+---
+--- Both wrote `tail[key] or exact[key]`, which selects an index by whether the tail list
+--- is empty ANYWHERE IN THE CORPUS, not by whether it answers HERE. So the moment any
+--- file defines `<anything>.key`, a module's own BARE `key` becomes unreachable:
+--- MEASURED on jquery, `jQuery.error(…)` resolved to a foreign `find.error` because
+--- core.js's bare `error` sat in `exact` while `tail` was non-empty — and the correction
+--- resolve_module_alias exists to make could not fire.
+---
+--- FALLBACK, not union: consult `tail` first and `exact` only when tail answered nothing
+--- in this file. A union would also change answers the old code got right — zig files
+--- hold both `Config.resolve` and a bare `resolve`, and merging the two sets makes a
+--- previously-unique fit ambiguous.
+---
+--- NOTE FOR ANYONE EDITING THIS: do NOT write `for _, l in ipairs({ tail[k], exact[k] })`.
+--- ipairs STOPS AT THE FIRST NIL, so a nil tail list (the common case — a bare-named def
+--- is not tail-indexed) skips the exact index too. That hole cost module_alias 845 of its
+--- 1054 fills on zig, and I mis-attributed the loss to a pipeline cascade before finding
+--- it. The lists are named explicitly here for exactly that reason.
+local function fit_in_file(tail, exact, key, file)
+    local function scan(list)
+        local fit, dup = nil, false
+        for _, nd in ipairs(list or {}) do
+            if nd.file == file and (nd.kind == 'function' or nd.kind == 'method') then
+                if fit and fit.id ~= nd.id then dup = true else fit = nd end
+            end
+        end
+        return fit, dup
+    end
+    local fit, dup = scan(tail[key])
+    if fit then return fit, dup end
+    return scan(exact[key])
+end
+
 -- Upgrade still-refused MODULE-ALIAS calls: `alias.member(...)` where `alias` is
 -- bound to require('mod') in this file (the import edge's `bind`) → mod's `member`
 -- export. The receiver's module is KNOWN, so the ambiguous tail (`get`/`has`/…)
@@ -1302,12 +1337,7 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
             local mod = recv and amap[cfile] and amap[cfile][recv]
             if mod then
                 -- the UNIQUE fn/method with this tail defined in the alias's module
-                local fit, dup = nil, false
-                for _, nd in ipairs(tail[member] or exact[member] or {}) do
-                    if nd.file == mod and (nd.kind == 'function' or nd.kind == 'method') then
-                        if fit and fit.id ~= nd.id then dup = true else fit = nd end
-                    end
-                end
+                local fit, dup = fit_in_file(tail, exact, member, mod)
                 local cto = cget(i, 'to')
                 -- NO fit, and the bound module is a file we never read: the
                 -- disposition the main resolver left (`no-def`, i.e. external =
@@ -1607,13 +1637,7 @@ local function resolve_field_chain(cv, fieldtypes, edges, exact, tail, addref, n
                     tfile = fe.file -- (B) same-file local type
                 end
                 if tfile then
-                    local fit, dup = nil, false
-                    for _, nd in ipairs(tail[ccallee] or exact[ccallee] or {}) do
-                        if nd.file == tfile
-                            and (nd.kind == 'function' or nd.kind == 'method') then
-                            if fit and fit.id ~= nd.id then dup = true else fit = nd end
-                        end
-                    end
+                    local fit, dup = fit_in_file(tail, exact, ccallee, tfile)
                     if fit and not dup then
                         cset(i, 'to', fit.id)
                         cset(i, 'inferred', true)

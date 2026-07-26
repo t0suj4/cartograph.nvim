@@ -80,7 +80,7 @@ return {
         budget_mb = 1600, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/TryGhost/Ghost',
         rev = 'f7d7df8f9816',
-        expected = { refs = 27931, nodes = 40863 }, -- recalib 2026-07-26: v104 js member-target function literals (+1444 refs/+255 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: recovered 1844, +663 out of a refusal, 311 redirected (sampled all corrections: `notify.notifyServerReady()` / `updateCheck.scheduleRecurringJobs()` / `siteApp.reload()` had been resolving to a same-file wrapper or a foreign namesake), 1008 previously-resolved calls now honestly AMBIGUOUS (a test file's `console.warn = …` stub competes with `Command.warn`; most sites are `logging.warn`, which neither owns), 0 LOST. Prior: refs 26487 / nodes 40608 -- recalib 2026-07-26: +316 refs (nodes UNCHANGED) = js/ts import BINDS. resolve_module_alias could never fire for JavaScript without them; 386 previously-ambiguous calls now resolve, every one `refused (ambiguous) => to <target>`, zero regressions of any shape. Spot-VERIFIED against source, not just counted: boot.js:192 `await linkRedirects.init()` where line 191 binds `require('./server/services/link-redirection')` — the binding decides a name ambiguous across dozens of service wrappers. Prior: 26171/40608 -- recalib 2026-07-19 CATCH-UP: +5123 refs/+741 nodes = JS/TS-pivot class-keying (v59+) + anon-fn shipped since ghost's v51 pin but never re-gated here (perf-cut: full sweep couldn't complete). #cb anon-fn stable at 18840; ref growth = class-keying resolving more calls. VERIFIED independent of P0 disposition/P1 pipeline (both count-neutral — zig/ruby/libs held exactly). Prior: 21048/39867 @ v51 (~18.7k #cb)
+        expected = { refs = 28306, nodes = 40863 }, -- recalib 2026-07-26: +375 refs (nodes unchanged) = v105 name-index fallback. +290 calls out of a refusal and 174 REDIRECTED, 0 lost: every sampled redirect is a correction where the require BINDING now beats a corpus name-match — `indexnow.listen()`, `slack.listen()`, `emailAnalyticsJobs.scheduleRecurringJobs()`, `routeSettings.loadRouteSettings()`, `registry.registerHelper()` had all been landing on a foreign namesake (that last one on a TEST file's export). Prior: 27931/40863
         lang = 'javascript',
         notes = 'js SCALE tier (2134 files) — a real node webapp: express'
             .. ' routes + handlebars themes (parametric-files territory)',
@@ -160,7 +160,7 @@ return {
         budget_mb = 3800, -- ~2x inline peak: the compiler files are enormous
         repo = 'https://github.com/ziglang/zig',
         rev = 'd5181a9c9bac',
-        expected = { refs = 24134, nodes = 9768 }, -- +3730 refs/+360 nodes @ std-alias node-minting RESOLUTION (v93): std-aliased calls resolve to minted external std nodes (`zig-std::std.mem.eql`) at the stdlib tier. Prior: 20404/9408 @ v90 (Z1b local-type-inference, +162)
+        expected = { refs = 24169, nodes = 9768 }, -- recalib 2026-07-26: +35 refs (nodes unchanged) = v105, the two name indexes are not alternatives: resolve_module_alias/field_chain could not see a module's own BARE export once any file defined `<x>.m`. +47 calls resolved (module_alias 1054 -> 1096, field_chain +5), 0 lost, 0 redirected. Prior: 24134/9768
         lang = 'zig',
         notes = 'zig + R5 receiver typing + @import module binding + value-recv '
             .. 'dual-key + multi-level chain type + instance-chain field typing '

@@ -73,7 +73,18 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 104 -- v104: JS/TS MEMBER-TARGET FUNCTION LITERALS ARE DEFS. `X.y = function(){}`
+M.VERSION = 105 -- v105: THE TWO NAME INDEXES ARE NOT ALTERNATIVES. resolve_module_alias
+               -- and resolve_field_chain both wrote `tail[m] or exact[m]`, selecting an
+               -- index by whether the tail list is empty ANYWHERE IN THE CORPUS rather
+               -- than by whether it answers for THIS module — so the moment any file
+               -- defined `<anything>.m`, a module's own BARE `m` went invisible to the
+               -- binding-authoritative correction those passes exist to make. MEASURED:
+               -- zig +47 resolutions, ghost +290 and 174 REDIRECTS (all sampled are
+               -- corrections — `indexnow.listen()`, `registry.registerHelper()` and
+               -- friends had been landing on a foreign namesake, one of them a test
+               -- file's export), 0 lost on either, every other corpus unchanged.
+               -- Resolution output changes, so a v104 cache would serve the old links.
+               -- v104: JS/TS MEMBER-TARGET FUNCTION LITERALS ARE DEFS. `X.y = function(){}`
                -- minted nothing while `const f = function(){}` and `X.prototype.m = …` both
                -- did, so every pre-class export (`jQuery.extend`, `module.exports.reload`)
                -- was invisible as a definition. MEASURED first (tools/assigndef.lua: 6.4% of
