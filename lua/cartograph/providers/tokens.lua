@@ -22,6 +22,7 @@
 --     capabilities.calls declares the shape.
 
 local M = {}
+local transport = require 'cartograph.transport' -- single owner of the validity key (stamp)
 
 local MAX_AT = 8 -- occurrences kept per edge; e.atn carries the full count
 
@@ -447,11 +448,8 @@ function M.extract(root, opts)
             file = file, order = -1,
             range = { start = { line = 0, char = 0 },
                 ['end'] = { line = 0, char = 0 } } }
-        local st = uv.fs_stat(abs(file))
-        if st then
-            data.stamps[file] = ('%d:%d:%d')
-                :format(st.mtime.sec, st.mtime.nsec or 0, st.size)
-        end
+        local s = transport.stamp(abs(file))
+        if s then data.stamps[file] = s end
         if src then
             local dname = dialect_of(file)
             local dialect = M.DIALECTS[dname]

@@ -7,6 +7,7 @@
 
 local M = {}
 local atr = require 'cartograph.at'
+local transport = require 'cartograph.transport' -- single owner of the validity key (stamp)
 
 function M.read_file(root, rel)
     local fd = io.open(root .. '/' .. rel, 'r')
@@ -17,8 +18,7 @@ function M.read_file(root, rel)
 end
 
 function M.disk_stamp(root, rel)
-    local st = vim.uv.fs_stat(root .. '/' .. rel)
-    return st and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
+    return transport.stamp(root .. '/' .. rel)
 end
 
 --- Comment adhesion: walk UP from a def's first line over lines that

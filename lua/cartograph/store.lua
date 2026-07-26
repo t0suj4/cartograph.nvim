@@ -4,6 +4,7 @@
 -- layouts possible later without touching the panes.
 
 local tier = require 'cartograph.tier' -- canonical ladder (edge_tier index)
+local transport = require 'cartograph.transport' -- single owner of the validity key (stamp)
 
 local M = {
     data    = nil,   -- decoded dump (GraphProvider output, schema #1)
@@ -27,11 +28,8 @@ function M.load(path)
         for _, n in ipairs(data.nodes or {}) do
             if n.file and not seen[n.file] then
                 seen[n.file] = true
-                local st = vim.uv.fs_stat(M.abs_in(data, n.file))
-                if st then
-                    data.stamps[n.file] = ('%d:%d:%d')
-                        :format(st.mtime.sec, st.mtime.nsec, st.size)
-                end
+                local s = transport.stamp(M.abs_in(data, n.file))
+                if s then data.stamps[n.file] = s end
             end
         end
     end
@@ -965,14 +963,9 @@ end
 local function frontier_text(file)
     local path = M.abs(file)
     local e = M._frontier_cache[file]
-    local st = vim.uv.fs_stat(path)
-    local stamp = st
-        and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
-        or 'gone'
+    local stamp = transport.stamp(path) or 'gone'
     if e and e.stamp == stamp then return e.text end
-    local fd = io.open(path, 'r')
-    local text = fd and fd:read('a') or false
-    if fd then fd:close() end
+    local text = transport.read(path) or false
     local hash = text and djb2(text) or nil
     if e then
         if e.hash == hash then
@@ -1678,12 +1671,17 @@ function M.content(node)
     if not (node and node.file) then return nil end
     local file = node.file
     local path = M.abs(file)
-    local st = vim.uv.fs_stat(path)
-    local stamp = st and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size) or 'gone'
+    local stamp = transport.stamp(path) or 'gone'
     local e = M._content_cache[file]
     if e and e.stamp == stamp then return e.lines or nil end
     local lines = false
-    if st then local ok, r = pcall(vim.fn.readfile, path); lines = ok and r or false end
+    -- the READ deliberately stays vim.fn.readfile rather than transport.read:
+    -- readfile drops a trailing empty line where splitting on '\n' keeps it, and
+    -- these lines feed DISPLAY. Routing the stamp is what this seam needed; the
+    -- read would need transport to offer readfile's exact line semantics first.
+    if stamp ~= 'gone' then
+        local ok, r = pcall(vim.fn.readfile, path); lines = ok and r or false
+    end
     M._content_cache[file] = { stamp = stamp, lines = lines }
     return lines or nil
 end
@@ -1971,9 +1969,7 @@ function M.stale(file)
     -- non-filesystem substrates (mcp://…) validate through their own
     -- transport at open time; a stat against their keys means nothing
     if (M.data.root or ''):match('^%w+://') then return nil end
-    local st = vim.uv.fs_stat(M.abs(file))
-    local now = st and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
-        or 'gone'
+    local now = transport.stamp(M.abs(file)) or 'gone'
     return now ~= s
 end
 

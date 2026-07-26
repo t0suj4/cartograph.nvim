@@ -15,6 +15,7 @@
 -- and a warm open re-scans only tables whose definition changed.
 
 local M = { providers = {} }
+local transport = require 'cartograph.transport' -- single owner of the validity key (stamp)
 
 function M.register(p)
     M.providers[p.name] = p
@@ -62,9 +63,10 @@ M.register {
         local changed, deleted, on_disk = {}, {}, {}
         for _, f in ipairs(files) do
             on_disk[f] = true
-            local st = vim.uv.fs_stat(meta.root .. '/' .. f)
-            local now = st
-                and ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
+            -- the RECORD level asking the BYTE level for a validity key: the
+            -- one call that lets a non-filesystem substrate be diffed and
+            -- warm-opened at all (this used to fs_stat inline)
+            local now = transport.stamp(meta.root .. '/' .. f)
             if meta.stamps[f] ~= now then changed[#changed + 1] = f end
         end
         local un = {}

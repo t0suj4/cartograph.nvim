@@ -4999,8 +4999,26 @@ function M.extract(root, opts)
     end
 
     for _, file in ipairs(files) do
-        local src = transport.read(abs(file))
-        if not src then goto next_file end
+        local src, rerr = transport.read(abs(file))
+        if not src then
+            -- UNAVAILABLE is not absence: the file is known to exist, we simply
+            -- could not read it. Dropping it would delete its module node and
+            -- silently reclassify every call into it as `external` — a
+            -- CONFIDENT BOUNDARY CLAIM derived from a failure. So it lands as an
+            -- opaque frontier instead, the same shape a *.min.js bundle or a
+            -- missing grammar gets: visible, stamped, unparsed. ABSENT (the file
+            -- vanished between the walk and the read) is a real race and stays a
+            -- silent skip.
+            if rerr == transport.UNAVAILABLE then
+                stamp(file) -- stat still works on an unreadable file
+                nodes[#nodes + 1] = { id = file, name = file, kind = 'module',
+                    file = file, unparsed = true, order = -1,
+                    range = { start = { line = 0, char = 0 },
+                        ['end'] = { line = 0, char = 0 } } }
+                cunparsed[#cunparsed + 1] = file
+            end
+            goto next_file
+        end
         local clang = container_for(file)
         if clang then
             extract_container(file, clang, src)

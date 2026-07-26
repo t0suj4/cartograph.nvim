@@ -34,6 +34,30 @@
 
 local M = {}
 
+-- ── failure has two kinds, and conflating them is unsound ────────────────────
+-- Every op returns (value, err). The distinction is NOT ergonomics: the
+-- extractor turns "no content" into a CONFIDENT NEGATIVE FACT. Measured on a
+-- 2-file fixture — make the callee's file unreadable and its module node
+-- disappears, while the call to it is classified `external`, i.e. "this is the
+-- project boundary". That claim feeds :CartographExternals, the portability
+-- report and the negative-facts linker kind.
+--
+-- On disk that needs a chmod, so it is nearly unreachable. Over a wire a
+-- timeout or a 5xx produces it routinely — a blip would silently redraw the
+-- project boundary, and (with no stamp written) a warm open could persist it.
+-- So:
+--
+--   ABSENT       authoritative: ENOENT, HTTP 404. A negative fact MAY be minted.
+--   UNAVAILABLE  indeterminate: EACCES, timeout, 5xx, no libz, opened-but-empty.
+--                A negative fact MUST NOT be minted. The caller records an
+--                opaque FRONTIER instead (data.unparsed + an unparsed module
+--                node), which ladder.lua already classifies as "neither
+--                resolved nor refused" — the honest state.
+M.ABSENT = 'absent'
+M.UNAVAILABLE = 'unavailable'
+
+local ENOENT = 2 -- the one errno that means absence; every other means unknown
+
 -- ── the disk transport ───────────────────────────────────────────────────────
 
 local disk = {
@@ -43,18 +67,28 @@ local disk = {
     claims = function () return false end,
 
     read = function (path)
-        local fd = io.open(path, 'r')
-        if not fd then return nil end
-        -- 'a' matches every site this replaced. A directory opens on Linux and
-        -- reads nil; that nil is the answer, not an error to paper over.
+        local fd, _, errno = io.open(path, 'r')
+        if not fd then
+            -- ENOENT is the ONLY authoritative absence. Everything else
+            -- (EACCES, EIO, ELOOP, …) means "could not determine", which must
+            -- not be reported as absence — see M.ABSENT below.
+            return nil, (errno == ENOENT) and M.ABSENT or M.UNAVAILABLE
+        end
+        -- 'a' matches every site this replaced. A directory OPENS on Linux and
+        -- reads nil; that is not absence either, so it is indeterminate too.
         local src = fd:read('a')
         fd:close()
+        if src == nil then return nil, M.UNAVAILABLE end
         return src
     end,
 
     stamp = function (path)
         local st = vim.uv.fs_stat(path)
-        if not st then return nil end
+        if not st then return nil, M.ABSENT end
+        -- NOTE: stat succeeds on an unreadable (chmod 000) file, so a file that
+        -- cannot be READ can still be STAMPED. That is what keeps an
+        -- unavailable file cache-honest: it gets a validity key, and a later
+        -- refresh notices when it becomes readable.
         return ('%d:%d:%d'):format(st.mtime.sec, st.mtime.nsec, st.size)
     end,
 
@@ -112,28 +146,30 @@ end
 
 -- ── the front door ───────────────────────────────────────────────────────────
 -- Callers use these, never a transport table directly, so routing stays in one
--- place. A transport missing an op behaves as that op failing (nil / empty),
--- which is the same shape as an unreadable path.
+-- place. A transport MISSING an op reports UNAVAILABLE, never ABSENT: "I cannot
+-- answer" is not "it is not there", and that is exactly the conflation the two
+-- kinds exist to prevent (a zip with no libz can list but not read).
 
---- Whole-file contents as a string, nil when unreadable.
+--- Whole-file contents as a string. Returns (nil, err) when unreadable — see
+--- M.ABSENT / M.UNAVAILABLE. Callers that only branch on nil are unaffected.
 function M.read(path)
     local t = M.for_path(path)
-    if not t.read then return nil end
+    if not t.read then return nil, M.UNAVAILABLE end
     return t.read(path)
 end
 
---- Contents split into lines, nil when unreadable. Callers that distinguish
---- "tried and failed" from "not tried" keep their own `or false` sentinel.
+--- Contents split into lines. Returns (nil, err) when unreadable; callers that
+--- distinguish "tried and failed" from "not tried" keep their own `or false`.
 function M.lines(path)
-    local src = M.read(path)
-    if not src then return nil end
+    local src, err = M.read(path)
+    if not src then return nil, err end
     return vim.split(src, '\n', { plain = true })
 end
 
---- The validity key for a path, nil when it has none.
+--- The validity key for a path. Returns (nil, err) when it has none.
 function M.stamp(path)
     local t = M.for_path(path)
-    if not t.stamp then return nil end
+    if not t.stamp then return nil, M.UNAVAILABLE end
     return t.stamp(path)
 end
 

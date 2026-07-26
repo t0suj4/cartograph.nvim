@@ -117,3 +117,106 @@ test('transport: a transport missing an op degrades to nil, never errors', funct
     eq(nil, transport.realpath('/a/b.partial'))
     transport.unregister(partial)
 end)
+
+-- ── failure has two kinds ────────────────────────────────────────────────────
+-- The soundness half. The extractor turns "no content" into a CONFIDENT NEGATIVE
+-- FACT (a call into a file it cannot read is classified `external` = "project
+-- boundary"), so absence and indeterminacy must not arrive as the same nil.
+
+local function unreadable(text)
+    local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
+    local p = d .. '/locked.lua'
+    local fd = assert(io.open(p, 'w')); fd:write(text or 'x'); fd:close()
+    vim.fn.system({ 'chmod', '000', p })
+    -- running as root defeats chmod; the caller skips rather than asserting a
+    -- property the environment cannot exhibit
+    local still = io.open(p, 'r')
+    if still then still:close(); vim.fn.delete(d, 'rf'); return nil end
+    return p, d
+end
+
+test('transport: ENOENT is ABSENT, an unreadable file is UNAVAILABLE', function ()
+    local missing = vim.fn.tempname() .. '/gone.lua'
+    local src, err = transport.read(missing)
+    eq(nil, src); eq(transport.ABSENT, err)
+    local p, d = unreadable()
+    if not p then skip 'running as root — chmod 000 is still readable' end
+    local src2, err2 = transport.read(p)
+    eq(nil, src2); eq(transport.UNAVAILABLE, err2)
+    vim.fn.system({ 'chmod', '644', p }); vim.fn.delete(d, 'rf')
+end)
+
+-- what keeps an unavailable file cache-honest: stat succeeds where open fails, so
+-- the frontier node still gets a validity key and a later refresh notices when
+-- the file becomes readable.
+test('transport: an UNREADABLE file can still be STAMPED', function ()
+    local p, d = unreadable('12345')
+    if not p then skip 'running as root — chmod 000 is still readable' end
+    local s, err = transport.stamp(p)
+    eq(nil, err)
+    ok(s ~= nil and s:match('^%d+:%d+:5$') ~= nil, 'stamped despite unreadable: ' .. tostring(s))
+    vim.fn.system({ 'chmod', '644', p }); vim.fn.delete(d, 'rf')
+end)
+
+test('transport: a missing op is UNAVAILABLE, never ABSENT', function ()
+    local t = transport.register {
+        name = 'noread',
+        claims = function (path) return path:match('%.noread$') ~= nil end,
+        stamp = function () return 'k' end,
+    }
+    local _, err = transport.read('/x.noread')
+    eq(transport.UNAVAILABLE, err) -- "I cannot answer" is not "it is not there"
+    transport.unregister(t)
+end)
+
+-- ── the extractor's reaction: a frontier, not a deletion ─────────────────────
+-- Measured before the fix: making the callee's file unreadable dropped its module
+-- node entirely (modules 2 -> 1) and the call to it became `external`.
+local function fixture()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, s)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(s); fd:close()
+    end
+    w('lib.lua', 'local function helper(x) return x + 1 end\nreturn { helper = helper }\n')
+    w('main.lua', "local lib = require 'lib'\n"
+        .. 'local function run() return lib.helper(1) end\nreturn { run = run }\n')
+    return root
+end
+
+test('transport: an UNAVAILABLE file stays a stamped unparsed frontier', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = fixture()
+    vim.fn.system({ 'chmod', '000', root .. '/lib.lua' })
+    local probe = io.open(root .. '/lib.lua', 'r')
+    if probe then probe:close(); vim.fn.delete(root, 'rf'); skip 'running as root' end
+    local d = ts.extract(root)
+    local mods, unp = 0, 0
+    for _, n in ipairs(d.nodes or {}) do
+        if n.kind == 'module' then
+            mods = mods + 1
+            if n.unparsed and n.file == 'lib.lua' then unp = unp + 1 end
+        end
+    end
+    eq(2, mods)                       -- the file did NOT vanish
+    eq(1, unp)                        -- ... it became an opaque frontier
+    eq(true, (d.stamps or {})['lib.lua'] ~= nil) -- ... and it is stamped
+    local roster = {}
+    for _, f in ipairs(d.unparsed or {}) do roster[f] = true end
+    eq(true, roster['lib.lua'] == true)          -- ... and on the roster
+    vim.fn.system({ 'chmod', '644', root .. '/lib.lua' }); vim.fn.delete(root, 'rf')
+end)
+
+-- KNOWN RED — the remaining half, deliberately not fixed in this change.
+-- The frontier NODE now survives, but the call into it is still disposed
+-- `external` ("this is the project boundary"), because the resolver's nodef path
+-- has no notion that the answering file went unread. Fixing it means teaching
+-- the disposition that a call whose import/receiver resolves to an UNPARSED file
+-- is `frontier`, not `external` — and that path is MIRRORED across the extract
+-- and relink drivers (4 EXT.nodef sites), which is exactly where the cbarg
+-- divergence came from. It gets its own change, with resolveparity beside it.
+test('transport: a call into an UNAVAILABLE file is not disposed external', function ()
+    skip 'KNOWN RED: resolver nodef path does not consult the unparsed roster'
+end)
