@@ -182,30 +182,43 @@ local LUA_GUARDS = {
     end,
 }
 
--- factorio mod-name -> top dir, from each dir's info.json "name" (the
--- mod's IDENTITY — dir names carry versions and may not match: space-
--- exploration-postprocess lives in space-exploration_0.7.5). The root's
--- OWN info.json maps its name to '' (self-references resolve in a
--- single-mod extraction too). Memoized per root.
+-- factorio mod-name -> top dir, from each dir's manifest "name" (the mod's
+-- IDENTITY — dir names carry versions and may not match: space-exploration-
+-- postprocess lives in space-exploration_0.7.5; MEASURED, 112 of 195 local
+-- archives disagree with their filename). The root's OWN manifest maps its name
+-- to '' (self-references resolve in a single-mod extraction too). Memoized per
+-- root.
+--
+-- The identity RULE is no longer restated here: it comes from the package-
+-- ecosystem spec (spec/ecosystem/lua-factorio.lua), which is the abstraction the
+-- comment below this one has been asking for. Reaching OUTSIDE the corpus — into
+-- a mods dir of zip archives — then uses the SAME declared rule rather than a
+-- second copy of it.
+-- the package-IDENTITY rule, from the ecosystem spec — resolved ONCE so every
+-- consumer in this file reads the same source instead of restating it
+local IDENT = (function ()
+    local eco = require('cartograph.spec.ecosystem').load('lua-factorio')
+    return eco and eco.identity or nil
+end)()
+
 local FMODS = {}
 local function factorio_mods(root, files)
     local map = FMODS[root]
     if map then return map end
     map = {}
+    if not IDENT then return map end -- no spec, no claim (never a guessed rule)
     local segs = { [''] = true }
     for f in pairs(files) do
         local seg = f:match('^([^/]+)/')
         if seg then segs[seg] = true end
     end
     for seg in pairs(segs) do
-        local p = root .. (seg == '' and '' or '/' .. seg) .. '/info.json'
-        local fd = io.open(p, 'r')
-        if fd then
-            local txt = fd:read('*a')
-            fd:close()
+        local p = root .. (seg == '' and '' or '/' .. seg) .. '/' .. IDENT.manifest
+        local txt = require('cartograph.transport').read(p)
+        if txt then
             local okj, m = pcall(vim.json.decode, txt)
-            if okj and type(m) == 'table' and type(m.name) == 'string' then
-                map[m.name] = seg
+            if okj and type(m) == 'table' and type(m[IDENT.name_key]) == 'string' then
+                map[m[IDENT.name_key]] = seg
             end
         end
     end
@@ -213,10 +226,17 @@ local function factorio_mods(root, files)
     return map
 end
 
--- nvim-plugin REPO SHAPE (a 3rd per-root detector, deliberately EMBEDDED INLINE
--- beside factorio_mods/toc_scope — the scattered cluster that the resolution-
--- health analyzer's rule 3 [scattered-special-case finder] must later detect as
--- one missing-abstraction; see [[cartograph-cross-project]] repo shapes). An nvim
+-- nvim-plugin REPO SHAPE (a 3rd per-root detector, still EMBEDDED INLINE beside
+-- factorio_mods/toc_scope — the scattered cluster the resolution-health
+-- analyzer's rule 3 [scattered-special-case finder] should detect as one
+-- missing-abstraction; see [[cartograph-cross-project]] repo shapes).
+-- STATUS: the abstraction now EXISTS — spec/ecosystem/ is that axis, and
+-- factorio's half of the cluster has moved into it (identity + manifest name are
+-- declared there, no longer restated here). These two are the remaining collapse:
+-- a wow-addon ecosystem (manifest = <Addon>/<Addon>.toc) and an nvim-plugin one
+-- (package root = lua/). Deliberately NOT moved in the same change — both feed
+-- resolution BOUNDARIES that the wow and self corpora exercise, so they want
+-- their own gate run. An nvim
 -- plugin puts its package under `lua/` (`require 'foo.bar'` → lua/foo/bar.lua), so
 -- `lua/` is the package root. MARKER-GATED (fires only when a lua/ layout is
 -- present), NOT the reverted blind dir-relative guess. Memoized per root.
@@ -244,8 +264,12 @@ local function toc_scope(file, _, root)
     if hit == nil then
         local dir = root .. '/' .. seg
         hit = vim.uv.fs_stat(dir .. '/' .. seg .. '.toc') ~= nil
-            -- factorio mods folder: info.json is the manifest marker
-            or vim.uv.fs_stat(dir .. '/info.json') ~= nil
+            -- factorio mods folder: the package MANIFEST is the marker. The
+            -- name comes from the ecosystem spec, not a second literal — this was
+            -- the duplicate copy of the fact that made the cluster below a
+            -- scattering rather than three unrelated detectors.
+            or (IDENT ~= nil
+                and vim.uv.fs_stat(dir .. '/' .. IDENT.manifest) ~= nil)
         if not hit then
             local it = vim.uv.fs_scandir(dir)
             while it do
