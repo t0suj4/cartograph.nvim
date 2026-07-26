@@ -247,6 +247,26 @@ if stats.mis == 0 and stats.missing == 0 and (stats.invented or 0) == 0
             print('       to precompute the poison set once, like the file->scope table.')
         end
     end
+    -- THE MONOTONICITY RATCHET, and it is RED on purpose. A demand graph may know LESS
+    -- than the whole graph; it may never know MORE. `extra` counts exactly the violations
+    -- of that, and until now the tool PRINTED them and exited 0 — so the one direction a
+    -- partial graph must never take was reported and never gated.
+    --
+    -- The target is 0, not today's numbers: pinning the measured counts would make the
+    -- gap permanent. Measured 2026-07-26, both awaiting a fix:
+    --   .        carry     7   one nested 2-char `cb` in fsm.lua; needs the polyglot ROOT
+    --                          scope — lua/cartograph alone is 0 over 2836 sites
+    --   rust     nocarry   1   resolve_self poison anti-monotonicity, no carried map
+    -- Measured at 0 and expected to STAY there: lua-spec, ruby, lua/cartograph (carry).
+    -- Neither red case has a fixture-scale reproduction — tests/thinindex_gaps_spec.lua
+    -- records what was tried and why this tool is the only thing holding them.
+    if stats.extra > 0 then
+        print(('MONOTONICITY FAIL — %d site(s) the demand graph resolved and the full'
+            .. ' graph declined.'):format(stats.extra))
+        print('       Ratchet target is 0; under-resolution is the only honest')
+        print('       degradation. See tests/thinindex_gaps_spec.lua.')
+        vim.cmd('cquit 1')
+    end
     vim.cmd('qall!')
 else
     print('FAIL — a demand-resolved call points somewhere the full graph does not, or a')
