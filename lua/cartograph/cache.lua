@@ -73,7 +73,19 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 105 -- v105: THE TWO NAME INDEXES ARE NOT ALTERNATIVES. resolve_module_alias
+M.VERSION = 106 -- v106: RECEIVER-PATH AGREEMENT in the name resolver. A call `a.b.m()`
+               -- and a candidate named `b.m` agree on the RECEIVER, which the bare tail
+               -- `m` says nothing about; where exactly one admitted candidate agrees,
+               -- that beats whichever name index answered first. PURELY ADDITIVE as
+               -- measured — every changed call was an AMBIGUOUS REFUSAL before, and no
+               -- corpus lost or redirected anything: go +69 (`h.PathSpec.RelURL()`, the
+               -- embedded-field idiom), v8 +187 (`base::OS::Abort()`), ghost +14
+               -- (`this.#MemberLinkClickEvent.create()`), rust +9
+               -- (`grep::matcher::LineTerminator::crlf()`); the other 25 corpora are
+               -- unchanged. A BARE candidate is deliberately NEUTRAL, never agreeing —
+               -- see recv_agrees and tests/recvagree_spec.lua for why the obvious
+               -- extension is unsound. New resolutions on disk, so a v105 cache is stale.
+               -- v105: THE TWO NAME INDEXES ARE NOT ALTERNATIVES. resolve_module_alias
                -- and resolve_field_chain both wrote `tail[m] or exact[m]`, selecting an
                -- index by whether the tail list is empty ANYWHERE IN THE CORPUS rather
                -- than by whether it answers for THIS module — so the moment any file

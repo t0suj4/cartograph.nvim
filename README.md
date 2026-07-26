@@ -1095,6 +1095,27 @@ every pre-ES6 library uses, `define(["./core"], function (jQuery) { … })` pass
 namespace itself as a parameter, and vetoing those removed 36 of jquery's 52 new defs
 — its whole `jQuery.*` surface.
 
+### Receiver-path agreement
+
+A call `a.b.m()` and a candidate named `b.m` agree on the *receiver*, which the
+bare tail `m` says nothing about; where exactly one admitted candidate agrees,
+that beats whichever name index answered first. It fires on idioms four languages
+share — Go's embedded fields (`h.PathSpec.RelURL()`, where the field is named for
+its type), C++ namespaces (`base::OS::Abort()`), Rust paths
+(`grep::matcher::LineTerminator::crlf()`), JS namespace objects and private fields
+(`this.#MemberLinkClickEvent.create()`) — and every call it changed had been an
+**ambiguous refusal**: go +69, v8 +187, ghost +14, rust +9, with nothing lost or
+redirected on any of the 29 corpora.
+
+A **bare** candidate is deliberately neutral, never agreeing. Letting bare `m`
+agree with `R.m` is the tempting extension and it is unsound: it would promote a
+free function over a method for every receiver call in every corpus, and deciding
+`foo.bar()` between a bare `bar` and `Class.bar` needs the receiver's *type*, not
+its name. That line is where name-based resolution stops and receiver typing
+begins — shipped for Zig (whose return types are written in the syntax), and
+measured low-value for the dynamic languages, where the generic conventions are
+exhausted and what remains is per-framework.
+
 ## Lint
 
 `:CartographLint` runs graph-aware, whole-program checks and drops the findings

@@ -80,7 +80,7 @@ return {
         budget_mb = 1600, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/TryGhost/Ghost',
         rev = 'f7d7df8f9816',
-        expected = { refs = 28306, nodes = 40863 }, -- recalib 2026-07-26: +375 refs (nodes unchanged) = v105 name-index fallback. +290 calls out of a refusal and 174 REDIRECTED, 0 lost: every sampled redirect is a correction where the require BINDING now beats a corpus name-match — `indexnow.listen()`, `slack.listen()`, `emailAnalyticsJobs.scheduleRecurringJobs()`, `routeSettings.loadRouteSettings()`, `registry.registerHelper()` had all been landing on a foreign namesake (that last one on a TEST file's export). Prior: 27931/40863
+        expected = { refs = 28320, nodes = 40863 }, -- recalib 2026-07-26: +14 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +14 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `this.#MemberLinkClickEvent.create()` and `OfferAmount.OfferTrialAmount.create()`. Prior: 28306
         lang = 'javascript',
         notes = 'js SCALE tier (2134 files) — a real node webapp: express'
             .. ' routes + handlebars themes (parametric-files territory)',
@@ -90,7 +90,7 @@ return {
         budget_mb = 7500, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://chromium.googlesource.com/v8/v8',
         rev = '0646faaada71',
-        expected = { refs = 74420, nodes = 165859 }, -- +7 @ v48 short-name honesty (V/I/T/F macro helpers)
+        expected = { refs = 74594, nodes = 165859 }, -- recalib 2026-07-26: +174 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +187 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `base::OS::Abort()` -> OS::Abort, `internal::HandleScope::ZapRange()` -> HandleScope::ZapRange. Prior: 74420
         lang = 'cpp',
         notes = 'cpp SCALE tier (1267 cc + 1813 h) — preprocessor-heavy,'
             .. ' the TU-walk torture target; .tq (torque) not spec\'d',
@@ -143,7 +143,7 @@ return {
         root = HOME .. '/git/hugo',
         repo = 'https://github.com/gohugoio/hugo',
         rev = '5a5f4a549522',
-        expected = { refs = 9593, nodes = 11769 }, -- recalib 2026-07-26: v104 js member-target function literals (+18 refs/+60 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: +13 out of a refusal, 2 to a refusal, 0 redirected, 0 LOST — every added node is a .js file (a mixed repo, not a go change). Prior: refs 9575 / nodes 11709 -- +7/+2 @ v63 B4 prototype methods (embedded HugoReload.prototype.reload); +1 @ v59 class-keying (LRUCache.put)
+        expected = { refs = 9658, nodes = 11769 }, -- recalib 2026-07-26: +65 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +69 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `h.PathSpec.RelURL()` -> PathSpec.RelURL (go's embedded-field idiom names the type in the receiver path). Prior: 9593
         lang = 'go',
         notes = 'go quick tier (901 files)',
     },
@@ -151,7 +151,7 @@ return {
         root = HOME .. '/git/ripgrep',
         repo = 'https://github.com/burntsushi/ripgrep',
         rev = '48b0c795f4fe',
-        expected = { refs = 2593, nodes = 3360 }, -- +125 catch-up @ v59 re-gate: PRE-EXISTING v55 module-alias drift (NOT js class-keying — rust has no JS; baseline was last pinned @ v48, v55 never re-gated here)
+        expected = { refs = 2600, nodes = 3360 }, -- recalib 2026-07-26: +7 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +9 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `grep::matcher::LineTerminator::crlf()` -> LineTerminator::crlf. Prior: 2593
         lang = 'rust',
         notes = 'rust quick tier (100 files)',
     },

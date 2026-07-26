@@ -1247,6 +1247,29 @@ local function resolve_interface(cv, implements, beans, extends, exact, addref, 
     return n
 end
 
+--- Does a candidate def's own name AGREE with the RECEIVER PATH of a call name?
+--- `def` agrees with `call` when def's whole dotted name is a suffix of call's at a
+--- separator boundary AND carries a qualifier of its own — so for a call
+--- `jQuery.find.attr`, the candidate `find.attr` agrees (its receiver `find` is right
+--- there in the call) while a bare `attr` does not (it says nothing about a receiver)
+--- and `Expr.attr` disagrees.
+---
+--- WHY ONLY MULTI-SEGMENT: a BARE candidate is neutral, never agreeing. Treating a bare
+--- `m` as agreeing with `R.m` is the rule that looks obvious and is wrong — it would
+--- make a free function outrank a method for every receiver call in every corpus (a
+--- `foo.bar()` whose receiver type we do not know is far more likely to be `Class.bar`
+--- than a bare `bar`). Deciding THAT needs the receiver's TYPE, which is receiver typing
+--- ([[cartograph-local-type-inference]]: shipped for zig, measured-low for the dynamic
+--- languages). This predicate deliberately answers only the part a NAME can settle.
+local function recv_agrees(call, defname)
+    if not defname or #defname >= #call then return false end
+    -- the candidate must name a receiver of its own; a bare name is neutral
+    if not defname:find('[%.:>#]') then return false end
+    if call:sub(-#defname) ~= defname then return false end
+    local sep = call:sub(-#defname - 1, -#defname - 1)
+    return sep == '.' or sep == ':' or sep == '>' or sep == '#'
+end
+
 --- The UNIQUE fn/method named `key` defined in `file` — the shared question behind two
 --- passes that both had it subtly wrong. Returns (fit, dup).
 ---
@@ -5394,8 +5417,7 @@ function M.extract(root, opts)
                 or name:find('::', 1, true) ~= nil
                 or (spec and spec.hash_qualified
                     and name:find('#', 1, true) ~= nil)
-            local fitset = {}
-            for _, n in ipairs(tc) do
+            local function admits(n)
                 local fits
                 if dotted then
                     fits = not (spec and spec.dot_calls_are_methods)
@@ -5414,7 +5436,33 @@ function M.extract(root, opts)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
-                if fits then fitset[#fitset + 1] = n end
+                return fits
+            end
+            -- ── RECEIVER-PATH AGREEMENT, before the tail-vs-exact preference.
+            -- A call `a.b.m` and a candidate named `b.m` agree on the RECEIVER, which
+            -- the bare tail `m` says nothing about. Where exactly one admitted
+            -- candidate agrees, that is a better answer than whichever index happened
+            -- to answer first — and it is the only receiver question a NAME can settle
+            -- (see recv_agrees). ADDITIVE BY CONSTRUCTION: a unique agreement either
+            -- fills a call the tail preference left ambiguous, or corrects one it
+            -- resolved to a candidate whose receiver contradicts the call's; with no
+            -- unique agreement the block below runs exactly as it did.
+            if dotted then
+                local agree
+                for _, list in ipairs({ tail[tl] or {}, exact[tl] or {} }) do
+                    for _, n in ipairs(list) do
+                        if recv_agrees(name, n.name) and admits(n) then
+                            if agree and agree.id ~= n.id then agree = nil; goto no_agree end
+                            agree = n
+                        end
+                    end
+                end
+                if agree then return agree, true end
+                ::no_agree::
+            end
+            local fitset = {}
+            for _, n in ipairs(tc) do
+                if admits(n) then fitset[#fitset + 1] = n end
             end
             if #fitset == 1 then return fitset[1], true end
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
@@ -6100,8 +6148,7 @@ function M.relink(data, touched)
                 or name:find('::', 1, true) ~= nil
                 or (spec and spec.hash_qualified
                     and name:find('#', 1, true) ~= nil)
-            local fitset = {}
-            for _, n in ipairs(tc) do
+            local function admits(n)
                 local fits
                 if dotted then
                     fits = not (spec and spec.dot_calls_are_methods)
@@ -6120,7 +6167,33 @@ function M.relink(data, touched)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
-                if fits then fitset[#fitset + 1] = n end
+                return fits
+            end
+            -- ── RECEIVER-PATH AGREEMENT, before the tail-vs-exact preference.
+            -- A call `a.b.m` and a candidate named `b.m` agree on the RECEIVER, which
+            -- the bare tail `m` says nothing about. Where exactly one admitted
+            -- candidate agrees, that is a better answer than whichever index happened
+            -- to answer first — and it is the only receiver question a NAME can settle
+            -- (see recv_agrees). ADDITIVE BY CONSTRUCTION: a unique agreement either
+            -- fills a call the tail preference left ambiguous, or corrects one it
+            -- resolved to a candidate whose receiver contradicts the call's; with no
+            -- unique agreement the block below runs exactly as it did.
+            if dotted then
+                local agree
+                for _, list in ipairs({ tail[tl] or {}, exact[tl] or {} }) do
+                    for _, n in ipairs(list) do
+                        if recv_agrees(name, n.name) and admits(n) then
+                            if agree and agree.id ~= n.id then agree = nil; goto no_agree end
+                            agree = n
+                        end
+                    end
+                end
+                if agree then return agree, true end
+                ::no_agree::
+            end
+            local fitset = {}
+            for _, n in ipairs(tc) do
+                if admits(n) then fitset[#fitset + 1] = n end
             end
             if #fitset == 1 then return fitset[1], true end
             return nil, nil, refusal(#fitset > 1 and 'ambiguous' or 'blocked',
