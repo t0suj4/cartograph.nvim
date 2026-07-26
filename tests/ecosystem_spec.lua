@@ -151,17 +151,17 @@ test('ecosystem: a spec edit INVALIDATES a warm graph cache', function ()
     local fd = assert(io.open(root .. '/m.lua', 'w'))
     fd:write('local function f(x) return x end\nreturn { f = f }\n'); fd:close()
 
-    ok(cache._ecosystem_stamp() ~= nil, 'the surface is stampable')
+    ok(cache._artifact_key() ~= nil, 'the surface is stampable')
     cache.wipe(root)
     cache.save(ts.extract(root))
     ok(cache.open(root) ~= nil, 'warm open works right after save')
 
     -- PERTURB the composition exactly as an edited spec would, without touching a
     -- checked-in file: swap in a stamp function that answers differently
-    local real = cache._ecosystem_stamp
-    cache._ecosystem_stamp = function () return (real() or '') .. ';edited' end
+    local real = cache._artifact_key
+    cache._artifact_key = function () return (real() or '') .. ';edited' end
     eq(nil, cache.open(root)) -- the layout rules moved -> the cache is stale
-    cache._ecosystem_stamp = real
+    cache._artifact_key = real
     ok(cache.open(root) ~= nil, 'and valid again once restored')
 
     cache.wipe(root); vim.fn.delete(root, 'rf')

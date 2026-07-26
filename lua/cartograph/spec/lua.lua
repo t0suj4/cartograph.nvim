@@ -196,16 +196,21 @@ local LUA_GUARDS = {
 -- second copy of it.
 -- the package-IDENTITY rule, from the ecosystem spec — resolved ONCE so every
 -- consumer in this file reads the same source instead of restating it
+local validity = require 'cartograph.validity'
+
 local IDENT = (function ()
     local eco = require('cartograph.spec.ecosystem').load('lua-factorio')
     return eco and eco.identity or nil
 end)()
 
-local FMODS = {}
-local function factorio_mods(root, files)
-    local map = FMODS[root]
-    if map then return map end
-    map = {}
+-- EPOCH-keyed, not memoized forever. A stamp is not available cheaply here: to
+-- know whether this map is stale you must scan the top-level directories and stat
+-- every candidate manifest, which is exactly what computing it does. So it turns
+-- over per EXTRACTION RUN instead — which was also the live bug, since adding a
+-- package to a tree left the identity map stale for the rest of the session.
+local factorio_mods = validity.memo { name = 'factorio-mods', epoch = 'extract',
+    compute = function (root, files)
+    local map = {}
     if not IDENT then return map end -- no spec, no claim (never a guessed rule)
     local segs = { [''] = true }
     for f in pairs(files) do
@@ -222,9 +227,8 @@ local function factorio_mods(root, files)
             end
         end
     end
-    FMODS[root] = map
     return map
-end
+end }
 
 -- nvim-plugin REPO SHAPE (a 3rd per-root detector, still EMBEDDED INLINE beside
 -- factorio_mods/toc_scope — the scattered cluster the resolution-health
@@ -240,30 +244,20 @@ end
 -- plugin puts its package under `lua/` (`require 'foo.bar'` → lua/foo/bar.lua), so
 -- `lua/` is the package root. MARKER-GATED (fires only when a lua/ layout is
 -- present), NOT the reverted blind dir-relative guess. Memoized per root.
-local NLROOT = {}
-local function nvim_lua_root(root, files)
-    local v = NLROOT[root]
-    if v ~= nil then return v end
-    v = false
-    for f in pairs(files) do
-        if f:match('^lua/.+%.lua$') then v = true; break end
-    end
-    NLROOT[root] = v
-    return v
-end
+local nvim_lua_root = validity.memo { name = 'nvim-lua-root', epoch = 'extract',
+    compute = function (root, files)
+        for f in pairs(files) do
+            if f:match('^lua/.+%.lua$') then return true end
+        end
+        return false
+    end }
 
 -- WoW-addon boundary detection, memoized per (root, top segment): an
 -- addon tree is <root>/<Addon>/<Addon>.toc (or any *.toc in the dir).
-local TOC_DIR = {}
-local function toc_scope(file, _, root)
-    local seg = file:match('^([^/]+)/')
-    -- multi-root corpora (self://) pass a table root: never an addon tree
-    if not seg or type(root) ~= 'string' then return '' end
-    local key = root .. '\31' .. seg
-    local hit = TOC_DIR[key]
-    if hit == nil then
-        local dir = root .. '/' .. seg
-        hit = vim.uv.fs_stat(dir .. '/' .. seg .. '.toc') ~= nil
+-- keyed per (root, top segment): the same epoch, a composite slot key
+local toc_hit = validity.memo { name = 'toc-dir', epoch = 'extract',
+    compute = function (_, dir, seg)
+        local hit = vim.uv.fs_stat(dir .. '/' .. seg .. '.toc') ~= nil
             -- factorio mods folder: the package MANIFEST is the marker. The
             -- name comes from the ecosystem spec, not a second literal — this was
             -- the duplicate copy of the fact that made the cluster below a
@@ -278,8 +272,14 @@ local function toc_scope(file, _, root)
                 if name:sub(-4) == '.toc' then hit = true break end
             end
         end
-        TOC_DIR[key] = hit
-    end
+        return hit
+    end }
+
+local function toc_scope(file, _, root)
+    local seg = file:match('^([^/]+)/')
+    -- multi-root corpora (self://) pass a table root: never an addon tree
+    if not seg or type(root) ~= 'string' then return '' end
+    local hit = toc_hit(root .. '\31' .. seg, root .. '/' .. seg, seg)
     return hit and seg or ''
 end
 

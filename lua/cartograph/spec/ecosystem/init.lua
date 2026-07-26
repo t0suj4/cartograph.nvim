@@ -17,19 +17,38 @@
 local M = {}
 
 local DIR = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/init%.lua$')
-local cache = {}
+local validity = require 'cartograph.validity'
 
 --- Load an ecosystem spec by name (e.g. 'lua-factorio'). Memoized. nil when
 --- absent or malformed — a half-loaded layout spec would be worse than none,
 --- since callers would silently resolve against half the rules.
-function M.load(name)
-    if cache[name] ~= nil then return cache[name] or nil end
-    local eco
-    local ok, mod = pcall(require, 'cartograph.spec.ecosystem.' .. name)
-    if ok and type(mod) == 'table' and mod.schema == 1 then eco = mod end
-    cache[name] = eco or false
-    return eco
-end
+--- KEYED ON THE ARTIFACT STAMP (see profile/init.lua for why caching forever was
+--- wrong: it returned a stale spec while the manifest recorded the fresh stamp).
+M.load = validity.memo {
+    name = 'ecosystem',
+    stamp = function (name) return M.stamp_of(name) end,
+    compute = function (name)
+        -- evict Lua's module cache: see profile/init.lua — a moved stamp must
+        -- actually re-read the artifact, and `require` would return the stale table
+        local modname = 'cartograph.spec.ecosystem.' .. name
+        package.loaded[modname] = nil
+        local ok, mod = pcall(require, modname)
+        if ok and type(mod) == 'table' and mod.schema == 1 then return mod end
+        return nil
+    end,
+}
+
+--- Graph-validity CONTRIBUTOR: package-layout rules (identity, manifest name,
+--- precedence) shape resolution, so a cached graph must invalidate when they move.
+--- Composed over EVERY declared spec, so one added later enters the key for free.
+validity.contribute('ecosystem', function ()
+    local parts = {}
+    for _, n in ipairs(M.names()) do
+        local st = M.stamp_of(n)
+        if st then parts[#parts + 1] = n .. '=' .. st end
+    end
+    return #parts > 0 and table.concat(parts, ';') or nil
+end)
 
 --- Content-identity stamp of the backing artifact, for cache invalidation. Same
 --- contract as profile.stamp_of: cheap (one fs_stat), nil for an unknown name.

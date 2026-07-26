@@ -3889,6 +3889,12 @@ end
 ---@return table data  the schema-1 graph (ready for store.ingest)
 function M.extract(root, opts)
     if M.PROFILE then prof = {}; prof._t0 = vim.uv.hrtime() end
+    -- turn over per-EXTRACTION derived state ([[cartograph-validity]]): the spec
+    -- layer's per-root memos (package identity, addon/plugin layout) derive from a
+    -- TREE, so a cheap validity key does not exist for them — they key on this
+    -- epoch instead. Bumping here is what makes a second extraction see a tree that
+    -- changed since the first, which it previously could not.
+    require('cartograph.validity').bump('extract')
     -- a URI root (self://loaded — the running instance's multi-root corpus)
     -- keeps off the filesystem's path rules: its files are plugin-labelled
     -- keys (telescope.nvim/lua/…) that resolve to real directories through
