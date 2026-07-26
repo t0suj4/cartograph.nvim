@@ -27,6 +27,20 @@ function M.provider(data)
     return M.providers[name:match('^([^:]+)') or name]
 end
 
+--- The live transport stack for a graph: its own `transport` spec if it carries
+--- one, else the provider's DECLARED composition, else the disk default. Built
+--- fresh rather than memoised — a stack is cheap and a cached one would outlive
+--- the substrate it describes (an unmounted archive).
+function M.transport(data)
+    local spec = (data or {}).transport
+    if not spec then
+        local p = M.provider(data or {})
+        spec = p and p.transports
+    end
+    if not spec then return transport end
+    return transport.build(spec)
+end
+
 --- The capability view of a graph.
 function M.caps(data)
     local p = M.provider(data)
@@ -54,19 +68,27 @@ end
 M.register {
     name = 'treesitter',
     idpass = true,
+    -- SUBSTRATE COMPOSITION, declared here rather than registered at runtime:
+    -- extraction also runs in spawned worker processes, so the composition has to
+    -- be data a jobfile can carry. A graph may override it (meta.transport) when
+    -- its corpus lives somewhere else — a mods dir of zip archives, say — and
+    -- diff/refresh then run over the SAME stack the extraction used, which is
+    -- what makes a non-filesystem corpus warm-openable at all.
+    transports = { { kind = 'disk' } },
     -- diff by walking the tree with extraction's own rules and comparing
     -- stamps; new files are 'changed' (no stamp), bundles count only when
     -- they appear or vanish (content churn is the frontier machinery's)
     diff = function (meta)
         local ts = require 'cartograph.providers.treesitter'
-        local files, minified = ts.list_files(meta.root)
+        local tp = M.transport(meta)
+        local files, minified = ts.list_files(meta.root, nil, tp)
         local changed, deleted, on_disk = {}, {}, {}
         for _, f in ipairs(files) do
             on_disk[f] = true
             -- the RECORD level asking the BYTE level for a validity key: the
             -- one call that lets a non-filesystem substrate be diffed and
             -- warm-opened at all (this used to fs_stat inline)
-            local now = transport.stamp(meta.root .. '/' .. f)
+            local now = tp.stamp(meta.root .. '/' .. f)
             if meta.stamps[f] ~= now then changed[#changed + 1] = f end
         end
         local un = {}
@@ -87,7 +109,8 @@ M.register {
     end,
     refresh_slice = function (data, rels, fileset)
         return require('cartograph.providers.treesitter').extract(data.root,
-            { subdirs = rels, fileset = fileset, skip_idpass = true })
+            { subdirs = rels, fileset = fileset, skip_idpass = true,
+                transport = M.transport(data) })
     end,
 }
 

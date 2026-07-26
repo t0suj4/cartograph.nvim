@@ -109,89 +109,119 @@ local disk = {
 
 M.disk = disk
 
--- ── the registry ─────────────────────────────────────────────────────────────
+-- ── KINDS: the load-time registry ────────────────────────────────────────────
+-- Declared in-file, like source.lua's provider registry and shapes.lua's
+-- M.registry — NOT mutated at runtime. A kind is a constructor: config table in,
+-- transport out (or nil when the substrate is unavailable, e.g. no libz).
+--
+-- WHY A KIND NAME AND NOT THE TRANSPORT ITSELF: extraction runs in SPAWNED nvim
+-- processes (parallel.lua:149) that receive their job as JSON (worker.lua:17-21).
+-- A transport table has function fields and cannot cross vim.json.encode, so the
+-- parent ships a DECLARATIVE SPEC and the worker rebuilds it — exactly how a
+-- multi-root corpus ships `job.roots` and the worker reconstructs `abs`, and how
+-- `job.packs` ships pack NAMES. A module-global registry would simply not exist
+-- in a worker: every claimed path would silently fall back to disk.
+M.kinds = {
+    disk = function () return disk end,
+}
 
-local registered = {}
+-- ── STACKS: composition is a VALUE ───────────────────────────────────────────
+-- A stack answers the same op set as a single transport, so it is substitutable
+-- for one and callers never learn which they hold: `(opts.transport or
+-- transport).read(path)`. Order matters — the first kind that CLAIMS a path
+-- serves it, and disk is the implicit tail.
+--
+-- A transport MISSING an op reports UNAVAILABLE, never ABSENT: "I cannot answer"
+-- is not "it is not there", which is the conflation the two kinds exist to
+-- prevent (a zip with no libz can list but not read).
 
---- Add a transport. Later registrations are asked FIRST, so a specific
---- substrate can shadow a general one. Disk is never in this list; it is the
---- fallback.
---- No production caller yet — disk is the only transport in step A. It exists so
---- that a second substrate is an ADDITION rather than an edit to for_path, and
---- the spec exercises it. With nothing registered, for_path IS "return disk".
-function M.register(t)
-    assert(type(t) == 'table' and t.name and t.claims,
-        'transport: needs { name, claims, ... }')
-    table.insert(registered, 1, t)
-    return t
+local function make(transports, spec)
+    local S = { spec = spec }
+
+    --- Which transport serves this path. Never nil: disk answers by default.
+    function S.for_path(path)
+        for _, t in ipairs(transports) do
+            if t.claims(path) then return t end
+        end
+        return disk
+    end
+
+    --- Whole-file contents as a string. Returns (nil, err) when unreadable — see
+    --- M.ABSENT / M.UNAVAILABLE. Callers that only branch on nil are unaffected.
+    function S.read(path)
+        local t = S.for_path(path)
+        if not t.read then return nil, M.UNAVAILABLE end
+        return t.read(path)
+    end
+
+    --- Contents split into lines. Returns (nil, err) when unreadable; callers
+    --- that distinguish "tried and failed" from "not tried" keep `or false`.
+    function S.lines(path)
+        local src, err = S.read(path)
+        if not src then return nil, err end
+        return vim.split(src, '\n', { plain = true })
+    end
+
+    --- The validity key for a path. Returns (nil, err) when it has none.
+    function S.stamp(path)
+        local t = S.for_path(path)
+        if not t.stamp then return nil, M.UNAVAILABLE end
+        return t.stamp(path)
+    end
+
+    --- Iterator over a container's entries, yielding (name, type).
+    function S.dir(path)
+        local t = S.for_path(path)
+        if not t.dir then return function () return nil end end
+        return t.dir(path)
+    end
+
+    --- uv-shaped stat, for callers needing type/size beyond the stamp.
+    function S.stat(path)
+        local t = S.for_path(path)
+        return t.stat and t.stat(path) or nil
+    end
+
+    --- Canonical path, or nil where the substrate has no such notion. A
+    --- transport without link semantics never yields type 'link', so callers
+    --- that resolve aliases never reach this.
+    function S.realpath(path)
+        local t = S.for_path(path)
+        return t.realpath and t.realpath(path) or nil
+    end
+
+    return S
 end
 
---- Remove a transport, restoring whatever answered its paths before. Symmetric
---- with register so a substrate can be withdrawn (an unmounted archive, a closed
---- session) without the registry growing forever; the spec is its caller today.
-function M.unregister(t)
-    for i, r in ipairs(registered) do
-        if r == t then table.remove(registered, i); return true end
+--- Build a live stack from a DECLARATIVE spec: { {kind='zip', …}, {kind='disk'} }.
+--- The spec is plain data, so it ships in a jobfile and a worker rebuilds the
+--- identical stack. An unknown kind is an error, not a silent fallback to disk —
+--- a typo must not degrade a corpus to "everything unreadable but no complaint".
+--- A kind that returns nil is SKIPPED: the substrate is genuinely unavailable
+--- (no libz), which the ops then report per-path as UNAVAILABLE.
+function M.build(spec)
+    local ts = {}
+    for _, e in ipairs(spec or {}) do
+        local kind = M.kinds[e and e.kind]
+        if not kind then
+            error(('transport: unknown kind %q (have: %s)')
+                :format(tostring(e and e.kind), table.concat(vim.tbl_keys(M.kinds), ', ')))
+        end
+        local t = kind(e)
+        if t then ts[#ts + 1] = t end
     end
-    return false
-end
-
---- Which transport serves this path. Never nil: disk answers by default.
-function M.for_path(path)
-    for _, t in ipairs(registered) do
-        if t.claims(path) then return t end
-    end
-    return disk
+    return make(ts, spec)
 end
 
 -- ── the front door ───────────────────────────────────────────────────────────
--- Callers use these, never a transport table directly, so routing stays in one
--- place. A transport MISSING an op reports UNAVAILABLE, never ABSENT: "I cannot
--- answer" is not "it is not there", and that is exactly the conflation the two
--- kinds exist to prevent (a zip with no libz can list but not read).
+-- The module IS a disk-only stack, so a caller with no threaded transport can
+-- use `transport.read(path)` unchanged. Derived from make() rather than written
+-- twice, so the two can never drift.
 
---- Whole-file contents as a string. Returns (nil, err) when unreadable — see
---- M.ABSENT / M.UNAVAILABLE. Callers that only branch on nil are unaffected.
-function M.read(path)
-    local t = M.for_path(path)
-    if not t.read then return nil, M.UNAVAILABLE end
-    return t.read(path)
-end
-
---- Contents split into lines. Returns (nil, err) when unreadable; callers that
---- distinguish "tried and failed" from "not tried" keep their own `or false`.
-function M.lines(path)
-    local src, err = M.read(path)
-    if not src then return nil, err end
-    return vim.split(src, '\n', { plain = true })
-end
-
---- The validity key for a path. Returns (nil, err) when it has none.
-function M.stamp(path)
-    local t = M.for_path(path)
-    if not t.stamp then return nil, M.UNAVAILABLE end
-    return t.stamp(path)
-end
-
---- Iterator over a container's entries, yielding (name, type).
-function M.dir(path)
-    local t = M.for_path(path)
-    if not t.dir then return function () return nil end end
-    return t.dir(path)
-end
-
---- uv-shaped stat, for callers that need type/size beyond the stamp.
-function M.stat(path)
-    local t = M.for_path(path)
-    return t.stat and t.stat(path) or nil
-end
-
---- Canonical path, or nil where the substrate has no such notion. A transport
---- without link semantics simply never yields type 'link', so callers that
---- resolve aliases never reach this.
-function M.realpath(path)
-    local t = M.for_path(path)
-    return t.realpath and t.realpath(path) or nil
-end
+local disk_only = make({}, { { kind = 'disk' } })
+M.for_path, M.read, M.lines = disk_only.for_path, disk_only.read, disk_only.lines
+M.stamp, M.dir = disk_only.stamp, disk_only.dir
+M.stat, M.realpath = disk_only.stat, disk_only.realpath
+M.spec = disk_only.spec
 
 return M

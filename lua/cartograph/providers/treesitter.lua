@@ -2825,7 +2825,8 @@ local EXCLUDE_DIRS = { node_modules = true, vendor = true, dist = true,
     -- vendored-source conventions (hugo's deps/, azerothcore's deps/)
     deps = true, third_party = true, thirdparty = true, external = true }
 
-local function list_files(root, subdirs)
+local function list_files(root, subdirs, tp)
+    tp = tp or transport
     local out, minified, tokens = {}, {}, {}
     local seen_real = {} -- external symlink targets already walked (cycles/dups)
     -- stack languages (forth/postscript) can't have a faithful grammar even in
@@ -2850,7 +2851,7 @@ local function list_files(root, subdirs)
     local function rec(rel)
         -- transport.dir yields nothing for an unreadable container, which is
         -- what the old `while it do` guard did for a nil scandir handle
-        for name, t in transport.dir(rel == '' and root or (root .. '/' .. rel)) do
+        for name, t in tp.dir(rel == '' and root or (root .. '/' .. rel)) do
             if name:sub(1, 1) ~= '.' then
                 local r = rel == '' and name or (rel .. '/' .. name)
                 if t == 'link' then
@@ -2861,10 +2862,10 @@ local function list_files(root, subdirs)
                     -- path is walked normally, and following both would
                     -- duplicate every file under two keys.
                     local p = root .. '/' .. r
-                    local st = transport.stat(p)
+                    local st = tp.stat(p)
                     if st and st.type == 'directory' then
-                        local rp = transport.realpath(p)
-                        local rootrp = transport.realpath(root)
+                        local rp = tp.realpath(p)
+                        local rootrp = tp.realpath(root)
                         if rp and rootrp
                             and rp:sub(1, #rootrp + 1) ~= rootrp .. '/' then
                             if not seen_real[rp] then
@@ -2901,7 +2902,7 @@ end
 -- the cache diffs the tree with the same walk/exclusion rules extraction uses.
 -- Third return = the stack-language files, for the token provider; every
 -- existing caller keeps at most two, so it costs them nothing.
-function M.list_files(root, subdirs) return list_files(root, subdirs) end
+function M.list_files(root, subdirs, tp) return list_files(root, subdirs, tp) end
 
 -- ── mentions: collect (phase 1, tree live) + reduce (lookups ready) ──────
 -- The id pass needs GLOBAL lookups (uniqueness is corpus-wide), so it used
@@ -3489,14 +3490,15 @@ end
 --       global?" without a corpus scan. Gated per language:
 --       spec.name_index = false opts a language out (when bare-identifier
 --       mention does not imply potential global use). }
-local function id_pass(root, files, L, abs)
+local function id_pass(root, files, L, abs, tp)
+    tp = tp or transport
     abs = abs or function (f) return root .. '/' .. f end
     for _, file in ipairs(files) do
         if L.fn_ranges[file] then
             local lang, spec = lang_for(file)
             local clang = container_for(file)
             if clang then lang, spec = 'javascript', M.spec.javascript end
-            local src = transport.read(abs(file))
+            local src = tp.read(abs(file))
             local okp, parser = pcall(vim.treesitter.get_string_parser,
                 src or '', clang or lang)
             if src and okp then
@@ -3658,9 +3660,9 @@ local function idpass_sink(lookups)
     return L, out
 end
 
-function M.id_pass(root, files, lookups, abs)
+function M.id_pass(root, files, lookups, abs, tp)
     local L, out = idpass_sink(lookups)
-    id_pass(root, files, L, abs)
+    id_pass(root, files, L, abs, tp)
     return out
 end
 
@@ -3880,6 +3882,18 @@ function M.extract(root, opts)
         root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
     end
     local abs = (opts and opts.abs) or function (f) return root .. '/' .. f end
+    -- WHERE BYTES COME FROM, threaded exactly like opts.abs above (which says
+    -- how to LOCATE a file; this says how to READ one). A declarative spec
+    -- rebuilds into a live stack — opts.transport may be either, since a stack
+    -- answers the same op set as the module's disk-only default. Threaded rather
+    -- than global because extraction also runs in spawned worker processes
+    -- (parallel.lua), which a module-level registry could never reach.
+    -- accepts EITHER a live stack (it has the ops) or a declarative spec (it does
+    -- not, so build it): a worker receives the spec, an in-process caller may
+    -- pass either. Nothing threaded = the module's disk-only stack.
+    local tp = opts and opts.transport
+    if tp and not tp.read then tp = transport.build(tp) end
+    tp = tp or transport
     -- INDEX-ONLY front-end ([[cartograph-thin-index]] M.index_only): parse + DEF nodes
     -- only — no per-def flow/df, no calls, no mentions/refs, no resolution. Yields the
     -- thin symbol index (id/name/kind/file/range/exported/torn/decl/ret) the LSP/nav
@@ -3898,7 +3912,7 @@ function M.extract(root, opts)
         files, minified = opts.files, {}
     else
         local _plf = pstart()
-        files, minified = list_files(root, opts and opts.subdirs)
+        files, minified = list_files(root, opts and opts.subdirs, tp)
         padd('list_files', _plf)
     end
     local fileset = {}
@@ -3969,7 +3983,7 @@ function M.extract(root, opts)
     end
 
     local function stamp(file)
-        local s = transport.stamp(abs(file))
+        local s = tp.stamp(abs(file))
         if s then data.stamps[file] = s end
     end
 
@@ -4999,7 +5013,7 @@ function M.extract(root, opts)
     end
 
     for _, file in ipairs(files) do
-        local src, rerr = transport.read(abs(file))
+        local src, rerr = tp.read(abs(file))
         if not src then
             -- UNAVAILABLE is not absence: the file is known to exist, we simply
             -- could not read it. Dropping it would delete its module node and
@@ -5339,7 +5353,7 @@ function M.extract(root, opts)
         if src_cache[p.file] == nil then
             -- `or false` is the "tried and failed" sentinel, distinct from the
             -- nil that means "not tried yet"
-            src_cache[p.file] = transport.lines(abs(p.file)) or false
+            src_cache[p.file] = tp.lines(abs(p.file)) or false
         end
         local line = src_cache[p.file] and src_cache[p.file][defstmt.l] or ''
         local lit = line:match('%$' .. varname .. [=[%s*=%s*['"]([%w_:\]+)['"]]=])
@@ -5372,7 +5386,7 @@ function M.extract(root, opts)
             if r.id == fnid then fnrow = r.s break end
         end
         if src_cache[file] == nil then
-            src_cache[file] = transport.lines(abs(file)) or false
+            src_cache[file] = tp.lines(abs(file)) or false
         end
         -- the assignment may sit NESTED inside its statement (an
         -- if-guard) and `.=` appends may follow it — appends PRESERVE the

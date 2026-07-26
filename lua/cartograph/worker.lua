@@ -40,6 +40,9 @@ if job.phase == 'parse' then
     out = ts.extract(job.root, {
         files = job.files, fileset = job.fileset, skip_idpass = true,
         abs = abs, packs = job.packs, -- overlay packs (rails) apply in workers
+        -- the DECLARATIVE transport spec, rebuilt here: a module-level registry
+        -- in the parent would not exist in this process at all
+        transport = job.transport,
     })
     -- worker fold-emit ([[cartograph-thin-index]] multi-store collect): fold df/flow HERE,
     -- in the worker process, then DETACH the per-node store refs — so the chunk ships the

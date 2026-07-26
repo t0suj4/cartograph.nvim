@@ -74,48 +74,86 @@ test('transport: dir yields entries with types; yields NOTHING when unreadable',
     vim.fn.delete(d, 'rf')
 end)
 
-test('transport: for_path falls back to disk when nothing is registered', function ()
+test('transport: a bare stack falls back to disk', function ()
     eq('disk', transport.for_path('/any/path.lua').name)
+    eq('disk', transport.build({ { kind = 'disk' } }).for_path('/x.lua').name)
 end)
 
--- ROUTING: a registered transport shadows disk for the paths it claims, and only
--- those. This is the whole mechanism by which step B is an addition.
-test('transport: a registered transport claims its own paths only', function ()
+-- ROUTING is a property of a STACK VALUE, not of module state. That matters
+-- beyond tidiness: extraction runs in SPAWNED processes (parallel.lua:149) that
+-- receive their job as JSON, so a registry mutated in the parent could never
+-- reach a worker — every claimed path would silently fall back to disk. A stack
+-- is built from a declarative spec that a jobfile CAN carry.
+test('transport: a built stack claims its own paths only', function ()
     local p = tmpfile('on disk\n')
-    local fake = transport.register {
-        name = 'fake',
-        claims = function (path) return path:match('%.fake$') ~= nil end,
-        read = function () return 'from fake' end,
-        stamp = function () return 'fakestamp' end,
-    }
-    eq('fake', transport.for_path('/x/y.fake').name)
-    eq('from fake', transport.read('/x/y.fake'))
-    eq('fakestamp', transport.stamp('/x/y.fake'))
-    -- ... and disk still answers everything it did before
-    eq('disk', transport.for_path(p).name)
-    eq('on disk\n', transport.read(p))
-    transport.unregister(fake)
+    transport.kinds.faketest = function (cfg)
+        return {
+            name = 'fake',
+            claims = function (path) return path:match('%.fake$') ~= nil end,
+            read = function () return cfg.payload end,
+            stamp = function () return 'fakestamp' end,
+        }
+    end
+    local stack = transport.build { { kind = 'faketest', payload = 'from fake' },
+        { kind = 'disk' } }
+    eq('fake', stack.for_path('/x/y.fake').name)
+    eq('from fake', stack.read('/x/y.fake'))
+    eq('fakestamp', stack.stamp('/x/y.fake'))
+    -- ... while disk still answers everything it did before
+    eq('disk', stack.for_path(p).name)
+    eq('on disk\n', stack.read(p))
+    -- ... and the module-level default is UNTOUCHED: no global was mutated
     eq('disk', transport.for_path('/x/y.fake').name)
+    transport.kinds.faketest = nil
     vim.fn.delete(p)
+end)
+
+-- the stack carries the DATA it was built from, which is the half that crosses a
+-- process boundary. Without this a worker cannot rebuild the parent's stack.
+test('transport: a stack keeps its declarative spec for the wire', function ()
+    local spec = { { kind = 'disk' } }
+    local stack = transport.build(spec)
+    eq(spec, stack.spec)
+    eq('table', type(vim.json.decode(vim.json.encode(stack.spec))))
+end)
+
+test('transport: an unknown kind is an ERROR, not a silent disk fallback', function ()
+    local ok_, err = pcall(transport.build, { { kind = 'nosuchkind' } })
+    eq(false, ok_)
+    ok(tostring(err):match('unknown kind') ~= nil, 'says which: ' .. tostring(err))
 end)
 
 -- PARTIAL CAPABILITY: the reason list/stamp/read are separate ops. A transport
 -- that can enumerate and stamp but not read (a zip with no libz) must degrade to
 -- the same nil an unreadable file gives, so no caller needs a new branch.
-test('transport: a transport missing an op degrades to nil, never errors', function ()
-    local partial = transport.register {
-        name = 'partial',
-        claims = function (path) return path:match('%.partial$') ~= nil end,
-        stamp = function () return 'stamped' end,
-        dir = function () return function () return nil end end,
-        -- deliberately NO read
-    }
-    eq('stamped', transport.stamp('/a/b.partial'))
-    eq(nil, transport.read('/a/b.partial'))   -- not an error
-    eq(nil, transport.lines('/a/b.partial'))  -- derived from read, same nil
-    eq(nil, transport.stat('/a/b.partial'))   -- no stat op either
-    eq(nil, transport.realpath('/a/b.partial'))
-    transport.unregister(partial)
+test('transport: a stack entry missing an op degrades to nil, never errors', function ()
+    transport.kinds.partialtest = function ()
+        return {
+            name = 'partial',
+            claims = function (path) return path:match('%.partial$') ~= nil end,
+            stamp = function () return 'stamped' end,
+            dir = function () return function () return nil end end,
+            -- deliberately NO read
+        }
+    end
+    local stack = transport.build { { kind = 'partialtest' } }
+    eq('stamped', stack.stamp('/a/b.partial'))
+    eq(nil, stack.read('/a/b.partial'))   -- not an error
+    eq(nil, stack.lines('/a/b.partial'))  -- derived from read, same nil
+    eq(nil, stack.stat('/a/b.partial'))   -- no stat op either
+    eq(nil, stack.realpath('/a/b.partial'))
+    transport.kinds.partialtest = nil
+end)
+
+-- a kind whose substrate is genuinely absent (no libz) returns nil and is
+-- SKIPPED, leaving the rest of the stack working rather than failing the build
+test('transport: a kind returning nil is skipped, not fatal', function ()
+    transport.kinds.absenttest = function () return nil end
+    local stack = transport.build { { kind = 'absenttest' }, { kind = 'disk' } }
+    local p = tmpfile('still works\n')
+    eq('still works\n', stack.read(p))
+    transport.kinds.absenttest = nil
+    vim.fn.delete(p)
 end)
 
 -- ── failure has two kinds ────────────────────────────────────────────────────
@@ -159,14 +197,17 @@ test('transport: an UNREADABLE file can still be STAMPED', function ()
 end)
 
 test('transport: a missing op is UNAVAILABLE, never ABSENT', function ()
-    local t = transport.register {
-        name = 'noread',
-        claims = function (path) return path:match('%.noread$') ~= nil end,
-        stamp = function () return 'k' end,
-    }
-    local _, err = transport.read('/x.noread')
+    transport.kinds.noreadtest = function ()
+        return {
+            name = 'noread',
+            claims = function (path) return path:match('%.noread$') ~= nil end,
+            stamp = function () return 'k' end,
+        }
+    end
+    local stack = transport.build { { kind = 'noreadtest' } }
+    local _, err = stack.read('/x.noread')
     eq(transport.UNAVAILABLE, err) -- "I cannot answer" is not "it is not there"
-    transport.unregister(t)
+    transport.kinds.noreadtest = nil
 end)
 
 -- ── the extractor's reaction: a frontier, not a deletion ─────────────────────
@@ -207,6 +248,26 @@ test('transport: an UNAVAILABLE file stays a stamped unparsed frontier', functio
     for _, f in ipairs(d.unparsed or {}) do roster[f] = true end
     eq(true, roster['lib.lua'] == true)          -- ... and on the roster
     vim.fn.system({ 'chmod', '644', root .. '/lib.lua' }); vim.fn.delete(root, 'rf')
+end)
+
+-- THE THREADING, end to end. A worker receives its transport as a JSON spec, so
+-- extract must accept the DECLARATIVE form and not just a live stack — this is
+-- the path parallel.lua ships through a jobfile.
+test('transport: extract accepts a declarative spec, same graph as the default',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = fixture()
+    local plain = ts.extract(root)
+    local spec = ts.extract(root, { transport = { { kind = 'disk' } } })
+    local live = ts.extract(root, { transport = transport.build { { kind = 'disk' } } })
+    eq(#(plain.nodes or {}), #(spec.nodes or {}))
+    eq(#(plain.calls or {}), #(spec.calls or {}))
+    eq(#(plain.nodes or {}), #(live.nodes or {}))
+    eq(plain.stamps['lib.lua'], spec.stamps['lib.lua'])
+    vim.fn.delete(root, 'rf')
 end)
 
 -- KNOWN RED — the remaining half, deliberately not fixed in this change.

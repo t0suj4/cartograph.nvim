@@ -413,7 +413,7 @@ function M.demand(file)
     local ts = require 'cartograph.providers.treesitter'
     local chunk = ts.extract(s.root,
         { files = { file }, fileset = s.fileset, skip_idpass = true,
-            abs = s.abs, packs = s.packs })
+            abs = s.abs, packs = s.packs, transport = s.transport })
     merge_chunk(s, chunk)
     s.arrived[file] = true -- even if unreadable: don't retry per descend
     if s.on_chunk then s.on_chunk(s.done, s.total, s.acc) end
@@ -425,6 +425,15 @@ end
 --- on_done fires on the main loop with the finished graph.
 function M.extract(root, o)
     local ts = require 'cartograph.providers.treesitter'
+    -- WHERE BYTES COME FROM. Two forms are needed because workers are separate
+    -- processes: `tstack` is live (in-parent walks/extracts) and `tspec` is the
+    -- DECLARATIVE half that survives vim.json.encode into a jobfile, which the
+    -- worker rebuilds. Threaded exactly like o.packs.
+    local tstack = o.transport
+    if tstack and not tstack.read then
+        tstack = require('cartograph.transport').build(tstack)
+    end
+    local tspec = tstack and tstack.spec or nil
     -- a multi-root corpus (self://loaded) supplies its OWN roster + a
     -- label→dir map; `abs` resolves the labelled keys. A plain directory
     -- root walks itself as before.
@@ -438,7 +447,7 @@ function M.extract(root, o)
         end
     else
         root = vim.fn.fnamemodify(vim.fn.expand(root), ':p'):gsub('/+$', '')
-        files, minified = ts.list_files(root)
+        files, minified = ts.list_files(root, nil, tstack)
     end
     -- S2 ([[cartograph-repo-shapes]]): default packs from the project shape ONCE
     -- here (not per worker) when none were given — every worker + the parent relink
@@ -450,7 +459,8 @@ function M.extract(root, o)
     local nw = math.min(o.workers or M.default_workers(),
         math.max(1, math.ceil(#files / M.BATCH)))
     if nw < 2 then
-        o.on_done(ts.extract(root, { files = files, abs = abs, packs = o.packs }))
+        o.on_done(ts.extract(root, { files = files, abs = abs, packs = o.packs,
+            transport = tstack }))
         return
     end
     local rtp = worker_rtp()
@@ -467,7 +477,7 @@ function M.extract(root, o)
         mentions = {}, _no_parser = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
         on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1,
-        packs = o.packs, wmetrics = {} }
+        packs = o.packs, transport = tstack, wmetrics = {} }
     M._session = s
 
     -- record-fold PEAK arc, step 2-live (gated CARTOGRAPH_MERGECOLS): fold each
@@ -649,7 +659,8 @@ function M.extract(root, o)
     local function finish_phase1()
         for _, fb in ipairs(failed) do -- sequential fallback, honest
             merge_chunk(s, ts.extract(root, { files = fb,
-                fileset = files, skip_idpass = true, abs = abs, packs = o.packs }))
+                fileset = files, skip_idpass = true, abs = abs, packs = o.packs,
+                transport = tstack }))
         end
         canonicalize()
         -- step 2-live: finalize the columnar store (fileset-ordered) → audit +
@@ -700,6 +711,7 @@ function M.extract(root, o)
         local t0 = vim.uv.hrtime()
         spawn({ phase = 'parse', root = root, files = b,
             fileset = files, rtp = rtp, roots = o.roots, packs = o.packs,
+            transport = tspec, -- the serialisable half; the worker rebuilds it
             foldstore = s.foldstore }, -- worker folds df/flow + ships the store once
             function (chunk, res)
             local cb0 = vim.uv.hrtime()
