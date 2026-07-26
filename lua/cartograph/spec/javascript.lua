@@ -6,6 +6,12 @@ local node_text = tsutil.node_text
 
 return {
         exts = { 'js', 'mjs', 'cjs', 'jsx' }, -- the JS grammar handles JSX
+        -- BINDER NODES: see spec/lua.lua. `for (const g of t)` binds g as a direct
+        -- identifier child; a classic `for` binds inside its initializer.
+        binders = {
+            { node = 'for_in_statement' },
+            { node = 'for_statement', child = 'lexical_declaration' },
+        },
         functions = [=[
             (function_declaration name: (identifier) @name) @def
             (method_definition name: (property_identifier) @name) @def

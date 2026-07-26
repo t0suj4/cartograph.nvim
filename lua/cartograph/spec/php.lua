@@ -139,6 +139,11 @@ local PHP_GUARDS = {
 
 return {
     exts = { 'php' },
+    -- BINDER NODES: see spec/lua.lua. `foreach ($t as $k => $v)` binds through a
+    -- `pair`, or directly for `foreach ($t as $x)`.
+    binders = {
+        { node = 'foreach_statement', child = 'pair' },
+    },
     write_gate = { variable_name = true, member_access_expression = true },
     is_write = php_is_write,
     guards = PHP_GUARDS,

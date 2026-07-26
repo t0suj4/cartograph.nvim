@@ -86,6 +86,10 @@ M.SLOTS = {
     module_effects = 'ANALYSIS', dataflow = 'ANALYSIS', regime = 'ANALYSIS',
     df_ids = 'ANALYSIS', merge_equations = 'ANALYSIS',
     params_field = 'ANALYSIS', body_field = 'ANALYSIS',
+    -- node types that BIND names (loop variables). df records them as `use` and
+    -- never as `def`, so without this a loop-bound receiver reads as a free name —
+    -- which put a local into externals' "real porting work" group until declared.
+    binders = 'ANALYSIS',
     string_sinks = 'ANALYSIS',
 
     -- QUIRKS (quarantine): single-language shims. Rule — each carries a comment

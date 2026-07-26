@@ -672,10 +672,11 @@ test('externals: a read rooted at a local or param is NOT external', function ()
     vim.fn.delete(root, 'rf')
 end)
 
--- the KNOWN imprecision, guarded rather than hidden: loop bindings are in neither
--- df's `def` nor the expr IR's binder position, so a root touched in only ONE
--- function is withheld and counted
-test('externals: a loop-bound receiver is withheld, and the count says so', function ()
+-- LOOP BINDINGS are locals, known from the spec's declared BINDER NODES. This was a
+-- spread heuristic ("withhold a root seen in only one function") until the grammar
+-- was declared; the heuristic is gone and nothing is withheld, which is the
+-- difference between guessing and knowing.
+test('externals: a loop-bound receiver is a LOCAL, with nothing withheld', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
     if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
@@ -683,14 +684,18 @@ test('externals: a loop-bound receiver is withheld, and the count says so', func
     local store = require 'cartograph.store'
     local root = refs_fixture('local function a(list)\n'
         .. '  for _, gen in pairs(list) do print(gen.energy) end\n'
-        .. '  return global.shared\nend\n'
+        .. '  return global.shared + global.once\nend\n'
         .. 'local function b()\n  return global.shared\nend\n'
         .. 'return { a = a, b = b }\n')
     store.ingest(ts.extract(root))
     local refs = require('cartograph.externals').references(store)
-    eq(nil, refs.names['gen.energy'])              -- withheld: one function only
-    ok((refs.withheld or 0) >= 1, 'and it is COUNTED, not silently dropped')
-    ok(refs.names['global.shared'] ~= nil, 'a root spread over functions survives')
+    eq(nil, refs.names['gen.energy'])   -- a declared binder: a local, not a global
+    eq(0, refs.withheld or 0)           -- ... and nothing had to be withheld to know
+    ok(refs.names['global.shared'] ~= nil, 'a genuinely free root survives')
+    -- the discriminator is the GRAMMAR, not spread: a loop-bound root is excluded
+    -- even when it is touched in only one function, and a free root is kept even
+    -- when it is
+    ok(refs.names['global.once'] ~= nil, 'a free root read in ONE function survives')
     vim.fn.delete(root, 'rf')
 end)
 

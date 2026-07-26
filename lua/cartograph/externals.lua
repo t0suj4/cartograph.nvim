@@ -120,24 +120,20 @@ end
 --- member_expression and Java's node is `field_access`. Adding it is one word, but it
 --- changes the expression IR for every analyzer built on it (optimize's LICM/CSE,
 --- narrow, untangle) on every Java corpus — its own change, with its own gate run.
---- KNOWN IMPRECISION, measured and guarded rather than hidden: LOOP BINDINGS are
---- not in the locals set. Neither df nor the expr IR marks them — `for _, gen in
---- pairs(list)` puts `gen` in `use` and never in `def`, and the expr layer models the
---- head as an opaque node whose bindings sit in a `variable_list` child. Identifying
---- them needs per-language BINDER NODE TYPES, which is spec territory, not something
---- to hand-roll here; until that exists a loop-bound receiver looks like an unknown
---- global (`crashSiteGenerator.energy` did).
---- So a root seen in only ONE function is WITHHELD and counted: a loop variable is
---- function-local by nature, while a real global is touched from several places. That
---- under-reports a global used exactly once — the safe direction, and the count says
---- how much was withheld rather than leaving it silent.
+--- LOOP BINDINGS are locals, and now known to be: the language specs declare their
+--- BINDER NODES and expr.of reports the bound names from the same parse it already
+--- performs. Before that they were in neither df's `def` nor the IR's binder position,
+--- so a loop-bound receiver looked like an unknown global
+--- (`crashSiteGenerator.energy` did) and the surface had to withhold every root seen
+--- in only ONE function to compensate. That heuristic is gone: precision came from
+--- declaring the grammar rather than from guessing at spread.
+--- `withheld` is kept at 0 for callers that report it — a language with no declared
+--- binders simply contributes no bound names, which shows up as reads to adjudicate
+--- rather than as silence.
 --- Returns { names = {name -> n}, where = {name -> file}, total, withheld }.
 function M.references(store)
     local expr = require 'cartograph.expr'
     local out = { names = {}, where = {}, total = 0, withheld = 0 }
-    -- collected first, filtered after: the withhold test is about a ROOT's spread
-    -- across functions, which is not known until every function has been walked
-    local cand, roots = {}, {}
     local data = store.data or {}
     -- names this graph DEFINES: a read rooted at one of them is internal, whatever
     -- else it is. Bare def names, since a read's root is a bare name.
@@ -159,6 +155,9 @@ function M.references(store)
                 for _, r in ipairs(fl.stmts or {}) do
                     for _, d in ipairs(r.def or {}) do locals[d] = true end
                 end
+                -- and the BINDER-declared names (loop variables), which df never
+                -- records as definitions
+                for bn in pairs(eo.bound or {}) do locals[bn] = true end
                 for _, r in ipairs(fl.stmts or {}) do
                     local got = {}
                     for _, e in ipairs((r.expr or {}).rhs or {}) do expr.dotted_reads(e, got) end
@@ -167,28 +166,12 @@ function M.references(store)
                     for _, chain in ipairs(got) do
                         local rootname = chain:match('^([%w_]+)')
                         if rootname and not locals[rootname] and not defined[rootname] then
-                            local c = cand[chain]
-                            if not c then c = { n = 0, fns = {}, file = n.file }
-                                cand[chain] = c end
-                            c.n = c.n + 1
-                            c.fns[n.id] = true
-                            roots[rootname] = roots[rootname] or {}
-                            roots[rootname][n.id] = true
+                            out.names[chain] = (out.names[chain] or 0) + 1
+                            out.where[chain] = out.where[chain] or n.file
                         end
                     end
                 end
             end
-        end
-    end
-    for chain, c in pairs(cand) do
-        local rootname = chain:match('^([%w_]+)')
-        local spread = 0
-        for _ in pairs(roots[rootname] or {}) do spread = spread + 1 end
-        if spread >= 2 then
-            out.names[chain] = c.n
-            out.where[chain] = c.file
-        else
-            out.withheld = out.withheld + 1
         end
     end
     for _ in pairs(out.names) do out.total = out.total + 1 end

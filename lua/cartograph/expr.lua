@@ -619,7 +619,58 @@ function M.of(store, fn_id)
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint) end }
     local flow = require 'cartograph.flow'
     local fl = flow.build(fn, src, cfg)
-    return { fl = fl, lang = lang, node = node }
+    return { fl = fl, lang = lang, node = node,
+        bound = M.bound_names(fn, src, s.binders) }
+end
+
+-- NAME-ish leaves, across the languages that declare binders
+local BINDNAME = { identifier = true, name = true, variable_name = true }
+
+--- Names BOUND by a declared binder node inside `fn` — loop variables, chiefly.
+--- Read from the TREESITTER tree, not the expression IR: the IR keeps node TYPES on
+--- opaque nodes but discards FIELD names, and JS's `for (const g of t)` has binding
+--- and iterated as two indistinguishable identifier children. So the tree is the only
+--- place the answer exists.
+---
+--- THE RULE, one shape for three grammars: a binder's own direct name children are
+--- bindings, plus every name inside a declared `child` container. The `body` field is
+--- never descended.
+--- Lua `for_generic_clause` puts them in a `variable_list`; `for_numeric_clause` has
+--- the name directly. JS `for_in_statement` has it directly. PHP `foreach_statement`
+--- binds through a `pair`, or directly.
+---
+--- IMPRECISION, deliberate and in the safe direction: where the ITERATED expression
+--- is itself a bare name (`for (const g of items)`), it is collected as a binding
+--- too. That can only make a genuinely external name look LOCAL, which
+--- under-reports rather than over-claims. A chain or call on the right — the common
+--- case, and the one that matters (`pairs(global.saved)`) — is untouched.
+function M.bound_names(fn, src, binders)
+    local out = {}
+    if not (fn and binders and #binders > 0) then return out end
+    local by_node = {}
+    for _, b in ipairs(binders) do by_node[b.node] = b end
+    local function collect_names(n)
+        if BINDNAME[n:type()] then out[txt(n, src)] = true end
+        for c in n:iter_children() do
+            if c:named() then collect_names(c) end
+        end
+    end
+    local function walk(n)
+        local b = by_node[n:type()]
+        if b then
+            for c, field in n:iter_children() do
+                if c:named() and field ~= 'body' then
+                    if BINDNAME[c:type()] then out[txt(c, src)] = true
+                    elseif b.child and c:type() == b.child then collect_names(c) end
+                end
+            end
+        end
+        for c in n:iter_children() do
+            if c:named() then walk(c) end
+        end
+    end
+    walk(fn)
+    return out
 end
 
 -- a row whose OWN node is a function declaration: `du` counts the whole closure

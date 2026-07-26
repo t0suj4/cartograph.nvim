@@ -354,6 +354,16 @@ end
 
 return {
     exts = { 'lua' },
+    -- BINDER NODES ([[cartograph-cross-project]]): node types that BIND names, so a
+    -- loop variable is known to be local. Neither df's `def` nor the expression IR
+    -- records them — `for _, g in pairs(t)` puts `g` in `use` and never in `def` —
+    -- which made a loop-bound receiver look like an unknown global.
+    -- `child` names a container holding the bound names; without it, the binder's
+    -- own direct name children are the bindings.
+    binders = {
+        { node = 'for_generic_clause', child = 'variable_list' },
+        { node = 'for_numeric_clause' },
+    },
     -- RESOLUTION BOUNDARY (the .toc scoping adapter): in a WoW-addon
     -- tree every addon vendors the same libraries (353 Ace3 copies),
     -- and whole-tree name resolution drowns in the ambiguity — the
