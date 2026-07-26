@@ -59,6 +59,37 @@ local LIT = { number = 'num', integer = 'num', float = 'num', string = 'str',
     string_literal = 'str', true_ = 'bool', ['true'] = 'bool', ['false'] = 'bool',
     boolean = 'bool', ['nil'] = 'nil', null = 'nil' }
 local NAME = { identifier = true, name = true }
+-- LANGUAGE COVERAGE IS PARTIAL, AND JAVA IS ESSENTIALLY UNMODELLED. Measured
+-- 2026-07-26 on 200 java functions from the elasticsearch libs corpus: 766 rows
+-- carrying expressions, 2074 OPAQUE (`?`) nodes, ZERO field nodes, zero dotted
+-- reads — and optimize found 0 hoists and 0 CSE across 120 methods. The
+-- expression-based analyzers (optimize's LICM/CSE, narrow, untangle, exprlint) are
+-- therefore blind on Java, not because Java lacks opportunities but because an
+-- opaque node has an opaque key: no two expressions compare equal and no purity
+-- gate passes.
+--
+-- THE GAP IS BROAD, NOT ONE ENTRY. Top opaque node types: argument_list 532,
+-- method_invocation 501 (java's CALL, absent from the CALL table below),
+-- expression_statement 301, decimal_integer_literal 98, line_comment 62,
+-- type_identifier 52, assignment_expression 45, object_creation_expression 31,
+-- null_literal 29, array_access 21. Calls, literals, assignment, allocation and
+-- indexing are all unmodelled.
+--
+-- ADDING `field_access` ALONE WAS TRIED AND REVERTED, deliberately. It did what it
+-- said (opaque 2074 -> 1966, 108 field nodes, 91 dotted reads) but unblocked
+-- nothing — optimize stayed at 0/0, since the surrounding method_invocation nodes
+-- remain opaque — and it DOUBLED greenspun's registry-audit findings on the corpus,
+-- 6 -> 12, all spurious: ordinary java methods (`assertRectangleResult`,
+-- `setBucket`, `getRank`) reported as registries with "100 key(s) dispatched".
+-- A partial grammar makes a downstream detector noisier without making any analyzer
+-- more capable.
+--
+-- SO JAVA COVERAGE IS A PROJECT, not a one-word change, and it carries SEMANTIC
+-- risk rather than merely structural: method_invocation decides is_pure,
+-- object_creation_expression decides allocates, and optimize can APPLY rewrites. A
+-- wrong entry there proposes an UNSOUND edit rather than a missing one. Whoever
+-- takes it should add the entries together, with the purity/allocation semantics
+-- checked, and re-measure registry-audit as the canary.
 local FIELD = { dot_index_expression = true, field_expression = true,
     member_expression = true }
 local INDEX = { bracket_index_expression = true, subscript_expression = true,
