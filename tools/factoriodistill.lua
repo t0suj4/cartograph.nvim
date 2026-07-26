@@ -16,6 +16,13 @@ local here = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/factoriodistill%.l
 package.path = here .. '/../lua/?.lua;' .. here .. '/../lua/?/init.lua;' .. package.path
 
 local API = (arg and arg[1]) or vim.fn.expand('~/git/Factorio-luacheckrc/.io/runtime-api.json')
+-- VERSION-KEYED OUTPUT. arg[2] is a suffix, so one distiller produces the artifact
+-- for each environment version and portability can DIFF them: an api absence is weak
+-- evidence ("2.0 lacks this name"), while a status CHANGE between two versions is
+-- strong ("1.1 had it, 2.0 does not"). Without a suffix the 2.0 artifact keeps its
+-- historical name, so existing callers are untouched.
+local SUFFIX = (arg and arg[2]) or ''
+local RUNTIME = 'lua-factorio-api' .. (SUFFIX ~= '' and ('-' .. SUFFIX) or '')
 if vim.fn.filereadable(API) ~= 1 then
     io.write('no runtime-api.json at ' .. API .. '\n'); os.exit(2)
 end
@@ -133,7 +140,7 @@ for _, fn in ipairs(api.global_functions or {}) do
 end
 
 local profile = {
-    schema = 1, runtime = 'lua-factorio-api', lang = 'lua',
+    schema = 1, runtime = RUNTIME, lang = 'lua',
     version = api.application_version, api_version = api.api_version,
     stamp = { source = API, application_version = api.application_version,
         api_version = api.api_version, stage = api.stage },
@@ -142,7 +149,7 @@ local profile = {
     free = free, free_sigs = free_sigs,
 }
 
-local out = here .. '/../lua/cartograph/spec/profile/lua-factorio-api.mpack'
+local out = here .. '/../lua/cartograph/spec/profile/' .. RUNTIME .. '.mpack'
 local tmp = out .. '.tmp.' .. vim.fn.getpid()
 local wf = assert(io.open(tmp, 'wb'))
 wf:write(vim.mpack.encode(profile)); wf:close()

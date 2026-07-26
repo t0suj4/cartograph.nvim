@@ -133,6 +133,35 @@ return {
     -- would make this module depend on the front end that depends on it).
     source_exts = { 'lua' },
 
+    -- ── where the environment DESCRIBES itself ───────────────────────────────
+    -- The runtime API description is published per version, so a profile for ANY
+    -- version is obtainable rather than hand-authored. Declared as data so the offer
+    -- is auditable and so nothing has to be guessed at the call site.
+    --
+    -- MEASURED 2026-07-26 against the live host: a full `x.y.z` resolves and so do
+    -- the `latest` / `stable` aliases, but a BARE MINOR 404s — `1.1` and `2.0` both
+    -- do, while `1.1.110` and `2.0.72` succeed. A manifest declares `1.1`, so a
+    -- declared version must be RESOLVED against the index before it can be fetched.
+    -- The index lists every published version as `<a href="/1.1.110/">`, which is
+    -- what makes "if available" a check rather than a guess (1.1 -> 1.1.110,
+    -- 2.0 -> 2.0.77, 2.1 -> 2.1.12 at time of measurement).
+    --
+    -- NETWORK IS NEVER IMPLICIT. Nothing here is contacted by extraction, by a
+    -- report, or by any verb: tools/apifetch.lua reports what is declared and what is
+    -- already local WITHOUT a request, and only reaches the host when explicitly
+    -- asked. A declaration is an offer, not a trigger.
+    api_source = {
+        index = 'https://lua-api.factorio.com/',
+        version_href = 'href="/(%d+%.%d+%.%d+)/"',
+        url = 'https://lua-api.factorio.com/%s/runtime-api.json',
+        aliases = { 'latest', 'stable' },
+        -- the distilled artifact for a version: dots stripped, so the module name
+        -- stays a legal Lua path (a dotted name makes require look for a directory —
+        -- see spec/profile/lua-factorio-11.lua)
+        artifact = 'lua-factorio-api-%s',
+        distiller = 'tools/factoriodistill.lua',
+    },
+
     -- ── package forms, in PRECEDENCE order ───────────────────────────────────
     -- Earlier wins. Factorio prefers an UNPACKED mod directory over a zip of the
     -- same mod, which is the normal state while editing one. This list IS the

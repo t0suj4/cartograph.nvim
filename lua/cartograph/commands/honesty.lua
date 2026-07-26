@@ -193,11 +193,29 @@ function M.register(H)
                 .. ' MOVE from the first to the second', vim.log.levels.WARN)
         end
         local port = require 'cartograph.portability'
+        -- ! = ALSO the READ surface. Opt-in behind the bang because references
+        -- re-parse every function (~3.5 ms each), which a default verb must not do
+        -- to a large corpus — the same reason portability.report gates it on opts.
+        -- It is the bang and not a flag word because the other verbs here already
+        -- spend it on "the more expensive answer" (escalate !, hedges !).
         -- two targets = the MOVE between them; direction matters
-        scratch(to and port.diff_report(store, from, to) or port.report(store, from))
-    end, { nargs = '*', complete = function ()
+        local lines
+        if to then
+            lines = port.diff_report(store, from, to)
+            if o.bang then
+                -- READS are where a port actually breaks (`global.foo` is never
+                -- called), so the reads diff is the worklist the calls diff cannot
+                -- produce. Appended, not substituted: both halves are the answer.
+                lines[#lines + 1] = ''
+                vim.list_extend(lines, port.reference_diff_report(store, from, to))
+            end
+        else
+            lines = port.report(store, from, o.bang and { references = true } or nil)
+        end
+        scratch(lines)
+    end, { nargs = '*', bang = true, complete = function ()
         return require('cartograph.portability').runtimes()
-    end, desc = 'cartograph: score the external surface against a target environment profile — which names it PROVIDES and which are not in it (candidate porting work, with call counts). With TWO targets, diff the MOVE from the first to the second: the names that change status ARE the work. Not-in-profile is not "missing": a dependency may supply it' })
+    end, desc = 'cartograph: score the external surface against a target environment profile — which names it PROVIDES and which are not in it (candidate porting work, with call counts). With TWO targets, diff the MOVE from the first to the second: the names that change status ARE the work. ! adds the READ surface (names touched but never called — where a port actually breaks; re-parses every function, so it is opt-in). Not-in-profile is not "missing": a dependency may supply it' })
 
     -- ── the EXTERNAL SURFACE: names used but defined nowhere here, with the
     --    shape inferred backward from usage (the boundary map + write-side seed)

@@ -606,6 +606,81 @@ function M.reference_report(store, runtime, opts)
     return L
 end
 
+--- THE VERSION DIFF OVER THE READ SURFACE — the strongest evidence this tool can
+--- produce about a port. M.diff scores the requirement set, which is CALL-derived, so
+--- on a 1.1 -> 2.0 move it reported 0 lost: every name that actually changed
+--- (`game.entity_prototypes`, `global.*`) is READ, never called. This scores
+--- externals.references under both profiles instead and reports STATUS CHANGES.
+---
+--- A change beats an absence. "2.0 does not hold this name" can be a fact about the
+--- artifact; "1.1 held it and 2.0 does not" is a fact about the environments, and it
+--- survives both artifacts being incomplete in the same way.
+--- Returns (result, err); result = { from, to, lost = {…}, gained = {…}, kept }.
+function M.reference_diff(store, from, to)
+    local pm = require 'cartograph.spec.profile'
+    local a, b = pm.load(from), pm.load(to)
+    if not a then return nil, ('unknown runtime %q'):format(from) end
+    if not b then return nil, ('unknown runtime %q'):format(to) end
+    if a.lang ~= b.lang then
+        return nil, ('%s is %s and %s is %s — different languages'):format(
+            from, tostring(a.lang), to, tostring(b.lang))
+    end
+    local refs = require('cartograph.externals').references(store)
+    local res = { from = from, to = to, lost = {}, gained = {}, kept = 0, neither = 0 }
+    for name, n in pairs(refs.names) do
+        local in_a, in_b = M.provides(a, name), M.provides(b, name)
+        if in_a and not in_b then
+            res.lost[#res.lost + 1] = { name = name, reads = n,
+                file = refs.where[name], was = in_a }
+        elseif in_b and not in_a then
+            res.gained[#res.gained + 1] = { name = name, reads = n,
+                file = refs.where[name], now = in_b }
+        elseif in_a then res.kept = res.kept + 1
+        else res.neither = res.neither + 1 end
+    end
+    local function bycount(x, y)
+        if x.reads ~= y.reads then return x.reads > y.reads end
+        return x.name < y.name
+    end
+    table.sort(res.lost, bycount); table.sort(res.gained, bycount)
+    return res
+end
+
+--- The reference diff as lines. Direction matters and the wording says so.
+function M.reference_diff_report(store, from, to, opts)
+    local res, err = M.reference_diff(store, from, to)
+    if not res then return { 'reference diff: ' .. err } end
+    local cap = (opts and opts.cap) or 15
+    local L = { ('reference diff — READS moving from %s to %s'):format(res.from, res.to) }
+    L[#L + 1] = ('  %d LOST, %d gained, %d unchanged, %d in neither'):format(
+        #res.lost, #res.gained, res.kept, res.neither)
+    if #res.lost == 0 then
+        L[#L + 1] = '  nothing read here was removed between these versions'
+    else
+        L[#L + 1] = ''
+        L[#L + 1] = '  LOST — present in the OLD environment, absent from the new. This is'
+        L[#L + 1] = '  the port worklist: a status CHANGE, not an artifact gap.'
+        for i = 1, math.min(cap, #res.lost) do
+            local e = res.lost[i]
+            L[#L + 1] = ('    %-34s %4d read(s)  was: %-18s %s'):format(e.name,
+                e.reads, e.was, e.file or '')
+        end
+        if #res.lost > cap then
+            L[#L + 1] = ('    … and %d more'):format(#res.lost - cap)
+        end
+    end
+    if #res.gained > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('  GAINED — %d name(s) the NEW environment holds and the old did'
+            .. ' not (already-migrated code, or a name that moved here):'):format(#res.gained)
+        for i = 1, math.min(5, #res.gained) do
+            L[#L + 1] = ('    %-34s %4d read(s)  %s'):format(res.gained[i].name,
+                res.gained[i].reads, res.gained[i].file or '')
+        end
+    end
+    return L
+end
+
 --- Display lines. `opts.cap` limits the not-in-profile list (default 25).
 --- `opts.references` appends the READ surface (see reference_report): opt-in because
 --- it re-parses every function (~3.5 ms each), which a default verb should not do to
@@ -695,6 +770,34 @@ function M.report(store, runtime, opts)
     if res.provided > 1 then
         L[#L + 1] = ('    … and %d more'):format(res.provided - 1)
     end
+    -- THE OTHER END OF A DECLARED MOVE. When the code declares a target version and
+    -- no profile for it is loadable, the report says so and says it is OBTAINABLE —
+    -- rather than silently scoring against one end, which can only ever produce an
+    -- absence. Nothing is contacted here: this reads local state and names a command.
+    if decl and decl.v then
+        -- `local a, b = cond and f()` TRUNCATES f() to one value, so the guard cannot
+        -- live in the expression — `min` came back nil and this whole block silently
+        -- did nothing. Second time this bit in one session (see spec/lua.lua's
+        -- require-form match), which is why it is written out here.
+        local maj, min = decl.v:match('^(%d+)%.(%d+)')
+        local other = (maj and min) and (runtime .. '-' .. maj .. min) or nil
+        local have_other = other
+            and require('cartograph.spec.profile').load(other) ~= nil
+        if other and have_other then
+            L[#L + 1] = ''
+            L[#L + 1] = ('  BOTH ENDS present: a version DIFF is available against %s,')
+                :format(other)
+            L[#L + 1] = '  which reports status CHANGES rather than absences.'
+        elseif other then
+            L[#L + 1] = ''
+            L[#L + 1] = ('  the OLD end (%s) is not present, so only absences can be'):format(other)
+            L[#L + 1] = '  reported here, never changes. This environment publishes its own'
+            L[#L + 1] = '  API description — `tools/apifetch.lua` lists what is fetchable'
+            L[#L + 1] = '  (it contacts nothing until asked). A profile module for the'
+            L[#L + 1] = '  version is also needed; the artifact alone is not a profile.'
+        end
+    end
+
     -- THE SECOND SURFACE. Names that are READ and never called cannot appear above:
     -- the audit is built from call records. Opt-in because it re-parses every
     -- function; announced always, so its absence is never mistaken for emptiness.

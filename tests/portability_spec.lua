@@ -725,3 +725,96 @@ test('portability: the reference report names the real porting work', function (
     ok(body:match('real porting work') ~= nil, 'both named as actionable')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── the VERSION DIFF: a change beats an absence ──────────────────────────────
+-- Scoring against one profile can only say "the target lacks this name", which may
+-- be a fact about the artifact. With BOTH environments present, a status CHANGE is a
+-- fact about the environments and survives both artifacts being incomplete the same
+-- way. MEASURED 1.1.110 vs 2.0.72: api_version 5 vs 6, 97 classes vs 148, 7 globals
+-- vs 9, LuaGameScript 133 members vs 74.
+--
+-- M.diff (the CALL surface) reports 0 lost on this move, because every name that
+-- actually changed is READ and never called — which is why reference_diff exists.
+
+test('portability: the 1.1 profile is the DELTA, not a copy', function ()
+    local pm = require 'cartograph.spec.profile'
+    local port = require 'cartograph.portability'
+    local a, b = pm.load('lua-factorio-11'), pm.load('lua-factorio')
+    if not (a and b) then skip 'factorio profiles not both present' end
+    ok(port.name_queryable(a), '1.1 can answer name queries')
+    -- the rename that matters: `global` became `storage` in 2.0
+    ok((a.nsset or {})['global'] ~= nil, '1.1 has global')
+    eq(nil, (b.nsset or {})['global'])
+    eq(nil, (a.nsset or {})['storage'])
+    ok((b.nsset or {})['storage'] ~= nil, '2.0 has storage')
+    -- 2.0-only globals are absent from 1.1
+    eq(nil, (a.nsset or {})['prototypes'])
+    eq(nil, (a.nsset or {})['helpers'])
+    -- the shared Lua half is REUSED, so it cannot drift and look like a version
+    -- difference: the stdlib namespaces are identical
+    for _, ns in ipairs({ 'table', 'string', 'math', 'coroutine' }) do
+        ok((a.nsset or {})[ns] ~= nil and (b.nsset or {})[ns] ~= nil,
+            ns .. ' present in both')
+    end
+end)
+
+-- REGRESSION for a trap that cost a debugging round: a Lua module name is a PATH, so
+-- a profile called `lua-factorio-1.1` makes require look for `lua-factorio-1/1.lua`.
+-- The loader tries require BEFORE its .mpack fallback, so a dotted name silently
+-- loads NOTHING — the first version of that file returned nil with no error.
+test('portability: no profile module name contains a dot', function ()
+    local dir = vim.fn.expand('~/git/cartograph.nvim/lua/cartograph/spec/profile')
+    if vim.fn.isdirectory(dir) ~= 1 then skip 'profile dir not present' end
+    local bad = {}
+    local it = vim.uv.fs_scandir(dir)
+    while it do
+        local n = vim.uv.fs_scandir_next(it)
+        if not n then break end
+        local base = n:match('^(.+)%.lua$')
+        if base and base ~= 'init' and base:find('%.') then bad[#bad + 1] = base end
+    end
+    eq({}, bad)
+end)
+
+test('portability: reference_diff reports what the move LOST', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not (pm.load('lua-factorio-11') and pm.load('lua-factorio')) then
+        skip 'factorio profiles not both present'
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    -- `global.x` is a namespace 2.0 removed; game.entity_prototypes a member it moved
+    local root = refs_fixture('local function a()\n'
+        .. '  if global.done then return game.entity_prototypes end\n'
+        .. '  return game.tick\nend\n'
+        .. 'local function b()\n  global.done = true\n  return game.players\nend\n'
+        .. 'return { a = a, b = b }\n')
+    store.ingest(ts.extract(root))
+    local res = port.reference_diff(store, 'lua-factorio-11', 'lua-factorio')
+    ok(res ~= nil, 'the diff ran')
+    local lost = {}
+    for _, e in ipairs(res.lost) do lost[e.name] = e end
+    ok(lost['global.done'], 'the removed NAMESPACE is lost')
+    eq('namespace global', lost['global.done'].was)
+    ok(lost['game.entity_prototypes'], 'the moved MEMBER is lost')
+    eq('member of LuaGameScript', lost['game.entity_prototypes'].was)
+    -- and what 2.0 still holds is NOT reported as work
+    eq(nil, lost['game.tick'])
+    eq(nil, lost['game.players'])
+    ok(res.kept >= 2, 'unchanged names are counted, not listed')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: a cross-language reference diff is refused', function ()
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    store.ingest({ schema = 1, root = '/tmp/x', nodes = {}, edges = {}, calls = {},
+        stamps = {} })
+    local res, err = port.reference_diff(store, 'lua-factorio', 'cruby')
+    eq(nil, res)
+    ok(tostring(err):match('different languages') ~= nil, 'says why: ' .. tostring(err))
+end)

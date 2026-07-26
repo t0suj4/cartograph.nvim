@@ -431,8 +431,12 @@ do
         print('  (no ecosystem loader)')
     else
         -- one pass over the plugin source, so this is O(source) not O(fields)
+        -- BOTH the runtime and the TOOLS: a rule may legitimately be consumed only
+        -- by a tool (api_source is, by apifetch), and scanning lua/ alone reported
+        -- three such rules as permanently UNREAD — the same false-noise problem the
+        -- `notes` exclusion fixed from the other direction.
         local src = {}
-        local stack = { REPO .. '/lua/cartograph' }
+        local stack = { REPO .. '/lua/cartograph', REPO .. '/tools' }
         while #stack > 0 do
             local dir = table.remove(stack)
             local okd, iter = pcall(vim.fs.dir, dir)
@@ -440,7 +444,8 @@ do
                 for n2, t2 in iter do
                     local pth = dir .. '/' .. n2
                     if t2 == 'directory' then stack[#stack + 1] = pth
-                    elseif n2:match('%.lua$') and not pth:match('/spec/ecosystem/') then
+                    elseif n2:match('%.lua$') and not pth:match('/spec/ecosystem/')
+                        and not pth:match('/tools/specaudit%.lua$') then
                         local fd = io.open(pth, 'rb')
                         if fd then src[#src + 1] = fd:read('a'); fd:close() end
                     end

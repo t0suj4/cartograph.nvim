@@ -187,24 +187,29 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               provides each name). Coverage, never a
                               verdict; an artifact that cannot answer
                               name queries says so instead of scoring 0%
-  :CartographPortability {runtime} [{to-runtime}]
+  :CartographPortability[!] {runtime} [{to-runtime}]
                               score the external surface against a target
                               environment profile (tab-completes the ones
                               that ship): which names it PROVIDES, and
-                              which are NOT IN it, with call counts — the
-                              candidate porting work. "Not in the profile"
-                              is NOT "missing": a dependency may supply
-                              it, or the artifact may be partial, so the
-                              profile's own size is printed with the
-                              verdict. A profile for another language is
-                              refused rather than scored. With TWO
-                              runtimes it diffs the MOVE from the first to
-                              the second: the names whose status changes
-                              ARE the porting work. Needs two profiles for
-                              the SAME language that can answer name
-                              queries — no shipped pair qualifies yet, and
-                              it refuses clearly rather than reporting
-                              everything as lost
+                              which are NOT IN it, with call counts, GROUPED
+                              BY WHY the artifact cannot adjudicate them.
+                              The header names BOTH ends when the package
+                              manifest declares a target, so it states a
+                              MOVE. "Not in the profile" is NOT "missing":
+                              a dependency may supply it, or the artifact
+                              may be partial, so the profile's own size is
+                              printed with the verdict. A profile for
+                              another language is refused rather than
+                              scored. With TWO runtimes it diffs the MOVE
+                              from the first to the second: the names whose
+                              status changes ARE the porting work (needs
+                              two same-language profiles that answer name
+                              queries: luajit/lua-factorio, ruby-core/
+                              ruby-rails, lua-factorio-11/lua-factorio).
+                              ! also reports the READ surface — names
+                              touched but never called, where `global.foo`
+                              and `game.x[...]` live; opt-in because it
+                              re-parses every function
   :CartographExternals        the external boundary — unresolved names
                               and the shape each use implies (~)
   :CartographEscalate[!]      escalate hedge-saturated fns to lua-ls

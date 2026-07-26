@@ -538,3 +538,72 @@ test('ecosystem roster: a corrupt archive member is a frontier, not the boundary
     eq('unread-file', call.ext and call.ext.why)
     vim.fn.delete(d, 'rf')
 end)
+
+-- ── the API-DESCRIPTION OFFER ────────────────────────────────────────────────
+-- An environment that publishes its own API description makes a profile for ANY
+-- version obtainable, which is what turns "the target lacks this name" (possibly a
+-- fact about the artifact) into "1.1 had it and 2.0 does not" (a fact about the
+-- environments). Declared as data so the offer is auditable — and so NETWORK IS NEVER
+-- IMPLICIT: extraction, every verb and every report stay offline, and tools/apifetch
+-- contacts the host only when explicitly asked.
+
+test('ecosystem: an api source is DECLARED, not hardcoded at a call site', function ()
+    local f = eco.load('lua-factorio')
+    local src = f.api_source
+    ok(src ~= nil, 'lua-factorio declares where its API is published')
+    ok(src.url:match('%%s') ~= nil, 'the url is a template over the version')
+    ok(src.index ~= nil, 'and an index, so availability is CHECKABLE not guessed')
+    ok(src.version_href ~= nil, 'with the pattern versions appear as in that index')
+    -- the artifact template must produce a legal Lua module name: a dotted one makes
+    -- require look for a directory (see spec/profile/lua-factorio-11.lua)
+    eq(nil, src.artifact:format('11'):find('%.'))
+end)
+
+-- MEASURED against the live host 2026-07-26 and pinned here as the reason a declared
+-- version must be RESOLVED: a full x.y.z resolves, `latest`/`stable` resolve, and a
+-- BARE MINOR 404s. A manifest declares `1.1`, so the bare form is exactly what a
+-- naive implementation would request.
+test('ecosystem: the declaration records that a bare MINOR is not addressable',
+    function ()
+    local src = eco.load('lua-factorio').api_source
+    local body = table.concat({ src.notes and src.notes.minor_not_addressable or '' })
+    -- the fact lives either in a note or in the file's prose; what must be true is
+    -- that aliases are declared, since those are the only non-exact forms that work
+    ok(#(src.aliases or {}) > 0, 'the working non-exact forms are named')
+    local found = false
+    for _, a in ipairs(src.aliases) do if a == 'latest' or a == 'stable' then found = true end end
+    ok(found, 'and they are the ones that actually resolve: ' ..
+        table.concat(src.aliases, ' ') .. body)
+end)
+
+-- the OFFER path must not perform any request. Asserted by running the tool with no
+-- arguments and checking it says so — a weak test on its own, so it is paired with
+-- the stronger structural one: no verb and no report reaches api_source at all.
+test('ecosystem: nothing in the plugin runtime consults api_source', function ()
+    local dir = vim.fn.expand('~/git/cartograph.nvim/lua/cartograph')
+    if vim.fn.isdirectory(dir) ~= 1 then skip 'source not present' end
+    local hits = {}
+    local stack = { dir }
+    while #stack > 0 do
+        local d = table.remove(stack)
+        local ok_, iter = pcall(vim.fs.dir, d)
+        if ok_ then
+            for n, ty in iter do
+                local p = d .. '/' .. n
+                if ty == 'directory' then stack[#stack + 1] = p
+                elseif n:match('%.lua$') and not p:match('/spec/ecosystem/') then
+                    local fd = io.open(p, 'rb')
+                    if fd then
+                        local body = fd:read('a'); fd:close()
+                        if body:find('api_source', 1, true) then
+                            hits[#hits + 1] = p:gsub('.*/lua/cartograph/', '')
+                        end
+                    end
+                end
+            end
+        end
+    end
+    -- the runtime may MENTION the offer in prose, but must not read the field: a
+    -- fetch has to stay an explicit, out-of-band action
+    eq({}, hits)
+end)

@@ -429,6 +429,22 @@ callers). Ariadne's thread, in text.
 
 ## Architecture (three seams)
 
+> A **fourth** seam now sits under the first: `transport.lua` answers *where bytes
+> come from*, separated from what reads them. Its ops are `list`, `stamp` and
+> `read` (with a ranged form and an optional bound reader) — three rather than one
+> because their dependency footprints differ: a zip serves listing and stamping
+> from its central directory, which is stored uncompressed, and needs zlib only for
+> content. So "enumerable and stampable but not readable" is a real state a
+> substrate can be in, and a missing library degrades a corpus instead of failing
+> it. Failure has two kinds, `ABSENT` (authoritative) and `UNAVAILABLE`
+> (indeterminate), because the extractor turns "no content" into a confident
+> negative fact — a file it cannot read used to leave the graph entirely and its
+> callers were reclassified as the project boundary. A zip archive is a substrate
+> on the same contract (`lua/cartograph/zip.lua`, reading all 195 archives of a
+> real Factorio mods directory), and composition is threaded rather than global,
+> because extraction also runs in spawned worker processes that receive their job
+> as JSON.
+
 1. **GraphProvider** — supplies `nodes{id,name,kind,file,range,order}` and
    `edges{from,to,kind}`. Three providers exist:
    - **MCP** (`:Cartograph mcp://name`): any MCP server tool that returns
@@ -1264,15 +1280,27 @@ sunk from the ranking rather than reported as the loosest fit.
 uses but doesn't define — against a target environment, and buckets each name:
 
 ```
-portability — ruby-rails rails-7: 528 of 2485 external name(s) provided
-  the profile claims 1734 symbols; a verdict is only as good as that
-  NOT IN ruby-rails (candidate porting work, most-used first):
-    DB.exec                      122 call(s)  about.rb
-    Jobs.enqueue                  63 call(s)  category.rb
-    DiscourseEvent.trigger        56 call(s)  category.rb
-  provided by ruby-rails: 528 name(s)
-    I18n.t                       302 call(s)  via vocab
+portability — MOVING FROM factorio 1.1 (declared in info.json) TO lua-factorio 2.0.72
+  33 of 92 external name(s) provided by the target
+  the profile claims 280 symbols; a verdict is only as good as that
+  NOT IN lua-factorio — 59 name(s) the artifact cannot adjudicate, grouped by WHY:
+    48 name(s), 101 call(s) — RECEIVER-TYPED — the artifact models global-rooted
+      calls only, so these have no representation in it at all …
+     3 name(s),  16 call(s) — BARE AND UNCLAIMED — no shipped profile claims these …
+     8 name(s),   8 call(s) — ANOTHER LANGUAGE — seen in files this profile does
+      not describe …
+  no ABSENT group: nothing here is a name a fully-enumerated class could have held
 ```
+
+Two things in that header are the point. The **declared** end comes from the
+package manifest — a file the resolver already parses — so the report states a
+*move* rather than scoring against one unnamed side. And the not-in list is
+**grouped by why the artifact is blind**, because "candidate porting work" was
+wrong for every entry rather than for most: with a methods-only artifact that
+models global-rooted calls, a miss was never evidence the target lacked the name.
+Only `ABSENT` — the root is a global whose documented class is *fully enumerated*
+and does not hold the member — says anything about the target, and the report says
+so explicitly when no such group exists.
 
 A dotted name needs its **root** provided, not just its tail — `print` is a
 LuaJIT base function but `game.print` is Factorio's API, and matching on the tail
@@ -1337,9 +1365,50 @@ so `URI.parse` isn't wrongly reported as unavailable). `for k in pairs(string)`
 measures the runtime that will actually execute the code, where a hand-typed list
 would only claim. nvim's own additions are excluded by name, since a profile called
 `luajit` must not quietly promise `vim`, and the stamp records which LuaJIT it
-saw. A move still needs two name-queryable profiles for one language — satisfied now for
-Lua and Ruby, while a JS pair awaits a second profile (a `node` introspection
-would work the same way).
+saw. A move still needs two name-queryable profiles for one language — satisfied for
+Lua and Ruby, and for **two versions of the same environment**: `lua-factorio-11`
+is the Factorio 1.1 profile, distilled from the vendor's own published API
+description and expressed as a *delta* over the 2.0 one (a second hand-maintained
+copy of the shared Lua half would drift, and the drift would read as a version
+difference). A JS pair awaits a second profile (a `node` introspection would work
+the same way).
+
+### The read surface (names touched, never called)
+
+The audit above is built from **call records**, so a name that is read and never
+invoked cannot appear in it — and two whole classes of porting work live exactly
+there. On a real Factorio mod, `game.entity_prototypes[...]` is an index
+expression and `global.foo` a field access: neither produces a call record.
+`:CartographPortability! <from> <to>` adds that second surface — the bang is where
+this verb spends real time — and a version pair turns it into a worklist:
+
+```
+reference diff — READS moving from lua-factorio-11 to lua-factorio
+  10 LOST, 0 gained, 16 unchanged, 0 in neither
+  LOST — present in the OLD environment, absent from the new:
+    global.savedRailbots      11 read(s)  was: namespace global
+    global.playersNeedZoom     9 read(s)  was: namespace global
+    game.entity_prototypes     2 read(s)  was: member of LuaGameScript
+    game.active_mods           1 read(s)  was: member of LuaGameScript
+```
+
+Those are the two real 1.1 → 2.0 items: `global` became `storage`, and three
+`game` members moved to `prototypes.*` / `script.active_mods`. A status **change**
+is evidence in a way an absence is not — it survives both artifacts being
+incomplete the same way.
+
+It is behind the bang because it re-parses every function (~3.5 ms each — 6 s on a
+1700-function corpus), and the default report *announces* it so its absence is
+never read as emptiness. Reads are **locality-filtered** (parameters, locals and
+declared loop bindings are excluded), which is what lets their roots be judged
+more sharply than callees: a root the profile does not know is not "some
+receiver", it is a global the target lacks.
+
+Coverage is honest about its edges: it finds what the expression layer models as
+field access — Lua, PHP and JS yes, **Java no** (measured: 156 rows with
+expressions, zero field reads), and where the iterated expression of a loop is
+itself a bare name it is treated as a binding, which can only make an external
+name look local rather than inventing one.
 
 It's the easiest verb here to overstate, so: the bucket is **NOT-IN-PROFILE**,
 never "missing" — a dependency may supply the name, or the artifact may be
@@ -2010,6 +2079,19 @@ nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no sn
 # Gives lua-factorio a comparable SIBLING, which is what the portability move-diff
 # needs: two name-queryable profiles for one language.
 nvim --headless -u NONE -l tools/luadistill.lua          # writes the .mpack
+# API-DESCRIPTION OFFER: some environments publish their own API description, so a
+# profile for ANY version is obtainable rather than hand-authored — which is what
+# turns "the target lacks this name" into "1.1 had it and 2.0 does not". The URL is
+# SPEC DATA (spec/ecosystem/*.lua api_source), never a literal at a call site, and
+# NETWORK IS NEVER IMPLICIT: extraction, every verb and every report stay offline,
+# and a test enforces that nothing under lua/cartograph/ even reads the field.
+nvim --headless -u NONE -l tools/apifetch.lua            # what is OFFERED. No request.
+nvim --headless -u NONE -l tools/apifetch.lua --check    # ask the index (CONTACTS host)
+nvim --headless -u NONE -l tools/apifetch.lua 1.1        # resolve + fetch + distil
+# A bare MINOR is not addressable (`1.1` 404s where `1.1.110` resolves), and a
+# manifest declares the bare form — so a declared version is RESOLVED against the
+# published index first, which is what makes "if available" a check, not a guess.
+nvim --headless -u NONE -l tools/factoriodistill.lua <api.json> 11   # version-keyed
 nvim --headless -u NONE -l tools/luadistill.lua --show    # print, write nothing
 # and the same move for ruby: ask the interpreter on PATH, load the DEFAULT GEMS
 # (so URI.parse isn't wrongly reported absent), and record which were loaded.

@@ -15,7 +15,10 @@ local function intercept()
     local orig = api.nvim_create_user_command
     local orig_del = api.nvim_del_user_command
     local seen = {}
-    api.nvim_create_user_command = function (name) seen[#seen + 1] = name end
+    api.nvim_create_user_command = function (name, _, opts)
+        seen[#seen + 1] = name
+        seen[name] = opts or {}
+    end
     api.nvim_del_user_command = function () end
     -- `done`, not `ok`: a local named ok would shadow the harness's assertion
     local done, err = pcall(function ()
@@ -65,6 +68,34 @@ test('commands: every group file on disk is wired into the dispatch', function (
         end
     end
     eq({}, missing, 'a group file exists but nothing requires it — its commands are dead')
+end)
+
+-- THE HELPDOC IS A CLAIM ABOUT THE REGISTRATION, and `[!]` is the one part of it a
+-- reader can act on directly: `:CartographPortability!` either works or errors with
+-- "no ! allowed". `bang = true` is a single word in an opts table, so dropping it
+-- while the doc keeps promising the bang is a silent lie, and docaudit cannot catch
+-- it (it matches command NAMES). Both directions are checked: an undocumented bang
+-- is a capability nobody can find.
+test('commands: every doc [!] is a registered bang, and every bang is documented',
+    function ()
+    local seen = intercept()
+    local doc = table.concat(vim.fn.readfile('doc/cartograph.txt'), '\n')
+    local documented = {}
+    for name in doc:gmatch('\n  :(Cartograph%a*)%[!%]') do documented[name] = true end
+    ok(next(documented) ~= nil, 'the doc was actually read')
+    local undocumented, unregistered = {}, {}
+    for _, n in ipairs(seen) do
+        local bang = (seen[n] or {}).bang and true or false
+        if bang and not documented[n] then undocumented[#undocumented + 1] = n end
+        if documented[n] and not bang then unregistered[#unregistered + 1] = n end
+        documented[n] = nil
+    end
+    table.sort(undocumented)
+    eq({}, undocumented, 'a command takes ! that the helpdoc never advertises')
+    eq({}, unregistered, 'the helpdoc promises ! but the command refuses it')
+    local phantom = {}
+    for n in pairs(documented) do phantom[#phantom + 1] = n end
+    eq({}, phantom, 'the doc documents a bang for a command that does not exist')
 end)
 
 test('commands: each group module exposes register(H) and contributes commands', function ()
