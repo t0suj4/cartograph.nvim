@@ -479,9 +479,13 @@ test('portability: unknown_reason classifies by the artifact SHAPE', function ()
     local port = require 'cartograph.portability'
     local prof = require('cartograph.spec.profile').load('lua-factorio')
     if not prof then skip 'no lua-factorio profile' end
-    -- a modelled namespace root: the miss is at MEMBER level, and members are not
-    -- enumerated, so it says nothing either way
-    eq('unenumerated-namespace', port.unknown_reason(prof, 'game.no_such_member', 'a.lua'))
+    -- a GLOBAL whose documented class is fully enumerated: the miss IS evidence.
+    -- This was 'unenumerated-namespace' until the distiller emitted attributes as
+    -- well as methods (220 members, 9 classes complete) — before that, a missing
+    -- member could not be told from an attribute the artifact never held.
+    eq('absent', port.unknown_reason(prof, 'game.no_such_member', 'a.lua'))
+    -- a Lua STDLIB namespace is still not a closed set: Factorio extends `table`
+    -- with lualib's deepcopy and the profile omits it, so a miss there says nothing
     eq('unenumerated-namespace', port.unknown_reason(prof, 'table.deepcopy', 'a.lua'))
     -- an UNmodelled root: receiver-typed, with no representation at all
     eq('receiver-typed', port.unknown_reason(prof, 'player.teleport', 'a.lua'))
@@ -521,9 +525,9 @@ test('portability: the report groups by reason and claims no porting work',
     -- ... replaced by the honest framing and a reason per group
     ok(body:match('cannot adjudicate, grouped by WHY') ~= nil, 'grouped framing')
     ok(body:match('RECEIVER%-TYPED') ~= nil, 'the receiver-typed group appears')
-    -- and it states WHY there is no "absent from the target" group
-    ok(body:match('NO "absent from the target" group') ~= nil, 'the absence is explained')
-    ok(body:match('distils METHODS only') ~= nil, 'with the artifact reason')
+    -- this fixture has no absent name, so the report SAYS there is no such group
+    -- rather than leaving a reader to wonder whether one was omitted
+    ok(body:match('no ABSENT group') ~= nil, 'the absence of the group is stated')
     vim.fn.delete(root, 'rf')
 end)
 
@@ -555,4 +559,58 @@ test('portability: the reason groups PARTITION the unknown names', function ()
     end
     eq(res.unknown, counted)
     vim.fn.delete(root, 'rf')
+end)
+
+-- the ABSENT bucket, which only exists because the distiller emits ATTRIBUTES as
+-- well as methods. Before that a miss inside a global's class was indistinguishable
+-- from an attribute the artifact never held, so no bucket could be earned.
+test('portability: a call to a member a COMPLETE class lacks is ABSENT', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    w('control.lua', 'local function boot()\n'
+        .. '  game.get_player(1)\n'         -- a real method: provided
+        .. '  game.tick_paused_probe()\n'   -- not a member of LuaGameScript
+        .. '  remote.no_such_call("x")\n'   -- not a member of LuaRemote
+        .. 'end\nreturn { boot = boot }\n')
+    store.ingest(ts.extract(root))
+    local res = port.audit(store, 'lua-factorio')
+    local byname = {}
+    for _, e in ipairs(res.entries) do byname[e.name] = e end
+    -- the two misses are ABSENT: their classes are fully enumerated
+    ok(byname['remote.no_such_call'], 'the miss is in the requirement set')
+    eq('absent', byname['remote.no_such_call'].reason)
+    eq(false, byname['remote.no_such_call'].provided)
+    -- and the report leads with that group, since it is the only one that says
+    -- anything about the TARGET rather than about the artifact
+    local body = table.concat(port.report(store, 'lua-factorio', { cap = 9 }), '\n')
+    ok(body:match('ABSENT FROM THE TARGET') ~= nil, 'the group is reported')
+    ok(body:match('real porting work') ~= nil, 'and named as the actionable one')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- a member that DOES exist must not land in absent — the artifact's completeness
+-- claim cuts both ways, and over-reporting work is as dishonest as hiding it
+test('portability: an existing member is provided, never absent', function ()
+    local port = require 'cartograph.portability'
+    local prof = require('cartograph.spec.profile').load('lua-factorio')
+    if not prof or not prof.api_complete then skip 'no distilled api artifact' end
+    -- METHODS and ATTRIBUTES both count: `tick` is an attribute, and treating it as
+    -- absent was exactly the methods-only failure
+    ok(port.provides(prof, 'game.get_player') ~= nil, 'a method is provided')
+    ok(port.provides(prof, 'game.tick') ~= nil, 'an ATTRIBUTE is provided too')
+    ok(port.provides(prof, 'game.players') ~= nil, 'and another')
+    eq(nil, port.provides(prof, 'game.entity_prototypes')) -- renamed in 2.0
+    -- a DEEP chain keeps the prefix answer: it continues into receiver-typed
+    -- territory the artifact cannot follow, so it is not adjudicated as absent
+    ok(port.provides(prof, 'game.surfaces.create_entity') ~= nil,
+        'a chain is not called absent')
 end)

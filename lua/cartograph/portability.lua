@@ -46,6 +46,23 @@ function M.provides(prof, name)
     if prof.sigs and prof.sigs[name] then return 'signature' end
     local root, rest = name:match('^([%w_]+)[%.:#]+(.+)$')
     if root then
+        -- A FULLY ENUMERATED CLASS ANSWERS FOR ITSELF, and must be consulted BEFORE
+        -- the namespace prefix below. The prefix says only "this root is a known
+        -- global", which is the right answer for a DISPOSITION (the call is external,
+        -- not project) but the wrong one for PORTABILITY: it made
+        -- `game.entity_prototypes` count as provided by `namespace game` and so
+        -- hid the single clearest piece of porting work in the corpus — that name
+        -- was renamed to prototypes.entity in 2.0.
+        -- Only a SINGLE-segment member is adjudicated: a deeper chain
+        -- (`game.surfaces[1].create_entity`) continues into receiver-typed territory
+        -- the artifact cannot follow, so it keeps the prefix answer.
+        local cls = (prof.global2class or {})[root]
+        if cls and (prof.api_complete or {})[cls] and rest:match('^[%w_]+$') then
+            if (prof.api_members or {})[cls .. '::' .. rest] then
+                return 'member of ' .. cls
+            end
+            return nil -- enumerated and NOT there: genuinely absent
+        end
         if prof.nsset and prof.nsset[root] then return 'namespace ' .. root end
         if prof.namespaces and prof.namespaces[root] then return 'namespace ' .. root end
         local ty = prof.types and prof.types[root]
@@ -251,13 +268,17 @@ end
 ---     the profile omits those, so even a "complete" stdlib namespace is not a
 ---     closed set to test against.
 ---
---- CONSEQUENCE, stated plainly: with this artifact there is NO sound "absent from
---- the target" bucket. Every not-in-profile name is outside what the artifact can
---- adjudicate, and the honest report groups them by WHY and says what each would
---- need. A future artifact that distils attributes could earn an `absent` bucket;
---- claiming one now would be inventing evidence.
---- Returns 'other-language' | 'receiver-typed' | 'unenumerated-namespace' |
---- 'unclaimed-bare'. `file` is where the name was seen; a name from a file of
+--- THAT HAS CHANGED for the enumerated classes. The distiller now emits attributes
+--- as well as methods (220 members, 104 of them attributes, across 9 classes) and
+--- DECLARES which classes are fully enumerated. Inside a complete class a miss IS
+--- evidence: `game.entity_prototypes` is absent from 2.0.72 because it was renamed
+--- to prototypes.entity, while `game.tick` is present — the two are now
+--- distinguishable, which is precisely what the methods-only artifact could not do.
+--- So `absent` exists, and ONLY for names a complete class could have held. Every
+--- other miss keeps its blindness label, because the artifact still models
+--- global-rooted calls only and the stdlib namespaces are still not closed sets.
+--- Returns 'other-language' | 'absent' | 'receiver-typed' |
+--- 'unenumerated-namespace' | 'unclaimed-bare'. `file` is where the name was seen; a name from a file of
 --- ANOTHER language is not the profile's business at all — one zipper.py in a
 --- Factorio mod put 13 python names in this list, and calling them "a sibling
 --- module or a third-party dependency" was a label I knew to be wrong. The
@@ -274,6 +295,16 @@ function M.unknown_reason(prof, name, file)
         if lang and lang ~= prof.lang then return 'other-language' end
     end
     local root, member = name:match('^([%w_]+)[.:]([%w_]+)$')
+    -- ABSENT: the root is a global whose documented class is FULLY enumerated, and
+    -- the member is not in it. The only bucket that is evidence about the target
+    -- rather than about the artifact.
+    if root and member then
+        local cls = (prof.global2class or {})[root]
+        if cls and (prof.api_complete or {})[cls]
+            and not (prof.api_members or {})[cls .. '::' .. member] then
+            return 'absent'
+        end
+    end
     if not root then
         -- a dotted CHAIN (a.b.c) or a call-shaped key: still receiver-typed, since
         -- nothing but the first segment could ever be a modelled namespace
@@ -303,6 +334,9 @@ end
 
 local ext_lang
 local REASON_TEXT = {
+    ['absent'] = 'ABSENT FROM THE TARGET — the documented class for this global is'
+        .. ' FULLY enumerated (methods and attributes) and does not hold the name.'
+        .. ' This is the group that is real porting work.',
     ['other-language'] = 'ANOTHER LANGUAGE — seen in files this profile does not'
         .. ' describe, so it is not the profile\'s business. Scoring them here was'
         .. ' noise: exclude those files, or score them against their own runtime.',
@@ -529,8 +563,9 @@ function M.report(store, runtime, opts)
         -- that in one line
         L[#L + 1] = '    (NOT-IN-PROFILE is not "missing" — a dependency may supply'
             .. ' it, or the artifact may not model it at all.)'
-        local groups, order = {}, { 'receiver-typed', 'unenumerated-namespace',
-            'unclaimed-bare', 'other-language' }
+        -- `absent` FIRST: it is the only group that says anything about the target
+        local groups, order = {}, { 'absent', 'receiver-typed',
+            'unenumerated-namespace', 'unclaimed-bare', 'other-language' }
         for _, e in ipairs(res.entries) do
             if not e.provided then
                 local g = groups[e.reason]
@@ -558,9 +593,10 @@ function M.report(store, runtime, opts)
             end
         end
         L[#L + 1] = ''
-        L[#L + 1] = '  NO "absent from the target" group appears because this artifact'
-        L[#L + 1] = '  cannot support one: it distils METHODS only, so a missing'
-        L[#L + 1] = '  member is indistinguishable from an attribute it never held.'
+        if not groups['absent'] then
+            L[#L + 1] = '  no ABSENT group: nothing here is a name a fully-enumerated'
+            L[#L + 1] = '  class could have held, so nothing is evidence about the target.'
+        end
     end
     L[#L + 1] = ''
     L[#L + 1] = ('  provided by %s: %d name(s)'):format(res.runtime, res.provided)

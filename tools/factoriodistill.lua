@@ -81,8 +81,15 @@ end
 local class_by_name = {}
 for _, c in ipairs(api.classes) do class_by_name[c.name] = c end
 
-local global2class, members, sigs = {}, {}, {}
-local n_members = 0
+-- BOTH methods AND attributes. Emitting methods only made the member set useless
+-- for adjudication: `game.tick`, `game.players`, `game.surfaces` are ATTRIBUTES, so
+-- they looked absent, and a genuinely REMOVED name was indistinguishable from a
+-- perfectly fine one — `game.entity_prototypes` (renamed to prototypes.entity in
+-- 2.0, real porting work) versus `game.tick` (fine). With both kinds in, a miss on
+-- a global's member is EVIDENCE, and `complete` below is what lets a consumer rely
+-- on that instead of guessing.
+local global2class, members, sigs, complete = {}, {}, {}, {}
+local n_members, n_attrs = 0, 0
 for _, g in ipairs(api.global_objects) do
     global2class[g.name] = g.type
     local c = class_by_name[g.type]
@@ -95,6 +102,27 @@ for _, g in ipairs(api.global_objects) do
                 n_members = n_members + 1
             end
         end
+        for _, a in ipairs(c.attributes or {}) do
+            local key = g.type .. '::' .. a.name
+            if not members[key] then
+                members[key] = true
+                -- an attribute has a TYPE and access flags, not a call signature;
+                -- rendering it as `: T [read-only]` keeps hover honest about which
+                -- kind of member it is
+                local acc = {}
+                if a.read ~= false then acc[#acc + 1] = 'read' end
+                if a.write then acc[#acc + 1] = 'write' end
+                sigs[key] = { sig = (': %s [%s]'):format(render_type(a.type),
+                    table.concat(acc, '/')), attribute = true }
+                n_members = n_members + 1
+                n_attrs = n_attrs + 1
+            end
+        end
+        -- COMPLETENESS, declared rather than assumed: this class's documented member
+        -- surface is now fully enumerated (methods + attributes), so a consumer may
+        -- treat a miss as absence. Operators (`[]`, `#`) are deliberately excluded —
+        -- they are not name-addressable, so they cannot make a NAME look absent.
+        complete[g.type] = true
     end
 end
 local free, free_sigs, n_free = {}, {}, 0
@@ -110,6 +138,7 @@ local profile = {
     stamp = { source = API, application_version = api.application_version,
         api_version = api.api_version, stage = api.stage },
     global2class = global2class, members = members, sigs = sigs,
+    complete = complete, -- classes whose member surface is fully enumerated
     free = free, free_sigs = free_sigs,
 }
 
@@ -122,11 +151,13 @@ assert(os.rename(tmp, out))
 io.write('=== factoriodistill ===\n')
 io.write(('  runtime-api %s (api v%s, %s) — %d classes, %d globals\n'):format(
     api.application_version, api.api_version, api.stage, #api.classes, #api.global_objects))
-io.write(('  global objects: %d ; owner-precise methods: %d ; free fns: %d\n'):format(
-    #api.global_objects, n_members, n_free))
+io.write(('  global objects: %d ; members: %d (%d attributes) ; free fns: %d\n')
+    :format(#api.global_objects, n_members, n_attrs, n_free))
 for _, g in ipairs(api.global_objects) do
     local c = class_by_name[g.type]
-    io.write(('    %-12s -> %-22s %d methods\n'):format(g.name, g.type, c and #(c.methods or {}) or 0))
+    io.write(('    %-12s -> %-22s %d methods + %d attributes%s\n'):format(g.name,
+        g.type, c and #(c.methods or {}) or 0, c and #(c.attributes or {}) or 0,
+        complete[g.type] and ' [complete]' or ''))
 end
 io.write('  sample: LuaGameScript::print = ' .. (sigs['LuaGameScript::print']
     and sigs['LuaGameScript::print'].sig or '?') .. '\n')

@@ -80,9 +80,15 @@ end
 -- → the profile stays disposition-only (graceful, gate-neutral like before).
 local api = require('cartograph.spec.profile').load('lua-factorio-api')
 local mint, mint_path, sigs, sig_kind, api_version
+local api_g2c, api_members, api_complete
 if api and api.global2class and api.members then
     local g2c, members, free_fns = api.global2class, api.members, api.free or {}
     mint, sig_kind, api_version = true, 'factorio', api.version
+    -- EXPOSED, not just closed over: a consumer that must decide whether a miss is
+    -- EVIDENCE needs the enumerated surface and the completeness claim, not only the
+    -- minting closure. Without this the portability report could not tell "the API
+    -- lacks this name" from "the artifact never held that kind of name".
+    api_g2c, api_members, api_complete = g2c, members, api.complete
     sigs = {} -- one hover table: method sigs (Class::method) + free-fn sigs (name)
     for k, v in pairs(api.sigs or {}) do sigs[k] = v end
     for k, v in pairs(api.free_sigs or {}) do sigs[k] = v end
@@ -113,4 +119,8 @@ return {
     vocab = vocab,
     -- minting + nav-time enrichment (present only when the api artifact loaded)
     mint = mint, mint_path = mint_path, sigs = sigs, sig_kind = sig_kind,
+    -- the ADJUDICABLE surface: global -> documented class, the flat
+    -- `Class::member` set (methods AND attributes since 2026-07-26), and which
+    -- classes are FULLY enumerated. A miss inside a complete class is evidence.
+    global2class = api_g2c, api_members = api_members, api_complete = api_complete,
 }
