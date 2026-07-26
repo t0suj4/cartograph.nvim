@@ -3856,10 +3856,16 @@ function M.index_only(root, opts)
     local data = M.extract(root, o)
     -- HONESTY MARKER ([[cartograph-thin-index]]): this graph has NO call graph / effect
     -- PDG (calls were never built). Whole-graph verbs — untangle/reorder/references/call-
-    -- hierarchy AND the call-graph SUMMARIES (census/ladder/externals/escalate) — read it
-    -- and refuse (commands.whole_graph) rather than serve a degraded/empty answer that reads
-    -- as "none" (e.g. census "nodes 0", ladder "0 calls", externals "0 external"). A full
+    -- hierarchy AND the call-graph SUMMARIES (census/ladder/externals/escalate) — refuse
+    -- (commands.whole_graph) rather than serve a degraded/empty answer that reads as
+    -- "none" (e.g. census "nodes 0", ladder "0 calls", externals "0 external"). A full
     -- :Cartograph open ingests fresh data without the marker → clears it.
+    -- The FIELD is provenance and stays set for the lifetime of this graph, because the
+    -- cache decides on it (warm_decision must never serve a thin cache to a full open,
+    -- and a partial graph's self-type map must not overwrite a whole one). The verbs go
+    -- through store.is_index_only(), which answers the narrower CAPABILITY question and
+    -- goes false once on-demand materialization has covered every file — see the
+    -- provenance-vs-capability note there.
     data.index_only = true
     return data
 end

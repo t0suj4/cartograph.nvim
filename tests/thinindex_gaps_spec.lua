@@ -1,11 +1,14 @@
--- RED TESTS — the measured thin-index-vs-fat-session gaps, written as tests so the fix
--- has a target and the gap cannot be quietly forgotten.
---
--- The two `RED` tests FAIL when their `skip` line is removed; the skip is there ONLY so
--- the commit fence stays green while the fix lands, and each one names the defect it is
--- waiting on. DELETE THE SKIP, don't weaken the assertion — a red test made green by
--- lowering the bar is worse than no test. To see them fail as intended, remove the one
--- `skip` line at the top of the body.
+-- The thin-index-vs-fat-session gaps. The first two tests here were written RED, landed
+-- skipped so the commit fence stayed green, and are now GREEN — they stand as the
+-- regressions for two fixes that share one shape: A FIELD ANSWERING TWO QUESTIONS.
+--   1. the coverage ledgers could not accumulate, because a materializer's own re-ingest
+--      cleared them (reset_indexes could not tell a NEW graph from a re-index of the
+--      same one). Fixed with an explicit keep_ledgers opt, not by inferring identity —
+--      refresh also re-ingests in place and CAN remove a file.
+--   2. index_only conflated PROVENANCE ("came from the index-only front end", which the
+--      cache must respect forever) with CAPABILITY ("is there a call graph?", which
+--      materialization can change). is_index_only() now answers capability; the field
+--      stays for the cache. Same shape as the cbarg bug in reduce_mentions.
 --
 -- Compatibility as measured 2026-07-26 ([[cartograph-thin-index]],
 -- [[cartograph-merging-strategies]]): demand materialization is site-for-site EXACT on
@@ -24,9 +27,10 @@ local function ready()
     return pcall(vim.treesitter.language.add, 'lua')
 end
 
--- small enough to materialize ENTIRELY, which is the point of both red tests: the
+-- small enough to materialize ENTIRELY, which is the point of the first two tests: the
 -- claims are about a thin index that has been filled in completely. Every file here
--- CONTAINS CALLS, so every materialization takes the re-ingest path.
+-- CONTAINS CALLS, so every materialization takes the re-ingest path — the path that
+-- used to wipe the ledgers.
 local FILES = {
     ['lib/util.lua'] = [[
 local function util_alpha(x) return x + 1 end
@@ -59,21 +63,22 @@ local function sorted_files()
     return f
 end
 
--- RED #1 — THE COVERAGE LEDGERS DO NOT ACCUMULATE.
+-- WAS RED — the coverage ledgers did not accumulate.
 -- materialize_file_calls ends with `M._calls_materialized[rel] = true`, set AFTER its
--- internal M.ingest(M.data) because ingest's reset_indexes() clears the ledgers by
--- design (a new graph invalidates them, and ingest cannot tell its own caller's
--- re-ingest from a fresh open). But only the CURRENT file is re-set, so every
--- successful materialization ERASES the record of every earlier one. Measured on a
--- 3-file tree: calls returned true for two files, and calls_materialized() then
--- reported ONLY the third — the one that had no calls and never materialized at all.
--- This is not cosmetic bookkeeping: these two functions are the coverage API a
--- coverage-aware whole_graph() guard has to consult (see RED #2), and
--- idpass_materialized() is ALREADY user-visible — :CartographMentions reports per-file
--- coverage from it, so it under-reports today.
-test('RED thin index: coverage ledgers lose every earlier file', function ()
+-- internal M.ingest(M.data) because ingest's reset_indexes() clears the ledgers (a NEW
+-- graph invalidates them). Only the CURRENT file was re-set, so every successful
+-- materialization erased the record of every earlier one. Measured on a 3-file tree:
+-- calls returned true for two files and calls_materialized() then reported ONLY the
+-- third — the one with no calls that never materialized at all; on this 2-file fixture
+-- the ledger came back EMPTY. Not cosmetic: these two functions are the coverage API the
+-- capability predicate consults (next test), and idpass_materialized() is user-visible
+-- through :CartographMentions, which therefore under-reported.
+-- Fixed by an explicit `keep_ledgers` opt on M.ingest, deliberately NOT inferred from
+-- `data == M.data`: refresh mutates the graph in place and re-ingests it too, and it can
+-- REMOVE a file — which would leave an entry claiming calls that are no longer there.
+-- Only a caller that knows its splice was additive may keep them.
+test('thin index: coverage ledgers ACCUMULATE across materializations', function ()
     if not ready() then skip 'no lua parser' end
-    skip 'KNOWN RED: ingest resets the ledgers; only the current file is re-set'
     local root = build()
     store.ingest(ts.index_only(root))
     local files = sorted_files()
@@ -91,17 +96,20 @@ test('RED thin index: coverage ledgers lose every earlier file', function ()
     vim.fn.delete(root, 'rf')
 end)
 
--- RED #2 — THE MARKER NEVER CLEARS.
--- materialize_file_calls' comment says it does not clear index_only because "one
--- file's calls is not a call graph" — true per file, and refusing while coverage is
--- partial is the uniform-honesty invariant working as designed. But when EVERY file's
--- calls and id pass have been materialized, the graph IS a call graph, and the marker
--- still says otherwise. commands.lua's whole_graph() reads this exact predicate, so 10
--- verbs (4 in analysis.lua, 6 in honesty.lua) refuse a graph that can answer them. The
--- guard should ask COVERAGE; the marker is what makes that impossible today.
-test('RED thin index: a FULLY materialized graph is still marked index-only', function ()
+-- WAS RED — the marker never cleared.
+-- Refusing while coverage is partial is the uniform-honesty invariant working as
+-- designed. But once EVERY file's calls and id pass are materialized the graph IS a call
+-- graph, and the marker still said otherwise — so commands.whole_graph(), which reads
+-- this predicate, made 10 verbs (4 analysis, 6 honesty) refuse a graph that could answer
+-- them. Verified by hand at the time: ladder.report and census.report both run on the
+-- materialized fixture graph.
+-- Fixed by splitting the two questions the one field was answering. What this test does
+-- NOT claim: a fully materialized graph can still differ from a full extract in TIER,
+-- and on a polyglot root in a few over-resolutions (the monotonicity ratchet in
+-- tools/demandcalls.lua holds that). That is a quality gap, not the empty "none" the
+-- refusal exists to prevent.
+test('thin index: total coverage retires the index-only CAPABILITY, keeps provenance', function ()
     if not ready() then skip 'no lua parser' end
-    skip 'KNOWN RED: index_only never clears, so whole_graph() refuses a full graph'
     local root = build()
     store.ingest(ts.index_only(root))
     ok(store.is_index_only(), 'starts thin (precondition)')
@@ -112,8 +120,17 @@ test('RED thin index: a FULLY materialized graph is still marked index-only', fu
     end
     -- the demand graph now holds every call the full extract does
     eq(#(ts.extract(root).calls or {}), #(store.data.calls or {}))
+    local cov = store.coverage()
+    eq(cov.files, cov.calls)
+    eq(cov.files, cov.idpass)
+    ok(cov.complete, 'coverage reports complete')
     ok(not store.is_index_only(),
         'total per-file coverage should retire the index-only marker')
+    -- ... and PROVENANCE survives, which is what keeps the fix safe: cache.lua reads
+    -- data.index_only DIRECTLY (a thin cache must never be served to a full open, and a
+    -- partial graph's self-type map must not overwrite a whole one). Capability is what
+    -- the honesty guards ask; provenance is a fact about where the graph came from.
+    eq(true, store.data.index_only)
     vim.fn.delete(root, 'rf')
 end)
 

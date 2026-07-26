@@ -129,7 +129,13 @@ local function idx_edge(T, e)
 end
 
 -- reset every derived index to empty (full ingest starts here)
-local function reset_indexes()
+--- keep_ledgers: the caller is re-indexing THE SAME graph after splicing one file in
+--- (the on-demand materializers), so the materialization ledgers below stay valid. It
+--- is an explicit opt, not inferred from `data == M.data`, because refresh also mutates
+--- the graph in place and re-ingests it — and refresh CAN remove a file, which would
+--- leave a ledger entry claiming calls that are no longer there. Only a caller that
+--- knows its splice was additive may keep them.
+local function reset_indexes(keep_ledgers)
     M.by_id, M.by_file, M.files = {}, {}, {}
     M.by_name = {} -- NAME axis: node name -> id list (Band:named)
     M.calls_to, M.calls_by_fn = {}, {}
@@ -144,14 +150,22 @@ local function reset_indexes()
     M.imports_in, M.imports_out = {}, {}
     M.reg_by, M.registers = {}, {}
     -- ON-DEMAND MATERIALIZATION LEDGERS: these say "file F's df/flow (or calls) are
-    -- already in THIS graph", so a new graph invalidates them. Surviving an ingest
+    -- already in THIS graph", so a NEW graph invalidates them. Surviving an ingest
     -- meant opening project B silently skipped materialization for any path project A
     -- had already materialized — a same-relative-path collision that reads as "this
     -- file has no calls". Caught by demandcalls_spec's second test.
-    M._df_materialized, M._calls_materialized, M._idpass_materialized = {}, {}, {}
+    -- But a materializer's OWN re-ingest is not a new graph, and clearing here made the
+    -- ledgers un-ACCUMULATABLE: each successful materialization wiped every earlier
+    -- file's entry, leaving only the one re-set afterwards (and, when the last call
+    -- materialized nothing, not even that — the ledger came back EMPTY after two
+    -- successful files). They are the coverage API, so under-reporting is not cosmetic:
+    -- :CartographMentions publishes per-file coverage from idpass_materialized().
+    if not keep_ledgers then
+        M._df_materialized, M._calls_materialized, M._idpass_materialized = {}, {}, {}
+    end
 end
 
-function M.ingest(data)
+function M.ingest(data, opts)
     M.data    = data
     M.toc     = nil -- load-order manifest; cartograph.toc.attach() sets it
     M._frontier_cache = {}
@@ -169,7 +183,7 @@ function M.ingest(data)
     -- after: readers re-read on mismatch, writers ABORT loudly. (The MCP
     -- wire waits fast-only and is exempt — timers can't fire there.)
     M.generation = (M.generation or 0) + 1
-    reset_indexes()
+    reset_indexes(opts and opts.keep_ledgers)
     -- RE-INGEST SAFETY (record-fold arc): a prior ingest may have wrapped
     -- calls/nodes/edges in a columnar view (proxies), and refresh/tests re-ingest
     -- the same graph. The folds + installs assume plain record tables, so
@@ -477,10 +491,12 @@ function M.materialize_file_calls(rel)
         -- cache validates it against the stamp set it was derived from and returns nil
         -- if the corpus moved, so a stale map can never be seeded.
         M.resolve_resident()
-        M.ingest(M.data) -- rebuild the indexes over the new calls/edges
+        -- keep_ledgers: this splice is ADDITIVE to the graph already resident, so every
+        -- earlier file's entry is still true. Without it the re-ingest cleared them and
+        -- coverage could never accumulate past the current file.
+        M.ingest(M.data, { keep_ledgers = true }) -- reindex over the new calls/edges
     end
-    -- AFTER the ingest, which resets the ledgers by design (a new graph invalidates
-    -- them) and cannot tell its own caller's re-ingest from a fresh open. Both flags
+    -- after the ingest, which no longer drops what earlier files recorded. Both flags
     -- are only a cache hint — the data now carries the calls and the df, so both
     -- functions' own early-outs would reach the same verdict by scanning.
     M._df_materialized[rel] = true
@@ -587,9 +603,9 @@ function M.materialize_file_idpass(rel)
     -- the marks this just minted are RESOLUTION INPUT, so anything already resolved was
     -- resolved without them (see resolve_resident). No-op when no calls are resident.
     M.resolve_resident()
-    M.ingest(M.data)
-    -- AFTER the ingest, which resets the ledgers by design and cannot distinguish its
-    -- caller's re-ingest from a fresh open (the same trap materialize_file_calls hit)
+    -- keep_ledgers: additive splice, so earlier files' entries hold (see the calls
+    -- materializer — clearing here is what made coverage un-accumulatable)
+    M.ingest(M.data, { keep_ledgers = true })
     M._idpass_materialized[rel] = true
     return true
 end
@@ -622,8 +638,11 @@ function M.selft_map(map)
 end
 
 --- Capture the map the provider just computed, after a WHOLE-GRAPH resolution. Called
---- where a full graph is ingested; a partial (demand) run must never overwrite it with
+--- where a full graph is ingested; a PARTIAL (demand) run must never overwrite it with
 --- its own thinner answer, which is exactly the value being guarded against.
+--- The guard is the CAPABILITY predicate, so a demand session that has materialized
+--- EVERY file may now contribute a map — at total coverage the call set is complete, so
+--- the map is the whole-graph one, not a thinner answer. Partial coverage still refuses.
 function M.capture_selft()
     if M.is_index_only() then return false end -- partial: its map is the unsound one
     local ts = package.loaded['cartograph.providers.treesitter']
@@ -646,13 +665,53 @@ function M.calls_materialized()
     return out
 end
 
---- HONESTY ([[cartograph-thin-index]]): true when the open graph is the THIN index —
---- defs only, no call graph / effect PDG. df/flow are LOCAL so they materialize on demand
---- (materialize_file_dataflow), but calls are an irreducibly whole-graph fixpoint that
---- index-only never ran. Whole-graph verbs consult this and refuse rather than serve a
---- degraded/empty answer. A full :Cartograph open ingests fresh data → the marker is gone.
+--- ON-DEMAND COVERAGE: how much of the thin index has been filled in, against a roster
+--- it always has — index_only carries every file's DEFS, so the module nodes ARE the
+--- file roster. `complete` is the honest answer to "is this a whole graph yet?".
+--- Unparsed frontiers are excluded: they can never have calls materialized, so counting
+--- them would make `complete` unreachable rather than merely false.
+function M.coverage()
+    local cm, im = M._calls_materialized or {}, M._idpass_materialized or {}
+    local files, calls, idpass = 0, 0, 0
+    for _, n in ipairs((M.data or {}).nodes or {}) do
+        if n.kind == 'module' and not n.unparsed then
+            files = files + 1
+            if cm[n.file] then calls = calls + 1 end
+            if im[n.file] then idpass = idpass + 1 end
+        end
+    end
+    return { files = files, calls = calls, idpass = idpass,
+        complete = files > 0 and calls == files and idpass == files }
+end
+
+--- HONESTY ([[cartograph-thin-index]]): true when the open graph cannot answer a
+--- whole-graph question — defs only, no call graph / effect PDG. Whole-graph verbs
+--- consult this and refuse rather than serve a degraded/empty answer. A full
+--- :Cartograph open ingests fresh data → the marker is gone.
+---
+--- PROVENANCE vs CAPABILITY. `data.index_only` was answering both, and they diverge the
+--- moment on-demand materialization exists:
+---   provenance — "this graph came from the index-only front end", which stays true
+---     forever and is what the CACHE must respect (a thin cache may never be served to
+---     a full open, cache.lua's warm_decision; and a partial graph's self-type map must
+---     not overwrite a whole one). Those read the FIELD directly and are unaffected.
+---   capability — "is there a call graph here?", which is what every honesty guard
+---     actually asks, and which becomes TRUE once every file's calls and id pass have
+---     been materialized. Refusing then is not honesty, it is a stale marker: the graph
+---     holds the same calls a full extract does.
+--- So this predicate answers the CAPABILITY question. Note what it does NOT claim: a
+--- fully materialized graph can still differ from a full extract in TIER, and on a
+--- polyglot root in a handful of over-resolutions (tools/demandcalls.lua's monotonicity
+--- ratchet holds that). That is a quality gap, not a completeness lie — the answer is no
+--- longer the empty "none" the refusal exists to prevent.
 function M.is_index_only()
-    return (M.data and M.data.index_only == true) or false
+    if not (M.data and M.data.index_only == true) then return false end
+    -- computed fresh, NOT memoized on M.generation: each materializer writes its ledger
+    -- entry AFTER its re-ingest has already bumped the generation, so a verdict computed
+    -- inside that window pins `incomplete` at a generation that never advances again.
+    -- Cost is one pass over the node list, on a path read once per verb — and it only
+    -- runs at all while the marker is set, i.e. on a thin graph.
+    return not M.coverage().complete
 end
 
 -- The resident TOPOLOGY view: a fold-backed Band, built lazily on first

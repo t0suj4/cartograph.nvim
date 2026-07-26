@@ -74,7 +74,14 @@ OPENING AND SESSIONS                                      *cartograph-cmd-open*
 
   :Cartograph [target]        open the cockpit (dir | dump | mcp://name)
   :CartographIndexOnly [dir]  open in index-only mode: a thin symbol
-                              index for LSP and navigation, no analysis
+                              index for LSP and navigation, no analysis.
+                              Analysis artifacts fill in ON DEMAND, per
+                              file (dataflow, calls, id pass), and the
+                              call-graph verbs refuse only while that
+                              coverage is PARTIAL — once every file is
+                              covered they answer normally. The graph
+                              still remembers it began thin, so it is
+                              never served from cache as a full open.
   :CartographRefresh[!]       re-extract current file (! = whole project)
   :CartographBands            list the open bands (multi-band session)
   :CartographSwitch {band}    switch the active band
