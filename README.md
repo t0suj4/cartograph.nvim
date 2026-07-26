@@ -2250,6 +2250,20 @@ pack/vocabulary, name-match, dispatch), and ranks them by the resolution points
 each would add if realized — the "where's the biggest win" call as data, per
 corpus (on zig it independently reproduces the ~50% std figure).
 
+`tools/assigndef.lua` <corpus> is the same question asked of a *missing def form*:
+a callable bound by assignment (`M.f = memo(g)`, `X.y = function(){}`) sometimes
+gets no def node, so every call to it is unresolved. It classifies each site by
+what the right-hand side is — LITERAL (the body is here), WRAPPED (the identity is
+here, the body elsewhere), ALIAS (wants the alias *followed*, not a def minted) —
+and reports, per class, how many unresolved calls a minted def would explain and
+how many have a competitor in the same scope (a hedge, not a fact). It answers
+the question that matters before an extraction change: **which language, which
+form, worth how much.** On the measured corpora the answer was not the one the
+motivating bug suggested — Lua's wrapper case is worth 0.18% of its unresolved
+calls, while a JavaScript function literal assigned to a member target
+(`jQuery.extend = function(){}` — the non-`prototype` form, which mints nothing
+today) is worth 6.4% on jquery and 1.9% on ghost.
+
 `tools/corpora.lua` names the corpora and holds calibrated baselines as data;
 `tools/bench.lua` is the bootstrap + measurement discipline (timed runs, peak
 RSS via `/proc`, median-of-N); `tools/snapshot.lua` saves slim extracts
