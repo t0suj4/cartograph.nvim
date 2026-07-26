@@ -165,6 +165,15 @@ local disk = {
     --- is what the inline version did — it left `link` in place and let the
     --- language check downstream decide. Returning nil here would silently drop
     --- a dangling `foo.lua` symlink the old walk collected.
+    --- HOW BIG, in bytes, or nil when unknown. Substrate-NEUTRAL, unlike the stat
+    --- it replaces: a wire answers it with Content-Length, an archive from its
+    --- central directory. Its one consumer is a container deciding read-once vs
+    --- ranged, and "unknown" is a legitimate answer that biases toward read-once.
+    size = function (path)
+        local st = vim.uv.fs_stat(path)
+        return st and st.size or nil
+    end,
+
     resolve_entry = function (root, rel, ty)
         if ty ~= 'link' then return ty end
         local p = root .. '/' .. rel
@@ -198,6 +207,135 @@ M.disk = disk
 -- in a worker: every claimed path would silently fall back to disk.
 M.kinds = {
     disk = function () return disk end,
+
+    --- A ZIP ARCHIVE as a substrate. Claims the composite keys transport.join
+    --- produces for a CONTAINER root value (`<archive>::<entry>`), which is why
+    --- that form never appears in n.file: it exists only between abs() and here.
+    ---
+    --- COMPOSES rather than opening files itself — it asks its BACKING stack for
+    --- byte ranges via attach() below, so a zip on disk, a zip inside a zip and a
+    --- zip over a wire are the same code. No recursion risk: the archive's own key
+    --- has no '::', so the zip never claims it and disk answers.
+    ---
+    --- PARTIAL CAPABILITY, by design: enumerating and stamping need only the
+    --- central directory (stored uncompressed), so they work with no zlib at all.
+    --- Only content needs inflate. Without libz the whole kind returns nil and
+    --- build() SKIPS it — the corpus degrades to "archives unreadable", which the
+    --- ops then report per-path as UNAVAILABLE, never as absence.
+    ---
+    --- cfg.whole_max: archives at or below this size are read ONCE and served from
+    --- memory; larger ones use per-entry ranges. Both directions are measured, and
+    --- they disagree by orders of magnitude, which is why this is a policy and not
+    --- a constant: a 759 KB archive over /mnt/c costs 7.55 ms whole (0.0167
+    --- ms/entry amortised over 453 entries) against 3.267 ms PER ENTRY when each
+    --- read reopens it — 196x. But reading a 201 MB archive whole costs 2179 ms and
+    --- 201 MB resident, where its trailer alone is 40.5 ms. Default 8 MB sits well
+    --- above the many-small-entries case and far below the pathological one.
+    zip = function (cfg)
+        local zip = require 'cartograph.zip'
+        if not zip.available() then return nil end
+        cfg = cfg or {}
+        local ext = cfg.ext or '.zip'
+        local whole_max = cfg.whole_max or (8 * 1024 * 1024)
+        local backing, cache = nil, {}
+
+        local function split(key)
+            local archive, entry = key:match('^(.-' .. ext:gsub('%p', '%%%0')
+                .. ')::(.*)$')
+            return archive, entry
+        end
+
+        --- The parsed central directory for an archive, keyed by the archive's own
+        --- validity stamp — so an edited archive re-parses and a stable one is
+        --- parsed once. Cheap to hold: entry records, not content.
+        local function handle(archive)
+            local stamp = backing.stamp(archive)
+            if not stamp then return nil, 'archive unstampable' end
+            local c = cache[archive]
+            if c and c.stamp == stamp then return c.z, c.err end
+            local whole
+            local size = backing.size(archive)
+            if size == nil or size <= whole_max then
+                -- read-once: the many-small-entries case, 196x on a high-latency
+                -- substrate. An unknown size is treated as small — a substrate that
+                -- cannot stat is usually one where round trips hurt most.
+                whole = backing.read_range(archive, 0)
+            end
+            local z, err = zip.open(function (pth, off, len)
+                return backing.read_range(pth, off, len)
+            end, archive, whole)
+            cache[archive] = { stamp = stamp, z = z, err = err }
+            return z, err
+        end
+
+        return {
+            name = 'zip',
+            claims = function (path)
+                return select(1, split(path)) ~= nil
+            end,
+            --- ATTACH: capture the stack this transport lives in, so container
+            --- bytes come from whatever serves the archive.
+            attach = function (stack) backing = stack end,
+
+            read = function (key)
+                local archive, entry = split(key)
+                if not archive then return nil, M.UNAVAILABLE end
+                local z, err = handle(archive)
+                if not z then
+                    -- a missing ARCHIVE is authoritative absence; anything else
+                    -- (truncated, unstampable, zip64) is indeterminate
+                    local _, aerr = backing.stamp(archive)
+                    return nil, (aerr == M.ABSENT) and M.ABSENT or M.UNAVAILABLE
+                end
+                if not z.byname[entry] then return nil, M.ABSENT end
+                local out = zip.read(z, entry)
+                if not out then return nil, M.UNAVAILABLE end
+                return out
+            end,
+
+            --- The ARCHIVE's stamp plus the entry name. Coarser than per-file by
+            --- nature — any edit to the archive changes every entry's key at once,
+            --- which is correct: the container IS the unit of change. Cheaper too:
+            --- one stat covers a whole package.
+            stamp = function (key)
+                local archive, entry = split(key)
+                if not archive then return nil, M.UNAVAILABLE end
+                local st, err = backing.stamp(archive)
+                if not st then return nil, err end
+                return st .. '|' .. entry
+            end,
+
+            --- Entries directly under a key's prefix, yielding (name, type) like a
+            --- directory walk. Nested paths report their first segment as a
+            --- 'directory' exactly once, so a caller can descend the same way it
+            --- descends a filesystem.
+            dir = function (key)
+                local archive, prefix = split(key)
+                if not archive then return function () return nil end end
+                local z = handle(archive)
+                if not z then return function () return nil end end
+                if prefix ~= '' and not prefix:match('/$') then prefix = prefix .. '/' end
+                local names, seen, i = {}, {}, 0
+                for _, e in ipairs(z.entries) do
+                    if e.name:sub(1, #prefix) == prefix and #e.name > #prefix then
+                        local rest = e.name:sub(#prefix + 1)
+                        local seg, more = rest:match('^([^/]+)(/?)')
+                        if seg and not seen[seg] then
+                            seen[seg] = true
+                            names[#names + 1] = { seg, (more == '/') and 'directory'
+                                or 'file' }
+                        end
+                    end
+                end
+                return function ()
+                    i = i + 1
+                    local n = names[i]
+                    if not n then return nil end
+                    return n[1], n[2]
+                end
+            end,
+        }
+    end,
 }
 
 -- ── STACKS: composition is a VALUE ───────────────────────────────────────────
@@ -268,6 +406,12 @@ local function make(transports, spec)
         return t.dir(path)
     end
 
+    --- Byte size, or nil when the substrate cannot say.
+    function S.size(path)
+        local t = S.for_path(path)
+        return t.size and t.size(path) or nil
+    end
+
     --- Resolve a directory entry's real type. Substrate-neutral by default: a
     --- transport with no link semantics simply gets its type back, so the walk
     --- carries no filesystem policy of its own.
@@ -314,7 +458,12 @@ function M.build(spec)
         local t = kind(e)
         if t then ts[#ts + 1] = t end
     end
-    return make(ts, spec)
+    local S = make(ts, spec)
+    -- LATE BINDING so a container transport can delegate to the stack it lives in:
+    -- constructors run before the stack exists, so this is the only order that
+    -- lets a zip read its archive through whatever serves it.
+    for _, t in ipairs(ts) do if t.attach then t.attach(S) end end
+    return S
 end
 
 -- ── the front door ───────────────────────────────────────────────────────────
@@ -326,6 +475,7 @@ local disk_only = make({}, { { kind = 'disk' } })
 M.for_path, M.read, M.lines = disk_only.for_path, disk_only.read, disk_only.lines
 M.read_range = disk_only.read_range
 M.resolve_entry, M.join = disk_only.resolve_entry, disk_only.join
+M.size = disk_only.size
 M.stamp, M.dir = disk_only.stamp, disk_only.dir
 M.spec = disk_only.spec
 

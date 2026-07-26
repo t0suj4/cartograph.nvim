@@ -80,25 +80,28 @@ test('ecosystem: forms become a transport stack spec, unsupported ones reported'
     eq('directory', f.forms[1].form)
     eq('archive', f.forms[2].form)
     local res = eco.stack_spec(f)
-    -- disk exists today; zip does not yet, so it is named rather than dropped
+    -- both declared forms have kinds now; an UNKNOWN one would still be named
+    -- rather than dropped, which is what the unsupported list is for
     eq('disk', res.spec[1] and res.spec[1].kind)
-    eq({ 'zip' }, res.unsupported)
+    eq({}, res.unsupported)
     -- and what it produced is buildable, which is the contract that matters
     local stack = transport.build(res.spec)
     eq('disk', stack.for_path('/x.lua').name)
 end)
 
--- when the zip kind lands, the SAME call must start emitting it with no edit here
--- — that is what makes the division additive rather than a rewrite
-test('ecosystem: a newly registered kind is picked up with no spec edit', function ()
-    transport.kinds.zip = function () return
-        { name = 'zip', claims = function (p) return p:match('%.zip::') ~= nil end }
-    end
+-- zip is now a REAL kind, so the declared archive form resolves. This is what
+-- "additive" meant: the spec never changed, the kind arrived, and stack_spec
+-- started emitting it. A kind is NEVER stubbed here — an earlier version of this
+-- test assigned transport.kinds.zip and nil'd it in teardown, which silently
+-- DELETED the real kind for every later test in the run.
+test('ecosystem: the declared archive form resolves now that zip exists', function ()
     local res = eco.stack_spec(eco.load('lua-factorio'))
     eq({}, res.unsupported)
     eq('disk', res.spec[1].kind)
     eq('zip', res.spec[2].kind)
-    transport.kinds.zip = nil
+    local stack = transport.build(res.spec)
+    eq('disk', stack.for_path('/x.lua').name)
+    eq('zip', stack.for_path('/m/P_1.0.zip::P/control.lua').name)
 end)
 
 -- root resolution: an override always wins, because the INSTALL is not derivable
