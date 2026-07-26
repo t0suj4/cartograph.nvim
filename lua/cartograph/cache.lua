@@ -73,7 +73,19 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 103 -- v103: THE REGISTRY MARK IS THE `reg` EDGE, not a node flag
+M.VERSION = 104 -- v104: JS/TS MEMBER-TARGET FUNCTION LITERALS ARE DEFS. `X.y = function(){}`
+               -- minted nothing while `const f = function(){}` and `X.prototype.m = …` both
+               -- did, so every pre-class export (`jQuery.extend`, `module.exports.reload`)
+               -- was invisible as a definition. MEASURED first (tools/assigndef.lua: 6.4% of
+               -- jquery's unresolved calls, 1.9% of ghost's), then gated: ghost +1844
+               -- recovered / +663 out of a refusal / 311 redirected (sampled: corrections)
+               -- / 0 lost. New NODES appear in every corpus holding .js — including the
+               -- mixed ones (grocy, python, go), so their baselines move too. A v103 cache
+               -- would serve graphs missing those defs and every call to them unresolved.
+               -- Paired with spec.skip_def, which withholds the def when the receiver is a
+               -- function-local object or `this` (see spec/javascript.lua for the four
+               -- measured wrong resolutions that forced it).
+               -- v103: THE REGISTRY MARK IS THE `reg` EDGE, not a node flag
                -- ([[cartograph-merging-strategies]]). The id pass used to flag a fn `cbarg`
                -- when a module-level mention put it in a dispatch table — the same branch that
                -- mints the `reg` edge, so the flag was a redundant copy. It was also harmful:

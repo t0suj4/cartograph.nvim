@@ -99,6 +99,12 @@ M.SLOTS = {
     block_container = 'QUIRKS',  -- grammar shape → coarse-region container
     block_skip = 'QUIRKS', call_skip = 'QUIRKS', call_skip_within = 'QUIRKS',
     skip_call = 'QUIRKS',        -- parse-level call filters (grammar noise)
+    -- per-def veto: a captured def that must NOT become a name in the graph, when
+    -- soundness depends on something a query cannot test (js: `X.y = function(){}`
+    -- where X is a function-local object). Generalization candidate: the same
+    -- question exists for lua `t.f = function() end` on a local table, so this
+    -- belongs with a shared LOCALITY predicate once a second language needs it.
+    skip_def = 'QUIRKS',
     entry_names = 'QUIRKS',      -- entry points → belongs in L4 project overlay
 }
 

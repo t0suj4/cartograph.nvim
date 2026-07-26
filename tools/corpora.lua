@@ -61,7 +61,7 @@ return {
         root = HOME .. '/git/grocy',
         repo = 'https://github.com/grocy/grocy',
         rev = '297cc5724441', -- PRE-FIX of #2259 (c415e2f) — the taint keystone
-        expected = { refs = 1241, nodes = 2497 }, -- recalib 2026-07-19: +1180 nodes = JS/TS pivot + anon-fn (public/viewjs/*.js: 1615 js nodes incl 1123 #cb callbacks); php side STABLE at 878 nodes (taint keystone unaffected — validated via reduced fixture in sinkflow_spec, not live corpus counts)
+        expected = { refs = 2238, nodes = 2595 }, -- recalib 2026-07-26: v104 js member-target function literals (+997 refs/+98 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: the cleanest case — recovered 1230, +12 out of a refusal, 0 redirected, 0 LOST: its frontend is `Grocy.Api.Post = function(){}` all the way down. Prior: refs 1241 / nodes 2497 -- recalib 2026-07-19: +1180 nodes = JS/TS pivot + anon-fn (public/viewjs/*.js: 1615 js nodes incl 1123 #cb callbacks); php side STABLE at 878 nodes (taint keystone unaffected — validated via reduced fixture in sinkflow_spec, not live corpus counts)
         lang = 'php',
         notes = 'the TAINT keystone (Slim/PSR-7 + LessQL): both poles ground-'
             .. 'truth-validated — rung-2 fires on GetProductStockLocations (the '
@@ -80,7 +80,7 @@ return {
         budget_mb = 1600, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/TryGhost/Ghost',
         rev = 'f7d7df8f9816',
-        expected = { refs = 26487, nodes = 40608 }, -- recalib 2026-07-26: +316 refs (nodes UNCHANGED) = js/ts import BINDS. resolve_module_alias could never fire for JavaScript without them; 386 previously-ambiguous calls now resolve, every one `refused (ambiguous) => to <target>`, zero regressions of any shape. Spot-VERIFIED against source, not just counted: boot.js:192 `await linkRedirects.init()` where line 191 binds `require('./server/services/link-redirection')` — the binding decides a name ambiguous across dozens of service wrappers. Prior: 26171/40608 -- recalib 2026-07-19 CATCH-UP: +5123 refs/+741 nodes = JS/TS-pivot class-keying (v59+) + anon-fn shipped since ghost's v51 pin but never re-gated here (perf-cut: full sweep couldn't complete). #cb anon-fn stable at 18840; ref growth = class-keying resolving more calls. VERIFIED independent of P0 disposition/P1 pipeline (both count-neutral — zig/ruby/libs held exactly). Prior: 21048/39867 @ v51 (~18.7k #cb)
+        expected = { refs = 27931, nodes = 40863 }, -- recalib 2026-07-26: v104 js member-target function literals (+1444 refs/+255 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: recovered 1844, +663 out of a refusal, 311 redirected (sampled all corrections: `notify.notifyServerReady()` / `updateCheck.scheduleRecurringJobs()` / `siteApp.reload()` had been resolving to a same-file wrapper or a foreign namesake), 1008 previously-resolved calls now honestly AMBIGUOUS (a test file's `console.warn = …` stub competes with `Command.warn`; most sites are `logging.warn`, which neither owns), 0 LOST. Prior: refs 26487 / nodes 40608 -- recalib 2026-07-26: +316 refs (nodes UNCHANGED) = js/ts import BINDS. resolve_module_alias could never fire for JavaScript without them; 386 previously-ambiguous calls now resolve, every one `refused (ambiguous) => to <target>`, zero regressions of any shape. Spot-VERIFIED against source, not just counted: boot.js:192 `await linkRedirects.init()` where line 191 binds `require('./server/services/link-redirection')` — the binding decides a name ambiguous across dozens of service wrappers. Prior: 26171/40608 -- recalib 2026-07-19 CATCH-UP: +5123 refs/+741 nodes = JS/TS-pivot class-keying (v59+) + anon-fn shipped since ghost's v51 pin but never re-gated here (perf-cut: full sweep couldn't complete). #cb anon-fn stable at 18840; ref growth = class-keying resolving more calls. VERIFIED independent of P0 disposition/P1 pipeline (both count-neutral — zig/ruby/libs held exactly). Prior: 21048/39867 @ v51 (~18.7k #cb)
         lang = 'javascript',
         notes = 'js SCALE tier (2134 files) — a real node webapp: express'
             .. ' routes + handlebars themes (parametric-files territory)',
@@ -143,7 +143,7 @@ return {
         root = HOME .. '/git/hugo',
         repo = 'https://github.com/gohugoio/hugo',
         rev = '5a5f4a549522',
-        expected = { refs = 9575, nodes = 11709 }, -- +7/+2 @ v63 B4 prototype methods (embedded HugoReload.prototype.reload); +1 @ v59 class-keying (LRUCache.put)
+        expected = { refs = 9593, nodes = 11769 }, -- recalib 2026-07-26: v104 js member-target function literals (+18 refs/+60 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: +13 out of a refusal, 2 to a refusal, 0 redirected, 0 LOST — every added node is a .js file (a mixed repo, not a go change). Prior: refs 9575 / nodes 11709 -- +7/+2 @ v63 B4 prototype methods (embedded HugoReload.prototype.reload); +1 @ v59 class-keying (LRUCache.put)
         lang = 'go',
         notes = 'go quick tier (901 files)',
     },
@@ -195,7 +195,7 @@ return {
         root = HOME .. '/git/django-oscar/src',
         repo = 'https://github.com/django-oscar/django-oscar',
         rev = 'c0608e0d167e',
-        expected = { refs = 1571, nodes = 3872 }, -- +enclosing-chain captured-callable wins @ v51
+        expected = { refs = 1583, nodes = 3883 }, -- recalib 2026-07-26: v104 js member-target function literals (+12 refs/+11 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: recovered 10, +3 out of a refusal, 0 redirected, 0 LOST — every added node is a .js file (a mixed repo, not a python change). Prior: refs 1571 / nodes 3872 -- +enclosing-chain captured-callable wins @ v51
         lang = 'python',
         notes = 'python quick tier (483 files) — the django adapter\'s home turf',
     },
@@ -211,7 +211,7 @@ return {
         root = HOME .. '/git/jquery/src',
         repo = 'https://github.com/jquery/jquery',
         rev = 'b043db95042b',
-        expected = { refs = 1029, nodes = 811 }, -- +anon callback fns @ v51 (df-strangler B; +257 #cb nodes)
+        expected = { refs = 1124, nodes = 852 }, -- recalib 2026-07-26: v104 js member-target function literals (+95 refs/+41 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: recovered 36, +11 out of a refusal, 20 redirected (10 CORRECT — `find.error`/`find.matchesSelector` calls that had been landing on core.js's bare `error` and selector-native's `matchesSelector`; 2 WRONG — `jQuery.error(…)` now hits `find.error`, a tail collision the `tail or exact` bug at treesitter.lua:5381 keeps resolve_module_alias from correcting), 0 LOST. Prior: refs 1029 / nodes 811 -- +anon callback fns @ v51 (df-strangler B; +257 #cb nodes)
         lang = 'javascript',
         notes = 'js quick tier (115 ESM files); selector/event-name strings'
             .. ' = typed-string territory',
@@ -220,7 +220,7 @@ return {
         root = HOME .. '/git/mootools-core/Source',
         repo = 'https://github.com/mootools/mootools-core',
         rev = '187a16bae2d7',
-        expected = { refs = 399, nodes = 545 }, -- +9/+3 @ v63 B4 prototype methods (Function.prototype.overloadSetter/String.prototype.contains)
+        expected = { refs = 443, nodes = 563 }, -- recalib 2026-07-26: v104 js member-target function literals (+44 refs/+18 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: recovered 4, +16 out of a refusal, 35 redirected — all `ua.match(/…/)`, i.e. String.prototype.match, where the old and new targets are both wrong (~-tier noise, not a regression), 0 LOST. Prior: refs 399 / nodes 545 -- +9/+3 @ v63 B4 prototype methods (Function.prototype.overloadSetter/String.prototype.contains)
         lang = 'javascript',
         notes = 'js archaeology tier (29 files, frozen 2017) — prototype-'
             .. 'extension culture, string-keyed dispatch',

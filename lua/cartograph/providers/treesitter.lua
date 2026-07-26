@@ -4093,10 +4093,19 @@ function M.extract(root, opts)
         -- its body has a home (its own df/flow, its inner calls attribute to IT
         -- via fn_at). Given a synthetic display name; NOT added to the name
         -- resolution index (exact/tail) — it is never a call target by name.
+        -- `spec.skip_def`: a per-def veto, for a captured def that must not become a
+        -- NAME in the graph. The other gates are per-language blankets (toplevel_only /
+        -- toplevel_parent); this one asks about THIS def, because a query can match a
+        -- shape whose soundness depends on something no query can test — js
+        -- `X.y = function(){}` is a definition when X is a module namespace and junk
+        -- when X is a function-local object (MEASURED: a local `opt.complete = …` in
+        -- jquery answered every bare `complete()` callback call in the corpus).
         local function handle_fn(defn, namen, aname)
             if defn and (namen or aname)
                 and not (not aname and spec.toplevel_only
                     and in_function(defn, spec))
+                and not (not aname and spec.skip_def
+                    and spec.skip_def(defn, namen, src))
                 and not (not aname and spec.toplevel_parent and defn:parent()
                     and defn:parent():type() ~= spec.toplevel_parent) then
                 local name = aname

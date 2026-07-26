@@ -12,6 +12,24 @@ return {
             { node = 'for_in_statement' },
             { node = 'for_statement', child = 'lexical_declaration' },
         },
+        -- MEMBER-TARGET FUNCTION LITERALS. MEASURED (tools/assigndef.lua):
+        -- `X.y = function(){}` minted NOTHING, while the declarator form
+        -- (`const f = function(){}`) and the prototype form both did — worth 6.4% of
+        -- jquery's unresolved calls and 1.9% of ghost's (jQuery.extend,
+        -- jQuery.Callbacks, opt.complete). Lua has always minted the same shape
+        -- (`M.f = function() end`), so this closes a gap BETWEEN TWO FRONT ENDS rather
+        -- than adding a new kind of claim, and it is no more aggressive than the
+        -- object-literal `pair` patterns already here (`{ complete: () => {} }` mints
+        -- a bare `complete`; the assignment form at least carries its receiver).
+        -- ONE pattern now serves the prototype case too: the collapse
+        -- (`X.prototype.m` -> `X.m`) lives in qualify and keys on the literal
+        -- `.prototype.` in the name, so the old `#eq? @_pp "prototype"` gate is no
+        -- longer what distinguishes the two forms.
+        -- Note a CHAINED assignment (`a.b = c.d = function(){}`) still mints only the
+        -- INNERMOST name: the outer right-hand side is an assignment_expression, not a
+        -- function. jQuery's `jQuery.extend = jQuery.fn.extend = function(){}` is that
+        -- shape, so `jQuery.fn.extend` is minted and `jQuery.extend` is not — one def
+        -- per function NODE, which is the constraint that keeps a def a fact.
         functions = [=[
             (function_declaration name: (identifier) @name) @def
             (method_definition name: (property_identifier) @name) @def
@@ -21,14 +39,13 @@ return {
             (pair key: (property_identifier) @name value: (function_expression) @def)
             (arguments (arrow_function) @adef)
             (arguments (function_expression) @adef)
+            ; ANY member target, not just X.prototype.m — see the note above the field
             (assignment_expression
-                left: (member_expression
-                    object: (member_expression property: (property_identifier) @_pp)) @name
-                right: (function_expression) @def (#eq? @_pp "prototype"))
+                left: (member_expression) @name
+                right: (function_expression) @def)
             (assignment_expression
-                left: (member_expression
-                    object: (member_expression property: (property_identifier) @_pp)) @name
-                right: (arrow_function) @def (#eq? @_pp "prototype"))
+                left: (member_expression) @name
+                right: (arrow_function) @def)
         ]=],
         calls = [=[
             (call_expression function: (identifier) @name) @call
@@ -50,6 +67,118 @@ return {
             (assignment_expression left: (identifier) @cvar
                 right: (new_expression constructor: (identifier) @cctor))
         ]=],
+        -- THE LOCALITY VETO for the member-target pattern above. `X.y = function(){}`
+        -- is a definition worth naming when X is a module namespace (`jQuery.param`,
+        -- `module.exports.x`) and JUNK when X is a function-local object: MEASURED on
+        -- jquery, `opt.complete = function(){}` inside jQuery.speed minted a def whose
+        -- tail then answered every bare `complete()` callback call in the corpus —
+        -- four confident wrong resolutions replacing four honest refusals.
+        -- A query cannot ask this, so the spec does: is the receiver's ROOT bound as a
+        -- parameter or a local declaration in an enclosing function?
+        -- `this.x = …` is deliberately NOT vetoed — it is the pre-class instance-method
+        -- form, and its receiver is not a local binding.
+        skip_def = function (defn, _, src)
+            local asg = defn:parent()
+            if not (asg and asg:type() == 'assignment_expression') then return false end
+            local lhs = asg:field('left')[1]
+            if not (lhs and lhs:type() == 'member_expression') then return false end
+            -- NEVER veto the prototype form. It minted before this veto existed, and a
+            -- prototype assignment defines a CLASS method however its constructor
+            -- variable is scoped (`var K = function(){}; K.prototype.m = …` inside a
+            -- module closure is the normal pre-ES6 idiom). Without this the veto
+            -- REMOVED 62 pre-existing defs on ghost and 4 on mootools — a change that
+            -- is supposed to be purely additive.
+            if node_text(lhs, src):find('%.prototype%.') then return false end
+            -- the receiver ROOT: the leftmost identifier of the member chain
+            local root = lhs
+            while root and root:type() == 'member_expression' do
+                root = root:field('object')[1]
+            end
+            -- `this.x = function(){}` is vetoed too. It IS the pre-class instance-method
+            -- idiom, but the def name `this.x` names no owner — it is a key nothing can
+            -- match on purpose, and its TAIL then answers unrelated calls. MEASURED on
+            -- mootools: `this.$each = function(){}` has tail `each` (a `$` is not a word
+            -- character), so it captured bare `each(…)` calls corpus-wide. Naming these
+            -- properly needs the enclosing constructor's name — a separate piece of work.
+            if root and root:type() == 'this' then return true end
+            if not (root and root:type() == 'identifier') then return false end
+            local want = node_text(root, src)
+            local fn_types = { function_declaration = true, method_definition = true,
+                arrow_function = true, function_expression = true }
+            -- A POSITIONAL IDENTIFIER PARAMETER IS NOT TREATED AS LOCAL, which
+            -- fn_locals already argues for the local-shadow gate: in the AMD/IIFE shape
+            -- every pre-ES6 library uses, `define(["./core"], function (jQuery) { … })`
+            -- passes the namespace itself as a positional parameter. Vetoing those
+            -- removed 36 of jquery's 52 new defs — the whole `jQuery.*` surface, i.e.
+            -- most of the measured value. A DESTRUCTURED param has no such reading and
+            -- is vetoed below.
+            local seen_fn = false
+            local up = asg:parent()
+            while up do
+                if fn_types[up:type()] then
+                    seen_fn = true
+                    local ps = up:field('parameters')[1]
+                    if ps then
+                        for p in ps:iter_children() do
+                            local pt = p:type()
+                            if (pt == 'object_pattern' or pt == 'array_pattern')
+                                and node_text(p, src):find(
+                                    '%f[%w_]' .. want .. '%f[^%w_]') then
+                                return true
+                            end
+                        end
+                    end
+                end
+                up = up:parent()
+            end
+            if not seen_fn then return false end -- top level: not a local
+            -- a local DECLARATION (`var opt = …` / `const o = {}`) anywhere in an
+            -- enclosing function body. Scanning the enclosing function's TEXT for a
+            -- declaration of that name is deliberately coarse in the SAFE direction:
+            -- a false "local" only withholds a def, never invents one.
+            -- a local DECLARATION in an enclosing function. STRUCTURAL, not a text
+            -- scan: a scan for `var <name>` misses every declarator after the first in
+            -- a comma-separated list, which is how jquery declares most of its locals
+            -- (`var opts = …, hooks, oldfire`) — it let `hooks.empty.fire`,
+            -- `elemData.handle` and `xhr.onreadystatechange` through on the first try.
+            local function declares(fnnode)
+                local body = fnnode:field('body')[1]
+                if not body then return false end
+                local found = false
+                local function walk(n)
+                    if found then return end
+                    for c in n:iter_children() do
+                        if found then return end
+                        if c:named() then
+                            local ct = c:type()
+                            if fn_types[ct] then -- a nested fn: its own scope
+                            elseif ct == 'variable_declaration'
+                                or ct == 'lexical_declaration' then
+                                for d in c:iter_children() do
+                                    if d:type() == 'variable_declarator' then
+                                        local nm = d:field('name')[1]
+                                        -- destructuring binds several names; any
+                                        -- identifier leaf counts
+                                        if nm and node_text(nm, src):find(
+                                            '%f[%w_]' .. want .. '%f[^%w_]') then
+                                            found = true; return
+                                        end
+                                    end
+                                end
+                            else walk(c) end
+                        end
+                    end
+                end
+                walk(body)
+                return found
+            end
+            up = asg:parent()
+            while up do
+                if fn_types[up:type()] and declares(up) then return true end
+                up = up:parent()
+            end
+            return false
+        end,
         params_field = 'parameters',
         body_field = 'body',
         fn_types = { function_declaration = true, method_definition = true,

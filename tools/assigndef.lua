@@ -41,11 +41,19 @@
 --   jquery  js       6.38%     1.38%    6.85%
 --
 -- So: Lua's WRAPPED case — the `M.load = memo{…}` bug that prompted this — is the
--- WEAKEST bucket. The buy is the JS LITERAL form, and it is a plain missing def form:
--- `const f = function(){}` mints, `Thing.prototype.f = …` mints, but
--- `X.y = function(){}` (a plain member target) mints NOTHING, which is jquery's
--- jQuery.extend / jQuery.Callbacks / opt.complete. Lua already handles that shape, so
--- it is a js/ts spec query rather than a new mechanism.
+-- WEAKEST bucket. The buy was the JS LITERAL form, a plain missing def form:
+-- `const f = function(){}` minted, `Thing.prototype.f = …` minted, but
+-- `X.y = function(){}` (a plain member target) minted NOTHING.
+--
+-- THAT ONE SHIPPED (cache v104, spec/javascript.lua + spec.skip_def). The LITERAL
+-- column above is history for js; re-run to see the residual, which is now two things
+-- the tool cannot tell apart from a gap:
+--   · receivers DELIBERATELY vetoed — a function-local object or `this`, where a def
+--     would answer unrelated calls (four measured wrong resolutions on jquery)
+--   · CHAINED assignments (`a.b = c.d = function(){}`): one def per function NODE, so
+--     only the innermost name is minted. jQuery's `jQuery.extend = jQuery.fn.extend =
+--     function(){}` is that shape.
+-- Reading a residual as a gap is the trap this header exists to prevent.
 --
 --   nvim --headless -u NONE -l tools/assigndef.lua <corpus> [--top=N] [--sites]
 --     --class=literal|wrapped|alias   isolate one form's evidence

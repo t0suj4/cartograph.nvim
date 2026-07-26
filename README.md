@@ -1043,6 +1043,48 @@ exact location; the explainer's rejection lines tell you when the
 button would change the verdict
 (`… — would PASS with deep heuristics (:CartographDiscover!)`).
 
+### Member-target definitions (JS/TS)
+
+`X.y = function(){}` is a definition, and JavaScript was the only front end that
+didn't say so: `const f = function(){}` minted a def, `X.prototype.m = …` minted
+one, and the plain member target minted **nothing** — so `jQuery.extend`,
+`module.exports.reload` and every other pre-class export was invisible, and calls to
+them could not resolve. Lua had always minted the same shape (`M.f = function() end`).
+`tools/assigndef.lua` measured the gap before it was closed; the gates measured the
+result per call against a pre-change baseline:
+
+| corpus | recovered | out of a refusal | redirected | **lost** |
+|---|---|---|---|---|
+| ghost | 1844 | 663 | 311 | **0** |
+| grocy | 1230 | 12 | 0 | **0** |
+| jquery | 36 | 11 | 20 | **0** |
+| mootools | 4 | 16 | 35 | **0** |
+
+The redirects are the column that matters, because a redirect can *destroy* a right
+answer. Sampled on ghost they are corrections — `notify.notifyServerReady()` had been
+resolving to boot.js's own local wrapper of the same name, `siteApp.reload()` to a
+foreign namesake. On jquery, 10 of 20 fix calls that had been landing on the wrong
+`error` / `matchesSelector`; 2 are wrong (`jQuery.error(…)` now hits `find.error`);
+mootools' 35 are all `ua.match(/…/)` — String's `match`, where the old and new answers
+are equally wrong. Nothing was lost anywhere.
+
+**The other half is a veto**, and the gates are what forced it. A query cannot ask
+whether a receiver is a module namespace or a function-local object, and the answer
+decides whether the def is a fact or noise: `opt.complete = function(){}` inside
+`jQuery.speed` answered every bare `complete()` callback call in the corpus, and
+mootools' `this.$each = function(){}` has tail `each` (a `$` is not a word character),
+so it captured every `each()` call. So the spec withholds a def when the receiver is a
+local declaration or `this` — never for a `prototype` assignment, since those minted
+before and a prototype method is a class method however its constructor is scoped.
+Ghost's 1008 newly *ambiguous* calls are the honest side of the same coin: a test
+file's `console.warn = …` stub now competes with `Command.warn`, and most of those
+sites are `logging.warn`, which neither owns.
+
+A positional parameter is deliberately **not** treated as local: in the AMD shape
+every pre-ES6 library uses, `define(["./core"], function (jQuery) { … })` passes the
+namespace itself as a parameter, and vetoing those removed 36 of jquery's 52 new defs
+— its whole `jQuery.*` surface.
+
 ## Lint
 
 `:CartographLint` runs graph-aware, whole-program checks and drops the findings
@@ -2261,8 +2303,8 @@ the question that matters before an extraction change: **which language, which
 form, worth how much.** On the measured corpora the answer was not the one the
 motivating bug suggested — Lua's wrapper case is worth 0.18% of its unresolved
 calls, while a JavaScript function literal assigned to a member target
-(`jQuery.extend = function(){}` — the non-`prototype` form, which mints nothing
-today) is worth 6.4% on jquery and 1.9% on ghost.
+(`jQuery.extend = function(){}`, the non-`prototype` form) was worth 6.4% on jquery
+and 1.9% on ghost. That one shipped: see [Member-target definitions](#member-target-definitions-jsts).
 
 `tools/corpora.lua` names the corpora and holds calibrated baselines as data;
 `tools/bench.lua` is the bootstrap + measurement discipline (timed runs, peak

@@ -44,8 +44,15 @@ test('proto: X.prototype.m = function → keyed X.m', function ()
     ok(by['Foo.bar'], 'Foo.prototype.bar → Foo.bar')
     ok(by['Foo.qux'], 'arrow prototype method Foo.qux')
     ok(by['App.View.render'], 'namespaced App.View.prototype.render → App.View.render')
-    ok(not by['obj.notproto'] and not by['notproto'],
-        'a non-prototype member assignment is not captured as a class method')
+    -- `obj.notproto = function(){}` IS captured now (a member-target function literal
+    -- is a real definition — see js_memberdef_spec), but the property this test guards
+    -- is unchanged and is the one that matters here: it is not a CLASS METHOD. It keeps
+    -- its receiver in the name, stays `kind = function`, and mints no bare class key,
+    -- so it can never seed a false class.
+    ok(by['obj.notproto'], 'a member-target literal is captured under its own name')
+    eq('function', by['obj.notproto'].kind)
+    ok(not by['notproto'],
+        'a non-prototype member assignment is NOT collapsed to a class key')
     vim.fn.delete(root, 'rf')
 end)
 
