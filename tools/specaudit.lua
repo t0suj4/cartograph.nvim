@@ -443,8 +443,17 @@ do
             if okd then
                 for n2, t2 in iter do
                     local pth = dir .. '/' .. n2
+                    -- SKIP THE DECLARATIONS, NOT THE LOADER. Excluding
+                    -- `/spec/ecosystem/` wholesale hid the roster, which lives in
+                    -- init.lua and is the primary consumer — so five rules it
+                    -- genuinely reads (roots.user.mod_list, enablement.list_key /
+                    -- enabled_key, identity.version_key / deps_key) sat on the UNREAD
+                    -- list, and the list is only worth anything if every name on it is
+                    -- really waiting for a consumer.
+                    local is_decl = pth:match('/spec/ecosystem/')
+                        and not pth:match('/spec/ecosystem/init%.lua$')
                     if t2 == 'directory' then stack[#stack + 1] = pth
-                    elseif n2:match('%.lua$') and not pth:match('/spec/ecosystem/')
+                    elseif n2:match('%.lua$') and not is_decl
                         and not pth:match('/tools/specaudit%.lua$') then
                         local fd = io.open(pth, 'rb')
                         if fd then src[#src + 1] = fd:read('a'); fd:close() end

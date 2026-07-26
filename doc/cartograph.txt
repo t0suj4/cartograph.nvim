@@ -212,6 +212,24 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               re-parses every function
   :CartographExternals        the external boundary — unresolved names
                               and the shape each use implies (~)
+  :CartographRoster [{ecosystem}] [{dir}]
+                              the package ROSTER of an INSTALLED ecosystem
+                              (default lua-factorio; tab-completes the ones
+                              that ship): packages by form, which of them
+                              LOAD, both cheap guesses at identity scored
+                              against the manifest, and every declared
+                              dependency judged against this install.
+                              Findings split ACTIVE vs LATENT by
+                              enablement — a conflict between two disabled
+                              packages is a fact about the install, not a
+                              fault in it. Reads a DIRECTORY, not a graph,
+                              so it needs no extraction; a large mods dir
+                              costs seconds. A root the spec marks not
+                              derivable is reported unspecified rather
+                              than guessed (see |cartograph-config|
+                              `ecosystem_roots`), and an ecosystem with no
+                              declared package forms is REFUSED rather
+                              than reported as an empty install
   :CartographEscalate[!]      escalate hedge-saturated fns to lua-ls
                               (async): confirmed / CONFLICT / refuted /
                               recovered. ! = the whole graph
@@ -517,6 +535,15 @@ comment per field.
   db            link sql:: entities to live tables
   fsm           the state-machine adapter
   factorio      the Factorio projection surface
+  ecosystem_roots
+                where an INSTALLED package ecosystem lives, keyed by
+                ecosystem name ({ ['lua-factorio'] = { install = … } }).
+                An override always wins; for a root the spec marks not
+                derivable it is the only way the root can be known —
+                Factorio's install is absent from every standard location
+                on a machine that has the game's user dir, so nothing is
+                guessed. :CartographRoster reports which roots resolved
+                and how each was established
 
 PROJECT SHAPES: marker files at the root (info.json + control.lua,
 manage.py, package.json, wp-settings.php, …) preset what they honestly

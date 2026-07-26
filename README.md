@@ -1417,6 +1417,70 @@ printed next to the verdict so a thin artifact can be discounted, and a profile
 for a *different language* is refused outright rather than marking every name
 unprovided and looking catastrophic.
 
+## Roster (what the install actually holds)
+
+Everything above is about *this* code. `:CartographRoster [ecosystem] [dir]` is
+about the packages around it — an installed ecosystem's own directory, read
+before there is a graph at all:
+
+```
+roster — lua-factorio
+  mods:///mnt/c/Users/t0suj4/AppData/Roaming/Factorio/mods
+  197 package(s), 5614 source file(s)
+  ROOTS
+    user     /mnt/c/Users/…/Factorio  (candidate)
+    install  NOT SPECIFIED — the spec declares it NOT DERIVABLE, so it must be
+             configured; nothing is guessed
+      218 dependenc(ies) point at packages the install provides — unverifiable
+      while the install root is unknown
+  FORMS   archive 195 · directory 2
+  READ THROUGH  disk -> zip
+  ENABLEMENT   11 enabled · 186 disabled · 0 not listed
+    affects HONESTY, never resolution: a disabled package is still present and
+    still readable, so a require into it resolves and carries that its target
+    does not load in this configuration
+  IDENTITY   from the manifest, always. The two cheaper guesses, scored:
+    filename hint      0 of 195 disagree — it held on every archive here, so it
+                       is a sound SEARCH key (which is all it is declared to be)
+    inner directory    112 of 195 disagree — THIS is why identity is never a
+                       path: an archive's top directory is not its package name
+  DEPENDENCIES   423 required · 432 optional · 472 satisfied here · 218 from the install
+    2 LATENT — the package declaring the dependency does not load
+    26 LATENT — at least one side is disabled
+    163 optional dependencies are absent — normal, not a fault
+    among the packages that LOAD: nothing required is missing, mis-versioned or
+    in conflict
+```
+
+**Enablement is what makes the verdicts usable.** The first version of this
+report announced *26 conflicts* on a perfectly healthy install — every one a pair
+of mods that are present and disabled, which is the normal state of a mods
+directory (186 of 197 here). A finding is ACTIVE only if the packages involved
+actually load; the rest are kept and marked LATENT, because they are true and
+they are not faults. That split is licensed by the spec itself, which declares
+`enablement.affects = 'honesty'` — never resolution.
+
+The same care applies in the other direction: an **optional** dependency that is
+absent is not a missing one (optionals outnumber required misses on the real
+corpus), a version constraint that cannot be compared yields **no opinion**
+rather than a verdict, `base` and `core` are counted as coming from the *install*
+rather than reported missing, and an unparseable dependency string is reported
+rather than dropped.
+
+The identity lines are a rule auditing itself. The spec says identity comes from
+the manifest and never from a path, so the report scores both cheaper guesses —
+and they don't fail together: the filename hint held on all 195 archives (it is a
+sound *search key*, which is all it claims to be), while the archive's own top
+directory disagrees on 112. That's the disagreement the rule exists for,
+reproduced independently of the note that first recorded it.
+
+Two refusals rather than empty answers: a root the spec marks `derivable = false`
+is reported **unspecified** — a different statement from "the search failed" —
+and an ecosystem that declares no package *forms* is refused by name.
+`lua-wow` knows its identity rule (`name_from = 'directory'`) but has no form to
+enumerate, so it says so instead of reporting a folder full of addons as an empty
+install.
+
 ## Mentions (name-level evidence, where resolution refused)
 
 `:CartographMentions [name]` — the word under the cursor by default — answers

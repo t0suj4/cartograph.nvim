@@ -30,6 +30,17 @@ M.luals_bin = nil
 -- on a minted profile symbol is an honest frontier (never a fabricated location).
 M.rbs_root = nil
 
+-- where an installed PACKAGE ECOSYSTEM lives, keyed by ecosystem name — the roots
+-- spec/ecosystem/<name>.lua declares candidates for. An override always wins over
+-- autodetection, and for a root the spec marks `derivable = false` it is the ONLY
+-- way the root can be known: measured, Factorio's install is absent from every
+-- standard location on a machine that has the game's user dir, so guessing would
+-- hand back a mods directory and silently no base/core data. nil = autodetect the
+-- ones that are derivable and REPORT the rest as unspecified (:CartographRoster
+-- says which, and how each was established).
+--   setup{ ecosystem_roots = { ['lua-factorio'] = { install = '/games/Factorio' } } }
+M.ecosystem_roots = nil
+
 -- cross-language bindings (string-key dispatch boundaries); nil = the
 -- defaults in cartograph/xlang.lua (chromium WebUI, guile gsubr,
 -- lua_register). Add your own: { export = { verb, name = argN },

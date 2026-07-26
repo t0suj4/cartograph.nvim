@@ -181,6 +181,19 @@ function M.roster(name, opts)
     if not eco then return nil, 'no ecosystem spec ' .. tostring(name) end
     local ident = eco.identity or {}
     local transport = require 'cartograph.transport'
+    -- REFUSE AN ECOSYSTEM THAT CANNOT BE ROSTERED, rather than reporting zero
+    -- packages. lua-wow declares identity and a boundary but no `forms` and no
+    -- `roots`, and without this it CRASHED on eco.roots when a dir was given and
+    -- otherwise returned an empty roster — a confident "this install holds nothing"
+    -- about a directory full of addons. What it needs is a roster generalized to
+    -- name_from = 'directory'; until then the refusal names the missing rule.
+    if not (eco.forms and #eco.forms > 0) then
+        return nil, ('%s declares no package `forms`, so its packages cannot be'
+            .. ' enumerated (identity.name_from = %s needs a roster that reads a'
+            .. ' name from the directory)'):format(name,
+            tostring(ident.name_from or 'nil'))
+    end
+    local roots_user = (eco.roots or {}).user or {}
 
     local dir = opts.dir
     if not dir then
@@ -188,7 +201,7 @@ function M.roster(name, opts)
         if not user then
             return nil, 'no package directory: user root ' .. tostring(how)
         end
-        dir = user .. '/' .. ((eco.roots.user or {}).mods or 'mods')
+        dir = user .. '/' .. (roots_user.mods or 'mods')
     end
     dir = (vim.fn.expand(dir):gsub('/+$', ''))
     if vim.fn.isdirectory(dir) ~= 1 then return nil, 'not a directory: ' .. dir end
@@ -201,7 +214,7 @@ function M.roster(name, opts)
     -- still present and still readable, so it stays in the roster and carries the
     -- fact instead of vanishing from it.
     local enabled = {}
-    local mlpath = (eco.roots.user or {}).mod_list
+    local mlpath = roots_user.mod_list
     if mlpath then
         local base = opts.dir and dir:gsub('/[^/]+$', '') or nil
         local at = base and (base .. '/' .. mlpath)

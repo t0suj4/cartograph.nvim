@@ -225,6 +225,23 @@ function M.register(H)
         scratch(require('cartograph.externals').report(store))
     end, { desc = 'cartograph: the external boundary — unresolved names + their used-shape (~)' })
 
+    -- ── THE PACKAGE WORLD OUTSIDE THIS REPO: what the install holds ──
+    --    Needs no graph — it reads a package directory, not a corpus, and is the
+    --    thing to run BEFORE extracting one (which is why it does not call live()).
+    cmd('CartographRoster', function (o)
+        local eco = o.fargs[1] or 'lua-factorio'
+        -- a root the spec marks NOT DERIVABLE can only come from config, so this
+        -- passes the overrides through — that is what lets the report state HOW each
+        -- root was established (override / autodetected / unspecified) instead of
+        -- just printing a path.
+        local roots = (require('cartograph.config').ecosystem_roots or {})[eco] or {}
+        scratch(require('cartograph.roster').report(eco, {
+            dir = o.fargs[2], user = roots.user, install = roots.install,
+        }))
+    end, { nargs = '*', complete = function ()
+        return require('cartograph.spec.ecosystem').names()
+    end, desc = 'cartograph: the package ROSTER of an installed ecosystem (default lua-factorio; an optional second arg is a package directory) — packages by form, which ones LOAD, both cheap guesses at identity scored against the manifest, and every declared dependency judged against this install. Findings are split ACTIVE vs LATENT by enablement: a conflict between two disabled packages is a fact about the install, not a fault in it. Reads a directory, not a graph, so it needs no extraction — but a large mods dir costs seconds' })
+
     -- ── which project shape was detected, and what it changed ──────
     cmd('CartographShapes', function ()
         local st = require 'cartograph.store'
