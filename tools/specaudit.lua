@@ -103,6 +103,8 @@ local vocabhits = {}   -- lang -> entry -> n
 local packhits = {}    -- pack -> entry -> n
 local capturehits = {} -- lang -> 'field@capture' -> n
 local gap = {}         -- lang -> tail -> n   (plain-unresolved, unlisted)
+local profhits = {}    -- profile -> declared name -> n
+local profseen = {}    -- profile -> calls seen in ITS language (coverage threshold)
 local callsseen = {}   -- lang -> n  (coverage threshold for vocab judgment)
 local filesseen = {}   -- lang -> n  (coverage threshold for capture judgment)
 
@@ -156,10 +158,45 @@ for _, name in ipairs(names) do
             for _, pn in ipairs(c.packs or {}) do
                 if ts.packs[pn] then active[pn] = ts.packs[pn] end
             end
+            -- the DECLARATIVE ARTIFACT surface: whichever profile this root's
+            -- shape activates. ~7400 hand-authored names across the shipped
+            -- profiles and nothing checked whether any of them are real or used.
+            local pname, prof
+            do
+                local ok_s, shapes = pcall(require, 'cartograph.shapes')
+                local pf = ok_s and shapes.profile_for(vim.fn.expand(c.root))
+                pname = pf and pf.profile
+                if pname then
+                    prof = require('cartograph.spec.profile').load(pname)
+                    if prof then profseen[pname] = (profseen[pname] or 0) end
+                end
+            end
             for _, call in ipairs(data.calls or {}) do
                 local e = call.file and call.file:match('%.([%w]+)$')
                 local lang = e and extlang[e]
                 local spec = lang and ts.spec[lang]
+                -- profile firing: only for files in the profile's OWN language, so
+                -- a polyglot corpus does not credit a lua profile with php calls
+                if prof and lang == prof.lang and call.callee then
+                    profseen[pname] = (profseen[pname] or 0) + 1
+                    -- `callee` is the BARE name; the qualified form lives in
+                    -- `full` (callrec.full: 'M.g' where callee is 'g'). Matching a
+                    -- namespace member against callee reported zero literal hits
+                    -- for every profile, which is how this was caught.
+                    local full = call.full or call.callee
+                    local tail = call.callee:match('([%w_]+)$')
+                    if (prof.free or {})[full] then
+                        tally(profhits, pname, full)
+                    else
+                        local ns, mem = full:match('^([%w_]+)[.:]([%w_]+)$')
+                        local t = ns and (prof.types or {})[ns]
+                        if t and (t.members or {})[mem] then
+                            tally(profhits, pname, ns .. '.' .. mem)
+                        elseif tail and (prof.free or {})[tail] then
+                            tally(profhits, pname, tail)
+                        end
+                    end
+                end
                 if spec and call.callee then
                     callsseen[lang] = (callsseen[lang] or 0) + 1
                     local tail = call.callee:match('([%w_]+[!?]?)$')
@@ -313,6 +350,134 @@ for _, lang in ipairs(sortedkeys(gap)) do
             parts[#parts + 1] = ('%s×%d'):format(top[i][1], top[i][2])
         end
         print(('  %s: %s'):format(lang, table.concat(parts, ' · ')))
+    end
+end
+
+print('')
+print('== SUSPECT: PROFILE-declared name never seen as a callee ==')
+do
+    local profmod = require 'cartograph.spec.profile'
+    local all = {}
+    local it = vim.uv.fs_scandir(REPO .. '/lua/cartograph/spec/profile')
+    while it do
+        local n = vim.uv.fs_scandir_next(it)
+        if not n then break end
+        local base = n:match('^(.+)%.lua$') or n:match('^(.+)%.mpack$')
+        if base and base ~= 'init' then all[base] = true end
+    end
+    for _, pn in ipairs(sortedkeys(all)) do
+        local prof = profmod.load(pn)
+        local seen = profseen[pn]
+        if not prof then
+            print(('  %-14s (artifact will not load)'):format(pn))
+        elseif not seen or seen == 0 then
+            -- NOT "all stale": no audited corpus activates this profile, so its
+            -- names were never given a chance to fire. Saying otherwise would be
+            -- the same overclaim the two-tier split exists to prevent.
+            print(('  %-14s not exercised by this corpus set (add a corpus whose'
+                .. ' shape activates it)'):format(pn))
+        else
+            -- ONLY BARE NAMES ARE JUDGED. A type-member key is not answerable
+            -- from a callee name, and whether it ever COULD be is
+            -- language-dependent: Lua writes `table.insert` literally, Ruby never
+            -- writes `Array.append` — the call site says `append` and attributing
+            -- it needs receiver typing. So members are COUNTED and their literal
+            -- hits reported, but their absence is NOT evidence of staleness.
+            -- Claiming otherwise would report a fact about the ARTIFACT as a claim
+            -- about the runtime, which is the trap portability.name_queryable
+            -- exists for — and it is how a first draft of this section announced
+            -- 1037 dead Rails names that were nothing of the kind.
+            local dead, live = {}, 0
+            for nm in pairs(prof.free or {}) do
+                if profhits[pn] and profhits[pn][nm] then live = live + 1
+                else dead[#dead + 1] = nm end
+            end
+            table.sort(dead)
+            local shown = {}
+            for i = 1, math.min(12, #dead) do shown[#shown + 1] = dead[i] end
+            print(('  %-14s %d calls seen · bare names %d/%d fired%s'):format(pn,
+                seen, live, live + #dead,
+                #dead > 0 and ('; %d never: %s%s'):format(#dead,
+                    table.concat(shown, ' · '),
+                    #dead > 12 and ' …' or '') or ''))
+            local members, mhit = 0, 0
+            for T, t in pairs(prof.types or {}) do
+                for m in pairs(t.members or {}) do
+                    members = members + 1
+                    if profhits[pn] and profhits[pn][T .. '.' .. m] then
+                        mhit = mhit + 1
+                    end
+                end
+            end
+            if members > 0 then
+                print(('  %-14s   %d type-member key(s), %d seen as a literal'
+                    .. ' qualified call — the rest need receiver typing, so their'
+                    .. ' absence is NOT stale evidence'):format('', members, mhit))
+            end
+        end
+    end
+end
+
+print('')
+print('== ECOSYSTEM specs: is every declared rule actually READ? ==')
+-- The check that matters for a layout spec: not "does this name exist in a
+-- grammar" but "does any code consult this field". A declared rule nobody reads is
+-- dead spec that looks authoritative — and unlike a vocab entry, no corpus can
+-- reveal it. Crude by design (a field read through a variable reads as unread), so
+-- it reports SUSPECT, never CONFIRMED.
+do
+    local ok_e, eco = pcall(require, 'cartograph.spec.ecosystem')
+    if not ok_e then
+        print('  (no ecosystem loader)')
+    else
+        -- one pass over the plugin source, so this is O(source) not O(fields)
+        local src = {}
+        local stack = { REPO .. '/lua/cartograph' }
+        while #stack > 0 do
+            local dir = table.remove(stack)
+            local okd, iter = pcall(vim.fs.dir, dir)
+            if okd then
+                for n2, t2 in iter do
+                    local pth = dir .. '/' .. n2
+                    if t2 == 'directory' then stack[#stack + 1] = pth
+                    elseif n2:match('%.lua$') and not pth:match('/spec/ecosystem/') then
+                        local fd = io.open(pth, 'rb')
+                        if fd then src[#src + 1] = fd:read('a'); fd:close() end
+                    end
+                end
+            end
+        end
+        local blob = table.concat(src, '\n')
+        local function reads(field)
+            return blob:find('%.' .. field .. '%f[^%w_]') ~= nil
+                or blob:find("%['" .. field .. "'%]") ~= nil
+                or blob:find('%f[%w_]' .. field .. '%s*=%s*') ~= nil
+        end
+        for _, en in ipairs(eco.names()) do
+            local spec = eco.load(en)
+            local unread, total = {}, 0
+            local function walk(t, path)
+                for k, v in pairs(t) do
+                    -- `notes` is prose ABOUT the rules; it can never be consumed,
+                    -- so counting it would give a permanently non-empty UNREAD
+                    -- list and hide the entries actually awaiting a consumer
+                    if type(k) == 'string' and k ~= 'schema' and k ~= 'notes' then
+                        local here = path == '' and k or (path .. '.' .. k)
+                        if type(v) == 'table' then
+                            walk(v, here)
+                        else
+                            total = total + 1
+                            if not reads(k) then unread[#unread + 1] = here end
+                        end
+                    end
+                end
+            end
+            walk(spec or {}, '')
+            table.sort(unread)
+            print(('  %-14s %d/%d leaf rules read by some consumer%s'):format(en,
+                total - #unread, total,
+                #unread > 0 and ('; UNREAD: ' .. table.concat(unread, ' · ')) or ''))
+        end
     end
 end
 

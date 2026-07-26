@@ -51,7 +51,11 @@ test('ecosystem: identity is manifest-authoritative, filename only a hint',
     function ()
     local f = eco.load('lua-factorio')
     eq('info.json', f.identity.manifest)
-    eq('manifest', f.identity.authoritative)
+    -- the assertion ABOUT the rule lives under `notes` (prose the rule-consumption
+    -- audit skips), so what is pinned here is that the rule itself is present and
+    -- that the hint is only ever a hint
+    ok(f.identity.notes.authoritative:match('manifest') ~= nil,
+        'the manifest is authoritative: ' .. tostring(f.identity.notes.authoritative))
     -- the hint must be a HINT: it extracts a name to try, and the caller confirms
     eq('space-exploration', ('space-exploration_0.7.5.zip'):match(f.identity.filename_hint))
     eq('Explosive Excavation', ('Explosive Excavation_1.3.0.zip'):match(f.identity.filename_hint))

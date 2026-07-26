@@ -19,13 +19,15 @@
 --   · it must cross a process boundary — extraction runs in spawned workers that
 --     receive JSON, the same constraint that made transport kinds declarative
 --   · declared in-file, like shapes.registry and source.lua's providers
---   · it is the shape tools/specaudit.lua audits: discrete rules that either FIRE
---     or do not, so a rule that quietly stops applying can be reported SUSPECT.
---     NOT WIRED YET — specaudit enumerates ts.spec and ts.packs only, and covers
---     neither spec/profile/ nor this directory. So the auditability is a property
---     of the SHAPE, not a check that runs today; extending specaudit to walk both
---     is its own piece of work, and until then a dead rule here is as invisible as
---     one anywhere else.
+--   · tools/specaudit.lua AUDITS it: for each leaf rule it asks whether any code
+--     actually reads that field, and reports the ones nothing consumes. That
+--     caught its own first finding — require_form.pattern was declared here while
+--     spec/lua.lua kept an inline copy. Rules still awaiting a consumer stay on
+--     the UNREAD list on purpose, which is the honest state; prose belongs under
+--     `notes`, which the audit skips, so the list stays actionable.
+--     LIMIT: specaudit is a periodic tool, not a gate (it needs snapshots and is
+--     far too slow for pre-commit), so this makes dead spec DISCOVERABLE, not
+--     enforced. Nobody is stopped from adding a rule no one reads.
 --
 -- THE DIVISION THIS PROTECTS: precedence here becomes transport STACK ORDER, so
 -- the ecosystem knows Factorio and nothing about bytes, transport knows bytes and
@@ -97,7 +99,11 @@ return {
         -- info.json out of a zip costs ~22ms over /mnt/c, so a 199-archive scan
         -- is ~4.4s). The hint must always be CONFIRMED against the manifest.
         filename_hint = '^(.+)_%d[%w%.%-]*%.zip$',
-        authoritative = 'manifest', -- never 'filename'
+        -- PROSE, not a rule: notes are skipped by the "is every declared rule
+        -- read?" audit, because an assertion about the rules can never be
+        -- consumed and would sit in its UNREAD list forever, drowning the
+        -- entries that are genuinely waiting for a consumer.
+        notes = { authoritative = 'the manifest, never the filename' },
     },
 
     -- ── package forms, in PRECEDENCE order ───────────────────────────────────
@@ -130,8 +136,8 @@ return {
         dotted_ok = true,                     -- '.' separators mean '/'
         exts = { '', '.lua' },
         index = 'init.lua',
-        -- a bare `require("x")` is package-LOCAL; only the __name__ form crosses
-        crosses_packages = 'only via the pattern above',
+        notes = { crosses_packages = 'a bare require("x") is package-LOCAL;'
+            .. ' only the __name__ form crosses' },
     },
 
     -- ── enablement ───────────────────────────────────────────────────────────

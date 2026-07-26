@@ -203,6 +203,12 @@ local IDENT = (function ()
     return eco and eco.identity or nil
 end)()
 
+-- the cross-package require FORM, from the same spec
+local REQFORM = (function ()
+    local eco = require('cartograph.spec.ecosystem').load('lua-factorio')
+    return eco and eco.require_form or nil
+end)()
+
 -- EPOCH-keyed, not memoized forever. A stamp is not available cheaply here: to
 -- know whether this map is stale you must scan the top-level directories and stat
 -- every candidate manifest, which is exactly what computing it does. So it turns
@@ -429,9 +435,15 @@ return {
         end
         -- factorio cross-mod require: __name__/path or __name__.dotted
         -- — the DECLARED cross-project import (cross-project layer 1).
-        -- The target dir comes from info.json identity; __base__/
-        -- __core__ (engine data, not in corpus) stay unresolved, honest.
-        local mn, rest = mod:match('^__([%w%-_]+)__[./](.+)$')
+        -- The FORM comes from the ecosystem spec, not a second copy of it: this
+        -- line held an inline duplicate of require_form.pattern, which
+        -- tools/specaudit.lua flagged as a declared rule nothing reads. The
+        -- target dir comes from manifest identity; __base__/__core__ (engine
+        -- data, not in corpus) stay unresolved, honest.
+        -- NB `local a, b = cond and f()` truncates f() to ONE value, so the
+        -- guard cannot live in the expression — `rest` would always be nil
+        local mn, rest
+        if REQFORM then mn, rest = mod:match(REQFORM.pattern) end
         if mn and type(root) == 'string' then
             local dir = factorio_mods(root, files)[mn]
             if dir then
