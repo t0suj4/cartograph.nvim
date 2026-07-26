@@ -499,12 +499,22 @@ end
 local reg = dofile(here .. '/corpora.lua')
 
 if #names == 0 then
-    -- default roster: every corpus with pinned expected counts, plus self
-    -- (snapshot-only baseline) — the push-time sweep. Quick tier first so
-    -- a systematic breakage surfaces in seconds, not after server.
+    -- default roster: every corpus with PINNED EXPECTED COUNTS — the push-time
+    -- sweep. Quick tier first so a systematic breakage surfaces in seconds, not
+    -- after server.
+    --
+    -- `self` used to be special-cased in here on a snapshot-only baseline, and it
+    -- could not work: self IS this repo, so every commit changes the corpus and
+    -- invalidates the baseline by construction. It went red by DRIFT rather than
+    -- by regression — the worst kind of gate, because the only way to green it is
+    -- to re-save, which blesses whatever drifted unread. Still a fine corpus to
+    -- name EXPLICITLY (observe/callmatrix/rescolmatrix do); just not a gate.
+    -- Self-analysis is gated instead by tools/dogfood.lua, which asserts
+    -- RATCHETS (counts that may not rise) — the shape of invariant a LIVING
+    -- corpus can actually hold.
     local quick, heavy = {}, {}
     for k, v in pairs(reg) do
-        if v.expected or k == 'self' then
+        if v.expected then
             table.insert(HEAVY[k] and heavy or quick, k)
         end
     end

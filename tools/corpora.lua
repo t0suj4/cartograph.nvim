@@ -329,7 +329,12 @@ return {
         root = HOME .. '/git/cartograph.nvim',
         repo = 'git@github.com:t0suj4/cartograph.nvim.git',
         lang = 'lua',
-        notes = 'cartograph on cartograph — LIVING corpus, snapshot-only baseline',
+        notes = 'cartograph on cartograph — LIVING corpus, NOT GATED: the corpus'
+            .. ' is this repo, so every commit invalidates a snapshot baseline by'
+            .. ' construction (red by drift, greenable only by blessing unread'
+            .. ' change). Self-analysis is gated by tools/dogfood.lua ratchets'
+            .. ' instead. Name it explicitly for measurement — it is a good'
+            .. ' polyglot-free lua corpus, it just cannot hold a fixed baseline',
     },
     bnw = {
         root = HOME .. '/git/bravest-new-world',
