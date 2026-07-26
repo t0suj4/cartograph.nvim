@@ -135,3 +135,45 @@ test('ecosystem: spec/lua.lua reads the identity rule rather than restating it',
     local _, n = src:gsub("'info%.json'", '')
     eq(0, n) -- zero literal copies of the manifest name remain
 end)
+
+-- REGRESSION for a live correctness hole: the ecosystem spec feeds resolution
+-- (factorio_mods' identity rule, toc_scope's manifest marker) but cache validity
+-- composed only file stamps, VERSION and the PROFILE stamp — so editing a layout
+-- rule left every warm cache confidently stale. stamp_of existed and nothing
+-- consumed it.
+test('ecosystem: a spec edit INVALIDATES a warm graph cache', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local cache = require 'cartograph.cache'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local function f(x) return x end\nreturn { f = f }\n'); fd:close()
+
+    ok(cache._ecosystem_stamp() ~= nil, 'the surface is stampable')
+    cache.wipe(root)
+    cache.save(ts.extract(root))
+    ok(cache.open(root) ~= nil, 'warm open works right after save')
+
+    -- PERTURB the composition exactly as an edited spec would, without touching a
+    -- checked-in file: swap in a stamp function that answers differently
+    local real = cache._ecosystem_stamp
+    cache._ecosystem_stamp = function () return (real() or '') .. ';edited' end
+    eq(nil, cache.open(root)) -- the layout rules moved -> the cache is stale
+    cache._ecosystem_stamp = real
+    ok(cache.open(root) ~= nil, 'and valid again once restored')
+
+    cache.wipe(root); vim.fn.delete(root, 'rf')
+end)
+
+-- and the composition covers EVERY declared spec, so one added later enters the
+-- key with no edit to cache.lua — the structural fix, not just the instance
+test('ecosystem: every declared spec is stampable', function ()
+    local ns = eco.names()
+    ok(#ns > 0, 'at least one ecosystem is declared')
+    for _, n in ipairs(ns) do
+        ok(eco.stamp_of(n) ~= nil, n .. ' is stampable')
+        ok(eco.load(n) ~= nil, n .. ' loads')
+    end
+end)

@@ -1,7 +1,10 @@
 -- PACKAGE-ECOSYSTEM loader ([[cartograph-cross-project]] repo shapes). Mirrors
--- spec/profile/init.lua deliberately: same schema marker, same memoized load,
--- same stamp_of so a cached graph whose resolution used an ecosystem spec can be
--- invalidated when the spec is edited.
+-- spec/profile/init.lua deliberately: same schema marker, same memoized load, same
+-- stamp_of — and cache.lua composes that stamp into graph validity, so editing a
+-- layout rule invalidates warm caches whose resolution used it. (The first version
+-- of this file claimed that while nothing consumed stamp_of, which left every warm
+-- cache confidently stale after a spec edit. The lesson kept: a stamp nobody
+-- composes is not invalidation, it is a comment.)
 --
 -- An ecosystem answers "where do OTHER packages live, how are they identified,
 -- which one wins" — the axis spec/lua.lua:216 flags as the missing abstraction

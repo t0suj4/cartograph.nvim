@@ -876,6 +876,31 @@ local function profile_id(nroot)
     return pf.profile, stamp
 end
 
+--- The ECOSYSTEM-SPEC surface as one stamp. Composed over EVERY declared spec
+--- rather than a per-root selection, deliberately: spec/lua.lua loads the identity
+--- rule unconditionally, so any of them could have shaped resolution, and — more
+--- to the point — a spec added later then enters this key with no edit here. That
+--- is the property whose absence caused the bug this fixes: the ecosystem spec
+--- began feeding resolution (factorio_mods' identity rule, toc_scope's manifest
+--- marker) while validity still composed only file stamps, VERSION and the
+--- profile, so editing a layout rule left every warm cache confidently stale.
+--- Cheap: one fs_stat per spec (one today).
+local function ecosystem_stamp()
+    local ok, eco = pcall(require, 'cartograph.spec.ecosystem')
+    if not ok then return nil end
+    local parts = {}
+    for _, n in ipairs(eco.names()) do
+        local st = eco.stamp_of(n)
+        if st then parts[#parts + 1] = n .. '=' .. st end
+    end
+    return #parts > 0 and table.concat(parts, ';') or nil
+end
+
+-- exposed for the spec (the `_field` convention), and CONSUMED through M so the
+-- seam is live: a test that swaps this must actually change what validity computes,
+-- or it proves nothing. A stamp nobody composes is not invalidation.
+M._ecosystem_stamp = ecosystem_stamp
+
 local function read_manifest(root)
     local dir, nroot = M.path(root)
     local m = read_decoded(dir .. '/manifest.bin')
@@ -887,6 +912,14 @@ local function read_manifest(root)
         -- = a clean cache miss → cold re-extract. Profileless roots: nil == nil.
         local cur_prof, cur_stamp = profile_id(nroot)
         if m.profile ~= cur_prof or m.profile_stamp ~= cur_stamp then
+            return nil, dir
+        end
+        -- ECOSYSTEM IDENTITY, same gate for the same reason: package-layout rules
+        -- (identity, manifest name, precedence) shape resolution too. An OLD
+        -- manifest carries no field here, so nil ~= the current stamp and it
+        -- invalidates once — correct, and no VERSION bump: extraction output is
+        -- unchanged, only what counts as still-valid.
+        if m.ecosystem_stamp ~= M._ecosystem_stamp() then
             return nil, dir
         end
         return m, dir
@@ -973,6 +1006,7 @@ local function manifest_of(data, sizes)
     end
     return { version = M.VERSION, root = data.root, schema = data.schema,
         provider = data.provider, -- which source: dispatch key for diff/refresh
+        ecosystem_stamp = M._ecosystem_stamp(), -- layout rules feed resolution
         stamps = data.stamps, unparsed = data.unparsed,
         capabilities = data.capabilities, no_parser = data.no_parser,
         packs = data.packs, profile = data.profile, profile_stamp = profile_stamp,
