@@ -18,6 +18,18 @@ local function tmpfile(text)
     return p
 end
 
+local function unreadable(text)
+    local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
+    local p = d .. '/locked.lua'
+    local fd = assert(io.open(p, 'w')); fd:write(text or 'x'); fd:close()
+    vim.fn.system({ 'chmod', '000', p })
+    -- running as root defeats chmod; the caller skips rather than asserting a
+    -- property the environment cannot exhibit
+    local still = io.open(p, 'r')
+    if still then still:close(); vim.fn.delete(d, 'rf'); return nil end
+    return p, d
+end
+
 test('transport: disk read returns whole contents, nil when absent', function ()
     local p = tmpfile('alpha\nbeta\n')
     eq('alpha\nbeta\n', transport.read(p))
@@ -156,22 +168,81 @@ test('transport: a kind returning nil is skipped, not fatal', function ()
     vim.fn.delete(p)
 end)
 
+-- ── ranged read ──────────────────────────────────────────────────────────────
+-- The op that makes a container composable over another substrate instead of
+-- special-cased inside it. Every case below was reached by probing Lua's seek/read
+-- first, because they are all live: a short read at EOF, a nil read AT EOF, and a
+-- suffix seek that ERRORS when it exceeds the file.
+
+test('transport: read_range returns a byte range, 0-based', function ()
+    local p = tmpfile('0123456789')
+    eq('3456', transport.read_range(p, 3, 4))
+    eq('0123456789', transport.read_range(p, 0, 99)) -- len past EOF: SHORT, not nil
+    eq('89', transport.read_range(p, 8, 5))
+    eq('0123456789', transport.read_range(p, 0))     -- no len = to the end
+    vim.fn.delete(p)
+end)
+
+-- a SUFFIX range (HTTP `bytes=-N`) is the primitive a container needs to find its
+-- trailer without pulling the whole file. seek('end', -n) errors when n exceeds
+-- the file, so this must clamp rather than fail.
+test('transport: a NEGATIVE offset is a suffix range, clamped', function ()
+    local p = tmpfile('0123456789')
+    eq('6789', transport.read_range(p, -4, 4))
+    eq('0123456789', transport.read_range(p, -99, 20)) -- clamps to start
+    vim.fn.delete(p)
+end)
+
+-- zero bytes available is NOT a failure: '' keeps the error channel meaning only
+-- "could not determine", which is the whole point of the two failure kinds.
+test('transport: at/past EOF and len<=0 are empty, not errors', function ()
+    local p = tmpfile('0123456789')
+    local at, err1 = transport.read_range(p, 10, 3)
+    eq('', at); eq(nil, err1)
+    local past, err2 = transport.read_range(p, 99, 3)
+    eq('', past); eq(nil, err2)
+    eq('', transport.read_range(p, 2, 0))
+    eq('', transport.read_range(p, 2, -5))
+    vim.fn.delete(p)
+end)
+
+test('transport: read_range reports ABSENT / UNAVAILABLE like read', function ()
+    local _, err = transport.read_range(vim.fn.tempname() .. '/gone', 0, 4)
+    eq(transport.ABSENT, err)
+    local p, d = unreadable('0123456789')
+    if not p then skip 'running as root — chmod 000 is still readable' end
+    local _, err2 = transport.read_range(p, 0, 4)
+    eq(transport.UNAVAILABLE, err2)
+    vim.fn.system({ 'chmod', '644', p }); vim.fn.delete(d, 'rf')
+end)
+
+-- the FALLBACK must be indistinguishable from native ranging, or a substrate that
+-- cannot seek would quietly answer differently from one that can
+test('transport: the whole-read fallback matches native ranging exactly', function ()
+    transport.kinds.noseek = function ()
+        return {
+            name = 'noseek',
+            claims = function (path) return path:match('%.noseek$') ~= nil end,
+            -- read only: no read_range, so the stack must slice for it
+            read = function () return '0123456789' end,
+        }
+    end
+    local stack = transport.build { { kind = 'noseek' }, { kind = 'disk' } }
+    local p = tmpfile('0123456789')
+    for _, case in ipairs { { 3, 4 }, { 8, 5 }, { 0, 99 }, { -4, 4 }, { -99, 20 },
+        { 10, 3 }, { 99, 3 }, { 2, 0 } } do
+        local off, len = case[1], case[2]
+        eq(transport.read_range(p, off, len), stack.read_range('/x.noseek', off, len))
+    end
+    eq(transport.read_range(p, 0), stack.read_range('/x.noseek', 0))
+    transport.kinds.noseek = nil
+    vim.fn.delete(p)
+end)
+
 -- ── failure has two kinds ────────────────────────────────────────────────────
 -- The soundness half. The extractor turns "no content" into a CONFIDENT NEGATIVE
 -- FACT (a call into a file it cannot read is classified `external` = "project
 -- boundary"), so absence and indeterminacy must not arrive as the same nil.
-
-local function unreadable(text)
-    local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
-    local p = d .. '/locked.lua'
-    local fd = assert(io.open(p, 'w')); fd:write(text or 'x'); fd:close()
-    vim.fn.system({ 'chmod', '000', p })
-    -- running as root defeats chmod; the caller skips rather than asserting a
-    -- property the environment cannot exhibit
-    local still = io.open(p, 'r')
-    if still then still:close(); vim.fn.delete(d, 'rf'); return nil end
-    return p, d
-end
 
 test('transport: ENOENT is ABSENT, an unreadable file is UNAVAILABLE', function ()
     local missing = vim.fn.tempname() .. '/gone.lua'
