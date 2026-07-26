@@ -106,6 +106,19 @@ return {
         notes = { authoritative = 'the manifest, never the filename' },
     },
 
+    -- the URI SCHEME a roster of this ecosystem carries as its root. Declared
+    -- because it is load-bearing evidence, not decoration: spec/lua.lua applies
+    -- Factorio require semantics only to a corpus that IS one, and "any labelled
+    -- corpus" is not the same test — self://loaded is labelled too, and turning
+    -- dir-relative matching on there is precisely the over-reach self_spec exists
+    -- to catch.
+    roster_scheme = 'mods',
+
+    -- which files in a package are SOURCE. A layout fact, not a language one: the
+    -- roster needs it to enumerate a package without asking the extractor (which
+    -- would make this module depend on the front end that depends on it).
+    source_exts = { 'lua' },
+
     -- ── package forms, in PRECEDENCE order ───────────────────────────────────
     -- Earlier wins. Factorio prefers an UNPACKED mod directory over a zip of the
     -- same mod, which is the normal state while editing one. This list IS the

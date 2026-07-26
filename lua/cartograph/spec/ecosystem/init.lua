@@ -129,4 +129,183 @@ function M.stack_spec(eco, cfg)
     return { spec = out, unsupported = unsupported }
 end
 
+-- ── the ROSTER: a package directory as a multi-root corpus ───────────────────
+-- The consumer everything else was for. A mods directory holds packages in two
+-- FORMS (unpacked directory, zip archive) at a declared PRECEDENCE, each with its
+-- own manifest identity; this turns that into the shape extraction already
+-- understands — the `roots` label map providers/self.lua established for a
+-- multi-root corpus, where a label's base may now be a CONTAINER rather than a
+-- directory (transport.join composes either).
+--
+-- WHY NO NEW PATH CONVENTION: a package is a LABEL, so a file key stays
+-- `Name/control.lua` — the shape the graph already parses (first segment = scope,
+-- extension = language). The `archive::entry` composite exists only between abs()
+-- and a transport. That was the whole point of keeping it out of n.file.
+
+--- Recursively collect a package's source files, relative to its base, through
+--- whatever transport serves it. Uniform across forms: a directory and an archive
+--- are both enumerated with dir(), so the caller writes one loop.
+local function collect(stack, base, exts, out, prefix, depth)
+    if depth > 24 then return end -- a container cannot nest forever
+    local key = stack.join and stack.join(base, prefix == '' and '.' or prefix) or nil
+    -- join needs a rest; for enumeration ask for the base itself
+    local at
+    if type(base) == 'table' then
+        at = base.container .. '::' .. (base.prefix
+            and (base.prefix .. (prefix == '' and '' or '/' .. prefix))
+            or prefix)
+    else
+        at = prefix == '' and base or (base .. '/' .. prefix)
+    end
+    for name, ty in stack.dir(at) do
+        if name:sub(1, 1) ~= '.' then
+            local rel = prefix == '' and name or (prefix .. '/' .. name)
+            if ty == 'directory' then
+                collect(stack, base, exts, out, rel, depth + 1)
+            else
+                local e = name:match('%.([%w]+)$')
+                if e and exts[e:lower()] then out[#out + 1] = rel end
+            end
+        end
+    end
+end
+
+--- The packages in a directory, and the corpus shape to extract them as.
+--- opts = { dir, user, transport, enabled_only }
+--- Returns (roster, nil) or (nil, why). roster =
+---   { root, roots, files, transport, packages = { {name, version, target, form,
+---     base, enabled} } }
+function M.roster(name, opts)
+    opts = opts or {}
+    local eco = M.load(name)
+    if not eco then return nil, 'no ecosystem spec ' .. tostring(name) end
+    local ident = eco.identity or {}
+    local transport = require 'cartograph.transport'
+
+    local dir = opts.dir
+    if not dir then
+        local user, how = M.root(eco, 'user', opts.user)
+        if not user then
+            return nil, 'no package directory: user root ' .. tostring(how)
+        end
+        dir = user .. '/' .. ((eco.roots.user or {}).mods or 'mods')
+    end
+    dir = (vim.fn.expand(dir):gsub('/+$', ''))
+    if vim.fn.isdirectory(dir) ~= 1 then return nil, 'not a directory: ' .. dir end
+
+    local stack = opts.transport
+    if not stack then stack = transport.build(M.stack_spec(eco).spec)
+    elseif not stack.read then stack = transport.build(stack) end
+
+    -- ENABLEMENT is an honesty input, never a resolution one: a disabled package is
+    -- still present and still readable, so it stays in the roster and carries the
+    -- fact instead of vanishing from it.
+    local enabled = {}
+    local mlpath = (eco.roots.user or {}).mod_list
+    if mlpath then
+        local base = opts.dir and dir:gsub('/[^/]+$', '') or nil
+        local at = base and (base .. '/' .. mlpath)
+            or (dir:gsub('/[^/]+$', '') .. '/' .. mlpath)
+        local txt = stack.read(at)
+        local okj, ml = pcall(vim.json.decode, txt or '')
+        if okj and type(ml) == 'table' then
+            local ek = eco.enablement or {}
+            for _, e in ipairs(ml[ek.list_key or 'mods'] or {}) do
+                if type(e) == 'table' and e[ek.name_key or 'name'] ~= nil then
+                    enabled[e[ek.name_key or 'name']] = e[ek.enabled_key or 'enabled']
+                        and true or false
+                end
+            end
+        end
+    end
+
+    local exts = {}
+    for _, e in ipairs(eco.source_exts or { eco.lang }) do exts[e:lower()] = true end
+
+    -- FORMS IN PRECEDENCE ORDER: the first form to claim a package name wins, which
+    -- is how an unpacked directory shadows an archive of the same package (the
+    -- normal state while editing one).
+    local claimed, packages = {}, {}
+    local function manifest_at(base, inner)
+        local at = type(base) == 'table'
+            and (base.container .. '::' .. (base.prefix and (base.prefix .. '/') or '')
+                .. inner)
+            or (base .. '/' .. inner)
+        local txt = stack.read(at)
+        if not txt then return nil end
+        local okj, m = pcall(vim.json.decode, txt)
+        if okj and type(m) == 'table' and type(m[ident.name_key]) == 'string' then
+            return m
+        end
+    end
+
+    local entries = {}
+    for ename, ty in stack.dir(dir) do entries[#entries + 1] = { ename, ty } end
+    table.sort(entries, function (a, b) return a[1] < b[1] end)
+
+    for _, form in ipairs(eco.forms or {}) do
+        for _, ent in ipairs(entries) do
+            local ename, ty = ent[1], ent[2]
+            local base, m
+            if form.form == 'directory' and ty == 'directory' then
+                base = dir .. '/' .. ename
+                m = manifest_at(base, ident.manifest)
+            elseif form.form == 'archive' and ty ~= 'directory'
+                and form.ext and ename:sub(-#form.ext) == form.ext then
+                local archive = dir .. '/' .. ename
+                -- the manifest sits under ONE top directory whose name may differ
+                -- from the package name (measured: 112 of 195 disagree), so it is
+                -- FOUND, never derived from the filename
+                for iname, ity in stack.dir(archive .. '::') do
+                    if ity == 'directory' and not m then
+                        local cand = { container = archive, prefix = iname }
+                        m = manifest_at(cand, ident.manifest)
+                        if m then base = cand end
+                    end
+                end
+            end
+            if m and base then
+                local pname = m[ident.name_key]
+                if not claimed[pname] then
+                    claimed[pname] = true
+                    packages[#packages + 1] = {
+                        name = pname,
+                        version = m[ident.version_key],
+                        target = m[ident.target_key],
+                        deps = m[ident.deps_key],
+                        form = form.form, base = base,
+                        enabled = enabled[pname],
+                    }
+                end
+            end
+        end
+    end
+
+    local roots, files = {}, {}
+    for _, pkg in ipairs(packages) do
+        if not (opts.enabled_only and pkg.enabled == false) then
+            roots[pkg.name] = pkg.base
+            local rels = {}
+            collect(stack, pkg.base, exts, rels, '', 0)
+            table.sort(rels)
+            for _, rel in ipairs(rels) do files[#files + 1] = pkg.name .. '/' .. rel end
+        end
+    end
+    table.sort(files)
+    return {
+        root = (eco.roster_scheme or 'pkg') .. '://' .. dir,
+        roots = roots, files = files,
+        transport = M.stack_spec(eco).spec, packages = packages, dir = dir,
+        -- a LIVE convenience: `roots` is the serialisable truth (a worker rebuilds
+        -- abs from it, as worker.lua already does), this saves an in-process caller
+        -- repeating the join every extraction
+        abs = function (file)
+            local label, rest = file:match('^([^/]+)/(.*)$')
+            local base = label and roots[label]
+            if base then return transport.join(base, rest) end
+            return dir .. '/' .. file
+        end,
+    }
+end
+
 return M

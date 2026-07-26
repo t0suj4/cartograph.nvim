@@ -198,16 +198,11 @@ local LUA_GUARDS = {
 -- consumer in this file reads the same source instead of restating it
 local validity = require 'cartograph.validity'
 
-local IDENT = (function ()
-    local eco = require('cartograph.spec.ecosystem').load('lua-factorio')
-    return eco and eco.identity or nil
-end)()
+local ECO = require('cartograph.spec.ecosystem').load('lua-factorio')
+local IDENT = ECO and ECO.identity or nil
 
 -- the cross-package require FORM, from the same spec
-local REQFORM = (function ()
-    local eco = require('cartograph.spec.ecosystem').load('lua-factorio')
-    return eco and eco.require_form or nil
-end)()
+local REQFORM = ECO and ECO.require_form or nil
 
 -- EPOCH-keyed, not memoized forever. A stamp is not available cheaply here: to
 -- know whether this map is stale you must scan the top-level directories and stat
@@ -222,6 +217,23 @@ local factorio_mods = validity.memo { name = 'factorio-mods', epoch = 'extract',
     for f in pairs(files) do
         local seg = f:match('^([^/]+)/')
         if seg then segs[seg] = true end
+    end
+    -- THIS ECOSYSTEM'S OWN ROSTER (root carries the declared roster_scheme, keys
+    -- are `Package/rel`) has already done this work: the label IS the package
+    -- identity, established from each manifest when the roster was built.
+    -- Re-deriving it would mean reading a manifest at `<uri>/<seg>/info.json`,
+    -- which is not a path at all — which is why a cross-package require into an
+    -- ARCHIVE resolved to nothing until this branch existed.
+    -- Gated on the DECLARED scheme, not on "root is a URI": self://loaded is a
+    -- labelled corpus too, and a non-empty map here switches on Factorio's
+    -- dir-relative require matching below — the over-reach self_spec catches.
+    local scheme = ECO and ECO.roster_scheme
+    if scheme and type(root) == 'string'
+        and root:sub(1, #scheme + 3) == scheme .. '://' then
+        for seg in pairs(segs) do
+            if seg ~= '' then map[seg] = seg end
+        end
+        return map
     end
     for seg in pairs(segs) do
         local p = root .. (seg == '' and '' or '/' .. seg) .. '/' .. IDENT.manifest
