@@ -133,7 +133,11 @@ function M.open(rr, path, whole)
         byname[e.name] = e
         p = p + 46 + nlen + elen + clen
     end
-    return { path = path, read = read, entries = entries, byname = byname }
+    -- `whole` = served from memory. A caller must not replace `read` in that case:
+    -- doing so sends every entry back to the substrate and throws away the
+    -- read-once win (measured 196x per entry on a high-latency mount).
+    return { path = path, read = read, entries = entries, byname = byname,
+        whole = whole ~= nil }
 end
 
 --- One entry's bytes, CRC-verified. (nil, why) on any failure — including 'no

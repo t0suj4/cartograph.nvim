@@ -252,3 +252,83 @@ test('zip: the central directory is parsed once per archive stamp', function ()
     transport.kinds.opentest = nil
     vim.fn.delete(d, 'rf')
 end)
+
+-- ── bursts: the archive is opened once per group of reads ────────────────────
+-- MEASURED on the real corpus: 202 MB archive 10.28 -> 7.40 ms/entry. The first
+-- attempt made the SMALL-archive path WORSE (23.2 -> 27.7 ms/archive) by acquiring
+-- a handle the memory-backed parse never used, and by overriding the in-memory
+-- reader — which would have sent every entry back to the substrate and thrown away
+-- the read-once win. Both are pinned here.
+
+test('zip: a memory-backed archive is NOT sent back to the substrate', function ()
+    if vim.fn.executable('zip') ~= 1 then skip 'no zip CLI' end
+    if not require('cartograph.zip').available() then skip 'no zlib' end
+    local archive, d = fixture()
+    local bytes = assert(io.open(archive, 'rb')):read('a')
+    local reads, readers = 0, 0
+    transport.kinds.bursttest = function ()
+        return {
+            name = 'burst', claims = function (p) return p:match('%.bz$') ~= nil end,
+            size = function () return #bytes end,
+            stamp = function () return 'st' end,
+            reader = function ()
+                readers = readers + 1
+                return { read_range = function (off, len)
+                    reads = reads + 1
+                    local s = (off and off < 0) and math.max(0, #bytes + off) or (off or 0)
+                    return bytes:sub(s + 1, len and (s + len) or nil)
+                end, close = function () end }
+            end,
+            read_range = function (_, off, len)
+                reads = reads + 1
+                local s = (off and off < 0) and math.max(0, #bytes + off) or (off or 0)
+                return bytes:sub(s + 1, len and (s + len) or nil)
+            end,
+        }
+    end
+    -- whole_max ABOVE the archive: read once, then serve from memory
+    local s = transport.build { { kind = 'zip', ext = '.bz', whole_max = 10 * 1024 * 1024 },
+        { kind = 'bursttest' } }
+    ok(s.read('/x.bz::Pkg_1.2.3/info.json') ~= nil, 'reads')
+    local after_open = reads
+    ok(s.read('/x.bz::Pkg_1.2.3/control.lua') ~= nil, 'reads again')
+    ok(s.read('/x.bz::Pkg_1.2.3/lib/util.lua') ~= nil, 'and again')
+    eq(after_open, reads)  -- two more entries cost ZERO substrate reads
+    eq(0, readers)         -- ... and no handle was acquired for a parse that
+                           --     would never have used it
+    transport.kinds.bursttest = nil
+    vim.fn.delete(d, 'rf')
+end)
+
+test('zip: a RANGED archive acquires a bound reader per burst', function ()
+    if vim.fn.executable('zip') ~= 1 then skip 'no zip CLI' end
+    if not require('cartograph.zip').available() then skip 'no zlib' end
+    local archive, d = fixture()
+    local bytes = assert(io.open(archive, 'rb')):read('a')
+    local readers, closes, oneshots = 0, 0, 0
+    transport.kinds.rangedtest = function ()
+        local function slice(off, len)
+            local s = (off and off < 0) and math.max(0, #bytes + off) or (off or 0)
+            return bytes:sub(s + 1, len and (s + len) or nil)
+        end
+        return {
+            name = 'ranged', claims = function (p) return p:match('%.rz$') ~= nil end,
+            size = function () return #bytes end,
+            stamp = function () return 'st' end,
+            reader = function ()
+                readers = readers + 1
+                return { read_range = slice,
+                    close = function () closes = closes + 1 end }
+            end,
+            read_range = function (_, off, len) oneshots = oneshots + 1; return slice(off, len) end,
+        }
+    end
+    -- whole_max BELOW it: ranged, so bursts are worth acquiring
+    local s = transport.build { { kind = 'zip', ext = '.rz', whole_max = 16 },
+        { kind = 'rangedtest' } }
+    ok(s.read('/y.rz::Pkg_1.2.3/info.json') ~= nil, 'reads')
+    ok(readers >= 1, 'a bound reader was acquired')
+    eq(readers, closes) -- every handle released: a roster must not leak fds
+    transport.kinds.rangedtest = nil
+    vim.fn.delete(d, 'rf')
+end)

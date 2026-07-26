@@ -75,6 +75,23 @@ local ENOENT = 2 -- the one errno that means absence; every other means unknown
 
 -- ── the disk transport ───────────────────────────────────────────────────────
 
+--- The range semantics, ONCE, so the one-shot read_range and the bound reader
+--- cannot drift: a suffix range clamps, a short read at EOF is normal, at/past EOF
+--- is '' rather than nil. Returns nil only when the SEEK failed.
+local function seek_range(fd, off, len)
+    local pos
+    if off and off < 0 then
+        -- seek('end', -n) errors when n exceeds the file, so clamp to the start
+        local size = fd:seek('end')
+        pos = fd:seek('set', math.max(0, (size or 0) + off))
+    else
+        pos = fd:seek('set', off or 0)
+    end
+    if not pos then return nil end
+    local got = len and fd:read(len) or fd:read('a')
+    return got or ''
+end
+
 local disk = {
     name = 'disk',
     -- the fallback: it claims nothing and is chosen only when no registered
@@ -116,17 +133,43 @@ local disk = {
         if not fd then
             return nil, (errno == ENOENT) and M.ABSENT or M.UNAVAILABLE
         end
-        local pos
-        if off and off < 0 then
-            local size = fd:seek('end')
-            pos = fd:seek('set', math.max(0, (size or 0) + off))
-        else
-            pos = fd:seek('set', off or 0)
-        end
-        if not pos then fd:close(); return nil, M.UNAVAILABLE end
-        local got = len and fd:read(len) or fd:read('a')
+        local got = seek_range(fd, off, len)
         fd:close()
-        return got or ''
+        if got == nil then return nil, M.UNAVAILABLE end
+        return got
+    end,
+
+    --- A BOUND READER: the same ranged reads against an already-open handle. For a
+    --- caller that makes SEVERAL ranged reads of one path — a container parsing its
+    --- trailer, then its directory, then an entry — where the cost is the reopen,
+    --- not the bytes. Measured on /mnt/c: an open is ~3.3 ms, so a per-entry read
+    --- that reopens twice pays that twice.
+    ---
+    --- OPTIONAL, like every other op: a substrate with no handle concept has none,
+    --- and callers must work without it (the zip kind falls back to read_range).
+    --- The handle is a RESOURCE, so the contract is deliberately narrow: acquire for
+    --- one burst, close it, do NOT hold it across a whole corpus. A 199-archive
+    --- roster holding one handle each would exhaust file descriptors, which is why
+    --- there is no pool here — that is a further optimisation with a lifetime
+    --- problem of its own, not a free win.
+    reader = function (path)
+        local fd, _, errno = io.open(path, 'rb')
+        if not fd then
+            return nil, (errno == ENOENT) and M.ABSENT or M.UNAVAILABLE
+        end
+        local closed = false
+        return {
+            read_range = function (off, len)
+                if closed then return nil, M.UNAVAILABLE end
+                if len ~= nil and len <= 0 then return '' end
+                local got = seek_range(fd, off, len)
+                if got == nil then return nil, M.UNAVAILABLE end
+                return got
+            end,
+            close = function ()
+                if not closed then closed = true; fd:close() end
+            end,
+        }
     end,
 
     stamp = function (path)
@@ -248,6 +291,22 @@ M.kinds = {
         --- The parsed central directory for an archive, keyed by the archive's own
         --- validity stamp — so an edited archive re-parses and a stable one is
         --- parsed once. Cheap to hold: entry records, not content.
+        --- A range reader for ONE burst of reads against one archive: a bound
+        --- reader when the backing substrate offers handles (halves the opens — a
+        --- trailer plus a central directory is two reads, and each reopen costs
+        --- ~3.3 ms on /mnt/c), else the plain per-call form. Returns (rr, release).
+        --- Acquired per burst and released immediately: holding one per archive
+        --- across a 199-package roster would exhaust file descriptors.
+        local function burst(archive)
+            local h = backing.reader and backing.reader(archive)
+            if h then
+                return function (_, off, len) return h.read_range(off, len) end,
+                    h.close
+            end
+            return function (pth, off, len) return backing.read_range(pth, off, len) end,
+                function () end
+        end
+
         local function handle(archive)
             local stamp = backing.stamp(archive)
             if not stamp then return nil, 'archive unstampable' end
@@ -261,9 +320,16 @@ M.kinds = {
                 -- cannot stat is usually one where round trips hurt most.
                 whole = backing.read_range(archive, 0)
             end
-            local z, err = zip.open(function (pth, off, len)
-                return backing.read_range(pth, off, len)
-            end, archive, whole)
+            -- a burst is only worth acquiring when the parse will actually READ:
+            -- with `whole` present zip.open serves from memory and never touches rr,
+            -- so opening a handle would be pure cost. Measured the wrong way round
+            -- first — 23.2 -> 27.7 ms/archive on the manifest scan — which is how
+            -- this branch got here.
+            local rr, release
+            if whole then rr, release = nil, function () end
+            else rr, release = burst(archive) end
+            local z, err = zip.open(rr, archive, whole)
+            release()
             cache[archive] = { stamp = stamp, z = z, err = err }
             return z, err
         end
@@ -288,7 +354,22 @@ M.kinds = {
                     return nil, (aerr == M.ABSENT) and M.ABSENT or M.UNAVAILABLE
                 end
                 if not z.byname[entry] then return nil, M.ABSENT end
-                local out = zip.read(z, entry)
+                -- the local header and the entry data are two reads of one
+                -- archive, so one burst lets a handle-capable substrate open once
+                -- instead of twice. NOT when the archive is memory-backed: replacing
+                -- that reader would send every entry back to the substrate and undo
+                -- the read-once win.
+                local out
+                if z.whole then
+                    out = zip.read(z, entry)
+                else
+                    local rr, release = burst(archive)
+                    local prev = z.read
+                    z.read = rr
+                    out = zip.read(z, entry)
+                    z.read = prev
+                    release()
+                end
                 if not out then return nil, M.UNAVAILABLE end
                 return out
             end,
@@ -406,6 +487,14 @@ local function make(transports, spec)
         return t.dir(path)
     end
 
+    --- A bound reader for repeated ranged reads of one path, or nil when the
+    --- serving substrate has no handle concept. The caller MUST close it.
+    function S.reader(path)
+        local t = S.for_path(path)
+        if not t.reader then return nil end
+        return t.reader(path)
+    end
+
     --- Byte size, or nil when the substrate cannot say.
     function S.size(path)
         local t = S.for_path(path)
@@ -475,7 +564,7 @@ local disk_only = make({}, { { kind = 'disk' } })
 M.for_path, M.read, M.lines = disk_only.for_path, disk_only.read, disk_only.lines
 M.read_range = disk_only.read_range
 M.resolve_entry, M.join = disk_only.resolve_entry, disk_only.join
-M.size = disk_only.size
+M.size, M.reader = disk_only.size, disk_only.reader
 M.stamp, M.dir = disk_only.stamp, disk_only.dir
 M.spec = disk_only.spec
 

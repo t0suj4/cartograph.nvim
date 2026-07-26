@@ -510,3 +510,53 @@ test('transport: a MULTI-ROOT parallel extract resolves labels in workers',
     eq(0, #(got.unparsed or {}))
     vim.fn.delete(A, 'rf'); vim.fn.delete(B, 'rf')
 end)
+
+-- ── the bound reader: repeated ranged reads of one path ──────────────────────
+-- For a caller making SEVERAL ranged reads of one path (a container reading its
+-- trailer, then its directory, then an entry) the cost is the REOPEN, not the
+-- bytes — ~3.3 ms per open on a high-latency mount. Optional, like every op: a
+-- substrate with no handle concept has none and callers must work without it.
+
+test('transport: a reader answers ranges identically to the one-shot form',
+    function ()
+    local p = tmpfile('0123456789')
+    local h = transport.reader(p)
+    ok(h ~= nil, 'disk offers a reader')
+    -- the SAME eight edge cases the one-shot form pins, so the two cannot drift
+    for _, case in ipairs { { 3, 4 }, { 8, 5 }, { 0, 99 }, { -4, 4 }, { -99, 20 },
+        { 10, 3 }, { 99, 3 }, { 2, 0 } } do
+        eq(transport.read_range(p, case[1], case[2]), h.read_range(case[1], case[2]))
+    end
+    eq(transport.read_range(p, 0), h.read_range(0))
+    h.close()
+    vim.fn.delete(p)
+end)
+
+test('transport: a closed reader is UNAVAILABLE, not a crash', function ()
+    local p = tmpfile('abc')
+    local h = transport.reader(p)
+    h.close()
+    h.close() -- idempotent: a double close must not error
+    local got, err = h.read_range(0, 3)
+    eq(nil, got); eq(transport.UNAVAILABLE, err)
+    vim.fn.delete(p)
+end)
+
+test('transport: a reader on a missing path reports ABSENT', function ()
+    local h, err = transport.reader(vim.fn.tempname() .. '/gone')
+    eq(nil, h); eq(transport.ABSENT, err)
+end)
+
+-- the op is OPTIONAL: a stack whose serving transport has no reader returns nil,
+-- and every caller must already have a path that works without one
+test('transport: a substrate with no handle concept simply has no reader', function ()
+    transport.kinds.noreader = function ()
+        return { name = 'noreader',
+            claims = function (p) return p:match('%.nr$') ~= nil end,
+            read_range = function () return 'x' end }
+    end
+    local stack = transport.build { { kind = 'noreader' }, { kind = 'disk' } }
+    eq(nil, stack.reader('/a/b.nr'))
+    eq('x', stack.read_range('/a/b.nr', 0, 1)) -- ... and ranges still work
+    transport.kinds.noreader = nil
+end)
