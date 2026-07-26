@@ -132,8 +132,31 @@ return {
         -- match ONLY a lone string literal argument — computed paths stay
         -- unresolved (honest frontier, not a guess). Predicates demand
         -- iter_matches in the consumer (iter_captures ignores #eq?).
+        -- @bind is the LOCAL NAME an import introduces, which is what lets a call
+        -- through that name be attributed to the imported file (resolve_module_alias,
+        -- and the `unread-file` disposition for a call into an opaque bundle). Only
+        -- SINGLE-bind forms are captured: a default import, a namespace import, and
+        -- CommonJS `const x = require(...)`. NAMED imports (`import {a, b}`) bind
+        -- several names to one edge and the edge carries one `bind`, so they stay
+        -- uncaptured rather than being represented wrongly — a deliberate gap, not
+        -- an oversight.
+        --
+        -- Several patterns can match ONE import site (a namespace import matches the
+        -- general form too, and a CJS require matches both the declaration and the
+        -- bare-call form). The consumer dedupes on the @path NODE, so the edge set is
+        -- exactly what it was before binds existed; only the bind is added.
         import_query = [=[
-            (import_statement source: (string) @path)
+            (import_statement
+                (import_clause [
+                    (identifier) @bind
+                    (namespace_import (identifier) @bind)
+                ])?
+                source: (string) @path)
+            (lexical_declaration (variable_declarator
+                name: (identifier) @bind
+                value: (call_expression
+                    function: (identifier) @_rq (#eq? @_rq "require")
+                    arguments: (arguments . (string) @path .))))
             (call_expression
                 function: (identifier) @_fn (#eq? @_fn "require")
                 arguments: (arguments . (string) @path .))

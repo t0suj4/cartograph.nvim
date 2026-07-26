@@ -1251,12 +1251,16 @@ end
 -- (~): a derived resolution via the alias binding (a single-assignment/reaching
 -- check would promote it, and rule out reassigned aliases — banked). Lua-only
 -- today (only lua's spec captures import_bind); js/php import forms come later.
-local function resolve_module_alias(cv, edges, exact, tail, addref, node_index)
-    -- files with a module node that was never PARSED (bundle / missing grammar /
-    -- UNAVAILABLE read). Derived from the nodes rather than threaded in, so both
-    -- drivers see the same set with no mirrored assignment to drift — this pass is
-    -- shared, which is the whole point of the resolution pipeline.
+local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, unparsed)
+    -- files that are KNOWN but never PARSED (bundle / missing grammar / UNAVAILABLE
+    -- read). THREADED, not derived from node_index: in the extract driver the
+    -- frontier module nodes are appended AFTER the resolution pipeline runs, so
+    -- deriving them here saw an empty set and a call into a bundle stayed disposed
+    -- `external` — the bug this parameter exists to fix. Each driver supplies it
+    -- from whatever it has at that moment (extract: its in-flight roster; relink:
+    -- data.unparsed), and resolveparity is what holds the two honest.
     local unread = {}
+    for _, f in ipairs(unparsed or {}) do unread[f] = true end
     for _, n in pairs(node_index or {}) do
         if n.unparsed and n.file then unread[n.file] = true end
     end
@@ -2473,7 +2477,8 @@ local RESOLVE_PASSES = {
     { name = 'super', run = function (x)
         return resolve_super(x.cv, x.data.extends, x.exact, x.addref, x.node_index) end },
     { name = 'module_alias', run = function (x)
-        return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref, x.node_index) end },
+        return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
+            x.node_index, x.unparsed) end },
     { name = 'chain_type', run = function (x)
         return resolve_chain_type(x.cv, x.exact, x.addref, x.node_index) end },
     { name = 'field_chain', run = function (x)
@@ -3939,6 +3944,16 @@ function M.extract(root, opts)
     local fileset = {}
     for _, f in ipairs(opts and opts.fileset or files) do fileset[f] = true end
     for _, f in ipairs(files) do fileset[f] = true end
+    -- IMPORTABLE is fileset plus the OPAQUE FRONTIERS (bundles): a `*.min.js` is a
+    -- real file that a real import targets, and leaving it unresolvable meant the
+    -- import edge vanished AND every call through the imported name was disposed
+    -- `external` — a project-boundary claim about a file we simply never parsed.
+    -- Kept SEPARATE from fileset because fileset also drives the SCOPE map (rust
+    -- crates, addon/package boundaries), and a bundle has no business acquiring a
+    -- scope; only import resolution should see it.
+    local importable = {}
+    for f in pairs(fileset) do importable[f] = true end
+    for _, f in ipairs(minified or {}) do importable[f] = true end
 
     -- stamps: what each parsed file's truth is keyed to (mtime+size — a
     -- display-honesty gate for edits that arrive OUTSIDE nvim, not an
@@ -4531,13 +4546,38 @@ function M.extract(root, opts)
             if q then
                 -- iter_matches, not iter_captures: predicates (#eq?) only
                 -- apply to matches; iter_captures would yield raw captures
+                -- ONE EDGE PER IMPORT SITE, keyed by the @path node's position:
+                -- several query patterns can match the same site (a namespace
+                -- import also matches the general import form; a CJS require
+                -- matches both its declaration and the bare call), and a spec may
+                -- supply @bind on only one of them. Deduping here keeps the edge
+                -- set identical to what it was before binds existed and merges the
+                -- bind into it, rather than emitting a second edge that would move
+                -- every JS corpus gate.
+                local at_site = {}
                 for _, match in q:iter_matches(tsroot, src, 0, -1) do
+                    local pathn, bindn
                     for id, ns in pairs(match) do
-                        if q.captures[id] == 'path' then
-                            local target = spec.resolve_import(
-                                node_text(cap_node(ns), src), fileset, file, root)
-                            if target and target ~= file then
-                                edges[#edges + 1] = { from = file, to = target, kind = 'import' }
+                        local cn = q.captures[id]
+                        if cn == 'path' then pathn = cap_node(ns)
+                        elseif cn == 'bind' then bindn = cap_node(ns) end
+                    end
+                    if pathn then
+                        local sr, sc = pathn:start()
+                        local site = sr * 4096 + sc
+                        local target = spec.resolve_import(
+                            node_text(pathn, src), importable, file, root)
+                        if target and target ~= file then
+                            local bind = bindn and node_text(bindn, src) or nil
+                            local idx = at_site[site]
+                            if idx then
+                                if bind and not edges[idx].bind then
+                                    edges[idx].bind = bind
+                                end
+                            else
+                                edges[#edges + 1] = { from = file, to = target,
+                                    kind = 'import', bind = bind }
+                                at_site[site] = #edges
                             end
                         end
                     end
@@ -4809,7 +4849,7 @@ function M.extract(root, opts)
                     -- which module)
                     if spec.import_call and full == spec.import_call then
                         local target = args[1] and args[1] ~= ''
-                            and spec.resolve_import(args[1], fileset, file, root)
+                            and spec.resolve_import(args[1], importable, file, root)
                         if target and target ~= file then
                             local pt = calln:parent()
                             local ptt = pt and pt:type() or ''
@@ -4825,7 +4865,7 @@ function M.extract(root, opts)
                     -- literal; the edge is name-matched, so it carries ~
                     if spec.import_call_like and args[1] and args[1] ~= ''
                         and spec.import_call_like(full, args[1]) then
-                        local target = spec.resolve_import(args[1], fileset, file, root)
+                        local target = spec.resolve_import(args[1], importable, file, root)
                         if target and target ~= file then
                             edges[#edges + 1] = { from = file, to = target,
                                 kind = 'import', inferred = true }
@@ -4931,7 +4971,7 @@ function M.extract(root, opts)
         -- `NAME.member()` calls against it (same edge shape as import_call).
         if spec.scan_imports and spec.resolve_import then
             for _, imp in ipairs(spec.scan_imports(tsroot, src)) do
-                local target = spec.resolve_import(imp.path, fileset, file, root)
+                local target = spec.resolve_import(imp.path, importable, file, root)
                 if target and target ~= file then
                     edges[#edges + 1] = { from = file, to = target,
                         kind = 'import', bind = imp.alias, inferred = true }
@@ -5626,9 +5666,17 @@ function M.extract(root, opts)
     -- with relink ([[cartograph-resolution-pipeline]]). ctx.consts folds the
     -- const-fold k='local' keys for the registry pass; ret_* carries the
     -- return-round report back out.
+    -- the frontier roster AS IT STANDS NOW: bundles from the walk plus whatever
+    -- the file loop turned into an opaque frontier (missing grammar, UNAVAILABLE
+    -- read). Their module nodes are minted after this point, which is exactly why
+    -- the set has to travel rather than be read back off the graph.
+    local unparsed_now = {}
+    for _, f in ipairs(minified or {}) do unparsed_now[#unparsed_now + 1] = f end
+    for _, f in ipairs(cunparsed or {}) do unparsed_now[#unparsed_now + 1] = f end
     local resolve_ctx = { calls = calls, data = data, exact = exact,
         tail = tail, addref = addref, node_index = node_index,
-        scope_of = scope_of, consts = constDefs, parent_fn = parent_fn }
+        scope_of = scope_of, consts = constDefs, parent_fn = parent_fn,
+        unparsed = unparsed_now }
     run_resolve_passes(resolve_ctx)
     if (resolve_ctx.ret_resolved or 0) > 0 then
         data.ret_resolved = resolve_ctx.ret_resolved
@@ -6154,7 +6202,12 @@ function M.relink(data, touched)
     -- built above, before the resolve loop.
     n = n + run_resolve_passes({ calls = data.calls, data = data, exact = exact,
         tail = tail, addref = addref, node_index = node_index,
-        scope_of = scope_of, consts = nil, parent_fn = parent_fn })
+        scope_of = scope_of, consts = nil, parent_fn = parent_fn,
+        -- relink reads the roster off the graph, where extract could not: by this
+        -- point the frontier module nodes exist, so node_index would answer too —
+        -- passing it keeps the two drivers giving the pass the same input rather
+        -- than two different routes to it
+        unparsed = data.unparsed })
     -- stdlib RESOLUTION face: mint std nodes for std-aliased calls. GLOBAL here
     -- (relink runs over the full merged graph → covers the parallel parent);
     -- idempotent, so re-running on an incremental relink is safe.
