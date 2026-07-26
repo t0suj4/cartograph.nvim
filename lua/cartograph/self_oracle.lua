@@ -28,7 +28,9 @@ local function abs_of(file, data)
     local roots = data and data.roots
     if roots then
         local label, rest = file:match('^([^/]+)/(.*)$')
-        if label and roots[label] then return roots[label] .. '/' .. rest end
+        if label and roots[label] then
+            return require('cartograph.transport').join(roots[label], rest)
+        end
     end
     return ((data and data.root) or '') .. '/' .. file
 end

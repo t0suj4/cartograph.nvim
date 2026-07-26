@@ -2880,29 +2880,18 @@ local function list_files(root, subdirs, tp)
         for name, t in tp.dir(rel == '' and root or (root .. '/' .. rel)) do
             if name:sub(1, 1) ~= '.' then
                 local r = rel == '' and name or (rel .. '/' .. name)
-                if t == 'link' then
-                    -- a symlinked DIR: follow only when it points OUTSIDE
-                    -- the root (a corpus assembled from symlinks —
-                    -- factorio-mods). An INTERNAL alias (ripgrep's
-                    -- HomebrewFormula -> pkg/brew) is skipped: the real
-                    -- path is walked normally, and following both would
-                    -- duplicate every file under two keys.
-                    local p = root .. '/' .. r
-                    local st = tp.stat(p)
-                    if st and st.type == 'directory' then
-                        local rp = tp.realpath(p)
-                        local rootrp = tp.realpath(root)
-                        if rp and rootrp
-                            and rp:sub(1, #rootrp + 1) ~= rootrp .. '/' then
-                            if not seen_real[rp] then
-                                seen_real[rp] = true
-                                t = 'directory'
-                            end
-                        end
-                    elseif st and st.type == 'file' then
-                        t = 'file'
-                    end
+                -- WHAT THIS ENTRY REALLY IS is the SUBSTRATE's question, not the
+                -- walk's: symlinks exist only on a filesystem, so the policy
+                -- (follow a dir-link only when it leaves the root, skip an
+                -- internal alias) lives in the disk transport. The walk keeps
+                -- just the cross-entry DEDUP, which is generic set logic over
+                -- whatever canonical identity the substrate hands back — two
+                -- aliases to one real directory must not yield every file twice.
+                local rty, canon = tp.resolve_entry(root, r, t)
+                if canon then
+                    if seen_real[canon] then rty = t else seen_real[canon] = true end
                 end
+                t = rty
                 if t == 'directory' then
                     local ex = EXCLUDE_DIRS[name:lower()]
                     if not ex then

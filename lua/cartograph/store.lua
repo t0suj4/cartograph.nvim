@@ -1654,7 +1654,11 @@ function M.abs_in(data, file)
     if roots then
         local label, rest = file:match('^([^/]+)/(.*)$')
         local base = label and roots[label]
-        if base then return base .. '/' .. rest end
+        -- a root value may be a DIRECTORY (a string) or a CONTAINER (a table — an
+        -- archive plus an in-container prefix). transport.join composes either, so
+        -- "a path" stops being assumed here. n.file is unchanged in both cases,
+        -- which is what keeps the first-segment label convention intact.
+        if base then return require('cartograph.transport').join(base, rest) end
     end
     return data.root .. '/' .. file
 end

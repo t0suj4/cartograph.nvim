@@ -152,8 +152,9 @@ test('transport: a stack entry missing an op degrades to nil, never errors', fun
     eq('stamped', stack.stamp('/a/b.partial'))
     eq(nil, stack.read('/a/b.partial'))   -- not an error
     eq(nil, stack.lines('/a/b.partial'))  -- derived from read, same nil
-    eq(nil, stack.stat('/a/b.partial'))   -- no stat op either
-    eq(nil, stack.realpath('/a/b.partial'))
+    -- and no resolve_entry: the type comes back exactly as given, so the walk
+    -- carries no filesystem policy for a substrate that has none
+    eq('file', stack.resolve_entry('/a', 'b.partial', 'file'))
     transport.kinds.partialtest = nil
 end)
 
@@ -374,4 +375,138 @@ test('transport: a call into an UNAVAILABLE file is NOT disposed external', func
     local req = require('cartograph.portability').requires(store)
     eq(nil, req.names['lib.helper'])
     vim.fn.system({ 'chmod', '644', root .. '/lib.lua' }); vim.fn.delete(root, 'rf')
+end)
+
+
+-- ── the filesystem is a SPECIAL CASE, not the shape ──────────────────────────
+-- `stat` and `realpath` were briefly contract ops, which was a leak: only a
+-- filesystem has symlinks, and their single caller was the extractor's walk. The
+-- policy moved into the disk transport; the walk kept only the generic dedup.
+
+test('transport: resolve_entry passes non-links straight through', function ()
+    local d = vim.fn.tempname(); vim.fn.mkdir(d, 'p')
+    eq('file', transport.resolve_entry(d, 'x.lua', 'file'))
+    eq('directory', transport.resolve_entry(d, 'sub', 'directory'))
+    vim.fn.delete(d, 'rf')
+end)
+
+-- a symlinked DIRECTORY pointing OUTSIDE the root is followed, and hands back a
+-- canonical id so the caller can dedup two aliases to one real directory
+test('transport: an OUTSIDE dir symlink resolves to directory + a canonical id',
+    function ()
+    local outside = vim.fn.tempname(); vim.fn.mkdir(outside .. '/pkg', 'p')
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    if vim.fn.executable('ln') ~= 1 then skip 'no ln' end
+    vim.fn.system({ 'ln', '-s', outside .. '/pkg', root .. '/linked' })
+    local ty, canon = transport.resolve_entry(root, 'linked', 'link')
+    eq('directory', ty)
+    ok(canon ~= nil and canon:match('pkg$') ~= nil, 'canonical: ' .. tostring(canon))
+    vim.fn.delete(root, 'rf'); vim.fn.delete(outside, 'rf')
+end)
+
+-- an INTERNAL alias is left as-is (skipped downstream): the real path is walked
+-- normally, and following both would key every file twice
+test('transport: an INSIDE dir symlink is left unchanged, no canonical', function ()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/real', 'p')
+    if vim.fn.executable('ln') ~= 1 then skip 'no ln' end
+    vim.fn.system({ 'ln', '-s', root .. '/real', root .. '/alias' })
+    local ty, canon = transport.resolve_entry(root, 'alias', 'link')
+    eq('link', ty)   -- unchanged
+    eq(nil, canon)   -- nothing to dedup
+    vim.fn.delete(root, 'rf')
+end)
+
+-- FIDELITY: a dangling link keeps its type, because the inline walk left `link`
+-- in place and let the language check decide. Returning nil would silently drop a
+-- broken `foo.lua` symlink the old walk collected.
+test('transport: a BROKEN link keeps its type unchanged', function ()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    if vim.fn.executable('ln') ~= 1 then skip 'no ln' end
+    vim.fn.system({ 'ln', '-s', root .. '/nothing-here', root .. '/foo.lua' })
+    eq('link', transport.resolve_entry(root, 'foo.lua', 'link'))
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ── root values are transport KEYS, not paths ────────────────────────────────
+-- The graph parses a file key's FIRST SEGMENT as a scope label in six places and
+-- its extension as the language. So a packed package must be a LABEL whose root
+-- value is a container — never a composite in n.file, which would collide with
+-- that convention instead of extending it.
+
+test('transport: join composes a directory root exactly as before', function ()
+    eq('/base/rest.lua', transport.join('/base', 'rest.lua'))
+    eq('/base/a/b.lua', transport.join('/base', 'a/b.lua'))
+end)
+
+test('transport: join composes a CONTAINER root, with and without a prefix',
+    function ()
+    eq('/m/Mod_1.0.zip::Mod/control.lua',
+        transport.join({ container = '/m/Mod_1.0.zip', prefix = 'Mod' }, 'control.lua'))
+    eq('/m/Mod_1.0.zip::control.lua',
+        transport.join({ container = '/m/Mod_1.0.zip' }, 'control.lua'))
+end)
+
+-- the point of the whole exercise: the composite lives ONLY between abs() and a
+-- transport. What the graph stores stays a conventional labelled path.
+test('transport: a container root leaves n.file conventional', function ()
+    local store = require 'cartograph.store'
+    local data = { root = '/corpus', roots = {
+        Unpacked = '/mods/Unpacked',
+        Packed = { container = '/mods/Packed_1.0.zip', prefix = 'Packed' },
+    } }
+    -- the KEY the graph holds is the same shape for both forms
+    eq('/mods/Unpacked/control.lua', store.abs_in(data, 'Unpacked/control.lua'))
+    eq('/mods/Packed_1.0.zip::Packed/control.lua',
+        store.abs_in(data, 'Packed/control.lua'))
+    -- ... and the first segment still parses as a label, which is what the six
+    -- segment-reading sites depend on
+    eq('Packed', ('Packed/control.lua'):match('^([^/]+)/'))
+    eq('lua', ('Packed/control.lua'):match('%.([%w]+)$'))
+end)
+
+-- ── the multi-root parallel path, which had NO coverage ──────────────────────
+-- transport.join replaced the root-value concatenation in FOUR places. Two are
+-- covered above (store.abs_in) and by self_spec; the other two — parallel.lua's
+-- abs closure and worker.lua's reconstruction of it — are only reached by a
+-- MULTI-ROOT parallel extract, which no gate performs (libs --parallel sets no
+-- roots, and self_spec builds its own abs). So this drives one, with enough files
+-- to force real worker SPAWNS: nw = min(default_workers, ceil(#files/BATCH)) needs
+-- 49+ files to exceed 1, and a worker rebuilds `abs` from job.roots in a separate
+-- process — the exact path a module-level anything could never reach.
+test('transport: a MULTI-ROOT parallel extract resolves labels in workers',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local par = require 'cartograph.parallel'
+    local A, B = vim.fn.tempname(), vim.fn.tempname()
+    vim.fn.mkdir(A, 'p'); vim.fn.mkdir(B, 'p')
+    local files = {}
+    for i = 1, 60 do
+        local dir, label = (i % 2 == 0) and A or B, (i % 2 == 0) and 'plugA' or 'plugB'
+        local rel = ('m%d.lua'):format(i)
+        local fd = assert(io.open(dir .. '/' .. rel, 'w'))
+        fd:write(('local function f%d(x) return x + %d end\nreturn { f%d = f%d }\n')
+            :format(i, i, i, i))
+        fd:close()
+        files[#files + 1] = label .. '/' .. rel
+    end
+    local done, got = false, nil
+    par.extract('self://loaded', {
+        roots = { plugA = A, plugB = B },
+        files = files,
+        on_done = function (d) got = d; done = true end,
+    })
+    vim.wait(240000, function () return done end, 50)
+    ok(got ~= nil, 'the parallel extract completed')
+    -- every file was READ through a label-resolved key: 60 defs means the workers
+    -- resolved `plugA/m2.lua` to a real directory in their own processes
+    local defs = 0
+    for _, n in ipairs(got.nodes or {}) do
+        if n.kind == 'function' then defs = defs + 1 end
+    end
+    eq(60, defs)
+    -- ... and nothing landed as an unreadable frontier
+    eq(0, #(got.unparsed or {}))
+    vim.fn.delete(A, 'rf'); vim.fn.delete(B, 'rf')
 end)

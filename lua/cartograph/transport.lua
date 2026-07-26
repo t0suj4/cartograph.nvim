@@ -9,7 +9,7 @@
 -- THREE OPS, not one read(). They are separate because their DEPENDENCY
 -- FOOTPRINTS differ, which is the whole reason a contract beats a helper:
 --
---   list   enumerate a container            (disk: fs_scandir)
+--   list   enumerate a container            (disk: fs_scandir + resolve_entry)
 --   stamp  a validity key for cache/refresh (disk: mtime+size)
 --   read   the bytes                        (disk: io.open)
 --
@@ -150,8 +150,36 @@ local disk = {
         return function () return vim.uv.fs_scandir_next(it) end
     end,
 
-    stat = function (path) return vim.uv.fs_stat(path) end,
-    realpath = function (path) return vim.uv.fs_realpath(path) end,
+    --- WHAT A DIRECTORY ENTRY ACTUALLY IS, in this substrate's terms. Only a
+    --- filesystem has symlinks, so the whole policy lives HERE rather than in the
+    --- extractor's walk: follow a symlinked DIRECTORY only when it points OUTSIDE
+    --- the root (a corpus assembled from symlinks — factorio-mods), and skip an
+    --- INTERNAL alias (ripgrep's HomebrewFormula -> pkg/brew) because the real
+    --- path is walked normally and following both would duplicate every file
+    --- under two keys.
+    --- Returns (type, canonical) — `canonical` is a cross-entry identity the
+    --- CALLER dedups on (two aliases to one real directory), and is nil whenever
+    --- there is nothing to dedup. A substrate with no link semantics needs no
+    --- resolve_entry at all: the walk then uses the type as given.
+    --- FIDELITY: a broken or non-file/dir link returns the type UNCHANGED, which
+    --- is what the inline version did — it left `link` in place and let the
+    --- language check downstream decide. Returning nil here would silently drop
+    --- a dangling `foo.lua` symlink the old walk collected.
+    resolve_entry = function (root, rel, ty)
+        if ty ~= 'link' then return ty end
+        local p = root .. '/' .. rel
+        local st = vim.uv.fs_stat(p)
+        if st and st.type == 'directory' then
+            local rp, rootrp = vim.uv.fs_realpath(p), vim.uv.fs_realpath(root)
+            if rp and rootrp and rp:sub(1, #rootrp + 1) ~= rootrp .. '/' then
+                return 'directory', rp
+            end
+            return ty -- internal alias: unchanged, skipped downstream
+        elseif st and st.type == 'file' then
+            return 'file'
+        end
+        return ty
+    end,
 }
 
 M.disk = disk
@@ -240,18 +268,30 @@ local function make(transports, spec)
         return t.dir(path)
     end
 
-    --- uv-shaped stat, for callers needing type/size beyond the stamp.
-    function S.stat(path)
-        local t = S.for_path(path)
-        return t.stat and t.stat(path) or nil
+    --- Resolve a directory entry's real type. Substrate-neutral by default: a
+    --- transport with no link semantics simply gets its type back, so the walk
+    --- carries no filesystem policy of its own.
+    function S.resolve_entry(root, rel, ty)
+        local t = S.for_path(root .. '/' .. rel)
+        if not t.resolve_entry then return ty end
+        return t.resolve_entry(root, rel, ty)
     end
 
-    --- Canonical path, or nil where the substrate has no such notion. A
-    --- transport without link semantics never yields type 'link', so callers
-    --- that resolve aliases never reach this.
-    function S.realpath(path)
-        local t = S.for_path(path)
-        return t.realpath and t.realpath(path) or nil
+    --- COMPOSE A KEY from a root value and a relative rest. This is where "a
+    --- path" stops being assumed: a root value may be a DIRECTORY (a string, the
+    --- only form until now) or a CONTAINER — an archive plus an optional
+    --- in-container prefix — in which case the composed key names a place inside
+    --- it. The `::` form is INTERNAL to the byte layer: it appears only between
+    --- abs() and a transport, never in n.file, never in a node id, never in a
+    --- cache key. That is deliberate — the graph parses a file key's FIRST
+    --- SEGMENT as a scope label in six places and its extension as the language,
+    --- so a composite in n.file would collide with an existing convention rather
+    --- than extend it. A packed package is a LABEL whose root value is a
+    --- container; the graph keeps seeing `Name/file.lua`.
+    function S.join(base, rest)
+        if type(base) ~= 'table' then return base .. '/' .. rest end
+        local inner = base.prefix and (base.prefix .. '/' .. rest) or rest
+        return base.container .. '::' .. inner
     end
 
     return S
@@ -285,8 +325,8 @@ end
 local disk_only = make({}, { { kind = 'disk' } })
 M.for_path, M.read, M.lines = disk_only.for_path, disk_only.read, disk_only.lines
 M.read_range = disk_only.read_range
+M.resolve_entry, M.join = disk_only.resolve_entry, disk_only.join
 M.stamp, M.dir = disk_only.stamp, disk_only.dir
-M.stat, M.realpath = disk_only.stat, disk_only.realpath
 M.spec = disk_only.spec
 
 return M

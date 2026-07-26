@@ -31,7 +31,9 @@ if job.roots then
     local roots = job.roots
     abs = function (file)
         local label, rest = file:match('^([^/]+)/(.*)$')
-        return (roots[label] or '') .. '/' .. (rest or file)
+        local base = roots[label]
+        if base == nil then return '/' .. (rest or file) end
+        return require('cartograph.transport').join(base, rest or file)
     end
 end
 
