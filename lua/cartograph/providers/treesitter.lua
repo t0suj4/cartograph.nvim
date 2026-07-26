@@ -35,11 +35,16 @@ M.EXT = {
                                                         -- surface ([[cartograph-stdlib-profile]]):
                                                         -- known external, version-keyed,
                                                         -- refines no-def when a profile is active
-    -- the answering file is KNOWN and is NOT external: an import binds the
-    -- receiver to it, but that file was never parsed (an opaque bundle, a missing
-    -- grammar, or a read that came back UNAVAILABLE). "I know which file would
-    -- answer and could not read it" is a FRONTIER, not a boundary — minting
-    -- `external` here would state a project boundary on the strength of a failure.
+    -- the answering file is KNOWN and is NOT external: an import binds the receiver
+    -- to it, but that file was never parsed. "I know which file would answer and
+    -- could not read it" is a FRONTIER, not a boundary — minting `external` here
+    -- would state a project boundary on the strength of a failure.
+    -- WHICH CASES REACH THIS, measured rather than assumed: an UNAVAILABLE read (a
+    -- corrupt archive member, EACCES, a wire failure, no libz for a deflated entry)
+    -- and a missing grammar. NOT bundles, which this was originally written for: a
+    -- bundle is an OUTPUT ARTIFACT referenced by URL, never imported by the module
+    -- graph, and across ghost/grocy/sylius/jquery/mootools/desynced there are ZERO
+    -- import edges — zero edges of ANY kind — pointing at one.
     unread  = { disp = 'frontier', why = 'unread-file' },
     stdalias = { disp = 'external', why = 'std-alias' },-- a call whose root name is
                                                         -- bound to the stdlib via an explicit

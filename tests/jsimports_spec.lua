@@ -7,9 +7,16 @@
 --
 -- MEASURED on ghost after this landed: 3278 import edges now carry a bind (was 0),
 -- and 386 previously-ambiguous calls resolve — all `refused (ambiguous) => to
--- <target>`, zero regressions. The bundle case, however, fires on NO gated corpus:
--- ghost's 3 bundles are not imported with a binding. The fixture below is the only
--- thing exercising it, which is stated rather than glossed.
+-- <target>`, zero regressions.
+--
+-- THE BUNDLE CASE WAS A MIS-MODEL, since measured across ghost/grocy/sylius/jquery/
+-- mootools/desynced: ZERO edges of any kind point at an unparsed file. Ghost's three
+-- are `admin-auth.min.js` and two built theme assets, named as served PATHS by
+-- serve-public-file.js / ghost_head.js / card-assets.js. A bundle is an OUTPUT
+-- ARTIFACT shipped to a browser, so nothing imports it. The fixture below still
+-- earns its place — it pins that IF a bundle is imported the disposition is right —
+-- but the case that actually occurs is an UNAVAILABLE read of a file genuinely in
+-- the graph, which ecosystem_spec drives on a corrupt archive member.
 
 local ts = require 'cartograph.providers.treesitter'
 

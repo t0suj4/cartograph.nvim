@@ -461,3 +461,80 @@ test('ecosystem: a variant .toc name still marks the directory', function ()
         'a variant toc still bounds its directory: ' .. tostring(to))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── the REACHABLE instance of `unread-file` ──────────────────────────────────
+-- MEASURED across the corpus set (ghost/grocy/sylius/jquery/mootools/desynced):
+-- import edges whose target is an unparsed file = 0 EVERYWHERE. Ghost has three
+-- unparsed files and 3278 import binds, and not one bind points at a bundle —
+-- ZERO edges of any kind do. Its bundles are `admin-auth.min.js` and two built
+-- theme assets, named by serve-public-file.js / ghost_head.js / card-assets.js as
+-- served PATHS.
+--
+-- So a bundle is an OUTPUT ARTIFACT, not a dependency: it exists to be shipped to a
+-- browser, so it is referenced by URL and never imported by the module graph. The
+-- disposition's original framing ("a call into an opaque bundle") mis-modelled what
+-- a bundle is.
+--
+-- The trigger that IS reachable is the other one: an UNAVAILABLE read of a file
+-- that really is in the graph. This drives it on a realistic failure — a CORRUPT
+-- ARCHIVE MEMBER in a package roster, where cross-package requires do bind — rather
+-- than on a synthetic chmod.
+test('ecosystem roster: a corrupt archive member is a frontier, not the boundary',
+    function ()
+    if vim.fn.executable('zip') ~= 1 then skip 'no zip CLI' end
+    if not require('cartograph.zip').available() then skip 'no zlib' end
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local zip = require 'cartograph.zip'
+    local transport = require 'cartograph.transport'
+    local ts = require 'cartograph.providers.treesitter'
+
+    local d = vim.fn.tempname()
+    vim.fn.mkdir(d .. '/mods/A', 'p'); vim.fn.mkdir(d .. '/build/Pkg_1.0', 'p')
+    local function w(p, t) local fd = assert(io.open(p, 'w')); fd:write(t); fd:close() end
+    w(d .. '/mods/A/info.json', '{"name":"A","version":"1.0"}')
+    w(d .. '/mods/A/control.lua', "local lib = require '__Pkg__/lib'\n"
+        .. 'return { run = function () return lib.helper(1) end }\n')
+    w(d .. '/build/Pkg_1.0/info.json', '{"name":"Pkg","version":"1.0"}')
+    -- padded so the member is DEFLATED (a stored member would survive corruption
+    -- as valid-but-wrong text rather than failing to inflate)
+    w(d .. '/build/Pkg_1.0/lib.lua',
+        ('local function helper(x) return x + 1 end -- %s\n'):format(('pad '):rep(200))
+        .. 'return { helper = helper }\n')
+    vim.fn.system({ 'sh', '-c', ('cd %q/build && zip -q -r -X %q/mods/Pkg_1.0.zip Pkg_1.0')
+        :format(d, d) })
+
+    -- corrupt exactly the member's compressed data, located through the parser so
+    -- the central directory stays intact (it is what makes the member KNOWN)
+    local archive = d .. '/mods/Pkg_1.0.zip'
+    local z = zip.open(function (p, off, len)
+        return transport.read_range(p, off, len)
+    end, archive)
+    local e = z.byname['Pkg_1.0/lib.lua']
+    ok(e ~= nil and e.method == 8, 'the member is deflated')
+    local lh = transport.read_range(archive, e.offset, 30)
+    local datapos = e.offset + 30 + (lh:byte(27) + lh:byte(28) * 256)
+        + (lh:byte(29) + lh:byte(30) * 256)
+    local fd = assert(io.open(archive, 'r+b'))
+    fd:seek('set', datapos + 8); fd:write('\255\255\255\255'); fd:close()
+
+    local r = eco.roster('lua-factorio', { dir = d .. '/mods' })
+    local data = ts.extract(r.root, { files = r.files, abs = r.abs,
+        transport = r.transport })
+    -- KNOWN but unread: the central directory still lists it, so it is on the
+    -- frontier roster rather than absent from the graph
+    local roster = {}
+    for _, f in ipairs(data.unparsed or {}) do roster[f] = true end
+    eq(true, roster['Pkg/lib.lua'])
+    -- and the bound cross-package call says FRONTIER, not "project boundary"
+    local call
+    for _, c in ipairs(data.calls or {}) do
+        if c.callee == 'helper' then call = c end
+    end
+    ok(call ~= nil, 'the call is recorded')
+    eq(nil, call.to)
+    eq('frontier', call.ext and call.ext.disp)
+    eq('unread-file', call.ext and call.ext.why)
+    vim.fn.delete(d, 'rf')
+end)
