@@ -465,3 +465,94 @@ test('portability: a URI root yields no declaration and does not crash', functio
         calls = {}, stamps = {} })
     eq(nil, port.declared_for(store, 'lua-factorio'))
 end)
+
+-- ── the honesty split: WHY a name is not in the profile ──────────────────────
+-- The list used to be headed "candidate porting work", which was wrong for EVERY
+-- entry rather than for most. MEASURED on lua-factorio: the artifact distils METHODS
+-- only (LuaGameScript::get_player and ::print are in it; ::tick, ::players,
+-- ::surfaces, ::entity_prototypes are not), and it models global-rooted calls only.
+-- So a miss is never evidence the target lacks the name — game.entity_prototypes,
+-- genuinely renamed in 2.0, is indistinguishable from game.tick, which is fine.
+-- Hence NO "absent" bucket, and the report says why rather than implying one.
+
+test('portability: unknown_reason classifies by the artifact SHAPE', function ()
+    local port = require 'cartograph.portability'
+    local prof = require('cartograph.spec.profile').load('lua-factorio')
+    if not prof then skip 'no lua-factorio profile' end
+    -- a modelled namespace root: the miss is at MEMBER level, and members are not
+    -- enumerated, so it says nothing either way
+    eq('unenumerated-namespace', port.unknown_reason(prof, 'game.no_such_member', 'a.lua'))
+    eq('unenumerated-namespace', port.unknown_reason(prof, 'table.deepcopy', 'a.lua'))
+    -- an UNmodelled root: receiver-typed, with no representation at all
+    eq('receiver-typed', port.unknown_reason(prof, 'player.teleport', 'a.lua'))
+    eq('receiver-typed', port.unknown_reason(prof, 'chest3.set_request_slot', 'a.lua'))
+    -- a deep chain is still receiver-typed: only the first segment could ever be a
+    -- modelled namespace
+    eq('receiver-typed', port.unknown_reason(prof, 'a.b.c', 'a.lua'))
+    -- bare
+    eq('unclaimed-bare', port.unknown_reason(prof, 'my_helper', 'a.lua'))
+    -- and a name from a file of another language is not this profile's business
+    eq('other-language', port.unknown_reason(prof, 'json.load', 'zipper.py'))
+    eq('other-language', port.unknown_reason(prof, 'open', 'tool.py'))
+end)
+
+test('portability: the report groups by reason and claims no porting work',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    w('control.lua', 'local function boot()\n'
+        .. '  local p = game.get_player(1)\n'          -- provided (a distilled method)
+        .. '  p.teleport({0,0})\n'                     -- receiver-typed
+        .. '  return my_helper()\n'                    -- bare, unclaimed
+        .. 'end\nreturn { boot = boot }\n')
+    store.ingest(ts.extract(root))
+    local body = table.concat(port.report(store, 'lua-factorio', { cap = 12 }), '\n')
+    -- the misleading label is GONE
+    eq(nil, body:find('candidate porting work', 1, true))
+    -- ... replaced by the honest framing and a reason per group
+    ok(body:match('cannot adjudicate, grouped by WHY') ~= nil, 'grouped framing')
+    ok(body:match('RECEIVER%-TYPED') ~= nil, 'the receiver-typed group appears')
+    -- and it states WHY there is no "absent from the target" group
+    ok(body:match('NO "absent from the target" group') ~= nil, 'the absence is explained')
+    ok(body:match('distils METHODS only') ~= nil, 'with the artifact reason')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- every unknown gets exactly one reason, so the groups partition the list rather
+-- than sampling it — otherwise a reader cannot trust the counts
+test('portability: the reason groups PARTITION the unknown names', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0"}')
+    w('control.lua', 'return { go = function ()\n'
+        .. '  thing.one(); other.two(); bare_three(); game.four()\n'
+        .. 'end }\n')
+    store.ingest(ts.extract(root))
+    local res = port.audit(store, 'lua-factorio')
+    local counted = 0
+    for _, e in ipairs(res.entries) do
+        if not e.provided then
+            ok(e.reason ~= nil, 'every unknown carries a reason: ' .. e.name)
+            counted = counted + 1
+        end
+    end
+    eq(res.unknown, counted)
+    vim.fn.delete(root, 'rf')
+end)

@@ -234,6 +234,89 @@ function M.manifest(store)
     return groups, unclaimed, req
 end
 
+--- WHY A NAME IS NOT IN THE PROFILE — which is a different question from whether
+--- the environment has it, and conflating the two is how a list of things the
+--- artifact cannot see got labelled "candidate porting work".
+---
+--- MEASURED on lua-factorio (2026-07-26), which is what these buckets are shaped
+--- by rather than guessed at:
+---   · the artifact distils METHODS ONLY. LuaGameScript::get_player and ::print are
+---     in it; ::tick, ::players, ::surfaces, ::entity_prototypes are NOT. So a miss
+---     on a global's member says nothing — game.entity_prototypes (genuinely renamed
+---     in 2.0) is indistinguishable from game.tick (perfectly fine in 2.0).
+---   · it models GLOBAL-ROOTED calls only (tools/factoriodistill.lua:6-11 says so),
+---     so a receiver-typed name has no representation at all. On the Von Neumann mod
+---     that is 66 of 92 names.
+---   · Factorio EXTENDS the Lua stdlib namespaces (table.deepcopy via lualib) and
+---     the profile omits those, so even a "complete" stdlib namespace is not a
+---     closed set to test against.
+---
+--- CONSEQUENCE, stated plainly: with this artifact there is NO sound "absent from
+--- the target" bucket. Every not-in-profile name is outside what the artifact can
+--- adjudicate, and the honest report groups them by WHY and says what each would
+--- need. A future artifact that distils attributes could earn an `absent` bucket;
+--- claiming one now would be inventing evidence.
+--- Returns 'other-language' | 'receiver-typed' | 'unenumerated-namespace' |
+--- 'unclaimed-bare'. `file` is where the name was seen; a name from a file of
+--- ANOTHER language is not the profile's business at all — one zipper.py in a
+--- Factorio mod put 13 python names in this list, and calling them "a sibling
+--- module or a third-party dependency" was a label I knew to be wrong. The
+--- audit-level guard only refuses when the profile's language is absent ENTIRELY,
+--- so a mixed corpus reaches here.
+--- LIMIT: requires() keeps ONE file per name (the alphabetically first), so a name
+--- seen in two languages is classified by that sample. Precise enough to pull an
+--- obvious foreign-stdlib name out of a list where it was being called a third-party
+--- dependency; not a per-occurrence judgement, and it does not pretend to be.
+function M.unknown_reason(prof, name, file)
+    local ext = file and file:match('%.([%w]+)$')
+    if ext and prof.lang then
+        local lang = ext_lang()[ext:lower()]
+        if lang and lang ~= prof.lang then return 'other-language' end
+    end
+    local root, member = name:match('^([%w_]+)[.:]([%w_]+)$')
+    if not root then
+        -- a dotted CHAIN (a.b.c) or a call-shaped key: still receiver-typed, since
+        -- nothing but the first segment could ever be a modelled namespace
+        local first = name:match('^([%w_]+)[.:]')
+        if first and not (prof.nsset or {})[first] then return 'receiver-typed' end
+        if first then return 'unenumerated-namespace' end
+        return 'unclaimed-bare'
+    end
+    if (prof.nsset or {})[root] then return 'unenumerated-namespace' end
+    return 'receiver-typed'
+end
+
+-- ext -> language, from the specs themselves (memoised: the spec table does not
+-- change within a process)
+local _ext_lang
+function ext_lang()
+    if _ext_lang then return _ext_lang end
+    _ext_lang = {}
+    local ok, ts = pcall(require, 'cartograph.providers.treesitter')
+    if ok then
+        for lang, sp in pairs(ts.spec or {}) do
+            for _, e in ipairs(sp.exts or {}) do _ext_lang[e:lower()] = lang end
+        end
+    end
+    return _ext_lang
+end
+
+local ext_lang
+local REASON_TEXT = {
+    ['other-language'] = 'ANOTHER LANGUAGE — seen in files this profile does not'
+        .. ' describe, so it is not the profile\'s business. Scoring them here was'
+        .. ' noise: exclude those files, or score them against their own runtime.',
+    ['receiver-typed'] = 'RECEIVER-TYPED — the artifact models global-rooted calls'
+        .. ' only, so these have no representation in it at all. Needs receiver'
+        .. ' typing; their absence is not evidence about the target.',
+    ['unenumerated-namespace'] = 'NAMESPACE MEMBER, NOT ENUMERATED — the root IS a'
+        .. ' modelled namespace but the artifact distils METHODS only (and omits'
+        .. ' lualib extensions), so a miss here says nothing either way.',
+    ['unclaimed-bare'] = 'BARE AND UNCLAIMED — no shipped profile claims these.'
+        .. ' Most often a sibling module or a third-party dependency, NOT a gap in'
+        .. ' the environment.',
+}
+
 --- Audit the open graph against a target runtime profile.
 --- Returns (result, err) where result = { runtime, size, provided, unknown,
 --- entries = { {name, calls, provided, why, files} } }.
@@ -270,7 +353,9 @@ function M.audit(store, runtime)
     for name, n in pairs(req.names) do
         local w = M.provides(prof, name)
         res.entries[#res.entries + 1] = { name = name, calls = n,
-            provided = w ~= nil, why = w, files = { req.where[name] } }
+            provided = w ~= nil, why = w, files = { req.where[name] },
+            reason = (w == nil)
+                and M.unknown_reason(prof, name, req.where[name]) or nil }
         if w then res.provided = res.provided + 1 else res.unknown = res.unknown + 1 end
     end
     table.sort(res.entries, function (a, b)
@@ -427,24 +512,55 @@ function M.report(store, runtime, opts)
     end
     L[#L + 1] = ('  the profile claims %d symbols; a verdict is only as good as that')
         :format(res.size)
-    L[#L + 1] = '  NOT-IN-PROFILE is not "missing": a dependency may supply it, or the'
-    L[#L + 1] = '  artifact may be partial. This scores the boundary, it does not rule.'
     L[#L + 1] = ''
     local shown = 0
     if res.unknown == 0 then
         L[#L + 1] = '  every external name is accounted for by this profile'
     else
-        L[#L + 1] = ('  NOT IN %s (candidate porting work, most-used first):'):format(res.runtime)
+        -- GROUPED BY WHY, and NOT called porting work. This list used to be headed
+        -- "candidate porting work", which was wrong for every entry rather than for
+        -- most: with a methods-only artifact that models global-rooted calls, a miss
+        -- is never evidence the target lacks the name. Saying which KIND of blindness
+        -- produced each miss is the honest form, and it names what would fix it.
+        L[#L + 1] = ('  NOT IN %s — %d name(s) the artifact cannot adjudicate,'
+            .. ' grouped by WHY:'):format(res.runtime, res.unknown)
+        -- the general disclaimer stays, above the per-group reasons: NOT-IN-PROFILE
+        -- is not "missing", and a reader who skims past the groups should still meet
+        -- that in one line
+        L[#L + 1] = '    (NOT-IN-PROFILE is not "missing" — a dependency may supply'
+            .. ' it, or the artifact may not model it at all.)'
+        local groups, order = {}, { 'receiver-typed', 'unenumerated-namespace',
+            'unclaimed-bare', 'other-language' }
         for _, e in ipairs(res.entries) do
-            if not e.provided and shown < cap then
-                shown = shown + 1
-                L[#L + 1] = ('    %-38s %4d call(s)  %s'):format(e.name, e.calls,
-                    e.files[1] or '')
+            if not e.provided then
+                local g = groups[e.reason]
+                if not g then g = { n = 0, calls = 0, items = {} }; groups[e.reason] = g end
+                g.n = g.n + 1; g.calls = g.calls + e.calls
+                g.items[#g.items + 1] = e
             end
         end
-        if res.unknown > shown then
-            L[#L + 1] = ('    … +%d more'):format(res.unknown - shown)
+        local per = math.max(3, math.floor(cap / 3))
+        for _, key in ipairs(order) do
+            local g = groups[key]
+            if g then
+                L[#L + 1] = ''
+                L[#L + 1] = ('    %d name(s), %d call(s) — %s'):format(g.n, g.calls,
+                    REASON_TEXT[key])
+                for i = 1, math.min(per, #g.items) do
+                    local e = g.items[i]
+                    L[#L + 1] = ('      %-36s %4d call(s)  %s'):format(e.name,
+                        e.calls, e.files[1] or '')
+                    shown = shown + 1
+                end
+                if #g.items > per then
+                    L[#L + 1] = ('      … and %d more'):format(#g.items - per)
+                end
+            end
         end
+        L[#L + 1] = ''
+        L[#L + 1] = '  NO "absent from the target" group appears because this artifact'
+        L[#L + 1] = '  cannot support one: it distils METHODS only, so a missing'
+        L[#L + 1] = '  member is indistinguishable from an attribute it never held.'
     end
     L[#L + 1] = ''
     L[#L + 1] = ('  provided by %s: %d name(s)'):format(res.runtime, res.provided)
