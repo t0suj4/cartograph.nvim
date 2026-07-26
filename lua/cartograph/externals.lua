@@ -93,6 +93,108 @@ function M.surface(store)
     return s
 end
 
+--- THE REFERENCE SURFACE: qualified READS of names this graph does not define.
+--- A SECOND surface, deliberately not folded into surface() above.
+---
+--- WHY IT EXISTS: surface() is built from CALL records, so a name that is read but
+--- never called is invisible to it — and that is exactly where two whole classes of
+--- porting work live. Measured on the Von Neumann mod: `game.entity_prototypes[...]`
+--- is an INDEX EXPRESSION (three occurrences) and `global.foo` is a FIELD ACCESS (30
+--- of them), so neither produces a call record and neither could ever appear in a
+--- call-derived requirement set. The attribute distillation made the artifact able to
+--- adjudicate such names; this is what lets them be seen at all.
+---
+--- WHY IT IS SEPARATE: folding reads into surface() would move `bases`, and with it
+--- every portability count on every corpus. Reads and calls are also different
+--- evidence — a call names something invoked, a read names something touched — so a
+--- report that merged them could not say which it meant. The caller decides.
+---
+--- COST, measured: ~3.5 ms per function, because expr.of re-parses the enclosing
+--- function per node — 233 ms for a 34-file mod, 6.1 s for grocy (1697 fns), 35.6 s
+--- for libs (10387 fns). Hence opt-in, and never part of surface().
+---
+--- LANGUAGE COVERAGE, measured rather than assumed: this finds what the expr layer
+--- models as FIELD ACCESS. Lua, php and js yes (grocy: 54 names). JAVA NO — 51 of 60
+--- sampled functions produced an IR and 156 rows carried expressions, yet 0 dotted
+--- reads, because expr's FIELD table lists dot_index_expression / field_expression /
+--- member_expression and Java's node is `field_access`. Adding it is one word, but it
+--- changes the expression IR for every analyzer built on it (optimize's LICM/CSE,
+--- narrow, untangle) on every Java corpus — its own change, with its own gate run.
+--- KNOWN IMPRECISION, measured and guarded rather than hidden: LOOP BINDINGS are
+--- not in the locals set. Neither df nor the expr IR marks them — `for _, gen in
+--- pairs(list)` puts `gen` in `use` and never in `def`, and the expr layer models the
+--- head as an opaque node whose bindings sit in a `variable_list` child. Identifying
+--- them needs per-language BINDER NODE TYPES, which is spec territory, not something
+--- to hand-roll here; until that exists a loop-bound receiver looks like an unknown
+--- global (`crashSiteGenerator.energy` did).
+--- So a root seen in only ONE function is WITHHELD and counted: a loop variable is
+--- function-local by nature, while a real global is touched from several places. That
+--- under-reports a global used exactly once — the safe direction, and the count says
+--- how much was withheld rather than leaving it silent.
+--- Returns { names = {name -> n}, where = {name -> file}, total, withheld }.
+function M.references(store)
+    local expr = require 'cartograph.expr'
+    local out = { names = {}, where = {}, total = 0, withheld = 0 }
+    -- collected first, filtered after: the withhold test is about a ROOT's spread
+    -- across functions, which is not known until every function has been walked
+    local cand, roots = {}, {}
+    local data = store.data or {}
+    -- names this graph DEFINES: a read rooted at one of them is internal, whatever
+    -- else it is. Bare def names, since a read's root is a bare name.
+    local defined = {}
+    for _, n in ipairs(data.nodes or {}) do
+        if n.name then defined[n.name:match('([%w_]+)$') or n.name] = true end
+    end
+    for _, n in ipairs(data.nodes or {}) do
+        if n.kind == 'function' or n.kind == 'method' then
+            local ok, eo = pcall(expr.of, store, n.id)
+            local fl = ok and eo and eo.fl
+            if fl then
+                -- LOCAL ROOTS: parameters plus anything assigned in the body. A read
+                -- rooted at one of these is a receiver whose type we do not know, not
+                -- an external name — `p.mineable_properties` where p is a local says
+                -- nothing about the environment.
+                local locals = {}
+                for _, pn in ipairs(fl.params or {}) do locals[pn] = true end
+                for _, r in ipairs(fl.stmts or {}) do
+                    for _, d in ipairs(r.def or {}) do locals[d] = true end
+                end
+                for _, r in ipairs(fl.stmts or {}) do
+                    local got = {}
+                    for _, e in ipairs((r.expr or {}).rhs or {}) do expr.dotted_reads(e, got) end
+                    for _, e in ipairs((r.expr or {}).lhs or {}) do expr.dotted_reads(e, got) end
+                    expr.dotted_reads((r.expr or {}).cond, got)
+                    for _, chain in ipairs(got) do
+                        local rootname = chain:match('^([%w_]+)')
+                        if rootname and not locals[rootname] and not defined[rootname] then
+                            local c = cand[chain]
+                            if not c then c = { n = 0, fns = {}, file = n.file }
+                                cand[chain] = c end
+                            c.n = c.n + 1
+                            c.fns[n.id] = true
+                            roots[rootname] = roots[rootname] or {}
+                            roots[rootname][n.id] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for chain, c in pairs(cand) do
+        local rootname = chain:match('^([%w_]+)')
+        local spread = 0
+        for _ in pairs(roots[rootname] or {}) do spread = spread + 1 end
+        if spread >= 2 then
+            out.names[chain] = c.n
+            out.where[chain] = c.file
+        else
+            out.withheld = out.withheld + 1
+        end
+    end
+    for _ in pairs(out.names) do out.total = out.total + 1 end
+    return out
+end
+
 -- bases sorted UNKNOWN-first (the boundary surprises lead), then by call volume
 local function ranked(bases)
     local out = {}

@@ -614,3 +614,109 @@ test('portability: an existing member is provided, never absent', function ()
     ok(port.provides(prof, 'game.surfaces.create_entity') ~= nil,
         'a chain is not called absent')
 end)
+
+-- ── the REFERENCE surface: names read but never called ───────────────────────
+-- surface() is built from CALL records, so a name that is read and never invoked is
+-- invisible to it — and two whole classes of porting work live exactly there.
+-- MEASURED on the Von Neumann mod: `game.entity_prototypes[...]` is an INDEX
+-- EXPRESSION and `global.foo` a FIELD ACCESS, so neither produces a call record.
+-- Verified against runtime-api 2.0.72, not merely reported: entity_prototypes,
+-- item_prototypes and active_mods are all absent from LuaGameScript (active_mods
+-- moved to LuaBootstrap, i.e. script.active_mods).
+
+local function refs_fixture(body)
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    w('control.lua', body)
+    return root
+end
+
+test('externals: a read is a reference; a CALL is not', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    -- `global.flag` is READ in two functions; `string.find` is CALLED
+    local root = refs_fixture('local function a()\n  if global.flag then return 1 end\n'
+        .. '  return string.find("x", "y")\nend\n'
+        .. 'local function b()\n  global.flag = true\n  return a()\nend\n'
+        .. 'return { a = a, b = b }\n')
+    store.ingest(ts.extract(root))
+    local refs = require('cartograph.externals').references(store)
+    ok(refs.names['global.flag'] ~= nil, 'the read is a reference')
+    -- the CALLEE position is excluded, so the two surfaces stay disjoint and each
+    -- can be reported as evidence of its own kind
+    eq(nil, refs.names['string.find'])
+    vim.fn.delete(root, 'rf')
+end)
+
+test('externals: a read rooted at a local or param is NOT external', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = refs_fixture('local function a(param)\n  local loc = {}\n'
+        .. '  return param.field + loc.other + global.real\nend\n'
+        .. 'local function b()\n  return global.real\nend\n'
+        .. 'return { a = a, b = b }\n')
+    store.ingest(ts.extract(root))
+    local refs = require('cartograph.externals').references(store)
+    eq(nil, refs.names['param.field'])  -- a parameter
+    eq(nil, refs.names['loc.other'])    -- a local
+    ok(refs.names['global.real'] ~= nil, 'a genuinely free root survives')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- the KNOWN imprecision, guarded rather than hidden: loop bindings are in neither
+-- df's `def` nor the expr IR's binder position, so a root touched in only ONE
+-- function is withheld and counted
+test('externals: a loop-bound receiver is withheld, and the count says so', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = refs_fixture('local function a(list)\n'
+        .. '  for _, gen in pairs(list) do print(gen.energy) end\n'
+        .. '  return global.shared\nend\n'
+        .. 'local function b()\n  return global.shared\nend\n'
+        .. 'return { a = a, b = b }\n')
+    store.ingest(ts.extract(root))
+    local refs = require('cartograph.externals').references(store)
+    eq(nil, refs.names['gen.energy'])              -- withheld: one function only
+    ok((refs.withheld or 0) >= 1, 'and it is COUNTED, not silently dropped')
+    ok(refs.names['global.shared'] ~= nil, 'a root spread over functions survives')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: the reference report names the real porting work', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local prof = require('cartograph.spec.profile').load('lua-factorio')
+    if not (prof and prof.api_complete) then skip 'no distilled api artifact' end
+    -- `global.*` is a root 2.0 removed; game.entity_prototypes is a member it moved
+    local root = refs_fixture('local function a()\n'
+        .. '  if global.done then return game.entity_prototypes["x"] end\n'
+        .. '  return game.tick\nend\n'
+        .. 'local function b()\n  global.done = true\n  return game.entity_prototypes\nend\n'
+        .. 'return { a = a, b = b }\n')
+    store.ingest(ts.extract(root))
+    -- the classifier, directly
+    eq('unknown-root', port.ref_reason(prof, 'global.done'))
+    eq('absent', port.ref_reason(prof, 'game.entity_prototypes'))
+    eq('unenumerated-namespace', port.ref_reason(prof, 'game.tick'))
+    local body = table.concat(port.reference_report(store, 'lua-factorio'), '\n')
+    ok(body:match('ROOT NOT IN THE TARGET') ~= nil, 'the removed-global group')
+    ok(body:match('MEMBER ABSENT') ~= nil, 'the moved-member group')
+    ok(body:match('real porting work') ~= nil, 'both named as actionable')
+    vim.fn.delete(root, 'rf')
+end)

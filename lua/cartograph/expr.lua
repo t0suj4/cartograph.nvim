@@ -375,6 +375,39 @@ function M.rootname(e)
     return nil
 end
 
+--- The OUTERMOST dotted chains READ inside an expression — every `a.b.c` that is
+--- not merely a prefix of a longer one. M.dotted answers for a whole expression and
+--- returns nil the moment an index or call is in the way, so it cannot see the
+--- `game.entity_prototypes` inside `game.entity_prototypes["x"]`; this walks in and
+--- reports the chains it finds. Descent STOPS at a hit, so prefixes (`game`) are not
+--- reported alongside the chain that contains them.
+---
+--- THE CALLEE POSITION IS NOT A READ, and is skipped. `string.find(x)` is a CALL —
+--- the call surface already holds it — so including it here would make the two
+--- surfaces overlap and neither could be reported as evidence of its own kind. What
+--- remains is precisely "names touched but not invoked", which is the class the
+--- call-derived surface can never see. Arguments ARE read, so they descend.
+---
+--- The traversal lives here because this layer owns the closed schema: a consumer
+--- hand-rolling the `k` cases would be a second place to update when it changes.
+function M.dotted_reads(e, out)
+    out = out or {}
+    if not e then return out end
+    local d = M.dotted(e)
+    if d and d:find('%.') then out[#out + 1] = d; return out end
+    if e.k == 'field' then M.dotted_reads(e.b, out)
+    elseif e.k == 'index' then M.dotted_reads(e.b, out); M.dotted_reads(e.i, out)
+    elseif e.k == 'call' then
+        -- e.f (the callee) deliberately NOT descended: see above
+        for _, a in ipairs(e.a or {}) do M.dotted_reads(a, out) end
+    elseif e.k == 'un' then M.dotted_reads(e.e, out)
+    elseif e.k == 'bin' then M.dotted_reads(e.l, out); M.dotted_reads(e.r, out)
+    elseif e.k == '?' or e.k == 'table' then
+        for _, c in ipairs(e.kids or {}) do M.dotted_reads(c, out) end
+    end
+    return out
+end
+
 --- PURE = no call / allocation / unknown / vararg anywhere. The single safety gate
 --- for every key-equality lint (comparing two side-effecting operands is unsound).
 function M.is_pure(e)

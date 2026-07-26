@@ -523,7 +523,93 @@ function M.declared_for(store, runtime)
     return require('cartograph.versionfloor').declared(root, scale)
 end
 
+--- WHY A REFERENCED name is not provided. Sharper than the call-side classifier,
+--- and only because references are LOCALITY-FILTERED: externals.references already
+--- dropped anything rooted at a parameter, a local, or a project def, so a root the
+--- profile does not know is not "some receiver" — it is a global the target
+--- environment does not define. That is the strongest porting signal available:
+--- `global.savedRailbots` reads a 1.1 global that 2.0 removed in favour of
+--- `storage`, and on the Von Neumann mod there are 44 such reads.
+--- Returns 'unknown-root' | 'absent' | 'unenumerated-namespace'.
+function M.ref_reason(prof, name)
+    local root, member = name:match('^([%w_]+)%.([%w_]+)')
+    if not root then return 'unknown-root' end
+    local cls = (prof.global2class or {})[root]
+    if cls and (prof.api_complete or {})[cls] then
+        if member and not (prof.api_members or {})[cls .. '::' .. member] then
+            return 'absent'
+        end
+        return 'unenumerated-namespace'
+    end
+    if (prof.nsset or {})[root] then return 'unenumerated-namespace' end
+    return 'unknown-root'
+end
+
+local REF_TEXT = {
+    ['unknown-root'] = 'ROOT NOT IN THE TARGET — the environment does not define this'
+        .. ' global at all. Not a receiver: references are locality-filtered, so a'
+        .. ' parameter or local was already excluded. This is real porting work.',
+    ['absent'] = 'MEMBER ABSENT — the root is a documented global whose class is'
+        .. ' fully enumerated, and it does not hold this member. Real porting work.',
+    ['unenumerated-namespace'] = 'PRESENT, or not adjudicable — the root is known and'
+        .. ' the member either exists or sits in a namespace the artifact does not'
+        .. ' enumerate.',
+}
+
+--- The REFERENCE surface, adjudicated. Separate from the call audit on purpose: a
+--- read and a call are different evidence, and folding them would move every
+--- existing count. Returns display lines, or {} when nothing is referenced.
+function M.reference_report(store, runtime, opts)
+    local prof = require('cartograph.spec.profile').load(runtime)
+    if not prof then return {} end
+    local refs = require('cartograph.externals').references(store)
+    if refs.total == 0 then return {} end
+    local cap = (opts and opts.cap) or 12
+    local groups = {}
+    for name, n in pairs(refs.names) do
+        local why = M.ref_reason(prof, name)
+        local g = groups[why]
+        if not g then g = { n = 0, reads = 0, items = {} }; groups[why] = g end
+        g.n = g.n + 1; g.reads = g.reads + n
+        g.items[#g.items + 1] = { name = name, reads = n, file = refs.where[name] }
+    end
+    local L = { '' }
+    L[#L + 1] = ('  REFERENCED but not called — %d name(s) read, never invoked:')
+        :format(refs.total)
+    L[#L + 1] = '    (a second surface: the call audit above cannot see these, because'
+    L[#L + 1] = '     a name that is read and never called produces no call record.)'
+    if (refs.withheld or 0) > 0 then
+        L[#L + 1] = ('    %d name(s) WITHHELD — their root is touched in only one'):format(refs.withheld)
+        L[#L + 1] = '     function, where a loop-bound local is indistinguishable from a'
+        L[#L + 1] = '     global until per-language binder nodes are specified.'
+    end
+    for _, key in ipairs({ 'unknown-root', 'absent', 'unenumerated-namespace' }) do
+        local g = groups[key]
+        if g then
+            table.sort(g.items, function (a, b)
+                if a.reads ~= b.reads then return a.reads > b.reads end
+                return a.name < b.name
+            end)
+            L[#L + 1] = ''
+            L[#L + 1] = ('    %d name(s), %d read(s) — %s'):format(g.n, g.reads,
+                REF_TEXT[key])
+            for i = 1, math.min(cap, #g.items) do
+                local e = g.items[i]
+                L[#L + 1] = ('      %-36s %4d read(s)  %s'):format(e.name, e.reads,
+                    e.file or '')
+            end
+            if #g.items > cap then
+                L[#L + 1] = ('      … and %d more'):format(#g.items - cap)
+            end
+        end
+    end
+    return L
+end
+
 --- Display lines. `opts.cap` limits the not-in-profile list (default 25).
+--- `opts.references` appends the READ surface (see reference_report): opt-in because
+--- it re-parses every function (~3.5 ms each), which a default verb should not do to
+--- a large corpus.
 function M.report(store, runtime, opts)
     local res, err = M.audit(store, runtime)
     if not res then return { 'portability: ' .. err } end
@@ -608,6 +694,17 @@ function M.report(store, runtime, opts)
     end
     if res.provided > 1 then
         L[#L + 1] = ('    … and %d more'):format(res.provided - 1)
+    end
+    -- THE SECOND SURFACE. Names that are READ and never called cannot appear above:
+    -- the audit is built from call records. Opt-in because it re-parses every
+    -- function; announced always, so its absence is never mistaken for emptiness.
+    if opts and opts.references then
+        vim.list_extend(L, M.reference_report(store, runtime, opts))
+    else
+        L[#L + 1] = ''
+        L[#L + 1] = '  a READ surface also exists (names touched but never called —'
+        L[#L + 1] = '  where a renamed attribute or a removed global lives). Not shown:'
+        L[#L + 1] = '  it re-parses every function (~3.5 ms each). Pass references=true.'
     end
     return L
 end
