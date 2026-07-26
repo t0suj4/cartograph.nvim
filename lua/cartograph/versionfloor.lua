@@ -469,6 +469,31 @@ function M.declarations(root)
                 v = spr:match('(%d[%d%.]*)'), scale = 'python' }
         end
     end
+    -- PACKAGE-MANIFEST declarations, driven by the ecosystem specs rather than a
+    -- fifth hardcoded arm: an ecosystem that names a manifest, the key holding the
+    -- ENVIRONMENT version it targets, and the ruler that version is measured on can
+    -- declare its floor here without an edit. Factorio's info.json is the first —
+    -- and the fact this reads is the one :CartographPortability needed to say "you
+    -- are porting 1.1 -> 2.0" instead of scoring against an unnamed profile.
+    do
+        local ok_e, ecomod = pcall(require, 'cartograph.spec.ecosystem')
+        if ok_e then
+            for _, name in ipairs(ecomod.names()) do
+                local e = ecomod.load(name)
+                local id = e and e.identity
+                if id and id.manifest and id.target_key and id.version_scale then
+                    local body = read(id.manifest)
+                    local okj, m = false, nil
+                    if body then okj, m = pcall(vim.json.decode, body) end
+                    local raw = okj and type(m) == 'table' and m[id.target_key]
+                    if type(raw) == 'string' then
+                        out[#out + 1] = { source = id.manifest, raw = raw,
+                            v = raw:match('(%d[%d%.]*)'), scale = id.version_scale }
+                    end
+                end
+            end
+        end
+    end
     local tsc = read('tsconfig.json')
     local tgt = tsc and tsc:match('"target"%s*:%s*"([^"]+)"')
     if tgt then

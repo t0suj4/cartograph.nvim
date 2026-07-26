@@ -94,6 +94,12 @@ return {
         -- :CartographPortability needs and currently never reads, which is what
         -- turns "score against some profile" into "you are porting 1.1 -> 2.0"
         target_key = 'factorio_version',
+        -- WHICH RULER that version is measured on. Not the language's: Factorio 1.1
+        -- and 2.0 are its own scale, and versionfloor records the hard way that
+        -- comparing across rulers is meaningless (a mixed ruby+typescript project
+        -- reported "floor 2022" because 2022 > 3.1). This is what lets a DECLARED
+        -- 1.1 be compared with a profile artifact built from 2.0.72.
+        version_scale = 'factorio',
         deps_key = 'dependencies',
         -- a HINT for finding the right archive without opening all of them (one
         -- info.json out of a zip costs ~22ms over /mnt/c, so a 199-archive scan

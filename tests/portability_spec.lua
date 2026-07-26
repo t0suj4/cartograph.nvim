@@ -357,3 +357,111 @@ test('portability: a gains-heavy diff SAYS the profiles overlap', function ()
     end
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── the version the code DECLARES it targets ─────────────────────────────────
+-- The report used to print only the ARTIFACT's version, which reads as a claim
+-- about the environment rather than about a MOVE. The missing fact was sitting in
+-- the package manifest — a file the resolver already parses — so the header said
+-- "lua-factorio 2.0.72" while never mentioning that the code declares 1.1.
+--
+-- Read through the ecosystem axis rather than a fifth hardcoded arm in
+-- versionfloor: an ecosystem names its manifest, the key holding the environment
+-- version, and the RULER that version sits on.
+
+local function fixture(manifest)
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function w(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close()
+    end
+    if manifest then w('info.json', manifest) end
+    w('control.lua', 'local function boot() return game.tick end\nreturn { boot = boot }\n')
+    return root
+end
+
+test('versionfloor: a package manifest declares its environment version', function ()
+    local vf = require 'cartograph.versionfloor'
+    local root = fixture('{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    local d
+    for _, cand in ipairs(vf.declarations(root)) do
+        if cand.source == 'info.json' then d = cand end
+    end
+    ok(d ~= nil, 'the manifest declaration was found')
+    eq('1.1', d.raw)
+    eq('1.1', d.v)
+    -- its OWN ruler, not the language's: comparing across rulers is meaningless,
+    -- which versionfloor records learning the hard way (floor "2022" > "3.1")
+    eq('factorio', d.scale)
+    eq(d, vf.declared(root, 'factorio'))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('versionfloor: no manifest means no declaration, not a guess', function ()
+    local vf = require 'cartograph.versionfloor'
+    local root = fixture(nil)
+    for _, cand in ipairs(vf.declarations(root)) do
+        ok(cand.source ~= 'info.json', 'nothing invented from an absent manifest')
+    end
+    eq(nil, vf.declared(root, 'factorio'))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: declared_for links a runtime to its ecosystem ruler', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = fixture('{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    store.ingest(ts.extract(root))
+    local d = port.declared_for(store, 'lua-factorio')
+    ok(d ~= nil, 'the runtime name resolved to an ecosystem with a ruler')
+    eq('1.1', d.raw); eq('info.json', d.source)
+    -- a runtime with no ecosystem of that name has no ruler, so no declaration
+    eq(nil, port.declared_for(store, 'luajit'))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: the report states the MOVE, both ends named', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = fixture('{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    store.ingest(ts.extract(root))
+    local head = port.report(store, 'lua-factorio', { cap = 1 })[1]
+    ok(head:match('MOVING FROM factorio 1%.1') ~= nil, 'the declared end: ' .. head)
+    ok(head:match('%(declared in info%.json%)') ~= nil, 'and WHERE it was declared')
+    ok(head:match('TO lua%-factorio') ~= nil, 'the target end too')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- with NO declaration the old header is kept verbatim: a report that cannot name
+-- the move must not imply one
+test('portability: an undeclared project keeps the plain header', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = fixture(nil)
+    store.ingest(ts.extract(root))
+    local head = port.report(store, 'lua-factorio', { cap = 1 })[1]
+    eq(nil, head:find('MOVING FROM', 1, true))
+    ok(head:match('^portability — lua%-factorio') ~= nil, 'plain header: ' .. head)
+    vim.fn.delete(root, 'rf')
+end)
+
+-- a non-filesystem root (a roster's mods://, self://loaded) has no manifest to read
+-- and must not be probed as if it were a path
+test('portability: a URI root yields no declaration and does not crash', function ()
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    store.ingest({ schema = 1, root = 'mods:///tmp/x', nodes = {}, edges = {},
+        calls = {}, stamps = {} })
+    eq(nil, port.declared_for(store, 'lua-factorio'))
+end)

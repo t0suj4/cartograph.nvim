@@ -383,15 +383,48 @@ function M.diff_report(store, from, to, opts)
     return L
 end
 
+--- THE VERSION THIS CODE DECLARES IT TARGETS, on the same ruler as the profile
+--- being scored against — or nil. The link is by NAME: a runtime called
+--- `lua-factorio` has an ecosystem spec of the same name, whose `version_scale`
+--- says which ruler its environment versions sit on, and versionfloor reads the
+--- declaration out of the package manifest.
+---
+--- This is the fact that turns "score against some profile" into "you are porting
+--- 1.1 -> 2.0". It was sitting in info.json, in a file the resolver ALREADY parses,
+--- and the report never read it — so the header printed the artifact's version and
+--- said nothing about the code's.
+function M.declared_for(store, runtime)
+    local root = (store.data or {}).root
+    if not root or root:match('^%w+://') then return nil end
+    local ok_e, ecomod = pcall(require, 'cartograph.spec.ecosystem')
+    if not ok_e then return nil end
+    local eco = ecomod.load(runtime)
+    local scale = eco and (eco.identity or {}).version_scale
+    if not scale then return nil end
+    return require('cartograph.versionfloor').declared(root, scale)
+end
+
 --- Display lines. `opts.cap` limits the not-in-profile list (default 25).
 function M.report(store, runtime, opts)
     local res, err = M.audit(store, runtime)
     if not res then return { 'portability: ' .. err } end
     local cap = (opts and opts.cap) or 25
     local L = {}
-    L[#L + 1] = ('portability — %s%s: %d of %d external name(s) provided')
-        :format(res.runtime, res.version and (' ' .. tostring(res.version)) or '',
-            res.provided, res.provided + res.unknown)
+    local decl = M.declared_for(store, runtime)
+    if decl then
+        -- both ends NAMED, on one ruler: the code's declared target and the
+        -- artifact's version. Without this the header stated only the artifact's,
+        -- which reads as a claim about the environment rather than about a MOVE.
+        L[#L + 1] = ('portability — MOVING FROM %s %s (declared in %s) TO %s%s')
+            :format(decl.scale, decl.raw, decl.source, res.runtime,
+                res.version and (' ' .. tostring(res.version)) or '')
+        L[#L + 1] = ('  %d of %d external name(s) provided by the target')
+            :format(res.provided, res.provided + res.unknown)
+    else
+        L[#L + 1] = ('portability — %s%s: %d of %d external name(s) provided')
+            :format(res.runtime, res.version and (' ' .. tostring(res.version)) or '',
+                res.provided, res.provided + res.unknown)
+    end
     L[#L + 1] = ('  the profile claims %d symbols; a verdict is only as good as that')
         :format(res.size)
     L[#L + 1] = '  NOT-IN-PROFILE is not "missing": a dependency may supply it, or the'
