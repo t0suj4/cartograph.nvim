@@ -55,7 +55,7 @@ end
 ---   bare, known } } }.
 function M.surface(store)
     local s = { total = 0, resolved = 0, internal_multi = 0, cross_scope = 0,
-        stdlib_tail = 0, external = 0, bases = {} }
+        stdlib_tail = 0, external = 0, unread = 0, bases = {} }
     for _, c in callrec.each(store.data) do
         s.total = s.total + 1
         if callrec.to(c) then
@@ -65,6 +65,15 @@ function M.surface(store)
             if r == 'ambiguous' then s.internal_multi = s.internal_multi + 1
             elseif r == 'blocked' then s.cross_scope = s.cross_scope + 1
             elseif r == 'vocab' then s.stdlib_tail = s.stdlib_tail + 1 end
+        elseif c.ext and c.ext.why == 'unread-file' then
+            -- silent, but NOT the boundary: an import binds this receiver to a
+            -- file we KNOW and never parsed (bundle / missing grammar /
+            -- UNAVAILABLE read). Its own bucket, and deliberately NOT added to
+            -- `bases`, so it reaches neither the external surface nor
+            -- portability's requirement set — putting a name we have no evidence
+            -- about into "candidate porting work" is exactly the overclaim the
+            -- disposition exists to stop.
+            s.unread = s.unread + 1
         else
             -- SILENT (c.to nil, c.refused nil) = external-unknown: the boundary.
             s.external = s.external + 1

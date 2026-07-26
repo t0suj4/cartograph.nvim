@@ -270,14 +270,37 @@ test('transport: extract accepts a declarative spec, same graph as the default',
     vim.fn.delete(root, 'rf')
 end)
 
--- KNOWN RED — the remaining half, deliberately not fixed in this change.
--- The frontier NODE now survives, but the call into it is still disposed
--- `external` ("this is the project boundary"), because the resolver's nodef path
--- has no notion that the answering file went unread. Fixing it means teaching
--- the disposition that a call whose import/receiver resolves to an UNPARSED file
--- is `frontier`, not `external` — and that path is MIRRORED across the extract
--- and relink drivers (4 EXT.nodef sites), which is exactly where the cbarg
--- divergence came from. It gets its own change, with resolveparity beside it.
-test('transport: a call into an UNAVAILABLE file is not disposed external', function ()
-    skip 'KNOWN RED: resolver nodef path does not consult the unparsed roster'
+-- WAS RED. The frontier node surviving is not enough: the CALL into it was still
+-- disposed `external` — "this is the project boundary" — a confident claim built
+-- on a failed read, feeding :CartographExternals and the portability report.
+-- Fixed in the SHARED resolution pass (resolve_module_alias), not at the 4
+-- mirrored EXT.nodef sites: the evidence is an explicit import BINDING to a file
+-- whose module node is unparsed, which is narrow enough to be sound and lives in
+-- one place, so extract and relink cannot drift.
+test('transport: a call into an UNAVAILABLE file is NOT disposed external', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = fixture()
+    vim.fn.system({ 'chmod', '000', root .. '/lib.lua' })
+    local probe = io.open(root .. '/lib.lua', 'r')
+    if probe then probe:close(); vim.fn.delete(root, 'rf'); skip 'running as root' end
+    local d = ts.extract(root)
+    local call
+    for _, c in ipairs(d.calls or {}) do if c.callee == 'helper' then call = c end end
+    ok(call ~= nil, 'the call site is still recorded')
+    eq(nil, call.to)                          -- unresolved: we could not read it
+    eq('frontier', call.ext and call.ext.disp) -- ... but NOT the boundary
+    eq('unread-file', call.ext and call.ext.why)
+
+    -- and the user-visible surfaces agree: it leaves the external boundary and
+    -- the portability requirement set, rather than posing as a dependency
+    local store = require 'cartograph.store'
+    store.ingest(d)
+    local surface = require('cartograph.externals').surface(store)
+    eq(1, surface.unread)
+    local req = require('cartograph.portability').requires(store)
+    eq(nil, req.names['lib.helper'])
+    vim.fn.system({ 'chmod', '644', root .. '/lib.lua' }); vim.fn.delete(root, 'rf')
 end)

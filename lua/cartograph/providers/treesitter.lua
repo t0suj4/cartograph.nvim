@@ -35,6 +35,12 @@ M.EXT = {
                                                         -- surface ([[cartograph-stdlib-profile]]):
                                                         -- known external, version-keyed,
                                                         -- refines no-def when a profile is active
+    -- the answering file is KNOWN and is NOT external: an import binds the
+    -- receiver to it, but that file was never parsed (an opaque bundle, a missing
+    -- grammar, or a read that came back UNAVAILABLE). "I know which file would
+    -- answer and could not read it" is a FRONTIER, not a boundary — minting
+    -- `external` here would state a project boundary on the strength of a failure.
+    unread  = { disp = 'frontier', why = 'unread-file' },
     stdalias = { disp = 'external', why = 'std-alias' },-- a call whose root name is
                                                         -- bound to the stdlib via an explicit
                                                         -- `const X = std....` binding in its file
@@ -1246,6 +1252,14 @@ end
 -- check would promote it, and rule out reassigned aliases — banked). Lua-only
 -- today (only lua's spec captures import_bind); js/php import forms come later.
 local function resolve_module_alias(cv, edges, exact, tail, addref, node_index)
+    -- files with a module node that was never PARSED (bundle / missing grammar /
+    -- UNAVAILABLE read). Derived from the nodes rather than threaded in, so both
+    -- drivers see the same set with no mirrored assignment to drift — this pass is
+    -- shared, which is the whole point of the resolution pipeline.
+    local unread = {}
+    for _, n in pairs(node_index or {}) do
+        if n.unparsed and n.file then unread[n.file] = true end
+    end
     local amap = {} -- file -> { alias -> module-file }, from require binds
     for _, e in ipairs(edges or {}) do
         if e.kind == 'import' and e.bind and e.from and e.to then
@@ -1286,6 +1300,18 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index)
                     end
                 end
                 local cto = cget(i, 'to')
+                -- NO fit, and the bound module is a file we never read: the
+                -- disposition the main resolver left (`no-def`, i.e. external =
+                -- "the project boundary") is a claim it cannot support. We know
+                -- exactly which file would answer. Say UNREAD instead. Narrow by
+                -- construction: it needs an explicit import BINDING plus an
+                -- unparsed target, so a corpus full of bundles does not become one
+                -- big frontier — only calls actually aimed INTO a bundle do. Not
+                -- counted as a resolution (it resolves nothing); the pass's return
+                -- stays the number of calls it actually linked.
+                if not fit and not cto and unread[mod] then
+                    cset(i, 'ext', EXT.unread)
+                end
                 if fit and not dup and fit.id ~= cto then
                     -- fill an UNRESOLVED call (refused-with-candidates, or a
                     -- clean exact-only refusal that leaves no refusal record —
