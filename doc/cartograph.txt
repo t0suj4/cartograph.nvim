@@ -101,7 +101,8 @@ NAVIGATING AND OVERLAYS                                    *cartograph-cmd-nav*
                               (call-dominator + subsystem)
   :CartographHeat             toggle the hub/heat overlay: fan-in/out
                               and role (symbols pane only)
-  :CartographMark             toggle the cursor row in the working set
+  :CartographMark             toggle the cursor row's subject in the
+                              working set (see |cartograph-subject|)
   :CartographWorkingSet       open the working-set view
   :CartographWorkspace        open the workspace — ad-hoc Lua against
                               the loaded graph; a returned node list is
@@ -444,8 +445,8 @@ already marks, `M` is already middle-of-screen. These ship as COMMANDS and stay
 unbound until you ask for them:
 
   field         default   what it does ~
-  mark          (unbound) toggle this row in the working set, which is
-                          what :CartographMark does
+  mark          (unbound) toggle this row's SUBJECT in the working set,
+                          which is what :CartographMark does
   set_view      (unbound) the working-set altitude (:CartographWorkingSet)
   set_next      (unbound) next working-set member
   set_prev      (unbound) previous working-set member
@@ -455,6 +456,23 @@ unbound until you ask for them:
     require('cartograph').setup { keys = { mark = ',m', set_view = ',M',
       set_next = ']w', set_prev = '[w', cone_in = ',c', cone_out = ',C' } }
 <
+
+THE SUBJECT OF A ROW                                       *cartograph-subject*
+
+`mark` and the cone verbs act on the row's SUBJECT — the node the row is about,
+which is not always a node the row IS:
+
+  1. the row's own symbol, at the file or working-set altitude
+  2. else what the row REFERS to: a call site, an occurrence, or a folded
+     usage group is about the function whose body contains it, so marking
+     works while you traverse references
+  3. else the altitude's own subject: the function you descended into, the
+     entity whose callers you are reading. No row at those altitudes is a
+     symbol, so without this, mark had nothing to act on and refused
+
+Because 3 marks something with no row of its own to carry the ●, the verb says
+which node it marked. A file row has no subject — a file is not a node — so
+mark there reports that rather than guessing at its members.
 
 ==============================================================================
 5. TRANSACTIONS                                       *cartograph-transactions*

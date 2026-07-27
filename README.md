@@ -395,9 +395,14 @@ Mark what you're working on; dive freely; come back. These ship as **commands**,
 squat on a vim key (`m` already marks, `M` is middle-of-screen). The `keys.`
 name after each is what to bind if you want it on a key.
 
-- `:CartographMark` (`keys.mark`) — toggle the symbol under the cursor in the
-  **working set** (● in the gutter; files containing members carry ● at the
-  files level).
+- `:CartographMark` (`keys.mark`) — toggle the row's **subject** in the
+  **working set** (● in the gutter; file rows carry ● when the file holds a
+  member). The subject is the row's own symbol, else what the row *refers to* —
+  a call site is about the function containing it — else the altitude's subject,
+  so marking works while you traverse references and from inside a function,
+  where no row is a symbol. It reports which it marked, since an altitude
+  subject has no row to put the ● on. `:CartographCone` reads the row the same
+  way.
 - `:CartographWorkingSet` (`keys.set_view`) — the working-set altitude: your
   members grouped by file, with the cursor on the **last-visited member** — the
   way back from a code dive. `l` dives back in, `h` returns the way you came.

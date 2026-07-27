@@ -58,9 +58,32 @@ local M = {
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
     line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
     line_detail = {},
+    -- what a row is ABOUT (a node id), which is NOT what `l` does here: a
+    -- caller row is about the using function but descends into its
+    -- occurrences. Keeping the two apart is the whole point — hover, descend,
+    -- stage, heat and paint all read line_node, so anchoring these rows by
+    -- setting IT would silently retarget `l`. See M.row_subject.
+    line_about = {},
+    -- a row's KIND, for overlays that must paint on what a row IS rather than
+    -- on a field that merely mentions a file (see the working-set ● below)
+    line_kind = {},
     trail = {},     -- descent trail: l pushes where you were, h pops (journey-back)
     fwd_trail = {}, -- ascent memory: h pushes where you left, l returns there exactly
 }
+
+-- Altitudes whose ROWS ARE NODES: hovering one previews that node's definition.
+-- They share M.hover_node — the working set and the candidate list were left out
+-- of the hover dispatch when they were added, so moving the cursor there changed
+-- nothing in the source pane. That is worst exactly at the working set, whose
+-- whole job is re-orientation after a code dive.
+--
+-- Public because MEMBERSHIP IS THE BUG SURFACE: hover_node's body was never
+-- broken, the dispatch just never reached it, so a spec that calls hover_node
+-- directly would pass against exactly that bug. The CursorMoved handler is a
+-- closure inside attach() and unreachable from a test, so this table is the seam
+-- a spec can hold to.
+M.NODE_HOVER = { file = true, region = true, tbl = true, state = true,
+    ws = true, refused = true }
 
 -- the lenses offered at an altitude. The `file` altitude gains a `live` lens
 -- ONLY under the self provider — the running instance can answer what a
@@ -141,12 +164,14 @@ local function file_row(ctx, file, depth, dim)
         ctx.marks[#ctx.lines] = { { #indent, #indent + #file, 'CartographFrontier' },
             { #indent + #file, -1, 'CartographDim' } }
         ctx.line_file[#ctx.lines] = file
+        ctx.line_kind[#ctx.lines] = 'file'
         return
     end
     if mod and mod.unparsed then
         ctx.lines[#ctx.lines + 1] = ('%s%s  (unparsed)'):format(indent, file)
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
         ctx.line_file[#ctx.lines] = file
+        ctx.line_kind[#ctx.lines] = 'file'
         return
     end
     -- self graph: ⚡ marks a file that actually RAN this session (a required
@@ -164,6 +189,7 @@ local function file_row(ctx, file, depth, dim)
         table.insert(ctx.marks[#ctx.lines], { b, -1, 'DiagnosticOk' })
     end
     ctx.line_file[#ctx.lines] = file
+    ctx.line_kind[#ctx.lines] = 'file'
     local sign = SIGN[store.classify(file)]
     if sign then ctx.signs[#ctx.signs + 1] = { row = #ctx.lines - 1, sign = sign } end
 end
@@ -183,6 +209,7 @@ local function render_ws(ctx)
             ctx.lines[#ctx.lines + 1] = n.file
             ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
             ctx.line_file[#ctx.lines] = n.file
+            ctx.line_kind[#ctx.lines] = 'file'
         end
         ctx.lines[#ctx.lines + 1] = '  ' .. n.name
         ctx.line_node[#ctx.lines] = n.id
@@ -286,6 +313,7 @@ local function render_file(ctx, file)
     ctx.lines[1] = ('%s  (%d)'):format(file, #shown_defs(file))
     ctx.marks[1] = { { 0, #file, 'CartographSection' }, { #file, -1, 'CartographDim' } }
     ctx.line_file[1] = file
+    ctx.line_kind[1] = 'file'
     ctx.file_header[file] = 1
     local sign = SIGN[store.classify(file)]
     if sign then ctx.signs[#ctx.signs + 1] = { row = 0, sign = sign } end
@@ -328,6 +356,8 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
     ctx.lines[1] = ('%s %s — %s (%s)'):format(icon, name, label, counts)
     ctx.marks[1] = { { 0, #icon, 'CartographDim' }, { #icon + 1, #icon + 1 + #name, 'CartographTitle' },
                      { #icon + 1 + #name, -1, 'CartographDim' } }
+    -- the header names the entity these sites refer TO
+    ctx.line_about[1] = node.id
 
     -- group per using function: a single site stays one flat row; several
     -- fold into a subtree (`▸ name (n)`, l toggles) whose children are the
@@ -364,6 +394,9 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
             if st.inferred then ctx.marks[#ctx.lines] = { { #text - 2, -1, 'CartographDim' } } end
             ctx.vnums[#ctx.lines] = tostring(st.line + 1)
             ctx.line_site[#ctx.lines] = st
+            -- the row is ABOUT the using function (descend still opens the
+            -- site, not the fn — that separation is line_about's whole reason)
+            ctx.line_about[#ctx.lines] = g.fn
         else
             -- several sites: the row DESCENDS into the occurrences (no folds —
             -- the browser has altitude, l/h are the only vocabulary)
@@ -372,6 +405,7 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
             ctx.lines[#ctx.lines + 1] = text
             ctx.marks[#ctx.lines] = { { 2 + #disp, -1, 'CartographDim' } }
             ctx.line_group[#ctx.lines] = g
+            ctx.line_about[#ctx.lines] = g.fn
         end
     end
     if #sites == 0 then
@@ -812,6 +846,8 @@ local function render_occs(ctx, key)
     local fname = fn.name or '?'
     ctx.lines[1] = ('%s — sites of %s (%d)'):format(fname, en.name or '?', #ranges)
     ctx.marks[1] = { { 0, #fname, 'CartographTitle' }, { #fname, -1, 'CartographDim' } }
+    -- the header names the USING function, whose body these occurrences are in
+    ctx.line_about[1] = fnid
     -- each row shows the REFERENCE itself (sliced from its range), tail-
     -- stripped to the accessed field: `local bar = self.foo` reads `.foo`.
     -- The full statement is one hover away in the source pane.
@@ -857,6 +893,8 @@ local function render_occs(ctx, key)
         ctx.vnums[#ctx.lines] = tostring(rsl + 1)
         ctx.line_site[#ctx.lines] = { fn = fnid, name = fname, file = fn.file,
             line = rsl, range = r }
+        -- every occurrence row is about the function whose body holds it
+        ctx.line_about[#ctx.lines] = fnid
     end
 end
 
@@ -993,6 +1031,9 @@ local function render_fn(ctx, id)
         node.access and '   (access point)' or '')
     ctx.marks[1] = { { 0, #pre, 'CartographDim' },
         { #pre, #pre + 1 + #(node.name or '?'), 'CartographTitle' } }
+    -- the header names this function: the row IS about it, so mark/cone act on
+    -- it here rather than falling back to the altitude
+    ctx.line_about[1] = id
     if node.access then
         ctx.marks[1][#ctx.marks[1] + 1] =
             { #pre + 1 + #(node.name or '?'), -1, 'CartographDim' }
@@ -1277,7 +1318,8 @@ function M.render()
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
-        line_regfor = {}, line_block = {}, line_detail = {} }
+        line_regfor = {}, line_block = {}, line_detail = {},
+        line_about = {}, line_kind = {} }
     local v = M.view
     if LENS_SETS[v.level] and cur_lens() == 'detail' then
         render_detail(ctx)
@@ -1313,6 +1355,7 @@ function M.render()
     M.line_trans, M.line_lit = ctx.line_trans, ctx.line_lit
     M.line_regfor, M.line_block = ctx.line_regfor, ctx.line_block
     M.line_detail = ctx.line_detail
+    M.line_about, M.line_kind = ctx.line_about, ctx.line_kind
 
     -- names come from arbitrary source text; a row must stay one row
     for i, l in ipairs(ctx.lines) do
@@ -1441,32 +1484,119 @@ function M.projection(limit)
     return { labels = labels, selected = selected }
 end
 
---- The node id under the cursor in the browser window, or nil. Lets commands
---- act on the current row (the working-set / cone ops are command-invocable so
---- they need no default key — see [[cartograph-terminology]], graph-ops rule).
-function M.cursor_id()
+--- The row under the cursor in the browser window, or nil if it isn't open.
+local function cursor_row()
     if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return nil end
-    return M.line_node and M.line_node[vim.api.nvim_win_get_cursor(M.win)[1]] or nil
+    return vim.api.nvim_win_get_cursor(M.win)[1]
 end
 
---- Toggle the cursor row in the working set (:CartographMark; the `mark` key
---- calls this when the user binds one).
+-- ── THE SUBJECT OF AN ALTITUDE ──────────────────────────────────────────────
+-- What is this view ABOUT? The recorded law ([[refactor-cockpit-design]], the
+-- FSM anchor): "every altitude must hang somewhere in the structural tree or
+-- h/l breaks symmetry — a synthetic altitude needs a source-code anchor node,
+-- or it's a one-way door." The RELATION altitudes (callers / occs / regfor)
+-- never got that treatment: their ROWS are other nodes referring to a subject
+-- that is itself never a row, so a verb keyed on the cursor row found nothing
+-- to act on and refused — while traversing references, exactly where you most
+-- want to mark what you landed on.
+--
+-- Two flavours, deliberately kept distinct. Conflating them is how three
+-- different "the node under the cursor" lookups accreted, each subtly wrong:
+--   'def'   the node whose DEFINITION this altitude shows. Drives the SOURCE
+--           PANE (sync_focus_to_view), so it stays narrow — widening it would
+--           make an ascent onto a callers list swap the def pane out from under
+--           you.
+--   'about' (the default) that, plus the relation altitudes. Drives VERBS —
+--           mark, cone, gf — which want the thing you are looking AT, not a
+--           definition to display.
+function M.subject(kind)
+    local v = M.view
+    local def = (v.level == 'fn' and v.fn)
+        or (v.level == 'block' and (v.block or ''):match('^(.-)\31'))
+        or (v.level == 'region' and v.region)
+        or (v.level == 'tbl' and v.tbl)
+        or (v.level == 'var' and v.var)
+        or nil
+    if kind == 'def' then return def end
+    -- the occs key is kind\31entity\31fn: the USING function is the subject
+    -- (its body is what you are reading), not the entity being referred to
+    local occs_fn = v.level == 'occs' and v.occs and v.occs:match('([^\31]*)$')
+    return def
+        or (v.level == 'callers' and v.callers)
+        or (v.level == 'regfor' and v.regfor)
+        or (occs_fn ~= '' and occs_fn)
+        or nil
+end
+
+--- The node a ROW is about: the row's own symbol, else its anchor (a reference
+--- row is about the function that contains it), else the altitude's subject.
+--- Returns (id, provenance) where provenance is 'row' or 'altitude' — the
+--- caller must say which, since an altitude answer marks something that has no
+--- row to show a sign on.
+---
+--- Nil-tolerant by design: render_regfor's site.fn is a MODULE, not a node, so
+--- it falls through to the altitude rather than naming something that isn't
+--- there. Written as an `or` chain and NOT as ipairs over a candidate list —
+--- ipairs stops at the first nil, which would silently drop every later
+--- alternative (the bug that cost resolve_module_alias 845 fills).
+function M.row_subject(row)
+    row = row or cursor_row()
+    if not row then return nil end
+    local function pick(id) return (id and store.node(id)) and id or nil end
+    local id = pick(M.line_node[row]) or pick(M.line_about[row])
+        or pick((M.line_site[row] or {}).fn)
+        or pick((M.line_group[row] or {}).fn)
+    if id then return id, 'row' end
+    id = pick(M.subject())
+    if id then return id, 'altitude' end
+    return nil
+end
+
+--- Hover a NODE row: tint its relationships and PREVIEW its definition in the
+--- source pane (a context takeover, restored on leave). Shared by every altitude
+--- in NODE_HOVER. Hover never re-roots the cockpit — pivoting stays a conscious
+--- <CR>/l, so the view follows the eye and focus follows intent. Returns the
+--- previewed id, or nil when the row is not a node row.
+function M.hover_node(r)
+    local id = M.line_node[r]
+    if not id then return nil end
+    M.paint(id)
+    -- already focused: nothing to preview, drop the takeover so the def shows
+    if id ~= store.focused then store.set_context({ node = id })
+    else store.set_context(nil) end
+    return id
+end
+
+--- Toggle the row's subject in the working set (:CartographMark; the `mark` key
+--- calls this when the user binds one). Reports the name either way: at a
+--- relation or fn altitude the mark lands on the altitude's subject, which has
+--- no row of its own to carry the ● — a silent toggle there looks like a no-op.
 function M.ws_toggle_cursor()
-    local id = M.cursor_id()
-    if not (id and store.node(id)) then
-        return vim.notify('cartograph: no symbol on this row', vim.log.levels.INFO)
+    local id, from = M.row_subject()
+    if not id then
+        return vim.notify('cartograph: nothing to mark here — mark works on a '
+            .. 'symbol, a reference to one, or the function you are inside',
+            vim.log.levels.INFO)
     end
-    store.ws_toggle(id)
+    local now = store.ws_toggle(id)
+    local n = store.node(id)
+    vim.notify(('cartograph: %s %s%s'):format(now and 'marked' or 'unmarked',
+        n and n.name or id, from == 'altitude' and ' (this altitude)' or ''),
+        vim.log.levels.INFO)
     local loc = store.loc_provider and store.loc_provider.get()
     M.render()
     if loc and store.loc_provider then store.loc_provider.set(loc) end
 end
 
---- Toggle a reachability cone on the cursor node (:CartographCone in|out).
+--- Toggle a reachability cone on the row's subject (:CartographCone in|out).
 function M.cone_cursor(dir)
-    local id = M.cursor_id()
+    local id = M.row_subject()
     local n = id and store.node(id)
-    if not n then return vim.notify('cartograph: no symbol on this row', vim.log.levels.INFO) end
+    if not n then
+        return vim.notify('cartograph: nothing to cone here — cone works on a '
+            .. 'symbol, a reference to one, or the function you are inside',
+            vim.log.levels.INFO)
+    end
     local count = store.set_cone(id, dir)
     M.paint_cone()
     if count == 0 and not store.cone then
@@ -1619,8 +1749,14 @@ function M.restage()
             local n = store.node(id)
             if n then memberfiles[n.file] = true end
         end
+        -- FILE rows only. line_file is set on every row that BELONGS to a file
+        -- (member rows carry it so hover/gf/staging can find their source), so
+        -- keying the file-level ● on it dotted every row of any file holding a
+        -- mark — a true field, the wrong question. line_kind says what the row
+        -- IS ([[cartograph-terminology]]: an overlay annotates rows, it must not
+        -- restate them).
         for row, f in pairs(M.line_file) do
-            if memberfiles[f] then
+            if memberfiles[f] and M.line_kind[row] == 'file' then
                 vim.api.nvim_buf_set_extmark(M.buf, ns_stage, row - 1, 0,
                     { sign_text = '● ', sign_hl_group = 'DiagnosticInfo',
                         priority = 50 })
@@ -1753,21 +1889,9 @@ function M.attach(win)
                     sync_focus_to_view()
                 end
                 M.emit_view() -- the selected row may have changed (deduped)
-                if M.view.level == 'file' or M.view.level == 'region'
-                    or M.view.level == 'tbl' or M.view.level == 'state' then
-                    -- hover TINTS relationships and PREVIEWS the row in the
-                    -- source pane (context takeover, restored on leave); it
-                    -- never re-roots the cockpit (pivoting stays a conscious
-                    -- <CR>/l): the view follows the eye, focus follows intent
-                    local id = M.line_node[r]
-                    if id then
-                        M.paint(id)
-                        if id ~= store.focused then
-                            store.set_context({ node = id })
-                        else
-                            store.set_context(nil)
-                        end
-                    elseif M.view.level == 'state' and M.line_trans[r] then
+                if M.NODE_HOVER[M.view.level] then
+                    if not M.hover_node(r)
+                        and M.view.level == 'state' and M.line_trans[r] then
                         -- a transition's "source" is its line in the spec
                         spec_context(M.line_trans[r])
                     end
@@ -1835,14 +1959,9 @@ function M.attach(win)
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
     end
-    -- the node a view is anchored on (whose def the source pane should show)
-    local function view_anchor()
-        return (M.view.level == 'fn' and M.view.fn)
-            or (M.view.level == 'block' and (M.view.block or ''):match('^(.-)\31'))
-            or (M.view.level == 'region' and M.view.region)
-            or (M.view.level == 'tbl' and M.view.tbl)
-            or (M.view.level == 'var' and M.view.var)
-    end
+    -- the node a view is anchored on (whose def the source pane should show).
+    -- The NARROW flavour of the altitude's subject, on purpose: see M.subject.
+    local function view_anchor() return M.subject('def') end
     -- keep the source pane in step with the browser: after a move lands on a
     -- node-anchored view, focus that node so the def pane shows it instead of
     -- staying stranded on wherever a descent last focused. The _own_pivot
@@ -2715,10 +2834,12 @@ function M.attach(win)
     vim.keymap.set('n', keys.open_file, function ()
         local r = row()
         local site = M.line_site[r]
-        local n = store.node(M.line_node[r]) or (site and store.node(site.fn))
-            or (M.line_group[r] and store.node(M.line_group[r].fn))
+        -- the four-way probe this used to open-code IS row_subject — it was the
+        -- only consumer that got the lookup right, so it now shares it. Extra
+        -- parens: row_subject also returns a provenance, which would otherwise
+        -- ride along as a second argument.
+        local n = store.node((M.row_subject(r)))
         local file = (site and site.file) or (n and n.file) or M.line_file[r]
-            or (M.view.level == 'fn' and store.node(M.view.fn) and store.node(M.view.fn).file)
         if not file then return end
         local lnum = (site and site.line + 1) or (M.view.level == 'fn' and M.line_stmt[r])
             or (n and atr.sl(n.range) + 1) or 1
