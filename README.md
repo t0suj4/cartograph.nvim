@@ -2101,8 +2101,8 @@ detection is covered by a golden test that runs the real `--graph` CLI over
 `tests/fixtures/effects` (self-skips if the CLI isn't installed).
 
 The same gates ride a **pre-commit fence** — `.githooks/pre-commit` runs the
-doc audit, the dogfood seam guard and the suite, cheapest first. It is checked
-in but inert in a fresh clone until git is pointed at it:
+doc audit, the **nav audit**, the dogfood seam guard and the suite, cheapest
+first. It is checked in but inert in a fresh clone until git is pointed at it:
 
 ```sh
 tools/install-hooks.sh      # git config core.hooksPath .githooks
@@ -2255,6 +2255,26 @@ nvim --headless -u NONE -l tools/rubydistill.lua
 # is prose, checked only for dead names and the roster claim.
 nvim --headless -u NONE -l tools/docaudit.lua           # audit
 nvim --headless -u NONE -l tools/docaudit.lua --emit    # + paste-ready help lines
+```
+
+`tools/navaudit.lua` is the same idea for the **cockpit**. The analysis half of
+cartograph has uniform honesty; the navigation half's failure mode is *silence* —
+a missing wire renders as "nothing here", which reads exactly like a real "none",
+so it never trips a fence and only a user finds it. Three checks, ratchet 0:
+
+- **surface honesty** — a file that reads whole-graph facts (`topo():callers`,
+  `occurrences`, …) must also be able to say they are *absent*. The unit is the
+  **surface, not the verb**: every earlier index-only guard sat on the command
+  surface, so the cockpit reached a fabricated "none" by *navigating*. A pane is
+  a surface; so is an LSP handler. Writing this check found a second instance.
+- **concern disposition** — every altitude either has a `panes/concerns.lua`
+  entry or is listed as explicitly not a concern, with a reason; stale or dead
+  entries on either side fail too.
+- **hover disposition** — every altitude is in the node-hover class or listed
+  with why it is not, so a new altitude cannot ship undecided.
+
+```sh
+nvim --headless -u NONE -l tools/navaudit.lua
 ```
 
 Three SYNTHETIC corpora are registered first-class in `tools/corpora.lua` —

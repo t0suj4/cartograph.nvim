@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # cartograph pre-commit fence ([[cartograph-shipping-checklist]] / bench:
-# "the seam fence only fences if it runs"). Three gates, CHEAPEST FIRST so a
-# failure costs 70ms rather than 22s (~22s total when all three pass):
+# "the seam fence only fences if it runs"). Four gates, CHEAPEST FIRST so a
+# failure costs 70ms rather than 22s (~22s total when all four pass):
 #
 #   1. docaudit — the DOC FENCE: a :Cartograph name our own docs still claim
 #      but nothing registers, a language count that contradicts the spec
 #      roster, or a GROWING helpdoc coverage gap (the ratchet) fails the commit.
-#   2. dogfood — the BAND SEAM-GUARD (a raw wide-index read outside band.lua/
+#   2. navaudit — the NAV FENCE: a SURFACE that reads whole-graph facts but
+#      cannot say they are ABSENT (i.e. would render a fabricated "none" on a
+#      thin index), an altitude with no concern disposition, a concern with an
+#      untyped empty, or an altitude nobody decided about for hover. The unit is
+#      the surface, not the verb — that distinction is why this exists.
+#   3. dogfood — the BAND SEAM-GUARD (a raw wide-index read outside band.lua/
 #      store.lua fails the commit) + the self-serving / lint dashboard.
-#   3. the full spec suite (tests/run.sh).
+#   4. the full spec suite (tests/run.sh).
 #
 # Checked in under .githooks/ and activated per-clone with
 #   git config core.hooksPath .githooks
@@ -38,6 +43,7 @@ step () { # label, cmd...
 }
 
 step "doc audit" "$NVIM" --headless -u NONE -l tools/docaudit.lua
+step "nav audit" "$NVIM" --headless -u NONE -l tools/navaudit.lua
 step "dogfood seam fence" "$NVIM" --headless -u NONE -l tools/dogfood.lua
 step "spec suite" bash tests/run.sh
 

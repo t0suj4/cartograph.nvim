@@ -194,8 +194,17 @@ local function bind_nav(buf, which)
         local fl  = cursor_file_line(win, node)
         local col = vim.api.nvim_win_get_cursor(win)[2]
         local to  = M.resolve_jump(node, fl, col, vim.fn.expand('<cword>'))
-        if to then store.pivot(to)
-        else vim.notify('cartograph: no known callee under the cursor', vim.log.levels.INFO) end
+        if to then return store.pivot(to) end
+        -- "no known callee" is a CLAIM about the call graph, so it may only be
+        -- made when there is one: resolve_jump reads topo():callees, which the
+        -- thin index does not carry, so on it every jump would report a
+        -- confident absence. Same fabrication the callers altitude had (see
+        -- cartograph.panes.concerns) — a second surface, one layer over: here
+        -- the manufactured fact is a notification rather than a rendered count.
+        local why = require('cartograph.panes.concerns').needs_edges(store)
+        vim.notify(why and ('cartograph: jump needs the call graph — ' .. why)
+            or 'cartograph: no known callee under the cursor',
+            why and vim.log.levels.WARN or vim.log.levels.INFO)
     end, { buffer = buf, desc = 'cartograph: jump to the definition under the cursor' })
     vim.keymap.set('n', keys.open_file, function () goto_real(vim.api.nvim_get_current_win(), which()) end,
         { buffer = buf, desc = 'cartograph: open the real file here' })

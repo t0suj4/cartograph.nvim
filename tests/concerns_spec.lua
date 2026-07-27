@@ -243,6 +243,21 @@ test('render: a full graph with genuinely no callers still says what that MEANS'
     symbols.buf = nil
 end)
 
+test('the guard belongs to the SURFACE: the source pane shares it too', function ()
+    -- navaudit's check A found this second instance while it was being written:
+    -- source.lua's jump reported "no known callee under the cursor" — a CLAIM
+    -- about the call graph — on a thin index that has none. The unit of the
+    -- honesty guard is the surface, not the verb.
+    local src = require 'cartograph.panes.source'
+    ok(type(src.resolve_jump) == 'function', 'the resolver is public')
+    -- resolve_jump itself stays pure (nil = nothing here); the CALLER decides
+    -- how to say so, which is why the guard reads from concerns
+    store.ingest({ schema = 1, root = '/proj', index_only = true,
+        nodes = { fn('m.lua::f', 'f') }, edges = {} })
+    eq(nil, src.resolve_jump(store.node('m.lua::f'), 0, 0, 'whatever'))
+    ok(concerns.needs_edges(store), 'and the surface can say WHY it is nil')
+end)
+
 test('empty: needs_edges is exported so `var` can share the fix', function ()
     -- var is not a concern entry (its subject and inverse are structural) but
     -- its rows come from the same use edges, so it must not be left fabricating
