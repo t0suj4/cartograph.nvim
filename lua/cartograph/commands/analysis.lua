@@ -223,6 +223,20 @@ function M.register(H)
         scratch(require('cartograph.fieldlink').report(store, id))
     end, { desc = 'cartograph: field/member linker (Track 3) — resolves the focused method\'s self.field READS to the self.field = … WRITE(s) on its class (own methods + extends ancestors), receiver-typed. Go-to-definition for a data member; a writeless read is left unresolved (sound-first, not the dead undefined-member lint)' })
 
+    -- ── the DATA STAGE: prototypes as base + ordered overrides + registration ─
+    cmd('CartographPrototypes', function ()
+        local store = live() if not store then return end
+        local lines = require('cartograph.prototypes').report(store)
+        if not lines then
+            -- typed empty: "not a project with a data stage" is a different fact
+            -- from "declares no prototypes", and must not render identically
+            return vim.notify('cartograph: no data-stage adapter for this project'
+                .. ' — the prototype reading activates on an env profile that has'
+                .. ' one (today: lua-factorio)', vim.log.levels.INFO)
+        end
+        scratch(lines)
+    end, { desc = 'cartograph: the DATA STAGE — every prototype the project declares, read as a BASE REFERENCE + an ORDERED sequence of field overrides + its registration, which is what a prototype actually is (not a table literal). Reads module-TOP-LEVEL rows, where 72% of a real mod\'s field assignments live. Honest about being a lower bound: an opaque call receiving the prototype marks it ~HEDGED, a non-literal value keeps its path and records why, an unresolved base names the local to follow, and an explicit nil is reported as a DELETE rather than an unknown' })
+
     -- ── untangle MODULE: independent function clusters in a file (or a dir) ─
     cmd('CartographUntangleModule', function (o)
         local store = live() if not store then return end

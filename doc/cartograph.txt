@@ -252,6 +252,20 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
                               on its class (own methods + extends
                               ancestors). A writeless read stays
                               unresolved
+  :CartographPrototypes       the DATA STAGE: every prototype the
+                              project declares, read as a base
+                              reference + an ORDERED sequence of field
+                              overrides + its registration — which is
+                              what a prototype is, not a table literal.
+                              Reads module-TOP-LEVEL rows. Honest about
+                              being a lower bound: an opaque call
+                              receiving the prototype marks it ~HEDGED,
+                              a non-literal value keeps its path and
+                              records why, an unresolved base names the
+                              local to follow, an explicit nil is a
+                              DELETE. Needs an env profile with a data
+                              stage (today: lua-factorio) and says so
+                              when there is none
   :CartographTrace [n]        where parameter [n] (default 1) gets its
                               values: one row per resolved call site,
                               |cartograph-keys| descend takes the next

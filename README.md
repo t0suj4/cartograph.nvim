@@ -1304,6 +1304,46 @@ resolution, only the accounting. (The banked *cross-file* override arm was itsel
 per-file-local `private`/`lib` tables sharing a member name, which a cross-file
 last-write resolver would wrongly unify.)
 
+## The data stage (prototypes as base + overrides)
+
+`:CartographPrototypes` reads a project's **declarative data** — and the shape it
+reads is the point, because a Factorio prototype is *not* a table literal:
+
+```lua
+local chest = table.deepcopy(data.raw["container"]["wooden-chest"])
+chest.name = "vn-chest"
+chest.inventory_size = 8000
+pathReplaceRecursively(chest)      -- an opaque call
+data:extend{chest}
+```
+
+A **base reference**, an **ordered sequence of field overrides** (order is the
+fact — a later override wins), and a **registration**. Reading it needs
+module-*top-level* rows, which is where 72% of a real 1.1 mod's 344 field
+assignments live, so it could not exist before the module harvest.
+
+It is a **lower bound by construction**, and says so in four ways rather than
+smoothing over any of them. An opaque call receiving the prototype marks it
+`~HEDGED` — not "mutator", because Lua passes tables by reference and the honest
+claim is that a rewrite can't be *ruled out*, so `log(x)` is hedged too and you
+can discount it from the callee. A non-literal value keeps its **path** and
+records *why* the value is unknown (`<call>`, `<table>`, `<name>`). An unresolved
+base **names the local** to follow instead of shrugging. And an explicit
+`x.field = nil` is reported as a **delete** — a fact, and a different one from
+"we couldn't read this".
+
+On a real 2000-line mod: 54 prototypes in 31 modules, 206 overrides, 26
+registered, 14 hedged, and **zero** left as a bare unknown — every one resolves to
+a named basis (copy · derived · copy-unresolved · literal · patch). Registration
+is read from the row's dataflow **use set**, not by parsing `{…}`: the expression
+IR models a table constructor as an opaque allocation, so `data:extend{chest}`
+never mentions `chest` in the IR at all.
+
+The domain semantics are three declared fields (the registrar call, the base
+table, the copy verbs) and activation rides the **env profile**, not the file
+extension — so a plain Lua project is never read as a prototype tree, and another
+ecosystem's data stage is a different adapter rather than new machinery.
+
 ## Trace (where a parameter's values come from)
 
 `:CartographTrace [n]` answers "what actually reaches this argument?" for
