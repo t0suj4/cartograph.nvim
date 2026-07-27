@@ -472,7 +472,9 @@ which is not always a node the row IS:
 
 Because 3 marks something with no row of its own to carry the ●, the verb says
 which node it marked. A file row has no subject — a file is not a node — so
-mark there reports that rather than guessing at its members.
+mark there reports that rather than guessing at its members. A "registered by"
+row is the exception that looks like one: it names a registering MODULE, and a
+module IS a node, so mark, cone and hover all act on it directly by rule 1.
 
 ==============================================================================
 5. TRANSACTIONS                                       *cartograph-transactions*
@@ -515,6 +517,15 @@ HAZARDS: disclosed with counts, yours to finish.
            dispatch table / load-time data / annotation — the fn view's
            "◆ registered by" descends into it), an entry point, or a
            visibility promise. No alibi ⇒ possibly dead
+
+An EMPTY view states which KIND of empty it is. "no callers found — entry
+point, or dynamically dispatched" is a computed absence: the call graph was
+built and holds none. "⚠ index-only mode has no call graph" is an ABSENT
+answer — shown as a frontier, with the count reading `unavailable` instead of
+0 — because a thin index carries every file's definitions and no edges, so a
+function with four callers would otherwise read as having none. The relation
+altitudes (callers, occurrences, registered-by, refusals) and a var's usage
+sites all make that distinction.
 
 ==============================================================================
 7. CONFIGURATION                                            *cartograph-config*

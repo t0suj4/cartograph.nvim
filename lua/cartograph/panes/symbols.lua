@@ -17,6 +17,7 @@ local config = require 'cartograph.config'
 local dfa    = require 'cartograph.df'
 local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
+local concerns = require 'cartograph.panes.concerns'
 
 -- file level shows functions and BLOCKS (runs of top-level statements rolled
 -- up under their first line); the individual vars live one level down
@@ -82,8 +83,13 @@ local M = {
 -- directly would pass against exactly that bug. The CursorMoved handler is a
 -- closure inside attach() and unreachable from a test, so this table is the seam
 -- a spec can hold to.
+-- The non-concern half is listed here because those altitudes have no registry
+-- entry (they are containment / data / the working set). The CONCERN half is
+-- DERIVED, so adding an entry with hover='node' cannot be forgotten here — the
+-- omission that left ws and refused previewing nothing.
 M.NODE_HOVER = { file = true, region = true, tbl = true, state = true,
-    ws = true, refused = true }
+    ws = true }
+for level in pairs(concerns.node_hover_levels()) do M.NODE_HOVER[level] = true end
 
 -- the lenses offered at an altitude. The `file` altitude gains a `live` lens
 -- ONLY under the self provider — the running instance can answer what a
@@ -331,7 +337,12 @@ end
 -- Shared "usage sites" renderer: one row per occurrence, hover shows the site
 -- in the bottom source view, descend enters the using function. Serves both
 -- the var level (reads of a module var) and the callers level (calls of a fn).
-local function render_sites(ctx, node, icon, label, sites, empty_note)
+-- `unavailable` (a reason string) means the sites were never COMPUTED, not that
+-- there are none: the header must not print a count and the empty row states the
+-- reason. Without it a fn with 4 callers read as "(no callers found — entry
+-- point, or dynamically dispatched)" on the thin index. See cartograph.panes.
+-- concerns, `empty`.
+local function render_sites(ctx, node, icon, label, sites, empty_note, unavailable)
     -- defensive: one row per distinct (function, position)
     local seen, uniq = {}, {}
     for _, s in ipairs(sites) do
@@ -348,8 +359,14 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
     end)
     local nint = 0
     for _, s in ipairs(sites) do if s.internal then nint = nint + 1 end end
-    local counts = (#sites - nint > 0 and nint > 0)
-            and ('%d + %d self'):format(#sites - nint, nint)
+    -- `unavailable` WINS over a count even if rows somehow exist: a partial set
+    -- shown as a total is the completeness lie the refusal exists to prevent,
+    -- whereas "unavailable" beside visible rows is merely odd. Not reachable
+    -- today (no edges means no sites), so this is the tie-break rule on record
+    -- rather than a live case.
+    local counts = unavailable and 'unavailable'
+        or ((#sites - nint > 0 and nint > 0)
+            and ('%d + %d self'):format(#sites - nint, nint))
         or (nint > 0 and ('%d self'):format(nint))
         or tostring(#sites)
     local name = node.name or '?'
@@ -409,8 +426,10 @@ local function render_sites(ctx, node, icon, label, sites, empty_note)
         end
     end
     if #sites == 0 then
-        ctx.lines[2] = '  ' .. empty_note
-        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        -- an UNAVAILABLE concern is a frontier, not a quiet nothing: it gets the
+        -- frontier highlight so it never reads like a computed absence
+        ctx.lines[2] = '  ' .. (unavailable and ('⚠ ' .. unavailable) or empty_note)
+        ctx.marks[2] = { { 0, -1, unavailable and 'CartographFrontier' or 'CartographDim' } }
     end
 end
 
@@ -459,8 +478,11 @@ local function render_var(ctx, id)
     -- the state atlas label rides the title: what KIND of state is this
     local atlas = require 'cartograph.atlas'
     local a = atlas.classify(store, id)
+    -- `var` is not a concern entry (its subject and inverse are structural), but
+    -- its rows come from the same use edges the thin index lacks, so it shares
+    -- the fabrication fix rather than being the one altitude left lying
     render_sites(ctx, node, '·', 'used by · ' .. a.label, sites,
-        '(no reads found — writes only, or dynamic access)')
+        '(no reads found — writes only, or dynamic access)', concerns.needs_edges(store))
     -- the FIELD decomposition (on demand, ~ms with warm parses): a
     -- multi-writer var often blurs per-field ownership — show it
     local fa = atlas.fields(store, id)
@@ -514,8 +536,8 @@ local function render_callers(ctx, id)
                 rec = rec, internal = internal }
         end
     end
-    render_sites(ctx, node, ICON[node.kind] or 'ƒ', 'callers', sites,
-        '(no callers found — entry point, or dynamically dispatched)')
+    local note, why = concerns.empty_of('callers', store)
+    render_sites(ctx, node, ICON[node.kind] or 'ƒ', 'callers', sites, note, why)
 end
 
 -- A REFUSAL as a place: an unresolved call kept the rule that refused
@@ -541,8 +563,9 @@ local function render_refused(ctx, call)
     ctx.marks[2] = { { 0, -1, 'CartographDim' } }
     local cands = ref.cands or {}
     if #cands == 0 then
-        ctx.lines[3] = '  (no candidates recorded)'
-        ctx.marks[3] = { { 0, -1, 'CartographDim' } }
+        local note, why = concerns.empty_of('refused', store)
+        ctx.lines[3] = '  ' .. (why and ('⚠ ' .. why) or note)
+        ctx.marks[3] = { { 0, -1, why and 'CartographFrontier' or 'CartographDim' } }
         return
     end
     ctx.lines[3] = ('candidates (%d%s):'):format(ref.n or #cands,
@@ -574,8 +597,10 @@ local function render_regfor(ctx, id)
     local node = store.node(id)
     if not node then ctx.lines[1] = '(gone)'; return end
     local regs = store.topo():registrants_detail(id)
+    local note, why = concerns.empty_of('regfor', store)
     local pre = ICON[node.kind] or 'ƒ'
-    ctx.lines[1] = ('%s %s — registered by (%d)'):format(pre, node.name or '?', #regs)
+    ctx.lines[1] = ('%s %s — registered by (%s)'):format(pre, node.name or '?',
+        why and 'unavailable' or tostring(#regs))
     ctx.marks[1] = { { 0, #pre, 'CartographDim' },
         { #pre, #pre + 1 + #(node.name or '?'), 'CartographTitle' },
         { #pre + 1 + #(node.name or '?'), -1, 'CartographDim' } }
@@ -586,14 +611,20 @@ local function render_regfor(ctx, id)
         ctx.lines[#ctx.lines + 1] = '  ' .. label
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographTitle' } }
         ctx.line_file[#ctx.lines] = r.from
+        -- the row is ABOUT the registering module — and a module node's id IS
+        -- its file path, so this is a node like any other row's. Recording it
+        -- gives mark/cone a 'row' answer instead of the altitude fallback, and
+        -- lets the row hover. (Banked as "the anchor is a MODULE not a fn, needs
+        -- a decision"; measured 80/80 resolvable, so there was no decision.)
+        ctx.line_about[#ctx.lines] = r.from
         if line then
             ctx.line_site[#ctx.lines] = { fn = r.from, file = r.from,
                 line = line, range = at }
         end
     end
     if #regs == 0 then
-        ctx.lines[2] = '  (none)'
-        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        ctx.lines[2] = '  ' .. (why and ('⚠ ' .. why) or note)
+        ctx.marks[2] = { { 0, -1, why and 'CartographFrontier' or 'CartographDim' } }
     end
 end
 
@@ -843,8 +874,10 @@ local function render_occs(ctx, key)
         end
     end
     table.sort(ranges, function (a, b) return atr.sl(a) < atr.sl(b) end)
+    local note, why = concerns.empty_of('occs', store)
     local fname = fn.name or '?'
-    ctx.lines[1] = ('%s — sites of %s (%d)'):format(fname, en.name or '?', #ranges)
+    ctx.lines[1] = ('%s — sites of %s (%s)'):format(fname, en.name or '?',
+        why and 'unavailable' or tostring(#ranges))
     ctx.marks[1] = { { 0, #fname, 'CartographTitle' }, { #fname, -1, 'CartographDim' } }
     -- the header names the USING function, whose body these occurrences are in
     ctx.line_about[1] = fnid
@@ -895,6 +928,12 @@ local function render_occs(ctx, key)
             line = rsl, range = r }
         -- every occurrence row is about the function whose body holds it
         ctx.line_about[#ctx.lines] = fnid
+    end
+    if #ranges == 0 then
+        -- this altitude had NO empty note at all: zero ranges rendered a header
+        -- counting (0) and not one row saying what that meant
+        ctx.lines[2] = '  ' .. (why and ('⚠ ' .. why) or note)
+        ctx.marks[2] = { { 0, -1, why and 'CartographFrontier' or 'CartographDim' } }
     end
 end
 
@@ -1518,13 +1557,13 @@ function M.subject(kind)
         or (v.level == 'var' and v.var)
         or nil
     if kind == 'def' then return def end
-    -- the occs key is kind\31entity\31fn: the USING function is the subject
-    -- (its body is what you are reading), not the entity being referred to
-    local occs_fn = v.level == 'occs' and v.occs and v.occs:match('([^\31]*)$')
+    -- the RELATION altitudes declare their own subject (cartograph.panes.
+    -- concerns) — three of them used to be spelled out here and `refused` was
+    -- simply missing, so mark refused on every refusal row that was not a
+    -- candidate while the ascend handler derived the same answer one line away.
+    local e = concerns.of(v.level)
     return def
-        or (v.level == 'callers' and v.callers)
-        or (v.level == 'regfor' and v.regfor)
-        or (occs_fn ~= '' and occs_fn)
+        or (e and concerns.subject_of(v.level, v[e.view_key]))
         or nil
 end
 
@@ -1534,11 +1573,14 @@ end
 --- caller must say which, since an altitude answer marks something that has no
 --- row to show a sign on.
 ---
---- Nil-tolerant by design: render_regfor's site.fn is a MODULE, not a node, so
---- it falls through to the altitude rather than naming something that isn't
---- there. Written as an `or` chain and NOT as ipairs over a candidate list —
---- ipairs stops at the first nil, which would silently drop every later
+--- Nil-tolerant by design: an anchor is not always a node (a synthetic or
+--- stale id), so the chain must SKIP a dead rung rather than name something that
+--- is not there. Written as an `or` chain and NOT as ipairs over a candidate
+--- list — ipairs stops at the first nil, which would silently drop every later
 --- alternative (the bug that cost resolve_module_alias 845 fills).
+--- (This note used to cite render_regfor's module anchor as the example. It was
+--- the wrong example: a module node's id IS its file path, so those rows resolve
+--- — measured 80/80. The nil-tolerance still matters; regfor never needed it.)
 function M.row_subject(row)
     row = row or cursor_row()
     if not row then return nil end
@@ -1558,7 +1600,12 @@ end
 --- <CR>/l, so the view follows the eye and focus follows intent. Returns the
 --- previewed id, or nil when the row is not a node row.
 function M.hover_node(r)
-    local id = M.line_node[r]
+    -- the row's OWN node: `line_node` is what the row IS, `line_about` what it
+    -- is about — a regfor row is about the registering module and carries only
+    -- the latter, so reading line_node alone left the whole altitude previewing
+    -- nothing. Deliberately NOT row_subject: that ladder ends at the ALTITUDE
+    -- subject, which would preview the subject from a header or chrome row.
+    local id = M.line_node[r] or M.line_about[r]
     if not id then return nil end
     M.paint(id)
     -- already focused: nothing to preview, drop the takeover so the def shows
@@ -2537,32 +2584,30 @@ function M.attach(win)
         elseif M.view.level == 'ws' then
             store.set_context(nil)
             M.show('files')
-        elseif M.view.level == 'occs' then
+        elseif concerns.of(M.view.level) then
+            -- THE INVERSE, declared: every relation altitude reconstructed its
+            -- ascend target by parsing its own key (occs branched on the key's
+            -- `kind` to choose var-vs-callers; refused/regfor matched the fn
+            -- out). Four copies of one idea, now one lookup.
             store.set_context(nil)
-            local kind, entity = (M.view.occs or ''):match('^(.-)\31(.-)\31')
-            if kind == 'var' then M.show('var', entity)
-            else M.show('callers', entity) end
+            local e = concerns.of(M.view.level)
+            local level, key = e.ascend(M.view[e.view_key])
+            -- a key that no longer names a node means the thing we hung below
+            -- is gone: surface to the file tree rather than an empty view
+            if level and (not key or store.node(key)) then
+                M.show(level, key)
+                if e.ascend_row then
+                    pcall(vim.api.nvim_win_set_cursor, win, { e.ascend_row, 0 })
+                end
+            else
+                M.show('files')
+            end
         elseif M.view.level == 'var' then
             store.set_context(nil)
             local id = M.view.var
             M.show('region', M.view.region)
             local r = M.node_line[id]
             if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
-        elseif M.view.level == 'callers' then
-            store.set_context(nil)
-            M.show('fn', M.view.callers)
-            pcall(vim.api.nvim_win_set_cursor, win, { 2, 0 })
-        elseif M.view.level == 'refused' then
-            -- the refusal hangs below its enclosing fn: surface there
-            store.set_context(nil)
-            local fnid = (M.view.refused or ''):match('^(.-)\31')
-            if fnid and store.node(fnid) then M.show('fn', fnid)
-            else M.show('files') end
-        elseif M.view.level == 'regfor' then
-            -- registrations hang below the registered fn: surface there
-            store.set_context(nil)
-            if store.node(M.view.regfor) then M.show('fn', M.view.regfor)
-            else M.show('files') end
         elseif M.view.level == 'block' then
             -- a body descent hangs below its function: surface back to it
             store.set_context(nil); store.set_highlight(nil)
