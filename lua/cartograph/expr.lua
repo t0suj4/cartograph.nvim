@@ -633,6 +633,15 @@ local function fn_node(node, src, lang)
     return nil
 end
 
+--- The tree ROOT for a whole file — a module's statement sequence, where fn_node
+--- would look for an enclosing function and find none.
+local function root_node(src, lang)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+    if not ok then return nil end
+    local tree = parser:parse()[1]
+    return tree and tree:root() or nil
+end
+
 --- the focused fn's flow record WITH per-row `.expr` harvested (aligned 1:1). INC 1
 --- rebuilds on demand (re-parse, like narrow) — not folded, no VERSION bump.
 --- @return table? { fl={stmts,params}, lang, node } or nil
@@ -652,6 +661,55 @@ function M.of(store, fn_id)
     local fl = flow.build(fn, src, cfg)
     return { fl = fl, lang = lang, node = node,
         bound = M.bound_names(fn, src, s.binders) }
+end
+
+--- A MODULE's TOP-LEVEL statement sequence, harvested with the same machinery.
+--- Same shape as M.of, so a consumer reads `.fl.stmts[i].expr` identically.
+---
+--- WHY THIS EXISTS. `M.of` is function-scoped: it locates the enclosing function
+--- node and walks its body, so it returns nil for a module. That is the whole
+--- reason config-as-code is invisible to the expression layer — MEASURED on a
+--- Factorio 1.1 mod, `harvest_row` parses 344/344 of its field-shaping
+--- assignments perfectly while the graph represents 0, and **249 of those sites
+--- (72%) are module top level**: every prototype, every `data:extend` argument,
+--- every `deepcopy(base)` + field-override sequence. Not a parser gap and not
+--- Factorio-specific — a Rails initializer and a webpack config are the same
+--- shape ([[cartograph-bench]] item 0).
+---
+--- A SEPARATE ENTRY, not a widening of M.of, deliberately: exprlint / optimize /
+--- untangle / hoistclosure take the FOCUSED node, so teaching M.of about modules
+--- would silently start analyzing module top-level code in four analyzers at
+--- once — a lint-output change nobody measured. Module-level analysis is opt-in;
+--- each consumer migrates with its own gate check.
+---
+--- Nested function bodies stay OPAQUE: a top-level `function f() … end` is one
+--- row of the sequence (emit does not recurse into a non-control node), which is
+--- what a module's own statement list means. Their insides are M.of's job.
+--- @return table? { fl={stmts,params={}}, lang, node, bound } or nil
+function M.of_module(store, mod_id)
+    local node = store.node and store.node(mod_id)
+    if not (node and node.file and node.kind == 'module') then return nil end
+    -- the SAME supported-language set as M.of (EXT is built from the langs that
+    -- declare a body_field flow), so this never claims a language M.of refuses
+    local lang = EXT[node.file:match('%.(%w+)$') or '']
+    if not lang or not spec[lang] then return nil end
+    local s = spec[lang]
+    -- a MISSING file must refuse, not report an empty module. store.content
+    -- returns nil when the file is gone and a (possibly empty) table when it is
+    -- readable, so the distinction lives here and nowhere else: `or {}` would
+    -- concat to '', parse to a childless root, and hand back a record with zero
+    -- rows — an unreadable file rendered as "this module has no statements",
+    -- which is the absence-as-silence class this codebase keeps paying for.
+    local lines = store.content(node)
+    if not lines then return nil end
+    local src = table.concat(lines, '\n')
+    local root = root_node(src, lang)
+    if not root then return nil end
+    local cfg = { seq = true, df_ids = s.df_ids, regime = s.regime,
+        expr = function (n, ns, hint) return M.harvest_row(n, ns, hint) end }
+    local flow = require 'cartograph.flow'
+    return { fl = flow.build(root, src, cfg), lang = lang, node = node,
+        bound = M.bound_names(root, src, s.binders) }
 end
 
 -- NAME-ish leaves, across the languages that declare binders

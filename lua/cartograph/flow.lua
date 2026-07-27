@@ -525,13 +525,24 @@ function M.build(fnnode, src, cfg)
         end
     end
 
-    local body = fn_body(fnnode)
+    -- `cfg.seq`: the node IS the statement sequence, not a function whose body
+    -- must be found. A MODULE's top-level statements are the tree ROOT (lua
+    -- `chunk`) — a sequence with no enclosing `body` field — so fn_body finds
+    -- nothing there and every config-as-code file (a Factorio prototype, a Rails
+    -- initializer) came back with zero rows. MEASURED on a Factorio 1.1 mod: 249
+    -- of its 344 field-shaping assignments (72%) are module top level.
+    -- region() only iterates named children, so it needs no BODY-type node.
+    local body = cfg.seq and fnnode or fn_body(fnnode)
     if body then region(body, 0, nil) end
     -- `cfg.method` seeds an implicit 'self' param — a per-language POLICY the
     -- caller decides (df seeds self only for lua colon-methods: `method and
     -- lang=='lua'`). Default false: no implicit receiver.
+    -- A sequence has no parameters: a chunk has no `parameters` field, so
+    -- param_names would return {} anyway — skipped explicitly because asking a
+    -- non-function for its parameters is a category error, not a lucky nil.
     return { stmts = stmts, cfg = cfg,
-        params = param_names(fnnode, src, cfg.pfield, cfg.method or false) }
+        params = (not cfg.seq)
+            and param_names(fnnode, src, cfg.pfield, cfg.method or false) or {} }
 end
 
 --- coarse projection: df's partition — TOP-LEVEL statements, each aggregating
