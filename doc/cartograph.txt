@@ -532,6 +532,24 @@ HAZARDS: disclosed with counts, yours to finish.
            "◆ registered by" descends into it), an entry point, or a
            visibility promise. No alibi ⇒ possibly dead
 
+A row FITS, or it says so.                              *cartograph-budget*
+The symbols pane has `symbols_width` columns of text (default 30; the gutter is
+outside it) and 'wrap' is off, so a longer row would be cut by the editor with
+no marker at all — the pane would silently withhold what it rendered. So a row
+carries ONE identity that fits, and whatever does not fit is detail with a home
+somewhere else:
+
+  a file row shows the shortest path SUFFIX that is UNIQUE among the files on
+  screen. Two railbot.lua in different directories each keep the directory that
+  separates them; a basename unique on its own drops its prefix entirely.
+  Descend (l) into the file and the dropped directory is the dim breadcrumb
+  above the header. The path itself is never lost — hover, gf, staging and the
+  source pane read the real path, never the label.
+
+  …        an identity too long even on its own is elided IN THE MIDDLE, both
+           ends kept (crash-site-…-machine.lua). Only an identity is ever
+           elided, and never silently; an annotation moves or goes instead.
+
 An EMPTY view states which KIND of empty it is. "no callers found — entry
 point, or dynamically dispatched" is a computed absence: the call graph was
 built and holds none. "⚠ index-only mode has no call graph" is an ABSENT
@@ -559,6 +577,10 @@ comment per field.
 
   option        what it sets ~
   keys          remap any binding — see |cartograph-keys|
+  symbols_width the symbols pane's TEXT budget in columns (default 30; the
+                gutter sits outside it, and the window is sized to fit both).
+                Every row's identity is rendered to FIT this — see
+                |cartograph-budget|
   entrypoints   path patterns for files EXPECTED to have no importer, so
                 they classify 'entry' (▶) instead of 'orphan' (○)
   exclude       extra vendored directory NAMES to skip

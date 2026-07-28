@@ -133,6 +133,83 @@ local function hl_setup()
     vim.api.nvim_set_hl(0, 'CartographRdep2', { bg = hl.blend(AMBER, bg, 0.11) })
 end
 
+-- ── THE BUDGET LAW ([[cartograph-concern-layering]]) ─────────────────────────
+-- The pane has `config.symbols_width` columns of text and no more: `wrap` is off,
+-- so nvim clips a longer row with NO marker and the pane silently withholds what
+-- it rendered. Measured before this existed: 28 of 35 file rows clipped at 30
+-- columns, and the per-file symbol COUNT — the thing you scan the roster for —
+-- was the first casualty, because it sits at the far right of the row.
+--
+-- So a row carries ONE IDENTITY that must fit, and anything that does not fit is
+-- detail with a home elsewhere (hover, the source pane, a descend). For a file
+-- row the identity is the shortest path SUFFIX that is UNIQUE among the displayed
+-- files: the directory prefix is detail, but AMBIGUITY IS NOT ALLOWED — a bare
+-- basename would render Von-Neumann's two railbot.lua files as the same row, and
+-- 12 identical `init.lua` rows are worse than a clipped path. The full path stays
+-- on the row via `line_file` (hover/gf/staging read it, never the label).
+
+--- The shortest unique path suffix per file, rebuilt when the graph generation
+--- moves (same cache discipline as var_idx).
+local short_idx, short_gen
+local function suffix(segs, n)
+    return table.concat(segs, '/', math.max(1, #segs - n + 1))
+end
+function M.shortpath(file)
+    if short_gen ~= store.generation or not short_idx then
+        short_idx, short_gen = {}, store.generation
+        local by_base = {}
+        for _, f in ipairs(store.files or {}) do
+            local base = f:match('([^/]+)$') or f
+            by_base[base] = by_base[base] or {}
+            table.insert(by_base[base], f)
+        end
+        for _, fs in pairs(by_base) do
+            if #fs == 1 then
+                short_idx[fs[1]] = fs[1]:match('([^/]+)$') or fs[1]
+            else
+                -- a shared basename grows parent segments until it separates
+                for _, f in ipairs(fs) do
+                    local segs = vim.split(f, '/')
+                    local take, label = 2, nil
+                    repeat
+                        label = suffix(segs, take)
+                        local clash = false
+                        for _, g in ipairs(fs) do
+                            if g ~= f and suffix(vim.split(g, '/'), take) == label then
+                                clash = true
+                                break
+                            end
+                        end
+                        take = take + 1
+                    until not clash or take > #segs
+                    short_idx[f] = label
+                end
+            end
+        end
+    end
+    return short_idx[file] or file
+end
+
+--- Fit an identity into what the budget leaves after `indent` and `tail`. Elides
+--- the MIDDLE (both ends of a name carry signal — `crash-site-…-machine.lua`)
+--- and MARKS it with …, because eliding identity is a real loss, unlike moving
+--- the directory prefix to hover. Never squeezes below MIN_IDENTITY: a long prose
+--- annotation must not mangle the name, so such a row overflows instead and
+--- tests/width_spec.lua counts it against a declared ratchet.
+local MIN_IDENTITY = 14
+function M.fit_identity(label, indent, tail)
+    local room = (require('cartograph.config').symbols_width or 30)
+        - vim.fn.strdisplaywidth(indent or '') - vim.fn.strdisplaywidth(tail or '')
+    room = math.max(room, MIN_IDENTITY)
+    if vim.fn.strdisplaywidth(label) <= room then return label end
+    local keep = room - 1                        -- 1 cell for the … marker
+    local head = math.ceil(keep / 2)
+    local back = keep - head
+    return vim.fn.strcharpart(label, 0, head) .. '…'
+        .. (back > 0 and vim.fn.strcharpart(label,
+            vim.fn.strchars(label) - back, back) or '')
+end
+
 -- ── per-level renderers (fill ctx.lines/marks/vnums/signs + row mappings) ────
 
 local function pesc(s) return (tostring(s):gsub('([^%w])', '%%%1')) end
@@ -165,16 +242,20 @@ end
 local function file_row(ctx, file, depth, dim)
     local indent = string.rep('  ', depth or 0)
     local mod = store.by_id and store.by_id[file]
+    -- identity fitted to what the budget leaves after this row's annotation
+    local function ident(tail) return M.fit_identity(M.shortpath(file), indent, tail) end
     if mod and mod.lazy then
-        ctx.lines[#ctx.lines + 1] = ('%s%s  (lazy — l loads it)'):format(indent, file)
-        ctx.marks[#ctx.lines] = { { #indent, #indent + #file, 'CartographFrontier' },
-            { #indent + #file, -1, 'CartographDim' } }
+        local label = ident('  (lazy — l loads it)')
+        ctx.lines[#ctx.lines + 1] = ('%s%s  (lazy — l loads it)'):format(indent, label)
+        ctx.marks[#ctx.lines] = { { #indent, #indent + #label, 'CartographFrontier' },
+            { #indent + #label, -1, 'CartographDim' } }
         ctx.line_file[#ctx.lines] = file
         ctx.line_kind[#ctx.lines] = 'file'
         return
     end
     if mod and mod.unparsed then
-        ctx.lines[#ctx.lines + 1] = ('%s%s  (unparsed)'):format(indent, file)
+        ctx.lines[#ctx.lines + 1] = ('%s%s  (unparsed)'):format(indent,
+            ident('  (unparsed)'))
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
         ctx.line_file[#ctx.lines] = file
         ctx.line_kind[#ctx.lines] = 'file'
@@ -185,13 +266,13 @@ local function file_row(ctx, file, depth, dim)
     local ran = store.data and store.data.provider == 'self'
         and require('cartograph.self_oracle').loaded_files(store.data)[file]
     local ndefs = #shown_defs(file)
-    ctx.lines[#ctx.lines + 1] = ('%s%s  (%d)%s%s'):format(indent, file,
-        ndefs, dim and ' …' or '', ran and '  ⚡' or '')
+    local tail = ('  (%d)%s%s'):format(ndefs, dim and ' …' or '', ran and '  ⚡' or '')
+    local label = ident(tail)
+    ctx.lines[#ctx.lines + 1] = indent .. label .. tail
     ctx.marks[#ctx.lines] = dim and { { 0, -1, 'CartographDim' } }
-        or { { #indent, #indent + #file, 'CartographSection' }, { #indent + #file, -1, 'CartographDim' } }
+        or { { #indent, #indent + #label, 'CartographSection' }, { #indent + #label, -1, 'CartographDim' } }
     if ran then
-        local b = #(('%s%s  (%d)%s'):format(indent, file, ndefs,
-            dim and ' …' or ''))
+        local b = #indent + #label + #(('  (%d)%s'):format(ndefs, dim and ' …' or ''))
         table.insert(ctx.marks[#ctx.lines], { b, -1, 'DiagnosticOk' })
     end
     ctx.line_file[#ctx.lines] = file
@@ -212,7 +293,7 @@ local function render_ws(ctx)
     for _, n in ipairs(list) do
         if n.file ~= lastfile then
             lastfile = n.file
-            ctx.lines[#ctx.lines + 1] = n.file
+            ctx.lines[#ctx.lines + 1] = M.fit_identity(M.shortpath(n.file), '', '')
             ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
             ctx.line_file[#ctx.lines] = n.file
             ctx.line_kind[#ctx.lines] = 'file'
@@ -316,13 +397,29 @@ local function render_files_tree(ctx)
 end
 
 local function render_file(ctx, file)
-    ctx.lines[1] = ('%s  (%d)'):format(file, #shown_defs(file))
-    ctx.marks[1] = { { 0, #file, 'CartographSection' }, { #file, -1, 'CartographDim' } }
-    ctx.line_file[1] = file
-    ctx.line_kind[1] = 'file'
-    ctx.file_header[file] = 1
+    -- THE DIRECTORY IS DISCLOSED HERE. Roster rows carry the shortest UNIQUE
+    -- suffix because the prefix is detail (the budget law) — and this altitude is
+    -- the place you descend INTO for that detail, so the dropped prefix appears as
+    -- a dim breadcrumb, shown only when something was actually dropped. A dropped
+    -- prefix that is never shown anywhere would be the absence-as-silence class;
+    -- one keypress away is a HOME.
+    local short = M.shortpath(file)
+    local dropped = #short < #file and file:sub(1, #file - #short - 1) or nil
+    if dropped then
+        ctx.lines[#ctx.lines + 1] = M.fit_identity(dropped, '', '/') .. '/'
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.line_sep[#ctx.lines] = true -- chrome: hover keeps the preview
+    end
+    local tail = ('  (%d)'):format(#shown_defs(file))
+    local label = M.fit_identity(short, '', tail)
+    local hrow = #ctx.lines + 1
+    ctx.lines[hrow] = label .. tail
+    ctx.marks[hrow] = { { 0, #label, 'CartographSection' }, { #label, -1, 'CartographDim' } }
+    ctx.line_file[hrow] = file
+    ctx.line_kind[hrow] = 'file'
+    ctx.file_header[file] = hrow
     local sign = SIGN[store.classify(file)]
-    if sign then ctx.signs[#ctx.signs + 1] = { row = 0, sign = sign } end
+    if sign then ctx.signs[#ctx.signs + 1] = { row = hrow - 1, sign = sign } end
     for _, n in ipairs(shown_defs(file)) do
         local icon = ICON[n.kind] or '?'
         ctx.lines[#ctx.lines + 1] = ('  %s %s'):format(icon, n.name or '?')

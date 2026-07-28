@@ -168,6 +168,16 @@ M.mcp = nil
 -- no default. See examples/factorio.lua for a complete wiring.
 M.live = nil
 
+-- the symbols pane's TEXT BUDGET, in columns — NOT the window width. The gutter
+-- (line numbers + the marker column) sits outside it, so the window is sized to
+-- budget + gutter at layout time. This is the number the row renderers honour:
+-- a row carries ONE identity and that identity must FIT, because a clipped row
+-- is a row that lies (nvim cuts it with no marker, `wrap` off). Whatever cannot
+-- fit is detail, and detail belongs somewhere else — hover, the source pane, or
+-- behind a descend. Measured before this existed: 28 of 35 file rows clipped at
+-- 30 columns, and the per-file symbol COUNT was the first thing to go.
+M.symbols_width = 30
+
 M.keys = {
     -- navigation
     pivot      = '<CR>',    -- re-root on / expand this entry (like descend)

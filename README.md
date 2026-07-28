@@ -187,8 +187,24 @@ rebind anything without touching pane code):
 ```lua
 require('cartograph').setup {
     keys = { jump = '<C-j>', back = '<C-h>' },  -- names in lua/cartograph/config.lua
+    symbols_width = 30,                         -- the browser's TEXT budget
 }
 ```
+
+**A row fits, or it says so.** `symbols_width` is the browser's *text* budget in
+columns — the gutter sits outside it, and the window is sized to hold both. It
+isn't cosmetic: `wrap` is off, so a longer row gets cut by the editor with no
+marker and the pane silently withholds what it rendered (measured on a real
+project: 28 of 35 file rows clipped at 30 columns, and the per-file symbol count —
+the thing you scan the roster for — went first). So every row carries **one
+identity that fits**, and whatever doesn't is detail with a home somewhere else. A
+file row shows the shortest path suffix that is *unique among the files on screen*:
+two `railbot.lua` in different directories each keep the directory that separates
+them, a unique basename drops its prefix entirely, and descending (`l`) into the
+file shows the dropped directory as a dim breadcrumb above the header. An identity
+too long even alone is elided in the middle with `…`, both ends kept. The path is
+never lost — hover, `gf`, staging and the source pane read the real path, never the
+label. `tests/width_spec.lua` is the fence.
 
 ### Navigation
 

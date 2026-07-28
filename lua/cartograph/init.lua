@@ -500,7 +500,13 @@ function M.open(dump_path, opts)
     local w_source = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(w_source, source.create())
 
-    vim.api.nvim_win_set_width(w_symbols, 38)
+    -- WIDTH = the declared TEXT budget + THIS window's gutter, because the budget
+    -- is what a row must fit in and the gutter (number + sign column) is outside
+    -- it. Sized once, here: re-sizing on every render would fight a deliberate
+    -- resize, and the budget the renderers honour is the config value either way.
+    local budget = require('cartograph.config').symbols_width or 30
+    local info = vim.fn.getwininfo(w_symbols)[1]
+    vim.api.nvim_win_set_width(w_symbols, budget + ((info and info.textoff) or 6))
 
     source.attach(w_source)
 
