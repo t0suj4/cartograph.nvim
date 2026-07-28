@@ -82,6 +82,12 @@ local function literal(e)
     local v = e.v
     if e.ty == 'str' and type(v) == 'string' then
         v = v:gsub('^([\'"])(.*)%1$', '%2')
+        -- a LONG BRACKET is a string literal too, and its delimiters are part of
+        -- the source text the IR carries: Von-Neumann's story text is
+        -- `[[…]]`, and leaving the brackets on made the value read as if the
+        -- content started with a bracket. Any level: [[…]], [=[…]=], …
+        local _, body = v:match('^%[(=*)%[(.*)%]%1%]$')
+        if body then v = body:gsub('^\n', '') end   -- a leading newline is skipped
     end
     return v, nil
 end
@@ -321,6 +327,35 @@ function M.census(store)
     return c
 end
 
+-- Rendering an override VALUE into a report line. A prototype field legitimately
+-- holds a MULTI-LINE `[[…]]` string (Von-Neumann's storyText1 is four paragraphs),
+-- and nvim_buf_set_lines REJECTS an embedded newline outright — so one story blob
+-- killed the whole command. Fold to one line, and while here, say more than
+-- tostring did: quoted, so the string "8000" is distinguishable from the number
+-- 8000 that the reading DOES tell apart; ↵ for a fold, … for a truncation, so
+-- neither is silent; and an explicit nil named as the DELETE it is.
+local VALUE_WIDTH = 60
+--- Truncate to `n` BYTES without splitting a UTF-8 sequence (this module stays
+--- vim-free, and LuaJIT has no utf8 library): back off over continuation bytes.
+local function cut(s, n)
+    if #s <= n then return s end
+    local i = n
+    while i > 0 do
+        local b = s:byte(i + 1)
+        if not b or b < 0x80 or b >= 0xC0 then break end   -- not a continuation
+        i = i - 1
+    end
+    return s:sub(1, i)
+end
+local function render_value(o)
+    if o.value == nil then return '<' .. tostring(o.why) .. '>' end
+    if o.value == expr.NIL then return 'nil  (DELETE)' end
+    if type(o.value) ~= 'string' then return tostring(o.value) end
+    local s = o.value:gsub('[\r\n]+', '↵')
+    if #s > VALUE_WIDTH then s = cut(s, VALUE_WIDTH - 3) .. '…' end
+    return ('"%s"'):format(s)
+end
+
 --- The report: every prototype the data stage declares, grouped by file, with the
 --- hedges inline. Lines, for the scratch buffer. `nil` when the adapter does not
 --- apply — the caller reports THAT rather than an empty list, since "this is not
@@ -360,15 +395,30 @@ function M.report(store)
                 or '  NOT registered here')
             if not p.complete then line = line .. '  ~' end
             out[#out + 1] = line
+            -- Overrides and frontiers INTERLEAVED by line. Printing all
+            -- overrides then all frontiers put a hedge at line 48 below an
+            -- override at line 51, which reads as if the hedge came after — and
+            -- the whole point of the sequence is that position matters. Stable:
+            -- overrides keep their relative order (later wins), a frontier sorts
+            -- to the first override that follows it.
+            local fi = 1
+            local function frontiers_before(n)
+                while fi <= #p.frontiers and (n == nil
+                        or p.frontiers[fi].line <= n) do
+                    local f = p.frontiers[fi]
+                    out[#out + 1] = ('       %-4d ~ %s: %s — may have rewritten any'
+                        .. ' field, so values below it are what the source ASSIGNS,'
+                        .. ' not necessarily the final ones')
+                        :format(f.line, f.kind, f.callee)
+                    fi = fi + 1
+                end
+            end
             for _, o in ipairs(p.overrides) do
-                local v = o.value ~= nil and ('%s'):format(tostring(o.value))
-                    or ('<' .. tostring(o.why) .. '>')
-                out[#out + 1] = ('       %-4d %-34s = %s'):format(o.line, o.path, v)
+                frontiers_before(o.line)
+                out[#out + 1] = ('       %-4d %-34s = %s')
+                    :format(o.line, o.path, render_value(o))
             end
-            for _, f in ipairs(p.frontiers) do
-                out[#out + 1] = ('       %-4d ~ %s: %s — may rewrite anything, so'
-                    .. ' later fields are unread'):format(f.line, f.kind, f.callee)
-            end
+            frontiers_before(nil)
         end
     end
     return out

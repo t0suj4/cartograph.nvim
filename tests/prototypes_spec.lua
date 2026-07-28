@@ -262,3 +262,78 @@ test('census: nil when the adapter does not apply', function ()
     eq(nil, proto.census(store))
     eq(nil, proto.all(store))
 end)
+
+-- ── the report, found by DRIVING the live cockpit on Von-Neumann ─────────────
+
+test('literal: a LONG BRACKET string keeps its content, not its delimiters',
+    function ()
+    -- the story text of a real mod is `[[…]]`, at any bracket level, and the IR
+    -- carries the source text verbatim — so the reading must strip the
+    -- delimiters exactly as it strips " and '
+    local ps = read([====[
+local s = { type = "x" }
+s.a = [[one]]
+s.b = [==[two]==]
+s.c = [[
+after a leading newline]]
+]====])
+    local o = ps[1].overrides
+    eq('one', o[1].value)
+    eq('two', o[2].value)
+    eq('after a leading newline', o[3].value)  -- Lua skips a leading newline
+end)
+
+test('report: a MULTI-LINE value cannot break the buffer contract', function ()
+    -- nvim_buf_set_lines REJECTS an embedded newline, so one story blob took the
+    -- whole command down live. Every report line must be ONE line — and the
+    -- folding must be visible, not silent.
+    local ps = read('local s = { type = "x" }\ns.t = [[a\nb\nc]]\n')
+    eq('a\nb\nc', ps[1].overrides[1].value)    -- the RECORD keeps the newlines
+    local lines = proto.report(store)
+    local hit
+    for _, l in ipairs(lines) do
+        ok(not l:find('[\r\n]'), 'no report line may contain a newline')
+        if l:find('%.t ') or l:find(' t  ') then hit = l end
+    end
+    hit = hit or table.concat(lines, '|')
+    ok(hit:find('↵'), 'the fold is marked, not silent: ' .. hit)
+end)
+
+test('report: a long value is truncated with a MARK, and a string is quoted',
+    function ()
+    local ps = read(('local s = { type = "x" }\ns.long = "%s"\ns.n = 8000\n'
+        .. 's.gone = nil\n'):format(('x'):rep(200)))
+    eq(200, #ps[1].overrides[1].value)         -- the record is not truncated
+    local lines = proto.report(store)
+    local long, num, del
+    for _, l in ipairs(lines) do
+        if l:find('long') then long = l end
+        if l:find(' n  ') then num = l end
+        if l:find('gone') then del = l end
+    end
+    ok(long and long:find('…'), 'truncation is marked: ' .. tostring(long))
+    ok(#long < 140, 'and bounded, got ' .. #long)
+    ok(long:find('"'), 'a string renders QUOTED, so it is distinguishable from a number')
+    ok(num and num:find('= 8000') and not num:find('"8000"'),
+        'a number renders bare: ' .. tostring(num))
+    ok(del and del:find('DELETE'), 'an explicit nil is named a DELETE: ' .. tostring(del))
+end)
+
+test('report: a frontier sorts INTO the override sequence by line', function ()
+    -- the sequence IS the fact (later wins), so a hedge printed after the
+    -- overrides it precedes reads as the opposite of what happened
+    read([[
+local p = table.deepcopy(data.raw["container"]["c"])
+p.a = 1
+mutate(p)
+p.b = 2
+]])
+    local lines = proto.report(store)
+    local seen = {}
+    for _, l in ipairs(lines) do
+        if l:find('  a  ') then seen[#seen + 1] = 'a' end
+        if l:find('opaque%-call') then seen[#seen + 1] = '~' end
+        if l:find('  b  ') then seen[#seen + 1] = 'b' end
+    end
+    eq({ 'a', '~', 'b' }, seen)
+end)
