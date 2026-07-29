@@ -29,7 +29,12 @@ local ICON      = { ['function'] = 'ƒ', method = ':', var = '·', region = '≡
 -- altitude's normal view; `detail` surfaces the code's fine-grained
 -- descendable elements (arguments, conditions, var/field reads).
 local LENS_SETS = {
-    fn     = { 'statements', 'detail' },
+    -- `lints` is the LENS PILOT ([[cartograph-interactive-reports]]): a per-fn
+    -- REPORT (:CartographExpr) shown as rows in the browser instead of a
+    -- dead-end scratch buffer. It cost nothing but a renderer because
+    -- exprlint.lint() already returns RECORDS and report() is only a formatter
+    -- over them — the conversion is free wherever that split already exists.
+    fn     = { 'statements', 'detail', 'lints' },
     block  = { 'statements', 'detail' },
     region = { 'statements', 'detail' },
 }
@@ -58,7 +63,7 @@ local M = {
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
     line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
-    line_detail = {},
+    line_detail = {}, line_proto = {},
     -- what a row is ABOUT (a node id), which is NOT what `l` does here: a
     -- caller row is about the using function but descends into its
     -- occurrences. Keeping the two apart is the whole point — hover, descend,
@@ -1398,6 +1403,218 @@ local function detail_scope() -- -> node, sr, sc, er, ec, has_df, fnid
         return n, atr.sl(r), atr.sc(r), atr.el(r), atr.ec(r), nil, nil
     end
 end
+-- ── the LENS PILOT: a per-fn report as rows ──────────────────────────────────
+-- Rows are FINDINGS, one per row, each anchored to its statement line so the
+-- existing fn-level hover previews it with no new dispatch. The report's PROSE
+-- (the rule glossary, the coverage footer) does not come along: under the budget
+-- law it is not row material, and :CartographExpr still prints it in full. That
+-- split — findings here, explanation there — is the lens/report division of
+-- labour, not a loss.
+local function render_lints(ctx, fn_id)
+    local node = fn_id and store.node(fn_id)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    local res = require('cartograph.exprlint').lint(store, fn_id)
+    local head = ('⚑ %s'):format(node.name or '?')
+    ctx.lines[1] = M.fit_identity(head, '', '')
+    ctx.marks[1] = { { 0, -1, 'CartographTitle' } }
+    ctx.line_node[1] = fn_id
+    -- TYPED EMPTY, both halves: a language the harvest does not cover is
+    -- UNAVAILABLE (a frontier), which is a different fact from a function the
+    -- lints cleared. Rendering them the same is the defect this pane keeps paying
+    -- for ([[cartograph-concern-layering]]).
+    if res.unsupported then
+        ctx.lines[2] = ('  ⚠ unread: no %s parser'):format(
+            (node.file or ''):match('%.(%w+)$') or '?')
+        ctx.marks[2] = { { 0, -1, 'CartographFrontier' } }
+        ctx.line_sep[2] = true
+        return
+    end
+    local c = res.census or { total = 0, unknown = 0 }
+    if #res.findings == 0 then
+        -- NEVER the word "clean". Measured: a python fn harvests 5 expression
+        -- nodes and trips 0 rules because the rung-0 rules are Lua-authored, so
+        -- "0 findings" can mean nothing-to-read, read-and-clean, or
+        -- no-rule-applies. The row states WHAT WAS CHECKED and lets the reader
+        -- draw the verdict — the alternative is a fabricated all-clear.
+        if c.total == 0 then
+            ctx.lines[2] = '  ⚠ no expressions read here'
+            ctx.marks[2] = { { 0, -1, 'CartographFrontier' } }
+        else
+            ctx.lines[2] = ('  0 findings · %d/%d read')
+                :format(c.total - c.unknown, c.total)
+            ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        end
+        ctx.line_sep[2] = true
+        return
+    end
+    for _, f in ipairs(res.findings) do
+        -- identity = the RULE (what this row IS); the line rides the vnum lane
+        -- and the message is the detail the source pane and the report carry
+        local mark = f.hedged and '~' or ' '
+        ctx.lines[#ctx.lines + 1] = ('%s %s'):format(mark,
+            M.fit_identity(f.rule or '?', '  ', ''))
+        ctx.marks[#ctx.lines] = f.hedged
+            and { { 0, 1, 'CartographFrontier' } } or nil
+        ctx.vnums[#ctx.lines] = tostring(f.line)
+        ctx.line_stmt[#ctx.lines] = f.line -- the fn hover highlights this line
+        ctx.line_kind[#ctx.lines] = 'lint'
+    end
+    if c.total > 0 and c.unknown > 0 then
+        -- the findings are a LOWER BOUND when part of the tree is unread
+        ctx.lines[#ctx.lines + 1] = ('  ~ %d/%d read'):format(c.total - c.unknown, c.total)
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographFrontier' } }
+        ctx.line_sep[#ctx.lines] = true
+    end
+end
+
+--- A prose NOTE as chrome: word-wrapped to the budget across as many dim rows as
+--- it needs. Prose is not identity and cannot be elided, so the honest options are
+--- "wrap it" or "move it elsewhere" — this is the cheap first answer to the
+--- prose-overflow class tests/width_spec.lua currently ratchets.
+local function note(ctx, text, hl)
+    local budget = require('cartograph.config').symbols_width or 30
+    local line = ''
+    local function flush()
+        if line == '' then return end
+        ctx.lines[#ctx.lines + 1] = line
+        ctx.marks[#ctx.lines] = { { 0, -1, hl or 'CartographDim' } }
+        ctx.line_sep[#ctx.lines] = true -- chrome: hover keeps the preview
+        line = ''
+    end
+    for word in tostring(text):gmatch('%S+') do
+        local cand = line == '' and ('  ' .. word) or (line .. ' ' .. word)
+        if vim.fn.strdisplaywidth(cand) > budget and line ~= '' then
+            flush(); line = '  ' .. word
+        else
+            line = cand
+        end
+    end
+    flush()
+end
+
+-- ── the COMPARTMENT PILOT: the prototype reading as two altitudes ────────────
+-- `protos` is a ROOT (a concern index — the first door that is not the file tree,
+-- [[cartograph-navigation-model]]); `proto` hangs below it, one prototype's
+-- ORDERED overrides and hedges. Both read prototypes.all/at — the same records
+-- :CartographPrototypes formats. A row's identity is the prototype's NAME (or the
+-- override's PATH); its VALUE is deliberately absent, because the value lives in
+-- the source one hover away and the report prints it in full. That is the budget
+-- law choosing what a row is FOR.
+local function render_protos(ctx)
+    local pr = require 'cartograph.prototypes'
+    local why = pr.unavailable(store)
+    if why then
+        ctx.lines[1] = 'prototypes  unavailable'
+        ctx.marks[1] = { { 0, -1, 'CartographFrontier' } }
+        ctx.line_sep[1] = true
+        return note(ctx, '⚠ ' .. why, 'CartographFrontier')
+    end
+    local all = pr.all(store) or {}
+    local total = 0
+    for _, m in ipairs(all) do total = total + #m.protos end
+    local tail = ('  (%d)'):format(total)
+    ctx.lines[1] = M.fit_identity('prototypes', '', tail) .. tail
+    ctx.marks[1] = { { 0, -1, 'CartographSection' } }
+    ctx.line_sep[1] = true
+    if total == 0 then
+        return note(ctx, '(this project declares no prototypes — the data stage is'
+            .. ' empty, not unreadable)')
+    end
+    for _, m in ipairs(all) do
+        local ftail = ('  (%d)'):format(#m.protos)
+        ctx.lines[#ctx.lines + 1] = M.fit_identity(M.shortpath(m.file), '', ftail) .. ftail
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.line_file[#ctx.lines] = m.file
+        ctx.line_kind[#ctx.lines] = 'file'
+        for i, p in ipairs(m.protos) do
+            local name = p.name or p.var
+                or (p.patch and ('%s/%s'):format(p.patch.type, p.patch.name))
+                or '(anonymous)'
+            local mark = p.complete and '' or ' ~'
+            ctx.lines[#ctx.lines + 1] = '  '
+                .. M.fit_identity(name, '  ', mark) .. mark
+            if not p.complete then
+                ctx.marks[#ctx.lines] = { { -3, -1, 'CartographFrontier' } }
+            end
+            ctx.vnums[#ctx.lines] = tostring(p.line)
+            ctx.line_proto[#ctx.lines] = pr.key(m.file, i)
+            ctx.line_file[#ctx.lines] = m.file
+            ctx.line_stmt[#ctx.lines] = p.line
+            ctx.line_kind[#ctx.lines] = 'proto'
+        end
+    end
+end
+
+local function render_proto(ctx, key)
+    local pr = require 'cartograph.prototypes'
+    local rec, file = pr.at(store, key)
+    if not rec then
+        ctx.lines[1] = 'prototype  gone'
+        ctx.marks[1] = { { 0, -1, 'CartographFrontier' } }
+        ctx.line_sep[1] = true
+        -- a DEAD ADDRESS says so: the alternative is an empty prototype, which
+        -- reads as "this one overrides nothing" ([[cartograph-navigation-model]])
+        return note(ctx, '⚠ the module changed — this prototype is no longer at'
+            .. ' this position', 'CartographFrontier')
+    end
+    local name = rec.name or rec.var
+        or (rec.patch and ('%s/%s'):format(rec.patch.type, rec.patch.name))
+        or '(anonymous)'
+    local btail = (' [%s]'):format(rec.basis or '?')
+    ctx.lines[1] = M.fit_identity(name, '', btail) .. btail
+    ctx.marks[1] = { { 0, -1, 'CartographTitle' } }
+    ctx.line_file[1] = file
+    ctx.line_stmt[1] = rec.line
+    ctx.line_kind[1] = 'proto'
+    if rec.base then
+        local base = ('%s/%s'):format(rec.base.type, rec.base.name)
+        ctx.lines[#ctx.lines + 1] = '  ← ' .. M.fit_identity(base, '  ← ', '')
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.line_sep[#ctx.lines] = true
+    elseif rec.from_path then
+        ctx.lines[#ctx.lines + 1] = '  ← ' .. M.fit_identity(rec.from_path, '  ← ', ' ?')
+            .. ' ?'
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographFrontier' } }
+        ctx.line_sep[#ctx.lines] = true
+    end
+    -- overrides and frontiers INTERLEAVED BY LINE: the sequence is the fact (a
+    -- later override wins), so a hedge must sit where it fired
+    local fi = 1
+    local function frontiers_upto(n)
+        while fi <= #(rec.frontiers or {})
+                and (n == nil or rec.frontiers[fi].line <= n) do
+            local f = rec.frontiers[fi]
+            ctx.lines[#ctx.lines + 1] = '  ~ '
+                .. M.fit_identity(f.callee or f.kind or '?', '  ~ ', '')
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographFrontier' } }
+            ctx.vnums[#ctx.lines] = tostring(f.line)
+            ctx.line_file[#ctx.lines] = file
+            ctx.line_stmt[#ctx.lines] = f.line
+            ctx.line_kind[#ctx.lines] = 'frontier'
+            fi = fi + 1
+        end
+    end
+    for _, o in ipairs(rec.overrides or {}) do
+        frontiers_upto(o.line)
+        -- the marker carries what the VALUE could not: ∅ a delete (a fact), ? a
+        -- value we could not read. The value itself is in the source, one hover
+        -- away, and :CartographPrototypes prints it.
+        local mark = (o.value == nil and ' ?')
+            or (o.value == require('cartograph.expr').NIL and ' ∅') or ''
+        ctx.lines[#ctx.lines + 1] = '  '
+            .. M.fit_identity(o.path or '?', '  ', mark) .. mark
+        ctx.vnums[#ctx.lines] = tostring(o.line)
+        ctx.line_file[#ctx.lines] = file
+        ctx.line_stmt[#ctx.lines] = o.line
+        ctx.line_kind[#ctx.lines] = 'override'
+    end
+    frontiers_upto(nil)
+    if #(rec.overrides or {}) == 0 and #(rec.frontiers or {}) == 0 then
+        local text = concerns.empty_of('proto', store)
+        note(ctx, text or '(no field overrides)')
+    end
+end
+
 local function render_detail(ctx)
     local n, sr, sc, er, ec, df, fnid = detail_scope()
     if not n then ctx.lines[1] = '(gone)'; return end
@@ -1474,11 +1691,13 @@ function M.render()
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
-        line_regfor = {}, line_block = {}, line_detail = {},
+        line_regfor = {}, line_block = {}, line_detail = {}, line_proto = {},
         line_about = {}, line_kind = {} }
     local v = M.view
     if LENS_SETS[v.level] and cur_lens() == 'detail' then
         render_detail(ctx)
+    elseif v.level == 'fn' and cur_lens() == 'lints' then
+        render_lints(ctx, v.fn)
     elseif v.level == 'files' then
         if M.files_mode == 'tree' then
             if store.toc then render_files_load(ctx) else render_files_tree(ctx) end
@@ -1501,6 +1720,8 @@ function M.render()
     elseif v.level == 'state' then render_state(ctx, v.state)
     elseif v.level == 'block' then render_block(ctx, v.block)
     elseif v.level == 'ws' then render_ws(ctx)
+    elseif v.level == 'protos' then render_protos(ctx)
+    elseif v.level == 'proto' then render_proto(ctx, v.proto)
     else render_fn(ctx, v.fn) end
 
     M.line_node, M.node_line = ctx.line_node, ctx.node_line
@@ -1510,7 +1731,7 @@ function M.render()
     M.line_group, M.line_sep, M.line_state = ctx.line_group, ctx.line_sep, ctx.line_state
     M.line_trans, M.line_lit = ctx.line_trans, ctx.line_lit
     M.line_regfor, M.line_block = ctx.line_regfor, ctx.line_block
-    M.line_detail = ctx.line_detail
+    M.line_detail, M.line_proto = ctx.line_detail, ctx.line_proto
     M.line_about, M.line_kind = ctx.line_about, ctx.line_kind
 
     -- names come from arbitrary source text; a row must stay one row
@@ -1853,7 +2074,8 @@ function M.show(level, ctx_val)
         elseif level == 'lit' then M.view.lit = ctx_val
         elseif level == 'live' then M.view.live = ctx_val
         elseif level == 'block' then M.view.block = ctx_val
-        elseif level == 'state' then M.view.state = ctx_val end
+        elseif level == 'state' then M.view.state = ctx_val
+        elseif level == 'proto' then M.view.proto = ctx_val end
     end
     M.render()
     if M.win and vim.api.nvim_win_is_valid(M.win) then
@@ -2095,6 +2317,20 @@ function M.attach(win)
                     local e = M.line_lit[r]
                     local v = store.node((M.view.lit or ''):match('^[^\31]*'))
                     if e and e.needle and v then var_context(v, e.needle) end
+                elseif M.view.level == 'protos' or M.view.level == 'proto' then
+                    -- a prototype is NOT a graph node: its anchor is a module +
+                    -- a line, so hover previews the declaring line in that
+                    -- module (the FSM-anchor law satisfied by the module, whose
+                    -- id IS its file path)
+                    local l, f = M.line_stmt[r], M.line_file[r]
+                    local mid = f and module_id(f)
+                    if l and mid and store.node(mid) then
+                        store.set_context({ node = mid, ranges = {
+                            { start = { line = l - 1, char = 0 },
+                              ['end'] = { line = l, char = 0 } } } })
+                    else
+                        store.set_context(nil)
+                    end
                 elseif M.view.level == 'fn' or M.view.level == 'block' then
                     local l = M.line_stmt[r]
                     local fnid = M.view.level == 'fn' and M.view.fn
@@ -2146,6 +2382,7 @@ function M.attach(win)
             live = M.view.live,
             tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
             refused = M.view.refused, regfor = M.view.regfor,
+            proto = M.view.proto,
             files_mode = M.files_mode,
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
@@ -2193,6 +2430,7 @@ function M.attach(win)
         M.view.tbl, M.view.occs, M.view.state = loc.tbl, loc.occs, loc.state
         M.view.lit, M.view.refused = loc.lit, loc.refused
         M.view.regfor, M.view.block = loc.regfor, loc.block
+        M.view.proto = loc.proto
         M.view.live = loc.live
         M.view.lens = loc.lens -- the lens rides the trail
         M._ghost = nil  -- fresh position: no ghosted lens node
@@ -2446,7 +2684,19 @@ function M.attach(win)
             end
             return
         end
-        if M.view.level == 'files' then
+        if M.view.level == 'protos' then
+            local key = M.line_proto[r]
+            if key then return enter('proto', key) end
+            local f = M.line_file[r]
+            if f then return enter('file', f) end
+            return
+        elseif M.view.level == 'proto' then
+            -- an override is a leaf of THIS axis. A silent no-op is
+            -- indistinguishable from a dropped keypress, so say it.
+            return vim.notify('cartograph: an override is a leaf here — h returns'
+                .. ' to the roster, <C-]> in the source pane goes to the value',
+                vim.log.levels.INFO)
+        elseif M.view.level == 'files' then
             local f = M.line_file[r]
             if f then
                 -- the lazy $VIMRUNTIME node: descending it extracts the
@@ -2734,6 +2984,11 @@ function M.attach(win)
             store.set_context(nil)
             surface_to_var(M.fsm_anchor())
         elseif M.view.level == 'ws' then
+            store.set_context(nil)
+            M.show('files')
+        elseif M.view.level == 'protos' then
+            -- a concern INDEX is a root: there is nothing structurally above it,
+            -- so h leaves for the one tree that is always there
             store.set_context(nil)
             M.show('files')
         elseif concerns.of(M.view.level) then

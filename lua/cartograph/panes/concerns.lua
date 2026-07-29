@@ -100,6 +100,26 @@ M.REGISTRY = {
         },
     },
 
+    -- ONE PROTOTYPE, as a place ([[cartograph-interactive-reports]] pilot 2):
+    -- rows are its ORDERED field overrides and its hedges. key = file \31 index.
+    -- The subject is the DECLARING MODULE — a module node's id IS its file path,
+    -- so this altitude hangs in the structural tree (the FSM-anchor law) even
+    -- though a prototype is not itself a graph node. Its uncomputed half is NOT
+    -- needs_edges: the reading re-parses module rows, so what makes it
+    -- unavailable is the absence of a data stage, not a thin index.
+    proto = {
+        view_key = 'proto',
+        subject  = function (key) return (key or ''):match('^(.-)\31') end,
+        ascend   = function () return 'protos', nil end,
+        hover    = 'site', -- rows are source positions in the declaring module
+        empty    = {
+            computed   = '(no field overrides — the base is taken as declared)',
+            uncomputed = function (store)
+                return require('cartograph.prototypes').unavailable(store)
+            end,
+        },
+    },
+
     -- a REFUSAL as a place: the rule that refused a call and the candidates it
     -- refused between. key = fn \31 line \31 callee.
     refused = {

@@ -304,6 +304,40 @@ function M.all(store)
     return out
 end
 
+-- ── the browser's view of the reading (the COMPARTMENT pilot) ────────────────
+-- The reading was a report first: `M.report` formats these same records into
+-- strings. A browser altitude is a SECOND consumer of the records, not a second
+-- reading ([[cartograph-interactive-reports]]) — which is why the only thing
+-- needed here is an addressable KEY per prototype.
+
+local KEYSEP = '\31'
+
+--- A stable key for one prototype: its module plus its position in that module's
+--- ordered list. Invertible by construction, because an altitude's key IS its own
+--- inverse ([[cartograph-navigation-model]]).
+function M.key(file, idx) return ('%s%s%d'):format(file, KEYSEP, idx) end
+
+--- key -> (record, file, idx). nil when the key no longer names a prototype (the
+--- file changed under us) — the caller must SAY that rather than render an empty
+--- prototype, which would read as "this one has no fields".
+function M.at(store, key)
+    local file, idx = (key or ''):match('^(.-)' .. KEYSEP .. '(%d+)$')
+    if not file then return nil end
+    local ps = M.of_module(store, file)
+    if not ps then return nil end
+    return ps[tonumber(idx)], file, tonumber(idx)
+end
+
+--- The UNCOMPUTED half of the typed empty: why the data stage may have no answer
+--- here at all. nil when the reading applies, so a caller can write
+--- `unavailable(store) or '(no prototypes declared)'` and never conflate the two.
+function M.unavailable(store)
+    if not M.adapter(store) then
+        return 'no data stage here — the prototype reading activates on an env'
+            .. ' profile that has one (today: lua-factorio)'
+    end
+end
+
 --- Census over M.all: how much of the data stage is READ vs hedged.
 function M.census(store)
     local all = M.all(store)

@@ -502,7 +502,10 @@ test('nav: the detail lens shows args/conditions/reads and rides the trail', fun
     end
     vim.api.nvim_win_set_cursor(wsym, { argrow, 2 })
     local argline = symbols.line_stmt[argrow]
-    press(keys.cycle) -- detail -> statements: the arg is gone, ghost to its statement
+    -- BACKWARD, because the fn lens set has three entries now (statements /
+    -- detail / lints): the assertion is about the ghost round-trip, not about a
+    -- two-element set, so the direction is what has to be explicit
+    press(keys.cycle_back) -- detail -> statements: the arg is gone, ghost to its statement
     eq('statements', symbols.view.lens or 'statements')
     eq(argline, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]]) -- same statement line
     press(keys.cycle) -- back to detail: the arg row is restored exactly
@@ -516,7 +519,7 @@ test('nav: the detail lens shows args/conditions/reads and rides the trail', fun
     local last = vim.api.nvim_buf_line_count(symbols.buf)
     vim.api.nvim_win_set_cursor(wsym, { last, 2 })
     local lastline = symbols.line_stmt[last]
-    press(keys.cycle) -- detail -> statements
+    press(keys.cycle_back) -- detail -> statements
     eq(lastline, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]])
     press(keys.cycle) -- back to detail
 
@@ -531,7 +534,7 @@ test('nav: the detail lens shows args/conditions/reads and rides the trail', fun
         local later = vrows[#vrows] -- a later occurrence (different statement line)
         local lline = symbols.line_stmt[later]
         vim.api.nvim_win_set_cursor(wsym, { later, 2 })
-        press(keys.cycle); press(keys.cycle) -- statements and back
+        press(keys.cycle_back); press(keys.cycle) -- statements and back
         local b = vim.api.nvim_win_get_cursor(wsym)[1]
         ok(symbols.line_detail[b] and symbols.line_detail[b].kind == 'var'
             and symbols.line_stmt[b] == lline,

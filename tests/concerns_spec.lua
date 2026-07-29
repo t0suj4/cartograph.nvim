@@ -34,8 +34,12 @@ local function reset(nodes, view)
 end
 
 --- A store stub for empty_of: only the capability predicate matters.
+--- A store stub for empty_of. It has to be capable w.r.t. EVERY precondition a
+--- concern can have, not just the thin index: `proto`'s unavailability is the
+--- absence of a DATA STAGE, so the stub carries a profile that has one. A stub
+--- that is accidentally incapable makes the computed-empty half untestable.
 local function stub(index_only)
-    return { data = { root = '/proj' },
+    return { data = { root = '/proj', profile = 'lua-factorio' },
         is_index_only = function () return index_only end }
 end
 
@@ -54,7 +58,7 @@ test('registry: every entry declares all five answers (the totality fence)',
         ok(type(e.empty.uncomputed) == 'function',
             level .. ' declares WHY it might have no answer')
     end
-    eq(4, n) -- callers, occs, regfor, refused
+    eq(5, n) -- callers, occs, regfor, refused + proto (the compartment pilot)
 end)
 
 test('registry: the containment/data altitudes are deliberately NOT concerns',
@@ -178,21 +182,46 @@ test('empty: every concern has a real computed note (occs had NONE)', function (
     end
 end)
 
-test('empty: an UNAVAILABLE concern states WHY, and is never the computed note',
+test('empty: an EDGE-derived concern is unavailable on a thin index, and says so',
     function ()
     -- THE FABRICATION: index-only carries every file's defs and 4 edges in total
     -- (import only — no ref/reg/use, 0 calls), so a fn with 4 callers on the full
     -- graph rendered "(no callers found — entry point, or dynamically
     -- dispatched)". A manufactured fact: the pane never asked.
-    for level in pairs(concerns.REGISTRY) do
-        local note, why = concerns.empty_of(level, stub(true))
-        ok(why, level .. ' reports a reason under index-only')
-        eq(note, why) -- one call answers both: the text IS the reason
-        ok(why:find('index%-only'), level .. ' names the mode: ' .. why)
-        ok(why:find('/proj', 1, true), level .. ' points at the full open')
-        local computed = concerns.REGISTRY[level].empty.computed
-        ok(why ~= computed, level .. ' does NOT reuse the computed note')
+    local n = 0
+    for level, e in pairs(concerns.REGISTRY) do
+        if e.empty.uncomputed == concerns.needs_edges then
+            n = n + 1
+            local note, why = concerns.empty_of(level, stub(true))
+            ok(why, level .. ' reports a reason under index-only')
+            eq(note, why) -- one call answers both: the text IS the reason
+            ok(why:find('index%-only'), level .. ' names the mode: ' .. why)
+            ok(why:find('/proj', 1, true), level .. ' points at the full open')
+            ok(why ~= e.empty.computed, level .. ' does NOT reuse the computed note')
+        end
     end
+    eq(4, n) -- callers, occs, regfor, refused: the four built from edges
+end)
+
+test('empty: a concern with a DIFFERENT precondition reports its own reason',
+    function ()
+    -- The pilot broke the old assumption that every unavailability is the thin
+    -- index. `proto` is unavailable when the project has no DATA STAGE, and — the
+    -- interesting half — it is AVAILABLE on a thin index, because the prototype
+    -- reading RE-PARSES module rows instead of reading edges. A fence that
+    -- assumed one cause would have forced a false reason here.
+    local no_stage = { data = { root = '/proj' },   -- no profile => no adapter
+        is_index_only = function () return false end }
+    local note, why = concerns.empty_of('proto', no_stage)
+    ok(why, 'proto reports a reason when there is no data stage')
+    eq(note, why)
+    ok(why:find('data stage'), 'and names what is missing: ' .. why)
+    ok(why ~= concerns.REGISTRY.proto.empty.computed, 'not the computed note')
+
+    local n2, w2 = concerns.empty_of('proto', stub(true)) -- index-only, has a stage
+    eq(nil, w2)
+    ok(n2:find('overrides'), 'on a thin index it is COMPUTABLE, so the note is the'
+        .. ' computed one: ' .. tostring(n2))
 end)
 
 test('empty: not a concern -> nil (the caller keeps its own note)', function ()

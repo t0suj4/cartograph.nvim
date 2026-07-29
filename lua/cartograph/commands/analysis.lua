@@ -224,8 +224,22 @@ function M.register(H)
     end, { desc = 'cartograph: field/member linker (Track 3) — resolves the focused method\'s self.field READS to the self.field = … WRITE(s) on its class (own methods + extends ancestors), receiver-typed. Go-to-definition for a data member; a writeless read is left unresolved (sound-first, not the dead undefined-member lint)' })
 
     -- ── the DATA STAGE: prototypes as base + ordered overrides + registration ─
-    cmd('CartographPrototypes', function ()
+    cmd('CartographPrototypes', function (o)
         local store = live() if not store then return end
+        -- WITH A BANG: the same records as a BROWSER ALTITUDE instead of a
+        -- dead-end buffer — descend a prototype for its ordered overrides, hover
+        -- to see the declaring line ([[cartograph-interactive-reports]] pilot 2).
+        -- The report stays the default: it prints the values, which the rows
+        -- deliberately do not (the budget law).
+        if o.bang then
+            local symbols = require 'cartograph.panes.symbols'
+            if not (symbols.win and vim.api.nvim_win_is_valid(symbols.win)) then
+                return vim.notify('cartograph: the browser is not open — :Cartograph'
+                    .. ' <dir> first, or drop the ! for the report',
+                    vim.log.levels.WARN)
+            end
+            return symbols.show('protos')
+        end
         local lines = require('cartograph.prototypes').report(store)
         if not lines then
             -- typed empty: "not a project with a data stage" is a different fact
@@ -235,7 +249,7 @@ function M.register(H)
                 .. ' one (today: lua-factorio)', vim.log.levels.INFO)
         end
         scratch(lines)
-    end, { desc = 'cartograph: the DATA STAGE — every prototype the project declares, read as a BASE REFERENCE + an ORDERED sequence of field overrides + its registration, which is what a prototype actually is (not a table literal). Reads module-TOP-LEVEL rows, where 72% of a real mod\'s field assignments live. Honest about being a lower bound: an opaque call receiving the prototype marks it ~HEDGED, a non-literal value keeps its path and records why, an unresolved base names the local to follow, and an explicit nil is reported as a DELETE rather than an unknown' })
+    end, { bang = true, desc = 'cartograph: the DATA STAGE — every prototype the project declares, read as a BASE REFERENCE + an ORDERED sequence of field overrides + its registration, which is what a prototype actually is (not a table literal). Reads module-TOP-LEVEL rows, where 72% of a real mod\'s field assignments live. Honest about being a lower bound: an opaque call receiving the prototype marks it ~HEDGED, a non-literal value keeps its path and records why, an unresolved base names the local to follow, and an explicit nil is reported as a DELETE rather than an unknown. WITH A BANG (:CartographPrototypes!) the same records open as a browser ALTITUDE — a roster you descend for one prototype\'s ordered overrides, hover to preview the declaring line, h back out — instead of a dead-end buffer' })
 
     -- ── untangle MODULE: independent function clusters in a file (or a dir) ─
     cmd('CartographUntangleModule', function (o)

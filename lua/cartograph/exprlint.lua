@@ -173,6 +173,13 @@ function M.lint(store, fn_id)
         if a.line ~= b.line then return a.line < b.line end
         return a.rule < b.rule
     end)
+    -- The census is not decoration: it is the only honest thing a CONSUMER can
+    -- say when there are no findings. MEASURED — with a python parser on the rtp,
+    -- `def f(a): if a == a: …` harvests total=5 / unknown=1 and trips ZERO rules,
+    -- because the rung-0 rules are Lua-authored. So "0 findings" means one of
+    -- three things (nothing to read · read and clean · read but no rule applies)
+    -- and a surface that renders it as "clean" fabricates a verdict. Every
+    -- consumer must report WHAT WAS CHECKED alongside the count.
     return { findings = out, census = { total = total, unknown = unknown, kinds = kinds } }
 end
 
@@ -188,7 +195,10 @@ function M.report(store, fn_id)
     end
     local L = {}
     if #res.findings == 0 then
-        L[#L + 1] = ('expr: %s — no Rung-0 findings'):format(node.name or fn_id)
+        -- not "clean": the count alone is a verdict the reading has not earned
+        -- (the coverage line below is what qualifies it)
+        L[#L + 1] = ('expr: %s — 0 findings of %d expression node(s) read')
+            :format(node.name or fn_id, (res.census or {}).total or 0)
     else
         L[#L + 1] = ('expr: %s — %d finding(s)'):format(node.name or fn_id, #res.findings)
         L[#L + 1] = ''

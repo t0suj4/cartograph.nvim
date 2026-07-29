@@ -273,7 +273,7 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
                               on its class (own methods + extends
                               ancestors). A writeless read stays
                               unresolved
-  :CartographPrototypes       the DATA STAGE: every prototype the
+  :CartographPrototypes[!]    the DATA STAGE: every prototype the
                               project declares, read as a base
                               reference + an ORDERED sequence of field
                               overrides + its registration — which is
@@ -286,7 +286,14 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
                               local to follow, an explicit nil is a
                               DELETE. Needs an env profile with a data
                               stage (today: lua-factorio) and says so
-                              when there is none
+                              when there is none. WITH A BANG the same
+                              records open in the browser instead: a
+                              roster you descend for one prototype's
+                              ordered overrides, hover to preview the
+                              declaring line, h back out. The rows carry
+                              paths and markers (∅ delete, ? unread, ~
+                              hedged) but no VALUES — those are in the
+                              source one hover away, and in the report
   :CartographTrace [n]        where parameter [n] (default 1) gets its
                               values: one row per resolved call site,
                               |cartograph-keys| descend takes the next

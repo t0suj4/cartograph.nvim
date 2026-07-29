@@ -124,6 +124,9 @@ local NOT_A_CONCERN = {
     lit    = 'data: a literal value tree',
     live   = 'data: runtime values, whose idiom is var_context not a node def',
     ws     = 'the working set: rows are a USER set, not a derived relation',
+    protos = 'a concern INDEX and a ROOT axis (the prototype roster): its rows'
+        .. ' hang from nothing, like files/states — the door is'
+        .. ' :CartographPrototypes!. `proto` below it IS a registry entry',
 }
 
 print('\n== B. CONCERN DISPOSITION: every altitude declared or explicitly not a'
@@ -177,6 +180,9 @@ end
 -- ── C. HOVER DISPOSITION ────────────────────────────────────────────────────
 local NO_NODE_HOVER = {
     files  = 'file rows are not node rows (the ● taught us line_file is too wide)',
+    protos = 'a prototype is not a graph node: its anchor is a module + a line,'
+        .. ' so hover previews the declaring line',
+    proto  = 'override rows are source positions in the declaring module, as fn',
     fn     = 'statement rows highlight the source line instead',
     block  = 'as fn',
     callers = 'site rows: the site renderer previews the position',
