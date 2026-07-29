@@ -244,6 +244,27 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
   :CartographDiscover[!] [verb]
                               explain registry auto-discovery (! deep tier)
   :CartographShapes           explain project-shape detection for this root
+  :CartographFeedback[!] [text]                       *cartograph-cmd-feedback*
+                              file feedback ABOUT CARTOGRAPH, frozen at the
+                              node you are standing on. You type only what you
+                              EXPECTED; the observed half is captured — the
+                              rendered rows verbatim, the gesture you pressed
+                              and the rows it was pressed on, the subject's
+                              frozen source, the typed empty as rendered, call
+                              provenance, and the environment facts that decide
+                              verdicts (parsers on the runtimepath, profile,
+                              packs, index-only, cache VERSION, commit). With
+                              no argument it opens a compose buffer with
+                              git-commit semantics: # lines are stripped, :w
+                              files it, :q abandons it. An entry FREEZES and
+                              never re-anchors, because an anchor repaired
+                              after an edit silently points at different code.
+                              Fileable with no graph loaded and on a row with
+                              no node — an absence is the most useful report
+                              there is. One JSON per entry under
+                              stdpath('state'): a user record, never a cache.
+                              ! = dump every entry for this root as pasteable
+                              markdown
 
 ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
 

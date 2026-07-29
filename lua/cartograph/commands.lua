@@ -112,6 +112,7 @@ function M.register()
         require 'cartograph.commands.refactor',
         require 'cartograph.commands.txn',
         require 'cartograph.commands.outward',
+        require 'cartograph.commands.feedback',
     }) do group.register(H) end
 end
 

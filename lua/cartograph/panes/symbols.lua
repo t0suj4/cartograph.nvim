@@ -1691,6 +1691,33 @@ function M.row_subject(row)
     return nil
 end
 
+--- The rendered rows of the browser, verbatim, plus the cursor's row index.
+--- What cartograph SAID — the claim a feedback entry disputes, and the only
+--- thing that makes such a report reproducible without asking the user to
+--- paraphrase what was on their screen (cartograph.feedback).
+function M.rows()
+    if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return nil end
+    local lines = vim.api.nvim_buf_get_lines(M.buf, 0, -1, false)
+    local r = (M.win and vim.api.nvim_win_is_valid(M.win))
+        and vim.api.nvim_win_get_cursor(M.win)[1] or nil
+    return lines, r
+end
+
+--- Record the gesture about to fire, together with what is on screen AS it
+--- fires. One slot, overwritten: feedback is filed about the last thing that
+--- surprised you, and by the time you have typed the expectation the before-side
+--- is gone. Recorded at the keymap seam so it is the keystroke actually pressed,
+--- never a transition inferred afterwards from the trail — "l did nothing" and
+--- "l went somewhere wrong" are different reports and the trail cannot tell them
+--- apart. nil until the first gesture, which is itself honest: a report filed
+--- without having navigated is not a transition report.
+M.last_gesture = nil
+function M.note_gesture(name)
+    local rows, r = M.rows()
+    M.last_gesture = { gesture = name, level = M.view.level, lens = M.view.lens,
+        row = r, rows = rows }
+end
+
 --- Hover a NODE row: tint its relationships and PREVIEW its definition in the
 --- source pane (a context takeover, restored on leave). Shared by every altitude
 --- in NODE_HOVER. Hover never re-roots the cockpit — pivoting stays a conscious
@@ -2599,18 +2626,26 @@ function M.attach(win)
             { buffer = M.buf, desc = 'cartograph: cone — descendants' })
     end
 
-    vim.keymap.set('n', keys.descend, descend,
+    -- Every FRAME/LENS gesture records itself before it runs (M.note_gesture):
+    -- a feedback report about a transition needs the side you came FROM, and
+    -- only the keymap knows which key was pressed. j/k are deliberately not
+    -- wrapped — they move within one frame, so they change no address.
+    local function gestured(name, fn)
+        return function () M.note_gesture(name); return fn() end
+    end
+
+    vim.keymap.set('n', keys.descend, gestured('descend', descend),
         { buffer = M.buf, desc = 'cartograph: descend (into file / into function)' })
-    vim.keymap.set('n', keys.pivot, function ()
+    vim.keymap.set('n', keys.pivot, gestured('pivot', function ()
         if M.view.level == 'file' or M.view.level == 'region' then
             local id = M.line_node[row()]
             if id then return store.pivot(id) end -- focus, stay at this altitude
         end
         descend()
-    end, { buffer = M.buf, nowait = true, desc = 'cartograph: pivot here (focus without zooming)' })
+    end), { buffer = M.buf, nowait = true, desc = 'cartograph: pivot here (focus without zooming)' })
     -- ascending lands the cursor ON what we came from (the file-manager rule),
     -- not on the first row of the wider view
-    vim.keymap.set('n', keys.ascend, function ()
+    vim.keymap.set('n', keys.ascend, gestured('ascend', function ()
         -- a pending block step-out is provisional: h returns INTO the block
         if M._stepout then return return_into_block() end
         if #M.trail == 0 and M.view.level == 'files' then return end
@@ -2736,7 +2771,7 @@ function M.attach(win)
         -- fn, var -> block, …) re-syncs the def pane to that node too — at
         -- once or on the next move, per config.sync_on_ascend
         arm_or_sync()
-    end, { buffer = M.buf, desc = 'cartograph: ascend (to file / to file tree)' })
+    end), { buffer = M.buf, desc = 'cartograph: ascend (to file / to file tree)' })
 
     -- j/k as a depth-first walk of the form tree. Inside a block they move
     -- among its forms; at the FIRST/LAST form they STEP OUT to the parent —
@@ -2917,9 +2952,9 @@ function M.attach(win)
             cycle_lens(step)
         end
     end
-    vim.keymap.set('n', keys.cycle, function () cycle(1) end,
+    vim.keymap.set('n', keys.cycle, gestured('cycle', function () cycle(1) end),
         { buffer = M.buf, desc = 'cartograph: cycle the altitude mode / lens' })
-    vim.keymap.set('n', keys.cycle_back, function () cycle(-1) end,
+    vim.keymap.set('n', keys.cycle_back, gestured('cycle-back', function () cycle(-1) end),
         { buffer = M.buf, desc = 'cartograph: cycle the altitude mode / lens (reverse)' })
 
     -- staging as cut & paste: dd cuts a function into the move-set, visual d
