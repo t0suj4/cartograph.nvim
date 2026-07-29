@@ -210,6 +210,23 @@ function M.fit_identity(label, indent, tail)
             vim.fn.strchars(label) - back, back) or '')
 end
 
+--- Fit free TEXT — a statement, a call, an expression — into the budget after
+--- `indent`. Unlike an identity, a statement reads left to right and its FRONT
+--- carries the signal (`local vonnCharacter = …` still says which local), so this
+--- elides the TAIL, where fit_identity elides the middle. Both MARK: the … is the
+--- whole difference between a fitted row and a silently clipped one. Measured, and
+--- the reason this exists: the detail lens emitted rows up to 82 columns into a
+--- 30-column pane — 7 of 15 rows on one function — and the overflow was invisible
+--- because the window simply stops drawing. The dropped text is never lost: every
+--- such row carries a line_stmt anchor, so the source pane holds it in full.
+function M.fit_text(text, indent)
+    local room = (require('cartograph.config').symbols_width or 30)
+        - vim.fn.strdisplaywidth(indent or '')
+    room = math.max(room, MIN_IDENTITY)
+    if vim.fn.strdisplaywidth(text) <= room then return text end
+    return vim.fn.strcharpart(text, 0, room - 1) .. '…'
+end
+
 -- ── per-level renderers (fill ctx.lines/marks/vnums/signs + row mappings) ────
 
 local function pesc(s) return (tostring(s):gsub('([^%w])', '%%%1')) end
@@ -1417,12 +1434,13 @@ local function render_detail(ctx)
         end
     end
     for _, st in ipairs(stmts) do
-        ctx.lines[#ctx.lines + 1] = '  ' .. st.text
+        ctx.lines[#ctx.lines + 1] = '  ' .. M.fit_text(st.text, '  ')
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
         ctx.line_stmt[#ctx.lines] = st.sr + 1
         for _, it in ipairs(st.items) do
             local icon = it.kind == 'cond' and '? ' or '· '
-            ctx.lines[#ctx.lines + 1] = '      ' .. icon .. it.text
+            ctx.lines[#ctx.lines + 1] = '      ' .. icon
+                .. M.fit_text(it.text, '      ' .. icon)
             ctx.line_stmt[#ctx.lines] = it.sr + 1
             ctx.line_detail[#ctx.lines] = { kind = it.kind,
                 key = ('%s\31%d\31%d\31%d\31%d'):format(fnid or n.id, it.sr, it.sc, it.er, it.ec) }
@@ -1436,7 +1454,9 @@ local function render_detail(ctx)
                         seen[vid] = true
                         local vn = store.node(vid)
                         if vn then
-                            ctx.lines[#ctx.lines + 1] = '      → ' .. (vn.name or vid)
+                            -- a var row is an IDENTITY, so it elides the middle
+                            ctx.lines[#ctx.lines + 1] = '      → '
+                                .. M.fit_identity(vn.name or vid, '      → ', '')
                             ctx.marks[#ctx.lines] = { { 0, 8, 'CartographDim' } }
                             ctx.line_stmt[#ctx.lines] = st.sr + 1 -- anchor to its statement
                             ctx.line_detail[#ctx.lines] = { kind = 'var', id = vid }

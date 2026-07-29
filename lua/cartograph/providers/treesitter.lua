@@ -2798,6 +2798,16 @@ local COND_TYPES = { if_statement = true, elseif_statement = true,
     while_statement = true, repeat_statement = true, switch_statement = true,
     ['for_statement'] = true, for_in_statement = true, when = true }
 
+-- One row of detail text: whitespace collapsed (a row IS one line) and length
+-- BOUNDED, because a generated statement can be arbitrarily long. The bound MARKS
+-- itself — an unmarked cut reads as the whole statement, and a consumer that fits
+-- to a narrower budget only hides that while its budget stays under this bound.
+local DETAIL_MAX = 80
+local function bounded(s)
+    if vim.fn.strchars(s) <= DETAIL_MAX then return s end
+    return vim.fn.strcharpart(s, 0, DETAIL_MAX - 1) .. '…'
+end
+
 -- a statement's DETAIL items: for a conditional, its condition; otherwise the
 -- arguments of any calls it makes (not descending into nested blocks — those
 -- belong to the block lens). Each item is { kind='cond'|'arg', sr,sc,er,ec, text }.
@@ -2806,7 +2816,7 @@ local function detail_items(stmt, src)
     local function mk(kind, n)
         local a, b, c, d = n:range()
         items[#items + 1] = { kind = kind, sr = a, sc = b, er = c, ec = d,
-            text = node_text(n, src):gsub('%s+', ' '):gsub('^%s*', ''):sub(1, 80) }
+            text = bounded(node_text(n, src):gsub('%s+', ' '):gsub('^%s*', '')) }
     end
     if COND_TYPES[stmt:type()] then
         local cond = stmt:field('condition')[1]
@@ -2864,7 +2874,11 @@ function M.detail(file, sr, sc, er, ec)
     for _, s in ipairs(stmts) do
         local a, b, c, d = s:range()
         out[#out + 1] = { sr = a, sc = b, er = c, ec = d,
-            text = node_text(s, src):gsub('%s+', ' '):gsub('^%s*', ''):sub(1, 80),
+            -- collapsed to one line (a row IS one line) and BOUNDED, because a
+            -- generated statement can be arbitrarily long. The bound MARKS itself:
+            -- an unmarked cut here reads as the whole statement, and the pane's own
+            -- budget fit only hides it while the budget stays under this bound.
+            text = bounded(node_text(s, src):gsub('%s+', ' '):gsub('^%s*', '')),
             items = detail_items(s, src) }
     end
     return out

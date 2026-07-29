@@ -53,10 +53,14 @@ M.FIELDS = { 'expected', 'gesture', 'from', 'altitude', 'lens',
 -- journal.lua's convention, deliberately: the STATE dir, not the cache dir,
 -- because a cache is something we are allowed to delete, and one JSON per entry
 -- so the file is readable with no tool at all.
-local function dir_of(root)
+--- The entry directory for a root. Creates it only when `peek` is false: READING a
+--- root must not bring its directory into existence, or merely listing a project
+--- you never filed against litters the state dir with empty folders — and an
+--- existing dir is the cheapest signal that a root HAS feedback.
+local function dir_of(root, peek)
     local dir = vim.fn.stdpath('state') .. '/cartograph/'
         .. (root or 'no-root'):gsub('/+$', ''):gsub('[/\\:]', '%%') .. '.feedback'
-    vim.fn.mkdir(dir, 'p')
+    if not peek then vim.fn.mkdir(dir, 'p') end
     return dir
 end
 M.dir = dir_of
@@ -311,7 +315,7 @@ end
 
 --- Entries for a root, newest first.
 function M.list(root)
-    local dir = dir_of(root)
+    local dir = dir_of(root, true) -- peek: listing must not create
     local out = {}
     local it = vim.uv.fs_scandir(dir)
     while it do

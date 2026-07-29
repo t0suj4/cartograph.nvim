@@ -12,7 +12,8 @@ local SCRATCH = '/tmp/claude-1000/-home-t0suj4-tools-nvim/feedback-spec'
 local ROOT = SCRATCH .. '/root'
 
 local function cleanup()
-    vim.fn.delete(fb.dir(ROOT), 'rf')
+    -- peek, or the delete is preceded by a mkdir that recreates what we remove
+    vim.fn.delete(fb.dir(ROOT, true), 'rf')
 end
 
 local function stub_store(over)
@@ -264,7 +265,7 @@ test('write/list: a round trip through JSON, newest first', function ()
 end)
 
 test('dir: entries live in the STATE dir — a user record, never a cache', function ()
-    local d = fb.dir(ROOT)
+    local d = fb.dir(ROOT, true)
     assert(d:find(vim.fn.stdpath('state'), 1, true) == 1, 'not under stdpath(state): ' .. d)
     assert(not d:find(vim.fn.stdpath('cache'), 1, true), 'a cache is deletable; this is not')
     assert(d:match('%.feedback$'), 'feedback entries must not share the journal dir')
@@ -342,6 +343,15 @@ end)
 
 -- ── the pane seam ────────────────────────────────────────────────────────────
 
+test('dir: reading a root does not leave an empty dir behind', function ()
+    -- fb.dir() mkdirs on READ (a write needs the dir to exist), so merely listing
+    -- a root created one — this spec littered the user's state dir with an empty
+    -- %tmp%…feedback-spec%root.feedback every run. Reading must not create.
+    local probe = ROOT .. '/never-written'
+    eq(0, #fb.list(probe))
+    eq(0, vim.fn.isdirectory(fb.dir(probe, true)))
+end)
+
 test('pane: the gesture recorder works with no browser open', function ()
     local symbols = require 'cartograph.panes.symbols'
     eq(nil, symbols.rows())          -- no buffer: nil, not an error
@@ -350,3 +360,6 @@ test('pane: the gesture recorder works with no browser open', function ()
     eq(nil, symbols.last_gesture.rows)
     symbols.last_gesture = nil
 end)
+
+-- this spec writes entries; leave the user's state dir as we found it
+cleanup()

@@ -163,6 +163,56 @@ test('width: the file header still maps to its row after a breadcrumb', function
     eq(1, symbols.file_header[SHORT])
 end)
 
+-- ── free TEXT rows: the detail lens ─────────────────────────────────────────
+-- Found by a :CartographFeedback entry, which froze the rows it was filed on and
+-- so made them measurable after the fact: the detail lens emitted rows up to 82
+-- columns — 7 of 15 on one function — into a 30-column pane. The budget work had
+-- reached identity rows and never these, and the ratchet below only ever measured
+-- the `files` and `ws` altitudes, so nothing was watching.
+
+test('width: free TEXT elides at the TAIL, where an identity elides the middle',
+    function ()
+    -- a statement reads left to right: the front says which local is being
+    -- assigned, so keeping the front is what keeps the row meaningful
+    local got = symbols.fit_text('local vonnCharacter = player.surface.create_entity{x=1}', '  ')
+    eq(28, vim.fn.strdisplaywidth(got))     -- 30 minus the 2-column indent
+    eq('local vonnCharacter = playe…', got) -- head kept, loss MARKED
+    -- and an identity of the same length elides the MIDDLE instead
+    local id = symbols.fit_identity('crash-site-assembling-machine.lua', '', '')
+    assert(id:match('^crash'), id)
+    assert(id:match('lua$'), id)  -- both ends carry signal for a name
+    assert(id:find('…', 1, true), 'the elision must be marked')
+end)
+
+test('width: text that already fits is passed through byte-identical', function ()
+    eq('local x = 1', symbols.fit_text('local x = 1', '  '))
+end)
+
+test('width: the budget, not a hardcoded bound, decides the fit', function ()
+    local saved = config.symbols_width
+    config.symbols_width = 50
+    eq(48, vim.fn.strdisplaywidth(symbols.fit_text(('x'):rep(200), '  ')))
+    config.symbols_width = saved
+end)
+
+test('width: the detail provider MARKS its own bound, so a wide budget cannot lie',
+    function ()
+    -- the pane fitting to 30 hid an unmarked 80-byte cut one layer down; raise the
+    -- budget past the provider's bound and the elision must still announce itself
+    local ts = require 'cartograph.providers.treesitter'
+    local f = vim.fn.tempname() .. '.lua'
+    -- the statement must live inside a FORM whose children are statements: detail
+    -- reads child forms, so a bare top-level declaration yields nothing
+    vim.fn.writefile({ 'local function g()',
+        '  local t = { ' .. ('"aaaaaaaa", '):rep(20) .. '}', 'end' }, f)
+    local stmts = ts.detail(f, 0, 0, 2, 3)
+    assert(#stmts > 0, 'no statements parsed')
+    local long = stmts[1].text
+    assert(vim.fn.strchars(long) <= 80, 'the bound is gone: ' .. #long)
+    assert(long:find('…', 1, true), 'the provider cut without marking: ' .. long)
+    vim.fn.delete(f)
+end)
+
 -- ── the ratchet for what does NOT fit yet ────────────────────────────────────
 
 test('width: PROSE rows are the known overflow class, and it does not grow',
