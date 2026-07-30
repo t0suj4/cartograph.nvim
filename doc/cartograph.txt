@@ -653,10 +653,47 @@ syntax REFUSES rather than guessing, the write is journaled, so
 |:CartographUndo| reverses it, and `un-suppress` is offered wherever a marker
 is already present.
 
-The count is never hidden: the lens says `N suppressed here` and
+The count is never hidden: the lens says `◆ N suppressed here` and
 :CartographExpr lists each silenced finding with the marker that silenced it.
 Otherwise "0 findings" would mean clean-or-hushed, which is the ambiguity this
 whole section exists to remove.
+
+THE COUNT IS A DOOR. `l` on it descends into the findings it counts — dim `∅`
+rows, one per silenced finding, each opening the same actions compartment a live
+finding does, where `un-suppress` is the option offered. Without it the count was
+a receipt rather than an affordance: once you navigated away from a finding you
+had just silenced, nothing led back to it, and |:CartographUndo| only reverses
+the newest entry in the journal. `h` returns to the lens you came from.
+
+An empty view here says `no finding here is suppressed — a marker MAY have gone
+since the count was drawn`. May, because this altitude is also reachable by a
+trail return or a restored location, where nothing was ever suppressed, and
+stating a change that did not happen is the failure this pane guards against.
+
+WHAT WENT UNREAD IS ALSO A DOOR.                            *cartograph-unread*
+`◆ N unread of M` on the lints lens counts the constructs the expression IR has
+no case for, and `l` opens them: one row per construct, named by its grammar node
+type, each anchored to its own source range. That row is why "0 findings" never
+reads as an all-clear — the findings are a FLOOR whenever part of the tree went
+unread.
+
+It is not merely "we did not look there". An unread node makes the expression
+containing it impure, and purity is the safety gate every operand-comparing rule
+sits behind, so the unknown propagates OUTWARD: in `for i, p in pairs(t)`, the
+iterator is read but the generic-for clause has no case, and the whole clause is
+fenced off. That is why unread means no guarantee rather than no attention.
+
+  ~        on a FINDING: the rule fired, but a runtime subtlety (NaN,
+           metamethods, truthy≠true) makes it a smell, not a certainty. A claim
+           about a RESULT, and the only thing ~ means on this lens
+  ?        a construct the IR does not model. A claim about the ANALYSIS
+  ⚠        could not read at all — no parser for this language
+  ✘        the OFFENDING NODE: in a finding's actions, the code the rule
+           actually objected to, sliced to the node's own range rather than its
+           statement. `constant-condition` marks `false`, not the whole `if`
+
+A finding's actions therefore LEAD with the offending code and explain
+underneath. Where the prose itself finally belongs is still an open question.
 
 ==============================================================================
 7. CONFIGURATION                                            *cartograph-config*

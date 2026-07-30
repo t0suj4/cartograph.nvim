@@ -185,6 +185,10 @@ local NO_NODE_HOVER = {
     proto  = 'override rows are source positions in the declaring module, as fn',
     lintact = 'action rows are not defs: each anchors to the REPORTED line, so'
         .. ' hover highlights that line (as fn)',
+    suppressed = 'silenced findings are positions in ONE body, as occs: each row'
+        .. ' anchors to the line whose marker silenced it',
+    unread = 'unmodelled CONSTRUCTS, not defs: each row anchors to its own source'
+        .. ' byte-range (expr nodes carry .at), previewed as a site',
     fn     = 'statement rows highlight the source line instead',
     block  = 'as fn',
     callers = 'site rows: the site renderer previews the position',

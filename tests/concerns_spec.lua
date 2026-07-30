@@ -58,8 +58,10 @@ test('registry: every entry declares all five answers (the totality fence)',
         ok(type(e.empty.uncomputed) == 'function',
             level .. ' declares WHY it might have no answer')
     end
-    -- callers, occs, regfor, refused + proto (the compartment pilot) + lintact
-    eq(6, n)
+    -- callers, occs, regfor, refused + proto (the compartment pilot) + the three
+    -- lint altitudes: lintact (one finding's actions), suppressed and unread (the
+    -- two doors behind the lints lens's counts)
+    eq(8, n)
 end)
 
 test('registry: lintact is about its fn and returns to it', function ()

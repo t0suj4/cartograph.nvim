@@ -100,11 +100,18 @@ function M.lint(store, fn_id)
     if not got then return { unsupported = true, findings = {}, census = { total = 0, unknown = 0, kinds = {} } } end
     local rows = got.fl.stmts
     local out, seen = {}, {}
-    local function add(line, rule, msg, hedged)
+    -- `node` is the OFFENDING EXPRESSION — the sub-expression the rule actually
+    -- objected to, not the statement containing it. Every rule has it in hand when
+    -- it fires, and every expr node carries `.at` (its source byte-range), so a
+    -- consumer can mark the construct itself: constant-condition marks `false`, not
+    -- the whole `if`. This is what lets an explanation BE the offending node instead
+    -- of a paragraph about it ([[cartograph-explaining-a-finding]]).
+    local function add(line, rule, msg, hedged, node)
         local key = line .. '\1' .. rule .. '\1' .. msg
         if seen[key] then return end
         seen[key] = true
-        out[#out + 1] = { line = line, rule = rule, msg = msg, hedged = hedged or false }
+        out[#out + 1] = { line = line, rule = rule, msg = msg,
+            hedged = hedged or false, node = node }
     end
     -- ancestry: is row r inside a loop?
     local function in_loop(r)
@@ -134,12 +141,13 @@ function M.lint(store, fn_id)
                     if sc and expr.is_pure(e.l) and expr.key(e.l) == expr.key(e.r) then
                         add(row.l, 'self-compare',
                             ('both sides of `%s` are identical → always %s'):format(e.op, tostring(sc.v)),
-                            sc.nan) -- ==/~= hedged: NaN self-comparison is the deliberate exception
+                            sc.nan, e) -- ==/~= hedged: NaN self-comparison is the deliberate exception
                     end
                     if (e.op == 'and' or e.op == 'or')
                         and expr.is_pure(e.l) and expr.key(e.l) == expr.key(e.r) then
                         add(row.l, 'duplicated-operand',
-                            ('`x %s x` — both operands identical, equals just `x`'):format(e.op))
+                            ('`x %s x` — both operands identical, equals just `x`'):format(e.op),
+                            false, e)
                     end
                     if BOOLCMP[e.op] then
                         local lb = e.l.k == 'lit' and e.l.ty == 'bool'
@@ -148,7 +156,7 @@ function M.lint(store, fn_id)
                             local bv = lb and e.l.v or e.r.v
                             add(row.l, 'bool-comparison',
                                 ('comparison to boolean literal `%s` — drop it (a value is truthy, not necessarily `== %s`)')
-                                    :format(tostring(bv), tostring(bv)), true)
+                                    :format(tostring(bv), tostring(bv)), true, e)
                         end
                     end
                     -- pseudo-ternary hazard: `(c and x) or y` where x is statically falsy
@@ -156,7 +164,8 @@ function M.lint(store, fn_id)
                         local okx, xv = expr.eval(e.l.r)
                         if okx and not expr.truthy(xv) then
                             add(row.l, 'pseudo-ternary',
-                                'lua `c and x or y` where `x` is falsy — the `or` ALWAYS falls through to `y`', false)
+                                'lua `c and x or y` where `x` is falsy — the `or` ALWAYS falls through to `y`',
+                                false, e)
                         end
                     end
                 end)
@@ -169,7 +178,7 @@ function M.lint(store, fn_id)
                 if expr.is_pure(l) and expr.is_pure(rr) and expr.key(l) == expr.key(rr) then
                     add(row.l, 'self-assignment',
                         'assignment of a value to itself — a no-op',
-                        l.k ~= 'name') -- field/index target hedged (a metamethod could fire)
+                        l.k ~= 'name', l) -- field/index target hedged (a metamethod could fire)
                 end
             end
             -- (7) string-concat in a loop: `s = s .. x` accumulation → O(n²), use table.concat
@@ -181,7 +190,8 @@ function M.lint(store, fn_id)
                     for _, n in ipairs(expr.names({ rhs = { rr } })) do reads[n] = true end
                     if reads[l.n] then
                         add(row.l, 'concat-in-loop',
-                            ('`%s = %s .. …` inside a loop is O(n²) — accumulate into a table and table.concat once'):format(l.n, l.n))
+                            ('`%s = %s .. …` inside a loop is O(n²) — accumulate into a table and table.concat once'):format(l.n, l.n),
+                            false, rr)
                     end
                 end
             end
@@ -197,7 +207,8 @@ function M.lint(store, fn_id)
                         add(row.l, 'constant-condition',
                             ('condition is constant — always %s%s'):format(tostring(tv),
                                 (loop and not tv) and ' (loop body is dead)'
-                                    or (not loop and (tv and ' (then-branch always taken)' or ' (then-branch dead)')) or ''))
+                                    or (not loop and (tv and ' (then-branch always taken)' or ' (then-branch dead)')) or ''),
+                            false, row.expr.cond)
                     end
                 end
             end
@@ -220,7 +231,8 @@ function M.lint(store, fn_id)
                     if expr.is_pure(chain[i].cond) and expr.is_pure(chain[j].cond)
                         and expr.key(chain[i].cond) == expr.key(chain[j].cond) then
                         add(chain[i].line, 'duplicated-condition',
-                            ('same condition as the branch at L%d — this branch is unreachable'):format(chain[j].line))
+                            ('same condition as the branch at L%d — this branch is unreachable'):format(chain[j].line),
+                            false, chain[i].cond)
                         break
                     end
                 end
@@ -229,12 +241,41 @@ function M.lint(store, fn_id)
     end
 
     -- census: expr-node coverage (the honest '?' rate)
-    local kinds, total, unknown = {}, 0, 0
+    --
+    -- ONE ROW PER (line, serialized rhs). MEASURED BUG, found by a user asking what
+    -- `~ 52/56 read` meant: a for-loop header lands in fl.stmts TWICE with
+    -- byte-identical expressions (verified expr.key(a) == expr.key(b) on the two
+    -- rows at playerBonuses.lua:197), so every header sub-expression was counted
+    -- twice — inflating the numerator AND the denominator. apply_bonuses reported 4
+    -- unread where there are 2. The telling part: `add` above ALREADY dedupes
+    -- findings on (line, rule, msg), so this function knew rows could repeat and
+    -- only the census forgot. Deduping the ROW fixes the cause; deduping NODES
+    -- would also collapse a genuinely repeated sub-expression within one row.
+    --
+    -- The unread set is KEPT, not just counted: a count nobody can open is a claim
+    -- nobody can check, which is exactly how the double-count survived. Each entry
+    -- carries the grammar node type with no IR case and its source range, so the
+    -- browser can name it and mark it ([[cartograph-explaining-a-finding]]).
+    local kinds, total, unknown, unread = {}, 0, 0, {}
+    local seen_rows = {}
     for _, row in ipairs(rows) do
         if row.expr then
-            for _, e in ipairs(row.expr.rhs or {}) do
-                expr.walk(e, function (n) kinds[n.k] = (kinds[n.k] or 0) + 1; total = total + 1
-                    if n.k == '?' then unknown = unknown + 1 end end)
+            local sig = { tostring(row.l) }
+            for _, e in ipairs(row.expr.rhs or {}) do sig[#sig + 1] = expr.key(e) end
+            local rsig = table.concat(sig, '\1')
+            if not seen_rows[rsig] then
+                seen_rows[rsig] = true
+                for _, e in ipairs(row.expr.rhs or {}) do
+                    expr.walk(e, function (n)
+                        kinds[n.k] = (kinds[n.k] or 0) + 1
+                        total = total + 1
+                        if n.k == '?' then
+                            unknown = unknown + 1
+                            unread[#unread + 1] = { line = row.l, t = n.t,
+                                at = n.at, kids = #(n.kids or {}) }
+                        end
+                    end)
+                end
             end
         end
     end
@@ -270,7 +311,7 @@ function M.lint(store, fn_id)
     -- three things (nothing to read · read and clean · read but no rule applies)
     -- and a surface that renders it as "clean" fabricates a verdict. Every
     -- consumer must report WHAT WAS CHECKED alongside the count.
-    return { findings = out, suppressed = hushed,
+    return { findings = out, suppressed = hushed, unread = unread,
         census = { total = total, unknown = unknown, kinds = kinds,
             suppressed = #hushed } }
 end

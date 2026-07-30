@@ -306,4 +306,187 @@ test('refresh: :CartographUndo (and any refresh) KEEPS the lens you were in',
     vim.cmd('close')
 end)
 
+
+-- ── THE SUPPRESSION DOOR ─────────────────────────────────────────────────────
+-- The defect this closes: `N suppressed here` was honest but TERMINAL. The only
+-- route to a silenced finding's `un-suppress` was to still be standing on it, and
+-- :CartographUndo reverses only the NEWEST journal entry — so from inside the
+-- browser a marker written earlier could not be taken back. Disclosure without a
+-- door is a receipt, not an affordance.
+
+--- Suppress the Nth finding of `id` and re-ingest; returns the new fn id.
+local function hush(id, n)
+    local f = xl.lint(store, id).findings[n or 1]
+    ok(f, 'there was a finding to suppress')
+    assert(suppress.apply(store, assert(suppress.plan(store, 'm.lua', f.line, f.rule))))
+    local ts = require 'cartograph.providers.treesitter'
+    local data = ts.extract(SCRATCH, {})
+    store.ingest(data)
+    for _, nd in ipairs(data.nodes) do
+        if nd.name == 'build' then return nd.id end
+    end
+end
+
+local function render(level, key, lens)
+    symbols.buf = symbols.buf or vim.api.nvim_create_buf(false, true)
+    if not vim.api.nvim_buf_is_valid(symbols.buf) then
+        symbols.buf = vim.api.nvim_create_buf(false, true)
+    end
+    symbols.view = { level = level, fn = level == 'fn' and key or nil,
+        suppressed = level == 'suppressed' and key or nil,
+        lintact = level == 'lintact' and key or nil, lens = lens }
+    symbols.render()
+    return vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false)
+end
+
+test('door: the suppressed COUNT is descendable, and says so', function ()
+    local id = project()
+    id = hush(id)
+    local rows = render('fn', id, 'lints')
+    local door
+    for i, l in ipairs(rows) do
+        if l:find('suppressed here', 1, true) then door = i end
+    end
+    ok(door, 'the count row is there: ' .. flat(rows))
+    eq(id, symbols.line_hushed[door], 'and it is registered as a DOOR')
+    ok(rows[door]:find('◆', 1, true),
+        'marked descendable like "registered by": ' .. rows[door])
+end)
+
+test('door: it opens on the findings it counted, each still a lint row', function ()
+    local id = project()
+    id = hush(id)
+    local rows = render('suppressed', id)
+    ok(flat(rows):find('build', 1, true), 'the header names the fn: ' .. flat(rows))
+    ok(flat(rows):find('(1)', 1, true), 'and counts what it holds: ' .. flat(rows))
+    local found
+    for i, l in ipairs(rows) do
+        if l:find('concat%-in%-loop') then found = i end
+    end
+    ok(found, 'the silenced finding has a ROW now: ' .. flat(rows))
+    ok(rows[found]:find('∅', 1, true), 'marked NOT-reported, not as a live finding')
+    ok(symbols.line_lint[found], 'and it carries a lintkey, so l opens its actions')
+end)
+
+test('door: the row opens the SAME compartment, which offers un-suppress',
+    function ()
+    local id = project()
+    id = hush(id)
+    render('suppressed', id)
+    local key
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false)) do
+        if l:find('concat%-in%-loop') then key = symbols.line_lint[i] end
+    end
+    ok(key, 'got the key off the row')
+    local rows = render('lintact', key)
+    local act
+    for i = 1, #rows do if symbols.line_act[i] then act = symbols.line_act[i] end end
+    ok(act, 'an action row is offered: ' .. flat(rows))
+    eq('unsuppress', act.verb, 'and it is UN-suppress, the one that applies')
+    ok(flat(rows):find('un%-suppress'), 'named as such: ' .. flat(rows))
+end)
+
+test('door: un-suppressing through it restores the finding and closes the door',
+    function ()
+    local id = project()
+    id = hush(id)
+    eq(0, #xl.lint(store, id).findings)
+    eq(1, #xl.lint(store, id).suppressed)
+    -- what the action row does, performed the way perform_action performs it
+    local f = xl.lint(store, id).suppressed[1]
+    assert(suppress.apply(store, assert(suppress.unplan(store, 'm.lua', f.line))))
+    local ts = require 'cartograph.providers.treesitter'
+    local data = ts.extract(SCRATCH, {})
+    store.ingest(data)
+    for _, nd in ipairs(data.nodes) do if nd.name == 'build' then id = nd.id end end
+    eq(1, #xl.lint(store, id).findings, 'the finding is live again')
+    eq(0, #xl.lint(store, id).suppressed)
+    local rows = render('fn', id, 'lints')
+    ok(not flat(rows):find('suppressed here', 1, true),
+        'and the door is gone, because there is nothing behind it: ' .. flat(rows))
+    -- the marker left no residue in the source
+    local src = vim.fn.readfile(SCRATCH .. '/m.lua')
+    ok(not table.concat(src, ' '):find('cg%-ignore'), 'no marker left in the file')
+end)
+
+test('door: an EMPTY suppressed view states the world, and only MAY-states a change',
+    function ()
+    -- reachable without the door (a trail return, a restored location), where
+    -- nothing was EVER suppressed — so it must not assert that a marker went away
+    local id = project()
+    local rows = render('suppressed', id)
+    local text = flat(rows)
+    ok(text:find('(0)', 1, true), 'the count is honest: ' .. text)
+    ok(text:find('no finding here is suppressed', 1, true), text)
+    ok(text:find('may have gone', 1, true),
+        'the change is possible, not asserted: ' .. text)
+end)
+
+test('door: every row of the suppressed view fits the budget', function ()
+    local id = project()
+    id = hush(id)
+    for _, l in ipairs(render('suppressed', id)) do
+        ok(vim.fn.strdisplaywidth(l) <= 30,
+            ('%d cols: %s'):format(vim.fn.strdisplaywidth(l), l))
+    end
+    -- the EMPTY form is prose and wraps, rather than overflowing in one row
+    local id2 = project()
+    for _, l in ipairs(render('suppressed', id2)) do
+        ok(vim.fn.strdisplaywidth(l) <= 30,
+            ('empty view, %d cols: %s'):format(vim.fn.strdisplaywidth(l), l))
+    end
+end)
+
+test('door: the registry declares it, so nav/hover/ascend are not open-coded',
+    function ()
+    local concerns = require 'cartograph.panes.concerns'
+    local e = concerns.of('suppressed')
+    ok(e, 'suppressed is a declared concern')
+    eq('suppressed', e.view_key)
+    eq('site', e.hover)
+    local id = project()
+    eq(id, concerns.subject_of('suppressed', id), 'its subject is the FUNCTION')
+    local lvl, key = e.ascend(id)
+    eq('fn', lvl, 'and ascending returns to the fn it belongs to')
+    eq(id, key)
+end)
+
+test('door: pressing `l` on the count actually opens it (the keypress path)',
+    function ()
+    -- the rest of these fence the renderer and the registry; this one fences the
+    -- GLUE, which is reachable only from the keymap and so is the part a spec
+    -- normally never touches
+    local id = project()
+    id = hush(id)
+    vim.cmd('vsplit')
+    symbols.buf = nil
+    symbols.create()
+    local win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(win, symbols.buf)
+    symbols.attach(win)
+    store.set_focus(id)
+    symbols.show('fn', id)
+    symbols.view.lens = 'lints'
+    symbols.render()
+    local door
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false)) do
+        if l:find('suppressed here', 1, true) then door = i end
+    end
+    ok(door, 'the door row is on screen')
+    vim.api.nvim_win_set_cursor(win, { door, 0 })
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(
+        require('cartograph.config').keys.descend, true, false, true), 'x', false)
+    eq('suppressed', symbols.view.level, 'l descended through the door')
+    eq(id, symbols.view.suppressed, 'onto the right function')
+    local rows = vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false)
+    ok(flat(rows):find('concat%-in%-loop'), 'showing the silenced finding: ' .. flat(rows))
+    -- and h comes back to the LENS we left, not the altitude default
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(
+        require('cartograph.config').keys.ascend, true, false, true), 'x', false)
+    eq('fn', symbols.view.level)
+    eq('lints', symbols.view.lens, 'h returned to the lens the door was on')
+    store.loc_provider = nil
+    vim.cmd('close')
+end)
+
 vim.fn.delete(SCRATCH, 'rf')

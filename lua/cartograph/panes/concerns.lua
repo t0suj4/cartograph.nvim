@@ -44,6 +44,20 @@ end
 
 M.needs_edges = needs_edges
 
+--- The rung-0 harvest READS THE FILE, and so does the suppression reader, so the
+--- real precondition for anything lint-shaped is LOCAL SOURCE — not the call
+--- graph. A graph served over a scheme root has no expressions to read and no
+--- line to write a marker on. Index-only is NOT a blocker here. Shared by the two
+--- lint altitudes so they cannot drift into disagreeing about their own frontier.
+local function needs_local_source(store)
+    local root = store.data and store.data.root
+    if not root or root:match('^%w+://') then
+        return 'this graph has no local source to read expressions from'
+    end
+end
+
+M.needs_local_source = needs_local_source
+
 M.REGISTRY = {
     -- who calls this function. Rows group per using fn; a group row descends
     -- into that fn's occurrences, a lone site row into the fn itself.
@@ -135,16 +149,59 @@ M.REGISTRY = {
             -- reachable only from a row that WAS a finding, so an empty here means
             -- the source moved out from under the key
             computed   = '(this finding is no longer reported here — the source changed)',
-            uncomputed = function (store)
-                -- the real precondition is LOCAL SOURCE: the rung-0 harvest reads
-                -- the file (and so does the suppression reader), so a graph served
-                -- over a scheme root has no expressions to read and no line to
-                -- write a marker on. Index-only is NOT a blocker here.
-                local root = store.data and store.data.root
-                if not root or root:match('^%w+://') then
-                    return 'this graph has no local source to read expressions from'
-                end
-            end,
+            uncomputed = needs_local_source,
+        },
+    },
+
+    -- THE COVERAGE DOOR. `~ 52/56 read` was the row that exists to stop "0 findings"
+    -- reading as an all-clear — and it was the one row a user could not parse ("I
+    -- don't know what this means"). No 30-column rewording fixes that: the ROWS are
+    -- the explanation. Descending it names each construct the expression IR has no
+    -- case for, at its line, with its source range.
+    --
+    -- Not merely "unexamined": a `?` node makes expr.is_pure false, and is_pure is
+    -- the single safety gate for every key-equality rule, so the unknown propagates
+    -- outward to every expression it nests inside. That is why unread ⇒ no
+    -- guarantee, and why this is a FRONTIER rather than a finding.
+    unread = {
+        view_key = 'unread',
+        subject  = function (key) return key end,
+        ascend   = function (key) return 'fn', key end,
+        hover    = 'site', -- rows anchor to the line carrying the unmodelled node
+        empty    = {
+            -- the door only appears when unknown > 0, so 0 here means the harvest
+            -- now covers what it did not — a real change, but a MAY (this altitude
+            -- is reachable by a trail return too)
+            computed   = '(every expression here is modelled — a construct may have'
+                .. ' become readable since the count was drawn)',
+            uncomputed = needs_local_source,
+        },
+    },
+
+    -- THE SUPPRESSION DOOR. The `N suppressed here` row on the lints lens is a
+    -- COUNT, and a count you cannot open is a dead end: once you navigated away
+    -- from the finding you had just silenced, its `un-suppress` was unreachable —
+    -- :CartographUndo only reverses the newest journal entry, so the marker was
+    -- effectively permanent from inside the browser. The count now descends into
+    -- the findings it counts, each of which opens its own lintact.
+    --
+    -- The subject is the FUNCTION, not a finding: these rows are a set of
+    -- positions in one body, exactly as `occs` is.
+    suppressed = {
+        view_key = 'suppressed',
+        subject  = function (key) return key end,
+        ascend   = function (key) return 'fn', key end,
+        hover    = 'site', -- rows anchor to the silenced line in the fn's source
+        empty    = {
+            -- States the world, and only MAY-states the change. The door opens
+            -- from a row that said N>0, so arriving at 0 usually does mean a
+            -- marker went away — but this altitude is also reachable by a trail
+            -- return or a restored location, where nothing was EVER suppressed,
+            -- and asserting a change there would fabricate one. An empty note is
+            -- exactly where that kind of invention is easiest to miss.
+            computed   = '(no finding here is suppressed — a marker may have gone'
+                .. ' since the count was drawn)',
+            uncomputed = needs_local_source,
         },
     },
 

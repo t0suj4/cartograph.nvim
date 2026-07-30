@@ -64,6 +64,7 @@ local M = {
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
     line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
     line_detail = {}, line_proto = {}, line_lint = {}, line_act = {},
+    line_hushed = {}, line_unread = {},
     -- what a row is ABOUT (a node id), which is NOT what `l` does here: a
     -- caller row is about the using function but descends into its
     -- occurrences. Keeping the two apart is the whole point — hover, descend,
@@ -1501,6 +1502,26 @@ end
 -- law it is not row material, and :CartographExpr still prints it in full. That
 -- split — findings here, explanation there — is the lens/report division of
 -- labour, not a loss.
+--- The coverage row, which is a DOOR onto the constructs that went unread.
+---
+--- THE ~ SPLIT. This said `~ 52/56 read` and was reported as "I don't know what this
+--- means" — the row that exists to keep "0 findings" from reading as an all-clear was
+--- the least legible thing on screen. Two causes, both addressed here:
+---
+---   * `~` was doing two jobs on ADJACENT rows. On a finding above, it means the rule
+---     FIRED but is hedged — a claim about a RESULT. Here it meant the rule COULD NOT
+---     fire — a claim about the ANALYSIS. Same glyph, same highlight, opposite
+---     subjects. `~` now belongs to the finding case alone.
+---   * a ratio is not a fact you can act on. It counts what it is ABOUT (the unread),
+---     not what it is not, and it OPENS — the rows behind it are the explanation no
+---     30-column paraphrase was going to be.
+local function coverage_door(ctx, fn_id, c)
+    if not (c.total > 0 and c.unknown > 0) then return end
+    ctx.lines[#ctx.lines + 1] = ('◆ %d unread of %d'):format(c.unknown, c.total)
+    ctx.marks[#ctx.lines] = { { 0, -1, 'CartographFrontier' } }
+    ctx.line_unread[#ctx.lines] = fn_id
+end
+
 local function render_lints(ctx, fn_id)
     local node = fn_id and store.node(fn_id)
     if not node then ctx.lines[1] = '(gone)'; return end
@@ -1538,10 +1559,13 @@ local function render_lints(ctx, fn_id)
         ctx.line_sep[2] = true
         -- 0 findings AND something silenced is not the same as 0 findings
         if (c.suppressed or 0) > 0 then
-            ctx.lines[3] = ('  %d suppressed here'):format(c.suppressed)
-            ctx.marks[3] = { { 0, -1, 'CartographDim' } }
-            ctx.line_sep[3] = true
+            ctx.lines[3] = ('◆ %d suppressed here'):format(c.suppressed)
+            ctx.marks[3] = { { 0, -1, 'CartographSection' } }
+            ctx.line_hushed[3] = fn_id -- a DOOR: descend to the silenced findings
         end
+        -- and 0 findings matters MOST when the harvest was partial: this is the
+        -- "never say clean" case, so the coverage door belongs here too
+        coverage_door(ctx, fn_id, c)
         return
     end
     for _, f in ipairs(res.findings) do
@@ -1559,18 +1583,15 @@ local function render_lints(ctx, fn_id)
         -- re-derives the finding from source rather than holding a stale copy
         ctx.line_lint[#ctx.lines] = M.lintkey(fn_id, f)
     end
-    -- DISCLOSED: what the source told us to ignore is counted, never hidden
+    -- DISCLOSED, and a DOOR: what the source told us to ignore is counted, never
+    -- hidden, and the count opens into the findings it counts (the ◆ marks it as
+    -- descendable, as "registered by" does at the fn altitude)
     if (c.suppressed or 0) > 0 then
-        ctx.lines[#ctx.lines + 1] = ('  %d suppressed here'):format(c.suppressed)
-        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
-        ctx.line_sep[#ctx.lines] = true
+        ctx.lines[#ctx.lines + 1] = ('◆ %d suppressed here'):format(c.suppressed)
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
+        ctx.line_hushed[#ctx.lines] = fn_id
     end
-    if c.total > 0 and c.unknown > 0 then
-        -- the findings are a LOWER BOUND when part of the tree is unread
-        ctx.lines[#ctx.lines + 1] = ('  ~ %d/%d read'):format(c.total - c.unknown, c.total)
-        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographFrontier' } }
-        ctx.line_sep[#ctx.lines] = true
-    end
+    coverage_door(ctx, fn_id, c)
 end
 
 --- A prose NOTE as chrome: word-wrapped to the budget across as many dim rows as
@@ -1641,6 +1662,29 @@ local function render_lintact(ctx, key)
     end
     ctx.line_stmt[1] = f.line
     ctx.vnums[1] = tostring(f.line)
+    -- THE OFFENDING NODE, before any prose. Asked for as "the explanations would show
+    -- offending nodes on the surface": the code the rule actually objected to is a
+    -- better explanation than a sentence about it, and it is a PLACE — the row anchors
+    -- to the node's own byte-range, so the source pane marks `false` rather than the
+    -- whole `if`. The prose stays below as chrome; where it ultimately belongs is
+    -- still open ([[cartograph-explaining-a-finding]]).
+    local nd = f.node
+    if nd and nd.at and node and node.file then
+        local src = vim.fn.readfile(store.abs(node.file))
+        local sl, el = atr.sl(nd.at), atr.el(nd.at)
+        local text = src[sl + 1]
+        if text then
+            -- a single-line node is sliced to the construct; a multi-line one keeps
+            -- its first line and says it continues, never silently
+            text = (sl == el) and text:sub(atr.sc(nd.at) + 1, atr.ec(nd.at))
+                or (vim.trim(text:sub(atr.sc(nd.at) + 1)) .. ' …')
+            ctx.lines[#ctx.lines + 1] = '✘ ' .. M.fit_text(vim.trim(text), '✘ ')
+            ctx.marks[#ctx.lines] = { { 0, 1, 'CartographFrontier' } }
+            ctx.vnums[#ctx.lines] = tostring(sl + 1)
+            ctx.line_site[#ctx.lines] = { fn = fn_id, file = node.file,
+                line = sl, range = nd.at }
+        end
+    end
     -- EXPLAIN: the message the 30-column row could not carry. Chrome, not an action.
     note(ctx, f.msg or '(no message)')
     if f.hedged then
@@ -1672,6 +1716,103 @@ local function render_lintact(ctx, key)
     local xl = require 'cartograph.exprlint'
     note(ctx, '⊘ no mechanical fix — ' .. (xl.FIX_WHY[f.rule] or xl.FIX_WHY_DEFAULT),
         'CartographDim')
+end
+
+--- THE UNREAD SET: the constructs the expression IR has no case for, as rows.
+---
+--- `~ 52/56 read` was reported as "I don't know what this means", and it is the row
+--- that exists to keep "0 findings" from reading as an all-clear — the honesty
+--- mechanism was the least legible thing on screen. The fix is not a cleverer 30
+--- columns: the rows ARE the explanation. `for_generic_clause` at L197 says more
+--- than any paraphrase of "the findings are a lower bound".
+---
+--- Rows are marked `?`, matching the IR's own k='?' for an unmodelled construct —
+--- deliberately NOT `~`, which on the lens above means a finding that fired but is
+--- hedged. One sigil for two facts (a RESULT vs the ANALYSIS) is what made the
+--- original row unreadable ([[cartograph-explaining-a-finding]]).
+local function render_unread(ctx, fn_id)
+    local node = fn_id and store.node(fn_id)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    local res = require('cartograph.exprlint').lint(store, fn_id)
+    local set = res.unread or {}
+    local note_text, why = concerns.empty_of('unread', store)
+    local pre = '?'
+    local tail = why and ' unavailable' or (' (%d)'):format(#set)
+    ctx.lines[1] = ('%s %s%s'):format(pre,
+        M.fit_identity(node.name or '?', pre .. ' ', tail), tail)
+    ctx.marks[1] = { { 0, #pre, 'CartographFrontier' },
+        { #pre, -1, 'CartographTitle' } }
+    ctx.line_node[1] = fn_id
+    ctx.line_about[1] = fn_id
+    for _, u in ipairs(set) do
+        -- the GRAMMAR NODE TYPE is the identity: it names the construct the harvest
+        -- does not model, which is the actionable fact (it is also what a spec
+        -- author would go and add a case for)
+        ctx.lines[#ctx.lines + 1] = ('? %s'):format(
+            M.fit_identity(u.t or '<unnamed>', '? ', ''))
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographFrontier' } }
+        ctx.vnums[#ctx.lines] = tostring(u.line)
+        ctx.line_stmt[#ctx.lines] = u.line
+        -- the node's own byte-range, so the source pane marks the CONSTRUCT and not
+        -- merely its line: every expr node carries .at by construction
+        if u.at then
+            ctx.line_site[#ctx.lines] = { fn = fn_id, file = node.file,
+                line = u.line, range = u.at }
+        end
+    end
+    if #set == 0 then
+        note(ctx, (why and ('⚠ ' .. why) or note_text),
+            why and 'CartographFrontier' or 'CartographDim')
+    end
+end
+
+--- THE SUPPRESSED SET: the findings the source told us to ignore, as rows.
+---
+--- This exists because a COUNT is not a place. "3 suppressed here" was honest but
+--- terminal: the only route to a silenced finding's `un-suppress` was to still be
+--- standing on it, and :CartographUndo reverses only the newest journal entry — so
+--- from inside the browser a marker written five minutes ago could not be taken
+--- back. Disclosure without a door is a receipt, not an affordance.
+---
+--- Rows are marked ∅ and dim: they are findings that are NOT being reported, and
+--- must not read as live ones. Each carries the same lintkey a live finding's row
+--- does, so `l` opens the identical compartment — which already offers
+--- `un-suppress` when the finding is hushed. That is the whole reason this is 30
+--- lines and not a new verb.
+local function render_suppressed(ctx, fn_id)
+    local node = fn_id and store.node(fn_id)
+    if not node then ctx.lines[1] = '(gone)'; return end
+    local res = require('cartograph.exprlint').lint(store, fn_id)
+    local hushed = res.suppressed or {}
+    local note_text, why = concerns.empty_of('suppressed', store)
+    local pre = '∅'
+    local tail = why and ' unavailable' or (' (%d)'):format(#hushed)
+    ctx.lines[1] = ('%s %s%s'):format(pre,
+        M.fit_identity(node.name or '?', pre .. ' ', tail), tail)
+    ctx.marks[1] = { { 0, #pre, 'CartographDim' },
+        { #pre, -1, 'CartographTitle' } }
+    ctx.line_node[1] = fn_id
+    ctx.line_about[1] = fn_id
+    for _, f in ipairs(hushed) do
+        -- the RULE is the identity, as on the lints lens; the ∅ says this one is
+        -- not being reported and the line rides the vnum lane
+        ctx.lines[#ctx.lines + 1] = ('∅ %s'):format(
+            M.fit_identity(f.rule or '?', '∅ ', ''))
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.vnums[#ctx.lines] = tostring(f.line)
+        ctx.line_stmt[#ctx.lines] = f.line
+        ctx.line_kind[#ctx.lines] = 'lint'
+        -- the SAME key a live finding carries: one compartment serves both, and it
+        -- offers un-suppress precisely when the finding it re-derives is hushed
+        ctx.line_lint[#ctx.lines] = M.lintkey(fn_id, f)
+    end
+    if #hushed == 0 then
+        -- through note(), not a bare row: an empty note is PROSE and the sibling
+        -- concerns' one-row form overflows a 30-column pane silently (measured 56
+        -- columns for callers'). This one wraps to the budget instead.
+        note(ctx, (why and ('⚠ ' .. why) or note_text),
+            why and 'CartographFrontier' or 'CartographDim')
+    end
 end
 
 
@@ -1875,7 +2016,7 @@ function M.render()
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
         line_regfor = {}, line_block = {}, line_detail = {}, line_proto = {},
-        line_lint = {}, line_act = {},
+        line_lint = {}, line_act = {}, line_hushed = {}, line_unread = {},
         line_about = {}, line_kind = {} }
     local v = M.view
     if LENS_SETS[v.level] and cur_lens() == 'detail' then
@@ -1907,6 +2048,8 @@ function M.render()
     elseif v.level == 'protos' then render_protos(ctx)
     elseif v.level == 'proto' then render_proto(ctx, v.proto)
     elseif v.level == 'lintact' then render_lintact(ctx, v.lintact)
+    elseif v.level == 'suppressed' then render_suppressed(ctx, v.suppressed)
+    elseif v.level == 'unread' then render_unread(ctx, v.unread)
     else render_fn(ctx, v.fn) end
 
     M.line_node, M.node_line = ctx.line_node, ctx.node_line
@@ -1918,6 +2061,7 @@ function M.render()
     M.line_regfor, M.line_block = ctx.line_regfor, ctx.line_block
     M.line_detail, M.line_proto = ctx.line_detail, ctx.line_proto
     M.line_lint, M.line_act = ctx.line_lint, ctx.line_act
+    M.line_hushed, M.line_unread = ctx.line_hushed, ctx.line_unread
     M.line_about, M.line_kind = ctx.line_about, ctx.line_kind
 
     -- names come from arbitrary source text; a row must stay one row
@@ -2270,7 +2414,9 @@ function M.show(level, ctx_val)
         elseif level == 'block' then M.view.block = ctx_val
         elseif level == 'state' then M.view.state = ctx_val
         elseif level == 'proto' then M.view.proto = ctx_val
-        elseif level == 'lintact' then M.view.lintact = ctx_val end
+        elseif level == 'lintact' then M.view.lintact = ctx_val
+        elseif level == 'suppressed' then M.view.suppressed = ctx_val
+        elseif level == 'unread' then M.view.unread = ctx_val end
     end
     M.render()
     if M.win and vim.api.nvim_win_is_valid(M.win) then
@@ -2579,6 +2725,7 @@ function M.attach(win)
             tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
             refused = M.view.refused, regfor = M.view.regfor,
             proto = M.view.proto, lintact = M.view.lintact,
+            suppressed = M.view.suppressed, unread = M.view.unread,
             files_mode = M.files_mode,
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
@@ -2628,6 +2775,8 @@ function M.attach(win)
         M.view.regfor, M.view.block = loc.regfor, loc.block
         M.view.proto = loc.proto
         M.view.lintact = loc.lintact
+        M.view.suppressed = loc.suppressed
+        M.view.unread = loc.unread
         M.view.live = loc.live
         M.view.lens = loc.lens -- the lens rides the trail
         M._ghost = nil  -- fresh position: no ghosted lens node
@@ -2911,6 +3060,14 @@ function M.attach(win)
         -- not carry, plus what can be done about it)
         local lk = M.line_lint[r]
         if lk then return enter('lintact', lk) end
+        -- the SUPPRESSED COUNT is a DOOR: it opens into the findings it counts, so
+        -- a marker written earlier can still be found and taken back
+        local hushed = M.line_hushed[r]
+        if hushed then return enter('suppressed', hushed, hushed) end
+        -- the COVERAGE row is a door too: it opens on the constructs the harvest
+        -- has no case for, which is the explanation the row could not fit
+        local unread = M.line_unread[r]
+        if unread then return enter('unread', unread, unread) end
         -- detail lens: an arg/cond row descends into that element's forms (the
         -- block lens); a var row opens the var's usage sites
         local d = M.line_detail[r]
@@ -3142,8 +3299,41 @@ function M.attach(win)
         return function () M.note_gesture(name); return fn() end
     end
 
-    vim.keymap.set('n', keys.descend, gestured('descend', descend),
-        { buffer = M.buf, desc = 'cartograph: descend (into file / into function)' })
+    -- A DEAD `l` MUST SAY SO. Reported twice, from `ƒ isTable` (fn) and from
+    -- `≡ local script,kprint = …` (region) — both row 1, and in both the feedback
+    -- entry's BEFORE and AFTER rows were byte-identical. Silence reads as broken,
+    -- and "l did nothing" is a different report from "l went somewhere wrong": the
+    -- pane must not leave the reader to work out which one they got.
+    --
+    -- Rather than enumerate the dead paths inside descend's dispatch (a dozen
+    -- branches, more early returns), COMPARE STATE before and after — the same test
+    -- the feedback capture uses to tell those two reports apart, and it cannot miss
+    -- a branch that grows later.
+    local function nav_sig()
+        local ok, loc = pcall(view_loc)
+        local n = (M.buf and vim.api.nvim_buf_is_valid(M.buf))
+            and vim.api.nvim_buf_line_count(M.buf) or 0
+        local first = (n > 0 and vim.api.nvim_buf_get_lines(M.buf, 0, 1, false)[1]) or ''
+        return ('%s\1%d\1%s'):format(ok and vim.inspect(loc) or '?', n, first)
+    end
+    vim.keymap.set('n', keys.descend, gestured('descend', function ()
+        local r = row()
+        local before = nav_sig()
+        descend()
+        -- an ACTION row speaks for itself, including when it refuses; a second
+        -- message here would just talk over it
+        if M.line_act[r] or nav_sig() ~= before then return end
+        local lvl = M.view.level or '?'
+        if r == 1 then
+            -- the title is the view you are already in: there is nothing BELOW it
+            vim.notify(('cartograph: this row is the %s you are in — nothing below it.'
+                .. ' Descend a ◆/↖ section or a statement row instead'):format(lvl),
+                vim.log.levels.INFO)
+        else
+            vim.notify(('cartograph: nothing to descend into on this row (%s)')
+                :format(lvl), vim.log.levels.INFO)
+        end
+    end), { buffer = M.buf, desc = 'cartograph: descend (into file / into function)' })
     vim.keymap.set('n', keys.pivot, gestured('pivot', function ()
         if M.view.level == 'file' or M.view.level == 'region' then
             local id = M.line_node[row()]

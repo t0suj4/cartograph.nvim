@@ -183,6 +183,13 @@ statement reads (`l` opens the var's usage sites). The fn altitude adds `lints`
 actions. The lens rides the `h`/`l` trail (ascend restores the lens you had),
 but not the `<C-o>` jumplist.
 
+A suppressed finding is still **counted**, and `◆ N suppressed here` is a **door**:
+`l` opens the findings it counts as dim `∅` rows, each leading to the same actions
+compartment, where `un-suppress` is what's offered. A count you can't open is a
+receipt, not an affordance — without the door, a marker written five minutes ago
+could not be found again from inside the browser, since `:CartographUndo` only
+reverses the newest journal entry.
+
 The pane's winbar names them, because a lens you can't discover is a lens you
 don't have:
 
