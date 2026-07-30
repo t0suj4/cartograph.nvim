@@ -63,7 +63,7 @@ local M = {
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
     line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
-    line_detail = {}, line_proto = {},
+    line_detail = {}, line_proto = {}, line_lint = {}, line_act = {},
     -- what a row is ABOUT (a node id), which is NOT what `l` does here: a
     -- caller row is about the using function but descends into its
     -- occurrences. Keeping the two apart is the whole point — hover, descend,
@@ -1445,6 +1445,12 @@ local function render_lints(ctx, fn_id)
             ctx.marks[2] = { { 0, -1, 'CartographDim' } }
         end
         ctx.line_sep[2] = true
+        -- 0 findings AND something silenced is not the same as 0 findings
+        if (c.suppressed or 0) > 0 then
+            ctx.lines[3] = ('  %d suppressed here'):format(c.suppressed)
+            ctx.marks[3] = { { 0, -1, 'CartographDim' } }
+            ctx.line_sep[3] = true
+        end
         return
     end
     for _, f in ipairs(res.findings) do
@@ -1458,6 +1464,15 @@ local function render_lints(ctx, fn_id)
         ctx.vnums[#ctx.lines] = tostring(f.line)
         ctx.line_stmt[#ctx.lines] = f.line -- the fn hover highlights this line
         ctx.line_kind[#ctx.lines] = 'lint'
+        -- a KEY, not an index: the row survives a re-render, and the compartment
+        -- re-derives the finding from source rather than holding a stale copy
+        ctx.line_lint[#ctx.lines] = M.lintkey(fn_id, f)
+    end
+    -- DISCLOSED: what the source told us to ignore is counted, never hidden
+    if (c.suppressed or 0) > 0 then
+        ctx.lines[#ctx.lines + 1] = ('  %d suppressed here'):format(c.suppressed)
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.line_sep[#ctx.lines] = true
     end
     if c.total > 0 and c.unknown > 0 then
         -- the findings are a LOWER BOUND when part of the tree is unread
@@ -1491,6 +1506,83 @@ local function note(ctx, text, hl)
     end
     flush()
 end
+
+-- ── the lint ACTIONS compartment ─────────────────────────────────────────────
+-- A finding row states WHAT is wrong in 30 columns; everything else about it — the
+-- explanation, and what you can do — lives one descend down. Asked for directly:
+-- "I would expect to descend into a list of suggested actions (supress/solve…)".
+--
+-- Every row here either DOES something or says why it cannot. An action list that
+-- silently omits the option it has not implemented is the same defect as a pane
+-- that renders an absence as silence: `fix` is always present and always states
+-- its own unavailability with a per-rule reason (exprlint.FIX_WHY).
+
+local KEYSEP = '\31'
+--- A finding's identity: stable across a re-render, unlike its index.
+function M.lintkey(fn_id, f)
+    return ('%s%s%d%s%s'):format(fn_id, KEYSEP, f.line, KEYSEP, f.rule)
+end
+--- Re-derive the finding a key names, from source. Returns finding, fn_id, hushed.
+function M.lintat(key)
+    local fn_id, line, rule = (key or ''):match('^(.-)' .. KEYSEP .. '(%d+)' .. KEYSEP .. '(.*)$')
+    if not fn_id then return nil end
+    local res = require('cartograph.exprlint').lint(store, fn_id)
+    for _, list in ipairs({ res.findings or {}, res.suppressed or {} }) do
+        for _, f in ipairs(list) do
+            if f.line == tonumber(line) and f.rule == rule then
+                return f, fn_id, f.suppressed_by ~= nil
+            end
+        end
+    end
+    return nil, fn_id
+end
+
+local function render_lintact(ctx, key)
+    local f, fn_id, hushed = M.lintat(key)
+    local node = fn_id and store.node(fn_id)
+    ctx.lines[1] = M.fit_identity(('⚑ %s'):format(f and f.rule or '?'), '', '')
+    ctx.marks[1] = { { 0, -1, 'CartographTitle' } }
+    if fn_id then ctx.line_node[1] = fn_id end
+    if not f then
+        -- the source moved under the key: say so rather than showing an empty menu
+        return note(ctx, '⚠ this finding is no longer reported here — the source'
+            .. ' changed since the roster was drawn', 'CartographFrontier')
+    end
+    ctx.line_stmt[1] = f.line
+    ctx.vnums[1] = tostring(f.line)
+    -- EXPLAIN: the message the 30-column row could not carry. Chrome, not an action.
+    note(ctx, f.msg or '(no message)')
+    if f.hedged then
+        note(ctx, '~ a runtime subtlety makes this a smell, not a certainty',
+            'CartographFrontier')
+    end
+    local file = node and node.file
+    -- SUPPRESS / UNSUPPRESS: one is always the honest option, never both
+    if hushed then
+        note(ctx, ('∅ suppressed by: %s'):format(f.suppressed_by), 'CartographDim')
+        ctx.lines[#ctx.lines + 1] = '  ▸ un-suppress'
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographTitle' } }
+        ctx.line_act[#ctx.lines] = { verb = 'unsuppress', file = file, lnum = f.line }
+        ctx.line_stmt[#ctx.lines] = f.line
+    else
+        local ok, why = require('cartograph.suppress').lead_for(file or '')
+        if ok then
+            ctx.lines[#ctx.lines + 1] = '  ▸ suppress here'
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographTitle' } }
+            ctx.line_act[#ctx.lines] = { verb = 'suppress', file = file,
+                lnum = f.line, rule = f.rule }
+            ctx.line_stmt[#ctx.lines] = f.line
+        else
+            note(ctx, '⊘ cannot suppress — ' .. tostring(why), 'CartographFrontier')
+        end
+    end
+    -- FIX: present even when unavailable, with the reason. "No safe rewrite" and
+    -- "nobody wrote one yet" are different facts and an omission states neither.
+    local xl = require 'cartograph.exprlint'
+    note(ctx, '⊘ no mechanical fix — ' .. (xl.FIX_WHY[f.rule] or xl.FIX_WHY_DEFAULT),
+        'CartographDim')
+end
+
 
 -- ── the COMPARTMENT PILOT: the prototype reading as two altitudes ────────────
 -- `protos` is a ROOT (a concern index — the first door that is not the file tree,
@@ -1692,6 +1784,7 @@ function M.render()
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
         line_regfor = {}, line_block = {}, line_detail = {}, line_proto = {},
+        line_lint = {}, line_act = {},
         line_about = {}, line_kind = {} }
     local v = M.view
     if LENS_SETS[v.level] and cur_lens() == 'detail' then
@@ -1722,6 +1815,7 @@ function M.render()
     elseif v.level == 'ws' then render_ws(ctx)
     elseif v.level == 'protos' then render_protos(ctx)
     elseif v.level == 'proto' then render_proto(ctx, v.proto)
+    elseif v.level == 'lintact' then render_lintact(ctx, v.lintact)
     else render_fn(ctx, v.fn) end
 
     M.line_node, M.node_line = ctx.line_node, ctx.node_line
@@ -1732,6 +1826,7 @@ function M.render()
     M.line_trans, M.line_lit = ctx.line_trans, ctx.line_lit
     M.line_regfor, M.line_block = ctx.line_regfor, ctx.line_block
     M.line_detail, M.line_proto = ctx.line_detail, ctx.line_proto
+    M.line_lint, M.line_act = ctx.line_lint, ctx.line_act
     M.line_about, M.line_kind = ctx.line_about, ctx.line_kind
 
     -- names come from arbitrary source text; a row must stay one row
@@ -2075,7 +2170,8 @@ function M.show(level, ctx_val)
         elseif level == 'live' then M.view.live = ctx_val
         elseif level == 'block' then M.view.block = ctx_val
         elseif level == 'state' then M.view.state = ctx_val
-        elseif level == 'proto' then M.view.proto = ctx_val end
+        elseif level == 'proto' then M.view.proto = ctx_val
+        elseif level == 'lintact' then M.view.lintact = ctx_val end
     end
     M.render()
     if M.win and vim.api.nvim_win_is_valid(M.win) then
@@ -2382,7 +2478,7 @@ function M.attach(win)
             live = M.view.live,
             tbl = M.view.tbl, occs = M.view.occs, state = M.view.state, lit = M.view.lit,
             refused = M.view.refused, regfor = M.view.regfor,
-            proto = M.view.proto,
+            proto = M.view.proto, lintact = M.view.lintact,
             files_mode = M.files_mode,
             row = (M.win and vim.api.nvim_win_is_valid(M.win))
                 and vim.api.nvim_win_get_cursor(M.win)[1] or 1 }
@@ -2431,6 +2527,7 @@ function M.attach(win)
         M.view.lit, M.view.refused = loc.lit, loc.refused
         M.view.regfor, M.view.block = loc.regfor, loc.block
         M.view.proto = loc.proto
+        M.view.lintact = loc.lintact
         M.view.live = loc.live
         M.view.lens = loc.lens -- the lens rides the trail
         M._ghost = nil  -- fresh position: no ghosted lens node
@@ -2679,8 +2776,41 @@ function M.attach(win)
         vim.notify(('cartograph: $VIMRUNTIME loaded — %d nodes spliced in')
             :format(added), vim.log.levels.INFO)
     end
+    -- Perform a lint action. Journaled through cartograph.suppress, so
+    -- :CartographUndo reverses it like any other apply verb; a refusal is spoken,
+    -- never a silent no-op (which reads as a dropped keypress).
+    local function perform_action(act)
+        local sup = require 'cartograph.suppress'
+        local plan, why
+        if act.verb == 'suppress' then
+            plan, why = sup.plan(store, act.file, act.lnum, act.rule)
+        elseif act.verb == 'unsuppress' then
+            plan, why = sup.unplan(store, act.file, act.lnum)
+        else
+            return vim.notify('cartograph: unknown action ' .. tostring(act.verb),
+                vim.log.levels.WARN)
+        end
+        if not plan then
+            return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)
+        end
+        local done, aerr = sup.apply(store, plan)
+        if not done then
+            return vim.notify('cartograph: ' .. tostring(aerr), vim.log.levels.ERROR)
+        end
+        M.render() -- the compartment re-derives from source, so it flips in place
+        vim.notify(('cartograph: %s at %s:%d — :CartographUndo reverses it'):format(
+            act.verb, vim.fn.fnamemodify(act.file, ':t'), act.lnum))
+    end
     local function descend()
         local r = row()
+        -- an ACTION row is a leaf that DOES something: l performs it. Lens- and
+        -- altitude-independent, so it is decided before any level dispatch.
+        local act = M.line_act[r]
+        if act then return perform_action(act) end
+        -- a LINT row opens its actions (the explanation the 30-column row could
+        -- not carry, plus what can be done about it)
+        local lk = M.line_lint[r]
+        if lk then return enter('lintact', lk) end
         -- detail lens: an arg/cond row descends into that element's forms (the
         -- block lens); a var row opens the var's usage sites
         local d = M.line_detail[r]

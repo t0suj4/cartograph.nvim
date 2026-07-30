@@ -58,7 +58,24 @@ test('registry: every entry declares all five answers (the totality fence)',
         ok(type(e.empty.uncomputed) == 'function',
             level .. ' declares WHY it might have no answer')
     end
-    eq(5, n) -- callers, occs, regfor, refused + proto (the compartment pilot)
+    -- callers, occs, regfor, refused + proto (the compartment pilot) + lintact
+    eq(6, n)
+end)
+
+test('registry: lintact is about its fn and returns to it', function ()
+    local key = 'f.lua::update@3\031120\031concat-in-loop'
+    eq('f.lua::update@3', concerns.subject_of('lintact', key))
+    local level, back = concerns.of('lintact').ascend(key)
+    eq('fn', level)
+    eq('f.lua::update@3', back) -- the finding hangs below the function it is in
+end)
+
+test('registry: lintact\'s unavailability is its OWN, not the shared one', function ()
+    -- rung-0 lints ride the expression IR, which a thin index can re-derive per
+    -- file, so binding this concern to needs_edges would refuse an answer it has
+    ok(concerns.of('lintact').empty.uncomputed ~= concerns.needs_edges,
+        'lintact must not inherit the call-graph precondition')
+    eq(nil, concerns.of('lintact').empty.uncomputed(stub(true)))
 end)
 
 test('registry: the containment/data altitudes are deliberately NOT concerns',

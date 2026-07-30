@@ -23,6 +23,75 @@ local SELFCMP = {
     ['<='] = { v = true }, ['>='] = { v = true } }
 local BOOLCMP = { ['=='] = true, ['~='] = true, ['!='] = true }
 
+-- ── suppression ──────────────────────────────────────────────────────────────
+-- A finding can be silenced FROM THE SOURCE IT IS ABOUT: `@cg-ignore` trailing the
+-- reported line, or on a comment line directly above it, optionally naming rules
+-- (`@cg-ignore: concat-in-loop`) so one marker does not silence everything the line
+-- could ever be flagged for. In the source and not in a config file, because the
+-- decision belongs where the code is: it moves with the function (txn.attach_above
+-- already makes moveapply/clonemerge carry an attached comment along) and it is
+-- reviewable in a diff.
+--
+-- Suppression is DISCLOSED, never silent. lint() returns the silenced findings
+-- SEPARATELY and counts them, and every consumer reports the count, because a
+-- linter that hides what it was told to ignore cannot be audited — and "0 findings"
+-- would once again mean two different things.
+M.MARK = '@cg-ignore'
+local MARKPAT = '@cg%-ignore'
+local COMMENT_LEADS = { '--', '#', '//', '/*', '*', ';' }
+
+local function is_comment(line)
+    local t = line and line:match('^%s*(%S.*)$')
+    if not t then return false end
+    for _, p in ipairs(COMMENT_LEADS) do
+        if t:sub(1, #p) == p then return true end
+    end
+    return false
+end
+
+--- The marker silencing `rule` at 1-based `lnum`, or nil. Checks the reported line
+--- itself, then the comment block directly above it (blank lines and code stop the
+--- walk — the same adhesion rule txn.attach_above uses for a def's comments).
+function M.suppressed_at(lines, lnum, rule)
+    local function marks(line)
+        if not line then return nil end
+        local at = line:find(MARKPAT)
+        if not at then return nil end
+        local named = line:match(MARKPAT .. '%s*:%s*([%w%s,_-]+)')
+        if not named then return vim.trim(line:sub(at)) end -- bare: silences all
+        for r in named:gmatch('[%w_-]+') do
+            if r == rule then return vim.trim(line:sub(at)) end
+        end
+        return nil
+    end
+    local own = marks(lines[lnum])
+    if own then return own end
+    local i = lnum - 1
+    while i >= 1 and is_comment(lines[i]) do
+        local m = marks(lines[i])
+        if m then return m end
+        i = i - 1
+    end
+    return nil
+end
+
+--- Why a rule offers no MECHANICAL fix. Declared per rule, because "there is no
+--- safe rewrite" and "nobody has written one yet" are different facts, and an
+--- action list that simply omits the option states neither.
+M.FIX_WHY = {
+    ['concat-in-loop'] = 'the rewrite restructures the loop into a table + '
+        .. 'table.concat — a judgement, not a substitution',
+    ['self-compare'] = 'what the comparison SHOULD have said is not derivable',
+    ['duplicated-operand'] = 'mechanical in principle; not implemented yet',
+    ['bool-comparison'] = 'mechanical in principle; not implemented yet',
+    ['self-assignment'] = 'deleting the line is unsafe when it carries other '
+        .. 'statements; not implemented yet',
+    ['pseudo-ternary'] = 'the intended value is not derivable',
+    ['constant-condition'] = 'which branch to keep is a judgement',
+    ['duplicated-condition'] = 'the intended condition is not derivable',
+}
+M.FIX_WHY_DEFAULT = 'no mechanical rewrite is implemented for this rule'
+
 -- ── the analysis ─────────────────────────────────────────────────────────────
 --- Rung-0 findings for the focused fn. @return table {
 ---   unsupported?, findings: { {line, rule, msg, hedged} }[], census: {total, unknown, kinds} }
@@ -173,6 +242,27 @@ function M.lint(store, fn_id)
         if a.line ~= b.line then return a.line < b.line end
         return a.rule < b.rule
     end)
+    -- split off what the source asked us to ignore (read once, per lint call)
+    local node = store.node and store.node(fn_id)
+    local src = {}
+    if node and store.abs then
+        local fd = io.open(store.abs(node.file), 'r')
+        if fd then
+            src = vim.split(fd:read('a') or '', '\n', { plain = true })
+            fd:close()
+        end
+    end
+    local kept, hushed = {}, {}
+    for _, f in ipairs(out) do
+        local m = #src > 0 and M.suppressed_at(src, f.line, f.rule) or nil
+        if m then
+            f.suppressed_by = m
+            hushed[#hushed + 1] = f
+        else
+            kept[#kept + 1] = f
+        end
+    end
+    out = kept
     -- The census is not decoration: it is the only honest thing a CONSUMER can
     -- say when there are no findings. MEASURED — with a python parser on the rtp,
     -- `def f(a): if a == a: …` harvests total=5 / unknown=1 and trips ZERO rules,
@@ -180,7 +270,9 @@ function M.lint(store, fn_id)
     -- three things (nothing to read · read and clean · read but no rule applies)
     -- and a surface that renders it as "clean" fabricates a verdict. Every
     -- consumer must report WHAT WAS CHECKED alongside the count.
-    return { findings = out, census = { total = total, unknown = unknown, kinds = kinds } }
+    return { findings = out, suppressed = hushed,
+        census = { total = total, unknown = unknown, kinds = kinds,
+            suppressed = #hushed } }
 end
 
 --- The lens surface (:CartographExpr): the focused fn's Rung-0 findings + an
@@ -207,6 +299,15 @@ function M.report(store, fn_id)
         end
     end
     local c = res.census
+    -- DISCLOSED: a silenced finding still gets a line, with the marker that
+    -- silenced it. Otherwise "0 findings" means clean-or-hushed all over again.
+    if #(res.suppressed or {}) > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('suppressed by the source: %d'):format(#res.suppressed)
+        for _, f in ipairs(res.suppressed) do
+            L[#L + 1] = ('    L%-4d %-20s %s'):format(f.line, f.rule, f.suppressed_by)
+        end
+    end
     L[#L + 1] = ''
     if c.total > 0 then
         L[#L + 1] = ('expression coverage: %d node(s), %d unknown (%.1f%% mapped)')

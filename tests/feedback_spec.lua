@@ -168,14 +168,42 @@ end)
 
 test('sight: the typed EMPTY is captured with its uncomputed flag', function ()
     -- 'callers' is a registered concern, so the pane's blankness has a declared
-    -- reason; capturing it separates "honest but unhelpful" from "lied"
+    -- reason; capturing it separates "honest but unhelpful" from "lied". The rows
+    -- must actually SHOW it, so render what the pane would render.
+    local concerns = require 'cartograph.panes.concerns'
+    local note = concerns.empty_of('callers', stub_store())
     local pane = { view = { level = 'callers' },
-        rows = function () return { 'x' }, 1 end,
+        rows = function () return { 'ƒ update', '  ' .. note }, 1 end,
         row_subject = function () return nil end }
     local s = fb.sight(stub_store(), pane)
     eq('table', type(s.empty))
     eq('string', type(s.empty.rendered))
     eq('boolean', type(s.empty.uncomputed))
+end)
+
+test('sight: an empty the pane did NOT render is not claimed as rendered', function ()
+    -- the defect a real entry caught: empty_of returns the text that WOULD show if
+    -- the altitude had nothing, so an unconditional capture declared "the pane was
+    -- blank" about a pane with three rows — and misfiled the report as an absence
+    local pane = { view = { level = 'callers' },
+        rows = function () return { 'ƒ update', '  ← railbot.lua:12' }, 1 end,
+        row_subject = function () return nil end }
+    local s = fb.sight(stub_store(), pane)
+    eq(nil, s.empty)
+    s.expected = 'the caller list is missing one'
+    eq(fb.UNAVAILABLE, fb.entry(s).empty)
+    eq('absence', fb.entry(s).kind) -- from the HOLE, not from a fabricated empty
+end)
+
+test('shows: a note WRAPPED across rows still counts as rendered', function ()
+    -- the pane word-wraps prose, so a per-row substring test would miss it and
+    -- reintroduce the fabrication from the other side
+    local rows = { 'ƒ update', '  (no callers found — entry point,',
+        '  or dynamically dispatched)' }
+    ok(fb.shows(rows, '(no callers found — entry point, or dynamically dispatched)'))
+    ok(not fb.shows(rows, '(no field overrides — the base is taken as declared)'))
+    ok(not fb.shows(rows, ''))
+    ok(not fb.shows(nil, 'anything'))
 end)
 
 test('sight: a node subject FREEZES its source bytes', function ()

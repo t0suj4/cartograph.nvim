@@ -120,6 +120,34 @@ M.REGISTRY = {
         },
     },
 
+    -- ONE LINT FINDING as a place: its explanation, and what can be done about it.
+    -- key = fn \31 line \31 rule. Asked for directly — a finding row states WHAT is
+    -- wrong in 30 columns and had nowhere to put the WHY or the actions.
+    -- The uncomputed half is neither needs_edges (rung-0 lints ride the expression
+    -- IR, which a thin index can re-derive per file) nor a data stage: what makes
+    -- this altitude unanswerable is a language the harvest cannot read.
+    lintact = {
+        view_key = 'lintact',
+        subject  = function (key) return (key or ''):match('^(.-)\31') end,
+        ascend   = function (key) return 'fn', (key or ''):match('^(.-)\31') end,
+        hover    = 'site', -- rows anchor to the reported line in the fn's source
+        empty    = {
+            -- reachable only from a row that WAS a finding, so an empty here means
+            -- the source moved out from under the key
+            computed   = '(this finding is no longer reported here — the source changed)',
+            uncomputed = function (store)
+                -- the real precondition is LOCAL SOURCE: the rung-0 harvest reads
+                -- the file (and so does the suppression reader), so a graph served
+                -- over a scheme root has no expressions to read and no line to
+                -- write a marker on. Index-only is NOT a blocker here.
+                local root = store.data and store.data.root
+                if not root or root:match('^%w+://') then
+                    return 'this graph has no local source to read expressions from'
+                end
+            end,
+        },
+    },
+
     -- a REFUSAL as a place: the rule that refused a call and the candidates it
     -- refused between. key = fn \31 line \31 callee.
     refused = {

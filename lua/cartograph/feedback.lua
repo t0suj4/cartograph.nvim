@@ -195,6 +195,19 @@ end
 
 -- ── capture: the sighting ────────────────────────────────────────────────────
 
+--- Did the pane actually render this text? Compared over the rows JOINED and
+--- whitespace-collapsed, because the pane word-wraps prose across several rows
+--- (panes/symbols note()) — a plain per-row substring test misses a wrapped note
+--- and would reintroduce the very fabrication this guards.
+function M.shows(rows, text)
+    if type(rows) ~= 'table' then return false end
+    local needle = (tostring(text):gsub('%s+', ' '))
+    needle = (needle:gsub('^%s*(.-)%s*$', '%1'))
+    if needle == '' then return false end
+    local hay = (table.concat(rows, ' '):gsub('%s+', ' '))
+    return hay:find(needle, 1, true) ~= nil
+end
+
 --- Everything an entry needs EXCEPT the expectation, gathered from a live
 --- browser. `pane` is injected (cartograph.panes.symbols in practice) so the
 --- gather is testable against a stub, and so a capture with no cockpit open
@@ -218,11 +231,17 @@ function M.sight(store, pane)
     -- the typed EMPTY as rendered: `why` non-nil means the pane was blank
     -- because nothing was COMPUTED, which is a different bug from a pane blank
     -- because there genuinely is nothing. Reports about absences hinge on it.
-    if s.altitude then
+    if s.altitude and rows then
         local ok, concerns = pcall(require, 'cartograph.panes.concerns')
         if ok and concerns.empty_of then
             local ok2, note, why = pcall(concerns.empty_of, s.altitude, store)
-            if ok2 and note then
+            -- ONLY when the pane actually rendered it. empty_of returns the text
+            -- that WOULD show had the altitude nothing to show, so capturing it
+            -- unconditionally produced an entry declaring "the pane was blank"
+            -- about a pane holding three rows — false about our own evidence, and
+            -- it made classify() report a content complaint as an absence. Found
+            -- by a real entry filed on the proto compartment.
+            if ok2 and note and M.shows(rows, note) then
                 s.empty = { rendered = note, uncomputed = why ~= nil }
             end
         end

@@ -587,6 +587,28 @@ function with four callers would otherwise read as having none. The relation
 altitudes (callers, occurrences, registered-by, refusals) and a var's usage
 sites all make that distinction.
 
+A SUPPRESSED finding is still counted.                *cartograph-suppression*
+On the `lints` lens, `l` on a finding descends into its ACTIONS: the full
+explanation the 30-column row could not carry, `suppress here`, and a `fix` row
+that is always present and states its own unavailability with a per-rule reason
+— an action list that omits the option it has not implemented says neither
+"there is no safe rewrite" nor "nobody wrote one yet".
+
+Suppressing appends `@cg-ignore: <rule>` to the reported line, and the reader
+also honours it on a comment line directly above (blank lines and code stop the
+walk). It is appended rather than inserted because inserting a line shifts
+every range below it — the write would invalidate the map it was issued from.
+Naming rules is what keeps one marker from silencing everything a line could
+ever be flagged for; a bare `@cg-ignore` silences all of them. Unknown comment
+syntax REFUSES rather than guessing, the write is journaled, so
+|:CartographUndo| reverses it, and `un-suppress` is offered wherever a marker
+is already present.
+
+The count is never hidden: the lens says `N suppressed here` and
+:CartographExpr lists each silenced finding with the marker that silenced it.
+Otherwise "0 findings" would mean clean-or-hushed, which is the ambiguity this
+whole section exists to remove.
+
 ==============================================================================
 7. CONFIGURATION                                            *cartograph-config*
 

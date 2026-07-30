@@ -183,6 +183,8 @@ local NO_NODE_HOVER = {
     protos = 'a prototype is not a graph node: its anchor is a module + a line,'
         .. ' so hover previews the declaring line',
     proto  = 'override rows are source positions in the declaring module, as fn',
+    lintact = 'action rows are not defs: each anchors to the REPORTED line, so'
+        .. ' hover highlights that line (as fn)',
     fn     = 'statement rows highlight the source line instead',
     block  = 'as fn',
     callers = 'site rows: the site renderer previews the position',
