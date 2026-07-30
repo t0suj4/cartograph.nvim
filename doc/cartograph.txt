@@ -461,7 +461,8 @@ NAVIGATION ~
   down          j         symbols: next row; at a block's last row it
                           steps OUT to the parent
   up            k         symbols: previous row, mirrored upward
-  cycle         <Tab>     cycle this altitude's lens / files view mode
+  cycle         <Tab>     cycle this altitude's lens (|cartograph-lenses|,
+                          which the pane's winbar names for you)
   cycle_back    <S-Tab>   cycle it the other way
   close         q         close a pane
 
@@ -498,6 +499,49 @@ unbound until you ask for them:
     require('cartograph').setup { keys = { mark = ',m', set_view = ',M',
       set_next = ']w', set_prev = '[w', cone_in = ',c', cone_out = ',C' } }
 <
+
+THE LENSES OF AN ALTITUDE                                   *cartograph-lenses*
+
+An altitude can show the same subject in more than one way. `cycle` (<Tab>)
+moves between them, `cycle_back` (<S-Tab>) the other way, and the pane's winbar
+names them so you never have to press a key to find out what is there:
+>
+    ⇥ statements [detail] lints
+<
+The bracketed one is in effect. An altitude with a single view says `— one view
+here` rather than drawing nothing, because blank chrome cannot be told from
+chrome that failed. The key is shown as you have it BOUND — remap `cycle` and
+the strip prints your binding, not a Tab you would press in vain.
+
+This table is checked against lua/cartograph/panes/symbols.lua by
+tests/lensbar_spec.lua, so it cannot drift from the code.
+
+  altitude      lenses ~
+  fn            statements detail lints
+  block         statements detail
+  region        statements detail
+  files         flat tree
+  file          members live
+
+  statements  each altitude's normal view: the code's statements in order
+  detail      the fine-grained descendable elements a statement contains —
+              arguments, conditions, var and field reads. A row here elides
+              its TAIL to fit (see |cartograph-budget|); the full text is one
+              hover away in the source pane
+  lints       :CartographExpr's findings as ROWS instead of a scratch buffer.
+              `l` on a finding descends into its actions (|cartograph-suppression|)
+  flat        the file roster, alphabetical, shortest unique path suffix
+  tree        the same files as an INCLUDE tree (or a load order, where the
+              project declares one)
+  members     what the file's module exposes
+  live        what the RUNNING instance says it exposes — `self://` only, so
+              it is offered at the file altitude only under that provider
+              (|cartograph-providers|). Nothing on disk can answer it
+
+Cycling FOLLOWS your position: the thing under the cursor is carried to its row
+in the new lens. When it has no row there — an argument vanishing in
+`statements` — it becomes a GHOST anchored to its enclosing statement, and
+cycling back restores it exactly.
 
 THE SUBJECT OF A ROW                                       *cartograph-subject*
 
@@ -577,6 +621,11 @@ somewhere else:
   …        an identity too long even on its own is elided IN THE MIDDLE, both
            ends kept (crash-site-…-machine.lua). Only an identity is ever
            elided, and never silently; an annotation moves or goes instead.
+
+  free TEXT — a statement, a call, a condition — elides at the TAIL instead
+  (`local vonnCharacter = playe…`), because a statement reads left to right and
+  its front is what identifies it. The full text is never lost: every such row
+  anchors to its source line, so the source pane holds it whole.
 
 An EMPTY view states which KIND of empty it is. "no callers found — entry
 point, or dynamically dispatched" is a computed absence: the call graph was

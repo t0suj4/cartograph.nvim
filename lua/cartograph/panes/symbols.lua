@@ -112,6 +112,97 @@ local function cur_lens()
     return set and (M.view.lens or set[1])
 end
 
+-- ── THE MODE STRIP ───────────────────────────────────────────────────────────
+-- A lens you cannot discover is a lens you do not have. Before this, the only
+-- way to learn that `fn` has three views was to press <Tab> and watch the pane
+-- change under you — the altitude offered no evidence of its own alternatives,
+-- which is the "absence rendered as silence" defect ([[cartograph-concern-layering]])
+-- applied to the browser's own controls.
+--
+-- Two flavours of mode share the one key: the files altitude cycles a display
+-- MODE (flat list <-> include tree), fn/block/region cycle a LENS. They answer
+-- as ONE list here because a caller asking "what else can I see from here" must
+-- not have to know which flavour it is looking at. Split, the disclosure would
+-- go silent exactly where the two disagree — which is what a display built on
+-- lens_set alone would have done at `files`, where <Tab> plainly works.
+--- @return string[]|nil modes  every mode of this altitude, cycling order
+--- @return string|nil active   the one in effect (nil iff modes is nil)
+function M.modes()
+    if M.view.level == 'files' then return { 'flat', 'tree' }, M.files_mode end
+    local set = lens_set(M.view.level)
+    if not set then return nil end
+    return set, cur_lens()
+end
+
+-- The cycle key as the user actually has it bound. The glyphs are a courtesy
+-- for the two defaults, never an assumption: every binding here is remappable
+-- by policy, so an unrecognised key prints literally rather than being drawn as
+-- a Tab it is not.
+local KEYGLYPH = { ['<Tab>'] = '⇥', ['<S-Tab>'] = '⇤' }
+local function cycle_key()
+    local k = config.keys.cycle
+    if type(k) ~= 'string' or k == '' then return nil end
+    return KEYGLYPH[k] or k
+end
+
+-- winbar text is statusline syntax: a literal % would be read as an item
+local function wesc(s) return (tostring(s):gsub('%%', '%%%%')) end
+
+--- The pane's one line of CHROME, naming the views this altitude also has.
+---
+--- It is a winbar and not a row on purpose. A row would be navigable (j/k would
+--- land on it), would need a line_* disposition, would shift every mapping below
+--- it, and would invite a descend it cannot answer. Chrome that describes the
+--- pane belongs outside the pane's own coordinate space — the same argument the
+--- gutter lanes make for markers ([[cartograph-gutter-lanes]]).
+---
+--- THE BUDGET LAW still holds: the window is symbols_width wide however you draw
+--- in it. So an overlong strip does not clip and does not tail-elide — a cut list
+--- of modes would read as "these are all of them", inventing an absence. It
+--- degrades instead, each step still true: full list → active plus a COUNT of the
+--- others → drop the key hint (a courtesy, the first thing to go) → fit_text,
+--- which at least marks its own cut.
+function M.winbar()
+    local set, active = M.modes()
+    local budget = config.symbols_width or 30
+    if not set then
+        -- NOT blank: this altitude having one view is an answer, and the only
+        -- way the strip's absence elsewhere reads as information rather than as
+        -- chrome that failed to draw.
+        return '%#CartographDim#' .. wesc(M.fit_text('— one view here', '')) .. '%*'
+    end
+    local key = cycle_key()
+    local prefix = key and (key .. ' ') or ''
+    local labels = {}
+    for i, name in ipairs(set) do
+        labels[i] = name == active and ('[' .. name .. ']') or name
+    end
+    local full = prefix .. table.concat(labels, ' ')
+    if vim.fn.strdisplaywidth(full) <= budget then
+        local out = { key and ('%#CartographDim#' .. wesc(key) .. ' ') or '' }
+        for i, name in ipairs(set) do
+            out[#out + 1] = (name == active and '%#CartographTitle#[' .. wesc(name) .. ']'
+                or '%#CartographDim#' .. wesc(name))
+            if i < #set then out[#out + 1] = ' ' end
+        end
+        return table.concat(out) .. '%*'
+    end
+    local count = (' +%d'):format(#set - 1)
+    local name = active or '?'
+    if vim.fn.strdisplaywidth(prefix .. '[' .. name .. ']' .. count) > budget then
+        prefix, key = '', nil -- the key hint is the courtesy, so it goes first
+    end
+    -- only the active name is left to give. The COUNT never goes: it is the whole
+    -- reason this form is honest, and it is what says a list was withheld.
+    local room = budget - vim.fn.strdisplaywidth(prefix .. '[]' .. count)
+    if room > 1 and vim.fn.strdisplaywidth(name) > room then
+        name = vim.fn.strcharpart(name, 0, room - 1) .. '…'
+    end
+    return (key and '%#CartographDim#' .. wesc(key) .. ' ' or '')
+        .. '%#CartographTitle#[' .. wesc(name) .. ']'
+        .. '%#CartographDim#' .. wesc(count) .. '%*'
+end
+
 -- a live key segment meaning "the upvalues of the function reached here"
 local UPSENT = '\30ups'
 
@@ -1836,6 +1927,14 @@ function M.render()
     vim.bo[M.buf].modifiable = true
     vim.api.nvim_buf_set_lines(M.buf, 0, -1, false, ctx.lines)
     vim.bo[M.buf].modifiable = false
+
+    -- the mode strip follows the altitude, so it is re-derived here rather than
+    -- only at attach time. Guarded on the window still showing OUR buffer: the
+    -- winbar is window-local and must never be painted onto someone else's.
+    if M.win and vim.api.nvim_win_is_valid(M.win)
+        and vim.api.nvim_win_get_buf(M.win) == M.buf then
+        vim.wo[M.win].winbar = M.winbar()
+    end
     for _, n in ipairs({ ns_ui, ns_class }) do vim.api.nvim_buf_clear_namespace(M.buf, n, 0, -1) end
     for _, s in ipairs(ctx.signs) do
         vim.api.nvim_buf_set_extmark(M.buf, ns_class, s.row, 0,
@@ -2370,6 +2469,7 @@ function M.attach(win)
     vim.wo[win].signcolumn = 'yes:1' -- stable-width gutter for the class markers
     vim.wo[win].wrap = false         -- rows are rows; long ones clip, not fold
     vim.wo[win].cursorline = true
+    vim.wo[win].winbar = M.winbar()  -- the mode strip, before the first render
     local keys = config.keys
     local function row() return vim.api.nvim_win_get_cursor(win)[1] end
     -- forward-declared: the CursorMoved handler + the ascend key fire these,
@@ -3335,9 +3435,8 @@ function M.attach(win)
     -- its enclosing statement and is remembered in M._ghost, so cycling back to
     -- the lens it lives in restores it exactly.
     local function cycle_lens(step)
-        local set = lens_set(M.view.level)
-        if not set then return end
-        local from = cur_lens()
+        local set, from = M.modes() -- the same list the strip publishes
+        if not (set and from) then return end
         -- carry the ghosted origin if we're mid-ghost, else the row we're on
         local anchor = M._ghost or { lens = from, desc = row_desc(row()) }
         local i = 1
@@ -3351,9 +3450,15 @@ function M.attach(win)
         vim.api.nvim_exec_autocmds('CursorMoved', { buffer = M.buf })
     end
     local function cycle(step)
+        local set, active = M.modes()
+        if not (set and active) then return end
         if M.view.level == 'files' then
             local under = M.line_file[row()]
-            M.files_mode = M.files_mode == 'tree' and 'flat' or 'tree'
+            -- stepped through the published list, not toggled: <S-Tab> means
+            -- BACKWARDS here too, and a third files mode would need no edit
+            local i = 1
+            for k, name in ipairs(set) do if name == active then i = k end end
+            M.files_mode = set[((i - 1 + step) % #set) + 1]
             M.show('files')
             for r = 1, vim.api.nvim_buf_line_count(M.buf) do
                 if M.line_file[r] == under then

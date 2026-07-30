@@ -90,7 +90,9 @@ declarations), `callers` / `used-by` / `sites`, `table`, `refused`,
   node).
 - **lens** — a way of reading the current altitude's rows, cycled with
   `<Tab>`/`<S-Tab>`. fn/block/region offer `statements` (default) and `detail`
-  (arguments, conditions, var/field reads). The lens rides the trail.
+  (arguments, conditions, var/field reads); fn also offers `lints`. The pane's
+  winbar names the lenses an altitude has, so finding out costs no keypress —
+  and says `— one view here` where there is only one. The lens rides the trail.
 
 **Navigation**:
 - **focus** — the node the cockpit is rooted on (shown in the source pane),
@@ -176,8 +178,24 @@ tree. At fn/block/region the lenses are `statements` (the default view) and
 `detail`: the code's fine-grained descendable elements, indented under each
 statement — a call's **arguments** and a conditional's **condition** (`l`
 descends into that element's forms), and the **module vars/fields** the
-statement reads (`l` opens the var's usage sites). The lens rides the `h`/`l`
-trail (ascend restores the lens you had), but not the `<C-o>` jumplist.
+statement reads (`l` opens the var's usage sites). The fn altitude adds `lints`
+— `:CartographExpr`'s findings as rows, where `l` descends into a finding's
+actions. The lens rides the `h`/`l` trail (ascend restores the lens you had),
+but not the `<C-o>` jumplist.
+
+The pane's winbar names them, because a lens you can't discover is a lens you
+don't have:
+
+```
+⇥ statements [detail] lints
+```
+
+The bracketed one is in effect, the key is the one you have *bound*, and an
+altitude with a single view says `— one view here` rather than drawing nothing
+— blank chrome is indistinguishable from chrome that failed. It obeys the same
+30-column budget as the rows: too narrow to list them all and it degrades to
+`[detail] +2`, counting what it withheld instead of truncating the list into a
+claim that those are all of them.
 
 ### Configuration
 

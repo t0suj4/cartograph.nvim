@@ -189,7 +189,7 @@ local function roster_claim(s)
 end
 
 -- ── 4b. the TABLES the helpdoc publishes ────────────────────────────────────
--- Rows of `  <field> <value> …` between a tag and the next section rule. A
+-- Rows of `  <field> <value> …` between a tag and the END OF ITS TOPIC. A
 -- trailing ~ marks a column header, not a row; continuation lines are indented
 -- past the field column and so never match.
 local function doc_rows(tag)
@@ -198,6 +198,15 @@ local function doc_rows(tag)
         if line:find('*' .. tag .. '*', 1, true) then
             inside = true
         elseif inside and line:match('^====') then
+            break
+        elseif inside and line:match('%*cartograph%-[%w%-]+%*')
+            and not line:find('*' .. tag .. '-', 1, true) then
+            -- A NEW TOPIC ends this one. Only a SUBsection (*<tag>-…*, as
+            -- cartograph-keys-unbound is to cartograph-keys) still publishes
+            -- rows about this table. Before this the region ran on to the next
+            -- ==== rule and swallowed any table that happened to sit in
+            -- between: |cartograph-lenses| lives in section 4, and its twelve
+            -- altitude rows were read as twelve keys.<field> that do not exist.
             break
         elseif inside and not line:match('~%s*$') then
             local field, val = line:match('^  (%a[%w_]*)%s+(%S+)')
