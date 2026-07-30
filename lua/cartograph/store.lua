@@ -1326,8 +1326,18 @@ end
 M._nav_back, M._nav_fwd = {}, {}
 M.loc_provider = nil -- { get = fn() -> loc, set = fn(loc) }, set by the browser
 
+--- A JUMPLIST entry. The lens is deliberately dropped: <C-o> is a jump, and a
+--- jump lands at the altitude's DEFAULT lens. Dropped here and not inside the
+--- provider, because the provider's other callers are carrying a position across a
+--- rebuild — they never moved, and must keep the lens they were reading in.
+local function loc_for_jump()
+    local l = M.loc_provider and M.loc_provider.get() or nil
+    if l then l.lens = nil end
+    return l
+end
+
 local function snapshot()
-    return { id = M.focused, loc = M.loc_provider and M.loc_provider.get() or nil }
+    return { id = M.focused, loc = loc_for_jump() }
 end
 
 local function restore(entry)
@@ -1363,7 +1373,7 @@ function M.record_crossing()
     local session = require 'cartograph.session'
     if not session.active then return end
     session.push_crossing({ band = session.active, id = M.focused,
-        loc = M.loc_provider and M.loc_provider.get() or nil })
+        loc = loc_for_jump() })
 end
 
 --- <C-o> / <C-t>: return to the previous pivot. Walks the active band's history

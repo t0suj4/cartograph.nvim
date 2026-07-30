@@ -69,6 +69,25 @@ test('nav: history restores the browser location, not just the focus', function 
     store.loc_provider = nil
 end)
 
+test('nav: a JUMPLIST entry omits the lens, but the location itself keeps it',
+    function ()
+    -- The policy split that :CartographUndo exposed. A jump lands at the
+    -- altitude's default lens, so store.pivot strips it from its entry. But the
+    -- SAME provider is what refresh/init/re-attach use to carry a position across
+    -- a rebuild, where the user never moved — stripping inside the provider applied
+    -- the jumplist's policy to all of them, and undo dropped you out of `lints`.
+    graph({ node('a', 'a'), node('b', 'b') })
+    store.loc_provider = {
+        get = function () return { level = 'fn', fn = store.focused, lens = 'lints' } end,
+        set = function () end,
+    }
+    store.set_focus('a')
+    store.pivot('b')
+    eq('lints', store.loc_provider.get().lens)          -- the location keeps it
+    eq(nil, store._nav_back[#store._nav_back].loc.lens) -- the JUMP entry does not
+    store.loc_provider = nil
+end)
+
 test('nav: ingest resets the history', function ()
     graph({ node('a', 'a'), node('b', 'b') })
     store.set_focus('a')
@@ -490,8 +509,13 @@ test('nav: the detail lens shows args/conditions/reads and rides the trail', fun
     eq('fn', symbols.view.level)
     eq('detail', symbols.view.lens)
 
-    -- the <C-o> jumplist snapshot does NOT carry the lens (trail only)
-    ok(store.loc_provider.get().lens == nil, 'the jumplist snapshot omits the lens')
+    -- the <C-o> jumplist ENTRY does NOT carry the lens (trail only): a jump lands
+    -- at the altitude's default. Asserted on the entry store.pivot records, not on
+    -- loc_provider.get() — the provider is shared with the callers that carry a
+    -- position across a REBUILD (refresh, re-ingest, re-attach), where the user
+    -- never moved and the lens MUST survive. Testing the mechanism instead of the
+    -- intent is what let :CartographUndo silently drop you out of a lens.
+    eq('detail', store.loc_provider.get().lens) -- the full location KEEPS it now
 
     -- position survives a lens switch: on an arg row, cycling to statements
     -- ghost-anchors to the arg's enclosing statement, and cycling BACK restores

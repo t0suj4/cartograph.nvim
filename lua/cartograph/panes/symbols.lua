@@ -2496,9 +2496,17 @@ function M.attach(win)
         enter(enter_var(n.id), n.id, n.id)
     end
     store.loc_provider = {
+        -- The FULL location, lens included: the lens is part of where you are, and
+        -- most callers here are carrying a position across a REBUILD (a refresh, a
+        -- re-ingest, a window re-attach) where the user never moved and must land
+        -- exactly where they were. The JUMPLIST is the one caller with the opposite
+        -- policy — a deliberate jump lands at the altitude's default lens — so it
+        -- strips the lens at its own call site (store.snapshot / record_crossing).
+        -- It used to be stripped HERE, which applied the jumplist's policy to every
+        -- caller: :CartographUndo dropped you out of the `lints` lens because the
+        -- refresh that follows it carries the location through this very provider.
         get = function ()
             local l = view_loc()
-            l.lens = nil -- the lens rides the trail only, not the jumplist
             l.trail = vim.list_extend({}, M.trail)
             l.fwd_trail = vim.list_extend({}, M.fwd_trail)
             return l
