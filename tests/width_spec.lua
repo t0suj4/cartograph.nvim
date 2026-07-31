@@ -231,3 +231,90 @@ test('width: PROSE rows are the known overflow class, and it does not grow',
     end
     eq(1, over) -- the ws empty note: "(empty — 'm' on a symbol marks it)"
 end)
+
+-- ── LISTS: packed, with the remainder COUNTED ─────────────────────────────────
+-- MEASURED on a real function (k-lib.lua::script.register_object, reported via
+-- :CartographFeedback): the plain `fn` altitude — the most-seen view in the pane —
+-- put 4 of its 7 rows past the budget, the widest at 81 columns in a 30-column
+-- window. `inputs:` and the per-statement reads are LISTS, and a list must not be
+-- elided like an identity: a truncated list reads as complete. So it packs what fits
+-- and counts what it withheld, the same way the mode strip degrades.
+
+test('append_list: packs what fits and counts the rest', function ()
+    config.symbols_width = 30
+    local got = symbols.append_list('inputs:', ' ',
+        { 'events', 'k_lib_events', 'on_init', 'k_lib_on_init', 'on_nth_tick' })
+    ok(vim.fn.strdisplaywidth(got) <= 30, ('%d cols: %s'):format(
+        vim.fn.strdisplaywidth(got), got))
+    ok(got:find('+%d'), 'the withheld names are counted: ' .. got)
+    ok(got:find('events', 1, true), 'and what fit is shown: ' .. got)
+end)
+
+test('append_list: a list that fits whole gains no count', function ()
+    config.symbols_width = 30
+    local got = symbols.append_list('inputs:', ' ', { 'a', 'b' })
+    eq('inputs: a, b', got)
+end)
+
+test('append_list: an empty list adds nothing at all', function ()
+    eq('inputs:', symbols.append_list('inputs:', ' ', {}))
+end)
+
+test('append_list: the LEAD survives even when no item fits, so the count says'
+    .. ' what it counts', function ()
+    config.symbols_width = 14
+    local got = symbols.append_list('  x', '  ← ',
+        { 'a_very_long_identifier', 'another_one' })
+    ok(got:find('←', 1, true), 'the relation is still named: ' .. got)
+    ok(got:find('+2', 1, true), 'and both are counted: ' .. got)
+    config.symbols_width = 30
+end)
+
+test('append_list: the count is honest about the exact remainder', function ()
+    config.symbols_width = 20
+    local got = symbols.append_list('·', ' ', { 'alpha', 'beta', 'gamma', 'delta' })
+    local n = tonumber(got:match('%+(%d+)'))
+    local shown = 0
+    for _, name in ipairs({ 'alpha', 'beta', 'gamma', 'delta' }) do
+        if got:find(name, 1, true) then shown = shown + 1 end
+    end
+    eq(4, shown + (n or 0), 'shown + counted must equal the whole list: ' .. got)
+    config.symbols_width = 30
+end)
+
+test('fn view: a real function with many inputs fits every row', function ()
+    config.symbols_width = 30
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local alpha, beta, gamma, delta, epsilon = 1, 2, 3, 4, 5',
+        'local function register_object(object)',
+        '\tobject.one = alpha',
+        '\tobject.two = beta',
+        '\tobject.three = gamma',
+        '\tobject.four = delta',
+        '\tobject.five = epsilon',
+        '\treturn object',
+        'end',
+        'return register_object',
+    }, '\n'))
+    fd:close()
+    local data = require('cartograph.providers.treesitter').extract(root, {})
+    store.ingest(data)
+    local id
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'register_object' then id = n.id end
+    end
+    ok(id, 'the fixture fn was extracted')
+    symbols.buf = nil
+    symbols.create()
+    symbols.view = { level = 'fn', fn = id }
+    symbols.render()
+    local over = {}
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false)) do
+        local w = vim.fn.strdisplaywidth(l)
+        if w > 30 then over[#over + 1] = ('row %d = %d cols: %s'):format(i, w, l) end
+    end
+    eq({}, over, 'the default altitude must not clip')
+end)

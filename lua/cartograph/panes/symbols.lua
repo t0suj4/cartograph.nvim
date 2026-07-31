@@ -307,6 +307,57 @@ function M.fit_identity(label, indent, tail)
             vim.fn.strchars(label) - back, back) or '')
 end
 
+--- Append a LIST to `text` after `lead`, packing what fits and COUNTING the rest
+--- as `+N`.
+---
+--- A list is not an identity, and it must not be elided like one: a truncated list
+--- reads as complete, which is the same invented-absence the mode strip degrades
+--- around. MEASURED, and the reason this exists: the plain `fn` altitude — the
+--- most-seen view in the pane — put 4 of 7 rows past the budget on a real
+--- function, the widest at 81 columns in a 30-column window, so `inputs:` and the
+--- per-statement reads were being cut by the editor with no marker at all. The
+--- dropped names are never lost: every such row carries a line_stmt anchor and the
+--- source pane holds the statement whole.
+function M.append_list(text, lead, items, sep)
+    sep = sep or ', '
+    local budget = require('cartograph.config').symbols_width or 30
+    local W = vim.fn.strdisplaywidth
+    local n = #items
+    if n == 0 then return text end
+    -- RESERVE THE DISCLOSURE FIRST. The count is the one part that may never be
+    -- dropped — it is the whole difference between a packed row and a lying one — so
+    -- nothing is packed that would leave no room for it. Caught by this file's own
+    -- width fence: an earlier version appended the lead unconditionally and produced
+    -- 32-column rows on the very view it was written to fix.
+    local all = (' +%d'):format(n)
+    local base = text .. lead
+    if W(base .. all) > budget then
+        base = text -- the lead is a courtesy; it goes before the count does
+        if W(base .. all) > budget then
+            -- even the count will not fit beside the caller's own text, so the text
+            -- gives way and MARKS it: withholding silently is the one thing barred
+            local keep = budget - W(all) - 1
+            if keep < 1 then return text end
+            base = vim.fn.strcharpart(text, 0, keep) .. '…'
+        end
+        return base .. all
+    end
+    local out, shown = base, 0
+    for i, it in ipairs(items) do
+        local cand = out .. (shown > 0 and sep or '') .. tostring(it)
+        local rest = n - i
+        local tail = rest > 0 and (' +%d'):format(rest) or ''
+        if W(cand .. tail) <= budget then
+            out, shown = cand, shown + 1
+        else
+            -- the lead STAYS here: `← +3` says three READS went unshown, where a
+            -- bare `+3` would not say three of what
+            return out .. (' +%d'):format(n - shown)
+        end
+    end
+    return out
+end
+
 --- Fit free TEXT — a statement, a call, an expression — into the budget after
 --- `indent`. Unlike an identity, a statement reads left to right and its FRONT
 --- carries the signal (`local vonnCharacter = …` still says which local), so this
@@ -1333,7 +1384,8 @@ local function render_fn(ctx, id)
         end
         return
     end
-    ctx.lines[3] = ('inputs: %s'):format(#df.inputs > 0 and table.concat(df.inputs, ', ') or '(none)')
+    ctx.lines[3] = #df.inputs > 0 and M.append_list('inputs:', ' ', df.inputs)
+        or 'inputs: (none)'
     ctx.marks[3] = { { 0, -1, 'CartographDim' } }
     -- callees AND module-var reads per STATEMENT, so rows can name them as
     -- descend targets. df statements are the body's top-level ones; anything
@@ -1368,15 +1420,18 @@ local function render_fn(ctx, id)
         end
     end
     for i, s in ipairs(dfa.stmts(node)) do
-        local defs = table.concat(s.def, ', ')
-        local uses = table.concat(s.use, ', ')
+        -- THE BUDGET LAW, per segment: what the statement DEFINES is the identity
+        -- and is fitted first; the reads that follow are the annotation and are
+        -- packed with a count for the remainder (M.append_list).
         local text, dim_from
-        if defs ~= '' and uses ~= '' then
-            text = ('  %s  ← %s'):format(defs, uses); dim_from = 2 + #defs
-        elseif defs ~= '' then
-            text = '  ' .. defs
+        if #s.def > 0 and #s.use > 0 then
+            text = '  ' .. M.fit_identity(table.concat(s.def, ', '), '  ', '')
+            dim_from = #text
+            text = M.append_list(text, '  ← ', s.use)
+        elseif #s.def > 0 then
+            text = '  ' .. M.fit_identity(table.concat(s.def, ', '), '  ', '')
         else
-            text = '  · ' .. uses; dim_from = 0
+            text = M.append_list('  ·', ' ', s.use); dim_from = 0
         end
         local cs = calls_at[i]
         if cs then
@@ -1392,7 +1447,7 @@ local function render_fn(ctx, id)
                 end
             end
             if dim_from == nil then dim_from = #text end
-            text = text .. '   → ' .. table.concat(names, ' ')
+            text = M.append_list(text, '   → ', names, ' ')
         end
         local vs = vars_at[i]
         if vs then
@@ -1401,7 +1456,7 @@ local function render_fn(ctx, id)
                 if not seen[v.name] then seen[v.name] = true; names[#names + 1] = v.name end
             end
             if dim_from == nil then dim_from = #text end
-            text = text .. '   · ' .. table.concat(names, ' ')
+            text = M.append_list(text, '   · ', names, ' ')
         end
         ctx.lines[#ctx.lines + 1] = text
         if dim_from then ctx.marks[#ctx.lines] = { { dim_from, -1, 'CartographDim' } } end
