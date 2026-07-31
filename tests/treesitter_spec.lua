@@ -377,7 +377,14 @@ test('treesitter: scheme — defines, named-let interior, use-modules', function
         ok(not (e.kind == 'ref' and e.self and e.from == byname.run.id),
             'no bogus self-edge from the signature')
     end
-    eq(0, #(store.usedby[byname.run.id] or {}))    -- no function-callers
+    -- `run`'s one caller is the top-level `(display (run 5))`, owned by the REGION
+    -- rather than by a function. This asserted 0 until v107: that load-time call was
+    -- resolved and then dropped for want of an enclosing fn, so the check three lines
+    -- below flagged it AS a load-time call while this line claimed nothing called
+    -- `run` at all. The intent — no FUNCTION caller — is what is checked now.
+    local runcallers = store.usedby[byname.run.id] or {}
+    eq(1, #runcallers)
+    eq('region', (store.node(runcallers[1]) or {}).kind) -- usedby holds bare ids
     eq(1, #(store.usedby[byname.step.id] or {}))   -- exactly run
     eq({ 'demo/util.scm' }, store.imports_out['demo/main.scm'])
     -- the top-level (display (run 5)) is a load-time call

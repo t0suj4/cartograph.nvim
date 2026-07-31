@@ -29,6 +29,13 @@ M.NODE_FIELDS = {
                -- writes through (lua/js reference semantics; ~ to own params)
     top = true, -- unconditional module-load def (lua): a load-order sibling for
                 -- the reassignment-override resolver (resolve_reassign, v56)
+    stmtrun = true, -- (region only, v107) a run of TOP-LEVEL STATEMENTS, as against
+                    -- a CONTAINER region (a vue/svelte `template`). Only these own
+                    -- module-level code, so only these can be the `from` of a call
+                    -- made outside any function. The mark keeps extract's region
+                    -- index identical to relink's, which rebuilds from node_index
+                    -- and would otherwise pick up container regions — a
+                    -- parallel-vs-sequential split the graph gate caught.
     synth = true, -- a synthetic def emitted from a DSL call (ruby attr_*),
                   -- no `def` keyword in the source
     altkeys = true, -- extra EXACT resolver keys for one def (zig value-receiver

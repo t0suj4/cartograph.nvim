@@ -4,6 +4,11 @@
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 
+-- Forms whose keyword arguments are DECLARATIONS (import/export specs), not
+-- expressions — so a list after a #:keyword inside them is data, never a call.
+local DECL_FORM = { ['define-module'] = true, ['define-library'] = true,
+    library = true }
+
 return {
         exts = { 'scm' },
         functions = [=[
@@ -55,6 +60,28 @@ return {
         skip_call = function (calln, src)
             local p = calln:parent()
             if not (p and p:type() == 'list') then return false end
+            -- Inside a DECLARATION form, a list following a #:keyword is that
+            -- keyword's DATA: `#:export (step limit)` names two exports, and only
+            -- looks like a call because scheme writes code and data alike. Latent
+            -- until v107 gave module-level calls an owner — before that the bogus
+            -- call resolved and was dropped for having no enclosing fn, and the
+            -- graph gate caught it as `step` acquiring a second caller.
+            --
+            -- SCOPED TO DECLARATION FORMS, and measured why: keyword arguments
+            -- elsewhere are ordinary expressions, so a blanket rule LOSES real
+            -- calls. `#:on-error (repl-option-ref repl 'on-error)`
+            -- (guile system/repl/repl.scm:204) is a keyword whose value IS a call —
+            -- the scheme gate reported it as the one edge removed.
+            local phead = p:named_child(0)
+            if phead and phead:type() == 'symbol' and DECL_FORM[node_text(phead, src)] then
+                for i = 0, p:named_child_count() - 1 do
+                    if p:named_child(i) == calln then
+                        local prev = i > 0 and p:named_child(i - 1)
+                        if prev and prev:type() == 'keyword' then return true end
+                        break
+                    end
+                end
+            end
             local head = p:named_child(0)
             if not (head and head:type() == 'symbol') then return false end
             local kw = node_text(head, src)

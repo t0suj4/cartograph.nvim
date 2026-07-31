@@ -73,7 +73,43 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 106 -- v106: RECEIVER-PATH AGREEMENT in the name resolver. A call `a.b.m()`
+M.VERSION = 107 -- v107: MODULE-LEVEL CALLS GET AN OWNER. A call outside any function
+               -- resolved fine — target found, call.to set — and the edge was then
+               -- dropped because its `from` was nil, so top-level code contributed
+               -- nothing to the call graph. Von-Neumann measured 69 region nodes over
+               -- 2045 source lines and 0 of its 110 call edges; `createScript`, called
+               -- from a top-level `return function() … end`, read as 0 callers AND 0
+               -- registrants. The bare-NAME path already kept its top-level evidence as
+               -- a registration from the module, so the WEAKER evidence was retained
+               -- while an actual CALL was discarded. The edge now hangs off the
+               -- enclosing REGION node, which already existed with a name and a range.
+               -- Additive by construction (only sites that produced no edge at all), in
+               -- both the extract and relink twins. `call.fn` still means "a function" —
+               -- consumers read it as one — so only the EDGE changed.
+               -- ADDITIVE AS MEASURED over all 29 corpora: +12376 ref edges on the 23
+               -- that moved, Δrefs == edges added EXACTLY on every one of them, nodes
+               -- unchanged on every one, and 0 edges removed anywhere. It creates no
+               -- resolutions — it stops discarding the edges of resolutions that already
+               -- existed, so any `~`-tier noise it surfaces was already in the calls.
+               -- Shares of the lift track how much of a language lives at file scope:
+               -- rspec +2122 (15x — a ruby BLOCK is not a node, `@adef` being
+               -- javascript-only, so every call inside describe/it was ownerless), scheme
+               -- +2143 (60%, everything is a top-level form), python +244 (django's
+               -- module-level get_model), java's region@0 = STATIC FIELD INITIALIZERS
+               -- (server +1502, libs +166), zig/odin container scope (+476/+1244), v8's
+               -- file-scope X-macro expansions (+549), sylius +1 (php class bodies have
+               -- no statement run). jquery is unchanged because its body is one IIFE.
+               -- COUPLED with the spec/scheme.lua DECL_FORM rule: a `define-module`
+               -- `#:export`/`#:re-export` list was being read as calls, 707 of them in
+               -- guile, several RESOLVED to the very function the list exports. Those were
+               -- harmless while unowned edges were dropped; without that rule v107 would
+               -- have promoted all 707 into fabricated self-call edges.
+               -- Worker chunks are exempt (skip_idpass/defs_only/dataflow_only): a
+               -- worker's slice-local resolution is PROVISIONAL, relink recomputes it
+               -- against the whole graph, and edges are never retracted — attributing in
+               -- a worker split the parallel graph from the inline one (haskell 12 vs 10,
+               -- caught by the matrix `par` column, invisible to the spec suite).
+               -- v106: RECEIVER-PATH AGREEMENT in the name resolver. A call `a.b.m()`
                -- and a candidate named `b.m` agree on the RECEIVER, which the bare tail
                -- `m` says nothing about; where exactly one admitted candidate agrees,
                -- that beats whichever name index answered first. PURELY ADDITIVE as

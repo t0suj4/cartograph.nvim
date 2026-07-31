@@ -28,7 +28,7 @@ return {
         repo = 'https://github.com/elastic/elasticsearch',
         rev = '4743238408a4',
         lang = 'java',
-        expected = { refs = 77127, nodes = 87241 }, -- +18 @ honesty pass v46 (stale baseline caught up on prior Java refused→resolved)
+        expected = { refs = 78629, nodes = 87241 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +1502 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. java's `region@0` owns STATIC FIELD INITIALIZERS — the load-time code of a class (TransportVersion.java's constants calling loadConstant/collectFromResources). Prior: 77127 -- +18 @ honesty pass v46 (stale baseline caught up on prior Java refused→resolved)
         notes = 'THE parity gate corpus (5x scale, 4843 files, ~55s extract)',
     },
     libs = {
@@ -36,7 +36,7 @@ return {
         repo = 'https://github.com/elastic/elasticsearch',
         rev = '4743238408a4',
         lang = 'java',
-        expected = { refs = 10822, nodes = 13888 }, -- +1 @ generic Class<T> return (getLibrary(VectorLibrary.class))
+        expected = { refs = 10988, nodes = 13888 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +166 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. In java the region is `region@0` and what it owns is STATIC FIELD INITIALIZERS — java's load-time code, structurally the same thing as a lua module body (Terminal.java's DEFAULT = defaultTerminal()). Prior: 10822 -- +1 @ generic Class<T> return (getLibrary(VectorLibrary.class))
         notes = 'the small/fast java corpus (943 files, ~10s) — quick iteration',
     },
     -- ── per-language quick tier (libs-sized: seconds, calibrated, pinned) ──
@@ -44,7 +44,7 @@ return {
         root = HOME .. '/git/mantisbt/core',
         repo = 'https://github.com/mantisbt/mantisbt',
         rev = '821ce4ac9dab',
-        expected = { refs = 6376, nodes = 2538 }, -- calibrated @ 098c537
+        expected = { refs = 6392, nodes = 2538 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +16 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. mantis's *_api.php files do load-time config_get_global/require_js/require_css at file scope. Prior: 6376 -- calibrated @ 098c537
         lang = 'php',
         notes = 'php quick tier (150 files); mantis events adapter banked',
     },
@@ -53,7 +53,7 @@ return {
         budget_mb = 1400, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/sylius/sylius',
         rev = '9b6799e2b884',
-        expected = { refs = 5605, nodes = 32213 }, -- recalib 2026-07-19: +53 nodes/+10 refs = JS/TS pivot (index.js webpack configs class-keyed SyliusShop._prepareWebpackConfig) + anon-fn #cb restructuring + 1 php fn-value honesty; php side stable
+        expected = { refs = 5606, nodes = 32213 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +1 ref (nodes unchanged) = a top-level call now owned by its statement-run REGION. The smallest lift in the grid, and it is the right answer: symfony php is class bodies with no file-scope statements, so the single edge is in a .js asset (statistics_chart.js::region@108 -> renderChart). Prior: 5605 -- recalib 2026-07-19: +53 nodes/+10 refs = JS/TS pivot (index.js webpack configs class-keyed SyliusShop._prepareWebpackConfig) + anon-fn #cb restructuring + 1 php fn-value honesty; php side stable
         lang = 'php',
         notes = 'php SCALE tier (4636 files) — symfony adapter territory',
     },
@@ -61,7 +61,7 @@ return {
         root = HOME .. '/git/grocy',
         repo = 'https://github.com/grocy/grocy',
         rev = '297cc5724441', -- PRE-FIX of #2259 (c415e2f) — the taint keystone
-        expected = { refs = 2238, nodes = 2595 }, -- recalib 2026-07-26: v104 js member-target function literals (+997 refs/+98 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: the cleanest case — recovered 1230, +12 out of a refusal, 0 redirected, 0 LOST: its frontend is `Grocy.Api.Post = function(){}` all the way down. Prior: refs 1241 / nodes 2497 -- recalib 2026-07-19: +1180 nodes = JS/TS pivot + anon-fn (public/viewjs/*.js: 1615 js nodes incl 1123 #cb callbacks); php side STABLE at 878 nodes (taint keystone unaffected — validated via reduced fixture in sinkflow_spec, not live corpus counts)
+        expected = { refs = 2367, nodes = 2595 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +129 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. THE TAINT KEYSTONE IS UNAFFECTED (rung-2 fires on the same GetProductStockLocations; these are load-time bootstraps — app.php's ConfigurationValidator/WebhookRunner and migrations/*.php calling GetDbConnection). Prior: 2238 -- recalib 2026-07-26: v104 js member-target function literals (+997 refs/+98 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: the cleanest case — recovered 1230, +12 out of a refusal, 0 redirected, 0 LOST: its frontend is `Grocy.Api.Post = function(){}` all the way down. Prior: refs 1241 / nodes 2497 -- recalib 2026-07-19: +1180 nodes = JS/TS pivot + anon-fn (public/viewjs/*.js: 1615 js nodes incl 1123 #cb callbacks); php side STABLE at 878 nodes (taint keystone unaffected — validated via reduced fixture in sinkflow_spec, not live corpus counts)
         lang = 'php',
         notes = 'the TAINT keystone (Slim/PSR-7 + LessQL): both poles ground-'
             .. 'truth-validated — rung-2 fires on GetProductStockLocations (the '
@@ -71,7 +71,7 @@ return {
         root = HOME .. '/git/7kaa',
         repo = 'https://git.code.sf.net/p/skfans/7kaa',
         rev = '9e5cde1bc1d7',
-        expected = { refs = 8017, nodes = 12144 }, -- +1 @ v48 short-name honesty (same-file sq)
+        expected = { refs = 8040, nodes = 12144 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +23 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. cpp's share is small because code lives in functions; what is left is file-scope initializers (src/OUNITA.cpp::region@536) + the repo's packaging/*.sh. Prior: 8017 -- +1 @ v48 short-name honesty (same-file sq)
         lang = 'cpp',
         notes = 'cpp quick tier (~325 cpp + 189 h); openmw is DIRTY — never pin it',
     },
@@ -80,7 +80,7 @@ return {
         budget_mb = 1600, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://github.com/TryGhost/Ghost',
         rev = 'f7d7df8f9816',
-        expected = { refs = 28320, nodes = 40863 }, -- recalib 2026-07-26: +14 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +14 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `this.#MemberLinkClickEvent.create()` and `OfferAmount.OfferTrialAmount.create()`. Prior: 28306
+        expected = { refs = 30967, nodes = 40863 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +2647 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. js anon callbacks ALREADY had owners (`#cb` nodes, @adef), so these are true module bodies: bin/*.js CLI scripts and config files whose whole point is load-time work. Prior: 28320 -- recalib 2026-07-26: +14 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +14 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `this.#MemberLinkClickEvent.create()` and `OfferAmount.OfferTrialAmount.create()`. Prior: 28306
         lang = 'javascript',
         notes = 'js SCALE tier (2134 files) — a real node webapp: express'
             .. ' routes + handlebars themes (parametric-files territory)',
@@ -90,7 +90,7 @@ return {
         budget_mb = 7500, -- ~2x fresh-process inline peak @ new clock
         repo = 'https://chromium.googlesource.com/v8/v8',
         rev = '0646faaada71',
-        expected = { refs = 74594, nodes = 165859 }, -- recalib 2026-07-26: +174 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +187 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `base::OS::Abort()` -> OS::Abort, `internal::HandleScope::ZapRange()` -> HandleScope::ZapRange. Prior: 74420
+        expected = { refs = 75143, nodes = 165859 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +549 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. In v8's headers `region@4` owns file-scope MACRO-LIST expansions (STDLIB_MATH_FUNCTION_LIST, EXPORT_TEMPLATE_DECLARE, RCS_SCOPE) — an X-macro invocation is genuinely code at file scope. Prior: 74594 -- recalib 2026-07-26: +174 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +187 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `base::OS::Abort()` -> OS::Abort, `internal::HandleScope::ZapRange()` -> HandleScope::ZapRange. Prior: 74420
         lang = 'cpp',
         notes = 'cpp SCALE tier (1267 cc + 1813 h) — preprocessor-heavy,'
             .. ' the TU-walk torture target; .tq (torque) not spec\'d',
@@ -99,7 +99,7 @@ return {
         root = HOME .. '/git/guile/module',
         repo = 'https://github.com/cky/guile',
         rev = '89ce9fb31b00',
-        expected = { refs = 3601, nodes = 3288 }, -- +5 @ v48 short-name honesty (scheme's ??/>>/vv culture)
+        expected = { refs = 5744, nodes = 3288 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +2143 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 edges removed. +60%, expected: in scheme essentially EVERYTHING is a top-level form. THE TWO CHANGES IN v107 ARE COUPLED — this recalib also removes 707 spurious call RECORDS, because a `define-module` declaration list (`#:export`/`#:re-export`/`#:use-module`) was being read as calls, and several of those had RESOLVED to the very function the list exports (control.scm:22 `prompt` -> call-with-prompt@64; buffered-input.scm:20 `port` -> make-buffered-input-port@35). Pre-v107 they were harmless — resolved but unowned, so the edge was dropped. WITHOUT the DECL_FORM scoping in spec/scheme.lua, v107 would have promoted all 707 into fabricated "this module calls what it exports" edges. Scoping is to DECL_FORM only: a keyword-VALUED call elsewhere is still a call (guile's `#:on-error (repl-option-ref repl 'on-error)`, which the first blanket rule lost). Prior: 3601 -- +5 @ v48 short-name honesty (scheme's ??/>>/vv culture)
         lang = 'scheme',
         notes = 'scheme quick tier (280 files)',
     },
@@ -107,7 +107,7 @@ return {
         root = HOME .. '/git/rails/activesupport/lib',
         repo = 'https://github.com/rails/rails',
         rev = 'ed0f92c5e779',
-        expected = { refs = 1590, nodes = 2791 }, -- recalibrated @ R5b-ivar (v78)
+        expected = { refs = 1594, nodes = 2791 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +4 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. Only 4 because activesupport/lib is framework SOURCE — class bodies, not statement runs (ForkTracker.hook! at file scope is the shape). Prior: 1590 -- recalibrated @ R5b-ivar (v78)
         lang = 'ruby',
         packs = {}, -- EXPLICIT packless (S2 belt+braces, [[cartograph-repo-shapes]]):
                     -- activesupport/lib is framework SOURCE, not an app — it detects
@@ -119,7 +119,7 @@ return {
         root = HOME .. '/git/discourse/app/models',
         repo = 'https://github.com/discourse/discourse',
         rev = '28b003a38d82',
-        expected = { refs = 7479, nodes = 5201 }, -- recalib @ UP-direction profile activation (v99): +4837 refs/+285 nodes = the ruby-rails profile now activates via ancestor-probing (config/application.rb 2 levels up in discourse/) → framework surface MINTS (ActiveRecord/ActiveSupport/ActionView), 0 edges removed, 0 project defs stolen (find yields to 5 project defs). Prior 2642 @ R5b-more (v98, pack-only, profile not activated on the subdir root)
+        expected = { refs = 7499, nodes = 5201 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +20 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. All 20 are `require` at the top of an app/models/*.rb — modest here because a rails model file is a class body, not a statement run (contrast rspec, +2122). Prior: 7479 -- recalib @ UP-direction profile activation (v99): +4837 refs/+285 nodes = the ruby-rails profile now activates via ancestor-probing (config/application.rb 2 levels up in discourse/) → framework surface MINTS (ActiveRecord/ActiveSupport/ActionView), 0 edges removed, 0 project defs stolen (find yields to 5 project defs). Prior 2642 @ R5b-more (v98, pack-only, profile not activated on the subdir root)
         lang = 'ruby',
         packs = { 'rails' }, -- the rails overlay pack (assoc/delegate emitters
                              -- + ActiveRecord vocab); the ruby-rails PROFILE also
@@ -130,7 +130,7 @@ return {
         root = HOME .. '/git/discourse/spec/models',
         repo = 'https://github.com/discourse/discourse',
         rev = '28b003a38d82',
-        expected = { refs = 151, nodes = 689 }, -- recalib @ UP-direction profile activation (v99): +138 refs/+174 nodes = ruby-rails profile UP-activates here too (also under discourse/). Prior 13/515 @ pack-only. DSL verbs still framework-refused; the lift is framework method minting
+        expected = { refs = 2273, nodes = 689 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +2122 refs (nodes unchanged), a 15x lift and the largest in the grid. Δrefs == edges added, 0 removed. WHY IT IS THIS BIG, and it is a real gap not an invention: a ruby BLOCK is not a node — `@adef` (anonymous-fn capture) is defined by spec/javascript.lua and by NO other language spec — so in a spec file, where every call lives inside `RSpec.describe do … it "…" do … end end`, NOTHING had an enclosing function and the whole corpus's evidence was being dropped. It now attributes to the file-level region. That owner is lexically true but COARSE (an `it` body is deferred, not load-time), and the coarseness is the same one accepted for `return function() … end`. Minting ruby blocks as `#cb`-style nodes is the follow-up that would sharpen it. Prior: 151 -- recalib @ UP-direction profile activation (v99): +138 refs/+174 nodes = ruby-rails profile UP-activates here too (also under discourse/). Prior 13/515 @ pack-only. DSL verbs still framework-refused; the lift is framework method minting
         lang = 'ruby',
         packs = { 'rails', 'rspec' }, -- MULTI-PACK composition (the de-risker):
                                       -- rails + the rspec/factory_bot test-DSL
@@ -143,7 +143,7 @@ return {
         root = HOME .. '/git/hugo',
         repo = 'https://github.com/gohugoio/hugo',
         rev = '5a5f4a549522',
-        expected = { refs = 9658, nodes = 11769 }, -- recalib 2026-07-26: +65 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +69 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `h.PathSpec.RelURL()` -> PathSpec.RelURL (go's embedded-field idiom names the type in the receiver path). Prior: 9593
+        expected = { refs = 9754, nodes = 11769 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +96 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. go's share is package-level `var x = f()` initializers (config/allconfig/alldecoders.go::region@13 dominates) + check.sh. Prior: 9658 -- recalib 2026-07-26: +65 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +69 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `h.PathSpec.RelURL()` -> PathSpec.RelURL (go's embedded-field idiom names the type in the receiver path). Prior: 9593
         lang = 'go',
         notes = 'go quick tier (901 files)',
     },
@@ -151,7 +151,7 @@ return {
         root = HOME .. '/git/ripgrep',
         repo = 'https://github.com/burntsushi/ripgrep',
         rev = '48b0c795f4fe',
-        expected = { refs = 2600, nodes = 3360 }, -- recalib 2026-07-26: +7 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +9 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `grep::matcher::LineTerminator::crlf()` -> LineTerminator::crlf. Prior: 2593
+        expected = { refs = 2609, nodes = 3360 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +9 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. Mostly `rgtest!` macro invocations at module scope in tests/ + two hyperlink/aliases.rs file-scope calls. Prior: 2600 -- recalib 2026-07-26: +7 refs (nodes unchanged) = v106 RECEIVER-PATH AGREEMENT — a candidate whose own qualified name is a segment-suffix of the call's wins when unique. +9 calls, EVERY ONE previously an ambiguous refusal; 0 lost, 0 redirected. e.g. `grep::matcher::LineTerminator::crlf()` -> LineTerminator::crlf. Prior: 2593
         lang = 'rust',
         notes = 'rust quick tier (100 files)',
     },
@@ -160,7 +160,7 @@ return {
         budget_mb = 3800, -- ~2x inline peak: the compiler files are enormous
         repo = 'https://github.com/ziglang/zig',
         rev = 'd5181a9c9bac',
-        expected = { refs = 24169, nodes = 9768 }, -- recalib 2026-07-26: +35 refs (nodes unchanged) = v105, the two name indexes are not alternatives: resolve_module_alias/field_chain could not see a module's own BARE export once any file defined `<x>.m`. +47 calls resolved (module_alias 1054 -> 1096, field_chain +5), 0 lost, 0 redirected. Prior: 24134/9768
+        expected = { refs = 24645, nodes = 9768 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +476 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. zig's container scope IS the idiom: `const X = std.ArrayList(T)` / `std.MultiArrayList` / `std.debug.assert` at file scope, all resolving into the zig-std profile. Prior: 24169 -- recalib 2026-07-26: +35 refs (nodes unchanged) = v105, the two name indexes are not alternatives: resolve_module_alias/field_chain could not see a module's own BARE export once any file defined `<x>.m`. +47 calls resolved (module_alias 1054 -> 1096, field_chain +5), 0 lost, 0 redirected. Prior: 24134/9768
         lang = 'zig',
         notes = 'zig + R5 receiver typing + @import module binding + value-recv '
             .. 'dual-key + multi-level chain type + instance-chain field typing '
@@ -180,7 +180,7 @@ return {
         budget_mb = 2000, -- ~2x inline peak
         repo = 'https://github.com/odin-lang/Odin',
         rev = '967c6046a624',
-        expected = { refs = 19526, nodes = 37121 }, -- recalibrated @ odin node-local tearing (v88)
+        expected = { refs = 20770, nodes = 37121 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +1244 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. +6%: like zig, odin puts procedure-valued declarations at package/container scope (bufio/reader.odin::region@337 wiring reader_read/reader_destroy into an io vtable). Prior: 19526 -- recalibrated @ odin node-local tearing (v88)
         lang = 'odin',
         notes = 'odin v1 + R1 package-qualified + node-local tearing (the core '
             .. 'stdlib, 1279 files) — C/procedural family, no methods; a proc in '
@@ -195,7 +195,7 @@ return {
         root = HOME .. '/git/django-oscar/src',
         repo = 'https://github.com/django-oscar/django-oscar',
         rev = 'c0608e0d167e',
-        expected = { refs = 1583, nodes = 3883 }, -- recalib 2026-07-26: v104 js member-target function literals (+12 refs/+11 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: recovered 10, +3 out of a refusal, 0 redirected, 0 LOST — every added node is a .js file (a mixed repo, not a python change). Prior: refs 1571 / nodes 3872 -- +enclosing-chain captured-callable wins @ v51
+        expected = { refs = 1827, nodes = 3883 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +244 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. +15%, the largest share of any non-ruby corpus: django's whole loading idiom is module-level (`get_model`/`get_class`/`is_model_registered` at the top of every models.py/admin.py). Prior: 1583 -- recalib 2026-07-26: v104 js member-target function literals (+12 refs/+11 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: recovered 10, +3 out of a refusal, 0 redirected, 0 LOST — every added node is a .js file (a mixed repo, not a python change). Prior: refs 1571 / nodes 3872 -- +enclosing-chain captured-callable wins @ v51
         lang = 'python',
         notes = 'python quick tier (483 files) — the django adapter\'s home turf',
     },
@@ -203,7 +203,7 @@ return {
         root = HOME .. '/git/ghc/libraries/base',
         repo = 'https://github.com/ghc/ghc',
         rev = '8585f8cb561e',
-        expected = { refs = 1571, nodes = 2805 }, -- +11 @ v48 short-name honesty (ghc test snippets' 1-char fns)
+        expected = { refs = 1581, nodes = 2805 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +10 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. This was the 10-edge case that caught the parallel-vs-inline split (a worker's slice-local resolution is PROVISIONAL — attribution must run only where resolution is final). Prior: 1571 -- +11 @ v48 short-name honesty (ghc test snippets' 1-char fns)
         lang = 'haskell',
         notes = 'haskell quick tier (515 files); ghc = the Track B reference repo',
     },
@@ -220,7 +220,7 @@ return {
         root = HOME .. '/git/mootools-core/Source',
         repo = 'https://github.com/mootools/mootools-core',
         rev = '187a16bae2d7',
-        expected = { refs = 443, nodes = 563 }, -- recalib 2026-07-26: v104 js member-target function literals (+44 refs/+18 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: recovered 4, +16 out of a refusal, 35 redirected — all `ua.match(/…/)`, i.e. String.prototype.match, where the old and new targets are both wrong (~-tier noise, not a regression), 0 LOST. Prior: refs 399 / nodes 545 -- +9/+3 @ v63 B4 prototype methods (Function.prototype.overloadSetter/String.prototype.contains)
+        expected = { refs = 495, nodes = 563 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +52 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. Biggest relative lift of the js corpora (+12%) and it fits the culture: in prototype-extension code the module BODY is the program (Core.js::region@22 calling Function.overloadSetter). Prior: 443 -- recalib 2026-07-26: v104 js member-target function literals (+44 refs/+18 nodes defs): `X.y = function(){}` now mints, so pre-class exports are definitions. MEASURED per-item vs a HEAD baseline: recovered 4, +16 out of a refusal, 35 redirected — all `ua.match(/…/)`, i.e. String.prototype.match, where the old and new targets are both wrong (~-tier noise, not a regression), 0 LOST. Prior: refs 399 / nodes 545 -- +9/+3 @ v63 B4 prototype methods (Function.prototype.overloadSetter/String.prototype.contains)
         lang = 'javascript',
         notes = 'js archaeology tier (29 files, frozen 2017) — prototype-'
             .. 'extension culture, string-keyed dispatch',
@@ -229,7 +229,7 @@ return {
         root = HOME .. '/git/testssl.sh',
         repo = 'https://github.com/testssl/testssl.sh',
         rev = 'deda4c762768',
-        expected = { refs = 822, nodes = 618 }, -- recalibrated @ torn-by-node + literal names
+        expected = { refs = 942, nodes = 618 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +120 refs (nodes unchanged) = a RESOLVED top-level call now yields an edge owned by its statement-run REGION instead of being dropped for want of an enclosing function. Δrefs == edges added exactly, 0 edges removed, 0 nodes minted. testssl.sh is one giant script: region@15023 alone owns 120 calls into its own functions. Prior: 822 -- recalibrated @ torn-by-node + literal names
         lang = 'bash',
         notes = 'bash quick tier (~20 files, one giant sophisticated script)',
     },
@@ -237,7 +237,7 @@ return {
         root = HOME .. '/git/ble.sh',
         repo = 'https://github.com/akinomyoga/ble.sh.git',
         rev = '5d39ebe6db67',
-        expected = { refs = 5260, nodes = 5081 }, -- recalib 2026-07-19: +3 nodes = anon-fn #cb + region in a .js helper (make/color.sample.gogh.js: forEach#cb, region) shipped since v48 but never re-gated; refs stable. VERIFIED independent of P0/P1 (count-neutral). Prior: 5078 @ v48 short-name honesty
+        expected = { refs = 6040, nodes = 5081 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +780 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. bash's plugin-loading idiom is entirely load-time: contrib/airline/*.bash bodies call `ble-import`, cmap files call `ble-bind`. Prior: 5260 -- recalib 2026-07-19: +3 nodes = anon-fn #cb + region in a .js helper (make/color.sample.gogh.js: forEach#cb, region) shipped since v48 but never re-gated; refs stable. VERIFIED independent of P0/P1 (count-neutral). Prior: 5078 @ v48 short-name honesty
         lang = 'bash',
         notes = 'bash SCALE tier (~420 files; a line editor written in bash —'
             .. ' eval-heavy, the aperture design\'s first real workout)',
@@ -298,7 +298,7 @@ return {
         root = HOME .. '/.cache/cartograph-tools/syn/lua-g5-s1',
         synthetic = { lang = 'lua', seed = 1, files = 8 },
         lang = 'lua',
-        expected = { refs = 102, nodes = 203 }, -- recalibrated @ gen v5 (+registry idiom + RNG shift)
+        expected = { refs = 117, nodes = 203 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +15 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. The generator already plants module-level require/registry calls, so this is the synthetic answer-key exercising the new owner (m1.lua::region@147 -> usec1). Prior: 102 -- recalibrated @ gen v5 (+registry idiom + RNG shift)
         notes = 'synthetic lua (gen.lua g2 seed 1): the resolution-ladder'
             .. ' bestiary — fwd-decls, fn-values, higher-order, shadows,'
             .. ' smt classes, requires, goto',
@@ -318,7 +318,7 @@ return {
         root = HOME .. '/.cache/cartograph-tools/syn/js-g5-s1',
         synthetic = { lang = 'js', seed = 1, files = 8 },
         lang = 'javascript',
-        expected = { refs = 154, nodes = 283 }, -- +6 @ v64 V2 ctor-typing (obj=new C → obj.calc→C.calc); +6 @ v62 B3 this.getv
+        expected = { refs = 162, nodes = 283 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +8 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. ESM module bodies calling across files (m6.js::region@1 -> m1.js::fa1). Prior: 154 -- +6 @ v64 V2 ctor-typing (obj=new C → obj.calc→C.calc); +6 @ v62 B3 this.getv
         notes = 'synthetic js (gen.lua g4 seed 1): hoisted fwd calls,'
             .. ' fn-value consts, let/var regimes, arrows, classes, ESM +'
             .. ' one CommonJS module, and min.js — a one-line minified'

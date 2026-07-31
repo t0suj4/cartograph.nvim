@@ -3912,6 +3912,77 @@ end
 -- upgrades tiers (a confirmed ref clears `inferred`; `tinf` is upgrade-only).
 -- extract and relink share this over their own refEdge + edge list (data.edges,
 -- which extract aliases as a local `edges`).
+-- MODULE-LEVEL OWNERSHIP (v107). A call outside any function resolves fine —
+-- target found, call.to set — and its edge used to be dropped because `from` was
+-- nil, so top-level code contributed nothing to the call graph. Von-Neumann
+-- measured 69 region nodes over 2045 source lines and 0 of its 110 call edges;
+-- `createScript`, called from a top-level `return function() … end`, read as 0
+-- callers AND 0 registrants. The bare-NAME path already kept its top-level
+-- evidence as a registration from the module, so the WEAKER evidence survived
+-- while an actual CALL was discarded.
+--
+-- A POST-PASS, and that is the whole point. Resolution happens in several passes,
+-- each ending `if fn then addref(...)`, and patching them one by one produced an
+-- INLINE-VS-PARALLEL SPLIT: the inline passes dropped what they resolved while
+-- relink's single fallback kept it, so a parallel extraction grew edges (and one
+-- tier flip) that the inline one lacked. The matrix `par` column caught it on 12
+-- corpora. Running once over the FINISHED call records makes the rule
+-- pass-independent, so both paths attribute exactly the same set: in parallel a
+-- worker owns what it resolved and relink owns the rest, and addref dedupes by
+-- (from,to) so a union is safe.
+--- The region index, derived from the NODES rather than from extraction-time
+--- bookkeeping. Both drivers have nodes, so both build the SAME index — which is
+--- the point: the first version had extract read its own `regionRanges` while
+--- relink rebuilt from node_index, and the two disagreed on 2 of 12 sites in
+--- haskell alone (inline 10 region-owned edges, parallel 12). Identical call sets
+--- and identical region sets make the rule deterministic per call, so a worker's
+--- share plus relink's share is exactly the inline set.
+--- Ranges are read through `atr`: a TABLE at extract, a packed NUMBER after ingest.
+local function region_index(nodes)
+    local byfile = {}
+    for _, nd in pairs(nodes) do
+        if nd.kind == 'region' and nd.stmtrun and nd.file and nd.range then
+            local l = byfile[nd.file]
+            if not l then l = {}; byfile[nd.file] = l end
+            l[#l + 1] = nd
+        end
+    end
+    return function (file, line)
+        local best
+        for _, nd in ipairs(byfile[file] or {}) do
+            local sl, el = atr.sl(nd.range), atr.el(nd.range)
+            if sl <= line and line <= el
+                and (not best or sl >= atr.sl(best.range)) then best = nd end
+        end
+        return best and best.id
+    end
+end
+
+--- @param count integer  how many call records there are
+--- @param get fun(i:integer, field:string):any  field accessor for record `i`
+--- Takes an ACCESSOR rather than a list because relink reads its calls through a
+--- COLUMN VIEW while extract holds plain records. One rule, two adapters — writing
+--- the rule twice is exactly what produced the split this pass exists to close.
+local function own_module_calls(count, get, region_at, addref)
+    local added = 0
+    for i = 1, count do
+        local to, fn, file = get(i, 'to'), get(i, 'fn'), get(i, 'file')
+        if to and not fn and file then
+            local at = get(i, 'at')
+            local line = (at and at.start and at.start.line) or get(i, 'line')
+            local reg = line and region_at(file, line)
+            -- reg ~= to guards the degenerate self-edge (a region that IS the target)
+            if reg and reg ~= to then
+                addref(reg, to, at
+                    or { start = { line = line, char = 0 },
+                        ['end'] = { line = line, char = 0 } }, get(i, 'inferred'))
+                added = added + 1
+            end
+        end
+    end
+    return added
+end
+
 local function ref_adder(refEdge, edges)
     return function (from, to, at, inferred, tinf)
         local k = from .. '\31' .. to
@@ -4083,6 +4154,7 @@ function M.extract(root, opts)
         end
         return best and best.id
     end
+
 
     local function stamp(file)
         local s = tp.stamp(abs(file))
@@ -4591,6 +4663,15 @@ function M.extract(root, opts)
                     local id = uid(('%s::region@%d'):format(file, run.s.start.line))
                     nodes[#nodes + 1] = { id = id, name = run.name, kind = 'region',
                         file = file, order = run.s.start.line,
+                        -- `stmtrun` = a run of TOP-LEVEL STATEMENTS, as opposed to a
+                        -- container region (a vue/svelte `template`). Only these own
+                        -- module-level code, and the mark is what keeps extract's
+                        -- index and relink's identical: relink rebuilds from
+                        -- node_index, which holds every region, and without the mark
+                        -- it attributed a template's ref to the template — a
+                        -- parallel-vs-sequential divergence the graph-identity gate
+                        -- caught.
+                        stmtrun = true,
                         range = { start = run.s.start, ['end'] = run.e['end'] } }
                     run = nil
                 end
@@ -5729,6 +5810,9 @@ function M.extract(root, opts)
             p.call.inferred = hedged or nil
             local from = fn_at(p.file, p.at.start.line)
             p.call.fn = from
+            -- a module-level call (from == nil) is owned by its REGION, attributed
+            -- in ONE post-pass after every resolution pass has run — see
+            -- own_module_calls below
             if from then addref(from, target.id, p.at, hedged) end
         else
             p.call.fn = fn_at(p.file, p.at.start.line)
@@ -5868,6 +5952,20 @@ function M.extract(root, opts)
     local _pcf = pstart()
     constfold.fold(calls, constDefs)
     padd('constfold', _pcf)
+    -- Module-level calls get their REGION owner, off an index built from the NODES so
+    -- both drivers see the same regions.
+    --
+    -- ONLY WHERE RESOLUTION IS FINAL. A worker CHUNK resolves against its slice, and
+    -- relink later recomputes those verdicts against the whole graph ("a worker's
+    -- slice-local refusal is stale"). An edge, once added, is never retracted — so
+    -- attributing inside a chunk LEAKED two haskell edges whose calls relink then
+    -- correctly un-resolved: inline had 10 region-owned edges, parallel 12, and the
+    -- matrix `par` column failed on 12 corpora. Same guard, and the same reason, as
+    -- the fold below: a chunk's work is provisional.
+    if not (opts and (opts.skip_idpass or opts.defs_only or opts.dataflow_only)) then
+        own_module_calls(#calls, function (i, f) return calls[i][f] end,
+            region_index(data.nodes), addref)
+    end
     -- fat-record migration P3: fold df/flow at PRODUCTION so the fat records never persist
     -- past extraction (ingest's fold becomes an idempotent no-op via data._dfcol/_flowcol;
     -- the folded columns are now serializable — P3a — so the cache round-trips the FOLDED
@@ -6245,6 +6343,9 @@ function M.relink(data, touched)
     -- owner lookup + module-alias foreign-override read it).
     -- local-shadow gate (see extract): built once, shared with resolve_local_callable
     local parent_fn = build_parent_fn(node_index)
+    -- the region index for module-level ownership: the SAME helper extract uses, so
+    -- the two drivers cannot disagree about which regions exist (see region_index)
+    local region_at = region_index(node_index)
     for i = 1, cv.n do
         local cfile = cget(i, 'file')
         local cfn = cget(i, 'fn')
@@ -6351,6 +6452,11 @@ function M.relink(data, touched)
             if s and s.cbarg then gn.cbarg = true end
         end
     end
+    -- module-level ownership, relink's half: the SAME post-pass extract runs, over
+    -- the column view. Both must run — in a parallel extraction a worker owns what
+    -- it resolved and relink owns the rest — and addref dedupes by (from,to), so the
+    -- union is exactly the inline set.
+    own_module_calls(cv.n, cget, region_at, addref)
     return n
 end
 
