@@ -1079,7 +1079,23 @@ M.rules = {
         run = load_order_findings },
     { name = 'listener-audit', severity = 'warn', disposition = 'suggestive',
         run = listener_findings },
-    { name = 'swallowed-type', severity = 'info', disposition = 'calibration', -- CART-0193
+    { name = 'swallowed-type', severity = 'info', disposition = 'calibration',
+        -- DISPOSITION UNDER REVIEW, and the `calibration` label is the weakest part of
+        -- this registry. It was filed as a calibration question (CART-0193, "likely lint
+        -- calibration, not 1965 bugs") and I twice argued otherwise before measuring:
+        -- the `M` in "M type is swallowed" is the PREFIX OF THE MATCHED DEF, not a
+        -- receiver type, so `M` being 79% of the count just means 371 of our files write
+        -- `local M = {}`. What the count actually measures is the PRECISION of
+        -- whole-graph unique-name matching: 7197 of 7456 inferred resolutions (97%)
+        -- cross files, and at least one is verifiably wrong — ansible.lua:238's
+        -- `p:range()` on a TREE-SITTER NODE resolves to callcols.lua's `M.range`.
+        -- A fabricated `to` edge is the phantom-fact class, which
+        -- [[cartograph-concern-layering]] rates WORSE than a phantom absence because
+        -- analyzers act on it.
+        -- WHY IT IS NOT RECLASSIFIED HERE: the right label depends on the WRONG-RATE of
+        -- those 7197, which is unmeasured (module_alias, 1767 of them, is a legitimate
+        -- cross-file stage). CART-0227 carries the sampling plan. Do not re-pin or
+        -- re-label this count until that rate is known.
         run = swallowed_findings },
     {
         name = 'dead-function', severity = 'warn', disposition = 'suggestive',

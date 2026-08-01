@@ -716,8 +716,15 @@ function M.truthy(v) return v ~= nil and v ~= false and v ~= NIL end
 
 -- ── on-demand entry (INC 1: re-parse + rebuild; not folded) ────────────────
 local spec = require('cartograph.providers.treesitter').spec
+-- THE FUNCTION-NODE set fn_node walks up to. A language whose function node is not
+-- here gets NO expression records at all, however complete the rest of the layer is —
+-- which is how ruby came to have 2104 flow records and zero expression ones
+-- (CART-0228): its nodes are `method` / `singleton_method`, and neither was listed.
+-- Verified by parsing: lua function_declaration · python function_definition · php
+-- method_declaration · go function_declaration · ruby method + singleton_method.
 local FN_TYPES = { function_declaration = true, function_definition = true,
-    method_declaration = true, method_definition = true, function_item = true }
+    method_declaration = true, method_definition = true, function_item = true,
+    method = true, singleton_method = true }
 local EXT = {} -- file ext → lang key in spec (only those with a body_field flow)
 for lang, s in pairs(spec) do
     if s.body_field and s.exts then for _, e in ipairs(s.exts) do EXT[e] = lang end end
