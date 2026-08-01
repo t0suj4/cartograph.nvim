@@ -938,7 +938,28 @@ function M.reference_report(store, runtime, opts)
     local prof = require('cartograph.spec.profile').load(runtime)
     if not prof then return {} end
     local refs = require('cartograph.externals').references(store)
-    if refs.total == 0 then return {} end
+    if refs.total == 0 then
+        -- A TYPED EMPTY, not silence (CART-0224 step 2). Returning {} here made the
+        -- whole section vanish, so a user who paid for the expensive opt-in could not
+        -- tell "this corpus reads nothing external" from "we do not model this
+        -- language's reads at all". Measured on a ruby corpus: 2303 functions, 0 with
+        -- an expression record, section absent entirely.
+        if (refs.unmodelled or 0) > 0 and (refs.analysed or 0) == 0 then
+            local ls = {}
+            for l, n in pairs(refs.unmodelled_langs or {}) do
+                ls[#ls + 1] = ('%s (%d fn)'):format(l, n)
+            end
+            table.sort(ls)
+            return { '', '  REFERENCED but not called — NOT COMPUTED for this corpus:',
+                ('    the expression layer does not model %s, so %d function(s) were'):format(
+                    #ls > 0 and table.concat(ls, ', ') or 'this language',
+                    refs.unmodelled),
+                '    never examined. This is not "no external reads" — it is no answer.' }
+        end
+        return { '', '  REFERENCED but not called — none: '
+            .. ('%d function(s) examined and no qualified read of an undefined name found')
+                :format(refs.analysed or 0) }
+    end
     local cap = (opts and opts.cap) or 12
     local groups = {}
     for name, n in pairs(refs.names) do

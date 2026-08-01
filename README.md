@@ -1615,6 +1615,11 @@ Those are the two real 1.1 → 2.0 items: `global` became `storage`, and three
 is evidence in a way an absence is not — it survives both artifacts being
 incomplete the same way.
 
+When the expression layer does not model a corpus's language, the section says
+**NOT COMPUTED** and how many functions were never examined — because a read
+surface that returns nothing looks exactly like a corpus with nothing to read, and
+those are different answers.
+
 It is behind the bang because it re-parses every function (~3.5 ms each — 6 s on a
 1700-function corpus), and the default report *announces* it so its absence is
 never read as emptiness. Reads are **locality-filtered** (parameters, locals and
@@ -1635,8 +1640,12 @@ opacity — from one node name.
 Still outside it: **Java** (`method_invocation` and `argument_list` are 58% of its
 unknowns in one concept, and adding `field_access` alone was tried and reverted
 because it unblocked nothing while the surrounding calls stayed opaque), and
-**Ruby**, which produces no expression records at all — its control-flow node types
-are not in the CFG's set, so the layer never starts. Where the iterated expression
+**Ruby**, which produces no expression records at all — though *not* for want of a
+CFG: measured, 2104 of its 2303 functions do carry flow records, so liveness,
+reaching and the dataflow-based verbs work there. It is the expression layer
+specifically that declines the language, which is why `:CartographUntangle` gives a
+real answer on Ruby while `narrow` and `optimize` say so and stop. Where the
+iterated expression
 of a loop is itself a bare name it is treated as a binding, which can only make an
 external name look local rather than inventing one.
 

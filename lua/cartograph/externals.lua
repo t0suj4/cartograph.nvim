@@ -113,13 +113,17 @@ end
 --- function per node — 233 ms for a 34-file mod, 6.1 s for grocy (1697 fns), 35.6 s
 --- for libs (10387 fns). Hence opt-in, and never part of surface().
 ---
---- LANGUAGE COVERAGE, measured rather than assumed: this finds what the expr layer
---- models as FIELD ACCESS. Lua, php and js yes (grocy: 54 names). JAVA NO — 51 of 60
---- sampled functions produced an IR and 156 rows carried expressions, yet 0 dotted
---- reads, because expr's FIELD table lists dot_index_expression / field_expression /
---- member_expression and Java's node is `field_access`. Adding it is one word, but it
---- changes the expression IR for every analyzer built on it (optimize's LICM/CSE,
---- narrow, untangle) on every Java corpus — its own change, with its own gate run.
+--- LANGUAGE COVERAGE IS A PER-LANGUAGE DECLARATION, and this surface only sees what
+--- the expr layer models as FIELD ACCESS. Measured, and it moved: lua and js always;
+--- php, python and go once their node names were entered (CART-0224 — grocy 54 -> 151
+--- names, python 0 -> 154, go 38 -> 3363). JAVA NO: its `field_access` /
+--- `method_invocation` are still unmapped, and adding them is a project rather than a
+--- word, because CALL decides is_pure / allocates and optimize APPLIES rewrites.
+--- RUBY IS THE CASE TO KNOW ABOUT: it has FLOW (2104 of 2303 functions carry a record)
+--- but NO EXPRESSION IR, so this surface can examine none of it. That is now REPORTED
+--- as unmodelled rather than returned as zero — `analysed` / `unmodelled` /
+--- `unmodelled_langs` below exist so a caller can tell an EMPTY answer from an ABSENT
+--- one, and portability's read section says which it is.
 --- LOOP BINDINGS are locals, and now known to be: the language specs declare their
 --- BINDER NODES and expr.of reports the bound names from the same parse it already
 --- performs. Before that they were in neither df's `def` nor the IR's binder position,
@@ -140,7 +144,20 @@ end
 --- file happened to be visited first (CART-0215).
 function M.references(store)
     local expr = require 'cartograph.expr'
-    local out = { names = {}, where = {}, files = {}, total = 0, withheld = 0 }
+    local tsl = function (f)
+        local ok, ts = pcall(require, 'cartograph.providers.treesitter')
+        return ok and ts.lang_of and ts.lang_of(f) or nil
+    end
+    local out = { names = {}, where = {}, files = {}, total = 0, withheld = 0,
+        -- HOW MANY FUNCTIONS THIS COULD NOT LOOK AT, and in which languages
+        -- (CART-0224 step 2). expr.of returns nil for a language the expression
+        -- layer does not model, and skipping those silently made `total = 0`
+        -- indistinguishable from "this corpus reads nothing external". Measured on a
+        -- ruby corpus: 2303 functions, 2104 WITH flow records, and 0 yielding an
+        -- expression record — so the read surface reported nothing and the portability
+        -- report simply omitted its section. A caller must be able to tell an EMPTY
+        -- answer from an ABSENT one.
+        analysed = 0, unmodelled = 0, unmodelled_langs = {} }
     local fileset = {}
     local data = store.data or {}
     -- names this graph DEFINES: a read rooted at one of them is internal, whatever
@@ -153,6 +170,18 @@ function M.references(store)
         if n.kind == 'function' or n.kind == 'method' then
             local ok, eo = pcall(expr.of, store, n.id)
             local fl = ok and eo and eo.fl
+            if not fl then
+                -- not modelled (or unreadable): COUNT it, with the language, so the
+                -- caller can say WHY it has nothing rather than implying there is
+                -- nothing to say
+                out.unmodelled = out.unmodelled + 1
+                local lang = n.file and tsl(n.file)
+                if lang then
+                    out.unmodelled_langs[lang] = (out.unmodelled_langs[lang] or 0) + 1
+                end
+            else
+                out.analysed = out.analysed + 1
+            end
             if fl then
                 -- LOCAL ROOTS: parameters plus anything assigned in the body. A read
                 -- rooted at one of these is a receiver whose type we do not know, not

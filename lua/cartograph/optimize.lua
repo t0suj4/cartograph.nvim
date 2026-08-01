@@ -535,6 +535,20 @@ function M.report(store, fn_id)
     local res = M.licm(store, fn_id)
     local rows = res.rows
     if #rows == 0 then
+        -- "no fine flow" is the WRONG REASON when the language simply is not modelled
+        -- by the expression layer, and that is the common case rather than the rare one:
+        -- measured on a ruby corpus, 2104 of 2303 functions DO carry a flow record while
+        -- 0 yield an expression record (CART-0224 step 2). Saying "no fine flow" there
+        -- sends a reader to look for a missing CFG that is present. exprlint and narrow
+        -- already name the language; this now does too.
+        local lang = node.file and select(2, pcall(function ()
+            return require('cartograph.providers.treesitter').lang_of(node.file)
+        end)) or nil
+        if not require('cartograph.expr').of(store, fn_id) then
+            return { ('optimize: %s not supported by the expression layer (INC 1 = Lua;'
+                .. ' langs slot in) — %s carries flow but no expression records')
+                :format(lang or 'this language', lang or 'it') }
+        end
         return { ('optimize: %s has no fine flow'):format(node.name or fn_id) }
     end
     local L = {}
