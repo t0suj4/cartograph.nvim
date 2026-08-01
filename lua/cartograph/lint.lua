@@ -831,26 +831,79 @@ local function null_deref_findings(store)
     return out
 end
 
+-- ── DISPOSITION: what a finding CLAIMS, declared per rule (CART-0192/0225) ───
+-- User design ([[greenspun-is-suggestive]]): "The greenspun analyzer is supposed to
+-- be suggestive, not authoritative. User would make it authoritative by supplying it
+-- with a template." That distinction existed only in the user's head; nothing in this
+-- registry recorded it, so every count read alike — and the plan to RATCHET all of
+-- them would have made suggestions authoritative.
+--
+-- WHY A RATCHET NEEDS THIS. A ratchet says "this count may not rise". That is right
+-- for a defect-by-construction and WRONG for a proposal: a suggestive rule finds MORE
+-- when a language's expressions become visible for the first time. Measured — adding
+-- java `field_access` doubled registry-audit 6->12 (expr.lua:80-95). Under a uniform
+-- ratchet, improving grammar coverage would break the fence and the cheapest way to
+-- stay green would be to keep languages OPAQUE. Worst possible incentive for a
+-- polyglot tool.
+--
+--   authoritative  a finding is a DEFECT BY CONSTRUCTION. Ratchetable.
+--   suggestive     a PROPOSAL. Needs a human, or a user-supplied template, to become
+--                  a verdict. Track the trend; never gate.
+--   calibration    the count is dominated by a known calibration question, so pinning
+--                  it would pin the miscalibration. Triage first (CART-0193/0196).
+--   annotation     not a defect at all — it LABELS structure for readers and views.
+--                  Ratcheting it would be meaningless.
+--
+-- THE BAR FOR `authoritative` IS POSITIVE JUSTIFICATION, not absence of doubt — the
+-- same discipline as profile.env_usable. Default to `suggestive`: mis-marking a real
+-- defect rule as suggestive loses a gate we could have had (a miss, fixable by
+-- triage), while mis-marking a proposal as authoritative fails builds for doing the
+-- right thing. Those costs are not symmetric.
+-- tests/lint_spec.lua fails if any rule omits this field, so a new rule cannot ship
+-- without someone deciding.
+M.DISPOSITIONS = { authoritative = true, suggestive = true, calibration = true,
+    annotation = true }
+
 M.rules = {
-    { name = 'resource-leak', severity = 'warn', run = resource_leak_findings },
-    { name = 'member-leak', severity = 'warn', run = member_leak_findings },
-    { name = 'null-deref', severity = 'warn', run = null_deref_findings },
-    { name = 'silent-drop', severity = 'warn', run = silent_drop_findings },
-    { name = 'seam-guard', severity = 'warn', run = seam_findings },
-    { name = 'truncation', severity = 'info', run = truncation_findings },
-    { name = 'require-cycle', severity = 'info', run = cycle_findings },
-    { name = 'sql', severity = 'info', run = sql_findings },
-    { name = 'sink-concat', severity = 'warn',
+    { name = 'resource-leak', severity = 'warn', disposition = 'suggestive',
+        -- recovered all 3 luanti oracles, but it is CONVENTION-specific: precision on
+        -- known positives is not evidence of no false positives off-convention
+        run = resource_leak_findings },
+    { name = 'member-leak', severity = 'warn', disposition = 'suggestive',
+        run = member_leak_findings },
+    { name = 'null-deref', severity = 'warn', disposition = 'suggestive',
+        -- the message says `possible` and the nilflow lattice hedges: a guard we do
+        -- not model reads as unguarded
+        run = null_deref_findings },
+    { name = 'silent-drop', severity = 'warn', disposition = 'authoritative',
+        -- its own comment: "a residual finding of ANY length is a real regression" —
+        -- the resolver resolves-or-refuses these, so a survivor is a resolver bug
+        run = silent_drop_findings },
+    { name = 'seam-guard', severity = 'warn', disposition = 'authoritative',
+        -- the original gated count: a raw wide-index read outside band.lua/store.lua
+        -- is wrong by definition, not by judgement
+        run = seam_findings },
+    { name = 'truncation', severity = 'info', disposition = 'authoritative',
+        -- AST-precise (2+ targets, one and/or rhs whose operand is a call) and the
+        -- semantics are unambiguous: the second target silently becomes nil. Three
+        -- real bugs in one day of our own development
+        run = truncation_findings },
+    { name = 'require-cycle', severity = 'info', disposition = 'suggestive',
+        -- HEDGED BY ITS OWN COMMENT: import edges do not record load-time vs lazy, so
+        -- a cycle is "fragile IF load-time", not a certain bug
+        run = cycle_findings },
+    { name = 'sql', severity = 'info', disposition = 'suggestive', run = sql_findings },
+    { name = 'sink-concat', severity = 'warn', disposition = 'suggestive',
         run = function (store) return require('cartograph.sinkflow').findings(store) end },
-    { name = 'sink-source', severity = 'warn',
+    { name = 'sink-source', severity = 'warn', disposition = 'suggestive',
         run = function (store) return require('cartograph.sinkflow').source_findings(store) end },
-    { name = 'sink-reach', severity = 'warn',
+    { name = 'sink-reach', severity = 'warn', disposition = 'suggestive',
         run = function (store) return require('cartograph.sinkflow').reach_findings(store) end },
     {
         -- the state atlas's lint face: state that is written but never
         -- read is dead weight — or reached dynamically in a way the graph
         -- cannot see, so the hedge is spoken, severity stays info
-        name = 'dead-state', severity = 'info',
+        name = 'dead-state', severity = 'info', disposition = 'suggestive',
         run = function (store)
             local out = {}
             local census = require('cartograph.atlas').census(store)
@@ -871,7 +924,11 @@ M.rules = {
         -- code queries but the database lacks are typos or missing
         -- migrations; tables the database holds but nothing queries are
         -- dead weight. The wiretap shape, at the schema boundary.
-        name = 'db-audit', severity = 'warn',
+        name = 'db-audit', severity = 'warn', disposition = 'suggestive',
+        -- AUTHORITATIVE CANDIDATE: it compares code against a declared schema, so a
+        -- reference to a column that does not exist may be a defect by construction.
+        -- Left suggestive until someone reads it and can justify the promotion.
+
         run = function (store)
             local d = store.data.dblink
             if not d then return {} end
@@ -900,7 +957,9 @@ M.rules = {
         -- naming an unregistered route is a render-time error waiting; a
         -- registered route nothing names is dead surface; a cross-file
         -- name collision resolves silently in Django and loudly here
-        name = 'route-audit', severity = 'warn',
+        name = 'route-audit', severity = 'warn', disposition = 'suggestive',
+        -- AUTHORITATIVE CANDIDATE, same reasoning as db-audit (declared routes).
+
         run = function (store)
             local out = {}
             -- django and symfony feed the same URL-boundary audit; the only
@@ -940,7 +999,7 @@ M.rules = {
         -- SILENT no-op (the handler never runs, no error); a handler nothing
         -- notifies is dead; an include pointing at a missing file breaks at
         -- runtime. The notify no-op is the classic footgun (a typo'd name).
-        name = 'ansible-audit', severity = 'warn',
+        name = 'ansible-audit', severity = 'warn', disposition = 'suggestive',
         run = function (store)
             local a = store.data.ansible
             if not a then return {} end
@@ -969,7 +1028,7 @@ M.rules = {
         -- name appears nowhere else in the role (tasks, handlers, jinja). A
         -- soft signal — a var could still be read via hostvars/lookup — so
         -- INFO, but on a large role it surfaces accumulated cruft.
-        name = 'ansible-vars', severity = 'info',
+        name = 'ansible-vars', severity = 'info', disposition = 'suggestive',
         run = function (store)
             local a = store.data.ansible
             if not a then return {} end
@@ -982,19 +1041,38 @@ M.rules = {
             return out
         end,
     },
-    { name = 'layering', severity = 'info', run = layering_findings },
-    { name = 'clone', severity = 'info', run = clone_findings },
-    { name = 'access-point', severity = 'info', run = access_point_findings },
-    { name = 'registry-audit', severity = 'warn', run = registry_audit_findings },
-    { name = 'pair-audit', severity = 'warn', run = pair_audit_findings },
-    { name = 'schema-mirror', severity = 'info', run = mirror_findings },
-    { name = 'greenspun', severity = 'info', run = greenspun_findings },
-    { name = 'dynamic-dispatch', severity = 'info', run = dynamic_findings },
-    { name = 'load-order', severity = 'warn', run = load_order_findings },
-    { name = 'listener-audit', severity = 'warn', run = listener_findings },
-    { name = 'swallowed-type', severity = 'info', run = swallowed_findings },
+    { name = 'layering', severity = 'info', disposition = 'suggestive',
+        -- a DOMINANT-direction heuristic: a against-the-grain import may be correct
+        run = layering_findings },
+    { name = 'clone', severity = 'info', disposition = 'calibration', -- CART-0196
+        run = clone_findings },
+    { name = 'access-point', severity = 'info', disposition = 'annotation',
+        -- not a defect: it MARKS node.access so views treat fan-in as plumbing
+        run = access_point_findings },
+    { name = 'registry-audit', severity = 'warn', disposition = 'suggestive',
+        run = registry_audit_findings },
+    { name = 'pair-audit', severity = 'warn', disposition = 'suggestive',
+        run = pair_audit_findings },
+    { name = 'schema-mirror', severity = 'info', disposition = 'calibration', -- CART-0196
+        run = mirror_findings },
+    { name = 'greenspun', severity = 'info', disposition = 'suggestive',
+        -- THE NAMED CASE: suggestive by design; a user-supplied TEMPLATE is what would
+        -- make it authoritative ([[greenspun-is-suggestive]])
+        run = greenspun_findings },
+    { name = 'dynamic-dispatch', severity = 'info', disposition = 'suggestive',
+        run = dynamic_findings },
+    { name = 'load-order', severity = 'warn', disposition = 'authoritative',
+        -- the manifest IS the load order (store.toc), so this is read from DATA, not
+        -- inferred: a load-time call into a later-loading file hits nil
+        run = load_order_findings },
+    { name = 'listener-audit', severity = 'warn', disposition = 'suggestive',
+        run = listener_findings },
+    { name = 'swallowed-type', severity = 'info', disposition = 'calibration', -- CART-0193
+        run = swallowed_findings },
     {
-        name = 'dead-function', severity = 'warn',
+        name = 'dead-function', severity = 'warn', disposition = 'suggestive',
+        -- an entry point, an export, or a dynamically dispatched target reads as dead
+
         run = function (store)
             local out = {}
             -- topology through the RESIDENT fold-backed Band (rung c)
@@ -1017,7 +1095,11 @@ M.rules = {
         end,
     },
     {
-        name = 'redundant-require', severity = 'warn',
+        name = 'redundant-require', severity = 'warn', disposition = 'suggestive',
+        -- AUTHORITATIVE CANDIDATE: it fires off store.classify(file)=='deadimport', a
+        -- derived FACT rather than a heuristic. Held back only because 'has no effect'
+        -- depends on the effect analysis being complete for that language.
+
         run = function (store)
             local out = {}
             for _, file in ipairs(store.files) do
@@ -1030,7 +1112,9 @@ M.rules = {
         end,
     },
     {
-        name = 'call-cycle', severity = 'warn',
+        name = 'call-cycle', severity = 'warn', disposition = 'suggestive',
+        -- a cycle is a FACT, but mutual recursion is legal: the defect is a judgement
+
         run = function (store)
             local band = store.topo()
             local ids, adj = {}, {}

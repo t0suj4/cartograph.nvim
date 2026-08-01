@@ -22,4 +22,11 @@ store.ingest(data)
 
 local lines, counts = dogfood.run(store)
 print(table.concat(lines, '\n'))
-os.exit(counts.seam == 0 and 0 or 1)
+-- THE FENCE IS THE AUTHORITATIVE SET, not seam-guard alone (CART-0192). Every other
+-- count is printed and not enforced, deliberately: a suggestive rule finds more when a
+-- language becomes visible, and gating that would reward keeping languages opaque.
+-- NOTE it needs no pinned baseline — the authoritative set is currently EMPTY on self,
+-- so the rule is "stays 0" rather than "no worse than N". That is on purpose: four
+-- separate stale baselines cost real time this session, and a fence with nothing to
+-- calibrate cannot go stale.
+os.exit((counts.authoritative or counts.seam) == 0 and 0 or 1)

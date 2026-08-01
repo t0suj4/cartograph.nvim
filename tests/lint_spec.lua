@@ -237,3 +237,41 @@ test('lint member-leak: a member new`d and never freed flags; delete/drop elsewh
     ok(not msg:match('m_deleted') and not msg:match('m_dropped'), 'delete/drop members excluded')
     vim.fn.delete(root, 'rf')
 end)
+
+
+-- ── DISPOSITION TOTALITY (CART-0192/0225) ───────────────────────────────────
+-- A ratchet makes a count AUTHORITATIVE, so a rule that never declared what its
+-- findings claim would be pinned by accident. The user's design point — greenspun is
+-- suggestive, and a user-supplied TEMPLATE is what makes it authoritative — lived
+-- nowhere in the registry, which is how the plan to pin all ten classes came to look
+-- harmless. This fence is what stops the distinction going unrecorded again.
+test('lint: every rule DECLARES what its findings claim', function ()
+    local lint = require 'cartograph.lint'
+    local missing, bad = {}, {}
+    for _, r in ipairs(lint.rules) do
+        if r.disposition == nil then missing[#missing + 1] = r.name
+        elseif not lint.DISPOSITIONS[r.disposition] then
+            bad[#bad + 1] = r.name .. '=' .. tostring(r.disposition)
+        end
+    end
+    eq({}, missing, 'a new rule must decide: authoritative / suggestive / calibration'
+        .. ' / annotation')
+    eq({}, bad, 'and it must be one of the declared dispositions')
+    ok(#lint.rules >= 25, 'sanity: the registry was actually read (' .. #lint.rules .. ')')
+end)
+
+test('lint: the AUTHORITATIVE set is small and positively justified', function ()
+    -- The bar is positive justification, not absence of doubt. Mis-marking a proposal
+    -- as authoritative fails builds for doing the right thing; mis-marking a defect
+    -- rule as suggestive only loses a gate. Those costs are not symmetric, so this
+    -- pins the set rather than letting it drift upward by habit.
+    local lint = require 'cartograph.lint'
+    local auth = {}
+    for _, r in ipairs(lint.rules) do
+        if r.disposition == 'authoritative' then auth[#auth + 1] = r.name end
+    end
+    table.sort(auth)
+    eq({ 'load-order', 'seam-guard', 'silent-drop', 'truncation' }, auth,
+        'promoting a rule to authoritative is a DECISION — update this list with the'
+        .. ' justification in the registry comment')
+end)

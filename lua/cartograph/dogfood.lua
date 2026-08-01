@@ -103,15 +103,46 @@ function M.report(store)
         end
     end
     local seam_n = by_rule['seam-guard'] or 0
+    -- GROUPED BY DISPOSITION (CART-0192/0225), because the counts do not mean the same
+    -- thing. Only an AUTHORITATIVE rule's finding is a defect by construction, so only
+    -- that group can fail the fence; a suggestive count rising can mean the analyzer
+    -- can simply SEE more (adding java field_access doubled registry-audit, and the
+    -- fix for that noise is a user template, not less grammar coverage). Printing them
+    -- in one undifferentiated list is what made "ratchet all ten" look harmless.
+    local disp = {}
+    for _, r in ipairs(lint.rules) do disp[r.name] = r.disposition or 'suggestive' end
+    local GROUPS = { 'authoritative', 'calibration', 'suggestive', 'annotation' }
+    local LABEL = {
+        authoritative = 'AUTHORITATIVE — a finding is a defect by construction (GATED)',
+        calibration = 'CALIBRATION-BOUND — triage before trusting the count',
+        suggestive = 'SUGGESTIVE — proposals; a template makes one authoritative',
+        annotation = 'ANNOTATION — labels structure, not a defect',
+    }
     line('LINT')
     line(('  seam-guard (Band): %d %s'):format(seam_n, seam_n == 0 and '✓ intact' or '✗ BREACH'))
     for _, s in ipairs(seam_sites) do line('    ' .. s) end
-    local rules = {}
-    for r in pairs(by_rule) do if r ~= 'seam-guard' then rules[#rules + 1] = r end end
-    table.sort(rules, function (a, b) return by_rule[a] > by_rule[b] end)
-    for _, r in ipairs(rules) do line(('  %-18s %d'):format(r, by_rule[r])) end
+    local auth_n = 0
+    for _, g in ipairs(GROUPS) do
+        local rules = {}
+        for r in pairs(by_rule) do
+            if r ~= 'seam-guard' and disp[r] == g then rules[#rules + 1] = r end
+        end
+        table.sort(rules, function (a, b) return by_rule[a] > by_rule[b] end)
+        if g == 'authoritative' or #rules > 0 then
+            line('  ' .. LABEL[g] .. ':')
+            for _, r in ipairs(rules) do line(('    %-18s %d'):format(r, by_rule[r])) end
+            if #rules == 0 then line('    (none)') end
+        end
+        if g == 'authoritative' then
+            for _, r in ipairs(rules) do auth_n = auth_n + by_rule[r] end
+        end
+    end
 
-    return out, { seam = seam_n, served = served, consistent = consistent }
+    -- `authoritative` counts seam-guard TOO: it is the original gated rule and is
+    -- declared authoritative in the registry, so the fence keeps its old meaning
+    -- exactly while gaining the other three.
+    return out, { seam = seam_n, served = served, consistent = consistent,
+        authoritative = auth_n + seam_n }
 end
 
 --- The numeric record (the ratchet's fuel — [[cartograph-capabilities]]

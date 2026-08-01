@@ -1179,7 +1179,28 @@ exhausted and what remains is per-framework.
 
 `:CartographLint` runs graph-aware, whole-program checks and drops the findings
 into the quickfix list. Not a luacheck replacement — it makes the *cross-file*
-checks luacheck can't:
+checks luacheck can't.
+
+**Every rule declares what its findings claim**, because the counts do not mean the
+same thing and a number that gates a build must be distinguishable from one that
+proposes a conversation:
+
+| disposition | what a finding is | gated? |
+|---|---|---|
+| **authoritative** | a defect by construction | **yes** — `seam-guard`, `silent-drop`, `truncation`, `load-order` |
+| **suggestive** | a proposal; needs a human, or a user-supplied template, to become a verdict | no — track the trend |
+| **calibration-bound** | a count dominated by a known calibration question | no — triage before trusting it |
+| **annotation** | not a defect at all; it labels structure for readers and views | no |
+
+The bar for *authoritative* is positive justification, not absence of doubt: mistaking
+a proposal for a defect fails builds for doing the right thing, while mistaking a
+defect rule for a proposal only loses a gate. So the set is small and deliberately
+hard to grow — a spec pins it by name, and another fails if any rule ships without
+deciding. `greenspun` is the named suggestive case: it finds *more* when a language's
+expressions become visible for the first time, so a rising count there is something to
+triage, never a regression.
+
+The rules:
 
 - **dead-function** — a *local* function with no caller anywhere (exported
   functions and metamethods are excluded — public/dynamically-dispatched surface
@@ -2533,8 +2554,13 @@ ledger).
 
 The **dogfood family** turns the tool on itself. `tools/dogfood.lua` is the
 one-screen self-check (resolution by tier, the LSP answering its own graph,
-lint) and the **seam-guard fence** — it exits non-zero if any code reads the
-wide graph indexes raw instead of through the Band. `tools/ratchet.lua` logs
+lint) and the **authoritative-lint fence** — it exits non-zero on any finding from a
+rule whose disposition says a finding *is* a defect: a raw read of the wide graph
+indexes instead of through the Band, a silently-dropped callable, a multi-return
+truncation, a load-order violation. Suggestive and calibration-bound counts are
+printed beside it and never gate, grouped by what they claim. The fence needs no
+pinned baseline because that set is currently empty on our own tree — the rule is
+"stays zero", and a fence with nothing to calibrate cannot go stale. `tools/ratchet.lua` logs
 those numbers per run and prints the delta (`resolved -0.3%` is a regression you
 see immediately). `tools/conflicts.lua <corpus>` shows each cartograph-vs-lua-ls
 disagreement with source context and cartograph's tier, so a conflict is

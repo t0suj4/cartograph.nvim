@@ -81,11 +81,20 @@ local NAME = { identifier = true, name = true }
 -- ADDING `field_access` ALONE WAS TRIED AND REVERTED, deliberately. It did what it
 -- said (opaque 2074 -> 1966, 108 field nodes, 91 dotted reads) but unblocked
 -- nothing — optimize stayed at 0/0, since the surrounding method_invocation nodes
--- remain opaque — and it DOUBLED greenspun's registry-audit findings on the corpus,
--- 6 -> 12, all spurious: ordinary java methods (`assertRectangleResult`,
--- `setBucket`, `getRank`) reported as registries with "100 key(s) dispatched".
--- A partial grammar makes a downstream detector noisier without making any analyzer
--- more capable.
+-- remain opaque. That is the reason it was reverted: no analyzer got more capable.
+--
+-- IT ALSO DOUBLED greenspun's registry-audit findings 6 -> 12, and THAT HALF WAS
+-- MISREAD as a second reason. registry-audit is `disposition = 'suggestive'`
+-- (lint.lua) — a proposal, not a verdict — so finding more when a language's
+-- expressions first become visible is EXPECTED, and java is full of genuine handler
+-- maps and listener registries. Whoever measured it judged the 12 "all spurious"
+-- (`assertRectangleResult`, `setBucket`, `getRank` reported as registries); that may
+-- well be right, but it is a NOISE observation to be resolved by a user-supplied
+-- template ([[greenspun-is-suggestive]]), not evidence of unsoundness. Do NOT cite it
+-- as a canary for a grammar change.
+--
+-- THE ACTUAL CANARY for this work is the purity/allocation semantics below, because
+-- those feed rewrites that get APPLIED.
 --
 -- SO JAVA COVERAGE IS A PROJECT, not a one-word change, and it carries SEMANTIC
 -- risk rather than merely structural: method_invocation decides is_pure,

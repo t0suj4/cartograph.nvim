@@ -16,6 +16,25 @@
 -- Heuristics guard against printf-shaped false positives: an export verb
 -- must carry a callable argument; an import verb must share keys with an
 -- export. Everything reported is countable and jumpable, not vibes.
+--
+-- ── SUGGESTIVE, NOT AUTHORITATIVE (user, 2026-08-01) ─────────────────────────
+-- "The greenspun analyzer is supposed to be suggestive, not authoritative. User
+-- would make it authoritative by supplying it with a template."
+--
+-- So a finding here is a PROPOSAL, and the path to a verdict is the user DECLARING
+-- the idiom rather than this file guessing it better. That mechanism is designed and
+-- unbuilt — see [[cartograph-parametric-templates]] (segments + holes, with
+-- substitute/match/anti-unify) and [[cartograph-surface-abstraction]]
+-- ("USER-DECLARED TEMPLATES supply a substrate's missing idiom"). It is missing by
+-- DESIGN SEQUENCE, not by oversight.
+--
+-- WHAT THAT MEANS FOR A COUNT, because it cost something once: this rule finds MORE
+-- when a language's expressions become visible for the first time. Adding java's
+-- `field_access` doubled registry-audit 6 -> 12 (expr.lua's java note), and that was
+-- read as evidence the grammar work was harmful. It is not — it is a suggestive
+-- analyzer with more to look at. A rising count here is NOISE to be triaged or
+-- resolved by a template; it is never a soundness signal, and it must not gate a
+-- build. That is why lint.lua declares this rule `disposition = 'suggestive'`.
 
 local M = {}
 
