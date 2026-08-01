@@ -125,9 +125,63 @@ end
 
 --- The bindings actually in force for a graph: config (or defaults) plus
 --- discovered registries (config.discover), deduped by export verb.
+--- The ACTIVE PROFILE's registry idioms, as export-only bindings (CART-0226).
+---
+--- User design: "I think the profiles should supply certain templates to turn
+--- suggestions into lints." greenspun GUESSES a registry from call sites; a declared
+--- API export KNOWS the shape from its signatures, so the environment can state its
+--- own idioms and a discovered one that matches is correct platform usage rather than
+--- an ad-hoc reimplementation. tools/factoriodistill derives them (7 on lua-factorio:
+--- add_command, add_interface, on_event, on_init, on_load, on_configuration_changed,
+--- on_nth_tick) and the hand profile republishes them.
+---
+--- EXPORT-ONLY, DELIBERATELY. Most of these are ENGINE-DISPATCHED: nothing in mod code
+--- imports `script.on_event`, the game does. `M.default_bindings` entries all pair an
+--- export with an importer because they describe language BOUNDARIES; a platform idiom
+--- often has no second side, and inventing one would fabricate links.
+--- WHERE THAT LEAVES THE GRAPH: link() skips a binding with no import side (see there),
+--- so this changes no edges today. The registration→handler ref that `script.on_event(
+--- id, handler)` implies is a REAL edge we do not yet have, and claiming it is a
+--- deliberate separate step — it moves the open graph, so it needs a cache VERSION bump
+--- and a gate re-save rather than riding along here.
+local function profile_bindings(data)
+    local name = data and data.profile
+    if not name then return {} end
+    local ok, pm = pcall(require, 'cartograph.spec.profile')
+    local prof = ok and pm.load(name) or nil
+    local out = {}
+    for _, t in ipairs((prof or {}).templates or {}) do
+        out[#out + 1] = { export = { verb = t.verb, name = t.key or 1 },
+            -- provenance: which profile declared it, and what kind of idiom it is, so a
+            -- consumer can say "this IS the platform's registry" rather than just
+            -- suppressing a finding silently
+            template = t, profile = name }
+    end
+    return out
+end
+
+--- Every binding in effect: the built-in language BOUNDARIES, the active profile's own
+--- IDIOMS, the user's additions, and finally whatever discovery proposes.
+---
+--- THE COMBINING RULE IS UNION WITH FIRST-DECLARED-WINS, stated because two functions
+--- deciding this differently is how the shape/profile stamping gap happened
+--- (CART-0218). Order matters only for the discovery guard below: a verb already
+--- declared by ANY tier is not proposed again.
+---
+--- `cfg.bindings` NOW COMPOSES instead of replacing, which is what its own
+--- documentation always said — config.lua:44-48 reads "nil = the defaults … Add your
+--- own", while the code was `cfg.bindings or M.default_bindings`, so declaring one
+--- binding silently dropped chromium WebUI, guile gsubr, lua_register and wordpress
+--- hooks. Same dispose-vs-extend confusion the packs axis got right by declaring it.
+--- Set `cfg.bindings_only = true` for the old replace-everything behaviour.
 function M.effective_bindings(data)
     local cfg = require('cartograph.config')
-    local bindings = vim.list_extend({}, cfg.bindings or M.default_bindings)
+    local bindings = {}
+    if not cfg.bindings_only then
+        vim.list_extend(bindings, M.default_bindings)
+        vim.list_extend(bindings, profile_bindings(data))
+    end
+    vim.list_extend(bindings, cfg.bindings or {})
     if cfg.discover ~= false then
         local have = {}
         for _, b in ipairs(bindings) do
@@ -271,6 +325,13 @@ function M.link(data, bindings)
     end
     for _, b in ipairs(bindings) do
         coop.tick()
+        -- A BINDING WITH NO IMPORT SIDE IS A DECLARATION, NOT A LINK (CART-0226): a
+        -- profile's registry idiom is usually engine-dispatched, so there is no
+        -- importer in the corpus to link to. Skipping it here is also what stops
+        -- `b.import.verb` below from indexing nil — greenspun.audit already guards the
+        -- same way (`if b.import and …`), so the two agree about what a one-sided
+        -- binding means.
+        if b.import and (b.import.verb or b.import.any_call) then
         local exports = {}
         for ci, c in callrec.each(data) do
             if ci % 8192 == 0 then coop.tick() end
@@ -313,6 +374,7 @@ function M.link(data, bindings)
                     stats.links = stats.links + 1
                 end
             end
+        end
         end
     end
     return stats

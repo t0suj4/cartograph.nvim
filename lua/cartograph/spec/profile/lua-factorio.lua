@@ -164,7 +164,7 @@ end
 -- → the profile stays disposition-only (graceful, gate-neutral like before).
 local api = require('cartograph.spec.profile').load('lua-factorio-api')
 local mint, mint_path, sigs, sig_kind, api_version
-local api_g2c, api_members, api_complete
+local api_g2c, api_members, api_complete, api_templates
 if api and api.global2class and api.members then
     local g2c, members, free_fns = api.global2class, api.members, api.free or {}
     mint, sig_kind, api_version = true, 'factorio', api.version
@@ -173,6 +173,10 @@ if api and api.global2class and api.members then
     -- minting closure. Without this the portability report could not tell "the API
     -- lacks this name" from "the artifact never held that kind of name".
     api_g2c, api_members, api_complete = g2c, members, api.complete
+    -- the environment's REGISTRY IDIOMS, derived from the declared signatures
+    -- (CART-0226). Republished like api_members, because the artifact is an
+    -- INGREDIENT and this module is what the consumers read.
+    api_templates = api.templates
     sigs = {} -- one hover table: method sigs (Class::method) + free-fn sigs (name)
     for k, v in pairs(api.sigs or {}) do sigs[k] = v end
     for k, v in pairs(api.free_sigs or {}) do sigs[k] = v end
@@ -215,4 +219,8 @@ return {
     -- `Class::member` set (methods AND attributes since 2026-07-26), and which
     -- classes are FULLY enumerated. A miss inside a complete class is evidence.
     global2class = api_g2c, api_members = api_members, api_complete = api_complete,
+    -- REGISTRY TEMPLATES: what a registry idiom LOOKS LIKE in this environment, so a
+    -- suggestion that matches one is correct platform usage and an ad-hoc
+    -- reimplementation of one is a real finding ([[greenspun-is-suggestive]]).
+    templates = api_templates,
 }

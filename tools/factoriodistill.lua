@@ -132,6 +132,100 @@ for _, g in ipairs(api.global_objects) do
         complete[g.type] = true
     end
 end
+-- ── REGISTRY TEMPLATES: the environment's own idioms, DERIVED (CART-0226) ────
+-- greenspun guesses a registry from call sites (a verb called many times with a
+-- string key and a callable). A declared export already KNOWS the shape from types,
+-- so the same predicate over signatures yields the environment's idioms
+-- authoritatively — and a template turns a suggestion into a lint
+-- ([[greenspun-is-suggestive]]).
+--
+-- FOUR KINDS, measured on this export rather than assumed. Only the first is a shape
+-- greenspun could ever have suggested; the rest a profile can supply and a call-site
+-- heuristic cannot:
+--   string-key  a STRING param + a CALLABLE param      commands.add_command
+--   dict        one `{[string]: function()}` param      remote.add_interface
+--   enum-key    a NAMED-CONCEPT key + a callable        script.on_event (LuaEventType)
+--   hook        a callable and NO key at all            script.on_init / on_load
+--
+-- `order` IS THE CALL POSITION, NOT THE ARRAY INDEX, and this is not a nicety: for
+-- add_command the array is [function, help, name] while the orders are 2, 1, 0 — the
+-- real call is add_command(name, help, fn). Using the array index would have put the
+-- key at arg 3 and the binding would have matched nothing, silently. xlang's `name`
+-- field is 1-based, so it is order + 1.
+local function looks_str(t)
+    if t == 'string' then return true end
+    if type(t) == 'table' then
+        if t.complex_type == 'union' then
+            for _, o in ipairs(t.options or {}) do if looks_str(o) then return true end end
+        elseif t.complex_type == 'literal' then return type(t.value) == 'string'
+        elseif t.complex_type == 'type' then return looks_str(t.value) end
+    end
+    return false
+end
+-- SYMMETRIC with looks_str: see through unions. `handler: function() | nil` is how an
+-- optional callback is declared, and a non-union-aware test misses every one — which
+-- is exactly what the first measurement did, reporting 0 where there were 5.
+local function looks_fn(t)
+    if type(t) ~= 'table' then return false end
+    if t.complex_type == 'function' then return true end
+    if t.complex_type == 'union' then
+        for _, o in ipairs(t.options or {}) do if looks_fn(o) then return true end end
+    elseif t.complex_type == 'type' then return looks_fn(t.value) end
+    return false
+end
+local function str_fn_dict(t)
+    if type(t) ~= 'table' then return false end
+    if t.complex_type ~= 'dictionary' and t.complex_type ~= 'LuaCustomTable' then return false end
+    return looks_str(t.key) and looks_fn(t.value)
+end
+local function concept_key(t)
+    if type(t) == 'string' and t:match('^Lua') then return t end
+    if type(t) == 'table' then
+        if t.complex_type == 'union' then
+            for _, o in ipairs(t.options or {}) do
+                local n = concept_key(o); if n then return n end
+            end
+        elseif t.complex_type == 'array' or t.complex_type == 'type' then
+            return concept_key(t.value)
+        end
+    end
+    return nil
+end
+
+local templates, n_tpl = {}, 0
+for _, g in ipairs(api.global_objects) do
+    local c = class_by_name[g.type]
+    for _, m in ipairs((c or {}).methods or {}) do
+        local key_arg, fn_arg, dict_arg, key_type
+        for _, p in ipairs(m.parameters or {}) do
+            local pos = (p.order or 0) + 1
+            if str_fn_dict(p.type) then dict_arg = pos
+            elseif looks_fn(p.type) then fn_arg = fn_arg or pos
+            elseif looks_str(p.type) then key_arg = key_arg or pos
+            elseif not key_type then
+                local ck = concept_key(p.type)
+                if ck then key_arg, key_type = key_arg or pos, ck end
+            end
+        end
+        local kind
+        if dict_arg then kind = 'dict'
+        elseif fn_arg and key_arg and key_type then kind = 'enum-key'
+        elseif fn_arg and key_arg then kind = 'string-key'
+        elseif fn_arg then kind = 'hook' end
+        if kind then
+            n_tpl = n_tpl + 1
+            templates[#templates + 1] = {
+                verb = g.name .. '.' .. m.name,       -- how mod code writes it
+                member = g.type .. '::' .. m.name,    -- owner-precise identity
+                via = g.name, kind = kind,
+                key = key_arg or dict_arg, fn = fn_arg or dict_arg,
+                key_type = key_type,
+            }
+        end
+    end
+end
+table.sort(templates, function (x, y) return x.verb < y.verb end)
+
 local free, free_sigs, n_free = {}, {}, 0
 for _, fn in ipairs(api.global_functions or {}) do
     free[fn.name] = true
@@ -154,6 +248,11 @@ local profile = {
     -- If these ever need renaming, move lua-factorio-11.lua in the same commit.
     global2class = global2class, members = members, sigs = sigs,
     complete = complete, -- classes whose member surface is fully enumerated
+    -- the environment's REGISTRY IDIOMS, derived from the declared signatures. The
+    -- hand profile republishes these; xlang composes them with its global defaults so
+    -- a discovered registry that MATCHES one is correct platform usage rather than a
+    -- finding, and an ad-hoc one that DUPLICATES one is a real finding.
+    templates = templates,
     free = free, free_sigs = free_sigs,
 }
 
@@ -173,6 +272,12 @@ for _, g in ipairs(api.global_objects) do
     io.write(('    %-12s -> %-22s %d methods + %d attributes%s\n'):format(g.name,
         g.type, c and #(c.methods or {}) or 0, c and #(c.attributes or {}) or 0,
         complete[g.type] and ' [complete]' or ''))
+end
+io.write(('  registry TEMPLATES derived: %d\n'):format(n_tpl))
+for _, t in ipairs(templates) do
+    io.write(('    %-34s %-11s key=%s fn=%s%s\n'):format(t.verb, t.kind,
+        tostring(t.key), tostring(t.fn),
+        t.key_type and (' <' .. t.key_type .. '>') or ''))
 end
 io.write('  sample: LuaGameScript::print = ' .. (sigs['LuaGameScript::print']
     and sigs['LuaGameScript::print'].sig or '?') .. '\n')

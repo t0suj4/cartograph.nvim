@@ -1200,6 +1200,12 @@ deciding. `greenspun` is the named suggestive case: it finds *more* when a langu
 expressions become visible for the first time, so a rising count there is something to
 triage, never a regression.
 
+**A template is how a suggestion becomes a verdict**, and the environment is where one
+is known: a profile declares its own registry idioms, derived from the declared API
+signatures, so a discovered registry that matches one is correct platform usage while a
+definition that duplicates one is `idiom-shadow` above. Those declarations compose with
+the built-in cross-language boundaries rather than replacing them.
+
 The rules:
 
 - **dead-function** — a *local* function with no caller anywhere (exported
@@ -1266,6 +1272,16 @@ The rules:
 
 - **dead-state** — a module var written (from functions) but never read: dead
   weight, or dynamic access the graph can't see — the hedge is in the message.
+- **idiom-shadow** — a definition that reimplements one of the *environment's own*
+  registry idioms. The profile declares them, derived from the declared API
+  signatures rather than guessed: `commands.add_command` is a string-keyed registry,
+  `remote.add_interface` takes a whole `{[string]: function()}` one, `script.on_event`
+  is keyed by an enum and `script.on_init` by nothing at all. A project definition
+  carrying the same verb is Greenspun's tenth rule stated against a *known* idiom — on
+  one real mod, a library builds its own `script` table with its own
+  `on_event`/`on_nth_tick`/`on_init` and hands the handler tables out itself. An
+  **annotation**, not a defect: providing your own event layer is an abstraction, and
+  what a reader needs is the fact that this name is not the platform's.
 - **seam-guard** — raw reads of a *folded representation*. Declare your seams
   (`config.seams = { { name, patterns, owners } }`) and any source line
   matching a pattern outside the owner files is a violation: the

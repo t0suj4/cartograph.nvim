@@ -103,6 +103,9 @@ return {
     types = types, free = copy(base.free), namespaces = namespaces, nsset = nsset,
     vocab = vocab,
     stages = stages, stage_owners = stage_owners,
+    -- 1.1's own idioms, from ITS api artifact — the registry surface is version-keyed
+    -- like everything else here
+    templates = api and api.templates or nil,
     mint = api ~= nil, mint_path = mint_path, sigs = sigs,
     sig_kind = api and 'factorio' or nil,
     global2class = api_g2c, api_members = api_members, api_complete = api_complete,

@@ -1051,6 +1051,18 @@ M.rules = {
         run = access_point_findings },
     { name = 'registry-audit', severity = 'warn', disposition = 'suggestive',
         run = registry_audit_findings },
+    -- the environment's OWN idioms, reimplemented in the project (CART-0226). An
+    -- ANNOTATION, not a defect: a library providing its own event layer is a deliberate
+    -- abstraction. What it states is the fact a reader needs — this name is not the
+    -- platform's. Requires the active profile to declare `templates`, so it is silent
+    -- for every environment that does not.
+    { name = 'idiom-shadow', severity = 'info', disposition = 'annotation',
+        run = function (store)
+            local prof = store.data and store.data.profile
+                and require('cartograph.spec.profile').load(store.data.profile)
+            return require('cartograph.greenspun').idiom_shadows(store.data,
+                prof and prof.templates or nil)
+        end },
     { name = 'pair-audit', severity = 'warn', disposition = 'suggestive',
         run = pair_audit_findings },
     { name = 'schema-mirror', severity = 'info', disposition = 'calibration', -- CART-0196

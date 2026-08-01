@@ -82,3 +82,140 @@ test('lua-factorio profile: hover shows the runtime-api signature of a minted no
     ok(val:find('· factorio ', 1, true), 'provenance labels the sig source as `factorio`, not RBS')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── PROFILE-SUPPLIED REGISTRY TEMPLATES (CART-0226) ─────────────────────────
+-- User design: "I think the profiles should supply certain templates to turn
+-- suggestions into lints." greenspun GUESSES a registry from call sites; the declared
+-- API export KNOWS the shape from its signatures, so the environment states its own
+-- idioms and a project definition carrying the same verb is an ad-hoc reimplementation
+-- of a facility the platform already provides.
+
+test('factorio templates: derived from the DECLARED signatures, with call positions',
+    function ()
+    local prof = require('cartograph.spec.profile').load('lua-factorio')
+    if not (prof and prof.templates) then skip 'no lua-factorio templates' end
+    local by = {}
+    for _, t in ipairs(prof.templates) do by[t.verb] = t end
+
+    -- a STRING key + a CALLABLE: greenspun's own export heuristic, over declared types
+    local add = by['commands.add_command']
+    ok(add, 'commands.add_command is an idiom')
+    eq('string-key', add.kind)
+    -- `order` IS THE CALL POSITION, NOT THE ARRAY INDEX: the JSON lists
+    -- [function, help, name] with orders 2,1,0, so the real call is
+    -- add_command(name, help, fn). Using the array index would have put the key at
+    -- arg 3 and every binding built from it would have matched nothing, silently.
+    eq(1, add.key, 'the key is the FIRST argument')
+    eq(3, add.fn, 'and the callable the third')
+
+    -- a whole registry in ONE argument
+    local iface = by['remote.add_interface']
+    ok(iface, 'remote.add_interface is an idiom')
+    eq('dict', iface.kind, '{[string]: function()} is a registry by itself')
+    eq(1, iface.key)
+
+    -- ENUM-KEYED, which greenspun could never have suggested: it looks for STRING keys
+    local ev = by['script.on_event']
+    ok(ev, 'script.on_event is an idiom')
+    eq('enum-key', ev.kind, 'keyed by a declared concept (LuaEventType), not a string')
+    eq(1, ev.key); eq(2, ev.fn)
+
+    -- KEYLESS HOOKS: one handler slot, no key at all
+    ok(by['script.on_init'], 'on_init is an idiom')
+    eq('hook', by['script.on_init'].kind)
+    eq(nil, by['script.on_init'].key, 'a hook has no key')
+end)
+
+test('factorio templates: idiom-shadow names what a project reimplements', function ()
+    local gs = require 'cartograph.greenspun'
+    local R = { start = { line = 45, char = 0 }, ['end'] = { line = 50, char = 0 } }
+    local templates = {
+        { verb = 'script.on_event', kind = 'enum-key', key = 1, fn = 2 },
+        { verb = 'commands.add_command', kind = 'string-key', key = 1, fn = 3 },
+    }
+    local data = { nodes = {
+        { id = 'a', name = 'script.on_event', kind = 'function', file = 'k.lua', range = R },
+        { id = 'b', name = 'my_own_thing', kind = 'function', file = 'k.lua', range = R },
+    } }
+    local out = gs.idiom_shadows(data, templates)
+    eq(1, #out, 'only the definition that collides with an idiom')
+    eq('k.lua', out[1].file)
+    eq(46, out[1].line, '1-based, via the range accessor (the range may be FOLDED)')
+    ok(out[1].message:find('script%.on_event'), 'names the idiom')
+    ok(out[1].message:find('enum%-key'), 'and which KIND of idiom it is')
+
+    -- SILENT for an environment that declares none — every profile but factorio today
+    eq(0, #gs.idiom_shadows(data, nil), 'no templates, no findings')
+    eq(0, #gs.idiom_shadows(data, {}), 'and an empty list is not an excuse to guess')
+end)
+
+test('xlang: profile templates COMPOSE with the built-in bindings', function ()
+    local xl = require 'cartograph.xlang'
+    local cfg = require 'cartograph.config'
+    local saved, saved_only = cfg.bindings, cfg.bindings_only
+    cfg.bindings, cfg.bindings_only = nil, nil
+
+    -- no profile: just the language-boundary defaults
+    local base = xl.effective_bindings({ nodes = {}, calls = {}, edges = {} })
+    local nbase = #base
+    ok(nbase >= 3, 'the built-in boundaries are there (' .. nbase .. ')')
+
+    -- with a profile, its idioms are ADDED, not substituted
+    local withp = xl.effective_bindings({ nodes = {}, calls = {}, edges = {},
+        profile = 'lua-factorio' })
+    ok(#withp > nbase, 'the profile contributes idioms on top (' .. #withp .. ')')
+    local tmpl, chromium = 0, false
+    for _, b in ipairs(withp) do
+        if b.template then tmpl = tmpl + 1 end
+        if b.export.verb == 'RegisterMessageCallback' then chromium = true end
+    end
+    ok(tmpl >= 5, 'the idioms are marked with their template (' .. tmpl .. ')')
+    ok(chromium, 'and the built-in boundaries SURVIVE — they are not replaced')
+
+    -- cfg.bindings ADDS, which is what config.lua always documented ("Add your own");
+    -- the code used to do `cfg.bindings or M.default_bindings`, so declaring one
+    -- binding silently dropped chromium, guile, lua_register and wordpress
+    cfg.bindings = { { export = { verb = 'MyRegister', name = 1 },
+        import = { any_call = true } } }
+    local withuser = xl.effective_bindings({ nodes = {}, calls = {}, edges = {} })
+    local mine, keptdefault = false, false
+    for _, b in ipairs(withuser) do
+        if b.export.verb == 'MyRegister' then mine = true end
+        if b.export.verb == 'RegisterMessageCallback' then keptdefault = true end
+    end
+    ok(mine, 'the user binding is in effect')
+    ok(keptdefault, 'and it did not silently replace the built-ins')
+
+    -- the old replace-everything behaviour is still reachable, explicitly
+    cfg.bindings_only = true
+    local only = xl.effective_bindings({ nodes = {}, calls = {}, edges = {} })
+    local hasdefault = false
+    for _, b in ipairs(only) do
+        if b.export.verb == 'RegisterMessageCallback' then hasdefault = true end
+    end
+    ok(not hasdefault, 'bindings_only DISPOSES, and it has to be asked for')
+    cfg.bindings, cfg.bindings_only = saved, saved_only
+end)
+
+test('xlang: a binding with NO import side is a DECLARATION, not a link', function ()
+    -- A platform idiom is usually ENGINE-dispatched: nothing in mod code imports
+    -- script.on_event, the game does. link() must skip such a binding rather than
+    -- index a nil import (it would crash) or invent an edge.
+    local xl = require 'cartograph.xlang'
+    local R = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }
+    local data = {
+        root = '/x',
+        nodes = {
+            { id = 'm.lua', name = 'm.lua', kind = 'module', file = 'm.lua', range = R, order = 0 },
+            { id = 'm.lua::h', name = 'h', kind = 'function', file = 'm.lua', range = R, order = 0 },
+        },
+        edges = {},
+        calls = { { fn = 'm.lua', callee = 'script.on_event', full = 'script.on_event',
+            file = 'm.lua', line = 0, at = R, argv = { 'defines.events.on_tick', 'h' } } },
+    }
+    local before = #data.edges
+    local stats = xl.link(data, { { export = { verb = 'script.on_event', name = 1 },
+        template = { verb = 'script.on_event', kind = 'enum-key' } } })
+    ok(stats ~= nil, 'link survives an import-less binding instead of crashing')
+    eq(before, #data.edges, 'and adds no edge: a declaration is not a link')
+end)

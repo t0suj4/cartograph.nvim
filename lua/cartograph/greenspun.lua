@@ -44,6 +44,51 @@ local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
 local callcols = require 'cartograph.callcols'
 
+--- Project definitions that REIMPLEMENT one of the environment's own registry
+--- idioms (CART-0226). `templates` comes from the active profile — derived from the
+--- declared API signatures, so the idiom is KNOWN rather than guessed.
+---
+--- THIS IS THE RULE'S NAMESAKE, finally statable. Everything else in this file infers
+--- "that looks like an ad-hoc registry" from call sites; with the platform's own idioms
+--- declared, a project definition carrying the SAME verb name is an ad-hoc
+--- implementation of a facility the environment already provides, and we can say which
+--- facility.
+---
+--- MEASURED on Von-Neumann: k-lib.lua builds `local script = {}` and gives it
+--- `on_event`, `on_nth_tick` and `on_init` that stash handlers in its own tables, with
+--- `register_object` handing the tables out — a hand-rolled event system beside the
+--- platform's. It is also why the stage axis skips 33 `script.*` call sites there: they
+--- resolve to these definitions, not to the environment.
+---
+--- DISPOSITION IS `annotation`, NOT A DEFECT, and the reason is in that same example: a
+--- library providing its own event layer is a deliberate abstraction, not a bug. What a
+--- reader needs is the FACT — `script` here is not the platform's `script`. Promoting
+--- this to a defect would need the DELEGATE-vs-REPLACE distinction (does the shadow
+--- call through to the real idiom, or supplant it?), which needs the shadow's body
+--- analysed and is deliberately not attempted here.
+function M.idiom_shadows(data, templates)
+    local by_verb = {}
+    for _, t in ipairs(templates or {}) do by_verb[t.verb] = t end
+    if next(by_verb) == nil then return {} end
+    local out = {}
+    for _, n in ipairs(data.nodes or {}) do
+        if (n.kind == 'function' or n.kind == 'method') and n.name then
+            local t = by_verb[n.name]
+            if t then
+                -- through atr, never n.range raw: the range is FOLDED to an index in
+                -- the store (a number), so reading .start.line direct crashes on any
+                -- ingested graph — the same class the seam-guard exists for
+                out[#out + 1] = { file = n.file,
+                    line = (n.range and atr.sl(n.range) or 0) + 1,
+                    message = ("'%s' reimplements this environment's own %s idiom"
+                        .. " — the platform provides it, so a reader must not assume"
+                        .. " this name means the platform's"):format(n.name, t.kind) }
+            end
+        end
+    end
+    return out
+end
+
 local EVAL_VERBS = {
     eval = true, exec = true, load = true, loadstring = true, dofile = true,
     create_function = true, Function = true, dlsym = true,
