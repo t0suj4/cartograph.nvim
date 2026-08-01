@@ -20,7 +20,31 @@ bench.bootstrap()
 local dfp = dofile(here .. '/dfparity.lua')
 
 local name = arg and arg[1]
-if not name then print('usage: dfgate <corpus> [--show [<class>]]'); os.exit(2) end
+if not name then print('usage: dfgate <corpus> [--show [<class>]] [--force]'); os.exit(2) end
+
+-- A LIVING CORPUS CANNOT HOLD THIS CENSUS. The gate fails on any class-count delta, and
+-- a corpus that changes under the pin moves it every cut — `self`'s pin was recalibrated
+-- ~30 times before it was retired (see dfparity.EXPECTED), so a delta there never meant
+-- a regression. CART-0024 diagnosed it and the tool kept running it anyway.
+-- DERIVED, NOT HARDCODED: tools/corpora.lua already marks the difference — a PINNED
+-- corpus declares `rev`, a living one does not — so this covers `bnw` too, and any living
+-- corpus added later, with no edit here. Same guard as tools/f2gate.lua.
+-- `--force` still runs it: the census is informative even when it is not a verdict, which
+-- is how the granularity residual documented in dfparity's header was identified.
+local forced = false
+for i = 1, #(arg or {}) do if arg[i] == '--force' then forced = true end end
+if not forced then
+    local okc, c = pcall(bench.corpus, name)
+    if okc and type(c) == 'table' and not c.rev then
+        print(('dfgate: SKIPPED %s — a LIVING corpus (no pinned rev) cannot hold a'
+            .. ' pinned census.'):format(name))
+        print('  It re-analyses its own new source every cut, so a census delta is growth,'
+            .. ' not drift.')
+        print('  Run a pinned corpus for the verdict, or --force for the numbers'
+            .. ' (tools/guards.lua prints self\'s census as context).')
+        os.exit(0)
+    end
+end
 -- --show [<class>]: the fix-side EXPLORER — dump the divergence instances of a
 -- class with source (Tool 1), instead of gating. No class → list the classes.
 local show = (arg[2] == '--show') and (arg[3] or true) or nil
@@ -69,6 +93,16 @@ end
 
 local expected = dfp.EXPECTED[name]
 if expected == nil then
+    -- A LIVING corpus reaching here was FORCED, so do not invite a pin: one was removed
+    -- from `self` on purpose after ~30 recalibrations. The census is context; the CFG
+    -- invariant sweep above is the part that can still fail, and it did its job either way.
+    local okc, c = pcall(bench.corpus, name)
+    if okc and type(c) == 'table' and not c.rev then
+        print('LIVING CORPUS — census printed as CONTEXT, not a verdict. Do NOT add'
+            .. ' EXPECTED[' .. name .. ']: it would move on every cut.')
+        print('  (flow-invariant errors above ARE still a real failure signal.)')
+        os.exit(failed and 1 or 0)
+    end
     print('NOT CALIBRATED: add EXPECTED[' .. name .. '] to tools/dfparity.lua after reviewing the census above')
     os.exit(failed and 1 or 2)
 end

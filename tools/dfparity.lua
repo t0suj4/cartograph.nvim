@@ -3,10 +3,47 @@
 -- SELF corpus inline on its already-extracted data). Pure: operates on an
 -- already-extracted `data` table, no extraction or exit of its own.
 --
--- The oracle: coarse(flow) must reproduce df's per-statement def/use (the
--- df-strangler parity contract), MODULO known flow-MORE-correct classes, and
--- flow's CFG (successors/liveness/reaching) must run clean over every function.
--- The structure gate (tools/gate.lua) can't see this — its snapshot DROPS df.
+-- ── THE ORACLE IS A REAL TWO-IMPLEMENTATION CHECK, AND HERE IS WHY IT STILL IS ──
+-- Read df.lua alone and this looks circular: "since df-strangler step 6 df IS
+-- flow.coarse, derived at extract with no separate build". Comparing coarse(flow)
+-- against a df that IS coarse(flow) would prove nothing.
+-- IT IS NOT CIRCULAR, and the reason lives in the CALLERS, not here: every caller
+-- extracts with `legacy_df = true` — tools/dfgate.lua:66, tools/matrix.lua:216,
+-- tools/guards.lua:39 — which builds the INDEPENDENT `dfreg` df alongside flow. So
+-- `df.get(n)` under those extracts is the independent builder's answer and
+-- `flow.coarse(flow.record(n))` is the derived one, and the two really are separate
+-- implementations of the same contract.
+-- STATED HERE BECAUSE check() CANNOT SHOW IT: this module just reads df.get(n), so
+-- which df that is depends entirely on how the caller extracted. Anyone reading only
+-- check() plus df.lua concludes the gate is vacuous — I did, and had to be corrected
+-- by matrix.lua's own comment ("comparing production df to flow.coarse would be
+-- circular. legacy_df builds the INDEPENDENT dfreg"). A NEW CALLER THAT FORGETS
+-- `legacy_df` SILENTLY TURNS THIS GATE VACUOUS: it would compare coarse(flow) with
+-- itself, report near-parity, and pass forever.
+--
+-- Three things it guards, in descending order of what they would catch:
+--   1. THE PARITY CONTRACT — coarse(flow) reproduces the independent dfreg's
+--      per-statement def/use, MODULO the labelled classes below.
+--   2. THE CFG INVARIANT SWEEP — `flow-invariant-errors` counts functions where
+--      successors / liveness / reaching_cfg THROW, over every function in a corpus.
+--      A whole-corpus crash sweep of the CFG algorithms that no other gate performs,
+--      and it gates even where the census is uncalibrated (matrix.lua:223). It was a
+--      side number in the summary line; it deserves naming.
+--   3. THE GRANULARITY RESIDUAL, pinned per corpus and EXPLAINED below rather than
+--      merely tolerated.
+--
+-- ── WHY A RESIDUAL SURVIVES, and it is granularity rather than disagreement ──
+-- The two are INDEXED differently. dfreg's row is per-OUTER-FUNCTION and absorbs names
+-- from NESTED closures; flow.record(n) is per-NODE, and a nested closure is its own
+-- node with its own flow. Verified on
+-- jquery (df-over-collects=12): at event.js:750
+--     jQuery.each( { focus: "focusin", … }, function( type, delegateType ) {
+--         function focusMappedHandler( nativeEvent ) { … }
+-- df's def set for the outer row carries `event, handle` and flow's does not, because
+-- those belong to the inner function. Same shape at ajax.js:91/294. So the residual is
+-- a permanent GRANULARITY difference, not a leak and not drift — which is exactly why
+-- the gate pins exact counts rather than a budget: a real one-sided regression has the
+-- same set-shape and only the COUNT distinguishes it.
 --
 -- Every divergence class is LABELLED and the full per-corpus census is PINNED
 -- (M.EXPECTED); the gate fails on ANY class-count delta. Exact counts, not a
@@ -44,33 +81,23 @@ local M = {}
 -- a start position, + the .ts-under-JS boundary), and `df-over-collects` (the
 -- REAL closure-leak divergences) rose as leaks got attributed to the right node.
 -- Net: cleaner, truer censuses. (self churns with cartograph's own code.)
+-- PINNED CENSUS, PER CORPUS. Only a corpus with a pinned `rev` can hold one; a LIVING
+-- corpus changes under the pin, so `self` deliberately has NO entry here (CART-0024
+-- diagnosed it years-of-commits ago: "self is a LIVING corpus … so it can never hold a
+-- fixed baseline"). tools/dfgate.lua skips a living corpus for the same reason, and
+-- tools/guards.lua PRINTS self's census as context without gating on it, which is the
+-- right treatment for a number that legitimately moves.
 M.EXPECTED = {
-    -- self includes its multi-language tests/fixtures (php/js/…), not just lua.
-    self = { ['binding-as-use'] = 83, ['df-over-collects'] = 570,
-        ['flow-over-collects'] = 2, ['OTHER'] = 1 }, -- +2 binding-as-use/+22
-        -- df-over @ P0 tier+disposition (tier.lua/census.disp/EXT) + P1 pipeline
-        -- (RESOLVE_PASSES/run_resolve_passes) added to self; ferr=0, benign.
-        -- self analyzes its OWN new
-        -- source each cut: +11 df-over @ v50 const-fold, +4/+1 @ v51 anon-fns/
-        -- enclosing-chain, +1/+1 @ v52 resolve_registry, +1 binding-as-use/+3
-        -- df-over @ untangle PDG INC 1-2, +2 @ INC 4, +1 binding-as-use @ extract
-        -- handoff, +6 df-over @ inter-untangle (analyze_module/report_module),
-        -- +5 df-over @ extract-candidates (nested-block view), +13 df-over @ expr
-        -- layer INC 1 (expr.lua/exprlint.lua added to self) + +1 binding-as-use/+3
-        -- df-over base drift @ INC 1 (treesitter grammar), +5 df-over @ expr INC 2
-        -- (optimize migration + localize + expr.dotted/rootname), +3 df-over @ expr
-        -- Rung 2 (narrow.param_nilability), +1 df-over @ INC 3 (optimize cross-block
-        -- CSE + PRE), +1 binding-as-use/+6 df-over @ the optapply APPLY verb, +1
-        -- binding-as-use @ optapply targeting (M.at/plan_at/run_at), +1 binding-as-use @
-        -- optapply hoist/localize verbs, +1 df-over @ optapply decline-ledger +
-        -- hedge-resolution + provenance, +2 df-over @ narrow-v2 type-tests
-        -- (type_call_var/gated_classify/binds), +2 df-over @ narrow-v2 field-paths
-        -- (field_unstable_of/path_of/fact_live added to narrow.lua), +3 df-over @ the
-        -- narrow-v2 DEVIRT report (M.devirt/M.devirt_report), +6 df-over @ the FIELD
-        -- LINKER (fieldlink.lua added to self), +7 df-over @ the DISAGREEMENT HARVEST (fieldharvest.lua + fieldlink read/write position fields),
-        -- +2 df-over @ v57 proto-OOP self-typing (resolve_self full-dotted owner + foreign-override lines). benign, flow-over-collects still 2.
-        -- df-additive/inert — external corpora unchanged, the flow.build cfg.expr hook
-        -- is OFF on the ingest path.
+    -- NO `self` ENTRY, DELIBERATELY. It had one, and its comment trail had grown to 25
+    -- lines recording ~30 separate recalibrations — "+11 df-over @ v50 const-fold, +4/+1
+    -- @ v51 anon-fns, … +2 @ v57 proto-OOP self-typing" — each one us analysing our own
+    -- newly-written source. That log IS the proof the pin cannot hold: every cut moved
+    -- it, so a delta never meant a regression, and CART-0024 diagnosed exactly that
+    -- ("self is a LIVING corpus … it can never hold a fixed baseline"). Removed rather
+    -- than recalibrated once more: tools/dfgate.lua now skips a living corpus,
+    -- tools/matrix.lua reports it as `~` (its own rule — gated where EXPECTED is
+    -- calibrated, reported elsewhere), and tools/guards.lua prints self's census as
+    -- context. The census for self is still WORTH LOOKING AT; it is just not a verdict.
     php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than
