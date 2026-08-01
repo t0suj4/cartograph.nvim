@@ -118,6 +118,23 @@ function M.name_queryable(prof)
     return false
 end
 
+--- Can it answer a DOTTED name (`game.print`)? A separate question from the above,
+--- and the distinction is load-bearing: a distilled factorio artifact carried 3 free
+--- functions — enough for name_queryable to say yes — while every dotted lookup
+--- returned nil because its member table was emitted under the wrong field name. The
+--- fence therefore passed and the MOVE diff reported "0 LOST" on a mod with two real
+--- breaking changes. Bare-name queryability is not evidence of dotted-name
+--- queryability, so the two predicates stay separate rather than one being widened.
+--- Mirrors the sources provides() consults for a `root.rest` name.
+function M.dotted_queryable(prof)
+    if next(prof.api_members or {}) ~= nil then return true end
+    if next(prof.types or {}) ~= nil then return true end
+    for _, field in ipairs({ 'nsset', 'namespaces' }) do
+        if next(prof[field] or {}) ~= nil then return true end
+    end
+    return false
+end
+
 --- How many symbols the profile actually claims — the weight of any verdict.
 function M.profile_size(prof)
     local n = 0
@@ -135,12 +152,24 @@ end
 ---   version floor         = max of requires.features
 ---   tightest environment  = the smallest T that covers requires.names  (M.rank)
 ---   dependency manifest   = requires.names grouped by WHO provides them (M.manifest)
---- Returns { names = {name -> calls}, where = {name -> file}, langs = set,
---- features = {version facts}, floor, total }.
+--- Returns { names = {name -> calls}, where = {name -> file}, files = {name -> sorted
+--- list of files}, langs = set, features = {version facts}, floor, total }.
+---
+--- `where` IS A SAMPLE, `files` IS THE POPULATION — the same split externals.references
+--- makes, for the same reason (CART-0215). `where` keeps its historical meaning, the
+--- ALPHABETICALLY FIRST file of the base, so no existing count moves; anything asking
+--- which environment a name lives in must read `files`, because until it existed the
+--- honest answer was unavailable and the audit picked by filename order.
+---
+--- GRANULARITY, stated because it bounds what can be built on this: `files` comes from
+--- the BASE's file set, so `data.raw` and `data.extend` share one list. That is the
+--- right grain for the environment question — the base (`game`, `data`, `script`) is
+--- exactly what a stage partition scopes — and the wrong grain for anything per-member.
 function M.requires(store)
     local externals = require 'cartograph.externals'
     local s = externals.surface(store)
-    local r = { names = {}, where = {}, langs = {}, total = 0 }
+    local r = { names = {}, where = {}, files = {}, langs = {}, total = 0 }
+    local fileset = {}
     for base, e in pairs(s.bases) do
         local first
         for f in pairs(e.files) do
@@ -149,6 +178,9 @@ function M.requires(store)
         local function add(name, n)
             r.names[name] = (r.names[name] or 0) + n
             r.where[name] = r.where[name] or first
+            local fs = fileset[name]
+            if not fs then fs = {}; fileset[name] = fs end
+            for f in pairs(e.files) do fs[f] = true end
         end
         -- a bare call names the base itself; members name base.member. Both can
         -- occur for one base (`Foo()` and `Foo.bar()`), so neither is exclusive.
@@ -156,6 +188,12 @@ function M.requires(store)
         for m, n in pairs(e.members) do add(base .. '.' .. m, n) end
     end
     for _ in pairs(r.names) do r.total = r.total + 1 end
+    for name, fs in pairs(fileset) do
+        local l = {}
+        for f in pairs(fs) do l[#l + 1] = f end
+        table.sort(l)
+        r.files[name] = l
+    end
     -- the VERSION half of the same requirement set
     local ts = require 'cartograph.providers.treesitter'
     local ext2lang = {}
@@ -278,21 +316,33 @@ end
 --- other miss keeps its blindness label, because the artifact still models
 --- global-rooted calls only and the stdlib namespaces are still not closed sets.
 --- Returns 'other-language' | 'absent' | 'receiver-typed' |
---- 'unenumerated-namespace' | 'unclaimed-bare'. `file` is where the name was seen; a name from a file of
---- ANOTHER language is not the profile's business at all — one zipper.py in a
---- Factorio mod put 13 python names in this list, and calling them "a sibling
---- module or a third-party dependency" was a label I knew to be wrong. The
---- audit-level guard only refuses when the profile's language is absent ENTIRELY,
---- so a mixed corpus reaches here.
---- LIMIT: requires() keeps ONE file per name (the alphabetically first), so a name
---- seen in two languages is classified by that sample. Precise enough to pull an
---- obvious foreign-stdlib name out of a list where it was being called a third-party
---- dependency; not a per-occurrence judgement, and it does not pretend to be.
-function M.unknown_reason(prof, name, file)
-    local ext = file and file:match('%.([%w]+)$')
-    if ext and prof.lang then
-        local lang = ext_lang()[ext:lower()]
-        if lang and lang ~= prof.lang then return 'other-language' end
+--- 'unenumerated-namespace' | 'unclaimed-bare'. `where` is where the name was seen —
+--- ONE file or a LIST of them; a name from files of ANOTHER language is not the
+--- profile's business at all — one zipper.py in a Factorio mod put 13 python names in
+--- this list, and calling them "a sibling module or a third-party dependency" was a
+--- label I knew to be wrong. The audit-level guard only refuses when the profile's
+--- language is absent ENTIRELY, so a mixed corpus reaches here.
+---
+--- THE SAMPLED VERDICT IS GONE (CART-0215). This used to take one file, because
+--- requires() kept only the alphabetically first, so a name seen in two languages was
+--- classified by whichever filename sorted first. Now the whole population decides,
+--- and the rule is the honest one: a name is another language's business only if NO
+--- file it appears in is this profile's language. A helper called from both zipper.py
+--- and control.lua is squarely the lua profile's business, and the old form could
+--- rule that out on filename order alone.
+function M.unknown_reason(prof, name, where)
+    local files = type(where) == 'table' and where or { where }
+    if prof.lang then
+        local known, mine = false, false
+        for _, f in ipairs(files) do
+            local ext = type(f) == 'string' and f:match('%.([%w]+)$')
+            local lang = ext and ext_lang()[ext:lower()]
+            if lang then
+                known = true
+                if lang == prof.lang then mine = true end
+            end
+        end
+        if known and not mine then return 'other-language' end
     end
     local root, member = name:match('^([%w_]+)[.:]([%w_]+)$')
     -- ABSENT: the root is a global whose documented class is FULLY enumerated, and
@@ -333,6 +383,19 @@ function ext_lang()
 end
 
 local ext_lang
+
+-- A name's provenance as one report cell: the first file, plus a COUNT of the others.
+-- Naming one file out of several and staying silent about the rest is the class this
+-- repo keeps rediscovering (absence rendered as silence) — the reader cannot tell
+-- "seen here" from "seen here and in four more", and the difference is exactly what a
+-- stage or language question turns on. `files` may be nil (a caller that only kept a
+-- sample), in which case this degrades to that sample and claims nothing.
+local function where_text(files, sample)
+    local first = (files and files[1]) or sample or ''
+    local n = files and #files or 0
+    if n > 1 then return ('%s (+%d)'):format(first, n - 1) end
+    return first
+end
 local REASON_TEXT = {
     ['absent'] = 'ABSENT FROM THE TARGET — the documented class for this global is'
         .. ' FULLY enumerated (methods and attributes) and does not hold the name.'
@@ -387,9 +450,14 @@ function M.audit(store, runtime)
     for name, n in pairs(req.names) do
         local w = M.provides(prof, name)
         res.entries[#res.entries + 1] = { name = name, calls = n,
-            provided = w ~= nil, why = w, files = { req.where[name] },
+            provided = w ~= nil, why = w,
+            -- EVERY file, not the sampled one: `files` is what a stage/language
+            -- question has to read (CART-0215). Falls back to the sample so an
+            -- entry always carries at least one, as it always has.
+            files = req.files[name] or { req.where[name] },
             reason = (w == nil)
-                and M.unknown_reason(prof, name, req.where[name]) or nil }
+                and M.unknown_reason(prof, name, req.files[name] or req.where[name])
+                or nil }
         if w then res.provided = res.provided + 1 else res.unknown = res.unknown + 1 end
     end
     table.sort(res.entries, function (a, b)
@@ -417,6 +485,17 @@ function M.diff(store, from, to)
             return nil, ('%s is a signature-keyed artifact with no name surface —'
                 .. ' a diff against it would call everything lost'):format(rt)
         end
+        -- …and the same refusal for the DOTTED surface, which is where a port
+        -- actually lives (`global.x`, `game.entity_prototypes`). Without this a
+        -- profile whose member table is unreadable still passes the bare-name fence
+        -- on a handful of free functions and then reports a serene "0 LOST" — which
+        -- is what happened, on a mod with two real breaking changes. Refusing is the
+        -- honest answer: the diff cannot see the surface it is being asked about.
+        if prof and not M.dotted_queryable(prof) then
+            return nil, ('%s cannot adjudicate a DOTTED name (no api_members / types /'
+                .. ' namespaces) — a MOVE diff against it would report every rename as'
+                .. ' unchanged'):format(rt)
+        end
     end
     local res = M.diff_entries(a, b)
     res.size_from, res.size_to = M.profile_size(pm.load(from)), M.profile_size(pm.load(to))
@@ -436,7 +515,7 @@ function M.diff_entries(a, b)
         local inB = bystatus[e.name]
         if e.provided and not inB then
             res.lost[#res.lost + 1] = { name = e.name, calls = e.calls, why = e.why,
-                file = e.files and e.files[1] }
+                file = e.files and e.files[1], files = e.files }
         elseif not e.provided and inB then
             res.gained[#res.gained + 1] = { name = e.name, calls = e.calls }
         elseif e.provided then
@@ -473,7 +552,8 @@ function M.diff_report(store, from, to, opts)
             :format(res.from, res.to)
         for i = 1, math.min(cap, #res.lost) do
             local e = res.lost[i]
-            L[#L + 1] = ('    %-34s %4d call(s)  %s'):format(e.name, e.calls, e.file or '')
+            L[#L + 1] = ('    %-34s %4d call(s)  %s'):format(e.name, e.calls,
+                where_text(e.files, e.file))
         end
         if #res.lost > cap then
             L[#L + 1] = ('    … +%d more'):format(#res.lost - cap)
@@ -571,7 +651,8 @@ function M.reference_report(store, runtime, opts)
         local g = groups[why]
         if not g then g = { n = 0, reads = 0, items = {} }; groups[why] = g end
         g.n = g.n + 1; g.reads = g.reads + n
-        g.items[#g.items + 1] = { name = name, reads = n, file = refs.where[name] }
+        g.items[#g.items + 1] = { name = name, reads = n, file = refs.where[name],
+            files = refs.files[name] }
     end
     local L = { '' }
     L[#L + 1] = ('  REFERENCED but not called — %d name(s) read, never invoked:')
@@ -596,7 +677,7 @@ function M.reference_report(store, runtime, opts)
             for i = 1, math.min(cap, #g.items) do
                 local e = g.items[i]
                 L[#L + 1] = ('      %-36s %4d read(s)  %s'):format(e.name, e.reads,
-                    e.file or '')
+                    where_text(e.files, e.file))
             end
             if #g.items > cap then
                 L[#L + 1] = ('      … and %d more'):format(#g.items - cap)
@@ -625,16 +706,29 @@ function M.reference_diff(store, from, to)
         return nil, ('%s is %s and %s is %s — different languages'):format(
             from, tostring(a.lang), to, tostring(b.lang))
     end
+    -- THE READS DIFF NEEDS THE DOTTED FENCE MOST. A read that breaks a port is almost
+    -- always dotted (`global.x`, `game.entity_prototypes`), so a profile that cannot
+    -- adjudicate a dotted name reports "nothing read here was removed" — the most
+    -- reassuring sentence in the tool, from the artifact least able to say it. The
+    -- calls diff refuses for the same reason; leaving this path unfenced meant the
+    -- refusal was printed for calls and contradicted for reads in one report.
+    for rt, prof in pairs({ [from] = a, [to] = b }) do
+        if not M.dotted_queryable(prof) then
+            return nil, ('%s cannot adjudicate a DOTTED name (no api_members / types /'
+                .. ' namespaces) — the READ surface is where a port breaks, so a diff'
+                .. ' against it would call every rename unchanged'):format(rt)
+        end
+    end
     local refs = require('cartograph.externals').references(store)
     local res = { from = from, to = to, lost = {}, gained = {}, kept = 0, neither = 0 }
     for name, n in pairs(refs.names) do
         local in_a, in_b = M.provides(a, name), M.provides(b, name)
         if in_a and not in_b then
             res.lost[#res.lost + 1] = { name = name, reads = n,
-                file = refs.where[name], was = in_a }
+                file = refs.where[name], files = refs.files[name], was = in_a }
         elseif in_b and not in_a then
             res.gained[#res.gained + 1] = { name = name, reads = n,
-                file = refs.where[name], now = in_b }
+                file = refs.where[name], files = refs.files[name], now = in_b }
         elseif in_a then res.kept = res.kept + 1
         else res.neither = res.neither + 1 end
     end
@@ -663,7 +757,7 @@ function M.reference_diff_report(store, from, to, opts)
         for i = 1, math.min(cap, #res.lost) do
             local e = res.lost[i]
             L[#L + 1] = ('    %-34s %4d read(s)  was: %-18s %s'):format(e.name,
-                e.reads, e.was, e.file or '')
+                e.reads, e.was, where_text(e.files, e.file))
         end
         if #res.lost > cap then
             L[#L + 1] = ('    … and %d more'):format(#res.lost - cap)
@@ -675,7 +769,263 @@ function M.reference_diff_report(store, from, to, opts)
             .. ' not (already-migrated code, or a name that moved here):'):format(#res.gained)
         for i = 1, math.min(5, #res.gained) do
             L[#L + 1] = ('    %-34s %4d read(s)  %s'):format(res.gained[i].name,
-                res.gained[i].reads, res.gained[i].file or '')
+                res.gained[i].reads, where_text(res.gained[i].files,
+                    res.gained[i].file))
+        end
+    end
+    return L
+end
+
+-- ── THE THIRD SURFACE: the DATA STAGE (CART-0213) ────────────────────────────
+-- M.diff scores CALLS, M.reference_diff scores READS, and both are name surfaces.
+-- A declarative-data stage is neither: a Factorio mod's data stage is a set of
+-- PROTOTYPES whose properties are table keys and field assignments, so no dotted
+-- name exists to adjudicate. That is why prototype-api.json ships as an INGREDIENT
+-- (see tools/prototypedistill.lua) rather than as a portability target.
+--
+-- WHY THE OBVIOUS CROSS-REFERENCE FAILS, and what replaces it. Matching a removed
+-- property NAME against every `key =` in the tree over-reports uselessly, because a
+-- property removed from a few prototypes shares its name with the same property
+-- still present on many others: measured on Von-Neumann, `height` matched 44 sites
+-- and was lost by exactly ONE prototype, while `name` matched 26 and was never lost
+-- at all. The fix is that a prototype CARRIES ITS OWN DISCRIMINATOR — it is copied
+-- out of `data.raw[<typename>][<name>]`, or patches one in place — so each property
+-- is checked against the property set of the prototype that actually owns it. No
+-- receiver typing, no inference, no heuristic.
+--
+-- WHAT IT CANNOT SEE, stated because a data-stage reading is a LOWER BOUND: the
+-- expression IR models a table constructor as an opaque allocation, so a prototype
+-- written as a bare literal (`data:extend{{type="x", …}}`) has invisible keys —
+-- basis='literal', 24 of Von-Neumann's 54 records. Those are reported as UNREAD,
+-- never as clean. Same for a record whose overrides an opaque call may have
+-- rewritten (complete=false).
+
+--- A prototype's usable property set: its OWN properties UNION every ancestor's,
+--- since the API declares inheritance rather than flattening it. Returns
+--- {prop -> 'required'|'optional'} or nil when the name is unknown.
+local function proto_props(prof, pn)
+    if not pn then return nil end
+    prof._propcache = prof._propcache or {}
+    local hit = prof._propcache[pn]
+    if hit ~= nil then return hit or nil end
+    local out, seen, cur, any = {}, {}, pn, false
+    while cur and not seen[cur] do
+        seen[cur] = true
+        if (prof.prototypes or {})[cur] then any = true end
+        for k, req in pairs(prof.own_props or {}) do
+            local owner, p = k:match('^(.-)::(.+)$')
+            if owner == cur and out[p] == nil then out[p] = req end
+        end
+        cur = (prof.parent or {})[cur]
+    end
+    local res = any and out or false
+    prof._propcache[pn] = res
+    return res or nil
+end
+
+--- Can this artifact answer a DATA-STAGE question? A third predicate beside
+--- name_queryable and dotted_queryable, and separate for the same reason: a runtime
+--- artifact answers neither of the others' questions here, and silently scoring a
+--- mod's prototypes against one would report every property as fine.
+function M.prototype_queryable(prof)
+    return prof ~= nil and prof.stage == 'prototype'
+        and next(prof.typenames or {}) ~= nil
+        and next(prof.own_props or {}) ~= nil
+end
+
+--- THE DATA-STAGE DIFF: which properties the mod actually sets stop existing
+--- between two prototype-api versions. Returns (result, err); result =
+---   { from, to, lost = {…}, gone_type = {…}, kept, unknown_prop,
+---     unread = {…}, hedged = {…}, untyped, records }
+--- `lost` is the worklist: each entry names the file, line, prototype, typename and
+--- property, and whether the property was REQUIRED (a required property that
+--- vanished is a different repair from an optional one).
+function M.prototype_diff(store, from, to)
+    local pm = require 'cartograph.spec.profile'
+    local a, b = pm.load(from), pm.load(to)
+    if not a then return nil, ('unknown runtime %q'):format(from) end
+    if not b then return nil, ('unknown runtime %q'):format(to) end
+    for rt, prof in pairs({ [from] = a, [to] = b }) do
+        if not M.prototype_queryable(prof) then
+            return nil, ('%s cannot answer a DATA-STAGE question (needs a'
+                .. ' stage="prototype" artifact with typenames + own_props; a runtime'
+                .. ' profile would call every property fine)'):format(rt)
+        end
+    end
+    local protos = require('cartograph.prototypes').all(store)
+    if not protos then
+        return nil, 'no data stage here — the prototype reading needs an env profile'
+            .. ' with a declared prototype adapter'
+    end
+    local res = { from = from, to = to, lost = {}, stale_delete = {}, gone_type = {},
+        kept = 0, unknown_prop = 0, unread = {}, hedged = {}, untyped = 0, records = 0 }
+    for _, m in ipairs(protos) do
+        for _, p in ipairs(m.protos) do
+            res.records = res.records + 1
+            local ty = (p.base and p.base.type) or (p.patch and p.patch.type)
+            local pn_a = ty and a.typenames[ty]
+            local pn_b = ty and b.typenames[ty]
+            -- UNREAD and UNTYPED are kept DISJOINT: a table-literal prototype has no
+            -- base to take a typename from, so every literal is also untyped, and
+            -- reporting both counts would double-count the same records — 24 + 28
+            -- against 54, which reads as more unadjudicable prototypes than exist.
+            -- Each record gets exactly one reason.
+            if p.basis == 'literal' then
+                res.unread[#res.unread + 1] = { file = m.file, line = p.line,
+                    why = 'a table literal: the expression IR models `{…}` as an'
+                        .. ' opaque allocation, so its keys are not readable' }
+            elseif not ty then
+                res.untyped = res.untyped + 1
+            elseif pn_a and not pn_b then
+                -- the data.raw KEY itself is gone: every property under it moves
+                res.gone_type[#res.gone_type + 1] = { file = m.file, line = p.line,
+                    typename = ty, was = pn_a, name = p.name }
+            end
+            if p.complete == false then
+                local callee = (p.frontiers[1] or {}).callee
+                res.hedged[#res.hedged + 1] = { file = m.file, line = p.line,
+                    callee = callee }
+            end
+            local props_a, props_b = proto_props(a, pn_a), proto_props(b, pn_b)
+            if props_a and props_b then
+                for _, ov in ipairs(p.overrides) do
+                    -- the FIRST segment is the property; a deeper path
+                    -- (`minable.result`) names a field of the property's own type,
+                    -- which needs the concept types and is not adjudicated here
+                    local prop = ov.path and ov.path:match('^([%w_]+)')
+                    if prop then
+                        local in_a, in_b = props_a[prop], props_b[prop]
+                        if in_a and not in_b then
+                            -- WRITE vs DELETE, and the difference decides the repair.
+                            -- `ty == 'nil'` is the expression IR's DECLARED encoding of
+                            -- a nil literal (expr.lua:11, a closed schema), so this is
+                            -- reading the schema rather than sniffing a value — the
+                            -- IR carries a sentinel for nil whose `tostring` is "nil",
+                            -- and my first attempt tested `value == nil`, which is
+                            -- never true and silently classified all nine deletions
+                            -- below as writes.
+                            -- 9 of Von-Neumann's 10 hits are deletions, so calling them
+                            -- all "a value written to a property that is gone" would be
+                            -- a worklist that is 90% wrong about what to do.
+                            --
+                            -- A DELETION IS STILL WORK, though, and the sneakier kind:
+                            -- `x.animation = nil` removed the animation in 1.1; in 2.0
+                            -- the property is gone, so the line deletes NOTHING and the
+                            -- entity silently keeps its graphics. No crash, no error,
+                            -- changed behaviour — which is why these are reported
+                            -- separately rather than filtered out.
+                            local entry = { file = m.file, line = ov.line,
+                                typename = ty, proto = pn_a, prop = prop,
+                                required = in_a == 'required', name = p.name,
+                                path = ov.path, hedged = p.complete == false }
+                            if ov.ty == 'nil' then
+                                res.stale_delete[#res.stale_delete + 1] = entry
+                            else
+                                entry.value = ov.value
+                                res.lost[#res.lost + 1] = entry
+                            end
+                        elseif in_a then
+                            res.kept = res.kept + 1
+                        else
+                            -- in NEITHER version: a property another mod adds, or a
+                            -- misspelling. NOT porting work, so it is counted and
+                            -- never listed as such.
+                            res.unknown_prop = res.unknown_prop + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local function rank(x, y)
+        if x.required ~= y.required then return x.required end -- required first
+        if x.prop ~= y.prop then return x.prop < y.prop end
+        return (x.file or '') .. tostring(x.line) < (y.file or '') .. tostring(y.line)
+    end
+    table.sort(res.lost, rank); table.sort(res.stale_delete, rank)
+    return res
+end
+
+--- The data-stage diff as lines.
+function M.prototype_diff_report(store, from, to, opts)
+    local res, err = M.prototype_diff(store, from, to)
+    if not res then return { 'prototype diff: ' .. err } end
+    local cap = (opts and opts.cap) or 20
+    local L = { ('prototype diff — the DATA STAGE moving from %s to %s'):format(
+        res.from, res.to) }
+    L[#L + 1] = ('  %d prototype(s) read; %d write(s) and %d deletion(s) hit a removed'
+        .. ' property, %d unchanged, %d in neither version'):format(res.records,
+        #res.lost, #res.stale_delete, res.kept, res.unknown_prop)
+    local function listing(items, label, note)
+        if #items == 0 then return end
+        L[#L + 1] = ''
+        L[#L + 1] = ('  %s — %d:'):format(label, #items)
+        for _, n in ipairs(note) do L[#L + 1] = '    ' .. n end
+        for i = 1, math.min(cap, #items) do
+            local e = items[i]
+            L[#L + 1] = ('    %-31s %-22s %s:%s%s%s'):format(e.prop,
+                e.typename, e.file or '?', tostring(e.line or '?'),
+                e.required and '  [REQUIRED]' or '',
+                e.hedged and '  (hedged: an opaque call may have rewritten this)' or '')
+        end
+        if #items > cap then
+            L[#L + 1] = ('    … and %d more'):format(#items - cap)
+        end
+    end
+    if #res.lost == 0 and #res.stale_delete == 0 then
+        L[#L + 1] = '  no property this mod sets was removed between these versions'
+    end
+    listing(res.lost, 'WRITES TO A REMOVED PROPERTY', {
+        'a VALUE is assigned to a property the new version does not have, so the',
+        'write goes nowhere. Each is checked against the property set of the',
+        'prototype that OWNS it, so this is a worklist and not a name match.' })
+    listing(res.stale_delete, 'DELETIONS THAT NO LONGER DELETE', {
+        'the line assigns `nil` to remove the property. The property is gone in the',
+        'new version, so the line now removes NOTHING and the prototype silently',
+        'keeps whatever the deletion used to suppress — no crash, changed behaviour.',
+        'Lower urgency than a write, but do not mistake it for a no-op.' })
+    if #res.gone_type > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('  THE data.raw KEY ITSELF IS GONE for %d prototype(s) — every'
+            .. ' property under it moves:'):format(#res.gone_type)
+        for i = 1, math.min(8, #res.gone_type) do
+            local e = res.gone_type[i]
+            L[#L + 1] = ('    %-26s was %s   %s:%s'):format(e.typename, e.was,
+                e.file or '?', tostring(e.line or '?'))
+        end
+    end
+    -- THE LOWER BOUND, stated rather than implied. A data-stage reading that printed
+    -- only its findings would read as a clean bill of health for the 24 prototypes it
+    -- literally cannot see.
+    if #res.unread > 0 or #res.hedged > 0 or res.untyped > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('  THIS IS A LOWER BOUND — %d of %d prototype(s) could not be'
+            .. ' adjudicated at all:'):format(#res.unread + res.untyped, res.records)
+        if #res.unread > 0 then
+            L[#L + 1] = ('    %d prototype(s) written as a TABLE LITERAL — the'
+                .. ' expression IR models `{…}` as an opaque allocation, so their keys'
+                .. ' were not read at all (not "no findings"):'):format(#res.unread)
+            for i = 1, math.min(5, #res.unread) do
+                L[#L + 1] = ('      %s:%s'):format(res.unread[i].file or '?',
+                    tostring(res.unread[i].line or '?'))
+            end
+            if #res.unread > 5 then
+                L[#L + 1] = ('      … and %d more'):format(#res.unread - 5)
+            end
+        end
+        if res.untyped > 0 then
+            L[#L + 1] = ('    %d further prototype(s) whose TYPENAME is unknown — copied'
+                .. ' from a local we could not resolve, so no property set applies')
+                :format(res.untyped)
+        end
+        if #res.hedged > 0 then
+            L[#L + 1] = ('    %d prototype(s) passed to an OPAQUE CALL, which lua'
+                .. ' semantics say may have rewritten anything:'):format(#res.hedged)
+            for i = 1, math.min(4, #res.hedged) do
+                L[#L + 1] = ('      %s:%s via %s'):format(res.hedged[i].file or '?',
+                    tostring(res.hedged[i].line or '?'),
+                    res.hedged[i].callee or '?')
+            end
         end
     end
     return L
@@ -745,7 +1095,7 @@ function M.report(store, runtime, opts)
                 for i = 1, math.min(per, #g.items) do
                     local e = g.items[i]
                     L[#L + 1] = ('      %-36s %4d call(s)  %s'):format(e.name,
-                        e.calls, e.files[1] or '')
+                        e.calls, where_text(e.files))
                     shown = shown + 1
                 end
                 if #g.items > per then

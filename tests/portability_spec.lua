@@ -500,6 +500,164 @@ test('portability: unknown_reason classifies by the artifact SHAPE', function ()
     eq('other-language', port.unknown_reason(prof, 'open', 'tool.py'))
 end)
 
+test('portability: a name is ANOTHER language\'s only if NO file of ours holds it',
+    function ()
+    -- CART-0215. This used to be decided from ONE sampled file, so a name seen in
+    -- both languages was classified by whichever filename sorted first. The
+    -- population decides now, and a single file of our own language is enough to
+    -- make the name our business.
+    local port = require 'cartograph.portability'
+    local prof = require('cartograph.spec.profile').load('lua-factorio')
+    if not prof then skip 'no lua-factorio profile' end
+    eq('other-language', port.unknown_reason(prof, 'json.load', { 'zipper.py', 'b.py' }),
+        'every file foreign -> still not our business')
+    eq('unclaimed-bare', port.unknown_reason(prof, 'my_helper', { 'zipper.py', 'a.lua' }),
+        'MIXED: one lua file makes it ours, and the old form could rule that out'
+        .. ' on filename order alone (a.lua sorts before zipper.py, so this one'
+        .. ' passed by luck — the reverse order was the bug)')
+    eq('unclaimed-bare', port.unknown_reason(prof, 'my_helper', { 'a.lua', 'zipper.py' }),
+        'and order does not matter, which is the actual fix')
+    -- back-compatible: a bare string is still a one-file population
+    eq('other-language', port.unknown_reason(prof, 'json.load', 'zipper.py'))
+    eq('unclaimed-bare', port.unknown_reason(prof, 'my_helper', nil),
+        'and no provenance at all cannot rule a language out')
+    -- an extension no spec claims is not evidence either way
+    eq('unclaimed-bare', port.unknown_reason(prof, 'my_helper', { 'notes.txt' }),
+        'an unknown extension is not a foreign language')
+end)
+
+-- ── THE THIRD SURFACE: the DATA STAGE (CART-0213) ───────────────────────────
+-- calls diff, reads diff, and now prototypes. What needs pinning is the thing that
+-- makes this a WORKLIST rather than a name match: a property is judged against the
+-- property set of the prototype that OWNS it, and a DELETION is not a write.
+
+local proto_tmp = vim.fn.tempname()
+
+--- A one-module factorio store. `profile` is what activates the prototype adapter
+--- (the L2 identity, never the extension), the same trick prototypes_spec uses.
+local function factorio_store(src)
+    local st = require 'cartograph.store'
+    vim.fn.mkdir(proto_tmp, 'p')
+    local name = 'data.lua'
+    vim.fn.writefile(vim.split(src, '\n'), proto_tmp .. '/' .. name)
+    st._content_cache = {}
+    st.ingest({ schema = 1, root = proto_tmp, profile = 'lua-factorio',
+        nodes = { { id = name, name = name, kind = 'module', file = name,
+            range = { start = { line = 0, char = 0 },
+                      ['end'] = { line = #vim.split(src, '\n') + 1, char = 0 } },
+            order = 0 } }, edges = {} })
+    return st
+end
+
+local function proto_ready()
+    local pm = require 'cartograph.spec.profile'
+    return pm.load('lua-factorio-proto-11') and pm.load('lua-factorio-proto-20')
+end
+
+test('portability: the data-stage diff separates a WRITE from a DELETION', function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- every property below was verified against BOTH artifacts before being used:
+    -- recipe.result and transport-belt.circuit_wire_connection_points are in 1.1 and
+    -- not 2.0; recipe.enabled is in both.
+    local st = factorio_store(table.concat({
+        'local r = table.deepcopy(data.raw.recipe["assembling-machine-1"])',
+        'r.result = "damaged-machine"',   -- a WRITE to a removed property
+        'r.enabled = true',               -- present in both: unchanged
+        'data:extend{r}',
+        'local b = table.deepcopy(data.raw["transport-belt"]["basic"])',
+        'b.circuit_wire_connection_points = nil', -- a DELETION of a removed property
+        'data:extend{b}',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+
+    eq(1, #res.lost, 'exactly ONE write to a removed property')
+    eq('result', res.lost[1].prop)
+    eq('recipe', res.lost[1].typename)
+    eq('RecipePrototype', res.lost[1].proto, 'and the prototype that OWNS it')
+    eq('damaged-machine', res.lost[1].value, 'carrying the value that goes nowhere')
+
+    -- THE REGRESSION THIS EXISTS FOR: my first discriminator tested `value == nil`,
+    -- which is never true (the IR carries a sentinel for a nil literal whose
+    -- tostring is "nil"), so all nine of Von-Neumann's deletions were reported as
+    -- writes — a worklist that was 90% wrong about what to DO. The schema says
+    -- ty == 'nil' (expr.lua:11) and that is what must be read.
+    eq(1, #res.stale_delete, 'and the nil-assignment is a DELETION, not a write')
+    eq('circuit_wire_connection_points', res.stale_delete[1].prop)
+    ok(res.kept >= 1, 'a property present in both versions is unchanged')
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: the data-stage diff reports what it CANNOT read', function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- a bare table literal: the expression IR models `{…}` as an opaque allocation,
+    -- so its keys are unreadable. It must be declared UNREAD, never counted clean —
+    -- a data-stage reading that printed only findings would be a fabricated all-clear.
+    local st = factorio_store(table.concat({
+        'local q = { type = "container", name = "q", inventory_size = 8 }',
+        'data:extend{q}',
+    }, '\n'))
+    local res = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
+    ok(res, 'the diff runs')
+    eq(0, #res.lost, 'nothing is claimed about it')
+    eq(1, #res.unread, 'because it is UNREAD, and says so')
+    ok(res.unread[1].why:find('opaque allocation'), 'with the reason, not a shrug')
+    local lines = port.prototype_diff_report(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    local text = table.concat(lines, '\n')
+    ok(text:find('LOWER BOUND'), 'and the report leads with the lower bound')
+    ok(text:find('not "no findings"'), 'saying explicitly that this is not an all-clear')
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: a RUNTIME artifact cannot answer a data-stage question', function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    local st = factorio_store('local r = table.deepcopy(data.raw.recipe["x"])')
+    -- the same class of fence as dotted_queryable: a runtime profile has no
+    -- typenames, so every property would come back fine — the most reassuring
+    -- possible answer from the artifact least able to give it
+    local res, err = port.prototype_diff(st, 'lua-factorio-api-11', 'lua-factorio-api-20')
+    eq(nil, res, 'refused rather than answered')
+    ok(err and err:find('DATA%-STAGE'), 'and it says what is missing: ' .. tostring(err))
+    ok(not port.prototype_queryable(require('cartograph.spec.profile')
+        .load('lua-factorio-api-11')), 'the predicate agrees')
+    ok(port.prototype_queryable(require('cartograph.spec.profile')
+        .load('lua-factorio-proto-11')), 'and accepts a prototype-stage artifact')
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: requires() carries EVERY file a name was seen in, not a sample',
+    function ()
+    if not ready() then skip('no ruby parser') end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- the SAME external base used from two files, deliberately named so the
+    -- alphabetically-first file is not the only interesting one
+    write(root, 'a_first.rb', { 'class A', '  def go', '    Wombat.frob(1)', '  end', 'end' })
+    write(root, 'z_last.rb', { 'class Z', '  def go', '    Wombat.frob(2)', '  end', 'end' })
+    local data = ts.extract(root); data.root = root
+    store.ingest(data)
+    local req = port.requires(store)
+    local files = req.files['Wombat.frob']
+    ok(files, 'the population is carried at all')
+    eq(2, #files, 'BOTH files, which is the whole point of CART-0215')
+    eq('a_first.rb', files[1], 'sorted, so reports and gates are deterministic')
+    eq('z_last.rb', files[2])
+    eq('a_first.rb', req.where['Wombat.frob'],
+        'and `where` keeps its historical meaning — the alphabetically first — so'
+        .. ' no existing count moves')
+    -- and the audit carries the population through, not the sample
+    local res = port.audit(store, 'ruby-rails')
+    for _, e in ipairs(res.entries) do
+        if e.name == 'Wombat.frob' then
+            eq(2, #e.files, 'the audit entry carries both files')
+        end
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('portability: the report groups by reason and claims no porting work',
     function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
@@ -817,4 +975,50 @@ test('portability: a cross-language reference diff is refused', function ()
     local res, err = port.reference_diff(store, 'lua-factorio', 'cruby')
     eq(nil, res)
     ok(tostring(err):match('different languages') ~= nil, 'says why: ' .. tostring(err))
+end)
+
+-- A DOTTED-QUERYABLE FENCE ([[cartograph-portability-lever]]). A distilled factorio
+-- artifact once emitted its member table as `members`/`complete` while
+-- portability.provides reads `api_members`/`api_complete`. It loaded fine, reported
+-- "[complete]" for all 9 globals, and answered nil for EVERY dotted name — so a MOVE
+-- diff compared silence with silence and printed "0 LOST" on a mod with two real
+-- breaking changes. The bare-name fence did not catch it because 3 free functions are
+-- enough for name_queryable to say yes. Hence a SECOND predicate, and these tests
+-- pin the distinction rather than the spelling.
+test('portability: bare-name queryable does not imply DOTTED queryable', function ()
+    local port = require 'cartograph.portability'
+    -- exactly the shape the old distiller emitted: free fns present, member table
+    -- under the field name nothing reads
+    local old = { lang = 'lua', free = { serpent = true },
+        members = { ['LuaGameScript::print'] = true }, complete = { LuaGameScript = true },
+        global2class = { game = 'LuaGameScript' } }
+    ok(port.name_queryable(old), 'free fns make it look queryable')
+    eq(false, port.dotted_queryable(old), 'but no dotted name can be adjudicated')
+    eq(nil, port.provides(old, 'game.print'),
+        'and provides() confirms it: the member table is unreachable')
+end)
+
+test('portability: the canonical field names ARE dotted-queryable', function ()
+    local port = require 'cartograph.portability'
+    local fixed = { lang = 'lua', free = { serpent = true },
+        api_members = { ['LuaGameScript::print'] = true },
+        api_complete = { LuaGameScript = true },
+        global2class = { game = 'LuaGameScript' } }
+    ok(port.dotted_queryable(fixed), 'api_members is what the reader consults')
+    eq('member of LuaGameScript', port.provides(fixed, 'game.print'))
+    -- and an ENUMERATED class makes a miss into evidence, which is the whole point
+    eq(nil, port.provides(fixed, 'game.entity_prototypes'))
+end)
+
+test('portability: a MOVE diff refuses a profile that cannot answer a dotted name',
+    function ()
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    store.ingest({ schema = 1, root = '/tmp/x', nodes = {}, edges = {}, calls = {},
+        stamps = {} })
+    -- lua-factorio is dotted-queryable; asking it to diff against a signature-keyed
+    -- artifact must REFUSE rather than report every rename as unchanged
+    local res, err = port.diff(store, 'lua-factorio', 'ruby-core')
+    eq(nil, res)
+    ok(err ~= nil and err ~= '', 'refuses with a reason: ' .. tostring(err))
 end)

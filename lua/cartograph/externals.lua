@@ -130,10 +130,18 @@ end
 --- `withheld` is kept at 0 for callers that report it — a language with no declared
 --- binders simply contributes no bound names, which shows up as reads to adjudicate
 --- rather than as silence.
---- Returns { names = {name -> n}, where = {name -> file}, total, withheld }.
+--- Returns { names = {name -> n}, where = {name -> file}, files = {name -> sorted
+--- list of files}, total, withheld }.
+---
+--- `where` IS A SAMPLE, `files` IS THE POPULATION. `where` keeps the first file a name
+--- was seen in (node order) so existing callers do not move, but every question about
+--- WHICH ENVIRONMENT a name belongs to has to ask `files`: a name read in two files
+--- has no single home, and answering from `where` makes the verdict depend on which
+--- file happened to be visited first (CART-0215).
 function M.references(store)
     local expr = require 'cartograph.expr'
-    local out = { names = {}, where = {}, total = 0, withheld = 0 }
+    local out = { names = {}, where = {}, files = {}, total = 0, withheld = 0 }
+    local fileset = {}
     local data = store.data or {}
     -- names this graph DEFINES: a read rooted at one of them is internal, whatever
     -- else it is. Bare def names, since a read's root is a bare name.
@@ -168,6 +176,11 @@ function M.references(store)
                         if rootname and not locals[rootname] and not defined[rootname] then
                             out.names[chain] = (out.names[chain] or 0) + 1
                             out.where[chain] = out.where[chain] or n.file
+                            if n.file then
+                                local fs = fileset[chain]
+                                if not fs then fs = {}; fileset[chain] = fs end
+                                fs[n.file] = true
+                            end
                         end
                     end
                 end
@@ -175,6 +188,14 @@ function M.references(store)
         end
     end
     for _ in pairs(out.names) do out.total = out.total + 1 end
+    -- sets -> sorted lists, so iteration order is deterministic for both reports and
+    -- gates (the set is built in node order, which is not)
+    for chain, fs in pairs(fileset) do
+        local l = {}
+        for f in pairs(fs) do l[#l + 1] = f end
+        table.sort(l)
+        out.files[chain] = l
+    end
     return out
 end
 

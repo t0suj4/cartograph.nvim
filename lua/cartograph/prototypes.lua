@@ -243,8 +243,15 @@ function M.of_module(store, mod_id)
                             for i = 1, math.floor(#seg / 2) do
                                 seg[i], seg[#seg - i + 1] = seg[#seg - i + 1], seg[i]
                             end
+                            -- `ty` too, so a PATCH override has the same record
+                            -- shape as a tracked-var one. Without it a consumer
+                            -- cannot tell `x.p = nil` (a deletion) from an
+                            -- unreadable value on a patch while it can on every
+                            -- other basis — the asymmetry that makes a downstream
+                            -- check silently wrong on exactly one branch.
                             pp.overrides[1] = { path = table.concat(seg, '.'),
-                                value = v, why = why, line = line }
+                                value = v, why = why, line = line,
+                                ty = (e.rhs or {})[1] and (e.rhs or {})[1].ty or nil }
                             break
                         end
                         seg[#seg + 1] = cur.n or '[]'

@@ -200,7 +200,17 @@ function M.register(H)
         -- spend it on "the more expensive answer" (escalate !, hedges !).
         -- two targets = the MOVE between them; direction matters
         local lines
-        if to then
+        -- DISPATCH ON THE STAGE the artifacts DECLARE, not on a flag the user has to
+        -- remember. A prototype-api pair answers a DATA-STAGE question (which
+        -- properties of the prototypes this mod declares stopped existing); a runtime
+        -- pair answers a NAME question. Routing a proto pair through the calls diff
+        -- printed a refusal, which was honest but no longer necessary — the answer
+        -- exists now (CART-0213).
+        local pm = require 'cartograph.spec.profile'
+        if to and port.prototype_queryable(pm.load(from))
+            and port.prototype_queryable(pm.load(to)) then
+            lines = port.prototype_diff_report(store, from, to)
+        elseif to then
             lines = port.diff_report(store, from, to)
             if o.bang then
                 -- READS are where a port actually breaks (`global.foo` is never
@@ -215,7 +225,7 @@ function M.register(H)
         scratch(lines)
     end, { nargs = '*', bang = true, complete = function ()
         return require('cartograph.portability').runtimes()
-    end, desc = 'cartograph: score the external surface against a target environment profile — which names it PROVIDES and which are not in it (candidate porting work, with call counts). With TWO targets, diff the MOVE from the first to the second: the names that change status ARE the work. ! adds the READ surface (names touched but never called — where a port actually breaks; re-parses every function, so it is opt-in). Not-in-profile is not "missing": a dependency may supply it' })
+    end, desc = 'cartograph: score the external surface against a target environment profile — which names it PROVIDES and which are not in it (candidate porting work, with call counts). With TWO targets, diff the MOVE from the first to the second: the names that change status ARE the work. ! adds the READ surface (names touched but never called — where a port actually breaks; re-parses every function, so it is opt-in). TWO PROTOTYPE-STAGE targets diff the DATA STAGE instead — which declared prototypes\' properties stopped existing, separating a write from a deletion that no longer deletes. Not-in-profile is not "missing": a dependency may supply it' })
 
     -- ── the EXTERNAL SURFACE: names used but defined nowhere here, with the
     --    shape inferred backward from usage (the boundary map + write-side seed)

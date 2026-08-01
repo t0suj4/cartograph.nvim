@@ -1569,6 +1569,52 @@ expressions, zero field reads), and where the iterated expression of a loop is
 itself a bare name it is treated as a binding, which can only make an external
 name look local rather than inventing one.
 
+### The third surface: a declarative DATA stage
+
+Calls and reads are both *name* surfaces. A Factorio mod's data stage is neither —
+it is a set of **prototypes** whose properties are table keys and field
+assignments, so no dotted name exists to adjudicate. Give the verb two
+**prototype-stage** artifacts and it dispatches on the stage they declare:
+
+```
+prototype diff — the DATA STAGE moving from lua-factorio-proto-11 to lua-factorio-proto-20
+  54 prototype(s) read; 1 write(s) and 9 deletion(s) hit a removed property, 142 unchanged
+
+  WRITES TO A REMOVED PROPERTY — 1:
+    result                          recipe               prototypes/entity/assembling-machine.lua:70
+
+  DELETIONS THAT NO LONGER DELETE — 9:
+    animation                       assembling-machine   prototypes/entity/assembling-machine.lua:59
+    circuit_wire_connection_points  transport-belt       prototypes/entity/belt.lua:33
+    module_specification            mining-drill         prototypes/entity/mining-drill.lua:56
+
+  THIS IS A LOWER BOUND — 28 of 54 prototype(s) could not be adjudicated at all:
+    24 prototype(s) written as a TABLE LITERAL — the IR models `{…}` as an opaque
+       allocation, so their keys were not read at all (not "no findings")
+```
+
+Two things make this a worklist rather than a name match. First, **a prototype
+carries its own discriminator** — it is copied out of `data.raw[<typename>][<name>]`
+— so each property is checked against the property set of the prototype that *owns*
+it, walking the declared inheritance chain. Matching removed property *names*
+against every `key =` instead is useless: measured on the same mod, `height` matched
+44 sites and was lost by exactly one prototype, and `name` matched 26 and was never
+lost at all.
+
+Second, **a deletion is not a write**. Nine of those ten lines assign `nil` to
+*remove* a property. That is neither a no-op nor a crash: the property is gone in
+2.0, so the line now removes nothing and the entity silently keeps whatever the
+deletion used to suppress. Different repair, different urgency, so they are
+different sections — reporting all ten as "a value written to a property that no
+longer exists" would be right about the facts and wrong about the work.
+
+The lower bound is stated rather than implied. A prototype written as a bare table
+literal has unreadable keys (the IR models `{…}` as an opaque allocation), and so do
+prototypes whose typename could not be resolved; both are counted as **unread**,
+alongside prototypes passed to an opaque call that Lua's by-reference semantics say
+may have rewritten anything. A *runtime* artifact is **refused** here rather than
+answered — it carries no typenames, so it would call every property fine.
+
 It's the easiest verb here to overstate, so: the bucket is **NOT-IN-PROFILE**,
 never "missing" — a dependency may supply the name, or the artifact may be
 partial, and cartograph cannot tell which. The profile's own symbol count is

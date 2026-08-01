@@ -144,6 +144,14 @@ local profile = {
     version = api.application_version, api_version = api.api_version,
     stamp = { source = API, application_version = api.application_version,
         api_version = api.api_version, stage = api.stage },
+    -- `members` / `complete` are THIS ARTIFACT'S names, and they are deliberate: the
+    -- artifact is an INGREDIENT, not a portability target. spec/profile/lua-factorio-11
+    -- reads `api.members` / `api.complete` and republishes them as the api_members /
+    -- api_complete that portability.provides consults. Renaming them here to match the
+    -- consumer looks tidier and silently cuts that bridge (measured: the hand profile's
+    -- api_members went empty, so `game.entity_prototypes` degraded from "member of
+    -- LuaGameScript" to "namespace game" and stopped being adjudicable as porting work).
+    -- If these ever need renaming, move lua-factorio-11.lua in the same commit.
     global2class = global2class, members = members, sigs = sigs,
     complete = complete, -- classes whose member surface is fully enumerated
     free = free, free_sigs = free_sigs,
