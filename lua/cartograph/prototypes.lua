@@ -58,6 +58,11 @@ M.FACTORIO = {
     name      = 'factorio-data',
     registrar = { ['data.extend'] = true },
     base_root = 'data.raw',
+    -- the property whose VALUE is the prototype's typename. A copied prototype takes
+    -- its type from `data.raw[<type>][<name>]`; a literal one declares it as a
+    -- property, and it is equally exact either way — `local x = {}` followed by
+    -- `x.type = "sound"` is the same fact as `{ type = "sound" }`, one line later.
+    type_key = 'type',
     copy_tail = { deepcopy = true },
 }
 
@@ -153,6 +158,45 @@ local function target_path(e)
     return root, rest
 end
 
+--- A table literal's OWN top-level entries, as prototype overrides (CART-0220).
+--- Returns (overrides, declared_type, own_name, unreadable_keys) or nil when `e` is
+--- not a table.
+---
+--- THIS IS WHERE 82% OF THE ECOSYSTEM LIVES. Measured across 195 installed mods:
+--- 3280 `data:extend` sites hand over an INLINE TABLE LITERAL against 594 that pass a
+--- variable, so the base-copy-plus-overrides shape this module was built for — the one
+--- Von-Neumann uses — is the minority everywhere else. Those keys used to be
+--- unreadable ({k='table'} was an opaque allocation); the expression IR now models a
+--- constructor entry as {k='pair', key, val}, so they are ordinary reads.
+---
+--- A LITERAL PROTOTYPE CARRIES ITS OWN DISCRIMINATOR in `type=`, exactly as a copied
+--- one carries it in `data.raw[<type>][<name>]` — so the property check stays exact for
+--- both shapes and needs no inference either way.
+---
+--- A COMPUTED KEY is counted, never guessed: `key.k == 'lit'` means the property name
+--- is known, and anything else (`{[x] = 1}`) is reported as unreadable so the record
+--- stays an honest lower bound instead of silently dropping an entry.
+local function literal_fields(e, line)
+    if not (e and e.k == 'table') then return nil end
+    local ovs, ty, own, unreadable = {}, nil, nil, 0
+    for _, kid in ipairs(e.kids or {}) do
+        if kid.k == 'pair' then
+            local key = kid.key
+            if key and key.k == 'lit' and type(key.v) == 'string' then
+                local prop = key.v
+                local v, why = literal(kid.val)
+                ovs[#ovs + 1] = { path = prop, value = v, why = why, line = line,
+                    ty = kid.val and kid.val.ty or nil }
+                if prop == 'type' and v then ty = v end
+                if prop == 'name' and v then own = v end
+            else
+                unreadable = unreadable + 1
+            end
+        end
+    end
+    return ovs, ty, own, unreadable
+end
+
 -- ── the reading ─────────────────────────────────────────────────────────────
 
 --- Prototypes declared in one module. Returns a list, source-ordered, or nil when
@@ -164,7 +208,13 @@ end
 ---   base       { type, name } it was copied from, or nil (a literal / unknown)
 ---   basis      'copy' | 'literal' | 'patch' | 'unknown'
 ---   patch      { type, name } when this OVERRIDES an existing prototype in place
----   overrides  ordered { path, value, ty, why, line }
+---   overrides  ordered { path, value, ty, why, line } — MUTATIONS after construction
+---   fields     a LITERAL's own constructor entries, same shape (CART-0220). Kept
+---              separate from `overrides` because they are construction, not mutation
+---   declared_type  the literal's own `type=` — its discriminator, as `base.type` is
+---              for a copied one
+---   unreadable_keys  how many entries had a COMPUTED key, so the record stays an
+---              honest lower bound
 ---   name       the prototype's own name, when a literal override supplied it
 ---   registered { line } | nil
 ---   frontiers  { { kind='mutator', callee, line } }
@@ -210,10 +260,19 @@ function M.of_module(store, mod_id)
                 elseif cp then
                     fresh(lhs1.n, line, 'unknown') -- a copy of something else
                 elseif rhs1.k == 'table' then
-                    -- a literal prototype: its FIELDS are invisible to the IR
-                    -- ({k='table'} is an opaque allocation), so the basis is
-                    -- honest about being unread rather than reporting none
-                    fresh(lhs1.n, line, 'literal')
+                    -- a LITERAL prototype. Its fields used to be invisible ({k='table'}
+                    -- was an opaque allocation); the IR now models constructor entries,
+                    -- so they are read here and the basis says so.
+                    local ovs, ty, own, bad = literal_fields(rhs1, line)
+                    local p = fresh(lhs1.n, line, 'literal')
+                    -- `fields` NOT `overrides`: this module's model is a base plus an
+                    -- ORDERED SEQUENCE OF OVERRIDES, and a literal's own keys are its
+                    -- CONSTRUCTION, not a later mutation. Merging them would silently
+                    -- redefine `overrides` for every existing consumer — measured: it
+                    -- shifted overrides[1] and broke four specs that index it.
+                    p.fields = ovs or {}
+                    p.declared_type, p.name = ty, own
+                    p.unreadable_keys = bad
                 end
             end
 
@@ -271,11 +330,31 @@ function M.of_module(store, mod_id)
                 end
                 if d and ad.registrar[d] then
                     if #touched == 0 then
-                        -- registered something we never tracked (an inline
-                        -- literal): recorded, not dropped
-                        local p = fresh(nil, line, 'literal')
-                        p.registered = { line = line }
-                        p.anonymous = true
+                        -- REGISTERED INLINE: `data:extend{{…}, {…}}`. This is the
+                        -- ecosystem's dominant shape (3280 of 3874 data:extend sites
+                        -- across 195 mods), and it used to produce ONE anonymous record
+                        -- with no fields at all. The argument's table entries are now
+                        -- readable, so each registered literal becomes its own record
+                        -- carrying its `type=` discriminator and its property keys.
+                        local arg = (rhs1.a or {})[1]
+                        local made = 0
+                        for _, kid in ipairs((arg and arg.k == 'table' and arg.kids) or {}) do
+                            if kid.k == 'table' then
+                                local ovs, ty, own, bad = literal_fields(kid, line)
+                                local p = fresh(nil, line, 'literal')
+                                p.fields, p.declared_type, p.name = ovs or {}, ty, own
+                                p.unreadable_keys = bad
+                                p.registered = { line = line }
+                                made = made + 1
+                            end
+                        end
+                        if made == 0 then
+                            -- registered something we could not read at all (a call, a
+                            -- name we never tracked): recorded, not dropped
+                            local p = fresh(nil, line, 'literal')
+                            p.registered = { line = line }
+                            p.anonymous = true
+                        end
                     end
                     for _, p in ipairs(touched) do p.registered = { line = line } end
                 elseif d then
@@ -289,6 +368,25 @@ function M.of_module(store, mod_id)
                             { kind = 'opaque-call', callee = d, line = line }
                         p.complete = false
                     end
+                end
+            end
+        end
+    end
+    -- THE DISCRIMINATOR CAN ARRIVE LATE. Von-Neumann writes `local cage_sound = {}`
+    -- and then `cage_sound.type = "sound"`, so the typename is an OVERRIDE rather than
+    -- a constructor entry — same fact, one line later. Read it from either, since
+    -- without it a record has no property set to be checked against.
+    if ad.type_key then
+        for _, p in ipairs(protos) do
+            if not p.declared_type then
+                for _, list in ipairs({ p.fields or {}, p.overrides or {} }) do
+                    for _, ov in ipairs(list) do
+                        if ov.path == ad.type_key and type(ov.value) == 'string' then
+                            p.declared_type = ov.value
+                            break
+                        end
+                    end
+                    if p.declared_type then break end
                 end
             end
         end

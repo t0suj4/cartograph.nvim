@@ -1157,7 +1157,11 @@ function M.prototype_diff(store, from, to)
     for _, m in ipairs(protos) do
         for _, p in ipairs(m.protos) do
             res.records = res.records + 1
+            -- a copied prototype names its type in `data.raw[<type>][<name>]`; an
+            -- inline LITERAL names it in its own `type=` key (CART-0220). Both are
+            -- the prototype's own discriminator, so both are exact.
             local ty = (p.base and p.base.type) or (p.patch and p.patch.type)
+                or p.declared_type
             local pn_a = ty and a.typenames[ty]
             local pn_b = ty and b.typenames[ty]
             -- UNREAD and UNTYPED are kept DISJOINT: a table-literal prototype has no
@@ -1165,10 +1169,13 @@ function M.prototype_diff(store, from, to)
             -- reporting both counts would double-count the same records — 24 + 28
             -- against 54, which reads as more unadjudicable prototypes than exist.
             -- Each record gets exactly one reason.
-            if p.basis == 'literal' then
+            if p.basis == 'literal' and not p.declared_type then
                 res.unread[#res.unread + 1] = { file = m.file, line = p.line,
-                    why = 'a table literal: the expression IR models `{…}` as an'
-                        .. ' opaque allocation, so its keys are not readable' }
+                    why = (p.unreadable_keys or 0) > 0
+                        and 'a table literal whose keys are COMPUTED, so the property'
+                            .. ' names are not knowable'
+                        or 'a table literal with no `type=` key, so no prototype owns'
+                            .. ' its properties' }
             elseif not ty then
                 res.untyped = res.untyped + 1
             elseif pn_a and not pn_b then
@@ -1183,7 +1190,13 @@ function M.prototype_diff(store, from, to)
             end
             local props_a, props_b = proto_props(a, pn_a), proto_props(b, pn_b)
             if props_a and props_b then
-                for _, ov in ipairs(p.overrides) do
+                -- BOTH lists: a literal's own constructor entries (`fields`) and any
+                -- later mutation (`overrides`). They are separate in the record because
+                -- construction is not mutation; the property question wants the union.
+                local entries = {}
+                for _, ov in ipairs(p.fields or {}) do entries[#entries + 1] = ov end
+                for _, ov in ipairs(p.overrides or {}) do entries[#entries + 1] = ov end
+                for _, ov in ipairs(entries) do
                     -- the FIRST segment is the property; a deeper path
                     -- (`minable.result`) names a field of the property's own type,
                     -- which needs the concept types and is not adjudicated here
@@ -1297,9 +1310,10 @@ function M.prototype_diff_report(store, from, to, opts)
         L[#L + 1] = ('  THIS IS A LOWER BOUND — %d of %d prototype(s) could not be'
             .. ' adjudicated at all:'):format(#res.unread + res.untyped, res.records)
         if #res.unread > 0 then
-            L[#L + 1] = ('    %d prototype(s) written as a TABLE LITERAL — the'
-                .. ' expression IR models `{…}` as an opaque allocation, so their keys'
-                .. ' were not read at all (not "no findings"):'):format(#res.unread)
+            L[#L + 1] = ('    %d prototype(s) with NO READABLE TYPENAME — a literal'
+                .. ' with no `type=` anywhere, or one whose keys are COMPUTED. Their'
+                .. ' properties were not checked at all (not "no findings"):')
+                :format(#res.unread)
             for i = 1, math.min(5, #res.unread) do
                 L[#L + 1] = ('      %s:%s'):format(res.unread[i].file or '?',
                     tostring(res.unread[i].line or '?'))

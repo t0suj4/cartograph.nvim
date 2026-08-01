@@ -162,12 +162,31 @@ data:extend{a, b}
     ok(by_var(ps, 'b').registered, 'b registered — both, from one call')
 end)
 
-test('registration: an ANONYMOUS registration is recorded, not dropped', function ()
+test('registration: an INLINE literal is IDENTIFIED, not anonymous (CART-0220)',
+    function ()
+    -- This used to be the anonymous case: registering a table literal produced one
+    -- record with no fields, because {…} was opaque in the IR. The IR now models
+    -- constructor entries, so the literal names itself — and this is the ecosystem's
+    -- dominant shape (3280 of 3874 data:extend sites across 195 installed mods).
     local ps = read('data:extend{ { type = "recipe", name = "r" } }\n')
     eq(1, #ps)
-    eq(true, ps[1].anonymous)
+    eq(nil, ps[1].anonymous, 'no longer anonymous: the literal identifies itself')
+    eq('recipe', ps[1].declared_type, 'its own type= is the discriminator')
+    eq('r', ps[1].name)
+    eq(2, #ps[1].fields, 'its constructor entries are READ')
+    eq({}, ps[1].overrides, 'and kept out of `overrides`, which means MUTATION')
     ok(ps[1].registered, 'the registration is a fact even with no var to attach')
     eq(nil, ps[1].var)
+end)
+
+test('registration: a registration it CANNOT read is still anonymous', function ()
+    -- the honest floor survives: registering something that is not a readable literal
+    -- (a call, a name we never tracked) is recorded as anonymous rather than dropped
+    local ps = read('data:extend{ make_recipes() }\n')
+    eq(1, #ps)
+    eq(true, ps[1].anonymous)
+    ok(ps[1].registered)
+    eq(nil, ps[1].declared_type, 'and it claims no type it could not read')
 end)
 
 test('registration: absent means absent', function ()

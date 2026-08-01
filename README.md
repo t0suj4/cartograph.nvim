@@ -1386,12 +1386,21 @@ base **names the local** to follow instead of shrugging. And an explicit
 `x.field = nil` is reported as a **delete** — a fact, and a different one from
 "we couldn't read this".
 
-On a real 2000-line mod: 54 prototypes in 31 modules, 206 overrides, 26
-registered, 14 hedged, and **zero** left as a bare unknown — every one resolves to
-a named basis (copy · derived · copy-unresolved · literal · patch). Registration
-is read from the row's dataflow **use set**, not by parsing `{…}`: the expression
-IR models a table constructor as an opaque allocation, so `data:extend{chest}`
-never mentions `chest` in the IR at all.
+On a real 2000-line mod: 54 prototypes in 31 modules, 26 registered, 14 hedged, and
+**zero** left as a bare unknown — every one resolves to a named basis (copy ·
+derived · copy-unresolved · literal · patch). Registration is read from the row's
+dataflow **use set** rather than from the constructor, because `data:extend{chest}`
+mentions `chest` only as an argument the dataflow already tracks.
+
+A prototype written as a bare **literal** is read too, and it is the shape that
+dominates elsewhere: across 195 installed mods, 3280 of 3874 `data:extend` sites
+hand over an inline table against 594 that pass a variable. The expression IR models
+a constructor entry as a key/value pair, so a literal names itself — its own `type=`
+is its discriminator, exactly as `data.raw[<type>][<name>]` is for a copied one, and
+`local x = {}` followed by `x.type = "sound"` is the same fact one line later. Those
+entries are kept in `fields`, separate from `overrides`, because a literal's own keys
+are construction and an override is a mutation. On the four-mod cross-project corpus
+that took the readable property population from 1349 to **11448**.
 
 The domain semantics are three declared fields (the registrar call, the base
 table, the copy verbs) and activation rides the **env profile**, not the file
@@ -1649,7 +1658,7 @@ assignments, so no dotted name exists to adjudicate. Give the verb two
 
 ```
 prototype diff — the DATA STAGE moving from lua-factorio-proto-11 to lua-factorio-proto-20
-  54 prototype(s) read; 1 write(s) and 9 deletion(s) hit a removed property, 142 unchanged
+  54 prototype(s) read; 17 write(s) and 9 deletion(s) hit a removed property, 259 unchanged
 
   WRITES TO A REMOVED PROPERTY — 1:
     result                          recipe               prototypes/entity/assembling-machine.lua:70
@@ -1660,8 +1669,8 @@ prototype diff — the DATA STAGE moving from lua-factorio-proto-11 to lua-facto
     module_specification            mining-drill         prototypes/entity/mining-drill.lua:56
 
   THIS IS A LOWER BOUND — 28 of 54 prototype(s) could not be adjudicated at all:
-    24 prototype(s) written as a TABLE LITERAL — the IR models `{…}` as an opaque
-       allocation, so their keys were not read at all (not "no findings")
+    18 prototype(s) with NO READABLE TYPENAME — a literal with no `type=` anywhere,
+       or one whose keys are COMPUTED, so nothing owns their properties
 ```
 
 Two things make this a worklist rather than a name match. First, **a prototype
@@ -1679,11 +1688,11 @@ deletion used to suppress. Different repair, different urgency, so they are
 different sections — reporting all ten as "a value written to a property that no
 longer exists" would be right about the facts and wrong about the work.
 
-The lower bound is stated rather than implied. A prototype written as a bare table
-literal has unreadable keys (the IR models `{…}` as an opaque allocation), and so do
-prototypes whose typename could not be resolved; both are counted as **unread**,
-alongside prototypes passed to an opaque call that Lua's by-reference semantics say
-may have rewritten anything. A *runtime* artifact is **refused** here rather than
+The lower bound is stated rather than implied, and it shrank rather than vanished:
+a literal with no `type=` anywhere, or one whose keys are computed, still has nothing
+that owns its properties. Those are counted as **unread**, alongside prototypes whose
+typename could not be resolved and prototypes passed to an opaque call that Lua's
+by-reference semantics say may have rewritten anything. A *runtime* artifact is **refused** here rather than
 answered — it carries no typenames, so it would call every property fine.
 
 It's the easiest verb here to overstate, so: the bucket is **NOT-IN-PROFILE**,

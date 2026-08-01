@@ -16,6 +16,9 @@
 --   { k='un',    op='-'|'not'|'#'|..., e=<expr> }
 --   { k='bin',   op='+'|'..'|'and'|'or'|'=='|..., l=<expr>, r=<expr> }
 --   { k='table' }                                     -- ALLOCATION (fresh identity)
+--   { k='pair',  key=<expr>, val=<expr>? }            -- a constructor's k=v entry;
+--       `key` is a str lit when the property name is KNOWN, an expression when the
+--       key is computed. `kids` carries both halves so kids-walkers still see them.
 --   { k='fn' }                                        -- ALLOCATION (closure)
 --   { k='vararg' }
 --   { k='?', t=<node type>, kids={<expr>...} }         -- honest unknown; kids keep
@@ -103,6 +106,27 @@ local TABLE = { table_constructor = true, table = true }
 local ALLOCFN = { function_definition = true, function_declaration = true,
     anonymous_function = true, arrow_function = true, lambda_expression = true }
 local VARARG = { vararg_expression = true, vararg = true, spread_element = true }
+-- KEY-VALUE PAIRS inside a constructor (CART-0220). VERIFIED per language by
+-- parsing a snippet and reading the grammar's own node names — not guessed:
+--   lua           `field`   in table_constructor   (name/value field accessors)
+--   javascript    `pair`    in object
+--   typescript    `pair`    in object
+--   python        `pair`    in dictionary
+--   ruby          `pair`    in hash (and in keyword arguments, which is the same shape)
+--   php           `array_element_initializer` in array_creation_expression
+--   rust          `field_initializer` in field_initializer_list
+--   haskell       `field_update` in record
+-- DELIBERATELY ABSENT, each for a reason:
+--   zig — its `.key = 1` parses as `assignment_expression`, a node used for ordinary
+--     assignment everywhere else. Adding it would re-kind every assignment in the
+--     language, which is the "a wrong entry proposes an unsound edit" hazard the java
+--     note above describes.
+--   go / c / cpp / odin — their pair nodes (`keyed_element`, `initializer_pair`, …)
+--     did not reproduce in the verification snippets, so they are unverified. Add one
+--     only with its own parse check; an unverified name is a silent no-op, and a
+--     WRONG one is worse.
+local PAIR = { field = true, pair = true, array_element_initializer = true,
+    field_initializer = true, field_update = true }
 local PAREN = { parenthesized_expression = true }
 local UNWRAP = { expression_list = true, variable_list = true }
 
@@ -213,6 +237,42 @@ function build_core(node, src)
             if c:named() and c:type() ~= 'comment' then kids[#kids + 1] = build(c, src) end
         end
         return { k = 'table', kids = kids }
+    end
+    if PAIR[t] then
+        -- A KEY-VALUE PAIR. `key`/`val` name the halves so a consumer never has to
+        -- know the grammar; `kids` is kept as well so every traversal that walks kids
+        -- keeps seeing both, which is what stops a name inside a constructor from
+        -- disappearing from the read-set.
+        --
+        -- THE KEY IS NORMALIZED HERE, because only the harvest knows the language:
+        -- in Lua `{x = 1}` and `{["x"] = 1}` are the SAME key, while `{[x] = 1}` is a
+        -- computed one — and the grammar reports `name=identifier` for both the first
+        -- and the last. A bracketed key is detected by the `[` token and kept as an
+        -- EXPRESSION; a bare identifier becomes a string literal, so a consumer's test
+        -- is uniform: `key.k == 'lit'` means the property name is known.
+        -- NB a synthesized key literal carries no quotes, exactly as its source text
+        -- has none; a real `["x"]` keeps the source quotes like every other str lit.
+        local kn = node:field('name')[1] or node:field('key')[1]
+        local vn = node:field('value')[1]
+        local ops = operands(node)
+        if not (kn or vn) then vn = ops[1] end
+        -- POSITIONAL element (`{1, 2}`): no key at all, so emit the VALUE itself
+        -- rather than a pair with a hole. Keeps the read-set byte-identical to before
+        -- for array-style constructors, which are the common case in every language.
+        if not kn then return vn and build(vn, src) or { k = '?', t = t, kids = {} } end
+        local bracketed = false
+        for c in node:iter_children() do
+            if not c:named() and vim.trim(txt(c, src)) == '[' then bracketed = true; break end
+        end
+        local key
+        if not bracketed and kn:type():match('identifier') then
+            key = { k = 'lit', ty = 'str', v = txt(kn, src) }
+        else
+            key = build(kn, src)
+        end
+        local val = vn and build(vn, src) or nil
+        return { k = 'pair', key = key, val = val,
+            kids = val and { key, val } or { key } }
     end
     if ALLOCFN[t] then return { k = 'fn' } end -- NEVER descend a closure body (du doesn't either)
     if VARARG[t] then return { k = 'vararg' } end
@@ -354,7 +414,8 @@ local function walk(e, fn)
     elseif e.k == 'call' then walk(e.f, fn); for _, a in ipairs(e.a) do walk(a, fn) end
     elseif e.k == 'un' then walk(e.e, fn)
     elseif e.k == 'bin' then walk(e.l, fn); walk(e.r, fn)
-    elseif e.k == '?' or e.k == 'table' then for _, c in ipairs(e.kids or {}) do walk(c, fn) end
+    elseif e.k == '?' or e.k == 'table' or e.k == 'pair' then
+        for _, c in ipairs(e.kids or {}) do walk(c, fn) end
     end
 end
 M.walk = walk
@@ -377,6 +438,9 @@ function M.key(e)
     end
     if k == 'un' then return 'U' .. e.op .. M.key(e.e) end
     if k == 'bin' then return 'B' .. e.op .. '(' .. M.key(e.l) .. ',' .. M.key(e.r) .. ')' end
+    if k == 'pair' then
+        return 'P' .. M.key(e.key) .. ':' .. (e.val and M.key(e.val) or '')
+    end
     if k == 'table' then return 'T' end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
@@ -433,7 +497,7 @@ function M.dotted_reads(e, out)
         for _, a in ipairs(e.a or {}) do M.dotted_reads(a, out) end
     elseif e.k == 'un' then M.dotted_reads(e.e, out)
     elseif e.k == 'bin' then M.dotted_reads(e.l, out); M.dotted_reads(e.r, out)
-    elseif e.k == '?' or e.k == 'table' then
+    elseif e.k == '?' or e.k == 'table' or e.k == 'pair' then
         for _, c in ipairs(e.kids or {}) do M.dotted_reads(c, out) end
     end
     return out
@@ -494,7 +558,8 @@ local function expr_reads(e, acc)
     elseif k == 'call' then expr_reads(e.f, acc); for _, a in ipairs(e.a) do expr_reads(a, acc) end
     elseif k == 'un' then expr_reads(e.e, acc)
     elseif k == 'bin' then expr_reads(e.l, acc); expr_reads(e.r, acc)
-    elseif k == '?' or k == 'table' then for _, c in ipairs(e.kids or {}) do expr_reads(c, acc) end
+    elseif k == '?' or k == 'table' or k == 'pair' then
+        for _, c in ipairs(e.kids or {}) do expr_reads(c, acc) end
     end
     -- lit / fn / vararg: no leaf reads
 end
@@ -533,7 +598,8 @@ function M.names(row)
         elseif k == 'call' then vars(e.f); for _, a in ipairs(e.a) do vars(a) end
         elseif k == 'un' then vars(e.e)
         elseif k == 'bin' then vars(e.l); vars(e.r)
-        elseif k == '?' or k == 'table' then for _, c in ipairs(e.kids or {}) do vars(c) end
+        elseif k == '?' or k == 'table' or k == 'pair' then
+            for _, c in ipairs(e.kids or {}) do vars(c) end
         end
     end
     for _, e in ipairs(row.rhs or {}) do vars(e) end

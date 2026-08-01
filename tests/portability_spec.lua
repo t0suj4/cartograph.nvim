@@ -854,25 +854,55 @@ test('portability: the data-stage diff separates a WRITE from a DELETION', funct
     vim.fn.delete(proto_tmp, 'rf')
 end)
 
-test('portability: the data-stage diff reports what it CANNOT read', function ()
+test('portability: an INLINE table literal is read — its type= is its discriminator',
+    function ()
     if not proto_ready() then skip 'no prototype-api artifacts' end
-    -- a bare table literal: the expression IR models `{…}` as an opaque allocation,
-    -- so its keys are unreadable. It must be declared UNREAD, never counted clean —
-    -- a data-stage reading that printed only findings would be a fabricated all-clear.
+    -- CART-0220. `data:extend{{…}}` is the ecosystem's dominant shape: 3280 of 3874
+    -- data:extend sites across 195 installed mods, against 594 that pass a variable.
+    -- Those keys used to be unreadable and the whole prototype counted as UNREAD; the
+    -- expression IR now models a constructor entry, so the literal is adjudicated by
+    -- its own `type=` exactly as a copied prototype is by data.raw[<type>][<name>].
+    -- Properties verified against BOTH artifacts first: container.vehicle_impact_sound
+    -- is in 1.1 and gone in 2.0; container.inventory_size is in both.
     local st = factorio_store(table.concat({
-        'local q = { type = "container", name = "q", inventory_size = 8 }',
-        'data:extend{q}',
+        'data:extend{{',
+        '  type = "container",',
+        '  name = "q",',
+        '  inventory_size = 8,',
+        '  vehicle_impact_sound = 1,',
+        '}}',
+    }, '\n'))
+    local res = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
+    ok(res, 'the diff runs')
+    eq(0, #res.unread, 'the literal is NOT unread any more — it is read')
+    eq(1, #res.lost, 'and its removed property is a real finding')
+    eq('vehicle_impact_sound', res.lost[1].prop)
+    eq('container', res.lost[1].typename, 'from the literal\'s OWN type= key')
+    ok(res.kept >= 1, 'while a property present in both versions is unchanged')
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: a literal it still cannot read is UNREAD, with the reason',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- The lower bound did not go away, it got smaller. Two things still defeat it, and
+    -- each says which: a COMPUTED key (the property name is not knowable) and a literal
+    -- with no `type=` (no prototype owns its properties). Reported, never counted clean
+    -- — a data-stage reading that printed only findings would be a fabricated all-clear.
+    local st = factorio_store(table.concat({
+        'local k = "inventory_size"',
+        'local u = { [k] = 8 }',        -- computed key, and no type=
+        'data:extend{u}',
     }, '\n'))
     local res = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
     ok(res, 'the diff runs')
     eq(0, #res.lost, 'nothing is claimed about it')
-    eq(1, #res.unread, 'because it is UNREAD, and says so')
-    ok(res.unread[1].why:find('opaque allocation'), 'with the reason, not a shrug')
-    local lines = port.prototype_diff_report(st, 'lua-factorio-proto-11',
-        'lua-factorio-proto-20')
-    local text = table.concat(lines, '\n')
+    eq(1, #res.unread, 'it is UNREAD, and counted')
+    ok(res.unread[1].why:find('COMPUTED') or res.unread[1].why:find('no `type=`'),
+        'with the reason, not a shrug: ' .. tostring(res.unread[1].why))
+    local text = table.concat(port.prototype_diff_report(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20'), '\n')
     ok(text:find('LOWER BOUND'), 'and the report leads with the lower bound')
-    ok(text:find('not "no findings"'), 'saying explicitly that this is not an all-clear')
     vim.fn.delete(proto_tmp, 'rf')
 end)
 
