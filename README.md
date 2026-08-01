@@ -1623,10 +1623,22 @@ more sharply than callees: a root the profile does not know is not "some
 receiver", it is a global the target lacks.
 
 Coverage is honest about its edges: it finds what the expression layer models as
-field access — Lua, PHP and JS yes, **Java no** (measured: 156 rows with
-expressions, zero field reads), and where the iterated expression of a loop is
-itself a bare name it is treated as a binding, which can only make an external
-name look local rather than inventing one.
+field access, and **that is a per-language declaration, not a general capability**.
+The layer was effectively a Lua one — a measured `?`-share of 5.4% on Lua against
+~40% on PHP and ~38% on Python, with PHP carrying *three* field nodes and Python
+*none*, because their grammars' node names had simply never been entered. Adding
+four verified names (PHP `member_access_expression`, Python `attribute` and
+`subscript`, Go `selector_expression`) took dotted reads from 54 to 151 on a PHP
+corpus, 0 to 154 on Python, and **38 to 3363 on Go** while removing a third of its
+opacity — from one node name.
+
+Still outside it: **Java** (`method_invocation` and `argument_list` are 58% of its
+unknowns in one concept, and adding `field_access` alone was tried and reverted
+because it unblocked nothing while the surrounding calls stayed opaque), and
+**Ruby**, which produces no expression records at all — its control-flow node types
+are not in the CFG's set, so the layer never starts. Where the iterated expression
+of a loop is itself a bare name it is treated as a binding, which can only make an
+external name look local rather than inventing one.
 
 ### Stages: one root, one language, three environments
 

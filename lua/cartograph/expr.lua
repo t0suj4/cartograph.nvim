@@ -102,10 +102,35 @@ local NAME = { identifier = true, name = true }
 -- wrong entry there proposes an UNSOUND edit rather than a missing one. Whoever
 -- takes it should add the entries together, with the purity/allocation semantics
 -- checked, and re-measure registry-audit as the canary.
+-- FIELD / INDEX node names, per language, VERIFIED BY PARSING (CART-0224). The IR
+-- was effectively a LUA IR with partial JS: measured `?` share was 5.4% on our own
+-- tree but ~40% on php and ~38% on python, and php had ZERO `field` nodes while
+-- python had zero `field` AND zero `index` — their node names simply were not here.
+-- Each addition below was confirmed by parsing a snippet and reading the grammar's own
+-- child list, not from memory:
+--   php    member_access_expression  "$a->b"    operands: variable_name , name
+--   python attribute                 "a.b"      operands: identifier , identifier
+--   python subscript                 "a[1]"     operands: identifier , integer
+--   go     selector_expression       "a.b"      operands: identifier , field_identifier
+-- All four are base-first / selector-second with exactly two named children, which is
+-- what the FIELD and INDEX branches below assume, and all four NEST correctly (`a.b.c`
+-- has the inner `a.b` node as its base) so a chain still forms for expr.dotted.
+-- php's base is `variable_name`, which line ~210 already unwraps.
+--
+-- DELIBERATELY NOT ADDED: php's `member_call_expression` ($a->b(1)). That is a CALL
+-- form, and CALL decides is_pure / allocates and feeds rewrites optimize can APPLY, so
+-- it needs the callee-position and method-flag semantics checked together — the same
+-- care the java note below demands, and the same reason `field_access` alone was
+-- reverted there. A read-position addition cannot propose an unsound edit; a call-form
+-- one can.
 local FIELD = { dot_index_expression = true, field_expression = true,
-    member_expression = true }
+    member_expression = true,
+    member_access_expression = true,  -- php   $a->b
+    attribute = true,                 -- python a.b
+    selector_expression = true }      -- go    a.b
 local INDEX = { bracket_index_expression = true, subscript_expression = true,
-    index_expression = true }
+    index_expression = true,
+    subscript = true }                -- python a[1] (a[1:2] keeps `?` for the slice)
 local METHOD = { method_index_expression = true }
 local CALL = { function_call = true, call_expression = true, call = true,
     function_call_expression = true }
