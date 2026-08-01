@@ -1080,22 +1080,23 @@ M.rules = {
     { name = 'listener-audit', severity = 'warn', disposition = 'suggestive',
         run = listener_findings },
     { name = 'swallowed-type', severity = 'info', disposition = 'calibration',
-        -- DISPOSITION UNDER REVIEW, and the `calibration` label is the weakest part of
-        -- this registry. It was filed as a calibration question (CART-0193, "likely lint
-        -- calibration, not 1965 bugs") and I twice argued otherwise before measuring:
-        -- the `M` in "M type is swallowed" is the PREFIX OF THE MATCHED DEF, not a
-        -- receiver type, so `M` being 79% of the count just means 371 of our files write
-        -- `local M = {}`. What the count actually measures is the PRECISION of
-        -- whole-graph unique-name matching: 7197 of 7456 inferred resolutions (97%)
-        -- cross files, and at least one is verifiably wrong — ansible.lua:238's
-        -- `p:range()` on a TREE-SITTER NODE resolves to callcols.lua's `M.range`.
-        -- A fabricated `to` edge is the phantom-fact class, which
-        -- [[cartograph-concern-layering]] rates WORSE than a phantom absence because
-        -- analyzers act on it.
-        -- WHY IT IS NOT RECLASSIFIED HERE: the right label depends on the WRONG-RATE of
-        -- those 7197, which is unmeasured (module_alias, 1767 of them, is a legitimate
-        -- cross-file stage). CART-0227 carries the sampling plan. Do not re-pin or
-        -- re-label this count until that rate is known.
+        -- `calibration` IS THE MEASURED LABEL, not a placeholder — CART-0227 sampled the
+        -- wrong-rate this comment used to be waiting on. What the count measures is the
+        -- PRECISION of whole-graph unique-name matching (the `M` in "M type is swallowed"
+        -- is the PREFIX OF THE MATCHED DEF, not a receiver type — `M` is 79% only because
+        -- 371 of our files write `local M = {}`). Of 7199 cross-file `inferred`
+        -- resolutions, 4780 (66.4%) are PROVEN correct mechanically: the receiver is a
+        -- local bound to a require OF THE FILE THE CALL RESOLVED INTO. 50 hand-read from
+        -- the 2419-edge residual came back 35 CORRECT / 15 wrong, so ~10% of the
+        -- population is fabricated (~726 edges, 95% CI 6.4–14.7%). Reading these findings
+        -- as a defect queue would be wrong by ~8x, which is what CART-0193 said before
+        -- either of my rereadings.
+        -- THE PHANTOM EDGES ARE STILL REAL and they do not belong to this lint: a
+        -- fabricated `to` is the class [[cartograph-concern-layering]] rates WORSE than a
+        -- phantom absence because untangle/optimize/taint act on it. CART-0230 carries the
+        -- structural refusal that removes 427 of them at a measured 9-of-9 precision.
+        -- Do not relabel this rule as a way of registering that concern — an honest
+        -- lower-tier count and a phantom-edge population are two different things.
         run = swallowed_findings },
     {
         name = 'dead-function', severity = 'warn', disposition = 'suggestive',
