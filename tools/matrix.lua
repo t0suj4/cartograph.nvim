@@ -435,12 +435,34 @@ local function run_row(name)
             else
                 local d = gd.diff(base, slim)
                 local det = gd.empty(d) and nil or gd.report(d, { limit = 10 })
-                if det and not bench.same_rev(meta.corpus_rev, now) then
-                    table.insert(det, 1, ('corpus rev drift (baseline @ %s,'
-                        .. ' now @ %s) — may be corpus change, not extractor')
-                        :format(meta.corpus_rev or '?', now or '?'))
+                -- MIRROR gate.lua's three cases (CART-0219). Only pinned-and-clean or
+                -- UNPINNED corpora reach here (a moved/dirty pinned checkout returned a
+                -- skip above), and an unpinned corpus can fail to certify it held still
+                -- three ways: identity UNRECORDABLE on either side (same_rev(nil,nil) is
+                -- false, so "unknown" was being reported as drift), REV DRIFT, or a DIRTY
+                -- tree (a rev names a commit, not a working tree). In those cases the
+                -- diff is CONTEXT and the cell is `~` — matrix's own convention for
+                -- reported-not-gated — never FAIL.
+                -- A PINNED corpus never goes advisory: its rev and cleanliness were
+                -- verified above, so a diff there is always the extractor.
+                local unknown = not (meta.corpus_rev and now)
+                local drifted = not unknown and not bench.same_rev(meta.corpus_rev, now)
+                local dirty = (meta.corpus_dirty and true or false)
+                    or (corpus.git and corpus.git.dirty and true or false)
+                local advisory = (not corpus.rev) and (unknown or drifted or dirty)
+                if det then
+                    table.insert(det, 1, unknown
+                        and ('corpus identity UNRECORDABLE (baseline %s, now %s) —'
+                            .. ' diff is CONTEXT'):format(meta.corpus_rev or '?', now or '?')
+                        or (drifted
+                            and ('corpus rev drift (baseline @ %s, now @ %s) — may be'
+                                .. ' corpus change, not extractor')
+                                :format(meta.corpus_rev or '?', now or '?')
+                            or (dirty
+                                and 'corpus has UNCOMMITTED changes — diff is CONTEXT'
+                                or 'extractor drift')))
                 end
-                cell('struct', gd.empty(d) and 'OK' or 'FAIL', det)
+                cell('struct', gd.empty(d) and 'OK' or (advisory and '~' or 'FAIL'), det)
             end
         end
     end

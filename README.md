@@ -2366,6 +2366,15 @@ plugin's runtime path, never required from `lua/cartograph/`.
 nvim --headless -u NONE -l tools/gate.lua server
 # (re)establish the baseline on a known-good rev
 nvim --headless -u NONE -l tools/gate.lua server --save
+# A DIFF IS ONLY EVIDENCE IF THE CORPUS HELD STILL. A corpus is PINNED (repo +
+# rev + expected) or LIVING (no rev). A pinned checkout that moved or is dirty
+# answers no question at all — the gate exits "NOT APPLICABLE" rather than
+# guessing. A living one reports its diff as CONTEXT instead of failing, because
+# it cannot certify it held still, and there are three ways to fail that: no
+# recordable identity (a symlink assembly of unpacked mod dirs has no rev to
+# record), a rev that moved, or a dirty tree — a rev names a commit, not a
+# working tree. Pinned corpora never go advisory, so the gating population is
+# exactly the corpora that can vouch for themselves.
 # df/flow PARITY gate: coarse(flow)==df (per-statement def/use, category-
 # catalogued) + flow's CFG invariants (successors/liveness/reaching) run clean.
 # Since the df-strangler completed (step 6), production df IS flow.coarse, so
@@ -2563,8 +2572,12 @@ suite — `--fast` runs only the selected specs (`SPEC=` filter on
 guards the push). `tools/guards.lua` self-applies the development lints with
 cartograph's own seam declarations, and (reusing that same extraction) runs the
 df/flow parity check on the repo — hard-gating `flow-invariant-errors==0` (the
-CFG must never throw); the churning self census is reported here but pinned only
-in `dfgate self`. The check core is `tools/dfparity.lua`, shared with `dfgate`. `tools/consumers.lua` is the shape roster
+CFG must never throw); the churning self census is reported here as context and
+**pinned nowhere**. It used to be pinned in `dfgate self`, and that entry's
+comment had grown to 25 lines recording ~30 recalibrations — each one us
+analysing our own newly written source — which is what a baseline looks like when
+it cannot hold. `dfgate` now skips a corpus with no pinned `rev` (`--force` prints
+the census anyway, labelled as context). The check core is `tools/dfparity.lua`, shared with `dfgate`. `tools/consumers.lua` is the shape roster
 and seam rewriter (`--rw`/`--rwmod`/`--apply`, refusals printed as a review
 ledger).
 
