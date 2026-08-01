@@ -1599,24 +1599,46 @@ exactly as before.
     prototypes/entity/demo-entities.lua, …
 ```
 
-A file's stage comes from **reachability over the import graph**, not a path glob.
-Two reasons: a glob over `prototypes/` would be one mod's layout dressed up as a
-rule, and a glob cannot express the case that matters most — a helper required by
-*both* `data.lua` and `control.lua` runs in both environments, so it may use only
-what **both** provide. The rule is the intersection, so a name is wrong there even
-when one of the two stages does have it.
+A file's stage comes from **reachability over the import graph**, not a path glob —
+a glob over `prototypes/` would be one mod's layout dressed up as a rule, and it
+could not express a helper required by *both* `data.lua` and `control.lua`, which
+runs in both environments and may use only what **both** provide. Entry points are
+declared by the profile because they are the engine's own loading contract, and that
+includes `migrations/*.lua`, which nothing requires — the engine loads it directly,
+so reachability alone can never place it (202 such files across 51 of 195 installed
+mods). Anchored to one level: files *deeper* than `migrations/` are ordinary
+requires, and reachability is the right mechanism for those.
 
 When a name is used at the wrong stage, that is **not an absence**. The environment
 has it, in a different stage — a stronger claim than not-provided, and a crash
-rather than a missing feature, so it gets its own section above the not-in-profile
-list rather than being buried in it.
+rather than a missing feature, so it gets its own section rather than being buried
+in the not-in-profile list.
 
-Both denominators are printed, because a bare "0 findings" cannot be told from
-"nothing was checked": the count of sites actually **judged**, and the files no
-entry point reaches, on which nothing was ruled at all. A call that resolved to a
-project definition is skipped — measured on a real mod, `k-lib.lua` assigns
+**Only a module-level use is decidable, and this is where honesty costs coverage.**
+Lua evaluates a function body when the function is *called*, so a runtime-only name
+inside a function of a data-stage file is a violation only if something calls it at
+that stage. Worse, the idiom for a stage-agnostic helper is to guard the global:
+`space-exploration/scripts/log.lua` really contains `if Log.debug_prints and game
+then game.print(…) end`. Judging those gave 17 findings on that corpus and every one
+was false. They are **withheld and counted**, never silently dropped, and a local
+that merely shares a global's name is recognised as a local — a parameter called
+`data` carrying event data accounted for the other five false findings.
+
+Every denominator is printed, because a bare "0 findings" cannot be told from
+"nothing was checked": sites actually **judged**, candidates **withheld**, locals
+recognised, and the files no entry point reaches, on which nothing was ruled. A call
+resolving to a project definition is skipped too — `k-lib.lua` assigns
 `script.on_event = function(…)`, overwriting the API member, so those 33 calls
-dispatch to the mod's own code and are none of the environment's business.
+dispatch to the mod's own code.
+
+**What this does not do is find bugs.** Measured across 195 installed mods, the
+factorio corpus and the Von Neumann mod: 961 + 35 judged sites, zero real
+violations, and four entry-level candidates that all dissolved on inspection.
+Factorio crashes loudly at load when a mod touches a global its stage lacks, so the
+bug never survives development — the platform already fences the class. The
+partition earns its place for other reasons: it is what makes the data-stage diff
+below scope its population honestly, and reporting orphans found three genuinely
+dead files. Treat a violation report as a safety net, not a yield.
 
 ### The third surface: a declarative DATA stage
 

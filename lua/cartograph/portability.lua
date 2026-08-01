@@ -264,9 +264,74 @@ function M.region_verdict(prof, name, stageset)
     return 'provided', nil, nil
 end
 
+--- Is this call site evaluated when the FILE IS LOADED — i.e. at module level
+--- rather than inside a function body? Only a module-level site is decidable by a
+--- stage partition: Lua runs a function body when it is CALLED, so a runtime-only
+--- name inside a function of a data-stage file is a violation only if something
+--- calls that function at the data stage, which needs per-stage call reachability.
+local function module_level(store, c)
+    local callrec = require 'cartograph.callrec'
+    local owner = callrec.fn(c)
+    if not owner then return true end -- no enclosing function at all
+    local nd = store.node and store.node(owner)
+    if not nd then return true end
+    return nd.kind ~= 'function' and nd.kind ~= 'method'
+end
+
+--- Is `root` a LOCAL at this call site — a parameter, an assigned local, or a loop
+--- binding — rather than the environment's global of that name? Mirrors the locality
+--- set externals.references builds, for the same reason.
+---
+--- MEASURED NECESSITY: without this, ALL FIVE of the factorio corpus's out-of-region
+--- findings are false. Four are `data` as a function PARAMETER carrying event data
+--- (`function teleport_to_zone(data) … data.player.teleport(…)`); one is `data` as a
+--- module-level local holding GUI state. `data` is a data-stage global in the
+--- partition and those files are runtime-stage, so every one looked like a violation.
+---
+--- CALLED ONLY WHEN A FINDING IS ABOUT TO BE EMITTED, which is what makes it
+--- affordable: expr.of re-parses the enclosing function (~3.5 ms), so paying that per
+--- SITE would cost seconds on a large corpus (719 sites on this one), while paying it
+--- per CANDIDATE FINDING costs nothing in the normal case of none. Sound in the only
+--- direction that matters — a shadowed local can turn a real finding into silence but
+--- never the reverse, so checking late can only remove false positives.
+local function shadowed_local(store, c, root)
+    local callrec = require 'cartograph.callrec'
+    local expr = require 'cartograph.expr'
+    store._stage_shadow = store._stage_shadow or {}
+    local owner, is_mod = callrec.fn(c), false
+    if not owner then
+        -- a MODULE-level call: the enclosing scope is the module's statement run
+        for _, n in ipairs((store.data or {}).nodes or {}) do
+            if n.kind == 'module' and n.file == callrec.file(c) then
+                owner, is_mod = n.id, true; break
+            end
+        end
+        if not owner then return false end
+    else
+        local nd = store.node and store.node(owner)
+        is_mod = nd ~= nil and nd.kind == 'module'
+    end
+    local set = store._stage_shadow[owner]
+    if set == nil then
+        set = {}
+        local ok, eo = pcall(is_mod and expr.of_module or expr.of, store, owner)
+        local fl = ok and eo and eo.fl
+        if fl then
+            for _, pn in ipairs(fl.params or {}) do set[pn] = true end
+            for _, r in ipairs(fl.stmts or {}) do
+                for _, d in ipairs(r.def or {}) do set[d] = true end
+            end
+            for bn in pairs((ok and eo and eo.bound) or {}) do set[bn] = true end
+        end
+        store._stage_shadow[owner] = set
+    end
+    return set[root] == true
+end
+
 --- EVERY SITE where a stage-scoped name is used, judged against the stage its file
 --- is loaded at. Returns nil when the profile declares no stages, else a list of
---- { name, file, line, loaded_at, provided_at } plus `sites` (how many were judged).
+--- { name, file, line, loaded_at, provided_at } plus `sites` (how many were judged)
+--- and `shadowed` (how many candidate findings a local of that name refuted).
 ---
 --- WHY THIS WALKS CALL RECORDS AND NOT THE REQUIREMENT SET. requires() is built
 --- from the SILENT external surface — calls that resolved to nothing and were not
@@ -287,7 +352,8 @@ function M.stage_sites(store, prof)
     if not sm then return nil end
     local callrec = require 'cartograph.callrec'
     local data = (store or {}).data or {}
-    local out, judged = { sites = 0 }, 0
+    local out, judged, shadowed, withheld =
+        { sites = 0, shadowed = 0, withheld = 0 }, 0, 0, 0
     for _, c in callrec.each(data) do
         local full = callrec.full(c)
         local root = full and full:match('^([%w_]+)[%.:]')
@@ -303,7 +369,25 @@ function M.stage_sites(store, prof)
                 if at and next(at) then
                     judged = judged + 1
                     local verdict, provided_at = M.region_verdict(prof, full, at)
-                    if verdict == 'out-of-region' then
+                    -- the locality check is LAST, so it costs per candidate finding
+                    -- rather than per site. A local named `data` or `game` is not the
+                    -- environment's global of that name and must not be judged.
+                    if verdict == 'out-of-region' and shadowed_local(store, c, root) then
+                        shadowed = shadowed + 1
+                    elseif verdict == 'out-of-region' and not module_level(store, c) then
+                        -- INSIDE A FUNCTION BODY, so it is NOT DECIDABLE here. Lua
+                        -- evaluates a body only when the function is CALLED, so a
+                        -- runtime-only name inside a function of a data-stage-loaded
+                        -- file is a violation only if that function is called at the
+                        -- data stage — which needs per-stage call reachability. And the
+                        -- Factorio idiom for a stage-agnostic helper is to NIL-GUARD
+                        -- the global: space-exploration/scripts/log.lua:32 is literally
+                        -- `if Log.debug_prints and game then game.print(…) end`.
+                        -- Measured: judging these produced 17 findings on the factorio
+                        -- corpus and every one was false. Withheld and COUNTED, never
+                        -- silently dropped.
+                        withheld = withheld + 1
+                    elseif verdict == 'out-of-region' then
                         local loaded = {}
                         for s in pairs(at) do loaded[#loaded + 1] = s end
                         table.sort(loaded)
@@ -314,7 +398,7 @@ function M.stage_sites(store, prof)
             end
         end
     end
-    out.sites = judged
+    out.sites, out.shadowed, out.withheld = judged, shadowed, withheld
     table.sort(out, function (a, b)
         if a.name ~= b.name then return a.name < b.name end
         if (a.file or '') ~= (b.file or '') then return (a.file or '') < (b.file or '') end
@@ -645,6 +729,7 @@ function M.audit(store, runtime)
     if sites then
         res.out_of_region = sites
         res.stage_sites = sites.sites
+        res.stage_shadowed, res.stage_withheld = sites.shadowed, sites.withheld
     end
     for name, n in pairs(req.names) do
         local w = M.provides(prof, name)
@@ -1280,6 +1365,21 @@ function M.report(store, runtime, opts)
             L[#L + 1] = ('  STAGES: %d file(s) placed in a load stage, %d stage-scoped'
                 .. ' call site(s) judged; none is used outside the stage that provides'
                 .. ' it'):format(nfiles, res.stage_sites or 0)
+            -- what the judgement REFUSED to rule on, stated rather than implied: a
+            -- clean stage report has to say what it declined, or "none" reads as
+            -- "everything checked".
+            if (res.stage_withheld or 0) > 0 then
+                L[#L + 1] = ('    %d candidate(s) WITHHELD — inside a function body, so'
+                    .. ' whether that stage ever evaluates them needs per-stage call'
+                    .. ' reachability (and the Factorio idiom is to nil-guard the'
+                    .. ' global: `if game then game.print(…) end`)')
+                    :format(res.stage_withheld)
+            end
+            if (res.stage_shadowed or 0) > 0 then
+                L[#L + 1] = ('    %d candidate(s) were a LOCAL of that name, not the'
+                    .. ' environment global — a parameter or an assigned local')
+                    :format(res.stage_shadowed)
+            end
         else
             L[#L + 1] = ('  USED OUTSIDE ITS STAGE — %d site(s) of %d judged, and these'
                 .. ' are not absences:'):format(#res.out_of_region,
@@ -1287,6 +1387,9 @@ function M.report(store, runtime, opts)
             L[#L + 1] = '    the environment HAS the name, in a different load stage'
             L[#L + 1] = '    than the file is loaded in. A stronger claim than'
             L[#L + 1] = '    not-provided, and a crash rather than a missing feature.'
+            L[#L + 1] = ('    (MODULE-LEVEL sites only. %d withheld inside a function'
+                .. ' body, %d were a local of that name.)'):format(
+                res.stage_withheld or 0, res.stage_shadowed or 0)
             for i = 1, math.min(cap, #res.out_of_region) do
                 local e = res.out_of_region[i]
                 L[#L + 1] = ('    %-30s %s:%s'):format(e.name, e.file,

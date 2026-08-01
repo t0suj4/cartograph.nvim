@@ -613,6 +613,104 @@ test('portability: a name used OUTSIDE its load stage is a finding, not an absen
     vim.fn.delete(root, 'rf')
 end)
 
+test('portability: migrations/ is an ENGINE entry point; deeper files are not',
+    function ()
+    if not lua_ready() then skip 'no lua parser' end
+    -- CART-0221. The engine loads migrations/<file>.lua directly, so nothing requires
+    -- them and reachability alone can never place them. Anything DEEPER is an ordinary
+    -- require: bravest-new-world keeps migrations/lib/util.lua, and a
+    -- `migrations/.*%.lua$` pattern would wrongly declare that an engine entry.
+    local st, root = factorio_tree({
+        ['data.lua'] = 'data.extend{{}}',
+        ['control.lua'] = 'game.print("x")',
+        ['migrations/1.0.0.lua'] = 'local h = require("migrations.lib.helper")\ngame.print("m")',
+        ['migrations/lib/helper.lua'] = 'local M = {}\nreturn M',
+    })
+    local res = port.audit(st, 'lua-factorio')
+    local sm = res.stages
+    ok(sm.by_file['migrations/1.0.0.lua'].runtime,
+        'a depth-1 migration is placed at the RUNTIME stage')
+    eq('runtime', sm.entries['migrations/1.0.0.lua'], 'and it is an ENTRY point')
+    eq(nil, sm.entries['migrations/lib/helper.lua'],
+        'while a deeper file is NOT an entry — the engine does not load it')
+    ok(sm.by_file['migrations/lib/helper.lua']
+        and sm.by_file['migrations/lib/helper.lua'].runtime,
+        'it is placed by REACHABILITY instead, which is the right mechanism')
+    -- game at the runtime stage is correct, so no finding
+    eq(nil, region_of(res, 'game.print'))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: a MULTI-MOD root places each mod\'s own entries', function ()
+    if not lua_ready() then skip 'no lua parser' end
+    -- A mods folder is the ecosystem's normal shape, and every entry pattern needs a
+    -- `/`-prefixed form for it. Measured before the fix: on the 4-mod factorio corpus
+    -- ZERO data-stage files were placed and 335 files were orphans, because
+    -- `^data%.lua$` only matches at the extraction root — while the runtime stage
+    -- worked by accident, already carrying `/control%.lua$` for scenarios.
+    --
+    -- The shape cannot fire on a multi-mod root (no root-level control.lua), so this
+    -- also exercises the CART-0217 profile override as the thing that makes such a
+    -- root analysable at all.
+    local st, root = factorio_tree({
+        ['modA/data.lua'] = 'data.extend{{}}',
+        ['modA/control.lua'] = 'game.print("a")',
+        ['modB/data-updates.lua'] = 'data.extend{{}}',
+        ['modB/settings.lua'] = 'data.extend{{}}',
+    })
+    local ts = require 'cartograph.providers.treesitter'
+    local d = ts.extract(root, { profile = 'lua-factorio' })
+    d.root = root
+    local st2 = require 'cartograph.store'; st2.ingest(d)
+    local sm = port.stage_map(st2, require('cartograph.spec.profile').load('lua-factorio'))
+    ok(sm.by_file['modA/data.lua'] and sm.by_file['modA/data.lua'].data,
+        'a sub-mod data.lua is a DATA entry')
+    ok(sm.by_file['modA/control.lua'] and sm.by_file['modA/control.lua'].runtime,
+        'and its control.lua is RUNTIME')
+    ok(sm.by_file['modB/data-updates.lua'] and sm.by_file['modB/data-updates.lua'].data,
+        'data-updates.lua too')
+    ok(sm.by_file['modB/settings.lua'] and sm.by_file['modB/settings.lua'].settings,
+        'and settings.lua lands in the SETTINGS stage')
+    eq(0, #sm.orphans, 'nothing is orphaned')
+    ok(st ~= nil, 'the fixture built')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: only MODULE-LEVEL sites are decidable; locals and bodies are not',
+    function ()
+    if not lua_ready() then skip 'no lua parser' end
+    -- The three dispositions, all measured on real mods before being coded:
+    --   MODULE LEVEL   evaluated when the file loads -> a real finding
+    --   FUNCTION BODY  evaluated only if CALLED at that stage -> withheld. The
+    --                  Factorio idiom is to nil-guard (`if game then game.print(…)`),
+    --                  and space-exploration/scripts/log.lua does exactly that;
+    --                  judging these gave 17 findings on that corpus, all false.
+    --   A LOCAL of that name (parameter or assignment) -> not the global at all;
+    --                  4 of the corpus's 5 other false findings were `data` as a param.
+    local st, root = factorio_tree({
+        ['data.lua'] = 'require("p")',
+        ['control.lua'] = 'game.print("ok")',
+        ['p.lua'] = table.concat({
+            'game.print("module level")',            -- FINDING: runs at load
+            'local function inner() game.print("body") end',  -- withheld
+            'local function shadow(game) game.print("param") end', -- a local
+            'return { inner = inner, shadow = shadow }',
+        }, '\n'),
+    })
+    local res = port.audit(st, 'lua-factorio')
+    local g = region_of(res, 'game.print')
+    ok(g, 'the MODULE-LEVEL use is reported')
+    eq('p.lua', g.file)
+    eq('data', table.concat(g.loaded_at, '+'))
+    ok((res.stage_withheld or 0) >= 1, 'the function-body use is WITHHELD, not reported')
+    ok((res.stage_shadowed or 0) >= 1, 'and the parameter is recognised as a LOCAL')
+    -- both counts must be DISCLOSED — a clean report that hid them would read as
+    -- "everything checked"
+    local text = table.concat(port.report(st, 'lua-factorio'), '\n')
+    ok(text:find('WITHHELD') or text:find('withheld'), 'the report says what it declined')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('portability: a file loaded at TWO stages is held to the INTERSECTION',
     function ()
     if not lua_ready() then skip 'no lua parser' end

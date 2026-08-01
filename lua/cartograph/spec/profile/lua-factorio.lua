@@ -86,17 +86,45 @@ local SHARED = 'string table math os coroutine debug bit32 serpent util defines'
 local STAGES = {
     -- mod settings are prototypes too, so the settings stage has `data` — but not
     -- `settings`, which is the thing it is in the middle of defining
+    --
+    -- EVERY PATTERN COMES IN A ROOT-ANCHORED AND A `/`-PREFIXED FORM, because a
+    -- Factorio corpus is very often a MULTI-MOD root: a mods folder, or the
+    -- symlink-assembled cross-project corpus. There each mod's entry sits at
+    -- `<mod>/data.lua`, so a `^data%.lua$`-only list placed ZERO data-stage files on
+    -- the 4-mod factorio corpus while the runtime stage worked by accident — it
+    -- already carried `/control%.lua$` for scenarios. Measured: 111 files placed, all
+    -- runtime, 335 orphans.
     { name = 'settings', adds = 'data',
       entry = { '^settings%.lua$', '^settings%-updates%.lua$',
-                '^settings%-final%-fixes%.lua$' } },
+                '^settings%-final%-fixes%.lua$',
+                '/settings%.lua$', '/settings%-updates%.lua$',
+                '/settings%-final%-fixes%.lua$' } },
     -- the data stage CAN read startup settings, which is why `settings` is here
     { name = 'data', adds = 'data settings',
-      entry = { '^data%.lua$', '^data%-updates%.lua$', '^data%-final%-fixes%.lua$' } },
-    -- control.lua at the mod root, and a scenario's own control.lua some
-    -- directories down (two patterns: Lua patterns have no alternation)
+      entry = { '^data%.lua$', '^data%-updates%.lua$', '^data%-final%-fixes%.lua$',
+                '/data%.lua$', '/data%-updates%.lua$', '/data%-final%-fixes%.lua$' } },
+    -- control.lua at the mod root, a scenario's own control.lua some directories
+    -- down, and MIGRATION SCRIPTS (several patterns: Lua patterns have no
+    -- alternation).
+    --
+    -- `migrations/<file>.lua` is an entry point the ENGINE loads directly during
+    -- save migration — nothing requires it, so reachability alone can never place
+    -- it and every migration file was landing in the orphan bucket. Measured on the
+    -- real mods folder: 202 migration .lua files across 51 of 195 mods, using
+    -- game (147 files), storage (74), script (22), global (17), rendering (3) —
+    -- unambiguously this stage.
+    --
+    -- ANCHORED TO ONE LEVEL, deliberately. Factorio auto-loads only the files
+    -- directly inside migrations/; anything deeper is an ordinary require. All 202
+    -- files in the mods folder sit at depth 1, but bravest-new-world keeps
+    -- `migrations/lib/util.lua` and `migrations/lib/wiretap_1.lua`, which its
+    -- top-level migrations require by hand — a `migrations/.*%.lua$` pattern would
+    -- declare those engine entry points, which they are not. Reachability places
+    -- them, which is the correct mechanism for a required file.
     { name = 'runtime',
       adds = 'game script storage rendering prototypes remote commands rcon helpers settings',
-      entry = { '^control%.lua$', '/control%.lua$' } },
+      entry = { '^control%.lua$', '/control%.lua$', '^migrations/[^/]+%.lua$',
+                '/migrations/[^/]+%.lua$' } },
 }
 
 --- STAGES -> { name, entry, provides = <visible namespace set> } plus the inverse
