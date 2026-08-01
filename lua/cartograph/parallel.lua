@@ -413,7 +413,8 @@ function M.demand(file)
     local ts = require 'cartograph.providers.treesitter'
     local chunk = ts.extract(s.root,
         { files = { file }, fileset = s.fileset, skip_idpass = true,
-            abs = s.abs, packs = s.packs, transport = s.transport })
+            abs = s.abs, packs = s.packs, profile = s.profile,
+            transport = s.transport })
     merge_chunk(s, chunk)
     s.arrived[file] = true -- even if unreadable: don't retry per descend
     if s.on_chunk then s.on_chunk(s.done, s.total, s.acc) end
@@ -462,7 +463,7 @@ function M.extract(root, o)
         math.max(1, math.ceil(#files / M.BATCH)))
     if nw < 2 then
         o.on_done(ts.extract(root, { files = files, abs = abs, packs = o.packs,
-            transport = tstack }))
+            profile = o.profile, transport = tstack }))
         return
     end
     local rtp = worker_rtp()
@@ -474,12 +475,16 @@ function M.extract(root, o)
 
     local acc = { schema = 1, root = root, provider = o.provider or 'treesitter',
         roots = o.roots, packs = o.packs, -- so the parent's relink applies them
+        -- the profile OVERRIDE rides to every worker exactly like packs (CART-0217):
+        -- one explicit value decided in the parent, so no worker re-derives it and
+        -- none can disagree about which environment it is resolving against
+        profile = o.profile,
         capabilities = { calls = true, litdata = true, df = 'lite' },
         nodes = {}, edges = {}, calls = {}, stamps = {}, fn_ranges = {},
         mentions = {}, _no_parser = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
         on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1,
-        packs = o.packs, transport = tstack, wmetrics = {} }
+        packs = o.packs, profile = o.profile, transport = tstack, wmetrics = {} }
     M._session = s
 
     -- record-fold PEAK arc, step 2-live (gated CARTOGRAPH_MERGECOLS): fold each
@@ -662,6 +667,7 @@ function M.extract(root, o)
         for _, fb in ipairs(failed) do -- sequential fallback, honest
             merge_chunk(s, ts.extract(root, { files = fb,
                 fileset = files, skip_idpass = true, abs = abs, packs = o.packs,
+                profile = o.profile,
                 transport = tstack }))
         end
         canonicalize()
@@ -713,6 +719,7 @@ function M.extract(root, o)
         local t0 = vim.uv.hrtime()
         spawn({ phase = 'parse', root = root, files = b,
             fileset = files, rtp = rtp, roots = o.roots, packs = o.packs,
+            profile = o.profile,
             transport = tspec, -- the serialisable half; the worker rebuilds it
             foldstore = s.foldstore }, -- worker folds df/flow + ships the store once
             function (chunk, res)

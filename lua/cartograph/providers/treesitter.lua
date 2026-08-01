@@ -62,7 +62,24 @@ local EXT = M.EXT
 -- a known review item); a non-matching root → nil → behaviour unchanged.
 local _profile_mod = require 'cartograph.spec.profile'
 local _shapes_mod -- lazy (avoid a load cycle: shapes → config, never us)
-local function active_profile_for(root)
+--- `override` DISPOSES of shape inference, exactly as an explicit `opts.packs` does
+--- (CART-0217): a string names the profile to activate, and `false` means NONE — so
+--- nil (absent) triggers detection while `false` does not. That nil/false asymmetry
+--- IS the packs doctrine, repeated here rather than reinvented.
+---
+--- AN UNUSABLE NAME IS AN ERROR, NOT A FALLBACK. Quietly reverting to shape
+--- detection would let a typo change how a whole graph resolves while reporting
+--- success — the same failure that let an INGREDIENT artifact be selected as a
+--- portability target and report "0 LOST" (CART-0209). env_usable is the fence.
+local function active_profile_for(root, override)
+    if override == false then return nil end -- explicit NONE: the `{}` of this axis
+    if override ~= nil then
+        local prof, err = _profile_mod.env_usable(override)
+        if not prof then
+            error('cartograph: profile override — ' .. tostring(err), 0)
+        end
+        return prof
+    end
     if type(root) ~= 'string' then return nil end
     _shapes_mod = _shapes_mod or require 'cartograph.shapes'
     -- UP-direction ([[cartograph-repo-shapes]]): a sub-root inside a shaped repo
@@ -4120,7 +4137,10 @@ function M.extract(root, opts)
     if #packnames > 0 then data.packs = packnames end
     -- L2 env profile the repo shape implies (factorio-mod → lua-factorio); nil
     -- for an unshaped root. Composed AFTER packs (base ⊕ L2 ⊕ L3), memoized/lang.
-    local active_profile = active_profile_for(root)
+    -- opts.profile DISPOSES of the shape's choice (CART-0217): a name activates that
+    -- profile, `false` activates none. Recorded on data.profile like the detected
+    -- case, so relink/refresh and the cache identity see what was actually used.
+    local active_profile = active_profile_for(root, opts and opts.profile)
     if active_profile then data.profile = active_profile.runtime end
     local eff_spec = spec_overlay(active_packs, active_profile)
 
@@ -6119,7 +6139,19 @@ function M.relink(data, touched)
     for _, pn in ipairs(data.packs or {}) do
         if M.packs[pn] then active_packs[#active_packs + 1] = M.packs[pn] end
     end
-    local active_profile = active_profile_for(data.root)
+    -- PREFER WHAT THE GRAPH WAS BUILT WITH. data.profile is set by extract (detected
+    -- or overridden) and restored by cache's empty_data on a warm graph, so it is the
+    -- authoritative answer; re-deriving from the shape would silently drop an override
+    -- at relink and refresh time. Falls back to detection when absent — the old
+    -- behaviour on every graph with no profile recorded.
+    --
+    -- DELIBERATELY NOT THROUGH env_usable. That fence exists for USER input, where a
+    -- bad name must be an error rather than a silent fallback. `data.profile` is our
+    -- OWN recorded value, already validated when it was chosen, so re-validating it
+    -- here would only create a new failure mode: a warm graph naming a profile since
+    -- renamed or removed would make relink THROW instead of degrading to detection.
+    local active_profile = (data.profile and _profile_mod.load(data.profile))
+        or active_profile_for(data.root)
     -- record the active profile on the parallel-parent result too (extract stamps
     -- it inline; relink is the parallel path — keep the provenance field consistent)
     if active_profile then data.profile = active_profile.runtime end

@@ -947,6 +947,25 @@ local function profile_id(nroot)
     return pf.profile, stamp
 end
 
+--- Was this graph built with a PROFILE OVERRIDE (CART-0217)? True when what the
+--- graph records differs from what the root's shape would activate now.
+---
+--- Such a graph MUST NOT be persisted. read_manifest's gate compares a manifest's
+--- profile against the shape-derived one, so an overridden graph could never be
+--- served warm anyway — but it would still be WRITTEN, overwriting the shape-derived
+--- cache and forcing the next ordinary open to re-extract cold. Refusing the write
+--- is what stops an override from poisoning the default path.
+---
+--- It consults the SAME profile_id the read gate does, deliberately: two functions
+--- deciding profile identity by different means is how the stamping gap arose in the
+--- first place. Nothing has to be threaded here — the graph already records what it
+--- was built with. Shared by BOTH save paths, because a guard on one of two is a
+--- guard that will be forgotten.
+local function profile_overridden(data)
+    local _, nroot = M.path(data.root)
+    return data.profile ~= (select(1, profile_id(nroot)))
+end
+
 --- Every DECLARATIVE ARTIFACT the graph's resolution consulted, as one key. No
 --- longer composed by hand here: each artifact kind registers itself with
 --- validity.contribute at load time and this folds whatever registered, so a new
@@ -1212,6 +1231,7 @@ function M.save(data, dirty)
     -- persistable <=> stamps: the source supplied wire-free validity
     -- keys, whatever it is. Samples (no stamps) never persist.
     if not (data and data.provider and data.stamps) then return end
+    if profile_overridden(data) then return end -- CART-0217: see profile_overridden
     local dir = M.path(data.root)
     vim.fn.mkdir(dir, 'p')
     M._bg_cancel(data.root) -- a sync save supersedes an in-flight one
@@ -1274,6 +1294,7 @@ end
 function M.save_bg(data)
     if require('cartograph.config').cache == false then return end
     if not (data and data.provider and data.stamps) then return end
+    if profile_overridden(data) then return end -- CART-0217: see profile_overridden
     local dir = M.path(data.root)
     vim.fn.mkdir(dir, 'p')
     M._bg_cancel(data.root)

@@ -260,3 +260,112 @@ test('shapes: the explainer names an UP-inherited profile (and survives a scalar
     ok(blob:match('↑ profile ruby%-rails inherited'), 'UP-inherited profile explained')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── THE PROFILE OVERRIDE (CART-0217) ────────────────────────────────────────
+-- The packs axis has always had a DISPOSE doctrine (explicit opts.packs wins, and
+-- `{}` means none); the profile axis never did. These pin the doctrine, the fence
+-- on an unusable name, and — most importantly — that an override cannot poison the
+-- root's cache, which is the part that would rot silently.
+
+local pm = require 'cartograph.spec.profile'
+
+test('profile.env_usable: an INGREDIENT or a typo is refused, with the reason',
+    function ()
+    local prof, err = pm.env_usable('lua-factorio')
+    ok(prof, 'a real environment profile is usable: ' .. tostring(err))
+    eq('lua', prof.lang)
+
+    -- a distilled runtime-api / prototype-api artifact is an INPUT to a hand
+    -- profile, not an environment. Naming one by string is exactly how an
+    -- ingredient became a portability target and reported "0 LOST" (CART-0209).
+    -- THE MARKER ALONE IS NOT ENOUGH, and this loop is what proved it: the proto
+    -- artifacts declare `ingredient`, but the three OLDER runtime-api artifacts
+    -- predate the marker and carry 3 free functions each — enough to pass any
+    -- "claims some names" test. The positive namespace/type requirement is what
+    -- catches those.
+    for _, ing in ipairs({ 'lua-factorio-api', 'lua-factorio-api-11',
+        'lua-factorio-api-20', 'lua-factorio-proto-11', 'lua-factorio-proto-20' }) do
+        if pm.load(ing) then
+            local p2, e2 = pm.env_usable(ing)
+            eq(nil, p2 and true or nil, ing .. ' must be refused as an environment')
+            ok(e2 and (e2:find('INGREDIENT') or e2:find('no namespace or type surface')),
+                'and say why: ' .. tostring(e2))
+        end
+    end
+    -- ruby-core is refused too, and that is CORRECT: it is the RBS signature-keyed
+    -- artifact, documented as not name-queryable, and as an extraction environment it
+    -- would disposition nothing. Pinned so nobody "fixes" it into one.
+    if pm.load('ruby-core') then
+        eq(nil, (pm.env_usable('ruby-core')) and true or nil,
+            'a signature-keyed artifact is not an environment')
+    end
+    -- while every real environment profile passes
+    for _, envn in ipairs({ 'luajit', 'ruby-rails', 'zig-std', 'cruby',
+        'lua-factorio-11' }) do
+        if pm.load(envn) then
+            local p4, e4 = pm.env_usable(envn)
+            ok(p4, envn .. ' is a usable environment: ' .. tostring(e4))
+        end
+    end
+    local p3, e3 = pm.env_usable('no-such-profile-at-all')
+    eq(nil, p3, 'a typo is refused')
+    ok(e3 and e3:find('no profile named'), 'named, so it is actionable')
+    eq(nil, pm.env_usable(nil), 'and a non-name is not a profile')
+end)
+
+test('profile override: a name DISPOSES of the shape, and false means NONE',
+    function ()
+    local ts = require 'cartograph.providers.treesitter'
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    -- an UNSHAPED root: the shape activates nothing, so any profile here is the
+    -- override's doing
+    local plain = mkroot({ ['m.lua'] = 'local function f() end\nreturn f\n' })
+    eq(nil, shapes.profile_for(plain), 'no shape, so no profile is detected')
+    local d0 = ts.extract(plain)
+    eq(nil, d0.profile, 'and the graph records none')
+    local d1 = ts.extract(plain, { profile = 'lua-factorio' })
+    eq('lua-factorio', d1.profile, 'the override activates it anyway')
+
+    -- a SHAPED root: factorio-mod detects lua-factorio, and `false` disposes of it
+    local fac = mkroot({ ['info.json'] = '{}', ['control.lua'] = 'game.print("x")',
+        ['data.lua'] = 'data.extend{{}}' })
+    local det = ts.extract(fac)
+    eq('lua-factorio', det.profile, 'the shape activates it')
+    local none = ts.extract(fac, { profile = false })
+    eq(nil, none.profile,
+        '`false` is the {} of this axis: explicit NONE, not "detect"')
+
+    -- and an unusable name ERRORS rather than quietly falling back to detection —
+    -- a silent fallback means a typo changes how a graph resolves while reporting
+    -- success
+    local okc, e = pcall(ts.extract, fac, { profile = 'no-such-profile' })
+    eq(false, okc, 'refused')
+    ok(tostring(e):find('profile override'), 'and says it was the override: ' .. tostring(e))
+    vim.fn.delete(plain, 'rf'); vim.fn.delete(fac, 'rf')
+end)
+
+test('profile override: an overridden graph does NOT populate the root cache',
+    function ()
+    local ts = require 'cartograph.providers.treesitter'
+    local cachem = require 'cartograph.cache'
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    if cfg.cache == false then skip 'cache disabled' end
+    -- THE POISONING THIS PREVENTS: the read gate compares a manifest's profile with
+    -- the SHAPE-derived one, so an overridden graph can never be served warm — but
+    -- without this guard it would still be WRITTEN, clobbering the shape-derived
+    -- cache so the next ordinary open re-extracts cold.
+    local fac = mkroot({ ['info.json'] = '{}', ['control.lua'] = 'game.print("x")',
+        ['data.lua'] = 'data.extend{{}}' })
+    local dir = cachem.path(fac)
+
+    local over = ts.extract(fac, { profile = false }) -- disagrees with the shape
+    cachem.save(over)
+    eq(0, vim.fn.filereadable(dir .. '/manifest.bin'),
+        'nothing was written for a graph whose profile is not the shape\'s')
+
+    local det = ts.extract(fac) -- agrees with the shape
+    cachem.save(det)
+    eq(1, vim.fn.filereadable(dir .. '/manifest.bin'),
+        'while the ordinary graph persists exactly as before')
+    vim.fn.delete(dir, 'rf'); vim.fn.delete(fac, 'rf')
+end)

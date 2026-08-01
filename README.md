@@ -698,6 +698,19 @@ callers). Ariadne's thread, in text.
      app (analyzing `app/models/` alone still sees the Rails marker two levels
      up, bounded by the repository root), so the same enrichment applies whether
      you open the whole app or one folder.
+     Activation is inferred, but it **disposes to an explicit choice**: an
+     extraction may pass `profile = "<name>"` to activate one regardless of
+     what the shape thinks, or `profile = false` for none — the same nil/false
+     asymmetry the pack option has, where absent means "detect" and an explicit
+     value means "this". An unusable name is an **error**, never a silent
+     fallback to detection: a distilled ingredient artifact or a signature-keyed
+     one is refused with the reason, because a typo that quietly changed how a
+     whole graph resolves while reporting success is the failure this fence
+     exists for. It also makes a profile's contribution *measurable* — on the
+     Von Neumann mod, extracting with and without gives 265 vs 201 resolved
+     calls out of the same 635, so the profile is worth exactly 64 and nothing
+     is fabricated. An overridden graph deliberately does **not** populate the
+     project's cache, so measuring can't poison the ordinary open.
      A **localized parse error** doesn't blind the rest of a file: a def is
      dropped from the name index only when the error sits inside its *own*
      subtree (Lua/bash, whose def names are self-contained), not merely because

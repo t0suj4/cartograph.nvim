@@ -89,4 +89,70 @@ function M.stamp_of(runtime)
     return #parts > 0 and table.concat(parts, '|') or nil
 end
 
+--- Is `runtime` usable as an EXTRACTION environment? Returns (profile, nil) or
+--- (nil, reason). The fence for an override that names a profile by STRING
+--- (CART-0217), and it exists because naming an artifact by string is exactly how
+--- an INGREDIENT once became selectable as a portability target and silently
+--- reported "0 LOST" (CART-0209). An override is the same hazard one layer down: a
+--- typo, or a plausible-looking artifact name, would otherwise change how a whole
+--- graph resolves with no complaint at all.
+---
+--- Four ways to fail, and each is a different mistake:
+---   · no such artifact — a typo, or a profile that was never distilled
+---   · an INGREDIENT, declared — an input to a hand-authored profile
+---   · no `lang` — a profile is applied PER LANGUAGE (eff_spec wraps it that way),
+---     so one that does not name its language cannot be applied at all
+---   · no NAMESPACE/TYPE surface — the positive test, and the one that carries the
+---     weight (see below)
+---
+--- THE MARKER IS NOT ENOUGH, WHICH IS WHY BOTH CHECKS EXIST. `ingredient = true`
+--- was added when prototypedistill was written; the three OLDER runtime-api
+--- artifacts predate it and carry no marker, and they hold 3 free functions each —
+--- enough to pass any "does it claim any names" test. Measured: the marker check
+--- alone accepted `lua-factorio-api-11` as an environment, which is exactly the
+--- CART-0209 failure one layer down. So the fence also asks positively for what an
+--- extraction environment must have: `prof_ext` adjudicates a dotted call through
+--- `nsset`/`namespaces`/`types`, and those are the bulk of every disposition, so an
+--- artifact modelling none of them would change essentially nothing while reading
+--- as though a whole environment had been applied.
+---
+--- Measured surfaces, which is what makes this a clean separation rather than a
+--- guess: environments carry 10-97 types/namespaces (lua-factorio 21, luajit 10,
+--- cruby 87, ruby-rails 40, zig-std 97); every ingredient carries 0.
+---
+--- `ruby-core` IS REFUSED, AND THAT IS CORRECT — do not "fix" it. It is the RBS
+--- signature-keyed artifact (`String#chomp`), documented as not name-queryable, and
+--- as an extraction environment it would disposition nothing. It remains perfectly
+--- usable everywhere it is used today (hover, signature lookup); it is only not an
+--- environment to activate.
+function M.env_usable(runtime)
+    if type(runtime) ~= 'string' or runtime == '' then
+        return nil, 'not a profile name'
+    end
+    local prof = M.load(runtime)
+    if not prof then
+        return nil, ('no profile named %q (profiles ship under spec/profile/)')
+            :format(runtime)
+    end
+    if prof.ingredient then
+        return nil, ('%s is an INGREDIENT, not an environment — it is an input to a'
+            .. ' hand-authored profile (see tools/*distill.lua) and disposes no'
+            .. ' names of its own'):format(runtime)
+    end
+    if not prof.lang then
+        return nil, ('%s names no `lang`, and a profile is applied per-language, so'
+            .. ' it cannot be activated'):format(runtime)
+    end
+    local surface = next(prof.types or {}) ~= nil or next(prof.nsset or {}) ~= nil
+        or (type(prof.namespaces) == 'table' and next(prof.namespaces) ~= nil)
+    if not surface then
+        return nil, ('%s models no namespace or type surface (nsset / namespaces /'
+            .. ' types are all empty), so activating it would disposition almost'
+            .. ' nothing while reading as a whole environment — it is a distilled'
+            .. ' INGREDIENT or a signature-keyed artifact, not an environment')
+            :format(runtime)
+    end
+    return prof, nil
+end
+
 return M
