@@ -189,6 +189,53 @@ test('shapes.packs_for: a markerless tree activates no pack', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0218: profile_for and packs_for are ONE walk with three DECLARED differences.
+-- What needs pinning is that the two COMBINING RULES stay distinct (they were only
+-- implicit before) and that both carry their inverse.
+test('shapes.select_env: the two combining rules are declared, and both invert',
+    function ()
+    local root = mkroot({ ['config/application.rb'] = 'module A; end',
+        ['.git/HEAD'] = 'ref: x', ['app/models/post.rb'] = 'class Post; end' })
+    local sub = root .. '/app/models'
+
+    -- NEAREST: one answer, and it names the directory + evidence that produced it
+    local prof = shapes.select_env(sub, 'profile')
+    ok(prof, 'a rails app selects a profile')
+    eq('ruby-rails', prof.value)
+    eq(root, prof.dir, 'the ANCESTOR that matched, not the queried root')
+    ok(prof.inherited, 'and it says the answer was inherited')
+    ok(prof.evidence and #prof.evidence > 0, 'with the evidence, not just a verdict')
+
+    -- UNION: a set, plus the inverse packs_for could not answer before
+    local packs = shapes.select_env(sub, 'packs')
+    eq({ 'rails' }, packs.values)
+    ok(packs.by['rails'], 'THE INVERSE: which shape activated this pack')
+    eq(root, packs.by['rails'].dir)
+    eq('rails', packs.by['rails'].name)
+
+    -- and packs_for still hands back a BARE list: it is serialized into worker opts,
+    -- so a stowaway field would ride over the wire
+    local plain = shapes.packs_for(sub)
+    eq({ 'rails' }, plain)
+    eq(nil, plain.by, 'no inverse smuggled into the serialized list')
+
+    -- an unknown axis is a programming error, not a silent empty answer
+    ok(not pcall(shapes.select_env, sub, 'nope'), 'an unknown axis refuses loudly')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('shapes.select_env: an unshaped root answers per its combining rule', function ()
+    local root = mkroot({ ['lib/x.rb'] = 'class X; end' })
+    eq(nil, shapes.select_env(root .. '/lib', 'profile'), 'NEAREST with no match = nil')
+    local packs = shapes.select_env(root .. '/lib', 'packs')
+    eq({}, packs.values, 'UNION with no match = the empty set, never nil')
+    eq({}, packs.by, 'and the inverse is empty rather than absent')
+    -- a non-string root is the same story, per rule
+    eq(nil, shapes.select_env(nil, 'profile'))
+    eq({}, shapes.select_env(nil, 'packs').values)
+    vim.fn.delete(root, 'rf')
+end)
+
 test('shapes: the explainer shows hits, misses and overrides', function ()
     local root = mkroot({ ['manage.py'] = '' })
     local blob = table.concat(shapes.explain(root), '\n')

@@ -307,6 +307,63 @@ local function shapes_disabled()
     return ok and cfg and cfg.shapes == false
 end
 
+-- ── ENVIRONMENT SELECTION: one walk, the differences DECLARED (CART-0218) ────
+-- profile_for and packs_for were the same ancestor walk over the same probe with
+-- the same evidence gate, written twice, differing in exactly three things — and
+-- the two disagreed about the COMBINING RULE (nearest vs union) with neither
+-- saying so. Both rules are correct; that they were implicit is what made this
+-- worth unifying. GATE: the unified selector reproduced both functions exactly on
+-- 43 real roots (0 mismatches) before this replaced them.
+--
+--   key      which shape-config field carries the answer
+--   combine  NEAREST (the first match down the chain wins — one answer) or
+--            UNION (every matched shape contributes — a set)
+--   tier     DISPOSITION (only labels calls; a cross-language match is inert) or
+--            EXTRACTION (changes the graph, so an explicit opt must DISPOSE)
+local SELECT = {
+    profile = { key = 'profile', combine = 'nearest', tier = 'disposition' },
+    packs   = { key = 'packs',   combine = 'union',   tier = 'extraction' },
+}
+
+--- Select the environment `what` for `root` off shape evidence, UP the bounded
+--- ancestor chain. Returns, for a NEAREST rule, { value, dir, name, evidence,
+--- inherited } or nil; for a UNION rule, { values = list, by = {value -> {dir,
+--- name, evidence}} }.
+---
+--- THE INVERSE IS PART OF THE CONTRACT: every selection can name the directory and
+--- the shape evidence that produced it, so a verdict downstream is explainable
+--- rather than asserted. NEAREST already carried its inverse; UNION dropped it.
+--- A RECORD, not a list with an extra key, deliberately: `packs_for`'s list is
+--- serialized into worker opts (parallel.lua) and compared with deep equality by
+--- the shape specs, so a stowaway field would ride over the wire and break both.
+function M.select_env(root, what)
+    local d = assert(SELECT[what], 'no such environment axis: ' .. tostring(what))
+    local union = d.combine == 'union'
+    if type(root) ~= 'string' or shapes_disabled() then
+        return union and { values = {}, by = {} } or nil
+    end
+    local seen, out, by = {}, {}, {}
+    for _, dir in ipairs(ancestor_dirs(root)) do
+        for _, p in ipairs(M.probe(dir)) do
+            local v = p.evidence and p.config and p.config[d.key]
+            if v then
+                if not union then
+                    return { value = v, dir = dir, name = p.name,
+                        evidence = p.evidence, inherited = dir ~= root }
+                end
+                for _, x in ipairs(v) do
+                    if not seen[x] then
+                        seen[x] = true; out[#out + 1] = x
+                        by[x] = { dir = dir, name = p.name, evidence = p.evidence }
+                    end
+                end
+            end
+        end
+    end
+    if not union then return nil end
+    return { values = out, by = by }
+end
+
 --- The L2 environment profile a root implies, searched UP the ancestor chain
 --- ([[cartograph-repo-shapes]] UP direction). An extraction root INSIDE a shaped
 --- repo — e.g. `discourse/app/models` under a Rails app whose `config/
@@ -316,16 +373,10 @@ end
 --- a profile only affects files of its own language, so a cross-language ancestor
 --- match is inert (eff_spec wraps it per-lang).
 function M.profile_for(root)
-    if type(root) ~= 'string' or shapes_disabled() then return nil end
-    for _, dir in ipairs(ancestor_dirs(root)) do
-        for _, p in ipairs(M.probe(dir)) do
-            if p.evidence and p.config and p.config.profile then
-                return { profile = p.config.profile, dir = dir, name = p.name,
-                    evidence = p.evidence, inherited = dir ~= root }
-            end
-        end
-    end
-    return nil
+    local r = M.select_env(root, 'profile')
+    if not r then return nil end
+    return { profile = r.value, dir = r.dir, name = r.name,
+        evidence = r.evidence, inherited = r.inherited }
 end
 
 --- The overlay PACKS a root implies, from shape evidence, searched UP the same
@@ -333,22 +384,14 @@ end
 --- UNION across matched shapes (compose_spec is additive). Activation is gated on
 --- APP-shaped evidence (the rails shape's `config/application.rb` marker), so a
 --- framework-SOURCE repo (no app marker) contributes nothing — the design's
---- false-positive fence. Returns a list (possibly empty). EXTRACTION-tier: a pack
---- changes the graph (synth defs), so this only DEFAULTS when no explicit packs
---- were given; explicit opts.packs (incl. {}) DISPOSES (the doctrine).
+--- false-positive fence. Returns a PLAIN list (possibly empty) — it is serialized
+--- into worker opts, so it stays a bare list; ask `select_env(root, 'packs').by`
+--- for which shape and directory activated each pack, which nothing could answer
+--- before CART-0218. EXTRACTION-tier: a pack changes the graph (synth defs), so
+--- this only DEFAULTS when no explicit packs were given; explicit opts.packs
+--- (incl. {}) DISPOSES (the doctrine).
 function M.packs_for(root)
-    if type(root) ~= 'string' or shapes_disabled() then return {} end
-    local seen, out = {}, {}
-    for _, dir in ipairs(ancestor_dirs(root)) do
-        for _, p in ipairs(M.probe(dir)) do
-            if p.evidence and p.config and p.config.packs then
-                for _, pk in ipairs(p.config.packs) do
-                    if not seen[pk] then seen[pk] = true; out[#out + 1] = pk end
-                end
-            end
-        end
-    end
-    return out
+    return M.select_env(root, 'packs').values
 end
 
 -- what THIS module added to config (per key): stripped before the next
