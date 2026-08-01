@@ -43,6 +43,32 @@ for T, t in pairs(types) do
 end
 table.sort(namespaces)
 
+-- THE STAGE PARTITION, as a DELTA too (CART-0216). The three stages and their
+-- entry filenames are identical in 1.1; what changed is which globals live in the
+-- runtime stage — `global` instead of `storage`, and no `helpers`/`prototypes`. So
+-- the partition is REBUILT from the 2.0 module's own stage definitions with that
+-- one substitution applied, rather than restated: a second hand-written copy would
+-- drift, and the drift would read as a version difference. Same reasoning as the
+-- TYPES delta above.
+local stages, stage_owners
+if base._stagedefs and base._build_stages then
+    local defs = {}
+    for _, st in ipairs(base._stagedefs) do
+        local adds = {}
+        for ns in st.adds:gmatch('%S+') do
+            -- drop what 2.0 added, and give the runtime stage 1.1's `global`
+            if not ADDED_IN_2_0[ns] then adds[#adds + 1] = ns end
+        end
+        if st.name == 'runtime' then
+            for name in pairs(ONLY_IN_1_1) do adds[#adds + 1] = name end
+            table.sort(adds)
+        end
+        defs[#defs + 1] = { name = st.name, entry = st.entry,
+            adds = table.concat(adds, ' ') }
+    end
+    stages, stage_owners = base._build_stages(defs, base._shared)
+end
+
 -- the api artifact for THIS version (tools/factoriodistill.lua <api.json> 11)
 -- NB the artifact and this module are named `-11`, not `-1.1`: a Lua module name is
 -- a PATH, so a dot in it makes require look for `lua-factorio-1/1.lua`. The profile
@@ -76,6 +102,7 @@ return {
     version = api_version or '1.1', stamp = 'hand-authored delta over lua-factorio',
     types = types, free = copy(base.free), namespaces = namespaces, nsset = nsset,
     vocab = vocab,
+    stages = stages, stage_owners = stage_owners,
     mint = api ~= nil, mint_path = mint_path, sigs = sigs,
     sig_kind = api and 'factorio' or nil,
     global2class = api_g2c, api_members = api_members, api_complete = api_complete,

@@ -526,6 +526,173 @@ test('portability: a name is ANOTHER language\'s only if NO file of ours holds i
         'an unknown extension is not a foreign language')
 end)
 
+-- ── THE STAGE PARTITION (CART-0216) ─────────────────────────────────────────
+-- One root, one language, three DISJOINT environments. Von-Neumann yields ZERO
+-- findings (its stage separation is clean), so every positive here is synthetic and
+-- these tests are the only thing proving the check fires at all.
+
+--- A real on-disk factorio mod, extracted for real, so the IMPORT EDGES the stage
+--- map walks are the extractor's own. control.lua + data.lua at the root is what
+--- makes the shape activate the lua-factorio profile, so this also exercises the
+--- selection path end to end.
+local function factorio_tree(files)
+    local ts = require 'cartograph.providers.treesitter'
+    local st = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    for rel, src in pairs(files) do
+        local dir = rel:match('^(.*)/[^/]+$')
+        if dir then vim.fn.mkdir(root .. '/' .. dir, 'p') end
+        vim.fn.writefile(vim.split(src, '\n'), root .. '/' .. rel)
+    end
+    st._content_cache = {}
+    local data = ts.extract(root); data.root = root
+    st.ingest(data)
+    return st, root
+end
+
+local function lua_ready()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.language.add, 'lua')
+end
+
+local function region_of(res, name)
+    for _, e in ipairs(res.out_of_region or {}) do
+        if e.name == name then return e end
+    end
+end
+
+test('portability: a name used OUTSIDE its load stage is a finding, not an absence',
+    function ()
+    if not lua_ready() then skip 'no lua parser' end
+    local st, root = factorio_tree({
+        ['data.lua'] = 'require("protos.belt")',
+        ['protos/belt.lua'] = table.concat({
+            -- `game` is RUNTIME-only: at the data stage this is a load-time crash
+            'game.print("hi")',
+            -- `data` and `string` are fine here
+            'data.extend{{ type = "container" }}',
+            'local s = string.format("%d", 1)',
+        }, '\n'),
+        ['control.lua'] = 'require("rt.tick")',
+        ['rt/tick.lua'] = table.concat({
+            'game.print("ok")',       -- correct stage
+            'data.extend{{}}',        -- `data` is DATA-only: wrong stage at runtime
+        }, '\n'),
+    })
+    local res = port.audit(st, 'lua-factorio')
+    ok(res and res.stages, 'the profile declares stages, so a map was built')
+    eq('data', res.stages.by_file['protos/belt.lua'] and 'data'
+        or tostring(res.stages.by_file['protos/belt.lua']),
+        'reachability placed a non-entry file: data.lua requires it')
+    ok(res.stages.by_file['protos/belt.lua'].data, 'belt.lua is a DATA-stage file')
+    ok(res.stages.by_file['rt/tick.lua'].runtime, 'tick.lua is a RUNTIME-stage file')
+
+    local g = region_of(res, 'game.print')
+    ok(g, 'game.print at the data stage is reported')
+    eq('protos/belt.lua', g.file)
+    eq('data', table.concat(g.loaded_at, '+'), 'the stage the FILE is loaded at')
+    eq('runtime', table.concat(g.provided_at, '+'), 'and the stage that HAS the name')
+
+    local d = region_of(res, 'data.extend')
+    ok(d, 'and `data` at runtime is reported too — the partition cuts both ways')
+    eq('rt/tick.lua', d.file)
+
+    -- NOT an absence: the environment holds both names, so `provided` stays true and
+    -- no existing count moves. The third disposition is recorded beside it.
+    for _, e in ipairs(res.entries) do
+        if e.name == 'game.print' then
+            ok(e.provided, 'still provided — the environment HAS it')
+            eq('out-of-region', e.region, 'with the region verdict beside that')
+        end
+    end
+    -- a SHARED namespace is never stage-scoped
+    eq(nil, region_of(res, 'string.format'), 'string.format is shared, never flagged')
+    eq(nil, port.stage_owners_of(require('cartograph.spec.profile').load('lua-factorio'),
+        'string.format'), 'and the partition has NO OPINION on it, which is not a refusal')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: a file loaded at TWO stages is held to the INTERSECTION',
+    function ()
+    if not lua_ready() then skip 'no lua parser' end
+    -- THE CASE A PATH GLOB CANNOT EXPRESS, and the reason the selector is
+    -- reachability: shared.lua is pulled in by BOTH entries, so it runs in both
+    -- environments and may use only what BOTH provide. `game` is runtime-only, so it
+    -- is wrong there even though ONE of its two stages does provide it.
+    local st, root = factorio_tree({
+        ['data.lua'] = 'require("shared")',
+        ['control.lua'] = 'require("shared")',
+        ['shared.lua'] = 'game.print("x")\nlocal s = string.rep("a", 2)',
+    })
+    local res = port.audit(st, 'lua-factorio')
+    ok(res.stages, 'a map was built')
+    local at = res.stages.by_file['shared.lua']
+    ok(at.data and at.runtime, 'shared.lua is placed at BOTH stages')
+    eq(1, #res.stages.shared, 'and reported as multi-stage')
+    local g = region_of(res, 'game.print')
+    ok(g, 'game.print is STILL a finding: membership in one stage is not enough')
+    eq('data+runtime', table.concat(g.loaded_at, '+'))
+    eq(nil, region_of(res, 'string.rep'), 'while a shared name is fine in both')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: a file NO entry reaches has no stage, and the report says so',
+    function ()
+    if not lua_ready() then skip 'no lua parser' end
+    local st, root = factorio_tree({
+        ['data.lua'] = 'data.extend{{}}',
+        ['control.lua'] = 'game.print("x")',
+        -- required by nothing: dead code, or loaded by a mechanism we do not model
+        ['orphan.lua'] = 'game.print("y")',
+    })
+    local res = port.audit(st, 'lua-factorio')
+    eq(1, #res.stages.orphans, 'exactly the unreached file')
+    eq('orphan.lua', res.stages.orphans[1])
+    -- and NOTHING was ruled about it: an unplaced file must not be silently treated
+    -- as clean, which is the absence-rendered-as-silence class
+    eq(nil, region_of(res, 'game.print'),
+        'no verdict on a file whose stage is unknown')
+    local text = table.concat(port.report(st, 'lua-factorio'), '\n')
+    ok(text:find('reached by NO entry point'), 'the report discloses it')
+    ok(text:find('nothing above ruled on them'), 'and says it did not rule')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('portability: a profile with NO stages behaves exactly as before', function ()
+    local pm = require 'cartograph.spec.profile'
+    -- every other shipped profile: no partition declared, so no map, no new bucket,
+    -- and nothing about the existing report changes
+    for _, name in ipairs({ 'luajit', 'ruby-core', 'zig-std' }) do
+        local prof = pm.load(name)
+        if prof then
+            eq(nil, port.stage_map({ data = { nodes = {}, edges = {} } }, prof),
+                name .. ' declares no stages, so there is no partition to apply')
+            eq(nil, port.stage_owners_of(prof, 'foo.bar'),
+                name .. ' has no opinion about any name\'s stage')
+        end
+    end
+end)
+
+test('portability: the 1.1 delta partitions its OWN runtime globals', function ()
+    local pm = require 'cartograph.spec.profile'
+    local p20, p11 = pm.load('lua-factorio'), pm.load('lua-factorio-11')
+    if not (p20 and p11) then skip 'no factorio profiles' end
+    -- the stage partition is a delta too: 1.1's runtime has `global`, 2.0's has
+    -- `storage`, and neither should carry the other's
+    ok(p20.stage_owners.storage and p20.stage_owners.storage.runtime,
+        '2.0: storage is runtime-only')
+    eq(nil, p20.stage_owners.global, '2.0 has no `global`')
+    ok(p11.stage_owners.global and p11.stage_owners.global.runtime,
+        '1.1: global is runtime-only')
+    eq(nil, p11.stage_owners.storage, '1.1 has no `storage`')
+    -- and what did NOT change stays identical, which is the point of a delta
+    ok(p11.stage_owners.data.data and p11.stage_owners.data.settings,
+        '`data` is a data+settings-stage name in both')
+    eq(nil, p11.stage_owners.helpers, 'helpers is 2.0-only, so it is absent here too')
+    eq(#p20.stages, #p11.stages, 'same three stages')
+end)
+
 -- ── THE THIRD SURFACE: the DATA STAGE (CART-0213) ───────────────────────────
 -- calls diff, reads diff, and now prototypes. What needs pinning is the thing that
 -- makes this a WORKLIST rather than a name match: a property is judged against the

@@ -1569,6 +1569,42 @@ expressions, zero field reads), and where the iterated expression of a loop is
 itself a bare name it is treated as a binding, which can only make an external
 name look local rather than inventing one.
 
+### Stages: one root, one language, three environments
+
+A Factorio mod is not one environment. `game` exists at runtime and not while
+prototypes are being defined; `data` is the other way round. A profile scoped only
+by root and language cannot say that — it claims all of them at once, so
+`game.print()` inside `prototypes/entity/belt.lua` reads as **provided** when it is
+a load-time crash. A profile may now declare `stages`, and one that doesn't behaves
+exactly as before.
+
+```
+  STAGES: 31 file(s) placed in a load stage, 35 stage-scoped call site(s) judged;
+  none is used outside the stage that provides it
+    3 file(s) reached by NO entry point, so no stage applies and nothing above ruled
+    on them (dead code, another language, or a load mechanism we do not model):
+    prototypes/entity/demo-entities.lua, …
+```
+
+A file's stage comes from **reachability over the import graph**, not a path glob.
+Two reasons: a glob over `prototypes/` would be one mod's layout dressed up as a
+rule, and a glob cannot express the case that matters most — a helper required by
+*both* `data.lua` and `control.lua` runs in both environments, so it may use only
+what **both** provide. The rule is the intersection, so a name is wrong there even
+when one of the two stages does have it.
+
+When a name is used at the wrong stage, that is **not an absence**. The environment
+has it, in a different stage — a stronger claim than not-provided, and a crash
+rather than a missing feature, so it gets its own section above the not-in-profile
+list rather than being buried in it.
+
+Both denominators are printed, because a bare "0 findings" cannot be told from
+"nothing was checked": the count of sites actually **judged**, and the files no
+entry point reaches, on which nothing was ruled at all. A call that resolved to a
+project definition is skipped — measured on a real mod, `k-lib.lua` assigns
+`script.on_event = function(…)`, overwriting the API member, so those 33 calls
+dispatch to the mod's own code and are none of the environment's business.
+
 ### The third surface: a declarative DATA stage
 
 Calls and reads are both *name* surfaces. A Factorio mod's data stage is neither —

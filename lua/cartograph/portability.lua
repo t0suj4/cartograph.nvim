@@ -135,6 +135,194 @@ function M.dotted_queryable(prof)
     return false
 end
 
+-- ── THE STAGE PARTITION (CART-0216) ─────────────────────────────────────────
+-- A profile is scoped by ROOT (which profile a tree activates) and by LANGUAGE.
+-- Neither can express an environment that is DISJOINT WITHIN one root and one
+-- language — a Factorio mod, where `game` exists at runtime and not while
+-- prototypes are being defined, and `data` the other way round. A profile may now
+-- declare `stages`; one that does not behaves exactly as before.
+--
+-- Two halves, and they are deliberately separate functions: SELECTING a file's
+-- stage needs the graph (the import edges), while ADJUDICATING a name against a
+-- stage is pure. Fusing them would put a store parameter into provides().
+
+--- WHICH STAGE(S) each file belongs to. An ENTRY file matches one of the profile's
+--- declared patterns; every other file inherits from whatever entry can REACH it
+--- over the import graph. Returns nil when the profile declares no stages.
+--- Otherwise { by_file = {file -> {stage -> true}}, orphans = sorted list,
+--- entries = {file -> stage}, shared = sorted list of multi-stage files }.
+---
+--- REACHABILITY, NOT A PATH GLOB, for two reasons. A glob over `prototypes/` would
+--- be one mod's layout dressed up as a rule, and a glob cannot express the case
+--- that matters most: a helper required by BOTH data.lua and control.lua is loaded
+--- in both environments, so it may use only what BOTH provide.
+---
+--- ORPHANS ARE RETURNED, NOT DROPPED. A file no entry reaches has no stage, and
+--- that is a fact about our reading (dead code, a file loaded by a mechanism we do
+--- not model, or another language entirely). Silently skipping it would be the
+--- absence-rendered-as-silence class: no findings would read as no problems.
+function M.stage_map(store, prof)
+    if not (prof and prof.stages and #prof.stages > 0) then return nil end
+    local data = (store or {}).data or {}
+    local imports = {}
+    for _, e in ipairs(data.edges or {}) do
+        if e.kind == 'import' and e.from and e.to then
+            local l = imports[e.from]
+            if not l then l = {}; imports[e.from] = l end
+            l[#l + 1] = e.to
+        end
+    end
+    -- THE FILE SET IS THIS PROFILE'S LANGUAGE ONLY, and both exclusions are load-
+    -- bearing. A PROFILE-MINTED node carries the profile NAME where a file goes
+    -- (`lua-factorio`, kind='external'), which has no extension and is not a file at
+    -- all — it appeared in the orphan list on the first run. And a file of another
+    -- language belongs to the LANGUAGE axis (`other-language`), so counting it here
+    -- too would report one fact twice under two names.
+    local files = {}
+    for _, n in ipairs(data.nodes or {}) do
+        if n.file then
+            local ext = n.file:match('%.([%w]+)$')
+            local lang = ext and ext_lang()[ext:lower()]
+            if lang and (not prof.lang or lang == prof.lang) then files[n.file] = true end
+        end
+    end
+
+    local res = { by_file = {}, orphans = {}, entries = {}, shared = {} }
+    for _, st in ipairs(prof.stages) do
+        local queue = {}
+        for f in pairs(files) do
+            for _, pat in ipairs(st.entry or {}) do
+                if f:match(pat) then
+                    queue[#queue + 1] = f
+                    res.entries[f] = st.name
+                    break
+                end
+            end
+        end
+        local seen = {}
+        for _, f in ipairs(queue) do seen[f] = true end
+        local i = 1
+        while i <= #queue do
+            local f = queue[i]; i = i + 1
+            res.by_file[f] = res.by_file[f] or {}
+            res.by_file[f][st.name] = true
+            for _, to in ipairs(imports[f] or {}) do
+                if not seen[to] then seen[to] = true; queue[#queue + 1] = to end
+            end
+        end
+    end
+    for f in pairs(files) do
+        local s = res.by_file[f]
+        if not s then
+            res.orphans[#res.orphans + 1] = f
+        else
+            local n = 0; for _ in pairs(s) do n = n + 1 end
+            if n > 1 then res.shared[#res.shared + 1] = f end
+        end
+    end
+    table.sort(res.orphans); table.sort(res.shared)
+    return res
+end
+
+--- The stages whose surface holds the ROOT of `name`, or nil when the name is not
+--- stage-scoped at all — a bare name, a SHARED namespace (`string`, `table`,
+--- `defines`), or a root the profile never modelled. nil means "the partition has
+--- nothing to say about this", which is not the same as a refusal and must not be
+--- reported as one.
+function M.stage_owners_of(prof, name)
+    local owners = prof and prof.stage_owners
+    if not (owners and name) then return nil end
+    local root = name:match('^([%w_]+)[%.:#]')
+    if not root then return nil end
+    return owners[root]
+end
+
+--- THE THIRD OUTCOME. Returns 'provided' | 'out-of-region' | nil, plus the stages
+--- that do hold the name. nil = the partition has no opinion (see above).
+---
+--- THE RULE IS INTERSECTION, NOT MEMBERSHIP: a file loaded at two stages must
+--- satisfy BOTH, so EVERY stage the file belongs to has to provide the name. Using
+--- "any stage provides it" would bless a helper that works when control.lua pulls
+--- it in and crashes when data.lua does — which is exactly the bug a stage axis
+--- exists to catch.
+---
+--- "Exists, but not at this stage" is a FINDING, and a stronger statement than "not
+--- provided" — the same reason a version DIFF beats an absence. It must never render
+--- as an absence.
+function M.region_verdict(prof, name, stageset)
+    local owners = M.stage_owners_of(prof, name)
+    if not owners then return nil end
+    if not stageset or next(stageset) == nil then return nil end -- stage unknown: do not rule
+    for s in pairs(stageset) do
+        if not owners[s] then
+            local list = {}
+            for o in pairs(owners) do list[#list + 1] = o end
+            table.sort(list)
+            return 'out-of-region', list, s
+        end
+    end
+    return 'provided', nil, nil
+end
+
+--- EVERY SITE where a stage-scoped name is used, judged against the stage its file
+--- is loaded at. Returns nil when the profile declares no stages, else a list of
+--- { name, file, line, loaded_at, provided_at } plus `sites` (how many were judged).
+---
+--- WHY THIS WALKS CALL RECORDS AND NOT THE REQUIREMENT SET. requires() is built
+--- from the SILENT external surface — calls that resolved to nothing and were not
+--- even refused — and a name the profile PROVIDES is never in it: `game.print`
+--- either MINTS to LuaGameScript::print (so it resolves) or is refused as `vocab`.
+--- Either way it never reaches requires(), which means the requirement set cannot
+--- see exactly the names a stage partition exists to judge. Measured: wiring the
+--- check to requires() found nothing on a fixture built to contain two obvious
+--- violations.
+---
+--- SOUNDNESS: a call that resolved to a PROJECT-DEFINED node is skipped. `game` may
+--- be someone's local variable, and if resolution found a real definition for it
+--- then this is not the environment's `game` at all. Minted profile nodes (whose
+--- `file` is the profile's own runtime name) and unresolved/refused calls are the
+--- uses of the global.
+function M.stage_sites(store, prof)
+    local sm = M.stage_map(store, prof)
+    if not sm then return nil end
+    local callrec = require 'cartograph.callrec'
+    local data = (store or {}).data or {}
+    local out, judged = { sites = 0 }, 0
+    for _, c in callrec.each(data) do
+        local full = callrec.full(c)
+        local root = full and full:match('^([%w_]+)[%.:]')
+        local owners = root and prof.stage_owners and prof.stage_owners[root]
+        if owners then
+            local to = callrec.to(c)
+            local target = to and store.node and store.node(to)
+            local is_project = target and target.file and target.file ~= prof.runtime
+                and sm.by_file[target.file] ~= nil
+            if not is_project then
+                local file = callrec.file(c)
+                local at = file and sm.by_file[file]
+                if at and next(at) then
+                    judged = judged + 1
+                    local verdict, provided_at = M.region_verdict(prof, full, at)
+                    if verdict == 'out-of-region' then
+                        local loaded = {}
+                        for s in pairs(at) do loaded[#loaded + 1] = s end
+                        table.sort(loaded)
+                        out[#out + 1] = { name = full, file = file, line = c.line,
+                            loaded_at = loaded, provided_at = provided_at }
+                    end
+                end
+            end
+        end
+    end
+    out.sites = judged
+    table.sort(out, function (a, b)
+        if a.name ~= b.name then return a.name < b.name end
+        if (a.file or '') ~= (b.file or '') then return (a.file or '') < (b.file or '') end
+        return (a.line or 0) < (b.line or 0)
+    end)
+    return out, sm
+end
+
 --- How many symbols the profile actually claims — the weight of any verdict.
 function M.profile_size(prof)
     local n = 0
@@ -446,18 +634,40 @@ function M.audit(store, runtime)
     -- `requires ∩ provides`, which is what the keystone says it should be
     local req = M.requires(store)
     local res = { runtime = runtime, lang = prof.lang, version = prof.version,
-        size = M.profile_size(prof), provided = 0, unknown = 0, entries = {} }
+        size = M.profile_size(prof), provided = 0, unknown = 0, entries = {},
+        out_of_region = {} }
+    -- THE STAGE PARTITION (CART-0216), only when the profile declares one. Its
+    -- population is the CALL SITES, not this requirement set: a name the profile
+    -- provides never reaches requires() (it mints or is refused), so the axis has to
+    -- read the calls directly. See stage_sites.
+    local sites, sm = M.stage_sites(store, prof)
+    res.stages = sm
+    if sites then
+        res.out_of_region = sites
+        res.stage_sites = sites.sites
+    end
     for name, n in pairs(req.names) do
         local w = M.provides(prof, name)
-        res.entries[#res.entries + 1] = { name = name, calls = n,
+        local files = req.files[name] or { req.where[name] }
+        local entry = { name = name, calls = n,
             provided = w ~= nil, why = w,
             -- EVERY file, not the sampled one: `files` is what a stage/language
             -- question has to read (CART-0215). Falls back to the sample so an
             -- entry always carries at least one, as it always has.
-            files = req.files[name] or { req.where[name] },
+            files = files,
             reason = (w == nil)
-                and M.unknown_reason(prof, name, req.files[name] or req.where[name])
+                and M.unknown_reason(prof, name, files)
                 or nil }
+        res.entries[#res.entries + 1] = entry
+        -- `provided` KEEPS ITS MEANING — "the environment holds this name" — so no
+        -- existing count moves. An entry whose name appears in the out-of-region site
+        -- list is TAGGED, so a consumer reading entries alone still sees the third
+        -- disposition rather than a bare "provided".
+        if w and res.out_of_region then
+            for _, s in ipairs(res.out_of_region) do
+                if s.name == name then entry.region = 'out-of-region'; break end
+            end
+        end
         if w then res.provided = res.provided + 1 else res.unknown = res.unknown + 1 end
     end
     table.sort(res.entries, function (a, b)
@@ -1057,6 +1267,55 @@ function M.report(store, runtime, opts)
     end
     L[#L + 1] = ('  the profile claims %d symbols; a verdict is only as good as that')
         :format(res.size)
+    -- THE STAGE PARTITION (CART-0216). Reported BEFORE the not-in-profile list,
+    -- because "exists, but not at this stage" is a stronger statement than "not
+    -- provided" and would be buried under it. The typed-empty rule applies in both
+    -- directions: a profile with no partition says so, and a partition that found
+    -- nothing says THAT rather than staying silent.
+    if res.stages then
+        local nfiles = 0
+        for _ in pairs(res.stages.by_file) do nfiles = nfiles + 1 end
+        L[#L + 1] = ''
+        if #res.out_of_region == 0 then
+            L[#L + 1] = ('  STAGES: %d file(s) placed in a load stage, %d stage-scoped'
+                .. ' call site(s) judged; none is used outside the stage that provides'
+                .. ' it'):format(nfiles, res.stage_sites or 0)
+        else
+            L[#L + 1] = ('  USED OUTSIDE ITS STAGE — %d site(s) of %d judged, and these'
+                .. ' are not absences:'):format(#res.out_of_region,
+                res.stage_sites or 0)
+            L[#L + 1] = '    the environment HAS the name, in a different load stage'
+            L[#L + 1] = '    than the file is loaded in. A stronger claim than'
+            L[#L + 1] = '    not-provided, and a crash rather than a missing feature.'
+            for i = 1, math.min(cap, #res.out_of_region) do
+                local e = res.out_of_region[i]
+                L[#L + 1] = ('    %-30s %s:%s'):format(e.name, e.file,
+                    tostring(e.line or '?'))
+                L[#L + 1] = ('      loaded at %s; provided at %s'):format(
+                    table.concat(e.loaded_at, '+'),
+                    table.concat(e.provided_at or {}, '+'))
+            end
+            if #res.out_of_region > cap then
+                L[#L + 1] = ('    … and %d more'):format(#res.out_of_region - cap)
+            end
+        end
+        -- what the partition could NOT place. A file no entry reaches has no stage,
+        -- so nothing above ruled on it — saying so is the difference between "no
+        -- findings" and "not checked".
+        if #res.stages.orphans > 0 then
+            L[#L + 1] = ('    %d file(s) reached by NO entry point, so no stage applies'
+                .. ' and nothing above ruled on them (dead code, another language, or'
+                .. ' a load mechanism we do not model): %s'):format(
+                #res.stages.orphans,
+                table.concat(res.stages.orphans, ', '):sub(1, 120))
+        end
+        if #res.stages.shared > 0 then
+            L[#L + 1] = ('    %d file(s) loaded at MORE THAN ONE stage, so they are'
+                .. ' held to the INTERSECTION of what those stages provide: %s')
+                :format(#res.stages.shared,
+                    table.concat(res.stages.shared, ', '):sub(1, 120))
+        end
+    end
     L[#L + 1] = ''
     local shown = 0
     if res.unknown == 0 then

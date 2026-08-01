@@ -64,6 +64,62 @@ local TYPES = {
     storage     = { members = {} }, -- the mod's persisted table (2.0; was `global`)
 }
 
+-- ── THE LOAD STAGES: one language, one directory, THREE environments ────────
+-- Factorio runs a mod through three sequential stages, and they are DISJOINT in
+-- what they provide. `game` does not exist while prototypes are being defined;
+-- `data` does not exist once the game is running. The flat TYPES table above
+-- cannot say that — it claims all of them at once — so `game.print()` inside
+-- prototypes/entity/belt.lua reads as PROVIDED when it is a load-time crash.
+--
+-- WHY THIS IS THE PROFILE'S BUSINESS AND NOT THE SHAPE'S: the entry filenames are
+-- Factorio's own loading contract (the game looks for exactly these names), which
+-- makes them environment knowledge. A shape describes how someone arranged their
+-- files; this describes what the runtime will do with them.
+--
+-- `entry` matches an ENTRY FILE only. Every other file takes its stage from
+-- REACHABILITY over the import graph (portability.stage_map) — stronger than a
+-- path glob, and the only thing that can express the case that actually matters:
+-- a helper required by BOTH data.lua and control.lua may use only what both
+-- stages provide, the INTERSECTION. A glob cannot say that, and a glob over
+-- `prototypes/` would be one mod's layout masquerading as a rule.
+local SHARED = 'string table math os coroutine debug bit32 serpent util defines'
+local STAGES = {
+    -- mod settings are prototypes too, so the settings stage has `data` — but not
+    -- `settings`, which is the thing it is in the middle of defining
+    { name = 'settings', adds = 'data',
+      entry = { '^settings%.lua$', '^settings%-updates%.lua$',
+                '^settings%-final%-fixes%.lua$' } },
+    -- the data stage CAN read startup settings, which is why `settings` is here
+    { name = 'data', adds = 'data settings',
+      entry = { '^data%.lua$', '^data%-updates%.lua$', '^data%-final%-fixes%.lua$' } },
+    -- control.lua at the mod root, and a scenario's own control.lua some
+    -- directories down (two patterns: Lua patterns have no alternation)
+    { name = 'runtime',
+      adds = 'game script storage rendering prototypes remote commands rcon helpers settings',
+      entry = { '^control%.lua$', '/control%.lua$' } },
+}
+
+--- STAGES -> { name, entry, provides = <visible namespace set> } plus the inverse
+--- namespace -> stages holding it. The inverse is what makes a verdict
+--- EXPLAINABLE ("`game` is runtime-only") instead of a bare refusal.
+local function build_stages(stagedefs, shared)
+    local function nameset(s)
+        local t = {}; for w in s:gmatch('%S+') do t[w] = true end; return t
+    end
+    local out, owners = {}, {}
+    for _, st in ipairs(stagedefs) do
+        local vis = nameset(shared)
+        for ns in st.adds:gmatch('%S+') do
+            vis[ns] = true
+            owners[ns] = owners[ns] or {}
+            owners[ns][st.name] = true
+        end
+        out[#out + 1] = { name = st.name, entry = st.entry, provides = vis }
+    end
+    return out, owners
+end
+local stages, stage_owners = build_stages(STAGES, SHARED)
+
 -- derived flat projections (built once at load): the vocab gate + prefix set.
 local free, namespaces, nsset, vocab = {}, {}, {}, {}
 for _, n in ipairs(FREE) do free[n] = {}; vocab[n] = true end
@@ -117,6 +173,14 @@ return {
     version = api_version or '2.0', stamp = 'hand-authored',
     types = TYPES, free = free, namespaces = namespaces, nsset = nsset,
     vocab = vocab,
+    -- THE STAGE PARTITION (CART-0216). A profile with no `stages` behaves exactly
+    -- as before — one implicit partition covering everything — so no other profile
+    -- needs touching and nothing regresses.
+    stages = stages, stage_owners = stage_owners,
+    -- exported so the 1.1 delta can rebuild the partition after renaming a global,
+    -- rather than restating it (a second copy would drift, and the drift would look
+    -- like a version difference — the same reasoning as the TYPES delta)
+    _stagedefs = STAGES, _shared = SHARED, _build_stages = build_stages,
     -- minting + nav-time enrichment (present only when the api artifact loaded)
     mint = mint, mint_path = mint_path, sigs = sigs, sig_kind = sig_kind,
     -- the ADJUDICABLE surface: global -> documented class, the flat
