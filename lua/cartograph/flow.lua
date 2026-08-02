@@ -201,7 +201,7 @@ end
 -- node set under the SAME stop-rules — a measured ~33% of flow.build spent
 -- re-traversing every statement just to usually return false). Set on any
 -- visited node whose type is in SUSPEND; the root is checked too.
-local function du(root, src, stop_body, ids)
+local function du(root, src, stop_body, ids, mods)
     ids = ids or DFID
     if not root then return {}, {}, false, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
@@ -238,6 +238,10 @@ local function du(root, src, stop_body, ids)
         for c in node:iter_children() do
             if c:named() then
               local ct = c:type() -- cache the per-child type FFI (was called 2-6× below)
+              -- a BINDING MODIFIER decorates the declaration and reads nothing; descending
+              -- it invented a read of `const` from lua's `local x <const>` (CART-0234).
+              -- Language-declared, because the node name means `a.b` in python.
+              if mods and mods[ct] then goto skipchild end
               if not FN[ct]
                 and not (stop_body and (BODY[ct] or CLAUSE[ct])) then
                 if SUSPEND[ct] then sus = true end -- fused suspension detection
@@ -272,6 +276,7 @@ local function du(root, src, stop_body, ids)
                 end
                 rec(c, cdefpos)
               end
+              ::skipchild::
             end
         end
     end
@@ -334,6 +339,9 @@ function M.build(fnnode, src, cfg)
     cfg = cfg or {}
     local regimetab = cfg.regime or {}
     -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
+    -- BINDING MODIFIERS (CART-0234): per-language node types to skip entirely, because
+    -- they decorate a declaration and read nothing. Threaded exactly like df_ids.
+    local mods = cfg.mods
     local ids = DFID
     if cfg.df_ids then
         ids = {}
@@ -376,7 +384,7 @@ function M.build(fnnode, src, cfg)
         end
         local idx = #stmts + 1
         local sb = CTRL[t] and true or false
-        local d, u, sus, rmw = du(node, src, sb, ids)
+        local d, u, sus, rmw = du(node, src, sb, ids, mods)
         stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
@@ -426,7 +434,7 @@ function M.build(fnnode, src, cfg)
                 end
             end
             if POST[t] and cond then
-                local cd, cu = du(cond, src, false, ids)
+                local cd, cu = du(cond, src, false, ids, mods)
                 stmts[#stmts + 1] = { l = line(cond), c = startcol(cond), kind = 'cond',
                     parent = idx, pol = 'cond', def = cd, use = cu,
                     expr = cfg.expr and cfg.expr(cond, src, 'cond') or nil }
@@ -457,7 +465,7 @@ function M.build(fnnode, src, cfg)
             -- fine model + blocking case CFG feasibility). break rows inside now
             -- surface — successors routes them to the switch join.
             local vf = node:field('value')[1]
-            local d, u = du(vf, src, false, ids) -- default (no value) → {},{}
+            local d, u = du(vf, src, false, ids, mods) -- default (no value) → {},{}
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'case', parent = parent,
                 pol = 'case', def = d, use = u, t = node:type() }
@@ -474,7 +482,7 @@ function M.build(fnnode, src, cfg)
             -- row (condition only, stop_body) and REGION its consequence as rows
             -- (was folded — the body statements were invisible). lua
             -- `elseif_statement` / python `elif_clause`: body under `consequence`.
-            local d, u = du(node, src, true, ids)
+            local d, u = du(node, src, true, ids, mods)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = node:type(), parent = parent,
                 pol = 'elseif', def = d, use = u, t = node:type() }
@@ -496,7 +504,7 @@ function M.build(fnnode, src, cfg)
             -- the header binds the exception var (DEF) and references the type
             -- (use); the body regions under it. Without this the caught var is
             -- unbound in the fine model and df's spurious use of it is unmatched.
-            local d, u = du(node, src, true, ids)
+            local d, u = du(node, src, true, ids, mods)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'catch', parent = parent,
                 pol = 'catch', def = d, use = u }

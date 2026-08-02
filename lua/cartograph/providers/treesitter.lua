@@ -3144,6 +3144,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec)
         member_access_expression = true, subscript_expression = true,
         variable_name = true }
     local dfid = spec.df_ids
+    local modskip = spec.binding_modifiers -- CART-0234
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
     local scoped = scopes and MF_SCOPED or 0
@@ -3222,6 +3223,18 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec)
         local i, c = 0, n:child(0)
         while c do
             local ct = c:type()
+            -- A BINDING MODIFIER (lua 5.4 `<const>`/`<close>`) decorates a declaration and
+            -- references nothing, so its subtree is skipped ENTIRELY — no mention, no df
+            -- use. Without this the identifier inside it became a mention of a symbol named
+            -- `const`, which is a phantom REFERENCE the moment a corpus really has one
+            -- (`local const = require 'const'` is idiomatic). Language-declared, because the
+            -- same node name is python's field access. CART-0234, the third collector: expr
+            -- and flow's du had the identical fabrication.
+            if modskip and modskip[ct] then
+                i = i + 1
+                c = n:child(i)
+                goto continue_child
+            end
             -- LAZY per-child facts: named() is an FFI call and most java
             -- children are anonymous tokens — pay it only on paths that
             -- consume it (the regression the first fused draft measured)
@@ -3343,6 +3356,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec)
             if c:child(0) then walk(c, cdefpos, cdfon) end
             i = i + 1
             c = n:child(i)
+            ::continue_child::
         end
         if bodyctx then
             fdepth = fdepth - 1
@@ -4383,6 +4397,7 @@ function M.extract(root, opts)
                 local _pf = pstart()
                 local fl = not defs_only and spec.body_field and flowmod.build(defn, src, {
                     pfield = spec.params_field, df_ids = spec.df_ids,
+                    mods = spec.binding_modifiers, -- CART-0234
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 padd('flow.build', _pf)
                 local dret, dretclass

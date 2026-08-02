@@ -553,6 +553,13 @@ return {
         end
         return true
     end,
+    -- BINDING MODIFIERS (CART-0234): node types that decorate a DECLARATION and carry
+    -- neither a value nor a name read. Lua 5.4's `local x <const>` / `<close>` parse as
+    -- `attribute` — which is ALSO python's name for `a.b`, so the shared node-type maps in
+    -- expr.lua and flow.lua cannot tell them apart without asking the language. Both sides
+    -- fabricated a read of a variable called `const` from this, and the expr self-gate
+    -- reported AGREEMENT because they fabricated it identically.
+    binding_modifiers = { attribute = true },
     -- CONFINEMENT (CART-0230), the other half of exported_def. `exported = false`
     -- says a name is invisible OUTSIDE its file; it does not say the VALUE cannot
     -- leave, and in lua it routinely does — commands.lua's `local function cmd` is

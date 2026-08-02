@@ -73,7 +73,14 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 111 -- v111: SELF-TYPING SURVIVES A VENDORED LIBRARY (CART-0241). chain_lookup
+M.VERSION = 112 -- v112: A BINDING MODIFIER READS NOTHING (CART-0234). lua 5.4's `local x
+               -- <const>` parses as `attribute`, which is ALSO python's name for `a.b`, so
+               -- the shared node-type maps harvested it as a field access with an empty
+               -- name — a read of a variable called `const`. BOTH expr and du fabricated
+               -- it, identically, which is why the expr self-gate reported agreement. The
+               -- spec now declares `binding_modifiers` and both consumers skip it, so
+               -- persisted df/flow `use` sets change on any lua 5.4 file.
+               -- v111: SELF-TYPING SURVIVES A VENDORED LIBRARY (CART-0241). chain_lookup
                -- refused any corpus-wide duplicate, so an addon corpus that vendors its
                -- libs (wow: 24 copies of one Ace3 class) had every self:m() into them
                -- refused. It now falls back to same-file then same-scope, the ladder the

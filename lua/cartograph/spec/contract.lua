@@ -88,6 +88,9 @@ M.SLOTS = {
     is_write = 'ANALYSIS', write_gate = 'ANALYSIS', guards = 'ANALYSIS',
     module_effects = 'ANALYSIS', dataflow = 'ANALYSIS', regime = 'ANALYSIS',
     df_ids = 'ANALYSIS', merge_equations = 'ANALYSIS',
+    binding_modifiers = 'ANALYSIS', -- declaration decorations that read nothing: lua
+                                    -- `<const>`/`<close>`, whose node name collides with
+                                    -- python's field access (CART-0234)
     params_field = 'ANALYSIS', body_field = 'ANALYSIS',
     -- node types that BIND names (loop variables). df records them as `use` and
     -- never as `def`, so without this a loop-bound receiver reads as a free name —

@@ -126,8 +126,56 @@ local NAME = { identifier = true, name = true }
 local FIELD = { dot_index_expression = true, field_expression = true,
     member_expression = true,
     member_access_expression = true,  -- php   $a->b
-    attribute = true,                 -- python a.b
+    attribute = true,                 -- python a.b — AND lua 5.4 `<const>`, see COLLIDE
     selector_expression = true }      -- go    a.b
+
+-- ── WHERE A NODE NAME MEANS TWO THINGS (CART-0234) ────────────────────────────────
+-- These maps are keyed on the tree-sitter node TYPE and shared by every language, which
+-- is only safe while no two grammars reuse a name for a different construct. MEASURED
+-- FALSE: `attribute` is python's `a.b` AND lua 5.4's variable attribute (`local x
+-- <const>`). A shared map keyed on a bare node type is a collision waiting for the next
+-- grammar (TSGAP-0004), so a collision gets named here rather than being resolved by
+-- luck.
+--
+-- A VETO, not a per-language rebuild of every map: the global tables stay the fast path
+-- and only a MEASURED collision carries an entry. `lang` is nil on the `expr.build`
+-- entry point (the transliterator, tests), and a nil lang vetoes nothing — the shape
+-- check above is what protects that path, which is why containment had to be part of
+-- this fix rather than an alternative to it.
+-- The set lives in the SPEC (`spec.binding_modifiers`), which is the per-language home and
+-- is also what flow.lua's du reads — one declared fact, two consumers, so the two sides of
+-- the expr self-gate cannot drift apart again the way they did here.
+-- LAZY on purpose: `spec` is required further down this file (module load order), so a
+-- direct reference here would read a nil GLOBAL and silently disable both consumers — the
+-- absence-as-falseness failure this very ticket is about.
+local specs
+local function modset(lang)
+    if not lang then return nil end
+    specs = specs or require('cartograph.providers.treesitter').spec
+    local s = specs and specs[lang]
+    return s and s.binding_modifiers or nil
+end
+local function VETO(lang, t)
+    local m = modset(lang)
+    return m ~= nil and m[t] == true
+end
+
+-- A declaration modifier standing in an assignment TARGET list. It binds nothing, reads
+-- nothing, and the def side already reports the name it modifies — so it is not an
+-- expression and must not enter the row at all.
+--
+-- THE VETO ALONE WOULD NOT HAVE BEEN ENOUGH: it routes `attribute` to `?`, and `?`
+-- deliberately keeps its children so a name can never be hidden — so the identifier
+-- `const` would still be a kid and expr.reads would still report a read of it. MEASURED on
+-- desynced: 7 phantom fields and 7 fabricated `const` reads before, 0 and 0 after, with
+-- the `?` census unchanged at 4582 (the modifier leaves the row entirely rather than
+-- becoming an honest-unknown). The ticket's "23 fabricated reads" counted 16 legitimate
+-- reads of a real field named `close` alongside them — there was only ever ONE leak path,
+-- not two.
+local function is_modifier(lang, node)
+    local m = modset(lang)
+    return m ~= nil and m[node:type()] == true
+end
 local INDEX = { bracket_index_expression = true, subscript_expression = true,
     index_expression = true,
     subscript = true }                -- python a[1] (a[1:2] keeps `?` for the slice)
@@ -213,14 +261,14 @@ end
 -- { start={line,char}, end={line,char} } (0-based rows, as at.sl/sc/el/ec read); the
 -- coordinates are FILE-ABSOLUTE because expr.of parses the whole file. The IR is rebuilt
 -- on demand (never folded/persisted) so this is additive — no cache/VERSION impact.
-function build_core(node, src)
+function build_core(node, src, lang)
     if not node then return { k = '?', t = '<nil>', kids = {} } end
     local t = node:type()
     if PAREN[t] then return build(node:named_child(0), src) end
     if UNWRAP[t] then -- a list where one expr is expected: build the sole child, else `?`
         local only, n = nil, 0
         for c in node:iter_children() do if c:named() and c:type() ~= 'comment' then only = c; n = n + 1 end end
-        if n == 1 then return build(only, src) end
+        if n == 1 then return build(only, src, lang) end
     end
     local lty = LIT[t]
     if lty then
@@ -236,39 +284,53 @@ function build_core(node, src)
         local inner = node:named_child(0)
         return { k = 'name', n = (txt(inner or node, src):gsub('^%$', '')) }
     end
-    if FIELD[t] then
+    -- CONTAINMENT (CART-0234). Every one of these arms is documented above as
+    -- base-first / selector-second with TWO named children. Reading `o[2]` without
+    -- checking it exists is how a one-operand node from some other grammar became a
+    -- confident field access with an EMPTY name: lua 5.4's `local x <const>` parses as
+    -- `attribute` — which is python's name for `a.b` — with the single child `const`,
+    -- so `txt(nil)` returned '' and the IR claimed a read of a variable called `const`.
+    -- The `?` arm exists for exactly this, and the shape check is what routes there.
+    -- INCOMPLETE MAPS UNDER-REPORT; COLLIDING MAPS FABRICATE.
+    if FIELD[t] and not VETO(lang, t) then
         local o = operands(node)
-        return { k = 'field', b = build(o[1], src), n = txt(o[2], src), method = false }
+        if o[1] and o[2] then
+            return { k = 'field', b = build(o[1], src, lang), n = txt(o[2], src), method = false }
+        end
     end
-    if METHOD[t] then
+    if METHOD[t] and not VETO(lang, t) then
         local o = operands(node)
-        return { k = 'field', b = build(o[1], src), n = txt(o[2], src), method = true }
+        if o[1] and o[2] then
+            return { k = 'field', b = build(o[1], src, lang), n = txt(o[2], src), method = true }
+        end
     end
-    if INDEX[t] then
+    if INDEX[t] and not VETO(lang, t) then
         local o = operands(node)
-        return { k = 'index', b = build(o[1], src), i = build(o[2], src) }
+        if o[1] and o[2] then
+            return { k = 'index', b = build(o[1], src, lang), i = build(o[2], src, lang) }
+        end
     end
     if CALL[t] then
         local callee, argnodes = call_parts(node)
         local a = {}
-        for _, an in ipairs(argnodes) do a[#a + 1] = build(an, src) end
-        local f = build(callee, src)
+        for _, an in ipairs(argnodes) do a[#a + 1] = build(an, src, lang) end
+        local f = build(callee, src, lang)
         return { k = 'call', f = f, a = a, method = (f.k == 'field' and f.method) or false }
     end
     if BIN[t] then
         local o = operands(node)
-        return { k = 'bin', op = op_token(node, src), l = build(o[1], src), r = build(o[2], src) }
+        return { k = 'bin', op = op_token(node, src), l = build(o[1], src, lang), r = build(o[2], src, lang) }
     end
     if UN[t] then
         local o = operands(node)
-        return { k = 'un', op = op_token(node, src), e = build(o[1], src) }
+        return { k = 'un', op = op_token(node, src), e = build(o[1], src, lang) }
     end
     if TABLE[t] then
         -- an ALLOCATION (fresh identity) but its field VALUES/keys READ names — carry
         -- them as kids so the read-set stays faithful to du (which descends the table).
         local kids = {}
         for c in node:iter_children() do
-            if c:named() and c:type() ~= 'comment' then kids[#kids + 1] = build(c, src) end
+            if c:named() and c:type() ~= 'comment' then kids[#kids + 1] = build(c, src, lang) end
         end
         return { k = 'table', kids = kids }
     end
@@ -293,7 +355,7 @@ function build_core(node, src)
         -- POSITIONAL element (`{1, 2}`): no key at all, so emit the VALUE itself
         -- rather than a pair with a hole. Keeps the read-set byte-identical to before
         -- for array-style constructors, which are the common case in every language.
-        if not kn then return vn and build(vn, src) or { k = '?', t = t, kids = {} } end
+        if not kn then return vn and build(vn, src, lang) or { k = '?', t = t, kids = {} } end
         local bracketed = false
         for c in node:iter_children() do
             if not c:named() and vim.trim(txt(c, src)) == '[' then bracketed = true; break end
@@ -302,9 +364,9 @@ function build_core(node, src)
         if not bracketed and kn:type():match('identifier') then
             key = { k = 'lit', ty = 'str', v = txt(kn, src) }
         else
-            key = build(kn, src)
+            key = build(kn, src, lang)
         end
-        local val = vn and build(vn, src) or nil
+        local val = vn and build(vn, src, lang) or nil
         return { k = 'pair', key = key, val = val,
             kids = val and { key, val } or { key } }
     end
@@ -313,15 +375,15 @@ function build_core(node, src)
     -- honest unknown: keep the named children as kids so no name is hidden
     local kids = {}
     for c in node:iter_children() do
-        if c:named() and c:type() ~= 'comment' then kids[#kids + 1] = build(c, src) end
+        if c:named() and c:type() ~= 'comment' then kids[#kids + 1] = build(c, src, lang) end
     end
     return { k = '?', t = t, kids = kids }
 end
 
 -- stamp the source range on every node built (see build_core's note). A node built
 -- from no TS node (build(nil)) has no range → `.at` stays nil.
-function build(node, src)
-    local e = build_core(node, src)
+function build(node, src, lang)
+    local e = build_core(node, src, lang)
     if node and type(e) == 'table' then
         local sr, sc, er, ec = node:range()
         e.at = { start = { line = sr, char = sc }, ['end'] = { line = er, char = ec } }
@@ -379,11 +441,11 @@ local CLAUSE = { else_statement = true, elseif_statement = true, elseif_clause =
 ---   'casehead' — a switch case: only its `value` label
 ---   (nil)      — a plain statement (assignment / return / bare expression)
 --- @return table { lhs={expr...}, rhs={expr...}, cond=expr? }
-function M.harvest_row(node, src, hint)
-    if hint == 'cond' then return { lhs = {}, rhs = {}, cond = build(node, src) } end
+function M.harvest_row(node, src, hint, lang)
+    if hint == 'cond' then return { lhs = {}, rhs = {}, cond = build(node, src, lang) } end
     if hint == 'casehead' then
         local v = node:field('value')[1]
-        return { lhs = {}, rhs = {}, cond = v and build(v, src) or nil }
+        return { lhs = {}, rhs = {}, cond = v and build(v, src, lang) or nil }
     end
     if hint == 'ctrlhead' then
         local cond = node:field('condition')[1] or node:field('value')[1]
@@ -392,24 +454,24 @@ function M.harvest_row(node, src, hint)
             if c:named() then
                 local ct = c:type()
                 if ct ~= 'comment' and not BODY[ct] and not CLAUSE[ct] then
-                    rhs[#rhs + 1] = build(c, src)
+                    rhs[#rhs + 1] = build(c, src, lang)
                 end
             end
         end
-        return { lhs = {}, rhs = rhs, cond = cond and build(cond, src) or nil }
+        return { lhs = {}, rhs = rhs, cond = cond and build(cond, src, lang) or nil }
     end
     local t = node:type()
     -- lua `local x = e` wraps an assignment_statement; unwrap to it
     if LOCALDECL[t] then
         for c in node:iter_children() do
-            if c:named() and ASSIGN[c:type()] then return M.harvest_row(c, src) end
+            if c:named() and ASSIGN[c:type()] then return M.harvest_row(c, src, nil, lang) end
         end
         -- bare `local a, b` (no initializer): the names are defs, no value exprs
         local lhs = {}
         for c in node:iter_children() do
             for _, tn in ipairs(list_children(c)) do
                 if NAME[tn:type()] or tn:type() == 'variable_list' then
-                    lhs[#lhs + 1] = build(tn, src)
+                    lhs[#lhs + 1] = build(tn, src, lang)
                 end
             end
         end
@@ -418,24 +480,27 @@ function M.harvest_row(node, src, hint)
     if ASSIGN[t] then
         local left, right = assign_sides(node)
         local lhs, rhs = {}, {}
-        for _, tn in ipairs(list_children(left)) do lhs[#lhs + 1] = build(tn, src) end
-        for _, vn in ipairs(list_children(right)) do rhs[#rhs + 1] = build(vn, src) end
+        for _, tn in ipairs(list_children(left)) do
+            -- a declaration MODIFIER in a target list is not a target (CART-0234)
+            if not is_modifier(lang, tn) then lhs[#lhs + 1] = build(tn, src, lang) end
+        end
+        for _, vn in ipairs(list_children(right)) do rhs[#rhs + 1] = build(vn, src, lang) end
         return { lhs = lhs, rhs = rhs }
     end
     -- control heads carry a condition (the switched value for go switch)
     local cond = node:field('condition')[1] or node:field('value')[1]
-    if cond then return { lhs = {}, rhs = {}, cond = build(cond, src) } end
+    if cond then return { lhs = {}, rhs = {}, cond = build(cond, src, lang) } end
     if RET[t] then
         local rhs = {}
         for c in node:iter_children() do
             for _, vn in ipairs(list_children(c)) do
-                if vn:named() and vn:type() ~= 'comment' then rhs[#rhs + 1] = build(vn, src) end
+                if vn:named() and vn:type() ~= 'comment' then rhs[#rhs + 1] = build(vn, src, lang) end
             end
         end
         return { lhs = {}, rhs = rhs }
     end
     -- default: a bare expression statement (a call, etc.) — the whole node is a value
-    return { lhs = {}, rhs = { build(node, src) } }
+    return { lhs = {}, rhs = { build(node, src, lang) } }
 end
 
 -- ── traversal + predicates ─────────────────────────────────────────────────
@@ -762,8 +827,9 @@ function M.of(store, fn_id)
     local fn = fn_node(node, src, lang)
     if not fn then return nil end
     local cfg = { pfield = s.params_field, df_ids = s.df_ids, regime = s.regime,
+        mods = s.binding_modifiers, -- CART-0234
         method = (node.kind == 'method') and lang == 'lua',
-        expr = function (n, ns, hint) return M.harvest_row(n, ns, hint) end }
+        expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'
     local fl = flow.build(fn, src, cfg)
     return { fl = fl, lang = lang, node = node,
@@ -813,7 +879,8 @@ function M.of_module(store, mod_id)
     local root = root_node(src, lang)
     if not root then return nil end
     local cfg = { seq = true, df_ids = s.df_ids, regime = s.regime,
-        expr = function (n, ns, hint) return M.harvest_row(n, ns, hint) end }
+        mods = s.binding_modifiers, -- CART-0234
+        expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'
     return { fl = flow.build(root, src, cfg), lang = lang, node = node,
         bound = M.bound_names(root, src, s.binders) }

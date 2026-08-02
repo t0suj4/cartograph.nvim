@@ -252,3 +252,63 @@ test('exprlint: constant condition and duplicated branch condition', function ()
     ok(findings_at('g', 5)['duplicated-condition'], 'duplicated elseif')
     ok(not findings_at('g', 8)['constant-condition'], 'a>b is not constant')
 end)
+
+test('lua 5.4 attribute: a binding modifier is neither a field nor a read (CART-0234)', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- `attribute` is python's name for `a.b` AND lua 5.4's `<const>`/`<close>`. The shared
+    -- node-type map turned the second into a field access with an EMPTY name, i.e. a read of
+    -- a variable called `const` that does not exist. Both expr AND du fabricated it
+    -- identically, so the self-gate reported agreement on a fabrication.
+    local lines = {
+        'local function g(n)',
+        '  local t <const> = { n }',
+        '  return t',
+        'end', 'return { g }' }
+    local src = table.concat(lines, '\n')
+    local root = vim.treesitter.get_string_parser(src, 'lua'):parse()[1]:root()
+    local fn
+    local function rec(nd)
+        if fn then return end
+        if nd:type() == 'function_declaration' then fn = nd; return end
+        for c in nd:iter_children() do if c:named() then rec(c) end end
+    end
+    rec(root)
+    -- WIRED exactly as expr.of wires it: the language is declared, so the spec's
+    -- `binding_modifiers` reach both consumers (harvest via lang, du via cfg.mods)
+    local mods = ts.spec.lua.binding_modifiers
+    ok(mods and mods.attribute, 'the lua spec declares the modifier')
+    local fl = flow.build(fn, src, { pfield = 'parameters', mods = mods,
+        expr = function (nd, s, hint) return expr.harvest_row(nd, s, hint, 'lua') end })
+
+    local row = row_at(fl, 2)
+    ok(row, 'the declaration row was harvested')
+    -- the DEF side is untouched: `t` is still declared here
+    ok(vim.tbl_contains(row.def, 't'), 'the binding still defs its name')
+    -- and NEITHER side invents a read of the attribute keyword
+    for _, nm in ipairs(expr.reads(row)) do
+        ok(nm ~= 'const', 'expr must not read `const`, got ' .. nm)
+    end
+    for _, nm in ipairs(row.use or {}) do
+        ok(nm ~= 'const', 'du must not read `const`, got ' .. nm)
+    end
+    eq(0, #expr.gate(fl), 'and the two sides agree, without agreeing on a fabrication')
+    -- the lhs holds the target only — no field node with an empty name
+    for _, e in ipairs(row.expr.lhs or {}) do
+        ok(not (e.k == 'field' and (e.n == nil or e.n == '')),
+            'no phantom field on the target list')
+    end
+
+    -- THE VETO MUST NOT OVER-FIRE: `attribute` in PYTHON is a real field access
+    if pcall(vim.treesitter.language.add, 'python') then
+        local psrc = 'x = a.b\n'
+        local proot = vim.treesitter.get_string_parser(psrc, 'python'):parse()[1]:root()
+        -- python wraps the assignment in an expression_statement; harvest_row wants the
+        -- `assignment` itself (the row node the provider would hand it)
+        local stmt = proot:named_child(0)
+        local asg = stmt:type() == 'assignment' and stmt or stmt:named_child(0)
+        local prow = expr.harvest_row(asg, psrc, nil, 'python')
+        local rhs = prow and prow.rhs and prow.rhs[1]
+        eq('field', rhs and rhs.k, 'python a.b is still a field')
+        eq('b', rhs and rhs.n, 'with its selector intact')
+    end
+end)
