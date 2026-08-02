@@ -73,7 +73,21 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 115 -- v115: A BINDING IS NOT A NAME MATCH (CART-0244). resolve_module_alias
+M.VERSION = 116 -- v116: THE CONFINEMENT WALK RIDES THE MENTION WALK (CART-0236). The
+               -- escape fact had its own per-file traversal, MEASURED at 15% of the whole
+               -- extract on wow; it now rides the mention DFS, which was already holding
+               -- that tree and already computing the one shape (callee) the rule turns on.
+               -- Output is IDENTICAL by design and by measurement — per-node facts joined
+               -- on identity agree on self/desynced/factorio/wow (4100 confined on wow, to
+               -- the node), matrix counts+struct PASS on 29 corpora. The bump is for the
+               -- ONE asymmetry the fold exposed: the surviving hook (now only the
+               -- index-only front-ends, which never walk mentions) did not skip binding
+               -- modifiers, so `local x <const>` counted as a mention of a symbol named
+               -- `const` — the v112 fabrication, in the one collector that had kept it.
+               -- Unobservable on every corpus here (it needs a file-local named `const`
+               -- in a lua 5.4 file), which is precisely why a cache could carry the old
+               -- answer without anything looking wrong.
+               -- v115: A BINDING IS NOT A NAME MATCH (CART-0244). resolve_module_alias
                -- marked all its resolutions `inferred` (~), but that flag means "resolved
                -- by unique NAME" — the require BINDING pins the file and the call names the
                -- member. MEASURED: 1775 such edges on our own tree, 26.6% of the calls

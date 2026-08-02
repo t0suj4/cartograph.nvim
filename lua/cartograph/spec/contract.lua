@@ -46,7 +46,11 @@ M.SLOTS = {
     exported_def = 'SCOPE&KEY',    -- visibility (pub/export) detection
     escape_names = 'SCOPE&KEY',    -- names mentioned in a VALUE position in a file:
                                    -- the other half of exported_def, since a
-                                   -- file-local's VALUE can still leave (CART-0230)
+                                   -- file-local's VALUE can still leave (CART-0230).
+                                   -- Only the index-only front-ends call it now
+    escape_nonvalue = 'SCOPE&KEY', -- the same rule as a parent-type veto table, so
+                                   -- the mention walk answers it as a rider and no
+                                   -- file is traversed twice (CART-0236)
     local_decls = 'SCOPE&KEY',     -- in-fn local bindings (local-shadow gate)
     id_fn_refs = 'SCOPE&KEY',      -- identifier arg = fn reference (callback)
     dot_calls_are_methods = 'SCOPE&KEY',

@@ -3533,6 +3533,74 @@ test('lua: a confined file-local is not a cross-file call target', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+test('lua: the escape rule reads the same off the mention walk as off its own query', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- CART-0236. The confinement fact now rides the mention walk (spec.escape_nonvalue)
+    -- instead of a second per-file traversal (spec.escape_names) — measured 15% of the
+    -- whole extract on wow. The hook stays for the index-only front-ends, which never
+    -- walk mentions, so ONE rule has TWO implementations and they can drift apart
+    -- silently: a drift makes files read as confined that are not, which deletes real
+    -- cross-file edges.
+    --
+    -- Agreement alone would not be evidence — two sides that share a blind spot agree
+    -- loudly (the expr self-gate reported AGREEMENT on a fabrication both sides made).
+    -- So each shape is ALSO pinned to the answer it must give.
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/lua', 'p')
+    local function put(p, s)
+        local fd = assert(io.open(root .. '/' .. p, 'w')); fd:write(s); fd:close()
+    end
+    put('lua/shapes.lua', table.concat({
+        'local M = {}',
+        'local cfg <const> = 1',
+        -- the identifier inside `<const>` is not a mention of anything, so a def
+        -- that happens to share the modifier's name stays confined
+        'local function const() return cfg end',
+        'local function callee_only() return 1 end',
+        'local function keyed() return 2 end',
+        'local function based() return 3 end',
+        'local function returned() return 4 end',
+        'local function methodkey() return 5 end',
+        'function M.use(o)',
+        '  callee_only()',            -- callee: a use of the binding, not of the value
+        '  local t = {}',
+        '  t.keyed = 1',              -- the KEY of `t.keyed` names no local
+        '  o:methodkey()',            -- likewise the method name of `o:m()`
+        '  local x = based.field',    -- contrived on purpose: the OBJECT side of an
+        '  return x, returned',       -- index IS a value read, the key side is not
+        'end',
+        'return M', '' }, '\n'))
+    local function facts()
+        local data = ts.extract(root)
+        local f = {}
+        for _, n in ipairs(data.nodes) do
+            if n.kind == 'function' then f[n.name] = n.escapes end
+        end
+        return f
+    end
+    local fused = facts()
+    eq(false, fused['const'], '`<const>` is a modifier, not a mention')
+    eq(false, fused['callee_only'], 'called, never passed')
+    eq(false, fused['keyed'], 'a field KEY of that name is not a mention')
+    eq(false, fused['methodkey'], 'a method NAME of that name is not a mention')
+    eq(true, fused['based'], 'the object side of an index IS a value read')
+    eq(true, fused['returned'], 'returned, so the value left')
+
+    -- now the index-only implementation, on the same shapes
+    local spec = ts.spec.lua
+    local saved = spec.escape_nonvalue
+    spec.escape_nonvalue = nil
+    local okrun, hook = pcall(facts)
+    spec.escape_nonvalue = saved
+    ok(okrun, 'the hook path still extracts: ' .. tostring(hook))
+    for name, v in pairs(fused) do
+        eq(v, hook[name], 'escape_names agrees on ' .. name)
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('lua effects: load-time side effects on module nodes', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

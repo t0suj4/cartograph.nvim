@@ -3259,7 +3259,12 @@ end
 -- independent df, opts.legacy_df). When false, the stack is still tracked for
 -- write-axis (pw) attribution, but no def/use/dep is accumulated — df comes
 -- from flow.coarse (df-strangler step 6).
-local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec)
+-- esc (CART-0236): the THIRD rider. A table = collect into it the names this
+-- file mentions in a VALUE position (the confinement fact, CART-0230), which is
+-- the same question `callee` already answers for one shape; the rest of the rule
+-- is grammar and lives in spec.escape_nonvalue. Its own walk was +14% of the
+-- whole extract, and it asked a tree this one is already holding.
+local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     local scopes = spec.scopes
     local idt = spec.mention_types or MENTION_ID
     local wgate, is_write, guards = spec.write_gate, spec.is_write, spec.guards
@@ -3270,6 +3275,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec)
         variable_name = true }
     local dfid = spec.df_ids
     local modskip = spec.binding_modifiers -- CART-0234
+    local escnv = esc and spec.escape_nonvalue -- CART-0236
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
     local scoped = scopes and MF_SCOPED or 0
@@ -3413,6 +3419,15 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec)
                 local callee = iscall
                     and (n:field('function')[1] == c or n:field('name')[1] == c)
                     or head -- the mention guard already proved c named
+                if escnv and not callee then
+                    -- a value mention unless the grammar says this position is
+                    -- not one. `nt` is the PARENT type (n is c's parent), which is
+                    -- exactly what the spec table is keyed on.
+                    local k = escnv[nt]
+                    if k == nil or (k ~= true and n:named_child(k) ~= c) then
+                        esc[name] = true
+                    end
+                end
                 local idx = nidx[name]
                 if not idx then
                     idx = buf.n + 1
@@ -4372,7 +4387,13 @@ function M.extract(root, opts)
     -- defs: functions, top-level vars, blocks, imports — one TREE at
     -- a time, so container files (vue/svelte SFCs) can run it once per
     -- script region while plain files run it on their single root
-    local function extract_defs(file, lang, spec, src, tsroot, dfreg)
+    -- escpend (CART-0236): a table = the mention walk will answer the confinement
+    -- question for this file, so collect the fn nodes that WANT the answer and let
+    -- the caller stamp them once the set exists (a post-pass per file, still well
+    -- before resolution, which runs after the whole file loop). nil = no mention
+    -- walk is coming (index-only front-ends): fall back to the spec's own walk,
+    -- which is then the file's ONLY walk.
+    local function extract_defs(file, lang, spec, src, tsroot, dfreg, escpend)
         -- df-strangler step 6: production DERIVES df from flow.coarse (no
         -- second AST walk). The legacy dfreg df-build survives ONLY as the
         -- parity ORACLE, gated on opts.legacy_df (bench.extract) so dfparity
@@ -4482,8 +4503,9 @@ function M.extract(root, opts)
                 -- and if it IS file-local: did the value ever leave? Asked only where
                 -- the answer can change a resolution (exp == false), so no file pays
                 -- the walk for a language or a def the guard cannot use.
+                local wantesc = exp == false and not aname
                 local esc
-                if exp == false and not aname then esc = escapes_file(name) end
+                if wantesc and not escpend then esc = escapes_file(name) end
                 local isfield = aname and true
                     or (spec.field_fn_cbarg
                         and namen:parent() and namen:parent():type() == 'field')
@@ -4569,6 +4591,7 @@ function M.extract(root, opts)
                     df = dfrec,
                     flow = fl and { stmts = fl.stmts, params = fl.params } or nil }
                 lastFn[file] = nodes[#nodes]
+                if wantesc and escpend then escpend[#escpend + 1] = nodes[#nodes] end
                 -- register this body in dfreg: ALWAYS (cheap — one entry) so
                 -- the mention DFS keeps a fn-node stack for write-axis (pw)
                 -- attribution. The df-record ACCUMULATION off that stack runs
@@ -5558,8 +5581,14 @@ function M.extract(root, opts)
                 end
             end
             local dfreg = {}
+            -- CART-0236: hand the confinement question to the mention walk when one
+            -- is coming. The list stays empty for a file with no file-local def, and
+            -- a non-empty list implies fnRanges[file] (handle_fn fills both), so the
+            -- stamping pass below cannot be skipped out from under it.
+            local escpend = (spec.escape_nonvalue
+                and not (defs_only or dataflow_only)) and {} or nil
             local _pd = pstart()
-            extract_defs(file, lang, spec, src, tsroot, dfreg)
+            extract_defs(file, lang, spec, src, tsroot, dfreg, escpend)
             padd('extract_defs', _pd) -- incl. flow.build (timed separately)
             -- calls + mentions/refs are deferred entirely in the index-only / dataflow-only
             -- front-ends (they, and the resolution they feed, are the bulk that defers on-demand)
@@ -5573,12 +5602,22 @@ function M.extract(root, opts)
             -- via dfreg (registered by extract_defs above).
             if fnRanges[file] then
                 local buf = mention_buf(spec)
+                local escset = escpend and escpend[1] and {} or nil
                 local _pm = pstart()
-                collect_mentions(buf, tsroot, src, spec, dfreg, opts and opts.legacy_df)
+                collect_mentions(buf, tsroot, src, spec, dfreg,
+                    opts and opts.legacy_df, escset)
                 padd('collect_mentions', _pm)
                 buf.m = table.concat(buf.parts)
                 buf.parts, buf.nidx = nil, nil
                 mentions[file] = buf
+                if escset then
+                    -- tri-state, like `exported`: this is the ASKED answer, so a
+                    -- name absent from the set is a definite false (confined), never
+                    -- a nil standing in for "we did not look".
+                    for _, fn in ipairs(escpend) do
+                        fn.escapes = escset[fn.name] == true
+                    end
+                end
             end
             end -- if not defs_only (calls + mentions deferred)
         end

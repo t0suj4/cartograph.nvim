@@ -19,6 +19,12 @@ local unparen = tsutil.unparen
 -- the identifier query behind escape_names (CART-0230), parsed once per session
 local ESCQ
 
+-- BINDING MODIFIERS (CART-0234), declared ONCE: `binding_modifiers` below hands
+-- this to the three collectors (mentions / expr / flow), and escape_names reads
+-- the same table so the two expressions of the escape rule cannot disagree about
+-- `local x <const>` (they did: the query saw a mention of a symbol named `const`).
+local LUA_MODS = { attribute = true }
+
 -- shared empty iterator: the `... or function () end` fallback used to avoid
 -- allocating a fresh closure on every nil-children branch in hot loops
 local function NOOP() end
@@ -559,7 +565,7 @@ return {
     -- expr.lua and flow.lua cannot tell them apart without asking the language. Both sides
     -- fabricated a read of a variable called `const` from this, and the expr self-gate
     -- reported AGREEMENT because they fabricated it identically.
-    binding_modifiers = { attribute = true },
+    binding_modifiers = LUA_MODS,
     -- CONFINEMENT (CART-0230), the other half of exported_def. `exported = false`
     -- says a name is invisible OUTSIDE its file; it does not say the VALUE cannot
     -- leave, and in lua it routinely does — commands.lua's `local function cmd` is
@@ -580,6 +586,13 @@ return {
     -- every named node from lua and cost +26% of the whole extract on desynced
     -- (6.6s -> 8.9s) — a per-file whole-tree walk in interpreted lua, for a fact
     -- that changes a few hundred resolutions. Same answers, a fraction of the cost.
+    --
+    -- STILL A SECOND WALK, though, and CART-0236 measured it at +14% of the whole
+    -- extract on desynced. `escape_nonvalue` below is the SAME RULE in a form the
+    -- mention walk can apply as it goes, so the full front-end pays no extra
+    -- traversal. This hook stays because the index-only front-ends never walk
+    -- mentions: there it is the only walk, not a duplicate one. Two expressions of
+    -- one rule can drift, so treesitter_spec pins them equal on the shapes below.
     escape_names = function (root, src)
         local set = {}
         ESCQ = ESCQ or vim.treesitter.query.parse('lua', '(identifier) @id')
@@ -587,7 +600,12 @@ return {
             local p = n:parent()
             local pt = p and p:type()
             local mention = true
-            if pt == 'function_call' then
+            if LUA_MODS[pt] then
+                -- a binding modifier names nothing (CART-0234). The mention walk
+                -- skips the whole subtree; here the parent test is equivalent,
+                -- because `<const>` holds exactly one identifier.
+                mention = false
+            elseif pt == 'function_call' then
                 -- the callee: `NAME(...)` is a use of the binding but not an
                 -- escape of the value
                 local nm = p:field('name')[1]
@@ -608,6 +626,22 @@ return {
         end
         return set
     end,
+    -- escape_names, expressed for the mention walk (CART-0236). Keyed by the
+    -- PARENT type of an identifier; the walk records the identifier as a value
+    -- mention unless it is the callee of a call (which the walk already knows) or
+    -- this table vetoes it:
+    --   true = no identifier under this parent is a value mention
+    --   N    = named-child N is the non-value part; every OTHER child is a read
+    -- The number is a child INDEX rather than a field name because `field()`
+    -- allocates a table per call and this runs on every member access in the
+    -- corpus; lua's index expressions are (object, key) in that order, and it is
+    -- the OBJECT that is read (`NAME.x` reads NAME — excluding both children would
+    -- call the file confined, wrong in the one direction that costs a live edge).
+    escape_nonvalue = {
+        function_declaration = true,    -- the def's own name
+        dot_index_expression = 1,       -- `t.NAME` — the KEY only
+        method_index_expression = 1,    -- `t:NAME`
+    },
     -- FIELD ALIAS (CART-0237): `local f = mod.field`, the sibling of import_bind. The
     -- import binds a MODULE to a local; this binds one of its MEMBERS, and a later bare
     -- `f()` is then a call into that module — evidence from the caller's own file, which
