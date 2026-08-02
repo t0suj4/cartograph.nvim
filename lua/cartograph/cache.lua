@@ -73,7 +73,14 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 113 -- v113: `local f = mod.field` RESOLVES (CART-0237). New per-file fact
+M.VERSION = 114 -- v114: MINTED EXTERNALS SURVIVE THE ROUND-TRIP (CART-0245). A stdlib
+               -- symbol minted during resolution lives in a stampless pseudo-file
+               -- (`zig-std`), so build_shards made no shard and dropped all 360 of zig's
+               -- while KEEPING the 4122 edges into them — a warm graph with 4122 dangling
+               -- targets. They ride the manifest now (the synth_unparsed precedent) and are
+               -- re-synthesized at load. The bump forces a cold re-extract: a v113 cache
+               -- has no `minted` list, so warm-opening it would stay broken.
+               -- v113: `local f = mod.field` RESOLVES (CART-0237). New per-file fact
                -- `data.fieldalias` (the member-binding sibling of an import bind) plus a
                -- resolution pass that answers a BARE `f()` through it. +232 calls on
                -- factorio, +122 on our own tree, 0 corrections — the SE witness was 226
@@ -1130,7 +1137,30 @@ local function manifest_of(data, sizes)
         local ok, profmod = pcall(require, 'cartograph.spec.profile')
         profile_stamp = ok and profmod.stamp_of and profmod.stamp_of(data.profile) or nil
     end
+    -- MINTED EXTERNALS (CART-0245): stdlib symbols minted during resolution live in a
+    -- pseudo-file named for the profile (`zig-std`), which has no STAMP — so `want` never
+    -- contains it, build_shards makes no shard for it, and all 360 of zig's std nodes were
+    -- dropped on save while the 4122 edges INTO them were kept. A warm graph was not merely
+    -- thinner: it carried 4122 DANGLING edge targets, and validate does not check
+    -- referential integrity, so nothing said so.
+    --
+    -- THE MANIFEST IS THE RIGHT HOME, not a shard: shards are enumerated from
+    -- `m.stamps`, and faking a stamp for a pseudo-file would put a non-file into the
+    -- validity-key set every consumer reads for staleness. The precedent is already here —
+    -- bundle/unparsed modules ride the manifest and are synthesized at load
+    -- (synth_unparsed). And the VALIDITY KEY needs no invention: this manifest already
+    -- carries profile + profile_stamp, and read_manifest invalidates the whole cache when
+    -- the profile identity changes, which is exactly when a minted set would go stale.
+    local minted
+    for _, n in ipairs(data.nodes or {}) do
+        if n.external and not (data.stamps or {})[n.file] then
+            minted = minted or {}
+            minted[#minted + 1] = { id = n.id, name = n.name, kind = n.kind,
+                file = n.file, ret = n.ret, sig = n.sig }
+        end
+    end
     return { version = M.VERSION, root = data.root, schema = data.schema,
+        minted = minted, -- see above; nil when the graph has none
         provider = data.provider, -- which source: dispatch key for diff/refresh
         ecosystem_stamp = M._artifact_key(), -- layout rules feed resolution
         stamps = data.stamps, unparsed = data.unparsed,
@@ -1410,6 +1440,20 @@ local function absorb(data, f, s)
 end
 
 -- frontier bundles: modules synthesized from the manifest roster
+-- MINTED EXTERNALS come back from the manifest (CART-0245). Same shape the minting site
+-- builds (kind='external', order=-1, a zero range) so a warm node is indistinguishable from
+-- a cold one — the cache column's per-item diff is what proves that.
+local function synth_minted(data, m)
+    if not (m.minted and #m.minted > 0) then return end
+    for _, x in ipairs(m.minted) do
+        data.nodes[#data.nodes + 1] = { id = x.id, name = x.name,
+            kind = x.kind or 'external', file = x.file, external = true, order = -1,
+            ret = x.ret, sig = x.sig,
+            range = { start = { line = 0, char = 0 },
+                ['end'] = { line = 0, char = 0 } } }
+    end
+end
+
 local function synth_unparsed(data, m)
     if not (m.unparsed and #m.unparsed > 0) then return end
     data.unparsed = m.unparsed
@@ -1448,6 +1492,7 @@ function M.load(root)
         end
     end
     synth_unparsed(data, m)
+    synth_minted(data, m)
     return data, bad
 end
 
@@ -1512,6 +1557,7 @@ function M.load_async(root, on_chunk, on_done)
             if not timer:is_closing() then timer:stop(); timer:close() end
             if okk then pcall(vim.on_key, nil, kid) end
             synth_unparsed(data, m)
+            synth_minted(data, m)
             on_done(data, bad)
         elseif on_chunk then
             on_chunk(data, i, #files)

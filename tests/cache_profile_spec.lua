@@ -75,3 +75,50 @@ test('cache profile: activation appearing under a cache also invalidates it', fu
     ok(cache.load(root) == nil, 'newly-activated profile invalidates the profileless cache')
     vim.fn.delete(root, 'rf')
 end)
+
+test('cache minted externals: they survive the round-trip, and so do the edges into them',
+    function ()
+    if config.cache == false then skip 'cache disabled' end
+    -- CART-0245. A stdlib symbol minted during resolution lives in a pseudo-file named for
+    -- the profile (`zig-std`), which carries NO STAMP — so build_shards created no shard for
+    -- it and dropped the node, while KEEPING the edge into it. MEASURED on zig: 360 nodes
+    -- lost and 4122 DANGLING edge targets in the warm graph, and `valid` passed throughout
+    -- because validate does not check referential integrity.
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    -- NO `profile` here: read_manifest invalidates a warm load when the root's current
+    -- profile identity differs, and a temp root activates none — the first version of this
+    -- test set profile='zig-std' and got nil back, which is that check working, not this
+    -- bug. What causes the DROP is the missing STAMP, nothing about profiles.
+    local g = graph(root, {
+        nodes = {
+            { id = 'a.rb', name = 'a.rb', kind = 'module', file = 'a.rb', order = -1, range = R },
+            { id = 'a.rb::f@1', name = 'f', kind = 'function', file = 'a.rb', order = 1, range = R },
+            -- the minted external: no stamp for its file, kind 'external'
+            { id = 'zig-std::std.mem.eql', name = 'std.mem.eql', kind = 'external',
+              file = 'zig-std', external = true, order = -1, range = R },
+        },
+        edges = {
+            { kind = 'ref', from = 'a.rb::f@1', to = 'zig-std::std.mem.eql', stdlib = true },
+        },
+    })
+    cache.save(g, nil)
+    local warm = assert(cache.load(root), 'warm load')
+
+    local ids, minted = {}, 0
+    for _, n in ipairs(warm.nodes) do
+        ids[n.id] = true
+        if n.external then minted = minted + 1 end
+    end
+    eq(1, minted, 'the minted external came back')
+    ok(ids['zig-std::std.mem.eql'], 'by its exact id, so the edge still lands')
+    -- the invariant that was actually broken: no edge may point at a node that is gone
+    local dangling = 0
+    for _, e in ipairs(warm.edges) do
+        if e.to and not ids[e.to] then dangling = dangling + 1 end
+    end
+    eq(0, dangling, 'no dangling edge targets in the warm graph')
+    -- and it must NOT have become a stamped file: `stamps` is the set of real validity
+    -- keys every consumer reads for staleness
+    eq(nil, warm.stamps['zig-std'], 'the pseudo-file did not sneak into the stamp set')
+    vim.fn.delete(root, 'rf')
+end)
