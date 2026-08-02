@@ -73,7 +73,13 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 110 -- v110: ONE CANONICAL SOURCE TEXT (CART-0238). Extraction reads through
+M.VERSION = 111 -- v111: SELF-TYPING SURVIVES A VENDORED LIBRARY (CART-0241). chain_lookup
+               -- refused any corpus-wide duplicate, so an addon corpus that vendors its
+               -- libs (wow: 24 copies of one Ace3 class) had every self:m() into them
+               -- refused. It now falls back to same-file then same-scope, the ladder the
+               -- main resolver already walks: +234 resolutions on wow. Resolution
+               -- semantics, hence the bump.
+               -- v110: ONE CANONICAL SOURCE TEXT (CART-0238). Extraction reads through
                -- transport.read_source now, which normalizes \r\n to \n, so a CRLF file
                -- is ONE string for every analysis reader instead of two (the display path
                -- has always stripped the CR — vim.fn.readfile). RANGES are unchanged:

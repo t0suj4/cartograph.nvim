@@ -3356,6 +3356,55 @@ test('lua: visibility is declared, and a deferred local stays private', function
     vim.fn.delete(root, 'rf')
 end)
 
+test('self:m() picks the VENDORED copy in its own file, not nothing', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- CART-0241. chain_lookup refused ANY corpus-wide duplicate, and an addon corpus
+    -- VENDORS its libraries — `AceConfigDialog:GetStatusTable` exists 24 times on wow, once
+    -- per addon — so every one of them was refused when the answer is obviously the copy in
+    -- the calling file. MEASURED: 298 unresolved `self:m()` calls on wow, of which the
+    -- scope ladder recovers 234.
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/AddonA/libs', 'p')
+    vim.fn.mkdir(root .. '/AddonB/libs', 'p')
+    local function put(p, s)
+        local fd = assert(io.open(root .. '/' .. p, 'w')); fd:write(s); fd:close()
+    end
+    -- the SAME library, vendored twice, byte-identical: two defs per method name
+    local lib = table.concat({
+        'local Dialog = {}',
+        'function Dialog:GetStatus() return self.status end',
+        'function Dialog:Open()',
+        '  local s = self:GetStatus()',      -- ← self:m() with a duplicated owner
+        '  return s',
+        'end',
+        'function Dialog:Close() return self:GetStatus() end',
+        'return Dialog', '' }, '\n')
+    put('AddonA/libs/Dialog.lua', lib)
+    put('AddonB/libs/Dialog.lua', lib)
+    local data = ts.extract(root)
+
+    local getstatus = {}      -- file -> id of that file's Dialog:GetStatus
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'Dialog:GetStatus' then getstatus[n.file] = n.id end
+    end
+    eq(2, vim.tbl_count(getstatus), 'the fixture really does duplicate the def')
+
+    local seen = 0
+    for _, c in ipairs(data.calls) do
+        if tostring(c.full) == 'self:GetStatus' then
+            seen = seen + 1
+            -- the ONLY sound answer is the copy in this very file; before CART-0241 the
+            -- duplicate made chain_lookup return nil and the call stayed unresolved
+            eq(getstatus[c.file], c.to,
+                ('self:GetStatus in %s must resolve to ITS OWN copy'):format(c.file))
+        end
+    end
+    eq(4, seen, 'two self-calls in each of the two copies')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('CRLF: one canonical source text for analysis, raw bytes for the write path', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

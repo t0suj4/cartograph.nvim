@@ -1000,17 +1000,39 @@ end
 -- member in class C: own defs (`:` then `.`), else walk the extends `super`
 -- chain; unique fit or nil. Shared by resolve_self (self:m) and
 -- resolve_local_ctor (obj:m) — the receiver-typing chain resolver.
-local function chain_lookup(super, exact, C, member, clang)
+--- `file` + `scope_of` are OPTIONAL and additive: omit them and this behaves exactly as it
+--- always did (any corpus-wide duplicate = give up). Pass them and a duplicate falls back
+--- to the SCOPE LADDER the main resolver already walks — same file, then same scope.
+---
+--- WHY (CART-0241, measured on wow): a corpus of addons VENDORS its libraries, so
+--- `AceConfigDialog:GetStatusTable` exists 24 times, once per addon. `dup` then refused all
+--- 24 when the answer is obviously the copy in the calling file. 298 `self:m()` calls were
+--- unresolved for exactly that reason — 184 whose enclosing method has no call site at all
+--- (so the lexical V3 stage below was eligible and only its LOOKUP missed) and 114 where
+--- call-site typing had already determined the class and stage (2) then found nothing.
+--- The other 83 stay unresolved BY DESIGN: their enclosing method is demonstrably called on
+--- a different receiver, which is evidence that self is NOT the owner.
+local function chain_lookup(super, exact, C, member, clang, file, scope_of)
     local seen, cur = {}, C
     for _ = 1, SUPER_STEP_LIMIT do
         for _, sep in ipairs({ ':', '.' }) do
             local fit, dup
+            local same, sscope, nsame, nscope = nil, nil, 0, 0
+            local sc = file and scope_of and scope_of(file)
             for _, nd in ipairs(exact[cur .. sep .. member] or {}) do
                 if elang_for(nd.file) == clang then
                     if fit and fit.id ~= nd.id then dup = true else fit = nd end
+                    if file and nd.file == file then nsame = nsame + 1; same = nd end
+                    if sc ~= nil and scope_of(nd.file) == sc then
+                        nscope = nscope + 1; sscope = nd
+                    end
                 end
             end
-            if dup then return nil end
+            if dup then
+                if nsame == 1 then return same end
+                if nscope == 1 then return sscope end
+                return nil
+            end
             if fit then return fit end
         end
         local par = super[cur]
@@ -1925,7 +1947,7 @@ end
 --- `seed` (nil on every whole-graph path, so extract and relink are unchanged) starts
 --- the map from a full graph's outcome, making the pass behave as if it had seen every
 --- call site. M._selft exposes the computed map so it can be captured and carried.
-local function resolve_self(cv, node_index, extends, exact, addref, seed)
+local function resolve_self(cv, node_index, extends, exact, addref, seed, scope_of)
     local cget, cset = cv.get, cv.set
     -- class-name set: any table T that owns a method (`T:x` / `T.x` in exact)
     local is_class = {}
@@ -1985,7 +2007,9 @@ local function resolve_self(cv, node_index, extends, exact, addref, seed)
                 local member = cfull:match('^self[:.]([%w_]+)$')
                 local C = member and selfclass(cfn)
                 if C then
-                    local fit = chain_lookup(super, exact, C, member, elang_for(cget(i, 'file')))
+                    -- scope-aware: a vendored library is duplicated per addon (CART-0241)
+                    local fit = chain_lookup(super, exact, C, member,
+                        elang_for(cget(i, 'file')), cget(i, 'file'), scope_of)
                     if fit then
                         cset(i, 'to', fit.id); cset(i, 'inferred', true); cset(i, 'refused', nil)
                         local cline = cget(i, 'line')
@@ -2030,7 +2054,8 @@ local function resolve_self(cv, node_index, extends, exact, addref, seed)
             -- so self is typed to the prototype and self:m resolves in ITS members.
             local owner = member and fn.name and fn.name:match('^(.+)[:.][%w_]+$')
             if owner and (methodcount[owner] or 0) >= 2 then
-                local fit = chain_lookup(super, exact, owner, member, elang_for(cget(i, 'file')))
+                local fit = chain_lookup(super, exact, owner, member,
+                    elang_for(cget(i, 'file')), cget(i, 'file'), scope_of)
                 -- FILL an unresolved call, OR OVERRIDE a FOREIGN promiscuous match:
                 -- the main resolve()'s member-name tail-match resolves `self:m` to an
                 -- UNRELATED same-named method when the owner truncated (all
@@ -2589,7 +2614,7 @@ local RESOLVE_PASSES = {
         -- (demand materialization). nil on every whole-graph path, so extract/relink
         -- are byte-identical — the gates are the proof.
         local r = resolve_self(x.cv, x.node_index, x.data.extends, x.exact, x.addref,
-            x.data.selft_seed)
+            x.data.selft_seed, x.scope_of)
         -- STAMP the map with the graph it describes. Without this, a consumer could
         -- carry a map left over from a DIFFERENT corpus in the same process — a stale
         -- self-type map is worse than none, since it types against foreign classes.
