@@ -25,6 +25,10 @@ M.NODE_FIELDS = {
     unparsed = true, df = true, flow = true, data = true, ctype = true, ret = true,
     retclass = true, -- generic Class<T> return: arg index binding the return var
     entry = true, exported = true, effects = true, apertures = true,
+    escapes = true, -- (v109) CONFINEMENT, only with exported == false: is the name
+                    -- mentioned in a value position in its own file? false = the
+                    -- value provably never left, so a cross-file name match into it
+                    -- is refused (CART-0230)
     pw = true, -- param-write fact: sorted indexes of OWN params this fn
                -- writes through (lua/js reference semantics; ~ to own params)
     top = true, -- unconditional module-load def (lua): a load-order sibling for

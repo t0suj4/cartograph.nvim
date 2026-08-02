@@ -1060,8 +1060,12 @@ local function calls_new()
   return brand_new(2)
 end
 ]])
+    -- beta is a GLOBAL, and has to be: this test's subject is the cross-file edge
+    -- surviving a splice, and since CART-0230 a `local function` whose value never
+    -- leaves its file is refused as a cross-file target — correctly, because a.lua
+    -- could not have been calling it. The fixture has to declare the edge it asserts.
     write('sub/b.lua', [[
-local function beta(y)
+function beta(y)
   return y * 2
 end
 
@@ -1099,11 +1103,11 @@ end
 -- a comment pushing everything down
 local hidden = 1
 
-local function beta(y)
+function beta(y)
   return y * 3
 end
 
-local function brand_new(z)
+function brand_new(z)
   return z + hidden
 end
 ]])
@@ -1364,7 +1368,9 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     end
     write('a.lua', 'local registry = {}\n\nlocal function alpha(x)\n'
         .. '  return beta(x)\nend\n')
-    write('sub/b.lua', 'local function beta(y)\n  return y * 2 + #registry\nend\n')
+    -- beta is a GLOBAL: a.lua calls it by bare name from another file, and since
+    -- CART-0230 that only resolves when the def is actually reachable from there
+    write('sub/b.lua', 'function beta(y)\n  return y * 2 + #registry\nend\n')
     write('extra.lua', 'local function gamma()\n  return 1\nend\n')
     cache.save(ts.extract(root))
 
@@ -1374,7 +1380,7 @@ test('incremental cache: warm open re-extracts only the diff', function ()
     ok(note:match('unchanged'), tostring(note))
 
     -- edit one file, delete another; only the diff re-extracts
-    write('sub/b.lua', 'local function beta(y)\n  return y * 3 + #registry\nend\n'
+    write('sub/b.lua', 'function beta(y)\n  return y * 3 + #registry\nend\n'
         .. '\nlocal function brand_new(z)\n  return z\nend\n')
     vim.fn.delete(root .. '/extra.lua')
     local warm2, note2 = cache.open(root)
@@ -2026,14 +2032,20 @@ test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
         fd:close()
         return t
     end
+    -- the twins are GLOBALS. The point of the fixture is the FOREIGN-REWRITE hazard
+    -- (`callers in sub/b.lua will reference greet by name — verify it is visible
+    -- there`), which needs b.lua's call to actually resolve into a.lua. Written as
+    -- `local function salute`, CART-0230 now refuses that match — and is right to:
+    -- a bare `salute(5)` in another file would have been a nil call at runtime, so
+    -- the old fixture was asserting a hazard about an edge that never existed.
     local A = table.concat({
-        'local function greet(x)',
+        'function greet(x)',
         '  local y = x + 1',
         '  return y * 2',
         'end',
         '',
         '-- twin docs: adhesion removes this line with the clone',
-        'local function salute(x)',
+        'function salute(x)',
         '  local y = x + 1',
         '  return y * 2',
         'end',
@@ -2092,7 +2104,7 @@ test('clone-merge: plan, refusals, apply, journal, byte-exact undo', function ()
 
     -- the files, byte-exact
     local expectedA = table.concat({
-        'local function greet(x)',
+        'function greet(x)',
         '  local y = x + 1',
         '  return y * 2',
         'end',
@@ -2879,11 +2891,17 @@ test('move-apply: plan, refusals, apply, moveset consumed, undo', function ()
     eq(expectedA, readf('a.lua'))
     eq(expectedB, readf('b.lua'))
 
-    -- the graph followed: traveler now lives in b.lua, caller relinked
+    -- the graph followed: traveler now lives in b.lua
     local t2 = store.node(byname('traveler'))
     eq('b.lua', t2 and t2.file)
-    ok(vim.tbl_contains(store.usedby[byname('traveler')] or {}, byname('stays')),
-        'stays still linked cross-file')
+    -- …and the caller is NOT relinked, which is the plan's own disclosure made good.
+    -- This move rewrote no call site (`the stays() call site is disclosed, not
+    -- rewritten`, asserted above), so a.lua still says a bare `traveler(2)` while
+    -- b.lua declares `local function traveler` — at runtime that is nil. Before
+    -- CART-0230 the graph re-minted the edge by unique name and read as if the move
+    -- had been wired: the hazard told the user to fix a call the graph called fine.
+    ok(not vim.tbl_contains(store.usedby[byname('traveler')] or {}, byname('stays')),
+        'the un-wired call site stays unresolved, matching the hazard')
 
     -- byte-exact undo
     local r, rw = journal.rollback(root)
@@ -3335,6 +3353,50 @@ test('lua: visibility is declared, and a deferred local stays private', function
     ok(byname['M:meth'].exported, 'method is reachable')
     ok(byname['Global'].exported, 'a bare `function g()` is a GLOBAL, hence reachable')
     ok(byname['M.assigned'].exported, 'field = function is reachable')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('lua: a confined file-local is not a cross-file call target', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- CART-0230. The unique-name matcher used to answer a bare `helper()` in ANY file
+    -- with the only `helper` in the workspace, even when that def is a `local function`
+    -- whose value never leaves its file — a manufactured edge. Refusing needs BOTH
+    -- premises: `exported == false` alone also kills the calls into `handoff`, which is
+    -- file-local but escapes through a table (the commands.lua `H` idiom, 5 correct
+    -- edges in CART-0227's 50-edge sample).
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/lua', 'p')
+    local function put(p, s)
+        local fd = assert(io.open(root .. '/' .. p, 'w')); fd:write(s); fd:close()
+    end
+    put('lua/owner.lua', table.concat({
+        'local M = {}',
+        'local function confined() return 1 end',   -- never mentioned as a value
+        'local function handoff() return 2 end',    -- escapes below
+        'function M.pub() return confined() end',
+        'M.H = { handoff = handoff }',              -- ← the escape
+        'return M', '' }, '\n'))
+    put('lua/caller.lua', table.concat({
+        'local M = {}',
+        'function M.a() return confined() end',    -- must NOT resolve
+        'function M.b() return handoff() end',     -- must resolve
+        'return M', '' }, '\n'))
+    local data = ts.extract(root)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do if n.name then byname[n.name] = n end end
+    eq(false, byname['confined'].escapes, 'never mentioned as a value')
+    eq(true, byname['handoff'].escapes, 'put in a table, so it may have left')
+    -- the fact is only asked where it can change a resolution
+    eq(nil, byname['M.pub'].escapes, 'an exported def is never asked')
+
+    local got = {}
+    for _, c in ipairs(data.calls) do
+        if c.file == 'lua/caller.lua' then got[tostring(c.callee)] = c.to end
+    end
+    eq(nil, got['confined'], 'a confined file-local is refused, not resolved')
+    ok(got['handoff'], 'an escaping file-local still resolves')
     vim.fn.delete(root, 'rf')
 end)
 

@@ -127,6 +127,30 @@ local refusal = tsutil.refusal
 -- a fresh closure on every nil-children branch in hot loops
 local function NOOP() end
 
+-- CONFINEMENT REFUSAL (CART-0230). A def the source declares file-local, whose
+-- name is never mentioned in a value position anywhere in its own file, cannot have
+-- escaped that file — so a call from ANOTHER file is not reaching it, however
+-- unique the name happens to be workspace-wide. Both resolve drivers consult this
+-- before minting a cross-file edge; an honest unresolved call replaces a
+-- manufactured one.
+--
+-- MEASURED on our own tree (526 files, 2430 cross-file inferred edges, 2419-edge
+-- residual hand-sampled at 50): refuses 435 edges, of which the sample says 10 are
+-- wrong and 0 are right. Both premises are load-bearing — `exported == false`
+-- alone refuses 598 and kills 5 CORRECT edges, the commands/*.lua calls into
+-- commands.lua's `local function cmd`/`live`, which DO escape through the `H`
+-- handoff table those submodules destructure. n=50 with 0 observed false
+-- positives bounds the FP rate near 8.6%, not at zero.
+--
+-- TRI-STATE, and the test is `== false` in both premises on purpose. A language
+-- with no exported_def leaves `exported` nil; a spec with no escape_names leaves
+-- `escapes` nil; either nil means NOT ASKED. Reading those as "no" is exactly the
+-- absence-as-falseness bug that made this guard's first version fire on 99.5% of
+-- the population and kill every correct edge in the sample.
+local function confined(n, cfile)
+    return n.file ~= cfile and n.exported == false and n.escapes == false
+end
+
 -- ── per-language specs ───────────────────────────────────────────────────────
 -- Each spec: file extensions, tree-sitter queries with a shared capture
 -- protocol (@def/@name for functions and vars, @call/@name for calls), and
@@ -4241,6 +4265,20 @@ function M.extract(root, opts)
         -- a multi-assignment (`a, b = 1, 2`) cross-products name×value in
         -- the query, so dedup by the (name,line) id it produces
         local seen_var = {}
+        -- CONFINEMENT (CART-0230). For a def the spec calls file-local, does its name
+        -- ever appear in this file in a VALUE position? One walk per file, lazily, and
+        -- only for languages that answer the question at all. Tri-state like
+        -- `exported`: nil = never asked, and every consumer must test `== false`.
+        -- (Per REGION, not per file, for container files — a name defined in one
+        -- script region and passed as a value in another would read as confined. Only
+        -- lua defines the hook and lua files are single-region, but a spec adding it
+        -- for an SFC language needs to widen this first.)
+        local escset
+        local function escapes_file(nm)
+            if not spec.escape_names then return nil end
+            escset = escset or spec.escape_names(tsroot, src)
+            return escset[nm] == true
+        end
         -- `aname` (optional): an ANONYMOUS fn (a callback arrow/function passed
         -- as a call argument, no binding name) — extracted as its own fn node so
         -- its body has a home (its own df/flow, its inner calls attribute to IT
@@ -4277,6 +4315,11 @@ function M.extract(root, opts)
                 if spec.exported_def then
                     exp = spec.exported_def(defn, src) == true
                 end
+                -- and if it IS file-local: did the value ever leave? Asked only where
+                -- the answer can change a resolution (exp == false), so no file pays
+                -- the walk for a language or a def the guard cannot use.
+                local esc
+                if exp == false and not aname then esc = escapes_file(name) end
                 local isfield = aname and true
                     or (spec.field_fn_cbarg
                         and namen:parent() and namen:parent():type() == 'field')
@@ -4346,6 +4389,10 @@ function M.extract(root, opts)
                     -- for the reassignment-override resolver (resolve_reassign)
                     top = (lang == 'lua' and toplevel_def(defn)) or nil,
                     exported = exp,
+                    -- CART-0230: only meaningful with exported == false. true = the
+                    -- name is mentioned in a value position in its own file, so the
+                    -- value may have escaped; false = it provably never did.
+                    escapes = esc,
                     torn = torn,
                     entry = (spec.entry_names or {})[name] or nil,
                     -- declared return type (base name): the per-function
@@ -5496,6 +5543,9 @@ function M.extract(root, opts)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
+                -- a confined file-local is not a candidate for a call in another
+                -- file, however unique its name is here (CART-0230)
+                if fits and confined(n, file) then fits = false end
                 if fits then fitset[#fitset + 1] = n end
             end
             if #fitset == 1 then return fitset[1], true end
@@ -5551,6 +5601,7 @@ function M.extract(root, opts)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
+                if fits and confined(n, file) then fits = false end -- CART-0230
                 return fits
             end
             -- ── RECEIVER-PATH AGREEMENT, before the tail-vs-exact preference.
@@ -6067,7 +6118,7 @@ local function build_symtab(nodes)
     for _, n in ipairs(nodes) do
         -- node_index covers EVERY node (mirrors build_index — call targets / enclosing fns
         -- are looked up by id regardless of kind/torn/decl). The resolution read-set (audited
-        -- off M.relink): id/kind/file/name + ret/retclass/arrow/exported/cbarg; NOT flow/df
+        -- off M.relink): id/kind/file/name + ret/retclass/arrow/exported/escapes/cbarg; NOT flow/df
         -- (the analysis payload). exact/tail/node_index alias the SAME stub so a cbarg write
         -- via exact is visible via node_index (relink mutates cbarg in-pass).
         -- params/locals/dfdef feed callee_binding (the local-shadow / fn-value gate).
@@ -6081,7 +6132,7 @@ local function build_symtab(nodes)
         end
         local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name,
             ret = n.ret, retclass = n.retclass, arrow = n.arrow,
-            exported = n.exported, cbarg = n.cbarg,
+            exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
             params = n.params, locals = n.locals, dfdef = dfdef }
         node_index[n.id] = stub
         if (n.kind == 'function' or n.kind == 'method') and not n.torn and not n.decl then
@@ -6256,6 +6307,9 @@ function M.relink(data, touched)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
+                -- a confined file-local is not a candidate for a call in another
+                -- file, however unique its name is here (CART-0230)
+                if fits and confined(n, file) then fits = false end
                 if fits then fitset[#fitset + 1] = n end
             end
             if #fitset == 1 then return fitset[1], true end
@@ -6311,6 +6365,7 @@ function M.relink(data, touched)
                 -- explicit and string-keyed — js .replace() must not
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
+                if fits and confined(n, file) then fits = false end -- CART-0230
                 return fits
             end
             -- ── RECEIVER-PATH AGREEMENT, before the tail-vs-exact preference.

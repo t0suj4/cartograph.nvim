@@ -16,6 +16,9 @@ local chain_eq = tsutil.chain_eq
 local optext_is = tsutil.optext_is
 local unparen = tsutil.unparen
 
+-- the identifier query behind escape_names (CART-0230), parsed once per session
+local ESCQ
+
 -- shared empty iterator: the `... or function () end` fallback used to avoid
 -- allocating a fresh closure on every nil-children branch in hot loops
 local function NOOP() end
@@ -549,6 +552,54 @@ return {
             scope = scope:parent()
         end
         return true
+    end,
+    -- CONFINEMENT (CART-0230), the other half of exported_def. `exported = false`
+    -- says a name is invisible OUTSIDE its file; it does not say the VALUE cannot
+    -- leave, and in lua it routinely does — commands.lua's `local function cmd` is
+    -- put in a handoff table the commands/* submodules destructure, and calls to it
+    -- from those files are real.
+    --
+    -- The distinguishing fact is whether the name is ever mentioned in its own file
+    -- somewhere OTHER than as the callee of a call: `t.f = NAME`, `return NAME`,
+    -- `g(NAME)`, `{ NAME }`, `NAME.x`. If it never is, the value never left, and a
+    -- cross-file call the name matcher wants to point here is not reaching it.
+    --
+    -- Returns the set of names this file mentions in a VALUE position. Deliberately
+    -- OVER-inclusive: a same-named parameter used as a value in some unrelated
+    -- function of this file lands in the set too, which only ever means "we do not
+    -- refuse". Under-inclusiveness is what would cost a live edge.
+    --
+    -- ONE query, parsed once per session and iterated in C. The first cut walked
+    -- every named node from lua and cost +26% of the whole extract on desynced
+    -- (6.6s -> 8.9s) — a per-file whole-tree walk in interpreted lua, for a fact
+    -- that changes a few hundred resolutions. Same answers, a fraction of the cost.
+    escape_names = function (root, src)
+        local set = {}
+        ESCQ = ESCQ or vim.treesitter.query.parse('lua', '(identifier) @id')
+        for _, n in ESCQ:iter_captures(root, src) do
+            local p = n:parent()
+            local pt = p and p:type()
+            local mention = true
+            if pt == 'function_call' then
+                -- the callee: `NAME(...)` is a use of the binding but not an
+                -- escape of the value
+                local nm = p:field('name')[1]
+                mention = not (nm and nm:id() == n:id())
+            elseif pt == 'function_declaration' then
+                mention = false -- the def's own name
+            elseif pt == 'dot_index_expression' or pt == 'method_index_expression' then
+                -- only the KEY is a non-mention. The OBJECT is a value read:
+                -- `NAME.x` reads NAME. (Excluding both children instead would
+                -- call such a file confined — wrong in the one direction that
+                -- costs a live edge.)
+                for _, f in ipairs { 'field', 'method' } do
+                    local k = p:field(f)[1]
+                    if k and k:id() == n:id() then mention = false end
+                end
+            end
+            if mention then set[node_text(n, src)] = true end
+        end
+        return set
     end,
     -- `require "x"` / `local x = require "x"`: module -> file
     import_call = 'require',

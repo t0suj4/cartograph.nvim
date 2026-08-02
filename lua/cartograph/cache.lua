@@ -73,7 +73,13 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 108 -- v108: LUA DECLARES ITS VISIBILITY (CART-0231). spec/lua.lua gained an
+M.VERSION = 109 -- v109: A CONFINED FILE-LOCAL IS NOT A CALL TARGET (CART-0230). Two
+               -- changes, one bump: fn nodes gained `escapes` (a file-local whose name
+               -- is never mentioned in a value position in its own file), and both
+               -- resolve drivers now REFUSE a cross-file name match into such a def.
+               -- Node-field AND resolution-semantics change — 435 edges on our own
+               -- tree stop being minted, so a v108 cache would hand back the phantoms.
+               -- v108: LUA DECLARES ITS VISIBILITY (CART-0231). spec/lua.lua gained an
                -- `exported_def`, so lua fn nodes now carry exported = true/false where
                -- they carried nil. Every other spec with a visibility concept already
                -- did; lua's absence meant consumers reading the field as a boolean read
