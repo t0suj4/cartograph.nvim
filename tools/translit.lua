@@ -2,6 +2,7 @@
 -- it back, and require the two IRs to be IDENTICAL.
 --
 --   nvim --headless -u NONE -l tools/translit.lua <corpus|dir> [--show=N] [--kinds] [--mem]
+--                                                 [--text]
 --
 -- ── WHY THIS IS A REAL TWO-IMPLEMENTATION CHECK ────────────────────────────────
 -- expr.lua's harvest is one direction: tree → schema. This is the other: schema → text →
@@ -23,6 +24,34 @@
 -- skip them for exactly that reason). This oracle compares the graph against ITSELF, so
 -- there is no baseline to go stale and no corpus it cannot run on — pinned, living, or a
 -- bare directory. A green run means something on the day you run it.
+--
+-- ── --text: AND WHAT DOES THE TEXT LOSE? ───────────────────────────────────────
+-- The fixpoint above deliberately says nothing about text, which leaves the obvious
+-- question unanswered: when the emitter DOES produce text, what did it drop? `--text`
+-- compares each emitted expression against THE SOURCE IT CAME FROM (`.at`, read raw off
+-- disk) as token streams — comments counted then dropped, parens dropped from both sides
+-- (build() unwraps them and the emitter has no precedence table), whitespace never a
+-- token. MEASURED, and the claim "only comments are lost" holds:
+--
+--   corpus     compared   same tokens   spans w/ a comment   num reformat   UNEXPLAINED
+--   self         51499       51471              3                28             0
+--   factorio     46198       46172             45                26             0
+--   desynced     54916       54636              6               265             0  (+15 CR)
+--   wow         604502      602719            164              1631             0  (+152 CR)
+--
+-- Comments inside an emittable expression are RARE (3 in 51k on our own tree, 164 in 604k
+-- on wow), so the claim is true and nearly VACUOUS. Two honesty notes that matter more
+-- than the claim: this covers only what EMITTED (79.5% of expressions on self), and the
+-- real losses are the REFUSALS above — table contents, closure bodies, loop clauses —
+-- which are declared rather than silent. Do not read a green --text as "the IR keeps the
+-- program"; read it as "where the IR speaks, it does not quietly change the words".
+--
+-- WHAT IT FOUND, and this is why comparing against the FILE and not against the IR was
+-- worth it: `store.content` reads with vim.fn.readfile (which STRIPS \r) while extraction
+-- reads with transport.read (io.open, which KEEPS it). On a CRLF corpus the same file is
+-- two different strings — on desynced/ui/Codex.lua, 1181 CR bytes vs 0, and every line
+-- one byte shorter, so an `.at` end-column does not address the same byte in both. Filed
+-- as its own ticket; counted here as CR-only, never as a loss.
 --
 -- ── A REFUSAL IS NOT A FAILURE ─────────────────────────────────────────────────
 -- Where the schema stores no contents the emitter DECLINES rather than inventing, because
@@ -49,11 +78,12 @@ if not name then
         .. ' [--show=N] [--kinds] [--mem]')
     os.exit(2)
 end
-local show, want_kinds, want_mem = 0, false, false
+local show, want_kinds, want_mem, want_text = 0, false, false, false
 for i = 2, #(arg or {}) do
     if arg[i]:match('^%-%-show=') then show = tonumber((arg[i]:gsub('^%-%-show=', ''))) or 0 end
     if arg[i] == '--kinds' then want_kinds = true end
     if arg[i] == '--mem' then want_mem = true end
+    if arg[i] == '--text' then want_text = true end
 end
 
 -- a corpus KEY or a plain directory, so this runs anywhere (see the calibration note above)
@@ -214,7 +244,29 @@ end
 
 -- ── the reverse leg: emitted text → schema, through the REAL harvest ───────────
 local VALUE_Q = '(variable_declaration (assignment_statement (expression_list value: (_) @v)))'
-local function reparse(text)
+
+-- token stream of one expression's parse tree: every LEAF under the value node, with
+-- comments COUNTED rather than recorded and parens dropped from the list. Shared by both
+-- sides of the --text comparison so neither side can tokenize by its own rules.
+local PAREN = { ['('] = true, [')'] = true }
+local function leaf_toks(vnode, src)
+    local out, ncom = {}, 0
+    local function walk(n)
+        if n:type() == 'comment' then ncom = ncom + 1; return end
+        if n:child_count() == 0 then
+            local t = vim.treesitter.get_node_text(n, src)
+            if not PAREN[t] then out[#out + 1] = t end
+            return
+        end
+        for c in n:iter_children() do walk(c) end
+    end
+    walk(vnode)
+    return out, ncom
+end
+
+-- (ir, why, toks): the token list is the emitted side's, taken from THIS parse rather
+-- than from a second one — --text would otherwise parse the same text twice.
+local function reparse(text, want_toks)
     local src = 'local __rt = ' .. text
     local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
     if not okp then return nil, 'no parser' end
@@ -223,9 +275,72 @@ local function reparse(text)
     if tree:root():has_error() then return nil, 'PARSE ERROR' end
     local q = vim.treesitter.query.parse('lua', VALUE_Q)
     for _, node in q:iter_captures(tree:root(), src) do
-        return expr.build(node, src)
+        local ir, why = expr.build(node, src)
+        return ir, why, want_toks and (leaf_toks(node, src)) or nil
     end
     return nil, 'no value node'
+end
+
+-- ── --text: WHAT DOES THE TEXT LOSE? (the source-comparison mode) ─────────────
+-- The round trip above is a fixpoint on the IR and says nothing about the TEXT. This mode
+-- asks the other question directly: emit an expression, and compare it against the SOURCE
+-- IT CAME FROM (every expr node carries `.at`, its byte range). The claim under test is
+-- "the only thing that goes missing is comments".
+--
+-- COMPARED AS TOKEN STREAMS, not as strings, and the exclusions are the point:
+--   comments   COUNTED, then dropped — they are what the claim is about.
+--   parens     dropped from BOTH sides. build() unwraps parenthesized_expression, so the
+--              IR cannot know they were there, and the emitter parenthesizes every un/bin
+--              because it carries no precedence table. This is a SECOND deliberate loss
+--              and it would otherwise drown out everything else.
+--   whitespace not a token — a multi-line expression collapsing to one line is not a loss.
+-- Anything left is a real difference in what the text SAYS, and the classes below name it.
+local atmod = require 'cartograph.at'
+local FLINES = {}
+local function file_lines(f)
+    local l = FLINES[f]
+    if l == nil then
+        l = false
+        local h = io.open(root .. '/' .. f)
+        if h then l = {}; for x in h:lines() do l[#l + 1] = x end; h:close() end
+        FLINES[f] = l
+    end
+    return l or nil
+end
+local function slice(lines, r)
+    local sl, sc, el, ec = atmod.sl(r), atmod.sc(r), atmod.el(r), atmod.ec(r)
+    if not (lines[sl + 1] and lines[el + 1]) then return nil end
+    if sl == el then return lines[sl + 1]:sub(sc + 1, ec) end
+    local parts = { lines[sl + 1]:sub(sc + 1) }
+    for i = sl + 1, el - 1 do parts[#parts + 1] = lines[i + 1] end
+    parts[#parts + 1] = lines[el + 1]:sub(1, ec)
+    return table.concat(parts, '\n')
+end
+
+-- the SOURCE side: parse the slice off disk and tokenize it the same way
+local function toks(text)
+    local src = 'local __rt = ' .. text
+    local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
+    if not okp then return nil, 'no parser' end
+    local tree = (parser:parse() or {})[1]
+    if not tree or tree:root():has_error() then return nil, 'PARSE ERROR' end
+    local q = vim.treesitter.query.parse('lua', VALUE_Q)
+    for _, node in q:iter_captures(tree:root(), src) do
+        local out, ncom = leaf_toks(node, src)
+        return out, nil, ncom
+    end
+    return nil, 'no value node'
+end
+
+-- both sides tokenized: same tokens, or the first place they part company
+local function tokdiff(a, b)
+    if #a ~= #b then
+        return ('token count %d vs %d'):format(#a, #b), math.min(#a, #b) + 1
+    end
+    for i = 1, #a do
+        if a[i] ~= b[i] then return ('%q vs %q'):format(a[i], b[i]), i end
+    end
+    return nil
 end
 
 -- ── sweep ─────────────────────────────────────────────────────────────────────
@@ -247,8 +362,12 @@ store.ingest(data)
 stage('after store.ingest')
 
 local stat = { exprs = 0, emitted = 0, ok = 0, mismatch = 0, invalid = 0,
-    legacy_esc = 0, fns = 0 }
+    legacy_esc = 0, fns = 0,
+    -- --text mode
+    tchecked = 0, tsame = 0, tcomment = 0, tncom = 0, tnum = 0, tcr = 0, tdiff = 0,
+    tnospan = 0, tsrcfail = 0 }
 local refusals, mismatches, kinds = {}, {}, {}
+local tclasses, tsamples = {}, {}
 local function note(t, k) t[k] = (t[k] or 0) + 1 end
 
 local function count_kinds(e)
@@ -259,9 +378,13 @@ local function count_kinds(e)
 end
 
 local fns = {}
+local nfile = {} -- fn id -> file, for the --text source slice
 for _, n in ipairs(data.nodes) do
     if (n.kind == 'function' or n.kind == 'method')
-        and n.file and n.file:match('%.lua$') then fns[#fns + 1] = n.id end
+        and n.file and n.file:match('%.lua$') then
+        fns[#fns + 1] = n.id
+        nfile[n.id] = n.file
+    end
 end
 table.sort(fns) -- deterministic report order
 stat.fns = #fns
@@ -291,7 +414,7 @@ for fi, id in ipairs(fns) do
                         note(refusals, refused or 'unknown')
                     else
                         stat.emitted = stat.emitted + 1
-                        local back, why = reparse(text)
+                        local back, why, etoks = reparse(text, want_text)
                         if not back then
                             -- attribute before blaming: a verbatim str lit carrying a
                             -- pre-5.2 escape is the SOURCE's, not the emitter's
@@ -308,6 +431,75 @@ for fi, id in ipairs(fns) do
                                 end
                             end
                         else
+                            -- WHAT THE TEXT LOST, for an expression that round-trips
+                            if want_text then
+                                if not e.at then stat.tnospan = stat.tnospan + 1
+                                else
+                                    local lines = file_lines(nfile[id] or '')
+                                    local orig = lines and slice(lines, e.at)
+                                    -- `orig and toks(orig)` would truncate the multiple
+                                    -- return to its first value and lose the comment count
+                                    local stoks, serr, ncom
+                                    if orig then stoks, serr, ncom = toks(orig) end
+                                    if not stoks or not etoks then
+                                        stat.tsrcfail = stat.tsrcfail + 1
+                                        note(tclasses, 'source span did not tokenize: '
+                                            .. tostring(serr or 'emit side'))
+                                    else
+                                        stat.tchecked = stat.tchecked + 1
+                                        local tdw, at1 = tokdiff(stoks, etoks)
+                                        if not tdw then
+                                            stat.tsame = stat.tsame + 1
+                                            if ncom > 0 then
+                                                stat.tcomment = stat.tcomment + 1
+                                                stat.tncom = stat.tncom + ncom
+                                            end
+                                        else
+                                            -- value-preserving number reformat is not a
+                                            -- loss of what the text SAYS: %.17g only ever
+                                            -- appears where %.14g would change the double
+                                            local numonly = #stoks == #etoks
+                                            for i = 1, #stoks do
+                                                if stoks[i] ~= etoks[i] then
+                                                    local a, b = tonumber(stoks[i]), tonumber(etoks[i])
+                                                    if not (a and b and a == b) then
+                                                        numonly = false break
+                                                    end
+                                                end
+                                            end
+                                            -- CR-ONLY: the token is byte-identical once
+                                            -- the source side's \r are removed. NOT an
+                                            -- emitter fault and not a comment — the two
+                                            -- source readers disagree (see the header).
+                                            local cronly = #stoks == #etoks
+                                            for i = 1, #stoks do
+                                                if stoks[i] ~= etoks[i] then
+                                                    if stoks[i]:gsub('\r', '') ~= etoks[i]
+                                                        or not stoks[i]:find('\r') then
+                                                        cronly = false break
+                                                    end
+                                                end
+                                            end
+                                            if numonly then
+                                                stat.tnum = stat.tnum + 1
+                                                note(tclasses, 'number reformatted, value identical')
+                                            elseif cronly then
+                                                stat.tcr = stat.tcr + 1
+                                                note(tclasses, 'CR stripped: readfile (store.content)'
+                                                    .. ' vs io.open (transport.read)')
+                                            else
+                                                stat.tdiff = stat.tdiff + 1
+                                                note(tclasses, 'UNEXPLAINED at token '
+                                                    .. tostring(at1) .. ': ' .. tdw)
+                                                if #tsamples < 40 then
+                                                    tsamples[#tsamples + 1] = { src = orig,
+                                                        emit = text, why = tdw, id = id }
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
                             local same, diff = eq(e, back, 'e')
                             if same then stat.ok = stat.ok + 1
                             else
@@ -339,6 +531,40 @@ end
 print(('  refused (frontier)    %7d  (%.1f%%)'):format(stat.exprs - stat.emitted,
     pct(stat.exprs - stat.emitted, stat.exprs)))
 
+if want_text then
+    print('\nTEXT vs SOURCE (tokens; comments counted, parens and whitespace excluded):')
+    print(('  compared              %7d'):format(stat.tchecked))
+    print(('    same tokens         %7d  (%.1f%%)'):format(stat.tsame, pct(stat.tsame, stat.tchecked)))
+    print(('      of those, spans carrying a comment %d (%d comments dropped)')
+        :format(stat.tcomment, stat.tncom))
+    print(('    number reformatted  %7d  <- value identical, text differs'):format(stat.tnum))
+    print(('    CR-only            %7d  <- the two source readers disagree, not a loss')
+        :format(stat.tcr))
+    print(('    UNEXPLAINED         %7d  <- something other than a comment went missing')
+        :format(stat.tdiff))
+    if stat.tnospan > 0 then
+        print(('  no source span       %7d  (built from no TS node)'):format(stat.tnospan))
+    end
+    if stat.tsrcfail > 0 then
+        print(('  span did not tokenize %6d'):format(stat.tsrcfail))
+    end
+    local cl = {}
+    for k, v in pairs(tclasses) do cl[#cl + 1] = { k, v } end
+    table.sort(cl, function (a, b) return a[2] > b[2] end)
+    if #cl > 0 then
+        print('  classes:')
+        for i = 1, math.min(12, #cl) do print(('    %7d  %s'):format(cl[i][2], cl[i][1])) end
+    end
+    if show > 0 and #tsamples > 0 then
+        print('  samples (source | emitted):')
+        for i = 1, math.min(show, #tsamples) do
+            print(('    %s\n    %s\n      %s  in %s'):format(
+                (tsamples[i].src or ''):gsub('\n', ' '):sub(1, 110),
+                (tsamples[i].emit or ''):sub(1, 110), tsamples[i].why, tsamples[i].id))
+        end
+    end
+end
+
 if want_kinds then
     local kl, ktot = {}, 0
     for k, v in pairs(kinds) do kl[#kl + 1] = { k, v }; ktot = ktot + v end
@@ -365,9 +591,15 @@ if show > 0 and #mismatches > 0 then
     end
 end
 
--- ONLY the two unambiguous bugs gate; a refusal is a frontier (see the header)
-if stat.mismatch > 0 or stat.invalid > 0 then
-    print(('\nTRANSLIT: FAIL — %d mismatch, %d invalid'):format(stat.mismatch, stat.invalid))
+-- ONLY the unambiguous bugs gate; a refusal is a frontier (see the header). Under --text
+-- an UNEXPLAINED token difference joins them: the deliberate losses (comments, parens,
+-- whitespace, a value-preserving number reformat, the CR reader disagreement) are each
+-- named and counted, so anything left is text the IR changed without saying so. Measured 0
+-- on self / factorio / desynced, which is what makes it a gate somebody can move.
+if stat.mismatch > 0 or stat.invalid > 0 or stat.tdiff > 0 then
+    print(('\nTRANSLIT: FAIL — %d mismatch, %d invalid%s'):format(
+        stat.mismatch, stat.invalid,
+        stat.tdiff > 0 and (', %d unexplained text difference'):format(stat.tdiff) or ''))
     os.exit(1)
 end
 print('\nTRANSLIT: PASS')
