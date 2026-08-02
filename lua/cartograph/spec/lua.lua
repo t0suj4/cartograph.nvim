@@ -608,6 +608,20 @@ return {
         end
         return set
     end,
+    -- FIELD ALIAS (CART-0237): `local f = mod.field`, the sibling of import_bind. The
+    -- import binds a MODULE to a local; this binds one of its MEMBERS, and a later bare
+    -- `f()` is then a call into that module — evidence from the caller's own file, which
+    -- beats any corpus-wide name match. Returns (recv, member) or nil.
+    -- Single-segment base only: `a.b.c` is a chain whose root type we do not know here,
+    -- and the require-alias map is keyed on one name.
+    field_alias = function (valn, src)
+        if valn:type() ~= 'dot_index_expression' then return nil end
+        local b, f = valn:named_child(0), valn:named_child(1)
+        if not (b and f and b:type() == 'identifier' and f:type() == 'identifier') then
+            return nil
+        end
+        return node_text(b, src), node_text(f, src)
+    end,
     -- `require "x"` / `local x = require "x"`: module -> file
     import_call = 'require',
     resolve_import = function (mod, files, from, root)

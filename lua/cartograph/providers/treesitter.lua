@@ -997,6 +997,7 @@ local function build_super(extends)
     end
     return super
 end
+
 -- member in class C: own defs (`:` then `.`), else walk the extends `super`
 -- chain; unique fit or nil. Shared by resolve_self (self:m) and
 -- resolve_local_ctor (obj:m) — the receiver-typing chain resolver.
@@ -1366,6 +1367,106 @@ local function fit_in_file(tail, exact, key, file)
     local fit, dup = scan(tail[key])
     if fit then return fit, dup end
     return scan(exact[key])
+end
+
+-- ── FIELD-ALIAS RESOLUTION (CART-0237) ────────────────────────────────────────────
+-- `local make_recipe = data_util.make_recipe` … then 226 bare `make_recipe{…}` calls.
+-- resolve_module_alias above answers `alias.member()`; this answers the case where the
+-- MEMBER itself was bound to a local and the call is BARE. Same evidence class — an
+-- explicit binding in the caller's own file — and the same authority: a binding beats any
+-- corpus-wide name match ([[cartograph-linker]] layer 1).
+--
+-- WHY IT MATTERS: before this, those calls name-matched to whatever unique `make_recipe`
+-- the corpus happened to hold — SE's private `local function make_recipe` in
+-- arcosphere.lua, 226 phantom edges — and once CART-0230 refused that, they resolved to
+-- nothing while the answer sat on line 3 of every caller.
+--
+-- MEASURED, before -> after (a textual pre-count of the same shape as the check)
+--   factorio   242 unresolved -> 10,   43 already-correct -> 275
+--   self       121 unresolved ->  1,   33 already-correct -> 155  (our own
+--              `local node_text = tsutil.node_text` idiom, 122 calls)
+--   desynced     0 — it has no require-based module aliasing at all
+-- ZERO corrections anywhere, so this is purely additive coverage, not a rewrite stage.
+--
+-- MODULE-LEVEL ALIASES ONLY, and that is a soundness boundary rather than a gap to close
+-- later: handle_var (where the alias is recorded) is gated on `not in_function`, so a
+-- `local add_fn = data_util.tech_add_…` written INSIDE a function is never collected. It
+-- must not be: this map is keyed by FILE, and a function-local binding is visible only in
+-- its own function, so applying it file-wide would resolve calls that never saw it. The
+-- residual above (10 on factorio, 1 on self) is exactly those, left unclaimed on purpose.
+--
+-- SOUNDNESS: gated on (1) an explicit require BINDING for the receiver in this file,
+-- (2) a SINGLE binding of the local (n > 1 = rebound = dropped, the ctorbinds
+-- discipline — which is also what stops a same-named local elsewhere in the file from
+-- being mistaken for the alias), and (3) a UNIQUE fn with that member name in the bound
+-- module's file. Any of the three missing → no edge.
+--
+-- The tier is `inferred` to MATCH resolve_module_alias, which resolves on the same
+-- evidence. CART-0237 argued for exact; whether a binding-derived edge should outrank a
+-- name match is a real question, but it must be decided for BOTH passes at once, not
+-- introduced as a silent difference between two siblings.
+local function resolve_field_alias(cv, edges, exact, tail, addref, node_index, faliases)
+    if not (faliases and next(faliases)) then return 0 end
+    local amap = {} -- file -> { require-alias -> module file }
+    for _, e in ipairs(edges or {}) do
+        if e.kind == 'import' and e.bind and e.from and e.to then
+            local m = amap[e.from]; if not m then m = {}; amap[e.from] = m end
+            m[e.bind] = e.to
+        end
+    end
+    if not next(amap) then return 0 end
+    local cget, cset = cv.get, cv.set
+    local n = 0
+    for i = 1, cv.n do
+        do
+            local cfile = cget(i, 'file')
+            local fa = cfile and faliases[cfile]
+            local callee = fa and tostring(cget(i, 'callee') or '')
+            local b = callee and fa[callee]
+            -- BARE call only: a dotted/method form is resolve_module_alias's job, and a
+            -- `full` carrying a receiver means this local was not the callee.
+            local cfull = b and cget(i, 'full')
+            if b and b.n == 1 and not (cfull and tostring(cfull):find('[%.:]')) then
+                local mod = amap[cfile] and amap[cfile][b.recv]
+                local fit, dup = nil, false
+                if mod then fit, dup = fit_in_file(tail, exact, b.member, mod) end
+                -- FILL an unresolved call, OR CORRECT one that landed OUTSIDE the bound
+                -- module — the binding is authoritative, exactly as in
+                -- resolve_module_alias. Needed for more than symmetry: a same-named
+                -- private helper in a THIRD file that escapes its file (so CART-0230
+                -- cannot refuse it) is a live name-match competitor, and without the
+                -- override the phantom wins over the binding written in the caller.
+                local cto = cget(i, 'to')
+                local cur = cto and node_index and node_index[cto]
+                local foreign = cur ~= nil and cur.file ~= mod
+                if fit and not dup and fit.id ~= cto and (not cto or foreign) then
+                    cset(i, 'to', fit.id)
+                    -- NOT `inferred`. The ladder's own label for that flag is
+                    -- "inferred (~ unique name)", and the name is exactly what this
+                    -- resolution did NOT use — the caller's own binding line names the
+                    -- module member. Marking it `~` also made swallowed-type fire on every
+                    -- one of these (MEASURED +156 findings on our own tree) telling the
+                    -- user their receiver type was laundered, when the type is written on
+                    -- line 3 of the file. resolve_module_alias DOES mark its (same-
+                    -- evidence) resolutions `~`; that looks like the same mislabel, but it
+                    -- is a calibrated pass with its own count, so it gets its own ticket
+                    -- and its own measurement rather than a silent change here.
+                    cset(i, 'inferred', nil)
+                    cset(i, 'refused', nil)
+                    cset(i, 'ext', nil)
+                    local cfn = cget(i, 'fn')
+                    if cfn then
+                        local cline = cget(i, 'line')
+                        addref(cfn, fit.id, cget(i, 'at')
+                            or { start = { line = cline, char = 0 },
+                                 ['end'] = { line = cline, char = 0 } }, true)
+                    end
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return n
 end
 
 -- Upgrade still-refused MODULE-ALIAS calls: `alias.member(...)` where `alias` is
@@ -2597,6 +2698,9 @@ local RESOLVE_PASSES = {
     { name = 'module_alias', run = function (x)
         return resolve_module_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
             x.node_index, x.unparsed) end },
+    { name = 'field_alias', run = function (x) -- `local f = mod.field` then bare f()
+        return resolve_field_alias(x.cv, x.data.edges, x.exact, x.tail, x.addref,
+            x.node_index, x.data.fieldalias) end },
     { name = 'chain_type', run = function (x)
         return resolve_chain_type(x.cv, x.exact, x.addref, x.node_index) end },
     { name = 'field_chain', run = function (x)
@@ -4545,6 +4649,22 @@ function M.extract(root, opts)
                         if type(cv) == 'string' then sv = cv end
                     end
                     constfold.record(constDefs, file, name, sv)
+                    -- FIELD ALIAS (CART-0237): `local f = mod.field`. Recorded per (file,
+                    -- local) with a REBIND COUNTER, exactly like ctorbinds — a name bound
+                    -- twice in one file is not a stable alias and the pass drops it. That
+                    -- is also what protects against a same-named local elsewhere in the
+                    -- file shadowing the module member.
+                    if spec.field_alias and valn and not torn then
+                        local arecv, amember = spec.field_alias(valn, src)
+                        if arecv and amember then
+                            data.fieldalias = data.fieldalias or {}
+                            local fa = data.fieldalias[file]
+                            if not fa then fa = {}; data.fieldalias[file] = fa end
+                            local b = fa[name]
+                            if not b then fa[name] = { recv = arecv, member = amember, n = 1 }
+                            else b.n = b.n + 1 end
+                        end
+                    end
                 end
             end
         end

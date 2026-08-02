@@ -61,6 +61,8 @@ M.SLOTS = {
     resolve_import = 'IMPORTS', import_query = 'IMPORTS',
     import_call = 'IMPORTS', import_bind = 'IMPORTS', import_line = 'IMPORTS',
     import_pats = 'IMPORTS', import_call_like = 'IMPORTS', scan_imports = 'IMPORTS',
+    field_alias = 'IMPORTS',        -- `local f = mod.field`: binds a MEMBER of an
+                                    -- imported module to a local (CART-0237)
     std_aliases = 'IMPORTS',        -- per-file names bound to the stdlib (std-alias disposition)
 
     -- TYPES: receiver / return / chain / field typing (the D-measurement's

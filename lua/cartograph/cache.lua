@@ -73,7 +73,13 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 112 -- v112: A BINDING MODIFIER READS NOTHING (CART-0234). lua 5.4's `local x
+M.VERSION = 113 -- v113: `local f = mod.field` RESOLVES (CART-0237). New per-file fact
+               -- `data.fieldalias` (the member-binding sibling of an import bind) plus a
+               -- resolution pass that answers a BARE `f()` through it. +232 calls on
+               -- factorio, +122 on our own tree, 0 corrections — the SE witness was 226
+               -- calls whose answer sat on line 3 of every caller. New data table AND
+               -- resolution semantics.
+               -- v112: A BINDING MODIFIER READS NOTHING (CART-0234). lua 5.4's `local x
                -- <const>` parses as `attribute`, which is ALSO python's name for `a.b`, so
                -- the shared node-type maps harvested it as a field access with an empty
                -- name — a read of a variable called `const`. BOTH expr and du fabricated

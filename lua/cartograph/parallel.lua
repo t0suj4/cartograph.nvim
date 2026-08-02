@@ -273,6 +273,11 @@ local function merge_chunk(s, chunk)
     for f, fb in pairs(chunk.ctorbinds or {}) do
         if not seen[f] then acc.ctorbinds[f] = fb end
     end
+    -- fieldalias (CART-0237): `local f = mod.field` per (file, local) — per-file overlay
+    acc.fieldalias = acc.fieldalias or {}
+    for f, fb in pairs(chunk.fieldalias or {}) do
+        if not seen[f] then acc.fieldalias[f] = fb end
+    end
     acc.smtclasses = acc.smtclasses or {}
     for f, fs in pairs(chunk.smtclasses or {}) do
         if not seen[f] then acc.smtclasses[f] = fs end

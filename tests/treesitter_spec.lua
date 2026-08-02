@@ -4122,3 +4122,56 @@ test('argv: PHP 8 named arguments unwrap to the value node', function ()
     eq('spread', by['spread_it'].argv[1].k, '...$rest is a spread')
     vim.fn.delete(root, 'rf')
 end)
+
+test('field alias: `local f = mod.field` makes a bare f() resolve into that module', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- CART-0237. SE writes `local make_recipe = data_util.make_recipe` and then calls it
+    -- bare 226 times. Those used to name-match a PRIVATE `local function make_recipe` in an
+    -- unrelated file (a phantom, refused since CART-0230), leaving the calls unresolved
+    -- while the answer sat on line 3 of every caller.
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root .. '/lua', 'p')
+    local function put(p, s)
+        local fd = assert(io.open(root .. '/' .. p, 'w')); fd:write(s); fd:close()
+    end
+    put('lua/util.lua', table.concat({
+        'local M = {}',
+        'function M.make_recipe(p) return p end',
+        'return M', '' }, '\n'))
+    -- a DECOY: another file's private helper with the same name. Before the binding was
+    -- read, this (or its twin) is what a bare call name-matched to.
+    put('lua/other.lua', table.concat({
+        'local function make_recipe(x) return x end',
+        'local M = {}',
+        'function M.use() return make_recipe(1) end',
+        'M.h = { make_recipe = make_recipe }',   -- escapes, so CART-0230 keeps it visible
+        'return M', '' }, '\n'))
+    put('lua/caller.lua', table.concat({
+        "local util = require 'util'",
+        'local make_recipe = util.make_recipe',   -- ← the alias
+        'local M = {}',
+        'function M.build() return make_recipe({ n = 1 }) end',
+        'return M', '' }, '\n'))
+    local data = ts.extract(root)
+
+    local want
+    for _, n in ipairs(data.nodes) do
+        if n.name == 'M.make_recipe' and n.file == 'lua/util.lua' then want = n.id end
+    end
+    ok(want, 'the module member was extracted')
+    -- the alias fact itself, keyed per file with the rebind counter
+    local fa = (data.fieldalias or {})['lua/caller.lua']
+    eq('util', fa and fa.make_recipe and fa.make_recipe.recv)
+    eq('make_recipe', fa and fa.make_recipe and fa.make_recipe.member)
+    eq(1, fa and fa.make_recipe and fa.make_recipe.n)
+
+    local got
+    for _, c in ipairs(data.calls) do
+        if c.file == 'lua/caller.lua' and tostring(c.callee) == 'make_recipe' then got = c end
+    end
+    ok(got, 'the bare call was recorded')
+    eq(want, got and got.to, 'it resolves to the BOUND module member, not the decoy')
+    vim.fn.delete(root, 'rf')
+end)
