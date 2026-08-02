@@ -173,7 +173,7 @@ function M.report(store)
     end
     local label = { confirmed = 'confirmed (observed live at runtime)',
         proven = 'proven (oracle / cross-language)',
-        linked = 'linked (same scope, plain)',
+        linked = 'linked (a binding, or same scope, plain)',
         typed = 'typed (graph-VM return-type summary)',
         inferred = 'inferred (~ unique name)',
         dynamic = 'dynamic (unseeable frontier)',

@@ -1457,9 +1457,12 @@ local function resolve_field_alias(cv, edges, exact, tail, addref, node_index, f
                     local cfn = cget(i, 'fn')
                     if cfn then
                         local cline = cget(i, 'line')
+                        -- 4th arg nil: I marked the CALL unhedged in 019ad4b but left the
+                        -- EDGE `~`, so the two disagreed about the same resolution
+                        -- (CART-0244 found it while auditing module_alias's tier)
                         addref(cfn, fit.id, cget(i, 'at')
                             or { start = { line = cline, char = 0 },
-                                 ['end'] = { line = cline, char = 0 } }, true)
+                                 ['end'] = { line = cline, char = 0 } }, nil)
                     end
                     n = n + 1
                 end
@@ -1549,14 +1552,32 @@ local function resolve_module_alias(cv, edges, exact, tail, addref, node_index, 
                     local foreign = cur ~= nil and cur.file ~= mod
                     if not cto or foreign then
                         cset(i, 'to', fit.id)
-                        cset(i, 'inferred', true)
+                        -- NOT hedged (CART-0244). The `inferred` flag means "resolved by
+                        -- unique NAME" — the ladder's own label is "inferred (~ unique
+                        -- name)" and its complement is called `matched`/`linked` by census,
+                        -- graphdiff and the ladder. This resolution used no corpus-wide
+                        -- name: the require BINDING pins the file, the CALL names the
+                        -- member, and fit_in_file requires it to be unique inside that
+                        -- file. MEASURED on the `self` corpus (the whole repo): all 1775
+                        -- module_alias resolutions carried the ~, and they were 26.6% of
+                        -- the calls feeding swallowed-type — a quarter of that lint's
+                        -- population telling the user to annotate a type that
+                        -- `local m = require 'x'` already states. Unhedging it drops
+                        -- swallowed-type from 1986 to 1748 on lua/ (dogfood's corpus) and
+                        -- moves 219 edges from ~inferred to matched; resolution% does not
+                        -- move, because these are the SAME edges. resolve_field_alias (the
+                        -- `local f = m.field` sibling) was already unhedged; the two agree
+                        -- now, on the call flag AND the edge flag.
+                        cset(i, 'inferred', nil)
                         cset(i, 'refused', nil)
                         local cfn = cget(i, 'fn')
                         if cfn then
                             local cline = cget(i, 'line')
+                            -- 4th arg nil: the EDGE is unhedged too, matching the call
+                            -- flag above (CART-0244)
                             addref(cfn, fit.id, cget(i, 'at')
                                 or { start = { line = cline, char = 0 },
-                                    ['end'] = { line = cline, char = 0 } }, true)
+                                    ['end'] = { line = cline, char = 0 } }, nil)
                         end
                         n = n + 1
                     end

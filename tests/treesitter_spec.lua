@@ -3559,21 +3559,24 @@ test('luals oracle: references settle what names refuse', function ()
             '~/.local/lib/lua-language-server/bin/lua-language-server')) == 1
     if not bin_ok then skip 'no lua-language-server' end
     local data = ts.extract(vim.fn.getcwd() .. '/tests/fixtures/luaoracle')
-    -- a.pick: MODULE-ALIAS resolves it STATICALLY (a = require 'alpha' → alpha's
-    -- pick) at inferred (~); the oracle then UPGRADES that ~ to solid — the tier
-    -- ladder (static rung-1 → oracle proven), luals explicitly targets ~ edges.
+    -- a.pick: MODULE-ALIAS resolves it STATICALLY (a = require 'alpha' → alpha's pick).
+    -- Since CART-0244 that resolution is NOT hedged — a require binding is not a unique-name
+    -- match — so there is no ~ for the oracle to upgrade here. What the oracle must still do
+    -- is SEE it and AGREE: luals.enrich selects binding-derived edges deliberately, because
+    -- a confident claim is exactly what an independent check is worth most on. A redirect or
+    -- a downgrade here would be a real bug on one of the two sides.
     local site
     for _, c in ipairs(data.calls) do
         if c.callee == 'pick' and c.file == 'user.lua' then site = c end
     end
     ok(site, 'call site found')
-    ok(site.to and site.to:match('^alpha%.lua') and site.inferred,
-        'module-alias pre-resolves a.pick to alpha at ~')
+    ok(site.to and site.to:match('^alpha%.lua') and not site.inferred,
+        'module-alias resolves a.pick to alpha, unhedged (a binding is not a name match)')
     local stats, why = luals.enrich(data)
     ok(stats, tostring(why))
-    -- lua-ls confirms the require binding: the ~ edge is upgraded to solid
+    -- lua-ls confirms the require binding: same target, still solid
     ok(site.to and site.to:match('^alpha%.lua'), tostring(site.to))
-    ok(not site.inferred, 'oracle upgrades the ~ to solid')
+    ok(not site.inferred, 'the oracle agrees — no redirect, no downgrade')
 end)
 
 test('luals async: settles the same, without blocking the caller', function ()

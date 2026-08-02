@@ -73,7 +73,14 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 114 -- v114: MINTED EXTERNALS SURVIVE THE ROUND-TRIP (CART-0245). A stdlib
+M.VERSION = 115 -- v115: A BINDING IS NOT A NAME MATCH (CART-0244). resolve_module_alias
+               -- marked all its resolutions `inferred` (~), but that flag means "resolved
+               -- by unique NAME" — the require BINDING pins the file and the call names the
+               -- member. MEASURED: 1775 such edges on our own tree, 26.6% of the calls
+               -- feeding swallowed-type. Both binding-derived stages (module_alias and
+               -- field_alias) are now unhedged on the CALL and the EDGE alike; `inferred`
+               -- is persisted, so the tier of those edges changes on disk.
+               -- v114: MINTED EXTERNALS SURVIVE THE ROUND-TRIP (CART-0245). A stdlib
                -- symbol minted during resolution lives in a stampless pseudo-file
                -- (`zig-std`), so build_shards made no shard and dropped all 360 of zig's
                -- while KEEPING the 4122 edges into them — a warm graph with 4122 dangling

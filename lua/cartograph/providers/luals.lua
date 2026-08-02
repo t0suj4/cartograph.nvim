@@ -55,13 +55,25 @@ function M.enrich(data, opts)
     -- lua-ls could actually see (soundness: every mutated site's file is open).
     local calls = opts.calls or data.calls or {}
 
-    -- candidates: lua defs that either carry an inferred inbound call
-    -- (upgrade-or-refute) or whose tail an UNRESOLVED call names (a
+    -- candidates: lua defs that either carry an inbound call THIS SIDE DERIVED rather
+    -- than proved (upgrade-or-refute) or whose tail an UNRESOLVED call names (a
     -- refusal the oracle might settle)
+    --
+    -- NOT just `c.inferred` (CART-0244): that flag now means "resolved by unique NAME",
+    -- and the binding-derived stages (module_alias, field_alias) no longer carry it —
+    -- 1775 edges on the self corpus. Selecting on the flag alone would have QUIETLY
+    -- REMOVED them from the oracle's reach, which is backwards: the more confident this
+    -- side is, the more an independent check is worth ("a lua-ls disagreement is a real
+    -- bug on ONE side").
+    -- SCOPED DELIBERATELY to the stages that just lost the flag, not widened to "anything
+    -- not proven": that would pull in every same-file exact match (~2x the candidates on
+    -- self) and each candidate costs lua-ls an open file. Same reach as before, minus the
+    -- accidental loss.
+    local BINDING_DERIVED = { module_alias = true, field_alias = true }
     local inferred_in, want_tail = {}, {}
     for _, c in ipairs(calls) do
         if c.file:match('%.lua$') and not c.dynamic then
-            if c.to and c.inferred then
+            if c.to and (c.inferred or BINDING_DERIVED[c.prov]) then
                 inferred_in[c.to] = true
             elseif not c.to then
                 want_tail[c.callee] = true
