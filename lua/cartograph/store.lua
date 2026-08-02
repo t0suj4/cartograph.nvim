@@ -965,7 +965,9 @@ local function frontier_text(file)
     local e = M._frontier_cache[file]
     local stamp = transport.stamp(path) or 'gone'
     if e and e.stamp == stamp then return e.text end
-    local text = transport.read(path) or false
+    -- SOURCE text (CART-0238): this feeds parsing/serving and is hashed for the
+    -- landing cache, so it must be the same string every other analysis reader sees
+    local text = transport.read_source(path) or false
     local hash = text and djb2(text) or nil
     if e then
         if e.hash == hash then
@@ -1693,6 +1695,14 @@ function M.content(node)
     -- readfile drops a trailing empty line where splitting on '\n' keeps it, and
     -- these lines feed DISPLAY. Routing the stamp is what this seam needed; the
     -- read would need transport to offer readfile's exact line semantics first.
+    --
+    -- CART-0238: these lines are ALSO what the on-demand analysis rebuild parses
+    -- (expr.of, narrow, optimize, trace), so they have to agree with the text
+    -- EXTRACTION parsed. They do now — readfile strips the CR of a CRLF line and
+    -- transport.read_source normalizes \r\n, leaving only that trailing empty line
+    -- between them, which no node range addresses. They did NOT agree before v110,
+    -- and no oracle could see it because both sides of each one read through the same
+    -- one of these two paths. Do not "simplify" either side back to a bare read.
     if stamp ~= 'gone' then
         local ok, r = pcall(vim.fn.readfile, path); lines = ok and r or false
     end

@@ -3356,6 +3356,90 @@ test('lua: visibility is declared, and a deferred local stays private', function
     vim.fn.delete(root, 'rf')
 end)
 
+test('CRLF: one canonical source text for analysis, raw bytes for the write path', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- CART-0238. Extraction used to read with transport.read (io.open, CR kept) while
+    -- store.content reads with vim.fn.readfile (CR stripped), so on a CRLF file the same
+    -- source was TWO DIFFERENT STRINGS and the extract-time IR disagreed with the
+    -- on-demand rebuild about the value of every multi-line string literal. Found by
+    -- translit --text; invisible to every other oracle, because both sides of each one
+    -- use the same reader.
+    local transport = require 'cartograph.transport'
+    local txn = require 'cartograph.txn'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    -- CRLF, and a LONG STRING spanning lines — the only construct whose own text can
+    -- carry a CR (a short string cannot hold a raw newline)
+    local fd = assert(io.open(root .. '/crlf.lua', 'wb'))
+    fd:write(table.concat({
+        'local M = {}', '',
+        'function M.layout()',
+        '  local tpl = [[',
+        '<Box>',
+        '</Box>]]',
+        '  return tpl',
+        'end', '',
+        'return M', '' }, '\r\n'))
+    fd:close()
+    local path = root .. '/crlf.lua'
+
+    -- the canonical read has no CR; the RAW read still does (that is the whole point:
+    -- the write path must splice the file's own line endings back)
+    local canon = assert(transport.read_source(path))
+    eq(nil, canon:find('\r'), 'the analysis text is CR-free')
+    ok((transport.read(path) or ''):find('\r'), 'the raw bytes are untouched')
+    ok((txn.read_file(root, 'crlf.lua') or ''):find('\r'), 'and the WRITE path reads raw')
+
+    -- THE INVARIANT: the two analysis readers now agree, line for line
+    local data = ts.extract(root)
+    store.ingest(data)
+    local fnode
+    for _, n in ipairs(data.nodes) do if n.name == 'M.layout' then fnode = n end end
+    ok(fnode, 'the function was extracted')
+    local content = store.content(fnode)
+    local split = vim.split(canon, '\n', { plain = true })
+    for i, l in ipairs(content) do
+        eq(l, split[i], 'reader agreement at line ' .. i)
+    end
+
+    -- and the recorded range addresses the SAME text under either reader — the property
+    -- that made this benign for columns (no token sits at the trailing CR) and that a
+    -- future normalization change must not break
+    local sl, el = atr.sl(fnode.range), atr.el(fnode.range)
+    eq(content[sl + 1], split[sl + 1], 'first line of the def')
+    eq(content[el + 1], split[el + 1], 'last line of the def')
+    eq('function M.layout()', content[sl + 1])
+
+    -- THE COVERAGE HALF, and it is the bigger one. A backslash line continuation inside
+    -- a short string is legal lua (the lexer takes ANY end-of-line sequence after the
+    -- backslash), but the tree-sitter grammar accepts `\` + LF and NOT `\` + CRLF, so on
+    -- a CRLF file it raises an ERROR — and the torn policy then refuses every def past
+    -- that row. MEASURED on wow: SuperDuperMacro.lua errored at row 15 of 1528 and lost
+    -- 90 defs, 159 edges and 623 calls; with the source normalized it parses clean.
+    local fd2 = assert(io.open(root .. '/cont.lua', 'wb'))
+    fd2:write(table.concat({
+        'local M = {}', '',
+        'function M.before()',
+        '  local s = "first\\',   -- ← `\` then CRLF: what the grammar rejects
+        'second"',
+        '  return s',
+        'end', '',
+        'function M.after() return 2 end', '',
+        'return M', '' }, '\r\n'))
+    fd2:close()
+    local d2 = ts.extract(root)
+    local names, torn = {}, {}
+    for _, n in ipairs(d2.nodes) do
+        if n.file == 'cont.lua' then names[n.name] = true; torn[n.name] = n.torn end
+    end
+    ok(names['M.before'], 'the def carrying the continuation is extracted')
+    ok(names['M.after'], 'AND the def after it — the torn policy would have refused it')
+    eq(nil, torn['M.after'], 'not torn: the normalized source has no parse error')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('lua: a confined file-local is not a cross-file call target', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

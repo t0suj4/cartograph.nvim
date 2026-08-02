@@ -73,7 +73,18 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 109 -- v109: A CONFINED FILE-LOCAL IS NOT A CALL TARGET (CART-0230). Two
+M.VERSION = 110 -- v110: ONE CANONICAL SOURCE TEXT (CART-0238). Extraction reads through
+               -- transport.read_source now, which normalizes \r\n to \n, so a CRLF file
+               -- is ONE string for every analysis reader instead of two (the display path
+               -- has always stripped the CR — vim.fn.readfile). RANGES are unchanged:
+               -- measured 0 of 4186 desynced ranges end past the CR-stripped line,
+               -- because no token sits at the trailing CR. But node TEXT, string-literal
+               -- VALUES and the frontier hash all change on a CRLF corpus, so a v109
+               -- cache would hand back the other string — and on wow the GRAPH itself
+               -- grows: a `\` + CRLF string continuation used to raise a parse ERROR and
+               -- tear every def after it, so SuperDuperMacro.lua gained 90 nodes, 159
+               -- edges and 623 calls.
+               -- v109: A CONFINED FILE-LOCAL IS NOT A CALL TARGET (CART-0230). Two
                -- changes, one bump: fn nodes gained `escapes` (a file-local whose name
                -- is never mentioned in a value position in its own file), and both
                -- resolve drivers now REFUSE a cross-file name match into such a def.

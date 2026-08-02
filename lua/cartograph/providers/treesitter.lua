@@ -2771,7 +2771,7 @@ function M.forms(file, sr, sc, er, ec)
     local _, spec = elang_for(file)
     local lang = parse_lang_for(file) -- TS parses under typescript, not js
     if not (lang and spec) then return {} end
-    local src = transport.read(file)
+    local src = transport.read_source(file)
     if not src then return {} end
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
     if not ok then return {} end
@@ -2894,7 +2894,7 @@ function M.detail(file, sr, sc, er, ec)
     local _, spec = elang_for(file)
     local lang = parse_lang_for(file) -- TS parses under typescript, not js
     if not (lang and spec) then return {} end
-    local src = transport.read(file); if not src then return {} end
+    local src = transport.read_source(file); if not src then return {} end
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
     if not ok then return {} end
     local tree = parser:parse()[1]; if not tree then return {} end
@@ -3625,7 +3625,7 @@ local function id_pass(root, files, L, abs, tp)
             local lang, spec = lang_for(file)
             local clang = container_for(file)
             if clang then lang, spec = 'javascript', M.spec.javascript end
-            local src = tp.read(abs(file))
+            local src = tp.read_source(abs(file))
             local okp, parser = pcall(vim.treesitter.get_string_parser,
                 src or '', clang or lang)
             if src and okp then
@@ -5297,7 +5297,7 @@ function M.extract(root, opts)
     end
 
     for _, file in ipairs(files) do
-        local src, rerr = tp.read(abs(file))
+        local src, rerr = tp.read_source(abs(file))
         if not src then
             -- UNAVAILABLE is not absence: the file is known to exist, we simply
             -- could not read it. Dropping it would delete its module node and

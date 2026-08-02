@@ -47,11 +47,18 @@
 -- program"; read it as "where the IR speaks, it does not quietly change the words".
 --
 -- WHAT IT FOUND, and this is why comparing against the FILE and not against the IR was
--- worth it: `store.content` reads with vim.fn.readfile (which STRIPS \r) while extraction
--- reads with transport.read (io.open, which KEEPS it). On a CRLF corpus the same file is
--- two different strings — on desynced/ui/Codex.lua, 1181 CR bytes vs 0, and every line
--- one byte shorter, so an `.at` end-column does not address the same byte in both. Filed
--- as its own ticket; counted here as CR-only, never as a loss.
+-- worth it: `store.content` read with vim.fn.readfile (STRIPS \r) while extraction read
+-- with transport.read (io.open, KEEPS it), so on a CRLF corpus the same file was two
+-- different strings and the extract-time IR and the on-demand rebuild disagreed about
+-- every multi-line string literal. FIXED in v110 — analysis reads through
+-- transport.read_source, one canonical \n text (CART-0238).
+--
+-- THE CR-ONLY CLASS SURVIVES THAT FIX, and deliberately: this mode still reads the file
+-- RAW, so it still sees the CRs the canonical text drops (15 on desynced, 152 on wow).
+-- Reading it the same way the IR did would put both sides of this comparison back on ONE
+-- reader — the exact blind spot that let the bug live. So the class is now "CRLF
+-- normalized for analysis, as lua's own lexer does inside a long string", and it doubles
+-- as the guard that the normalization stays deliberate and stays the only one.
 --
 -- ── A REFUSAL IS NOT A FAILURE ─────────────────────────────────────────────────
 -- Where the schema stores no contents the emitter DECLINES rather than inventing, because
@@ -467,10 +474,15 @@ for fi, id in ipairs(fns) do
                                                     end
                                                 end
                                             end
-                                            -- CR-ONLY: the token is byte-identical once
-                                            -- the source side's \r are removed. NOT an
-                                            -- emitter fault and not a comment — the two
-                                            -- source readers disagree (see the header).
+                                            -- CR-ONLY: byte-identical once the source
+                                            -- side's \r are removed. NOT a loss — the
+                                            -- canonical analysis text normalizes \r\n,
+                                            -- exactly as lua's own lexer does inside a
+                                            -- long string (transport.read_source). THIS
+                                            -- SIDE STAYS RAW ON PURPOSE: reading the file
+                                            -- the same way the IR did would put both
+                                            -- sides of this check back on one reader,
+                                            -- which is the blind spot that hid CART-0238.
                                             local cronly = #stoks == #etoks
                                             for i = 1, #stoks do
                                                 if stoks[i] ~= etoks[i] then
@@ -485,8 +497,8 @@ for fi, id in ipairs(fns) do
                                                 note(tclasses, 'number reformatted, value identical')
                                             elseif cronly then
                                                 stat.tcr = stat.tcr + 1
-                                                note(tclasses, 'CR stripped: readfile (store.content)'
-                                                    .. ' vs io.open (transport.read)')
+                                                note(tclasses, 'CRLF normalized by'
+                                                    .. ' read_source (as lua does in a long string)')
                                             else
                                                 stat.tdiff = stat.tdiff + 1
                                                 note(tclasses, 'UNEXPLAINED at token '
@@ -538,7 +550,7 @@ if want_text then
     print(('      of those, spans carrying a comment %d (%d comments dropped)')
         :format(stat.tcomment, stat.tncom))
     print(('    number reformatted  %7d  <- value identical, text differs'):format(stat.tnum))
-    print(('    CR-only            %7d  <- the two source readers disagree, not a loss')
+    print(('    CR-only            %7d  <- CRLF normalized for analysis, not a loss')
         :format(stat.tcr))
     print(('    UNEXPLAINED         %7d  <- something other than a comment went missing')
         :format(stat.tdiff))

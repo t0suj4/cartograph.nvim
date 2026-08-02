@@ -448,6 +448,44 @@ local function make(transports, spec)
         return t.read(path)
     end
 
+    --- THE SAME BYTES AS SOURCE TEXT: `\r\n` normalized to `\n`, and nothing else
+    --- touched. Use this wherever the bytes are about to be PARSED, hashed, sliced by a
+    --- node range, or compared against another read of the same file; use plain read()
+    --- when the bytes are bytes (an archive, a stamp, the write path).
+    ---
+    --- WHY IT HAS TO EXIST (CART-0238). The display path reads with vim.fn.readfile,
+    --- which strips the CR; extraction read with plain read(), which keeps it. On a CRLF
+    --- corpus the same file was therefore TWO DIFFERENT STRINGS, and the extract-time IR
+    --- and the on-demand rebuild (expr.of → store.content) disagreed about the value of
+    --- every multi-line string literal — 15 on desynced, 152 on wow, found by translit
+    --- --text and by nothing else, because both sides of every other oracle share a
+    --- reader. MEASURED before choosing this fix: 0 of 4186 node ranges on desynced end
+    --- past the CR-stripped line, so COLUMNS were never exposed (no token sits at the
+    --- trailing CR) — the exposure was values and text, not offsets.
+    ---
+    --- `\r\n` -> `\n` and NOT gsub('\r', ''): a lone CR inside a string literal is data
+    --- the program means to carry, and this must match readfile, which only ever drops
+    --- the CR of a CRLF pair. It also matches LUA ITSELF, whose lexer normalizes any
+    --- end-of-line sequence inside a long string to a single newline — so the normalized
+    --- text is what the running program sees, and the raw text never was.
+    ---
+    --- AND IT BUYS COVERAGE, which turned out to be the bigger half. A backslash line
+    --- continuation inside a short string takes ANY end-of-line sequence in real lua, but
+    --- the tree-sitter grammar accepts `\` + LF and NOT `\` + CRLF — so on a CRLF file it
+    --- raises an ERROR, and the torn policy then refuses every def past that row.
+    --- MEASURED on wow: SuperDuperMacro.lua errored at row 15 of 1528 and the graph was
+    --- missing 90 defs, 159 edges and 623 calls; normalized, it parses clean. A whole
+    --- 1500-line addon was 1% extracted because of two bytes per line.
+    ---
+    --- THE WRITE PATH DELIBERATELY DOES NOT USE THIS. txn.read_file stays raw, so a
+    --- refactoring splices CRLF lines back exactly as it found them instead of silently
+    --- reformatting every line ending in the file.
+    function S.read_source(path)
+        local src, err = S.read(path)
+        if not src then return nil, err end
+        return (src:gsub('\r\n', '\n'))
+    end
+
     --- Contents split into lines. Returns (nil, err) when unreadable; callers
     --- that distinguish "tried and failed" from "not tried" keep `or false`.
     function S.lines(path)
@@ -562,6 +600,7 @@ end
 
 local disk_only = make({}, { { kind = 'disk' } })
 M.for_path, M.read, M.lines = disk_only.for_path, disk_only.read, disk_only.lines
+M.read_source = disk_only.read_source
 M.read_range = disk_only.read_range
 M.resolve_entry, M.join = disk_only.resolve_entry, disk_only.join
 M.size, M.reader = disk_only.size, disk_only.reader
