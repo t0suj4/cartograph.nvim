@@ -52,9 +52,28 @@ do
 end
 for _, f in ipairs(vim.fn.glob('tests/*_spec.lua', false, true)) do
     if not only or only[f:match('([^/]+)%.lua$')] then
-        local chunk, err = loadfile(f)
-        if not chunk then error('cannot load ' .. f .. ': ' .. err) end
-        chunk()
+        -- A LOAD-TIME FAILURE MUST EXIT, NOT ESCAPE. Both paths below used to raise out of
+        -- run.lua's main chunk — and an error there means `vim.cmd('qall!')` at the bottom
+        -- is NEVER REACHED, so headless nvim prints a traceback and then sits in the event
+        -- loop FOREVER. run.sh's `set -euo pipefail` cannot catch it: the process never
+        -- exits, so there is no exit code to test. The suite stops failing and starts
+        -- HANGING — which also hangs the pre-commit hook that runs it.
+        -- MEASURED, twice: a broken `require` in cloneextract_spec left a headless nvim
+        -- idle in do_epoll_wait for ~3h, and an older one for 6 DAYS. The same incident
+        -- also bought a wrong diagnosis — the suite was read as "slow" for 500s when it
+        -- had in fact already died. A hang is the worst shape a gate can fail in, because
+        -- it is indistinguishable from slow work.
+        local chunk, lerr = loadfile(f)
+        if not chunk then
+            print(('\nLOAD ERROR — cannot compile %s:\n  %s'):format(f, tostring(lerr)))
+            vim.cmd('cquit 1')
+        end
+        local okc, cerr = pcall(chunk)
+        if not okc then
+            print(('\nLOAD ERROR — %s raised while loading:\n  %s')
+                :format(f, tostring(cerr):gsub('\n', '\n  ')))
+            vim.cmd('cquit 1')
+        end
     end
 end
 
