@@ -466,6 +466,90 @@ return {
     params_field = 'parameters',
     body_field = 'body',
     is_method = function (name) return name:find(':') ~= nil end,
+    -- VISIBILITY (CART-0231). Lua's is purely syntactic — a `local` binding is
+    -- invisible outside its file BY NAME, everything else is reachable (a dotted
+    -- name through its table, a bare `function g()` through _G). Until this existed
+    -- every lua node carried `exported = nil`, and consumers that read the field as
+    -- a boolean read ABSENCE AS FALSENESS: lsp hover labelled `function M.abs`
+    -- `_local_`, for the whole language we dogfood on.
+    --
+    -- THE THREE SHAPES ARE THE THREE the `functions` query captures, no more:
+    --   (1) function_declaration  — `function g/M.f/M:m` AND `local function l`;
+    --       the only difference is a leading anonymous `local` token.
+    --   (2) function_definition under assignment_statement — `M.h = function()`,
+    --       `g = function()`. `local a = function()` reaches the same capture but
+    --       carries a `variable_declaration` ancestor, which is its `local`.
+    --   (3) function_definition under a table `field` — `{ k = function() end }`.
+    --
+    -- BIASED TOWARD `true` ON PURPOSE. A wrong `false` is the harmful direction:
+    -- it lets a consumer refuse a live edge (CART-0230) or call a reachable
+    -- function dead. So only syntax that PROVES a local binding returns false, and
+    -- case (3) returns true — whether the containing table escapes is a different
+    -- question, and answering it wrong here would be answering it in the harmful
+    -- direction.
+    exported_def = function (defn, src)
+        if defn:type() == 'function_declaration' then
+            local first = defn:child(0)
+            return not (first and not first:named() and first:type() == 'local')
+        end
+        -- an anonymous function VALUE: the `local` lives on the enclosing STATEMENT,
+        -- not on the value, so walk up to find the statement that BINDS it.
+        local a, asn = defn:parent(), nil
+        while a do
+            local t = a:type()
+            -- case (3) first: inside a table constructor the fn is a MEMBER, not a
+            -- name binding, and the enclosing statement's `local` belongs to the
+            -- table rather than to this function.
+            if t == 'table_constructor' then return true end
+            if t == 'variable_declaration' then return false end -- `local x = function()`
+            if t == 'assignment_statement' then asn = a end
+            if t == 'chunk' or t == 'return_statement' or t == 'block' then break end
+            a = a:parent()
+        end
+        if not asn then return true end
+        -- `NAME = function()`. A dotted/bracketed target is a table member, so
+        -- reachable. A PLAIN IDENTIFIER is a local iff some enclosing scope declares
+        -- it — the DEFERRED-ASSIGNMENT idiom, `local abs` … `abs = function()`, which
+        -- is how worker.lua's `abs`, gen.lua's `body` and the factorio profiles'
+        -- `mint_path` are written. Reading only the assignment calls all five of those
+        -- exported, so the declaration has to be looked for.
+        local vlist = asn:child(0)
+        local target = vlist and vlist:type() == 'variable_list' and vlist:child(0)
+        if not (target and target:type() == 'identifier') then return true end
+        local name = node_text(target, src)
+        local scope = asn:parent()
+        while scope do
+            local st = scope:type()
+            if st == 'block' or st == 'chunk' then
+                for c in scope:iter_children() do
+                    if c:type() == 'variable_declaration' then
+                        -- child(0) is the UNNAMED `local` token, not the binding list.
+                        -- (A dump filtered to named children hides that and makes
+                        -- `c:child(0)` look like the variable_list.) The list is a
+                        -- named child: a variable_list directly for `local x`, or one
+                        -- nested under an assignment_statement for `local x = v`.
+                        local l
+                        for k in c:iter_children() do
+                            local kt = k:type()
+                            if kt == 'variable_list' then l = k break end
+                            if kt == 'assignment_statement' then
+                                for k2 in k:iter_children() do
+                                    if k2:type() == 'variable_list' then l = k2 break end
+                                end
+                                break
+                            end
+                        end
+                        for id in (l and l:iter_children() or function () end) do
+                            if id:type() == 'identifier'
+                                and node_text(id, src) == name then return false end
+                        end
+                    end
+                end
+            end
+            scope = scope:parent()
+        end
+        return true
+    end,
     -- `require "x"` / `local x = require "x"`: module -> file
     import_call = 'require',
     resolve_import = function (mod, files, from, root)

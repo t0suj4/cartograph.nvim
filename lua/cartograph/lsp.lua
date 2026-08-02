@@ -319,10 +319,18 @@ M.handlers['textDocument/hover'] = function (store, params)
     end
     local n = node_at(store, file, p.line, p.character)
     if n then
-        return md {
-            ('**%s** %s'):format(n.name or n.id, n.kind or ''),
-            n.exported and '_exported_' or '_local_',
-        }
+        local lines = { ('**%s** %s'):format(n.name or n.id, n.kind or '') }
+        -- TRI-STATE, AND THE THIRD STATE MUST STAY SILENT (CART-0231). nil means the
+        -- language declares no visibility concept — not the same fact as `local`. The
+        -- old `n.exported and '_exported_' or '_local_'` collapsed the two, so every
+        -- symbol in any language without an `exported_def` hovered as `_local_`,
+        -- including `function M.abs` in the language we dogfood on. Hover is the
+        -- honesty surface: an unknown is rendered by SAYING NOTHING, never by taking
+        -- the negative branch.
+        if n.exported ~= nil then
+            lines[#lines + 1] = n.exported and '_exported_' or '_local_'
+        end
+        return md(lines)
     end
     return vim.NIL
 end
@@ -431,7 +439,10 @@ M.handlers['cartograph/why'] = function (store, params)
         return { kind = 'call', callee = callrec.callee(c), status = 'frontier' }
     end
     local n = node_at(store, file, p.line, p.character)
-    if n then return { kind = 'def', name = n.name, node = n.id, exported = n.exported or false } end
+    -- `exported = n.exported`, NOT `or false` (CART-0231): an absent key says the
+    -- language has no visibility concept, where `false` would assert privacy we did
+    -- not establish. Same tri-state the hover above keeps.
+    if n then return { kind = 'def', name = n.name, node = n.id, exported = n.exported } end
     return vim.NIL
 end
 

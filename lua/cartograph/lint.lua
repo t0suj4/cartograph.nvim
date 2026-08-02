@@ -13,8 +13,16 @@ local argv = require 'cartograph.argv'
 local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
 
+-- THE FALLBACK IS NOW FOR LANGUAGES THAT DECLARE NO VISIBILITY, which is what it
+-- always claimed to be — but until CART-0231 gave spec/lua.lua an `exported_def` it
+-- was also the only visibility Lua had, so this private heuristic was carrying the
+-- language we dogfood on. It differs from the spec's answer in one way worth knowing:
+-- a bare `function g()` is a GLOBAL, hence reachable, and the name test below calls it
+-- private (no dot). That is why 7 WoW/toc fixture entry points stopped being reported
+-- dead when the spec verdict arrived — `exported + no caller` is public surface, the
+-- trap tests/heat_spec.lua names.
 local function exported(n)
-    if n.exported ~= nil then return n.exported end -- provider's verdict
+    if n.exported ~= nil then return n.exported end -- provider's verdict wins
     return n.kind == 'method' or (n.name and n.name:find('%.') ~= nil)
 end
 

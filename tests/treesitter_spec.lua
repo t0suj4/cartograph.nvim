@@ -3296,6 +3296,48 @@ test('lua: top-level GLOBAL assignments are vars (a flat globals module)', funct
     vim.fn.delete(root, 'rf')
 end)
 
+test('lua: visibility is declared, and a deferred local stays private', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- CART-0231: before spec/lua.lua declared `exported_def`, EVERY lua node carried
+    -- exported = nil, and consumers reading the field as a boolean read absence as
+    -- falseness (lsp hover called `function M.abs` `_local_`). Lua's visibility is
+    -- purely syntactic, so all of these are decidable.
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/vis.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'function M.dotted() end',          -- reachable through its table
+        'function M:meth() end',
+        'function Global() end',            -- reachable through _G
+        'local function priv() end',
+        'local anon = function () end',
+        'M.assigned = function () end',
+        'local deferred',                   -- THE CASE THAT NEEDS THE DECLARATION
+        'if x then deferred = function () end end',
+        'return M', '' }, '\n'))
+    fd:close()
+    local data = ts.extract(root)
+    local byname = {}
+    for _, n in ipairs(data.nodes) do if n.name then byname[n.name] = n end end
+    -- a name binding the file cannot expose is false, NOT nil: the point is that the
+    -- language now has a verdict rather than a silence.
+    eq(false, byname['priv'].exported, 'local function is private')
+    eq(false, byname['anon'].exported, 'local = function is private')
+    -- `local deferred` … `deferred = function()` — reading only the assignment says
+    -- exported (it looks like a global assign), so the enclosing scopes have to be
+    -- searched for the declaration. worker.lua's `abs`, gen.lua's `body` and the
+    -- factorio profiles' `mint_path` are all written this way.
+    eq(false, byname['deferred'].exported, 'a DEFERRED local assignment stays private')
+    ok(byname['M.dotted'].exported, 'dotted is reachable through its table')
+    ok(byname['M:meth'].exported, 'method is reachable')
+    ok(byname['Global'].exported, 'a bare `function g()` is a GLOBAL, hence reachable')
+    ok(byname['M.assigned'].exported, 'field = function is reachable')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('lua effects: load-time side effects on module nodes', function ()
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end

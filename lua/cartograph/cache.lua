@@ -73,7 +73,13 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 107 -- v107: MODULE-LEVEL CALLS GET AN OWNER. A call outside any function
+M.VERSION = 108 -- v108: LUA DECLARES ITS VISIBILITY (CART-0231). spec/lua.lua gained an
+               -- `exported_def`, so lua fn nodes now carry exported = true/false where
+               -- they carried nil. Every other spec with a visibility concept already
+               -- did; lua's absence meant consumers reading the field as a boolean read
+               -- ABSENCE AS FALSENESS (lsp hover called `function M.abs` `_local_`).
+               -- Node-field change, hence the bump.
+               -- v107: MODULE-LEVEL CALLS GET AN OWNER. A call outside any function
                -- resolved fine — target found, call.to set — and the edge was then
                -- dropped because its `from` was nil, so top-level code contributed
                -- nothing to the call graph. Von-Neumann measured 69 region nodes over
