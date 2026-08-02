@@ -12,6 +12,7 @@ local M = {}
 local argv = require 'cartograph.argv'
 local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
+local callview = require 'cartograph.callview'
 
 -- THE FALLBACK IS NOW FOR LANGUAGES THAT DECLARE NO VISIBILITY, which is what it
 -- always claimed to be — but until CART-0231 gave spec/lua.lua an `exported_def` it
@@ -937,6 +938,131 @@ end
 M.DISPOSITIONS = { authoritative = true, suggestive = true, calibration = true,
     annotation = true }
 
+-- ── DEAD BY CONSTRUCTION (CART-0249) ─────────────────────────────────────────────
+-- dead-function below is SUGGESTIVE for a stated reason: "an entry point, an export, or a
+-- dynamically dispatched target reads as dead". For a FILE-LOCAL the confinement fact closes
+-- every one of those doors, because each is a VALUE POSITION and that is exactly what
+-- `escapes` records (CART-0230):
+--     put in a dispatch table   -> a value position -> escapes = true
+--     passed as a callback      -> a value position -> escapes = true
+--     fetched from another file -> impossible: the name is local AND never escaped
+-- So with three premises, "no callers" stops being a proposal:
+--   1. exported == false     the SOURCE says file-local (spec.exported_def), not a heuristic
+--   2. escapes == false      never read in a value position in its own file
+--   3. not refusal-shadowed  no refused call in that file could be this function
+--
+-- PREMISE 3 IS LOAD-BEARING AND WAS MEASURED, not guessed: without it our own tree reports
+-- 149 and 137 are FALSE — every one a `walk` / `visit` / `seq` / `rec`, the same-named nested
+-- helper idiom, two per file, so `walk(root)` is refused as ambiguous-WITHIN-file and its
+-- target reads as callerless. Refusal victims, not dead code. A refused call already carries
+-- its candidates ("refusals are places"), so this is a lookup, not new analysis.
+--
+-- MEASURED with all three: self 12 · factorio 11 · desynced 0 (that codebase puts everything
+-- in tables, so everything escapes — the right answer for it) · lua/ alone 0, which is why
+-- this can be AUTHORITATIVE without the dogfood fence going red on day one.
+-- Hand-verified: a fixture literally named `genuinely_dead`; `edge_at` in tests/flow_spec.lua
+-- (one occurrence, its own def); factorio's `mili`/`rock`/`spac`/`deep`, one occurrence each
+-- while siblings `auto`/`logi`/`chem` have four call sites.
+--
+-- NOT CLAIMED: anything about exported functions, anything where `escapes` is nil (a language
+-- whose spec declares no escape_names — lua only, today), and nothing about `load()`/_G
+-- tricks, which cannot reach a local without a value position anyway.
+local function refusal_shadow(data)
+    local by_id, by_name = {}, {}
+    local cv = callview.of(data)
+    for i = 1, cv.n do
+        local r = cv.get(i, 'refused')
+        if r then
+            for _, cand in ipairs((type(r) == 'table' and r.cands) or {}) do
+                by_id[type(cand) == 'table' and cand.id or cand] = true
+            end
+            local callee, f = cv.get(i, 'callee'), cv.get(i, 'file')
+            if callee and f then by_name[f .. '\31' .. tostring(callee)] = true end
+        end
+    end
+    return by_id, by_name
+end
+
+--- is `n` provably dead? (false = not provable, so the suggestive rule keeps it)
+--- `xmlh` = manifest-referenced handlers (WoW .toc / XML): the ENGINE dispatches those by
+--- name from outside the lua source entirely, so they are file-local, never a value in lua,
+--- and callerless while being perfectly alive. Confinement cannot see a reference that is not
+--- in the lua at all — the same alibi the suggestive rule already respects, and without it
+--- this rule would be authoritative AND WRONG on exactly the corpus with the most addons.
+local function provably_dead(n, band, shadow_id, shadow_name, xmlh, occurs_once)
+    if n.exported ~= false or n.escapes ~= false then return false end
+    if not (n.kind == 'function' or n.kind == 'method') then return false end
+    if n.decl or n.cbarg or n.entry or metamethod(n) then return false end
+    if xmlh and xmlh[n.name] then return false end
+    -- PREMISE 4, and a false positive on wow is what demanded it: the name must occur EXACTLY
+    -- ONCE in its file — at its own definition. A CALL GRAPH CANNOT CLOSE THIS HOLE BY
+    -- ITSELF, because a construct the extractor does not model produces no call record at all,
+    -- so premise 3 (a refused call) has nothing to see. Swatter.lua's `keyPairs` is called by
+    -- `for addon, reg in keyPairs(addons) do` — a generic-for header, which is the LARGEST `?`
+    -- class we have (19036 on wow, CART-0233), so the lint called a live function dead.
+    -- An occurrence count subsumes the escape test for this purpose and covers every
+    -- unmodelled construct at once; extra matches (a comment, a string) only ever make us
+    -- DECLINE to claim death, which is the safe direction.
+    if not occurs_once(n) then return false end
+    local tl = n.name and (n.name:match('([%w_]+)$') or n.name)
+    if shadow_id[n.id] or (tl and n.file and shadow_name[n.file .. '\31' .. tl]) then
+        return false
+    end
+    return band:n_callers(n.id) == 0 and band:n_registrants(n.id) == 0
+end
+
+--- does this local's name appear ONCE in its file (its own definition)? Text-level on
+--- purpose: the question is whether ANY construct mentions it, including ones the extractor
+--- does not model. Word-bounded so `iterate_over` is not matched by `find_iterate_over`.
+local function occurs_once_in_file(store)
+    local cache = {}
+    return function (n)
+        local tl = n.name and (n.name:match('([%w_]+)$') or n.name)
+        if not tl then return false end
+        local lines = cache[n.file]
+        if lines == nil then
+            lines = store.content({ file = n.file }) or false
+            cache[n.file] = lines
+        end
+        if not lines then return false end -- unreadable: claim nothing
+        local seen = 0
+        for _, l in ipairs(lines) do
+            local from = 1
+            while true do
+                local a, b = l:find(tl, from, true)
+                if not a then break end
+                local before = a > 1 and l:sub(a - 1, a - 1) or ' '
+                local after = l:sub(b + 1, b + 1)
+                if not before:match('[%w_]') and not after:match('[%w_]') then
+                    seen = seen + 1
+                    if seen > 1 then return false end
+                end
+                from = b + 1
+            end
+        end
+        return seen == 1
+    end
+end
+
+local function dead_confined_findings(store)
+    local out = {}
+    local band = store.topo()
+    local xmlh = store.toc and store.toc.handlers or {}
+    local occurs_once = occurs_once_in_file(store)
+    local shadow_id, shadow_name = refusal_shadow(store.data)
+    for _, n in ipairs(store.data.nodes) do
+        if provably_dead(n, band, shadow_id, shadow_name, xmlh, occurs_once) then
+            out[#out + 1] = { file = store.abspath(n), line = atr.sl(n.range) + 1,
+                -- the message states the PROOF, because that is what makes it actionable:
+                -- a reader can check it without trusting the analyzer
+                message = ("local function '%s' is DEAD: its name appears only at this"
+                    .. ' definition, and a local cannot be reached from anywhere else')
+                    :format(n.name) }
+        end
+    end
+    return out
+end
+
 M.rules = {
     { name = 'resource-leak', severity = 'warn', disposition = 'suggestive',
         -- recovered all 3 luanti oracles, but it is CONVENTION-specific: precision on
@@ -1171,6 +1297,13 @@ M.rules = {
         -- Do not relabel this rule as a way of registering that concern — an honest
         -- lower-tier count and a phantom-edge population are two different things.
         run = swallowed_findings },
+
+    {   -- the PROVABLE tier (CART-0249): three premises, so a finding is a defect by
+        -- construction. Beside dead-function, not replacing it — a rule carries ONE
+        -- disposition, and the suggestive tier still has a job wherever we cannot know.
+        name = 'dead-confined', severity = 'warn', disposition = 'authoritative',
+        run = dead_confined_findings,
+    },
     {
         name = 'dead-function', severity = 'warn', disposition = 'suggestive',
         -- an entry point, an export, or a dynamically dispatched target reads as dead
@@ -1181,8 +1314,13 @@ M.rules = {
             local band = store.topo()
             -- manifest projects: XML-referenced handlers are engine-dispatched
             local xmlh = store.toc and store.toc.handlers or {}
+            -- whatever dead-confined can PROVE is reported there, at its own disposition;
+            -- reporting the same function twice under two dispositions is noise
+            local shadow_id, shadow_name = refusal_shadow(store.data)
+            local occurs_once = occurs_once_in_file(store)
             for _, n in ipairs(store.data.nodes) do
-                if (n.kind == 'function' or n.kind == 'method')
+                if not provably_dead(n, band, shadow_id, shadow_name, xmlh, occurs_once)
+                    and (n.kind == 'function' or n.kind == 'method')
                     and not n.decl -- a prototype is a declaration, not dead code
                     and not exported(n) and not metamethod(n) and not n.cbarg
                     and not n.entry and not xmlh[n.name]

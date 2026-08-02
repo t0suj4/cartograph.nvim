@@ -271,7 +271,84 @@ test('lint: the AUTHORITATIVE set is small and positively justified', function (
         if r.disposition == 'authoritative' then auth[#auth + 1] = r.name end
     end
     table.sort(auth)
-    eq({ 'load-order', 'seam-guard', 'silent-drop', 'truncation' }, auth,
+    -- dead-confined joined the set 2026-08-02 (CART-0249) and the justification is that its
+    -- finding rests on three SOURCE facts, none of them a heuristic: the spec says the
+    -- function is file-local (exported == false), the confinement walk says its name is never
+    -- read in a value position in that file (escapes == false — which is precisely what a
+    -- dispatch-table entry or a callback WOULD be), and no refused call in the file could name
+    -- it. With those three, "no callers" is not a guess. MEASURED before promoting: 0 on lua/
+    -- (so this fence stays green), 12 on the whole repo, 11 on factorio, 0 on desynced; and
+    -- premise 3 is what makes it honest — without it the same-named nested `walk`/`visit`
+    -- helper idiom produces 137 false positives out of 149.
+    eq({ 'dead-confined', 'load-order', 'seam-guard', 'silent-drop', 'truncation' }, auth,
         'promoting a rule to authoritative is a DECISION — update this list with the'
         .. ' justification in the registry comment')
+end)
+
+test('dead-confined: provable only with all three premises', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local lint = require 'cartograph.lint'
+    local store = require 'cartograph.store'
+    -- CART-0249. Confinement turns "no callers" into a defect BY CONSTRUCTION for a
+    -- file-local, because a dispatch-table entry or a callback IS a value position and that
+    -- is what `escapes` records. Each file below isolates one premise.
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function put(p, s)
+        local fd = assert(io.open(root .. '/' .. p, 'w')); fd:write(s); fd:close()
+    end
+    -- 1. DEAD: file-local, never a value, nothing calls it
+    put('dead.lua', table.concat({
+        'local M = {}',
+        'local function unused_helper() return 1 end',
+        'function M.work() return 2 end',
+        'return M', '' }, '\n'))
+    -- 2. NOT dead: never called BY NAME, but its value escapes into a table — the exact
+    --    case that makes the plain no-callers test a proposal rather than a proof
+    put('escapes.lua', table.concat({
+        'local M = {}',
+        'local function handler() return 1 end',
+        'M.handlers = { onClick = handler }',
+        'return M', '' }, '\n'))
+    -- 3. NOT dead: two same-named nested helpers, so the call is refused as ambiguous and
+    --    BOTH targets read as callerless. Without premise 3 this is a false positive — it
+    --    was 137 of 149 on our own tree.
+    put('ambig.lua', table.concat({
+        'local M = {}',
+        'function M.a()',
+        '  local function walk(n) return n end',
+        '  return walk(1)',
+        'end',
+        'function M.b()',
+        '  local function walk(n) return n + 1 end',
+        '  return walk(2)',
+        'end',
+        'return M', '' }, '\n'))
+    -- 4. NOT dead: plainly called in its own file
+    put('live.lua', table.concat({
+        'local M = {}',
+        'local function used() return 1 end',
+        'function M.go() return used() end',
+        'return M', '' }, '\n'))
+    store.ingest(ts.extract(root))
+
+    local hits = {}
+    for _, f in ipairs(lint.run(store, { only = { ['dead-confined'] = true } })) do
+        hits[f.file:gsub('^.*/', '')] = (hits[f.file:gsub('^.*/', '')] or 0) + 1
+    end
+    eq(1, hits['dead.lua'] or 0, 'the confined, uncalled local IS reported')
+    eq(0, hits['escapes.lua'] or 0, 'a local whose value escapes into a table is NOT dead')
+    eq(0, hits['ambig.lua'] or 0, 'a refusal-shadowed name is NOT claimed dead')
+    eq(0, hits['live.lua'] or 0, 'a called local is not reported')
+
+    -- and the suggestive rule must not double-report what the authoritative one proved
+    local dsug = {}
+    for _, f in ipairs(lint.run(store, { only = { ['dead-function'] = true } })) do
+        dsug[f.file:gsub('^.*/', '')] = true
+    end
+    eq(nil, dsug['dead.lua'], 'one function, one disposition')
+    vim.fn.delete(root, 'rf')
 end)
