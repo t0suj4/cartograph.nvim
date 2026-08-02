@@ -346,6 +346,19 @@ return {
     wow = {
         root = HOME .. '/work/wow_addons',
         lang = 'lua', -- not a git repo: path-only identity, snapshot meta is the stamp
+        budget_mb = 8200, -- ~2x MEASURED inline extract peak (4077 MB, 130s wall)
+        -- THE LARGEST CORPUS IN THIS REGISTRY BY SOURCE BYTES (81 MB, ahead of v8's 65)
+        -- and it carried NO budget until measured, which cost twice over: matrix's
+        -- admission control weights an UNDECLARED corpus at a flat 500 MB (`weight()`),
+        -- so this one was scheduled as ~1/8th of its own extract, and its `mem` column
+        -- read `--` instead of gating. It stayed latent rather than live only because the
+        -- default roster is `if v.expected then` and this corpus pins no counts.
+        -- CAUTION — WHY A BUDGET ALONE IS NOT ENOUGH: this, like every budget in this
+        -- file, is an EXTRACT peak. A tool that extracts and then SWEEPS every function
+        -- pays a further multi-GB transient that nothing here describes — on desynced the
+        -- graph is 290 MB while sweeping it costs 2.5-4.5 GB. So a sweep can sit inside
+        -- its declared budget throughout extraction and still OOM, with `mem` reporting
+        -- OK. See tools/bench.lua's sweep_gc for the measurement and the mitigation.
         notes = '353 addons / 2.27M lines — SCALE corpus; .toc load-order'
             .. ' adapter banked, whole-tree extract is a stress test not a gate',
     },

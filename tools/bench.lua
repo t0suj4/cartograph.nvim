@@ -91,6 +91,43 @@ function M.peak_reset()
     return ok
 end
 
+--- Resident MB right now (VmRSS, not the high-water VmHWM) — for STAGED reporting inside
+--- a long sweep, where the useful question is WHERE growth happens, not what the total was.
+function M.rss_mb()
+    local fd = io.open('/proc/self/status', 'r')
+    if not fd then return nil end
+    local txt = fd:read('a'); fd:close()
+    local kb = txt:match('VmRSS:%s*(%d+)%s*kB')
+    return kb and (tonumber(kb) / 1024) or nil
+end
+
+--- THE SWEEP GC STEP. Call once per item in a whole-corpus per-function walk:
+---   for i, id in ipairs(fns) do … bench.sweep_gc(i) end
+---
+--- MEASURED (desynced, 3021 fns / 36459 rows, identical code three ways):
+---   baseline (lua default pause 200%)     plateau 4556 MB   sweep 65.0s
+---   collectgarbage('setpause', 110)       plateau 3084 MB   sweep 67.2s  (+3.4%)
+---   collectgarbage() every 200 items      plateau 2767 MB   sweep 65.2s  (+0.3%)
+--- -39% PEAK FOR +0.3% WALL in that isolated build-only loop. EXPECT LESS IN A REAL
+--- TOOL: translit on the same corpus went 3110 -> 2555 MB, i.e. -18%, because its
+--- emit+reparse work already provokes collections, so its baseline high-water was never
+--- as high. Quote the -18% for a working sweep and the -39% only for a bare build loop.
+--- It works because the plateau is GC HIGH-WATER FROM CHURN
+--- and not live data: staged RSS climbs ~2.8 GB over the FIRST 500 functions and is then
+--- FLAT to the end — the signature of an arena that grew once and is reused, not of
+--- accumulation. (Which is also why "the sweep leaks" was the wrong diagnosis: nothing
+--- grows after function 500.)
+---
+--- THE NUMBER THAT MOTIVATES IT: on that corpus the GRAPH costs 290 MB while SWEEPING it
+--- costs 3-4.5 GB — an order of magnitude more than the thing being swept. The storage arc
+--- ([[cartograph-fold-core]]: sharded CSR, 32.5x fold, extraction peak) all targets the
+--- 290 MB; nothing targeted the 10x-larger TRANSIENT that every per-function analysis
+--- pays. That transient is why a scale corpus can OOM while its extract fits easily —
+--- wow extracts in 130s at 4.1 GB, then an unguarded sweep over it exhausted 11 GB.
+function M.sweep_gc(i, every)
+    if i % (every or 200) == 0 then collectgarbage() end
+end
+
 --- Run f once inside a measurement window: full gc before, timed, peak RSS
 --- over the window (when /proc allows the reset), lua-heap delta.
 function M.measure(f, ...)
