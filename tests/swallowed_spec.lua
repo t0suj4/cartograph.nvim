@@ -5,6 +5,15 @@ local store = require 'cartograph.store'
 local lint  = require 'cartograph.lint'
 
 local GET, ZAP = 'm.lua::Thing.get@5', 'm.lua::Thing:zap@10'
+-- THE ENCLOSING FN, and it is not decoration (CART-0241). These fixtures used to hand a
+-- `argv = { { k = 'local', name = 't', l = 20 } }` to the lint, and the lint believed it —
+-- but the extractor NEVER produces that: slot 1 of a method call is a positional
+-- placeholder (`{ k = 'expr' }`) that every other argv consumer skips. So the repair branch
+-- was unreachable on real input for 1987 findings while these tests stayed green, because a
+-- hand-built input supplied the one shape reality lacks. The lint now reads the receiver
+-- name from `full` and its binding line from the enclosing fn's FINE flow rows, so the
+-- fixture has to carry both — which is exactly what makes the test worth having.
+local CALLER = 'm.lua::use@18'
 
 local function fn(id, name, l)
     return { id = id, name = name, kind = 'function', file = 'm.lua',
@@ -12,8 +21,13 @@ local function fn(id, name, l)
 end
 
 local function graph(calls)
+    local caller = fn(CALLER, 'use', 18)
+    -- fine flow rows: `t` is bound on 0-based line 20, and rows are 1-BASED
+    -- c/parent are not decoration: flow.fold reads both on every fine row
+    caller.flow = { stmts = { { l = 21, c = 0, parent = 0,
+        def = { 't' }, use = { 'get' } } }, params = {} }
     store.ingest({ schema = 1, root = '/x',
-        nodes = { fn(GET, 'Thing.get', 5), fn(ZAP, 'Thing:zap', 10) },
+        nodes = { fn(GET, 'Thing.get', 5), fn(ZAP, 'Thing:zap', 10), caller },
         edges = {}, calls = calls })
 end
 
@@ -21,14 +35,16 @@ local function only() return { only = { ['swallowed-type'] = true } } end
 
 -- an inferred method call on local `t` (defined at line 20)
 local function zap_call(line)
-    return { callee = 'zap', to = ZAP, inferred = true, method = true,
+    -- `full` carries the receiver, as the extractor writes it; argv slot 1 stays the
+    -- placeholder the extractor actually emits
+    return { callee = 'zap', full = 't:zap', to = ZAP, inferred = true, method = true,
         file = 'm.lua', line = line or 21, args = { '' },
-        argv = { { k = 'local', name = 't', l = 20 } }, fn = 'x' }
+        argv = { { k = 'expr' } }, fn = CALLER }
 end
 -- the resolved getter call on the def line
 local function get_call()
     return { callee = 'get', to = GET, file = 'm.lua', line = 20,
-        args = {}, argv = {}, fn = 'x' }
+        args = {}, argv = {}, fn = CALLER }
 end
 
 test('swallowed: root cause found -> one finding, ---@return on the getter', function ()
@@ -49,9 +65,10 @@ test('swallowed: no getter on the def line -> ---@type on the local', function (
 end)
 
 test('swallowed: non-local receiver -> finding at the call, no fix', function ()
-    graph({ { callee = 'zap', to = ZAP, inferred = true, method = true,
-        file = 'm.lua', line = 33, args = { '' },
-        argv = { { k = 'field', path = 'state.thing' } }, fn = 'x' } })
+    -- a CHAIN receiver (`state.thing:zap()`): not a simple local, so no repair
+    graph({ { callee = 'zap', full = 'state.thing:zap', to = ZAP, inferred = true,
+        method = true, file = 'm.lua', line = 33, args = { '' },
+        argv = { { k = 'expr' } }, fn = CALLER } })
     local f = lint.run(store, only())
     eq(1, #f)
     eq(34, f[1].line)

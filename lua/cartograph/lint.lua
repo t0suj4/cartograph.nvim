@@ -160,6 +160,59 @@ end
 -- finding at the ROOT CAUSE when possible: if the receiver's def line calls a
 -- resolved function of the same class (a getter), one `---@return CLASS` there
 -- fixes every caller at once; otherwise offer `---@type CLASS` on the local.
+-- THE RECEIVER OF `x:m()`, AND THE LINE THAT BINDS IT (CART-0241).
+--
+-- This used to ask `argv.at(c, 1)` and require `k == 'local'`, which NEVER holds: slot 1 of
+-- a method call is a positional PLACEHOLDER — the extractor sets `{ k = 'expr' }` so the
+-- explicit arguments keep their index — and every other argv consumer skips it with
+-- `c.method and 1 or 0` (greenspun does so in five places, fsm in one). So argv is not
+-- wrong here and neither are those consumers; this lint was asking argv a question argv
+-- never answers, and the whole repair branch below was unreachable. MEASURED: 1987 findings
+-- on lua/, 0 carrying a fix, 0 whose message said "quick fix".
+--
+-- Both facts are available without argv: the receiver NAME from the call's own text, and its
+-- binding line from the enclosing fn's FINE flow rows, which carry a def-name set per
+-- STATEMENT. Rows are 1-BASED (verified: `local band = M.get()` on source line 3 is row
+-- l=3) while this lint keys everything 0-based off callrec.line, hence the -1.
+--
+-- FINE ROWS, NOT THE COARSE df PROJECTION: the coarse rows FOLD a region into its head, so
+-- a binding nested in an `if` is reported at the `if`'s line — the first version of this
+-- pointed `---@type Band` at `if t == 'binary_expression' then`, because the coarse row
+-- there carries def=[ch] for the whole region. The fine row for that line correctly has
+-- def=[], and the real `local ch = …` gets its own row.
+local function recv_binding(store, c)
+    -- THE TWO PROVIDERS DISAGREE ABOUT SLOT 1, which is why this looked like dead code and
+    -- had a GREEN TEST at the same time. The lua-ls CLI graph fills argv slot 1 with the
+    -- receiver's own shape (`{k='local', name='t', l=21}`) — inferred_golden_spec loads such
+    -- a graph and its `---@return` assertion passed on it. The tree-sitter provider instead
+    -- reserves slot 1 as a POSITIONAL PLACEHOLDER (`{k='expr'}`) so explicit args keep their
+    -- index, which every other argv consumer accounts for with `c.method and 1 or 0`. So on
+    -- every tree-sitter graph — i.e. every corpus and the whole lint surface — the repair
+    -- was unreachable: 1987 findings on lua/, 0 with a fix.
+    -- Take whichever the provider can answer: slot 1 when it really describes a local,
+    -- else the call's own text plus the enclosing fn's flow rows.
+    local a1 = callrec.method(c) and argv.at(c, 1)
+    if a1 and a1.k == 'local' and a1.l then return a1.name, a1.l end
+    local full = callrec.full(c)
+    local name = full and tostring(full):match('^([%w_]+)[:%.][%w_]+$')
+    if not name then return nil end -- a chain (`a.b:m`) is not a simple local receiver
+    local fnid = callrec.fn(c)
+    local fn = fnid and store.node(fnid)
+    if not fn then return nil end
+    local cl = callrec.line(c) -- 0-based
+    local flowmod = require 'cartograph.flow'
+    local at -- the LAST binding at or above the call: the one in effect there
+    for _, st in ipairs(flowmod.rows(fn)) do
+        local l0 = (st.l or 0) - 1
+        if l0 <= cl then
+            for _, d in ipairs(st.def or {}) do
+                if d == name then at = l0 end
+            end
+        end
+    end
+    return name, at
+end
+
 local function swallowed_findings(store)
     local calls = store.data.calls
     if not calls or #calls == 0 then return {} end
@@ -174,11 +227,21 @@ local function swallowed_findings(store)
 
     -- vm-resolved calls by file:line, to find the getter behind a def site
     local resolved_at = {}
+    -- …and its complement: lines whose call went OUTSIDE the corpus. A receiver bound by
+    -- one of those is an EXTERNAL object, so the class this lint name-matched is a phantom
+    -- and the repair would be ACTIVELY WRONG ADVICE — `local fd = io.open(…)` then
+    -- `fd:write(…)` name-matches our own `M.write` and the fallback offered `---@type M`
+    -- for a lua file handle. Measured while making the repair reachable (CART-0241): of the
+    -- first five suggestions, that shape was two. A wrong message is calibration debt; a
+    -- wrong FIX is something a user applies.
+    local external_at = {}
     for _, c in ipairs(calls) do
+        local k = callrec.file(c) .. ':' .. callrec.line(c)
         if callrec.to(c) and not c.inferred then
-            local k = callrec.file(c) .. ':' .. callrec.line(c)
             resolved_at[k] = resolved_at[k] or {}
             table.insert(resolved_at[k], c)
+        elseif not callrec.to(c) and not c.dynamic then
+            external_at[k] = true
         end
     end
 
@@ -187,11 +250,13 @@ local function swallowed_findings(store)
         local tn = c.inferred and callrec.to(c) and store.node(callrec.to(c))
         local class = tn and class_of(tn.name)
         if class then
-            local recv = callrec.method(c) and argv.at(c, 1)
+            local rname, rline
+            if callrec.method(c) then rname, rline = recv_binding(store, c) end
             local file, line, fix, label
-            if recv and recv.k == 'local' and recv.l then
-                file, line = callrec.file(c), recv.l
-                for _, g in ipairs(resolved_at[callrec.file(c) .. ':' .. recv.l] or {}) do
+            -- no repair when the receiver's binding line calls OUT of the corpus (above)
+            if rname and rline and not external_at[callrec.file(c) .. ':' .. rline] then
+                file, line = callrec.file(c), rline
+                for _, g in ipairs(resolved_at[callrec.file(c) .. ':' .. rline] or {}) do
                     local gn = store.node(g.to)
                     if gn and class_of(gn.name) == class then
                         file, line = gn.file, atr.sl(gn.range)
