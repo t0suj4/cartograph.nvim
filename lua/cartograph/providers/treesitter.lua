@@ -5990,19 +5990,50 @@ function M.extract(root, opts)
                 end
             end
         end
+        -- ── SLICE EXTRACTS DO NOT RESOLVE (CART-0232) ────────────────────────────
+        -- `exact`/`tail` here are built from THIS SLICE's nodes, so "the only def with
+        -- that name" is a batch artifact: a name that is ambiguous across the corpus
+        -- looks unique inside one worker's files and resolves. That edge then RIDES THE
+        -- MERGE into relink, which only re-resolves calls whose `to` is still nil — so
+        -- the phantom is never revisited and the parallel graph gains edges the inline
+        -- one refuses. MEASURED on ghost: jobs=1 identical to inline, jobs=2 stable but
+        -- +2 edges, jobs=4 VARYING run to run (the partition itself varies), which is
+        -- what left the matrix `par` column permanently red.
+        --
+        -- This is the THIRD time this exact shape has been found here, and the fix is
+        -- the one the other two already use: a slice skips the global-evidence step and
+        -- relink is authoritative. See the id pass ("slice-local uniqueness is not
+        -- global uniqueness") and the cbarg pre-scan ("a worker slice's unique is a
+        -- batch artifact... slice extracts skip the pre-scan"). Resolution was the one
+        -- stage still doing it.
+        --
+        -- The typed-string / traced / dynamic EXTRACTION facts above stay: they are
+        -- properties of the call's own text, not of the name index.
+        local resolve_here = not (opts and opts.skip_idpass)
         local target, inferred, refused, ext
         if p.call.dynamic then
             -- $fn(...): frontier — unless single-assignment literal flow
             -- pins the name down within the function
-            local lit
-            target, lit = literal_flow(p)
+            local lit, t = nil, nil
+            t, lit = literal_flow(p)
             -- traced carries the LITERAL whenever one was found (truthy as
             -- before) so relink can re-resolve it — a parallel slice may
-            -- know the literal but not see its target
+            -- know the literal but not see its target.
+            -- RUN EVEN IN A SLICE: the literal is a FILE-LOCAL fact (a single
+            -- assignment inside this function), and recording it is exactly how the
+            -- design intends a slice to hand the call to relink. Skipping the whole
+            -- block cost phpproj's `$handler = 'scale'; $handler(4)` edge — the
+            -- parity test caught it immediately.
             if lit then p.call.traced = lit end
-            if target then
-                p.call.dynamic = nil -- pinned down: no longer a frontier
+            if resolve_here then
+                target = t
+                if target then
+                    p.call.dynamic = nil -- pinned down: no longer a frontier
+                end
             end
+        elseif not resolve_here then
+            -- a slice leaves the call unresolved for the parent's relink, exactly as a
+            -- fresh call arrives there (see the note above)
         elseif p.indirect then
             target = resolve(p.indirect, p.file)
             inferred = false -- the literal IS the dispatch mechanism
@@ -6092,7 +6123,9 @@ function M.extract(root, opts)
         tail = tail, addref = addref, node_index = node_index,
         scope_of = scope_of, consts = constDefs, parent_fn = parent_fn,
         unparsed = unparsed_now }
-    run_resolve_passes(resolve_ctx)
+    -- slice extracts skip the passes too (CART-0232): every one of them reads the
+    -- slice-local exact/tail index, and relink re-runs the whole pipeline globally.
+    if not (opts and opts.skip_idpass) then run_resolve_passes(resolve_ctx) end
     if (resolve_ctx.ret_resolved or 0) > 0 then
         data.ret_resolved = resolve_ctx.ret_resolved
         data.ret_rounds = resolve_ctx.ret_rounds
