@@ -123,7 +123,24 @@ M.EXPECTED = {
     -- closure-leak catch-up, never re-gated (matrix couldn't complete pre-P1;
     -- dfpar is matrix-only). df/flow extraction untouched by P0/P1; ferr=0,
     -- categories unchanged. Same prior-work debt as ghost's count recalib.
-    ghost = { ['df-over-collects'] = 6986, ['OTHER'] = 9, ['receiver'] = 1 },
+    -- recalib 2026-08-02: 6986→7094 (+108 df-over-collects), ATTRIBUTED BY BISECT to
+    -- b73d63e (v104, "JS/TS: a member-target function literal is a def") — the ONLY cut
+    -- that moves it. Measured on the pinned checkout, one run per rev:
+    --     b73d63e~1  fns=26141 stmts=99679  df-over-collects=6986   <- the old pin, exact
+    --     b73d63e    fns=26425 stmts=101616 df-over-collects=7094
+    --     969cd67~1 / 969cd67 (v107 module-level owner)  7094, unchanged
+    -- So `X.y = function(){}` becoming a def added 284 functions and 1937 statements to
+    -- ghost's df-bearing population, and the extra rows carry the SAME catalogued
+    -- closure-leak — the mechanism the v51 note above describes ("their bodies, previously
+    -- covered by NO fn, now get their own df/flow"). New fns leak a little above average
+    -- (108/284 = 0.38 vs the corpus's 0.267 per fn), which is what function LITERALS should
+    -- do: they are the callbacks. ferr=0, OTHER and receiver unchanged, so additive
+    -- coverage and not a regression. v104 re-saved pinned counts and struct baselines for
+    -- six corpora but not this table — the same "dfpar is matrix-only" debt as the line
+    -- above, and the reason CART-0232 found the sweep already red.
+    -- jquery/mootools/synjs/libs re-checked at the same time: all OK, so this was the only
+    -- stale entry.
+    ghost = { ['df-over-collects'] = 7094, ['OTHER'] = 9, ['receiver'] = 1 },
     jquery = { ['df-over-collects'] = 12, ['OTHER'] = 2 },
     mootools = {}, -- perfect parity (js archaeology tier)
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
