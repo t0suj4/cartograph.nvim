@@ -262,9 +262,27 @@ local function run_row(name)
                 cell('cache', 'FAIL', { 'cache save/load failed: '
                     .. tostring(warm) })
             else
+                -- VALIDATE THE WARM GRAPH TOO (CART-0247). validate.check already enforces
+                -- referential integrity — edge-dangling-from/to and call-dangling-to — but
+                -- the `valid` column above runs it on the COLD extract, and nothing ran it
+                -- on the artifact the cache produces. That is how CART-0245 shipped a warm
+                -- zig graph carrying 4122 edges into nodes that were never saved while
+                -- `valid` stayed green: the check existed, the graph it needed to see did
+                -- not reach it. MEASURED before adding this: 0 dangling endpoints on the
+                -- cold graph of all 35 registry corpora, and the check costs 0-205 ms
+                -- (v8 the worst, against a 178s extract) — so the invariant is real, it is
+                -- already written down, and it only needed running here.
+                local vw = require('cartograph.validate').check(warm)
                 local d = gd.diff(snapshot.slim(data), snapshot.slim(warm))
-                cell('cache', gd.empty(d) and 'OK' or 'FAIL',
-                    gd.empty(d) and nil or gd.report(d, { limit = 10 }))
+                local det = gd.empty(d) and {} or gd.report(d, { limit = 10 })
+                if not vw.ok then
+                    -- validate.report returns ONE string (the `valid` cell above wraps it
+                    -- in a table for the same reason), not a list of lines
+                    det[#det + 1] = 'WARM GRAPH INVALID: '
+                        .. require('cartograph.validate').report(vw)
+                end
+                local good = gd.empty(d) and vw.ok
+                cell('cache', good and 'OK' or 'FAIL', good and nil or det)
             end
         end
     end
