@@ -2708,7 +2708,15 @@ work-list of our own analyzers. What it measured: emittability is **monotone in 
 density** — 51.2% of `nio`'s functions carry no blocking hole versus 1.8% of `desynced`'s,
 tracking 1.06 versus 0.003 annotation claims per function. The oracle hole is irreducible
 by construction and is *not* counted against emittability: filling it with one run is the
-design, not a gap.
+design, not a gap. An **absent `require` is not fatal** either — it becomes an
+*injection point*, since short of globals and mutation we know what a body does with what
+it is given, so a stub makes the function testable and the test then characterizes
+behaviour *under that stub* (which its header must disclose, because a stub is a supplied
+premise). Measured: reclassifying absent-callee roots from unbuildable fixtures to
+injectable stubs raised `desynced` from 1.8% to 5.2% — but it *lowered* `self` from 19.7%
+to 17.3%, because a function that writes module state or mutates an argument cannot be
+isolated by injection and honestly blocks. So the frame's value tracks **purity**, not just
+how much environment is missing.
 
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the

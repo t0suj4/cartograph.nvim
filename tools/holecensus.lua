@@ -68,6 +68,7 @@ local store = require 'cartograph.store'
 local annot = require 'cartograph.annot'
 local argvm = require 'cartograph.argv'
 local builtins = require 'cartograph.builtins'
+local expr = require 'cartograph.expr'
 local txn = require 'cartograph.txn'
 local at = require 'cartograph.at'
 
@@ -99,7 +100,7 @@ local function holes_of(node, ctx)
     -- it materializes rows carrying `.expr` AND returns the spec-driven `bound` set
     -- (expr.bound_names over the language's declared binders), which is the only
     -- source that knows about LOOP VARIABLES.
-    local eo = require('cartograph.expr').of(store, node.id)
+    local eo = expr.of(store, node.id)
     local fl = eo and eo.fl
     if not fl then return nil, 'no expression rows' end
     local params = fl.params
@@ -171,6 +172,77 @@ local function holes_of(node, ctx)
         end
     end
 
+    -- 4. DEPENDENCY holes — calls to something ABSENT from the corpus (an
+    -- unresolved/outside callee). THE KEY MOVE (user, 2026-08-03): an absent require
+    -- does NOT disqualify a function, it becomes an INJECTION POINT. Short of globals
+    -- and mutation we know what the body does with what it is given, so a stub makes
+    -- it testable — the test then characterizes behaviour UNDER THAT STUB, and the
+    -- stub is a SUPPLIED PREMISE the test header must disclose
+    -- ([[cartograph-hedge-resolution-writes]]).
+    --
+    -- So a dependency hole is NON-BLOCKING, like the oracle: you can always inject
+    -- something. UNLESS the function is not PURE MODULO INJECTION — a module-state
+    -- write or an argument mutation means injection cannot isolate it, and then the
+    -- dependency really does block. `hard` marks that case.
+    local effects = require 'cartograph.effects'
+    local purity = effects.purity and effects.purity(store, node.id)
+    local writes = purity and purity:match('^writes') ~= nil
+    -- argument mutation: an lhs field/index rooted at a PARAMETER. effects.purity
+    -- summarizes MODULE state, not writes through a parameter, so this is separate.
+    local pset, mutates = {}, false
+    for _, p in ipairs(params) do pset[p] = true end
+    for _, s in ipairs(fl.stmts or {}) do
+        for _, e in ipairs(s.expr and s.expr.lhs or {}) do
+            if (e.k == 'field' or e.k == 'index') and pset[expr.rootname(e) or ''] then
+                mutates = true
+            end
+        end
+    end
+    local hard = writes or mutates
+    local callrec = require 'cartograph.callrec'
+    local sites = (store.topo and store.topo().sites) and store.topo():sites(node.id) or {}
+    local seend = {}
+    -- Roots of absent callees, so the FIXTURE pass does not charge them AGAIN. An
+    -- absent `AbsentLib.transform(v)` surfaces twice — as this dependency hole and as a
+    -- free read of `AbsentLib` — and the fixture copy is BLOCKING, which would defeat
+    -- the injection frame with its own accounting. The root name IS the injection
+    -- point, so it belongs to the dependency hole and nowhere else.
+    -- `callee` is the BARE segment (`transform`), so the receiver root escapes it —
+    -- `full` is the fully-qualified path the spec built (`AbsentLib.transform`) and is
+    -- what names the injection point. Take both, plus `full`'s first segment.
+    local injroot = {}
+    for _, c in ipairs(sites) do
+        if not c.to then
+            for _, nm in ipairs({ callrec.callee(c), callrec.full(c) }) do
+                if nm then
+                    injroot[nm] = true
+                    local seg = nm:match('^([%w_]+)')
+                    if seg then injroot[seg] = true end
+                end
+            end
+        end
+    end
+    for _, c in ipairs(sites) do
+        if not c.to then                      -- no resolved target = outside/unresolved
+            local nm = callrec.callee(c) or '?'
+            if not seend[nm] then
+                seend[nm] = true
+                -- `claim` when the effect VOCABULARY knows the name (we know something
+                -- about the stub's shape); otherwise the stub is a pure hypothesis.
+                -- A profile-supplied signature (CART-0029's input adapters) is what
+                -- would upgrade the rest.
+                local sig = effects.sig_of and effects.sig_of('lua', nm, false)
+                H[#H + 1] = { kind = 'dependency', name = nm, hard = hard,
+                    tier = sig and 'claim' or nil, rule = 'profile',
+                    why = sig and 'the effect vocabulary declares this name'
+                        or (hard and ('absent, and the fn is not pure-modulo-injection ('
+                            .. (writes and 'writes module state' or 'mutates an argument')
+                            .. ') — injection cannot isolate it')
+                        or 'absent from the corpus — a stub is a HYPOTHESIS to disclose') }
+            end
+        end
+    end
+
     -- 3. FIXTURE holes — free non-builtin VARIABLE reads. `derived` when a same-file
     -- definition carries the name, so loading the module supplies it.
     --
@@ -183,11 +255,10 @@ local function holes_of(node, ctx)
     -- unmet dependencies. expr.lua labels the two functions explicitly: `reads` is
     -- "NOT the semantic variable set (a field selector isn't a var)" and `names` is
     -- "names semantically READ … for lints / eval env". This is the second.
-    local expr = require 'cartograph.expr'
     local seen = {}
     for _, s in ipairs(fl.stmts or {}) do
         for _, u in ipairs(s.expr and expr.names(s.expr) or {}) do
-            if not bound[u] and not seen[u] then
+            if not bound[u] and not seen[u] and not injroot[u] then
                 seen[u] = true
                 if not builtins.genuine('lua', u, bound) then
                     if ctx.samefile[u] then
@@ -241,14 +312,20 @@ local function sweep()
                     holes[#holes + 1] = h
                     if not h.tier then
                         frontier = frontier + 1
-                        -- An ORACLE frontier hole is NOT blocking: it is the hole the
-                        -- design expects a single RUN to fill, and no static tier can
-                        -- ever supply it. Counting it against emittability made the
-                        -- first headline (5.1% "zero-frontier") answer the wrong
-                        -- question — every value-returning function has one by
-                        -- construction. What BLOCKS emission is an input we cannot
-                        -- choose or a fixture we cannot build.
-                        if h.kind ~= 'oracle' then blocking = blocking + 1 end
+                        -- What BLOCKS emission is narrower than "frontier":
+                        --  · ORACLE      never blocks — it is the hole a single RUN
+                        --    fills, and no static tier can ever supply it. Counting it
+                        --    made the first headline (5.1%) answer the wrong question:
+                        --    every value-returning fn has one by construction.
+                        --  · DEPENDENCY  blocks only when `hard` — an absent require is
+                        --    an INJECTION POINT, so a stub always exists; but if the fn
+                        --    writes module state or mutates an argument, injection
+                        --    cannot isolate it and the dependency is a real wall.
+                        --  · INPUT / FIXTURE always block: we cannot choose the value
+                        --    or build the world.
+                        local soft = h.kind == 'oracle'
+                            or (h.kind == 'dependency' and not h.hard)
+                        if not soft then blocking = blocking + 1 end
                     end
                 end
                 fns[#fns + 1] = { fn = n.name or '?', file = rel,
@@ -262,14 +339,23 @@ end
 
 -- ── report ──────────────────────────────────────────────────────────────────
 local function rotate(holes, axis)
-    local key = ({ kind = 'kind', tier = 'tier', rule = 'rule', file = 'file' })[axis]
-        or 'kind'
+    -- `dep` = DEPENDENCY holes only, grouped by the absent callee's NAME. This is the
+    -- PROFILE WORK-LIST: "we do not know how to stub it" is not the honest frontier, it
+    -- is a statement about our profile COVERAGE — the callee has a real documented
+    -- signature somewhere (CART-0029's adapters: factorio runtime-api.json, RBS,
+    -- typeshed). FREQUENCY is the evidence: a name called hundreds of times is not
+    -- exotic, it is a core API we are missing.
+    local depmode = axis == 'dep'
+    local key = ({ kind = 'kind', tier = 'tier', rule = 'rule', file = 'file',
+        dep = 'name' })[axis] or 'kind'
     local g = {}
     for _, h in ipairs(holes) do
+        if not depmode or h.kind == 'dependency' then
         local k = h[key] or (key == 'tier' and 'FRONTIER' or '?')
         g[k] = g[k] or { n = 0, frontier = 0 }
         g[k].n = g[k].n + 1
         if not h.tier then g[k].frontier = g[k].frontier + 1 end
+        end
     end
     local ord = {}
     for k in pairs(g) do ord[#ord + 1] = k end
@@ -306,8 +392,23 @@ local FIXTURE = table.concat({
     '    return x',
     'end',
     '',
+    -- INJECTION: calls an absent dependency and is otherwise clean → the dependency
+    -- hole must be SOFT (non-blocking), so the fn stays emittable
+    'local function injects(v)',
+    '    return AbsentLib.transform(v)',
+    'end',
+    '',
+    -- HARD: same absent call, but it also MUTATES ITS ARGUMENT, so injection cannot
+    -- isolate it and the dependency hole must BLOCK
+    'local function mutates(rec)',
+    '    rec.seen = AbsentLib.stamp()',
+    '    return rec',
+    'end',
+    '',
     'record("boot", 3)',
+    'injects(1)',
     'M.add, M.record, M.murky, M.usesfree = add, record, murky, usesfree',
+    'M.injects, M.mutates = injects, mutates',
     'return M',
 }, '\n') .. '\n'
 
@@ -315,12 +416,14 @@ local function selftest()
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/fx.lua', 'w')); fd:write(FIXTURE); fd:close()
     store.ingest(ts.extract(root))
-    local holes = sweep()
-    local by = {}
+    local holes, fns = sweep()
+    local by, hard, blk = {}, {}, {}
     for _, h in ipairs(holes) do
         by[h.fn] = by[h.fn] or {}
         by[h.fn][h.kind .. ':' .. h.name] = h.tier or 'FRONTIER'
+        if h.kind == 'dependency' then hard[h.fn] = h.hard and true or false end
     end
+    for _, f in ipairs(fns) do blk[f.fn] = f.blocking end
     local fails = {}
     local function chk(c, m) if not c then fails[#fails + 1] = m end end
     local function tier(fn, k) return by[fn] and by[fn][k] end
@@ -349,6 +452,17 @@ local function selftest()
         chk(not (h.kind == 'fixture' and builtins.lua[h.name]),
             'a genuine builtin became a fixture hole: ' .. tostring(h.name))
     end
+    -- INJECTION: an absent dependency in an otherwise-clean fn is a SOFT hole, so the
+    -- function stays EMITTABLE — this is the whole point of the injection frame.
+    chk(hard['injects'] == false, 'injects: the absent dep must be SOFT (injectable)')
+    chk(blk['injects'] == 0,
+        'injects must be EMITTABLE despite the absent dependency, got blocking='
+        .. tostring(blk['injects']))
+    -- …but the same absent call in a fn that MUTATES ITS ARGUMENT is HARD and blocks:
+    -- injection cannot isolate a function that writes through its own parameter.
+    chk(hard['mutates'] == true, 'mutates: the absent dep must be HARD (arg mutation)')
+    chk((blk['mutates'] or 0) > 0, 'mutates must NOT be emittable, got blocking='
+        .. tostring(blk['mutates']))
     vim.fn.delete(root, 'rf')
     return fails
 end
