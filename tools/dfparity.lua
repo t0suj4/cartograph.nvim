@@ -146,6 +146,10 @@ M.EXPECTED = {
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
     -- grammar. All flow-more-correct (closure-leak + bindings df misses).
     libs = { ['df-over-collects'] = 1588, ['flow-over-collects'] = 4 },
+    -- nio: the annotated-lua tier (CART-0240). Calibrated on arrival rather than
+    -- left reporting `~`, because it is PINNED and a pinned corpus can hold a
+    -- baseline — an uncalibrated row is a note forever and gates nothing.
+    nio = { ['binding-as-use'] = 9, ['df-over-collects'] = 105 }, -- @ 21f5324
     -- synthetic corpora (tools/gen.lua): deterministic content, so these
     -- censuses are exact for (GEN_VERSION, seed) — recalibrate on gen bumps
     synlua = { ['df-over-collects'] = 49 }, -- closure-leak, flow-correct (@ gen v5)

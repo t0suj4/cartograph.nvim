@@ -626,6 +626,13 @@ return {
         end
         return set
     end,
+    -- ANNOTATIONS (CART-0240): how a tag line looks in THIS language, captured as
+    -- (tag, body). The lua family writes LuaLS/EmmyLua `---@tag body`; jsdoc's
+    -- `/** @tag {Type} name */` is a different shape and gets its own pattern when
+    -- it is built. The tag VOCABULARY is shared (cartograph.annot.TAGS) because
+    -- @param/@return/@field mean the same thing in every dialect that has them;
+    -- only the spelling is per-language, which is why only the pattern lives here.
+    annot_tag = '^%s*%-%-%-@([%a_]+)%s*(.*)$',
     -- escape_names, expressed for the mention walk (CART-0236). Keyed by the
     -- PARENT type of an identifier; the walk records the identifier as a value
     -- mention unless it is the callee of a call (which the walk already knows) or

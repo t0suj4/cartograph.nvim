@@ -36,9 +36,6 @@ function M.load(path)
     return M.ingest(data)
 end
 
---- Build all indexes from a decoded graph (schema #1). Split out from load() so
---- it can be driven directly from in-memory graphs (tests, non-file providers).
----@param data table
 -- Per-item index builders, shared by the full ingest and the incremental
 -- streaming step (M.ingest_step) so the two produce identical indexes by
 -- construction — the step is just these applied to the delta on top of what's
@@ -163,6 +160,9 @@ local function reset_indexes(keep_ledgers)
     end
 end
 
+--- Build all indexes from a decoded graph (schema #1). Split out from load() so
+--- it can be driven directly from in-memory graphs (tests, non-file providers).
+---@param data table
 function M.ingest(data, opts)
     M.data    = data
     M.toc     = nil -- load-order manifest; cartograph.toc.attach() sets it

@@ -367,6 +367,25 @@ return {
         lang = 'lua', -- not a git repo
         notes = 'game-script corpus; adapter gap banked',
     },
+    nio = {
+        -- THE ANNOTATED-LUA CORPUS (CART-0240 step zero). Every lua corpus we gate
+        -- on is effectively UNANNOTATED — wow_addons carries 3 annotation lines in
+        -- 2.27M, factorio-mods none — so anything reading annotations would ship
+        -- untested by construction. This one is 1851 type tags in 6982 lines (the
+        -- densest on the machine), DECLARES 432 @class + 67 @alias, and 88 of its
+        -- 148 def-attached @return tags name a class it declares itself: the shape
+        -- an answer-key or receiver-typing measurement needs.
+        -- A lazy.nvim plugin checkout, so it is a real git repo and PINNABLE — the
+        -- reason to prefer ONE plugin over the whole 25k-annotation lazy/ tree,
+        -- which is 34 independent package roots and could never hold a baseline.
+        root = HOME .. '/.local/share/nvim/lazy/nvim-nio',
+        repo = 'https://github.com/nvim-neotest/nvim-nio',
+        rev = '21f5324bfac1',
+        lang = 'lua',
+        expected = { refs = 273, nodes = 376 }, -- calibrated 2026-08-03 @ 21f5324
+        notes = 'annotated-lua tier (24 files): the annotation reader/lint gate'
+            .. ' (CART-0240); tools/annotcensus.lua is its census',
+    },
     factorio = {
         root = HOME .. '/work/factorio-mods',
         lang = 'lua', -- symlink-assembled multi-mod root (SE + postprocess

@@ -1187,7 +1187,7 @@ proposes a conversation:
 
 | disposition | what a finding is | gated? |
 |---|---|---|
-| **authoritative** | a defect by construction | **yes** — `seam-guard`, `silent-drop`, `truncation`, `load-order` |
+| **authoritative** | a defect by construction | **yes** — `seam-guard`, `silent-drop`, `truncation`, `load-order`, `dead-confined`, `annotation-mismatch` |
 | **suggestive** | a proposal; needs a human, or a user-supplied template, to become a verdict | no — track the trend |
 | **calibration-bound** | a count dominated by a known calibration question | no — triage before trusting it |
 | **annotation** | not a defect at all; it labels structure for readers and views | no |
@@ -1210,7 +1210,28 @@ The rules:
 
 - **dead-function** — a *local* function with no caller anywhere (exported
   functions and metamethods are excluded — public/dynamically-dispatched surface
-  isn't dead).
+  isn't dead). *Suggestive*: an entry point or a dynamically dispatched target
+  reads as dead here, which is exactly what the next rule fixes.
+- **dead-confined** — the same emptiness, **proved** instead of proposed, so a
+  finding is a defect by construction. Three source facts, none of them a
+  heuristic: the language says the function is file-local, its name is never read
+  in a *value* position anywhere in that file (so it cannot be in a dispatch
+  table, cannot have been passed as a callback, cannot have been fetched from
+  another module — every one of those is a value position), and no *refused* call
+  in the file could have been naming it. The message states the proof, so a reader
+  can check it without trusting the analyzer. `dead-function` skips whatever this
+  rule proves, so the two never double-report.
+- **annotation-mismatch** — a `---@param NAME` that names no parameter of the
+  function its comment block adheres to. The only part of a type annotation that
+  can be checked *without* modelling a single type — a function either has a
+  parameter of that name or it does not — so it is authoritative while everything
+  else about an annotation stays a claim. Catches the stranded docblock (an edit
+  inserted a helper between a doc comment and the function it documents) and the
+  stale `@param` left behind by a signature change. Sound about three shapes that
+  only look like disagreements: `@param ...` (a real parameter the signature list
+  doesn't name), a dotted `@param opts.field` (checked against its root), and a
+  language that declares no annotation syntax at all (not asked, rather than
+  answered "none"). `tools/annotcensus.lua` is the measurement behind it.
 - **silent-drop** — a *bare* call whose callee is a **local or param** of the
   enclosing function, yet resolved to nothing **and** was not refused: resolution
   silently gave up on a callable it can see the binding for (the function-value /
@@ -2620,6 +2641,20 @@ parity vs a lua-ls dump). `tools/gaps.lua <root>` ranks a project's unresolved
 callees by the gate that stopped them — the resolution work-list. And
 `tools/seammigrate.lua` enumerates any remaining raw wide-index reads with the
 Band accessor each should become — the migration work-list.
+
+`tools/annotcensus.lua` <corpus|path> is the **annotation census**: the tag mix
+(and how much of it is prose a reader must ignore *by name* — nvim's own
+`@brief`/`@toc`/`@text` are not type tags), how many tags actually reach a
+definition, what the `@return` types name, and the `annotation-mismatch` findings.
+It takes a bare path as well as a registered corpus name, on purpose: the point is
+to weigh a candidate corpus *before* registering it. What it measured is why the
+annotation work is scoped the way it is — three quarters of the fuel is
+`@class`/`@field` type declarations rather than definition annotations, and the
+attach rate ranges from 1.7% (`nvim-lspconfig`, whose 6600 tags are mostly config
+schemas adhering to nothing) to 97.3% (this repo, which only annotates defs). The
+`nio` corpus is registered for exactly this: every other Lua corpus we gate on is
+effectively unannotated, so anything reading annotations would otherwise ship
+untested by construction.
 
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the

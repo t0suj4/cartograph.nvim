@@ -2819,6 +2819,14 @@ function M.attach_pats(file)
     return lang and ATTACH[lang] or {}
 end
 
+--- The annotation tag-line pattern for `file`, or nil where the language declares
+--- none — which is the honest answer for "this file has no annotations we can
+--- read", NOT "this file has none" (CART-0240).
+function M.annot_tag(file)
+    local lang, spec = elang_for(file)
+    return lang and spec and spec.annot_tag or nil
+end
+
 -- the effective language, for verbs that need a hazard decision
 function M.lang_of(file)
     return (elang_for(file))

@@ -1063,6 +1063,90 @@ local function dead_confined_findings(store)
     return out
 end
 
+-- ── annotations: the part of a CLAIM that is checkable without a type system ──
+--
+-- CART-0240. An annotation is a human's claim about a type, so almost nothing in it
+-- can be verified — which is why that ticket's resolution ambitions were de-funded on
+-- measurement. But ONE thing in it is not a type claim at all: `---@param NAME` names
+-- a parameter, and a function either has a parameter of that name or it does not.
+-- That is a FACT, so this rule is authoritative, and the fix is on the annotation's
+-- side (or the signature's — we say which names exist and let the reader choose).
+--
+-- MEASURED (8 findings across cartograph + nvim's runtime + oil + plenary, every one
+-- hand-read): 2 stranded docblocks in OUR OWN TREE, where an edit inserted a helper
+-- between a doc comment and the function it documents; 1 stale `@param cb` on a
+-- function that no longer takes a callback; 2 malformed `@param nil ...`; 2 on
+-- vararg forwarders. lua-language-server independently reports undefined-doc-param
+-- on ALL of these shapes, including the forwarder and including a block separated
+-- from its def by a plain `--` comment — so our adhesion rule and its binding rule
+-- agree, which is the bar for calling a disagreement OUR finding rather than a
+-- difference of opinion.
+--
+-- THREE SOUNDNESS EXCLUSIONS, none of them corpus-calibrated:
+--   * `...` is a real parameter that `params` does not list, so `@param ...` is never
+--     a finding (34 such lines in the fuel corpus).
+--   * a DOTTED name (`@param opts.field`, LuaLS's way of documenting a table field)
+--     is checked against its ROOT segment. Zero occurrences in the fuel corpus —
+--     excluded because the shape is legal, not because it showed up.
+--   * a language that declares no `annot_tag` is not asked. Absence of a reader is
+--     not absence of annotations.
+local function annotation_findings(store)
+    local ts = require 'cartograph.providers.treesitter'
+    local annot = require 'cartograph.annot'
+    local txn = require 'cartograph.txn'
+    local out = {}
+    local lines_of, pat_of, adh_of = {}, {}, {}
+    for _, n in ipairs(store.data.nodes) do
+        if (n.kind == 'function' or n.kind == 'method') and n.file and n.range then
+            local pat = pat_of[n.file]
+            if pat == nil then
+                pat = ts.annot_tag(n.file) or false
+                pat_of[n.file] = pat
+            end
+            if pat then
+                local lines = lines_of[n.file]
+                if lines == nil then
+                    lines = store.content({ file = n.file }) or false
+                    lines_of[n.file] = lines
+                end
+                local adh = adh_of[n.file]
+                if adh == nil then
+                    adh = ts.attach_pats(n.file)
+                    adh_of[n.file] = adh
+                end
+                local s = atr.sl(n.range)
+                if lines and #adh > 0 then
+                    local top = txn.attach_above(lines, s, adh)
+                    if top < s then
+                        local blk = {}
+                        for i = top + 1, s do blk[#blk + 1] = lines[i] end
+                        local params, plist = {}, {}
+                        for _, p in ipairs(n.params or {}) do
+                            params[p] = true
+                            plist[#plist + 1] = p
+                        end
+                        for _, r in ipairs(annot.read_block(blk, top, pat)) do
+                            if r.kind == 'param' and r.name and r.name ~= '...' then
+                                local root = r.name:match('^([^%.]+)') or r.name
+                                if not params[root] then
+                                    out[#out + 1] = { file = store.abspath(n),
+                                        line = r.line + 1,
+                                        message = ("@param '%s' names no parameter of '%s' (%s)")
+                                            :format(r.name, n.name,
+                                                #plist > 0
+                                                    and ('parameters: ' .. table.concat(plist, ', '))
+                                                    or 'it takes no named parameters') }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
 M.rules = {
     { name = 'resource-leak', severity = 'warn', disposition = 'suggestive',
         -- recovered all 3 luanti oracles, but it is CONVENTION-specific: precision on
@@ -1303,6 +1387,12 @@ M.rules = {
         -- disposition, and the suggestive tier still has a job wherever we cannot know.
         name = 'dead-confined', severity = 'warn', disposition = 'authoritative',
         run = dead_confined_findings,
+    },
+    {   -- a NAME check, not a type check — see annotation_findings for why that is
+        -- what makes it authoritative, and for the three soundness exclusions
+        name = 'annotation-mismatch', severity = 'warn',
+        disposition = 'authoritative',
+        run = annotation_findings,
     },
     {
         name = 'dead-function', severity = 'warn', disposition = 'suggestive',

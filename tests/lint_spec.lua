@@ -280,9 +280,99 @@ test('lint: the AUTHORITATIVE set is small and positively justified', function (
     -- (so this fence stays green), 12 on the whole repo, 11 on factorio, 0 on desynced; and
     -- premise 3 is what makes it honest — without it the same-named nested `walk`/`visit`
     -- helper idiom produces 137 false positives out of 149.
-    eq({ 'dead-confined', 'load-order', 'seam-guard', 'silent-drop', 'truncation' }, auth,
+    -- annotation-mismatch joined 2026-08-03 (CART-0240). Justification: it is the one
+    -- part of an annotation that is NOT a type claim — `---@param NAME` either names a
+    -- parameter of the function it adheres to or it does not, which is a fact about
+    -- names. Confirmed against an independent implementation: lua-language-server
+    -- reports undefined-doc-param on every shape this rule reports, including a block
+    -- separated from its def by a plain `--` comment (so its binding rule and our
+    -- adhesion rule agree). MEASURED before promoting: 8 findings across 8 annotated
+    -- roots, every one hand-read and real — 2 of them stranded docblocks in this repo,
+    -- now fixed, so this fence stays green at 0.
+    eq({ 'annotation-mismatch', 'dead-confined', 'load-order', 'seam-guard',
+        'silent-drop', 'truncation' }, auth,
         'promoting a rule to authoritative is a DECISION — update this list with the'
         .. ' justification in the registry comment')
+end)
+
+test('annot: the type is ONE token, and the comment after it is not part of it', function ()
+    local annot = require 'cartograph.annot'
+    local P = '^%s*%-%-%-@([%a_]+)%s*(.*)$'
+    local function parse(line)
+        local tag, body = line:match(P)
+        return annot.parse_body(annot.TAGS[tag or ''], body)
+    end
+    -- the two dialects spell the trailing comment differently and BOTH occur in the
+    -- wild; "everything after the name" reads the type as `string @The input …`
+    eq('string', parse('---@param char string @The input character.').type,
+        'EmmyLua ends the type with @')
+    eq('string', parse('---@param char string The input character.').type,
+        'LuaLS ends it with nothing at all')
+    -- whitespace INSIDE brackets belongs to the type
+    eq('fun(key:string, value:V)', parse('---@param fn fun(key:string, value:V)').type)
+    eq('table<integer, dap.bp>', parse('---@return table<integer, dap.bp>').type)
+    -- …but an UNBALANCED bracket must not swallow the line
+    eq('integer', parse('---@param n integer < 5').type, 'prose with a stray < ')
+    -- `X|nil` is the other spelling of `X?`, and collapsing it is a spelling
+    -- equivalence — NOT a licence to model unions
+    local r = parse('---@return nio.lsp.types.ResponseError|nil')
+    eq('nio.lsp.types.ResponseError', r.type)
+    eq(true, r.opt, 'read as nullable')
+    eq('A|B', parse('---@return A|B').type, 'a REAL union stays opaque')
+    -- a multi-value tag keeps the first and says so, rather than inventing slots
+    local m = parse('---@return function?, string? error_message')
+    eq('function', m.type)
+    eq(true, m.multi)
+    eq(true, m.opt, 'the ? belongs to `function`, not to the comma')
+    -- the visibility word precedes a field name
+    eq('items', parse('---@field private items table').name)
+    -- an unknown tag is ignored BY NAME: nvim's gen_vimdoc emits @brief/@toc/@text
+    eq(nil, annot.TAGS['brief'])
+    eq(nil, parse('---@brief a paragraph of prose'), 'prose tags carry no row')
+end)
+
+test('annotation-mismatch: a name check, with the three exclusions', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.lua', 'w'))
+    fd:write(table.concat({
+        '---@param a string',
+        '---@param b string',
+        'local function ok(a, b) return a, b end',       -- both named: silent
+        '',
+        '---@param a string',
+        '-- a plain comment does NOT break the block, and lua-ls binds across it too',
+        'local function stranded(x) return x end',       -- `a`: FINDING
+        '',
+        '---@param ... any',
+        'local function varok(...) return ... end',      -- `...` is never a finding
+        '',
+        '---@param opts.field string',
+        'local function dotted(opts) return opts end',   -- root `opts` exists: silent
+        '',
+        '---@param self Thing',
+        '---@param n integer',
+        'function Thing:m(n) return self, n end',        -- `self` IS a lua method param
+        '',
+        '---@param gone string',
+        'local function stale(kept) return kept end',    -- `gone`: FINDING
+        'return { ok, stranded, varok, dotted, stale }', '' }, '\n'))
+    fd:close()
+    local store2 = require 'cartograph.store'
+    store2.ingest(ts.extract(root))
+    local f = lint.run(store2, only('annotation-mismatch'))
+    local got = {}
+    for _, x in ipairs(f) do got[#got + 1] = x.message end
+    table.sort(got)
+    eq(2, #got, 'exactly the two real disagreements: ' .. table.concat(got, ' | '))
+    ok(got[1]:match("@param 'a' names no parameter of 'stranded'"), got[1])
+    ok(got[2]:match("@param 'gone' names no parameter of 'stale'"), got[2])
+    ok(got[2]:match('parameters: kept'), 'the message says which names DO exist')
+    vim.fn.delete(root, 'rf')
 end)
 
 test('dead-confined: provable only with all three premises', function ()

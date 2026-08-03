@@ -15,10 +15,6 @@
 
 local M = {}
 
---- Extract a graph from a configured MCP server.
----@param name string  the key under config.mcp
----@param opts { only:string[]? }?  restrict to these keys (incremental)
----@return table? data, string? err
 -- a `sql(query) -> raw, err` closure over a generic SQL tool, for recipes
 local function sql_fn(client, cfg)
     return function (query)
@@ -27,6 +23,10 @@ local function sql_fn(client, cfg)
     end
 end
 
+--- Extract a graph from a configured MCP server.
+---@param name string  the key under config.mcp
+---@param opts { only:string[]? }?  restrict to these keys (incremental)
+---@return table? data, string? err
 function M.extract(name, opts)
     local cfg = (require('cartograph.config').mcp or {})[name]
     if not cfg then

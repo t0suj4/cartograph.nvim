@@ -73,6 +73,9 @@ M.SLOTS = {
     -- local-inference rung lands here)
     chain_root = 'TYPES', chain_type = 'TYPES', scan_fields = 'TYPES',
     fields = 'TYPES', def_ret = 'TYPES', fn_types = 'TYPES',
+    annot_tag = 'TYPES',           -- how an annotation tag line is spelled here
+                                   -- (LuaLS `---@x`, jsdoc `@x {T}`); the tag
+                                   -- vocabulary itself is shared (CART-0240)
     recv_local = 'TYPES', recv_root = 'TYPES', recv_path = 'TYPES',
     litdata_types = 'TYPES',
     dynamic_callee_types = 'TYPES', smt_query = 'TYPES',
