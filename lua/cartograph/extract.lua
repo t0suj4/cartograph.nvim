@@ -43,8 +43,24 @@ local function has_control_escape(lines)
     return false
 end
 
---- @param opts { df:table, sel:{first:integer,last:integer}, fn_start:integer, body_end:integer, file_lines:string[], name:string, reaching:nil|table[], flow_rows:nil|table[] }
+-- text guard: `...` cannot be passed to the helper. It is invisible to the
+-- dataflow — neither `params` nor a statement's `use` records it (a variadic
+-- fn's param list is just its NAMED parameters) — so nothing else would catch
+-- it, and the spliced helper would not even parse at module scope. Same
+-- conservative direction as has_control_escape.
+local function has_vararg(lines)
+    for _, l in ipairs(lines) do if l:find('...', 1, true) then return true end end
+    return false
+end
+
+--- @param opts { df:table, sel:{first:integer,last:integer}, fn_start:integer, body_end:integer, file_lines:string[], name:string, reaching:nil|table[], flow_rows:nil|table[], fn_params:nil|string[] }
 --- fn_start / body_end / sel are 1-based file line numbers. df.stmts[].l are too.
+--- fn_params = the ENCLOSING function's declared parameter names (flow.record's
+--- `params`, or node.params). REQUIRED, and `nil` REFUSES rather than defaulting
+--- to {}: an empty list is the real answer for a no-parameter function, whereas
+--- nil means NOT ASKED, and treating the two alike is what silently dropped a
+--- param read from the helper's signature (CART-0125). Same tri-state discipline
+--- as the escape fact — a consumer must not read absence as falseness.
 --- reaching = flow.reaching_cfg edges ({at,var,from,hedged}, row indices into
 --- flow_rows); flow_rows = flow.stmts (row → {l,def,...}). Together they attribute
 --- a shadowed name's later use to a def by SCOPE-correct reaching instead of by
@@ -57,6 +73,12 @@ function M.plan(opts)
     if not df or not df.stmts or #df.stmts == 0 then
         return { ok = false, reason = 'no data-flow for this function' }
     end
+    if opts.fn_params == nil then
+        return { ok = false, reason =
+            'the enclosing function\'s parameter list was not supplied (fn_params) — '
+            .. 'without it a parameter the selection reads is silently dropped from the '
+            .. 'helper\'s interface and becomes a nil global. Refusing rather than emit that.' }
+    end
     local stmts = df.stmts
 
     -- control escape first — it's the clearest reason and is independent of the
@@ -67,6 +89,11 @@ function M.plan(opts)
         return { ok = false, reason =
             'the selection contains return/break/goto. Extracting it would change control flow — '
             .. 'the return/break would only exit the new function, not the original. Not supported.' }
+    end
+    if has_vararg(sel_lines) then
+        return { ok = false, reason =
+            'the selection uses `...`. The helper is a separate function, so it cannot receive '
+            .. 'the enclosing vararg — pass the values it needs explicitly first. Not supported.' }
     end
 
     -- statement i spans [stmts[i].l, end(i)]; end(i) is the line before the next
@@ -96,12 +123,32 @@ function M.plan(opts)
             .. 'top-level statements; it cannot split a control structure yet.' }
     end
 
-    -- params = locals used in the selection whose reaching def is BEFORE it
-    -- (upvalues/params of the enclosing fn have no dep — captured by closure).
+    -- params = locals used in the selection whose reaching def is BEFORE it.
     local params_set = {}
     for idx = firstIdx, lastIdx do
         for _, d in ipairs(stmts[idx].dep or {}) do
             if d.from < firstIdx then params_set[d.var] = true end
+        end
+    end
+    -- …PLUS the enclosing function's own PARAMETERS that the selection reads.
+    -- A parameter has no defining statement, so it produces no dep edge and this
+    -- set would otherwise miss it entirely. It used to be excused as "captured by
+    -- closure" — but the helper is spliced at MODULE scope (insert_before =
+    -- fn_start, above the enclosing fn's header), so it captures nothing: the
+    -- read became a GLOBAL read, silently nil at runtime. That is a wrong-code
+    -- bug the parse gate cannot see, because `local x = a + 1` parses fine
+    -- whether `a` is a param or a nil global (CART-0125).
+    --
+    -- Enclosing LOCALS need no such rule: one declared before the selection
+    -- yields a dep edge (above), and a MODULE-level one stays in scope at the
+    -- splice point. Only the parameter list is invisible to dataflow.
+    local encl = {}
+    for _, p in ipairs(opts.fn_params or {}) do encl[p] = true end
+    if next(encl) then
+        for idx = firstIdx, lastIdx do
+            for _, u in ipairs(stmts[idx].use or {}) do
+                if encl[u] then params_set[u] = true end
+            end
         end
     end
     -- returns = locals defined in the selection and used after it

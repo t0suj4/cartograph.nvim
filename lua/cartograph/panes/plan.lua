@@ -59,6 +59,14 @@ function M.render()
                     :format(t.name, t.anchor or '?'), 'Title')
             lines[#lines + 1] = ('  %s — captures nothing from the enclosing fn (verified)')
                 :format(t.file)
+        elseif t.verb == 'extract-fn' then
+            lines[#lines + 1] = hl(marks, #lines,
+                ('EXTRACT-FN  %s(%s)%s ← %s    :CartographDiff · :CartographApply · :CartographTxnClear')
+                    :format(t.name, table.concat(t.params, ', '),
+                        #t.returns > 0 and (' -> ' .. table.concat(t.returns, ', ')) or '',
+                        t.how or t.fn or '?'), 'Title')
+            lines[#lines + 1] = ('  %s — a new local fn above %s; the call replaces L%d-%d')
+                :format(t.file, t.fn or '?', t.replace.first, t.replace.last)
         elseif t.verb == 'reorder' then
             lines[#lines + 1] = hl(marks, #lines,
                 ('REORDER  move %d statement(s) (L%d%s) before L%d in %s    :CartographDiff · :CartographApply · :CartographTxnClear')

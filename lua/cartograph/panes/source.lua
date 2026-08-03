@@ -8,7 +8,6 @@
 -- reference actually happens, without leaving the focused node.
 
 local store    = require 'cartograph.store'
-local extract  = require 'cartograph.extract'
 local hl       = require 'cartograph.hl'
 local atr = require 'cartograph.at'
 
@@ -214,64 +213,59 @@ end
 
 -- Extract the selected TOP-pane lines into a new local function. `line1`/`line2`
 -- are 1-based rows in the top buffer; the body starts at row HEADER_ROWS. Shows
--- a preview in the bottom pane and asks before writing anything to disk.
+-- the computed interface in the pane, then STAGES a transaction — this verb used
+-- to vim.fn.writefile straight to disk (no journal, no CAS, no parse gate, and a
+-- graph left stale enough that it told you to regenerate the dump by hand). It
+-- now rides extractapply like every other write verb, so the commit is
+-- :CartographApply and the undo is :CartographUndo (CART-0125).
 function M.extract(line1, line2, name)
     local node = M.cur
     if not node then return vim.notify('cartograph: no function focused', vim.log.levels.WARN) end
+    if store.txn then
+        return vim.notify('cartograph: a transaction is already staged'
+            .. ' — :CartographApply or :CartographTxnClear first', vim.log.levels.WARN)
+    end
     local fn_start = atr.sl(node.range) + 1        -- 1-based
-    local body_end = atr.el(node.range)           -- last body line (before `end`)
     -- top buffer row 3 (1-based) shows file line fn_start
     local file_first = fn_start + (line1 - (HEADER_ROWS + 1))
     local file_last  = fn_start + (line2 - (HEADER_ROWS + 1))
 
-    local all = store.content(node)
-    if not all then return vim.notify('cartograph: cannot read ' .. node.file, vim.log.levels.ERROR) end
-
-    -- shadow safety: scope-correct CFG reaching attributes a shadowed name's
-    -- later uses to defs by ROW, so the plan drops a false return (or refuses an
-    -- unsure one) instead of emitting split-variable code (df-strangler step-5)
-    local flow = require 'cartograph.flow'
-    local reaching, flow_rows
-    local fl = flow.present(node) and flow.record(node)
-    if fl then flow_rows, reaching = fl.stmts, flow.reaching_cfg(fl) end
-    local plan = extract.plan { df = require('cartograph.df').get(node),
-        sel = { first = file_first, last = file_last },
-        fn_start = fn_start, body_end = body_end, file_lines = all, name = name,
-        reaching = reaching, flow_rows = flow_rows }
-    local function show_then_restore(lines, prompt)
+    local ea = require 'cartograph.extractapply'
+    local plan, why = ea.plan(store, node.id,
+        { first = file_first, last = file_last }, name)
+    local function show_then_restore(lines)
         set_lines(M.buf, lines)
         scroll_top(M.win_top)
-        local choice = prompt and vim.fn.confirm(prompt, '&Apply\n&Cancel', 2)
-        if not prompt then vim.fn.confirm('(press Enter)', '&Ok', 1) end
+        vim.fn.confirm('(press Enter)', '&Ok', 1)
         set_lines(M.buf, body_lines(M.cur))
         scroll_top(M.win_top)
-        return choice == 1
     end
-    if not plan.ok then
+    if not plan then
         local msg = { ('── cannot extract lines %d-%d'):format(file_first, file_last), '' }
-        msg[#msg + 1] = plan.reason
+        msg[#msg + 1] = tostring(why)
         msg[#msg + 1] = ''
         msg[#msg + 1] = 'Extract works on whole top-level statements of a function.'
-        vim.notify('cartograph: cannot extract — ' .. plan.reason, vim.log.levels.WARN)
+        vim.notify('cartograph: cannot extract — ' .. tostring(why), vim.log.levels.WARN)
         show_then_restore(msg)
         return
     end
 
-    -- preview in the pane, confirm before touching disk
-    local prev = { ('── extract preview: %s(%s)%s'):format(name, table.concat(plan.params, ', '),
+    -- the computed interface in the pane; the exact bytes are :CartographDiff
+    local prev = { ('── extract staged: %s(%s)%s'):format(name, table.concat(plan.params, ', '),
         #plan.returns > 0 and ('  ->  ' .. table.concat(plan.returns, ', ')) or ''), '' }
     for _, l in ipairs(plan.new_fn) do prev[#prev + 1] = l end
     prev[#prev + 1] = ''
     prev[#prev + 1] = ('call replaces %s:%d-%d:'):format(node.file, plan.replace.first, plan.replace.last)
     for _, l in ipairs(plan.call) do prev[#prev + 1] = l end
     for _, h in ipairs(plan.hazards) do prev[#prev + 1] = '⚠ ' .. h end
-    if not show_then_restore(prev,
-            ('Extract %d line(s) into %s()?'):format(file_last - file_first + 1, name)) then
-        return vim.notify('cartograph: extract cancelled', vim.log.levels.INFO)
-    end
-    vim.fn.writefile(extract.apply(plan, all), store.abspath(node))
-    vim.notify(('cartograph: extracted %s(). Regenerate the graph dump to refresh the cockpit.'):format(name),
-        vim.log.levels.INFO)
+    prev[#prev + 1] = ''
+    prev[#prev + 1] = 'nothing is written yet — :CartographDiff reviews, :CartographApply commits'
+    show_then_restore(prev)
+    store.set_txn(plan)
+    vim.notify(('cartograph: extract staged — %d line(s) → %s(%d param%s).'
+        .. ' Review with :CartographDiff, then :CartographApply'):format(
+        file_last - file_first + 1, name, #plan.params,
+        #plan.params == 1 and '' or 's'), vim.log.levels.INFO)
 end
 
 function M.create()

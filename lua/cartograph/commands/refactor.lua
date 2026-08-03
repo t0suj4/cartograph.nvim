@@ -68,6 +68,144 @@ function M.register(H)
     end, { nargs = 1, complete = 'file',
         desc = 'cartograph: extract the staged move-set into a new file' })
 
+    -- ── THE REPORT→STAGE LAST MILE (CART-0125) ────────────────────────
+    -- Three report surfaces computed an extraction and dry-ran it; none could
+    -- stage one, so the write half was reachable only by hand-building the
+    -- move-set. One verb per listing, each turning the plan its report already
+    -- printed into a reviewable transaction.
+
+    -- untangle-MODULE's "extract-as-module candidates" → a staged move-set
+    cmd('CartographExtractCluster', function (o)
+        local st = live() if not st then return end
+        st = whole_graph(st) if not st then return end
+        if st.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first', vim.log.levels.WARN)
+        end
+        local un = require 'cartograph.untangle'
+        local ea = require 'cartograph.extractapply'
+        local which, dest = o.fargs[1], o.fargs[2]
+        local c = which and ea.comp_of(which)
+        if not (c and dest) then
+            return vim.notify('cartograph: :CartographExtractCluster <letter> <dest.lua>'
+                .. ' (the cluster letter :CartographUntangleModule lists)', vim.log.levels.WARN)
+        end
+        -- the SAME scope the report clustered: a directory arg, else the focused
+        -- node's file. Re-derived rather than remembered, so a stale report
+        -- cannot silently address the wrong cluster.
+        local scope, label
+        if o.fargs[3] then
+            scope, label = un.files_under(st, o.fargs[3]), o.fargs[3]
+            if #scope == 0 then
+                return vim.notify('cartograph: no files under ' .. o.fargs[3], vim.log.levels.WARN)
+            end
+        else
+            local n = st.focused and st.node(st.focused)
+            if not (n and n.file) then
+                return vim.notify('cartograph: focus a node in the file first'
+                    .. ' (or pass the same dir you gave :CartographUntangleModule)',
+                    vim.log.levels.WARN)
+            end
+            scope, label = { n.file }, n.file
+        end
+        local res = un.analyze_scope(st, scope)
+        if c >= res.ncomp then
+            return vim.notify(('cartograph: %s has %d cluster(s) — no %s')
+                :format(label, res.ncomp, ea.letter(c)), vim.log.levels.WARN)
+        end
+        local plan, why = un.extract_module(st, res, c, dest)
+        if not plan then
+            return vim.notify('cartograph: cannot extract cluster '
+                .. ea.letter(c) .. ' — ' .. tostring(why), vim.log.levels.WARN)
+        end
+        -- the cluster's SAFETY verdict is a separate question from the move
+        -- mechanics moveapply just checked; an uncertified scope rides as a
+        -- hazard rather than blocking, because the mechanics are still sound
+        if not un.module_safe(res, c) then
+            table.insert(plan.hazards, 1, ('cluster %s is ~ NOT certified — an unmodeled'
+                .. ' coupling could connect it to another cluster'
+                .. ' (:CartographUntangleModule names the blocking statements)')
+                :format(ea.letter(c)))
+        end
+        st.set_txn(plan)
+        vim.notify(('cartograph: extract-cluster %s staged — %d symbol(s) → NEW %s,'
+            .. ' %d hazard(s). Review with :CartographDiff, then :CartographApply')
+            :format(ea.letter(c), #plan.moves, plan.dest, #plan.hazards),
+            vim.log.levels.INFO)
+    end, { nargs = '*', complete = 'file',
+        desc = 'cartograph: stage one CLUSTER of :CartographUntangleModule as its own new module — <letter> <dest.lua> [<dir>], the letter being the cluster the report lists (pass the same dir arg for a god-PACKAGE scope; omit it for the focused file). The god-object split, end to end: untangle picks the cluster, moveapply independently checks the move mechanics and reports load-order/cycle hazards. An uncertified cluster stages with the coupling disclosed, never silently. Review :CartographDiff, commit :CartographApply' })
+
+    -- untangle's per-concern "extract candidates" → a staged helper extraction
+    cmd('CartographExtractConcern', function (o)
+        local store = live() if not store then return end
+        store = whole_graph(store) if not store then return end
+        if store.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first', vim.log.levels.WARN)
+        end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
+        end
+        -- NO mat_df here, deliberately: plan_concern goes through
+        -- untangle.effect_edges, which needs the whole-graph call fixpoint. On an
+        -- index-only graph the effect edges would come back EMPTY and the concern
+        -- count would read higher than the truth — an unsound "independent"
+        -- claim. whole_graph above refuses that case outright, which is why this
+        -- verb is guarded like :CartographUntangle and not like the df-local
+        -- verbs ([[cartograph-thin-index]]).
+        local ea = require 'cartograph.extractapply'
+        if o.fargs[1] == nil then
+            return vim.notify('cartograph: :CartographExtractConcern <letter> [<name>]'
+                .. ' (the concern letter :CartographUntangle lists)', vim.log.levels.WARN)
+        end
+        local plan, why = ea.plan_concern(store, id, o.fargs[1], o.fargs[2])
+        if not plan then
+            return vim.notify('cartograph: cannot extract concern '
+                .. tostring(o.fargs[1]) .. ' — ' .. tostring(why), vim.log.levels.WARN)
+        end
+        store.set_txn(plan)
+        vim.notify(('cartograph: extract-concern staged — %s(%d param%s) out of %s,'
+            .. ' %d hazard(s). Review with :CartographDiff, then :CartographApply')
+            :format(plan.name, #plan.params, #plan.params == 1 and '' or 's',
+            plan.fn, #plan.hazards), vim.log.levels.INFO)
+    end, { nargs = '*',
+        desc = 'cartograph: stage one CONCERN of :CartographUntangle as a new local helper — <letter> [<name>], the letter being the concern the report lists. untangle picks the boundary; extract.plan independently validates the mechanics (params from live-in, returns from live-out, scope-correct reaching), so an independent-but-unextractable concern is refused with the reason. A scattered concern refuses — reorder gathers it first. Review :CartographDiff, commit :CartographApply' })
+
+    -- the SELECTION path, headless: the source pane's :CartographExtract without
+    -- the cockpit (so the verb is agent-drivable, [[cartograph-apply-for-agent]])
+    cmd('CartographExtractFn', function (o)
+        local store = live() if not store then return end
+        if store.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first', vim.log.levels.WARN)
+        end
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
+        end
+        mat_df(store, n.file)
+        local first, last, name = tonumber(o.fargs[1]), tonumber(o.fargs[2]), o.fargs[3]
+        if not (first and last and name) then
+            return vim.notify('cartograph: :CartographExtractFn <first> <last> <name>'
+                .. ' (FILE line numbers, whole top-level statements)', vim.log.levels.WARN)
+        end
+        local plan, why = require('cartograph.extractapply')
+            .plan(store, id, { first = first, last = last }, name)
+        if not plan then
+            return vim.notify('cartograph: cannot extract — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        store.set_txn(plan)
+        vim.notify(('cartograph: extract staged — L%d-%d → %s(%d param%s) in %s.'
+            .. ' Review with :CartographDiff, then :CartographApply'):format(
+            first, last, name, #plan.params, #plan.params == 1 and '' or 's',
+            plan.fn), vim.log.levels.INFO)
+    end, { nargs = '*',
+        desc = 'cartograph: stage extracting FILE lines <first>..<last> of the focused function into a new local <name> — the headless face of the source pane\'s :CartographExtract. Whole top-level statements only; refuses a selection that cuts a control-structure body, contains return/break/goto, or would split a shadowed variable (scope-correct CFG reaching decides, never a name match). Review :CartographDiff, commit :CartographApply' })
+
     -- ── reorder APPLY: move a statement, verified against the commute verdict ──
     cmd('CartographReorderApply', function (o)
         local store = live() if not store then return end

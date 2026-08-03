@@ -600,7 +600,12 @@ function M.extract_plan(store, fn_id, res, c, name)
     return require('cartograph.extract').plan {
         df = df, sel = sel, fn_start = at.sl(node.range) + 1, body_end = body_end,
         file_lines = store.content(node), reaching = flowmod.reaching_cfg(fl),
-        flow_rows = rows, name = name or ('extracted_' .. string.char(65 + (c % 26))) }
+        -- the enclosing fn's params: no dep edge names them, and the helper lands
+        -- at module scope where they are out of scope (CART-0125). fl.params only
+        -- — node.params is nil for a parameterless fn, so it cannot distinguish
+        -- "none" from "unknown"; `fl` is guaranteed non-nil above.
+        flow_rows = rows, fn_params = fl.params,
+        name = name or ('extracted_' .. string.char(65 + (c % 26))) }
 end
 
 --- The lens surface (INC 4): render the focused fn's fine-PDG concerns + the

@@ -377,6 +377,34 @@ verb refuses is as load-bearing as what it writes — see
   :'<,'>CartographExtract {name}
                               extract the selected lines into a function
                               (source pane only)
+  :CartographExtractFn {first} {last} {name}
+                              the same extraction without the pane: FILE
+                              lines {first}..{last} of the focused
+                              function become a new local {name}. Whole
+                              top-level statements only — refuses a
+                              selection that cuts a control-structure
+                              body, contains return/break/goto, uses the
+                              enclosing `...`, or would split a shadowed
+                              variable
+  :CartographExtractCluster {letter} {dest} [dir]
+                              stage ONE cluster of
+                              :CartographUntangleModule as its own new
+                              module — {letter} is the cluster that
+                              report lists. Pass the same {dir} for a
+                              god-PACKAGE scope; omit it for the focused
+                              file. untangle picks the cluster, moveapply
+                              independently checks the move mechanics; an
+                              uncertified cluster stages with the
+                              coupling disclosed as a hazard
+  :CartographExtractConcern {letter} [name]
+                              stage ONE concern of :CartographUntangle as
+                              a new local helper. untangle picks the
+                              boundary and extract.plan validates the
+                              mechanics independently, so a concern that
+                              is independent but not mechanically
+                              extractable is refused with the reason. A
+                              scattered concern refuses — reorder gathers
+                              it first
   :CartographExtractHelper    propose the parameterized helper this
                               function and its nearest near-clone could
                               factor into — the anti-unified template

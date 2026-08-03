@@ -288,16 +288,36 @@ caller — public surface, *not* dead), `unused?` (a local with no caller), or
 
 In the **source** pane, visually select whole statements and run
 `:'<,'>CartographExtract <name>`. The engine computes the new function's
-parameters (locals read but defined before the selection) and return values
-(locals defined in the selection and used after it) from the data-flow, shows a
-**preview** in the source pane, and writes to disk only after you confirm.
+parameters (the enclosing function's parameters and locals the selection reads)
+and return values (locals defined in the selection and used after it) from the
+data-flow, shows the interface in the pane, and **stages a transaction** — review
+the exact bytes with `:CartographDiff`, commit with `:CartographApply`, undo with
+`:CartographUndo`. `:CartographExtractFn <first> <last> <name>` is the same verb
+without the pane, addressing FILE line numbers, so a script or an agent can drive
+it headlessly.
 
 It is deliberately conservative: it works on **whole top-level statements** and
-**refuses** a selection that cuts a loop/branch body or contains a
-`return`/`break`/`goto`. It cannot see non-local (table/global) state, so that
-risk is disclosed as a hazard on the preview rather than silently assumed away —
-verify those by eye. After applying, regenerate the graph dump to refresh the
-cockpit.
+**refuses** a selection that cuts a loop/branch body, contains a
+`return`/`break`/`goto`, uses the enclosing `...` (a separate function cannot
+receive it), or would split a shadowed variable — scope-correct CFG reaching
+decides that last one, never a name match. It cannot see non-local
+(table/global) state, so that risk is disclosed as a hazard rather than silently
+assumed away — verify those by eye.
+
+Two report surfaces feed the same verb, so a finding can be acted on where you
+read it:
+
+- `:CartographExtractConcern <letter> [name]` stages one **concern** of
+  [`:CartographUntangle`](#untangle-independent-concerns--safe-to-split) as a
+  helper.
+- `:CartographExtractCluster <letter> <dest.lua> [dir]` stages one **cluster** of
+  `:CartographUntangleModule` as its own new module — the god-file split, end to
+  end.
+
+Both are **two independent analyses that must agree**: untangle picks the
+boundary, and the extract/move machinery re-derives the mechanics. A cluster
+untangle calls independent can still be refused on the mechanics, and that
+refusal is the honest answer rather than a bug on either side.
 
 ### Staging a move
 
@@ -2116,7 +2136,9 @@ with **extract candidates**: each contiguous certified concern is handed to
 `extract.plan`, which independently validates the mechanics (live-in→params,
 live-out→returns, refusing on control-escape or ambiguous returns) — so untangle
 picks the boundary and extract.plan checks it. A scattered concern is refused
-until a reorder gathers it.
+until a reorder gathers it. `:CartographExtractConcern <letter> [name]` stages the
+candidate you're looking at — the report's letter is the handle, so the listing is
+a work-list rather than a dead end.
 
 `:CartographUntangleModule` is the same idea one level up — it clusters the
 focused *file's functions* into independent groups over call edges + shared
@@ -2128,8 +2150,12 @@ secretly connect it to another cluster; otherwise `~`, with the blocking calls
 named. Pass a directory (`:CartographUntangleModule <dir>`) to cluster a whole
 package across files; a certified cluster hands off to the module extractor
 (`moveapply`), whose load-order/cycle hazards are the independent cross-check.
-What counts as shared state is a per-ecosystem sharing-model seam (the default
-couples any written module var).
+`:CartographExtractCluster <letter> <dest.lua> [dir]` stages that handoff as a
+transaction — the god-object split from *finding* to *diff* without hand-building
+a move-set. An uncertified cluster still stages, with the possible coupling
+carried as a hazard rather than blocking: the move mechanics are sound either way,
+and what is unproven is disclosed, never silently. What counts as shared state is
+a per-ecosystem sharing-model seam (the default couples any written module var).
 
 Connected components answer *"are these provably independent?"* — a strict
 yes/no. But cohesive code is often **one** connected concern with rich internal

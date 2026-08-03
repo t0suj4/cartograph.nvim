@@ -29,7 +29,7 @@ local F_DF = { inputs = { 'a', 'b' }, stmts = {
 
 test('extract: live-in becomes params, live-out becomes returns', function ()
     local p = extract.plan { df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1, body_end = 5,
-                             file_lines = F, name = 'sum' }
+                             file_lines = F, name = 'sum', fn_params = { 'a', 'b' } }
     ok(p.ok, p.reason)
     eq({ 'x', 'y' }, p.params)   -- x,y defined before the selection -> params
     eq({ 'z' }, p.returns)       -- z defined here, used after -> return
@@ -39,7 +39,7 @@ end)
 
 test('extract: apply splices in the new function and the call', function ()
     local p = extract.plan { df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1, body_end = 5,
-                             file_lines = F, name = 'sum' }
+                             file_lines = F, name = 'sum', fn_params = { 'a', 'b' } }
     local out = extract.apply(p, F)
     eq('local function sum(x, y)', out[1])
     eq('end', out[4])
@@ -51,7 +51,7 @@ end)
 
 test('extract: refuses a selection containing a control escape', function ()
     local p = extract.plan { df = F_DF, sel = { first = 4, last = 5 }, fn_start = 1, body_end = 5,
-                             file_lines = F, name = 'x' }
+                             file_lines = F, name = 'x', fn_params = { 'a', 'b' } }
     ok(not p.ok)
     ok(p.reason:match('return/break/goto'), p.reason)
 end)
@@ -68,7 +68,7 @@ test('extract: refuses a selection that cuts a loop body', function ()
     -- selecting the loop's start line through the middle of its body (3..5)
     -- lands on the loop statement's boundary but ends mid-body -> misaligned
     local p = extract.plan { df = loopdf, sel = { first = 3, last = 5 }, fn_start = 1, body_end = 7,
-                             file_lines = lines, name = 'x' }
+                             file_lines = lines, name = 'x', fn_params = {} }
     ok(not p.ok)
     ok(p.reason:match('starts or ends inside'), p.reason)
 end)
@@ -83,7 +83,7 @@ test('extract: a selection nested inside a block explains the top-level limit', 
     local lines = { 'local function g()', '    local acc = {}', '    for i = 1, 10 do',
                     '        acc[i] = i', '        munge(acc)', '    end', '    return acc', 'end' }
     local p = extract.plan { df = loopdf, sel = { first = 4, last = 5 }, fn_start = 1, body_end = 7,
-                             file_lines = lines, name = 'x' }
+                             file_lines = lines, name = 'x', fn_params = {} }
     ok(not p.ok)
     ok(p.reason:match('nested inside'), p.reason)
     ok(p.reason:match('TOP.LEVEL'), p.reason)
@@ -96,7 +96,7 @@ test('extract: a side-effecting statement extracts with params and no returns', 
         { l = 3, def = {}, use = { 'n' }, dep = { dep(1, 'n') } },
     } }
     local p = extract.plan { df = df, sel = { first = 3, last = 3 }, fn_start = 1, body_end = 3,
-                             file_lines = lines, name = 'do_record' }
+                             file_lines = lines, name = 'do_record', fn_params = {} }
     ok(p.ok, p.reason)
     eq({ 'n' }, p.params)
     eq({}, p.returns)
@@ -150,18 +150,21 @@ local S_REACH = {
 
 test('extract shadow: without reaching, an ambiguous return REFUSES', function ()
     local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
-        fn_start = 1, body_end = 7, file_lines = S, name = 'f2' }
+        fn_start = 1, body_end = 7, file_lines = S, name = 'f2', fn_params = { 'a' } }
     ok(not p.ok)
     ok(p.reason:match('inside and'), p.reason)
 end)
 
 test('extract shadow: reaching DROPS the false return (post-use misses the selection)', function ()
     local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
-        fn_start = 1, body_end = 7, file_lines = S, name = 'f2',
+        fn_start = 1, body_end = 7, file_lines = S, name = 'f2', fn_params = { 'a' },
         flow_rows = S_ROWS, reaching = S_REACH }
     ok(p.ok, p.reason)
     eq({}, p.returns)            -- no junk `local x = f2(...)`
-    eq('    f2()', p.call[1])
+    -- `a` is f's PARAMETER and the selection reads it, so it has to be passed.
+    -- This expectation used to read `f2()` — wrong code: the helper is spliced at
+    -- MODULE scope, where `a` is a nil global (CART-0125).
+    eq('    f2(a)', p.call[1])
 end)
 
 test('extract shadow: reaching KEEPS a return a post-use actually reaches', function ()
@@ -173,11 +176,59 @@ test('extract shadow: reaching KEEPS a return a post-use actually reaches', func
         { l = 7, def = {}, use = { 'x' }, dep = { dep(2, 'x') } },
     } }
     local p = extract.plan { df = df2, sel = { first = 6, last = 6 },
-        fn_start = 1, body_end = 7, file_lines = S, name = 'f2',
+        fn_start = 1, body_end = 7, file_lines = S, name = 'f2', fn_params = { 'a' },
         flow_rows = S_ROWS, reaching = S_REACH }
     ok(p.ok, p.reason)
     eq({ 'x' }, p.returns)
-    eq('    local x = f2()', p.call[1])
+    eq('    local x = f2(a)', p.call[1])   -- `a` passed, per CART-0125 (was f2())
+end)
+
+-- ── THE ENCLOSING FN'S PARAMETERS (CART-0125) ────────────────────────────────
+-- A parameter has no defining statement, so it produces no dep edge and the
+-- live-in set misses it. It was excused as "captured by closure", but the helper
+-- is spliced ABOVE the enclosing function (module scope) and captures nothing —
+-- so the read became a nil global. Wrong code the parse gate cannot see, since
+-- `local x = a + 1` parses the same either way.
+
+test('extract: an enclosing PARAMETER the selection reads becomes a param', function ()
+    -- line 2 is `local x = a + 1`: `a` is f's parameter, not a local with a def
+    local p = extract.plan { df = F_DF, sel = { first = 2, last = 2 }, fn_start = 1,
+        body_end = 5, file_lines = F, name = 'mk', fn_params = { 'a', 'b' } }
+    ok(p.ok, p.reason)
+    eq({ 'a' }, p.params)         -- NOT {} — `a` must be passed in
+    eq({ 'x' }, p.returns)
+    eq('    local x = mk(a)', p.call[1])
+    eq({ 'local function mk(a)', '    local x = a + 1', '    return x', 'end' }, p.new_fn)
+    -- `b` is a parameter too, but this selection never reads it
+    for _, v in ipairs(p.params) do ok(v ~= 'b', 'an unread param is not passed') end
+end)
+
+test('extract: a NOT-ASKED parameter list refuses (nil is not the empty list)', function ()
+    local p = extract.plan { df = F_DF, sel = { first = 2, last = 2 }, fn_start = 1,
+        body_end = 5, file_lines = F, name = 'mk' }   -- no fn_params at all
+    ok(not p.ok)
+    ok(p.reason:match('fn_params'), p.reason)
+    -- and {} is a real answer, honoured: a genuinely parameterless enclosing fn
+    local q = extract.plan { df = F_DF, sel = { first = 4, last = 4 }, fn_start = 1,
+        body_end = 5, file_lines = F, name = 'mk', fn_params = {} }
+    ok(q.ok, q.reason)
+    eq({ 'x', 'y' }, q.params)
+end)
+
+test('extract: a selection using `...` is refused (the helper cannot receive it)', function ()
+    local lines = { 'local function va(fmt, ...)', '    local n = select("#", ...)',
+                    '    record(fmt, n)', 'end' }
+    local df = { inputs = {}, stmts = {
+        { l = 2, def = { 'n' }, use = {}, dep = {} },
+        { l = 3, def = {}, use = { 'n' }, dep = { dep(1, 'n') } },
+    } }
+    -- `...` is in NEITHER fn_params (only named params are listed) NOR the
+    -- statement's `use`, so nothing but the text guard can catch it — and the
+    -- spliced helper would not even parse at module scope.
+    local p = extract.plan { df = df, sel = { first = 2, last = 2 }, fn_start = 1,
+        body_end = 3, file_lines = lines, name = 'count', fn_params = { 'fmt' } }
+    ok(not p.ok)
+    ok(p.reason:match('%.%.%.'), p.reason)
 end)
 
 test('extract shadow: a hedged reach into the selection refuses rather than guess', function ()
@@ -188,7 +239,7 @@ test('extract shadow: a hedged reach into the selection refuses rather than gues
         { at = 4, var = 'x', from = { 1 }, hedged = { [1] = true } },
     }
     local p = extract.plan { df = S_DF, sel = { first = 2, last = 5 },
-        fn_start = 1, body_end = 7, file_lines = S, name = 'f2',
+        fn_start = 1, body_end = 7, file_lines = S, name = 'f2', fn_params = { 'a' },
         flow_rows = S_ROWS, reaching = reach }
     ok(not p.ok)
     ok(p.reason:match('conservative reach'), p.reason)
