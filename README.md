@@ -2718,6 +2718,21 @@ to 17.3%, because a function that writes module state or mutates an argument can
 isolated by injection and honestly blocks. So the frame's value tracks **purity**, not just
 how much environment is missing.
 
+`tools/portgraph.lua` <corpus|path> is the **port graph**: for library functions we cannot
+see, we can never name the types — but if `FindComponent`'s return flows into
+`RemoveFromParent`'s first argument, those two anonymous **ports** are observably
+interchangeable, and sweeping the corpus for such flows partitions opaque values into
+compatibility classes. *You don't need the name, you need the partition.* Ports are
+`(callee, slot)`; edges come from three observed flow shapes (a local mediating two calls,
+direct nesting `B(A())`, and a method receiver `h:Destroy()`); union-find does the rest —
+no solver. The naive partition is **expected to be degenerate**, and the tool prints the
+largest-class share as the number the propagation rules have to beat, plus the top ports by
+degree as their work-list: `ipairs#a1` (degree 137 on this repo) accepts anything iterable,
+so it unifies every table in one stroke. What already works is the part the blob doesn't
+reach — with no declarations anywhere, observed flow alone recovers
+`nvim_get_current_win#ret ~ nvim_win_set_height#a1 ~ getwininfo#a1` as one class, which is a
+window handle.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit
