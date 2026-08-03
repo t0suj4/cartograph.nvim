@@ -2682,6 +2682,34 @@ schemas adhering to nothing) to 97.3% (this repo, which only annotates defs). Th
 effectively unannotated, so anything reading annotations would otherwise ship
 untested by construction.
 
+`tools/pathsat.lua` <corpus|path> is the **contradictory-path ceiling probe**: would a
+boolean path solver earn its keep? It asks whether any statement's dominating guard
+conjunction (`cfg.guards_over`) asserts both `C` and `¬C`, which would prove it
+unreachable — and reports a *ladder* of tiers (RAW → PURE → NOREASSIGN → STRICT),
+because the naive form is a name match and the drop between tiers is the finding.
+Across seven Lua corpora (50,964 functions) the filters removed **310 of 311** naive
+hits; the one survivor is real dead code, and it needed no solver at all — real guard
+conjunctions are small enough that contradiction detection is a set-membership test
+rather than a satisfiability problem. It refuses to print corpus numbers until a
+fixture of known positives *and* known near-misses passes, on the principle that a
+probe reporting zero is uninterpretable until it has been shown able to fire — a gate
+that caught two bugs in the probe itself before it reported anything.
+
+`tools/holecensus.lua` <corpus|path> [--by kind|tier|rule|file] is the **test-template
+hole census**: if a test were generated as a *template with holes*, how many holes would
+each function have, and which are **our gap** rather than the honest frontier? A hole is
+never *labelled* "our bug" — an **edge** is drawn to the evidence that indicts us, tiered
+because the answer keys have unequal authority (an observed call-site literal is
+`measured`; a same-file definition is `derived`; a declared annotation is only a `claim`,
+since docblocks demonstrably lie — that is why `annotation-mismatch` exists). Absence of
+the edge *is* the frontier, rendered as an unlinked hole rather than as silence. `--by`
+rotates the same structure: by hole kind, by tier, or **by owning rule**, which reads as a
+work-list of our own analyzers. What it measured: emittability is **monotone in annotation
+density** — 51.2% of `nio`'s functions carry no blocking hole versus 1.8% of `desynced`'s,
+tracking 1.06 versus 0.003 annotation claims per function. The oracle hole is irreducible
+by construction and is *not* counted against emittability: filling it with one run is the
+design, not a gap.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit
