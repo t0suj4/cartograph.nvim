@@ -48,6 +48,9 @@ bench.bootstrap()
 local ts = require 'cartograph.providers.treesitter'
 local store = require 'cartograph.store'
 local expr = require 'cartograph.expr'
+local annot = require 'cartograph.annot'
+local txn = require 'cartograph.txn'
+local at = require 'cartograph.at'
 
 -- ── union-find over port keys ───────────────────────────────────────────────
 local UF = {}
@@ -315,6 +318,99 @@ local function together(part, group)
         root = r
     end
     return root ~= nil
+end
+
+
+-- ── W4: DECLARATIONS NAME A CLASS (CART-0271) ───────────────────────────────
+-- A class is a set of ports with no name. Give ONE member a declared type and the whole
+-- class acquires it — that is the AMPLIFICATION the profile lever buys, and it is
+-- measurable: how many ports does one declaration name?
+--
+-- The naming source here is ANNOTATIONS, not a profile file: annot.lua already reads
+-- @param/@return off docblocks (CART-0240) and this repo annotates 97.3% of its defs. A
+-- profile (CART-0266 stdlib members, CART-0029 adapters) arrives later through the SAME
+-- door with no new machinery — so this measures what CART-0266 would be worth.
+--
+-- A DECLARED NAME IS A CLAIM, not a fact (docblocks lie — that is why annotation-mismatch
+-- exists). So two different declarations inside one class are reported as a CONFLICT and
+-- never resolved by majority: "which side is wrong" is precisely what a declaration cannot
+-- settle. A conflict means our partition over-merged OR the docblocks disagree, and both
+-- are worth knowing.
+--
+-- THE LINK IS FUZZY AND THE MATCH RATE IS REPORTED. A port key is the callee name AS
+-- WRITTEN AT THE CALL SITE (`optimize.cse#a2`) while the node is `M.cse` in optimize.lua.
+-- The index below keys each node several ways — its name, its last segment, and
+-- `<file basename>.<last segment>` (the `local optimize = require ...; optimize.cse()`
+-- idiom) — and the report states how many ports resolved at all, so amplification is read
+-- against its own coverage rather than presented as complete.
+local function declarations()
+    local byname = {}
+    local function put(k, v) if k and byname[k] == nil then byname[k] = v end end
+    for _, n in ipairs(store.data.nodes or {}) do
+        if (n.kind == 'function' or n.kind == 'method') and n.name and n.file then
+            local last = n.name:match('([%w_]+)$')
+            local base = n.file:match('([%w_]+)%.lua$')
+            put(n.name, n)
+            put(last, n)
+            if base and last then put(base .. '.' .. last, n) end
+        end
+    end
+    -- node → { ret = type?, params = { [index] = type } }
+    local decl, srccache = {}, {}
+    for _, n in ipairs(store.data.nodes or {}) do
+        if (n.kind == 'function' or n.kind == 'method') and n.file
+            and n.file:match('%.lua$') and n.range then
+            local lines = srccache[n.file]
+            if lines == nil then
+                lines = store.content(n) or false
+                srccache[n.file] = lines
+            end
+            local pat = ts.annot_tag and ts.annot_tag(n.file)
+            local pats = ts.attach_pats and ts.attach_pats(n.file)
+            if lines and pat then
+                local s0 = at.sl(n.range)
+                local first = txn.attach_above(lines, s0, pats)
+                if first and first < s0 then
+                    local tags = annot.read_block(lines, first, pat)
+                    if tags and #tags > 0 then
+                        local fl = require('cartograph.flow')
+                        local rec = fl.present(n) and fl.record(n)
+                        local idx = {}
+                        for i, pname in ipairs((rec and rec.params) or {}) do idx[pname] = i end
+                        local d = { params = {} }
+                        for _, t in ipairs(tags) do
+                            if t.kind == 'return' and t.type then d.ret = d.ret or t.type
+                            elseif t.kind == 'param' and t.name and t.type and idx[t.name] then
+                                d.params[idx[t.name]] = t.type
+                            end
+                        end
+                        if d.ret or next(d.params) then decl[n] = d end
+                    end
+                end
+            end
+        end
+    end
+    return byname, decl
+end
+
+--- port → declared type string, or nil. Also returns whether the port RESOLVED to a node
+--- at all (the coverage figure), because an unresolved port and a resolved-but-undeclared
+--- one are different answers.
+local function decl_of(byname, decl, p, callee_of)
+    local name = callee_of(p)
+    local slot = p:match('#([^#]*)$')
+    local node = byname[name]
+    if not node then
+        local last = name:match('([%w_]+)$')
+        node = last and byname[last]
+    end
+    if not node then return nil, false end
+    local d = decl[node]
+    if not d then return nil, true end
+    if slot == 'ret' then return d.ret, true end
+    local i = slot and slot:match('^a(%d+)$')
+    if i then return d.params[tonumber(i)], true end
+    return nil, true
 end
 
 -- ── selftest ────────────────────────────────────────────────────────────────
@@ -617,6 +713,78 @@ for i = 1, math.min(#best.classes, show) do
         #m > 6 and ('  … +' .. (#m - 6)) or ''))
 end
 
+
+-- ── W4: AMPLIFICATION AND CONFLICTS (CART-0271) ─────────────────────────────
+-- AMPLIFICATION answers "how many ports does ONE declaration name?" — the profile lever,
+-- quantified. CONFLICTS answer "does the partition agree with the declarations?" — a
+-- self-check that needs no hand-reading, since two different declared types inside one
+-- class mean we over-merged or the docblocks disagree.
+--
+-- PREDICTION recorded in CART-0271 before running: conflicts CONCENTRATE in the large
+-- classes (the residual blob) and are RARE in small ones. If that holds,
+-- conflicts-per-class is a proxy for partition quality; if they are spread uniformly, the
+-- partition is worse than class size suggests and W2 is not done.
+local byname, decl = declarations()
+local ndecl = 0
+for _ in pairs(decl) do ndecl = ndecl + 1 end
+
+local resolved, declared = 0, 0
+local pdecl = {}
+for pt in pairs(col.pcount) do
+    local d, ok = decl_of(byname, decl, pt, col.callee_of)
+    if ok then resolved = resolved + 1 end
+    if d then declared = declared + 1; pdecl[pt] = d end
+end
+print('')
+print(('  W4 DECLARATIONS — %d annotated fn(s); %d/%d ports resolved to a node (%.0f%%),'
+    .. ' %d carry a declared type'):format(ndecl, resolved, tot,
+    tot > 0 and 100 * resolved / tot or 0, declared))
+
+local named, conflict, ampl, singles = 0, 0, 0, 0
+local conflicts, bysize = {}, { big = 0, bigc = 0, small = 0, smallc = 0 }
+for _, m in ipairs(best.classes) do
+    local kinds, first = {}, nil
+    local n = 0
+    for _, pt in ipairs(m) do
+        local d = pdecl[pt]
+        if d then
+            if kinds[d] == nil then kinds[d] = 0; n = n + 1; first = first or d end
+            kinds[d] = kinds[d] + 1
+        end
+    end
+    local isbig = #m >= 10
+    if isbig then bysize.big = bysize.big + 1 else bysize.small = bysize.small + 1 end
+    if n == 1 then
+        named = named + 1
+        ampl = ampl + #m
+        if #m == 1 then singles = singles + 1 end
+    elseif n > 1 then
+        conflict = conflict + 1
+        if isbig then bysize.bigc = bysize.bigc + 1 else bysize.smallc = bysize.smallc + 1 end
+        local ks = {}
+        for k, c in pairs(kinds) do ks[#ks + 1] = ('%s x%d'):format(k, c) end
+        table.sort(ks)
+        conflicts[#conflicts + 1] = { size = #m, kinds = ks, sample = m[1] }
+    end
+end
+print(('    classes NAMED by >=1 declaration: %d — they cover %d ports, so one declaration'
+    .. ' names %.1f ports on average (%d of them name only themselves)')
+    :format(named, ampl, named > 0 and ampl / named or 0, singles))
+print(('    classes with CONFLICTING declarations: %d'):format(conflict))
+print(('    …by class size: big (>=10 ports) %d/%d conflict (%.0f%%) ·'
+    .. ' small %d/%d (%.0f%%)'):format(bysize.bigc, bysize.big,
+    bysize.big > 0 and 100 * bysize.bigc / bysize.big or 0,
+    bysize.smallc, bysize.small,
+    bysize.small > 0 and 100 * bysize.smallc / bysize.small or 0))
+if #conflicts > 0 then
+    table.sort(conflicts, function (a, b) return a.size > b.size end)
+    print('    CONFLICTS (a declaration is a CLAIM — never resolved by majority):')
+    for i = 1, math.min(#conflicts, 6) do
+        local c = conflicts[i]
+        print(('      [%d ports] %s   e.g. %s'):format(c.size,
+            table.concat(c.kinds, ' | '):sub(1, 90), c.sample))
+    end
+end
 
 -- ── W3: THE PORT QUERY ──────────────────────────────────────────────────────
 -- The user-facing capability, in its honest form. "What accepts this?" is answered with a

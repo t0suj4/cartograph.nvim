@@ -2758,6 +2758,18 @@ and destroys every real class, because most specific flows in real code happen e
 A metric can be improved by destroying the thing it measures, which is why the acceptance
 check has a second side.
 
+A **declaration on any one member names the whole class**, which is where the payoff
+compounds: measured on this repo, one annotation names **3.4 ports** on average and not a
+single one names only itself. The same door takes a profile later, so nothing here waits on
+one. And because a class can be checked against the declarations its members carry, two
+different declared types inside one class is a **conflict** — meaning either the partition
+over-merged or the docblocks disagree, and it is reported rather than resolved by majority,
+since which side is wrong is exactly what a declaration cannot settle. Those conflicts land
+where they should: 18% of large classes and **0% of small ones**, which makes
+conflicts-per-class a partition-quality check that needs no hand-reading. The sobering figure
+is coverage — only 5.4% of resolved ports carry any declaration at all, even here, because
+ports sit on external and stdlib callees; a game mod has none whatsoever.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit
