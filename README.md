@@ -2733,6 +2733,20 @@ reach — with no declarations anywhere, observed flow alone recovers
 `nvim_get_current_win#ret ~ nvim_win_set_height#a1 ~ getwininfo#a1` as one class, which is a
 window handle.
 
+The **propagation rules** that make the partition usable came out of a matrix, and the
+matrix killed the rule that looked most obvious. One rule survives: a callee that is
+*unqualified*, is not a project definition, and whose degree clears a threshold is a
+**universal sink** — its edges are recorded but do not transit, because a port that
+collects every string in a codebase has no single type. That plus a degree gate takes the
+largest class from 69.7% of ports to 21.6% on this repo and from 79.8% to 15.2% on a game
+mod, with every hand-read real class intact. The rule that died was "the callee's root is a
+known builtin": `vim` is in the builtin roster as an always-present module table, so it
+condemned every `vim.api.*` port and destroyed the window-handle class — which was visible
+*only* because the acceptance metric is two-sided. On largest-class share alone it read as a
+clear win. What survives the rules are real types nobody declared:
+`math.floor#ret ~ math.min#ret ~ math.ceil#ret` is a number, and in the game mod four
+different faction getters unify with the parameter that consumes them.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit

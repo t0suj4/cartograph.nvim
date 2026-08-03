@@ -139,8 +139,11 @@ local function flows_of(node, emit)
     end
 end
 
--- ── the sweep ───────────────────────────────────────────────────────────────
-local function build()
+-- ── COLLECT: the observed flows, with NO unification yet ────────────────────
+-- Split from partitioning deliberately (CART-0269): the propagation rules need every
+-- port's DEGREE before deciding which ports may unify, and keeping collection separate
+-- means the rules become a measurable MATRIX rather than a hardcoded choice.
+local function collect()
     -- names DEFINED anywhere in the graph, so a port can be marked EXTERNAL. A port on
     -- a callee we can see is still a real port (and a resolved return type would TYPE
     -- the class it joins) — but the anonymous partition is about the ones we cannot.
@@ -152,17 +155,14 @@ local function build()
             if last then known[last] = true end
         end
     end
-    local u = uf()
-    local edges, seen = 0, {}
-    local pcount = {}
+    local pairsl, seen, pcount = {}, {}, {}
     local function emit(a, b)
         local k = a .. '\1' .. b
         if seen[k] then return end
         seen[k] = true
-        edges = edges + 1
+        pairsl[#pairsl + 1] = { a, b }
         pcount[a] = (pcount[a] or 0) + 1
         pcount[b] = (pcount[b] or 0) + 1
-        u:union(a, b)
     end
     local nfn = 0
     for _, n in ipairs(store.data.nodes or {}) do
@@ -172,7 +172,92 @@ local function build()
             pcall(flows_of, n, emit)
         end
     end
-    -- classes
+    local function callee_of(p) return (p:match('^(.*)#[^#]*$')) or p end
+    local function is_ext(p)
+        local name = callee_of(p)
+        local last = name:match('([%w_]+)$')
+        return not (known[name] or (last and known[last]))
+    end
+    return { edges = pairsl, pcount = pcount, nfn = nfn,
+        is_ext = is_ext, callee_of = callee_of, known = known }
+end
+
+-- ── THE PROPAGATION RULES (CART-0269) ───────────────────────────────────────
+-- A UNIVERSAL SINK is a port that unifies values which have nothing to do with each
+-- other. `ipairs#a1` accepts anything iterable, so every table in the corpus flows into
+-- that ONE port and it fuses all of them in a single stroke — measured as the first
+-- member of the blob on BOTH corpora (CART-0268). A sink's edges are still COLLECTED
+-- (W3's data model wants the counts) but they do not TRANSIT: no edge incident to a sink
+-- participates in unification, so a sink ends up unified with nothing, which is the
+-- honest answer for a port that has no single type.
+--
+-- Three independent rules, each toggleable, because the matrix is the deliverable and
+-- "neither rule alone suffices" is itself a finding:
+--   builtin  the callee's ROOT name is a genuine builtin (builtins.lua's existing
+--            roster — no new data). Catches ipairs / type / tostring / table.concat.
+--            CANNOT catch `s:match` / `s:gsub` / `s:format`: those are bare method calls
+--            with no dotted root, and their member signatures are exactly CART-0266's
+--            gap. So this rule is a floor, not the mechanism.
+--   method   an UNQUALIFIED callee (no dot) that is not a project definition is a bare
+--            METHOD NAME whose receiver class is unknown, so the port fuses every
+--            receiver in the corpus. Structural, needs no roster.
+--   degree   the callee's degree sits far above the population. DERIVED FROM THE DATA,
+--            so it generalizes to project-local sinks no roster would ever list — but it
+--            is a CALIBRATION, so `--sweep` reports the whole curve instead of hiding a
+--            magic number.
+local builtins = require 'cartograph.builtins'
+-- ONE RULE, and the matrix is what reduced it to one (CART-0269).
+--
+-- `bare`: the callee is UNQUALIFIED (no dot), is not a project definition, and its DEGREE
+-- is at or above `mdeg`. Such a port fuses receivers/values that have nothing in common:
+-- `match#self` (degree 59 here) collects every string in the corpus, `ipairs#a1` (137)
+-- every table. Structural and degree-derived — no roster, and it generalizes to
+-- project-local sinks no roster would list.
+--
+-- DEGREE-GATED, and the first version was NOT — that mattered. A categorical "every
+-- unqualified callee is a sink" also condemned `Destroy#self` in the selftest, an engine
+-- method with exactly ONE receiver class. A bare name fuses receivers only when receivers
+-- ACTUALLY flow into it. 3 is deliberately low: two receivers can be a genuine shared
+-- supertype, three is where fusion starts costing more than it explains.
+--
+-- ── A RULE THE MATRIX KILLED, kept here because the reason is the lesson ──────
+-- There was a `builtin` rule: the callee's ROOT name is a genuine builtin per
+-- builtins.lua. It looked obviously right and it is MEASURED WRONG — largest% fell to
+-- 49.0% but `kept` dropped from 2/2 to 1/2, because **`vim` is in builtins.lua as an
+-- always-present module table**, so the rule condemned every `vim.api.*` port and
+-- destroyed the nvim WINDOW-HANDLE class. Being rooted at a builtin module table does not
+-- make a function polymorphic. It also condemned `table.concat#ret`, whose return is a
+-- string — and fusing all strings into one class is CORRECT, they ARE one type. The blob
+-- is several genuine mega-types (string, table) fused by UNIVERSALLY polymorphic
+-- functions; only the latter are sinks. `bare` already catches the useful part (a bare
+-- global like `ipairs` is unqualified), so the roster rule bought nothing and cost a real
+-- class. THE TWO-SIDED METRIC IS THE ONLY REASON THIS WAS VISIBLE — on largest% alone the
+-- rule looked like a win.
+local MDEG = 3
+local function sinks_of(col, opts)
+    local s = {}
+    local mdeg = (opts.bare == true) and MDEG or opts.bare
+    for p in pairs(col.pcount) do
+        local name = col.callee_of(p)
+        local unqualified = not name:find('.', 1, true)
+        local deg = col.pcount[p] or 0
+        if mdeg and unqualified and not col.known[name] and deg >= mdeg then
+            s[p] = 'bare'
+        elseif opts.degree and deg >= opts.degree then s[p] = 'degree'
+        end
+    end
+    return s
+end
+
+local _ = builtins   -- kept required: the killed rule's rationale above cites its roster
+
+local function partition(col, opts)
+    local sinks = sinks_of(col, opts)
+    local u = uf()
+    local used = 0
+    for _, e in ipairs(col.edges) do
+        if not (sinks[e[1]] or sinks[e[2]]) then u:union(e[1], e[2]); used = used + 1 end
+    end
     local cls = {}
     for k in pairs(u.p) do
         local r = u:find(k)
@@ -182,14 +267,24 @@ local function build()
     local list = {}
     for _, members in pairs(cls) do list[#list + 1] = members end
     table.sort(list, function (a, b) return #a > #b end)
-    -- externality of a port's callee
-    local function is_ext(p)
-        local name = p:match('^(.*)#[^#]*$') or p
-        local last = name:match('([%w_]+)$')
-        return not (known[name] or (last and known[last]))
+    local nsink = 0
+    for _ in pairs(sinks) do nsink = nsink + 1 end
+    return { uf = u, classes = list, sinks = sinks, nsink = nsink,
+        used = used, ports = u.n }
+end
+
+--- are all of `group`'s ports still in ONE class? The SECOND half of the two-sided
+--- acceptance metric: breaking the blob by also breaking a real class trades one
+--- worthless answer for another.
+local function together(part, group)
+    local root
+    for _, p in ipairs(group) do
+        if not part.uf.p[p] then return false end
+        local r = part.uf:find(p)
+        if root and r ~= root then return false end
+        root = r
     end
-    return { uf = u, edges = edges, classes = list, nfn = nfn,
-        pcount = pcount, is_ext = is_ext }
+    return root ~= nil
 end
 
 -- ── selftest ────────────────────────────────────────────────────────────────
@@ -219,31 +314,74 @@ local FIXTURE = table.concat({
     '    Engine.CloseSocket(s)',
     'end',
     '',
+    -- THE BLOB MAKER (CART-0269): both families flow into ipairs#a1, a universal sink,
+    -- which fuses them. Baseline MUST show them fused; the rules MUST separate them
+    -- while leaving each family's own class intact — the two-sided metric, gated.
+    -- THREE receivers, not two, and deliberately: `bare` is DEGREE-GATED at MDEG=3, so a
+    -- two-receiver port is NOT a sink (two values reaching one parameter can be a genuine
+    -- shared supertype). With only two families they stay fused and the assertions below
+    -- fail — correctly. The gate is part of the contract, so the fixture must clear it.
+    'local function iterall(k)',
+    '    local h = Engine.FindComponent(k)',
+    '    local s = Engine.OpenSocket(k)',
+    '    local q = Engine.OpenQueue(k)',
+    '    for _, x in ipairs(h) do Engine.Touch(x) end',
+    '    for _, y in ipairs(s) do Engine.Touch(y) end',
+    '    for _, z in ipairs(q) do Engine.Touch(z) end',
+    'end',
+    '',
     'M.chain, M.nested, M.meth, M.other = chain, nested, meth, other',
+    'M.iterall = iterall',
     'return M',
 }, '\n') .. '\n'
+
+local NO_RULES = {}
+local ALL_RULES = { bare = true }
 
 local function selftest()
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/fx.lua', 'w')); fd:write(FIXTURE); fd:close()
     store.ingest(ts.extract(root))
-    local g = build()
+    local col = collect()
+    local base = partition(col, NO_RULES)
+    local ruled = partition(col, ALL_RULES)
     local fails = {}
     local function chk(c, m) if not c then fails[#fails + 1] = m end end
     local FC = port('Engine.FindComponent', 'ret')
-    local function same(a, b) return g.uf.p[a] and g.uf.p[b] and g.uf:find(a) == g.uf:find(b) end
-    chk(same(FC, port('Engine.RemoveFromParent', 'a1')),
-        'local-mediated flow must link FindComponent.ret ~ RemoveFromParent.a1')
-    chk(same(FC, port('Engine.Attach', 'a1')),
-        'DIRECT NESTING must link FindComponent.ret ~ Attach.a1')
-    chk(same(FC, port('Destroy', 'self')),
-        'a METHOD RECEIVER must be a port: FindComponent.ret ~ Destroy.self')
-    -- the socket family is a DIFFERENT opaque type and must stay separate: if these
-    -- merge, the partition is worthless and the test would not notice
-    chk(g.uf.p[port('Engine.OpenSocket', 'ret')], 'the socket family is present')
-    chk(not same(FC, port('Engine.OpenSocket', 'ret')),
-        'DISTINCT opaque families must NOT merge (the whole value of a partition)')
-    chk(g.is_ext(FC), 'Engine.FindComponent is EXTERNAL (absent from the corpus)')
+    local SOCK = port('Engine.OpenSocket', 'ret')
+    local function same(g, a, b)
+        return g.uf.p[a] and g.uf.p[b] and g.uf:find(a) == g.uf:find(b)
+    end
+
+    -- W1: the three observed flow shapes still link, under BOTH settings
+    for label, g in pairs({ baseline = base, ruled = ruled }) do
+        chk(same(g, FC, port('Engine.RemoveFromParent', 'a1')),
+            label .. ': local-mediated flow must link FindComponent.ret ~ RemoveFromParent.a1')
+        chk(same(g, FC, port('Engine.Attach', 'a1')),
+            label .. ': DIRECT NESTING must link FindComponent.ret ~ Attach.a1')
+        chk(same(g, FC, port('Destroy', 'self')),
+            label .. ': a METHOD RECEIVER must be a port: FindComponent.ret ~ Destroy.self')
+    end
+    chk(col.is_ext(FC), 'Engine.FindComponent is EXTERNAL (absent from the corpus)')
+
+    -- W2, SIDE ONE: the baseline MUST be degenerate here (both families fused through
+    -- ipairs#a1) — if it is not, the fixture no longer exercises over-merging and every
+    -- assertion below would pass vacuously.
+    chk(same(base, FC, SOCK),
+        'BASELINE must FUSE the two families through ipairs#a1 — else this fixture'
+        .. ' does not test the rules at all')
+    -- W2, SIDE TWO: the rules separate them…
+    chk(not same(ruled, FC, SOCK),
+        'the RULES must separate the two families (ipairs#a1 must stop transiting)')
+    -- …WITHOUT breaking either family's own class. This is the half that a
+    -- largest-class-share metric alone would never catch.
+    chk(same(ruled, FC, port('Engine.RemoveFromParent', 'a1'))
+        and same(ruled, FC, port('Engine.Attach', 'a1')),
+        'the component family must SURVIVE the rules')
+    chk(same(ruled, SOCK, port('Engine.CloseSocket', 'a1')),
+        'the socket family must SURVIVE the rules')
+    chk(ruled.sinks[port('ipairs', 'a1')] ~= nil,
+        'ipairs#a1 must be marked a SINK (a bare global IS unqualified)')
     vim.fn.delete(root, 'rf')
     return fails
 end
@@ -260,8 +398,7 @@ if #fails > 0 then
     print(('portgraph: SELFTEST FAILED (%d) — refusing to report'):format(#fails))
     os.exit(1)
 end
-print('  ok — local-mediated / direct-nested / method-receiver flows all link;'
-    .. ' two distinct opaque families stay SEPARATE; externality detected')
+print('  ok — three flow shapes link under both settings; the BASELINE fuses two families\n    through ipairs#a1 and the RULES separate them WITHOUT breaking either (the two-sided\n    metric, gated); ipairs#a1 marked a sink; a degree-1 method receiver survives')
 
 if not target or target == '--selftest' then
     print('portgraph: selftest only (pass a corpus|path to sweep)')
@@ -278,56 +415,101 @@ end
 print('')
 print(('portgraph %s — %s'):format(target, root))
 store.ingest(ts.extract(root))
-local g = build()
+local col = collect()
 
 local ext, tot = 0, 0
-for p in pairs(g.uf.p) do
+for p in pairs(col.pcount) do
     tot = tot + 1
-    if g.is_ext(p) then ext = ext + 1 end
+    if col.is_ext(p) then ext = ext + 1 end
 end
 print(('  %d lua fn(s) walked · %d PORT(s) (%d external, %.0f%%) · %d observed EDGE(s)')
-    :format(g.nfn, tot, ext, tot > 0 and 100 * ext / tot or 0, g.edges))
-print(('  %d class(es)'):format(#g.classes))
+    :format(col.nfn, tot, ext, tot > 0 and 100 * ext / tot or 0, #col.edges))
 
--- THE BASELINE W2 (CART-0269) HAS TO IMPROVE. A fat top class is the EXPECTED naive
--- result, not a failure of this tool.
-local big = g.classes[1] and #g.classes[1] or 0
-print(('  ★ BASELINE class-size distribution — largest class holds %d / %d ports (%.1f%%)')
-    :format(big, tot, tot > 0 and 100 * big / tot or 0))
-local buckets, hist = {}, {}
-for _, m in ipairs(g.classes) do hist[#m] = (hist[#m] or 0) + 1 end
-local sizes = {}
-for k in pairs(hist) do sizes[#sizes + 1] = k end
-table.sort(sizes)
-for _, k in ipairs(sizes) do buckets[#buckets + 1] = ('%d:%d'):format(k, hist[k]) end
-print(('    size:count  %s'):format(table.concat(buckets, ' ')))
-if tot > 0 and big / tot > 0.5 then
-    print('    → DEGENERATE (>50% in one class), which is what W2\'s propagation rules'
-        .. ' exist to fix — this is the number to beat, not a verdict on the idea')
+-- ── THE RULE MATRIX (CART-0269) ─────────────────────────────────────────────
+-- One row per rule combination, because "neither rule alone suffices" is itself a
+-- finding and a single hardcoded setting would hide it. `largest%` is side ONE of the
+-- acceptance metric; `kept` is side TWO — the real classes that must survive, hand-read
+-- in CART-0268. A row that wins on largest% while losing `kept` has traded one worthless
+-- answer for another.
+local FIXTURES = {
+    { name = 'nvim window handle', ports = {
+        'vim.api.nvim_get_current_win#ret', 'vim.api.nvim_win_set_height#a1',
+        'vim.api.nvim_set_current_win#a1' } },
+    { name = 'function id', ports = { 'fn_id#ret', 'optimize.cse#a2' } },
+    { name = 'desynced location', ports = {
+        'heart.GetLocationXY#ret', 'RevealArea#a1', 'SpawnExplorable#a1' } },
+}
+local ROWS = {
+    { label = 'baseline (W1)',   opts = {} },
+    { label = 'bare (deg>=3)',   opts = { bare = true } },
+    { label = 'bare + deg>=12 ★', opts = { bare = true, degree = 12 } },
+    { label = 'bare + deg>=8',   opts = { bare = true, degree = 8 } },
+}
+print('')
+print('  RULE MATRIX — largest% is side ONE of the metric, kept-classes side TWO:')
+print(('    %-24s %6s %7s %9s %8s  %s'):format('rules', 'sinks', 'classes', 'largest', 'largest%', 'kept'))
+for _, r in ipairs(ROWS) do
+    local part = partition(col, r.opts)
+    local big = part.classes[1] and #part.classes[1] or 0
+    local kept, avail = 0, 0
+    for _, f in ipairs(FIXTURES) do
+        -- only score a fixture whose ports exist in THIS corpus
+        local present = false
+        for _, pt in ipairs(f.ports) do if col.pcount[pt] then present = true end end
+        if present then
+            avail = avail + 1
+            if together(part, f.ports) then kept = kept + 1 end
+        end
+    end
+    print(('    %-24s %6d %7d %9d %7.1f%%  %d/%d'):format(r.label, part.nsink,
+        #part.classes, big, part.ports > 0 and 100 * big / part.ports or 0, kept, avail))
+end
+print('    (kept = the hand-read real classes still in ONE class; only those whose ports')
+print('     exist in this corpus are scored, so `avail` differs per corpus)')
+
+-- ── DEGREE SENSITIVITY, on top of builtin+method ────────────────────────────
+-- The degree rule is a CALIBRATION, so the curve is printed instead of a magic number
+-- being buried in the code. Read the knee; do not read a single row.
+print('')
+print('  DEGREE SWEEP (on top of `bare`) — a calibration, shown not hidden:')
+for _, d in ipairs({ 8, 12, 16, 20, 30, 50 }) do
+    local part = partition(col, { bare = true, degree = d })
+    local big = part.classes[1] and #part.classes[1] or 0
+    local kept, avail = 0, 0
+    for _, f in ipairs(FIXTURES) do
+        local present = false
+        for _, pt in ipairs(f.ports) do if col.pcount[pt] then present = true end end
+        if present then
+            avail = avail + 1
+            if together(part, f.ports) then kept = kept + 1 end
+        end
+    end
+    print(('    degree >= %-3d  sinks %-5d classes %-5d largest %-5d (%.1f%%)  kept %d/%d')
+        :format(d, part.nsink, #part.classes, big,
+            part.ports > 0 and 100 * big / part.ports or 0, kept, avail))
 end
 
--- THE W2 WORK-LIST. A port's DEGREE is how many distinct flows touch it, and a
--- high-degree port is a UNIVERSAL SINK: `ipairs#a1` accepts anything iterable, so every
--- table in the corpus flows into it and that ONE port unifies all of them. Measured on
--- both corpora, `ipairs#a1` is the top member of the blob — so the dominant over-merge
--- source is POLYMORPHIC STDLIB FUNCTIONS, not the passthrough project function I
--- expected. Degree is derivable from the data, which makes the W2 rule measurable rather
--- than a hand-maintained blocklist.
+-- ── the chosen operating point, in detail ───────────────────────────────────
+-- THE CHOSEN OPERATING POINT, picked from the sweep rather than assumed: deg>=12 is the
+-- most aggressive threshold at which BOTH corpora keep every real class (self drops to
+-- 21.6% from 69.7%, desynced to 15.2% from 79.8%; deg>=8 goes further on desynced but
+-- breaks a real class on self). A calibration, so the curve above stays printed.
+local best = partition(col, { bare = true, degree = 12 })
 print('')
-print('  TOP PORTS BY DEGREE (the W2 work-list — a universal sink unifies its neighbours):')
+print('  TOP PORTS BY DEGREE (the sinks the rules caught are marked):')
 local pd = {}
-for p, n in pairs(g.pcount) do pd[#pd + 1] = { p = p, n = n } end
+for p, n in pairs(col.pcount) do pd[#pd + 1] = { p = p, n = n } end
 table.sort(pd, function (a, b) return a.n > b.n end)
 for i = 1, math.min(#pd, 8) do
-    print(('    %-42s degree %d%s'):format(pd[i].p, pd[i].n,
-        g.is_ext(pd[i].p) and '' or '  (resolved)'))
+    print(('    %-42s degree %-4d %s'):format(pd[i].p, pd[i].n,
+        best.sinks[pd[i].p] and ('SINK (' .. best.sinks[pd[i].p] .. ')') or ''))
 end
 
 print('')
-print(('  LARGEST CLASSES (a class = ports observed to hold interchangeable values):'))
-for i = 1, math.min(#g.classes, show) do
-    local m = g.classes[i]
-    table.sort(m, function (a, b) return (g.pcount[a] or 0) > (g.pcount[b] or 0) end)
+print('  LARGEST CLASSES at the operating point bare+deg>=12:')
+for i = 1, math.min(#best.classes, show) do
+    local m = best.classes[i]
+    table.sort(m, function (a, b) return (col.pcount[a] or 0) > (col.pcount[b] or 0) end)
     local shown = {}
     for j = 1, math.min(#m, 6) do shown[#shown + 1] = m[j] end
     print(('    [%d ports] %s%s'):format(#m, table.concat(shown, '  '),
