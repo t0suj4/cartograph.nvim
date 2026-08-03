@@ -1,6 +1,7 @@
 -- THE PORT GRAPH (CART-0268, W1 of the anonymous-type partition CART-0267).
 --
 --   nvim --headless -u NONE -l tools/portgraph.lua <corpus|path> [--show N]
+--        [--port 'callee#slot']   the "what accepts this?" query, with evidence counts
 --   nvim --headless -u NONE -l tools/portgraph.lua --selftest
 --
 -- THE IDEA (user, [[cartograph-anonymous-types]]). For an unknown library function we
@@ -155,11 +156,18 @@ local function collect()
             if last then known[last] = true end
         end
     end
-    local pairsl, seen, pcount = {}, {}, {}
+    -- EDGE MULTIPLICITY (W3, CART-0270): the count IS the evidence, so it is kept rather
+    -- than deduped away. `w` = how many distinct SITES observed this exact pair, which is
+    -- what lets a relationship be reported as "observed interchangeable at N sites"
+    -- (EVIDENCE) instead of "the same type" (a CLAIM) — the user's "roughly", surviving
+    -- into the data model rather than only into the prose. DEGREE stays a count of
+    -- DISTINCT partners: the two are different axes and W3's job is not to conflate them.
+    local pairsl, seen, pcount, w = {}, {}, {}, {}
     local function emit(a, b)
         local k = a .. '\1' .. b
-        if seen[k] then return end
+        if seen[k] then w[k] = w[k] + 1; return end
         seen[k] = true
+        w[k] = 1
         pairsl[#pairsl + 1] = { a, b }
         pcount[a] = (pcount[a] or 0) + 1
         pcount[b] = (pcount[b] or 0) + 1
@@ -178,7 +186,21 @@ local function collect()
         local last = name:match('([%w_]+)$')
         return not (known[name] or (last and known[last]))
     end
-    return { edges = pairsl, pcount = pcount, nfn = nfn,
+    -- neighbours(port) → { {port, n} } sorted by evidence. THE user-facing query: the
+    -- honest answer to "what accepts this?" is a RANKED LIST WITH COUNTS, never a type.
+    local nbr = {}
+    for _, e in ipairs(pairsl) do
+        local n = w[e[1] .. '\1' .. e[2]]
+        nbr[e[1]] = nbr[e[1]] or {}; table.insert(nbr[e[1]], { e[2], n })
+        nbr[e[2]] = nbr[e[2]] or {}; table.insert(nbr[e[2]], { e[1], n })
+    end
+    for _, l in pairs(nbr) do
+        table.sort(l, function (a, b)
+            if a[2] ~= b[2] then return a[2] > b[2] end
+            return a[1] < b[1]
+        end)
+    end
+    return { edges = pairsl, pcount = pcount, nfn = nfn, w = w, nbr = nbr,
         is_ext = is_ext, callee_of = callee_of, known = known }
 end
 
@@ -255,8 +277,16 @@ local function partition(col, opts)
     local sinks = sinks_of(col, opts)
     local u = uf()
     local used = 0
+    -- minw = the EVIDENCE THRESHOLD. A class is a QUERY at a stated threshold, never a
+    -- stored fact: at minw=1 a single observation is enough to link two ports, at minw=2
+    -- a relationship must have been seen twice. The threshold is always reported with the
+    -- result so no reader mistakes a derived view for an asserted partition.
+    local minw = opts.minw or 1
     for _, e in ipairs(col.edges) do
-        if not (sinks[e[1]] or sinks[e[2]]) then u:union(e[1], e[2]); used = used + 1 end
+        local ok = (col.w[e[1] .. '\1' .. e[2]] or 1) >= minw
+        if ok and not (sinks[e[1]] or sinks[e[2]]) then
+            u:union(e[1], e[2]); used = used + 1
+        end
     end
     local cls = {}
     for k in pairs(u.p) do
@@ -382,14 +412,48 @@ local function selftest()
         'the socket family must SURVIVE the rules')
     chk(ruled.sinks[port('ipairs', 'a1')] ~= nil,
         'ipairs#a1 must be marked a SINK (a bare global IS unqualified)')
+
+    -- W3: MULTIPLICITY. Engine.Touch#a1 is fed from three separate ipairs loops, so its
+    -- edges exist; and FindComponent.ret -> Destroy.self is seen ONCE. The counts must be
+    -- recorded, because the count is what turns a claim into evidence.
+    local w1 = col.w[FC .. '\1' .. port('Destroy', 'self')]
+    chk(w1 == 1, 'a once-observed pair must have weight 1, got ' .. tostring(w1))
+    -- FindComponent.ret is observed flowing into RemoveFromParent.a1 in `chain` and into
+    -- Attach.a1 in `nested` — distinct partners, so DEGREE counts them separately while
+    -- each edge keeps its own weight. Degree and weight are different axes.
+    chk((col.pcount[FC] or 0) >= 3,
+        'FindComponent.ret has >=3 DISTINCT partners, got ' .. tostring(col.pcount[FC]))
+
+    -- W3: the NEIGHBOUR QUERY is the user-facing answer, and it is a ranked list with
+    -- evidence rather than a type name.
+    local nb = col.nbr[FC]
+    chk(nb and #nb >= 3, 'the neighbour query returns FindComponent.ret\'s partners')
+    if nb then
+        local seenrfp = false
+        for _, e in ipairs(nb) do
+            if e[1] == port('Engine.RemoveFromParent', 'a1') then
+                seenrfp = true
+                chk(type(e[2]) == 'number' and e[2] >= 1, 'each neighbour carries a COUNT')
+            end
+        end
+        chk(seenrfp, 'RemoveFromParent.a1 is among the neighbours')
+    end
+
+    -- W3: minw is an EVIDENCE THRESHOLD — at minw=2 the once-seen pairs stop linking.
+    local strict = partition(col, { bare = true, minw = 2 })
+    chk(not same(strict, FC, port('Destroy', 'self')),
+        'at minw=2 a once-observed pair must NOT link')
     vim.fn.delete(root, 'rf')
     return fails
 end
 
 -- ── main ────────────────────────────────────────────────────────────────────
 local target = arg[1]
-local show = 8
-for i = 1, #(arg or {}) do if arg[i] == '--show' then show = tonumber(arg[i + 1]) or 8 end end
+local show, queryport = 8, nil
+for i = 1, #(arg or {}) do
+    if arg[i] == '--show' then show = tonumber(arg[i + 1]) or 8 end
+    if arg[i] == '--port' then queryport = arg[i + 1] end
+end
 
 print('portgraph SELFTEST (a partition that merges everything must not report)')
 local fails = selftest()
@@ -470,6 +534,43 @@ print('     exist in this corpus are scored, so `avail` differs per corpus)')
 -- ── DEGREE SENSITIVITY, on top of builtin+method ────────────────────────────
 -- The degree rule is a CALIBRATION, so the curve is printed instead of a magic number
 -- being buried in the code. Read the knee; do not read a single row.
+-- ── W3: THE EVIDENCE AXIS ───────────────────────────────────────────────────
+-- Weight is a DIFFERENT axis from degree, and the prediction recorded in CART-0270 before
+-- building was that it would barely move largest%: the blob is many DISTINCT edges into one
+-- sink (fan-in), each observed once or twice, so filtering per-edge weight removes
+-- scattered pairs rather than the fan-in. These rows test that rather than assume it.
+print('')
+print('  EVIDENCE (W3) — edge weight = how many SITES observed that exact pair:')
+local whist, wtot, wmax = {}, 0, 0
+for _, n in pairs(col.w) do
+    whist[n] = (whist[n] or 0) + 1
+    wtot = wtot + 1
+    if n > wmax then wmax = n end
+end
+local wk = {}
+for k in pairs(whist) do wk[#wk + 1] = k end
+table.sort(wk)
+local wb = {}
+for _, k in ipairs(wk) do wb[#wb + 1] = ('%d:%d'):format(k, whist[k]) end
+print(('    weight:edges  %s   (max %d)'):format(table.concat(wb, ' '), wmax))
+for _, mw in ipairs({ 1, 2, 3 }) do
+    local part = partition(col, { bare = true, degree = 12, minw = mw })
+    local big = part.classes[1] and #part.classes[1] or 0
+    local kept, avail = 0, 0
+    for _, f in ipairs(FIXTURES) do
+        local present = false
+        for _, pt in ipairs(f.ports) do if col.pcount[pt] then present = true end end
+        if present then
+            avail = avail + 1
+            if together(part, f.ports) then kept = kept + 1 end
+        end
+    end
+    print(('    minw >= %d   classes %-5d largest %-5d (%.1f%%)  kept %d/%d')
+        :format(mw, #part.classes, big,
+            part.ports > 0 and 100 * big / part.ports or 0, kept, avail))
+end
+print('    (a class is a QUERY at a stated threshold, never a stored partition)')
+
 print('')
 print('  DEGREE SWEEP (on top of `bare`) — a calibration, shown not hidden:')
 for _, d in ipairs({ 8, 12, 16, 20, 30, 50 }) do
@@ -514,4 +615,33 @@ for i = 1, math.min(#best.classes, show) do
     for j = 1, math.min(#m, 6) do shown[#shown + 1] = m[j] end
     print(('    [%d ports] %s%s'):format(#m, table.concat(shown, '  '),
         #m > 6 and ('  … +' .. (#m - 6)) or ''))
+end
+
+
+-- ── W3: THE PORT QUERY ──────────────────────────────────────────────────────
+-- The user-facing capability, in its honest form. "What accepts this?" is answered with a
+-- RANKED LIST CARRYING EVIDENCE — "observed interchangeable at N sites" — never with a type
+-- name we do not have. This is W5's input.
+if queryport then
+    print('')
+    local nb = col.nbr[queryport]
+    if not nb then
+        print(('  PORT %s — no observed flows (unlinked: the honest frontier)')
+            :format(queryport))
+    else
+        local cls = best.uf.p[queryport] and best.uf:find(queryport)
+        local size = 0
+        if cls then
+            for _, m in ipairs(best.classes) do
+                if best.uf:find(m[1]) == cls then size = #m break end
+            end
+        end
+        print(('  PORT %s — %d observed partner(s); class of %d at bare+deg>=12%s')
+            :format(queryport, #nb, size,
+                best.sinks[queryport] and (' — SINK (' .. best.sinks[queryport] .. ')') or ''))
+        for i = 1, math.min(#nb, 12) do
+            print(('    %-46s observed at %d site(s)'):format(nb[i][1], nb[i][2]))
+        end
+        if #nb > 12 then print(('    … %d more'):format(#nb - 12)) end
+    end
 end

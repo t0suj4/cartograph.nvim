@@ -2747,6 +2747,17 @@ clear win. What survives the rules are real types nobody declared:
 `math.floor#ret ~ math.min#ret ~ math.ceil#ret` is a number, and in the game mod four
 different faction getters unify with the parameter that consumes them.
 
+Compatibility is **evidence, not equality**, so every relationship carries how many sites
+observed it and a class is a *query at a stated threshold* rather than a stored fact.
+`--port 'callee#slot'` is the user-facing form: it answers "what accepts this?" with a
+ranked list carrying counts, never with a type name we don't have —
+`nvim_get_current_win#ret` reports seven observed partners, `nvim_win_set_buf#a1` at three
+sites and the rest at one. Tempting as it looks, filtering by that count is **measured
+harmful**: requiring two observations drops the largest class from 21.6% to 6.5% of ports
+and destroys every real class, because most specific flows in real code happen exactly once.
+A metric can be improved by destroying the thing it measures, which is why the acceptance
+check has a second side.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit
