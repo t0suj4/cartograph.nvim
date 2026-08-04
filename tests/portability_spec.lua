@@ -47,6 +47,124 @@ test('portability: runtimes() is DERIVED from the shipped artifacts', function (
     eq(nil, has['init'], 'the loader module is not a runtime')
 end)
 
+-- ── WHAT MAY BE A TARGET (CART-0209) ───────────────────────────────────────
+-- The roster is what EXISTS; a target is what can ANSWER. These pin the
+-- DISTINCTION and, deliberately, NOT the `ingredient` marker: filtering on the
+-- marker was the obvious fix and it would have dropped a working target.
+
+test('portability: target_kinds separates the NAMES question from the DATA one',
+    function ()
+    -- a names target must answer BOTH a bare and a dotted name — the same pair
+    -- M.diff already fences on, so the list cannot drift from the fence
+    local env = { lang = 'x', vocab = { tally = true }, types = { String = {} } }
+    eq(true, port.target_kinds(env).names, 'bare + dotted = a names target')
+    eq(false, port.target_kinds(env).data, 'and it answers no data-stage question')
+
+    -- THE CART-0209 ARTIFACT: name-queryable on a few free functions, blind to
+    -- every dotted name, which is how it once reported "0 LOST" on a real port
+    local ingredient = { lang = 'x', free = { log = true },
+        sigs = { ['LuaGameScript::print'] = true } }
+    eq(true, port.name_queryable(ingredient), 'it does claim SOME names')
+    eq(false, port.target_kinds(ingredient).names, 'and is still no names target')
+    eq(false, port.target_kinds(ingredient).data, 'nor a data one')
+
+    -- …while a PROTOTYPE artifact answers neither name question and IS a target
+    local proto = { lang = 'x', ingredient = true, stage = 'prototype',
+        prototypes = { lamp = true }, typenames = { lamp = 'lamp' },
+        own_props = { ['lamp::height'] = 'optional' } }
+    eq(false, port.target_kinds(proto).names, 'no name surface at all')
+    eq(true, port.target_kinds(proto).data, 'but it is the data-stage target')
+    eq(nil, port.target_kinds(nil).names or nil, 'and no profile answers nothing')
+end)
+
+test('portability: targets() offers what can ANSWER, never the ingredient marker',
+    function ()
+    local roster, names, data = port.runtimes(), {}, {}
+    for _, r in ipairs(port.targets('names')) do names[r] = true end
+    for _, r in ipairs(port.targets('data')) do data[r] = true end
+    local inroster = {}
+    for _, r in ipairs(roster) do inroster[r] = true end
+
+    ok(#port.targets() < #roster, 'the target list is SMALLER than the roster')
+    for _, t in ipairs(port.targets()) do
+        ok(inroster[t], t .. ' is a shipped artifact')
+    end
+
+    local pm = require 'cartograph.spec.profile'
+    -- the three runtime-api artifacts predate the marker and carry none: they are
+    -- caught by what they can ANSWER, not by what they declare
+    for _, ing in ipairs({ 'lua-factorio-api', 'lua-factorio-api-11',
+        'lua-factorio-api-20' }) do
+        if pm.load(ing) then
+            eq(nil, names[ing] or nil, ing .. ' is no names target')
+            eq(nil, data[ing] or nil, ing .. ' is no data target either')
+            local p, why = port.targetable(ing)
+            eq(nil, p, 'and it is refused')
+            ok(why:find('INGREDIENT', 1, true) and why:find('keyed by class', 1, true),
+                'with the MECHANISM, not a label: ' .. tostring(why))
+        end
+    end
+    -- AND THE OTHER DIRECTION, which is the whole reason the filter is not the
+    -- marker: both prototype artifacts DECLARE `ingredient` and both are targets
+    for _, pr in ipairs({ 'lua-factorio-proto-11', 'lua-factorio-proto-20' }) do
+        local prof = pm.load(pr)
+        if prof then
+            eq(true, prof.ingredient, pr .. ' declares the marker')
+            ok(data[pr], 'and is STILL offered — for the data-stage question')
+            eq(nil, names[pr] or nil, 'but not for the name question')
+        end
+    end
+    -- every real environment survives
+    for _, envn in ipairs({ 'luajit', 'lua-factorio', 'lua-factorio-11',
+        'ruby-rails', 'zig-std', 'cruby' }) do
+        if pm.load(envn) then ok(names[envn], envn .. ' is a names target') end
+    end
+    -- ruby-core is refused, and that is CORRECT (RBS, signature-keyed) — the same
+    -- disposition profile.env_usable gives it, for the same reason
+    if pm.load('ruby-core') then
+        eq(nil, names['ruby-core'] or nil, 'a signature-keyed artifact is no target')
+    end
+end)
+
+test('portability: the roster report tells a reader what completion narrowed',
+    function ()
+    local text = table.concat(port.roster_report(), '\n')
+    local pm = require 'cartograph.spec.profile'
+    ok(text:find('NAMES', 1, true), 'the name question has a section')
+    ok(text:find('DATA STAGE', 1, true), 'and so does the data one')
+    if pm.load('lua-factorio-api-11') then
+        ok(text:find('NOT A TARGET', 1, true), 'what is not offered is SHOWN')
+        ok(text:find('lua%-factorio%-api%-11'), 'by name')
+        ok(text:find('keyed by class', 1, true), 'with the mechanism')
+        -- and NOT as a worthless file: every one of these is load-bearing somewhere
+        ok(text:find('load%-bearing elsewhere'), 'and without calling it junk')
+    end
+    if pm.load('lua-factorio-proto-20') then
+        ok(text:find('prototypes,', 1, true),
+            'a data artifact is measured in ITS currency, not "0 sigs"')
+    end
+end)
+
+test('portability: the SINGLE-target audit is fenced like the diff', function ()
+    local store = require 'cartograph.store'
+    store.ingest({ schema = 1, root = '/x', nodes = {}, edges = {}, calls = {} })
+    local pm = require 'cartograph.spec.profile'
+    -- an empty graph has no language, so the language guard cannot fire and what
+    -- refuses here is the target fence itself. Before it existed this printed a
+    -- header claiming 294 symbols and 92 names of "candidate porting work".
+    if pm.load('lua-factorio-api-11') then
+        local res, err = port.audit(store, 'lua-factorio-api-11')
+        eq(nil, res, 'an ingredient is not auditable')
+        ok(err:find('INGREDIENT', 1, true), 'and says why: ' .. tostring(err))
+    end
+    if pm.load('lua-factorio-proto-20') then
+        local res, err = port.audit(store, 'lua-factorio-proto-20')
+        eq(nil, res, 'nor is a data-stage artifact, on the NAME question')
+        ok(err:find('DATA%-STAGE') and err:find('TWO', 1, true),
+            'and the refusal names the OTHER DOOR: ' .. tostring(err))
+    end
+end)
+
 test('portability: an unknown runtime is refused by name', function ()
     local store = require 'cartograph.store'
     store.ingest({ schema = 1, root = '/x', nodes = {}, edges = {}, calls = {} })
@@ -141,20 +259,27 @@ test('portability: rank() discloses an unrankable artifact instead of 0%', funct
     if not ready() then skip('no ruby parser') end
     local port = require 'cartograph.portability'
     local store, root = ruby_store { 'class A', '  def go', '    I18n.t("x")', '  end', 'end' }
-    local ranked = port.rank(store)
+    local ranked, _, skipped = port.rank(store)
     local byname = {}
     for _, r in ipairs(ranked) do byname[r.runtime] = r end
     ok(byname['ruby-rails'] and byname['ruby-rails'].queryable,
         'a vocab profile is name-queryable')
     -- ruby-core is RBS-derived: signature keys only, so it cannot answer name
-    -- queries and must not be scored as though it provides nothing
-    if byname['ruby-core'] then
-        eq(false, byname['ruby-core'].queryable,
-            'a signature-keyed artifact is flagged, not blamed')
+    -- queries and must not be scored as though it provides nothing. IT IS NOT
+    -- RANKED AT ALL NOW (CART-0209) — and NOT DROPPED EITHER: an artifact that
+    -- vanishes from the list leaves "three profiles ship" where five do.
+    if require('cartograph.spec.profile').load('ruby-core') then
+        eq(nil, byname['ruby-core'], 'a signature-keyed artifact is not ranked')
         eq('ruby-rails', ranked[1].runtime, 'and it never ranks as the tightest fit')
+        local seen = {}
+        for _, s in ipairs(skipped) do seen[s.runtime] = s end
+        ok(seen['ruby-core'], 'it is RETURNED as skipped, not silently dropped')
+        ok(seen['ruby-core'].reason:find('no name surface', 1, true),
+            'with the mechanism: ' .. tostring(seen['ruby-core'].reason))
     end
     local text = table.concat(port.requires_report(store), '\n')
     ok(text:find('not rankable', 1, true), 'the report says so in words: ' .. text:sub(1, 40))
+    ok(text:find('ruby%-core'), 'and NAMES the artifact it did not score')
     ok(text:find('coverage is not a verdict', 1, true), 'and refuses the stronger reading')
     vim.fn.delete(root, 'rf')
 end)

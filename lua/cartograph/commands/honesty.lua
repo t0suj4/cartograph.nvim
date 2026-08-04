@@ -187,12 +187,14 @@ function M.register(H)
         local store = live() if not store then return end
         store = whole_graph(store) if not store then return end
         local from, to = o.fargs[1], o.fargs[2]
-        if not from then
-            return vim.notify('cartograph: :CartographPortability <runtime>'
-                .. ' [<to-runtime>] — one target audits against it, two diff the'
-                .. ' MOVE from the first to the second', vim.log.levels.WARN)
-        end
         local port = require 'cartograph.portability'
+        if not from then
+            -- NO TARGET NAMED = PRINT THE LIST, not a usage string. Completion narrows
+            -- the offered set silently (CART-0209), so a reader who has not pressed
+            -- <Tab> is told which artifacts answer which question — and which ones ship
+            -- and answer neither, with why. A usage line taught nothing.
+            return scratch(port.roster_report())
+        end
         -- ! = ALSO the READ surface. Opt-in behind the bang because references
         -- re-parse every function (~3.5 ms each), which a default verb must not do
         -- to a large corpus — the same reason portability.report gates it on opts.
@@ -224,7 +226,13 @@ function M.register(H)
         end
         scratch(lines)
     end, { nargs = '*', bang = true, complete = function ()
-        return require('cartograph.portability').runtimes()
+        -- TARGETS, not the whole roster (CART-0209). Completion is where a reader
+        -- learns what is auditable, so offering an artifact that cannot answer either
+        -- question this verb asks taught a wrong list and then refused it. The
+        -- prototype-api artifacts ARE still offered — they answer the DATA-stage
+        -- question — which is why the filter is on what an artifact can ANSWER rather
+        -- than on its `ingredient` marker.
+        return require('cartograph.portability').targets()
     end, desc = 'cartograph: score the external surface against a target environment profile — which names it PROVIDES and which are not in it (candidate porting work, with call counts). With TWO targets, diff the MOVE from the first to the second: the names that change status ARE the work. ! adds the READ surface (names touched but never called — where a port actually breaks; re-parses every function, so it is opt-in). TWO PROTOTYPE-STAGE targets diff the DATA STAGE instead — which declared prototypes\' properties stopped existing, separating a write from a deletion that no longer deletes. Not-in-profile is not "missing": a dependency may supply it' })
 
     -- ── the EXTERNAL SURFACE: names used but defined nowhere here, with the

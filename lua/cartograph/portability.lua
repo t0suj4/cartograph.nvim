@@ -87,9 +87,12 @@ function M.provides(prof, name)
     return nil
 end
 
---- The runtimes that can be audited against: whatever artifacts ship. Derived,
---- not listed, so a newly distilled profile becomes a target with no edit here
---- (and drives the command's completion).
+--- THE ROSTER: every artifact that ships. Derived, not listed, so a newly distilled
+--- profile appears here with no edit.
+---
+--- NOT the list of things you may audit against — that is M.targets(), and the
+--- difference is the whole of CART-0209. This roster is what EXISTS; a target is what
+--- can ANSWER. Consumers wanting the second must say so.
 function M.runtimes()
     local dir = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/[^/]+$')
         .. '/spec/profile'
@@ -133,6 +136,140 @@ function M.dotted_queryable(prof)
         if next(prof[field] or {}) ~= nil then return true end
     end
     return false
+end
+
+-- ── WHAT MAY BE A TARGET (CART-0209) ────────────────────────────────────────
+-- The three predicates above answer three DIFFERENT questions, and the reason this
+-- section exists is that they disagree — so "is this artifact a target" has no
+-- answer until you say a target FOR WHAT. The command asks two:
+--   NAMES  audit / report / MOVE diff — needs a bare AND a dotted name surface
+--   DATA   the prototype-stage diff  — needs a prototype surface
+--
+-- MEASURED over every shipped artifact (2026-08-04), which is what makes this a
+-- partition and not a guess:
+--   6 environments   name+dotted, no prototypes  → a NAMES target
+--   2 prototype-api  neither name surface, 2744/3579 own_props → a DATA target
+--   3 runtime-api    name-queryable on 3 free functions, dotted NO
+--   1 ruby-core      none of the three (RBS, signature-keyed)
+--
+-- SO `ingredient = true` IS THE WRONG AXIS, and filtering on it would have removed a
+-- WORKING target: both prototype artifacts declare the marker and both are exactly
+-- what the data-stage diff is aimed at. The marker says "not a NAME surface", which is
+-- one question of two. The runtime-api trio, meanwhile, carries NO marker at all and
+-- is the artifact CART-0209 was filed about.
+--
+-- WHY THE LIST NOW MATCHES THE FENCE. M.diff already refuses an artifact that fails
+-- either name predicate; the LIST offered it anyway, so completion tempted the reader
+-- into a refusal (or, before the fences, into a serene "0 LOST"). A list that cannot
+-- tempt you beats a fence that fires — and deriving the list from the fence's own
+-- predicates means the two cannot drift.
+
+--- WHICH QUESTIONS this artifact can be a target for: { names = bool, data = bool }.
+function M.target_kinds(prof)
+    if not prof then return { names = false, data = false } end
+    return {
+        names = M.name_queryable(prof) and M.dotted_queryable(prof),
+        data = M.prototype_queryable(prof) and true or false,
+    }
+end
+
+--- WHY an artifact can be no target at all — the MECHANISM, with NO artifact name in
+--- it, so a caller can either prefix one (a refusal about a specific pick) or GROUP
+--- identical reasons (a report listing five). Phrased to follow "<name> is ".
+local function target_refusal(prof)
+    if M.name_queryable(prof) then
+        -- THE CART-0209 ARTIFACT. It holds the whole API — 291 members — but keyed by
+        -- CLASS (`LuaGameScript::print`), a key space no CALL NAME can ever match,
+        -- and its member table sits under the distiller's own spelling that provides()
+        -- deliberately does not read. So it is name-queryable on a handful of free
+        -- functions and blind to everything it actually contains: measured 0 of 92 on
+        -- a corpus where the hand profile republishing the SAME data answers 33.
+        -- NO COUNT IN THE SENTENCE, deliberately: the measure belongs to the ARTIFACT
+        -- and the mechanism is SHARED, so keeping them apart is what lets three
+        -- artifacts share one paragraph instead of printing it three times over.
+        return 'an INGREDIENT, not a target: its symbols are keyed by class'
+            .. ' (LuaGameScript::print) and no call name can match that key space, so'
+            .. ' it would score 0% against a surface it holds but cannot spend — a'
+            .. ' hand-authored profile republishes it, audit that instead'
+    end
+    return 'not a target: it has no name surface and no prototype surface — it is'
+        .. ' signature-keyed (String#chomp) or a distilled ingredient, so a verdict'
+        .. ' against it would call every name unknown'
+end
+
+--- WHY a DATA-only artifact is not on a NAMES list. Not a refusal — it names the OTHER
+--- DOOR, because this artifact is precisely the target of the data-stage diff. A
+--- reason that says only "cannot adjudicate a name" is true and useless.
+local function data_only_reason()
+    return 'a DATA-STAGE artifact with no name surface at all — pass TWO'
+        .. ' prototype-stage artifacts to diff the data stage instead'
+end
+
+--- HOW BIG this artifact is, in ITS OWN currency. profile_size counts vocab/free/sigs
+--- and so reports 0 for a prototype artifact holding 2744 properties — which is how
+--- the old report came to label one "signature-keyed artifact (0 sigs)", a sentence
+--- wrong in both halves.
+local function measure_of(prof)
+    if M.prototype_queryable(prof) then
+        local np, npr = 0, 0
+        for _ in pairs(prof.prototypes or {}) do np = np + 1 end
+        for _ in pairs(prof.own_props or {}) do npr = npr + 1 end
+        return ('%d prototypes, %d properties'):format(np, npr)
+    end
+    return ('%d symbols'):format(M.profile_size(prof))
+end
+
+--- Is `runtime` offerable as a target, and for what? Returns (prof, kinds) or
+--- (nil, reason). The reason names the MECHANISM, because every one of these
+--- artifacts is genuinely useful somewhere else — a refusal here is "wrong question",
+--- never "worthless file".
+function M.targetable(runtime)
+    if type(runtime) ~= 'string' or runtime == '' then
+        return nil, 'not a profile name'
+    end
+    local prof = require('cartograph.spec.profile').load(runtime)
+    if not prof then
+        return nil, ('no profile named %q (profiles ship under spec/profile/)')
+            :format(runtime)
+    end
+    local kinds = M.target_kinds(prof)
+    if kinds.names or kinds.data then return prof, kinds end
+    return nil, ('%s (%s) is %s'):format(runtime, measure_of(prof),
+        target_refusal(prof))
+end
+
+--- The artifacts that may be audited against, optionally for ONE question
+--- ('names' | 'data'). Drives the command's completion.
+function M.targets(kind)
+    local out = {}
+    for _, rt in ipairs(M.runtimes()) do
+        local _, kinds = M.targetable(rt)
+        if type(kinds) == 'table' and (not kind or kinds[kind]) then
+            out[#out + 1] = rt
+        end
+    end
+    return out
+end
+
+--- THE WHOLE ROSTER, dispositioned — rows of { runtime, lang, kinds, reason }. What
+--- targets() drops is not silence: a report can print WHICH artifacts it did not
+--- score and WHY, which is the difference between "no shipped profile covers this"
+--- and "five of them were quietly skipped".
+function M.target_roster()
+    local pm = require 'cartograph.spec.profile'
+    local out = {}
+    for _, rt in ipairs(M.runtimes()) do
+        local prof, k = M.targetable(rt)
+        local p = prof or pm.load(rt)
+        -- THE REASON IS NAME-FREE HERE, unlike targetable's, so a report can group the
+        -- artifacts that share a mechanism; the measure travels beside it instead
+        out[#out + 1] = { runtime = rt, lang = p and p.lang,
+            size = p and M.profile_size(p) or 0,
+            measure = p and measure_of(p) or nil,
+            kinds = type(k) == 'table' and k or nil,
+            reason = (not prof) and p and target_refusal(p) or nil }
+    end
+    return out
 end
 
 -- ── THE STAGE PARTITION (CART-0216) ─────────────────────────────────────────
@@ -493,13 +630,28 @@ end
 --- requirement set it covers — the "tightest environment" query. COVERAGE, not a
 --- verdict: a profile covering everything is not proof the code runs there, only
 --- that this boundary holds no counter-evidence.
+---
+--- Returns (ranked, req, skipped). ONLY NAMES-TARGETS ARE RANKED, and the rest are
+--- RETURNED rather than dropped (CART-0209): scoring the three runtime-api artifacts
+--- printed `lua-factorio-api-20  0.0% covered`, which reads as a claim that Factorio
+--- 2.0 provides none of this mod's names when it is a fact about a key space. Nor may
+--- they vanish — five skipped artifacts and a silent list is the
+--- absence-rendered-as-silence class, so `skipped` carries each one's reason.
 function M.rank(store)
     local pm = require 'cartograph.spec.profile'
     local req = M.requires(store)
-    local out = {}
+    local out, skipped = {}, {}
     for _, runtime in ipairs(M.runtimes()) do
         local prof = pm.load(runtime)
-        if prof and (not prof.lang or req.langs[prof.lang]) then
+        if prof and (not prof.lang or req.langs[prof.lang])
+            and not M.target_kinds(prof).names then
+            -- the reason carries NO artifact name, so the report can group the three
+            -- runtime-api artifacts under one sentence instead of printing it thrice
+            local data = M.target_kinds(prof).data
+            skipped[#skipped + 1] = { runtime = runtime, size = M.profile_size(prof),
+                data = data, measure = measure_of(prof),
+                reason = data and data_only_reason() or target_refusal(prof) }
+        elseif prof and (not prof.lang or req.langs[prof.lang]) then
             local hit, miss = 0, 0
             for name in pairs(req.names) do
                 if M.provides(prof, name) then
@@ -521,19 +673,25 @@ function M.rank(store)
         if math.abs(a.pct - b.pct) > 0.001 then return a.pct > b.pct end
         return a.size < b.size
     end)
-    return out, req
+    table.sort(skipped, function (a, b) return a.runtime < b.runtime end)
+    return out, req, skipped
 end
 
 --- Group the requirement set by WHO provides it — the dependency manifest. A name
 --- no shipped profile claims is left in its own bucket, NOT called external: it
 --- is most often a sibling module or a third-party dependency.
+---
+--- NAMES-TARGETS ONLY, same as rank. An ingredient claiming 3 free functions would
+--- otherwise appear as a co-owner (`lua-factorio+lua-factorio-api`) of the names it
+--- shares with the profile that republishes it — a provider group naming a file that
+--- is an input to another entry in the same list.
 function M.manifest(store)
     local pm = require 'cartograph.spec.profile'
     local req = M.requires(store)
     local profs = {}
     for _, runtime in ipairs(M.runtimes()) do
         local p = pm.load(runtime)
-        if p and (not p.lang or req.langs[p.lang]) then
+        if p and (not p.lang or req.langs[p.lang]) and M.target_kinds(p).names then
             profs[#profs + 1] = { runtime = runtime, prof = p }
         end
     end
@@ -713,6 +871,22 @@ function M.audit(store, runtime)
         table.sort(got)
         return nil, ('%s is a %s profile, but this graph is %s — nothing to compare')
             :format(runtime, prof.lang, table.concat(got, '/'))
+    end
+    -- …AND THE SAME REFUSAL FOR AN ARTIFACT THAT CANNOT ANSWER A NAME QUESTION
+    -- (CART-0209). M.diff was fenced and this, the SINGLE-target path, was not — so
+    -- `:CartographPortability lua-factorio-api-11` printed a header asserting 294
+    -- claimed symbols and then 92 names of "candidate porting work", every one of them
+    -- an artifact-shaped fact. The fence is the same predicates diff uses, so the two
+    -- verbs cannot disagree about what is auditable.
+    local _, kinds = M.targetable(runtime)
+    if type(kinds) == 'string' then
+        return nil, kinds
+    elseif not kinds.names then
+        -- the SAME sentence the report prints, from the same function: a verb and a
+        -- report disagreeing about why an artifact was skipped is how one of them
+        -- ends up carrying a label borrowed from an unrelated case
+        return nil, ('%s (%s) is %s'):format(runtime, measure_of(prof),
+            data_only_reason())
     end
     -- one requirement set, scored against this profile: the audit is now just
     -- `requires ∩ provides`, which is what the keystone says it should be
@@ -1559,10 +1733,75 @@ function M.report(store, runtime, opts)
     return L
 end
 
+--- A long reason as report lines: first line prefixed, continuations indented under
+--- it. Reasons NAME THE MECHANISM, so they are sentences rather than labels, and a
+--- 250-column line in a scratch buffer is a reason nobody reads.
+local function reason_lines(prefix, text, cont)
+    local out, line = {}, prefix
+    local first = true
+    for word in text:gmatch('%S+') do
+        if not first and #line + 1 + #word > 78 then
+            out[#out + 1] = line
+            line = cont .. word
+        else
+            line = first and (line .. word) or (line .. ' ' .. word)
+        end
+        first = false
+    end
+    out[#out + 1] = line
+    return out
+end
+
+--- THE ROSTER AS A REPORT — what you may audit against, and what ships that you may
+--- not. This is what the verb prints when no target is named: completion narrows the
+--- list silently, and a reader who has not pressed <Tab> deserves to be told WHY four
+--- of the twelve artifacts on disk are not offered. Needs no graph.
+function M.roster_report()
+    local rows = M.target_roster()
+    local L = { ('portability TARGETS — %d artifact(s) ship; a target is one that can'):format(#rows),
+        '  ANSWER the question you ask, which is not the same set:' }
+    local bykind = { names = {}, data = {} }
+    local refused, order = {}, {}
+    for _, r in ipairs(rows) do
+        if r.kinds and r.kinds.names then
+            local g = bykind.names
+            g[#g + 1] = ('%s (%s, %s)'):format(r.runtime, r.lang or '?', r.measure
+                or (r.size .. ' symbols'))
+        elseif r.kinds and r.kinds.data then
+            local g = bykind.data
+            g[#g + 1] = ('%s (%s, %s)'):format(r.runtime, r.lang or '?',
+                r.measure or '?')
+        else
+            local why = r.reason or 'no disposition'
+            if not refused[why] then refused[why] = {}; order[#order + 1] = why end
+            local g = refused[why]
+            g[#g + 1] = r.runtime
+        end
+    end
+    L[#L + 1] = ''
+    L[#L + 1] = '  NAMES — audit one, or diff the MOVE between two of the same language:'
+    for _, t in ipairs(bykind.names) do L[#L + 1] = '    ' .. t end
+    L[#L + 1] = ''
+    L[#L + 1] = '  DATA STAGE — pass TWO of these to diff declared prototypes instead:'
+    for _, t in ipairs(bykind.data) do L[#L + 1] = '    ' .. t end
+    if #order > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = '  NOT A TARGET — these ship and are load-bearing elsewhere; each'
+        L[#L + 1] = '  reason below says where, because none of them is a useless file:'
+        for _, why in ipairs(order) do
+            L[#L + 1] = '    ' .. table.concat(refused[why], ', ')
+            -- the reason is name-free, so it is printed ONCE for the group; it already
+            -- reads as a predicate of each artifact named above it
+            vim.list_extend(L, reason_lines('      — ', why, '        '))
+        end
+    end
+    return L
+end
+
 --- The code's OWN profile as a report: what it requires, which shipped
 --- environment covers most of it, and where each requirement comes from.
 function M.requires_report(store)
-    local ranked, req = M.rank(store)
+    local ranked, req, skipped = M.rank(store)
     local groups, unclaimed = M.manifest(store)
     local langs = {}
     for l in pairs(req.langs) do langs[#langs + 1] = l end
@@ -1580,17 +1819,37 @@ function M.requires_report(store)
         L[#L + 1] = '    (no shipped profile targets this language)'
     end
     for _, r in ipairs(ranked) do
-        if r.queryable then
-            L[#L + 1] = ('    %-16s %5.1f%% covered  (%d of %d; profile claims %d)')
-                :format(r.runtime, r.pct, r.provided, r.provided + r.unknown, r.size)
-        else
-            L[#L + 1] = ('    %-16s   not rankable — signature-keyed artifact (%d'
-                .. ' sigs), no name surface to query'):format(r.runtime, r.size)
-        end
+        L[#L + 1] = ('    %-16s %5.1f%% covered  (%d of %d; profile claims %d)')
+            :format(r.runtime, r.pct, r.provided, r.provided + r.unknown, r.size)
     end
     if #ranked > 0 then
         L[#L + 1] = '    coverage is not a verdict: full coverage means this boundary'
         L[#L + 1] = '    holds no counter-evidence, not that the code runs there.'
+    end
+    -- WHAT WAS NOT RANKED, AND WHY. These artifacts ship for this language and were
+    -- deliberately not scored; printing the list is what keeps that from reading as
+    -- "only three profiles exist". Each reason names the mechanism, because every one
+    -- of them is load-bearing somewhere else (an input to a hand profile, the
+    -- data-stage diff's own target, the signature source hover reads).
+    if #skipped > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('  NOT RANKED — %d shipped artifact(s) of this language answer no'):format(#skipped)
+        L[#L + 1] = '  NAME query, so each is not rankable here rather than 0% covered:'
+        -- GROUPED BY REASON, in roster order. Three artifacts share one mechanism, and
+        -- printing the same paragraph three times is how a reader learns to skip it.
+        local order, byreason = {}, {}
+        for _, s in ipairs(skipped) do
+            if not byreason[s.reason] then
+                byreason[s.reason] = {}
+                order[#order + 1] = s.reason
+            end
+            local g = byreason[s.reason]
+            g[#g + 1] = ('%s (%s)'):format(s.runtime, s.measure)
+        end
+        for _, why in ipairs(order) do
+            L[#L + 1] = '    ' .. table.concat(byreason[why], ', ')
+            vim.list_extend(L, reason_lines('      — ', why, '        '))
+        end
     end
     L[#L + 1] = ''
     L[#L + 1] = '  DEPENDENCY MANIFEST — the requirement set grouped by who provides it:'

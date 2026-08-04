@@ -82,10 +82,12 @@ for _, t in ipairs(api.types or {}) do concept[t.name] = true end
 
 local profile = {
     schema = 1, runtime = RUNTIME, lang = 'lua', stage = 'prototype',
-    -- INGREDIENT, not a portability target: see the header. portability.runtimes()
-    -- derives its target list from whatever artifacts ship, and an artifact that
-    -- cannot adjudicate a dotted name must not be selectable as a diff target — that
-    -- exact mistake produced a silent "0 LOST" once already (CART-0209).
+    -- INGREDIENT for the NAME surface — see the header — and READ AS EXACTLY THAT: it
+    -- means "no bare/dotted name lives here", NOT "never a target". This artifact IS
+    -- the target of the data-stage diff, so portability.targets() offers it and
+    -- portability.target_kinds() classes it `data`, while spec.profile.env_usable
+    -- refuses it as an extraction environment. The marker is one question of two, and
+    -- filtering the target list ON IT would have dropped this file (CART-0209).
     ingredient = true,
     version = api.application_version, api_version = api.api_version,
     stamp = { source = API, application_version = api.application_version,

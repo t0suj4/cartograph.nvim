@@ -187,11 +187,19 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               DEPENDENCY MANIFEST (the set grouped by who
                               provides each name). Coverage, never a
                               verdict; an artifact that cannot answer
-                              name queries says so instead of scoring 0%
+                              name queries is NOT RANKED and NAMED as
+                              such, with the mechanism — a distilled
+                              INGREDIENT keyed by class, or a
+                              prototype-stage artifact whose question is
+                              the data stage — rather than scoring 0%
   :CartographPortability[!] {runtime} [{to-runtime}]
                               score the external surface against a target
                               environment profile (tab-completes the ones
-                              that ship): which names it PROVIDES, and
+                              that can ANSWER, which is fewer than the ones
+                              that ship — a distilled INGREDIENT is not a
+                              target; with NO argument it prints that list,
+                              including what ships and answers neither
+                              question, and why): which names it PROVIDES, and
                               which are NOT IN it, with call counts, GROUPED
                               BY WHY the artifact cannot adjudicate them.
                               The header names BOTH ends when the package
@@ -205,8 +213,9 @@ HONESTY AND RESOLUTION                                 *cartograph-cmd-honesty*
                               from the first to the second: the names whose
                               status changes ARE the porting work (needs
                               two same-language profiles that answer name
-                              queries: luajit/lua-factorio, ruby-core/
-                              ruby-rails, lua-factorio-11/lua-factorio).
+                              queries: luajit/lua-factorio, lua-factorio-11
+                              /lua-factorio; TWO prototype-stage artifacts
+                              diff the DATA stage instead).
                               ! also reports the READ surface — names
                               touched but never called, where `global.foo`
                               and `game.x[...]` live; opt-in because it

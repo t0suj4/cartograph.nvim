@@ -1514,7 +1514,12 @@ version and dependencies are all set algebra over that one set:
 this code REQUIRES — ruby: 2485 external name(s), version floor 3.1
   TIGHTEST ENVIRONMENT — shipped profiles by coverage of that set:
     ruby-rails        21.2% covered  (528 of 2485; profile claims 1734)
-    ruby-core          not rankable — signature-keyed artifact (302 sigs)
+  NOT RANKED — 1 shipped artifact(s) of this language answer no
+  NAME query, so each is not rankable here rather than 0% covered:
+    ruby-core (302 symbols)
+      — not a target: it has no name surface and no prototype surface — it
+        is signature-keyed (String#chomp) or a distilled ingredient, so a
+        verdict against it would call every name unknown
   DEPENDENCY MANIFEST — the requirement set grouped by who provides it:
     ruby-rails                    527 name(s),  1501 call(s)
     claimed by no profile        1957 name(s)
@@ -1528,15 +1533,32 @@ portability audit scores exactly this set rather than walking the graph again.
 
 Two honesty rules do the work. **Coverage is not a verdict**: full coverage means
 this boundary holds no counter-evidence, not that the code runs there. And an
-artifact that *cannot answer name queries* says so instead of scoring 0% — the
-RBS-derived `ruby-core` profile is keyed by signature (`String#chomp`), so a 0%
-would read as a claim about CRuby when it is a fact about the artifact. It is
-sunk from the ranking rather than reported as the loosest fit.
+artifact that *cannot answer name queries* is **not ranked, and named as such** —
+the RBS-derived `ruby-core` profile is keyed by signature (`String#chomp`), so a
+0% would read as a claim about CRuby when it is a fact about the artifact.
+
+Which is why **the roster is not the target list**. Every artifact that ships is
+in the roster; a *target* is one that can answer the question you asked, and the
+two differ by five files here. Three `lua-factorio-api-*` artifacts hold the whole
+API — 291 members — keyed by class (`LuaGameScript::print`), a key space no call
+name can match: they are *ingredients* a hand-authored profile republishes, and
+scoring against one gave `0.0% covered` where the profile republishing the same
+data answers 33 of 92. Two `lua-factorio-proto-*` artifacts answer no name
+question at all and are the target of the *data-stage* diff instead. So the filter
+is on what an artifact can **answer**, never on the `ingredient` marker it
+declares — filtering on the marker was the obvious fix, and it would have dropped
+both working data-stage targets while missing all three that caused the bug.
+What is dropped from the ranking is *listed with its mechanism*: five artifacts
+skipped in silence would read as "only three profiles ship".
 
 ## Portability (will it run there, and where does it break)
 
 `:CartographPortability <runtime>` scores the **external surface** — what the code
-uses but doesn't define — against a target environment, and buckets each name:
+uses but doesn't define — against a target environment, and buckets each name.
+With **no argument** it prints the target list instead of a usage line: which
+artifacts answer the *name* question, which answer the *data-stage* one, and which
+ship and answer neither — with the mechanism, because none of them is a useless
+file (see [the roster is not the target list](#what-this-code-requires-one-set-three-questions)).
 
 ```
 portability — MOVING FROM factorio 1.1 (declared in info.json) TO lua-factorio 2.0.72
