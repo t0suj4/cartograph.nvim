@@ -303,6 +303,22 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
                               call, varargs), `·` is an answer
   :CartographBranchValues     the values live through each CFG branch
                               (~ = hedged reaching)
+  :CartographPortClasses [port]
+                              anonymous-type COMPATIBILITY CLASSES from
+                              observed flow. For callees we cannot see, the
+                              types can never be NAMED — but a return that
+                              flows into another call's argument makes those
+                              two PORTS observably interchangeable, so the
+                              corpus partitions opaque values into classes
+                              with no declarations anywhere. A class is NOT a
+                              type: it is "these ports were observed
+                              interchangeable", with the evidence count, a
+                              declared name marked as the claim it is,
+                              conflicting declarations reported rather than
+                              resolved, and the UNLINKED ports counted out
+                              loud. With a function focused it starts at that
+                              function's ports; <CR> descends into a class,
+                              then into a port's partners
   :CartographNarrow           where a guard proves a variable non-nil in
                               a region (branch-sensitive narrowing)
   :CartographParamNil         inferred parameter nilability (required /

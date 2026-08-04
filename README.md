@@ -2770,6 +2770,14 @@ conflicts-per-class a partition-quality check that needs no hand-reading. The so
 is coverage — only 5.4% of resolved ports carry any declaration at all, even here, because
 ports sit on external and stdlib callees; a game mod has none whatsoever.
 
+All of that is a lens, not just a probe: **`:CartographPortClasses`** opens the roster of
+classes (each named by its highest-degree members), `<CR>` descends into one to see its ports
+split by axis — *produced by* versus *accepted by* — and `<CR>` again gives a port's observed
+partners ranked by evidence. Focused on a function it starts at that function's own ports, so
+the question it answers is "what else can go where this parameter goes?"; a port name as an
+argument goes straight there. `tools/portgraph.lua` and the lens read the **same** module, so
+the measured numbers and the displayed ones cannot drift apart.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit

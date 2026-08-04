@@ -286,6 +286,79 @@ function M.register(H)
         mat_df(store, n.file)
         scratch(require('cartograph.lens').report(store, id))
     end, { desc = 'cartograph: values LIVE through each CFG branch of the focused fn (~=hedged reaching) — the branch-value lens' })
+
+    -- ── PORT CLASSES: anonymous-type compatibility from observed flow ──────
+    -- A NAVIGABLE lens, and the descent is the point ([[cartograph-navigation-model]]):
+    -- the roster lists classes, <CR> descends into one to see its ports split by AXIS
+    -- (produced-by vs accepted-by), and <CR> again shows a port's observed partners with
+    -- their evidence counts. Consent to descend, never a dump.
+    local function portpane(lines, at_)
+        local buf = scratch(lines)
+        vim.keymap.set('n', '<CR>', function ()
+            local st = live() if not st then return end
+            local sub = at_[vim.api.nvim_win_get_cursor(0)[1]]
+            if not sub then return end
+            local pf = require 'cartograph.portflow'
+            if sub.kind == 'class' then
+                portpane(pf.class_report(st, sub.idx))
+            elseif sub.kind == 'port' then
+                portpane(pf.port_report(st, sub.port))
+            end
+        end, { buffer = buf, desc = 'cartograph: descend into this class / port' })
+        return buf
+    end
+
+    cmd('CartographPortClasses', function (o)
+        local store = live() if not store then return end
+        local pf = require 'cartograph.portflow'
+        -- an explicit port argument skips the roster (the agent-drivable entry)
+        if o.args ~= '' then
+            return portpane(pf.port_report(store, o.args))
+        end
+        -- with a function FOCUSED, start at that function's own ports: the useful
+        -- question is "what else can go where THIS parameter goes?"
+        local n = store.focused and store.node(store.focused)
+        if n and (n.kind == 'function' or n.kind == 'method') then
+            local ports, a = pf.ports_of(store, n)
+            if #ports == 0 then
+                -- SAY WHY rather than silently showing the roster instead. A port belongs
+                -- to a CALLEE, so a function nobody calls has none — that is a real answer
+                -- and swallowing it is the absence-as-silence defect, in this very surface.
+                return portpane({
+                    ('%s has no ports.'):format(n.name or '?'),
+                    '',
+                    'A port is (callee, slot) — it exists because something CALLS the'
+                        .. ' function. This one is never called in the graph, so there are',
+                    'no observed flows through its return or its parameters to compare'
+                        .. ' against anything.',
+                    '',
+                    ':CartographPortClasses with nothing focused = the whole roster.',
+                }, {})
+            end
+            if #ports > 0 then
+                local L, at_ = { ('ports of %s (%d)'):format(n.name or '?', #ports), '' }, {}
+                for _, pt in ipairs(ports) do
+                    local cls = a.part.uf.p[pt] and a.part.uf:find(pt)
+                    local size = 0
+                    if cls then
+                        for _, m in ipairs(a.part.classes) do
+                            if a.part.uf:find(m[1]) == cls then size = #m break end
+                        end
+                    end
+                    L[#L + 1] = ('  %-44s %s'):format(pt, size > 1
+                        and ('in a class of ' .. size)
+                        or (a.part.sinks[pt] and 'UNIVERSAL SINK (no single type)'
+                            or 'unlinked — the frontier, not an empty answer'))
+                    at_[#L] = { kind = 'port', port = pt }
+                end
+                L[#L + 1] = ''
+                L[#L + 1] = '<CR> = this port\'s observed partners  ·  :CartographPortClasses'
+                    .. ' with no focus = the whole roster'
+                return portpane(L, at_)
+            end
+        end
+        portpane(pf.roster(store))
+    end, { nargs = '?', desc = 'cartograph: anonymous-type COMPATIBILITY CLASSES from observed flow — for callees we cannot see, the types can never be NAMED, but a return that flows into another call\'s argument makes those two PORTS observably interchangeable, so the corpus partitions opaque values into classes with no declarations anywhere. A class is NOT a type: it is "these ports were observed interchangeable", with the evidence count shown, a declared name marked as the CLAIM it is, conflicting declarations reported rather than resolved, and the UNLINKED ports counted out loud. With a function focused, starts at that function\'s ports; with a port argument, goes straight to it; otherwise the roster. <CR> descends' })
 end
 
 return M

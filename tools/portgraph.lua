@@ -52,366 +52,15 @@ local annot = require 'cartograph.annot'
 local txn = require 'cartograph.txn'
 local at = require 'cartograph.at'
 
--- ── union-find over port keys ───────────────────────────────────────────────
-local UF = {}
-UF.__index = UF
-local function uf() return setmetatable({ p = {}, n = 0 }, UF) end
-function UF:add(k)
-    if self.p[k] == nil then self.p[k] = k; self.n = self.n + 1 end
-    return k
-end
-function UF:find(k)
-    local p = self.p
-    while p[k] ~= k do p[k] = p[p[k]]; k = p[k] end
-    return k
-end
-function UF:union(a, b)
-    local ra, rb = self:find(self:add(a)), self:find(self:add(b))
-    if ra ~= rb then self.p[ra] = rb end
-end
-
-local function port(name, slot) return name .. '#' .. slot end
-
--- ── one function's observed flows ───────────────────────────────────────────
--- Everything comes off the expr IR: a `call` node is { k='call', f=<callee expr>,
--- a={args}, method=bool }, and expr.dotted turns a name/field chain into the qualified
--- callee name (nil for a computed callee, which we skip rather than guess).
-local function flows_of(node, emit)
-    local eo = expr.of(store, node.id)
-    local fl = eo and eo.fl
-    if not fl then return end
-
-    -- local name → the callee whose RETURN was assigned to it
-    local prod = {}
-    for _, s in ipairs(fl.stmts or {}) do
-        local rhs = s.expr and s.expr.rhs
-        local first = rhs and rhs[1]
-        if first and first.k == 'call' and s.def then
-            local cn = expr.dotted(first.f)
-            if cn then for _, d in ipairs(s.def) do prod[d] = cn end end
-        end
-    end
-
-    -- every call node in the body, and where each of its arguments came from
-    local function visit(e)
-        if type(e) ~= 'table' then return end
-        if e.k == 'call' then
-            -- A METHOD call keys on the METHOD SEGMENT alone, not on expr.dotted, which
-            -- would return `h.Destroy` — the receiver VARIABLE's name is not part of the
-            -- callee's identity, and not knowing the receiver's type is the entire point.
-            -- NAMED W2 CANDIDATE (CART-0269): bare-method-name ports are a KNOWN
-            -- over-merge source — every `:destroy()` in a corpus collapses into one port
-            -- regardless of receiver class. A rule must keep them apart unless the
-            -- receiver classes already unify.
-            local cname = e.method and e.f and e.f.n or expr.dotted(e.f)
-            if cname then
-                -- a METHOD receiver is a port too: `h:Destroy()` says whatever `h`
-                -- holds flows into Destroy's `self` slot.
-                if e.method and e.f.b then
-                    local rn = (e.f.b.k == 'name') and e.f.b.n or nil
-                    if rn and prod[rn] then
-                        emit(port(prod[rn], 'ret'), port(cname, 'self'))
-                    elseif e.f.b.k == 'call' then
-                        local inner = expr.dotted(e.f.b.f)
-                        if inner then emit(port(inner, 'ret'), port(cname, 'self')) end
-                    end
-                end
-                for i, a in ipairs(e.a or {}) do
-                    if a.k == 'name' and prod[a.n] then
-                        emit(port(prod[a.n], 'ret'), port(cname, 'a' .. i))
-                    elseif a.k == 'call' then
-                        -- direct nesting: B(A()) — no local mediates it
-                        local inner = expr.dotted(a.f)
-                        if inner then emit(port(inner, 'ret'), port(cname, 'a' .. i)) end
-                    end
-                end
-            end
-        end
-        for k, v in pairs(e) do
-            if k ~= 'f' or e.k ~= 'call' then
-                if type(v) == 'table' then visit(v) end
-            end
-        end
-        if e.k == 'call' and e.f then visit(e.f) end
-    end
-    for _, s in ipairs(fl.stmts or {}) do
-        if s.expr then
-            for _, x in ipairs(s.expr.rhs or {}) do visit(x) end
-            for _, x in ipairs(s.expr.lhs or {}) do visit(x) end
-            if s.expr.cond then visit(s.expr.cond) end
-        end
-    end
-end
-
--- ── COLLECT: the observed flows, with NO unification yet ────────────────────
--- Split from partitioning deliberately (CART-0269): the propagation rules need every
--- port's DEGREE before deciding which ports may unify, and keeping collection separate
--- means the rules become a measurable MATRIX rather than a hardcoded choice.
-local function collect()
-    -- names DEFINED anywhere in the graph, so a port can be marked EXTERNAL. A port on
-    -- a callee we can see is still a real port (and a resolved return type would TYPE
-    -- the class it joins) — but the anonymous partition is about the ones we cannot.
-    local known = {}
-    for _, n in ipairs(store.data.nodes or {}) do
-        if n.name then
-            known[n.name] = true
-            local last = n.name:match('([%w_]+)$')
-            if last then known[last] = true end
-        end
-    end
-    -- EDGE MULTIPLICITY (W3, CART-0270): the count IS the evidence, so it is kept rather
-    -- than deduped away. `w` = how many distinct SITES observed this exact pair, which is
-    -- what lets a relationship be reported as "observed interchangeable at N sites"
-    -- (EVIDENCE) instead of "the same type" (a CLAIM) — the user's "roughly", surviving
-    -- into the data model rather than only into the prose. DEGREE stays a count of
-    -- DISTINCT partners: the two are different axes and W3's job is not to conflate them.
-    local pairsl, seen, pcount, w = {}, {}, {}, {}
-    local function emit(a, b)
-        local k = a .. '\1' .. b
-        if seen[k] then w[k] = w[k] + 1; return end
-        seen[k] = true
-        w[k] = 1
-        pairsl[#pairsl + 1] = { a, b }
-        pcount[a] = (pcount[a] or 0) + 1
-        pcount[b] = (pcount[b] or 0) + 1
-    end
-    local nfn = 0
-    for _, n in ipairs(store.data.nodes or {}) do
-        if (n.kind == 'function' or n.kind == 'method') and n.file
-            and n.file:match('%.lua$') and n.range then
-            nfn = nfn + 1
-            pcall(flows_of, n, emit)
-        end
-    end
-    local function callee_of(p) return (p:match('^(.*)#[^#]*$')) or p end
-    local function is_ext(p)
-        local name = callee_of(p)
-        local last = name:match('([%w_]+)$')
-        return not (known[name] or (last and known[last]))
-    end
-    -- neighbours(port) → { {port, n} } sorted by evidence. THE user-facing query: the
-    -- honest answer to "what accepts this?" is a RANKED LIST WITH COUNTS, never a type.
-    local nbr = {}
-    for _, e in ipairs(pairsl) do
-        local n = w[e[1] .. '\1' .. e[2]]
-        nbr[e[1]] = nbr[e[1]] or {}; table.insert(nbr[e[1]], { e[2], n })
-        nbr[e[2]] = nbr[e[2]] or {}; table.insert(nbr[e[2]], { e[1], n })
-    end
-    for _, l in pairs(nbr) do
-        table.sort(l, function (a, b)
-            if a[2] ~= b[2] then return a[2] > b[2] end
-            return a[1] < b[1]
-        end)
-    end
-    return { edges = pairsl, pcount = pcount, nfn = nfn, w = w, nbr = nbr,
-        is_ext = is_ext, callee_of = callee_of, known = known }
-end
-
--- ── THE PROPAGATION RULES (CART-0269) ───────────────────────────────────────
--- A UNIVERSAL SINK is a port that unifies values which have nothing to do with each
--- other. `ipairs#a1` accepts anything iterable, so every table in the corpus flows into
--- that ONE port and it fuses all of them in a single stroke — measured as the first
--- member of the blob on BOTH corpora (CART-0268). A sink's edges are still COLLECTED
--- (W3's data model wants the counts) but they do not TRANSIT: no edge incident to a sink
--- participates in unification, so a sink ends up unified with nothing, which is the
--- honest answer for a port that has no single type.
---
--- Three independent rules, each toggleable, because the matrix is the deliverable and
--- "neither rule alone suffices" is itself a finding:
---   builtin  the callee's ROOT name is a genuine builtin (builtins.lua's existing
---            roster — no new data). Catches ipairs / type / tostring / table.concat.
---            CANNOT catch `s:match` / `s:gsub` / `s:format`: those are bare method calls
---            with no dotted root, and their member signatures are exactly CART-0266's
---            gap. So this rule is a floor, not the mechanism.
---   method   an UNQUALIFIED callee (no dot) that is not a project definition is a bare
---            METHOD NAME whose receiver class is unknown, so the port fuses every
---            receiver in the corpus. Structural, needs no roster.
---   degree   the callee's degree sits far above the population. DERIVED FROM THE DATA,
---            so it generalizes to project-local sinks no roster would ever list — but it
---            is a CALIBRATION, so `--sweep` reports the whole curve instead of hiding a
---            magic number.
-local builtins = require 'cartograph.builtins'
--- ONE RULE, and the matrix is what reduced it to one (CART-0269).
---
--- `bare`: the callee is UNQUALIFIED (no dot), is not a project definition, and its DEGREE
--- is at or above `mdeg`. Such a port fuses receivers/values that have nothing in common:
--- `match#self` (degree 59 here) collects every string in the corpus, `ipairs#a1` (137)
--- every table. Structural and degree-derived — no roster, and it generalizes to
--- project-local sinks no roster would list.
---
--- DEGREE-GATED, and the first version was NOT — that mattered. A categorical "every
--- unqualified callee is a sink" also condemned `Destroy#self` in the selftest, an engine
--- method with exactly ONE receiver class. A bare name fuses receivers only when receivers
--- ACTUALLY flow into it. 3 is deliberately low: two receivers can be a genuine shared
--- supertype, three is where fusion starts costing more than it explains.
---
--- ── A RULE THE MATRIX KILLED, kept here because the reason is the lesson ──────
--- There was a `builtin` rule: the callee's ROOT name is a genuine builtin per
--- builtins.lua. It looked obviously right and it is MEASURED WRONG — largest% fell to
--- 49.0% but `kept` dropped from 2/2 to 1/2, because **`vim` is in builtins.lua as an
--- always-present module table**, so the rule condemned every `vim.api.*` port and
--- destroyed the nvim WINDOW-HANDLE class. Being rooted at a builtin module table does not
--- make a function polymorphic. It also condemned `table.concat#ret`, whose return is a
--- string — and fusing all strings into one class is CORRECT, they ARE one type. The blob
--- is several genuine mega-types (string, table) fused by UNIVERSALLY polymorphic
--- functions; only the latter are sinks. `bare` already catches the useful part (a bare
--- global like `ipairs` is unqualified), so the roster rule bought nothing and cost a real
--- class. THE TWO-SIDED METRIC IS THE ONLY REASON THIS WAS VISIBLE — on largest% alone the
--- rule looked like a win.
-local MDEG = 3
-local function sinks_of(col, opts)
-    local s = {}
-    local mdeg = (opts.bare == true) and MDEG or opts.bare
-    for p in pairs(col.pcount) do
-        local name = col.callee_of(p)
-        local unqualified = not name:find('.', 1, true)
-        local deg = col.pcount[p] or 0
-        if mdeg and unqualified and not col.known[name] and deg >= mdeg then
-            s[p] = 'bare'
-        elseif opts.degree and deg >= opts.degree then s[p] = 'degree'
-        end
-    end
-    return s
-end
-
-local _ = builtins   -- kept required: the killed rule's rationale above cites its roster
-
-local function partition(col, opts)
-    local sinks = sinks_of(col, opts)
-    local u = uf()
-    local used = 0
-    -- minw = the EVIDENCE THRESHOLD. A class is a QUERY at a stated threshold, never a
-    -- stored fact: at minw=1 a single observation is enough to link two ports, at minw=2
-    -- a relationship must have been seen twice. The threshold is always reported with the
-    -- result so no reader mistakes a derived view for an asserted partition.
-    local minw = opts.minw or 1
-    for _, e in ipairs(col.edges) do
-        local ok = (col.w[e[1] .. '\1' .. e[2]] or 1) >= minw
-        if ok and not (sinks[e[1]] or sinks[e[2]]) then
-            u:union(e[1], e[2]); used = used + 1
-        end
-    end
-    local cls = {}
-    for k in pairs(u.p) do
-        local r = u:find(k)
-        cls[r] = cls[r] or {}
-        table.insert(cls[r], k)
-    end
-    local list = {}
-    for _, members in pairs(cls) do list[#list + 1] = members end
-    table.sort(list, function (a, b) return #a > #b end)
-    local nsink = 0
-    for _ in pairs(sinks) do nsink = nsink + 1 end
-    return { uf = u, classes = list, sinks = sinks, nsink = nsink,
-        used = used, ports = u.n }
-end
-
---- are all of `group`'s ports still in ONE class? The SECOND half of the two-sided
---- acceptance metric: breaking the blob by also breaking a real class trades one
---- worthless answer for another.
-local function together(part, group)
-    local root
-    for _, p in ipairs(group) do
-        if not part.uf.p[p] then return false end
-        local r = part.uf:find(p)
-        if root and r ~= root then return false end
-        root = r
-    end
-    return root ~= nil
-end
-
-
--- ── W4: DECLARATIONS NAME A CLASS (CART-0271) ───────────────────────────────
--- A class is a set of ports with no name. Give ONE member a declared type and the whole
--- class acquires it — that is the AMPLIFICATION the profile lever buys, and it is
--- measurable: how many ports does one declaration name?
---
--- The naming source here is ANNOTATIONS, not a profile file: annot.lua already reads
--- @param/@return off docblocks (CART-0240) and this repo annotates 97.3% of its defs. A
--- profile (CART-0266 stdlib members, CART-0029 adapters) arrives later through the SAME
--- door with no new machinery — so this measures what CART-0266 would be worth.
---
--- A DECLARED NAME IS A CLAIM, not a fact (docblocks lie — that is why annotation-mismatch
--- exists). So two different declarations inside one class are reported as a CONFLICT and
--- never resolved by majority: "which side is wrong" is precisely what a declaration cannot
--- settle. A conflict means our partition over-merged OR the docblocks disagree, and both
--- are worth knowing.
---
--- THE LINK IS FUZZY AND THE MATCH RATE IS REPORTED. A port key is the callee name AS
--- WRITTEN AT THE CALL SITE (`optimize.cse#a2`) while the node is `M.cse` in optimize.lua.
--- The index below keys each node several ways — its name, its last segment, and
--- `<file basename>.<last segment>` (the `local optimize = require ...; optimize.cse()`
--- idiom) — and the report states how many ports resolved at all, so amplification is read
--- against its own coverage rather than presented as complete.
-local function declarations()
-    local byname = {}
-    local function put(k, v) if k and byname[k] == nil then byname[k] = v end end
-    for _, n in ipairs(store.data.nodes or {}) do
-        if (n.kind == 'function' or n.kind == 'method') and n.name and n.file then
-            local last = n.name:match('([%w_]+)$')
-            local base = n.file:match('([%w_]+)%.lua$')
-            put(n.name, n)
-            put(last, n)
-            if base and last then put(base .. '.' .. last, n) end
-        end
-    end
-    -- node → { ret = type?, params = { [index] = type } }
-    local decl, srccache = {}, {}
-    for _, n in ipairs(store.data.nodes or {}) do
-        if (n.kind == 'function' or n.kind == 'method') and n.file
-            and n.file:match('%.lua$') and n.range then
-            local lines = srccache[n.file]
-            if lines == nil then
-                lines = store.content(n) or false
-                srccache[n.file] = lines
-            end
-            local pat = ts.annot_tag and ts.annot_tag(n.file)
-            local pats = ts.attach_pats and ts.attach_pats(n.file)
-            if lines and pat then
-                local s0 = at.sl(n.range)
-                local first = txn.attach_above(lines, s0, pats)
-                if first and first < s0 then
-                    local tags = annot.read_block(lines, first, pat)
-                    if tags and #tags > 0 then
-                        local fl = require('cartograph.flow')
-                        local rec = fl.present(n) and fl.record(n)
-                        local idx = {}
-                        for i, pname in ipairs((rec and rec.params) or {}) do idx[pname] = i end
-                        local d = { params = {} }
-                        for _, t in ipairs(tags) do
-                            if t.kind == 'return' and t.type then d.ret = d.ret or t.type
-                            elseif t.kind == 'param' and t.name and t.type and idx[t.name] then
-                                d.params[idx[t.name]] = t.type
-                            end
-                        end
-                        if d.ret or next(d.params) then decl[n] = d end
-                    end
-                end
-            end
-        end
-    end
-    return byname, decl
-end
-
---- port → declared type string, or nil. Also returns whether the port RESOLVED to a node
---- at all (the coverage figure), because an unresolved port and a resolved-but-undeclared
---- one are different answers.
-local function decl_of(byname, decl, p, callee_of)
-    local name = callee_of(p)
-    local slot = p:match('#([^#]*)$')
-    local node = byname[name]
-    if not node then
-        local last = name:match('([%w_]+)$')
-        node = last and byname[last]
-    end
-    if not node then return nil, false end
-    local d = decl[node]
-    if not d then return nil, true end
-    if slot == 'ret' then return d.ret, true end
-    local i = slot and slot:match('^a(%d+)$')
-    if i then return d.params[tonumber(i)], true end
-    return nil, true
-end
+-- THE ANALYSIS NOW LIVES IN lua/cartograph/portflow.lua (W5, CART-0272) and this harness
+-- READS IT. One implementation, so the probe's numbers and the verb's display cannot
+-- diverge — the rule extractapply follows for its splice (CART-0125). What stays here is
+-- the measurement the verb has no business carrying: the rule MATRIX, the sweeps, and the
+-- baseline the rules had to beat.
+local pf = require 'cartograph.portflow'
+local port, collect, partition, together = pf.port, pf.collect, pf.partition, pf.together
+local sinks_of, declarations, decl_of = pf.sinks_of, pf.declarations, pf.decl_of
+local _ = sinks_of
 
 -- ── selftest ────────────────────────────────────────────────────────────────
 local FIXTURE = table.concat({
@@ -468,7 +117,7 @@ local function selftest()
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/fx.lua', 'w')); fd:write(FIXTURE); fd:close()
     store.ingest(ts.extract(root))
-    local col = collect()
+    local col = collect(store)
     local base = partition(col, NO_RULES)
     local ruled = partition(col, ALL_RULES)
     local fails = {}
@@ -575,7 +224,7 @@ end
 print('')
 print(('portgraph %s — %s'):format(target, root))
 store.ingest(ts.extract(root))
-local col = collect()
+local col = collect(store)
 
 local ext, tot = 0, 0
 for p in pairs(col.pcount) do
@@ -724,14 +373,14 @@ end
 -- classes (the residual blob) and are RARE in small ones. If that holds,
 -- conflicts-per-class is a proxy for partition quality; if they are spread uniformly, the
 -- partition is worse than class size suggests and W2 is not done.
-local byname, decl = declarations()
+local byname, decl = declarations(store)
 local ndecl = 0
 for _ in pairs(decl) do ndecl = ndecl + 1 end
 
 local resolved, declared = 0, 0
 local pdecl = {}
 for pt in pairs(col.pcount) do
-    local d, ok = decl_of(byname, decl, pt, col.callee_of)
+    local d, ok = decl_of(byname, decl, pt)
     if ok then resolved = resolved + 1 end
     if d then declared = declared + 1; pdecl[pt] = d end
 end
