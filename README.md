@@ -2762,8 +2762,13 @@ meta declares and LuaJIT lacks is a claim about another runtime — `string.pack
 runtime the profile measures. The cross-check is what *found* them: the meta gates those
 behind an `@version` tag, a second mechanism beside the `#if` preprocessor.
 
-Result on `self`: frontier holes **12194 → 10520**, emittable functions 17.4% → 18.0%, and
-functions with *zero* holes of any kind 89 → 124. On `desynced` the frontier falls 251 and
+Result on `self`: frontier holes **12194 → 10520**, the census's emittable count 17.4% → 18.0%, and
+functions with *zero* holes of any kind 89 → 124. (That emittability figure counts the hole kinds
+the *census* knows about. The emitter later learned four more — reach, load, env, inspect — and
+against its full hole set the same corpus measures **3.7% emittable and 3.2% runnable**. A tier is
+not a value: an `@param number` makes a hole non-blocking and still gives you nothing to call the
+function with. The answer-key loop caught the divergence; the three numbers are tracked separately
+rather than sharing a word.) On `desynced` the frontier falls 251 and
 emittability does not move at all — its absent callees are a game engine, not the stdlib —
 which is the exact inverse of the injection frame's distribution. Two complementary levers.
 
