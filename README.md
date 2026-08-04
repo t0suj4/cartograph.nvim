@@ -3059,6 +3059,31 @@ reduction here that *measures* rather than assumes, and the lint and the reducer
 pass — a condition that changes nothing is both a finding and one fewer axis. What it scanned and
 what it skipped are both stated, because a silent cap reads as "we explored everything".
 
+And that is what the whole arc was for. `:CartographCertify` records what the touched symbols
+return and DO, you refactor, and `:CartographCertifyCheck` replays the same runs and compares —
+**neutrality with real assertions instead of a hash**. The existing witness check is a genuine and
+useful proxy: it hashes a body's *shape* (df shape + params + callees), so it certifies a MOVE and
+correctly drifts on an extract-helper. What it cannot do is speak for a body that changed **on
+purpose**, which is the refactor you are least sure of.
+
+Measured on a two-symbol case, the proxy got **both answers backwards**:
+
+| symbol | reality | witness hash | certificate |
+|---|---|---|---|
+| `M.tag`, `"[" .. s .. "]"` → `"<" .. s .. ">"` | **changed** | NEUTRAL — same shape | **CHANGED** |
+| `M.add`, body rewritten *and* params renamed | **neutral** | DRIFTED — body touched | **NEUTRAL** |
+
+Neither result is a criticism of the proxy — its own header says it certifies moves, not rewrites —
+but it is exactly why a real assertion was worth building.
+
+Two pieces of honesty carry it. **A hash always computes and a run does not**: a symbol with an
+unfilled hole cannot be certified by assertion, so it is reported as covered *only by the witness
+hash* — named, never counted as neutral, because a certificate that borrowed the proxy's coverage
+while implying the assertion's strength would be worse than the proxy alone. And inputs replay **by
+position**, so a parameter rename survives (keyed by name, the check broke on the most
+behaviour-neutral refactor there is), while an **arity** change is reported as a *signature* change
+rather than a behaviour comparison between two different functions.
+
 Meanwhile `writes` stopped being a refusal at all. A separate process contains anything
 process-*local*, so a module-state write is both safe and reproducible in one — measured, a
 function incrementing a module counter returns `1` on three separate runs, because each run is

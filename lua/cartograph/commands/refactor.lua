@@ -427,6 +427,46 @@ function M.register(H)
     end, { nargs = '*',
         desc = 'cartograph: declare that a guard CONDITION holds (or does not) and let the value it hinges on be DERIVED from that — an input hole says "choose a value" and offers no way to choose one, while what a person knows is the condition ("the file is non-empty"). The premise is yours and the value is ours: `n > 10` asserted true yields n = 11. The premise is a CLAIM and the report discloses WHICH BRANCH it selected, because a spec that quietly picked a side reads as characterizing the function when it characterized one path. A condition comparing two unknowns is REFUSED by name — there is no solver here, and a value satisfying a half-understood condition looks derived and is a guess. :CartographCharacterize lists the assertable ids' })
 
+    -- ── THE BEHAVIOUR CERTIFICATE: neutrality with REAL ASSERTIONS (CART-0264) ──
+    -- Deliberately the same shape as :CartographNeutralitySnapshot / Check above, because it
+    -- answers the same question with stronger evidence: that pair HASHES a body's shape, this
+    -- one RUNS the symbol before and after and compares what it did.
+    cmd('CartographCertify', function (o)
+        local store = live() if not store then return end
+        local cert = require 'cartograph.certificate'
+        -- the symbols: an explicitly focused function, else whatever a staged plan touches
+        local ids = {}
+        if store.focused then
+            local n = store.node(store.focused)
+            if n and (n.kind == 'function' or n.kind == 'method') then ids = { store.focused } end
+        end
+        local c = cert.hold(store, { ids = ids, staged = store.txn, force = o.bang })
+        vim.notify(('cartograph: certificate taken — %d symbol(s) OBSERVED, %d uncertifiable.'
+            .. ' Refactor, then :CartographCertifyCheck'):format(#c.entries,
+            #c.uncertifiable), vim.log.levels.INFO)
+        local L = { ('certificate — %d observed, %d uncertifiable'):format(#c.entries,
+            #c.uncertifiable) }
+        for _, e in ipairs(c.entries) do
+            L[#L + 1] = ('  observed  %-28s returns %s'):format(e.name, tostring(e.ret))
+        end
+        for _, u in ipairs(c.uncertifiable) do
+            L[#L + 1] = ('  ONLY the witness hash covers %-18s %s'):format(u.name,
+                (u.why or ''):gsub('\n.*', ''))
+        end
+        scratch(L)
+    end, { nargs = '*', bang = true,
+        desc = 'cartograph: TAKE a behaviour certificate for the focused function (or every symbol a staged plan touches) — run each one now and record what it returned and what it DID, so the same runs can be replayed after the refactor. Stronger than |:CartographNeutralitySnapshot|, which hashes a body\'s SHAPE: a hash proves a body was not TOUCHED and cannot speak for one that changed on purpose, which is the refactor you are least sure of. A symbol that cannot be characterized is reported as covered ONLY by the witness hash — a hash always computes and a run does not, so the coverage gap is named rather than counted as neutral. ! forces past the effect-analysis refusal' })
+
+    cmd('CartographCertifyCheck', function ()
+        local store = live() if not store then return end
+        local cert = require 'cartograph.certificate'
+        local res, why = cert.check_held(store)
+        if not res then
+            return vim.notify('cartograph: ' .. tostring(why), vim.log.levels.WARN)
+        end
+        scratch(cert.report(res))
+    end, { desc = 'cartograph: CHECK the behaviour certificate against the current graph — replay each recorded run and compare. NEUTRAL BY ASSERTION means the symbol ran both times and agreed (measured evidence); CHANGED is the finding; and a symbol covered ONLY by the witness hash is labelled as such rather than counted neutral. Inputs are replayed BY POSITION, so a parameter rename survives, while an arity change is reported as a SIGNATURE change instead of a behaviour comparison across two different functions' })
+
     -- ── FORK: both states of a condition, and which conditions MATTER (CART-0283) ──
     cmd('CartographCharacterizeFork', function (o)
         local store = live() if not store then return end

@@ -506,6 +506,34 @@ verb refuses is as load-bearing as what it writes — see
                               half-understood condition looks derived and
                               is a guess. |:CartographCharacterize| lists
                               the assertable conditions with their ids
+  :CartographCertify[!]       TAKE a behaviour certificate for the focused
+                              function (or every symbol a staged plan
+                              touches): run each one NOW and record what it
+                              returned and what it DID, so the same runs
+                              can be replayed after the refactor. Stronger
+                              than |:CartographNeutralitySnapshot|, which
+                              hashes a body's SHAPE — a hash proves a body
+                              was not TOUCHED and cannot speak for one that
+                              changed on purpose, which is the refactor you
+                              are least sure of. Measured on a two-symbol
+                              case, the hash got BOTH answers backwards: it
+                              called a string-literal change neutral (same
+                              shape) and drifted a behaviour-preserving
+                              rewrite (body touched). A symbol that cannot
+                              be characterized is reported as covered ONLY
+                              by the witness hash, because a hash always
+                              computes and a run does not, so the coverage
+                              gap is NAMED rather than counted as neutral.
+                              ! forces past the effect-analysis refusal
+  :CartographCertifyCheck     CHECK it against the current graph — replay
+                              each recorded run and compare. NEUTRAL BY
+                              ASSERTION means it ran both times and agreed
+                              (measured evidence); CHANGED is the finding.
+                              Inputs replay BY POSITION, so a parameter
+                              RENAME survives, while an ARITY change is
+                              reported as a SIGNATURE change rather than a
+                              behaviour comparison between two different
+                              functions
   :CartographCharacterizeFork[!] [{condition}]
                               run the focused function with a condition
                               asserted BOTH ways and show both states. A
