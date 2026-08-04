@@ -484,6 +484,28 @@ verb refuses is as load-bearing as what it writes — see
                               to |:CartographNeutralityCheck|, whose
                               df-shape witness is a proxy for the same
                               question
+  :CartographCharacterizeAssert {condition} {true|false}
+                              declare that a guard's condition HOLDS (or
+                              does not) and let the value it hinges on be
+                              DERIVED from that. An input hole says
+                              "choose a value" and offers no way to choose
+                              one; what a person actually knows is the
+                              CONDITION — "the file is non-empty", "the
+                              mode is fast". So the premise is yours and
+                              the value is ours: `n > 10` asserted true
+                              yields `n = 11`. The premise is a CLAIM
+                              (someone declared it) and the report
+                              DISCLOSES which branch it selected, because
+                              a spec that quietly picked a side reads as
+                              characterizing the function when it
+                              characterized one path. The inversion covers
+                              a closed set of comparison shapes — a
+                              condition comparing two unknowns is REFUSED
+                              by name rather than guessed at, since there
+                              is no solver here and a value satisfying a
+                              half-understood condition looks derived and
+                              is a guess. |:CartographCharacterize| lists
+                              the assertable conditions with their ids
   :CartographCharacterizeRun[!] [{file} {line}]
                               fill that spec's ORACLE hole by RUNNING the
                               function — the ONE verb here that executes

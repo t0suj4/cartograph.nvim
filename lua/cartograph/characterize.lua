@@ -748,6 +748,9 @@ function M.plan(store, fn_id, opts)
         subject = reach,
         package_path = pathlines or {},
         sandbox = sandboxed and inject or nil,
+        -- the FORKABLE CONDITIONS, computed once and carried, so the report, an agent and a
+        -- future fork all read the same list rather than three recomputations of it
+        conditions = M.conditions(store, node, lines),
         -- kept as a LIST for the report and the refusal text; the authority is the hole rows
         unfilled_env = (#unfilled_env > 0) and unfilled_env or nil,
         has_oracle = has_oracle,
@@ -782,7 +785,12 @@ end
 ---    and it looks exactly like a real characterization test. Worse than no test.
 ---  · a MEASURED hole is not overwritten: the code already demonstrates that input.
 M.BY_TIER = { run = 'measured', spec = 'claim', observed = 'measured',
-    agent = 'agent-supplied' }
+    agent = 'agent-supplied',
+    -- ASSERTED: the user declared a PREDICATE and we derived the value from it. A `claim`,
+    -- because the premise is declared and (weakest-link) a value derived from a claim is one.
+    asserted = 'claim',
+    -- SANDBOX: our own declared fake standing in for a channel.
+    sandbox = 'claim' }
 M.ORACLE_CHANNELS = { run = true, spec = true }
 
 --- THE LADDER, so a tier can be COMPARED rather than only printed. Strongest first.
@@ -863,6 +871,187 @@ function M.fill(plan, fills)
         if not (h.value or h.satisfied_by) then left = left + 1 end
     end
     plan.unfilled = left
+    return n
+end
+
+
+-- ── ASSERTED CONDITIONS (CART-0282, user: "we can let user force assert it true which would
+--    have ripple effect on the info we know") ────────────────────────────────
+-- An input hole says "choose a value" and offers no way to choose one. But what a person
+-- actually knows is not the value, it is THE CONDITION: "the file is non-empty", "the list
+-- has more than one element". So let them assert the PREDICATE and DERIVE the value from it.
+--
+-- THAT IS THE `derived` RUNG THE LADDER WAS MISSING. The assertion is a `claim` (someone
+-- DECLARED it), the value we compute from it is our own analysis — and by the weakest-link
+-- rule a value derived from a claim IS a claim, so the whole thing lands at `claim` with a
+-- basis naming both halves. Legitimate, because CART-0263's prohibition is on PREDICTING AN
+-- OBSERVATION; supplying a premise is the sanctioned move.
+--
+-- NO SOLVER, and that is measured rather than hoped: CART-0256 found conjunctions in real code
+-- are tiny, so this is INVERSION OF A SMALL CLOSED SET of comparison shapes, not satisfiability.
+-- A shape outside the set is REFUSED by name — the honest frontier, not a guess.
+--
+-- SCOPE: conditions on a PARAMETER, which is the population measured at ~45% of functions and
+-- whose hole (`input:<param>`) always exists at plan time. A condition on a field of an opaque
+-- value wants a static inspect hole first (CART-0280 discovers those at RUN time only).
+
+--- The FORKABLE conditions of a function: guards whose truth hinges on an unknown. Rows carry
+--- { id, line, text, leaf, leaf_hole }. This is what a user names to assert, and it is also
+--- exactly the input a FORK needs (CART-0283), so it lives here rather than in either.
+function M.conditions(store, node, lines)
+    local expr = require 'cartograph.expr'
+    local eo = expr.of(store, node.id)
+    local fl = eo and eo.fl
+    if not (fl and fl.params) then return {} end
+    local param = {}
+    for _, p in ipairs(fl.params) do param[p] = true end
+    local out, seen = {}, {}
+    for _, st in ipairs(fl.stmts or {}) do
+        local c = st.expr and st.expr.cond
+        if c then
+            -- THE UNKNOWN LEAF, and only a PARAMETER counts here: it is the one unknown whose
+            -- hole is guaranteed to exist before anything runs.
+            local leaf
+            expr.walk(c, function (e)
+                if not leaf and e.k == 'name' and param[e.n] then leaf = e.n end
+            end)
+            -- `st.l` IS 1-BASED (measured, not assumed: lines[st.l] is the guard itself), so
+            -- there is no +1 here. The first cut added one and reported the line BELOW the
+            -- condition — a row pointing at the wrong line is worse than no row, because it
+            -- reads as precise.
+            local ln = st.l or 1
+            local id = ('condition:L%d'):format(ln)
+            if leaf and not seen[id] then
+                seen[id] = true
+                out[#out + 1] = { id = id, line = ln, leaf = leaf,
+                    leaf_hole = 'input:' .. leaf,
+                    text = ((lines and lines[ln]) or ''):gsub('^%s+', ''):gsub('%s+$', ''),
+                    cond = c }
+            end
+        end
+    end
+    return out
+end
+
+--- INVERT a comparison: a value for `leaf` making the condition `want`. Returns (source, why)
+--- or (nil, why-not). The shapes are a CLOSED SET and anything else is refused by name — a
+--- value that satisfies a condition we only half-understood would be the worst kind of fill,
+--- since it looks derived and is a guess.
+local function satisfy(cond, leaf, want)
+    local expr = require 'cartograph.expr'
+    local function isleaf(e) return e and e.k == 'name' and e.n == leaf end
+    local function lit(e)
+        if e and e.k == 'lit' then return e end
+        return nil
+    end
+    -- `not <inner>` flips the target
+    if cond.k == 'un' and (cond.op == 'not' or cond.op == '!') then
+        return satisfy(cond.e, leaf, not want)
+    end
+    -- bare truthiness: `if x then`
+    if isleaf(cond) then
+        return want and 'true' or 'false',
+            ('%s is %s, so the guard is %s'):format(leaf, want and 'truthy' or 'false',
+                tostring(want))
+    end
+    if cond.k ~= 'bin' then
+        return nil, ('the condition is not a comparison this version can invert (%s)')
+            :format(cond.k)
+    end
+    -- normalise so the leaf is on the left
+    local op, l, r = cond.op, cond.l, cond.r
+    if not isleaf(l) and isleaf(r) then
+        l, r = r, l
+        op = ({ ['<'] = '>', ['>'] = '<', ['<='] = '>=', ['>='] = '<=' })[op] or op
+    end
+    if not isleaf(l) then
+        return nil, ('the condition does not compare `%s` directly (it may be a field or a'
+            .. ' call, which this version does not invert)'):format(leaf)
+    end
+    local rl = lit(r)
+    if op == '==' or op == '~=' or op == '!=' then
+        local eq = (op == '==') == want
+        if not rl then
+            if r and r.k == 'lit' then rl = r end
+        end
+        if rl and rl.ty == 'nil' then
+            return eq and 'nil' or 'true',
+                ('%s %s nil'):format(leaf, eq and 'is' or 'is not')
+        end
+        if not rl then
+            return nil, 'the compared value is not a literal, so nothing can be derived'
+        end
+        -- A LITERAL'S `v` IS ALREADY LUA SOURCE, quotes and all (measured: a str lit's v is
+        -- `"fast"`, seven characters). So %q on it produces `"\"fast\""` — a DIFFERENT string
+        -- that of course fails the comparison, which is how the first cut asserted `mode ==
+        -- "fast"` true and watched the run take the false branch. Use it verbatim.
+        local v = tostring(rl.v)
+        if eq then return v, ('%s equals %s'):format(leaf, v) end
+        -- DIFFERENT, and it must be different in a way the same comparison agrees with
+        if rl.ty == 'num' then return tostring((tonumber(rl.v) or 0) + 1),
+            ('%s differs from %s'):format(leaf, v) end
+        if rl.ty == 'str' then
+            local raw = v:match('^"(.*)"$') or v:match("^'(.*)'$") or v
+            return ('%q'):format(raw .. '~'), ('%s differs from %s'):format(leaf, v)
+        end
+        return nil, 'cannot construct a value DIFFERENT from ' .. v
+    end
+    local n = rl and rl.ty == 'num' and tonumber(rl.v)
+    if not n then
+        return nil, ('`%s` is compared with something that is not a number literal, so no'
+            .. ' value can be derived'):format(leaf)
+    end
+    local pick = ({
+        ['>'] = want and (n + 1) or n,
+        ['>='] = want and n or (n - 1),
+        ['<'] = want and (n - 1) or n,
+        ['<='] = want and n or (n + 1),
+    })[op]
+    if not pick then
+        return nil, ('the operator `%s` is not one this version inverts'):format(tostring(op))
+    end
+    return tostring(pick), ('%s %s %s holds'):format(leaf, op, tostring(n))
+end
+M.satisfy = satisfy
+
+--- WHY AN ASSERTED INPUT DOES NOT WEAKEN THE ORACLE, stated so nobody "fixes" it later. The
+--- weakest-link rule weakens an observation made THROUGH A FICTION — a sandboxed run, where the
+--- value came from our own fake. An asserted input is not a fiction: `mode = "fast"` is a real
+--- value and the run really returned 1, so the pair (input, output) WAS observed and the oracle
+--- is `measured`. What the assertion weakens is GENERALITY, not the observation: it is a claim
+--- about which input is worth characterizing, and the premise line carries exactly that.
+--- Conflating the two would tier every measurement by the reason someone chose its input.
+---
+--- ASSERT a condition's outcome and fill the value it hinges on. Returns (n_filled, nil) or
+--- (nil, why). The fill DISCLOSES which branch it selected, because a spec that quietly picked
+--- a side reads as characterizing the function when it characterized one path.
+function M.assert_condition(store, plan, cond_id, want)
+    local node = store.node(plan.fn_id)
+    local lines = node and store.content(node)
+    local rows = M.conditions(store, node, lines)
+    local row
+    for _, r in ipairs(rows) do if r.id == cond_id then row = r end end
+    if not row then
+        local ids = {}
+        for _, r in ipairs(rows) do ids[#ids + 1] = r.id end
+        return nil, ('no forkable condition %q in %s (have: %s)'):format(cond_id, plan.fn,
+            #ids > 0 and table.concat(ids, ', ') or 'none — nothing here hinges on a parameter')
+    end
+    local value, why = satisfy(row.cond, row.leaf, want and true or false)
+    if not value then
+        return nil, ('cannot derive a value making `%s` %s: %s'):format(row.text,
+            tostring(want), why)
+    end
+    local n, ferr = M.fill(plan, { [row.leaf_hole] = {
+        value = value, by = 'asserted',
+        basis = ('ASSERTED `%s` is %s (%s), so %s = %s. The premise is yours; the value is'
+            .. ' derived from it'):format(row.text, tostring(want), why, row.leaf, value),
+    } })
+    if not n then return nil, ferr end
+    plan.asserted = plan.asserted or {}
+    plan.asserted[#plan.asserted + 1] = { id = row.id, line = row.line, text = row.text,
+        want = want and true or false, leaf = row.leaf, value = value,
+        selects = want and 'the TRUE branch' or 'the FALSE branch' }
     return n
 end
 
@@ -1178,6 +1367,29 @@ function M.report(plan)
     add('', nil)
     add('  + supplied or measured · = satisfied by the environment · ? a HOLE that'
         .. ' will error', nil)
+    -- WHAT WAS ASSERTED, and which branch it selected. A spec built on an assertion that does
+    -- not say so reads as characterizing the FUNCTION when it characterized one PATH.
+    for _, a in ipairs(plan.asserted or {}) do
+        add(('  ! %s = %s  ASSERTED %s at L%d — selects %s'):format(a.leaf, a.value,
+            tostring(a.want), a.line, a.selects), { file = plan.file, line = a.line })
+    end
+    -- AND WHAT IS ASSERTABLE BUT UNASSERTED, because an input hole that says only "choose a
+    -- value" hides the fact that a CONDITION is what the value is for.
+    local left = {}
+    for _, c in ipairs(plan.conditions or {}) do
+        local done = false
+        for _, a in ipairs(plan.asserted or {}) do if a.id == c.id then done = true end end
+        if not done then left[#left + 1] = c end
+    end
+    if #left > 0 then
+        add('', nil)
+        add(('  %d forkable condition(s) — assert one to DERIVE the value it hinges on:')
+            :format(#left), nil)
+        for _, c in ipairs(left) do
+            add(('    %-16s %s   (hinges on `%s`)'):format(c.id, c.text, c.leaf),
+                { file = plan.file, line = c.line })
+        end
+    end
     return L, A
 end
 

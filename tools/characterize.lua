@@ -34,7 +34,7 @@ local ch = require 'cartograph.characterize'
 local argv = arg or {}
 local target, subject, write, dir = argv[1], argv[2], false, nil
 local run, force, det = false, false, false
-local fills = {}
+local fills, asserts = {}, {}
 local i = 3
 while i <= #argv do
     local a = argv[i]
@@ -45,6 +45,17 @@ while i <= #argv do
     elseif a == '--run' then run = true
     elseif a == '--force' then force = true
     elseif a == '--determinism' then det = true
+    -- --assert <condition-id>=true|false: declare a PREDICATE and let the value be DERIVED
+    -- from it. What a person knows is the condition, not the number.
+    elseif a == '--assert' then
+        i = i + 1
+        local spec = argv[i] or ''
+        local id, want = spec:match('^(.-)=(%a+)$')
+        if not (id and (want == 'true' or want == 'false')) then
+            print(('characterize: --assert needs <condition-id>=true|false, got %q'):format(spec))
+            os.exit(2)
+        end
+        asserts[#asserts + 1] = { id = id, want = want == 'true' }
     elseif a == '--dir' then i = i + 1; dir = argv[i]
     elseif a == '--fill' then
         i = i + 1
@@ -122,6 +133,19 @@ if next(fills) then
         os.exit(2)
     end
     print(('characterize: %d hole(s) filled'):format(n))
+end
+
+-- ASSERTED CONDITIONS (CART-0282), before the run: each derives the value its condition
+-- hinges on, so the run takes the asserted branch.
+for _, a in ipairs(asserts) do
+    local n, aerr = ch.assert_condition(store, plan, a.id, a.want)
+    if not n then
+        print('characterize: assert refused — ' .. tostring(aerr))
+        os.exit(2)
+    end
+    local last = plan.asserted[#plan.asserted]
+    print(('characterize: ASSERTED %s is %s -> %s = %s (selects %s)'):format(last.text,
+        tostring(last.want), last.leaf, last.value, last.selects))
 end
 
 -- FILL THE ORACLE BY RUNNING (CART-0263). After the static fills, because a probe

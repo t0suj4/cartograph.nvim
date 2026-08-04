@@ -387,6 +387,46 @@ function M.register(H)
     end, { nargs = '*', bang = true,
         desc = 'cartograph: a runnable CHARACTERIZATION SPEC for the focused function (or the one enclosing <file> <line>) — every value we cannot know is a HOLE that ERRORS when run, never a guessed assertion, so an unfilled spec fails rather than reporting false coverage. Holes carry their tier: a measured call-site literal is filled, a same-file definition or a stdlib call is satisfied by loading the module / by the runtime and disclosed as a PREMISE, and the expected value is a hole one RUN fills. ! stages the write (never inside tests/ — a characterization spec is SUPPOSED to fail when behaviour changes and must not gate a commit). The executable counterpart to :CartographNeutrality, whose df-shape witness is a proxy for the same question' })
 
+    -- ── ASSERT A CONDITION and let the value be DERIVED from it (CART-0282) ────
+    cmd('CartographCharacterizeAssert', function (o)
+        local store = live() if not store then return end
+        local ch = require 'cartograph.characterize'
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
+        end
+        local cond, want = o.fargs[1], o.fargs[2]
+        if not (cond and (want == 'true' or want == 'false')) then
+            return vim.notify('cartograph: :CartographCharacterizeAssert <condition:Lnn>'
+                .. ' <true|false> — :CartographCharacterize lists the ids',
+                vim.log.levels.WARN)
+        end
+        -- STAGED ON THE EXISTING PLAN when one is staged for this function, so a second
+        -- assertion composes with the first instead of discarding it.
+        local plan = (store.txn and store.txn.verb == 'characterize'
+            and store.txn.fn_id == id) and store.txn or nil
+        if not plan then
+            local p, why = ch.plan(store, id)
+            if not p then
+                return vim.notify('cartograph: cannot characterize — ' .. tostring(why),
+                    vim.log.levels.WARN)
+            end
+            plan = p
+        end
+        local okA, why = ch.assert_condition(store, plan, cond, want == 'true')
+        if not okA then
+            return vim.notify('cartograph: cannot assert — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        store.set_txn(plan)
+        local a = plan.asserted[#plan.asserted]
+        vim.notify(('cartograph: ASSERTED %s is %s — %s = %s, selects %s'):format(a.text,
+            tostring(a.want), a.leaf, a.value, a.selects), vim.log.levels.INFO)
+        scratch(ch.report(plan))
+    end, { nargs = '*',
+        desc = 'cartograph: declare that a guard CONDITION holds (or does not) and let the value it hinges on be DERIVED from that — an input hole says "choose a value" and offers no way to choose one, while what a person knows is the condition ("the file is non-empty"). The premise is yours and the value is ours: `n > 10` asserted true yields n = 11. The premise is a CLAIM and the report discloses WHICH BRANCH it selected, because a spec that quietly picked a side reads as characterizing the function when it characterized one path. A condition comparing two unknowns is REFUSED by name — there is no solver here, and a value satisfying a half-understood condition looks derived and is a guess. :CartographCharacterize lists the assertable ids' })
+
     -- ── FILL THE ORACLE BY RUNNING — the one verb that EXECUTES (CART-0263) ────
     -- A SEPARATE COMMAND, not a flag, because the consent is different in kind:
     -- everything else in this plugin reads. This runs your code. Naming it in the

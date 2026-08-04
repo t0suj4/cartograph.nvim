@@ -3010,6 +3010,26 @@ so it's caught statically and blocks; a comparison raises, and the refusal names
 rather than the interpreter. The proxy is used exactly where the metatable can see, and the static
 side covers where it cannot.
 
+And then the input hole got an answer. `input:n` says *choose a value* and offers no way to
+choose one — but what a person actually knows isn't the value, it's the **condition**: "the file
+is non-empty", "the mode is fast". So **`:CartographCharacterizeAssert` lets you declare the
+predicate and derives the value from it**: `n > 10` asserted true yields `n = 11`, and the run
+demonstrably takes that branch (`M.pick` asserted true returns 1, asserted false returns 2).
+
+That fills the tier ladder's last empty rung, and the split is worth being precise about. The
+**premise** is a `claim` — someone declared it — while the **observation stays `measured`**,
+because an asserted input is not a fiction: `n = 11` is a real value and the run really returned
+"big", so the *pair* was observed. What the assertion weakens is **generality**, not the
+observation; conflating those would tier every measurement by the reason someone picked its input.
+The report discloses **which branch the assertion selected**, since a spec that quietly picks a
+side reads as characterizing the function when it characterized one path.
+
+There's no solver, and that's measured rather than hoped: an earlier probe found conjunctions in
+real code are tiny, so this is **inversion of a closed set** of comparison shapes — `>`, `>=`, `<`,
+`<=`, `==`, `~=` against a literal, plus bare truthiness and `nil`. A condition comparing two
+unknowns is **refused by name**, because a value satisfying a half-understood condition looks
+derived and is a guess.
+
 Meanwhile `writes` stopped being a refusal at all. A separate process contains anything
 process-*local*, so a module-state write is both safe and reproducible in one — measured, a
 function incrementing a module counter returns `1` on three separate runs, because each run is
