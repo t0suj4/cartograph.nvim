@@ -3098,6 +3098,38 @@ a *first* call. What a process cannot contain is the world, which is why `io` is
 that needed a sandbox. The recorded value carries that premise, because a reader who doesn't
 know it is the first call will misread the number.
 
+And once a run can be recorded, a tool can propose invariants — which is where most such tools go
+wrong, because an invariant that held over five inputs is not a property of a function. So
+`tools/invariants.lua` **attacks its own proposals**: it proposes from one run and then varies every
+axis that run did not, because *an invariant inferred from runs that all took the same branch is
+wrong exactly along the axis the evidence never varied*. The fork already knows which axis that is,
+and the assertion inverter can construct an input that takes the other side — so the counterexample
+is **derived from the function's own control flow**. The invariant proposes, the inverter attacks,
+the run decides, and none of the three steps guesses.
+
+Measured on a two-line function:
+
+```lua
+function M.lookup(k)
+    if k == "known" then return k end
+    return nil
+end
+```
+
+One run with `k = "known"` supports **four** wrong candidates at once — always returns `"known"`,
+always returns a string, never returns nil, returns argument 1 unchanged. Forking the single guard
+refutes **all four**, each row carrying the counterexample that killed it. A propose-only tool ships
+those four as knowledge. Against `function M.always(x) if x > 0 then return "yes" end return "yes" end`
+the same attack refutes nothing, which is the half that makes it discriminating rather than merely
+destructive.
+
+The honesty is in three places. A survivor is `derived` with a **support count**, never a fact. **No
+opinion is not support** — a template that cannot read a value abstains, because "checked and true"
+and "could not check" are different rows. And an invariant that survived because we **could not
+attack it** is not one that nothing could refute, so the report states what it could not vary and
+why: with no forkable condition it says outright that every row rests on one input set, which is the
+weakest evidence the tool can produce.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit
