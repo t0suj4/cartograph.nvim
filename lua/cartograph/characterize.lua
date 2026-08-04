@@ -255,6 +255,14 @@ local SANDBOX_SRC = {
     'end',
 }
 
+--- THE TIER OF AN INJECTED FAKE. `claim`, uniformly and deliberately: a fake is something we
+--- DECLARED, exactly like an annotation, and CART-0240 established that a declaration is the
+--- weakest evidence there is. A future fill could be stronger — a value RECORDED from a real
+--- unsandboxed run would be `measured`, and a profile-supplied one is still a `claim` — which
+--- is the whole point of treating the environment as a hole: the fill has a tier, and better
+--- sources can replace ours without any of this machinery changing.
+M.SANDBOX_TIER = 'claim'
+
 --- The injectable roster: name → the FAKE's return, as Lua source. Every entry is a
 --- DECLARED answer rather than a plausible one, and each is chosen to be the least
 --- surprising failure: an unopened file is `nil, reason`, which is what real `io.open`
@@ -490,6 +498,26 @@ M.BY_TIER = { run = 'measured', spec = 'claim', observed = 'measured',
     agent = 'agent-supplied' }
 M.ORACLE_CHANNELS = { run = true, spec = true }
 
+--- THE LADDER, so a tier can be COMPARED rather than only printed. Strongest first.
+M.TIER_RANK = { measured = 1, derived = 2, claim = 3, ['agent-supplied'] = 4 }
+
+--- THE WEAKEST LINK (user, 2026-08-04: "why not treat the environment as a hole to fill?").
+--- An observation made THROUGH a supplied premise is only as strong as that premise: a value
+--- observed by running the subject against our DECLARED fake `os.getenv` is not `measured`
+--- evidence about anything, it is a `claim` — and it shipped as `measured` with the sandbox
+--- mentioned only in prose, which is the tier field saying one thing and the sentence beside
+--- it saying another. THE CHANNEL RECORDS HOW, THE TIER RECORDS HOW STRONG, and they are
+--- separate fields for exactly this reason: `by` stays 'run' because it WAS a run.
+function M.weakest(...)
+    local worst, rank = nil, 0
+    for i = 1, select('#', ...) do
+        local t = (select(i, ...))
+        local r = t and M.TIER_RANK[t]
+        if r and r > rank then worst, rank = t, r end
+    end
+    return worst
+end
+
 function M.fill(plan, fills)
     if not (plan and type(fills) == 'table') then return nil, 'no fills' end
     local byid = {}
@@ -527,7 +555,9 @@ function M.fill(plan, fills)
                 .. ' refusing to overwrite evidence with a supplied value'):format(id)
         end
         h.basis, h.by = f.basis, by
-        h.filled_tier = M.BY_TIER[by]
+        -- an explicit tier WEAKENS (never strengthens): a caller may say "this run went
+        -- through a claim-tier stub", and may not promote a claim to a measurement
+        h.filled_tier = M.weakest(M.BY_TIER[by], f.tier)
         if h.kind == 'oracle' then
             -- THE ORACLE IS A TUPLE, always, because a function returning `nil, err` is
             -- characterized on half its behaviour otherwise. `n` is the arity and it is

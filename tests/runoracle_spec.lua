@@ -377,7 +377,10 @@ test('sandbox: a function returning NOTHING is characterized by its CALL LOG', f
     ok(eff, 'but there IS an effects hole — its behaviour is what it DOES')
     assert(ro.fill_oracle(store, plan))
     eq('run', eff.by)
-    eq('measured', eff.filled_tier)
+    -- CLAIM, not measured: the log was observed THROUGH our declared fake `print`, so it is
+    -- only as strong as that fake (see the weakest-link test below). The channel still says
+    -- `run`, because it was one.
+    eq('claim', eff.filled_tier)
     ok(eff.value:find('%[log%] hello'), 'the log carries the call: ' .. tostring(eff.value))
     eq(0, plan.unfilled, 'and nothing is left open')
     -- and the spec REPRODUCES it, which is the only real check: the spec must install the
@@ -434,4 +437,46 @@ test('sandbox: it RESTORES what it replaced, so it cannot outlive its subject', 
     eq(before, print, 'the host process keeps its own print after the spec has run')
     eq(before, _G.print, 'and the global is the same one')
     cleanup()
+end)
+
+test('the tier is the WEAKEST LINK: a sandboxed run is a claim, not a measurement',
+    function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    -- USER, 2026-08-04: "why not treat the environment as a hole to fill?" — and the first
+    -- thing that reframe exposed was a shipped defect. A value observed by running the
+    -- subject against our DECLARED fake `os.getenv` was tiered `measured`, the STRONGEST
+    -- tier, with the sandbox mentioned only in prose. Nothing about the world was measured:
+    -- "unset" is entirely a product of our own stub. An observation made THROUGH a supplied
+    -- premise is only as strong as that premise.
+    local plan = planned('M.env',
+        { ['input:k'] = { value = '"HOME"', basis = 'a real variable', by = 'agent' } })
+    assert(ro.fill_oracle(store, plan))
+    local o = hole(plan, 'oracle')
+    eq('claim', o.filled_tier, 'a sandboxed value is a CLAIM')
+    eq('run', o.by, 'while the CHANNEL still records that it WAS a run — how and how-strong'
+        .. ' are separate fields, which is why this was expressible at all')
+    ok(o.basis:find('only as strong as that premise', 1, true), tostring(o.basis))
+    cleanup()
+
+    -- and an UNSANDBOXED run is unaffected: nothing was supplied, so nothing weakens it
+    proj()
+    local p2 = planned('M.add', { ['input:a'] = num(3), ['input:b'] = num(4) })
+    assert(ro.fill_oracle(store, p2))
+    eq('measured', hole(p2, 'oracle').filled_tier, 'a real run stays measured')
+    cleanup()
+end)
+
+test('characterize.weakest: the ladder compares, and a fill can only WEAKEN', function ()
+    eq('claim', ch.weakest('measured', 'claim'))
+    eq('agent-supplied', ch.weakest('claim', 'agent-supplied'))
+    eq('measured', ch.weakest('measured', nil), 'nil supplies no constraint')
+    eq('measured', ch.weakest('measured'))
+    -- A FILL CANNOT PROMOTE ITSELF. Allowing an explicit tier to strengthen would let a
+    -- caller launder a claim into a measurement, which is the fabrication one field over.
+    local p = { holes = { { id = 'input:x', kind = 'input' } } }
+    assert(ch.fill(p, { ['input:x'] = { value = '1', basis = 'b', by = 'agent',
+        tier = 'measured' } }))
+    eq('agent-supplied', p.holes[1].filled_tier,
+        'an agent-supplied value cannot claim to be measured')
 end)

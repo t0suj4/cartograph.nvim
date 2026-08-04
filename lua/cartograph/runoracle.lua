@@ -457,13 +457,23 @@ function M.fill_oracle(store, plan, opts)
     -- its premise would be the promise this module makes and breaks in the same breath.
     local lp = M.LABEL_PREMISE[(res.purity or ''):gsub(' .*$', '')]
     if lp then basis = basis .. '; ' .. lp end
+    -- THE ENVIRONMENT IS A HOLE, SO ITS TIER TRAVELS (user steer). A run THROUGH declared
+    -- fakes is not `measured` evidence about the world — it is only as strong as the fakes,
+    -- and shipping it as measured put the strongest tier on a value our own stub produced.
+    local envtier = plan.sandbox and ch.SANDBOX_TIER or nil
+    if envtier then
+        basis = basis .. ('; the tier is %s, not measured: every value here came through'
+            .. ' DECLARED fakes, and an observation made through a supplied premise is only'
+            .. ' as strong as that premise'):format(envtier)
+    end
     local fills = {}
     if oracle then
-        fills[oracle.id] = { value = res.source, n = res.n, by = 'run', basis = basis }
+        fills[oracle.id] = { value = res.source, n = res.n, by = 'run', basis = basis,
+            tier = envtier }
     end
     if eff then
         fills[eff.id] = { value = ('%q'):format(res.calls or ''), by = 'run',
-            basis = basis }
+            basis = basis, tier = envtier }
     end
     return ch.fill(plan, fills)
 end
