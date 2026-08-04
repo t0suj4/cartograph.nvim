@@ -73,6 +73,7 @@ local txn = require 'cartograph.txn'
 local at = require 'cartograph.at'
 local pm = require 'cartograph.spec.profile'
 local holes = require 'cartograph.holes'
+local ch = require 'cartograph.characterize'
 -- THE BASE RUNTIME'S SIGNATURES (CART-0266), loaded once. nil when no artifact
 -- ships for the language, and the report SAYS so — a stub gap and a missing
 -- signature SOURCE must not render the same way.
@@ -100,17 +101,35 @@ local function sweep()
         local pat = ts.annot_tag and ts.annot_tag(rel)
         local pats = ts.attach_pats and ts.attach_pats(rel)
         for _, n in ipairs(nodes) do
-            local ctx = holes.ctx_for(store, n, lines, pat, pats)
-            local okh, H, why = pcall(holes.of, store, n, ctx)
+            -- THE CENSUS CONSUMES THE EMITTER'S PLAN (CART-0284). It used to call holes.of
+            -- directly, which was fine until the EMITTER learned four more hole kinds — reach,
+            -- load, env, inspect — and the census kept counting the old four. Its headline
+            -- silently stopped describing what an emittable function needs: 18.0% here against
+            -- the emitter's 3.7% on the same corpus.
+            --
+            -- `holes.of` was extracted so the two could not disagree, and they diverged anyway,
+            -- because ONE SHARED FUNCTION IS NOT PARITY IF NEW WORK GOES AROUND IT. So the fix
+            -- is not another shared helper to maintain — it is to make the census a CONSUMER of
+            -- the single producer. characterize.plan calls holes.of and adds what only it can
+            -- see; the census now measures exactly the hole set the emitter faces, and a fifth
+            -- hole kind cannot desynchronise them because there is nothing left to synchronise.
+            local okh, plan, why = pcall(ch.plan, store, n.id)
+            local H = okh and plan and plan.holes or nil
             if not okh then
                 skipped[#skipped + 1] = 'error'
             elseif not H then
-                skipped[#skipped + 1] = why or '?'
+                skipped[#skipped + 1] = tostring(plan == nil and why or 'no plan')
             else
-                local frontier, blocking = 0, 0
+                local frontier, blocking, novalue = 0, 0, 0
                 for _, h in ipairs(H) do
                     h.fn, h.file = n.name or '?', rel
                     rows[#rows + 1] = h
+                    -- RUNNABLE is a different question from EMITTABLE and needs its own count:
+                    -- a TIER is not a VALUE, so an `@param number` unblocks a hole while giving
+                    -- us nothing to call the function with. Two questions, two numbers, and they
+                    -- must never share a word again.
+                    if h.kind ~= 'oracle' and h.kind ~= 'effects'
+                        and not (h.value or h.satisfied_by) then novalue = novalue + 1 end
                     if not h.tier then
                         frontier = frontier + 1
                         -- What BLOCKS emission is narrower than "frontier":
@@ -128,7 +147,7 @@ local function sweep()
                     end
                 end
                 fns[#fns + 1] = { fn = n.name or '?', file = rel,
-                    n = #H, frontier = frontier, blocking = blocking }
+                    n = #H, frontier = frontier, blocking = blocking, novalue = novalue }
             end
         end
         files[rel] = nil
@@ -170,6 +189,13 @@ local function rotate(holes, axis)
     return g, ord
 end
 
+-- THE FIXTURE'S FUNCTIONS ARE EXPORTED, and that is not cosmetic (CART-0284). They were all
+-- `local function`, so once the census consumes the emitter's plan every one of them carries a
+-- REACH hole — nothing outside the file can call a file-local function, so no spec can either —
+-- and that hole would mask every assertion below it about inputs, oracles and dependencies. Worth
+-- saying plainly: while the census computed its own hole set it had never measured a function a
+-- spec could actually CALL, which is a large part of why its headline read so much higher than the
+-- emitter's.
 local FIXTURE = table.concat({
     'local M = {}',
     'local LIMIT = 10',
@@ -178,36 +204,36 @@ local FIXTURE = table.concat({
     '---@param a number',
     '---@param b number',
     '---@return number',
-    'local function add(a, b)',
+    'function M.add(a, b)',
     '    return a + b',
     'end',
     '',
     -- fully templatable: params observed as literals below, returns nothing
-    'local function record(name, count)',
+    'function M.record(name, count)',
     '    M.log = name',
     '    M.n = count',
     'end',
     '',
     -- a frontier oracle + a frontier input (no literal, no annotation)
-    'local function murky(cb)',
+    'function M.murky(cb)',
     '    return cb()',
     'end',
     '',
     -- a fixture hole: reads LIMIT (same-file → derived) and UNKNOWN_G (frontier)
-    'local function usesfree(x)',
+    'function M.usesfree(x)',
     '    if x > LIMIT then return UNKNOWN_G end',
     '    return x',
     'end',
     '',
     -- INJECTION: calls an absent dependency and is otherwise clean → the dependency
     -- hole must be SOFT (non-blocking), so the fn stays emittable
-    'local function injects(v)',
+    'function M.injects(v)',
     '    return AbsentLib.transform(v)',
     'end',
     '',
     -- HARD: same absent call, but it also MUTATES ITS ARGUMENT, so injection cannot
     -- isolate it and the dependency hole must BLOCK
-    'local function mutates(rec)',
+    'function M.mutates(rec)',
     '    rec.seen = AbsentLib.stamp()',
     '    return rec',
     'end',
@@ -233,7 +259,11 @@ local function selftest()
     for _, f in ipairs(fns) do blk[f.fn] = f.blocking end
     local fails = {}
     local function chk(c, m) if not c then fails[#fails + 1] = m end end
-    local function tier(fn, k) return by[fn] and by[fn][k] end
+    -- the fixture EXPORTS its functions (see the note on FIXTURE), so a node's name is
+    -- `M.add`, not `add`. One prefix here rather than the same edit on twenty lookups.
+    local function tier(fn, k) return by['M.' .. fn] and by['M.' .. fn][k] end
+    local function blkof(fn) return blk['M.' .. fn] end
+    local function hardof(fn) return hard['M.' .. fn] end
 
     -- `add` is annotated but never called with literals → params are CLAIM tier,
     -- and its @return makes the oracle a CLAIM too (shape, not value)
@@ -261,15 +291,15 @@ local function selftest()
     end
     -- INJECTION: an absent dependency in an otherwise-clean fn is a SOFT hole, so the
     -- function stays EMITTABLE — this is the whole point of the injection frame.
-    chk(hard['injects'] == false, 'injects: the absent dep must be SOFT (injectable)')
-    chk(blk['injects'] == 0,
+    chk(hardof('injects') == false, 'injects: the absent dep must be SOFT (injectable)')
+    chk(blkof('injects') == 0,
         'injects must be EMITTABLE despite the absent dependency, got blocking='
-        .. tostring(blk['injects']))
+        .. tostring(blkof('injects')))
     -- …but the same absent call in a fn that MUTATES ITS ARGUMENT is HARD and blocks:
     -- injection cannot isolate a function that writes through its own parameter.
-    chk(hard['mutates'] == true, 'mutates: the absent dep must be HARD (arg mutation)')
-    chk((blk['mutates'] or 0) > 0, 'mutates must NOT be emittable, got blocking='
-        .. tostring(blk['mutates']))
+    chk(hardof('mutates') == true, 'mutates: the absent dep must be HARD (arg mutation)')
+    chk((blkof('mutates') or 0) > 0, 'mutates must NOT be emittable, got blocking='
+        .. tostring(blkof('mutates')))
     vim.fn.delete(root, 'rf')
     return fails
 end
@@ -313,19 +343,23 @@ print(('holecensus %s — %s'):format(target, root))
 store.ingest(ts.extract(root))
 local holes, fns, skipped = sweep()
 
-local clean, emittable = 0, 0
+local clean, emittable, runnable = 0, 0, 0
 local hist = {}
 for _, f in ipairs(fns) do
     if f.frontier == 0 then clean = clean + 1 end
     if f.blocking == 0 then emittable = emittable + 1 end
+    if (f.novalue or 0) == 0 then runnable = runnable + 1 end
     hist[f.blocking] = (hist[f.blocking] or 0) + 1
 end
 print(('  %d function(s) censused, %d skipped, %d hole(s)')
     :format(#fns, #skipped, #holes))
-print(('  ★ EMITTABLE (no BLOCKING hole — every input choosable, every fixture'
-    .. ' buildable; one RUN fills the oracle): %d / %d = %.1f%%')
+-- TWO NUMBERS, NEVER ONE WORD (CART-0284). EMITTABLE asks "does anything at all speak to every
+-- hole"; RUNNABLE asks "can we actually call it". A tier is not a value, and the gap between them
+-- was invisible while one word carried both.
+print(('  ★ EMITTABLE (no BLOCKING hole — something speaks to every hole): %d / %d = %.1f%%')
     :format(emittable, #fns, #fns > 0 and 100 * emittable / #fns or 0))
-print(('    of those, ZERO holes of any kind at all: %d'):format(clean))
+print(('  ★ RUNNABLE  (every hole carries a VALUE — we could actually call it): %d / %d = %.1f%%')
+    :format(runnable, #fns, #fns > 0 and 100 * runnable / #fns or 0))
 local hk = {}
 for k in pairs(hist) do hk[#hk + 1] = k end
 table.sort(hk)

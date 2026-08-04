@@ -2733,8 +2733,11 @@ since docblocks demonstrably lie — that is why `annotation-mismatch` exists). 
 the edge *is* the frontier, rendered as an unlinked hole rather than as silence. `--by`
 rotates the same structure: by hole kind, by tier, or **by owning rule**, which reads as a
 work-list of our own analyzers. What it measured: emittability is **monotone in annotation
-density** — 51.2% of `nio`'s functions carry no blocking hole versus 1.8% of `desynced`'s,
-tracking 1.06 versus 0.003 annotation claims per function. The oracle hole is irreducible
+density** — 51.2% of `nio`'s functions carried no blocking hole versus 1.8% of `desynced`'s,
+tracking 1.06 versus 0.003 annotation claims per function. (Those figures counted the hole kinds
+the census computed at the time. It now consumes the *emitter's* hole set — which also knows about
+reachability, the module load and the environment — and nio reads **2.8% emittable / 0.5%
+runnable**. The trend held; the level was measuring a smaller question than the word implied.) The oracle hole is irreducible
 by construction and is *not* counted against emittability: filling it with one run is the
 design, not a gap. An **absent `require` is not fatal** either — it becomes an
 *injection point*, since short of globals and mutation we know what a body does with what
@@ -2763,12 +2766,11 @@ runtime the profile measures. The cross-check is what *found* them: the meta gat
 behind an `@version` tag, a second mechanism beside the `#if` preprocessor.
 
 Result on `self`: frontier holes **12194 → 10520**, the census's emittable count 17.4% → 18.0%, and
-functions with *zero* holes of any kind 89 → 124. (That emittability figure counts the hole kinds
-the *census* knows about. The emitter later learned four more — reach, load, env, inspect — and
-against its full hole set the same corpus measures **3.7% emittable and 3.2% runnable**. A tier is
-not a value: an `@param number` makes a hole non-blocking and still gives you nothing to call the
-function with. The answer-key loop caught the divergence; the three numbers are tracked separately
-rather than sharing a word.) On `desynced` the frontier falls 251 and
+functions with *zero* holes of any kind 89 → 124. (That emittability figure counted the hole kinds
+the census computed at the time — it now consumes the emitter's, which knows about reachability, the
+module load and the environment, and the same corpus reads **3.7% emittable / 3.2% runnable**. Both
+numbers are printed, because *a tier is not a value*: an `@param number` makes a hole non-blocking
+and still gives you nothing to call the function with. The answer-key loop caught the divergence.) On `desynced` the frontier falls 251 and
 emittability does not move at all — its absent callees are a game engine, not the stdlib —
 which is the exact inverse of the injection frame's distribution. Two complementary levers.
 
