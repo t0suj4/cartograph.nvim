@@ -427,6 +427,34 @@ function M.register(H)
     end, { nargs = '*',
         desc = 'cartograph: declare that a guard CONDITION holds (or does not) and let the value it hinges on be DERIVED from that — an input hole says "choose a value" and offers no way to choose one, while what a person knows is the condition ("the file is non-empty"). The premise is yours and the value is ours: `n > 10` asserted true yields n = 11. The premise is a CLAIM and the report discloses WHICH BRANCH it selected, because a spec that quietly picked a side reads as characterizing the function when it characterized one path. A condition comparing two unknowns is REFUSED by name — there is no solver here, and a value satisfying a half-understood condition looks derived and is a guess. :CartographCharacterize lists the assertable ids' })
 
+    -- ── FORK: both states of a condition, and which conditions MATTER (CART-0283) ──
+    cmd('CartographCharacterizeFork', function (o)
+        local store = live() if not store then return end
+        local fork = require 'cartograph.fork'
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
+        end
+        -- WITH a condition: fork it and show both states. WITHOUT: SCAN every condition, which
+        -- is the reducer — 2n runs instead of 2^n, and it says which axes are worth combining.
+        if o.fargs[1] then
+            local f, why = fork.at(store, id, o.fargs[1], { force = o.bang })
+            if not f then
+                return vim.notify('cartograph: cannot fork — ' .. tostring(why),
+                    vim.log.levels.WARN)
+            end
+            return scratch(fork.report(f))
+        end
+        local s, why = fork.scan(store, id, { force = o.bang })
+        if not s then
+            return vim.notify('cartograph: cannot scan — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        scratch(fork.scan_report(s))
+    end, { nargs = '*', bang = true,
+        desc = 'cartograph: FORK a condition — run the focused function with the condition asserted BOTH ways and show both states, because a condition on an unknown has no right answer to pick: it has two behaviours, and describing one is describing half. Both states are CLAIM tier and neither is "the behaviour"; what DIFFERS between them is the deliverable. If the two states are OBSERVATIONALLY IDENTICAL the condition decides nothing — a guard that guards nothing, hedged to these inputs. With NO argument it SCANS every forkable condition independently (2n runs, not 2^n) and reports which are LIVE: measured on this repo, over half of all functions have nothing to fork and ~90% have four conditions or fewer, so the explosion is real but rare and the scan is what narrows the rest. The cap on how many it scans is stated, never silent. ! forces past the effect-analysis refusal' })
+
     -- ── FILL THE ORACLE BY RUNNING — the one verb that EXECUTES (CART-0263) ────
     -- A SEPARATE COMMAND, not a flag, because the consent is different in kind:
     -- everything else in this plugin reads. This runs your code. Naming it in the

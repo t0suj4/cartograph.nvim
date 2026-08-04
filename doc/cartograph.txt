@@ -506,6 +506,35 @@ verb refuses is as load-bearing as what it writes — see
                               half-understood condition looks derived and
                               is a guess. |:CartographCharacterize| lists
                               the assertable conditions with their ids
+  :CartographCharacterizeFork[!] [{condition}]
+                              run the focused function with a condition
+                              asserted BOTH ways and show both states. A
+                              condition on an unknown has no right answer
+                              to pick — it has two behaviours, and
+                              describing one is describing half — so this
+                              does not resolve it, it REPRESENTS THE SET.
+                              Both states are CLAIM tier and neither is
+                              "the behaviour"; WHAT DIFFERS between them is
+                              the deliverable, and `f.size > 0` rendered as
+                              "these lines run / these lines run" says what
+                              that condition DOES better than prose could.
+                              If the two states are OBSERVATIONALLY
+                              IDENTICAL — same return, same effects — the
+                              condition decides nothing: a guard that
+                              guards nothing, which is BEHAVIOURAL where
+                              |:CartographOptimize|'s redundancy check is
+                              structural. Hedged to these inputs, always.
+                              With NO argument it SCANS every forkable
+                              condition INDEPENDENTLY (2n runs, not 2^n)
+                              and reports which are LIVE — the reducer,
+                              since only the live ones are worth
+                              combining. Measured on this repo: over half
+                              of all functions have nothing to fork and
+                              ~90% have four conditions or fewer, so the
+                              explosion is real but rare. How many it
+                              scanned, and how many it did not, are both
+                              STATED — a silent cap reads as "we explored
+                              everything"
   :CartographCharacterizeRun[!] [{file} {line}]
                               fill that spec's ORACLE hole by RUNNING the
                               function — the ONE verb here that executes

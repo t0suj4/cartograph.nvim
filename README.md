@@ -3030,6 +3030,35 @@ real code are tiny, so this is **inversion of a closed set** of comparison shape
 unknowns is **refused by name**, because a value satisfying a half-understood condition looks
 derived and is a guess.
 
+And then the choice went away entirely. A condition on an unknown has no right answer to pick —
+it has **two behaviours**, and describing one is describing half. So `:CartographCharacterizeFork`
+runs it **both ways** and shows both states: neither is presented as *the* behaviour, both are
+`claim` tier, and **what differs between them is the deliverable**. Rendering `f.size > 0` as
+"these lines run / these lines run" says what that condition *does* better than any prose we could
+write.
+
+Forking also buys a lint nobody asked for. If the two states are **observationally identical** —
+same return, same effect log — the condition decides nothing: a guard that guards nothing. That's
+*behavioural* where the structural redundancy check can't reach, and it's hedged in the same
+breath, because it says nothing about paths the fork didn't explore.
+
+The combinatorial explosion is real but **rare**, which I measured before building anything:
+
+| | 0 forks | ≤1 | ≤2 | ≤4 | worst |
+|---|---|---|---|---|---|
+| self (3403 fns) | 55.0% | 73.3% | 83.3% | **91.9%** | `M.extract` 45 (3.5×10¹³ states) |
+| nio (217) | 83.4% | 92.2% | 96.3% | 99.1% | 7 |
+| desynced (1900) | 58.2% | 75.3% | 83.1% | 90.5% | `AddStats` 89 |
+
+Over half of all functions have nothing to fork, and ~90% sit at four conditions or fewer — 16
+states, trivially enumerable. **So for most of the corpus the smart thing is to be dumb**:
+enumerate to a stated bound, no heuristic and no search. For the remaining ~10%, the answer isn't
+a cleverer search — it's the **scan**: fork every condition *independently*, 2n runs instead of
+2ⁿ, and keep only the ones whose states differ. That turns n into k live axes, it's the only
+reduction here that *measures* rather than assumes, and the lint and the reducer are the same
+pass — a condition that changes nothing is both a finding and one fewer axis. What it scanned and
+what it skipped are both stated, because a silent cap reads as "we explored everything".
+
 Meanwhile `writes` stopped being a refusal at all. A separate process contains anything
 process-*local*, so a module-state write is both safe and reproducible in one — measured, a
 function incrementing a module counter returns `1` on three separate runs, because each run is
