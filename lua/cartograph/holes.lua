@@ -233,6 +233,10 @@ function M.of(store, node, ctx)
                 H[#H + 1] = { kind = 'dependency', name = nm, hard = hard,
                     tier = (ssig or sig) and 'claim' or nil,
                     rule = ssig and 'stdlib' or 'profile',
+                    -- the OWNER SET when the name is ambiguous, carried as DATA rather
+                    -- than only in the prose, so a consumer can act on it (the emitter
+                    -- needs to know the runtime holds every candidate)
+                    owners = (how == 'ambiguous') and owners or nil,
                     stub = ssig and ssig.sig or nil,
                     hedged = (how == 'unique') or nil,
                     why = why }

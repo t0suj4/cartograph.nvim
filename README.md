@@ -2927,6 +2927,47 @@ shows up as a diff in every review and trains its reader to stop reading it. The
 idempotent to the byte: identical content journals nothing, because a journal entry per no-op
 would fill the undo stack with steps that undo nothing.
 
+And then the refusal turned into an **injection**. Refusing to run an `io` subject was the
+safe answer and a poor one: it excluded exactly the population a refactor most needs a
+witness for. So instead of refusing, cartograph injects **its own functions** — the same
+frame that turns an absent `require` into an injection point, pointed at the *dangerous*
+case instead of the *absent* one. A fake `io.open` records the call and touches nothing;
+`os.execute("rm -rf /nope")` is recorded, never performed; and the containment claim is
+checked against the filesystem, not against the roster.
+
+The bigger prize isn't running io functions. It's functions that **return nothing**, whose
+behaviour *is* their effects: those used to emit "no oracle … which this spec does not
+observe" — true, and silence where a hole belongs. Now the **call log is the oracle**, and a
+population that was entirely uncharacterizable is characterizable. `M.log(msg)` is
+characterized as `print("[log] hello")`.
+
+Three things shape the design. The roster is **derived from the effect vocabulary**, not
+hand-listed: a channel we have no fake for is refused *by name*, because a sandbox with a
+hole in it looks contained and is not — "refuse io" became "refuse *unknown* io". A
+**nondeterministic** channel is injected too, which only surfaced by driving it: the
+vocabulary calls `os.getenv` pure-but-nondet, so an io-only filter passed it through and the
+run recorded this machine's real `$HOME` — a value that fails on anyone else's machine, and
+one the purity *label* cannot see either. And **a fake is a supplied premise, not the truth**:
+with a fake that fails, `io.open(p) ~= nil` records `false`; with one that succeeds, `true`.
+Both are facts about our stubs, so the basis says the value was measured *under the sandbox*
+and the emitted spec **reinstalls the same sandbox** — a spec running against a different
+world could not reproduce the value it was handed.
+
+Two defects fell out of driving it, and both are about injecting into a namespace you also
+use. `print` is io in the vocabulary, so the sandbox faked it — and the *probe reports through
+print*, so it silenced itself and the run failed with "produced no value". Our own output
+handle is now captured before any injection can land. And a spec loaded **in-process** left
+the fake installed, so the host's output went silent after the first spec ran; the sandbox now
+restores every global it replaced, before the assertions, so even a *failing* spec leaves the
+process clean. A sandbox that outlives its subject has escaped.
+
+Meanwhile `writes` stopped being a refusal at all. A separate process contains anything
+process-*local*, so a module-state write is both safe and reproducible in one — measured, a
+function incrementing a module counter returns `1` on three separate runs, because each run is
+a *first* call. What a process cannot contain is the world, which is why `io` is the label
+that needed a sandbox. The recorded value carries that premise, because a reader who doesn't
+know it is the first call will misread the number.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit

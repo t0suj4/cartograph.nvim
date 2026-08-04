@@ -24,6 +24,7 @@ local SRC = table.concat({
     'local COUNT = 0',                                          -- 8
     'function M.bump() COUNT = COUNT + 1 return COUNT end',     -- 9
     'function M.opens(p) local f = io.open(p, "r") return f ~= nil end', -- 10
+    'function M.editor() return vim.fn.tempname() end',         -- 11
     'return M',                                                 -- 11
 }, '\n') .. '\n'
 
@@ -91,18 +92,43 @@ test('runoracle: OUR OWN EFFECT ANALYSIS decides whether we may run it', functio
     local okp, label = ro.runnable(store, planned('M.add'))
     eq(true, okp, 'a pure function is runnable (' .. tostring(label) .. ')')
 
-    -- writes module state: REFUSED, because filling an oracle must not mutate anything
-    local okw, whyw = ro.runnable(store, planned('M.bump'))
-    eq(nil, okw, 'a module-state writer is refused')
-    ok(whyw:find('writes', 1, true), 'and says which label: ' .. tostring(whyw))
+    -- THE LINE IS CONTAINMENT, NOT PURITY (CART-0277). A separate process contains
+    -- anything process-LOCAL, so a module-state write is safe AND reproducible in it —
+    -- measured, `M.bump` returns 1 on three separate runs because each is a FIRST call.
+    -- So it is allowed, and the recorded basis carries that premise: allowing a label
+    -- without emitting its premise would be a promise made and broken in one breath.
+    local okw, labelw = ro.runnable(store, planned('M.bump'))
+    eq(true, okw, 'a module-state writer is runnable in a fresh process (' ..
+        tostring(labelw) .. ')')
+    local wplan = planned('M.bump')
+    assert(ro.fill_oracle(store, wplan))
+    local worac
+    for _, h in ipairs(wplan.holes) do if h.kind == 'oracle' then worac = h end end
+    eq('1', worac.raw_value, 'and the value is the FIRST call: ' .. tostring(worac.raw_value))
+    ok(worac.basis:find('FIRST call', 1, true),
+        'with the premise disclosed: ' .. tostring(worac.basis))
 
-    -- touches the world: REFUSED, because running it would actually DO the io
-    local oki, whyi = ro.runnable(store, planned('M.opens'))
-    eq(nil, oki, 'an io function is refused: ' .. tostring(whyi))
+    -- touches the world with a channel we CANNOT fake: still refused, because running it
+    -- would actually do the io. `M.opens` calls io.open, which IS injectable — so what is
+    -- pinned here is that the label alone no longer decides; the CHANNELS do.
+    local oplan = planned('M.opens')
+    ok(oplan.sandbox and oplan.sandbox['io.open'],
+        'io.open is derived as an injectable channel')
 
-    -- and the override is EXPLICIT, never a fallback
-    eq(true, (ro.runnable(store, planned('M.bump'), { force = true })))
-    local _, flabel = ro.runnable(store, planned('M.bump'), { force = true })
+    -- AN io CHANNEL WE CANNOT FAKE IS STILL REFUSED, which is the honest narrowing:
+    -- "refuse io" became "refuse UNKNOWN io". `vim.fn.*` is world in the effect vocabulary
+    -- and is not in the injectable roster, so the sandbox would have a hole in it — and a
+    -- sandbox with a hole LOOKS contained and is not.
+    local eplan = planned('M.editor')
+    local oke, whye = ro.runnable(store, eplan)
+    eq(nil, oke, 'an un-injectable channel is refused')
+    ok(whye:find('cannot inject', 1, true) or whye:find('io', 1, true),
+        'and names it: ' .. tostring(whye))
+
+    -- and the override is EXPLICIT, never a fallback, and LABELLED so a spec built on it
+    -- discloses that we ran something our own analysis had flagged
+    local okf, flabel = ro.runnable(store, planned('M.editor'), { force = true })
+    eq(true, okf)
     ok(flabel:find('FORCED', 1, true), 'a forced run is LABELLED: ' .. tostring(flabel))
     cleanup()
 end)
@@ -166,11 +192,14 @@ end)
 test('runoracle: a function returning NOTHING has no oracle to fill', function ()
     if not ready() then skip('no lua parser') end
     proj()
+    -- M.void returns nothing AND touches no channel we can inject, so there is genuinely
+    -- nothing to observe — and the reason says WHICH of the two is missing rather than
+    -- shrugging at the whole question.
     local plan = planned('M.void')
     local n, why = ro.fill_oracle(store, plan)
     eq(nil, n, 'there is nothing to observe')
-    ok(why:find('EFFECTS', 1, true),
-        'and the reason names what its behaviour IS: ' .. tostring(why))
+    ok(why:find('touches no channel we can inject', 1, true),
+        'and the reason names what is missing: ' .. tostring(why))
     cleanup()
 end)
 
@@ -286,5 +315,123 @@ test('budget: a subject that floods output is bounded too', function ()
     ok(why:find('OUTPUT budget', 1, true), tostring(why))
     -- and it is honest about WHAT it bounds: memory, not time
     ok(why:find('memory is what this bounds', 1, true), tostring(why))
+    cleanup()
+end)
+
+-- ── THE SANDBOX (CART-0277, user: "can't we just inject our own functions?") ──
+-- The io refusal was safe and poor: it excluded exactly the population a refactor most
+-- needs a witness for. So inject instead — and the containment claims are proved by
+-- CHECKING THE WORLD, not by reading the roster.
+
+local SSRC = table.concat({
+    'local M = {}',
+    'function M.save(p, s) local f = io.open(p, "w") if f then f:write(s) f:close() end return p end',
+    'function M.log(msg) print("[log] " .. msg) end',
+    'function M.shell(c) return os.execute(c) end',
+    'function M.env(k) return os.getenv(k) or "unset" end',
+    'return M',
+}, '\n') .. '\n'
+
+local function sproj()
+    root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(SSRC); fd:close()
+    local data = ts.extract(root); data.root = data.root or root
+    store.ingest(data)
+end
+local function hole(plan, kind)
+    for _, h in ipairs(plan.holes) do if h.kind == kind then return h end end
+end
+
+test('sandbox: the effect is RECORDED and the world is not touched', function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    local victim = '/tmp/cartograph-sandbox-must-not-exist'
+    vim.fn.delete(victim)
+    local plan = planned('M.save', {
+        ['input:p'] = { value = ('%q'):format(victim), basis = 'a path', by = 'agent' },
+        ['input:s'] = { value = '"hi"', basis = 'content', by = 'agent' } })
+    ok(plan.sandbox and plan.sandbox['io.open'],
+        'io.open is derived from the effect vocabulary as an injectable channel')
+    assert(ro.fill_oracle(store, plan))
+    -- THE CONTAINMENT PROOF is the filesystem, not the roster
+    eq(0, vim.fn.filereadable(victim), 'the file was NOT created')
+    local eff = hole(plan, 'effects')
+    ok(eff and eff.value:find('io.open', 1, true),
+        'and the call is RECORDED: ' .. tostring(eff and eff.value))
+    ok(eff.value:find(victim, 1, true), 'with its arguments')
+    -- A FAKE IS A SUPPLIED PREMISE: the basis has to say the value came from our stubs,
+    -- or an observation of a fabricated world reads as an observation of the real one.
+    ok(eff.basis:find('SANDBOX', 1, true), 'disclosed: ' .. tostring(eff.basis))
+    cleanup()
+end)
+
+test('sandbox: a function returning NOTHING is characterized by its CALL LOG', function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    -- THE REAL PRIZE. This population used to emit "no oracle … which this spec does not
+    -- observe" — true, and silence where a hole belongs.
+    local plan = planned('M.log',
+        { ['input:msg'] = { value = '"hello"', basis = 'any string', by = 'agent' } })
+    eq(nil, hole(plan, 'oracle'), 'it returns nothing, so there is no oracle hole')
+    local eff = hole(plan, 'effects')
+    ok(eff, 'but there IS an effects hole — its behaviour is what it DOES')
+    assert(ro.fill_oracle(store, plan))
+    eq('run', eff.by)
+    eq('measured', eff.filled_tier)
+    ok(eff.value:find('%[log%] hello'), 'the log carries the call: ' .. tostring(eff.value))
+    eq(0, plan.unfilled, 'and nothing is left open')
+    -- and the spec REPRODUCES it, which is the only real check: the spec must install the
+    -- SAME sandbox or it cannot see the same log
+    local okrun, err = pcall(assert(loadstring(table.concat(ch.emit(plan), '\n'), 's')))
+    ok(okrun, 'the spec reproduces the recorded log: ' .. tostring(err))
+    cleanup()
+end)
+
+test('sandbox: a NONDETERMINISTIC channel is injected too', function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    -- FOUND BY DRIVING IT: the effect vocabulary calls os.getenv pure-but-NONDET, so an
+    -- io-only filter passed it through and the run recorded this machine's real $HOME — a
+    -- value that fails on anyone else's machine. Nondeterminism is as fatal to a recorded
+    -- value as a side effect is to the world, and the purity LABEL cannot see it either.
+    local plan = planned('M.env',
+        { ['input:k'] = { value = '"HOME"', basis = 'a real variable', by = 'agent' } })
+    ok(plan.sandbox and plan.sandbox['os.getenv'], 'os.getenv is injected')
+    assert(ro.fill_oracle(store, plan))
+    local o = hole(plan, 'oracle')
+    eq('"unset"', o.raw_value,
+        'the recorded value is the DECLARED fake, not this machine: ' .. tostring(o.raw_value))
+    cleanup()
+end)
+
+test('sandbox: os.execute is recorded, never performed', function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    local plan = planned('M.shell',
+        { ['input:c'] = { value = '"rm -rf /nope"', basis = 'a destructive command',
+            by = 'agent' } })
+    assert(ro.fill_oracle(store, plan))
+    local eff = hole(plan, 'effects')
+    ok(eff.value:find('rm %-rf /nope'), 'the command is RECORDED: ' .. tostring(eff.value))
+    local o = hole(plan, 'oracle')
+    ok(o.raw_value:find('sandboxed', 1, true),
+        'and the return is the declared fake: ' .. tostring(o.raw_value))
+    cleanup()
+end)
+
+test('sandbox: it RESTORES what it replaced, so it cannot outlive its subject', function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    -- FOUND BY DRIVING IT: `print` is io in the vocabulary, so the sandbox faked it — and
+    -- the PROBE reports through print, so it silenced itself ("produced no value"). Two
+    -- consequences, both fixed: our own output handle is captured BEFORE any injection,
+    -- and the spec puts every global back. A sandbox that outlives its subject has escaped.
+    local plan = planned('M.log',
+        { ['input:msg'] = { value = '"x"', basis = 'any', by = 'agent' } })
+    assert(ro.fill_oracle(store, plan))
+    local before = print
+    assert(loadstring(table.concat(ch.emit(plan), '\n'), 's'))()
+    eq(before, print, 'the host process keeps its own print after the spec has run')
+    eq(before, _G.print, 'and the global is the same one')
     cleanup()
 end)

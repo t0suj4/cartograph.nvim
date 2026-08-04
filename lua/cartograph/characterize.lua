@@ -183,11 +183,167 @@ local function satisfied_by(h)
                 .. ' unverified — if the receiver is something else, the run will say so'
             or 'the runtime: a Lua interpreter holds this'
     end
+    if h.kind == 'dependency' and h.owners then
+        -- AN AMBIGUOUS STDLIB NAME IS STILL SUPPLIED BY THE RUNTIME. The SET is about
+        -- which OWNER declares the member (`write` is file's and io's), not about whether
+        -- the name exists — the interpreter holds every candidate. Blocking here stopped
+        -- any subject using `f:write(...)` from running at all, for a question that does
+        -- not affect availability. Disclosed with the set named, per usual.
+        return ('the runtime, which holds every candidate owner (%s) — the SET is about'
+            .. ' which one declares it, not about whether it exists'):format(
+            table.concat(h.owners, ', '))
+    end
     if h.kind == 'fixture' and h.tier == 'derived' then
         return 'loading the module: a same-file definition carries this name'
     end
     return nil
 end
+
+
+-- ── THE SANDBOX (CART-0277, user steer: "can't we just inject our own functions?") ──
+-- An `io` subject was REFUSED outright, which is the safe answer and a poor one: the
+-- population it excludes is exactly the population a refactor most needs a witness for.
+-- So instead of refusing, INJECT — the CART-0261 injection frame turned on the DANGEROUS
+-- case instead of the ABSENT one. A fake `io.open` records the call and touches nothing.
+--
+-- AND THE REAL PRIZE IS NOT RUNNING io FUNCTIONS. It is functions that return NOTHING,
+-- whose behaviour IS their effects: this used to emit "no oracle … which this spec does
+-- not observe", i.e. silence where a hole belongs. With a sandbox the CALL LOG is the
+-- oracle, and a population that was 100% uncharacterizable becomes characterizable.
+--
+-- A FAKE IS A SUPPLIED PREMISE, NOT THE TRUTH, and that governs everything here. With a
+-- fake that fails, `io.open(p) ~= nil` records false; with one that succeeds, true. BOTH
+-- are facts about OUR STUB. So every injected name is disclosed as a premise, the basis
+-- says the value was measured UNDER this environment, and THE SPEC INSTALLS THE SAME
+-- SANDBOX — a spec that ran against a different world could not reproduce the value it
+-- was handed, and the mismatch would read as a behaviour change in the subject.
+--
+-- The formatter is deliberately small: a call LOG needs argument text, not a faithful
+-- round-trippable value (that is runoracle.serialize's job for the RETURN). Both the
+-- probe and the spec emit this same block, from here, for the usual reason.
+local SANDBOX_SRC = {
+    'local __log, __restore = {}, {}',
+    'local function __fmt(v)',
+    '    local t = type(v)',
+    '    if t == "string" then return string.format("%q", v) end',
+    '    if t == "number" or t == "boolean" or v == nil then return tostring(v) end',
+    '    if t == "table" then return "{table}" end',
+    '    return "<" .. t .. ">"',
+    'end',
+    -- WHATEVER WE REPLACE, WE PUT BACK. Found by driving it: a spec loaded IN-PROCESS
+    -- (which the test suite does, and which lets several specs share one process) left the
+    -- fake `print` installed, so the HOST's output went silent after the first spec ran.
+    -- Restoring is not politeness — a sandbox that outlives its subject has escaped.
+    'local function __patch(root, member, name, fake)',
+    '    local t = root and _G[root] or _G',
+    '    local key = member or name',
+    '    local old = t[key]',
+    '    __restore[#__restore + 1] = function () t[key] = old end',
+    '    t[key] = fake',
+    'end',
+    'local function __unsandbox()',
+    '    for i = #__restore, 1, -1 do __restore[i]() end',
+    '    __restore = {}',
+    'end',
+    'local function __rec(name, fake)',
+    '    return function (...)',
+    '        local n, a = select("#", ...), {}',
+    '        for i = 1, n do a[i] = __fmt((select(i, ...))) end',
+    '        __log[#__log + 1] = name .. "(" .. table.concat(a, ", ") .. ")"',
+    '        if fake then return fake(...) end',
+    '    end',
+    'end',
+}
+
+--- The injectable roster: name → the FAKE's return, as Lua source. Every entry is a
+--- DECLARED answer rather than a plausible one, and each is chosen to be the least
+--- surprising failure: an unopened file is `nil, reason`, which is what real `io.open`
+--- returns when it cannot open — so a subject that checks for nil takes its own error
+--- path instead of dying inside our stub.
+---
+--- `os.exit` IS THE ONE THAT MUST BE HERE. A subject calling it would kill the probe
+--- before it could report, and the run would surface as "produced no value" — a tool
+--- failure where the truth is "the subject exited". Faked into an error, it is a finding.
+M.SANDBOX = {
+    ['io.open'] = 'function () return nil, "sandboxed: no file was opened" end',
+    ['io.lines'] = 'function () return function () return nil end end',
+    ['io.read'] = 'function () return nil end',
+    ['io.write'] = 'function () return nil end',
+    ['io.popen'] = 'function () return nil, "sandboxed: no process was started" end',
+    ['os.execute'] = 'function () return nil, "sandboxed: nothing was executed" end',
+    ['os.remove'] = 'function () return nil, "sandboxed: nothing was removed" end',
+    ['os.rename'] = 'function () return nil, "sandboxed: nothing was renamed" end',
+    ['os.getenv'] = 'function () return nil end',
+    ['os.tmpname'] = 'function () return "/sandboxed/tmpname" end',
+    ['os.time'] = 'function () return 0 end',
+    ['os.clock'] = 'function () return 0 end',
+    ['os.date'] = 'function () return "sandboxed" end',
+    ['os.exit'] = 'function (c) error("sandboxed: the subject called os.exit("'
+        .. ' .. tostring(c) .. ")", 0) end',
+    print = 'function () return nil end',
+    collectgarbage = 'function () return 0 end',
+}
+
+--- The sandbox as spec lines: the recorder, then one patch per injected name.
+local function sandbox_lines(names)
+    local L = {}
+    for _, l in ipairs(SANDBOX_SRC) do L[#L + 1] = l end
+    local sorted = {}
+    for n in pairs(names or {}) do sorted[#sorted + 1] = n end
+    table.sort(sorted)          -- deterministic: the spec must not churn between runs
+    for _, n in ipairs(sorted) do
+        local fake = M.SANDBOX[n]
+        if fake then
+            local root, member = n:match('^([%w_]+)%.([%w_]+)$')
+            if root then
+                L[#L + 1] = ('__patch("%s", "%s", "%s", __rec("%s", %s))')
+                    :format(root, member, n, n, fake)
+            else
+                L[#L + 1] = ('__patch(nil, "%s", "%s", __rec("%s", %s))')
+                    :format(n, n, n, fake)
+            end
+        end
+    end
+    return L
+end
+M.sandbox_lines = sandbox_lines
+
+--- WHICH INJECTABLE CHANNELS this function touches, DERIVED from the effect vocabulary
+--- rather
+--- than hand-listed. Returns (inject = {name->true}, unknown = {names}). An io-attributed
+--- callee we have no fake for lands in `unknown`, and the run refuses — which turns
+--- "refuse io" into "refuse UNKNOWN io", the honest narrowing. A sandbox that silently
+--- misses one channel is worse than no sandbox, because the run LOOKS contained.
+local function io_channels(store, node)
+    local effects = require 'cartograph.effects'
+    local callrec = require 'cartograph.callrec'
+    local sites = (store.topo and store.topo().sites) and store.topo():sites(node.id) or {}
+    local inject, unknown, seen = {}, {}, {}
+    for _, c in ipairs(sites) do
+        local full = callrec.full(c) or callrec.callee(c)
+        local bare = callrec.callee(c)
+        for _, nm in ipairs({ full, bare }) do
+            if nm and not seen[nm] then
+                seen[nm] = true
+                local sig = effects.sig_of and effects.sig_of('lua', nm, false)
+                -- NONDET COUNTS, NOT JUST IO, and this was caught by driving it: the
+                -- vocabulary calls `os.getenv` pure-but-NONDETERMINISTIC, so the io filter
+                -- passed it through and the run recorded the real `/home/t0suj4`. A spec
+                -- carrying that value FAILS on anyone else's machine — nondeterminism is
+                -- as fatal to a recorded value as a side effect is to the world, and the
+                -- purity LABEL cannot see it either (it is derived from writes and world
+                -- only). So both go through the sandbox.
+                if sig and (sig.io or sig.nondet) then
+                    if M.SANDBOX[nm] then inject[nm] = true
+                    else unknown[#unknown + 1] = nm end
+                end
+            end
+        end
+    end
+    table.sort(unknown)
+    return inject, unknown
+end
+M.io_channels = io_channels
 
 local function hole_id(h) return ('%s:%s'):format(h.kind, h.name or '?') end
 
@@ -222,6 +378,25 @@ function M.plan(store, fn_id, opts)
     -- that makes every other one moot: a spec that cannot call its subject is not a
     -- spec. Keeping it only in `plan.subject` let the header report "2 unfilled" for a
     -- file-local function whose real answer is "3, and one of them is fatal".
+    -- THE SANDBOX, and the EFFECTS hole that only exists because of it (CART-0277).
+    local inject, unknown_io = io_channels(store, node)
+    local sandboxed = next(inject) ~= nil
+    -- AN EFFECT-ONLY FUNCTION HAS A HOLE, not a shrug. This used to emit "no oracle …
+    -- which this spec does not observe": true, and silence where a hole belongs. With a
+    -- sandbox its behaviour IS the recorded call log, so the log is the thing to observe.
+    local has_oracle = false
+    for _, h in ipairs(H) do if h.kind == 'oracle' then has_oracle = true end end
+    if sandboxed then
+        H[#H + 1] = { kind = 'effects', name = '<calls>', rule = 'execution',
+            why = ('what this function DOES: the sandboxed call log (%s). One RUN fills'
+                .. ' it; no static tier can'):format(
+                table.concat((function ()
+                    local t = {}
+                    for n in pairs(inject) do t[#t + 1] = n end
+                    table.sort(t); return t
+                end)(), ' ')) }
+    end
+
     local reach = reach_of(node, lines)
     -- THE LOAD IS A PREMISE TOO, and when it cannot be derived it is a HOLE rather
     -- than a crash inside the spec's own preamble (see load_premise).
@@ -278,6 +453,9 @@ function M.plan(store, fn_id, opts)
         ref = store.ref_of(node.id),
         subject = reach,
         package_path = pathlines or {},
+        sandbox = sandboxed and inject or nil,
+        unknown_io = (#unknown_io > 0) and unknown_io or nil,
+        has_oracle = has_oracle,
         abspath = root and (root .. '/' .. node.file) or node.file,
         params = node.params or {},
         holes = rows, premises = premises, unfilled = unfilled,
@@ -335,7 +513,10 @@ function M.fill(plan, fills)
             return nil, ('fill for %s names an unknown channel %q (run|spec|agent)')
                 :format(id, tostring(by))
         end
-        if h.kind == 'oracle' and not M.ORACLE_CHANNELS[by] then
+        -- THE EFFECTS HOLE IS AN OBSERVATION TOO, and takes the same channel rule as the
+        -- oracle: a PREDICTED call log makes a spec that passes because the prediction
+        -- matched the prediction, which is the same fabrication one field over.
+        if (h.kind == 'oracle' or h.kind == 'effects') and not M.ORACLE_CHANNELS[by] then
             return nil, ('the ORACLE hole %s may be filled by RUNNING (by=\'run\') or'
                 .. ' by a SPEC (by=\'spec\'), never by prediction: a predicted expected'
                 .. ' value makes a test that passes because the prediction matched the'
@@ -387,6 +568,12 @@ end
 function M.preamble(plan)
     local L = {}
     local function add(s) L[#L + 1] = s end
+    -- OUR OWN OUTPUT CHANNEL, CAPTURED BEFORE ANYTHING CAN BE INJECTED. Found by driving
+    -- it: `print` is in the effect vocabulary as io, so the sandbox faked it — and the
+    -- PROBE reports through print, so it silenced itself and the run failed with "produced
+    -- no value". A tool that injects into a shared namespace has to hold its own handles
+    -- first; whatever we replace, we may be a user of too.
+    add 'local __out = print'
     add(('-- CHARACTERIZATION SPEC for `%s` (%s)'):format(plan.fn, plan.file))
     add '-- Generated by cartograph. NOT a hand-written test, and NOT in the push fence:'
     add '-- a characterization spec is SUPPOSED to fail when behaviour changes.'
@@ -423,6 +610,16 @@ function M.preamble(plan)
     add "    error(('HOLE: %s — %s'):format(id, why), 2)"
     add 'end'
     add ''
+    -- THE SANDBOX GOES IN BEFORE THE SUBJECT IS LOADED, because a module can call io at
+    -- LOAD time and an injection that arrives after the dofile would have missed it.
+    if plan.sandbox then
+        add '-- SANDBOX: our own functions, injected. Every call is RECORDED and the world'
+        add '-- is untouched. A fake is a SUPPLIED PREMISE, not the truth — the values below'
+        add '-- are what this subject does UNDER THIS ENVIRONMENT, which is a real fact and'
+        add '-- a different one from what it does against the real io.'
+        for _, l in ipairs(M.sandbox_lines(plan.sandbox)) do add(l) end
+        add ''
+    end
     for _, l in ipairs(plan.package_path or {}) do
         add('-- DERIVED premise: the module requires siblings, so the spec supplies the')
         add('-- package path the graph aligned them to (a require it could NOT align is')
@@ -497,6 +694,11 @@ function M.preamble(plan)
     add 'local function CAPTURE(...) return select("#", ...), { ... } end'
     add(('local gotn, got = CAPTURE(%s(%s))'):format(plan.subject.expr or 'SUBJECT',
         table.concat(args, ', ')))
+    if plan.sandbox then
+        add 'local gotcalls = table.concat(__log, " | ")'
+        -- RESTORED BEFORE THE ASSERTIONS, so a FAILING spec still leaves the process clean
+        add '__unsandbox()'
+    end
     return L, args
 end
 
@@ -544,7 +746,27 @@ function M.emit(plan)
         add '-- no oracle: this function returns nothing, so behaviour is its EFFECTS,'
         add '-- which this spec does not observe. Nothing is asserted about the result.'
     end
-    add(('print(%q)'):format('ok  ' .. plan.fn .. ' characterized'))
+    -- THE EFFECT LOG, asserted separately from the return tuple because they are separate
+    -- claims: a function can keep its return value and change what it DOES, and a spec
+    -- that folded them would report one as the other.
+    local eff
+    for _, h in ipairs(plan.holes) do
+        if h.kind == 'effects' then eff = h end
+    end
+    if eff and plan.sandbox then
+        if eff.value then
+            add(oneline(('-- %s, by %s: %s'):format(eff.filled_tier or '?',
+                eff.by or '?', eff.basis or '')))
+            add(('local wantcalls = %s'):format(eff.value))
+        else
+            add(('local wantcalls = %s'):format(hole_call(eff)))
+        end
+        add 'if gotcalls ~= wantcalls then'
+        add(('    error(("CHANGED (effects): %s did [%%s], characterized as [%%s]")'
+            .. ':format(gotcalls, wantcalls))'):format(plan.fn))
+        add 'end'
+    end
+    add(('__out(%q)'):format('ok  ' .. plan.fn .. ' characterized'))
     return L
 end
 
@@ -627,8 +849,12 @@ function M.report(plan)
         -- hole the run had just answered read `FRONTIER` on the same line as a basis
         -- saying it was observed — a row contradicting itself teaches a reader to trust
         -- neither half. `filled_tier` is what the evidence actually is now.
+        -- A SATISFIED ROW IS NOT FRONTIER. The tier column answers "what evidence could
+        -- FILL this", and a hole the environment already answers is not waiting for
+        -- evidence at all — printing FRONTIER beside a `=` mark was the same
+        -- self-contradiction the filled rows had.
         add(('  %s %-22s %-9s %s'):format(mark, h.id,
-            h.filled_tier or h.tier or 'FRONTIER',
+            h.satisfied_by and 'env' or h.filled_tier or h.tier or 'FRONTIER',
             h.satisfied_by or h.basis or h.why or ''), nil)
     end
     add('', nil)

@@ -133,7 +133,21 @@ end
 --- Returns (true, label) or (nil, why). `opts.force` overrides EXPLICITLY, and the
 --- override rides into the basis, so a spec built on it discloses that we ran something
 --- our own analysis had flagged.
-M.SAFE = { pure = true }
+-- THE LINE IS CONTAINMENT, NOT PURITY (CART-0277). A separate process contains anything
+-- process-LOCAL, so a module-state write is safe AND reproducible in it — measured:
+-- `M.bump`, which increments a module-level counter, returned 1 on three separate runs,
+-- because each run is a fresh process and therefore a FIRST call. What a process cannot
+-- contain is the WORLD, so `io` is the label that needs a sandbox rather than a refusal.
+-- A HEDGED label still refuses: `~` means our analysis is not sure which side of that
+-- line the function is on, and guessing is exactly what this tool must not do.
+M.SAFE = { pure = true, writes = true }
+--- The premise a label commits the spec to, or nil when it needs none. `writes` is
+--- allowed but not FREE: the recorded value is the first call in a fresh process, and a
+--- reader has to know that or they will misread the number.
+M.LABEL_PREMISE = {
+    writes = 'the subject writes module state, so the recorded value is its FIRST call'
+        .. ' in a fresh process — a second call in one process may differ',
+}
 function M.runnable(store, plan, opts)
     local effects = require 'cartograph.effects'
     local label = effects.purity and effects.purity(store, plan.fn_id) or nil
@@ -143,6 +157,19 @@ function M.runnable(store, plan, opts)
             .. ' running it would do — refusing (force overrides)'):format(plan.fn)
     end
     if M.SAFE[label] then return true, label end
+    -- io IS RUNNABLE WHEN EVERY CHANNEL IT TOUCHES IS ONE WE CAN FAKE (CART-0277): the
+    -- effects are then RECORDED instead of performed. `unknown_io` is the honest fence —
+    -- one un-fakeable channel and the run refuses NAMING it, because a sandbox with a hole
+    -- in it looks contained and is not.
+    if (label == 'io' or label == 'io~') and plan.sandbox then
+        if plan.unknown_io then
+            return nil, ('%s is `%s` and reaches channels we cannot inject (%s) — a'
+                .. ' sandbox that misses one channel LOOKS contained and is not, so this'
+                .. ' refuses rather than half-containing it (force overrides)'):format(
+                plan.fn, label, table.concat(plan.unknown_io, ', '))
+        end
+        return true, label .. ' (SANDBOXED)'
+    end
     if opts and opts.force then return true, label .. ' (FORCED)' end
     local what = ({
         ['pure~'] = 'our own effect analysis is HEDGED about it — not certain it is pure',
@@ -214,6 +241,10 @@ end
 function M.probe_text(plan, budget)
     budget = budget or M.BUDGET
     local pre = {
+        -- the prologue runs BEFORE the preamble, so it needs its own handle on the real
+        -- print: the budget hook fires from inside the subject's execution, by which time
+        -- the sandbox may have replaced the global
+        'local __out = print',
         '-- EXECUTION BUDGET (CART-0263). Installed BEFORE the subject is even loaded, so a',
         '-- module that loops while LOADING is bounded too. os.exit rather than error(),',
         '-- because a subject full of pcall would swallow an error and keep going.',
@@ -232,9 +263,9 @@ function M.probe_text(plan, budget)
         ('    __ticks = __ticks + %d'):format(M.TICK),
         '    if __ticks > __budget then',
         '        debug.sethook()',
-        ('        print(%q)'):format(M.MARK_A),
-        '        print("BUDGET instructions " .. __ticks)',
-        ('        print(%q)'):format(M.MARK_B),
+        ('        __out(%q)'):format(M.MARK_A),
+        '        __out("BUDGET instructions " .. __ticks)',
+        ('        __out(%q)'):format(M.MARK_B),
         '        os.exit(0)',
         '    end',
         ('end, "", %d)'):format(M.TICK),
@@ -251,17 +282,18 @@ function M.probe_text(plan, budget)
     add 'for i = 1, gotn do'
     add '    local s = ser(got[i])'
     add '    if not s then'
-    add(('        print(%q)'):format(M.MARK_A))
-    add '        print("REFUSED " .. i .. " " .. type(got[i]))'
-    add(('        print(%q)'):format(M.MARK_B))
+    add(('        __out(%q)'):format(M.MARK_A))
+    add '        __out("REFUSED " .. i .. " " .. type(got[i]))'
+    add(('        __out(%q)'):format(M.MARK_B))
     add '        os.exit(0)'
     add '    end'
     add '    out[i] = s'
     add 'end'
-    add(('print(%q)'):format(M.MARK_A))
-    add 'print("COST " .. __ticks)'
-    add 'print("VALUES " .. gotn .. " " .. table.concat(out, ", "))'
-    add(('print(%q)'):format(M.MARK_B))
+    add(('__out(%q)'):format(M.MARK_A))
+    add '__out("COST " .. __ticks)'
+    if plan.sandbox then add '__out("CALLS " .. gotcalls)' end
+    add '__out("VALUES " .. gotn .. " " .. table.concat(out, ", "))'
+    add(('__out(%q)'):format(M.MARK_B))
     return L
 end
 
@@ -274,7 +306,10 @@ end
 function M.run(store, plan, opts)
     opts = opts or {}
     for _, h in ipairs(plan.holes or {}) do
-        if h.kind ~= 'oracle' and not (h.value or h.satisfied_by) then
+        -- `oracle` AND `effects` are what the run FILLS, so neither can be a precondition
+        -- for running: requiring them would make the verb refuse to do its own job.
+        if h.kind ~= 'oracle' and h.kind ~= 'effects'
+            and not (h.value or h.satisfied_by) then
             return nil, ('%s is still a hole — fill every input before running, because a'
                 .. ' probe cannot run on a hole'):format(h.id)
         end
@@ -337,10 +372,13 @@ function M.run(store, plan, opts)
         if inside and l:match('%S') then lines[#lines + 1] = l end
         if l:find(M.MARK_A, 1, true) then inside = true end
     end
-    local payload, cost
+    local payload, cost, calls
     for _, l in ipairs(lines) do
         local c = l:match('^COST (%d+)$')
-        if c then cost = tonumber(c) else payload = (payload or '') .. l end
+        local k = l:match('^CALLS (.*)$')
+        if c then cost = tonumber(c)
+        elseif k then calls = k
+        else payload = (payload or '') .. l end
     end
     if payload and payload:match('^BUDGET instructions (%d+)') then
         local burned = payload:match('^BUDGET instructions (%d+)')
@@ -371,7 +409,8 @@ function M.run(store, plan, opts)
     end
     local n, src = payload:match('^VALUES (%d+) ?(.*)$')
     if not n then return nil, 'the probe emitted an unreadable payload: ' .. payload end
-    return { n = tonumber(n), source = src, purity = label, cost = cost }
+    return { n = tonumber(n), source = src, purity = label, cost = cost,
+        calls = calls }
 end
 
 --- Run, then FILL the oracle at tier `measured`. Returns (n_filled, nil) or (nil, why).
@@ -379,32 +418,54 @@ end
 --- a value observed from a function our analysis flagged is still evidence, but evidence
 --- whose provenance the spec has to carry.
 function M.fill_oracle(store, plan, opts)
-    local oracle
+    local oracle, eff
     for _, h in ipairs(plan.holes or {}) do
         if h.kind == 'oracle' then oracle = h end
+        if h.kind == 'effects' then eff = h end
     end
-    if not oracle then
-        return nil, ('%s has no oracle hole — it returns nothing, so its behaviour is its'
-            .. ' EFFECTS and a run cannot characterize it'):format(plan.fn)
+    -- A FUNCTION THAT RETURNS NOTHING IS NOT UNCHARACTERIZABLE ANY MORE (CART-0277): with
+    -- a sandbox its behaviour IS the recorded call log, so an `effects` hole is a thing a
+    -- run can fill. Only a subject with NEITHER is out of reach, and then the reason names
+    -- what is missing rather than shrugging at the whole question.
+    if not (oracle or eff) then
+        return nil, ('%s returns nothing and touches no channel we can inject, so a run'
+            .. ' has nothing to observe — its behaviour is effects we cannot see'):format(
+            plan.fn)
     end
-    if oracle.by == 'run' and oracle.value then
+    local already = 0
+    if oracle and oracle.by == 'run' and oracle.value then already = already + 1 end
+    if eff and eff.by == 'run' and eff.value then already = already + 1 end
+    if already > 0 and already == ((oracle and 1 or 0) + (eff and 1 or 0)) then
         return 0        -- already observed; re-running would only replace it with itself
     end
     local res, why = M.run(store, plan, opts)
     if not res then return nil, why end
-    return ch.fill(plan, { [oracle.id] = {
-        value = res.source, n = res.n, by = 'run',
-        -- THE COST RIDES IN THE BASIS. It is provenance (what it took to observe this)
-        -- and it is also the only evidence anyone has for choosing a budget: a default
-        -- nobody can see the cost against is a superstition.
-        -- "0 instructions" would read as free; it means BELOW THE HOOK GRANULARITY, which
-        -- is a different claim and the honest one to print.
-        basis = ('observed by running the subject in a separate process (purity %s, %s)')
-            :format(res.purity or '?',
-                res.cost == nil and 'instruction count unavailable'
-                or res.cost == 0 and ('fewer than %d Lua VM instructions'):format(M.TICK)
-                or ('%d Lua VM instructions'):format(res.cost)),
-    } })
+    -- THE COST RIDES IN THE BASIS. It is provenance (what it took to observe this) and it
+    -- is the only evidence anyone has for choosing a budget: a default nobody can see the
+    -- cost against is a superstition. "0 instructions" would read as free, so it renders
+    -- as "fewer than <granularity>" — a different and honest claim.
+    -- AND A SANDBOXED RUN SAYS SO, because the value is then a fact about our stubs.
+    local basis = ('observed by running the subject in a separate process (purity %s, %s%s)')
+        :format(res.purity or '?',
+            res.cost == nil and 'instruction count unavailable'
+            or res.cost == 0 and ('fewer than %d Lua VM instructions'):format(M.TICK)
+            or ('%d Lua VM instructions'):format(res.cost),
+            plan.sandbox and ', UNDER THE SANDBOX below' or '')
+    -- THE LABEL'S OWN PREMISE, if it has one. `writes` is ALLOWED because a fresh process
+    -- makes it reproducible — but the recorded value is then the FIRST call, and a reader
+    -- who does not know that will misread the number. Allowing a label without emitting
+    -- its premise would be the promise this module makes and breaks in the same breath.
+    local lp = M.LABEL_PREMISE[(res.purity or ''):gsub(' .*$', '')]
+    if lp then basis = basis .. '; ' .. lp end
+    local fills = {}
+    if oracle then
+        fills[oracle.id] = { value = res.source, n = res.n, by = 'run', basis = basis }
+    end
+    if eff then
+        fills[eff.id] = { value = ('%q'):format(res.calls or ''), by = 'run',
+            basis = basis }
+    end
+    return ch.fill(plan, fills)
 end
 
 --- Run TWICE and say whether the subject is deterministic. Returns (true, note) or

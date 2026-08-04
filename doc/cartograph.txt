@@ -491,13 +491,32 @@ verb refuses is as load-bearing as what it writes — see
                               command and not a flag. The subject runs in
                               a SEPARATE PROCESS (an infinite loop or an
                               os.exit must not take the editor with it),
-                              and only when cartograph's own effect
-                              analysis calls it `pure`: `io` would touch
-                              the world, `writes` would mutate module
-                              state, and a hedged `pure~` means the
-                              analysis is not certain — all refused
-                              unless ! forces it, and a forced run is
-                              DISCLOSED in the spec header. The observed
+                              and cartograph's own effect analysis decides
+                              whether it may run at all. `pure` runs. So
+                              does `writes`, because a FRESH PROCESS makes
+                              a module-state write reproducible — the
+                              recorded value is its FIRST call, and the
+                              spec says so. An `io` subject is SANDBOXED
+                              rather than refused: our own functions are
+                              injected in its place, so `io.open` and
+                              `os.execute` are RECORDED and the world is
+                              untouched, and a NONDETERMINISTIC channel
+                              (`os.getenv`, `os.time`) is injected too,
+                              since a value that differs per machine is as
+                              useless as one with a side effect. A channel
+                              we have no fake for is still REFUSED, by
+                              name — a sandbox with a hole in it looks
+                              contained and is not. A hedged `pure~` is
+                              refused as well: `~` means the analysis is
+                              not sure which side of that line it is on.
+                              ! forces past any refusal, and a forced run
+                              is DISCLOSED in the spec header.
+                              A FAKE IS A SUPPLIED PREMISE: a sandboxed
+                              value is what the subject does UNDER THAT
+                              ENVIRONMENT, which the basis states and
+                              which the emitted spec REINSTALLS, since a
+                              spec running against a different world could
+                              not reproduce the value it was given. The observed
                               value is recorded at tier=measured with a
                               basis naming how it was obtained; a value
                               with no Lua literal form (a function,
