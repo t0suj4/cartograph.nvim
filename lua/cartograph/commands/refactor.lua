@@ -345,6 +345,47 @@ function M.register(H)
                 :format(#cmp.drifted), vim.log.levels.WARN)
         end
     end, { desc = 'cartograph: diff the current per-function behavior witnesses against the baseline snapshot — neutral = a pure move (witness unchanged), DRIFTED = the body changed (a rewrite). Certifies a relocation was behavior-neutral; honestly flags a rewrite. Companion to :CartographMove / :CartographExtractModule' })
+
+    -- ── CHARACTERIZE: a runnable spec WITH HOLES for the focused function ──────
+    -- The executable counterpart to :CartographNeutrality above, and the reason it
+    -- sits beside it: neutrality certifies a refactor changed nothing by hashing the
+    -- df shape, a PROXY. A characterization spec run before and after is the same
+    -- check with REAL assertions (CART-0260 step 1 / CART-0262).
+    cmd('CartographCharacterize', function (o)
+        local store = live() if not store then return end
+        if store.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first', vim.log.levels.WARN)
+        end
+        local ch = require 'cartograph.characterize'
+        -- TARGETED, like every other apply verb: the focused function, or the one
+        -- enclosing <file> <line> when given ([[cartograph-apply-for-agent]]).
+        local id = store.focused
+        if o.fargs[1] and o.fargs[2] then
+            id = ch.at(store, o.fargs[1], tonumber(o.fargs[2]))
+        end
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function, or pass <file> <line>',
+                vim.log.levels.WARN)
+        end
+        local plan, why = ch.plan(store, id)
+        if not plan then
+            return vim.notify('cartograph: cannot characterize — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        -- BANG STAGES THE WRITE; the default only SHOWS the plan. A spec is a file, and
+        -- a verb that writes one on sight is a verb you cannot use to look.
+        if o.bang then
+            store.set_txn(plan)
+            vim.notify(('cartograph: characterize staged — %s → %s, %d hole(s) UNFILLED'
+                .. ' (each errors when run). Review :CartographDiff, commit'
+                .. ' :CartographApply'):format(plan.fn, plan.path, plan.unfilled),
+                vim.log.levels.INFO)
+        end
+        scratch(ch.report(plan))
+    end, { nargs = '*', bang = true,
+        desc = 'cartograph: a runnable CHARACTERIZATION SPEC for the focused function (or the one enclosing <file> <line>) — every value we cannot know is a HOLE that ERRORS when run, never a guessed assertion, so an unfilled spec fails rather than reporting false coverage. Holes carry their tier: a measured call-site literal is filled, a same-file definition or a stdlib call is satisfied by loading the module / by the runtime and disclosed as a PREMISE, and the expected value is a hole one RUN fills. ! stages the write (never inside tests/ — a characterization spec is SUPPOSED to fail when behaviour changes and must not gate a commit). The executable counterpart to :CartographNeutrality, whose df-shape witness is a proxy for the same question' })
 end
 
 return M

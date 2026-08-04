@@ -67,6 +67,16 @@ function M.render()
                         t.how or t.fn or '?'), 'Title')
             lines[#lines + 1] = ('  %s — a new local fn above %s; the call replaces L%d-%d')
                 :format(t.file, t.fn or '?', t.replace.first, t.replace.last)
+        elseif t.verb == 'characterize' then
+            lines[#lines + 1] = hl(marks, #lines,
+                ('CHARACTERIZE  %s → %s    :CartographDiff · :CartographApply · :CartographTxnClear')
+                    :format(t.fn or '?', t.path or '?'), 'Title')
+            -- THE UNFILLED COUNT IS THE HEADLINE, not a footnote: this spec is SUPPOSED
+            -- to fail until they are answered, so a reader who misses the number reads
+            -- the failure as a defect in the subject.
+            lines[#lines + 1] = ('  %d hole(s) UNFILLED of %d — each ERRORS when run;'
+                .. ' a spec that passed with holes would be false coverage')
+                :format(t.unfilled or 0, #(t.holes or {}))
         elseif t.verb == 'reorder' then
             lines[#lines + 1] = hl(marks, #lines,
                 ('REORDER  move %d statement(s) (L%d%s) before L%d in %s    :CartographDiff · :CartographApply · :CartographTxnClear')

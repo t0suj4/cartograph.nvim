@@ -2841,6 +2841,43 @@ the question it answers is "what else can go where this parameter goes?"; a port
 argument goes straight there. `tools/portgraph.lua` and the lens read the **same** module, so
 the measured numbers and the displayed ones cannot drift apart.
 
+And then the census stopped counting and started **emitting**.
+**`:CartographCharacterize`** (headless: `tools/characterize.lua <root> <fn|file:line>`)
+turns one function into a *runnable* characterization spec — self-contained, no harness,
+`nvim --headless -l` or plain Lua. Every value we cannot know is a `HOLE(...)` that
+**errors**, so an unfilled spec *fails*. That is not a stylistic choice: a suite that goes
+green because its assertions are missing is absence-rendered-as-silence at its most
+dangerous, since it looks exactly like coverage.
+
+What the environment already supplies is **not** a hole, and that is where CART-0266's
+signatures pay off twice: the spec runs in a Lua interpreter, so a `table.concat`
+dependency is *satisfied by the runtime*; it `dofile`s the subject, so a same-file
+definition is *satisfied by the load*. Both are still rows, disclosed as **premises**,
+because "no hole" and "a hole the environment fills" are different claims. A file-local
+function is a **reach hole** — a spec that cannot call its subject is not a spec. And the
+module load is a premise too: `require 'a.b.c'` is aligned against a file the graph holds
+to *derive* the package path, and a require that cannot be aligned becomes a hole rather
+than a crash inside the spec's own preamble. That last one only showed up by driving the
+verb on a real module; the fixture required nothing, so `dofile` worked and hid it.
+
+Filling a hole is **discharging a hedge**, so it follows the decline ledger's protocol: a
+fill without a stated **basis** is refused, and the tier records *who* answered —
+`measured`, `derived`, `claim`, or **agent-supplied**, a fourth tier that exists because
+without it an agent's guess is byte-identical to an observed call-site literal. The oracle
+hole is stricter still: fillable by **running** (a recorded behaviour) or by a **spec**,
+*never by prediction*, because a predicted expected value produces a test that passes
+because the prediction matched the prediction — indistinguishable from a real
+characterization test and worse than none.
+
+The output never enters the push fence: `plan()` refuses any path under `tests/` or ending
+`_spec.lua`, and the default lands in `characterized/`, gitignored. A characterization
+spec is *supposed* to fail when behaviour changes; wiring one into pre-commit would block
+every legitimate refactor. It is a tool you invoke, and the write still rides the full txn
+ladder — journal, CAS, and a load gate on our own output. This is the executable
+counterpart to `:CartographNeutralityCheck`, which certifies a refactor by hashing the df
+shape: a **proxy** for the same question, where this is a real assertion. Run it before and
+after, and a behaviour change reports as `CHANGED: M.add returned 8, characterized as 7`.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit

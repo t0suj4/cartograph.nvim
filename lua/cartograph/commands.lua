@@ -65,6 +65,7 @@ local function txn_module()
     if v == 'reorder' then return 'cartograph.reorder' end
     if v == 'hoist-closure' then return 'cartograph.hoistclosure' end
     if v == 'extract-fn' then return 'cartograph.extractapply' end
+    if v == 'characterize' then return 'cartograph.characterize' end
     return 'cartograph.clonemerge'
 end
 

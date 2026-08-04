@@ -2,6 +2,13 @@
 scratch/
 *.dump.json
 
+# GENERATED CHARACTERIZATION SPECS (CART-0262). Deliberately ignored: a
+# characterization spec is SUPPOSED to fail when behaviour changes, so committing one
+# would turn every legitimate refactor into a red diff. Generate, run, discard — or
+# move it out of here by hand once you have decided it is a real test.
+characterized/
+*_char.lua
+
 # editor / OS
 .DS_Store
 *.swp
