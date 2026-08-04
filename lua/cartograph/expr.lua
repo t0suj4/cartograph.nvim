@@ -635,6 +635,11 @@ end
 --- what optimize's `[%[%]#]` scan approximated. A pure MODULE receiver (string in
 --- string.format) is exempt STRUCTURALLY: a field whose base is a bare name used as
 --- a call target isn't a content read. INC 1 keeps it simple: any field/index/`#`.
+--- The pure TRAVERSAL, exported (CART-0280) so a consumer walking for a construct does not
+--- have to reimplement it. Every duplicate walker in this codebase has eventually disagreed
+--- with the original about one node kind; there is one walk.
+function M.walk(e, fn) return walk(e, fn) end
+
 function M.reads_content(e)
     local yes = false
     walk(e, function (n)

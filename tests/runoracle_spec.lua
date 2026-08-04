@@ -570,3 +570,111 @@ test('env: a sandbox path that cannot be installed is an ERROR, not silence', fu
         'it refuses rather than running unsandboxed: ' .. tostring(err))
     cleanup()
 end)
+
+-- ── OPAQUE SENTINELS (CART-0280, user: "if the return value of a function is only passed
+--    around, we never need to know what it is") ─────────────────────────────
+local OSRC = table.concat({
+    'local M = {}',
+    'function M.save(p, s) local f = io.open(p, "w") if f then f:write(s) f:close() end return p end',
+    'function M.tag(p) local f = io.open(p, "r") return "h=" .. f.name end',
+    'function M.len(p) local f = io.open(p, "r") return #f end',
+    'function M.cmp(p) local f = io.open(p, "r") if f.size > 0 then return "big" end return "small" end',
+    'return M',
+}, '\n') .. '\n'
+local function oproj()
+    root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(OSRC); fd:close()
+    local data = ts.extract(root); data.root = data.root or root
+    store.ingest(data)
+end
+local function P(v) return { value = v, basis = 'a path', by = 'agent' } end
+
+test('opaque: a sentinel keeps the trace ALIVE instead of truncating it', function ()
+    if not ready() then skip('no lua parser') end
+    oproj()
+    -- THE DEFECT THIS FIXES, and it shipped: `io.open` faked to nil made `if f then` false,
+    -- so the log recorded the OPEN and none of the writing — a characterization that claims
+    -- to describe what a function DOES, omitting the two calls that do it, while LOOKING
+    -- complete. `f` is only PASSED (receiver of :write/:close, never inspected), so an
+    -- IDENTITY is all it ever needed.
+    local plan = planned('M.save',
+        { ['input:p'] = P('"/tmp/x"'), ['input:s'] = P('"hi"') })
+    assert(ro.fill_oracle(store, plan))
+    local eff = hole(plan, 'effects')
+    ok(eff.value:find('io.open', 1, true), 'the open is there')
+    -- (the log is a %q-quoted string, so its inner quotes are escaped — match the call, not
+    -- the quoting)
+    ok(eff.value:find(':write', 1, true) and eff.value:find('hi', 1, true),
+        'AND the write: ' .. tostring(eff.value))
+    ok(eff.value:find(':close', 1, true), 'AND the close')
+    -- IDENTITY, not value: one handle used twice is a different trace from two handles used
+    -- once, and a characterization that cannot tell them apart describes another program.
+    ok(eff.value:find('<h1>', 1, true), 'the handle is numbered: ' .. tostring(eff.value))
+    cleanup()
+end)
+
+test('opaque: an INSPECTION is a derived hole with a relation and a constraint', function ()
+    if not ready() then skip('no lua parser') end
+    oproj()
+    -- USER: "f.size or #f could be a hole with a relation and we can learn more depending on
+    -- how they are used." The run TEACHES THE PLAN — this hole did not exist before it ran.
+    local plan = planned('M.tag', { ['input:p'] = P('"/tmp/x"') })
+    assert(ro.fill_oracle(store, plan))
+    local ins
+    for _, h in ipairs(plan.holes) do if h.kind == 'inspect' then ins = h end end
+    ok(ins, 'the inspection became a HOLE')
+    ok(ins.name:find('name', 1, true), 'named by what was read: ' .. tostring(ins.name))
+    ok(ins.relation and ins.relation:find('derived from', 1, true),
+        'with a RELATION to the value it came from: ' .. tostring(ins.relation))
+    eq('concat', ins.constraint, 'and the operator that observed it')
+    ok(ins.basis:find('string%-coercible'),
+        'which CONSTRAINS what a real value could be: ' .. tostring(ins.basis))
+    -- answered by the sentinel, so it does not block — but it is a hole, so a better fill
+    -- can sharpen the characterization later
+    eq('claim', ins.filled_tier)
+    cleanup()
+end)
+
+test('opaque: the two blind spots a sentinel CANNOT cover are refused, not faked', function ()
+    if not ready() then skip('no lua parser') end
+    oproj()
+    -- MEASURED under LuaJIT: `#f` does NOT fire __len (5.1 semantics) and silently answers 0.
+    -- A sentinel that answers 0 for a length has FABRICATED a value while looking opaque, so
+    -- this is caught STATICALLY and blocks — the run must never be the thing that lies.
+    local plan = planned('M.len', { ['input:p'] = P('"/tmp/x"') })
+    local lh
+    for _, h in ipairs(plan.holes) do
+        if h.kind == 'inspect' and h.constraint == 'length' then lh = h end
+    end
+    ok(lh, 'the length inspection is a hole BEFORE anything runs')
+    eq('length', lh.constraint)
+    ok(lh.why:find('SILENTLY answer 0', 1, true), tostring(lh.why))
+    local res, why = ro.run(store, plan)
+    eq(nil, res, 'and the run is blocked')
+    ok(why:find('inspect:#f', 1, true), 'naming it: ' .. tostring(why))
+
+    -- and a COMPARISON raises (5.1 compares mixed types without a metamethod), which is at
+    -- least loud — but the message must point at the missing premise, not at Lua
+    local p2 = planned('M.cmp', { ['input:p'] = P('"/tmp/x"') })
+    local r2, why2 = ro.run(store, p2)
+    eq(nil, r2)
+    ok(why2:find('INSPECTED an opaque value', 1, true),
+        'the refusal names the inspection, not the interpreter: ' .. tostring(why2))
+    ok(why2:find('CONCRETE value', 1, true), 'and says what would fix it')
+    cleanup()
+end)
+
+test('opaque: a fake keeps EVERY return value', function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    -- SECOND TIME THIS TRUNCATION SHIPPED. `local r = fake(...)` keeps the first value and
+    -- drops the rest, so os.execute's `nil, "sandboxed…"` became a bare nil — the same class
+    -- CART-0263 fixed for the subject's own returns, reintroduced in the code that fixed it.
+    local plan = planned('M.shell',
+        { ['input:c'] = { value = '"true"', basis = 'a command', by = 'agent' } })
+    assert(ro.fill_oracle(store, plan))
+    local o = hole(plan, 'oracle')
+    eq(2, o.n, 'both values of the fake survive: ' .. tostring(o.raw_value))
+    ok(o.raw_value:find('sandboxed', 1, true), tostring(o.raw_value))
+    cleanup()
+end)

@@ -286,7 +286,13 @@ function M.probe_text(plan, budget)
     add 'end'
     add(('__out(%q)'):format(M.MARK_A))
     add '__out("COST " .. __ticks)'
-    if ch.sandbox_of(plan) then add '__out("CALLS " .. gotcalls)' end
+    if ch.sandbox_of(plan) then
+        add '__out("CALLS " .. gotcalls)'
+        -- INSPECTIONS, one per line: each is a DERIVED HOLE with a relation, and the
+        -- operator that observed it is evidence about what the value must be (user,
+        -- CART-0280: "we can learn more depending on how they are used").
+        add 'for _, i in ipairs(__ins) do __out("INSPECT " .. i) end'
+    end
     add '__out("VALUES " .. gotn .. " " .. table.concat(out, ", "))'
     add(('__out(%q)'):format(M.MARK_B))
     return L
@@ -367,12 +373,17 @@ function M.run(store, plan, opts)
         if inside and l:match('%S') then lines[#lines + 1] = l end
         if l:find(M.MARK_A, 1, true) then inside = true end
     end
-    local payload, cost, calls
+    local payload, cost, calls, inspections
     for _, l in ipairs(lines) do
         local c = l:match('^COST (%d+)$')
         local k = l:match('^CALLS (.*)$')
+        local ins = l:match('^INSPECT (.*)$')
         if c then cost = tonumber(c)
         elseif k then calls = k
+        elseif ins then
+            inspections = inspections or {}
+            local nm, op = ins:match('^(.-) ([%w_]+)$')
+            inspections[#inspections + 1] = { name = nm or ins, op = op or '?' }
         else payload = (payload or '') .. l end
     end
     if payload and payload:match('^BUDGET instructions (%d+)') then
@@ -393,8 +404,22 @@ function M.run(store, plan, opts)
         -- and it is quoted verbatim: "the run failed" with no reason would be exactly the
         -- silence this codebase treats as the recurring defect.
         local tail = (out or ''):gsub('%s+$', '')
+        tail = tail:sub(math.max(1, #tail - 400))
+        -- A SENTINEL THAT GOT COMPARED, named as such. MEASURED under LuaJIT: `f.size > 0`
+        -- does NOT fire __lt (5.1 compares mixed types directly), so the subject raises
+        -- "attempt to compare table with number" — loud, but the message points at Lua rather
+        -- than at the missing premise. A comparison is an INSPECTION the proxy cannot stand in
+        -- for, and the fix is a concrete value, so the refusal says that instead.
+        if ch.sandbox_of(plan) and (tail:find('attempt to compare', 1, true)
+            or tail:find('attempt to perform arithmetic', 1, true)) then
+            return nil, ('the subject INSPECTED an opaque value in a way a sentinel cannot'
+                .. ' stand in for (it compared or did arithmetic on it, which LuaJIT resolves'
+                .. ' without consulting a metamethod). That is a hole with a relation, not a'
+                .. ' bug: fill the env hole it came from with a CONCRETE value of the right'
+                .. ' shape. The subject said:\n%s'):format(tail)
+        end
         return nil, ('the probe produced no value (exit %d). The subject, or loading it,'
-            .. ' failed:\n%s'):format(code, tail:sub(math.max(1, #tail - 400)))
+            .. ' failed:\n%s'):format(code, tail)
     end
     local ri, rt = payload:match('^REFUSED (%d+) (%S+)')
     if ri then
@@ -405,7 +430,7 @@ function M.run(store, plan, opts)
     local n, src = payload:match('^VALUES (%d+) ?(.*)$')
     if not n then return nil, 'the probe emitted an unreadable payload: ' .. payload end
     return { n = tonumber(n), source = src, purity = label, cost = cost,
-        calls = calls }
+        calls = calls, inspections = inspections }
 end
 
 --- Run, then FILL the oracle at tier `measured`. Returns (n_filled, nil) or (nil, why).
@@ -465,6 +490,33 @@ function M.fill_oracle(store, plan, opts)
         basis = basis .. ('; the tier is %s, not measured: every value here came through'
             .. ' DECLARED fakes, and an observation made through a supplied premise is only'
             .. ' as strong as that premise'):format(envtier)
+    end
+    -- THE RUN TEACHES THE PLAN (user, CART-0280). An inspection is a DERIVED hole with a
+    -- RELATION to the value it came from, discovered at RUN time rather than at plan time —
+    -- so the hole set is a GRAPH that grows from evidence, not a list fixed in advance. Each
+    -- row records WHICH operator observed it, because that is what constrains the value: a
+    -- `concat` says string-coercible, an `arith` says numeric.
+    for _, i in ipairs(res.inspections or {}) do
+        local id = 'inspect:' .. i.name
+        local dup = false
+        for _, h in ipairs(plan.holes) do if h.id == id then dup = true end end
+        if not dup then
+            local root = i.name:match('^(<h%d+>)') or i.name
+            plan.holes[#plan.holes + 1] = {
+                id = id, kind = 'inspect', name = i.name, rule = 'execution',
+                relation = root ~= i.name and ('derived from ' .. root) or nil,
+                constraint = i.op,
+                -- ANSWERED BY THE SENTINEL, so it does not block — but it is a hole, because
+                -- a real value here would sharpen the characterization, and a better fill can
+                -- replace ours without any of this changing.
+                value = '<opaque>', by = 'sandbox', filled_tier = ch.SANDBOX_TIER,
+                basis = ('an opaque sentinel answered it; the subject used it via `%s`, so a'
+                    .. ' real value would have to be %s'):format(i.op,
+                    ({ concat = 'string-coercible', arith = 'numeric',
+                       tostring = 'string-coercible' })[i.op] or 'compatible with that use'),
+                why = ('the subject INSPECTED an opaque value via `%s`'):format(i.op),
+            }
+        end
     end
     local fills = {}
     if oracle then

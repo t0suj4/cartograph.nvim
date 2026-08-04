@@ -526,7 +526,25 @@ verb refuses is as load-bearing as what it writes — see
                               ENVIRONMENT, which the basis states and
                               which the emitted spec REINSTALLS, since a
                               spec running against a different world could
-                              not reproduce the value it was given. The observed
+                              not reproduce the value it was given.
+                              A value the subject only PASSES AROUND needs
+                              an IDENTITY, not a value, so a fake hands
+                              back an OPAQUE SENTINEL — `io.open` returns
+                              `<h1>` and the trace records `<h1>:write(…)`
+                              and `<h1>:close()` instead of dying at the
+                              `if f then` guard. When the subject does
+                              INSPECT such a value, that is not a
+                              violation: it is a DERIVED hole with a
+                              RELATION to the value it came from, plus the
+                              operator that observed it as a constraint —
+                              a `..` means string-coercible. The run
+                              teaches the plan. Two inspections a sentinel
+                              cannot stand in for are refused rather than
+                              faked: `#f` (LuaJIT fires no __len, so a run
+                              would SILENTLY answer 0 — caught statically)
+                              and a comparison (which raises, and the
+                              refusal names the inspection rather than the
+                              interpreter). The observed
                               value is recorded at tier=measured with a
                               basis naming how it was obtained; a value
                               with no Lua literal form (a function,

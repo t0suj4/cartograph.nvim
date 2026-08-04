@@ -221,24 +221,43 @@ end
 -- The formatter is deliberately small: a call LOG needs argument text, not a faithful
 -- round-trippable value (that is runoracle.serialize's job for the RETURN). Both the
 -- probe and the spec emit this same block, from here, for the usual reason.
+-- ── THE OPAQUE SENTINEL (CART-0280, user: "if the return value is only passed around, we
+--    never need to know what it is") ─────────────────────────────────────────
+-- A fake that returns `nil` TRUNCATES THE TRACE, and that shipped as a fabrication: for
+--     function M.save(p, s) local f = io.open(p,"w") if f then f:write(s) f:close() end return p end
+-- the recorded log was `io.open("/tmp/zz","w")` AND NOTHING ELSE, because `if f then` was
+-- false. A characterization that claims to describe what a function DOES, omitting the two
+-- calls that actually save anything, while LOOKING complete.
+--
+-- `f` is only PASSED AROUND — receiver of `:write` and `:close`, never inspected — so the
+-- fake does not need to return a FILE HANDLE. It needs to return an OPAQUE SENTINEL THAT
+-- RECORDS ITS OWN USE. A value nobody inspects needs an IDENTITY, not a value, and the
+-- sentinel's recorded uses ARE its identity ([[cartograph-anonymous-types]] one layer down).
+--
+-- WHAT THE PROXY CAN AND CANNOT SEE IS MEASURED, not assumed (LuaJIT 2.1):
+--   if f then        truthy, no metamethod    -> THE BODY RUNS. This is the whole fix.
+--   f == nil         no __eq (table vs nil)   -> reads as not-nil, correctly
+--   f.size, f:m(x)   __index then __call      -> observable
+--   "x"..f, f.n+1    __concat, __add          -> observable
+--   #f               __len NEVER FIRES        -> silently 0 (5.1 semantics). A BLIND SPOT.
+--   f.size > 0       __lt NEVER FIRES         -> RAISES (5.1 compares mixed types directly)
+-- The last two are why the static side matters: a `#` inspection would let the run answer 0
+-- and never say so, and a comparison aborts the run. Both are caught from the expression IR
+-- as BLOCKING holes instead (see inspect_holes), so the proxy is used only where it works.
 local SANDBOX_SRC = {
-    'local __log, __restore = {}, {}',
+    -- __ins is SEPARATE from __log: an inspection is not something the subject DID to the
+    -- world, it is something it ASKED of a value — a different kind of row, and folding the
+    -- two would make the effect trace unstable under a change that observes nothing.
+    'local __log, __restore, __seen, __ins = {}, {}, {}, {}',
+    'local __nsent = 0',
     'local function __fmt(v)',
     '    local t = type(v)',
     '    if t == "string" then return string.format("%q", v) end',
     '    if t == "number" or t == "boolean" or v == nil then return tostring(v) end',
-    '    if t == "table" then return "{table}" end',
+    '    if t == "table" then return __seen[v] or "{table}" end',
     '    return "<" .. t .. ">"',
     'end',
-    -- WHATEVER WE REPLACE, WE PUT BACK. Found by driving it: a spec loaded IN-PROCESS
-    -- (which the test suite does, and which lets several specs share one process) left the
-    -- fake `print` installed, so the HOST's output went silent after the first spec ran.
-    -- Restoring is not politeness — a sandbox that outlives its subject has escaped.
-    -- A PATH, not a root-and-member pair. `vim.fn.tempname` is THREE segments, and a
-    -- two-segment matcher silently fell through to patching a GLOBAL literally named
-    -- "vim.fn.tempname" — accepted, installed nowhere, and the run then went through the
-    -- real call while reporting success. A name shape assumption that fails OPEN is the
-    -- worst kind: everything looks wired.
+    -- WHATEVER WE REPLACE, WE PUT BACK (a sandbox that outlives its subject has escaped).
     'local function __patch(path, fake)',
     '    local t = _G',
     '    for i = 1, #path - 1 do',
@@ -255,12 +274,81 @@ local SANDBOX_SRC = {
     '    for i = #__restore, 1, -1 do __restore[i]() end',
     '    __restore = {}',
     'end',
+    -- THE SENTINEL. Numbered, so the log shows IDENTITY: one handle used twice is a different
+    -- trace from two handles used once, and a characterization that cannot tell them apart is
+    -- describing a different program.
+    'local __mt',
+    'local function __sentinel(label)',
+    '    __nsent = __nsent + 1',
+    '    local name = label or ("<h" .. __nsent .. ">")',
+    '    local p = setmetatable({}, __mt)',
+    '    __seen[p] = name',
+    '    return p, name',
+    'end',
+    '__mt = {',
+    '    __index = function (t, k)',
+    -- A read is NOT logged here: `f:write(x)` is an index followed by a call, and logging
+    -- the index too would double-report one event. The DERIVED sentinel remembers where it
+    -- came from, and whatever happens to it next is what gets recorded.
+    '        local d = select(1, __sentinel((__seen[t] or "?") .. "." .. tostring(k)))',
+    '        return d',
+    '    end,',
+    '    __call = function (t, ...)',
+    '        local n, a = select("#", ...), {}',
+    '        for i = 1, n do a[i] = __fmt((select(i, ...))) end',
+    '        local nm = __seen[t] or "?"',
+    -- METHOD FORM when the first argument IS the receiver: `<h1>:write("hi")` rather than
+    -- `<h1>.write(<h1>, "hi")`. The same event, rendered the way it was written.
+    '        local recv, meth = nm:match("^(.*)%.([%w_]+)$")',
+    '        if recv and n > 0 and __seen[(select(1, ...))] == recv then',
+    '            table.remove(a, 1)',
+    '            __log[#__log + 1] = recv .. ":" .. meth .. "(" .. table.concat(a, ", ") .. ")"',
+    '        else',
+    '            __log[#__log + 1] = nm .. "(" .. table.concat(a, ", ") .. ")"',
+    '        end',
+    '        return (__sentinel(nm .. "()"))',
+    '    end,',
+    -- INSPECTIONS. Each is a DERIVED HOLE with a relation, recorded with the operator that
+    -- observed it, because how the value is USED is evidence about what it must be.
+    '    __concat = function (a, b)',
+    '        local nm = __seen[a] or __seen[b] or "?"',
+    '        __ins[#__ins + 1] = nm .. " concat"',
+    '        return tostring(nm)',
+    '    end,',
+    '    __add = function (a, b)',
+    '        local nm = __seen[a] or __seen[b] or "?"',
+    '        __ins[#__ins + 1] = nm .. " arith"',
+    '        return 0',
+    '    end,',
+    '    __tostring = function (t)',
+    '        __ins[#__ins + 1] = (__seen[t] or "?") .. " tostring"',
+    '        return __seen[t] or "<opaque>"',
+    '    end,',
+    '}',
+    -- EVERY RETURN VALUE OF THE FAKE, and this is the second time this exact truncation has
+    -- shipped: `local r = fake(...)` keeps the FIRST and drops the rest, so `os.execute`'s
+    -- `nil, "sandboxed…"` became a bare `nil`. The suite caught it — a test written for
+    -- CART-0263's truncation catching the same class in the code that fixed it. Multi-value
+    -- returns need select('#') EVERY time they cross a boundary.
+    'local function __pack(...) return select("#", ...), { ... } end',
     'local function __rec(name, fake)',
     '    return function (...)',
     '        local n, a = select("#", ...), {}',
     '        for i = 1, n do a[i] = __fmt((select(i, ...))) end',
-    '        __log[#__log + 1] = name .. "(" .. table.concat(a, ", ") .. ")"',
-    '        if fake then return fake(...) end',
+    '        local call = name .. "(" .. table.concat(a, ", ") .. ")"',
+    '        if fake then',
+    '            local rn, rv = __pack(fake(...))',
+    '            local r = rv[1]',
+    -- AN OPAQUE RETURN IS A SENTINEL, so the trace CONTINUES instead of dying at the guard.
+    '            if r == "__CARTOGRAPH_OPAQUE__" then',
+    '                local p, nm = __sentinel()',
+    '                __log[#__log + 1] = call .. " -> " .. nm',
+    '                return p',
+    '            end',
+    '            __log[#__log + 1] = call',
+    '            return (unpack or table.unpack)(rv, 1, rn)',
+    '        end',
+    '        __log[#__log + 1] = call',
     '    end',
     'end',
 }
@@ -282,12 +370,20 @@ M.SANDBOX_TIER = 'claim'
 --- `os.exit` IS THE ONE THAT MUST BE HERE. A subject calling it would kill the probe
 --- before it could report, and the run would surface as "produced no value" — a tool
 --- failure where the truth is "the subject exited". Faked into an error, it is a finding.
+-- A fake returning this SENTINEL STRING gets an opaque handle instead (see __rec). It is a
+-- string rather than a flag on the roster because the roster's values are SOURCE, and the
+-- probe is the only place that can mint a sentinel.
+M.OPAQUE = '"__CARTOGRAPH_OPAQUE__"'
 M.SANDBOX = {
-    ['io.open'] = 'function () return nil, "sandboxed: no file was opened" end',
+    -- io.open USED TO RETURN nil, AND THAT TRUNCATED EVERY TRACE THROUGH IT: `if f then
+    -- f:write(s) end` never ran, so the log recorded the open and none of the writing. An
+    -- OPAQUE HANDLE lets the subject continue and records what it does with it, which is the
+    -- behaviour we were trying to characterize in the first place.
+    ['io.open'] = 'function () return ' .. M.OPAQUE .. ' end',
     ['io.lines'] = 'function () return function () return nil end end',
     ['io.read'] = 'function () return nil end',
-    ['io.write'] = 'function () return nil end',
-    ['io.popen'] = 'function () return nil, "sandboxed: no process was started" end',
+    ['io.write'] = 'function () return ' .. M.OPAQUE .. ' end',
+    ['io.popen'] = 'function () return ' .. M.OPAQUE .. ' end',
     ['os.execute'] = 'function () return nil, "sandboxed: nothing was executed" end',
     ['os.remove'] = 'function () return nil, "sandboxed: nothing was removed" end',
     ['os.rename'] = 'function () return nil, "sandboxed: nothing was renamed" end',
@@ -423,6 +519,76 @@ local function env_holes(store, node)
 end
 M.env_holes = env_holes
 
+--- THE TWO BLIND SPOTS A SENTINEL CANNOT COVER, found statically because the run cannot see
+--- them. MEASURED under LuaJIT: `#f` does NOT fire `__len` (5.1 semantics) and silently answers
+--- 0, and `f.size > 0` does NOT fire `__lt` (5.1 compares mixed types directly) — it RAISES.
+--- The second is at least loud; THE FIRST IS A SILENT LIE, and a sentinel that answers 0 for a
+--- length has fabricated a value while looking opaque.
+---
+--- So a `#` applied to a value bound from an opaque channel is a BLOCKING hole with the
+--- constraint stated: fill it with a real value, because the sentinel cannot stand in here.
+--- The static answer is a LOWER BOUND (an alias we did not follow escapes it), which is why the
+--- run's own failure message covers the comparison case rather than this walk trying to.
+local function opaque_length_holes(store, node, opaque)
+    if not next(opaque or {}) then return {} end
+    local expr = require 'cartograph.expr'
+    local eo = expr.of(store, node.id)
+    local fl = eo and eo.fl
+    if not fl then return {} end
+    -- names bound from a call to an opaque channel
+    local bound = {}
+    for _, st in ipairs(fl.stmts or {}) do
+        if st.expr and st.def and #st.def > 0 then
+            local hit = false
+            -- A ROW IS NOT AN EXPRESSION. `st.expr` carries { lhs, rhs, cond } lists (see
+            -- expr.names), so walking the row itself traverses NOTHING — which is exactly how
+            -- the length blind spot stayed undetected on its first outing: the check ran, saw
+            -- no nodes, and reported nothing. A walker handed the wrong shape is silent.
+            local function each(row, fn)
+                for _, e in ipairs(row.rhs or {}) do expr.walk(e, fn) end
+                for _, e in ipairs(row.lhs or {}) do expr.walk(e, fn) end
+                if row.cond then expr.walk(row.cond, fn) end
+            end
+            each(st.expr, function (e)
+                if e.k == 'call' and e.f then
+                    local nm = expr.dotted(e.f) or e.f.n
+                    if nm and (opaque[nm] or opaque[tostring(nm):match('([%w_]+)$') or '']) then
+                        hit = true
+                    end
+                end
+            end)
+            if hit then for _, d in ipairs(st.def) do bound[d] = true end end
+            st.__each = each
+        end
+    end
+    if not next(bound) then return {} end
+    local out, seen = {}, {}
+    local function each(row, fn)
+        for _, e in ipairs(row.rhs or {}) do expr.walk(e, fn) end
+        for _, e in ipairs(row.lhs or {}) do expr.walk(e, fn) end
+        if row.cond then expr.walk(row.cond, fn) end
+    end
+    for _, st in ipairs(fl.stmts or {}) do
+        if st.expr then
+            each(st.expr, function (e)
+                if e.k == 'un' and e.op == '#' and e.e and e.e.k == 'name' and bound[e.e.n]
+                    and not seen[e.e.n] then
+                    seen[e.e.n] = true
+                    out[#out + 1] = { kind = 'inspect', name = '#' .. e.e.n,
+                        rule = 'execution', constraint = 'length',
+                        relation = ('length of `%s`, which holds an opaque value')
+                            :format(e.e.n),
+                        why = ('the subject takes the LENGTH of `%s`, and a sentinel cannot'
+                            .. ' stand in: LuaJIT does not fire __len on a table, so the run'
+                            .. ' would SILENTLY answer 0. Supply a real value for it')
+                            :format(e.e.n) }
+                end
+            end)
+        end
+    end
+    return out
+end
+
 local function hole_id(h) return ('%s:%s'):format(h.kind, h.name or '?') end
 
 --- One COMMENT line's worth of text. A control character here is not cosmetic: Lua treats
@@ -469,6 +635,15 @@ function M.plan(store, fn_id, opts)
     -- path, the profile evidence and the fill mechanism, while the dependency row carries a
     -- bare segment and no way to answer. Matching on the last segment is sound HERE because
     -- both rows were derived from the same function's call sites.
+    -- and the blind spots the sentinel cannot cover, from the static side
+    local opaque = {}
+    for _, e in ipairs(envrows) do
+        if e.value and e.value:find('__CARTOGRAPH_OPAQUE__', 1, true) then
+            opaque[e.name] = true
+            opaque[e.name:match('([%w_]+)$') or e.name] = true
+        end
+    end
+    for _, h in ipairs(opaque_length_holes(store, node, opaque)) do H[#H + 1] = h end
     local covered = {}
     for _, e in ipairs(envrows) do
         H[#H + 1] = e
@@ -524,16 +699,17 @@ function M.plan(store, fn_id, opts)
     local rows, unfilled, premises = {}, 0, {}
     for _, h in ipairs(H) do
         local sat = satisfied_by(h)
-        local row = { id = hole_id(h), kind = h.kind, name = h.name, tier = h.tier,
-            rule = h.rule, why = h.why, hard = h.hard, hedged = h.hedged,
-            stub = h.stub, satisfied_by = sat, owners = h.owners,
-            blocking = holes.blocking(h) or nil,
-            -- A ROW MAY ARRIVE ALREADY FILLED, which env holes do (CART-0279 ships a
-            -- default fake for the channels it knows). This loop used to copy a FIXED
-            -- field list, so a pre-supplied fill was silently dropped and every env hole
-            -- read as unfilled — a whitelist copy is how a new field gets lost.
-            value = h.value, by = h.by, filled_tier = h.filled_tier, basis = h.basis,
-            declared = h.declared }
+        -- COPY THE WHOLE ROW, then add what only this loop can compute. This was a WHITELIST
+        -- of field names, and it lost a field THREE TIMES: the pre-supplied `value` of an env
+        -- hole (so every env hole read as unfilled), then `owners`, then `constraint` and
+        -- `relation` on an inspect hole (so the constraint a run had just learned vanished
+        -- between the hole and the report). A whitelist copy is a list you must remember to
+        -- update, in a file where new hole kinds are the whole direction of travel — so it is
+        -- the wrong shape, not a list with three bugs in it.
+        local row = {}
+        for k, v in pairs(h) do row[k] = v end
+        row.id, row.satisfied_by = hole_id(h), sat
+        row.blocking = holes.blocking(h) or nil
         -- a MEASURED input is already an answer: the code itself demonstrates it
         if h.kind == 'input' and h.tier == 'measured' then
             local lit = h.why:match('passes the string (.*)$')

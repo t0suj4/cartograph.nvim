@@ -2987,6 +2987,29 @@ fell through to patching a global *literally called* `"vim.fn.tempname"`: accept
 nowhere, and the spec ran unsandboxed while looking contained. A name-shape assumption that fails
 **open** is the worst kind, so a path we cannot walk now errors.
 
+Then a sharper observation collapsed the value problem too: **if a return value is only passed
+around, we never need to know what it is.** The `io.open` fake returned `nil`, which made
+`if f then f:write(s) f:close() end` skip its body — so the recorded log was the *open* and none
+of the writing. A characterization that claims to describe what a function does, omitting the two
+calls that do it, and *looking complete*. But `f` is only ever the receiver of `:write` and
+`:close`: it needs an **identity, not a value**. So a fake hands back an opaque **sentinel** that
+records its own use, and the trace becomes
+`io.open("/tmp/zz","w") -> <h1> | <h1>:write("hi") | <h1>:close()` — numbered, because one handle
+used twice is a different program from two handles used once.
+
+And when the subject *does* inspect such a value, that isn't a violation of opacity — it's a
+**derived hole with a relation**, plus the operator that observed it as a constraint.
+`"h=" .. f.name` yields `inspect:<h1>.name`, *derived from `<h1>`*, constrained *string-coercible*.
+The run teaches the plan: that hole did not exist before it ran. Which also fills the tier
+ladder's empty rung — a fill that *satisfies* a recorded constraint is `derived`, neither observed
+nor declared, and that is the line between deriving a value and fabricating one.
+
+Two inspections a sentinel cannot cover are refused rather than faked, and both limits are
+measured rather than assumed: `#f` fires no `__len` under LuaJIT and would **silently answer 0**,
+so it's caught statically and blocks; a comparison raises, and the refusal names the *inspection*
+rather than the interpreter. The proxy is used exactly where the metatable can see, and the static
+side covers where it cannot.
+
 Meanwhile `writes` stopped being a refusal at all. A separate process contains anything
 process-*local*, so a module-state write is both safe and reproducible in one — measured, a
 function incrementing a module counter returns `1` on three separate runs, because each run is
