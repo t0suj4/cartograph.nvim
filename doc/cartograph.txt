@@ -503,13 +503,23 @@ verb refuses is as load-bearing as what it writes — see
                               untouched, and a NONDETERMINISTIC channel
                               (`os.getenv`, `os.time`) is injected too,
                               since a value that differs per machine is as
-                              useless as one with a side effect. A channel
-                              we have no fake for is still REFUSED, by
-                              name — a sandbox with a hole in it looks
-                              contained and is not. A hedged `pure~` is
-                              refused as well: `~` means the analysis is
-                              not sure which side of that line it is on.
-                              ! forces past any refusal, and a forced run
+                              useless as one with a side effect.
+                              A CHANNEL WE HAVE NO FAKE FOR IS A HOLE, not
+                              a refusal: `env:vim.fn.tempname` is a row
+                              like any other, so an unfilled one BLOCKS
+                              the run naming itself and makes the spec
+                              ERROR — and supplying it (an agent, a
+                              profile, a recorded value) makes the subject
+                              characterizable. One unmodelled call no
+                              longer makes a whole function unreachable;
+                              measured on this repo, that moved 2633 of
+                              3601 functions out of a categorical refusal
+                              and into addressable holes. A HEDGED label
+                              (`~`) is a DISCLOSURE rather than a refusal:
+                              it means the channel enumeration may be
+                              INCOMPLETE, which the spec states. Only an
+                              effect summary we do not have at all still
+                              refuses. ! forces past it, and a forced run
                               is DISCLOSED in the spec header.
                               A FAKE IS A SUPPLIED PREMISE: a sandboxed
                               value is what the subject does UNDER THAT

@@ -234,12 +234,22 @@ local SANDBOX_SRC = {
     -- (which the test suite does, and which lets several specs share one process) left the
     -- fake `print` installed, so the HOST's output went silent after the first spec ran.
     -- Restoring is not politeness — a sandbox that outlives its subject has escaped.
-    'local function __patch(root, member, name, fake)',
-    '    local t = root and _G[root] or _G',
-    '    local key = member or name',
+    -- A PATH, not a root-and-member pair. `vim.fn.tempname` is THREE segments, and a
+    -- two-segment matcher silently fell through to patching a GLOBAL literally named
+    -- "vim.fn.tempname" — accepted, installed nowhere, and the run then went through the
+    -- real call while reporting success. A name shape assumption that fails OPEN is the
+    -- worst kind: everything looks wired.
+    'local function __patch(path, fake)',
+    '    local t = _G',
+    '    for i = 1, #path - 1 do',
+    '        t = t and t[path[i]]',
+    '        if type(t) ~= "table" then return false end',
+    '    end',
+    '    local key = path[#path]',
     '    local old = t[key]',
     '    __restore[#__restore + 1] = function () t[key] = old end',
     '    t[key] = fake',
+    '    return true',
     'end',
     'local function __unsandbox()',
     '    for i = #__restore, 1, -1 do __restore[i]() end',
@@ -292,6 +302,31 @@ M.SANDBOX = {
     collectgarbage = 'function () return 0 end',
 }
 
+--- WHICH ENV FILLS ARE INSTALLED — a VIEW over the holes, never stored state. This was a
+--- `plan.sandbox` field computed once at plan time, and it made a filled hole a lie: an agent
+--- filling `env:vim.fn.tempname` AFTER planning was accepted, never installed, and the run
+--- then went through the REAL nondeterministic call while the oracle was tiered `measured`.
+--- Two things wrong at once, both from a cached copy of state that had moved.
+--- ONE SOURCE OF TRUTH, and the holes are it.
+function M.sandbox_of(plan)
+    local out, any = {}, false
+    for _, h in ipairs(plan.holes or {}) do
+        if h.kind == 'env' and h.value then out[h.name] = h.value; any = true end
+    end
+    return any and out or nil
+end
+
+--- The WEAKEST tier among the installed env fills, or nil when nothing is installed. A run
+--- through an agent-invented stub is `agent-supplied` evidence, not `claim` and certainly not
+--- `measured`: the environment's tier travels into everything observed through it.
+function M.env_tier(plan)
+    local t
+    for _, h in ipairs(plan.holes or {}) do
+        if h.kind == 'env' and h.value then t = M.weakest(t or h.filled_tier, h.filled_tier) end
+    end
+    return t
+end
+
 --- The sandbox as spec lines: the recorder, then one patch per injected name.
 local function sandbox_lines(names)
     local L = {}
@@ -300,58 +335,93 @@ local function sandbox_lines(names)
     for n in pairs(names or {}) do sorted[#sorted + 1] = n end
     table.sort(sorted)          -- deterministic: the spec must not churn between runs
     for _, n in ipairs(sorted) do
-        local fake = M.SANDBOX[n]
+        local fake = names[n]
         if fake then
-            local root, member = n:match('^([%w_]+)%.([%w_]+)$')
-            if root then
-                L[#L + 1] = ('__patch("%s", "%s", "%s", __rec("%s", %s))')
-                    :format(root, member, n, n, fake)
-            else
-                L[#L + 1] = ('__patch(nil, "%s", "%s", __rec("%s", %s))')
-                    :format(n, n, n, fake)
-            end
+            local segs = {}
+            for seg in n:gmatch('[%w_]+') do segs[#segs + 1] = ('%q'):format(seg) end
+            -- AND IT MUST NOT FAIL SILENTLY: a path we cannot walk (the host is absent in
+            -- this interpreter) is an ERROR, because a spec that ran unsandboxed while
+            -- believing itself contained is the failure mode this whole layer exists to
+            -- prevent.
+            L[#L + 1] = ('if not __patch({ %s }, __rec("%s", %s)) then'):format(
+                table.concat(segs, ', '), n, fake)
+            L[#L + 1] = ('    error("sandbox: cannot install %s — the path does not exist'
+                .. ' in this interpreter, so this spec would run UNSANDBOXED", 0)'):format(n)
+            L[#L + 1] = 'end'
         end
     end
     return L
 end
 M.sandbox_lines = sandbox_lines
 
---- WHICH INJECTABLE CHANNELS this function touches, DERIVED from the effect vocabulary
---- rather
---- than hand-listed. Returns (inject = {name->true}, unknown = {names}). An io-attributed
---- callee we have no fake for lands in `unknown`, and the run refuses — which turns
---- "refuse io" into "refuse UNKNOWN io", the honest narrowing. A sandbox that silently
---- misses one channel is worse than no sandbox, because the run LOOKS contained.
-local function io_channels(store, node)
+--- WHAT THIS FUNCTION NEEDS FROM ITS ENVIRONMENT, as HOLE ROWS (CART-0279, user: "why not
+--- treat the environment as a hole to fill?"). Derived from the effect vocabulary, per callee.
+---
+--- THIS RETIRED THREE MECHANISMS THAT WERE ONE QUESTION. A hand-maintained sandbox roster, a
+--- categorical io REFUSAL, and (a layer up) the VM's host problem were all enumerating the
+--- same names for different reasons — and all three ask "what does this code need from its
+--- environment, and who supplies it?", which is a HOLE. The hole machinery already had
+--- everything: an id, an owning rule, a tier, a mandatory basis, prediction refused, a premise
+--- line in the header, and an unfilled hole that ERRORS instead of passing.
+---
+--- WHEN THREE MECHANISMS KEEP NEEDING THE SAME LIST, THE LIST IS A FIRST-CLASS THING YOU HAVE
+--- NOT NAMED YET.
+---
+--- SO THE REFUSAL IS GONE. A channel we have no fake for is no longer a reason to refuse the
+--- whole subject — it is one more named, addressable hole, and the run's existing precondition
+--- ("every hole but the oracle must be filled") blocks it for free. Strictly more coverage at
+--- identical honesty: before this, ONE unmodelled call made a function uncharacterizable.
+---
+--- NONDET COUNTS, NOT JUST IO. Measured while building the sandbox: the vocabulary calls
+--- `os.getenv` pure-but-NONDETERMINISTIC, so an io-only filter passed it through and a run
+--- recorded this machine's real $HOME — a value that fails on anyone else's machine, and one
+--- the purity LABEL cannot see either.
+local function env_holes(store, node)
     local effects = require 'cartograph.effects'
     local callrec = require 'cartograph.callrec'
+    local pm = require 'cartograph.spec.profile'
+    local stdprof = pm.load(pm.base_for('lua'))
     local sites = (store.topo and store.topo().sites) and store.topo():sites(node.id) or {}
-    local inject, unknown, seen = {}, {}, {}
+    local rows, seen = {}, {}
     for _, c in ipairs(sites) do
-        local full = callrec.full(c) or callrec.callee(c)
-        local bare = callrec.callee(c)
-        for _, nm in ipairs({ full, bare }) do
+        for _, nm in ipairs({ callrec.full(c) or callrec.callee(c), callrec.callee(c) }) do
             if nm and not seen[nm] then
                 seen[nm] = true
                 local sig = effects.sig_of and effects.sig_of('lua', nm, false)
-                -- NONDET COUNTS, NOT JUST IO, and this was caught by driving it: the
-                -- vocabulary calls `os.getenv` pure-but-NONDETERMINISTIC, so the io filter
-                -- passed it through and the run recorded the real `/home/t0suj4`. A spec
-                -- carrying that value FAILS on anyone else's machine — nondeterminism is
-                -- as fatal to a recorded value as a side effect is to the world, and the
-                -- purity LABEL cannot see it either (it is derived from writes and world
-                -- only). So both go through the sandbox.
                 if sig and (sig.io or sig.nondet) then
-                    if M.SANDBOX[nm] then inject[nm] = true
-                    else unknown[#unknown + 1] = nm end
+                    local fake = M.SANDBOX[nm]
+                    -- A PROFILE SIGNATURE IS EVIDENCE, NOT A FILL. It gives the RETURN TYPE,
+                    -- and a type is not a value — the same reason an `@param` annotation does
+                    -- not fill an input hole. So it rides as an EDGE to what would fill this
+                    -- ([[cartograph-explaining-a-finding]]), never as an invented value.
+                    local declared = pm.member_sig and select(1, pm.member_sig(stdprof, nm:match('([%w_]+)$'), nm))
+                    rows[#rows + 1] = {
+                        kind = 'env', name = nm, rule = 'profile',
+                        -- OUR DEFAULT FILL, at the tier a DECLARATION deserves. It is data,
+                        -- replaceable by a better source, which is the whole argument for the
+                        -- reframe: the same hole can be filled better later and nothing here
+                        -- changes.
+                        value = fake or nil,
+                        by = fake and 'sandbox' or nil,
+                        filled_tier = fake and M.SANDBOX_TIER or nil,
+                        basis = fake and ("cartograph's own declared fake — the call is"
+                            .. ' RECORDED and the world is untouched') or nil,
+                        declared = declared and declared.sig or nil,
+                        why = fake and 'injected: the call is recorded, not performed'
+                            or ((declared and ('the environment supplies this and we have no'
+                                .. ' fake for it. The profile declares %s, so a stub of that'
+                                .. ' shape would fill it'):format(declared.sig)
+                            or 'the environment supplies this and we have no fake for it —'
+                                .. ' nothing we hold can say what it returns')),
+                    }
                 end
             end
         end
     end
-    table.sort(unknown)
-    return inject, unknown
+    table.sort(rows, function (a, b) return a.name < b.name end)
+    return rows
 end
-M.io_channels = io_channels
+M.env_holes = env_holes
 
 local function hole_id(h) return ('%s:%s'):format(h.kind, h.name or '?') end
 
@@ -386,8 +456,42 @@ function M.plan(store, fn_id, opts)
     -- that makes every other one moot: a spec that cannot call its subject is not a
     -- spec. Keeping it only in `plan.subject` let the header report "2 unfilled" for a
     -- file-local function whose real answer is "3, and one of them is fatal".
-    -- THE SANDBOX, and the EFFECTS hole that only exists because of it (CART-0277).
-    local inject, unknown_io = io_channels(store, node)
+    -- THE ENVIRONMENT AS HOLES (CART-0279), and the EFFECTS hole that exists because we can
+    -- inject at all (CART-0277). `sandbox` is now DERIVED from the env holes that carry a
+    -- fill, so the emitter installs exactly what is filled and nothing else.
+    local envrows = env_holes(store, node)
+    local inject, unfilled_env = {}, {}
+    -- AN ENV HOLE SUBSUMES THE DEPENDENCY HOLE FOR THE SAME CALL. `vim.fn.tempname` arrived
+    -- twice — once as `dependency:tempname` (an unresolved callee) and once as
+    -- `env:vim.fn.tempname` (a channel the vocabulary names) — which is one NEED counted
+    -- TWICE, inflating `unfilled` and giving a filler two ids for one thing. Exactly the
+    -- duplication this reframe exists to remove, so the env row owns it: it carries the full
+    -- path, the profile evidence and the fill mechanism, while the dependency row carries a
+    -- bare segment and no way to answer. Matching on the last segment is sound HERE because
+    -- both rows were derived from the same function's call sites.
+    local covered = {}
+    for _, e in ipairs(envrows) do
+        H[#H + 1] = e
+        covered[e.name:match('([%w_]+)$') or e.name] = e.name
+        if e.value then inject[e.name] = true else unfilled_env[#unfilled_env + 1] = e.name end
+    end
+    if next(covered) then
+        local kept = {}
+        for _, h in ipairs(H) do
+            local sub = h.kind == 'dependency' and covered[h.name or '']
+            if sub then
+                -- recorded on the surviving row, never dropped in silence
+                for _, e in ipairs(envrows) do
+                    if e.name == sub then
+                        e.subsumes = (e.subsumes or '') .. 'dependency:' .. h.name
+                    end
+                end
+            else
+                kept[#kept + 1] = h
+            end
+        end
+        H = kept
+    end
     local sandboxed = next(inject) ~= nil
     -- AN EFFECT-ONLY FUNCTION HAS A HOLE, not a shrug. This used to emit "no oracle …
     -- which this spec does not observe": true, and silence where a hole belongs. With a
@@ -422,8 +526,14 @@ function M.plan(store, fn_id, opts)
         local sat = satisfied_by(h)
         local row = { id = hole_id(h), kind = h.kind, name = h.name, tier = h.tier,
             rule = h.rule, why = h.why, hard = h.hard, hedged = h.hedged,
-            stub = h.stub, satisfied_by = sat,
-            blocking = holes.blocking(h) or nil }
+            stub = h.stub, satisfied_by = sat, owners = h.owners,
+            blocking = holes.blocking(h) or nil,
+            -- A ROW MAY ARRIVE ALREADY FILLED, which env holes do (CART-0279 ships a
+            -- default fake for the channels it knows). This loop used to copy a FIXED
+            -- field list, so a pre-supplied fill was silently dropped and every env hole
+            -- read as unfilled — a whitelist copy is how a new field gets lost.
+            value = h.value, by = h.by, filled_tier = h.filled_tier, basis = h.basis,
+            declared = h.declared }
         -- a MEASURED input is already an answer: the code itself demonstrates it
         if h.kind == 'input' and h.tier == 'measured' then
             local lit = h.why:match('passes the string (.*)$')
@@ -462,7 +572,8 @@ function M.plan(store, fn_id, opts)
         subject = reach,
         package_path = pathlines or {},
         sandbox = sandboxed and inject or nil,
-        unknown_io = (#unknown_io > 0) and unknown_io or nil,
+        -- kept as a LIST for the report and the refusal text; the authority is the hole rows
+        unfilled_env = (#unfilled_env > 0) and unfilled_env or nil,
         has_oracle = has_oracle,
         abspath = root and (root .. '/' .. node.file) or node.file,
         params = node.params or {},
@@ -642,12 +753,13 @@ function M.preamble(plan)
     add ''
     -- THE SANDBOX GOES IN BEFORE THE SUBJECT IS LOADED, because a module can call io at
     -- LOAD time and an injection that arrives after the dofile would have missed it.
-    if plan.sandbox then
+    local sandbox = M.sandbox_of(plan)
+    if sandbox then
         add '-- SANDBOX: our own functions, injected. Every call is RECORDED and the world'
         add '-- is untouched. A fake is a SUPPLIED PREMISE, not the truth — the values below'
         add '-- are what this subject does UNDER THIS ENVIRONMENT, which is a real fact and'
         add '-- a different one from what it does against the real io.'
-        for _, l in ipairs(M.sandbox_lines(plan.sandbox)) do add(l) end
+        for _, l in ipairs(M.sandbox_lines(sandbox)) do add(l) end
         add ''
     end
     for _, l in ipairs(plan.package_path or {}) do
@@ -724,7 +836,7 @@ function M.preamble(plan)
     add 'local function CAPTURE(...) return select("#", ...), { ... } end'
     add(('local gotn, got = CAPTURE(%s(%s))'):format(plan.subject.expr or 'SUBJECT',
         table.concat(args, ', ')))
-    if plan.sandbox then
+    if sandbox then
         add 'local gotcalls = table.concat(__log, " | ")'
         -- RESTORED BEFORE THE ASSERTIONS, so a FAILING spec still leaves the process clean
         add '__unsandbox()'
@@ -783,7 +895,7 @@ function M.emit(plan)
     for _, h in ipairs(plan.holes) do
         if h.kind == 'effects' then eff = h end
     end
-    if eff and plan.sandbox then
+    if eff and M.sandbox_of(plan) then
         if eff.value then
             add(oneline(('-- %s, by %s: %s'):format(eff.filled_tier or '?',
                 eff.by or '?', eff.basis or '')))

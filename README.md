@@ -2961,6 +2961,32 @@ the fake installed, so the host's output went silent after the first spec ran; t
 restores every global it replaced, before the assertions, so even a *failing* spec leaves the
 process clean. A sandbox that outlives its subject has escaped.
 
+Then the whole thing collapsed into one mechanism. The sandbox roster, the io refusal, and
+(a layer up) the VM's host problem were three ways of asking *what does this code need from its
+environment, and who supplies it* — which is a **hole**, and the hole machinery already had
+everything: an id, an owning rule, a tier, a mandatory basis, prediction refused, a premise
+line, and an unfilled hole that *errors* instead of passing. When three mechanisms keep needing
+the same list, the list is a first-class thing you haven't named yet.
+
+So `env:io.open` is a row that ships with a **default fill** (our fake, at `claim` — a fake is
+something we *declared*), and `env:vim.fn.tempname` is a row that ships **unfilled**. The
+refusal disappears: an unmodellable channel no longer makes the whole subject unreachable, it
+blocks the run *naming itself* and makes the spec error — and supplying it, from an agent or a
+profile or a recorded value, makes the subject characterizable. Measured on this repo, that
+moved **2633 of 3601 functions** out of a categorical label gate and into addressable holes.
+A profile signature rides along as *evidence* rather than a fill, because a type is not a value —
+the same reason an `@param` doesn't fill an input hole.
+
+Three defects fell out of doing it, each the same shape: a stale copy of state that had moved.
+The row-building loop copied a **fixed field list**, so a pre-supplied fill was silently dropped
+and every env hole read as unfilled. `plan.sandbox` was computed once at plan time, so an agent
+filling a hole *afterwards* was accepted, never installed, and the run went through the real call
+while the oracle was tiered `measured` — the sandbox is now a **view over the holes**, which are
+the single source of truth. And the patcher matched two-segment names, so `vim.fn.tempname`
+fell through to patching a global *literally called* `"vim.fn.tempname"`: accepted, installed
+nowhere, and the spec ran unsandboxed while looking contained. A name-shape assumption that fails
+**open** is the worst kind, so a path we cannot walk now errors.
+
 Meanwhile `writes` stopped being a refusal at all. A separate process contains anything
 process-*local*, so a module-state write is both safe and reproducible in one — measured, a
 function incrementing a module counter returns `1` on three separate runs, because each run is

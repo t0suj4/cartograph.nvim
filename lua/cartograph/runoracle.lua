@@ -133,21 +133,35 @@ end
 --- Returns (true, label) or (nil, why). `opts.force` overrides EXPLICITLY, and the
 --- override rides into the basis, so a spec built on it discloses that we ran something
 --- our own analysis had flagged.
--- THE LINE IS CONTAINMENT, NOT PURITY (CART-0277). A separate process contains anything
--- process-LOCAL, so a module-state write is safe AND reproducible in it — measured:
--- `M.bump`, which increments a module-level counter, returned 1 on three separate runs,
--- because each run is a fresh process and therefore a FIRST call. What a process cannot
--- contain is the WORLD, so `io` is the label that needs a sandbox rather than a refusal.
--- A HEDGED label still refuses: `~` means our analysis is not sure which side of that
--- line the function is on, and guessing is exactly what this tool must not do.
-M.SAFE = { pure = true, writes = true }
---- The premise a label commits the spec to, or nil when it needs none. `writes` is
---- allowed but not FREE: the recorded value is the first call in a fresh process, and a
---- reader has to know that or they will misread the number.
+-- ── MAY WE RUN IT? THE ENV HOLES DECIDE; THE LABEL ONLY DISCLOSES ──────────
+-- This was a purity GATE: `pure` ran, everything else refused. CART-0279 retired most of
+-- it, because the gate was doing a job the env holes now do properly and better.
+--
+--  · CONTAINMENT IS THE PROCESS. A separate process contains anything process-LOCAL, so a
+--    module-state write is safe AND reproducible in one — measured, a counter-incrementing
+--    function returns 1 on three separate runs because each is a FIRST call.
+--  · WHAT A PROCESS CANNOT CONTAIN IS THE WORLD, and every world channel the vocabulary
+--    names is now an `env` HOLE. An unfilled one BLOCKS THE RUN through the ordinary
+--    precondition, naming itself — so the fence is the holes, not the label.
+--  · A HEDGED LABEL (`~`) IS A DISCLOSURE, NOT A REFUSAL. `~` means the effect analysis is
+--    not certain, so the channel ENUMERATION may be incomplete and something we could not
+--    see would run for real. Refusing on it sounded prudent and was measured untenable:
+--    `io~` covers most real Lua (any method call on an untyped receiver hedges — `f:write`
+--    after an `io.open`), so refusing would have gutted the feature to protect against a
+--    risk we can state precisely instead. Stating it is what this codebase does everywhere
+--    else with `~`.
+--  · NO SUMMARY AT ALL still refuses: with no label we know nothing about what it touches,
+--    and that is different from knowing imprecisely.
+M.SAFE = { pure = true, writes = true, io = true,
+    ['pure~'] = true, ['writes~'] = true, ['io~'] = true }
+--- The premise a label commits the spec to, or nil. Allowing a label without emitting its
+--- premise would be a promise made and broken in one breath.
 M.LABEL_PREMISE = {
     writes = 'the subject writes module state, so the recorded value is its FIRST call'
         .. ' in a fresh process — a second call in one process may differ',
 }
+M.HEDGE_PREMISE = 'the effect analysis is HEDGED about this subject, so the channel'
+    .. ' enumeration may be INCOMPLETE — a channel we could not see ran for real'
 function M.runnable(store, plan, opts)
     local effects = require 'cartograph.effects'
     local label = effects.purity and effects.purity(store, plan.fn_id) or nil
@@ -156,31 +170,12 @@ function M.runnable(store, plan, opts)
         return nil, ('the effect analysis has no summary for %s, so we cannot say what'
             .. ' running it would do — refusing (force overrides)'):format(plan.fn)
     end
-    if M.SAFE[label] then return true, label end
-    -- io IS RUNNABLE WHEN EVERY CHANNEL IT TOUCHES IS ONE WE CAN FAKE (CART-0277): the
-    -- effects are then RECORDED instead of performed. `unknown_io` is the honest fence —
-    -- one un-fakeable channel and the run refuses NAMING it, because a sandbox with a hole
-    -- in it looks contained and is not.
-    if (label == 'io' or label == 'io~') and plan.sandbox then
-        if plan.unknown_io then
-            return nil, ('%s is `%s` and reaches channels we cannot inject (%s) — a'
-                .. ' sandbox that misses one channel LOOKS contained and is not, so this'
-                .. ' refuses rather than half-containing it (force overrides)'):format(
-                plan.fn, label, table.concat(plan.unknown_io, ', '))
-        end
-        return true, label .. ' (SANDBOXED)'
+    if M.SAFE[label] then
+        return true, label .. (ch.sandbox_of(plan) and ' (SANDBOXED)' or '')
     end
     if opts and opts.force then return true, label .. ' (FORCED)' end
-    local what = ({
-        ['pure~'] = 'our own effect analysis is HEDGED about it — not certain it is pure',
-        io = 'it touches the world (io / os / the editor), so running it would DO that',
-        ['io~'] = 'it may touch the world, and the analysis is not certain',
-        writes = 'it writes module state, so running it would mutate the process',
-        ['writes~'] = 'it may write module state, and the analysis is not certain',
-    })[label] or ('its purity label is ' .. label)
-    return nil, ('%s is `%s`: %s. Refusing to run it — filling an oracle must not have'
-        .. ' side effects (force overrides, and the spec then discloses it)')
-        :format(plan.fn, label, what)
+    return nil, ('%s is `%s`, which this version does not know how to contain — refusing'
+        .. ' (force overrides, and the spec then discloses it)'):format(plan.fn, label)
 end
 
 -- ── THE PROBE: the spec's own preamble, assertion replaced by a report ───────
@@ -291,7 +286,7 @@ function M.probe_text(plan, budget)
     add 'end'
     add(('__out(%q)'):format(M.MARK_A))
     add '__out("COST " .. __ticks)'
-    if plan.sandbox then add '__out("CALLS " .. gotcalls)' end
+    if ch.sandbox_of(plan) then add '__out("CALLS " .. gotcalls)' end
     add '__out("VALUES " .. gotn .. " " .. table.concat(out, ", "))'
     add(('__out(%q)'):format(M.MARK_B))
     return L
@@ -455,12 +450,17 @@ function M.fill_oracle(store, plan, opts)
     -- makes it reproducible — but the recorded value is then the FIRST call, and a reader
     -- who does not know that will misread the number. Allowing a label without emitting
     -- its premise would be the promise this module makes and breaks in the same breath.
-    local lp = M.LABEL_PREMISE[(res.purity or ''):gsub(' .*$', '')]
+    local bare = (res.purity or ''):gsub(' .*$', '')
+    local lp = M.LABEL_PREMISE[bare]
     if lp then basis = basis .. '; ' .. lp end
+    if bare:find('~', 1, true) then basis = basis .. '; ' .. M.HEDGE_PREMISE end
     -- THE ENVIRONMENT IS A HOLE, SO ITS TIER TRAVELS (user steer). A run THROUGH declared
     -- fakes is not `measured` evidence about the world — it is only as strong as the fakes,
     -- and shipping it as measured put the strongest tier on a value our own stub produced.
-    local envtier = plan.sandbox and ch.SANDBOX_TIER or nil
+    -- the tier of the ENVIRONMENT this ran through, read from the holes (a filled env hole
+    -- may be OURS at `claim` or an agent's invention at `agent-supplied`, and the run is only
+    -- as strong as the weakest of them)
+    local envtier = ch.env_tier(plan)
     if envtier then
         basis = basis .. ('; the tier is %s, not measured: every value here came through'
             .. ' DECLARED fakes, and an observation made through a supplied premise is only'

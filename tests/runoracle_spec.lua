@@ -112,24 +112,40 @@ test('runoracle: OUR OWN EFFECT ANALYSIS decides whether we may run it', functio
     -- would actually do the io. `M.opens` calls io.open, which IS injectable — so what is
     -- pinned here is that the label alone no longer decides; the CHANNELS do.
     local oplan = planned('M.opens')
-    ok(oplan.sandbox and oplan.sandbox['io.open'],
+    ok(ch.sandbox_of(oplan) and ch.sandbox_of(oplan)['io.open'],
         'io.open is derived as an injectable channel')
 
-    -- AN io CHANNEL WE CANNOT FAKE IS STILL REFUSED, which is the honest narrowing:
-    -- "refuse io" became "refuse UNKNOWN io". `vim.fn.*` is world in the effect vocabulary
-    -- and is not in the injectable roster, so the sandbox would have a hole in it — and a
-    -- sandbox with a hole LOOKS contained and is not.
+    -- AN io CHANNEL WE CANNOT FAKE IS NO LONGER A REFUSAL (CART-0279) — it is an UNFILLED
+    -- env HOLE, and the run's ordinary precondition blocks it, naming itself. The label
+    -- stopped being the fence; the holes are. That is strictly more coverage at identical
+    -- honesty: before, ONE unmodelled call made a whole function uncharacterizable.
     local eplan = planned('M.editor')
-    local oke, whye = ro.runnable(store, eplan)
-    eq(nil, oke, 'an un-injectable channel is refused')
-    ok(whye:find('cannot inject', 1, true) or whye:find('io', 1, true),
-        'and names it: ' .. tostring(whye))
+    eq(true, (ro.runnable(store, eplan)), 'the LABEL no longer refuses it')
+    local ehole
+    for _, h in ipairs(eplan.holes) do
+        if h.kind == 'env' and h.name:find('tempname', 1, true) then ehole = h end
+    end
+    ok(ehole, 'the channel is an env HOLE')
+    eq(nil, ehole.value, 'unfilled, because we ship no fake for vim.fn.*')
+    local res, whye = ro.run(store, eplan)
+    eq(nil, res, 'so the RUN is blocked')
+    ok(whye:find('env:vim.fn.tempname', 1, true),
+        'by the hole, which names itself: ' .. tostring(whye))
 
-    -- and the override is EXPLICIT, never a fallback, and LABELLED so a spec built on it
-    -- discloses that we ran something our own analysis had flagged
-    local okf, flabel = ro.runnable(store, planned('M.editor'), { force = true })
-    eq(true, okf)
-    ok(flabel:find('FORCED', 1, true), 'a forced run is LABELLED: ' .. tostring(flabel))
+    -- SUPPLY THE ENVIRONMENT and it runs — the environment is a premise like any other, and
+    -- the value observed through it is only as strong as the premise (see the weakest-link
+    -- test): an agent-invented stub yields `agent-supplied`, not `measured`.
+    assert(ch.fill(eplan, { [ehole.id] = {
+        value = 'function () return "/tmp/fixed" end',
+        basis = 'a fixed path, so the spec is reproducible', by = 'agent' } }))
+    ok(ro.fill_oracle(store, eplan), 'and now the oracle can be observed')
+    local o2
+    for _, h in ipairs(eplan.holes) do if h.kind == 'oracle' then o2 = h end end
+    eq('agent-supplied', o2.filled_tier,
+        'weakened by the environment it ran through: ' .. tostring(o2.filled_tier))
+    local okrun, rerr = pcall(assert(loadstring(table.concat(ch.emit(eplan), '\n'), 's')))
+    ok(okrun, 'and the spec REPRODUCES it, because it installs the same env: '
+        .. tostring(rerr))
     cleanup()
 end)
 
@@ -350,8 +366,8 @@ test('sandbox: the effect is RECORDED and the world is not touched', function ()
     local plan = planned('M.save', {
         ['input:p'] = { value = ('%q'):format(victim), basis = 'a path', by = 'agent' },
         ['input:s'] = { value = '"hi"', basis = 'content', by = 'agent' } })
-    ok(plan.sandbox and plan.sandbox['io.open'],
-        'io.open is derived from the effect vocabulary as an injectable channel')
+    ok(ch.sandbox_of(plan) and ch.sandbox_of(plan)['io.open'],
+        'io.open is derived from the effect vocabulary and ships a default fill')
     assert(ro.fill_oracle(store, plan))
     -- THE CONTAINMENT PROOF is the filesystem, not the roster
     eq(0, vim.fn.filereadable(victim), 'the file was NOT created')
@@ -399,7 +415,7 @@ test('sandbox: a NONDETERMINISTIC channel is injected too', function ()
     -- value as a side effect is to the world, and the purity LABEL cannot see it either.
     local plan = planned('M.env',
         { ['input:k'] = { value = '"HOME"', basis = 'a real variable', by = 'agent' } })
-    ok(plan.sandbox and plan.sandbox['os.getenv'], 'os.getenv is injected')
+    ok(ch.sandbox_of(plan) and ch.sandbox_of(plan)['os.getenv'], 'os.getenv is injected')
     assert(ro.fill_oracle(store, plan))
     local o = hole(plan, 'oracle')
     eq('"unset"', o.raw_value,
@@ -479,4 +495,78 @@ test('characterize.weakest: the ladder compares, and a fill can only WEAKEN', fu
         tier = 'measured' } }))
     eq('agent-supplied', p.holes[1].filled_tier,
         'an agent-supplied value cannot claim to be measured')
+end)
+
+test('env: the environment is a HOLE — no roster, no refusal, one mechanism', function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    local plan = planned('M.save', {
+        ['input:p'] = { value = '"/tmp/x"', basis = 'a path', by = 'agent' },
+        ['input:s'] = { value = '"hi"', basis = 'content', by = 'agent' } })
+    local e
+    for _, h in ipairs(plan.holes) do if h.kind == 'env' then e = h end end
+    ok(e, 'a world channel is an env HOLE, not a roster entry')
+    eq('io.open', e.name, 'named by the FULL path the vocabulary matched')
+    ok(e.value, 'and it ships a DEFAULT FILL — our fake')
+    eq('claim', e.filled_tier, 'at the tier a DECLARATION deserves, never measured')
+    eq('sandbox', e.by, 'with the channel recording who supplied it')
+
+    -- ONE NEED, ONE HOLE. `vim.fn.tempname` used to arrive twice — as dependency:tempname
+    -- (an unresolved callee) and as env:vim.fn.tempname (a named channel) — which inflated
+    -- `unfilled` and gave a filler two ids for one thing. The env row owns it: it carries
+    -- the full path, the profile evidence and the fill mechanism.
+    for _, h in ipairs(plan.holes) do
+        eq(nil, (h.kind == 'dependency' and h.name == 'open') or nil,
+            'the dependency duplicate is subsumed, not counted twice')
+    end
+    cleanup()
+end)
+
+test('env: the SANDBOX is a view over the holes, never stored state', function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    -- A `plan.sandbox` FIELD computed once at plan time made a filled hole a lie: an agent
+    -- filling an env hole AFTER planning was accepted, never installed, and the run then
+    -- went through the REAL call while the oracle was tiered `measured`. Two wrongs from one
+    -- cached copy of state that had moved. The holes are the single source of truth.
+    local plan = planned('M.env',
+        { ['input:k'] = { value = '"HOME"', basis = 'a var', by = 'agent' } })
+    local before = ch.sandbox_of(plan)
+    ok(before and before['os.getenv'], 'the default fill shows in the view')
+    -- REPLACE our fake with the agent's, and the view must follow
+    local eh
+    for _, h in ipairs(plan.holes) do if h.kind == 'env' then eh = h end end
+    assert(ch.fill(plan, { [eh.id] = { value = 'function () return "Z" end',
+        basis = 'a fixed value', by = 'agent' } }))
+    local after = ch.sandbox_of(plan)
+    ok(after['os.getenv']:find('"Z"', 1, true), 'the view reflects the NEW fill')
+    eq('agent-supplied', ch.env_tier(plan),
+        'and the environment tier follows the weakest fill')
+    -- which then travels into everything observed through it
+    assert(ro.fill_oracle(store, plan))
+    local o
+    for _, h in ipairs(plan.holes) do if h.kind == 'oracle' then o = h end end
+    eq('agent-supplied', o.filled_tier)
+    eq('"Z"', o.raw_value, 'the AGENT\'s environment is what ran')
+    cleanup()
+end)
+
+test('env: a sandbox path that cannot be installed is an ERROR, not silence', function ()
+    if not ready() then skip('no lua parser') end
+    sproj()
+    local plan = planned('M.env',
+        { ['input:k'] = { value = '"HOME"', basis = 'a var', by = 'agent' } })
+    local eh
+    for _, h in ipairs(plan.holes) do if h.kind == 'env' then eh = h end end
+    -- a THREE-segment path used to fall through a two-segment matcher and patch a global
+    -- literally named "vim.fn.tempname" — accepted, installed nowhere, and the spec then ran
+    -- UNSANDBOXED while looking contained. A name-shape assumption that fails OPEN is the
+    -- worst kind, so a path we cannot walk now errors.
+    eh.name = 'nosuchhost.deep.fn'
+    assert(ch.fill(plan, { [eh.id] = { value = 'function () return 1 end',
+        basis = 'x', by = 'agent' } }))
+    local _, err = pcall(assert(loadstring(table.concat(ch.emit(plan), '\n'), 's')))
+    ok(tostring(err):find('cannot install', 1, true),
+        'it refuses rather than running unsandboxed: ' .. tostring(err))
+    cleanup()
 end)
