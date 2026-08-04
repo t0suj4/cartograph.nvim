@@ -46,6 +46,63 @@ M.load = validity.memo {
 end,
 }
 
+-- ── THE BASE RUNTIME OF A LANGUAGE, AND ITS MEMBER SIGNATURES (CART-0266) ────
+-- The activation axis knows FRAMEWORK shapes (a factorio mod, a rails app) and
+-- nothing about the plain case: every Lua repo is a Lua repo, so no marker selects
+-- the base runtime and `luajit` activates NOWHERE. That is why these are READ-SIDE
+-- lookups rather than a resolution change — a caller that wants a stdlib signature
+-- asks for one, exactly as lsp.lua's hover already does, and no graph moves.
+--
+-- WHY IT WAS WORTH THE ARTIFACT: the top absent callees across our corpora are the
+-- Lua stdlib (match 432, concat 222, sort 211, close 193, open 180 on `self`), every
+-- one 100% frontier for a STUB — "if we don't know how to stub it, that is a gap on
+-- our side" (user). The names were always known; the SIGNATURE is what a stub needs,
+-- and tools/luadistill.lua now distils it from lua-language-server's @meta.
+
+--- The base runtime profile name for a language, or nil. A LOOKUP, not detection:
+--- there is nothing to detect, which is precisely the gap.
+M.BASE = { lua = 'luajit' }
+function M.base_for(lang) return lang and M.BASE[lang] or nil end
+
+--- THE MEMBER SIGNATURE for a callee, with the HEDGE stated. Returns
+--- (sig, how, owners) where `how` is:
+---   'namespace'  the call names its own namespace (`table.concat`) — SOUND, the
+---                root is in nsset and the member is that namespace's
+---   'free'       a bare call to a free function (`tostring`) — SOUND
+---   'unique'     a bare/method call whose member name has exactly ONE owner in the
+---                whole roster (`s:match` → string#match). A HEDGE, not a fact: the
+---                receiver is unverified, and a value of another type carrying a
+---                same-named method would be mis-signed. The caller must render it.
+--- and nil + 'ambiguous' + the OWNER LIST when the member name has several owners
+--- (`close` → file, io): a set is the honest answer where one owner is a guess, and
+--- [[cartograph-anonymous-types]]' port classes are what could later decide it.
+---
+--- ORDER IS THE SOUNDNESS ORDER, strongest first, so a call that names its namespace
+--- never falls through to the receiver-blind rule.
+function M.member_sig(prof, callee, full)
+    if not (prof and prof.sigs and callee) then return nil end
+    if full then
+        local root, member = full:match('^([%w_]+)%.([%w_]+)$')
+        if root and (prof.nsset or {})[root] then
+            local s = prof.sigs[root .. '#' .. member]
+            if s then return s, 'namespace' end
+            -- the namespace is real and the member is not IN it: an honest absence,
+            -- and a stronger statement than "unknown" — do NOT fall through to a
+            -- bare-name guess, which would answer a question about `table.nope`
+            -- with some other namespace's `nope`
+            if (prof.types or {})[root] then return nil, 'absent-member' end
+        end
+    end
+    if (prof.free or {})[callee] and prof.sigs[callee] then
+        return prof.sigs[callee], 'free'
+    end
+    local amb = (prof.sig_ambiguous or {})[callee]
+    if amb then return nil, 'ambiguous', amb end
+    local key = (prof.canon or {})[callee]
+    if key and prof.sigs[key] then return prof.sigs[key], 'unique' end
+    return nil
+end
+
 --- Register as a graph-validity CONTRIBUTOR: a cached graph is only valid while
 --- every profile artifact its resolution consulted is unchanged. cache.lua folds
 --- whatever registers here, so this needs no edit there.

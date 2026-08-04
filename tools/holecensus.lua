@@ -71,6 +71,11 @@ local builtins = require 'cartograph.builtins'
 local expr = require 'cartograph.expr'
 local txn = require 'cartograph.txn'
 local at = require 'cartograph.at'
+local pm = require 'cartograph.spec.profile'
+-- THE BASE RUNTIME'S SIGNATURES (CART-0266), loaded once. nil when no artifact
+-- ships for the language, and the report SAYS so — a stub gap and a missing
+-- signature SOURCE must not render the same way.
+local stdprof = pm.load(pm.base_for("lua"))
 
 -- ── the docblock above a def, as {params={name->type}, ret=bool} ─────────────
 -- Mirrors lint.lua's annotation_findings walk (same reader, same adhesion rule).
@@ -227,18 +232,51 @@ local function holes_of(node, ctx)
             local nm = callrec.callee(c) or '?'
             if not seend[nm] then
                 seend[nm] = true
-                -- `claim` when the effect VOCABULARY knows the name (we know something
-                -- about the stub's shape); otherwise the stub is a pure hypothesis.
-                -- A profile-supplied signature (CART-0029's input adapters) is what
-                -- would upgrade the rest.
+                -- THE STUB'S SHAPE, from the strongest source that answers (CART-0266).
+                -- A REAL SIGNATURE now exists for the Lua stdlib — params AND returns,
+                -- distilled from lua-language-server's @meta by tools/luadistill.lua —
+                -- which is what a stub actually needs. READ-SIDE: the base runtime
+                -- profile activates nowhere (every Lua repo is a Lua repo, so no shape
+                -- marker selects it), so this ASKS rather than waiting for a resolution
+                -- change that would move every Lua corpus's graph.
+                --
+                -- KEPT DISTINCT FROM THE EFFECT VOCABULARY, deliberately. Both are
+                -- `claim` tier, and conflating them is what made this ticket's own
+                -- caveat necessary: the vocabulary knows a name's EFFECT SHAPE and says
+                -- nothing about what a stub RETURNS, so counting a vocabulary hit as a
+                -- stubbable signature over-reported by exactly the population the real
+                -- signatures now cover. `how` carries the soundness of the match.
+                local ssig, how, owners = pm.member_sig(stdprof, nm, callrec.full(c))
                 local sig = effects.sig_of and effects.sig_of('lua', nm, false)
+                local why
+                if ssig then
+                    why = ('the %s stdlib declares %s%s'):format(
+                        (stdprof or {}).runtime or 'base', ssig.sig,
+                        how == 'unique' and ' — HEDGED: the only stdlib owner of this'
+                            .. ' member name, receiver unverified' or '')
+                elseif how == 'ambiguous' then
+                    why = ('%d stdlib owner(s) declare a member named `%s` (%s) — a SET,'
+                        .. ' not a signature: the receiver decides and we cannot'):format(
+                        #owners, nm, table.concat(owners, ', '))
+                elseif how == 'absent-member' then
+                    why = 'the namespace IS the stdlib and does not hold this member —'
+                        .. ' an absence, which is a stronger statement than an unknown'
+                elseif sig then
+                    why = 'the effect vocabulary declares this name — an EFFECT shape,'
+                        .. ' not a return type: it cannot say what a stub returns'
+                elseif hard then
+                    why = ('absent, and the fn is not pure-modulo-injection (%s) —'
+                        .. ' injection cannot isolate it'):format(
+                        writes and 'writes module state' or 'mutates an argument')
+                else
+                    why = 'absent from the corpus — a stub is a HYPOTHESIS to disclose'
+                end
                 H[#H + 1] = { kind = 'dependency', name = nm, hard = hard,
-                    tier = sig and 'claim' or nil, rule = 'profile',
-                    why = sig and 'the effect vocabulary declares this name'
-                        or (hard and ('absent, and the fn is not pure-modulo-injection ('
-                            .. (writes and 'writes module state' or 'mutates an argument')
-                            .. ') — injection cannot isolate it')
-                        or 'absent from the corpus — a stub is a HYPOTHESIS to disclose') }
+                    tier = (ssig or sig) and 'claim' or nil,
+                    rule = ssig and 'stdlib' or 'profile',
+                    stub = ssig and ssig.sig or nil,
+                    hedged = (how == 'unique') or nil,
+                    why = why }
             end
         end
     end
@@ -345,17 +383,25 @@ local function rotate(holes, axis)
     -- signature somewhere (CART-0029's adapters: factorio runtime-api.json, RBS,
     -- typeshed). FREQUENCY is the evidence: a name called hundreds of times is not
     -- exotic, it is a core API we are missing.
+    -- AND IT IS A WORK-LIST, SO IT MUST NOT LIST FINISHED WORK (CART-0266). A builtin
+    -- is legitimately "outside the corpus" and so has always appeared here — ipairs 258
+    -- on desynced — non-frontier and therefore harmless to the verdict, but pure noise
+    -- in the one view whose whole purpose is "what should we go and model next". A hole
+    -- that already has a signature is not a gap in our coverage; the ROSTER of stdlib
+    -- signatures is printed separately, where it belongs.
     local depmode = axis == 'dep'
     local key = ({ kind = 'kind', tier = 'tier', rule = 'rule', file = 'file',
         dep = 'name' })[axis] or 'kind'
     local g = {}
     for _, h in ipairs(holes) do
+        if depmode and h.rule == 'stdlib' then goto skip end
         if not depmode or h.kind == 'dependency' then
         local k = h[key] or (key == 'tier' and 'FRONTIER' or '?')
         g[k] = g[k] or { n = 0, frontier = 0 }
         g[k].n = g[k].n + 1
         if not h.tier then g[k].frontier = g[k].frontier + 1 end
         end
+        ::skip::
     end
     local ord = {}
     for k in pairs(g) do ord[#ord + 1] = k end
@@ -473,6 +519,10 @@ local axis, show = 'kind', 10
 for i = 1, #(arg or {}) do
     if arg[i] == '--by' then axis = arg[i + 1] or 'kind' end
     if arg[i] == '--show' then show = tonumber(arg[i + 1]) or 10 end
+    -- THE A/B FOR CART-0266, so the stdlib-signature delta is REPRODUCIBLE rather
+    -- than a number someone remembered from a session. Drops the signature source and
+    -- nothing else, which is exactly the before-state.
+    if arg[i] == '--no-stdlib' then stdprof = nil end
 end
 
 print('holecensus SELFTEST (a census that classifies nothing must not report)')
@@ -542,3 +592,41 @@ for _, k in ipairs({ 'measured', 'derived', 'claim', 'FRONTIER' }) do
     end
 end
 local _ = ot
+
+-- ── THE STDLIB SIGNATURE SPLIT (CART-0266) ──────────────────────────────────
+-- Printed SEPARATELY from the count, because "5020 stubs now have a signature" would
+-- overstate it: a member-name match with an UNVERIFIED RECEIVER (`s:match` →
+-- string#match, the only stdlib owner of that name) is a hedge, and a value of some
+-- other type carrying a same-named method would be mis-signed. The sound rungs name
+-- their own namespace (`table.concat`) or are free functions (`tostring`).
+-- A SET is reported where the name has several owners — `close` is file's AND io's, so
+-- the honest answer is both and the receiver is what we do not have.
+local n_sound, n_hedged, n_set, n_absent_mem = 0, 0, 0, 0
+for _, h in ipairs(holes) do
+    if h.rule == 'stdlib' then
+        if h.hedged then n_hedged = n_hedged + 1 else n_sound = n_sound + 1 end
+    elseif h.kind == 'dependency' and h.why then
+        if h.why:find('a SET,', 1, true) then n_set = n_set + 1
+        elseif h.why:find('does not hold this member', 1, true) then
+            n_absent_mem = n_absent_mem + 1
+        end
+    end
+end
+if not stdprof then
+    print('')
+    print('  STDLIB SIGNATURES: none — no base-runtime profile for lua (--no-stdlib, or'
+        .. ' no artifact ships). Every stub shape below is the effect vocabulary at best.')
+elseif n_sound + n_hedged + n_set > 0 then
+    print('')
+    print(('  STDLIB SIGNATURES (%s, tier=claim — %s):'):format(stdprof.runtime,
+        stdprof.sig_kind or 'no sig_kind'))
+    print(('    %6d SOUND   the call names its own namespace, or a free function'):format(n_sound))
+    print(('    %6d HEDGED  unique member name, RECEIVER UNVERIFIED — a guess that'
+        .. ' happens to have exactly one candidate'):format(n_hedged))
+    print(('    %6d SET     several stdlib owners declare the name; the receiver'
+        .. ' decides and we do not have it'):format(n_set))
+    if n_absent_mem > 0 then
+        print(('    %6d ABSENT  the namespace IS the stdlib and lacks the member — an'
+            .. ' absence, stronger than an unknown'):format(n_absent_mem))
+    end
+end

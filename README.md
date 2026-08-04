@@ -2564,6 +2564,12 @@ nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no sn
 # Gives lua-factorio a comparable SIBLING, which is what the portability move-diff
 # needs: two name-queryable profiles for one language.
 nvim --headless -u NONE -l tools/luadistill.lua          # writes the .mpack
+# …and the DECLARED half beside it (CART-0266): member SIGNATURES read from
+# lua-language-server's @meta, which is the only source that can say what a stdlib
+# call RETURNS. Introspection decides EXISTENCE (a measurement), the meta decides
+# SHAPE (a claim, sig_kind='annotation'), and the exact join makes each a check on
+# the other. --meta <dir> points at another copy.
+nvim --headless -u NONE -l tools/luadistill.lua --meta <dir>
 # API-DESCRIPTION OFFER: some environments publish their own API description, so a
 # profile for ANY version is obtainable rather than hand-authored — which is what
 # turns "the target lacks this name" into "1.1 had it and 2.0 does not". The URL is
@@ -2739,6 +2745,41 @@ injectable stubs raised `desynced` from 1.8% to 5.2% — but it *lowered* `self`
 to 17.3%, because a function that writes module state or mutates an argument cannot be
 isolated by injection and honestly blocks. So the frame's value tracks **purity**, not just
 how much environment is missing.
+
+That census then indicted us. Its top absent callees on every Lua corpus were the *Lua
+standard library* — `match` 432, `concat` 222, `sort` 211, `close` 193, `open` 180 — each
+100% frontier for a stub, i.e. the most documented API there is and we could not say what
+it returns. *"If we don't know how to stub it, that's a gap on our side"* (user). The names
+were never the problem: `luadistill` introspects them. A stub needs the **signature**, and
+only a declaration carries one, so the distiller now also reads lua-language-server's
+`@meta` — **two sources, two tiers, checking each other**. `for k in pairs(string)` is a
+*measurement* of the interpreter that will run the code; an `@meta` docblock is a *claim*.
+The join is exact, so each audits the other and both directions inform: a function the
+interpreter has and the meta doesn't is an honest signature gap (2 of them); a member the
+meta declares and LuaJIT lacks is a claim about another runtime — `string.pack`,
+`math.type`, `table.pack` — moved out of `sigs` rather than served, because hovering a
+5.4 signature over a function LuaJIT doesn't have would fabricate a member of the very
+runtime the profile measures. The cross-check is what *found* them: the meta gates those
+behind an `@version` tag, a second mechanism beside the `#if` preprocessor.
+
+Result on `self`: frontier holes **12194 → 10520**, emittable functions 17.4% → 18.0%, and
+functions with *zero* holes of any kind 89 → 124. On `desynced` the frontier falls 251 and
+emittability does not move at all — its absent callees are a game engine, not the stdlib —
+which is the exact inverse of the injection frame's distribution. Two complementary levers.
+
+The honesty is in the split, not the count. A signature is `SOUND` when the call names its
+own namespace (`table.concat`) or is a free function; `HEDGED` when only the member name
+matched (`s:match` → `string#match`, the sole stdlib owner of that name — a guess that
+happens to have one candidate, receiver unverified); and a `SET` when several owners
+declare it (`close` is *file*'s and *io*'s — the receiver decides and we don't have it).
+Sampling the hedged population found the rule's one real failure: 176 sites signed from
+`buf#get`/`buf#put` (LuaJIT's require-only `string.buffer`) and `profile#start` against
+this repo's own `cv:get`, `store:get`, `timer:start`. Generic member names on an optional
+extension library are the worst possible source for a name-only rule — so eligibility is
+**derived, not blocklisted**: an owner may answer a bare name only if the interpreter
+presents it as a namespace, or if a member of one *declares it as a return type* (`io.open`
+returns `file*`, so `file#seek` may sign `fd:seek()`). That drops 39 canon entries, and the
+frontier count *rises* by exactly the wrong answers removed.
 
 `tools/portgraph.lua` <corpus|path> is the **port graph**: for library functions we cannot
 see, we can never name the types — but if `FindComponent`'s return flows into
