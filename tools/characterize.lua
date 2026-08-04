@@ -4,7 +4,8 @@
 -- ([[cartograph-apply-for-agent]]).
 --
 --   nvim --headless -u NONE -l tools/characterize.lua <root> <fn-name|file:line>
---        [--write] [--dir <d>] [--fill <id>=<value>@<basis>]...
+--        [--write] [--dir <d>] [--fill <id>=<value>@<basis>]... [--run] [--force]
+--        [--determinism]
 --
 -- --write stages nothing and asks nothing: it writes through txn (journal + CAS +
 -- a load gate on our own output), which is the same ladder every write verb rides.
@@ -32,11 +33,18 @@ local ch = require 'cartograph.characterize'
 
 local argv = arg or {}
 local target, subject, write, dir = argv[1], argv[2], false, nil
+local run, force, det = false, false, false
 local fills = {}
 local i = 3
 while i <= #argv do
     local a = argv[i]
     if a == '--write' then write = true
+    -- --run EXECUTES THE SUBJECT, in a separate process, gated by our own effect
+    -- analysis (only `pure` by default). It is a separate flag from --write and from
+    -- --force because each is a distinct consent: generate, run, override, commit.
+    elseif a == '--run' then run = true
+    elseif a == '--force' then force = true
+    elseif a == '--determinism' then det = true
     elseif a == '--dir' then i = i + 1; dir = argv[i]
     elseif a == '--fill' then
         i = i + 1
@@ -116,6 +124,34 @@ if next(fills) then
     print(('characterize: %d hole(s) filled'):format(n))
 end
 
+-- FILL THE ORACLE BY RUNNING (CART-0263). After the static fills, because a probe
+-- cannot run on a hole: every input has to be answered first.
+if run then
+    local ro = require 'cartograph.runoracle'
+    if det then
+        local stable, note = ro.determinism(store, plan, { force = force })
+        print(('characterize: determinism — %s'):format(tostring(note)))
+        if stable == false then
+            -- A NONDETERMINISTIC SUBJECT MUST NOT BE CHARACTERIZED SILENTLY: a spec that
+            -- fails at random teaches its reader to ignore failures, which is worse than
+            -- having no spec at all.
+            print('characterize: refusing to record an oracle for a nondeterministic'
+                .. ' subject')
+            os.exit(2)
+        end
+    end
+    local n, rerr = ro.fill_oracle(store, plan, { force = force })
+    if not n then
+        print('characterize: run refused — ' .. tostring(rerr))
+        os.exit(2)
+    end
+    print(('characterize: oracle filled by RUNNING (%d)'):format(n))
+    -- the observed cost, so a budget can be raised from evidence
+    for _, h in ipairs(plan.holes) do
+        if h.kind == 'oracle' and h.basis then print('  ' .. h.basis) end
+    end
+end
+
 for _, l in ipairs(ch.report(plan)) do print(l) end
 
 if write then
@@ -124,8 +160,15 @@ if write then
         print('characterize: write refused — ' .. tostring(aerr))
         os.exit(2)
     end
-    print(('  WROTE %s/%s (journalled; :CartographUndo reverts it)'):format(root,
-        plan.path))
+    if entry.unchanged then
+        -- IDEMPOTENT: identical bytes, so nothing was journalled. Saying "wrote" here
+        -- would put a step on the undo stack that undoes nothing.
+        print(('  UNCHANGED %s/%s — identical bytes, nothing journalled'):format(root,
+            plan.path))
+    else
+        print(('  WROTE %s/%s (journalled; :CartographUndo reverts it)'):format(root,
+            plan.path))
+    end
 else
     print('')
     print('-- the spec (pass --write to commit it through txn):')

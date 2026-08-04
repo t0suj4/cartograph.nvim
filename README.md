@@ -2878,6 +2878,55 @@ counterpart to `:CartographNeutralityCheck`, which certifies a refactor by hashi
 shape: a **proxy** for the same question, where this is a real assertion. Run it before and
 after, and a behaviour change reports as `CHANGED: M.add returned 8, characterized as 7`.
 
+Then **`:CartographCharacterizeRun`** fills the oracle by *running* the function — the one
+verb in this plugin that executes your code, which is why it is its own command and not a
+flag. The exception is the point rather than a crack in the rule: every analysis refuses to
+run anything, which is exactly *why* the expected value is a hole and never a guess. But a
+hole is not a wall. The value exists, one run away, and a recorded run is `measured`
+evidence — the strongest tier there is and the only one that can ever answer this question.
+We still never *invent* it; we observe it, label it observed, and record what we ran.
+
+Four things make that safe enough to ship, and the first is the loop closing on itself:
+**our own effect analysis decides.** `effects.purity` already labels every function
+`pure` / `io` / `writes` (with `~` when it is unsure), so "is running this safe" has an
+answer we *computed*. Only `pure` runs by default — `io` would touch the world, `writes`
+would mutate module state, and a hedged `pure~` means our analysis is not certain; all three
+are refusals, overridable only explicitly, and a forced run is disclosed in the spec header.
+The subject runs in a **separate process**, so an infinite loop or an `os.exit` cannot take
+the editor. **Serialization is a refusal surface**: a value with no Lua literal form — a
+function, userdata, a cyclic table, NaN, a table with a table key — leaves the oracle a
+*hole* with the reason, rather than a fabricated fixture. And **determinism is checkable**:
+two runs, and a disagreement is reported as the subject's nondeterminism, because a spec
+that fails at random teaches its reader to ignore failures.
+
+The run carries an **execution budget**, and it is two-sided because each half is blind to
+what the other catches. An **instruction count** is deterministic — the same subject trips it
+at the same point on every machine, which matters more here than anywhere else, since a
+load-dependent limit would make the *recording* flaky and recording reproducible values is the
+whole job. It only works with the **JIT off**, though: measured, a 100-million-iteration loop
+finished having produced *zero* ticks, because LuaJIT count hooks fire only in the interpreter
+and a hot loop compiles to a trace. So the probe runs interpreted — slower, and the only way
+that half of the fence is real rather than decorative. A **wall clock** covers everything the
+hook cannot see: a real nine-require module load costs 6000 instructions and ~15 ms, nearly all
+of that time spent in C, so the clock is not a redundant second fence but the only fence on
+most of the cost. Output is capped as well, which bounds memory rather than time. Each limit
+names itself when it fires, and a successful run records what it **cost** in the spec's own
+basis — a default nobody can see the cost against is a superstition.
+
+Development turned up three defects worth naming, all of them found by running the thing
+rather than by reading it. A recorded **table** produced a spec that would not parse: nvim's
+headless `print` emits CRLF, and Lua treats a bare `\r` as a *line terminator*, so the
+provenance comment ended early and the rest of the line parsed as code — a value crossing a
+process boundary is bytes, not text, until something normalizes it. `local got = f(x)` kept
+only the **first** return value, so a function returning `nil, err` was characterized on half
+its behaviour while the spec read as complete; the capture is now `select('#', ...)`-based,
+which also distinguishes `return nil` from `return`. And the emitted header carried the graph
+**generation**, so applying bumped it and a re-characterization of an unchanged function
+wrote different bytes — a generated file that changes when nothing it describes has changed
+shows up as a diff in every review and trains its reader to stop reading it. The write is now
+idempotent to the byte: identical content journals nothing, because a journal entry per no-op
+would fill the undo stack with steps that undo nothing.
+
 Two **decision** tools answer "what's worth building." `tools/ablate.lua`
 [corpus] drops each resolution pass in turn, re-extracts, and reports the
 **net** resolution it loses — the marginal value `by_prov`'s gross credit

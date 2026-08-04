@@ -484,6 +484,44 @@ verb refuses is as load-bearing as what it writes — see
                               to |:CartographNeutralityCheck|, whose
                               df-shape witness is a proxy for the same
                               question
+  :CartographCharacterizeRun[!] [{file} {line}]
+                              fill that spec's ORACLE hole by RUNNING the
+                              function — the ONE verb here that executes
+                              your code, which is why it is its own
+                              command and not a flag. The subject runs in
+                              a SEPARATE PROCESS (an infinite loop or an
+                              os.exit must not take the editor with it),
+                              and only when cartograph's own effect
+                              analysis calls it `pure`: `io` would touch
+                              the world, `writes` would mutate module
+                              state, and a hedged `pure~` means the
+                              analysis is not certain — all refused
+                              unless ! forces it, and a forced run is
+                              DISCLOSED in the spec header. The observed
+                              value is recorded at tier=measured with a
+                              basis naming how it was obtained; a value
+                              with no Lua literal form (a function,
+                              userdata, a cyclic table, NaN) leaves the
+                              oracle a HOLE rather than a guess. Every
+                              INPUT hole must be filled first — a probe
+                              cannot run on a hole. |:CartographApply|
+                              then writes the spec IDEMPOTENTLY:
+                              identical bytes journal nothing.
+                              THE RUN CARRIES AN EXECUTION BUDGET, and it
+                              is two-sided because each half is blind to
+                              what the other catches: an INSTRUCTION count
+                              (deterministic — the same subject trips it at
+                              the same point on every machine, which is why
+                              the probe runs with the JIT off; a compiled
+                              trace fires no count hook at all) and a WALL
+                              CLOCK (load-dependent, and the only fence on
+                              C-level work — a blocking read or a huge
+                              parse produces almost no instructions).
+                              Output is capped too, which bounds memory
+                              rather than time. Every limit names itself
+                              when it fires, and a successful run records
+                              what it COST in the spec's basis, so a
+                              budget can be raised from evidence
 
 TRANSACTIONS                                               *cartograph-cmd-txn*
 

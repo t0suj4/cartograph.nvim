@@ -386,6 +386,48 @@ function M.register(H)
         scratch(ch.report(plan))
     end, { nargs = '*', bang = true,
         desc = 'cartograph: a runnable CHARACTERIZATION SPEC for the focused function (or the one enclosing <file> <line>) — every value we cannot know is a HOLE that ERRORS when run, never a guessed assertion, so an unfilled spec fails rather than reporting false coverage. Holes carry their tier: a measured call-site literal is filled, a same-file definition or a stdlib call is satisfied by loading the module / by the runtime and disclosed as a PREMISE, and the expected value is a hole one RUN fills. ! stages the write (never inside tests/ — a characterization spec is SUPPOSED to fail when behaviour changes and must not gate a commit). The executable counterpart to :CartographNeutrality, whose df-shape witness is a proxy for the same question' })
+
+    -- ── FILL THE ORACLE BY RUNNING — the one verb that EXECUTES (CART-0263) ────
+    -- A SEPARATE COMMAND, not a flag, because the consent is different in kind:
+    -- everything else in this plugin reads. This runs your code. Naming it in the
+    -- command is the disclosure.
+    cmd('CartographCharacterizeRun', function (o)
+        local store = live() if not store then return end
+        if store.txn then
+            return vim.notify('cartograph: a transaction is already staged'
+                .. ' — :CartographApply or :CartographTxnClear first', vim.log.levels.WARN)
+        end
+        local ch = require 'cartograph.characterize'
+        local ro = require 'cartograph.runoracle'
+        local id = store.focused
+        if o.fargs[1] and o.fargs[2] then
+            id = ch.at(store, o.fargs[1], tonumber(o.fargs[2]))
+        end
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function, or pass <file> <line>',
+                vim.log.levels.WARN)
+        end
+        local plan, why = ch.plan(store, id)
+        if not plan then
+            return vim.notify('cartograph: cannot characterize — ' .. tostring(why),
+                vim.log.levels.WARN)
+        end
+        -- THE INPUTS MUST ALREADY BE ANSWERED: a probe cannot run on a hole, and the
+        -- refusal says which one rather than surfacing the spec's own HOLE error as
+        -- though the subject had failed.
+        local nf, rerr = ro.fill_oracle(store, plan, { force = o.bang })
+        if not nf then
+            return vim.notify('cartograph: cannot run — ' .. tostring(rerr),
+                vim.log.levels.WARN)
+        end
+        store.set_txn(plan)
+        vim.notify(('cartograph: oracle OBSERVED by running %s — %d hole(s) still'
+            .. ' unfilled. Review :CartographDiff, commit :CartographApply'):format(
+            plan.fn, plan.unfilled), vim.log.levels.INFO)
+        scratch(ch.report(plan))
+    end, { nargs = '*', bang = true,
+        desc = 'cartograph: fill the focused function\'s ORACLE hole by RUNNING it — the one verb in this plugin that EXECUTES your code, which is why it is its own command rather than a flag. The subject runs in a SEPARATE PROCESS (an infinite loop or an os.exit must not take the editor with it) and only when our OWN effect analysis calls it `pure`: `io` would touch the world, `writes` would mutate module state, and a hedged `pure~` means the analysis is not certain — all refused unless ! forces it, and a forced run is disclosed in the spec header. The observed value is recorded at tier=measured with the basis naming how it was obtained; a value with no Lua literal form (a function, userdata, a cyclic table, NaN) leaves the oracle a HOLE rather than a guess. Every INPUT hole must be filled first: a probe cannot run on a hole. Then :CartographApply writes the spec, idempotently — identical bytes journal nothing' })
 end
 
 return M
