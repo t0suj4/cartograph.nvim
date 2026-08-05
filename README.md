@@ -2860,12 +2860,33 @@ What the environment already supplies is **not** a hole, and that is where CART-
 signatures pay off twice: the spec runs in a Lua interpreter, so a `table.concat`
 dependency is *satisfied by the runtime*; it `dofile`s the subject, so a same-file
 definition is *satisfied by the load*. Both are still rows, disclosed as **premises**,
-because "no hole" and "a hole the environment fills" are different claims. A file-local
-function is a **reach hole** — a spec that cannot call its subject is not a spec. And the
+because "no hole" and "a hole the environment fills" are different claims. And the
 module load is a premise too: `require 'a.b.c'` is aligned against a file the graph holds
 to *derive* the package path, and a require that cannot be aligned becomes a hole rather
 than a crash inside the spec's own preamble. That last one only showed up by driving the
 verb on a real module; the fixture required nothing, so `dofile` worked and hid it.
+
+**How the spec reaches its subject** is a hole of its own, and it is *four* answers rather
+than one. A `function M.add()` is a member of whatever the module returns — checked, not
+assumed, because a file that does not end in `return M` would give a spec that dies with
+"attempt to index nil". A **nested** `local function` inside another function can never be
+reached by anything: it does not exist until the enclosing call runs, so the refusal names
+what to characterize *instead*. But a **file-level** `local function` is an **upvalue** of
+whichever exported function references it — so the spec walks upvalues from the module's
+exports and gets the real function object, with no stub and no source rewriting. That walk
+compares `linedefined` and the source file, not just the name, because a `local sort =
+table.sort` beside a `local function sort` would otherwise hand back an impostor and the
+spec would characterize a different function while reading as a success.
+
+Those two halves are deliberately different channels: cartograph *derives* from source that
+an exported function mentions the local, and the emitted spec *observes* it by walking for
+real. A disagreement is a genuine bug on one side, and the walk coming back empty fires the
+hole rather than leaving a nil subject to crash three lines later. The spec also says out
+loud that it reached past the module's public surface, because a subject reached that way is
+one the module never promised. Measured on this repo: 658 of the 798 file-level locals whose
+carrier *could* exist are recovered (82%), which moved emittable from 3.7% to 4.4%. The
+1118 remaining are in **scripts** — `tools/`, `tests/` — which return no module table at
+all, so no carrier can exist and the refusal is the honest answer rather than a gap.
 
 Filling a hole is **discharging a hedge**, so it follows the decline ledger's protocol: a
 fill without a stated **basis** is refused, and the tier records *who* answered —

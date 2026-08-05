@@ -16,7 +16,15 @@ local store = require 'cartograph.store'
 
 -- M.add: annotated, reads a same-file const (a `derived` fixture → satisfied by the
 -- module load). M.join: calls table.concat (a stdlib dependency → satisfied by the
--- runtime). helper: file-local, so a spec cannot reach it at all.
+-- runtime).
+--
+-- AND THREE DIFFERENT KINDS OF `local function` (CART-0286), because they used to share
+-- one refusal and their ceilings are opposite:
+--   scale   file-level, MENTIONED by an exported fn → an UPVALUE of it, so reachable
+--   row     NESTED inside M.rows → does not exist until M.rows runs, so reachable by
+--           NOTHING, ever
+--   helper  file-level and mentioned by nobody → dead, or reached only through a
+--           module-level table this derivation deliberately does not follow
 local SRC = table.concat({
     'local M = {}',                                   -- 1
     'local LIMIT = 10',                               -- 2
@@ -40,7 +48,20 @@ local SRC = table.concat({
     '    return AbsentLib.transform(v)',              -- 20
     'end',                                            -- 21
     '',                                               -- 22
-    'return M',                                       -- 23
+    'local function scale(x) return x * 3 end',       -- 23
+    '',                                               -- 24
+    'function M.scaled(v)',                           -- 25
+    '    return scale(v)',                            -- 26
+    'end',                                            -- 27
+    '',                                               -- 28
+    'function M.rows(n)',                             -- 29
+    '    local function row(i) return i .. "!" end',  -- 30
+    '    local out = {}',                             -- 31
+    '    for i = 1, n do out[i] = row(i) end',        -- 32
+    '    return table.concat(out, ",")',              -- 33
+    'end',                                            -- 34
+    '',                                               -- 35
+    'return M',                                       -- 36
 }, '\n') .. '\n'
 
 local root
@@ -119,7 +140,7 @@ test('characterize: a stdlib call is satisfied by the RUNTIME the spec runs in',
     cleanup()
 end)
 
-test('characterize: a file-local function is a REACH hole, not a silent failure',
+test('characterize: an unmentioned file-local is a REACH hole, not a silent failure',
     function ()
     if not ready() then skip('no lua parser') end
     proj()
@@ -127,11 +148,79 @@ test('characterize: a file-local function is a REACH hole, not a silent failure'
     eq('file-local', plan.subject.kind)
     local h = holes_by_id(plan)
     ok(h['reach:helper'], 'the reach is a hole ROW, so it is COUNTED')
-    ok(h['reach:helper'].why:find('file%-local'), 'with the reason')
+    ok(h['reach:helper'].why:find('nothing exported mentions it', 1, true),
+        'with the reason: ' .. tostring(h['reach:helper'].why))
+    eq(nil, h['reach:helper'].tier, 'and no tier, so it BLOCKS')
     -- it must be counted: a spec that cannot call its subject is not a spec, and
     -- reporting "2 unfilled" for a function whose real answer is 3 understates the one
     -- hole that makes the others moot
     ok(plan.unfilled >= 3, 'and it counts toward unfilled: ' .. tostring(plan.unfilled))
+    cleanup()
+end)
+
+test('reach: a NESTED closure is a different refusal — a door, not a dead end', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local plan = assert(ch.plan(store, id_of('row')))
+    eq('nested', plan.subject.kind)
+    eq('M.rows', plan.subject.host)
+    local h = holes_by_id(plan)
+    -- THE POINT OF SPLITTING THE KIND: this one is unreachable by ANY mechanism, so the
+    -- refusal must name what to characterize INSTEAD rather than restate the wall.
+    ok(h['reach:row'].why:find('does not EXIST until', 1, true), 'says why never')
+    ok(h['reach:row'].why:find('characterize `M.rows` instead', 1, true),
+        'and names the door: ' .. tostring(h['reach:row'].why))
+    eq(nil, h['reach:row'].tier, 'no tier: it blocks, and always will')
+    cleanup()
+end)
+
+test('reach: a file-level local is an UPVALUE of its caller — DERIVED, and it RUNS',
+    function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local plan = assert(ch.plan(store, id_of('scale')))
+    eq('upvalue', plan.subject.kind)
+    eq('M.scaled', plan.subject.carrier)
+    local h = holes_by_id(plan)
+    -- DERIVED, not measured: OUR analysis says an exported fn closes over it. The
+    -- runtime is the one that OBSERVES it, and that is the other channel.
+    eq('derived', h['reach:scale'].tier)
+    eq(nil, h['reach:scale'].blocking, 'so it does not block')
+    ok(h['reach:scale'].satisfied_by
+        and h['reach:scale'].satisfied_by:find('UPVALUE walk', 1, true),
+        'and the mechanism is NAMED as a premise: '
+        .. tostring(h['reach:scale'].satisfied_by))
+
+    -- AND THE PREMISE IS LOUD IN THE SPEC ITSELF, because a subject reached past the
+    -- public surface is one the module never promised.
+    ch.fill(plan, { ['input:x'] = { value = '4', basis = 'a small number',
+        by = 'agent' } })
+    local src = table.concat(ch.emit(plan), '\n')
+    ok(src:find('PAST the module', 1, true), 'the spec SAYS it reached past the surface')
+
+    -- THE CLAIM IS ABOUT EXECUTION, so it is tested by executing: an unfilled oracle
+    -- must still be the only thing standing between this spec and green.
+    local ro = require 'cartograph.runoracle'
+    local okr, why = ro.fill_oracle(store, plan)
+    ok(okr, 'the RUN reaches the subject through the walk: ' .. tostring(why))
+    eq(0, plan.unfilled, 'nothing left unfilled')
+    local f = assert(load(table.concat(ch.emit(plan), '\n'), 'up_char'))
+    local ran, err = pcall(f)
+    ok(ran, 'the emitted spec PASSES against the real function object: ' .. tostring(err))
+    cleanup()
+end)
+
+test('reach: the upvalue walk checks IDENTITY, not just the name', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local plan = assert(ch.plan(store, id_of('scale')))
+    local src = table.concat(ch.emit(plan), '\n')
+    -- A name match would accept an impostor: `local sort = table.sort` beside a `local
+    -- function sort` would hand back the wrong function and the spec would characterize
+    -- something else entirely while reading as a success.
+    ok(src:find('linedefined == wantline', 1, true), 'the walk compares the def LINE')
+    ok(src:find('short_src', 1, true), 'and the source file')
+    ok(src:find('lua/m%.lua') or src:find('m%.lua'), 'against the subject\'s own file')
     cleanup()
 end)
 

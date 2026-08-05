@@ -473,9 +473,18 @@ verb refuses is as load-bearing as what it writes — see
                               runtime) and disclosed as a PREMISE, since
                               "no hole" and "a hole the environment fills"
                               are different claims; the expected value is
-                              a hole one RUN fills. A file-local function
-                              is a REACH hole — a spec that cannot call
-                              its subject is not a spec. ! stages the
+                              a hole one RUN fills. HOW THE SPEC REACHES
+                              THE SUBJECT is a hole too, with four
+                              answers: a member of the returned module; a
+                              FILE-LEVEL local, reached as an UPVALUE of
+                              whichever exported function closes over it
+                              (identity checked by def line + source file,
+                              so a same-named impostor is refused); a
+                              NESTED local, which nothing can ever reach
+                              because it does not exist until the
+                              enclosing call runs — so the refusal names
+                              what to characterize INSTEAD; or a local
+                              nothing exported mentions. ! stages the
                               write, which txn journals and CAS-verifies
                               and which is REFUSED inside tests/ — a
                               characterization spec is SUPPOSED to fail

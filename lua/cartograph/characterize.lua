@@ -66,37 +66,172 @@ function M.at(store, file, line)
     return best
 end
 
---- HOW THE SPEC REACHES THE SUBJECT, which is a hole of its own when it cannot.
---- A `function M.add()` is reachable as a member of whatever the module returns; a
---- `local function helper()` is not reachable from outside the file AT ALL, and saying
---- so is the honest answer — a test that cannot call its subject is not a test.
+--- THE FUNCTION NODES OF ONE FILE, innermost-last, so an enclosure test is a range
+--- containment test. Built from the graph rather than re-parsed: the ranges are the
+--- extractor's, so "nested" here means what it means everywhere else in the codebase.
+local function file_fns(store, rel)
+    local out = {}
+    for _, x in ipairs(store.by_file and store.by_file[rel] or {}) do
+        local n = type(x) == 'table' and x or store.node(x)
+        if n and (n.kind == 'function' or n.kind == 'method') and n.range then
+            out[#out + 1] = n
+        end
+    end
+    return out
+end
+
+local function encloses(outer, inner)
+    local os_, oe = at.sl(outer.range), at.el(outer.range)
+    local is_, ie = at.sl(inner.range), at.el(inner.range)
+    return os_ <= is_ and oe >= ie and not (os_ == is_ and oe == ie)
+end
+
+--- The innermost function node strictly containing `node`, or nil at file level.
+local function enclosing_fn(fns, node)
+    local best
+    for _, n in ipairs(fns) do
+        if n.id ~= node.id and encloses(n, node) then
+            if not best or encloses(best, n) then best = n end
+        end
+    end
+    return best
+end
+
+--- WHICH EXPORTED FUNCTION CLOSES OVER THIS FILE-LEVEL LOCAL (CART-0286). A file-level
+--- `local function helper()` is unreachable through the module's PUBLIC SURFACE, and the
+--- old refusal stopped there — but it is an UPVALUE of whichever exported function
+--- references it, so `debug.getupvalue` hands back the REAL function object with no
+--- source rewriting, no stub and no guess.
+---
+--- THIS IS THE STATIC HALF, and it exists so the spec is not emitted on a hope: we
+--- DERIVE that some exported function mentions the name (transitively through other
+--- file-level locals), and the emitted spec then CHECKS it by walking upvalues for real.
+--- Two channels on one question, which is the arc's standing rule — the channel that
+--- supplies an answer must not be the channel that checks it. A disagreement between the
+--- two is a real bug on one side.
+---
+--- IT UNDER-CLAIMS ON PURPOSE. A mention at MODULE level (`M.TEMPLATES = { holds = holds }`)
+--- also makes the local reachable, through the table rather than through a closure, and
+--- this does not count it: deciding whether that table ends up on the returned root is a
+--- separate derivation. Under-claiming costs coverage; over-claiming would emit a spec
+--- whose subject is nil, and the arc's failure direction is fixed.
+local function upvalue_chain(store, node, lines)
+    local fns = file_fns(store, node.file)
+    -- name -> the innermost function whose body mentions it, other than its own def
+    local function carriers_of(name)
+        local pat = '%f[%w_]' .. name:gsub('%W', '%%%0') .. '%f[^%w_]'
+        local out, seen = {}, {}
+        for i, l in ipairs(lines) do
+            if l:find(pat) then
+                local host
+                for _, n in ipairs(fns) do
+                    if at.sl(n.range) <= i - 1 and at.el(n.range) >= i - 1 then
+                        if not host or encloses(host, n) then host = n end
+                    end
+                end
+                -- a self-mention inside the subject's own body carries it nowhere
+                if host and host.name and not seen[host.name]
+                    and not (at.sl(host.range) == at.sl(node.range)
+                        and at.el(host.range) == at.el(node.range)) then
+                    seen[host.name] = true
+                    out[#out + 1] = host
+                end
+            end
+        end
+        return out
+    end
+    -- BFS from the subject OUTWARD, mirroring the runtime walk's direction in reverse:
+    -- the subject is an upvalue of a carrier, which is an upvalue of ITS carrier, and the
+    -- chain has to terminate at something the module actually exports.
+    local queue, visited = { { name = node.name, chain = {} } }, { [node.name] = true }
+    local head = 1
+    while head <= #queue and head <= 64 do
+        local cur = queue[head]; head = head + 1
+        for _, c in ipairs(carriers_of(cur.name)) do
+            local root, member = (c.name or ''):match('^([%w_]+)%.([%w_]+)$')
+            local chain = {}
+            for _, x in ipairs(cur.chain) do chain[#chain + 1] = x end
+            chain[#chain + 1] = c.name
+            if root then
+                return { carrier = c.name, module = root, member = member, chain = chain }
+            end
+            if not visited[c.name] and enclosing_fn(fns, c) == nil then
+                visited[c.name] = true
+                queue[#queue + 1] = { name = c.name, chain = chain }
+            end
+        end
+    end
+    return nil
+end
+
+--- HOW THE SPEC REACHES THE SUBJECT, which is a hole of its own when it cannot. Four
+--- kinds, and the split between the last two is the whole of CART-0286:
+---   member     `function M.add()` — a member of whatever the module returns
+---   upvalue    a FILE-LEVEL `local function`, reached as an upvalue of an exported fn
+---   nested     a `local function` INSIDE another function — unreachable by ANY
+---              mechanism, because it does not exist until the enclosing call runs
+---   unreturned the module does not end in `return <root>`, so the reach is unverified
 ---
 --- THE MODULE-TABLE ASSUMPTION IS CHECKED, not assumed: the file must actually
 --- `return <root>` at module level, where <root> is the name the definition hangs off.
 --- Guessing here would emit a spec that dies with "attempt to index nil", which reads
 --- as a broken tool rather than as the missing premise it is.
-local function reach_of(node, lines)
+---
+--- MEASURED, and it is why this is two kinds rather than one (self, lua/ only): 1887
+--- file-level locals against 618 nested closures, counted as ONE hole class with ONE
+--- refusal. Their ceilings are opposite — one is mechanically reachable, the other never
+--- can be — so one sentence for both was a number that described neither.
+local function reach_of(store, node, lines)
     local root, member = (node.name or ''):match('^([%w_]+)%.([%w_]+)$')
-    if not root then
-        return { kind = 'file-local', name = node.name,
-            why = ('`%s` is file-local: nothing outside %s can call it, so a spec'
-                .. ' cannot reach it without an export'):format(
-                tostring(node.name), node.file) }
-    end
-    for i = #lines, 1, -1 do
-        local l = lines[i]
-        if l and l:match('%S') then
-            if l:match('^%s*return%s+' .. root .. '%s*$') then
-                return { kind = 'member', module = root, member = member,
-                    expr = 'SUBJECT.' .. member }
+    local returns_root = false
+    if root then
+        for i = #lines, 1, -1 do
+            local l = lines[i]
+            if l and l:match('%S') then
+                returns_root = l:match('^%s*return%s+' .. root .. '%s*$') ~= nil
+                break
             end
-            break
         end
     end
-    return { kind = 'unreturned', module = root, member = member,
-        why = ('%s does not end in `return %s`, so what dofile hands back may not'
-            .. ' hold `%s` — the reach is unverified'):format(node.file, root,
-            tostring(node.name)) }
+    if root and returns_root then
+        return { kind = 'member', module = root, member = member,
+            expr = 'SUBJECT.' .. member }
+    end
+    if root then
+        return { kind = 'unreturned', module = root, member = member,
+            why = ('%s does not end in `return %s`, so what dofile hands back may not'
+                .. ' hold `%s` — the reach is unverified'):format(node.file, root,
+                tostring(node.name)) }
+    end
+    -- NESTED IS A DIFFERENT REFUSAL, and it is a DOOR rather than a dead end: the thing
+    -- to characterize is the enclosing function, and the message says which one.
+    local fns = file_fns(store, node.file)
+    local host = enclosing_fn(fns, node)
+    if host then
+        return { kind = 'nested', name = node.name, host = host.name,
+            host_id = host.id,
+            why = ('`%s` is nested inside `%s`: it does not EXIST until `%s` runs, so no'
+                .. ' mechanism can reach it — characterize `%s` instead'):format(
+                tostring(node.name), tostring(host.name), tostring(host.name),
+                tostring(host.name)) }
+    end
+    local up = upvalue_chain(store, node, lines)
+    if up then
+        return { kind = 'upvalue', name = node.name, expr = 'SUBJECT',
+            carrier = up.carrier, module = up.module, chain = up.chain,
+            -- the IDENTITY check's two halves: a name match alone would accept an
+            -- impostor of the same name defined elsewhere
+            src = node.file, line = at.sl(node.range) + 1,
+            why = ('`%s` is file-level-local, reached as an upvalue of `%s`%s — the real'
+                .. ' function object, NOT the public surface'):format(
+                tostring(node.name), up.carrier,
+                #up.chain > 1 and (' via ' .. table.concat(up.chain, ' <- ')) or '') }
+    end
+    return { kind = 'file-local', name = node.name,
+        why = ('`%s` is file-level-local in %s and nothing exported mentions it, so it is'
+            .. ' not an upvalue of anything a spec can load — dead, or reached only'
+            .. ' through a module-level table this derivation does not follow')
+            :format(tostring(node.name), node.file) }
 end
 
 --- CAN THE SPEC LOAD THE SUBJECT MODULE AT ALL? Returns (package_path_lines, nil) or
@@ -195,6 +330,14 @@ local function satisfied_by(h)
     end
     if h.kind == 'fixture' and h.tier == 'derived' then
         return 'loading the module: a same-file definition carries this name'
+    end
+    if h.kind == 'reach' and h.tier == 'derived' then
+        -- CART-0286: the spec walks upvalues and gets the REAL function object, so the
+        -- environment does answer this — but the premise is loud, because a subject
+        -- reached this way is one the module never promised.
+        return ('the transitive UPVALUE walk from the module\'s exports (`%s`) — the real'
+            .. ' function object, reached PAST the public surface'):format(
+            tostring(h.carrier))
     end
     return nil
 end
@@ -684,7 +827,7 @@ function M.plan(store, fn_id, opts)
                 end)(), ' ')) }
     end
 
-    local reach = reach_of(node, lines)
+    local reach = reach_of(store, node, lines)
     -- THE LOAD IS A PREMISE TOO, and when it cannot be derived it is a HOLE rather
     -- than a crash inside the spec's own preamble (see load_premise).
     local pathlines, loadwhy = load_premise(store, node, lines)
@@ -692,7 +835,13 @@ function M.plan(store, fn_id, opts)
         H[#H + 1] = { kind = 'load', name = node.file, rule = 'linker', why = loadwhy }
     end
     if reach.kind ~= 'member' then
+        -- AN UPVALUE REACH IS A DERIVED PREMISE, NOT A WALL (CART-0286). The row stays —
+        -- reaching past a module's public surface is exactly the kind of thing a reader
+        -- must be able to see — but it carries a tier, so it does not block, and
+        -- `satisfied_by` names the mechanism that answers it.
         H[#H + 1] = { kind = 'reach', name = node.name or '?', rule = 'linker',
+            tier = reach.kind == 'upvalue' and 'derived' or nil,
+            carrier = reach.carrier, chain = reach.chain,
             why = reach.why }
     end
 
@@ -1064,6 +1213,58 @@ local function hole_call(h)
     return ('HOLE(%q, %q)'):format(h.id, (h.why or 'no evidence'):gsub('"', "'"))
 end
 
+--- THE UPVALUE WALK (CART-0286), emitted into the spec so it is self-contained. A
+--- file-level `local function` is an upvalue of whichever exported function references
+--- it, so this reaches the REAL function object — no stub, no source rewriting, and
+--- nothing performed.
+---
+--- A NAME MATCH IS NOT AN IDENTITY MATCH, which is why the location is checked. Two
+--- distinct locals can share a name (a `local sort = table.sort` alongside a `local
+--- function sort`), and returning the wrong one would characterize a different function
+--- entirely while the spec read as a success. `debug.getinfo` says where the object it
+--- found was actually defined; if that disagrees with the subject's own line, the walk
+--- reports NOTHING rather than a plausible impostor. Under-return is recoverable, a
+--- confident wrong answer is not.
+local UPVALUE = {
+    'local function UPVALUE(root, name, wantsrc, wantline)',
+    '    local seen = {}',
+    '    local function ok(f)',
+    '        if type(f) ~= "function" then return false end',
+    '        if not (wantsrc and wantline) then return true end',
+    '        local i = debug.getinfo(f, "S")',
+    '        return i and i.linedefined == wantline',
+    '            and (i.short_src or ""):sub(-#wantsrc) == wantsrc',
+    '    end',
+    '    local function walk(v, d)',
+    '        if d > 8 or seen[v] then return nil end',
+    '        seen[v] = true',
+    '        if type(v) == "function" then',
+    '            local i = 1',
+    '            while true do',
+    '                local n, uv = debug.getupvalue(v, i)',
+    '                if not n then break end',
+    '                if n == name and ok(uv) then return uv end',
+    '                if type(uv) == "function" or type(uv) == "table" then',
+    '                    local hit = walk(uv, d + 1)',
+    '                    if hit then return hit end',
+    '                end',
+    '                i = i + 1',
+    '            end',
+    '        elseif type(v) == "table" then',
+    '            for k, vv in pairs(v) do',
+    '                if k == name and ok(vv) then return vv end',
+    '                if type(vv) == "function" or type(vv) == "table" then',
+    '                    local hit = walk(vv, d + 1)',
+    '                    if hit then return hit end',
+    '                end',
+    '            end',
+    '        end',
+    '        return nil',
+    '    end',
+    '    return walk(root, 0)',
+    'end',
+}
+
 --- The plan as spec lines. PURE — no disk, so the dry-run diff, the applied bytes and
 --- the tests all read the same function.
 --- The spec's PREAMBLE — everything up to and including the call — shared verbatim with
@@ -1140,12 +1341,32 @@ function M.preamble(plan)
             add(('HOLE(%q, %q)'):format(h.id, (h.why or ''):gsub('"', "'")))
         end
     end
-    if plan.subject.kind ~= 'member' then
+    if plan.subject.kind == 'member' then
+        add(('local SUBJECT = dofile(%q)'):format(plan.abspath))
+    elseif plan.subject.kind == 'upvalue' then
+        -- THE RUNTIME HALF OF THE TWO-CHANNEL CHECK (CART-0286). The plan DERIVED, from
+        -- source, that an exported function mentions this local; this walk goes and gets
+        -- it. If the walk comes back empty the derivation was wrong, and that is a HOLE
+        -- firing — never a nil SUBJECT and an "attempt to call a nil value" three lines
+        -- later, which would read as a broken tool instead of a wrong premise.
+        add(('-- REACH: %s'):format(plan.subject.why or 'reached as an upvalue'))
+        add '-- This spec reaches PAST the module\'s public surface. That is a real fact'
+        add '-- about a real function object, and a different fact from what a consumer of'
+        add '-- the module can observe — which is why it is stated here rather than assumed.'
+        for _, l in ipairs(UPVALUE) do add(l) end
+        add(('local MODULE = dofile(%q)'):format(plan.abspath))
+        add(('local SUBJECT = UPVALUE(MODULE, %q, %q, %d)'):format(
+            plan.subject.name or '?', plan.subject.src or '?',
+            plan.subject.line or -1))
+        add(('if not SUBJECT then HOLE(%q, %q) end'):format('reach:' .. plan.fn,
+            ('the upvalue walk found no `%s` reachable from this module\'s exports, so'
+                .. ' the derivation that `%s` closes over it was WRONG — a real'
+                .. ' disagreement between our source analysis and the runtime')
+            :format(tostring(plan.subject.name), tostring(plan.subject.carrier))))
+    else
         add(('-- REACH: %s'):format(plan.subject.why or 'the subject is not reachable'))
         add(('local SUBJECT = HOLE(%q, %q)'):format('reach:' .. plan.fn,
             (plan.subject.why or 'unreachable'):gsub('"', "'")))
-    else
-        add(('local SUBJECT = dofile(%q)'):format(plan.abspath))
     end
     add ''
     -- INPUTS, in parameter order, so the call reads like the signature
