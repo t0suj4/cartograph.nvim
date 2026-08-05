@@ -3090,7 +3090,13 @@ sentence encoded "we do not know the **right** value", which is a claim about ge
 costume of a claim about runnability. So **`:CartographCharacterizeSynth` synthesizes the input from
 what the body requires of it**: `p.foo` means a table carrying `foo` — and the field names come free
 with the access — `p + 1` means a number, `p()` a function, `s:upper()` a string because `upper` is a
-string method while `o:render()` is a table carrying a function field. Measured on this repo: of
+string method while `o:render()` is a table carrying a function field. Shapes are per **access
+path**, not per parameter: `ipairs(p.items)` makes `items` a table, `#o.list + o.count` gives one
+field a table and its sibling a number, and `c.opts.mode.name` nests three deep. That distinction is
+not academic — the first version derived a shape for `p` and merely *created* empty ones for its
+fields, which then got filled with an opaque string, and iterating a string raised. It accounted for
+143 of 196 `bad argument to a builtin` failures in the verified run; deriving the fields turned 96 of
+them into passing specs. Measured on this repo: of
 4411 blocking input parameters, **46.9% are never inspected at all**, so literally any value runs,
 and the other 53.1% carry a shape the code itself pins.
 

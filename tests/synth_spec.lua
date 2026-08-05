@@ -22,6 +22,11 @@ local SRC = table.concat({
     'function M.count(t) return #t end',                -- table (# answers on a real table)
     'function M.passthru(v) return v end',              -- UNCONSTRAINED: any value runs
     'function M.nested(c) return c.opts.mode end',      -- a table INSIDE a table
+    -- THE CASE THAT MOTIVATED ACCESS-PATH SHAPES (CART-0297): the field, not the parameter,
+    -- is what gets iterated. 143 of 196 bad-argument raises were exactly this.
+    'function M.iter(p) local n = 0 for _, x in ipairs(p.items) do n = n + 1 end return n end',
+    'function M.deepnum(o) return #o.list + o.count end',
+    'function M.modulo(v) return v % 3 end',            -- `%` must not reach a format string
     'function M.both(x) return x.k + (x * 2) end',      -- CONFLICT: table and number
     'return M',
 }, '\n') .. '\n'
@@ -190,5 +195,47 @@ test('synth: fill never touches a hole that already has real evidence', function
             eq('measured', h.filled_tier, 'at its own tier')
         end
     end
+    cleanup()
+end)
+
+test('synth: a FIELD gets its shape from how the FIELD is used, not just the parameter',
+    function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    -- `ipairs(p.items)` makes `items` a TABLE. Before access-path shapes, the field was
+    -- created and never derived, so it was filled with the opaque string `"<synth:items>"` and
+    -- iterating it raised — 143 of 196 bad-argument raises in the verified run.
+    local sh = shape('M.iter', 'p')
+    eq('table', sh.kind)
+    ok(sh.fields.items, 'the field is known')
+    eq('table', sh.fields.items.kind, 'AND its type is derived: ' .. tostring(sh.fields.items.kind))
+    local v = assert(synth.value(sh, 'p'))
+    ok(v:find('items = {', 1, true), 'so the value is iterable: ' .. v)
+    -- the property is about RUNNING, so it is tested by running
+    local f = assert(loadstring('local p = ' .. v .. '\nlocal n = 0\n'
+        .. 'for _, x in ipairs(p.items) do n = n + 1 end\nreturn n'))
+    eq(0, f(), 'and iterating it does not raise')
+    cleanup()
+end)
+
+test('synth: sibling fields get DIFFERENT shapes from their own usage', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local sh = shape('M.deepnum', 'o')
+    eq('table', sh.fields.list.kind, '#o.list -> table')
+    eq('number', sh.fields.count.kind, 'o.count + x -> number')
+    local v = assert(synth.value(sh, 'o'))
+    ok(v:find('count = 0', 1, true) and v:find('list = {', 1, true), v)
+    cleanup()
+end)
+
+test('synth: the modulo operator does not reach a format string', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    -- `'%s ' .. op .. ' x'` with op='%' makes format read `% ` as a conversion spec and
+    -- crashes mid-sweep. The operator is DATA, and this pins that it stays data.
+    local sh = shape('M.modulo', 'v')
+    eq('number', sh.kind)
+    ok(#sh.why > 0 and sh.why[1]:find('%%'), 'the note survives: ' .. tostring(sh.why[1]))
     cleanup()
 end)

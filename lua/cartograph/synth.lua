@@ -64,59 +64,128 @@ local function merge(a, b)
     return 'conflict'
 end
 
---- What one expression tree requires of the name `p`. Accumulates into `sh`:
+-- ── SHAPES ARE PER ACCESS PATH, NOT PER PARAMETER (CART-0297) ───────────────
+-- The first version matched a bare NAME node, so it derived a shape for `p` and merely
+-- CREATED empty ones for `p.foo` — `sh.fields[n] = M.new()` and then nothing. `M.value` filled
+-- those with the opaque string `"<synth:foo>"`, and a body doing `ipairs(p.items)` raised.
+--
+-- MEASURED: that single gap is 169 of 196 `bad argument to a builtin` raises (143 ipairs, 26
+-- pairs) — the largest failure category in the whole verified run, and it was never about the
+-- PARAMETER's type. The field names already came free with the access; this is their TYPES.
+--
+-- So the operand test becomes a PATH test: every rule below applies to whatever path it is
+-- applied to, one level down as readily as at the root. `p`, `p.items`, `p.items.name`.
+
+-- How deep a path is followed. A synthesized value nested deeper than this is more scaffolding
+-- than input, and the bound is stated rather than discovered by a stack overflow.
+M.MAX_PATH = 4
+
+--- The access path `e` denotes, if it is rooted at `p`. Returns a list of field names ({} for
+--- the root itself) or nil. An INDEX (`p[k]`) ends the path: it says its base is a table, but
+--- the key is not a name we can synthesize a field for.
+local function path_of(e, p)
+    if not e then return nil end
+    if e.k == 'name' then return e.n == p and {} or nil end
+    if e.k == 'field' and not e.method then
+        local base = path_of(e.b, p)
+        if not base or #base >= M.MAX_PATH then return nil end
+        local out = {}
+        for i, x in ipairs(base) do out[i] = x end
+        out[#out + 1] = e.n
+        return out
+    end
+    return nil
+end
+
+--- The sub-shape at `path`, created on the way down. Every intermediate step is a table by
+--- construction — you cannot read `a.b.c` unless `a.b` is indexable — so that is recorded
+--- rather than inferred later.
+local function shape_at(sh, path)
+    local cur = sh
+    for _, k in ipairs(path or {}) do
+        cur.kind = merge(cur.kind, 'table')
+        cur.fields[k] = cur.fields[k] or M.new()
+        cur = cur.fields[k]
+    end
+    return cur
+end
+
+local function pname(p, path)
+    return p .. (#(path or {}) > 0 and ('.' .. table.concat(path, '.')) or '')
+end
+
+--- What one expression tree requires of `p` AND OF EVERY PATH UNDER IT. Accumulates into `sh`:
 ---   sh.kind    any | function | number | string | table | conflict
----   sh.fields  name -> sub-shape, for a table (the field names come free with the access)
+---   sh.fields  name -> sub-shape (the names come free with the access, the types from here)
 ---   sh.methods name -> true, for `p:m()`
 ---   sh.why     the usages that decided it, so a reader can disagree with us
 local function usage(e, p, sh, depth)
     if depth > 6 then return end
     expr.walk(e, function (n)
-        local function is(x) return x and x.k == 'name' and x.n == p end
         local function note(w) sh.why[#sh.why + 1] = w end
-        if n.k == 'field' and is(n.b) then
-            if n.method then
-                sh.methods[n.n] = true
-                sh.kind = merge(sh.kind,
-                    M.STRING_METHODS[n.n] and 'string' or 'table')
-                note(('p:%s()'):format(n.n))
-            else
-                sh.kind = merge(sh.kind, 'table')
-                sh.fields[n.n] = sh.fields[n.n] or M.new()
-                note(('p.%s'):format(n.n))
+        -- CONSTRAIN the shape at whatever path the operand denotes
+        local function put(operand, kind, fmt)
+            local path = path_of(operand, p)
+            if not path then return false end
+            local at_ = shape_at(sh, path)
+            at_.kind = merge(at_.kind, kind)
+            note(fmt:format(pname(p, path)))
+            return true
+        end
+        if n.k == 'field' then
+            local base = path_of(n.b, p)
+            if base then
+                local at_ = shape_at(sh, base)
+                if n.method then
+                    at_.methods[n.n] = true
+                    at_.kind = merge(at_.kind,
+                        M.STRING_METHODS[n.n] and 'string' or 'table')
+                    note(('%s:%s()'):format(pname(p, base), n.n))
+                else
+                    at_.kind = merge(at_.kind, 'table')
+                    at_.fields[n.n] = at_.fields[n.n] or M.new()
+                    note(('%s.%s'):format(pname(p, base), n.n))
+                end
             end
-        elseif n.k == 'index' and is(n.b) then
-            sh.kind = merge(sh.kind, 'table')
-            note('p[k]')
-        elseif n.k == 'call' and is(n.f) then
-            sh.kind = merge(sh.kind, 'function')
-            note('p()')
-        elseif n.k == 'un' and n.op == '#' and is(n.e) then
+        elseif n.k == 'index' then
+            put(n.b, 'table', '%s[k]')
+        elseif n.k == 'call' and n.f and path_of(n.f, p) then
+            put(n.f, 'function', '%s()')
+        elseif n.k == 'un' and n.op == '#' then
             -- `#p` on a real table answers correctly, unlike on a sandbox sentinel where
             -- __len never fires (5.1) — so synthesis is strictly SAFER here than a proxy.
-            sh.kind = merge(sh.kind, 'table')
-            note('#p')
-        elseif n.k == 'un' and n.op == '-' and is(n.e) then
-            sh.kind = merge(sh.kind, 'number'); note('-p')
-        elseif n.k == 'bin' and (is(n.l) or is(n.r)) then
+            put(n.e, 'table', '#%s')
+        elseif n.k == 'un' and n.op == '-' then
+            put(n.e, 'number', '-%s')
+        elseif n.k == 'bin' then
             local op = n.op or ''
+            -- NEVER INTERPOLATE SOURCE TEXT INTO A FORMAT STRING. `op` can be `%`, which
+            -- makes `'%s ' .. op .. ' x'` read `% ` as a conversion spec and crashes
+            -- `format` mid-sweep. The operator is data, and data gets escaped.
+            local ops = op:gsub('%%', '%%%%')
+            local kind, fmt
             if op == '+' or op == '-' or op == '*' or op == '/' or op == '%'
                 or op == '^' or op == '//' then
-                sh.kind = merge(sh.kind, 'number'); note('p ' .. op .. ' x')
+                kind, fmt = 'number', '%s ' .. ops .. ' x'
             elseif op == '..' then
-                sh.kind = merge(sh.kind, 'string'); note('p .. x')
+                kind, fmt = 'string', '%s .. x'
             elseif op == '<' or op == '>' or op == '<=' or op == '>=' then
                 -- ORDER COMPARISON, and in 5.1 a mixed-type compare RAISES rather than
                 -- returning false, so guessing wrong here aborts the run instead of taking
                 -- a branch. `number` is the reading that keeps the run alive.
-                sh.kind = merge(sh.kind, 'number'); note('p ' .. op .. ' x')
+                kind, fmt = 'number', '%s ' .. ops .. ' x'
             end
-        elseif n.k == 'call' and n.f and n.f.k == 'name'
+            if kind then
+                if not put(n.l, kind, fmt) then put(n.r, kind, fmt) end
+            end
+        end
+        -- ITERATION, the case that motivated all of this: `ipairs(p.items)` must make
+        -- `items` a table, not the opaque string a field with no derived shape gets.
+        if n.k == 'call' and n.f and n.f.k == 'name'
             and (n.f.n == 'ipairs' or n.f.n == 'pairs' or n.f.n == 'next'
                 or n.f.n == 'unpack') then
             for _, a in ipairs(n.a or {}) do
-                if is(a) then sh.kind = merge(sh.kind, 'table')
-                    note(n.f.n .. '(p)') end
+                put(a, 'table', n.f.n .. '(%s)')
             end
         end
     end)
@@ -189,6 +258,15 @@ function M.value(sh, name)
             if sh.methods[k] then v = 'function () end'
             else
                 local sub = sh.fields[k]
+                -- A REFUSAL PROPAGATES. `or <opaque string>` would turn a CONFLICTED field
+                -- into a plausible value — the body says this field is two types and we would
+                -- answer with a string. Refusing the whole value is the honest response, and
+                -- it is the same rule the top level already follows.
+                if sub and sub.kind == 'conflict' then
+                    return nil, ('the field `%s` is used as more than one type (%s)')
+                        :format(k, table.concat(sub.why, ', ', 1,
+                            math.min(3, #sub.why)))
+                end
                 v = (sub and M.value(sub, k)) or ('%q'):format('<synth:' .. k .. '>')
             end
             -- a field name that is a keyword needs bracket form, the bug CART-0289 found
