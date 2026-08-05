@@ -1053,7 +1053,7 @@ function M.plan(store, fn_id, opts)
             .. ' characterization spec must not gate a commit; it is a tool you invoke')
             :format(path)
     end
-    return {
+    local plan = {
         verb = 'characterize', generation = store.generation,
         file = node.file, fn = node.name or '?', fn_id = node.id,
         ref = store.ref_of(node.id),
@@ -1080,6 +1080,33 @@ function M.plan(store, fn_id, opts)
         creates = { [path] = true },
         stamps = { [path] = root and txn.disk_stamp(root, path) or nil },
     }
+    -- THE PROLOGUE SUPPLY IS AUTOMATIC, and that is a deliberate line (CART-0296). Every
+    -- other value-supplying step here is explicit, because it involves a CHOICE — an agent's
+    -- guess, an asserted premise, a synthesized minimal value. Re-emitting a same-file
+    -- declaration involves none: it is the FILE'S OWN SOURCE answering a name from that same
+    -- file, which is exactly the claim `satisfied_by` makes automatically when the module
+    -- load answers it. A reconstruction does not load the module, so the same claim has to be
+    -- honoured a different way — and leaving it to a command would mean the honest answer
+    -- (the code says so) needed asking for, while the guesses did not.
+    if plan.subject and plan.subject.kind == 'reconstructed' then
+        local prologue = require 'cartograph.prologue'
+        local nsup = prologue.supply(store, plan)
+        if nsup and nsup > 0 then
+            local left = 0
+            for _, h in ipairs(plan.holes) do
+                local sat = h.satisfied_by
+                if not sat and not h.value and not h.decl then left = left + 1 end
+            end
+            plan.unfilled = left
+            for _, h in ipairs(plan.holes) do
+                if h.decl then
+                    plan.premises[#plan.premises + 1] = ('fixture %s — %s'):format(
+                        tostring(h.name), h.basis or 'a re-emitted declaration')
+                end
+            end
+        end
+    end
+    return plan
 end
 
 --- SUPPLY A PREMISE for one or more holes — the agent-facing half, and the same
@@ -1663,8 +1690,23 @@ function M.preamble(plan)
         end
     end
     -- FIXTURE holes the module load does not answer
+    --
+    -- A RE-EMITTED DECLARATION COMES FIRST AND AS A GLOBAL (CART-0296). A reconstruction
+    -- compiles the subject as its own chunk, so its free names resolve as GLOBALS — the same
+    -- property that lets a fixture be injected at all. So the declaration is re-emitted and
+    -- then published under its own name: the spec evaluates the SAME SOURCE the file does,
+    -- which needs no serializer (a function value has no literal form) and cannot fabricate.
+    -- Order matters: a declaration may read an earlier one, so they land in plan order,
+    -- which is source order.
     for _, h in ipairs(plan.holes) do
-        if h.kind == 'fixture' and not h.satisfied_by then
+        if h.kind == 'fixture' and not h.satisfied_by and h.decl then
+            add(('-- fixture %s — %s'):format(h.name, oneline(h.basis or '')))
+            add(h.decl)
+            add(('_G[%q] = %s'):format(h.name, h.name))
+        end
+    end
+    for _, h in ipairs(plan.holes) do
+        if h.kind == 'fixture' and not h.satisfied_by and not h.decl then
             if h.value then
                 add(('_G[%q] = %s  -- fixture: %s'):format(h.name, h.value,
                     h.basis or ''))

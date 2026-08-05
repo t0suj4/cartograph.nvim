@@ -3120,10 +3120,17 @@ The gap is mostly not a bug. Of 399 subjects that produce no value, **366 are th
 on the input we chose — `bad argument to a builtin` (194), indexing a nil (80), calling a nil (60) —
 and only 21 are our own load errors. A raise is a real behaviour and a legitimate thing to
 characterize; that it currently refuses instead of recording it is the next piece of work, not a
-limit. A separate 441 functions are emittable but refuse to run because a hole carries a *tier* and
-no *value* — 395 of those are same-file definitions a reconstruction no longer receives from a module
-load, which is a cost the reconstruction knowingly paid and can now be repaid by composing it with
-the upvalue walk.
+limit. A separate 441 functions were emittable but refused to run because a hole carried a *tier* and no
+*value* — 395 of those same-file definitions a reconstruction no longer receives from a module load,
+a cost the reconstruction knowingly paid. Those are now **re-emitted**: for a name the subject reads
+from its own file, cartograph finds that name's module-level declaration and puts it back into the
+spec, so the spec evaluates *the same source the file does*. No evaluator and no serializer are
+involved, which matters because a function value has no literal form — source can supply what a
+serializer never could. A multi-line constructor is grown until it compiles rather than brace-matched,
+and a declaration that would *perform* something (`local DANGER = os.time()`) is refused by name,
+since re-emitting it would call `os.time` at spec load. It is the one supply step here that happens
+automatically, because it involves no choice: the file's own source is answering a name from that same
+file, which is exactly the claim `satisfied_by` makes when a module load answers it.
 
 And then the choice went away entirely. A condition on an unknown has no right answer to pick —
 it has **two behaviours**, and describing one is describing half. So `:CartographCharacterizeFork`

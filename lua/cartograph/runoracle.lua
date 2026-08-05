@@ -340,8 +340,12 @@ function M.run(store, plan, opts)
     for _, h in ipairs(plan.holes or {}) do
         -- `oracle` AND `effects` are what the run FILLS, so neither can be a precondition
         -- for running: requiring them would make the verb refuse to do its own job.
+        -- `decl` counts as answered (CART-0296): a re-emitted module-level declaration IS
+        -- the value, supplied as SOURCE the probe's own runtime evaluates rather than as a
+        -- serialized literal. Requiring `value` here would refuse a hole that the preamble
+        -- demonstrably fills — and it did, for 395 same-file fixtures.
         if h.kind ~= 'oracle' and h.kind ~= 'effects'
-            and not (h.value or h.satisfied_by) then
+            and not (h.value or h.satisfied_by or h.decl) then
             return nil, ('%s is still a hole — fill every input before running, because a'
                 .. ' probe cannot run on a hole'):format(h.id)
         end
