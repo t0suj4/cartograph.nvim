@@ -1200,7 +1200,15 @@ function M.fill(plan, fills)
         -- an explicit tier WEAKENS (never strengthens): a caller may say "this run went
         -- through a claim-tier stub", and may not promote a claim to a measurement
         h.filled_tier = M.weakest(M.BY_TIER[by], f.tier)
-        if h.kind == 'oracle' then
+        if h.kind == 'oracle' and f.raises then
+            -- A RAISE IS NOT A TUPLE (CART-0295). The observation is the MESSAGE, so it is
+            -- stored as one and flagged: wrapping it in `n, { … }` would make a raise
+            -- indistinguishable from a function that RETURNED that string, which is a
+            -- different program.
+            h.raises, h.n = true, 0
+            h.raw_value = tostring(f.value)
+            h.value = h.raw_value
+        elseif h.kind == 'oracle' then
             -- THE ORACLE IS A TUPLE, always, because a function returning `nil, err` is
             -- characterized on half its behaviour otherwise. `n` is the arity and it is
             -- SEPARATE from the list: select('#') keeps a trailing nil that `#t` cannot
@@ -1722,8 +1730,32 @@ function M.preamble(plan)
     -- trailing nil, which `#t` cannot see — `return nil` and `return` are different
     -- behaviours and a characterization spec has to be able to tell them apart.
     add 'local function CAPTURE(...) return select("#", ...), { ... } end'
-    add(('local gotn, got = CAPTURE(%s(%s))'):format(plan.subject.expr or 'SUBJECT',
-        table.concat(args, ', ')))
+    -- ── A RAISE IS A BEHAVIOUR, SO THE CALL IS GUARDED (CART-0295) ──────────
+    -- The call used to be bare, so a subject that RAISES took the whole probe down and the
+    -- run reported "produced no value" — a function whose behaviour on a given input is TO
+    -- FAIL got no spec at all. Measured: 366 of 399 no-value cases were the subject raising.
+    -- `f({}) raises "attempt to index a nil value"` is a real, reproducible fact, and exactly
+    -- the kind of thing a refactor breaks silently.
+    --
+    -- THE MESSAGE IS PART OF THE OBSERVATION, and it carries a `file:line` prefix. Comparing
+    -- the raw message would fail on any edit ABOVE the raising line — a false CHANGED, which
+    -- teaches its reader to ignore failures, and this arc already refuses that for values. So
+    -- the prefix is stripped HERE, in the one place both consumers share, and the strip is
+    -- disclosed wherever the expectation is printed.
+    add 'local function UNPREFIX(m)'
+    add '    m = tostring(m)'
+    -- ONE leading `<chunk>:<line>: ` and only one: the rest is the subject's own words and
+    -- must survive intact, including any colon-number it contains itself.
+    add '    return (m:gsub("^[^\\n]-:%d+: ", "", 1))'
+    add 'end'
+    add 'local __ok, __err, gotn, got'
+    add 'do'
+    add(('    local __r = { pcall(function () return CAPTURE(%s(%s)) end) }')
+        :format(plan.subject.expr or 'SUBJECT', table.concat(args, ', ')))
+    add '    __ok = __r[1]'
+    add '    if __ok then gotn, got = __r[2], __r[3]'
+    add '    else __err = UNPREFIX(__r[2]); gotn, got = 0, {} end'
+    add 'end'
     if sandbox then
         add 'local gotcalls = table.concat(__log, " | ")'
         -- RESTORED BEFORE THE ASSERTIONS, so a FAILING spec still leaves the process clean
@@ -1760,7 +1792,21 @@ function M.emit(plan)
     for _, h in ipairs(plan.holes) do
         if h.kind == 'oracle' then oracle = h end
     end
-    if oracle then
+    if oracle and oracle.raises then
+        -- CHARACTERIZING A RAISE (CART-0295), and it asserts in BOTH directions: a subject
+        -- that stops raising has changed just as much as one that starts, and a spec checking
+        -- only the message would pass silently the day the function starts returning.
+        add(oneline(('-- %s, by %s: %s'):format(oracle.filled_tier or '?',
+            oracle.by or '?', oracle.basis or '')))
+        add(('local wanterr = %s'):format(oracle.value))
+        add 'if __ok then'
+        add ("    error(('CHANGED: %s no longer raises — it returned %s, characterized as"
+            .. " raising %q'):format(" .. ('%q, SHOW(gotn, got), wanterr))'):format(plan.fn))
+        add 'elseif __err ~= wanterr then'
+        add ("    error(('CHANGED: %s raised %q, characterized as raising %q'):format("
+            .. ('%q, __err, wanterr))'):format(plan.fn))
+        add 'end'
+    elseif oracle then
         if oracle.value then
             add(oneline(('-- %s, by %s: %s'):format(oracle.filled_tier or '?',
                 oracle.by or '?', oracle.basis or '')))
@@ -1768,6 +1814,13 @@ function M.emit(plan)
         else
             add(('local wantn, want = %s'):format(hole_call(oracle)))
         end
+        -- A RAISE WHERE A VALUE WAS CHARACTERIZED IS ALSO A CHANGE, and it used to surface as
+        -- the subject's own error escaping the spec — which reads as a broken spec rather
+        -- than as the behaviour change it is.
+        add 'if not __ok then'
+        add ("    error(('CHANGED: %s RAISED %q, characterized as returning %s'):format("
+            .. ('%q, __err, SHOW(wantn, want)))'):format(plan.fn))
+        add 'end'
         add 'if gotn ~= wantn or not SAME(got, want) then'
         add ("    error(('CHANGED: %s returned %s, characterized as %s'):format("
             .. ('%q, SHOW(gotn, got), SHOW(wantn, want)))'):format(plan.fn))

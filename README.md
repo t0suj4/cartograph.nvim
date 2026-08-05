@@ -3122,11 +3122,21 @@ function, which no default census can afford; what is *not* an option is keeping
 dropping the check. **A name may only claim what the check behind it performs** — the third time that
 rule has had to be applied here, after emittable-vs-runnable and the reach count.
 
-The gap is mostly not a bug. Of 399 subjects that produce no value, **366 are the subject raising**
-on the input we chose — `bad argument to a builtin` (194), indexing a nil (80), calling a nil (60) —
-and only 21 are our own load errors. A raise is a real behaviour and a legitimate thing to
-characterize; that it currently refuses instead of recording it is the next piece of work, not a
-limit. A separate 441 functions were emittable but refused to run because a hole carried a *tier* and no
+**A raise is a behaviour, so it gets characterized.** Of 399 subjects that produced no value, 366
+were the subject *raising* on the input we chose, and a function whose behaviour on that input is to
+fail had no spec at all. Now the call is guarded and the error is the expectation: `f({}) raises
+"attempt to index a nil value"` is reproducible, and it is exactly what a refactor breaks silently.
+The assertion runs in **both** directions — a subject that stops raising has changed as much as one
+that starts, and a spec checking only the message would pass silently the day the function begins
+returning.
+
+Two things keep that honest. The message's `file:line` prefix is **stripped**, because comparing the
+raw text would report a false `CHANGED` for any edit above the raising line, which teaches a reader
+to ignore failures. And a raise caused by *our own premise* is refused rather than recorded: a
+sentinel that got compared, or a `require` that cannot resolve in a fresh process — the latter's
+message embeds the searched paths, so it is not even stable between runs. Together with the field
+shapes above, this took the verified figure from 26.2% to **37.6%** and reduced "produced no value"
+from 399 to 6. A separate 441 functions were emittable but refused to run because a hole carried a *tier* and no
 *value* — 395 of those same-file definitions a reconstruction no longer receives from a module load,
 a cost the reconstruction knowingly paid. Those are now **re-emitted**: for a name the subject reads
 from its own file, cartograph finds that name's module-level declaration and puts it back into the

@@ -446,10 +446,25 @@ if verify then
                 ran = ran + 1
                 local okr, why = ro.fill_oracle(store, plan)
                 if okr and plan.unfilled == 0 then
-                    local f, lerr = load(table.concat(ch.emit(plan), '\n'), 'v')
-                    local r = false
-                    if f then r = pcall(f) end
-                    if r then passed = passed + 1 else ourbug = ourbug + 1 end
+                    -- ── THE SPEC RUNS IN A SUBPROCESS, WHICH IS HOW IT IS USED ──────
+                    -- Running it in-process reported 12 failures that were entirely this
+                    -- harness's fault: a re-emitted `local store = require '…'` (CART-0296)
+                    -- supplies the MODULE but not its STATE, and in-process that module is
+                    -- already loaded and populated by this very sweep — so a subject indexing
+                    -- `store.by_file` returned where the probe's fresh process raised. The
+                    -- probe is the reference environment because a generated spec is invoked
+                    -- as `nvim --headless -l characterized/x_char.lua`. Verifying against a
+                    -- polluted process would have blamed the artifact for the harness.
+                    local text = table.concat(ch.emit(plan), '\n') .. '\n'
+                    local dir = vim.fn.tempname()
+                    vim.fn.mkdir(dir, 'p')
+                    local sf = dir .. '/spec.lua'
+                    local fh = io.open(sf, 'w')
+                    fh:write(text); fh:close()
+                    local pr = vim.system({ vim.v.progpath, '--headless', '-u', 'NONE',
+                        '-l', sf }, { text = true }):wait(20000)
+                    vim.fn.delete(dir, 'rf')
+                    if pr.code == 0 then passed = passed + 1 else ourbug = ourbug + 1 end
                 else
                     local w = tostring(why)
                     if w:find('produced no value') then

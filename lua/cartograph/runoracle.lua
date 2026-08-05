@@ -304,6 +304,15 @@ function M.probe_text(plan, budget)
     add 'debug.sethook()      -- the subject has returned; stop counting'
     add '-- THE PROBE: report the tuple, assert nothing.'
     for _, l in ipairs(vim.split(PROBE_SER, '\n')) do add(l) end
+    -- A RAISE IS REPORTED, NOT ALLOWED TO KILL THE PROBE (CART-0295). It is its own row
+    -- rather than a REFUSED value, because "it raised" and "we cannot serialize what it
+    -- returned" are different facts about the subject and must not arrive as one.
+    add 'if not __ok then'
+    add(('    __out(%q)'):format(M.MARK_A))
+    add '    __out("RAISED " .. tostring(__err))'
+    add(('    __out(%q)'):format(M.MARK_B))
+    add '    os.exit(0)'
+    add 'end'
     add 'local out = {}'
     add 'for i = 1, gotn do'
     add '    local s = ser(got[i])'
@@ -462,6 +471,50 @@ function M.run(store, plan, opts)
             .. ' VALUE and a %s has no value form, so the oracle stays a HOLE')
             :format(ri, rt, rt)
     end
+    -- THE SUBJECT RAISED, and that is an OBSERVATION rather than a failure to observe
+    -- (CART-0295). It comes back as its own field so no consumer can mistake it for a value.
+    local raised = payload:match('^RAISED (.*)$')
+    if raised then
+        -- ── A RAISE THROUGH OUR OWN STUB IS NOT THE SUBJECT'S BEHAVIOUR ─────
+        -- This diagnostic used to work by the probe DYING: a sentinel that gets compared
+        -- raises "attempt to compare table with number" (LuaJIT resolves a mixed compare
+        -- without consulting __lt), the probe took the traceback with it, and the branch above
+        -- named the missing premise. Catching raises silently removed that — the first version
+        -- of CART-0295 characterized "raises: attempt to compare table with number" as though
+        -- it were a fact about the function, when it is a fact about OUR sentinel.
+        --
+        -- So the same refusal has to fire here. A characterized raise is only honest when the
+        -- raise is the SUBJECT's; one caused by a premise we supplied is a hole with a
+        -- relation, and the fix is a concrete value rather than a recorded error.
+        if ch.sandbox_of(plan) and (raised:find('attempt to compare', 1, true)
+            or raised:find('attempt to perform arithmetic', 1, true)) then
+            return nil, ('the subject INSPECTED an opaque value in a way a sentinel cannot'
+                .. ' stand in for (it compared or did arithmetic on it, which LuaJIT resolves'
+                .. ' without consulting a metamethod). That is a hole with a relation, not a'
+                .. ' bug: fill the env hole it came from with a CONCRETE value of the right'
+                .. ' shape. The subject said:\n%s'):format(raised)
+        end
+        -- A FAILED `require` IS OUR PREMISE, NOT THE SUBJECT'S BEHAVIOUR, and characterizing
+        -- it was wrong twice over. It means a re-emitted declaration (CART-0296) or the
+        -- aligned package path could not resolve — so the honest answer is that the LOAD
+        -- premise is incomplete, exactly as `load_premise` reports when it can see the
+        -- problem in advance.
+        --
+        -- AND ITS MESSAGE IS NOT EVEN STABLE: Lua appends the whole searched path list, which
+        -- contains process-specific temp directories, so the probe's text and the spec's text
+        -- differ and the spec reports a false CHANGED. That is the determinism rule biting a
+        -- raise: stripping the `file:line` prefix is not enough when the BODY carries paths.
+        local mod = raised:match("^module '([%w%._%-/]+)' not found")
+        if mod then
+            return nil, ('the subject could not load `%s` — a re-emitted declaration or the'
+                .. ' aligned package path does not resolve it in a fresh process, so this is'
+                .. ' an incomplete LOAD premise rather than behaviour to characterize. (The'
+                .. ' message would also be unstable: Lua appends the searched paths, which'
+                .. ' differ per process.)'):format(mod)
+        end
+        return { raised = raised, n = 0, purity = label, cost = cost,
+            calls = calls, inspections = inspections }
+    end
     local n, src = payload:match('^VALUES (%d+) ?(.*)$')
     if not n then return nil, 'the probe emitted an unreadable payload: ' .. payload end
     return { n = tonumber(n), source = src, purity = label, cost = cost,
@@ -555,8 +608,21 @@ function M.fill_oracle(store, plan, opts)
     end
     local fills = {}
     if oracle then
-        fills[oracle.id] = { value = res.source, n = res.n, by = 'run', basis = basis,
-            tier = envtier }
+        if res.raised then
+            -- THE SUBJECT RAISED, AND THAT IS WHAT WE CHARACTERIZE (CART-0295). The value is
+            -- the MESSAGE, and `raises` marks the row so the emitter compares the right thing
+            -- — a raise and a returned string are not the same observation and must not share
+            -- a field. The basis discloses the prefix strip, because a reader comparing this
+            -- against the real message would otherwise find them different.
+            fills[oracle.id] = { value = ('%q'):format(res.raised), raises = true,
+                by = 'run', tier = envtier,
+                basis = basis .. '; the subject RAISED rather than returning, so what is'
+                    .. ' characterized is the error — its `file:line` prefix is STRIPPED so'
+                    .. ' an edit above the raising line is not reported as a behaviour change' }
+        else
+            fills[oracle.id] = { value = res.source, n = res.n, by = 'run', basis = basis,
+                tier = envtier }
+        end
     end
     if eff then
         fills[eff.id] = { value = ('%q'):format(res.calls or ''), by = 'run',
