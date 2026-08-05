@@ -2723,8 +2723,8 @@ fixture of known positives *and* known near-misses passes, on the principle that
 probe reporting zero is uninterpretable until it has been shown able to fire — a gate
 that caught two bugs in the probe itself before it reported anything.
 
-`tools/holecensus.lua` <corpus|path> [--by kind|tier|rule|file] is the **test-template
-hole census**: if a test were generated as a *template with holes*, how many holes would
+`tools/holecensus.lua` <corpus|path> [--by kind|tier|rule|file] [--verify [N]] is the
+**test-template hole census**: if a test were generated as a *template with holes*, how many holes would
 each function have, and which are **our gap** rather than the honest frontier? A hole is
 never *labelled* "our bug" — an **edge** is drawn to the evidence that indicts us, tiered
 because the answer keys have unequal authority (an observed call-site literal is
@@ -2737,7 +2737,11 @@ density** — 51.2% of `nio`'s functions carried no blocking hole versus 1.8% of
 tracking 1.06 versus 0.003 annotation claims per function. (Those figures counted the hole kinds
 the census computed at the time. It now consumes the *emitter's* hole set — which also knows about
 reachability, the module load and the environment — and nio reads **2.8% emittable / 0.5%
-runnable**. The trend held; the level was measuring a smaller question than the word implied.) The oracle hole is irreducible
+runnable**. The trend held; the level was measuring a smaller question than the word implied.)
+`--verify` really runs the synthesized population — a purity-gated subprocess per function, so it is
+opt-in — and prints what a run proved rather than what a fill implied, with the failures split by
+whether the *subject* raised or *we* broke. It exists because this tool's own third headline once
+said `runnable` over an unverified count. The oracle hole is irreducible
 by construction and is *not* counted against emittability: filling it with one run is the
 design, not a gap. An **absent `require` is not fatal** either — it becomes an
 *injection point*, since short of globals and mutation we know what a body does with what
@@ -3097,9 +3101,29 @@ since picking a side would run the function under a premise the code contradicts
 minimal value **picks a path** — `{}` for a parameter the body loops over characterizes the *empty*
 case — the spec says so at the top, in the same breath as the values: the behaviour recorded is
 real, its *generality* is ours. That's why it is a separate command rather than a flag, and why the
-census reports it as a **third number** instead of folding it into emittable: **9.4% emittable, plus
-42.9% runnable under synthesis, together 52.3%.** Diluting evidence with our own guesses on the
-largest hole population in the corpus is precisely how a survey lies by confidence.
+census reports it as a **third number** instead of folding it into emittable. Diluting evidence with
+our own guesses on the largest hole population in the corpus is precisely how a survey lies by
+confidence.
+
+That third number is called **fillable**, and the name is a correction. It first shipped as
+*runnable under synthesis* while counting only that the input holes got **filled** — a proxy for the
+claim the word made, in the very tool that exists to catch proxies. `holecensus --verify` really runs
+the population, and the honest figures are **9.4% emittable plus 16.8% verified, together 26.2%** —
+not the 52.3% the unverified count implied. The capability is real (of the 1499 fillable, all 588
+whose oracle a run could observe emit a **passing** spec, and zero pass-then-fail) but the headline
+overstated it by 2.5×. Verification is opt-in because it costs a purity-gated subprocess per
+function, which no default census can afford; what is *not* an option is keeping the word and
+dropping the check. **A name may only claim what the check behind it performs** — the third time that
+rule has had to be applied here, after emittable-vs-runnable and the reach count.
+
+The gap is mostly not a bug. Of 399 subjects that produce no value, **366 are the subject raising**
+on the input we chose — `bad argument to a builtin` (194), indexing a nil (80), calling a nil (60) —
+and only 21 are our own load errors. A raise is a real behaviour and a legitimate thing to
+characterize; that it currently refuses instead of recording it is the next piece of work, not a
+limit. A separate 441 functions are emittable but refuse to run because a hole carries a *tier* and
+no *value* — 395 of those are same-file definitions a reconstruction no longer receives from a module
+load, which is a cost the reconstruction knowingly paid and can now be repaid by composing it with
+the upvalue walk.
 
 And then the choice went away entirely. A condition on an unknown has no right answer to pick —
 it has **two behaviours**, and describing one is describing half. So `:CartographCharacterizeFork`

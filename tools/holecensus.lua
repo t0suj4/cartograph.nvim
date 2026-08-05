@@ -3,7 +3,7 @@
 -- Measured BEFORE writing any emitter, in the tools/pathsat + tools/ifaceceil style.
 --
 --   nvim --headless -u NONE -l tools/holecensus.lua <corpus|path>
---        [--by kind|tier|rule|file] [--show N]
+--        [--by kind|tier|rule|file] [--show N] [--verify [N]]
 --   nvim --headless -u NONE -l tools/holecensus.lua --selftest
 --
 -- THE IDEA (user, 2026-08-03). Generate tests as a TEMPLATE WITH HOLES. Cartograph
@@ -317,9 +317,18 @@ end
 -- ── main ────────────────────────────────────────────────────────────────────
 local target = arg[1]
 local axis, show = 'kind', 10
+-- VERIFY IS OPT-IN BECAUSE IT REALLY RUNS: a purity-gated subprocess per function, which no
+-- default census can afford. Opt-in and slow is honest; the word RUNNABLE on an unverified
+-- count was not (CART-0293).
+local verify, verifycap = false, 4000
+local synthids = {}
 for i = 1, #(arg or {}) do
     if arg[i] == '--by' then axis = arg[i + 1] or 'kind' end
     if arg[i] == '--show' then show = tonumber(arg[i + 1]) or 10 end
+    if arg[i] == '--verify' then
+        verify = true
+        verifycap = tonumber(arg[i + 1]) or verifycap
+    end
     -- THE A/B FOR CART-0266, so the stdlib-signature delta is REPRODUCIBLE rather
     -- than a number someone remembered from a session. Drops the signature source and
     -- nothing else, which is exactly the before-state.
@@ -376,6 +385,19 @@ print(('  ★ RUNNABLE  (every hole carries a VALUE — we could actually call i
 -- own values, so they are reported on their own line and never added into EMITTABLE. Folding a
 -- guess into an evidence number is how a survey lies by confidence, and the largest hole
 -- population in the corpus is the worst place to start doing it.
+--
+-- ★ AND IT SAYS `FILLABLE`, NOT `RUNNABLE`, WHICH IS A CORRECTION (CART-0293). This line first
+-- shipped calling itself RUNNABLE UNDER SYNTHESIS while counting only that the input holes got
+-- FILLED — a PROXY for the claim in the word. Verified by actually running the population: 1499
+-- filled, 588 whose oracle a run could observe (39.2%), so the honest figure was 16.8% of the
+-- corpus and the headline overstated it 2.5x. The gap is mostly NOT our bug — 366 of 399 are the
+-- subject RAISING on the input we chose (CART-0295) — but the word was still wrong, and it is the
+-- same error this tool exists to catch, made in this tool's own headline.
+--
+-- SO THE RULE, THIRD TIME OF ASKING (CART-0284 emittable-vs-runnable, CART-0286's reach count, and
+-- now this): A NAME MAY ONLY CLAIM WHAT THE CHECK BEHIND IT PERFORMS. The census cannot verify by
+-- running — that is purity-gated and costs a subprocess per function — so it reports what static
+-- inspection proves and says so, and `--verify` is the opt-in pass that really runs.
 local synthable, synthrefused = 0, 0
 for _, f in ipairs(fns) do
     if f.blocking > 0 and f.blocking == (f.inblocking or 0) and f.id then
@@ -387,20 +409,84 @@ for _, f in ipairs(fns) do
                 for _, h in ipairs(plan.holes) do
                     if not h.tier and blocking_of(h) and not h.value then left = left + 1 end
                 end
-                if left == 0 then synthable = synthable + 1 end
+                if left == 0 then
+                    synthable = synthable + 1
+                    synthids[#synthids + 1] = f.id
+                end
                 if type(ref) == 'table' and #ref > 0 then synthrefused = synthrefused + 1 end
             end
         end
     end
 end
-print(('  ★ + RUNNABLE UNDER SYNTHESIS (inputs we would CHOOSE, tier derived|claim): %d'
+print(('  ★ + FILLABLE BY SYNTHESIS (inputs we would CHOOSE, tier derived|claim): %d'
     .. ' / %d = %.1f%%  → together %.1f%%'):format(synthable, #fns,
     #fns > 0 and 100 * synthable / #fns or 0,
     #fns > 0 and 100 * (emittable + synthable) / #fns or 0))
+print('      FILLABLE, not runnable: this counts holes FILLED, which is not the same as a run'
+    .. ' succeeding — pass --verify to find out (measured 39% of them, CART-0293)')
 print(('      a synthesized input exercises ONE path and the path is OUR choice, so this is'
     .. ' its own number%s'):format(synthrefused > 0
     and (('; %d fn(s) REFUSED — the body uses a parameter as two types'):format(synthrefused))
     or ''))
+
+-- ── --verify: the pass that makes the word earn itself (CART-0293) ──────────
+-- Really fills the oracle (a purity-gated subprocess) and really loads and executes the
+-- emitted spec. What it prints is what a RUN proved, and the FAILURE breakdown is the more
+-- useful half: a subject that RAISES on our chosen input is a behaviour we are discarding
+-- (CART-0295), while a load error is ours.
+if verify then
+    local ro = require 'cartograph.runoracle'
+    local ran, passed, noval, refused_other, ourbug = 0, 0, 0, 0, 0
+    local raises = {}
+    for i = 1, math.min(#synthids, verifycap) do
+        local okp, plan = pcall(ch.plan, store, synthids[i])
+        if okp and plan then
+            local nf, ref = synth.fill(store, plan)
+            if nf and type(ref) == 'table' and #ref == 0 then
+                ran = ran + 1
+                local okr, why = ro.fill_oracle(store, plan)
+                if okr and plan.unfilled == 0 then
+                    local f, lerr = load(table.concat(ch.emit(plan), '\n'), 'v')
+                    local r = false
+                    if f then r = pcall(f) end
+                    if r then passed = passed + 1 else ourbug = ourbug + 1 end
+                else
+                    local w = tostring(why)
+                    if w:find('produced no value') then
+                        noval = noval + 1
+                        local k = w:find('bad argument') and 'bad argument to a builtin'
+                            or w:find('attempt to index') and 'index a nil'
+                            or w:find('attempt to call') and 'call a nil'
+                            or w:find('attempt to perform arithmetic') and 'arithmetic'
+                            or w:find('attempt to compare') and 'compare'
+                            or w:find('attempt to concatenate') and 'concatenate'
+                            or 'other / load'
+                        raises[k] = (raises[k] or 0) + 1
+                    else refused_other = refused_other + 1 end
+                end
+            end
+        end
+    end
+    print('')
+    print(('  ── --verify: %d of %d fillable function(s) actually RUN ─────────')
+        :format(ran, synthable))
+    print(('     SPEC PASSES (a run observed the oracle):   %d  (%.1f%% of those attempted)')
+        :format(passed, ran > 0 and 100 * passed / ran or 0))
+    print(('     VERIFIED TOTAL with emittable:             %d / %d = %.1f%%')
+        :format(emittable + passed, #fns, #fns > 0 and 100 * (emittable + passed) / #fns or 0))
+    print(('     the subject produced no value:             %d'):format(noval))
+    for k, v in pairs(raises) do
+        print(('        %5d  %s'):format(v, k))
+    end
+    print(('     refused before running (a hole with a tier but no VALUE): %d')
+        :format(refused_other))
+    print(('     ran but the spec failed (OUR bug — a passing run must emit a passing spec): %d')
+        :format(ourbug))
+    if #synthids > verifycap then
+        print(('     %d not attempted (cap %d) — raise it with `--verify N`')
+            :format(#synthids - verifycap, verifycap))
+    end
+end
 local hk = {}
 for k in pairs(hist) do hk[#hk + 1] = k end
 table.sort(hk)
