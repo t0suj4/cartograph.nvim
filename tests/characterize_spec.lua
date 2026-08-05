@@ -165,12 +165,17 @@ test('reach: a NESTED closure is a different refusal — a door, not a dead end'
     eq('nested', plan.subject.kind)
     eq('M.rows', plan.subject.host)
     local h = holes_by_id(plan)
-    -- THE POINT OF SPLITTING THE KIND: this one is unreachable by ANY mechanism, so the
+    -- THE POINT OF SPLITTING THE KIND: the upvalue walk cannot reach this one, so the
     -- refusal must name what to characterize INSTEAD rather than restate the wall.
-    ok(h['reach:row'].why:find('does not EXIST until', 1, true), 'says why never')
+    ok(h['reach:row'].why:find('not an OBJECT until', 1, true), 'says why this walk cannot')
     ok(h['reach:row'].why:find('characterize `M.rows` instead', 1, true),
         'and names the door: ' .. tostring(h['reach:row'].why))
-    eq(nil, h['reach:row'].tier, 'no tier: it blocks, and always will')
+    -- AND THE REFUSAL IS SCOPED TO THIS MECHANISM, not to the language: a reconstruction
+    -- from the declaration's own source can reach it, and pinning that here is what stops
+    -- the refusal being re-read as "impossible" by the next session (CART-0289).
+    ok(h['reach:row'].why:find('RECONSTRUCT it from its own source', 1, true),
+        'and names the OTHER mechanism, so the wall is not mistaken for the language')
+    eq(nil, h['reach:row'].tier, 'no tier: it blocks THIS mechanism')
     cleanup()
 end)
 

@@ -168,9 +168,20 @@ end
 --- kinds, and the split between the last two is the whole of CART-0286:
 ---   member     `function M.add()` — a member of whatever the module returns
 ---   upvalue    a FILE-LEVEL `local function`, reached as an upvalue of an exported fn
----   nested     a `local function` INSIDE another function — unreachable by ANY
----              mechanism, because it does not exist until the enclosing call runs
+---   nested     a `local function` INSIDE another function — not an OBJECT until the
+---              enclosing call runs, so THIS mechanism cannot reach it
 ---   unreturned the module does not end in `return <root>`, so the reach is unverified
+---
+--- A REFUSAL HERE IS ABOUT THIS MECHANISM, NOT ABOUT THE CODE, and the first version of
+--- this comment got that wrong (user, 2026-08-05: "they're only unreachable because we
+--- don't have anything to reach in and make it run"). Walking a module's exports needs a
+--- module — so a SCRIPT's file-level local and a NESTED closure both refuse, and neither
+--- is unreachable in general: a declaration compiles from its own source text with its
+--- free names supplied exactly as the fixture holes already supply them. That is a
+--- RECONSTRUCTION (`derived`) rather than the object the module built (`measured`) —
+--- same bytes, captured state that WE supplied — and conflating the two would report a
+--- fact about our own closure as a fact about theirs. CART-0289 builds it; this comment
+--- exists so the refusal below is never read as a statement about the language.
 ---
 --- THE MODULE-TABLE ASSUMPTION IS CHECKED, not assumed: the file must actually
 --- `return <root>` at module level, where <root> is the name the definition hangs off.
@@ -210,8 +221,10 @@ local function reach_of(store, node, lines)
     if host then
         return { kind = 'nested', name = node.name, host = host.name,
             host_id = host.id,
-            why = ('`%s` is nested inside `%s`: it does not EXIST until `%s` runs, so no'
-                .. ' mechanism can reach it — characterize `%s` instead'):format(
+            why = ('`%s` is nested inside `%s`: it is not an OBJECT until `%s` runs, so'
+                .. ' the upvalue walk cannot reach it — characterize `%s` instead, or'
+                .. ' RECONSTRUCT it from its own source with the enclosing locals'
+                .. ' supplied (CART-0289)'):format(
                 tostring(node.name), tostring(host.name), tostring(host.name),
                 tostring(host.name)) }
     end

@@ -480,11 +480,16 @@ verb refuses is as load-bearing as what it writes — see
                               whichever exported function closes over it
                               (identity checked by def line + source file,
                               so a same-named impostor is refused); a
-                              NESTED local, which nothing can ever reach
-                              because it does not exist until the
+                              NESTED local, which this mechanism cannot
+                              reach because it is not an object until the
                               enclosing call runs — so the refusal names
                               what to characterize INSTEAD; or a local
-                              nothing exported mentions. ! stages the
+                              nothing exported mentions. The last two
+                              refuse THIS mechanism, not every one: a
+                              declaration also compiles from its own
+                              source, which reconstructs an EQUIVALENT
+                              closure rather than the object the module
+                              built. ! stages the
                               write, which txn journals and CAS-verifies
                               and which is REFUSED inside tests/ — a
                               characterization spec is SUPPOSED to fail
