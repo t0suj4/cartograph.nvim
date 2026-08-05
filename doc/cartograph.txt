@@ -551,6 +551,28 @@ verb refuses is as load-bearing as what it writes — see
                               reported as a SIGNATURE change rather than a
                               behaviour comparison between two different
                               functions
+  :CartographCharacterizeSynth
+                              SYNTHESIZE the focused function's input
+                              holes from what its BODY requires of each
+                              parameter: `p.foo` means a table carrying
+                              `foo`, `p + 1` a number, `p()` a function,
+                              and a parameter nothing inspects takes ANY
+                              value. An input hole was an unconditional
+                              wall ("we cannot choose the value"), which
+                              encoded "we do not know the RIGHT value" —
+                              a claim about GENERALITY dressed as one
+                              about RUNNABILITY. A synthesized value is
+                              `derived` when the body pins the shape and
+                              `claim` when nothing inspects it, NEVER
+                              measured: it is OUR value. And a MINIMAL
+                              value exercises ONE path, so the spec says
+                              at the top that the path was our choice and
+                              not a caller's — use
+                              |:CartographCharacterizeFork| for the
+                              branches it did not take. A parameter the
+                              body uses as TWO types is REFUSED rather
+                              than resolved, because picking a side would
+                              run it under a premise the code contradicts
   :CartographCharacterizeFork[!] [{condition}]
                               run the focused function with a condition
                               asserted BOTH ways and show both states. A

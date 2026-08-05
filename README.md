@@ -3079,6 +3079,28 @@ real code are tiny, so this is **inversion of a closed set** of comparison shape
 unknowns is **refused by name**, because a value satisfying a half-understood condition looks
 derived and is a guess.
 
+That distinction — generality is not the same as the observation — turned out to be the whole
+answer to the input hole, and it took a while to notice. `holes.blocking` treated an input as an
+unconditional wall, commented *"we cannot choose the value"*. But we can always choose a value; that
+sentence encoded "we do not know the **right** value", which is a claim about generality wearing the
+costume of a claim about runnability. So **`:CartographCharacterizeSynth` synthesizes the input from
+what the body requires of it**: `p.foo` means a table carrying `foo` — and the field names come free
+with the access — `p + 1` means a number, `p()` a function, `s:upper()` a string because `upper` is a
+string method while `o:render()` is a table carrying a function field. Measured on this repo: of
+4411 blocking input parameters, **46.9% are never inspected at all**, so literally any value runs,
+and the other 53.1% carry a shape the code itself pins.
+
+A synthesized value is `derived` when the body constrained it and `claim` when nothing did, never
+`measured` — it's *our* value, and "the code told us the shape" and "we picked something harmless"
+must not share a word. A parameter the body uses as two types is **refused** rather than resolved,
+since picking a side would run the function under a premise the code contradicts. And because a
+minimal value **picks a path** — `{}` for a parameter the body loops over characterizes the *empty*
+case — the spec says so at the top, in the same breath as the values: the behaviour recorded is
+real, its *generality* is ours. That's why it is a separate command rather than a flag, and why the
+census reports it as a **third number** instead of folding it into emittable: **9.4% emittable, plus
+42.9% runnable under synthesis, together 52.3%.** Diluting evidence with our own guesses on the
+largest hole population in the corpus is precisely how a survey lies by confidence.
+
 And then the choice went away entirely. A condition on an unknown has no right answer to pick —
 it has **two behaviours**, and describing one is describing half. So `:CartographCharacterizeFork`
 runs it **both ways** and shows both states: neither is presented as *the* behaviour, both are

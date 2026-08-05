@@ -74,6 +74,10 @@ local at = require 'cartograph.at'
 local pm = require 'cartograph.spec.profile'
 local holes = require 'cartograph.holes'
 local ch = require 'cartograph.characterize'
+local synth = require 'cartograph.synth'
+-- ALIASED BEFORE THE SHADOW: the report section rebinds `holes` to the sweep's ROW LIST
+-- (`local holes, fns, skipped = sweep()`), so the module is out of reach down there.
+local blocking_of = holes.blocking
 -- THE BASE RUNTIME'S SIGNATURES (CART-0266), loaded once. nil when no artifact
 -- ships for the language, and the report SAYS so — a stub gap and a missing
 -- signature SOURCE must not render the same way.
@@ -120,7 +124,7 @@ local function sweep()
             elseif not H then
                 skipped[#skipped + 1] = tostring(plan == nil and why or 'no plan')
             else
-                local frontier, blocking, novalue = 0, 0, 0
+                local frontier, blocking, novalue, inblocking = 0, 0, 0, 0
                 for _, h in ipairs(H) do
                     h.fn, h.file = n.name or '?', rel
                     rows[#rows + 1] = h
@@ -141,13 +145,19 @@ local function sweep()
                         --    an INJECTION POINT, so a stub always exists; but if the fn
                         --    writes module state or mutates an argument, injection
                         --    cannot isolate it and the dependency is a real wall.
-                        --  · INPUT / FIXTURE always block: we cannot choose the value
-                        --    or build the world.
-                        if holes.blocking(h) then blocking = blocking + 1 end
+                        --  · INPUT / FIXTURE always block: we cannot choose the RIGHT
+                        --    value or build the world. Note "right" — an input hole is a
+                        --    GENERALITY limit, not a runnability one, which is what the
+                        --    third headline below measures (CART-0290).
+                        if holes.blocking(h) then
+                            blocking = blocking + 1
+                            if h.kind == 'input' then inblocking = inblocking + 1 end
+                        end
                     end
                 end
-                fns[#fns + 1] = { fn = n.name or '?', file = rel,
-                    n = #H, frontier = frontier, blocking = blocking, novalue = novalue }
+                fns[#fns + 1] = { fn = n.name or '?', file = rel, id = n.id,
+                    n = #H, frontier = frontier, blocking = blocking, novalue = novalue,
+                    inblocking = inblocking }
             end
         end
         files[rel] = nil
@@ -360,6 +370,37 @@ print(('  ★ EMITTABLE (no BLOCKING hole — something speaks to every hole): %
     :format(emittable, #fns, #fns > 0 and 100 * emittable / #fns or 0))
 print(('  ★ RUNNABLE  (every hole carries a VALUE — we could actually call it): %d / %d = %.1f%%')
     :format(runnable, #fns, #fns > 0 and 100 * runnable / #fns or 0))
+-- AND A THIRD, KEPT SEPARATE (CART-0290, user: "there should be very few functions we cannot run
+-- with filled holes"). The two above count REAL EVIDENCE. This one counts functions whose only
+-- walls are input holes we could SYNTHESIZE from what the body requires of each parameter — our
+-- own values, so they are reported on their own line and never added into EMITTABLE. Folding a
+-- guess into an evidence number is how a survey lies by confidence, and the largest hole
+-- population in the corpus is the worst place to start doing it.
+local synthable, synthrefused = 0, 0
+for _, f in ipairs(fns) do
+    if f.blocking > 0 and f.blocking == (f.inblocking or 0) and f.id then
+        local okp, plan = pcall(ch.plan, store, f.id)
+        if okp and plan then
+            local nf, ref = synth.fill(store, plan)
+            if nf then
+                local left = 0
+                for _, h in ipairs(plan.holes) do
+                    if not h.tier and blocking_of(h) and not h.value then left = left + 1 end
+                end
+                if left == 0 then synthable = synthable + 1 end
+                if type(ref) == 'table' and #ref > 0 then synthrefused = synthrefused + 1 end
+            end
+        end
+    end
+end
+print(('  ★ + RUNNABLE UNDER SYNTHESIS (inputs we would CHOOSE, tier derived|claim): %d'
+    .. ' / %d = %.1f%%  → together %.1f%%'):format(synthable, #fns,
+    #fns > 0 and 100 * synthable / #fns or 0,
+    #fns > 0 and 100 * (emittable + synthable) / #fns or 0))
+print(('      a synthesized input exercises ONE path and the path is OUR choice, so this is'
+    .. ' its own number%s'):format(synthrefused > 0
+    and (('; %d fn(s) REFUSED — the body uses a parameter as two types'):format(synthrefused))
+    or ''))
 local hk = {}
 for k in pairs(hist) do hk[#hk + 1] = k end
 table.sort(hk)

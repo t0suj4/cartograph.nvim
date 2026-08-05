@@ -1102,7 +1102,15 @@ M.BY_TIER = { run = 'measured', spec = 'claim', observed = 'measured',
     -- because the premise is declared and (weakest-link) a value derived from a claim is one.
     asserted = 'claim',
     -- SANDBOX: our own declared fake standing in for a channel.
-    sandbox = 'claim' }
+    sandbox = 'claim',
+    -- SYNTHESIZED (CART-0290): we built the value from what the BODY requires of the
+    -- parameter. That is our own analysis reading the code, which is exactly `derived` —
+    -- and never `measured`, which belongs to a value the code DEMONSTRATED at a call site.
+    -- The unconstrained case (nothing in the body inspects the parameter, so any value
+    -- runs) needs no special channel: the filler passes tier='claim' and the weakest-link
+    -- rule below takes it down, because "the code told us the shape" and "we picked
+    -- something harmless" are different strengths and must not share a word.
+    synthesized = 'derived' }
 M.ORACLE_CHANNELS = { run = true, spec = true }
 
 --- THE LADDER, so a tier can be COMPARED rather than only printed. Strongest first.
@@ -1523,6 +1531,24 @@ function M.preamble(plan)
     if #supplied > 0 then
         add '-- SUPPLIED PREMISES — who answered, on what basis, and at which tier:'
         for _, s in ipairs(supplied) do add('--   · ' .. s) end
+        add ''
+    end
+    -- A SYNTHESIZED INPUT CHANGES WHAT THIS SPEC IS, so it is stated at the top rather than
+    -- left implied by a tier three lines up (CART-0290). A minimal value picks a PATH — `{}`
+    -- for a parameter the body loops over characterizes the EMPTY case — and a reader who
+    -- takes this for "what the function does" has been misled by our silence, not by a wrong
+    -- value. The value is real, the behaviour is real; the GENERALITY is what we chose.
+    local nsynth = 0
+    for _, h in ipairs(plan.holes) do
+        if h.by == 'synthesized' then nsynth = nsynth + 1 end
+    end
+    if nsynth > 0 then
+        add(('-- ⚠ %d INPUT(S) WERE SYNTHESIZED BY US, not observed at any call site. Each is'):
+            format(nsynth))
+        add '-- a MINIMAL value of the shape the body requires, so this spec characterizes ONE'
+        add '-- PATH — the path OUR choice of input selects, which is not necessarily the one'
+        add '-- any caller takes. The behaviour recorded below is real; its GENERALITY is ours.'
+        add '-- :CartographCharacterizeFork shows the branches this input did not take.'
         add ''
     end
     add(('-- %d hole(s) UNFILLED. This spec MUST fail until they are filled: a hole'):format(

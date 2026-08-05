@@ -427,6 +427,48 @@ function M.register(H)
     end, { nargs = '*',
         desc = 'cartograph: declare that a guard CONDITION holds (or does not) and let the value it hinges on be DERIVED from that — an input hole says "choose a value" and offers no way to choose one, while what a person knows is the condition ("the file is non-empty"). The premise is yours and the value is ours: `n > 10` asserted true yields n = 11. The premise is a CLAIM and the report discloses WHICH BRANCH it selected, because a spec that quietly picked a side reads as characterizing the function when it characterized one path. A condition comparing two unknowns is REFUSED by name — there is no solver here, and a value satisfying a half-understood condition looks derived and is a guess. :CartographCharacterize lists the assertable ids' })
 
+    -- ── SYNTHESIZE THE INPUTS from what the BODY requires (CART-0290) ─────────
+    -- ITS OWN COMMAND, not a flag on :CartographCharacterize, for the same reason
+    -- :CartographCharacterizeRun is its own command: it changes the PREMISE of the
+    -- resulting spec, and nobody should acquire a synthesized input by accident.
+    cmd('CartographCharacterizeSynth', function ()
+        local store = live() if not store then return end
+        local ch = require 'cartograph.characterize'
+        local synth = require 'cartograph.synth'
+        local id = store.focused
+        local n = id and store.node(id)
+        if not n or (n.kind ~= 'function' and n.kind ~= 'method') then
+            return vim.notify('cartograph: focus a function first', vim.log.levels.WARN)
+        end
+        local plan = (store.txn and store.txn.verb == 'characterize'
+            and store.txn.fn_id == id) and store.txn or nil
+        if not plan then
+            local p, why = ch.plan(store, id)
+            if not p then
+                return vim.notify('cartograph: cannot characterize — ' .. tostring(why),
+                    vim.log.levels.WARN)
+            end
+            plan = p
+        end
+        local nf, ref = synth.fill(store, plan)
+        if not nf then
+            return vim.notify('cartograph: cannot synthesize — ' .. tostring(ref),
+                vim.log.levels.WARN)
+        end
+        store.set_txn(plan)
+        if nf == 0 then
+            vim.notify('cartograph: no unfilled input holes to synthesize',
+                vim.log.levels.INFO)
+        else
+            vim.notify(('cartograph: SYNTHESIZED %d input(s) — OUR values, so this'
+                .. ' characterizes ONE path and the path is our choice%s'):format(nf,
+                (type(ref) == 'table' and #ref > 0)
+                    and (', ' .. #ref .. ' REFUSED (type conflict)') or ''),
+                vim.log.levels.INFO)
+        end
+        scratch(synth.report(store, id, plan))
+    end, { desc = 'cartograph: SYNTHESIZE the focused function\'s input holes from what its BODY requires of each parameter — `p.foo` means a table carrying `foo`, `p + 1` means a number, and a parameter nothing inspects takes ANY value. An input hole used to be an unconditional wall ("we cannot choose the value"), which encoded "we do not know the RIGHT value": a claim about GENERALITY dressed as a claim about RUNNABILITY. A synthesized value is `derived` when the body pins the shape and `claim` when nothing inspects it, NEVER measured — and a MINIMAL value exercises ONE path, so the spec says the path was our choice and not a caller\'s. Use :CartographCharacterizeFork to see the branches it did not take. A parameter the body uses as two types is REFUSED rather than resolved' })
+
     -- ── THE BEHAVIOUR CERTIFICATE: neutrality with REAL ASSERTIONS (CART-0264) ──
     -- Deliberately the same shape as :CartographNeutralitySnapshot / Check above, because it
     -- answers the same question with stronger evidence: that pair HASHES a body's shape, this
