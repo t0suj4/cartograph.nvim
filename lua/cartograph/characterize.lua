@@ -164,6 +164,116 @@ local function upvalue_chain(store, node, lines)
     return nil
 end
 
+--- Squash a source fragment into something a one-line refusal can carry.
+local function oneline_trim(s)
+    return (tostring(s or ''):gsub('%s+', ' '):gsub('^ ', ''):gsub(' $', ''))
+end
+
+--- THE DECLARATION'S SIGNATURE — its line up to and including the parameter list — which is
+--- what a reconstruction anchors on. NOT the whole line, and a test caught why: a one-liner
+--- like `local function helper(x) return x * 2 end` carries its BODY on the anchor line, so
+--- editing the body would stop the anchor matching and the spec would report "the
+--- declaration is gone" instead of `CHANGED`. That is exactly backwards — noticing a body
+--- edit is the entire job. Anchoring on the signature keeps the subject FINDABLE, recompiles
+--- the edited body, and lets the behaviour change be reported as one.
+local function anchor_of(line)
+    return line:match('^(.-%b())') or line
+end
+
+--- HOW A DECLARATION IS WRAPPED SO THAT IT BINDS THE SUBJECT'S NAME — as SOURCE, because
+--- this rule has to hold in two places at once: here, when the plan checks that the
+--- reconstruction compiles, and inside the emitted spec, when it rebuilds the closure for
+--- real. Two hand-written copies of a three-branch rule is precisely the parity bug this
+--- codebase has already paid for twice (holes.lua's extraction, the census's hole set), so
+--- there is ONE string and both sides run the same bytes.
+M.WRAP_SRC = [[
+local function WRAP(text, name, wrap)
+    if wrap == 'local' then return 'local ' .. text end
+    if wrap == 'assign' then return ('local %s = %s'):format(name, text) end
+    return text
+end]]
+local WRAP = assert(((loadstring or load))(M.WRAP_SRC .. '\nreturn WRAP'))()
+
+--- CAN WE REBUILD THE SUBJECT FROM ITS OWN SOURCE (CART-0289)? The upvalue walk needs a
+--- module to walk from, so it refuses a SCRIPT's file-level local and a NESTED closure —
+--- and neither refusal is about the language. A declaration compiles on its own, and
+--- compiling it yields a function with the SAME BYTES as the one the file would build.
+---
+--- WHAT IT IS NOT: the object the module built. Its free names resolve as GLOBALS rather
+--- than as the enclosing scope's locals, so its captured state is what the SPEC supplies.
+--- That makes it `derived` and never `measured`, and it makes a same-file definition a
+--- real HOLE instead of something the module load answers — see satisfied_by. A function
+--- that shares mutable state with its enclosing scope will NOT behave identically here,
+--- which is a premise the spec has to print rather than a caveat we keep to ourselves.
+---
+--- WE COMPILE BUT NEVER RUN, and that line matters: `plan()` must not execute user code
+--- (only :CartographCharacterizeRun does). Compiling is a pure syntax check, so the
+--- derivation is self-checking — a declaration that does not compile standalone cannot be
+--- reconstructed and the compiler says so exactly.
+---
+--- BUT COMPILING IS NOT ENOUGH, and this cost a real plan/run disagreement to learn.
+--- `local NIL = setmetatable({}, { __tostring = function () return 'nil' end })` compiles
+--- perfectly, and `return __tostring` then reads a nil GLOBAL: the text was a statement
+--- that binds something else entirely. Compiling proves SYNTAX; it says nothing about
+--- WHICH NAME the text binds, and only running would settle that. So the form is chosen
+--- SYNTACTICALLY, from three shapes that bind the subject BY CONSTRUCTION:
+---   `local function f()`   the statement already binds it        (wrap = 'none')
+---   `function f()`         a global fn decl, localised            (wrap = 'local')
+---   `function(...)`        an anonymous expression, named         (wrap = 'assign')
+--- Anything else is refused rather than hoped about.
+---
+--- AND THE DECLARATION MUST OWN ITS LINES. The spec re-reads whole lines, so a function
+--- sharing a line with other code (the `NIL` case above: `local NIL = setmetatable({}, {`
+--- before it and ` })` after) would drag that code in. Refusing here is what keeps the
+--- run-time mechanism simple enough to trust: whole lines, grown until they compile.
+local function reconstruct(node, lines)
+    local sl, el = at.sl(node.range) + 1, at.el(node.range) + 1
+    local name = node.name
+    if not (name and lines[sl] and lines[el] and sl <= el) then return nil end
+    local before = lines[sl]:sub(1, at.sc(node.range))
+    local after = lines[el]:sub(at.ec(node.range) + 1)
+    if before:match('%S') or after:match('%S') then
+        return nil, ('the declaration shares its line with other code (`%s` before it,'
+            .. ' `%s` after), so extracting whole lines would carry that code along')
+            :format(oneline_trim(before), oneline_trim(after))
+    end
+    local text = table.concat(lines, '\n', sl, el)
+    local head = text:gsub('^%s+', '')
+    local esc = name:gsub('%W', '%%%0')
+    local wrap
+    if head:match('^local%s+function%s+' .. esc .. '%f[^%w_]') then wrap = 'none'
+    elseif head:match('^function%s+' .. esc .. '%f[^%w_]') then wrap = 'local'
+    elseif head:match('^function%s*%(') then wrap = 'assign'
+    else
+        return nil, ('the declaration does not begin with a shape that BINDS `%s`'
+            .. ' (starts `%s`) — compiling it would prove syntax and bind something else')
+            :format(name, oneline_trim(head:sub(1, 40)))
+    end
+    local ld = loadstring or load
+    local chunk, err = ld(('%s\nreturn %s'):format(WRAP(text, name, wrap), name),
+        'reconstruct')
+    if not chunk then
+        return nil, ('the declaration at %s:%d does not compile on its own (%s)')
+            :format(node.file, sl, tostring(err))
+    end
+    -- THE ANCHOR IS THE DECLARATION'S OWN FIRST LINE, not its line NUMBER: the spec
+    -- re-reads the file when it runs (never a snapshot — an embedded copy would pass
+    -- forever after an edit, which is the silence this codebase keeps paying for), and a
+    -- line number goes stale the moment anything above it moves. It must be UNIQUE in the
+    -- file or the spec cannot know which of them is its subject.
+    local anchor = anchor_of(lines[sl])
+    local hits = 0
+    for _, l in ipairs(lines) do
+        if l:sub(1, #anchor) == anchor then hits = hits + 1 end
+    end
+    if hits ~= 1 then
+        return nil, ('the declaration\'s signature `%s` is not unique in %s (%d'
+            .. ' occurrences), so a spec re-reading the file could not tell which one is'
+            .. ' the subject'):format(oneline_trim(anchor), node.file, hits)
+    end
+    return { anchor = anchor, lines = el - sl + 1, wrap = wrap }
+end
+
 --- HOW THE SPEC REACHES THE SUBJECT, which is a hole of its own when it cannot. Four
 --- kinds, and the split between the last two is the whole of CART-0286:
 ---   member     `function M.add()` — a member of whatever the module returns
@@ -219,14 +329,25 @@ local function reach_of(store, node, lines)
     local fns = file_fns(store, node.file)
     local host = enclosing_fn(fns, node)
     if host then
+        local rc, rcwhy = reconstruct(node, lines)
+        if rc then
+            return { kind = 'reconstructed', name = node.name, expr = 'SUBJECT',
+                host = host.name, host_id = host.id,
+                anchor = rc.anchor, decl_lines = rc.lines, wrap = rc.wrap,
+                why = ('`%s` is nested inside `%s` so it is not an OBJECT until `%s` runs'
+                    .. ' — RECONSTRUCTED from its own %d-line declaration instead. Same'
+                    .. ' bytes, but the enclosing locals it closes over are whatever this'
+                    .. ' spec supplies, NOT what `%s` would have built'):format(
+                    tostring(node.name), tostring(host.name), tostring(host.name),
+                    rc.lines, tostring(host.name)) }
+        end
         return { kind = 'nested', name = node.name, host = host.name,
             host_id = host.id,
             why = ('`%s` is nested inside `%s`: it is not an OBJECT until `%s` runs, so'
-                .. ' the upvalue walk cannot reach it — characterize `%s` instead, or'
-                .. ' RECONSTRUCT it from its own source with the enclosing locals'
-                .. ' supplied (CART-0289)'):format(
+                .. ' the upvalue walk cannot reach it, and it cannot be reconstructed'
+                .. ' either (%s) — characterize `%s` instead'):format(
                 tostring(node.name), tostring(host.name), tostring(host.name),
-                tostring(host.name)) }
+                tostring(rcwhy or 'no declaration text'), tostring(host.name)) }
     end
     local up = upvalue_chain(store, node, lines)
     if up then
@@ -240,11 +361,22 @@ local function reach_of(store, node, lines)
                 tostring(node.name), up.carrier,
                 #up.chain > 1 and (' via ' .. table.concat(up.chain, ' <- ')) or '') }
     end
+    -- NOTHING EXPORTED MENTIONS IT — which for a SCRIPT (tools/, tests/: no `return M` at
+    -- all) is the normal case, not an anomaly. Reconstruction does not need an export.
+    local rc, rcwhy = reconstruct(node, lines)
+    if rc then
+        return { kind = 'reconstructed', name = node.name, expr = 'SUBJECT',
+            anchor = rc.anchor, decl_lines = rc.lines, wrap = rc.wrap,
+            why = ('`%s` is file-level-local in %s and nothing exported mentions it (a'
+                .. ' SCRIPT has no module table to walk), so it is RECONSTRUCTED from its'
+                .. ' own %d-line declaration. Same bytes; every free name it reads is'
+                .. ' whatever this spec supplies'):format(
+                tostring(node.name), node.file, rc.lines) }
+    end
     return { kind = 'file-local', name = node.name,
-        why = ('`%s` is file-level-local in %s and nothing exported mentions it, so it is'
-            .. ' not an upvalue of anything a spec can load — dead, or reached only'
-            .. ' through a module-level table this derivation does not follow')
-            :format(tostring(node.name), node.file) }
+        why = ('`%s` is file-level-local in %s, nothing exported mentions it, and it'
+            .. ' cannot be reconstructed either (%s)'):format(
+            tostring(node.name), node.file, tostring(rcwhy or 'no declaration text')) }
 end
 
 --- CAN THE SPEC LOAD THE SUBJECT MODULE AT ALL? Returns (package_path_lines, nil) or
@@ -316,7 +448,7 @@ end
 --- A HEDGED stdlib signature is deliberately NOT satisfied here: `s:match` was signed
 --- by the only stdlib owner of the name with the receiver unverified (CART-0266), so
 --- the RUNTIME may hold something else entirely under that name.
-local function satisfied_by(h)
+local function satisfied_by(h, reach)
     if h.kind == 'dependency' and h.rule == 'stdlib' then
         -- A HEDGED signature is satisfied TOO, and this changed after driving it: a
         -- receiver-unverified match like `("x"):rep(n)` → string#rep was BLOCKING the run
@@ -342,9 +474,24 @@ local function satisfied_by(h)
             table.concat(h.owners, ', '))
     end
     if h.kind == 'fixture' and h.tier == 'derived' then
+        -- A RECONSTRUCTION DOES NOT LOAD THE MODULE, so the module load cannot answer
+        -- this (CART-0289). The subject is compiled from its own text, and its free names
+        -- resolve as GLOBALS — so a same-file definition is a REAL hole here, and saying
+        -- otherwise would emit a spec that dies on a nil global while its premise list
+        -- claimed the environment had it covered. The tier stays `derived` (our analysis
+        -- did find the definition); what changes is whether anything SUPPLIES it.
+        if reach and reach.kind == 'reconstructed' then return nil end
         return 'loading the module: a same-file definition carries this name'
     end
     if h.kind == 'reach' and h.tier == 'derived' then
+        if reach and reach.kind == 'reconstructed' then
+            -- CART-0289. The loudest premise this file emits, and deliberately: what runs
+            -- is OUR closure over the subject's bytes, not the one the file builds.
+            return ('RECOMPILING the declaration from the file at run time — same bytes,'
+                .. ' but every free name resolves to what this spec supplies, so it is an'
+                .. ' EQUIVALENT closure and not the object %s builds'):format(
+                reach.host and ('`' .. reach.host .. '`') or 'the file')
+        end
         -- CART-0286: the spec walks upvalues and gets the REAL function object, so the
         -- environment does answer this — but the premise is loud, because a subject
         -- reached this way is one the module never promised.
@@ -848,19 +995,22 @@ function M.plan(store, fn_id, opts)
         H[#H + 1] = { kind = 'load', name = node.file, rule = 'linker', why = loadwhy }
     end
     if reach.kind ~= 'member' then
-        -- AN UPVALUE REACH IS A DERIVED PREMISE, NOT A WALL (CART-0286). The row stays —
-        -- reaching past a module's public surface is exactly the kind of thing a reader
+        -- AN UPVALUE OR RECONSTRUCTED REACH IS A DERIVED PREMISE, NOT A WALL (CART-0286 /
+        -- CART-0289). The row stays — reaching past a module's public surface, or
+        -- rebuilding the subject from its own bytes, is exactly the kind of thing a reader
         -- must be able to see — but it carries a tier, so it does not block, and
         -- `satisfied_by` names the mechanism that answers it.
         H[#H + 1] = { kind = 'reach', name = node.name or '?', rule = 'linker',
-            tier = reach.kind == 'upvalue' and 'derived' or nil,
+            tier = (reach.kind == 'upvalue' or reach.kind == 'reconstructed')
+                and 'derived' or nil,
             carrier = reach.carrier, chain = reach.chain,
+            host = reach.host, decl_lines = reach.decl_lines,
             why = reach.why }
     end
 
     local rows, unfilled, premises = {}, 0, {}
     for _, h in ipairs(H) do
-        local sat = satisfied_by(h)
+        local sat = satisfied_by(h, reach)
         -- COPY THE WHOLE ROW, then add what only this loop can compute. This was a WHITELIST
         -- of field names, and it lost a field THREE TIMES: the pre-supplied `value` of an env
         -- hole (so every env hole read as unfilled), then `owners`, then `constraint` and
@@ -1238,6 +1388,59 @@ end
 --- found was actually defined; if that disagrees with the subject's own line, the walk
 --- reports NOTHING rather than a plausible impostor. Under-return is recoverable, a
 --- confident wrong answer is not.
+--- THE RECONSTRUCTION (CART-0289), emitted into the spec. It RE-READS THE FILE, and that
+--- is the whole design rather than an implementation detail: a spec carrying an embedded
+--- COPY of the declaration would keep passing after the function was edited, reporting
+--- "unchanged" about source it no longer describes. A characterization test whose job is
+--- to fail on a behaviour change, silently succeeding forever, is the worst failure this
+--- codebase has — so the text is fetched at run time, every time.
+---
+--- ANCHORED ON THE DECLARATION'S FIRST LINE, NOT ITS LINE NUMBER, because a line number
+--- goes stale the instant anything above it moves and would then extract a DIFFERENT
+--- function while reading as a success. The anchor must be unique (checked when the plan
+--- is made, re-checked here) — two identical declaration lines and the spec cannot know
+--- which one is its subject, so it refuses.
+---
+--- THE END OF THE DECLARATION IS FOUND BY COMPILING, not by counting lines or matching
+--- `end`: grow the text a line at a time and stop at the first prefix that compiles AND
+--- binds the name to a function defined at the chunk's own first line. A body edit that
+--- adds or removes lines is handled for free, and re-implementing a parser here would be
+--- the wrong kind of clever.
+local RECONSTRUCT = {
+    -- THE WRAP RULE, verbatim from M.WRAP_SRC: the spec applies the SAME bytes the plan
+    -- checked, so the two cannot drift into disagreeing about what the declaration is.
+    M.WRAP_SRC,
+    'local function RECONSTRUCT(path, anchor, name, wrap)',
+    '    local fh = io.open(path, "r")',
+    '    if not fh then return nil, "cannot read " .. path end',
+    '    local src = fh:read("*a"); fh:close()',
+    '    local lines, at, hits = {}, nil, 0',
+    '    for l in (src .. "\\n"):gmatch("([^\\n]*)\\n") do lines[#lines + 1] = l end',
+    '    for i, l in ipairs(lines) do',
+    '        if l:sub(1, #anchor) == anchor then at = at or i; hits = hits + 1 end',
+    '    end',
+    '    if hits == 0 then',
+    '        return nil, "the declaration " .. anchor .. " is no longer in " .. path',
+    '    elseif hits > 1 then',
+    '        return nil, ("the declaration %s occurs %d times in %s")',
+    '            :format(anchor, hits, path)',
+    '    end',
+    '    local ld = loadstring or load',
+    '    for n = 1, 2000 do',
+    '        if not lines[at + n - 1] then break end',
+    '        local text = WRAP(table.concat(lines, "\\n", at, at + n - 1), name, wrap)',
+    '        local chunk = ld(("%s\\nreturn %s"):format(text, name), "@" .. path)',
+    '        if chunk then',
+    '            local ok, fn = pcall(chunk)',
+    '            local i = ok and type(fn) == "function"',
+    '                and debug.getinfo(fn, "S") or nil',
+    '            if i and i.linedefined == 1 then return fn end',
+    '        end',
+    '    end',
+    '    return nil, "no prefix of the declaration compiles to a function"',
+    'end',
+}
+
 local UPVALUE = {
     'local function UPVALUE(root, name, wantsrc, wantline)',
     '    local seen = {}',
@@ -1376,6 +1579,24 @@ function M.preamble(plan)
                 .. ' the derivation that `%s` closes over it was WRONG — a real'
                 .. ' disagreement between our source analysis and the runtime')
             :format(tostring(plan.subject.name), tostring(plan.subject.carrier))))
+    elseif plan.subject.kind == 'reconstructed' then
+        -- THE LOUDEST PREMISE IN THIS FILE, and it earns the space: what runs below is OUR
+        -- closure over the subject's bytes. Same source, different captured state.
+        add(('-- REACH: %s'):format(plan.subject.why or 'reconstructed from source'))
+        add '-- THIS IS A RECONSTRUCTION, NOT THE OBJECT THE FILE BUILDS. The declaration is'
+        add '-- recompiled from its own source, so every free name it reads resolves to what'
+        add '-- THIS SPEC supplies (the fixtures below) rather than to the enclosing scope.'
+        add '-- A subject that shares MUTABLE state with that scope will not behave the same'
+        add '-- way here, and that is a real difference rather than a formality.'
+        add '-- The file is re-read on every run: an embedded copy would keep passing after'
+        add '-- the function was edited, which is the one failure a characterization test'
+        add '-- must never have.'
+        for _, l in ipairs(RECONSTRUCT) do add(l) end
+        add(('local SUBJECT, __rcwhy = RECONSTRUCT(%q, %q, %q, %q)'):format(
+            plan.abspath, plan.subject.anchor or '?', plan.subject.name or '?',
+            plan.subject.wrap or 'none'))
+        add(('if not SUBJECT then HOLE(%q, "reconstruction failed: " ..'
+            .. ' tostring(__rcwhy)) end'):format('reach:' .. plan.fn))
     else
         add(('-- REACH: %s'):format(plan.subject.why or 'the subject is not reachable'))
         add(('local SUBJECT = HOLE(%q, %q)'):format('reach:' .. plan.fn,

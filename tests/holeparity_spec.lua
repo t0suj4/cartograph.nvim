@@ -25,6 +25,10 @@ local SRC = table.concat({
     'function M.clamp(n) if n > LIMIT then return LIMIT end return n end',
     'function M.save(p) local f = io.open(p, "w") if f then f:close() end return p end',
     'local function hidden(x) return x end',
+    -- INSIDE a table constructor, so it does not own its lines: the shape reconstruction
+    -- refuses (CART-0289), which is what keeps a genuinely-blocking REACH hole in this
+    -- fixture now that a plain file-level local is reachable.
+    'local WRAPPED = setmetatable({}, { __tostring = function () return "w" end })',
     'return M',
 }, '\n') .. '\n'
 
@@ -99,16 +103,29 @@ test('parity: A TIER IS NOT A VALUE — emittable and runnable are different cou
     cleanup()
 end)
 
-test('parity: a file-local function is not emittable, and that is the point', function ()
+test('parity: an unreachable function is not emittable, and that is the point', function ()
     if not ready() then skip('no lua parser') end
     proj()
     -- The census's OWN fixture was file-local until this ticket, so while it computed its own hole
     -- set it had never measured a function a spec could actually CALL — a large part of why its
     -- headline read so much higher than the emitter's.
-    local plan = assert(ch.plan(store, fn('hidden').id))
+    --
+    -- `__tostring` is the subject now rather than `hidden`, because a plain file-level local IS
+    -- reachable since CART-0289 (recompiled from its own declaration). This one sits inside
+    -- `local WRAPPED = setmetatable({}, { … })`, so it owns none of its lines and no mechanism
+    -- here can take it — the blocking case the parity check needs.
+    local plan = assert(ch.plan(store, fn('__tostring').id))
     local reach
     for _, h in ipairs(plan.holes) do if h.kind == 'reach' then reach = h end end
-    ok(reach, 'a file-local function carries a REACH hole')
+    ok(reach, 'an unreachable function carries a REACH hole')
     eq(true, holes.blocking(reach), 'which BLOCKS: no spec can call it')
+
+    -- AND ITS OPPOSITE, so this test pins the DISTINCTION rather than just the wall: the
+    -- file-level local beside it is reachable, tiered, and does not block.
+    local ok2 = assert(ch.plan(store, fn('hidden').id))
+    local r2
+    for _, h in ipairs(ok2.holes) do if h.kind == 'reach' then r2 = h end end
+    eq('derived', r2 and r2.tier, 'a file-level local is DERIVED-reachable')
+    eq(false, holes.blocking(r2), 'and does not block')
     cleanup()
 end)

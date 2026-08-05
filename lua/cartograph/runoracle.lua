@@ -68,6 +68,31 @@ M.TICK = 1000       -- hook granularity; the counter advances in these steps
 
 -- ── SERIALIZATION: a value we cannot write back is not characterizable ───────
 
+-- A KEY THAT LOOKS LIKE AN IDENTIFIER IS NOT NECESSARILY USABLE AS ONE. `{ end = 1 }` is a
+-- syntax error, and this bug shipped: the key test was `^[%a_][%w_]*$`, which every Lua
+-- KEYWORD passes. It stayed invisible because nothing characterizable returned a table
+-- keyed by one — until CART-0289's reconstruction reached functions returning cartograph's
+-- OWN range shape, `{ start = …, ['end'] = … }`. The apply gate caught the unparseable
+-- spec, as designed, but the recorded value was already wrong, and a reader would have
+-- read "the emitter is broken" rather than "this key needs quoting".
+M.RESERVED = {}
+for w in ('and break do else elseif end false for function goto if in local nil not or'
+    .. ' repeat return then true until while'):gmatch('%S+') do
+    M.RESERVED[w] = true
+end
+
+-- AND `%q` ALONE IS NOT A STRING LITERAL WE CAN TRANSPORT. Lua writes a newline as a
+-- backslash followed by a REAL newline — valid source, and destroyed the moment the value
+-- crosses the probe's line-oriented process boundary, which strips CR and rejoins lines.
+-- The result was `"line one\  line two"`: a mangled literal that reads as OUR bug rather
+-- than as a transport limit. So a newline becomes the two-character escape and stays on
+-- ONE line, and a CR is escaped for the same reason it is stripped at the boundary.
+-- Found by CART-0289 reaching a subject that returns multi-line source text; before that,
+-- nothing characterizable returned a multi-line string.
+local function qstr(s)
+    return (('%q'):format(s):gsub('\\\n', '\\n'):gsub('\r', '\\r'))
+end
+
 --- A Lua VALUE as Lua SOURCE. Returns (source, nil) or (nil, why). Refusal-first: this
 --- is the gate that stops an uncharacterizable value from being written as one.
 --- NaN and the infinities are refused because no literal reproduces them, so the spec
@@ -77,7 +102,7 @@ function M.serialize(v, seen, depth)
     local t = type(v)
     if v == nil then return 'nil' end
     if t == 'boolean' then return tostring(v) end
-    if t == 'string' then return ('%q'):format(v) end
+    if t == 'string' then return qstr(v) end
     if t == 'number' then
         if v ~= v then return nil, 'the value is NaN, which no literal reproduces' end
         if v == math.huge or v == -math.huge then
@@ -118,7 +143,7 @@ function M.serialize(v, seen, depth)
         if not vs then seen[v] = nil; return nil, why end
         if type(k) == 'number' then
             parts[#parts + 1] = ('[%d] = %s'):format(k, vs)
-        elseif k:match('^[%a_][%w_]*$') then
+        elseif k:match('^[%a_][%w_]*$') and not M.RESERVED[k] then
             parts[#parts + 1] = ('%s = %s'):format(k, vs)
         else
             parts[#parts + 1] = ('[%q] = %s'):format(k, vs)
@@ -190,12 +215,18 @@ M.MARK_A, M.MARK_B = '--<CARTOGRAPH-ORACLE>', '--</CARTOGRAPH-ORACLE>'
 -- test pins that they agree, because two serializers that drift would record a value the
 -- spec cannot reproduce.
 local PROBE_SER = [[
+local RESERVED = {}
+for w in ("and break do else elseif end false for function goto if in local nil not or"
+    .. " repeat return then true until while"):gmatch("%S+") do RESERVED[w] = true end
+local function QSTR(s)
+    return (string.format("%q", s):gsub("\\\n", "\\n"):gsub("\r", "\\r"))
+end
 local function ser(v, seen, depth)
     seen, depth = seen or {}, depth or 0
     local t = type(v)
     if v == nil then return "nil" end
     if t == "boolean" then return tostring(v) end
-    if t == "string" then return string.format("%q", v) end
+    if t == "string" then return QSTR(v) end
     if t == "number" then
         if v ~= v or v == math.huge or v == -math.huge then return nil end
         if v == math.floor(v) and math.abs(v) < 2^53 then return string.format("%d", v) end
@@ -218,7 +249,7 @@ local function ser(v, seen, depth)
         if not vs then seen[v] = nil; return nil end
         if type(k) == "number" then
             parts[#parts + 1] = "[" .. k .. "] = " .. vs
-        elseif string.match(k, "^[%a_][%w_]*$") then
+        elseif string.match(k, "^[%a_][%w_]*$") and not RESERVED[k] then
             parts[#parts + 1] = k .. " = " .. vs
         else
             parts[#parts + 1] = "[" .. string.format("%q", k) .. "] = " .. vs

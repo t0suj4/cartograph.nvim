@@ -479,17 +479,20 @@ verb refuses is as load-bearing as what it writes — see
                               FILE-LEVEL local, reached as an UPVALUE of
                               whichever exported function closes over it
                               (identity checked by def line + source file,
-                              so a same-named impostor is refused); a
-                              NESTED local, which this mechanism cannot
-                              reach because it is not an object until the
-                              enclosing call runs — so the refusal names
-                              what to characterize INSTEAD; or a local
-                              nothing exported mentions. The last two
-                              refuse THIS mechanism, not every one: a
-                              declaration also compiles from its own
-                              source, which reconstructs an EQUIVALENT
-                              closure rather than the object the module
-                              built. ! stages the
+                              so a same-named impostor is refused); or
+                              RECONSTRUCTED — recompiled from its own
+                              declaration, which reaches a SCRIPT's local
+                              and a NESTED closure alike, since neither is
+                              walkable from a module table. A
+                              reconstruction is an EQUIVALENT closure and
+                              not the object the file builds: its captured
+                              state is what the spec supplies, so it is
+                              `derived`, never `measured`, and the spec
+                              says so. It RE-READS the file every run
+                              (an embedded copy would pass forever after
+                              an edit) anchored on the signature, and a
+                              declaration that does not OWN its lines is
+                              refused. ! stages the
                               write, which txn journals and CAS-verifies
                               and which is REFUSED inside tests/ — a
                               characterization spec is SUPPOSED to fail

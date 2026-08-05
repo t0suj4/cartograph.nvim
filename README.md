@@ -2884,17 +2884,30 @@ loud that it reached past the module's public surface, because a subject reached
 one the module never promised. Measured on this repo: 658 of the 798 file-level locals whose
 carrier *could* exist are recovered (82%), which moved emittable from 3.7% to 4.4%.
 
-The rest currently **refuse**, and the refusal is about *this* mechanism rather than about the
-code — a distinction worth stating precisely, because the first version of this paragraph got
-it wrong. Walking a module's exports needs a module: 1118 file-level locals live in **scripts**
-(`tools/`, `tests/`) that return no table at all, and 620 more are **nested** inside another
-function, so they do not exist as objects until the enclosing call runs. Neither is reachable
-*this* way. Both are reachable another way — a declaration compiles from its own source text,
-with its free names supplied exactly as the fixture holes already supply them — and that is a
-**reconstruction**, not the object the script would have built: same bytes, but its captured
-state is what we supplied rather than what the enclosing scope held. Those are different facts
-about different objects, so they will get different tiers rather than one blurred answer
-(CART-0289).
+Walking a module's exports needs a module, though — and most functions have none to offer. 1118
+file-level locals live in **scripts** (`tools/`, `tests/`) that return no table at all, and 620
+more are **nested** inside another function, so they are not objects until the enclosing call
+runs. Neither is reachable *that* way, and the first version of this paragraph called them
+unreachable full stop, which was a limit of the mechanism written down as a limit of the code.
+
+They are reachable by **reconstruction**: a declaration compiles from its own source text, and
+its free names resolve as globals — which is exactly how the fixture holes above already supply
+things. So the mechanism supplies the closure and the existing machinery supplies what the
+closure reaches for. What comes back is an *equivalent* closure and **not** the object the file
+builds: same bytes, but its captured state is what the spec supplied rather than what the
+enclosing scope held, so a subject sharing mutable state with that scope will not behave
+identically. That makes it `derived` and never `measured`, and the spec prints the difference
+rather than keeping it to itself.
+
+Three things keep it honest. The spec **re-reads the file every run** — an embedded copy of the
+declaration would keep passing after the function was edited, reporting "unchanged" about source
+it no longer describes, which is the one failure a characterization test must never have. It
+anchors on the declaration's **signature**, not its line number (which goes stale when anything
+above it moves) and not its whole line (which for a one-liner is the body too, so a body edit
+would lose the subject instead of reporting `CHANGED`). And a declaration that does not *own*
+its lines is refused outright: `local BOXED = setmetatable({}, { __tostring = function () … end })`
+compiles perfectly as a statement while binding something else entirely, so "it compiles" was
+never a sufficient check. Measured: emittable **4.4% → 9.4%**, runnable **3.7% → 5.7%**.
 
 Filling a hole is **discharging a hedge**, so it follows the decline ledger's protocol: a
 fill without a stated **basis** is refused, and the tier records *who* answered —

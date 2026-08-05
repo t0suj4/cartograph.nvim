@@ -42,12 +42,21 @@ local SRC = table.concat({
     '    return table.concat(parts, ",")',            -- 14
     'end',                                            -- 15
     '',                                               -- 16
-    'local function helper(x) return x * 2 end',      -- 17
+    -- MULTI-LINE ON PURPOSE: with the body on its own lines, a spec that embedded a COPY of
+    -- the declaration is distinguishable from one that re-reads the file (CART-0289).
+    'local function helper(x)',                        -- 17
+    '    local doubled = x * 2',
+    '    return doubled',
+    'end',
     '',                                               -- 18
     'function M.viaAbsent(v)',                        -- 19
     '    return AbsentLib.transform(v)',              -- 20
     'end',                                            -- 21
     '',                                               -- 22
+    -- SHARES ITS LINE with the statement that builds it, so whole-line extraction would
+    -- drag `local BOXED = setmetatable({}, {` and ` })` along: the one shape that still
+    -- refuses outright (CART-0289), and the real case that exposed it.
+    'local BOXED = setmetatable({}, { __tostring = function () return "b" end })',
     'local function scale(x) return x * 3 end',       -- 23
     '',                                               -- 24
     'function M.scaled(v)',                           -- 25
@@ -140,42 +149,118 @@ test('characterize: a stdlib call is satisfied by the RUNTIME the spec runs in',
     cleanup()
 end)
 
-test('characterize: an unmentioned file-local is a REACH hole, not a silent failure',
+test('reach: a declaration sharing its line REFUSES — the wall that is really a wall',
+    function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    -- `__tostring` lives inside `local BOXED = setmetatable({}, { … })`, so the lines it
+    -- sits on are not its own. This is the one shape reconstruction cannot take, and it is
+    -- the case that caught a plan/run disagreement: the whole line COMPILES (it is a valid
+    -- statement) while binding something else entirely, so "it compiles" was never enough.
+    local plan = assert(ch.plan(store, id_of('__tostring')))
+    eq('file-local', plan.subject.kind)
+    local h = holes_by_id(plan)
+    ok(h['reach:__tostring'], 'the reach is a hole ROW, so it is COUNTED')
+    ok(h['reach:__tostring'].why:find('shares its line with other code', 1, true),
+        'and says exactly what is in the way: ' .. tostring(h['reach:__tostring'].why))
+    eq(nil, h['reach:__tostring'].tier, 'no tier, so it BLOCKS')
+    cleanup()
+end)
+
+test('reach: an unmentioned file-level local is RECONSTRUCTED from its own source',
+    function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    -- Nothing exported mentions `helper`, so the upvalue walk has nothing to walk from —
+    -- and that was reported as unreachable, which was a claim about the MECHANISM dressed
+    -- up as a claim about the code (CART-0289).
+    local plan = assert(ch.plan(store, id_of('helper')))
+    eq('reconstructed', plan.subject.kind)
+    local h = holes_by_id(plan)
+    eq('derived', h['reach:helper'].tier, 'DERIVED: we compiled it, we did not observe it')
+    eq(nil, h['reach:helper'].blocking, 'so it does not block')
+    ok(h['reach:helper'].satisfied_by
+        and h['reach:helper'].satisfied_by:find('RECOMPILING', 1, true),
+        'and the mechanism is named: ' .. tostring(h['reach:helper'].satisfied_by))
+    cleanup()
+end)
+
+test('reach: a NESTED closure is reconstructed, and the premise names its host', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local plan = assert(ch.plan(store, id_of('row')))
+    eq('reconstructed', plan.subject.kind)
+    eq('M.rows', plan.subject.host)
+    local h = holes_by_id(plan)
+    eq('derived', h['reach:row'].tier)
+    -- THE PREMISE MUST SAY WHOSE CAPTURED STATE IS MISSING. A nested closure's free names
+    -- are the enclosing function's locals, and a reconstruction supplies them itself — so
+    -- "not what `M.rows` would have built" is the whole disclosure, not a flourish.
+    ok(plan.subject.why:find('NOT what `M.rows` would have built', 1, true),
+        'names the host whose state is NOT reproduced: ' .. tostring(plan.subject.why))
+    cleanup()
+end)
+
+test('reach: a reconstruction RE-READS the file — never an embedded snapshot', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local plan = assert(ch.plan(store, id_of('helper')))
+    ch.fill(plan, { ['input:x'] = { value = '5', basis = 'a number', by = 'agent' } })
+    local src = table.concat(ch.emit(plan), '\n')
+    -- THE PROPERTY THAT MATTERS MOST HERE: a spec carrying a COPY of the declaration would
+    -- keep passing after the function was edited, reporting "unchanged" about source it no
+    -- longer describes. So the spec must open the file, and must NOT contain the body.
+    ok(src:find('io.open(path', 1, true), 'the spec opens the file at run time')
+    ok(not src:find('local doubled = x * 2', 1, true),
+        'and does NOT embed the declaration body, which would pass forever after an edit')
+    -- anchored on the SIGNATURE, not on a line NUMBER that goes stale the moment anything
+    -- above it moves — and not on the whole line, which for a one-liner is the body too
+    ok(src:find('local function helper(x)', 1, true),
+        'anchored on the declaration signature')
+    cleanup()
+end)
+
+test('reach: editing a reconstructed body reports CHANGED, not "subject gone"', function ()
+    if not ready() then skip('no lua parser') end
+    local dir = proj()
+    local plan = assert(ch.plan(store, id_of('helper')))
+    ch.fill(plan, { ['input:x'] = { value = '5', basis = 'a number', by = 'agent' } })
+    local ro = require 'cartograph.runoracle'
+    ok(ro.fill_oracle(store, plan), 'oracle observed by running')
+    local src = table.concat(ch.emit(plan), '\n')
+    -- the spec returns nothing, so its SUCCESS is "it did not error"
+    local okbefore, beforeerr = pcall(assert(load(src, 'before')))
+    ok(okbefore, 'the spec passes against the current source: ' .. tostring(beforeerr))
+
+    -- NOW EDIT THE BODY. This is the property the whole re-read design exists for: the spec
+    -- must notice, and it must notice as a BEHAVIOUR CHANGE rather than by losing track of
+    -- its subject. Anchoring on the signature is what makes the difference — the anchor
+    -- still matches, the new body is recompiled, and the assertion fires.
+    local path = dir .. '/m.lua'
+    local fd = assert(io.open(path, 'r')); local text = fd:read('*a'); fd:close()
+    text = text:gsub('local doubled = x %* 2', 'local doubled = x * 99')
+    fd = assert(io.open(path, 'w')); fd:write(text); fd:close()
+
+    local f = assert(load(src, 'after'))
+    local okrun, err = pcall(f)
+    eq(false, okrun, 'the spec FAILS after the edit')
+    ok(tostring(err):find('CHANGED', 1, true),
+        'and it fails as a behaviour change, not as a missing subject: ' .. tostring(err))
+    cleanup()
+end)
+
+test('reach: reconstruction and the plan agree on the WRAP rule, by construction',
     function ()
     if not ready() then skip('no lua parser') end
     proj()
     local plan = assert(ch.plan(store, id_of('helper')))
-    eq('file-local', plan.subject.kind)
-    local h = holes_by_id(plan)
-    ok(h['reach:helper'], 'the reach is a hole ROW, so it is COUNTED')
-    ok(h['reach:helper'].why:find('nothing exported mentions it', 1, true),
-        'with the reason: ' .. tostring(h['reach:helper'].why))
-    eq(nil, h['reach:helper'].tier, 'and no tier, so it BLOCKS')
-    -- it must be counted: a spec that cannot call its subject is not a spec, and
-    -- reporting "2 unfilled" for a function whose real answer is 3 understates the one
-    -- hole that makes the others moot
-    ok(plan.unfilled >= 3, 'and it counts toward unfilled: ' .. tostring(plan.unfilled))
-    cleanup()
-end)
-
-test('reach: a NESTED closure is a different refusal — a door, not a dead end', function ()
-    if not ready() then skip('no lua parser') end
-    proj()
-    local plan = assert(ch.plan(store, id_of('row')))
-    eq('nested', plan.subject.kind)
-    eq('M.rows', plan.subject.host)
-    local h = holes_by_id(plan)
-    -- THE POINT OF SPLITTING THE KIND: the upvalue walk cannot reach this one, so the
-    -- refusal must name what to characterize INSTEAD rather than restate the wall.
-    ok(h['reach:row'].why:find('not an OBJECT until', 1, true), 'says why this walk cannot')
-    ok(h['reach:row'].why:find('characterize `M.rows` instead', 1, true),
-        'and names the door: ' .. tostring(h['reach:row'].why))
-    -- AND THE REFUSAL IS SCOPED TO THIS MECHANISM, not to the language: a reconstruction
-    -- from the declaration's own source can reach it, and pinning that here is what stops
-    -- the refusal being re-read as "impossible" by the next session (CART-0289).
-    ok(h['reach:row'].why:find('RECONSTRUCT it from its own source', 1, true),
-        'and names the OTHER mechanism, so the wall is not mistaken for the language')
-    eq(nil, h['reach:row'].tier, 'no tier: it blocks THIS mechanism')
+    eq('none', plan.subject.wrap, 'a `local function` statement binds its own name')
+    -- ONE SOURCE, TWO CONSUMERS: the plan checks the reconstruction compiles by running
+    -- this rule, and the spec rebuilds the closure by running the SAME BYTES. Two
+    -- hand-written copies of a three-branch rule is the parity bug this codebase has
+    -- already paid for twice.
+    local src = table.concat(ch.emit(plan), '\n')
+    ok(src:find(ch.WRAP_SRC, 1, true), 'the spec carries WRAP_SRC verbatim')
     cleanup()
 end)
 
