@@ -12,6 +12,10 @@
 -- emitted; consumers already degrade to honest frontiers.
 
 local atr = require 'cartograph.at' -- dual-mode range reads: relink/refresh re-run these paths over the FOLDED store
+-- @langs bash c cpp go haskell java javascript lua odin php python ruby rust scheme tsx typescript zig
+-- THE EXTRACTOR: every shipped language passes through here, which is why its
+-- node-type knowledge is supposed to live in the per-language SPECS rather than in
+-- this file. Declared so the language fence checks that separation holds.
 local flowmod = require 'cartograph.flow' -- df-strangler step 4: eager per-fn fine flow rows, folded at ingest (flow requires nothing back → no cycle)
 local dfmod = require 'cartograph.df' -- fat-record migration: the DUAL-MODE df.stmts accessor (folded OR raw), so relink readers are fold-agnostic (df requires nothing → no cycle)
 local constfold = require 'cartograph.constfold' -- const-fold ladder step 1: same-file scalar-const index + argv fold (no cycle)
@@ -229,7 +233,7 @@ local optext_is = tsutil.optext_is
 
 -- absence test anywhere in CONJUNCT position (descend parens + and only)
 local function conj_abs(G, n, src, chain)
-    while n:type() == 'parenthesized_expression' do n = n:named_child(0) end
+    n = tsutil.unparen(n)
     if n:type() == G.binop and optext_is(n, src, G.andops) then
         return conj_abs(G, n:named_child(0), src, chain)
             or conj_abs(G, n:named_child(1), src, chain)
@@ -266,6 +270,7 @@ end
 -- Language-generic over the IDXC types; php unwraps the $ sigil.
 local function mention_field(c, n, src)
     local p = n
+    -- @langs-ok php/bash `$var` mention shape; the other grammars use a plain identifier, handled by the arm above
     if p:type() == 'variable_name' then c = p; p = p:parent() end
     if not p then return nil end
     local t = p:type()
@@ -277,6 +282,7 @@ local function mention_field(c, n, src)
     if t == 'bracket_index_expression' or t == 'subscript_expression' then
         if p:named_child(0) ~= c then return nil end
         local k = p:named_child(1)
+        -- @langs-ok a STRING key in a bracket index (`t["k"]`); the grammars lacking `string` name it `string_literal` and do not index by string literal syntactically
         if k and k:type() == 'string' then
             local inner = k:named_child(0)
             if inner then return node_text(inner, src) end
@@ -300,7 +306,7 @@ end
 -- Sound in the SKIP direction only: "no write unless param i truthy" —
 -- additional conjuncts merely restrict further, they cannot fire a write.
 local function param_conj(G, n, src, params)
-    while n:type() == 'parenthesized_expression' do n = n:named_child(0) end
+    n = tsutil.unparen(n)
     local t = n:type()
     if t == G.binop and optext_is(n, src, G.andops) then
         return param_conj(G, n:named_child(0), src, params)
@@ -378,7 +384,7 @@ local function guard_class(c, n, src, G)
         end
         if negcond then -- else-arm: the whole condition, negated
             local x = negcond
-            while x:type() == 'parenthesized_expression' do x = x:named_child(0) end
+            x = tsutil.unparen(x)
             local i = params[node_text(x, src)]
             if i then return 1, -i, pw end
         end
@@ -413,6 +419,7 @@ local function ruby_rails_synth(tsroot, src)
         end
     end
     local function walk(n)
+        -- @langs-ok ruby/python `call` node — this walk is the ruby symbol-argument harvest below
         if n:type() == 'call' then
             local m = n:field('method')[1]
             local mn = m and node_text(m, src)
@@ -422,6 +429,7 @@ local function ruby_rails_synth(tsroot, src)
                 if C then
                     -- the FIRST symbol is the association name → reader + writer
                     for c in args:iter_children() do
+                        -- @langs-ok ruby `simple_symbol` (`:sym`) — ruby-only literal, no analogue to mirror
                         if c:type() == 'simple_symbol' then
                             local sym = node_text(c, src):sub(2)
                             if sym:match('^[%a_][%w_]*$') then
@@ -438,6 +446,7 @@ local function ruby_rails_synth(tsroot, src)
                     -- every top-level symbol is a delegated method; the `to:`/
                     -- `prefix:`/`allow_nil:` options are pairs, skipped
                     for c in args:iter_children() do
+                        -- @langs-ok ruby `simple_symbol` again, same harvest
                         if c:type() == 'simple_symbol' then
                             local sym = node_text(c, src):sub(2)
                             if sym:match('^[%a_][%w_]*$') then
@@ -774,6 +783,7 @@ local function callable_arg(a, src)
         local els = {}
         for _, el in inext, a, -1 do
             if el:named() and not tsutil.is_comment(el) then
+                -- @langs-ok php `array_element_initializer` — php's array-literal element wrapper
                 if el:type() == 'array_element_initializer' then
                     el = el:named_child(0) or el
                 end
@@ -790,6 +800,7 @@ local function callable_arg(a, src)
         local found
         local function hunt(n, depth)
             if found or depth > 4 then return end
+            -- @langs-ok cpp `qualified_identifier` / `pointer_expression` — C++ name+deref shapes
             if n:type() == 'qualified_identifier'
                 and n:parent() and n:parent():type() == 'pointer_expression' then
                 found = node_text(n, src)
@@ -835,6 +846,7 @@ local function fn_locals(def, spec, src)
                 if spec.fn_types[ct] then -- nested fn: its own scope
                 elseif spec.local_decls[ct] then
                     for _, d in inext, c, -1 do
+                        -- @langs-ok java/js `variable_declarator` — those grammars wrap a declared name
                         if d:type() == 'variable_declarator' then
                             local nm = d:field('name')[1]
                             if nm then binding_ids(nm) end
@@ -872,22 +884,28 @@ local function fn_params(def, spec, src, method)
     local out = method and { 'self' } or {}
     if ps then
         for _, c in inext, ps, -1 do
+            -- @langs-ok the per-language PARAM-NAME chain: each arm names the grammar it serves (`variable` scheme, `variable_name` php, `pointer_declarator` c/cpp) and the arms together cover the roster
             if c:type() == 'identifier' or c:type() == 'variable' then
                 out[#out + 1] = node_text(c, src)
+            -- @langs-ok same param-name chain (php/bash $var)
             elseif c:type() == 'variable_name' then -- php $param
                 out[#out + 1] = node_text(c, src):gsub('^%$', '')
             elseif c:named() then -- c parameter_declaration / defaulted params
                 for _, id in inext, c, -1 do
+                    -- @langs-ok same param-name chain
                     if id:type() == 'identifier' then
                         out[#out + 1] = node_text(id, src)
                         break
                     end
+                    -- @langs-ok same param-name chain (php $param)
                     if id:type() == 'variable_name' then
                         out[#out + 1] = node_text(id, src):gsub('^%$', '')
                         break
                     end
+                    -- @langs-ok same param-name chain (c/cpp pointer declarator)
                     if id:type() == 'pointer_declarator' then
                         local inner = id:field('declarator')[1]
+                        -- @langs-ok same param-name chain (c/cpp pointer declarator inner name)
                         if inner and inner:type() == 'identifier' then
                             out[#out + 1] = node_text(inner, src)
                         end
@@ -2889,6 +2907,7 @@ local function child_forms(node, lisp)
         -- every child list is a nested form (the caller drops the signature
         -- list of a def/lambda); bare symbols/atoms are leaves, not forms
         for _, c in inext, node, -1 do
+            -- @langs-ok scheme `list` — the s-expression node, scheme-only by construction
             if c:named() and c:type() == 'list' then out[#out + 1] = c end
         end
         return out
@@ -2967,6 +2986,7 @@ function M.forms(file, sr, sc, er, ec)
     local drop_first_list = false
     if lisp then
         local head = n:named_child(0)
+        -- @langs-ok scheme `symbol` — the s-expression head
         if head and head:type() == 'symbol' then
             local h = node_text(head, src)
             if h:match('^define') or h:match('^lambda') or h:match('^let')
@@ -4516,6 +4536,7 @@ function M.extract(root, opts)
                 if wantesc and not escpend then esc = escapes_file(name) end
                 local isfield = aname and true
                     or (spec.field_fn_cbarg
+                        -- @langs-ok lua/haskell/odin `field` — the callback-arg field shape this spec hook needs
                         and namen:parent() and namen:parent():type() == 'field')
                 if spec.cbarg_within and not isfield then
                     local a = defn:parent()
@@ -4578,6 +4599,7 @@ function M.extract(root, opts)
                     locals = not aname and fn_locals(defn, spec, src) or nil,
                     -- an arrow inherits `this` lexically; a regular function
                     -- rebinds it — the B3 this-typing walk needs to tell them apart
+                    -- @langs-ok js/ts `arrow_function` — the B3 this-typing walk is a JS-family concern
                     arrow = defn:type() == 'arrow_function' or nil,
                     cbarg = isfield or nil,
                     -- unconditional module-load def (lua): a load-order sibling
@@ -5042,6 +5064,7 @@ function M.extract(root, opts)
                     end
                     if childn and decl then
                         local child = node_text(childn, src)
+                        -- @langs-ok java/php/ts `interface_declaration` — languages without interfaces have nothing to mirror
                         local cintf = decl:type() == 'interface_declaration'
                         data.implements = data.implements or {}
                         for _, ifn in ipairs(ifaces) do
@@ -5131,6 +5154,7 @@ function M.extract(root, opts)
                         argv[1] = { k = 'expr' }
                     end
                     local argsn = calln:field('arguments')[1]
+                    -- @langs-ok lua's sugar call forms `f"s"` / `f{...}`, which only lua's grammar admits
                     if argsn and (argsn:type() == 'string' or argsn:type() == 'table_constructor') then
                         local v = argsn:type() == 'string'
                             and node_text(argsn, src):gsub('^["\']', ''):gsub('["\']$', '') or ''
@@ -5200,6 +5224,7 @@ function M.extract(root, opts)
                                 local ti = a:named_child(0)
                                 args[#args + 1] = ''
                                 argv[#argv + 1] = { k = 'class',
+                                    -- @langs-ok `type_identifier` in a typed-argument position; the grammars lacking it are untyped or name types differently, and this arm only fires where the spec supplies a typed arg
                                     v = ti and ti:type() == 'type_identifier'
                                         and node_text(ti, src) or nil }
                             elseif t == 'string' or t == 'string_literal'

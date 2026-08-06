@@ -156,19 +156,8 @@ end
 local FALSE_LIT = { ['0'] = true, ['0.0'] = true, ['false'] = true,
     ['False'] = true, ['nil'] = true, ['null'] = true }
 local TRUE_LIT = { ['true'] = true, ['True'] = true, ['1'] = true }
--- paren wrappers to peel before reading the literal. Ruby's is `parenthesized_
--- statements`, not `_expression` — so `while (true)` in ruby was never recognised as a
--- constant loop condition (the langaudit finding next door to the comment one).
-local PARENS = {
-    parenthesized_expression = true,   -- most grammars
-    parenthesized_statements = true,   -- ruby
-}
 local function const_cond(node, src)
-    while node and PARENS[node:type()] do
-        local inner
-        for c in node:iter_children() do if c:named() then inner = c break end end
-        node = inner
-    end
+    node = tsutil.unparen(node)
     if not node then return nil end
     local s = vim.trim(txt(node, src))
     if FALSE_LIT[s] then return false end

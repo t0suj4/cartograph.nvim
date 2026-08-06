@@ -40,6 +40,27 @@ function M.is_comment(node)
     return node ~= nil and M.COMMENT[node:type()] == true
 end
 
+-- PAREN WRAPPERS to peel before reading a condition or a literal. Ruby's is
+-- `parenthesized_statements`, not `_expression` — so `while (true)` and every
+-- parenthesised guard went unpeeled there. Three sites had their own copy of the
+-- single-name test (flow's const_cond, the extractor's param_conj and its else-arm
+-- negation); one definition, for the reason COMMENT above is one definition.
+M.PARENS = {
+    parenthesized_expression = true,   -- most grammars
+    parenthesized_statements = true,   -- ruby
+}
+
+--- Peel paren wrappers off `node`, returning the innermost named child.
+function M.unparen(node)
+    while node and M.PARENS[node:type()] do
+        local inner
+        for c in node:iter_children() do if c:named() then inner = c break end end
+        if not inner then break end
+        node = inner
+    end
+    return node
+end
+
 -- Node text, hot-path fast form. vim.treesitter.get_node_text allocates two
 -- throwaway tables (opts, metadata) on EVERY call before doing this same
 -- byte-slice; over a big corpus that is millions of dead tables feeding the
