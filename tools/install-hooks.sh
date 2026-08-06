@@ -10,5 +10,5 @@ cd "$(git rev-parse --show-toplevel)"
 git config core.hooksPath .githooks
 chmod +x .githooks/* 2>/dev/null || true
 echo "hooks active: core.hooksPath -> .githooks"
-echo "  pre-commit: docaudit + navaudit + dogfood seam fence + spec suite"
+echo "  pre-commit: docaudit + navaudit + langaudit + dogfood seam fence + spec suite"
 echo "              (bypass: git commit --no-verify)"

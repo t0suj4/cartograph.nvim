@@ -15,6 +15,9 @@
 --   3. NOOP is the trivial engine empty-iterator idiom, copied local.
 -- node_text/inext are the shared tsutil deps. Behaviour-identical.
 
+-- @langs java — a spec IS one grammar's mapping, so every node type here is
+-- java's by construction.
+
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 local inext = tsutil.inext

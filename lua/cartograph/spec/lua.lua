@@ -9,6 +9,9 @@
 -- local. RB_ASSOC/ruby_rails_synth are the RAILS pack and stay in the engine.
 -- Pure motion; behaviour-identical.
 
+-- @langs lua — a spec IS one grammar's mapping, so every node type here is
+-- lua's by construction.
+
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 local inext = tsutil.inext

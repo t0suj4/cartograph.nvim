@@ -59,6 +59,11 @@ local callrec = require 'cartograph.callrec'
 -- receiver): substring matching mismatches non-SQL names (print_date_selection_set,
 -- shell_exec) — measured on mantis (1887 fns).
 
+-- @langs php
+-- Taint's sinks, sources and VALIDATORS are php function names, and CALLTYPES is a
+-- php node-type list — the rung-1.5 guard model is php-shaped even though the store
+-- it reads is polyglot.
+
 local M = {}
 
 local cfg = require 'cartograph.cfg'

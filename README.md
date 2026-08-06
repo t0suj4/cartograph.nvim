@@ -2584,6 +2584,26 @@ nvim --headless -u NONE -l tools/specaudit.lua              # default corpus set
 nvim --headless -u NONE -l tools/specaudit.lua ruby rails   # explicit corpora
 nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no snapshot
 
+# LANGUAGE FENCE — the audit that exists because four of these shipped in one arc and
+# not one was caught by a test. A module that serves several grammars can hardcode a
+# single grammar's vocabulary (`node:type() == 'if_statement'`, `stmt.t ==
+# 'assignment_statement'`) and stay green forever, because the test suite is Lua-only:
+# a Ruby-shaped hole leaves every assertion passing. One of the four was silently
+# UNSOUND — the helper that stales a narrowing when its variable is reassigned matched
+# only Lua's node name, so on Ruby it staled nothing at all. The oracle is the compiled
+# grammar itself (`language.inspect(lang).symbols`), so "which grammars define this
+# node type" is read, not guessed, and a module declares what it serves with a
+# `@langs` line. The verdict is deliberately CALIBRATION-BOUND rather than
+# authoritative: a deliberate single-grammar branch has the same *shape* as the bug, so
+# each hit is either fixed or waived in place with `-- @langs-ok <reason>` — and the
+# waiver is the point, since all four originals were assumptions nobody had written
+# down. It knows two correct patterns and stays quiet for both: a per-language table,
+# and a disjunction whose alternatives together cover every declared language. Like
+# `pathsat`, it refuses to report until a fixture of planted positives *and* controls
+# passes, because an audit that has never fired is indistinguishable from a clean tree.
+nvim --headless -u NONE -l tools/langaudit.lua              # part of the pre-commit fence
+nvim --headless -u NONE -l tools/langaudit.lua --all        # + modules with no @langs claim
+
 # LUA PROFILE — mint the `luajit` L2 profile by INTROSPECTING this interpreter,
 # rather than transcribing a manual: `for k in pairs(string)` measures the runtime
 # that will execute the code. nvim's own additions are excluded by name (a profile

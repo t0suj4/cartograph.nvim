@@ -1,6 +1,9 @@
 -- The BASH language spec (L0 grammar binding + L1 name model)
 -- extracted from the engine ([[cartograph-spec-layering]] P1). Pure motion.
 
+-- @langs bash — a spec IS one grammar's mapping, so every node type here is
+-- bash's by construction.
+
 local tsutil = require 'cartograph.spec.tsutil'
 local inext = tsutil.inext
 local refusal = tsutil.refusal

@@ -14,6 +14,11 @@
 -- reads M.spec directly. Physical spec-module extraction (spec/<lang>.lua) is a
 -- later step this registry defines the target of.
 
+-- @langs any
+-- The spec CAPABILITY CONTRACT: it names what a spec must provide, never a
+-- particular grammar's nodes. (Declared `contract` at first, and the audit's own
+-- malformed-declaration check rejected it — `contract` is not an installed grammar.)
+
 local M = {}
 
 -- The capability ladder: groups in dependency order, each with what filling it

@@ -1,6 +1,9 @@
 -- The RUST language spec (L0 grammar binding + L1 name model)
 -- extracted from the engine ([[cartograph-spec-layering]] P1). Pure motion.
 
+-- @langs rust — a spec IS one grammar's mapping, so every node type here is
+-- rust's by construction.
+
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 local inext = tsutil.inext

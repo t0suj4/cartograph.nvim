@@ -23,6 +23,10 @@
 
 local cfg = require 'cartograph.cfg'
 
+-- @langs cpp
+-- Null-deref is a C++ analysis end to end: it parses with the cpp parser and its
+-- deref shapes (`p->x`), NULL/nullptr comparisons and guard vocabulary are all C++.
+
 local M = {}
 
 -- nullable-RETURN heuristic: a call whose callee tail matches RETURNS a

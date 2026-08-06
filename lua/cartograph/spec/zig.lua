@@ -7,6 +7,9 @@
 -- from the tsutil substrate (the only cross-module dependency); everything
 -- else is zig-local. Gate: matrix-identical (gate zig).
 
+-- @langs zig — a spec IS one grammar's mapping, so every node type here is
+-- zig's by construction.
+
 local node_text = require('cartograph.spec.tsutil').node_text
 
 -- zig_base_type peels *, ?, [], [N] wrappers to the base type identifier,

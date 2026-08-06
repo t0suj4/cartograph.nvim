@@ -9,6 +9,8 @@
 -- Lua nil/truthiness; typeof/instanceof/discriminant (JS/Java) slot in later
 -- (instanceof matters for other codebases — the table is ready for it).
 
+-- @langs lua ruby
+
 local cfg = require 'cartograph.cfg'
 local at = require 'cartograph.at'
 local flowmod = require 'cartograph.flow'
@@ -105,6 +107,8 @@ local vocab = {}
 local function path_of(n, src)
     if not n then return nil end
     if n:type() == 'identifier' then return { path = txt(n, src), root = txt(n, src), depth = 0 } end
+    -- @langs-ok lua-only helper: ruby has NO field paths by design (x.y is a method
+    -- dispatch), so rb_path deliberately has no dot-chain arm to mirror this one
     if n:type() == 'dot_index_expression' then
         local base = path_of(n:named_child(0), src)
         local fld = n:field('field')[1]
@@ -116,6 +120,8 @@ local function path_of(n, src)
 end
 -- `type(P)` over a single path (identifier or field path) → its path info, else nil
 local function type_call_path(n, src)
+    -- @langs-ok lua-only helper: the ruby type test is the METHOD is_a?, read by
+    -- rb_classify's call arm, not a global call like lua's type()
     if not n or n:type() ~= 'function_call' then return nil end
     local callee = n:named_child(0)
     if not (callee and callee:type() == 'identifier' and txt(callee, src) == 'type') then return nil end
@@ -135,6 +141,8 @@ local function disc_kind(n, src)
     if not n then return nil end
     local s = str_lit(n, src)
     if s then return 'eq:s:' .. s end
+    -- @langs-ok lua-only helper: ruby's numeric literal is `integer`, handled by
+    -- rb_lit_kind, which is this function's ruby twin
     if n:type() == 'number' then return 'eq:n:' .. txt(n, src) end
     return nil
 end
@@ -256,6 +264,8 @@ end
 local function rb_const(args, src)
     local a = args and args:named_child(0)
     if not a or args:named_child(1) then return nil end
+    -- @langs-ok ruby-only helper: a class NAME in is_a?(K). Lua has no constant node
+    -- and its type test compares a string, handled by str_lit
     if a:type() == 'constant' or a:type() == 'scope_resolution' then return txt(a, src) end
     return nil
 end
@@ -284,6 +294,8 @@ end
 -- link in the chain (`params[:a].valid?`) ends the descent without a claim.
 local function rb_root_nonnil(node, src)
     local n = node
+    -- @langs-ok ruby-only helper (rb_*): `call` is ruby's dot-dispatch node, and this
+    -- whole chain-descent exists because ruby has no field-access node at all
     while n and n:type() == 'call' do
         local r = n:field('receiver')[1]
         if not r then return {} end
@@ -457,12 +469,17 @@ local function field_unstable_of(fn, src)
         if t == 'assignment_statement' then
             local vlist, elist
             for c in n:iter_children() do
+                -- @langs-ok lua-only: field_unstable_of gates depth-≥1 PATHS, and ruby
+                -- has none by design, so this walk is never reached for ruby facts
                 if c:type() == 'variable_list' then vlist = c
+                -- @langs-ok lua-only, same reason
                 elseif c:type() == 'expression_list' then elist = c end
             end
             if vlist then for tgt in vlist:iter_children() do -- field-write targets
+                -- @langs-ok lua-only, same reason: ruby facts are all depth 0
                 if tgt:type() == 'dot_index_expression' then
                     local p = path_of(tgt, src); if p then mark(p.path, true) end -- A.f inclusive
+                -- @langs-ok lua-only, same reason as above
                 elseif tgt:type() == 'bracket_index_expression' then
                     local b = path_of(tgt:named_child(0), src); if b then mark(b.path, false) end -- A[?] → A.*
                 end
@@ -476,6 +493,7 @@ local function field_unstable_of(fn, src)
                 if a:named() then local p = path_of(a, src); if p then mark(p.path, false) end end
             end end
             local callee = n:named_child(0)
+            -- @langs-ok lua-only staling walk; ruby has no depth-≥1 facts to stale
             if callee and callee:type() == 'method_index_expression' then
                 local p = path_of(callee:named_child(0), src); if p then mark(p.path, false) end
             end
@@ -853,6 +871,8 @@ function M.redundant(store, fn_id)
     local function visit(n)
         for c in n:iter_children() do
             if c:named() then
+                -- @langs-ok `redundant` is gated to lua by VERB_LANG: its subject IS
+                -- a lua if_statement, and ruby's equivalent needs its own finder (CART-0302)
                 if c:type() == 'if_statement' then
                     local cond = c:field('condition')[1]
                     if cond then
@@ -903,8 +923,11 @@ function M.devirt(store, fn_id)
     local function visit(n)
         for c in n:iter_children() do
             if c:named() then
+                -- @langs-ok `devirt` is gated to lua by VERB_LANG: its subject is a lua
+                -- method call, and ruby dispatch needs its own finder (CART-0302)
                 if c:type() == 'function_call' then
                     local callee = c:named_child(0)
+                    -- @langs-ok same lua-gated devirt subject
                     if callee and callee:type() == 'method_index_expression' then
                         summary.method_calls = summary.method_calls + 1
                         local rp = path_of(callee:named_child(0), src)

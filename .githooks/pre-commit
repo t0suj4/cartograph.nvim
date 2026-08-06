@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cartograph pre-commit fence ([[cartograph-shipping-checklist]] / bench:
-# "the seam fence only fences if it runs"). Four gates, CHEAPEST FIRST so a
-# failure costs 70ms rather than 22s (~22s total when all four pass):
+# "the seam fence only fences if it runs"). Five gates, CHEAPEST FIRST so a
+# failure costs 70ms rather than 22s (~23s total when all five pass):
 #
 #   1. docaudit — the DOC FENCE: a :Cartograph name our own docs still claim
 #      but nothing registers, a language count that contradicts the spec
@@ -11,9 +11,14 @@
 #      thin index), an altitude with no concern disposition, a concern with an
 #      untyped empty, or an altitude nobody decided about for hover. The unit is
 #      the surface, not the verb — that distinction is why this exists.
-#   3. dogfood — the BAND SEAM-GUARD (a raw wide-index read outside band.lua/
+#   3. langaudit — the LANGUAGE FENCE: a module that declares `@langs` and then
+#      compares a node type ONE of those grammars does not have. Four such
+#      assumptions shipped in a single arc, one of them silently unsound, and
+#      none was caught by a test — the suite is lua-only, so a ruby-shaped hole
+#      leaves it green. 1.4s.
+#   4. dogfood — the BAND SEAM-GUARD (a raw wide-index read outside band.lua/
 #      store.lua fails the commit) + the self-serving / lint dashboard.
-#   4. the full spec suite (tests/run.sh).
+#   5. the full spec suite (tests/run.sh).
 #
 # Checked in under .githooks/ and activated per-clone with
 #   git config core.hooksPath .githooks
@@ -44,6 +49,7 @@ step () { # label, cmd...
 
 step "doc audit" "$NVIM" --headless -u NONE -l tools/docaudit.lua
 step "nav audit" "$NVIM" --headless -u NONE -l tools/navaudit.lua
+step "language fence" "$NVIM" --headless -u NONE -l tools/langaudit.lua
 step "dogfood seam fence" "$NVIM" --headless -u NONE -l tools/dogfood.lua
 step "spec suite" bash tests/run.sh
 

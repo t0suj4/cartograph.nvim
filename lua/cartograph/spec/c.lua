@@ -1,6 +1,9 @@
 -- The C language spec (L0 grammar binding + L1 name model)
 -- extracted from the engine ([[cartograph-spec-layering]] P1). Pure motion.
 
+-- @langs c — a spec IS one grammar's mapping, so every node type here is
+-- c's by construction.
+
 return {
         exts = { 'c', 'h' },
         functions = [[

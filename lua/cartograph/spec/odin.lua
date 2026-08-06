@@ -3,6 +3,9 @@
 -- close_moveset seeded on odin_context returned it as the whole cluster (no
 -- private consts); node_text is the one shared dep (required below). Pure motion.
 
+-- @langs odin — a spec IS one grammar's mapping, so every node type here is
+-- odin's by construction.
+
 local node_text = require('cartograph.spec.tsutil').node_text
 
 -- Odin package-qualified resolution (R1). A .odin file declares `package P`; the

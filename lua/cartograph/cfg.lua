@@ -19,6 +19,8 @@
 -- (successor edges: joins, loop back-edges) is a separate cut for liveness /
 -- resource-pairing.
 --
+-- @langs lua ruby python php c javascript typescript
+--
 -- Per-grammar: covers if/elseif/while, php/c/JS/python ternaries, python
 -- comprehension if-clauses, ruby's if/unless/elsif/while/until + their statement
 -- MODIFIERS, and short-circuit `&&`/`||`/`and`/`or` right operands. Loops without
@@ -152,6 +154,8 @@ end
 local function condition_of(p)
     local c = p:field('condition')[1]
     if c then return c end
+    -- @langs-ok the python-only field-less positional shape again: c/php name the same
+    -- node but expose a `condition` field, which the line above already returned on
     if p:type() == 'conditional_expression' then return p:named_child(1) end
     return nil
 end
@@ -164,6 +168,7 @@ end
 local function alternative_of(p)
     local alt = p:field('alternative')[1]
     if alt then return alt end
+    -- @langs-ok same python-only positional shape as positive_guard's, same discriminator
     if p:type() == 'conditional_expression' and not p:field('condition')[1] then
         return p:named_child(2)
     end
@@ -176,11 +181,15 @@ local function positive_guard(p, child)
         local body = p:field('body')[1]
         if not (body and same(child, body)) then return nil end
         for c in p:iter_children() do
+            -- @langs-ok if_clause exists only in python; the enclosing branch is
+            -- already gated on COMPREHENSION, which no other declared grammar has
             if c:type() == 'if_clause' then return c:named_child(0) end
         end
         return nil
     end
     local cond = p:field('condition')[1]
+    -- @langs-ok python-only shape: a field-LESS conditional_expression. c/php name the
+    -- same node but expose a `condition` field, so `not cond` is the discriminator.
     if not cond and pt == 'conditional_expression' then -- python positional ternary
         local cons = p:named_child(0)
         if cons and same(child, cons) then return p:named_child(1) end

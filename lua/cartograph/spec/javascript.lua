@@ -1,6 +1,13 @@
 -- The JAVASCRIPT language spec (L0 grammar binding + L1 name model)
 -- extracted from the engine ([[cartograph-spec-layering]] P1). Pure motion.
 
+-- @langs javascript typescript tsx
+-- NOT just javascript, despite the filename: treesitter.lua derives the typescript
+-- and tsx specs FROM this one (`M.spec.typescript = tbl_extend({}, M.spec.javascript)`),
+-- so it deliberately names TS-only nodes such as `public_field_definition`. The audit
+-- found that by flagging exactly that comparison against a javascript-only claim —
+-- the file's real language set was wider than its name and nothing said so.
+
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 

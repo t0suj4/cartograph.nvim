@@ -4,6 +4,9 @@
 -- RB_BIND_PARENT); RB_ASSOC + ruby_rails_synth are RAILS-PACK-only and stay in
 -- the engine with M.packs.rails. node_text is the shared dep. Pure motion.
 
+-- @langs ruby — a spec IS one grammar's mapping, so every node type here is
+-- ruby's by construction.
+
 local node_text = require('cartograph.spec.tsutil').node_text
 
 -- Ruby bare-call capture (the "open ceiling"): a bare identifier `save` with

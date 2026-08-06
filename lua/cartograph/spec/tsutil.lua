@@ -5,6 +5,9 @@
 -- requires the spec modules). The engine aliases these too, so there is ONE
 -- definition. Pure: depends on nothing.
 
+-- @langs any — a SHARED helper over every spec: the node types it names
+-- belong to whichever grammar the caller passed, not to one of its own.
+
 local M = {}
 
 -- Node text, hot-path fast form. vim.treesitter.get_node_text allocates two

@@ -1,6 +1,9 @@
 -- The SCHEME language spec (L0 grammar binding + L1 name model)
 -- extracted from the engine ([[cartograph-spec-layering]] P1). Pure motion.
 
+-- @langs scheme — a spec IS one grammar's mapping, so every node type here is
+-- scheme's by construction.
+
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 

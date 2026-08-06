@@ -6,6 +6,9 @@
 -- and the engine require it from there. node_text/inext are the other shared
 -- deps. Pure motion; behaviour-identical.
 
+-- @langs php — a spec IS one grammar's mapping, so every node type here is
+-- php's by construction.
+
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 local inext = tsutil.inext
