@@ -13,6 +13,10 @@
 
 local at = require 'cartograph.at'
 
+-- @langs lua
+-- Explicitly lua-gated at the entry point (`if not node.file:match('%.lua$')`), so
+-- the lua node types below are the whole claim rather than an assumption.
+
 local M = {}
 
 local FN_TYPES = { function_declaration = true, function_definition = true }

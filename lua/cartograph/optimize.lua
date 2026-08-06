@@ -537,10 +537,15 @@ function M.report(store, fn_id)
     if #rows == 0 then
         -- "no fine flow" is the WRONG REASON when the language simply is not modelled
         -- by the expression layer, and that is the common case rather than the rare one:
-        -- measured on a ruby corpus, 2104 of 2303 functions DO carry a flow record while
-        -- 0 yield an expression record (CART-0224 step 2). Saying "no fine flow" there
-        -- sends a reader to look for a missing CFG that is present. exprlint and narrow
-        -- already name the language; this now does too.
+        -- Naming the language matters because "no fine flow" sends a reader looking
+        -- for a missing CFG that may well be present — the record can be there while the
+        -- EXPRESSION layer is not. RUBY was the original example (CART-0224 step 2
+        -- measured 2104 of 2303 functions carrying flow and 0 yielding an expression
+        -- record); RE-MEASURED 2026-08-06 it is 2104 of 2104, so ruby has since closed
+        -- and this message must not keep naming it. The live example is ODIN: 31955
+        -- functions, 0 flow records, because expr's supported set requires the body to be
+        -- a NAMED FIELD and tree-sitter-odin does not label it (CART-0305). A measured
+        -- fact quoted in a user-visible string is a claim with a shelf life.
         local lang = node.file and select(2, pcall(function ()
             return require('cartograph.providers.treesitter').lang_of(node.file)
         end)) or nil
