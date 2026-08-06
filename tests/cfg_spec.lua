@@ -240,28 +240,65 @@ test('cfg: early-exit guard-clause post-dominates; non-terminating does not', fu
     ok(gs[1]:find('!', 1, true) and gs[1]:find('bad', 1, true), 'it is the negated early-exit guard')
 end)
 
-test('cfg: JS ternary condition dominates the consequence, not the alternative', function ()
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
-    if not pcall(vim.treesitter.language.add, 'javascript') then skip 'no javascript parser' end
-    local src = 'function f(x) { const y = isValid(x) ? use(x) : bail(); }'
-    local root = vim.treesitter.get_string_parser(src, 'javascript'):parse()[1]:root()
-    local cons = find(root, src, 'call_expression', 'use(x)')
-    local alt = find(root, src, 'call_expression', 'bail(')
-    eq(1, #guard_texts(cons, src), 'the ternary consequence is dominated by the condition')
-    ok(guard_texts(cons, src)[1]:find('isValid', 1, true), 'guard is the ternary condition')
-    eq(0, #guard_texts(alt, src), 'the ternary alternative is NOT dominated')
-end)
+-- ── the TERNARY alternative (CART-0299) ──────────────────────────────────────
+-- The same omission CART-0257 fixed for else/elseif, one construct later: `c ? a : b`
+-- provably holds ¬c while evaluating `b`, and guards_over said nothing. It needed its
+-- own arm because a ternary has no else-typed NODE — the else-value is an arbitrary
+-- expression — so the trigger is the child's IDENTITY with the `alternative`.
+local TERNARY = {
+    { 'javascript', 'function f(x) { const y = valid(x) ? use(x) : bail(x); }',
+      'call_expression', 'use(x)', 'bail(x)' },
+    { 'php', '<?php function f($x) { $y = valid($x) ? use1($x) : bail($x); }',
+      'function_call_expression', 'use1($x)', 'bail($x)' },
+    { 'c', 'void f(int x){ int y = valid(x) ? use1(x) : bail(x); }',
+      'call_expression', 'use1(x)', 'bail(x)' },
+    -- python's is FIELD-LESS and positional ([consequence, condition, alternative]),
+    -- so both the condition and the alternative are read by index
+    { 'python', 'y = use(x) if valid(x) else bail(x)', 'call', 'use(x)', 'bail(x)' },
+    { 'ruby', 'def f(x)\n  y = valid(x) ? use(x) : bail(x)\nend\n', 'call', 'use(x)', 'bail(x)' },
+}
+local function exact(root, src, type_, text)
+    if root:type() == type_ and vim.treesitter.get_node_text(root, src) == text then return root end
+    for c in root:iter_children() do
+        if c:named() then
+            local r = exact(c, src, type_, text)
+            if r then return r end
+        end
+    end
+end
 
-test('cfg: python ternary (positional, no condition field) dominates consequence', function ()
-    if not ready_lang('python') then skip 'no python parser' end
-    local src = 'y = use(x) if valid(x) else bail()'
-    local root = vim.treesitter.get_string_parser(src, 'python'):parse()[1]:root()
-    local cons = find(root, src, 'call', 'use(x)')
-    local alt = find(root, src, 'call', 'bail(')
-    eq(1, #guard_texts(cons, src), 'consequence dominated by the condition')
-    ok(guard_texts(cons, src)[1]:find('valid', 1, true), 'guard is the condition')
-    eq(0, #guard_texts(alt, src), 'the else value is NOT dominated')
+for _, case in ipairs(TERNARY) do
+    local lang, src, ctype, cons_t, alt_t = case[1], case[2], case[3], case[4], case[5]
+    test('cfg: a ternary CONSEQUENCE is dominated and its ALTERNATIVE negated (' .. lang .. ')', function ()
+        if not ready_lang(lang) then skip('no ' .. lang .. ' parser') end
+        local root = vim.treesitter.get_string_parser(src, lang):parse()[1]:root()
+        local cons = assert(exact(root, src, ctype, cons_t), 'no node ' .. cons_t)
+        local alt = assert(exact(root, src, ctype, alt_t), 'no node ' .. alt_t)
+        local gc, ga = guard_texts(cons, src), guard_texts(alt, src)
+        eq(1, #gc, 'consequence has exactly one guard')
+        ok(gc[1]:sub(1, 1) ~= '!' and gc[1]:find('valid', 1, true),
+            'and it is POSITIVE: ' .. gc[1])
+        -- BEFORE CART-0299 this asserted 0 — the alternative was correctly excluded
+        -- from positive domination and then nothing was said about it.
+        eq(1, #ga, 'the alternative has exactly one guard')
+        ok(ga[1]:sub(1, 1) == '!' and ga[1]:find('valid', 1, true),
+            'and it is the NEGATED condition: ' .. ga[1])
+    end)
+end
+
+test('cfg: a NESTED ternary is an elseif chain — the last branch carries both negations', function ()
+    if not ready_lang('javascript') then skip 'no javascript parser' end
+    -- `a ? p : b ? q : r` is the expression spelling of if/elsif/else, and it falls
+    -- out of the nesting for free: no chain-walking arm needed, because unlike the
+    -- FLAT statement grammars each ternary is its own parent.
+    local src = 'function f(x) { const y = a(x) ? p() : b(x) ? q() : r(); }'
+    local root = vim.treesitter.get_string_parser(src, 'javascript'):parse()[1]:root()
+    local q = assert(exact(root, src, 'call_expression', 'q()'))
+    local r = assert(exact(root, src, 'call_expression', 'r()'))
+    -- guard_set strips parens so one expectation covers grammars that wrap the
+    -- condition, which here also eats the CALL parens: `a(x)` reads as `ax`.
+    eq('!ax bx', fmt(guard_set(q, src)), 'the middle branch: b holds, a did not')
+    eq('!ax !bx', fmt(guard_set(r, src)), 'the last branch: neither held')
 end)
 
 test('cfg: python comprehension if-clause guards the element body only', function ()

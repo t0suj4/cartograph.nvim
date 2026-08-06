@@ -147,6 +147,29 @@ end
 -- `conditional_expression` (no fields) — positional [consequence, condition,
 -- alternative], guarded = consequence; (3) comprehensions — cond = the
 -- `if_clause` filter, guarded = the `body` (element) only.
+-- p's condition, tolerating python's FIELD-LESS positional ternary
+-- (`consequence if condition else alternative` → named children [0,1,2]).
+local function condition_of(p)
+    local c = p:field('condition')[1]
+    if c then return c end
+    if p:type() == 'conditional_expression' then return p:named_child(1) end
+    return nil
+end
+
+-- p's ALTERNATIVE branch. For an if, this is an else-typed NODE and `ELSE` is the
+-- trigger; for a TERNARY there is no such node — the else-value is an arbitrary
+-- expression — so the trigger has to be the child's IDENTITY with the alternative
+-- (CART-0299). Grammars that point `alternative` straight at a statement rather
+-- than at an else_clause land here too, and the emitted fact is the same one.
+local function alternative_of(p)
+    local alt = p:field('alternative')[1]
+    if alt then return alt end
+    if p:type() == 'conditional_expression' and not p:field('condition')[1] then
+        return p:named_child(2)
+    end
+    return nil
+end
+
 local function positive_guard(p, child)
     local pt = p:type()
     if COMPREHENSION[pt] then
@@ -179,7 +202,7 @@ end
 -- Each clause's contribution is `not INVERTED[clause]`: reaching the `else` of
 -- `if C` means ¬C, but reaching the `else` of ruby's `unless C` means C HELD.
 local function negated_chain(p, child, out)
-    local cond = p:field('condition')[1]
+    local cond = condition_of(p)
     if not cond then return end
     for c in p:iter_children() do
         if same(c, child) then break end
@@ -285,7 +308,8 @@ function M.guards_over(node, src)
             local cond = positive_guard(p, child)
             if cond then
                 out[#out + 1] = { cond = cond, neg = INVERTED[p:type()] or false }
-            elseif ELSE[child:type()] then
+            elseif ELSE[child:type()] or same(child, alternative_of(p)) then
+                -- an else-typed node, OR the alternative BRANCH of a ternary
                 negated_chain(p, child, out)
             end
         elseif SHORTCIRCUIT[p:type()] then
