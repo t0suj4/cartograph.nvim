@@ -16,16 +16,31 @@ local builtins = require 'cartograph.builtins'
 
 local M = {}
 
--- vars REASSIGNED (an assignment_statement, not a fresh `local`) anywhere in the fn.
+-- vars REASSIGNED (an assignment, not a fresh `local`) anywhere in the fn.
 -- guards_over is purely structural — it can't see that `if x then … x = f() … use(x)`
 -- reassigns x between the guard and the use, staling the narrowing. Conservatively
 -- kill narrowing for any reassigned var (sound: never under-kills). Reuses flow's def.
+--
+-- ★ THE STATEMENT TYPE IS PER-GRAMMAR, and this was one literal: 'assignment_
+-- statement', which is LUA's name. Ruby's is `assignment` (plus `operator_assignment`
+-- for `x ||= v`), so the moment ruby entered EXT_LANG this returned EMPTY for every
+-- ruby function — 6168 assignments' worth of staling silently absent on discourse
+-- alone, i.e. precisely the unsoundness the paragraph above exists to prevent, in the
+-- helper written to prevent it. A hardcoded node-type name inside a shared helper is
+-- a language assumption in disguise (the third in this arc, after cfg's
+-- `== 'if_statement'` guard-clause test and the `block` type-name collision).
+local ASSIGN = {
+    assignment_statement = true,                    -- lua
+    assignment = true, operator_assignment = true,  -- ruby
+    -- for whoever adds them next; harmless until the language is in EXT_LANG
+    assignment_expression = true, augmented_assignment_expression = true,
+}
 local function mutated_of(store_node)
     local m = {}
     local fl = store_node and flowmod.present(store_node) and flowmod.record(store_node)
     if fl and fl.stmts then
         for _, s in ipairs(fl.stmts) do
-            if s.t == 'assignment_statement' then
+            if ASSIGN[s.t] then
                 for _, v in ipairs(s.def or {}) do m[v] = true end
             end
         end
@@ -62,6 +77,16 @@ local function gated_classify(raw, type_shadowed)
         end
         return out
     end
+end
+
+-- is the type-test channel untrustworthy in this fn? LUA-SPECIFIC: lua's test is a
+-- call to the GLOBAL `type`, which a local of the same name shadows. Ruby's is the
+-- METHOD `is_a?` on the receiver itself — there is no global to shadow, so the gate
+-- does not apply and hardcoding 'lua' here would have silently disabled ruby's
+-- type: facts (or, worse if the argument order ever flipped, trusted a shadowed one).
+local function type_is_shadowed(lang, node)
+    if lang ~= 'lua' then return false end
+    return not builtins.genuine('lua', 'type', bound_set(node))
 end
 
 -- ── per-language guard vocabulary ────────────────────────────────────────────
@@ -168,10 +193,234 @@ local function lua_classify(cond, src, holds)
 end
 vocab.lua = lua_classify
 
-local EXT_LANG = { lua = 'lua' } -- INC 1: Lua only; add js/java as the vocab grows
+-- ── RUBY (CART-0300) ─────────────────────────────────────────────────────────
+-- MEASURED FIRST over 6494 distinct (condition, polarity) guards on discourse/app +
+-- rails/activesupport, because the precondition is "conditions the vocab can
+-- CLASSIFY", not "statements under a guard". What the census said, and it is not what
+-- a port of the lua vocab would have assumed:
+--
+--   receiver non-nil (any `.`-call)  1465 facts  47-55% of the total — the LARGEST rung
+--   truthy (bare var / @ivar)         677
+--   present? / blank?                 583        24% of discourse's, FOUR in activesupport
+--   type: from is_a?/kind_of?          70
+--   non-nil from nil? / == nil        100        just 1.8-3.5% of forms
+--
+-- ★ SO A NIL-CENTRED PORT OF THE LUA VOCAB WOULD HAVE MEASURED AS NEARLY DEAD. Lua's
+-- vocab is built around `x ~= nil`; ruby's guard culture is presence predicates and
+-- method dispatch, and `x.nil?` is the rarest form of the lot. Size by the IDIOM, not
+-- by the mechanism you already have.
+--
+-- TWO STRUCTURAL DIVERGENCES FROM LUA, both soundness-driven:
+--
+-- (1) NO FIELD PATHS. In lua `x.y` is a dot_index_expression — a table read, stable
+--     until something writes it, which is why lua narrows depth-≥1 paths under a
+--     staling gate. In ruby `x.y` is a `call`: a METHOD DISPATCH that may return a
+--     different value on each evaluation, with no syntactic way to tell an attr_reader
+--     from a computation. So ruby paths are depth 0 ONLY (identifier / @ivar) and
+--     `x.y` chains are refused. 1236 of discourse's guards (24%) fall here — the
+--     largest refused bucket, and refusing it is the whole point.
+--
+-- (2) ★ A NEW INFERENCE CHANNEL, POLARITY-INDEPENDENT: evaluating `x.m` AT ALL proves
+--     x non-nil, because `nil.m` raises NoMethodError. If execution reached past the
+--     condition, the receiver was not nil — on BOTH branches, which no other fact here
+--     is. Excluded: the methods NilClass really does answer (`to_s`, `nil?`, `class`,
+--     `present?`/`blank?` under ActiveSupport, …) and safe navigation `x&.m`, which
+--     exists precisely to permit nil. This is the biggest rung and it is not a
+--     vocabulary entry at all; the same channel applies to python (AttributeError on
+--     None), which is a follow-on.
+local RB_ROOT = { identifier = true, instance_variable = true }
+-- methods NilClass answers, so dispatching them proves nothing about the receiver
+local RB_NIL_OK = {
+    ['to_s'] = true, ['to_a'] = true, ['to_h'] = true, ['to_i'] = true, ['to_f'] = true,
+    ['to_r'] = true, ['to_c'] = true, ['inspect'] = true, ['nil?'] = true,
+    ['class'] = true, ['hash'] = true, ['dup'] = true, ['clone'] = true,
+    ['freeze'] = true, ['frozen?'] = true, ['tap'] = true, ['then'] = true,
+    ['itself'] = true, ['send'] = true, ['public_send'] = true, ['methods'] = true,
+    ['object_id'] = true, ['instance_variables'] = true, ['instance_of?'] = true,
+    ['is_a?'] = true, ['kind_of?'] = true, ['respond_to?'] = true, ['equal?'] = true,
+    ['eql?'] = true, ['=='] = true, ['!='] = true, ['display'] = true,
+    -- ActiveSupport extends NilClass with these
+    ['present?'] = true, ['blank?'] = true, ['presence'] = true, ['try'] = true,
+    ['in?'] = true, ['as_json'] = true, ['duplicable?'] = true,
+}
+local RB_TYPEP = { ['is_a?'] = true, ['kind_of?'] = true, ['instance_of?'] = true }
+-- a depth-0 ruby path (`x` or `@x`), else nil. Deliberately NOT recursive: see (1).
+local function rb_path(n, src)
+    if n and RB_ROOT[n:type()] then
+        local s = txt(n, src)
+        return { path = s, root = s, depth = 0 }
+    end
+    return nil
+end
+-- the constant name in `x.is_a?(K)` / `x.is_a? K`, else nil
+local function rb_const(args, src)
+    local a = args and args:named_child(0)
+    if not a or args:named_child(1) then return nil end
+    if a:type() == 'constant' or a:type() == 'scope_resolution' then return txt(a, src) end
+    return nil
+end
+local function rb_lit_kind(n, src)
+    if not n then return nil end
+    local t = n:type()
+    if t == 'string' then
+        local s = txt(n, src):match('^["\'](.-)["\']$')
+        return s and ('eq:s:' .. s) or nil
+    end
+    if t == 'integer' then return 'eq:n:' .. txt(n, src) end
+    -- a SYMBOL gets its OWN discriminator, for exactly the reason the s:/n: prefixes
+    -- exist: `:draft` and `"draft"` are not equal in ruby, so tagging both `eq:s:`
+    -- would let a discriminant proved by one satisfy a test against the other. The
+    -- `sym:` tag also deliberately fails env_type's `^eq:s:` string test — a Symbol
+    -- is not a String — and the leading colon is stripped so the tag carries the VALUE.
+    if t == 'simple_symbol' then return 'eq:sym:' .. (txt(n, src):gsub('^:', '')) end
+    return nil
+end
+
+-- Channel (2) applied to a CHAIN's innermost receiver: `z.owner.active?` proves z
+-- non-nil, because z answered `.owner`. The method judged is the one dispatched ON THE
+-- ROOT, not the outermost — `z.to_s.empty?` proves nothing, since nil answers `to_s`.
+-- Any `&.` between the root and its hop refuses the whole claim; the operator further
+-- out does not matter (`z.owner&.active?` still had z answer `.owner`). A non-call
+-- link in the chain (`params[:a].valid?`) ends the descent without a claim.
+local function rb_root_nonnil(node, src)
+    local n = node
+    while n and n:type() == 'call' do
+        local r = n:field('receiver')[1]
+        if not r then return {} end
+        if txt(n:field('operator')[1], src) ~= '.' then return {} end
+        local p = rb_path(r, src)
+        if p then
+            if RB_NIL_OK[txt(n:field('method')[1], src)] then return {} end
+            return { fact(p, 'non-nil') }
+        end
+        n = r
+    end
+    return {}
+end
+
+local function rb_classify(cond, src, holds, depth)
+    depth = depth or 0
+    if not cond or depth > 8 then return {} end
+    local t = cond:type()
+    if t == 'parenthesized_statements' or t == 'begin_block' then
+        return rb_classify(cond:named_child(0), src, holds, depth + 1)
+    end
+    if RB_ROOT[t] then -- `if x` / `if @x`: only nil and false are falsy in ruby
+        local p = rb_path(cond, src)
+        if p and holds then return { fact(p, 'truthy') } end
+        return {}
+    end
+    if t == 'unary' then
+        local op = txt(cond:field('operator')[1], src)
+        if op == '!' or op == 'not' then
+            local operand = cond:named_child(0)
+            return rb_classify(operand, src, not holds, depth + 1)
+        end
+        return {}
+    end
+    if t == 'binary' then
+        local op = txt(cond:field('operator')[1], src)
+        local l, r = cond:field('left')[1], cond:field('right')[1]
+        if op == '&&' or op == 'and' then
+            if not holds then return {} end -- ¬(a∧b) proves nothing about either
+            local out = rb_classify(l, src, true, depth + 1)
+            for _, f in ipairs(rb_classify(r, src, true, depth + 1)) do out[#out + 1] = f end
+            return out
+        elseif op == '||' or op == 'or' then
+            if holds then return {} end     -- (a∨b) proves nothing; ¬(a∨b) proves both
+            local out = rb_classify(l, src, false, depth + 1)
+            for _, f in ipairs(rb_classify(r, src, false, depth + 1)) do out[#out + 1] = f end
+            return out
+        elseif op == '==' or op == '!=' then
+            local lp, rp = rb_path(l, src), rb_path(r, src)
+            local lnil, rnil = txt(l, src) == 'nil', txt(r, src) == 'nil'
+            local p = (lp and rnil and lp) or (rp and lnil and rp) or nil
+            if p then
+                if (op == '!=') == holds then return { fact(p, 'non-nil') } end
+                return {} -- `x == nil` holding proves x IS nil: no positive fact
+            end
+            local dp = (lp and rb_lit_kind(r, src) and { lp, rb_lit_kind(r, src) })
+                or (rp and rb_lit_kind(l, src) and { rp, rb_lit_kind(l, src) }) or nil
+            if dp and ((op == '==') == holds) then return { fact(dp[1], dp[2]) } end
+            return {}
+        end
+        -- any other operator (`>`, `<=>`, `=~`, `+`) DISPATCHES on the left operand,
+        -- so reaching here proves it non-nil whichever way the test went
+        local lp = rb_path(l, src)
+        if lp then return { fact(lp, 'non-nil') } end
+        return {}
+    end
+    if t == 'call' then
+        local recv = cond:field('receiver')[1]
+        if not recv then return {} end -- a bare `valid?` says nothing about a variable
+        local p = rb_path(recv, src)
+        -- a DEEP receiver (`z.owner.active?`): the PATH is refused per divergence (1),
+        -- but the chain's ROOT still answered its own hop, so channel (2) applies to it
+        if not p then return rb_root_nonnil(recv, src) end
+        local m = txt(cond:field('method')[1], src)
+        local op = txt(cond:field('operator')[1], src)
+        if op == '&.' then return {} end -- safe navigation permits nil by construction
+        if m == 'nil?' then
+            if not holds then return { fact(p, 'non-nil') } end
+            return {}
+        end
+        -- present?/blank? are ActiveSupport, and SOUND to read in either world: if the
+        -- call evaluated at all then either AS is loaded (nil.present? is false, false
+        -- .present? is false ⇒ present? true means truthy) or it is not (a receiver
+        -- answering present? at all is a non-nil object, hence truthy).
+        if m == 'present?' and holds then return { fact(p, 'truthy') } end
+        if m == 'blank?' and not holds then return { fact(p, 'truthy') } end
+        if RB_TYPEP[m] and holds then
+            local k = rb_const(cond:field('arguments')[1], src)
+            if k then return { fact(p, 'type:' .. k) } end
+            return {}
+        end
+        if not RB_NIL_OK[m] then return { fact(p, 'non-nil') } end -- the (2) channel
+        return {}
+    end
+    if t == 'element_reference' then -- `params[:id]` dispatches `[]` on the receiver
+        local p = rb_path(cond:named_child(0), src)
+        if p then return { fact(p, 'non-nil') } end
+        return {}
+    end
+    return {}
+end
+vocab.ruby = function (cond, src, holds) return rb_classify(cond, src, holds, 0) end
+
+local EXT_LANG = { lua = 'lua', rb = 'ruby' } -- INC 1 lua; ruby = CART-0300
+
+-- ★ WHICH VERB SUPPORTS WHICH LANGUAGE, and it is NOT the same answer for all four.
+-- `narrow` (the lens) is fully language-driven — the vocab classifies the condition
+-- and STMT_BLOCK finds the statements — so it serves ruby. The other three still find
+-- their SUBJECTS with lua-specific node types: `redundant` looks for an
+-- `if_statement`, `devirt` for a `function_call` with a `method_index_expression`
+-- callee, `param_nilability` for DEREF_INDEX shapes and a lua CONDN set. Landing
+-- vocab.ruby was by itself enough to let all four past the old `vocab[lang]` check,
+-- after which those three would have walked a ruby tree, matched nothing, and returned
+-- an EMPTY list — indistinguishable from "this function has nothing to report".
+-- Refusing by name keeps the absence legible.
+local VERB_LANG = {
+    narrow = { lua = true, ruby = true },
+    param_nilability = { lua = true },
+    redundant = { lua = true },
+    devirt = { lua = true },
+}
 
 -- ── the fn's AST (re-parse; guards_over is inherently AST-based, like taint) ──
-local FN_TYPES = { function_declaration = true, function_definition = true }
+local FN_TYPES = {
+    function_declaration = true, function_definition = true, -- lua
+    method = true, singleton_method = true,                  -- ruby
+}
+-- statement CONTAINERS — where the walk below looks for the statements to annotate.
+-- Was the single literal 'block', i.e. LUA's name: on ruby the walk would have found
+-- no statements at all and returned an EMPTY point list, which reads as "nothing to
+-- narrow here" rather than as "this language is not wired up". Absence rendered as
+-- silence, in the shape that is hardest to notice ([[cartograph-concern-layering]]).
+local STMT_BLOCK = {
+    block = true,                                            -- lua
+    body_statement = true, ['then'] = true, ['do'] = true,   -- ruby
+    block_body = true, ['else'] = true,
+}
 local function fn_node(node, src, lang)
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
     if not ok then return nil end
@@ -285,13 +534,13 @@ function M.narrow(store, fn_id)
     local node = store.node and store.node(fn_id)
     if not node or not node.file then return { points = {} } end
     local lang = EXT_LANG[node.file:match('%.(%w+)$') or '']
-    if not lang or not vocab[lang] then
+    if not lang or not (vocab[lang] and VERB_LANG.narrow[lang]) then
         return { lang = node.file:match('%.(%w+)$'), unsupported = true, points = {} }
     end
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, points = {} } end
-    local classify = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node)))
+    local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
     local mutated = mutated_of(node)
     local funstable = field_unstable_of(fn, src)
 
@@ -299,7 +548,7 @@ function M.narrow(store, fn_id)
     local function visit(n)
         for c in n:iter_children() do
             if c:named() then
-                if c:type() == 'block' then
+                if STMT_BLOCK[c:type()] then
                     for stmt in c:iter_children() do
                         if stmt:named() and stmt:type() ~= 'comment' then
                             local env = {}
@@ -495,13 +744,13 @@ function M.param_nilability(store, fn_id)
     local node = store.node and store.node(fn_id)
     if not node or not node.file then return { params = {} } end
     local lang = EXT_LANG[node.file:match('%.(%w+)$') or '']
-    if not lang or not vocab[lang] then
+    if not lang or not (vocab[lang] and VERB_LANG.param_nilability[lang]) then
         return { lang = node.file:match('%.(%w+)$'), unsupported = true, params = {} }
     end
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, params = {} } end
-    local classify, mutated = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node))), mutated_of(node)
+    local classify, mutated = gated_classify(vocab[lang], type_is_shadowed(lang, node)), mutated_of(node)
     local funstable = field_unstable_of(fn, src)
     local fl = flowmod.present(node) and flowmod.record(node)
     local plist = (fl and fl.params) or {}
@@ -588,13 +837,13 @@ function M.redundant(store, fn_id)
     local node = store.node and store.node(fn_id)
     if not node or not node.file then return { checks = {} } end
     local lang = EXT_LANG[node.file:match('%.(%w+)$') or '']
-    if not lang or not vocab[lang] then
+    if not lang or not (vocab[lang] and VERB_LANG.redundant[lang]) then
         return { lang = node.file:match('%.(%w+)$'), unsupported = true, checks = {} }
     end
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, checks = {} } end
-    local classify = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node)))
+    local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
     local mutated = mutated_of(node)
     local funstable = field_unstable_of(fn, src)
     -- determine() handles only SINGLE predicates, so a conjunction `cond and other()`
@@ -640,13 +889,13 @@ function M.devirt(store, fn_id)
     local node = store.node and store.node(fn_id)
     if not node or not node.file then return { sites = {}, summary = {} } end
     local lang = EXT_LANG[node.file:match('%.(%w+)$') or '']
-    if not lang or not vocab[lang] then
+    if not lang or not (vocab[lang] and VERB_LANG.devirt[lang]) then
         return { lang = node.file:match('%.(%w+)$'), unsupported = true, sites = {}, summary = {} }
     end
     local src = table.concat(store.content(node) or {}, '\n')
     local fn = fn_node(node, src, lang)
     if not fn then return { lang = lang, sites = {}, summary = {} } end
-    local classify = gated_classify(vocab[lang], not builtins.genuine('lua', 'type', bound_set(node)))
+    local classify = gated_classify(vocab[lang], type_is_shadowed(lang, node))
     local mutated, funstable = mutated_of(node), field_unstable_of(fn, src)
 
     local sites = {}

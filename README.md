@@ -2307,6 +2307,29 @@ non-nil (a non-nil value can still be `false`) and drops a narrowing once the va
 is reassigned, so it reports a redundancy only when the earlier guard genuinely still
 holds.
 
+The lens reads **Ruby** as well as Lua, and the vocabulary was written from a census of
+6,494 real guard conditions rather than from the Lua one, which turned out to matter:
+`x.nil?` is the *rarest* form in Ruby at under 2%, so a nil-centred translation of the
+Lua vocabulary would have covered almost nothing. What Ruby code actually guards on is
+presence predicates and plain method dispatch. Two consequences are worth knowing when
+reading the output. First, **there are no field paths**: in Lua `x.y` is a table read,
+stable until something writes it, so the lens narrows it under a staling gate; in Ruby
+`x.y` is a *method dispatch* that may answer differently on each call, with nothing
+syntactic to separate an `attr_reader` from a computation — so Ruby facts are about bare
+variables and instance variables only, and the largest single category of guard is
+deliberately refused. Second, and pulling the other way, Ruby admits a fact no other
+language here does: **dispatching a method at all proves the receiver non-nil**, because
+`nil.empty?` raises. That fact holds on *both* branches — the call already happened —
+which makes it the only polarity-independent narrowing in the system, and on real code
+it is also the largest. Its soundness lives entirely in two exclusions the lens takes
+seriously: safe navigation (`x&.m`, which exists precisely to permit nil) and the
+methods `NilClass` genuinely answers (`to_s`, `class`, `nil?`, and under ActiveSupport
+`present?`/`blank?`) — so `x.to_s.empty?` proves nothing at all, while `x.owner.active?`
+proves `x` non-nil and says nothing about `x.owner`. The other three verbs below still
+find their subjects with Lua-specific syntax and **refuse Ruby by name** rather than
+walking it and reporting an empty result, which would read as "nothing to say" instead
+of "not wired up".
+
 `:CartographParamNil` turns the same guard analysis outward, onto the function's
 *parameters*. For each one it infers a nilability contract from how the body uses it: a
 parameter that is dereferenced (`p.x`, `p()`, `#p`, arithmetic on it) without ever being

@@ -510,3 +510,170 @@ test('narrow: a shadowed `type` disables type-test narrowing (soundness)', funct
     }
     eq(nil, env_at('g', 3).x)
 end)
+
+-- ── RUBY (CART-0300) ────────────────────────────────────────────────────────
+-- The vocab was sized by a CENSUS of 6494 real guard conditions before it was
+-- written, and the census overturned the obvious design: `x.nil?` is the RAREST
+-- form (1.8%), while presence predicates and plain method dispatch dominate. A
+-- nil-centred port of the lua vocab would have measured as nearly dead.
+
+local function rb(lines) ingest(lines, 'rb') end
+
+test('narrow ruby: `return unless p` leaves p narrowed AFTER it', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- the rails guard-clause idiom, and the reason cfg needed the INVERTED set
+    rb {
+        'class K',
+        '  def f(p)',
+        '    return unless p',
+        '    use(p)',        -- L4
+        '  end',
+        'end',
+    }
+    eq('non-nil', env_at('K#f', 4).p)
+end)
+
+test('narrow ruby: present? narrows, blank? narrows its ELSE, nil? inverts', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    rb {
+        'class K',
+        '  def f(a, b, c)',
+        '    if a.present?',
+        '      use(a)',      -- L4
+        '    end',
+        '    if b.blank?',
+        '      noop(b)',     -- L7  — blank? holding proves nothing positive
+        '    else',
+        '      use(b)',      -- L9  — ¬blank? ⇒ present ⇒ truthy
+        '    end',
+        '    unless c.nil?',
+        '      use(c)',      -- L12 — `unless x.nil?` body: NOT nil? ⇒ non-nil
+        '    end',
+        '  end',
+        'end',
+    }
+    eq('non-nil', env_at('K#f', 4).a)
+    eq('non-nil', env_at('K#f', 9).b)
+    eq('non-nil', env_at('K#f', 12).c)
+    -- L7 stands on `b.blank?` being TRUE, which says b is nil-or-empty: the only
+    -- thing we know is that b answered the call, and blank? is a method NilClass
+    -- HAS under ActiveSupport, so not even that. No fact.
+    eq(nil, env_at('K#f', 7).b)
+end)
+
+test('narrow ruby: ★ dispatching ANY method proves the receiver non-nil, BOTH ways', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- The rung the census found largest (47-55% of all facts) and the only
+    -- polarity-INDEPENDENT one here: `nil.empty?` raises NoMethodError, so if
+    -- execution got past the condition at all, x was not nil — in the then AND the
+    -- else. Nothing in the lua vocab works like this.
+    rb {
+        'class K',
+        '  def f(x)',
+        '    if x.empty?',
+        '      a(x)',        -- L4
+        '    else',
+        '      b(x)',        -- L6
+        '    end',
+        '  end',
+        'end',
+    }
+    eq('non-nil', env_at('K#f', 4).x)
+    eq('non-nil', env_at('K#f', 6).x, 'the ELSE branch too — the call happened either way')
+end)
+
+test('narrow ruby: safe navigation and NilClass methods prove NOTHING', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- `&.` exists precisely to permit nil, and nil really does answer to_s/class/
+    -- nil?/present?, so dispatching one of those is not evidence. Both are the
+    -- soundness edge of the rung above: get either wrong and the biggest rung
+    -- becomes the biggest source of false facts.
+    rb {
+        'class K',
+        '  def f(x, y)',
+        '    if x&.valid?',
+        '      use(x)',      -- L4 — must NOT narrow
+        '    end',
+        '    if y.to_s == "q"',
+        '      use(y)',      -- L7 — must NOT narrow: nil.to_s is legal
+        '    end',
+        '  end',
+        'end',
+    }
+    eq(nil, env_at('K#f', 4).x)
+    eq(nil, env_at('K#f', 7).y)
+end)
+
+test('narrow ruby: is_a? gives a type, == a discriminant, x.y.z gives NO path', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    rb {
+        'class K',
+        '  def f(x, y, z)',
+        '    if x.is_a?(Numeric)',
+        '      use(x)',      -- L4
+        '    end',
+        '    if y == :draft',
+        '      use(y)',      -- L7
+        '    end',
+        '    if z.owner.active?',
+        '      use(z)',      -- L10 — z non-nil (it answered .owner), but NOT z.owner
+        '    end',
+        '    if z.to_s.empty?',
+        '      use(z)',      -- L13 — NO fact: nil answers to_s, so z may be nil
+        '    end',
+        '  end',
+        'end',
+    }
+    eq('type:Numeric', env_at('K#f', 4).x)
+    eq('eq:sym:draft', env_at('K#f', 7).y)
+    -- ★ NO FIELD PATHS IN RUBY. In lua `z.owner` is a table read, stable until
+    -- written, so lua narrows it under a staling gate. In ruby it is a METHOD
+    -- DISPATCH that may answer differently on each call, and nothing syntactic
+    -- distinguishes an attr_reader from a computation — so depth-≥1 is refused.
+    eq(nil, env_at('K#f', 10)['z.owner'])
+    eq('non-nil', env_at('K#f', 10).z, 'but the chain ROOT is still proven non-nil')
+    -- and the method judged is the one dispatched ON THE ROOT, not the outermost
+    eq(nil, env_at('K#f', 13).z, 'z.to_s.empty? proves nothing: nil answers to_s')
+end)
+
+test('narrow ruby: a REASSIGNED variable is not narrowed (the mutated_of gate)', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- ★ THE SOUNDNESS PIN. mutated_of matched the single literal
+    -- 'assignment_statement' — LUA's node type. Ruby's is `assignment`, so wiring
+    -- ruby into EXT_LANG made it return EMPTY for every ruby function: 6168
+    -- assignments' worth of staling silently absent on discourse alone, and this
+    -- test's narrowing would be reported as if the rebind never happened.
+    rb {
+        'class K',
+        '  def f(p)',
+        '    return unless p',
+        '    p = fetch()',
+        '    use(p)',        -- L5 — the guard is STALE, no fact
+        '  end',
+        'end',
+    }
+    eq(nil, env_at('K#f', 5).p)
+end)
+
+test('narrow ruby: the OTHER three verbs refuse ruby by name, not by silence', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- redundant/devirt/param_nilability still find their SUBJECTS with lua node
+    -- types, and landing vocab.ruby was enough on its own to let them past the old
+    -- `vocab[lang]` check — after which they would walk a ruby tree, match nothing
+    -- and return an empty list, which reads as "nothing to report" rather than
+    -- "not wired up". Refusing by name keeps the absence legible.
+    rb {
+        'class K',
+        '  def f(x)',
+        '    if x',
+        '      use(x)',
+        '    end',
+        '  end',
+        'end',
+    }
+    local id = fn_id('K#f')
+    eq(nil, narrow.narrow(store, id).unsupported, 'the LENS serves ruby')
+    eq(true, narrow.redundant(store, id).unsupported)
+    eq(true, narrow.devirt(store, id).unsupported)
+    eq(true, narrow.param_nilability(store, id).unsupported)
+end)

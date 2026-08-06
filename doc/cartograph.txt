@@ -329,7 +329,11 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
                               function's ports; <CR> descends into a class,
                               then into a port's partners
   :CartographNarrow           where a guard proves a variable non-nil in
-                              a region (branch-sensitive narrowing)
+                              a region (branch-sensitive narrowing).
+                              Lua and Ruby; in Ruby, dispatching any
+                              method proves the receiver non-nil on
+                              BOTH branches, while `x.y` paths are
+                              refused (a method call, not a field)
   :CartographParamNil         inferred parameter nilability (required /
                               optional / unknown) against the ---@param
                               annotations; an unguarded deref of a
