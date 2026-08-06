@@ -14,8 +14,20 @@
 -- its `.l`-span consumers (extract/trace/reorder) stay unchanged while new
 -- consumers opt into the fine view.
 
-local M = {}
+-- @langs bash c cpp go haskell java javascript lua odin php python ruby rust scheme tsx typescript zig
+-- flow is the SUBSTRATE every extracted language rides, so its claim is the whole
+-- spec roster. The per-language TABLES below (BODY / CTRL / …) are the pattern that
+-- makes that claim honest; a direct comparison against one grammar's node name is
+-- what the language fence is looking for.
 
+local M = {}
+local tsutil = require 'cartograph.spec.tsutil'
+
+-- COMMENTS are skipped everywhere below, and there is no single node NAME for one:
+-- java/rust say line_comment/block_comment. spec/tsutil holds the union, because
+-- 32 sites across this file, the extractor, expr and narrow each had their own
+-- copy of the lua-only test (CART-0304).
+local COMMENT = tsutil.COMMENT
 -- a region body: lua `block`, C/php `compound_statement`, JS/TS `statement_block`
 local BODY = { block = true, compound_statement = true, statement_block = true }
 -- control statements: recurse into their sub-regions
@@ -106,7 +118,7 @@ local function target_label(node, src)
     local lf = node:field('label')[1]
     if lf then return normlbl(txt(lf, src)) end
     for c in node:iter_children() do
-        if c:named() and c:type() ~= 'comment' then return normlbl(txt(c, src)) end
+        if c:named() and not COMMENT[c:type()] then return normlbl(txt(c, src)) end
     end
     return nil
 end
@@ -117,7 +129,7 @@ local function labeled_parts(node, src)
     local label = lf and normlbl(txt(lf, src)) or nil
     local inner
     for c in node:iter_children() do
-        if c:named() and c:type() ~= 'comment' and c ~= lf then
+        if c:named() and not COMMENT[c:type()] and c ~= lf then
             local ct = c:type()
             if not label and (ct == 'identifier' or ct == 'statement_identifier'
                 or ct == 'label_name') then
@@ -130,6 +142,8 @@ end
 -- a loop's OWN label (rust `'outer: loop`), else nil
 local function loop_label(node, src)
     for c in node:iter_children() do
+        -- @langs-ok `label` is rust's (and haskell's) node; no other grammar in the
+        -- roster has labelled loops at all, so there is nothing to mirror it with
         if c:type() == 'label' then return normlbl(txt(c, src)) end
     end
     return nil
@@ -142,8 +156,15 @@ end
 local FALSE_LIT = { ['0'] = true, ['0.0'] = true, ['false'] = true,
     ['False'] = true, ['nil'] = true, ['null'] = true }
 local TRUE_LIT = { ['true'] = true, ['True'] = true, ['1'] = true }
+-- paren wrappers to peel before reading the literal. Ruby's is `parenthesized_
+-- statements`, not `_expression` — so `while (true)` in ruby was never recognised as a
+-- constant loop condition (the langaudit finding next door to the comment one).
+local PARENS = {
+    parenthesized_expression = true,   -- most grammars
+    parenthesized_statements = true,   -- ruby
+}
 local function const_cond(node, src)
-    while node and node:type() == 'parenthesized_expression' do
+    while node and PARENS[node:type()] do
         local inner
         for c in node:iter_children() do if c:named() then inner = c break end end
         node = inner
@@ -313,6 +334,8 @@ local function param_names(fn, src, pfield, method)
                     if it == 'variable_name' then out[#out + 1] = txt(id, src):gsub('^%$', ''); break end
                     if it == 'pointer_declarator' then
                         local inner = id:field('declarator')[1]
+                        -- @langs-ok inside a C/C++ pointer_declarator, whose inner
+                        -- declarator is an identifier in exactly those grammars
                         if inner and inner:type() == 'identifier' then out[#out + 1] = txt(inner, src) end
                         break
                     end
@@ -359,7 +382,7 @@ function M.build(fnnode, src, cfg)
         if t == 'expression_statement' then
             local inner
             for c in node:iter_children() do
-                if c:named() and c:type() ~= 'comment' then
+                if c:named() and not COMMENT[c:type()] then
                     if inner then inner = nil; break end
                     inner = c
                 end
@@ -423,7 +446,7 @@ function M.build(fnnode, src, cfg)
             for gc in node:iter_children() do
                 if gc:named() and gc ~= cond then
                     local gt = gc:type()
-                    if gt == 'comment' then -- skip
+                    if COMMENT[gt] then -- skip
                     elseif BODY[gt] then
                         region(gc, idx, 'body')          -- php block body / loop body
                     elseif CLAUSE[gt] then
@@ -449,7 +472,7 @@ function M.build(fnnode, src, cfg)
         for c in block:iter_children() do
             if c:named() then
                 local ct = c:type()
-                if ct ~= 'comment' then
+                if not COMMENT[ct] then
                     if CLAUSE[ct] then clause(c, parent) else emit(c, parent, pol) end
                 end
             end
@@ -471,7 +494,7 @@ function M.build(fnnode, src, cfg)
                 pol = 'case', def = d, use = u, t = node:type() }
             if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'casehead') end
             for c in node:iter_children() do
-                if c:named() and c ~= vf and c:type() ~= 'comment' then
+                if c:named() and c ~= vf and not COMMENT[c:type()] then
                     if BODY[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
                 end
             end
@@ -493,7 +516,7 @@ function M.build(fnnode, src, cfg)
             else -- fallback: region non-condition named children
                 local condn = node:field('condition')[1]
                 for c in node:iter_children() do
-                    if c:named() and c ~= condn and c:type() ~= 'comment' then
+                    if c:named() and c ~= condn and not COMMENT[c:type()] then
                         if BODY[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
                     end
                 end
@@ -526,7 +549,7 @@ function M.build(fnnode, src, cfg)
         local b = node:field('body')[1]
         if b and BODY[b:type()] then region(b, parent, pol) return end
         for c in node:iter_children() do
-            if c:named() and c:type() ~= 'comment' then
+            if c:named() and not COMMENT[c:type()] then
                 if BODY[c:type()] then region(c, parent, pol)
                 else emit(c, parent, pol) end
             end

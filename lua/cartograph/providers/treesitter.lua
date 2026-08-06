@@ -708,7 +708,7 @@ local function litval(n, src, spec, depth)
     if (spec.litdata_types or {})[t] and depth < LIT_DEPTH then
         local arr, map, count = {}, {}, 0
         for _, item in inext, n, -1 do
-            if item:named() and item:type() ~= 'comment' then
+            if item:named() and not tsutil.is_comment(item) then
                 count = count + 1
                 if count > LIT_ITEMS then break end
                 local it = item:type()
@@ -728,7 +728,7 @@ local function litval(n, src, spec, depth)
                     -- php: positional children; 2 = key => value, 1 = element
                     local kids = {}
                     for _, c2 in inext, item, -1 do
-                        if c2:named() and c2:type() ~= 'comment' then kids[#kids + 1] = c2 end
+                        if c2:named() and not tsutil.is_comment(c2) then kids[#kids + 1] = c2 end
                     end
                     local v = kids[#kids] and litval(kids[#kids], src, spec, depth + 1)
                     if #kids >= 2 and v ~= nil then
@@ -773,7 +773,7 @@ local function callable_arg(a, src)
     if t == 'array_creation_expression' or t == 'array' then
         local els = {}
         for _, el in inext, a, -1 do
-            if el:named() and el:type() ~= 'comment' then
+            if el:named() and not tsutil.is_comment(el) then
                 if el:type() == 'array_element_initializer' then
                     el = el:named_child(0) or el
                 end
@@ -2895,11 +2895,11 @@ local function child_forms(node, lisp)
     end
     local function scan(n)
         for _, c in inext, n, -1 do
-            if c:named() and c:type() ~= 'comment' then
+            if c:named() and not tsutil.is_comment(c) then
                 local t = c:type()
                 if SUBSTMT_BLOCKS[t] then
                     for _, g in inext, c, -1 do
-                        if g:named() and g:type() ~= 'comment' then out[#out + 1] = g end
+                        if g:named() and not tsutil.is_comment(g) then out[#out + 1] = g end
                     end
                 elseif SUBSTMT_CLAUSES[t] then
                     scan(c)
@@ -2948,7 +2948,7 @@ function M.forms(file, sr, sc, er, ec)
         local function find_stmt(node)
             local container = SUBSTMT_BLOCKS[node:type()] or ROOT_TYPES[node:type()]
             for _, c in inext, node, -1 do
-                if c:named() and c:type() ~= 'comment' then
+                if c:named() and not tsutil.is_comment(c) then
                     local csr, _, cer = c:range()
                     if container and csr == sr then return c end
                     if sr >= csr and sr <= cer then
@@ -3021,7 +3021,7 @@ local function detail_items(stmt, src)
         local cond = stmt:field('condition')[1]
         if not cond then
             for _, c in inext, stmt, -1 do
-                if c:named() and c:type() ~= 'comment'
+                if c:named() and not tsutil.is_comment(c)
                     and not SUBSTMT_BLOCKS[c:type()] then cond = c break end
             end
         end
@@ -3030,10 +3030,10 @@ local function detail_items(stmt, src)
     end
     local function walk(n)
         for _, c in inext, n, -1 do
-            if c:named() and c:type() ~= 'comment' and not SUBSTMT_BLOCKS[c:type()] then
+            if c:named() and not tsutil.is_comment(c) and not SUBSTMT_BLOCKS[c:type()] then
                 if ARG_LISTS[c:type()] then
                     for _, a in inext, c, -1 do
-                        if a:named() and a:type() ~= 'comment' then mk('arg', a) end
+                        if a:named() and not tsutil.is_comment(a) then mk('arg', a) end
                     end
                 else
                     walk(c)
@@ -3381,7 +3381,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             local cdefpos, cdfid
             if nctx > 0 then
                 cnamed = c:named()
-                if bodyctx and cnamed and ct ~= 'comment' then
+                if bodyctx and cnamed and not tsutil.COMMENT[ct] then
                     -- a body's direct named children ARE its statements
                     bodyctx.cur = { l = c:range() + 1,
                         def = {}, use = {}, dep = {} }
@@ -4956,7 +4956,7 @@ function M.extract(root, opts)
                 end
             end
             for _, stmt in inext, container, -1 do
-                if stmt:named() and stmt:type() ~= 'comment'
+                if stmt:named() and not tsutil.is_comment(stmt)
                     and not (spec.block_skip or {})[stmt:type()] then
                     local p = pos_of(stmt)
                     -- a top-level fn def statement starts on the def's line
@@ -5148,7 +5148,7 @@ function M.extract(root, opts)
                     for _, a in (argsn and argsn.child and inext)
                         or (argnodes and ipairs(argnodes)) or NOOP,
                         argnodes or argsn, argnodes and 0 or -1 do
-                        if a:named() and a:type() ~= 'comment' then
+                        if a:named() and not tsutil.is_comment(a) then
                             -- KEYWORD arguments: unwrap to the VALUE node
                             -- (classified exactly like a positional) and
                             -- remember the name — f(callback=handler) is
@@ -5494,7 +5494,7 @@ function M.extract(root, opts)
         for _, c in inext, croot, -1 do
             local t = c:type()
             if c:named() and t ~= 'script_element' and t ~= 'style_element'
-                and t ~= 'comment' then
+                and not tsutil.COMMENT[t] then
                 local s, _, e = c:range()
                 if not tps or s < tps then tps = s end
                 if not tpe or e > tpe then tpe = e end

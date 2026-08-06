@@ -5,10 +5,40 @@
 -- requires the spec modules). The engine aliases these too, so there is ONE
 -- definition. Pure: depends on nothing.
 
--- @langs any — a SHARED helper over every spec: the node types it names
--- belong to whichever grammar the caller passed, not to one of its own.
+-- @langs any — a SHARED helper over every spec: the node types it names are
+-- cross-grammar UNIONS (see COMMENT below), never one grammar's vocabulary
+-- imposed on the rest.
 
 local M = {}
+
+-- ★ WHAT EVERY GRAMMAR CALLS A COMMENT, and it is not one name. Most say
+-- `comment`; JAVA and RUST say `line_comment`/`block_comment` (rust adds
+-- `doc_comment`), and scheme has `block_comment` beside `comment`.
+--
+-- This table exists because 32 sites across flow, the extractor, the expression
+-- IR and narrow each tested `type() ~= 'comment'` — so in java and rust a comment
+-- was a STATEMENT, an expression CHILD and a narrowable point. Measured when the
+-- first of them was fixed: elasticsearch/libs 42766 -> 40354 flow rows (-5.6%),
+-- ripgrep 11906 -> 10955 (-8.0%), with defs and uses IDENTICAL — the signature of
+-- phantom EMPTY rows disappearing rather than real statements being lost. Found by
+-- tools/langaudit.lua (CART-0304); no test could see it, because the suite is
+-- lua-only and lua calls its comments `comment`.
+--
+-- ONE definition, here, because the point of the finding was that thirty-two
+-- copies of a language assumption drift independently — and the df/flow parity
+-- gate's own header names exactly that hazard ("a per-language fix landed on ONE
+-- side").
+M.COMMENT = {
+    comment = true,                             -- lua, ruby, php, python, go, js, c…
+    line_comment = true, block_comment = true,  -- java, rust, scheme
+    doc_comment = true,                         -- rust `///`
+}
+
+--- Is `node` a comment in ANY grammar we bind? Cheap membership, no language
+--- parameter needed: the names do not collide across the roster.
+function M.is_comment(node)
+    return node ~= nil and M.COMMENT[node:type()] == true
+end
 
 -- Node text, hot-path fast form. vim.treesitter.get_node_text allocates two
 -- throwaway tables (opts, metadata) on EVERY call before doing this same

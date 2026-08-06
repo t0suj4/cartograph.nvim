@@ -39,6 +39,7 @@
 -- disagreement-oracle discipline, inside the substrate). `expr.gate` runs it.
 
 local at = require 'cartograph.at'
+local tsutil = require 'cartograph.spec.tsutil'
 
 local M = {}
 
@@ -222,7 +223,7 @@ local build, build_core
 local function operands(node)
     local out = {}
     for c in node:iter_children() do
-        if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end
+        if c:named() and not tsutil.is_comment(c) then out[#out + 1] = c end
     end
     return out
 end
@@ -242,11 +243,11 @@ end
 local function call_parts(node)
     local callee, args, i = nil, {}, 0
     for c in node:iter_children() do
-        if c:named() and c:type() ~= 'comment' then
+        if c:named() and not tsutil.is_comment(c) then
             if i == 0 then callee = c
             elseif c:type() == 'arguments' or c:type() == 'argument_list' then
                 for a in c:iter_children() do
-                    if a:named() and a:type() ~= 'comment' then args[#args + 1] = a end
+                    if a:named() and not tsutil.is_comment(a) then args[#args + 1] = a end
                 end
             else args[#args + 1] = c end
             i = i + 1
@@ -267,7 +268,7 @@ function build_core(node, src, lang)
     if PAREN[t] then return build(node:named_child(0), src) end
     if UNWRAP[t] then -- a list where one expr is expected: build the sole child, else `?`
         local only, n = nil, 0
-        for c in node:iter_children() do if c:named() and c:type() ~= 'comment' then only = c; n = n + 1 end end
+        for c in node:iter_children() do if c:named() and not tsutil.is_comment(c) then only = c; n = n + 1 end end
         if n == 1 then return build(only, src, lang) end
     end
     local lty = LIT[t]
@@ -330,7 +331,7 @@ function build_core(node, src, lang)
         -- them as kids so the read-set stays faithful to du (which descends the table).
         local kids = {}
         for c in node:iter_children() do
-            if c:named() and c:type() ~= 'comment' then kids[#kids + 1] = build(c, src, lang) end
+            if c:named() and not tsutil.is_comment(c) then kids[#kids + 1] = build(c, src, lang) end
         end
         return { k = 'table', kids = kids }
     end
@@ -375,7 +376,7 @@ function build_core(node, src, lang)
     -- honest unknown: keep the named children as kids so no name is hidden
     local kids = {}
     for c in node:iter_children() do
-        if c:named() and c:type() ~= 'comment' then kids[#kids + 1] = build(c, src, lang) end
+        if c:named() and not tsutil.is_comment(c) then kids[#kids + 1] = build(c, src, lang) end
     end
     return { k = '?', t = t, kids = kids }
 end
@@ -413,7 +414,7 @@ local function list_children(node) -- the named exprs of a *_list (or the node i
     if UNWRAP[node:type()] then
         local out = {}
         for c in node:iter_children() do
-            if c:named() and c:type() ~= 'comment' then out[#out + 1] = c end
+            if c:named() and not tsutil.is_comment(c) then out[#out + 1] = c end
         end
         return out
     end
@@ -453,7 +454,7 @@ function M.harvest_row(node, src, hint, lang)
         for c in node:iter_children() do
             if c:named() then
                 local ct = c:type()
-                if ct ~= 'comment' and not BODY[ct] and not CLAUSE[ct] then
+                if not tsutil.COMMENT[ct] and not BODY[ct] and not CLAUSE[ct] then
                     rhs[#rhs + 1] = build(c, src, lang)
                 end
             end
@@ -494,7 +495,7 @@ function M.harvest_row(node, src, hint, lang)
         local rhs = {}
         for c in node:iter_children() do
             for _, vn in ipairs(list_children(c)) do
-                if vn:named() and vn:type() ~= 'comment' then rhs[#rhs + 1] = build(vn, src, lang) end
+                if vn:named() and not tsutil.is_comment(vn) then rhs[#rhs + 1] = build(vn, src, lang) end
             end
         end
         return { lhs = {}, rhs = rhs }

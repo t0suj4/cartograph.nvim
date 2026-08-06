@@ -73,7 +73,21 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 116 -- v116: THE CONFINEMENT WALK RIDES THE MENTION WALK (CART-0236). The
+M.VERSION = 117 -- v117: A COMMENT IS NOT A STATEMENT IN JAVA OR RUST (CART-0304). flow's
+               -- six comment skips all matched the single node name `comment`, which is
+               -- what lua/ruby/php/python/go/js/c call it — java and rust call theirs
+               -- `line_comment`/`block_comment` (+ rust `doc_comment`). So on those two
+               -- SHIPPED languages every comment became a flow ROW: a statement with no
+               -- def and no use, inflating the row count and the region tree. Folded at
+               -- ingest (store.lua flow.fold), hence the bump. MEASURED: elasticsearch/
+               -- libs 42766 -> 40354 rows (-5.6%), ripgrep 11906 -> 10955 (-8.0%), and
+               -- defs/uses IDENTICAL in both — exactly the signature of phantom EMPTY
+               -- rows going away rather than real statements being lost. Found by
+               -- tools/langaudit.lua the first time flow.lua declared its @langs; it had
+               -- been live in two languages and no test could see it, because the suite
+               -- is lua-only. Same commit: ruby's `while (true)` now peels its parens
+               -- (`parenthesized_statements`, which the peel did not know).
+               -- v116: THE CONFINEMENT WALK RIDES THE MENTION WALK (CART-0236). The
                -- escape fact had its own per-file traversal, MEASURED at 15% of the whole
                -- extract on wow; it now rides the mention DFS, which was already holding
                -- that tree and already computing the one shape (callee) the rule turns on.

@@ -15,6 +15,7 @@ local cfg = require 'cartograph.cfg'
 local at = require 'cartograph.at'
 local flowmod = require 'cartograph.flow'
 local builtins = require 'cartograph.builtins'
+local tsutil = require 'cartograph.spec.tsutil'
 
 local M = {}
 
@@ -568,7 +569,7 @@ function M.narrow(store, fn_id)
             if c:named() then
                 if STMT_BLOCK[c:type()] then
                     for stmt in c:iter_children() do
-                        if stmt:named() and stmt:type() ~= 'comment' then
+                        if stmt:named() and not tsutil.is_comment(stmt) then
                             local env = {}
                             for _, g in ipairs(cfg.guards_over(stmt, src)) do
                                 for _, f in ipairs(classify(g.cond, src, not g.neg)) do
@@ -737,6 +738,8 @@ local function param_annotations(fn, src)
     while s:parent() and not STMT_PARENT[s:parent():type()] do s = s:parent() end
     local ann, block = {}, {}
     local sib = s:prev_named_sibling()
+    -- @langs-ok the `---@param` annotation block is lua's, and param_nilability is
+    -- gated to lua by VERB_LANG; ruby's declared types live in RBS/sig, not a comment
     while sib and sib:type() == 'comment' do block[#block + 1] = txt(sib, src); sib = sib:prev_named_sibling() end
     for _, line in ipairs(block) do
         local name, opt, rest = line:match('^%s*%-%-%-?@param%s+([%w_]+)(%??)%s*(.*)$')
