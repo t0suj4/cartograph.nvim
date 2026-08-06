@@ -38,6 +38,11 @@
 -- node). They must match exactly — a mismatch is a real bug on ONE side (the
 -- disagreement-oracle discipline, inside the substrate). `expr.gate` runs it.
 
+-- @langs bash c cpp go haskell java javascript lua odin php python ruby rust scheme tsx typescript zig
+-- The IR is LANGUAGE-AGNOSTIC by design (a closed schema, `?` for anything unmodelled),
+-- so the harvest runs on every extracted language and its node-type knowledge belongs in
+-- per-language tables. Declared so the language fence checks that claim.
+
 local at = require 'cartograph.at'
 local tsutil = require 'cartograph.spec.tsutil'
 
@@ -245,6 +250,11 @@ local function call_parts(node)
     for c in node:iter_children() do
         if c:named() and not tsutil.is_comment(c) then
             if i == 0 then callee = c
+            -- @langs-ok the WRAPPER is what varies: haskell/scheme/bash have no
+            -- argument-list node at all (juxtaposition / list / word call models) and
+            -- odin exposes each argument directly, and all of those land in the `else`
+            -- below, which takes an unwrapped child AS an argument. Verified: odin call
+            -- args do reach the IR.  @langs-ok the wrapper varies; the else-branch covers it
             elseif c:type() == 'arguments' or c:type() == 'argument_list' then
                 for a in c:iter_children() do
                     if a:named() and not tsutil.is_comment(a) then args[#args + 1] = a end
@@ -395,7 +405,11 @@ M.build = build
 
 -- ── per-row harvest ──────────────────────────────────────────────────────────
 -- assignment left/right targets (fields for php/js, node types for lua)
-local function assign_sides(node)
+local ASSIGN_OP = { ['='] = true, [':='] = true, ['+='] = true, ['-='] = true,
+    ['*='] = true, ['/='] = true, ['%='] = true, ['||='] = true, ['&&='] = true,
+    ['|='] = true, ['&='] = true, ['^='] = true, ['<<='] = true, ['>>='] = true,
+    ['**='] = true, ['//='] = true, ['??='] = true, ['.='] = true }
+local function assign_sides(node, src)
     local left = node:field('left')[1]
     local right = node:field('right')[1] or node:field('value')[1]
     if not left or not right then
@@ -406,6 +420,28 @@ local function assign_sides(node)
                 elseif ct == 'expression_list' and not right then right = c end
             end
         end
+    end
+    -- ★ POSITIONAL FALLBACK. Odin's `assignment_statement` carries NO fields and no
+    -- *_list wrappers — its children are just `identifier`, the operator TOKEN, and
+    -- the value — so both branches above came back empty and every odin assignment
+    -- harvested to an EMPTY expression row. The IR's whole promise is that an
+    -- unmodelled construct becomes `?` rather than a lie, and this was neither: it
+    -- was silence. Split on the operator token, which is the one thing every
+    -- assignment grammar has in common. (CART-0304, found by declaring expr's @langs.)
+    if not (left and right) and src then
+        local before, after, seen = {}, {}, false
+        for c in node:iter_children() do
+            if not c:named() then
+                if ASSIGN_OP[vim.treesitter.get_node_text(c, src)] then seen = true end
+            elseif not tsutil.is_comment(c) then
+                if seen then after[#after + 1] = c else before[#before + 1] = c end
+            end
+        end
+        -- N targets and M values, because odin's multi-return idiom (`v, ok := m[k]`)
+        -- is a QUARTER of its assignments — a 1:1-only fallback would have left the
+        -- most characteristic shape in the language unharvested. The separator commas
+        -- are anonymous tokens, so the named children ARE the operands.
+        if seen and #before > 0 and #after > 0 then return nil, nil, before, after end
     end
     return left, right
 end
@@ -471,6 +507,8 @@ function M.harvest_row(node, src, hint, lang)
         local lhs = {}
         for c in node:iter_children() do
             for _, tn in ipairs(list_children(c)) do
+                -- @langs-ok `variable_list` is lua's bare-`local a, b` target wrapper;
+                -- no other grammar in the roster wraps an initialiser-less declaration
                 if NAME[tn:type()] or tn:type() == 'variable_list' then
                     lhs[#lhs + 1] = build(tn, src, lang)
                 end
@@ -479,13 +517,13 @@ function M.harvest_row(node, src, hint, lang)
         return { lhs = lhs, rhs = {} }
     end
     if ASSIGN[t] then
-        local left, right = assign_sides(node)
+        local left, right, lpos, rpos = assign_sides(node, src)
         local lhs, rhs = {}, {}
-        for _, tn in ipairs(list_children(left)) do
+        for _, tn in ipairs(lpos or list_children(left)) do
             -- a declaration MODIFIER in a target list is not a target (CART-0234)
             if not is_modifier(lang, tn) then lhs[#lhs + 1] = build(tn, src, lang) end
         end
-        for _, vn in ipairs(list_children(right)) do rhs[#rhs + 1] = build(vn, src, lang) end
+        for _, vn in ipairs(rpos or list_children(right)) do rhs[#rhs + 1] = build(vn, src, lang) end
         return { lhs = lhs, rhs = rhs }
     end
     -- control heads carry a condition (the switched value for go switch)
