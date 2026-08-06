@@ -127,6 +127,104 @@ test('cfg: python elif was UNSOUND, not merely imprecise', function ()
     eq('!x z', fmt(guard_set(c, src)))
 end)
 
+-- ── RUBY (CART-0298) ────────────────────────────────────────────────────────
+-- Ruby had NO guard-dominance at all — its constructs are named `if`/`unless`/
+-- `elsif`/`while`/`until` and none were in COND — so all four consumers were blind
+-- on a language whose arc is shipped. It also brought the first INVERTED
+-- construct: `unless C` guards its body with ¬C and its else with C. An inverted
+-- polarity shipped as a positive one is UNSOUND, so both directions are asserted.
+local function rb(code, want)
+    local root = vim.treesitter.get_string_parser(code, 'ruby'):parse()[1]:root()
+    -- match the CALL node exactly: `U(p) if p` is itself only 9 characters, so a
+    -- substring search finds the if_modifier before the call inside it
+    local function findcall(n, text)
+        if n:type() == 'call' and vim.treesitter.get_node_text(n, code) == text then return n end
+        for c in n:iter_children() do
+            if c:named() then
+                local r = findcall(c, text)
+                if r then return r end
+            end
+        end
+    end
+    for text, expect in pairs(want) do
+        local n = assert(findcall(root, text), 'no call node ' .. text)
+        eq(fmt(expect), fmt(guard_set(n, code)), text .. ' in `' .. code:gsub('\n', ' ') .. '`')
+    end
+end
+
+test('cfg ruby: the if/elsif/else chain (the NESTED family)', function ()
+    if not ready_lang('ruby') then skip 'no ruby parser' end
+    rb('def f(x, y)\n  if x then A()\n  elsif y then B()\n  else D()\n  end\nend\n', {
+        ['A()'] = { x = true },
+        ['B()'] = { y = true, ['!x'] = true },
+        ['D()'] = { ['!x'] = true, ['!y'] = true },
+    })
+end)
+
+test('cfg ruby: `unless` INVERTS — its body is the ¬ branch and its else the positive one', function ()
+    if not ready_lang('ruby') then skip 'no ruby parser' end
+    -- BOTH directions, because getting one right by luck is easy: emitting a
+    -- constant `neg` would pass the body and fail the else, and emitting a
+    -- constant `not neg` would do the reverse.
+    rb('def f(x)\n  unless x\n    A()\n  else\n    D()\n  end\nend\n', {
+        ['A()'] = { ['!x'] = true },
+        ['D()'] = { x = true },
+    })
+    rb('def f(x, y)\n  while x\n    A()\n  end\n  until y\n    B()\n  end\nend\n', {
+        ['A()'] = { x = true },
+        ['B()'] = { ['!y'] = true },
+    })
+end)
+
+test('cfg ruby: `return unless p` is the guard clause, and it leaves p TRUTHY', function ()
+    if not ready_lang('ruby') then skip 'no ruby parser' end
+    -- THE POINT OF THE TICKET. Ruby's early-exit idiom is spelled with the
+    -- INVERTED keyword, so the guard-clause scan could not stay a hardcoded
+    -- `type() == 'if_statement'` test — and the polarity flip is load-bearing:
+    -- reporting ¬p here would be exactly the wrong fact about the common case.
+    rb('def f(p)\n  return unless p\n  U(p)\nend\n', { ['U(p)'] = { p = true } })
+    rb('def f(p)\n  return if p\n  U(p)\nend\n', { ['U(p)'] = { ['!p'] = true } })
+    -- a NON-terminating modifier is not a guard clause for what follows
+    rb('def f(p)\n  log(p) unless p\n  U(p)\nend\n', { ['U(p)'] = {} })
+    -- and the statement modifiers themselves guard their own body, both ways
+    rb('def f(p)\n  U(p) if p\n  V(p) unless p\nend\n',
+        { ['U(p)'] = { p = true }, ['V(p)'] = { ['!p'] = true } })
+end)
+
+test('cfg ruby: a block is a scope boundary, but a guard clause INSIDE one works', function ()
+    if not ready_lang('ruby') then skip 'no ruby parser' end
+    -- conservative, matching every other language's callback policy: a block body
+    -- is its own scope even though a synchronous `each` really does run under the
+    -- enclosing guard. Withholding a fact is sound; inventing one is not.
+    rb('def f(x, xs)\n  if x\n    xs.each { |v| U(v) }\n  end\nend\n', { ['U(v)'] = {} })
+    rb('def f(xs)\n  xs.each do |v|\n    next unless v\n    U(v)\n  end\nend\n',
+        { ['U(v)'] = { v = true } })
+end)
+
+test('cfg ruby: a class body IS dominated; case/when says nothing', function ()
+    if not ready_lang('ruby') then skip 'no ruby parser' end
+    -- a class body executes INLINE, so a guard around it really does dominate it
+    -- (and any method inside stops the climb on its own) — `class` is deliberately
+    -- not a boundary.
+    rb('if RUBY\n  class K\n    A()\n  end\nend\n', { ['A()'] = { RUBY = true } })
+    -- a `when` carries a PATTERN, not a boolean condition, so `case` contributes
+    -- nothing rather than a made-up equality. Sound refusal, not an omission.
+    rb('def f(v)\n  case v\n  when 1 then A()\n  else D()\n  end\nend\n',
+        { ['A()'] = {}, ['D()'] = {} })
+end)
+
+test('cfg: `block` is a TYPE-NAME COLLISION — lua guards survive it', function ()
+    if not ready_lang('lua') then skip 'no lua parser' end
+    -- ruby's brace block and lua's statement block are both `block`. Listing the
+    -- NAME in FN_BOUND would have silently disabled guards_over for lua — every
+    -- guard would stop dominating at the first block, which is the body of every
+    -- `if`. They are told apart by ruby's `body` field, which lua's block lacks.
+    local src = 'local function f(x)\n  if x then\n    do\n      U(x)\n    end\n  end\nend\n'
+    local root = vim.treesitter.get_string_parser(src, 'lua'):parse()[1]:root()
+    local n = assert(find(root, src, 'function_call', 'U(x)'))
+    eq('x', fmt(guard_set(n, src)), 'the guard reaches through a lua do-block')
+end)
+
 test('cfg: early-exit guard-clause post-dominates; non-terminating does not', function ()
     if not ready() then skip 'no php parser' end
     local root, src = parse(table.concat({
