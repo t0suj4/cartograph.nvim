@@ -2284,7 +2284,11 @@ constant folding. Where a guard *proves* something about a variable (`if x`,
 guard dominates: *in here, `x` is non-nil*. It reuses the same `guards_over` CFG
 dominance the taint sanitizers ride, and narrows only where the predicate actually
 proves it — an `and`-conjunction narrows every conjunct, but an `or` or a negated
-compound narrows nothing. The guard vocabulary is per-language and extensible. Beyond nil and
+compound narrows nothing. The region includes the branch *not* taken: in the `else` of
+`if not p` the variable is non-nil, and in an `elseif` every condition the chain already
+tested is known false — facts that are true of the most ordinary code there is and that
+this lens, for a while, declined to state because it had only ever been taught to speak
+about the positive branch. The guard vocabulary is per-language and extensible. Beyond nil and
 truthiness it reads **type tests**: `if type(x) == 'string'` narrows `x` to that type in
 the region — the seed of devirtualization — which is sound for a local (a call can't
 change its type) and, importantly, is only trusted when `type` is the real global and not
@@ -2715,13 +2719,34 @@ boolean path solver earn its keep? It asks whether any statement's dominating gu
 conjunction (`cfg.guards_over`) asserts both `C` and `¬C`, which would prove it
 unreachable — and reports a *ladder* of tiers (RAW → PURE → NOREASSIGN → STRICT),
 because the naive form is a name match and the drop between tiers is the finding.
-Across seven Lua corpora (50,964 functions) the filters removed **310 of 311** naive
-hits; the one survivor is real dead code, and it needed no solver at all — real guard
-conjunctions are small enough that contradiction detection is a set-membership test
-rather than a satisfiability problem. It refuses to print corpus numbers until a
-fixture of known positives *and* known near-misses passes, on the principle that a
-probe reporting zero is uninterpretable until it has been shown able to fire — a gate
-that caught two bugs in the probe itself before it reported anything.
+Across seven Lua corpora (~51,000 functions) the filters remove all but **three** naive
+hits, and no survivor needed a solver at all — real guard conjunctions are small enough
+that contradiction detection is a set-membership test rather than a satisfiability
+problem. It refuses to print corpus numbers until a fixture of known positives *and*
+known near-misses passes, on the principle that a probe reporting zero is
+uninterpretable until it has been shown able to fire — a gate that has now caught four
+bugs in the probe itself before it reported anything.
+
+Two of those three only became visible later, and how they did is the more useful half
+of the story. The first verdict was **one** survivor, and it was banked as a *lower
+bound* rather than an answer, because `guards_over` was at the time blind to the
+negative fact an `else` or `elseif` carries — so the shape where a copy-pasted condition
+is most likely to appear was the shape the probe could not see. Teaching the dominance
+relation to emit `¬C` in the else of `if C` raised the count, and both new finds are real
+defects in shipped third-party code: one where an early exit has already established a
+value truthy, making the `else` of a later test on it unreachable — so that function can
+never report a boolean `false`, only `nil` — and one where `elseif level == 3` is simply
+written twice, leaving the second branch dead. The same run also produced two *false*
+positives, and neither was caused by the change: both were admissions the top tier had
+always been capable of and had never reached. A condition reading a container
+(`if t[k] then … load() … if t[k] then`) is mutable through the intervening call exactly
+as a call is, which the name-keyed filters are structurally blind to and only the purity
+filter can refuse; and `char == "  "` versus `char == " "` were collapsed into one key by
+a normalizer that squashed whitespace over the condition's source *text*, when
+whitespace is insignificant between tokens and significant inside one. Making a
+mechanism more precise surfaces the false positives its filters could always have
+admitted — the first run after a precision fix is a report about the instrument as much
+as about the world.
 
 `tools/holecensus.lua` <corpus|path> [--by kind|tier|rule|file] [--verify [N]] is the
 **test-template hole census**: if a test were generated as a *template with holes*, how many holes would

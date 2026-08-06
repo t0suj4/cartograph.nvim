@@ -23,9 +23,13 @@
 -- LADDER of tiers, and the DROP between them is the finding, not a footnote:
 --
 --   RAW      same canonical key under both polarities. No filters. The naive number.
---   PURE     + the condition contains no call/table/closure/vararg (expr.is_pure).
---            `if f() then … if not f() then` is NOT a contradiction: two calls may
---            return different values.
+--   PURE     + the condition contains no call/table/closure/vararg (expr.is_pure)
+--            AND does not read a container (expr.reads_content). `if f() then …
+--            if not f() then` is NOT a contradiction: two calls may return
+--            different values — and `if t[k] then … load() … if t[k] then` is not
+--            one either, for the same reason. The container half was added when
+--            CART-0257 made an admissible false positive visible (AtlasLoot); the
+--            name-keyed tiers below it CANNOT see a mutation through an index.
 --   NOREASSIGN + no name in the condition is REASSIGNED anywhere in the function.
 --            Mirrors narrow.lua's shipped `mutated_of` (assignment_statement defs),
 --            whose header names this exact hazard: guards_over "can't see that
@@ -64,6 +68,26 @@ local at = require 'cartograph.at'
 
 local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or '' end
 local function squash(s) return (s:gsub('%s+', ' '):gsub('^ ', ''):gsub(' $', '')) end
+
+-- The KEY text: whitespace squashed everywhere EXCEPT inside a string literal,
+-- built by rejoining the node's children rather than rewriting its source text.
+-- A flat `gsub('%s+', ' ')` collapsed `char == "  "` (two spaces) and
+-- `char == " "` (one) into one key, and Skada/Modules/Nickname.lua:301/305 tests
+-- exactly those two in one elseif chain — so the CART-0257 negations turned a
+-- latent normalizer bug into a reported STRICT survivor. Whitespace is
+-- insignificant BETWEEN tokens and significant INSIDE one; a normalizer that
+-- does not know the difference manufactures contradictions.
+local function keytext(n, src)
+    if not n then return '' end
+    if n:type() == 'string' then return txt(n, src) end
+    local parts, any = {}, false
+    for c in n:iter_children() do
+        any = true
+        parts[#parts + 1] = keytext(c, src)
+    end
+    if not any then return squash(txt(n, src)) end
+    return table.concat(parts, ' ')
+end
 
 -- ── guard NORMALIZATION: a TS condition node → (key, polarity) ───────────────
 -- Only value-preserving rewrites, each individually sound:
@@ -108,11 +132,11 @@ local function normalize(n, src)
             if ot ~= '~=' and ot ~= '!=' then break end
             local l, r = n:field('left')[1], n:field('right')[1]
             if not (l and r) then break end
-            return squash(txt(l, src) .. ' == ' .. txt(r, src)), not pol, n
+            return keytext(l, src) .. ' == ' .. keytext(r, src), not pol, n
         else break end
     end
     if not n then return nil end
-    return squash(txt(n, src)), pol, n
+    return keytext(n, src), pol, n
 end
 
 -- ── the two filter inputs, per function ─────────────────────────────────────
@@ -196,14 +220,25 @@ local function fn_node(root, node)
     return nil
 end
 
--- the condition's expr IR, for purity + the names it reads
+-- the condition's expr IR, for purity + the names it reads.
+-- PURE = is_pure AND NOT reads_content. The container-read half was added after
+-- the CART-0257 else/elseif negations made a false positive VISIBLE that the
+-- tier had always been able to admit: AtlasLoot.lua:1224 tests
+-- `AtlasLoot_Data[dataID]`, its else branch calls LoadAddOn(moduleName) — whose
+-- entire job is to POPULATE that table — and re-tests the same index at 1240.
+-- No name is reassigned and none is defined in the function, so NOREASSIGN and
+-- STRICT (both name-keyed) are structurally blind to it; only purity can refuse
+-- it, and a container read is the same hazard as a call for the same reason —
+-- two evaluations may differ. `expr.reads_content` already existed and says so
+-- in its own docstring ("values a mutation elsewhere can change").
 local function cond_facts(cnode, src)
     local okr, row = pcall(expr.harvest_row, cnode, src, 'cond', 'lua')
     if not (okr and row and row.cond) then return nil end
     local okp, pure = pcall(expr.is_pure, row.cond)
+    local okc, reads = pcall(expr.reads_content, row.cond)
     local okn, names = pcall(expr.names, row)
-    if not (okp and okn) then return nil end
-    return { pure = pure, names = names }
+    if not (okp and okc and okn) then return nil end
+    return { pure = pure and not reads, names = names }
 end
 
 --- Contradictions in ONE function. Returns a list of findings, each a distinct
@@ -346,92 +381,146 @@ end
 
 -- ── SELFTEST: known positives AND known near-misses ─────────────────────────
 local FIXTURE = table.concat({
-    'local M = {}',                                     -- 1
-    '',                                                 -- 2
+    'local M = {}',
+    '',
     -- POSITIVE 1: nested `if x` / `if not x`, x is a param, never assigned
-    'local function p1(x)',                             -- 3
-    '    if x then',                                    -- 4
-    '        if not x then',                            -- 5
-    '            M.dead1 = 1',                          -- 6
-    '        end',                                      -- 7
-    '    end',                                          -- 8
-    'end',                                              -- 9
-    '',                                                 -- 10
+    'local function p1(x)',
+    '    if x then',
+    '        if not x then',
+    '            M.dead1 = 1',
+    '        end',
+    '    end',
+    'end',
+    '',
     -- POSITIVE 2: early-exit guard clause then the same condition
-    'local function p2(y)',                             -- 11
-    '    if y == 3 then return end',                    -- 12
-    '    if y == 3 then',                               -- 13
-    '        M.dead2 = 1',                              -- 14
-    '    end',                                          -- 15
-    'end',                                              -- 16
-    '',                                                 -- 17
+    'local function p2(y)',
+    '    if y == 3 then return end',
+    '    if y == 3 then',
+    '        M.dead2 = 1',
+    '    end',
+    'end',
+    '',
     -- POSITIVE 3: ~= normalizes to the == form with flipped polarity
-    'local function p3(z)',                             -- 18
-    '    if z ~= 4 then',                               -- 19
-    '        if z == 4 then',                           -- 20
-    '            M.dead3 = 1',                          -- 21
-    '        end',                                      -- 22
-    '    end',                                          -- 23
-    'end',                                              -- 24
-    '',                                                 -- 25
+    'local function p3(z)',
+    '    if z ~= 4 then',
+    '        if z == 4 then',
+    '            M.dead3 = 1',
+    '        end',
+    '    end',
+    'end',
+    '',
     -- NEAR-MISS A: impure condition — two calls may differ. RAW yes, PURE no.
-    'local function m1(t)',                             -- 26
-    '    if t:ok() then',                               -- 27
-    '        if not t:ok() then',                       -- 28
-    '            M.live1 = 1',                          -- 29
-    '        end',                                      -- 30
-    '    end',                                          -- 31
-    'end',                                              -- 32
-    '',                                                 -- 33
+    'local function m1(t)',
+    '    if t:ok() then',
+    '        if not t:ok() then',
+    '            M.live1 = 1',
+    '        end',
+    '    end',
+    'end',
+    '',
     -- NEAR-MISS B: reassigned between the guards. RAW+PURE yes, NOREASSIGN no.
-    'local function m2(w, f)',                          -- 34
-    '    if w then',                                    -- 35
-    '        w = f',                                     -- 36
-    '        if not w then',                            -- 37
-    '            M.live2 = 1',                          -- 38
-    '        end',                                      -- 39
-    '    end',                                          -- 40
-    'end',                                              -- 41
-    '',                                                 -- 42
+    'local function m2(w, f)',
+    '    if w then',
+    '        w = f',
+    '        if not w then',
+    '            M.live2 = 1',
+    '        end',
+    '    end',
+    'end',
+    '',
     -- NEAR-MISS C: SHADOWED by a fresh local — the inner `v` is a NEW binding.
     -- RAW+PURE+NOREASSIGN all yes (no assignment_statement!), STRICT no.
-    'local function m3(v, g)',                          -- 43
-    '    if v then',                                    -- 44
-    '        local v = g',                              -- 45
-    '        if not v then',                            -- 46
-    '            M.live3 = 1',                          -- 47
-    '        end',                                      -- 48
-    '    end',                                          -- 49
-    'end',                                              -- 50
-    '',                                                 -- 51
+    'local function m3(v, g)',
+    '    if v then',
+    '        local v = g',
+    '        if not v then',
+    '            M.live3 = 1',
+    '        end',
+    '    end',
+    'end',
+    '',
     -- NEAR-MISS D: THE REGRESSION CASE. The guards live inside a NESTED closure,
     -- and so does the `local s` / `s = h(s)` that invalidates them. A def-set read
     -- from the OUTER function's flow record cannot see either, which is exactly how
     -- the first version of this probe produced 12 false positives on `self` (the
     -- `local store = live() … store = whole_graph(store)` command-callback idiom).
     -- Must be detected RAW and killed by NOREASSIGN.
-    'local function m4(h)',                             -- 52
-    '    reg("v", function ()',                         -- 53
-    '        local s = h()',                            -- 54
-    '        if not s then return end',                 -- 55
-    '        s = h(s)',                                 -- 56
-    '        if not s then return end',                 -- 57
-    '        M.live4 = s',                              -- 58
-    '    end)',                                         -- 59
-    'end',                                              -- 60
-    '',                                                 -- 61
+    'local function m4(h)',
+    '    reg("v", function ()',
+    '        local s = h()',
+    '        if not s then return end',
+    '        s = h(s)',
+    '        if not s then return end',
+    '        M.live4 = s',
+    '    end)',
+    'end',
+    '',
+    -- NEAR-MISS E: a CONTAINER READ re-tested across a call that populates it —
+    -- the AtlasLoot shape. No name is reassigned and none is defined, so the
+    -- name-keyed tiers pass it; PURE must be the one to kill it.
+    'local function m5(t, k)',
+    '    if t[k] then',
+    '        M.hit = 1',
+    '    else',
+    '        populate(t, k)',
+    '        if t[k] then',
+    '            M.live5 = 1',
+    '        end',
+    '    end',
+    'end',
+    '',
+    -- CONTROL 2: two DIFFERENT string literals that a whitespace-squashing
+    -- normalizer collapses into one key — the Skada shape. Must be SILENT: it is
+    -- not a near-miss to be caught by a later tier, it is not a contradiction at
+    -- all, and reporting it is the normalizer manufacturing one.
+    'local function ok2(char)',
+    '    if char == "  " then',
+    '        M.two = 1',
+    '    elseif char == " " then',
+    '        M.one = 1',
+    '    end',
+    'end',
+    '',
     -- CONTROL: no contradiction at all
-    'local function ok1(a, b)',                         -- 62
-    '    if a then',                                    -- 63
-    '        if b then',                                -- 64
-    '            M.fine = 1',                           -- 65
-    '        end',                                      -- 66
-    '    end',                                          -- 67
-    'end',                                              -- 68
-    '',                                                 -- 69
-    'M.p1, M.p2, M.p3 = p1, p2, p3',                     -- 70
-    'M.m1, M.m2, M.m3, M.m4, M.ok1 = m1, m2, m3, m4, ok1', -- 71
-    'return M',                                          -- 72
+    'local function ok1(a, b)',
+    '    if a then',
+    '        if b then',
+    '            M.fine = 1',
+    '        end',
+    '    end',
+    'end',
+    '',
+    -- POSITIVE 4: THE ELSE PATH (CART-0257). ¬x holds in the else, so `if x`
+    -- inside it is unreachable. This shape yielded RAW 0 before guards_over
+    -- emitted else/elseif negations — the probe was blind to the most idiomatic
+    -- branch shape there is, which is why CART-0256's yield was banked as a
+    -- LOWER BOUND rather than an answer. Kept here so the fix cannot silently
+    -- regress: a zero from this probe is only meaningful if it can still fire.
+    'local function p4(x)',
+    '    if x then',
+    '        M.a = 1',
+    '    else',
+    '        if x then',
+    '            M.dead4 = 1',
+    '        end',
+    '    end',
+    'end',
+    '',
+    -- POSITIVE 5: THE ELSEIF CHAIN — a repeated condition, i.e. the copy-paste
+    -- defect this probe exists to find, and the place the ticket argued it is
+    -- MOST likely to occur. ¬y from standing on the chain ∧ y from the clause.
+    'local function p5(y)',
+    '    if y then',
+    '        M.b = 1',
+    '    elseif y then',
+    '        M.dead5 = 1',
+    '    end',
+    'end',
+    '',
+    'M.p1, M.p2, M.p3, M.p4, M.p5 = p1, p2, p3, p4, p5',
+    'M.m1, M.m2, M.m3, M.m4, M.m5 = m1, m2, m3, m4, m5',
+    'M.ok1, M.ok2 = ok1, ok2',
+    'return M',
 }, '\n') .. '\n'
 
 local function selftest()
@@ -452,7 +541,7 @@ local function selftest()
         return l[1]
     end
     -- positives must reach STRICT
-    for _, fn in ipairs { 'p1', 'p2', 'p3' } do
+    for _, fn in ipairs { 'p1', 'p2', 'p3', 'p4', 'p5' } do
         local f = one(fn)
         chk(f, fn .. ': expected exactly one contradiction, got '
             .. tostring(byfn[fn] and #byfn[fn] or 0))
@@ -482,8 +571,21 @@ local function selftest()
     chk(d and d.reassigned,
         'm4: must be killed by NOREASSIGN — the def-set must cross the CLOSURE boundary'
         .. ' (this is the 12-false-positive regression)')
-    -- control must be silent
+    -- THE CONTAINER READ: only PURE can refuse it, and it must.
+    local e = one('m5')
+    chk(e, 'm5: expected a RAW detection (container read re-tested across a call)')
+    chk(e and not e.pure,
+        'm5: must be killed by PURE — `t[k]` is mutable through a call, and the'
+        .. ' name-keyed tiers cannot see it (the AtlasLoot false positive)')
+    chk(e and not e.reassigned and not e.defined,
+        'm5: and NOREASSIGN/STRICT must NOT save us here — the point is that they'
+        .. ' pass it, so purity is load-bearing')
+    -- controls must be silent
     chk(byfn['ok1'] == nil, 'ok1: must report nothing')
+    chk(byfn['ok2'] == nil,
+        'ok2: `char == "  "` and `char == " "` are DIFFERENT conditions — a'
+        .. ' whitespace-squashing normalizer manufactures a contradiction here'
+        .. ' (the Skada false positive)')
     vim.fn.delete(root, 'rf')
     return fails
 end
@@ -500,8 +602,9 @@ if #fails > 0 then
     print(('pathsat: SELFTEST FAILED (%d) — refusing to report corpus numbers'):format(#fails))
     os.exit(1)
 end
-print('  ok — 3 positives reach STRICT; 3 near-misses detected RAW and killed at'
-    .. ' PURE / NOREASSIGN / STRICT respectively; 1 control silent')
+print('  ok — 5 positives reach STRICT (incl. the else + elseif shapes CART-0257'
+    .. ' made visible); 4 near-misses detected RAW and killed at'
+    .. ' PURE / NOREASSIGN / STRICT / PURE respectively; 2 controls silent')
 
 if not target or target == '--selftest' then
     print('pathsat: selftest only (pass a corpus|path to sweep)')

@@ -2,11 +2,12 @@
 
 local cfg = require 'cartograph.cfg'
 
-local function ready()
+local function ready_lang(lang)
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
     if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
-    return pcall(vim.treesitter.language.add, 'php')
+    return pcall(vim.treesitter.language.add, lang)
 end
+local function ready() return ready_lang('php') end
 
 -- parse php, return (root, src)
 local function parse(code)
@@ -38,14 +39,14 @@ local function guard_texts(node, src)
     return out
 end
 
-test('cfg: positive nesting dominates; else and condition do not', function ()
+test('cfg: positive nesting dominates; the else carries the NEGATION', function ()
     if not ready() then skip 'no php parser' end
     local root, src = parse(table.concat({
         'function f($x) {',
         '  if (valid($x)) {',
         '    sink_then($x);',      -- dominated by valid($x)
         '  } else {',
-        '    sink_else($x);',      -- NOT dominated (else)
+        '    sink_else($x);',      -- ¬valid($x) — NOT positively dominated
         '  }',
         '}',
     }, '\n'))
@@ -53,7 +54,77 @@ test('cfg: positive nesting dominates; else and condition do not', function ()
     local elsec = find(root, src, 'function_call_expression', 'sink_else')
     eq(1, #guard_texts(thenc, src), 'then-branch has one dominating guard')
     ok(guard_texts(thenc, src)[1]:find('valid', 1, true))
-    eq(0, #guard_texts(elsec, src), 'else-branch is not positively dominated')
+    -- BEFORE CART-0257 this asserted 0: the else path was correctly excluded from
+    -- POSITIVE domination and then nothing was said about it at all, so four
+    -- consumers read `if (!p) {} else { use(p) }` as knowing nothing about p.
+    local gs = guard_texts(elsec, src)
+    eq(1, #gs, 'the else branch is dominated by exactly one fact')
+    ok(gs[1]:sub(1, 1) == '!' and gs[1]:find('valid', 1, true),
+        'and it is the NEGATED condition, not the positive one: ' .. gs[1])
+end)
+
+-- The chain, per grammar family. LUA/PYTHON are FLAT (the clauses are sibling
+-- `alternative`s of one if_statement) and C/PHP are NESTED (`alternative` is a
+-- single else the next if lives inside) — the same walk has to produce the same
+-- conjunction from both shapes, which is the whole reason this is table-driven.
+local CHAIN = {
+    { 'lua', 'if x then A() elseif y then B() elseif z then C() else D() end' },
+    { 'python', 'if x:\n  A()\nelif y:\n  B()\nelif z:\n  C()\nelse:\n  D()\n' },
+    { 'c', 'void f(){ if (x) A(); else if (y) B(); else if (z) C(); else D(); }' },
+}
+-- guards as a normalized SET of `!?name` (paren/whitespace stripped), so one
+-- expectation covers grammars that wrap the condition differently
+local function guard_set(node, src)
+    local out = {}
+    for _, g in ipairs(cfg.guards_over(node, src)) do
+        local t = vim.treesitter.get_node_text(g.cond, src):gsub('[%s()]', '')
+        out[(g.neg and '!' or '') .. t] = true
+    end
+    return out
+end
+local function fmt(set)
+    local ks = {}
+    for k in pairs(set) do ks[#ks + 1] = k end
+    table.sort(ks)
+    return table.concat(ks, ' ')
+end
+
+for _, case in ipairs(CHAIN) do
+    local lang, code = case[1], case[2]
+    test('cfg: elseif chain — every earlier condition is negated (' .. lang .. ')', function ()
+        if not ready_lang(lang) then skip('no ' .. lang .. ' parser') end
+        local root = vim.treesitter.get_string_parser(code, lang):parse()[1]:root()
+        local calltype = lang == 'lua' and 'function_call' or (lang == 'python' and 'call' or 'call_expression')
+        local want = {
+            ['A('] = { x = true },
+            ['B('] = { y = true, ['!x'] = true },
+            ['C('] = { z = true, ['!y'] = true, ['!x'] = true },
+            ['D('] = { ['!z'] = true, ['!y'] = true, ['!x'] = true },
+        }
+        for needle, expect in pairs(want) do
+            local n = assert(find(root, code, calltype, needle), 'no node for ' .. needle)
+            eq(fmt(expect), fmt(guard_set(n, code)), needle .. ' in ' .. lang)
+        end
+    end)
+end
+
+test('cfg: python elif was UNSOUND, not merely imprecise', function ()
+    if not ready_lang('python') then skip 'no python parser' end
+    -- `elif_clause` was in neither the COND nor the ELSE table, so from the
+    -- SECOND elif the walk reached the if_statement with a child that was
+    -- neither `alternative`[1] nor a known else type — and positive_guard
+    -- returned the if's condition. A consumer was told `x` HOLDS in `elif z`,
+    -- which is exactly backwards. The first elif never showed it (it IS
+    -- `alternative`[1], so the `same(child, alt)` arm caught it) — which is why
+    -- a one-elif fixture would have passed and called the model sound.
+    local src = 'if x:\n  A()\nelif z:\n  C()\n'
+    local root = vim.treesitter.get_string_parser(src, 'python'):parse()[1]:root()
+    local c = assert(find(root, src, 'call', 'C('))
+    for _, g in ipairs(cfg.guards_over(c, src)) do
+        local t = vim.treesitter.get_node_text(g.cond, src)
+        if t == 'x' then ok(g.neg, 'x must be NEGATED inside `elif z`, never positive') end
+    end
+    eq('!x z', fmt(guard_set(c, src)))
 end)
 
 test('cfg: early-exit guard-clause post-dominates; non-terminating does not', function ()
@@ -83,12 +154,6 @@ test('cfg: JS ternary condition dominates the consequence, not the alternative',
     ok(guard_texts(cons, src)[1]:find('isValid', 1, true), 'guard is the ternary condition')
     eq(0, #guard_texts(alt, src), 'the ternary alternative is NOT dominated')
 end)
-
-local function ready_lang(lang)
-    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
-    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
-    return pcall(vim.treesitter.language.add, lang)
-end
 
 test('cfg: python ternary (positional, no condition field) dominates consequence', function ()
     if not ready_lang('python') then skip 'no python parser' end

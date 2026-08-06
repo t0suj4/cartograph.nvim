@@ -4,9 +4,14 @@
 -- but no branch structure. This is the cheap, syntactic slice: a node is
 -- POSITIVELY DOMINATED by a guard condition G iff it is nested in the guarded
 -- region of the construct headed by G — an if/elseif then-body, a while body,
--- a ternary then-branch. The else/alternative path is NEGATED and excluded
+-- a ternary then-branch. The else/alternative path is NOT positively dominated
 -- (soundness: a value validated in a condition is NOT guaranteed valid on the
--- else path — a consumer must still fire there).
+-- else path — a consumer must still fire there) — but it carries the NEGATIVE
+-- fact instead: in the `else` of `if C`, ¬C provably holds, and in an
+-- `elseif D`, ¬C ∧ D. Those were simply never emitted before CART-0257; the
+-- omission read as a claim about positive domination while four consumers
+-- (narrow / nilflow / sinkflow / lint) silently lost precision on the most
+-- idiomatic branch shape there is.
 --
 -- Computed on demand from an AST node (like df.get reads a node); NOT yet
 -- extract+folded (phase 1b — deferred; the weight measurement put it at ~1% of
@@ -28,8 +33,7 @@ local M = {}
 -- `if_clause`; only the `body` (element) is guarded. positive_guard() below
 -- resolves each shape.
 local COND = {
-    if_statement = true, elseif_statement = true, elseif_clause = true,
-    else_if_clause = true, while_statement = true,
+    if_statement = true, while_statement = true,
     conditional_expression = true, ternary_expression = true,
     list_comprehension = true, set_comprehension = true,
     dictionary_comprehension = true, generator_expression = true,
@@ -44,12 +48,32 @@ local COMPREHENSION = {
 local SHORTCIRCUIT = { binary_expression = true, boolean_operator = true }
 local SC_AND = { ['&&'] = true, ['and'] = true }
 local SC_OR = { ['||'] = true, ['or'] = true }
+-- ── the else/elseif chain (CART-0257) ────────────────────────────────────────
+-- An ELSEIF clause carries its OWN condition (positively dominating its body,
+-- hence folded into COND below) and stands on the negation of every condition
+-- the chain tested BEFORE it. A plain ELSE adds no condition and negates them
+-- all. TWO GRAMMAR FAMILIES, both handled by negated_chain():
+--   FLAT   (lua `elseif_statement` / python `elif_clause`): the clauses are
+--          `alternative` SIBLINGS of the one if_statement, so the preceding
+--          conditions are preceding siblings.
+--   NESTED (c/php/JS `else_clause`): `alternative` is a single else node the
+--          next if lives inside, so each hop up the chain contributes its own.
+-- `elif_clause` was missing from both tables, which is why python was not
+-- merely imprecise but UNSOUND: from the 2nd `elif` the walk reached the
+-- if_statement with a child that was neither its `alternative`[1] nor a known
+-- else type, so the if's condition was emitted as POSITIVELY dominating.
+local ELSEIF = {
+    elseif_statement = true, elseif_clause = true, else_if_clause = true,
+    elif_clause = true,
+}
+local ELSE_ONLY = { else_clause = true, else_statement = true }
 -- direct-child types that put us on the NEGATED (else/elseif) path of an
 -- enclosing if — the positive condition above does not dominate through them
-local ELSE = {
-    else_clause = true, else_statement = true, elseif_statement = true,
-    elseif_clause = true, else_if_clause = true,
-}
+local ELSE = {}
+for _, t in ipairs { ELSEIF, ELSE_ONLY } do
+    for k in pairs(t) do ELSE[k] = true end
+end
+for k in pairs(ELSEIF) do COND[k] = true end
 -- climbing stops here: a guard OUTSIDE the enclosing function does not
 -- dominate its body (params/sources are fresh per call)
 local FN_BOUND = {
@@ -95,6 +119,24 @@ local function positive_guard(p, child)
         return cond
     end
     return nil
+end
+
+-- The ¬-facts owed to standing on if-like `p`'s NEGATED path, appended to `out`:
+-- p's own condition, plus (FLAT grammars) every ELSEIF clause of p that the
+-- chain tested before reaching `child`. The trigger is the CLAUSE node, not its
+-- body, because a node inside an `elseif`'s CONDITION is on the negated path
+-- too — `elseif D` is only evaluated once every earlier condition failed.
+local function negated_chain(p, child, out)
+    local cond = p:field('condition')[1]
+    if not cond then return end
+    for c in p:iter_children() do
+        if same(c, child) then break end
+        if c:named() and ELSEIF[c:type()] then
+            local cc = c:field('condition')[1]
+            if cc then out[#out + 1] = { cond = cc, neg = true } end
+        end
+    end
+    out[#out + 1] = { cond = cond, neg = true }
 end
 
 -- statements that unconditionally leave the flow, so a preceding
@@ -155,9 +197,11 @@ local function if_body(ifnode)
 end
 
 --- Guards that structurally dominate `node`, as { cond, neg }: neg=false =
---- positive nesting (cond holds at node); neg=true = a preceding terminating
---- guard-clause `if(cond){…exit}` (so ¬cond holds at node). A node inside a
---- condition, or reached via an else/alternative, is not positively dominated.
+--- positive nesting (cond holds at node); neg=true = ¬cond holds at node, from
+--- a preceding terminating guard-clause `if(cond){…exit}`, an `||` left operand,
+--- or an else/elseif chain the node stands on. A node inside a condition is not
+--- dominated by it. Every consumer reads `neg` as pure POLARITY (the asserted
+--- truth value is `not neg`), so the three sources are interchangeable.
 function M.guards_over(node, src)
     local out = {}
     local child, p = node, node:parent()
@@ -165,7 +209,11 @@ function M.guards_over(node, src)
         if FN_BOUND[p:type()] then break end
         if COND[p:type()] then
             local cond = positive_guard(p, child)
-            if cond then out[#out + 1] = { cond = cond, neg = false } end
+            if cond then
+                out[#out + 1] = { cond = cond, neg = false }
+            elseif ELSE[child:type()] then
+                negated_chain(p, child, out)
+            end
         elseif SHORTCIRCUIT[p:type()] then
             local cond, neg = shortcircuit_guard(p, child, src)
             if cond then out[#out + 1] = { cond = cond, neg = neg } end
