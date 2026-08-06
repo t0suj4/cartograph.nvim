@@ -831,12 +831,26 @@ local spec = require('cartograph.providers.treesitter').spec
 -- (CART-0228): its nodes are `method` / `singleton_method`, and neither was listed.
 -- Verified by parsing: lua function_declaration · python function_definition · php
 -- method_declaration · go function_declaration · ruby method + singleton_method.
+-- ★ THIS TABLE IS A PER-LANGUAGE SET WITH NO OWNER, and it was missing odin's
+-- `procedure_declaration` — so even after flow learned to reach odin's body,
+-- M.of still returned nil for all 31955 odin functions, because it could not find
+-- the enclosing function NODE. `fn_types` is already a declared spec field
+-- (spec/contract.lua, TYPES tier) and this should read it rather than hardcode a
+-- partial copy; expr, fieldlink and narrow each keep their own. CART-0306.
+-- The language fence cannot see this one: a TABLE is the correct pattern, and the
+-- audit only flags direct comparisons — it cannot tell a complete table from a
+-- partial one, which is a limit worth knowing (CART-0305).
 local FN_TYPES = { function_declaration = true, function_definition = true,
     method_declaration = true, method_definition = true, function_item = true,
-    method = true, singleton_method = true }
-local EXT = {} -- file ext → lang key in spec (only those with a body_field flow)
+    method = true, singleton_method = true,
+    procedure_declaration = true } -- odin
+local EXT = {} -- file ext → lang key in spec (only those with a body-bearing flow)
 for lang, s in pairs(spec) do
-    if s.body_field and s.exts then for _, e in ipairs(s.exts) do EXT[e] = lang end end
+    -- body_of is the POSITIONAL twin of body_field (CART-0305): a language that
+    -- reaches its body by descent is just as supported as one that names it.
+    if (s.body_field or s.body_of) and s.exts then
+        for _, e in ipairs(s.exts) do EXT[e] = lang end
+    end
 end
 
 local function fn_node(node, src, lang)
@@ -872,6 +886,7 @@ function M.of(store, fn_id)
     if not fn then return nil end
     local cfg = { pfield = s.params_field, df_ids = s.df_ids, regime = s.regime,
         mods = s.binding_modifiers, -- CART-0234
+        body_of = s.body_of, params_of = s.params_of, -- CART-0305
         method = (node.kind == 'method') and lang == 'lua',
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'

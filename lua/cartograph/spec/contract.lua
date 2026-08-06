@@ -106,6 +106,14 @@ M.SLOTS = {
                                     -- `<const>`/`<close>`, whose node name collides with
                                     -- python's field access (CART-0234)
     params_field = 'ANALYSIS', body_field = 'ANALYSIS',
+    -- …and their POSITIONAL twins, for a grammar that does not LABEL either. Odin is
+    -- the case: a `procedure_declaration` holds a `procedure` wrapper which holds the
+    -- `parameters` and the `block`, none of them a named field, so both field-based
+    -- readers came back empty and odin got NO flow records at all — 31955 functions
+    -- dark, silently, because a function with no flow record simply yields no findings
+    -- (CART-0305). A hook rather than a `body_type` string: the body can be nested
+    -- arbitrarily deep, and a spec that must descend two levels should say how.
+    body_of = 'ANALYSIS', params_of = 'ANALYSIS',
     -- node types that BIND names (loop variables). df records them as `use` and
     -- never as `def`, so without this a loop-bound receiver reads as a free name —
     -- which put a local into externals' "real porting work" group until declared.

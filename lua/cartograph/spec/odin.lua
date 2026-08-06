@@ -68,6 +68,36 @@ return {
         ]=],
         -- Odin has no methods — every proc is free (UFCS is banked)
         is_method = function () return false end,
+        -- ★ ODIN LABELS NEITHER THE BODY NOR THE PARAMETERS. A
+        -- `procedure_declaration` holds a `procedure` WRAPPER, and that holds the
+        -- `parameters` and the `block` as positional children — odin's whole field
+        -- list has no `body` and no `params`. Both field-based readers therefore came
+        -- back empty and odin got NO flow records at all: 31955 functions with zero
+        -- fine flow, so optimize / untangle / narrow / expr.of / const-fold / exprlint
+        -- and the shape roster were not degraded on odin, they were ABSENT — and
+        -- silently, because a function with no flow record simply yields no findings
+        -- (CART-0305, measured). These two hooks are the positional twins of
+        -- body_field / params_field; flow.build prefers the field and falls back here.
+        body_of = function (def)
+            for c in def:iter_children() do
+                if c:named() and c:type() == 'procedure' then
+                    for g in c:iter_children() do
+                        if g:named() and g:type() == 'block' then return g end
+                    end
+                end
+            end
+            return nil
+        end,
+        params_of = function (def)
+            for c in def:iter_children() do
+                if c:named() and c:type() == 'procedure' then
+                    for g in c:iter_children() do
+                        if g:named() and g:type() == 'parameters' then return g end
+                    end
+                end
+            end
+            return nil
+        end,
         -- NODE-LOCAL tearing: a proc's key is `package.proc`, and the package
         -- comes from the file-top `package` decl (before any parse error), so a
         -- proc AFTER an error has lost no enclosing context. Tear only defs whose

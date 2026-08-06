@@ -306,9 +306,11 @@ end
 -- for coarse-dep PARITY: the pfield container's leaves; php `variable_name`
 -- drops its `$`; a method seeds 'self' first; nested declarators (C params,
 -- pointers) descend to the first name. `pfield` comes from the language cfg.
-local function param_names(fn, src, pfield, method)
+local function param_names(fn, src, pfield, method, params_of)
     local out = method and { 'self' } or {}
-    local ps = pfield and fn:field(pfield)[1]
+    -- params_of: the POSITIONAL twin of pfield, for a grammar that does not label the
+    -- parameter list either (odin nests `parameters` inside its `procedure` wrapper).
+    local ps = (pfield and fn:field(pfield)[1]) or (params_of and params_of(fn))
     if ps then
         for c in ps:iter_children() do
             local t = c:type()
@@ -552,7 +554,12 @@ function M.build(fnnode, src, cfg)
     -- initializer) came back with zero rows. MEASURED on a Factorio 1.1 mod: 249
     -- of its 344 field-shaping assignments (72%) are module top level.
     -- region() only iterates named children, so it needs no BODY-type node.
-    local body = cfg.seq and fnnode or fn_body(fnnode)
+    -- cfg.body_of: the per-language POSITIONAL body reader, for a grammar that does
+    -- not label the body (odin nests it inside a `procedure` wrapper). fn_body's
+    -- field-then-direct-child search cannot see a GRANDCHILD, and it must not fall
+    -- back to `fnnode` itself — that walks the parameters as bogus statements.
+    local body = cfg.seq and fnnode
+        or (cfg.body_of and cfg.body_of(fnnode)) or fn_body(fnnode)
     if body then region(body, 0, nil) end
     -- `cfg.method` seeds an implicit 'self' param — a per-language POLICY the
     -- caller decides (df seeds self only for lua colon-methods: `method and
@@ -562,7 +569,7 @@ function M.build(fnnode, src, cfg)
     -- non-function for its parameters is a category error, not a lucky nil.
     return { stmts = stmts, cfg = cfg,
         params = (not cfg.seq)
-            and param_names(fnnode, src, cfg.pfield, cfg.method or false) or {} }
+            and param_names(fnnode, src, cfg.pfield, cfg.method or false, cfg.params_of) or {} }
 end
 
 --- coarse projection: df's partition — TOP-LEVEL statements, each aggregating

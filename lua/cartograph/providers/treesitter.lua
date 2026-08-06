@@ -4571,9 +4571,11 @@ function M.extract(root, opts)
                 -- symbol stub carries none); the declared-return summary (dret) stays,
                 -- it's a cheap signature read the index/summaries want.
                 local _pf = pstart()
-                local fl = not defs_only and spec.body_field and flowmod.build(defn, src, {
+                local fl = not defs_only and (spec.body_field or spec.body_of)
+                    and flowmod.build(defn, src, {
                     pfield = spec.params_field, df_ids = spec.df_ids,
                     mods = spec.binding_modifiers, -- CART-0234
+                    body_of = spec.body_of, params_of = spec.params_of, -- CART-0305
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 padd('flow.build', _pf)
                 local dret, dretclass

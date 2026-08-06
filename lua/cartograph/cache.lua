@@ -73,7 +73,22 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 117 -- v117: A COMMENT IS NOT A STATEMENT IN JAVA OR RUST (CART-0304). flow's
+M.VERSION = 118 -- v118: ODIN GETS FINE FLOW (CART-0305). Odin labels NEITHER its
+               -- procedure body NOR its parameters — a `procedure_declaration` holds a
+               -- `procedure` WRAPPER which holds the `parameters` and the `block`, and
+               -- odin's whole field list has no `body` — so both field-based readers
+               -- came back empty and odin had ZERO flow records: 31955 functions dark,
+               -- silently, since a function with no flow record simply yields no
+               -- findings. Added `body_of`/`params_of` to the spec capability contract
+               -- as the POSITIONAL twins of body_field/params_field (a hook, not a
+               -- `body_type` string: the body can nest arbitrarily deep). MEASURED:
+               -- odin 0 -> 87736 flow rows / 21384 defs / 394115 uses, and expression
+               -- records 0 -> 600 of 600 sampled. Third consumer needed the same hook
+               -- (extractor, expr.of) and a FOURTH gate was expr's own hardcoded
+               -- FN_TYPES, which lacked `procedure_declaration` — a partial per-language
+               -- table the language fence cannot see, since it only flags direct
+               -- comparisons (CART-0306).
+               -- v117: A COMMENT IS NOT A STATEMENT IN JAVA OR RUST (CART-0304). flow's
                -- six comment skips all matched the single node name `comment`, which is
                -- what lua/ruby/php/python/go/js/c call it — java and rust call theirs
                -- `line_comment`/`block_comment` (+ rust `doc_comment`). So on those two
