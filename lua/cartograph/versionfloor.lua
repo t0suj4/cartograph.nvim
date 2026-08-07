@@ -23,6 +23,18 @@
 --     NOTHING and is counted as unknown, not as clean.
 --   · A language with no table is reported as uncovered, not as floor-free.
 
+-- @langs javascript python ruby tsx typescript
+-- MY FIRST GUESS HERE WAS `python ruby` AND THE FENCE REFUSED IT IMMEDIATELY: the
+-- module also carries the ECMAScript ladder (`M.FEATURES.javascript/typescript/tsx
+-- = ES`), so it compares js node types too. Exactly the spec/javascript.lua
+-- precedent — the real language set was wider than the obvious one and only the
+-- audit knew (CART-0304).
+--
+-- EVERY node literal below sits INSIDE a per-language feature table
+-- (M.FEATURES.<lang>[…].test), so each is that language's by construction — a
+-- structure the audit cannot see, since it reads the comparison and not the table
+-- it lives in. Hence the `@langs-ok` waivers rather than a rewrite: the tabling it
+-- would ask for is already there, one level up.
 local M = {}
 
 -- ── detector helpers (over the tree) ───────────────────────────────────────
@@ -111,6 +123,7 @@ M.FEATURES = {
             node = 'assignment',
             test = function (n)
                 for c in n:iter_children() do
+                    -- @langs-ok inside FEATURES.python — python's annotation node
                     if c:named() and c:type() == 'type' then return true end
                 end
                 return false
@@ -125,7 +138,8 @@ M.FEATURES = {
             node = 'type',
             test = function (n)
                 for c in n:iter_children() do
-                    if c:named() and c:type() == 'binary_operator' and anon(c, '|') then
+                    -- @langs-ok inside FEATURES.python — PEP 604 `X | Y` union
+                if c:named() and c:type() == 'binary_operator' and anon(c, '|') then
                         return true
                     end
                 end
@@ -159,12 +173,14 @@ local ES = {
         node = 'spread_element',
         test = function (n)
             local p = n:parent()
+            -- @langs-ok inside ES (the js/ts/tsx ladder) — object spread
             return p ~= nil and p:type() == 'object'
         end },
     { id = 'optional-catch', v = '2019', desc = 'catch {} without a binding',
         node = 'catch_clause',
         test = function (n)
             for c in n:iter_children() do
+                -- @langs-ok inside ES (the js/ts/tsx ladder) — optional catch binding
                 if c:named() and c:type() ~= 'statement_block' then return false end
             end
             return true
@@ -607,6 +623,7 @@ M.CHANGED_SYNTAX = {
             desc = '&:sym — Symbol#to_proc returns a lambda since 3.0',
             test = function (n)
                 for c in n:iter_children() do
+                    -- @langs-ok inside FEATURES.ruby / CHANGED.ruby — ruby symbol
                     if c:named() and c:type() == 'simple_symbol' then return true end
                 end
                 return false

@@ -6,9 +6,50 @@
 -- side-effecting operands is unsound). Read-only; a SUGGESTION, `~` where a runtime
 -- subtlety (NaN, metamethods, truthy≠true) means it's a smell not a certainty.
 
+-- @langs bash c cpp go java javascript lua php python ruby rust tsx typescript zig
+-- It runs wherever `expr.of` succeeds — every language declaring body_field or
+-- body_of — NOT lua, despite the "INC 1 = Lua" its report used to print. MEASURED
+-- before this declaration: js 225 fns / 0 findings, php 73 / 0, python 267 / 0,
+-- go 279 / 0, against lua 275 / 11 and rust 278 / 17. Those zeroes were not clean
+-- code; three rules were gated on LUA'S node names and could not fire (CART-0304).
+--
+-- ★ FIXING THE NAMES WAS NECESSARY AND NOT SUFFICIENT, and saying so matters more than
+-- the declaration. Measured with PLANTED POSITIVES (one file per language holding a
+-- self-assignment and a duplicated if/elseif condition): ruby went [] ->
+-- [self-assignment], but python and js still report nothing, for two reasons one layer
+-- DOWN in expr.lua — js/python wrap an assignment in `expression_statement` and
+-- assign_sides does not reach through it, so `lhs` comes back EMPTY and every lhs/rhs
+-- rule is dead; and python spells a comparison `comparison_operator`, absent from
+-- expr's BIN table, so `x > 1` keys as an honest-unknown and every PURITY-gated rule
+-- refuses it. CART-0314 holds the measurement. So a zero here still does not mean
+-- "clean" on those two languages — and the corpus census could not tell you that,
+-- because it read 0 both before and after. Only the planted fixture distinguished them.
+
 local expr = require 'cartograph.expr'
+local tsutil = require 'cartograph.spec.tsutil'
 
 local M = {}
+
+-- A PLAIN assignment `x = y`, per language. Deliberately NOT flow.lua's ASSIGN,
+-- which also carries `augmented_assignment_expression` because it answers "where
+-- are the def-position roots" — and `x += x` is emphatically not a self-assignment
+-- no-op. Same shape, different question, so a separate table that says why (the
+-- FNDECL test from CART-0308: do not unify on shape alone).
+local PLAIN_ASSIGN = {
+    assignment_statement = true,   -- lua
+    assignment = true,             -- ruby, python
+    assignment_expression = true,  -- php, js, c, cpp, java, go
+    variable_assignment = true,    -- bash
+}
+
+-- ★ A DECLARED REFUSAL, not a table with holes. The concat-in-loop rule needs an
+-- operator that means STRING CONCATENATION and nothing else. Lua's `..` and php's
+-- `.` qualify. Everywhere else the spelling is `+`, which is overloaded with
+-- arithmetic — `s = s + x` is an O(n²) accumulation only if both operands are
+-- strings, and that is a TYPE question the expression IR does not answer. Listing
+-- `+` here would fire the rule on every integer accumulator in the corpus, so the
+-- rule declines those languages instead, and this comment is why (CART-0304).
+local CONCAT_OP = { lua = '..', php = '.' }
 
 -- loop control heads (by raw node `t`) — mirrors optimize.LOOPISH
 local LOOPISH = { for_statement = true, for_in_statement = true,
@@ -99,6 +140,7 @@ function M.lint(store, fn_id)
     local got = expr.of(store, fn_id)
     if not got then return { unsupported = true, findings = {}, census = { total = 0, unknown = 0, kinds = {} } } end
     local rows = got.fl.stmts
+    local concat_op = CONCAT_OP[got.lang or '']
     local out, seen = {}, {}
     -- `node` is the OFFENDING EXPRESSION — the sub-expression the rule actually
     -- objected to, not the statement containing it. Every rule has it in hand when
@@ -172,7 +214,7 @@ function M.lint(store, fn_id)
             end
             -- (4) self-assignment: a REASSIGNMENT `x = x` (a `local x = x` is legitimate
             --     upvalue capture — excluded, it's a variable_declaration not assignment).
-            if row.t == 'assignment_statement'
+            if PLAIN_ASSIGN[row.t or '']
                 and #(row.expr.lhs or {}) == 1 and #(row.expr.rhs or {}) == 1 then
                 local l, rr = row.expr.lhs[1], row.expr.rhs[1]
                 if expr.is_pure(l) and expr.is_pure(rr) and expr.key(l) == expr.key(rr) then
@@ -182,15 +224,16 @@ function M.lint(store, fn_id)
                 end
             end
             -- (7) string-concat in a loop: `s = s .. x` accumulation → O(n²), use table.concat
-            if row.t == 'assignment_statement' and #(row.expr.lhs or {}) == 1
+            if PLAIN_ASSIGN[row.t or ''] and #(row.expr.lhs or {}) == 1
                 and #(row.expr.rhs or {}) == 1 and in_loop(r) then
                 local l, rr = row.expr.lhs[1], row.expr.rhs[1]
-                if l.k == 'name' and rr.k == 'bin' and rr.op == '..' then
+                if concat_op and l.k == 'name' and rr.k == 'bin' and rr.op == concat_op then
                     local reads = {}
                     for _, n in ipairs(expr.names({ rhs = { rr } })) do reads[n] = true end
                     if reads[l.n] then
                         add(row.l, 'concat-in-loop',
-                            ('`%s = %s .. …` inside a loop is O(n²) — accumulate into a table and table.concat once'):format(l.n, l.n),
+                            ('`%s = %s %s …` inside a loop is O(n²) — accumulate into a list and join once')
+                                :format(l.n, l.n, concat_op),
                             false, rr)
                     end
                 end
@@ -218,10 +261,10 @@ function M.lint(store, fn_id)
     -- (8) duplicated condition within an if-chain: the head `if` cond + its `elseif`
     --     conds; a later duplicate of an earlier one is unreachable.
     for r, row in ipairs(rows) do
-        if row.t == 'if_statement' and row.expr and row.expr.cond then
+        if tsutil.IF_HEAD[row.t or ''] and row.expr and row.expr.cond then
             local chain = { { line = row.l, cond = row.expr.cond } }
             for _, row2 in ipairs(rows) do
-                if row2.parent == r and (row2.t == 'elseif_statement' or row2.kind == 'elseif_statement')
+                if row2.parent == r and (tsutil.ELSEIF[row2.t or ''] or tsutil.ELSEIF[row2.kind or ''])
                     and row2.expr and row2.expr.cond then
                     chain[#chain + 1] = { line = row2.l, cond = row2.expr.cond }
                 end
@@ -323,7 +366,12 @@ function M.report(store, fn_id)
     if not node then return { 'expr: no such node' } end
     local res = M.lint(store, fn_id)
     if res.unsupported then
-        return { ('expr: %s not supported (INC 1 = Lua; the harvest is language-agnostic, langs slot in)')
+        -- NOT "INC 1 = Lua", which this said for months after the harvest had grown
+        -- to fourteen languages — a measured claim with a shelf life, in a string a
+        -- user reads (CART-0304). `unsupported` means expr.of declined the FILE, so
+        -- name that: the language has no body_field/body_of and gets no rows at all.
+        return { ('expr: %s not supported — this language declares no function body '
+            .. 'the flow builder can reach, so there are no expression rows to lint')
             :format(node.file and node.file:match('%.(%w+)$') or '?') }
     end
     local L = {}

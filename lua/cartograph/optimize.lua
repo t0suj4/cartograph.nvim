@@ -7,7 +7,13 @@
 -- reaching_cfg (now correct for accumulators/rmw + block-local reassignments —
 -- [[flow-precision-gaps]], the prerequisite) + effects purity ([[cartograph-licm-cse]]).
 
+-- @langs bash c cpp go java javascript lua php python ruby rust tsx typescript zig
+-- It rides the expression IR, so it is reached wherever expr.of succeeds. The PRE
+-- gate below ("is this a clean two-arm if/else") was matching LUA's elseif name
+-- only, which made it blind on every other language — and that gate is what keeps
+-- optapply.plan_pre from applying a rewrite to a mis-partitioned chain (CART-0304).
 local flow = require 'cartograph.flow'
+local tsutil = require 'cartograph.spec.tsutil'
 local effects = require 'cartograph.effects'
 local expr = require 'cartograph.expr'
 local callrec = require 'cartograph.callrec'
@@ -379,12 +385,25 @@ function M.pre(store, fn_id)
     end
     local hoists = {}
     for H = 1, n do
-        if rows[H].t == 'if_statement' then
+        if tsutil.IF_HEAD[rows[H].t or ''] then
             -- arms present under H; PRE only for the clean two-arm if/else (no elseif)
             local has_elseif, has_else = false, false
             for r = 1, n do
                 if rows[r].parent == H then
-                    if rows[r].t == 'elseif_statement' or rows[r].kind == 'elseif_statement' then has_elseif = true end
+                    -- ★ BOTH GRAMMAR FAMILIES, and deliberately OVER-detecting.
+                    -- FLAT grammars name the arm (lua `elseif_statement`, python
+                    -- `elif_clause`, ruby `elsif`). NESTED ones (c, php, js) have no
+                    -- elseif node at all — the arm is a plain if_statement under the
+                    -- else, which shows up here as a child row that is itself an IF
+                    -- head. Matching only lua's name left this gate BLIND on every
+                    -- other language, and it is what stops PRE from treating an
+                    -- if/elseif CHAIN as a clean two-arm if/else — a wrong partition
+                    -- that optapply.plan_pre would then APPLY (CART-0304).
+                    -- The IF_HEAD arm also matches a plain `if` nested in the THEN
+                    -- branch, which is not an elseif. That over-detection is the
+                    -- SAFE direction: it only makes PRE decline, never mis-hoist.
+                    if tsutil.ELSEIF[rows[r].t or ''] or tsutil.ELSEIF[rows[r].kind or '']
+                        or tsutil.IF_HEAD[rows[r].t or ''] then has_elseif = true end
                     if rows[r].pol == 'else' then has_else = true end
                 end
             end

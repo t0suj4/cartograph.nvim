@@ -16,6 +16,11 @@
 --
 -- Pure consumer: no extraction change, every fact already in the graph.
 
+-- @langs lua php javascript python typescript tsx
+-- NOT a lua module despite the neighbours: `field_of` reads php's `variable_name`
+-- wrapper and pairs `dot_index_expression`/`member_access_expression` and
+-- `bracket_index_expression`/`subscript_expression` as or-groups — it was written
+-- polyglot and nothing said so (the spec/javascript.lua precedent, CART-0304).
 local M = {}
 
 M.LABELS = { 'const', 'dead', 'set-once', 'single-writer', 'multi-writer',
@@ -73,6 +78,7 @@ end
 -- the immediate field of a base-var occurrence, or nil for a whole-var use
 local function field_of(c, src)
     local p = c:parent()
+    -- @langs-ok php's `$x` wrapper; a no-op peel on every other declared grammar
     if p and p:type() == 'variable_name' then c = p; p = p:parent() end -- php $x
     if not p then return nil end
     local t = p:type()

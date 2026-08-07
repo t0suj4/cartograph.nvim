@@ -24,6 +24,18 @@
 --   oa.run_at(store, 'm.lua', 5)              -- plan+apply the opt at m.lua:5
 --   -- oa.report(store, fn_id) lists what's applyable without touching the file
 
+-- @langs lua
+-- It SERVES lua: the rewrites it emits are lua syntax (`local x = …`), its ASSIGN
+-- table and call-node test are lua's, and `builtins` — the no-throw gate — has one
+-- table, lua's.
+--
+-- ★ BUT `lang_of` ADMITS ALL FOURTEEN body_field LANGUAGES, so the verb is REACHED
+-- on files it does not serve. That gap is real and now honest rather than silent:
+-- the localize decline used to blame the USER'S ROOT ("not a genuine always-present
+-- global") for our own missing vocabulary, which invites a reader to discharge a
+-- hedge whose premise was never in question. It now names the gap. Declaring `lua`
+-- rather than the admitted fourteen states what is true; CART-0315 tracks closing
+-- the admission itself (CART-0304).
 local optimize = require 'cartograph.optimize'
 local txn = require 'cartograph.txn'
 local expr = require 'cartograph.expr'
@@ -281,7 +293,19 @@ function M.plan_localize(store, fn_id, opts)
                 local reason, class, res, waived, name = nil, nil, nil, nil, c.leaf
                 if not ln then reason, class = 'could not locate the loop', 'blocked'
                 elseif nested then reason, class = 'loop contains a nested function (scope-unsafe)', 'risk'
-                elseif not (rootname and builtins.genuine('lua', rootname, bound)) then
+                elseif not builtins[lang] then
+                    -- ★ NAME THE REAL GAP. `lang_of` admits every body_field language —
+                    -- 14 of them — but `builtins` has ONE table, lua's. On the other
+                    -- thirteen the genuine() test could only ever answer false, and the
+                    -- decline below blamed the USER'S ROOT ("not a genuine always-present
+                    -- global") for our own missing vocabulary. A hedge with a false
+                    -- premise is worse than a refusal, because it invites the reader to
+                    -- discharge it by asserting something that was never in question
+                    -- (CART-0304). The verb still declines; it just says why.
+                    reason, class = ('no builtins vocabulary for %s — cannot tell an '
+                        .. 'always-present global from a local, so the hoist is not '
+                        .. 'provably no-throw'):format(lang), 'blocked'
+                elseif not (rootname and builtins.genuine(lang, rootname, bound)) then
                     -- genuine = a stdlib/vim global NOT shadowed by a local/param here. A
                     -- shadowed `math` breaks the no-throw insertion (the hoisted `local
                     -- f = math.f` could raise if the local math is nil) → declined.

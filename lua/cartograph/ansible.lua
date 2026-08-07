@@ -18,6 +18,11 @@
 -- persisted (nodes/edges marked an=true). Needs the yaml parser; without it
 -- the pass is skipped (see :checkhealth cartograph).
 
+-- @langs any
+-- Ansible playbooks are YAML, and no yaml grammar is installed here — so langaudit
+-- SKIPS every literal in this file and a clean run proves nothing about it. `any`
+-- rather than `yaml` says that honestly: the claim is "not a tree-sitter node
+-- vocabulary the fence can check", not "checked and clean" (CART-0304).
 local M = {}
 
 local R0 = { start = { line = 0, char = 0 }, ['end'] = { line = 0, char = 0 } }

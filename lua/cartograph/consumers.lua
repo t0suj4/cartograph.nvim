@@ -24,6 +24,9 @@
 -- threading through the CSR makes this interprocedural
 -- ([[graph-vm-type-resolution]], [[cartograph-shape-roster]]).
 
+-- @langs lua
+-- Lua-gated at every entry (`%.lua$`), so the lua node types below are the whole
+-- claim rather than an assumption.
 local M = {}
 
 -- taint kinds: 'list' = a list of shape records; 'elem' = one record;

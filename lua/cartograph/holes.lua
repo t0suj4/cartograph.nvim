@@ -17,6 +17,11 @@
 -- that decides it (the census and the emitter must agree on which functions are
 -- emittable, or the headline measures a different population than the verb serves).
 
+-- @langs lua
+-- The emittability census is lua-shaped: `return_statement` is lua's name (ruby
+-- says `return`, rust `return_expression`), and the annotation tiers it ranks are
+-- LuaLS `---@` docblocks. Declared narrow so widening it is a decision someone
+-- makes on purpose — see [[cartograph-characterization-arc]] first (CART-0304).
 local M = {}
 
 local annot = require 'cartograph.annot'

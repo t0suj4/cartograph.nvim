@@ -91,10 +91,10 @@ local SC_OR = { ['||'] = true, ['or'] = true }
 -- else type, so the if's condition was emitted as POSITIVELY dominating.
 -- ruby is the NESTED family (`elsif` carries the next clause as its alternative)
 -- and its plain else is the bare type `else`.
-local ELSEIF = {
-    elseif_statement = true, elseif_clause = true, else_if_clause = true,
-    elif_clause = true, elsif = true,
-}
+-- ONE HOME, beside COMMENT and PARENS (CART-0304): exprlint and optimize each
+-- reached for the bare literal `elseif_statement` instead — lua's name — so this
+-- set moved to spec/tsutil rather than being copied a third and fourth time.
+local ELSEIF = require('cartograph.spec.tsutil').ELSEIF
 local ELSE_ONLY = { else_clause = true, else_statement = true, ['else'] = true }
 -- direct-child types that put us on the NEGATED (else/elseif) path of an
 -- enclosing if — the positive condition above does not dominate through them

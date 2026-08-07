@@ -50,6 +50,37 @@ M.PARENS = {
     parenthesized_statements = true,   -- ruby
 }
 
+-- THE ELSEIF VOCABULARY, third resident of this file for the same reason as the
+-- two above (CART-0304). Lived as a cfg.lua local; exprlint and optimize each
+-- reached for the single literal `elseif_statement` instead, which is LUA's name.
+--
+-- ★ AND THE TWO GRAMMAR FAMILIES ARE THE POINT, not the spellings. FLAT grammars
+-- give an elseif its own node type (lua `elseif_statement`, python `elif_clause`,
+-- ruby `elsif`) and it is a SIBLING alternative. NESTED grammars (c, php, js) have
+-- NO elseif node at all — `else if` is a plain `if_statement` inside an
+-- `else_clause`. So a table can never answer "is this an elseif" for the nested
+-- family, and a consumer that walks an if-CHAIN by node type is not merely missing
+-- entries there, it is asking a question the grammar does not answer. That is a
+-- REFUSAL to declare, not a table row to add.
+M.ELSEIF = {
+    elseif_statement = true,   -- lua
+    elseif_clause = true,
+    else_if_clause = true,
+    elif_clause = true,        -- python
+    elsif = true,              -- ruby
+}
+
+-- if-statement HEADS. Deliberately NOT cfg's `COND`, which also carries while /
+-- ternary / comprehension because it answers "does this node guard something".
+-- An if-chain walker wants the `if` family alone (the FNDECL test from CART-0308:
+-- same shape is not the same question).
+M.IF_HEAD = {
+    if_statement = true,       -- lua, python, c, php, js, java, go, …
+    ['if'] = true,             -- ruby
+    if_expression = true,      -- rust
+    if_modifier = true,        -- ruby `x if cond`
+}
+
 --- Peel paren wrappers off `node`, returning the innermost named child.
 function M.unparen(node)
     while node and M.PARENS[node:type()] do
