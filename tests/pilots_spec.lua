@@ -135,13 +135,16 @@ test('lens: each row ANCHORS to its statement line, so hover needs no new code',
 end)
 
 test('lens: never the word CLEAN — a row states what was CHECKED', function ()
-    -- MEASURED, and the reason this test exists: with a python parser on the rtp
-    -- (which the full suite gets, because flow_spec's ready() appends
-    -- nvim-treesitter to the rtp) `def f(a): if a == a:` harvests FIVE expression
-    -- nodes and trips ZERO rung-0 rules, because the rules are Lua-authored. The
-    -- lens said "(clean — no rung-0 findings)" about a language nothing had
-    -- checked. Parser availability is an ENVIRONMENT fact, so this asserts the
-    -- invariant that holds either way: no verdict without coverage.
+    -- ★ THE ORIGINAL PREMISE WAS FIXED, NOT WEAKENED (CART-0314). This test was
+    -- written because `def f(a): if a == a:` harvested five expression nodes and
+    -- tripped ZERO rung-0 rules — the rules were Lua-authored, so the lens said
+    -- "(clean — no rung-0 findings)" about a language nothing had checked. Python's
+    -- `comparison_operator` is now in expr's BIN table, so the SAME case reports
+    -- `self-compare` with census.unknown = 0: the coverage the test was documenting
+    -- the absence of now exists.
+    -- The INVARIANT it guards outlives that and is what is asserted below: the lens
+    -- never says "clean", and it states either what it read or what it found. Parser
+    -- availability is still an ENVIRONMENT fact, so both branches must hold.
     project({ ['a.py'] = 'def f(a):\n    if a == a:\n        return 1\n    return a\n' })
     store.ingest({ schema = 1, root = TMP, nodes = {
         { id = 'a.py', name = 'a.py', kind = 'module', file = 'a.py',
@@ -154,8 +157,10 @@ test('lens: never the word CLEAN — a row states what was CHECKED', function ()
     local lines = render_lens('fn', 'pf', 'lints')
     local joined = table.concat(lines, ' ')
     ok(not joined:find('clean'), 'no all-clear verdict: ' .. joined)
-    ok(joined:find('read') or joined:find('⚠'),
-        'it says what was read (or that nothing was): ' .. joined)
+    -- a listed FINDING is also not an all-clear — accept it alongside the
+    -- coverage line, since which one appears depends on the parser being present
+    ok(joined:find('read') or joined:find('⚠') or joined:find('self%-compare'),
+        'it says what was read, or what it found: ' .. joined)
 end)
 
 test('lens: a partly-unread function marks its findings a LOWER BOUND', function ()

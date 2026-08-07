@@ -13,17 +13,29 @@
 -- go 279 / 0, against lua 275 / 11 and rust 278 / 17. Those zeroes were not clean
 -- code; three rules were gated on LUA'S node names and could not fire (CART-0304).
 --
--- ★ FIXING THE NAMES WAS NECESSARY AND NOT SUFFICIENT, and saying so matters more than
--- the declaration. Measured with PLANTED POSITIVES (one file per language holding a
--- self-assignment and a duplicated if/elseif condition): ruby went [] ->
--- [self-assignment], but python and js still report nothing, for two reasons one layer
--- DOWN in expr.lua — js/python wrap an assignment in `expression_statement` and
--- assign_sides does not reach through it, so `lhs` comes back EMPTY and every lhs/rhs
--- rule is dead; and python spells a comparison `comparison_operator`, absent from
--- expr's BIN table, so `x > 1` keys as an honest-unknown and every PURITY-gated rule
--- refuses it. CART-0314 holds the measurement. So a zero here still does not mean
--- "clean" on those two languages — and the corpus census could not tell you that,
--- because it read 0 both before and after. Only the planted fixture distinguished them.
+-- ★ FIXING THE NAMES WAS NECESSARY AND NOT SUFFICIENT. Measured with PLANTED
+-- POSITIVES (one file per language holding a self-assignment and a duplicated
+-- if/elseif condition), the name fix alone moved only ruby, [] -> [self-assignment];
+-- python and js still reported nothing, blocked one layer DOWN in expr.lua. Both
+-- blockers are now fixed there (CART-0314): an `expression_statement` wrapping a
+-- plain assignment is unwrapped, so `lhs` is populated, and python's
+-- `comparison_operator` is in the BIN table, so `x > 1` is no longer an
+-- honest-unknown that every purity gate must refuse. The fixture now reads
+--   lua [duplicated-condition self-assignment] · python [duplicated-condition
+--   self-assignment] · ruby [self-assignment] · js [self-assignment]
+-- js lacks duplicated-condition BY DESIGN: it is a NESTED-else grammar with no
+-- elseif node at all, which spec/tsutil states as a refusal rather than a gap.
+--
+-- ★★ AND THE CORPUS CENSUS COULD NOT HAVE TOLD YOU ANY OF THIS. It read 0 on
+-- js/php/python/go before the name fix, after it, AND after the IR fix — three
+-- identical readings across two real repairs. What changed underneath was capability;
+-- what the census measures is the corpus, and django/hugo/grocy simply contain no
+-- self-assignment and no duplicated if-chain condition in the sampled functions. That
+-- the two zeroes are now DIFFERENT — "these corpora are clean" rather than "these
+-- rules cannot fire" — is invisible in the number and is the whole point: a zero has
+-- to be interrogated with a planted positive, not with a bigger corpus. (rust's 17
+-- constant-condition findings are the cross-check that the pipeline does fire on a
+-- non-lua language when the pattern is actually present.)
 
 local expr = require 'cartograph.expr'
 local tsutil = require 'cartograph.spec.tsutil'
@@ -40,6 +52,14 @@ local PLAIN_ASSIGN = {
     assignment = true,             -- ruby, python
     assignment_expression = true,  -- php, js, c, cpp, java, go
     variable_assignment = true,    -- bash
+    -- ★ AND THE WRAPPER, because the ROW keeps the wrapper's type. expr.harvest_row
+    -- now unwraps an `expression_statement` holding a plain assignment (CART-0314),
+    -- but `row.t` still comes from FLOW, which records the statement node — so a
+    -- js/python `y = x` row reads `expression_statement` however well the IR split
+    -- it. The real discriminator is the SHAPE the guards below already test
+    -- (exactly one lhs and one rhs), which no bare call or augmented assignment
+    -- has; this entry just stops the type test from vetoing the shape test.
+    expression_statement = true,
 }
 
 -- ★ A DECLARED REFUSAL, not a table with holes. The concat-in-loop rule needs an

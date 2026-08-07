@@ -188,7 +188,19 @@ local INDEX = { bracket_index_expression = true, subscript_expression = true,
 local METHOD = { method_index_expression = true }
 local CALL = { function_call = true, call_expression = true, call = true,
     function_call_expression = true }
-local BIN = { binary_expression = true, binary_operation = true }
+-- BINARY operator nodes. `comparison_operator`/`boolean_operator` are PYTHON's
+-- spellings, and their absence is why every purity-gated analyzer was dead there:
+-- `x > 1` fell to the honest-unknown `?` path, and `is_pure` correctly refuses an
+-- unknown, so narrow / exprlint / optimize all declined python conditions without
+-- ever saying they could not read them (CART-0314).
+-- ★ `comparison_operator` IS N-ARY. Python chains: `1 < x < 9` has THREE operands,
+-- and the 2-operand model below would silently drop the third — a vanished read,
+-- which is the one thing the closed schema exists to prevent. The build guard sends
+-- any arity but 2 to `?`, whose `kids` keep every sub-expression, so a chain stays
+-- honest rather than becoming wrong. (`not x` is `not_operator`, a separate UN
+-- entry that is deliberately still unmodelled — it reads as `?`.)
+local BIN = { binary_expression = true, binary_operation = true,
+    comparison_operator = true, boolean_operator = true }
 local UN = { unary_expression = true, unary_operation = true }
 local TABLE = { table_constructor = true, table = true }
 local ALLOCFN = { function_definition = true, function_declaration = true,
@@ -328,7 +340,7 @@ function build_core(node, src, lang)
         local f = build(callee, src, lang)
         return { k = 'call', f = f, a = a, method = (f.k == 'field' and f.method) or false }
     end
-    if BIN[t] then
+    if BIN[t] and #operands(node) == 2 then
         local o = operands(node)
         return { k = 'bin', op = op_token(node, src), l = build(o[1], src, lang), r = build(o[2], src, lang) }
     end
@@ -460,8 +472,26 @@ end
 local ASSIGN = { assignment_statement = true, assignment = true,
     assignment_expression = true, augmented_assignment_expression = true,
     variable_assignment = true }
+-- ASSIGN minus the augmented forms — the ones whose target is written and NOT read.
+-- Ruby's `operator_assignment` is in neither table: ruby `x += 1` is unmodelled
+-- today, and widening that here would be a separate change with its own measurement
+-- (CART-0316).
+local PLAIN_ASSIGN = { assignment_statement = true, assignment = true,
+    assignment_expression = true, variable_assignment = true }
+-- statement wrappers: grammars that make an assignment an EXPRESSION need a
+-- statement node around it (js, python, c, java, go).
+local STMT_WRAP = { expression_statement = true }
 local LOCALDECL = { variable_declaration = true, local_declaration = true,
-    local_variable_declaration = true }
+    local_variable_declaration = true,
+    -- js/ts `let`/`const`. Its absence had the same effect as the missing
+    -- expression_statement unwrap one line up: `let y = x` harvested whole, so the
+    -- declared NAME counted as a read (gate extra=[y]) (CART-0314).
+    lexical_declaration = true }
+-- the name=value pair inside a declaration, where the grammar uses one rather than
+-- nesting a whole assignment node (js/ts `let y = x`, java `int y = x`). The bare
+-- path below cannot serve these: it collects every NAME child as a target, which
+-- for a declarator would put the VALUE `x` in the lhs and leave rhs empty.
+local DECLARATOR = { variable_declarator = true, init_declarator = true }
 local RET = { return_statement = true }
 -- sub-region boundaries harvest must NOT descend from a control HEAD (mirrors du's
 -- stop_body: the head owns its condition/clause, not the body or sibling clauses).
@@ -498,10 +528,38 @@ function M.harvest_row(node, src, hint, lang)
         return { lhs = {}, rhs = rhs, cond = cond and build(cond, src, lang) or nil }
     end
     local t = node:type()
+    -- ★ AN `expression_statement` WRAPPING A PLAIN ASSIGNMENT, unwrapped exactly as
+    -- lua's `local x = e` is below. js and python put `y = x` inside one, so the
+    -- ASSIGN branch never saw it and the whole statement harvested as a single rhs
+    -- value: `lhs` came back EMPTY and the assignment TARGET counted as a read. Not
+    -- silence this time but a real disagreement, and expr.gate was already reporting
+    -- it (extra=[y]) — on real js and python, where nobody was running it, while the
+    -- synthetic js corpus happens to contain no bare `y = x;` to catch it.
+    -- PLAIN forms only. An augmented `x += 1` must keep the whole-node reading:
+    -- du records x in `rmw`, the IR has no rmw concept on a target, so splitting it
+    -- would make reads={x,1} disagree with use∪rmw={x} — trading a fixed gate
+    -- finding for a new one (CART-0314).
+    if STMT_WRAP[t] then
+        for c in node:iter_children() do
+            if c:named() and PLAIN_ASSIGN[c:type()] then
+                return M.harvest_row(c, src, nil, lang)
+            end
+        end
+    end
     -- lua `local x = e` wraps an assignment_statement; unwrap to it
     if LOCALDECL[t] then
         for c in node:iter_children() do
             if c:named() and ASSIGN[c:type()] then return M.harvest_row(c, src, nil, lang) end
+        end
+        -- a DECLARATOR child carries name/value as fields — split it like an assignment
+        for c in node:iter_children() do
+            if c:named() and DECLARATOR[c:type()] then
+                local nm = c:field('name')[1] or c:field('declarator')[1]
+                local vl = c:field('value')[1]
+                if nm and vl then
+                    return { lhs = { build(nm, src, lang) }, rhs = { build(vl, src, lang) } }
+                end
+            end
         end
         -- bare `local a, b` (no initializer): the names are defs, no value exprs
         local lhs = {}
