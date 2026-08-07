@@ -1700,17 +1700,23 @@ four verified names (PHP `member_access_expression`, Python `attribute` and
 corpus, 0 to 154 on Python, and **38 to 3363 on Go** while removing a third of its
 opacity — from one node name.
 
-Still outside it: **Java** (`method_invocation` and `argument_list` are 58% of its
-unknowns in one concept, and adding `field_access` alone was tried and reverted
-because it unblocked nothing while the surrounding calls stayed opaque), and
-**Ruby**, which produces no expression records at all — though *not* for want of a
-CFG: measured, 2104 of its 2303 functions do carry flow records, so liveness,
-reaching and the dataflow-based verbs work there. It is the expression layer
-specifically that declines the language, which is why `:CartographUntangle` gives a
-real answer on Ruby while `narrow` and `optimize` say so and stop. Where the
-iterated expression
-of a loop is itself a bare name it is treated as a binding, which can only make an
-external name look local rather than inventing one.
+Still outside it: **Java**, where `method_invocation` and `argument_list` are 58% of
+the unknowns in one concept, and adding `field_access` alone was tried and reverted
+because it unblocked nothing while the surrounding calls stayed opaque. Where the
+iterated expression of a loop is itself a bare name it is treated as a binding, which
+can only make an external name look local rather than inventing one.
+
+This paragraph used to name **Ruby** here too, and say it produced no expression
+records at all. That was measured, true when written, and false the next day — the
+commit that added Ruby's `method` and `singleton_method` node names landed while the
+sentence stayed. Ruby now answers for 173 of 192 sampled functions. The correction is
+worth keeping visible rather than quietly deleting, because *a measured fact quoted in
+prose is a claim with a shelf life* and nothing in the tree fences one: the doc audit
+checks names against a registry and counts against the spec roster, and a sentence
+asserting that a language produces **none** of something is neither — its only oracle
+is a run. Note which direction rots unseen. A stale claim that a language *is* served
+gets caught the first time somebody tries it; a stale claim that it *is not* is never
+caught, because nobody tries.
 
 ### Stages: one root, one language, three environments
 
@@ -2579,7 +2585,17 @@ nvim --headless -u NONE -l tools/observe.lua bnw      # any lua corpus as the wo
 # snapshots keyed by the FILE's language (mixed corpora exercise embedded
 # langs); pack vocab is audited only where the pack is ACTIVE; plus GAP
 # candidates (frequent plain-unresolved callees no vocab claims — where the
-# next pack comes from).
+# next pack comes from). It also fences the one spec field the LANGUAGE FENCE
+# is blind to: `fn_types` is a TABLE of node types, not a query, so nothing
+# compiled it and a php entry the grammar had RENAMED sat there naming nothing.
+# Two directions, because only the second catches an OMISSION and an omission
+# is what a partial table looks like: every entry must EXIST in the grammar
+# (the compile tier), and every node type the `functions` query is observed to
+# capture as a def must be NAMED by the set. An empty set is read as a declared
+# REFUSAL rather than a defect — scheme's function node is `list`, the same
+# type as every other s-expression, so it genuinely cannot answer from node
+# types alone and says so instead of falling back to a default that would
+# report "no functions in this file".
 nvim --headless -u NONE -l tools/specaudit.lua              # default corpus set
 nvim --headless -u NONE -l tools/specaudit.lua ruby rails   # explicit corpora
 nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no snapshot

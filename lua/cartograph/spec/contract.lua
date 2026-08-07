@@ -78,6 +78,14 @@ M.SLOTS = {
     -- local-inference rung lands here)
     chain_root = 'TYPES', chain_type = 'TYPES', scan_fields = 'TYPES',
     fields = 'TYPES', def_ret = 'TYPES', fn_types = 'TYPES',
+    -- the subset of fn_types the extractor never MINTS as a node. It QUALIFIES
+    -- fn_types, so it lives beside it rather than in ANALYSIS with its consumer:
+    -- one fact, one tier. "Which function encloses this node" (fn_types) and
+    -- "where does the flow walk stop" (fn_types minus this, plus the legacy set)
+    -- are different questions, and a stop at an unminted type DELETES the rows
+    -- rather than relocating them to a node that would hold them — measured, go
+    -- 30 -> 1772 dfgate divergences when the two were conflated (CART-0308).
+    fn_unminted = 'TYPES',
     annot_tag = 'TYPES',           -- how an annotation tag line is spelled here
                                    -- (LuaLS `---@x`, jsdoc `@x {T}`); the tag
                                    -- vocabulary itself is shared (CART-0240)

@@ -11,6 +11,18 @@
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 
+-- ONE owner for "what is a function scope here" — the spec field below and the
+-- local-shadow walk inside `local_decls` both read this. They were two separate
+-- literals that happened to agree; a set with two copies is a set that will
+-- eventually disagree with itself (CART-0306). The generator forms are new:
+-- omitting them made a node inside `function* g(){}` resolve to the OUTER
+-- function, which is simply the wrong answer.
+local FN_TYPES = {
+    function_declaration = true, method_definition = true,
+    arrow_function = true, function_expression = true,
+    generator_function = true, generator_function_declaration = true,
+}
+
 return {
         exts = { 'js', 'mjs', 'cjs', 'jsx' }, -- the JS grammar handles JSX
         -- BINDER NODES: see spec/lua.lua. `for (const g of t)` binds g as a direct
@@ -110,8 +122,7 @@ return {
             if root and root:type() == 'this' then return true end
             if not (root and root:type() == 'identifier') then return false end
             local want = node_text(root, src)
-            local fn_types = { function_declaration = true, method_definition = true,
-                arrow_function = true, function_expression = true }
+            local fn_types = FN_TYPES
             -- A POSITIONAL IDENTIFIER PARAMETER IS NOT TREATED AS LOCAL, which
             -- fn_locals already argues for the local-shadow gate: in the AMD/IIFE shape
             -- every pre-ES6 library uses, `define(["./core"], function (jQuery) { … })`
@@ -188,8 +199,35 @@ return {
         end,
         params_field = 'parameters',
         body_field = 'body',
-        fn_types = { function_declaration = true, method_definition = true,
-            arrow_function = true, function_expression = true },
+        fn_types = FN_TYPES,
+        -- ★ "MINTED" HAS TO MEAN *ALWAYS* MINTED, NOT SOMETIMES. The generator
+        -- forms are never captured by the `functions` query above. But
+        -- `function_expression` is worse than never — it is CONDITIONAL: minted
+        -- as a variable_declarator value, a pair value, an `arguments` child or
+        -- an assignment_expression right, and NOT minted anywhere else. The
+        -- position that matters is the IIFE, `(function(){ … })()`, which is
+        -- what jquery and ghost are built out of. Treating it as a flow stop
+        -- deleted every IIFE body's rows: dfgate ghost 6986 -> 28406.
+        -- A conditionally-minted type must be listed here, because the cost of
+        -- being wrong is DELETED rows and the cost of being conservative is only
+        -- the pre-existing over-collection into the enclosing function (CART-0308).
+        -- `method_definition` goes the same way, for the same reason one step
+        -- down: the query names `name: (property_identifier)`, so a `#private`
+        -- or `[computed]` method is not minted. Ghost kept +440 divergences over
+        -- its baseline until this was listed; jquery and mootools are pre-ES6 and
+        -- had already returned to their EXACT pinned counts, which is what showed
+        -- the residual was method_definition and nothing else.
+        --
+        -- ★★ SO JAVASCRIPT GAINS NO STOP AT ALL, and that is the honest outcome
+        -- rather than a failure: this query is POSITIONAL — it mints a function by
+        -- where it SITS, not by what it IS — so no js scope type is unconditionally
+        -- minted except `function_declaration`, which LEGACY already stops at. A
+        -- language whose def query is positional cannot support scope stops until
+        -- the query does (CART-0313). The measurable win here is ruby, rust and
+        -- odin, whose `method`/`function_item`/`procedure_declaration` always are.
+        fn_unminted = { generator_function = true,
+            generator_function_declaration = true, function_expression = true,
+            method_definition = true },
         is_method = function (_, def) return def:type() == 'method_definition' end,
         -- ES6 methods carry their class: `class C { m(){} }` -> `C.m` (the JS
         -- analog of lua `C:m` / php `C::m`). A method_definition is a class

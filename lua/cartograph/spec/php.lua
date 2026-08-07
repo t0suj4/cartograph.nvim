@@ -181,8 +181,11 @@ return {
     ]=],
     params_field = 'parameters',
     body_field = 'body',
+    -- `anonymous_function`, NOT `anonymous_function_creation_expression`: the
+    -- grammar renamed it and the dead entry sat here unnoticed, because nothing
+    -- audits a TABLE of node types the way a query gets compiled (CART-0306).
     fn_types = { function_definition = true, method_declaration = true,
-        anonymous_function_creation_expression = true, arrow_function = true },
+        anonymous_function = true, arrow_function = true },
     is_method = function (_, def) return def:type() == 'method_declaration' end,
     -- methods carry their class: Worker::work (ambiguity semantics match cpp)
     qualify = function (name, defn, src)

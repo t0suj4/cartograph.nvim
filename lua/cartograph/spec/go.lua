@@ -25,6 +25,12 @@ return {
         ]=],
         params_field = 'parameters',
         body_field = 'body',
+        fn_types = { function_declaration = true, method_declaration = true,
+            func_literal = true }, -- a closure is a scope with no name
+        -- a func_literal encloses, but the `functions` query mints only
+        -- function_declaration/method_declaration. Stopping there orphaned every
+        -- closure body in the corpus: dfgate go 30 -> 1772 divergences (CART-0308).
+        fn_unminted = { func_literal = true },
         is_method = function (_, def)
             return def:type() == 'method_declaration'
         end,

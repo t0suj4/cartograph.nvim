@@ -55,12 +55,17 @@ for lang, spec in pairs(ts.spec) do
     for _, e in ipairs(spec.exts or {}) do extlang[e] = extlang[e] or lang end
 end
 
--- a spec field "is a query" when it's a string with a capture in it
+-- a spec field "is a query" when it's a string with a capture in it — AND opens
+-- with an s-expression. Without the last clause `annot_tag` qualified, because a
+-- LUA PATTERN `'^%s*%-%-%-@([%a_]+)%s*(.*)$'` also contains an `@` and a `(`; it
+-- then failed to compile and was reported under CONFIRMED STALE forever. A known
+-- false positive in a section teaches you to skim it, which is the whole value of
+-- the tier — and the fn_types check now files into the same list.
 local function query_fields(spec)
     local out = {}
     for k, v in pairs(spec) do
         if type(v) == 'string' and v:find('@', 1, true)
-            and v:find('(', 1, true) then out[k] = v end
+            and v:match('^%s*[%(%[]') then out[k] = v end
     end
     return out
 end
@@ -84,6 +89,19 @@ for lang, spec in pairs(ts.spec) do
     if not havep then
         no_parser[#no_parser + 1] = lang
     else
+        -- `fn_types` is a TABLE of node types, so it never reaches the query
+        -- compiler and nothing ever checked it against the grammar. It sat with a
+        -- php entry the grammar had RENAMED, naming nothing, indefinitely. The
+        -- symbol table is the same oracle tools/langaudit.lua uses — a table of
+        -- node types earns the compile tier exactly as a query does (CART-0306).
+        local okins, info = pcall(vim.treesitter.language.inspect, lang)
+        local syms = (okins and info or {}).symbols or {}
+        for t in pairs(spec.fn_types or {}) do
+            if syms[t] == nil then
+                confirmed_stale[#confirmed_stale + 1] =
+                    ('%s fn_types: %q is not a node type in this grammar'):format(lang, t)
+            end
+        end
         compiled[lang] = {}
         for field, qsrc in pairs(query_fields(spec)) do
             local ok, q = pcall(vim.treesitter.query.parse, lang, qsrc)
@@ -107,6 +125,7 @@ local profhits = {}    -- profile -> declared name -> n
 local profseen = {}    -- profile -> calls seen in ITS language (coverage threshold)
 local callsseen = {}   -- lang -> n  (coverage threshold for vocab judgment)
 local filesseen = {}   -- lang -> n  (coverage threshold for capture judgment)
+local deftypes = {}    -- lang -> node type -> n  (what `functions`@def landed on)
 
 local function tally(t, lang, key, n)
     local l = t[lang]; if not l then l = {}; t[lang] = l end
@@ -243,9 +262,17 @@ for _, name in ipairs(names) do
                         if tree then
                             filesseen[lang] = (filesseen[lang] or 0) + 1
                             for _, cq in ipairs(compiled[lang]) do
-                                for id in cq.q:iter_captures(tree:root(), src, 0, -1) do
-                                    tally(capturehits, lang,
-                                        cq.field .. '@' .. cq.q.captures[id])
+                                for id, node in cq.q:iter_captures(tree:root(), src, 0, -1) do
+                                    local cap = cq.q.captures[id]
+                                    tally(capturehits, lang, cq.field .. '@' .. cap)
+                                    -- FN_TYPES COMPLETENESS, free of an extra walk:
+                                    -- whatever the `functions` query calls a def, the
+                                    -- spec's fn_types must be able to NAME. The two
+                                    -- answered differently for six languages before
+                                    -- anyone looked (CART-0306).
+                                    if cq.field == 'functions' and cap == 'def' then
+                                        tally(deftypes, lang, node:type())
+                                    end
                                 end
                             end
                         end
@@ -270,6 +297,44 @@ print('')
 print('== CONFIRMED STALE: query fails to compile against the grammar ==')
 if #confirmed_stale == 0 then print('  (none)') end
 for _, s in ipairs(confirmed_stale) do print('  ' .. s) end
+
+print('')
+print('== fn_types COMPLETENESS: every observed `functions`@def type must be named ==')
+-- The other direction from the compile check above: that one asks "does this
+-- entry exist in the grammar", this asks "does the grammar produce a def type
+-- this set cannot name". Only the second one catches an OMISSION, which is the
+-- shape the language fence is blind to — a partial table looks exactly like a
+-- complete one (CART-0306).
+do
+    local anyf = false
+    for _, lang in ipairs(sortedkeys(deftypes)) do
+        local declared = ts.spec[lang] and ts.spec[lang].fn_types
+        local miss, cover = {}, {}
+        for t, n in pairs(deftypes[lang]) do
+            if declared and declared[t] then cover[#cover + 1] = ('%s=%d'):format(t, n)
+            else miss[#miss + 1] = ('%s=%d'):format(t, n) end
+        end
+        table.sort(miss); table.sort(cover)
+        if not declared then
+            anyf = true
+            print(('  %s: NO fn_types declared — falls back to the shared default, which'
+                .. ' names %s'):format(lang, table.concat(cover, ' ')))
+        elseif not next(declared) then
+            -- ORDER MATTERS: an empty set misses EVERY observed type, so testing
+            -- for misses first would report a declared refusal as a defect and
+            -- the honest thing would read exactly like the dishonest one.
+            print(('  %s: fn_types is empty BY DECLARATION — %s observed as a def type'
+                .. ' and not nameable from the node type alone')
+                :format(lang, table.concat(miss, ' ')))
+        elseif #miss > 0 then
+            anyf = true
+            print(('  %s: %s NOT in fn_types (covered: %s)')
+                :format(lang, table.concat(miss, ' · '),
+                    #cover > 0 and table.concat(cover, ' ') or 'none'))
+        end
+    end
+    if not anyf then print('  (every declared set covers every observed def type)') end
+end
 
 print('')
 print('== SUSPECT: query capture never fired (usage can only say suspect) ==')

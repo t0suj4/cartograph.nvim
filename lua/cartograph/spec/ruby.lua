@@ -346,6 +346,19 @@ return {
         ]=],
         params_field = 'parameters',
         body_field = 'body',
+        -- `block` / `do_block` are deliberately ABSENT. A ruby block is not a
+        -- function scope: it CLOSES OVER the enclosing method's locals, so
+        -- treating one as a scope boundary would cut a def from its uses.
+        -- `lambda` DOES introduce one — for ENCLOSURE. It is listed here and
+        -- excluded from the flow stop below, and the distinction is the whole
+        -- lesson of CART-0308: "which function encloses this node" and "where
+        -- does the flow walk stop" are two different sets, and a stop is only
+        -- sound where the extractor mints a node to receive the rows.
+        fn_types = { method = true, singleton_method = true, lambda = true },
+        -- `lambda` is a scope for ENCLOSURE but the `functions` query above mints
+        -- only method/singleton_method, so it is not a sound flow STOP: stopping
+        -- there deletes the closure's rows instead of relocating them (CART-0308).
+        fn_unminted = { lambda = true },
         is_method = function (_, def)
             if def:type() == 'singleton_method' then return true end
             local p = def:parent()

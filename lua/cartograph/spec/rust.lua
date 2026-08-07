@@ -26,6 +26,11 @@ return {
         ]],
         params_field = 'parameters',
         body_field = 'body',
+        fn_types = { function_item = true, closure_expression = true,
+            macro_definition = true }, -- the `functions` query calls a macro a def
+        -- a closure encloses, but the `functions` query mints only function_item
+        -- and macro_definition — so it is not a sound flow stop (CART-0308).
+        fn_unminted = { closure_expression = true },
         -- fns inside impl/trait blocks are methods, carrying their type:
         -- Config::new — which also keeps every type's `new` distinct
         is_method = function (_, def)

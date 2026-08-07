@@ -640,6 +640,73 @@ end
 
 local DEFAULT_FN_TYPES = { function_definition = true, function_declaration = true }
 
+--- Which node types bound a FUNCTION SCOPE in `lang` — the one answer to
+--- "which function encloses this node?", which four modules used to answer
+--- from four private tables (CART-0306).
+---
+--- ★ AN EMPTY DECLARED SET IS A REFUSAL, NOT AN UNSET FIELD. `spec.fn_types = {}`
+--- is scheme saying it cannot answer from node types at all (its function node is
+--- `list`, the same type as every s-expression). It must stay empty rather than
+--- fall through to the two names below, neither of which exists in that grammar —
+--- the fallback would answer nil everywhere and read as "this file has no
+--- functions". `{}` is truthy in lua so `or` happens to work today; the explicit
+--- nil test is here so that stays true if a spec ever declares `false`.
+--- @param lang string
+--- @return table<string, true>
+function M.fn_types(lang)
+    local s = M.spec[lang]
+    if s and s.fn_types ~= nil then return s.fn_types end
+    return DEFAULT_FN_TYPES
+end
+
+-- ★★ THE SECOND SET, AND CONFLATING IT WITH THE FIRST IS A SOUNDNESS BUG.
+-- "Which function encloses this node?" (fn_types, above) and "where does the flow
+-- walk STOP?" are different questions, because a flow stop is only sound at a node
+-- type whose interior gets its OWN flow record. Stop at a type the extractor never
+-- mints and the rows are not relocated to a better owner — they are DELETED.
+-- Absence rendered as silence, this time inside the walk (CART-0308).
+--
+-- MEASURED, by threading fn_types straight through and reading dfgate: go 30 ->
+-- 1772 divergences (`func_literal` is a scope but go's `functions` query captures
+-- only function_declaration/method_declaration, so every closure body in the corpus
+-- was orphaned), python 3 -> 66 (`lambda`), ruby and rust likewise. Confirmed
+-- against the QUERIES, not a sample — a type absent from a 120-file sample may
+-- still be minted; a type absent from the query never is.
+--
+-- LEGACY is the union flow carried before this change. It is kept WHOLE and
+-- deliberately: it already stopped at unminted types for cpp/java (`lambda_
+-- expression`) and php (`anonymous_function`, `arrow_function`), so that orphaning
+-- is PRE-EXISTING and pinned into every dfparity census. Removing those is a real
+-- fix and a separate one — folding it in here would double the blast radius and
+-- confound the recalibration. This change only stops making it worse.
+local LEGACY_FN_STOP = { function_definition = true, function_declaration = true,
+    method_declaration = true, anonymous_function = true, arrow_function = true,
+    lambda_expression = true, constructor_declaration = true }
+
+--- Where flow's walk stops descending: every LEGACY stop, plus the language's own
+--- scope types MINUS the ones it declares it does not mint (`fn_unminted`).
+---
+--- ★ `fn_unminted` MEANS "NOT *ALWAYS* MINTED", and the distinction is not pedantic.
+--- A type minted in only SOME syntactic positions is unsound as a stop, because the
+--- other positions get no node to receive the rows. js `function_expression` is the
+--- case: minted as a declarator/pair value, an argument, or an assignment right —
+--- and NOT as an IIFE head, which is the shape jquery and ghost are built out of.
+--- Listing it costs the pre-existing over-collection into the enclosing function;
+--- omitting it cost 21420 deleted rows on ghost alone. When in doubt, list it: the
+--- failure modes are not symmetric.
+--- @param lang string
+--- @return table<string, true>
+function M.flow_stop(lang)
+    local s = M.spec[lang]
+    local unminted = (s and s.fn_unminted) or {}
+    local out = {}
+    for t in pairs(LEGACY_FN_STOP) do out[t] = true end
+    for t in pairs(M.fn_types(lang)) do
+        if not unminted[t] then out[t] = true end
+    end
+    return out
+end
+
 -- `memo` (optional, PER TREE — node ids alias across trees) caches the
 -- answer at every ancestor visited: call sites in the same function stop
 -- one level up instead of re-walking to the root each time.
@@ -4576,6 +4643,8 @@ function M.extract(root, opts)
                     pfield = spec.params_field, df_ids = spec.df_ids,
                     mods = spec.binding_modifiers, -- CART-0234
                     body_of = spec.body_of, params_of = spec.params_of, -- CART-0305
+                    fn_types = M.flow_stop(lang), -- the nested-fn STOP, not the
+                    -- enclosure set: only where a node is minted to hold the rows
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 padd('flow.build', _pf)
                 local dret, dretclass

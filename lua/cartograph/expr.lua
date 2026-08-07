@@ -824,26 +824,21 @@ end
 function M.truthy(v) return v ~= nil and v ~= false and v ~= NIL end
 
 -- ── on-demand entry (INC 1: re-parse + rebuild; not folded) ────────────────
-local spec = require('cartograph.providers.treesitter').spec
+local ts = require('cartograph.providers.treesitter')
+local spec = ts.spec
 -- THE FUNCTION-NODE set fn_node walks up to. A language whose function node is not
--- here gets NO expression records at all, however complete the rest of the layer is —
+-- in it gets NO expression records at all, however complete the rest of the layer is —
 -- which is how ruby came to have 2104 flow records and zero expression ones
 -- (CART-0228): its nodes are `method` / `singleton_method`, and neither was listed.
--- Verified by parsing: lua function_declaration · python function_definition · php
--- method_declaration · go function_declaration · ruby method + singleton_method.
--- ★ THIS TABLE IS A PER-LANGUAGE SET WITH NO OWNER, and it was missing odin's
--- `procedure_declaration` — so even after flow learned to reach odin's body,
--- M.of still returned nil for all 31955 odin functions, because it could not find
--- the enclosing function NODE. `fn_types` is already a declared spec field
--- (spec/contract.lua, TYPES tier) and this should read it rather than hardcode a
--- partial copy; expr, fieldlink and narrow each keep their own. CART-0306.
--- The language fence cannot see this one: a TABLE is the correct pattern, and the
--- audit only flags direct comparisons — it cannot tell a complete table from a
--- partial one, which is a limit worth knowing (CART-0305).
-local FN_TYPES = { function_declaration = true, function_definition = true,
-    method_declaration = true, method_definition = true, function_item = true,
-    method = true, singleton_method = true,
-    procedure_declaration = true } -- odin
+--
+-- ★ IT USED TO BE A HARDCODED UNION, and a union is the wrong shape for a
+-- per-language set: it is right for whichever language you last checked and
+-- silently partial for the rest. Measured on the sampled def population it named
+-- 0% of haskell, 0% of scheme, 35% of javascript, 66% of typescript, 87% of java
+-- and 99% of rust — and it DISAGREED with the provider, which was already reading
+-- `spec.fn_types` for the same question, so two modules gave two answers about
+-- which function encloses the same node. Now there is one owner per language and
+-- the spec audit checks it (CART-0306).
 local EXT = {} -- file ext → lang key in spec (only those with a body-bearing flow)
 for lang, s in pairs(spec) do
     -- body_of is the POSITIONAL twin of body_field (CART-0305): a language that
@@ -859,7 +854,8 @@ local function fn_node(node, src, lang)
     local root = parser:parse()[1]:root()
     local d = root:named_descendant_for_range(at.sl(node.range), at.sc(node.range),
         at.el(node.range), at.ec(node.range))
-    while d do if FN_TYPES[d:type()] then return d end; d = d:parent() end
+    local fnt = ts.fn_types(lang)
+    while d do if fnt[d:type()] then return d end; d = d:parent() end
     return nil
 end
 
@@ -887,6 +883,7 @@ function M.of(store, fn_id)
     local cfg = { pfield = s.params_field, df_ids = s.df_ids, regime = s.regime,
         mods = s.binding_modifiers, -- CART-0234
         body_of = s.body_of, params_of = s.params_of, -- CART-0305
+        fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
         method = (node.kind == 'method') and lang == 'lua',
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'
@@ -1000,14 +997,27 @@ end
 -- the expr layer honestly models the row as a `fn` ALLOCATION. This is a documented
 -- du over-reach — the ONE row class where reads ≠ use∪rmw by design (anonymous-fn
 -- ASSIGNMENTS, where the fn is a child, du stops and both agree). The gate skips it.
-local FNDECL = { function_declaration = true, function_definition = true,
-    method_declaration = true, method_definition = true, function_item = true,
-    local_function = true, arrow_function = true, lambda_expression = true }
+-- ★ SO THIS SET IS NOT A SEPARATE JUDGEMENT — IT IS FLOW'S STOP-SET. The exclusion
+-- exists precisely because `du`'s FN-stop did not fire at the root, so the two must
+-- name the same node types or the gate mis-fires. They were written out separately
+-- and DID NOT AGREE (CART-0308): flow's set had php `anonymous_function` and java
+-- `constructor_declaration` that this one lacked; this one had rust `function_item`
+-- and js `method_definition` that flow's lacked, plus `local_function`, which is a
+-- node type in NO installed grammar — the same dead-name defect the spec audit
+-- caught in `spec.fn_types`, one table over, where the audit cannot see it.
+-- Both now derive from the language's declared set, so they agree by construction.
+local FN_FALLBACK = require('cartograph.providers.treesitter').flow_stop('lua')
 
 --- the SELF-GATE: for each row, `expr.reads(row)` must equal `use ∪ rmw`. Returns a
 --- list of disagreements (empty = clean). Used by syngate + tests + dogfooding.
+--- `lang` must be the language the flow was BUILT for — pass `of()`'s `lang` field.
+--- Omitting it falls back to lua, which is what the lua-only test fixtures want and
+--- is wrong for anything else, so pass it.
 --- @return table[] { row, line, reads, du, missing, extra }
-function M.gate(fl)
+function M.gate(fl, lang)
+    local FNDECL = lang
+        and require('cartograph.providers.treesitter').flow_stop(lang)
+        or FN_FALLBACK
     local bad = {}
     for i, s in ipairs(fl.stmts or {}) do
         if s.expr and not FNDECL[s.t or ''] then

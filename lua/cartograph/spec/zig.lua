@@ -466,6 +466,7 @@ return {
         ]=],
         params_field = 'parameters',
         body_field = 'body',
+        fn_types = { function_declaration = true },
         -- a fn nested in a struct_declaration is a member (of the enclosing
         -- `const T = struct`); a top-level fn is free
         is_method = function (_, def)

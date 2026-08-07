@@ -19,7 +19,9 @@ local at = require 'cartograph.at'
 
 local M = {}
 
-local FN_TYPES = { function_declaration = true, function_definition = true }
+-- lua's fn-scope set, from the language's OWN spec rather than a fourth private
+-- copy of it (CART-0306). Lua-gated above, so one language is the whole claim.
+local FN_TYPES = require('cartograph.providers.treesitter').fn_types('lua')
 local function txt(n, src) return n and vim.treesitter.get_node_text(n, src) or '' end
 
 -- store.content returns the WHOLE file, so we parse the file once (cached) and

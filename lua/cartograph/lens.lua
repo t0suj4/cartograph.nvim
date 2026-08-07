@@ -8,10 +8,6 @@
 local flow = require 'cartograph.flow'
 local M = {}
 
-local FN = { function_definition = true, method_declaration = true,
-    function_declaration = true, method = true, function_item = true,
-    method_definition = true, arrow_function = true }
-
 -- store node → a built flow (demand re-parse of its file, cfg from ts.spec).
 local function build_flow(store, node)
     if not (node and node.file) then return nil, 'node has no file' end
@@ -28,6 +24,13 @@ local function build_flow(store, node)
     local plang = ts.parse_lang(node.file)
     local pok, parser = pcall(vim.treesitter.get_string_parser, src, plang)
     if not pok then return nil, 'no parser for ' .. tostring(plang) end
+    -- the SPEC lang, not the parse lang: typescript/tsx derive their spec from
+    -- javascript's table, so both resolve to the same set and the parse-lang
+    -- split above stays a parsing concern (CART-0308). The private table this
+    -- replaced had ruby's `method` but not php's `anonymous_function`, and no
+    -- odin, rust or go closure at all — a lens that silently found no function
+    -- rather than saying so.
+    local FN = ts.fn_types(lang)
     local sl, target = atr.sl(node.range), nil
     local function rec(n)
         if FN[n:type()] and select(1, n:range()) == sl and not target then target = n end
@@ -37,6 +40,9 @@ local function build_flow(store, node)
     if not target then return nil, 'could not locate the function AST' end
     local cfg = { pfield = spec.params_field, df_ids = spec.df_ids,
         regime = spec.regime, mods = spec.binding_modifiers, -- CART-0234
+        -- NOT `FN`: locating the enclosing fn and stopping the walk are different
+        -- questions, and only the stop must be restricted to minted types (CART-0308)
+        fn_types = ts.flow_stop(lang),
         method = spec.is_method and spec.is_method(node.name or '', target) or false }
     return flow.build(target, src, cfg)
 end

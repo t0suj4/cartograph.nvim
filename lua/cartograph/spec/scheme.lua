@@ -33,6 +33,17 @@ return {
                 (#eq? @_kw "define"))
         ]=],
         body_field = nil,
+        -- ★ A DECLARED REFUSAL, not an omission. Scheme's function node type is
+        -- `list` — the same type as every other s-expression — so "is this node a
+        -- function?" is UNANSWERABLE from the type alone; it takes the head symbol
+        -- (`define`, `lambda`), which is structure, not vocabulary. An empty set
+        -- says so out loud. Leaving the field absent instead would fall back to the
+        -- shared default (`function_definition`/`function_declaration`), neither of
+        -- which exists in this grammar — so every scheme answer would be nil and
+        -- read as "no functions here" rather than "this language cannot say".
+        -- Absence rendered as silence, again ([[cartograph-concern-layering]]).
+        -- The fix is a positional `fn_of` hook, the twin of odin's body_of: CART-0307.
+        fn_types = {},
         mention_types = { symbol = true },
         toplevel_parent = 'program', -- internal defines are a function's interior
         is_method = function () return false end,

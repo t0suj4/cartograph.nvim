@@ -477,6 +477,9 @@ return {
     ]],
     params_field = 'parameters',
     body_field = 'body',
+    -- `function_definition` is BOTH the anonymous form and the value half of
+    -- `M.f = function () … end`, so the two types cover every lua fn scope.
+    fn_types = { function_declaration = true, function_definition = true },
     is_method = function (name) return name:find(':') ~= nil end,
     -- VISIBILITY (CART-0231). Lua's is purely syntactic — a `local` binding is
     -- invisible outside its file BY NAME, everything else is reachable (a dotted

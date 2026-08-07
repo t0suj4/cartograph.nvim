@@ -44,6 +44,7 @@ return {
         ]],
         params_field = 'parameters',
         body_field = 'body',
+        fn_types = { function_definition = true },
         is_method = function () return false end,
         entry_names = { main = true },
         -- both forms: "quoted" (relative) AND <angled>. Angle-bracket

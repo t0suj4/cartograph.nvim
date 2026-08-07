@@ -112,7 +112,22 @@ M.EXPECTED = {
     rust = { ['binding-as-use'] = 363, ['df-over-collects'] = 1980,
         ['flow-over-collects'] = 1988 },
     python = { ['df-over-collects'] = 3 }, -- closure-leak/dedup only
-    ruby = {}, -- perfect parity
+    -- recalib 2026-08-07 (CART-0308, flow's nested-fn stop became per-language):
+    -- 0 -> 2, both at active_support/deprecation/constant_accessor.rb:9 and both the
+    -- SAME site — `extension = Module.new do … def const_missing … end`. Ruby's `method`
+    -- / `singleton_method` were never in flow's stop-set (a hardcoded union built around
+    -- lua/js/php names), so a `def` nested inside a block folded its whole body into the
+    -- enclosing method's row. It stops now, and the body's rows live on the nested
+    -- method's OWN node — which exists, because ruby's `functions` query mints
+    -- method/singleton_method unconditionally. So this is the documented GRANULARITY
+    -- class (dfreg indexes per OUTER function and absorbs; flow.record is per NODE), the
+    -- same shape jquery has carried at 12 for years — NOT a leak.
+    -- VERIFIED by reading both the source and the sets: df carries const_missing,
+    -- class_variable_get, deprecate_constant … (the names DEFINED inside the block) and
+    -- flow carries only `new`. Rows RELOCATED, not lost — and that distinction is the
+    -- whole ticket, because a stop at an UNMINTED type deletes them instead. Measured
+    -- when the two were conflated: ghost 6986 -> 28406, go 30 -> 1772.
+    ruby = { ['df-over-collects'] = 2 }, -- was {} (perfect parity)
     -- ghost = the JS scale corpus; df-over-collects (closure-leak) dominates. The
     -- old partition/disjoint/flow-over-collects residual was the re-parse .ts-
     -- under-JS + node-resolution artifact — gone with stored flow (OTHER=3 left).

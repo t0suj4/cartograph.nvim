@@ -205,7 +205,9 @@ local function def_sets(fn, src)
     return reassigned, defined
 end
 
-local FN_TYPES = { function_declaration = true, function_definition = true }
+-- lua-only by construction (it parses with 'lua' and harvests rows as 'lua'), so
+-- it reads lua's OWN declared scope set rather than repeating it (CART-0306).
+local FN_TYPES = require('cartograph.providers.treesitter').fn_types('lua')
 -- takes the file's ALREADY-PARSED root: one parse per FILE, not per function.
 -- Re-parsing per function was both slow and part of why the first wow run was
 -- OOM-killed (exit 137) — the sweep-memory lesson that a per-corpus tool must

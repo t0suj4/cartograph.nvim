@@ -164,7 +164,7 @@ if base.flag and n > 0 then base.ok = true end
 data:extend{base}
 ]])
     local eo = expr.of_module(store, id)
-    local bad = expr.gate(eo.fl)
+    local bad = expr.gate(eo.fl, eo.lang)
     local shown = {}
     for _, b in ipairs(bad) do
         shown[#shown + 1] = ('line %d missing=[%s] extra=[%s]'):format(

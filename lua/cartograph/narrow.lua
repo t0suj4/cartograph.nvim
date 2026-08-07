@@ -420,10 +420,19 @@ local VERB_LANG = {
 }
 
 -- ── the fn's AST (re-parse; guards_over is inherently AST-based, like taint) ──
-local FN_TYPES = {
-    function_declaration = true, function_definition = true, -- lua
-    method = true, singleton_method = true,                  -- ruby
-}
+-- The scope-boundary set, DERIVED from the specs of exactly the languages
+-- VERB_LANG admits, rather than written out here (CART-0306). A union is the
+-- right shape only when it is over a KNOWN language list that maintains itself:
+-- add ruby to a verb above and this follows, where the hand-written version
+-- would have quietly gone on describing lua.
+local FN_TYPES = {}
+for _, langs in pairs(VERB_LANG) do
+    for lang in pairs(langs) do
+        for t in pairs(require('cartograph.providers.treesitter').fn_types(lang)) do
+            FN_TYPES[t] = true
+        end
+    end
+end
 -- statement CONTAINERS — where the walk below looks for the statements to annotate.
 -- Was the single literal 'block', i.e. LUA's name: on ruby the walk would have found
 -- no statements at all and returned an EMPTY point list, which reads as "nothing to

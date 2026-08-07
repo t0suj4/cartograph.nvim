@@ -30,6 +30,7 @@ return {
         litdata_types = { string = true, raw_string = true, array = true,
             word = true, number = true },
         body_field = 'body',
+        fn_types = { function_definition = true },
         -- $x expansions carry variable_name; a bare word in argument
         -- position can NAME a function (trap cleanup EXIT) — both mention
         -- kinds feed the id pass

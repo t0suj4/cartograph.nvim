@@ -73,7 +73,109 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 118 -- v118: ODIN GETS FINE FLOW (CART-0305). Odin labels NEITHER its
+M.VERSION = 120 -- v120: A FLOW STOP IS ONLY SOUND WHERE A NODE IS MINTED TO RECEIVE
+               -- THE ROWS (CART-0308). flow's nested-function stop was a hardcoded
+               -- cross-language union, so it lacked ruby `method`, rust `function_item`
+               -- and odin `procedure_declaration` — a nested function on those
+               -- languages folded its whole body into the ENCLOSING function's rows.
+               -- Now threaded per-language from the spec.
+               -- ★ AND THE SET IS NOT `fn_types`. "Which function encloses this node?"
+               -- and "where does the walk stop?" are DIFFERENT QUESTIONS, and I
+               -- conflated them first: stopping at a type the extractor never mints
+               -- does not relocate the rows to a better owner, it DELETES them, because
+               -- the owner does not exist. Measured by threading fn_types straight
+               -- through and reading dfgate: go 30 -> 1772 divergences (`func_literal`),
+               -- ghost 6986 -> 28406 (js `function_expression`), python 3 -> 66
+               -- (`lambda`). Each spec now declares `fn_unminted` and the stop is
+               -- LEGACY ∪ (fn_types \ fn_unminted).
+               -- ★★ "MINTED" MEANS *ALWAYS* MINTED. js mints `function_expression` only
+               -- as a declarator/pair value, an argument, or an assignment right — never
+               -- as an IIFE head, the shape jquery and ghost are built from; and
+               -- `method_definition` only when the key is a plain property_identifier,
+               -- missing `#private` and `[computed]`. Both are therefore unsound stops,
+               -- so JAVASCRIPT GAINS NONE: its def query is POSITIONAL, minting by where
+               -- a function SITS rather than what it IS (CART-0313). jquery and mootools
+               -- returning to their EXACT pinned censuses is what proved that reading.
+               -- MEASURED, the whole point of the change — rows IDENTICAL, only the
+               -- absorbed names go: ruby 3771 rows both sides, defs 908 -> 907, uses
+               -- 10439 -> 10424; odin 89775 rows both sides, defs 21991 -> 21966, uses
+               -- 398053 -> 397708. An unchanged row count with a smaller def/use census
+               -- is precisely "relocated, not deleted" — the counterpart of v119's
+               -- Δrefs = 0. dfparity: 13 of 14 corpora unmoved, ruby 0 -> 2 (one site,
+               -- `Module.new do … def const_missing … end`, verified by reading it).
+               -- v119: FIVE LANGUAGES HAD NO ENCLOSING FUNCTION, EVER (CART-0306).
+               -- `in_function` — which decides a call's `encl` and its `top` marker
+               -- during EXTRACTION — read `spec.fn_types or DEFAULT`, and that default
+               -- is { function_definition, function_declaration }. Ruby, java, rust,
+               -- odin and scheme have NEITHER node type, so for those five it returned
+               -- nil for every node in every file: every call marked top-level, no call
+               -- attributed to the function containing it. Go lost its methods, cpp and
+               -- python their lambdas, js its generators — and php's declared entry read
+               -- `anonymous_function_creation_expression`, a name the grammar had
+               -- RENAMED, so php's anonymous functions were dark too. Every spec now
+               -- declares fn_types, one accessor answers the question
+               -- (ts.fn_types(lang)), and five modules that kept private partial copies
+               -- read it instead. MEASURED with expr.of over a sampled def population,
+               -- before -> after: jquery js 19% -> 100%, ghost js 31% -> 100% and ts
+               -- 27% -> 100%, grocy js 9% -> 100%, server java 82% -> 100%. Controls
+               -- behaved as controls: rust 99.5% -> 100% (its `function_item` happened
+               -- to be in the union), ruby 90% -> 90% and grocy php 100% -> 100%, both
+               -- unchanged BY CONSTRUCTION.
+               -- ★ HASKELL STAYED AT 0% AND THAT IS THE INSTRUCTIVE ONE. It had already
+               -- declared fn_types, so the prediction was 0 -> 100 — but expr's EXT map
+               -- admits a language only if it has `body_field or body_of`, and haskell
+               -- sets `body_field = nil` deliberately ("df comes from the custom hook
+               -- below"). A SECOND gate, downstream of the one being fixed. Size a
+               -- mechanism by the population meeting its precondition, and then check
+               -- the CONSUMER's precondition too — the same lesson the previous arc
+               -- wrote down and this change did not apply until the census refused it.
+               -- ★ WHAT ACTUALLY MOVED IN THE GRAPH: java, rust and cpp — libs -24 nodes
+               -- / -65 edges, ripgrep -26 / -25, server -340 / -1496 / +137, v8 -22 /
+               -- -256. The predicate is sharp: a language moves iff its `vars` query is
+               -- UNROOTED **and** its in_function could not see the enclosing scope.
+               -- Unrooted are c, cpp, java, lua, rust, scheme; of those c and lua were
+               -- already served by the shared default and scheme is still blind (now
+               -- DECLAREDLY). Everyone else roots at `source_file`/`program` and never
+               -- needed the predicate at all.
+               -- WHAT THE REMOVED NODES WERE, verified by reading them: rust
+               -- function-local `static RE` / `const ARGS_GZIP` declarations, java fields
+               -- of ANONYMOUS CLASSES inside methods (ReleasableIterator.java's `private
+               -- T value` lives in a `new ReleasableIterator<>() { … }` inside a static
+               -- method), and cpp declarations inside LAMBDA bodies, which the set had
+               -- never named. Each had been published as a MODULE-level variable of its
+               -- file; this is fabrication going away, not coverage lost, and Δrefs = 0
+               -- on all four corpora is the signature that says so.
+               -- ⚠ THE 137 ADDED EDGES ON SERVER ARE NOT A WIN, and should not be read as
+               -- one. They are `use` edges from a method to a `var:` in another file
+               -- (AbstractGeometryFieldMapper::ignoreMalformed -> CustomTermFreqField's
+               -- `var:value`). Removing the fabricated LOCAL variable did not make those
+               -- references correct — it removed the local decoy that was absorbing them,
+               -- so they fell through to a corpus-wide name match on a name as common as
+               -- `value`. Same imprecision, relocated: a wrong local answer became a
+               -- wrong global one ([[cartograph-linker]]'s measured ~10% name-match
+               -- error). Net is -1359 edges and the removals are the real result; the
+               -- additions are residue worth naming rather than counting as progress.
+               -- Recalibrated: libs 13886 -> 13862, rust 3264 -> 3238, server 87241 ->
+               -- 86901, v8 165859 -> 165837.
+               -- ☠ AND I WROTE "java and rust, exactly and only" WHILE THE SWEEP WAS
+               -- STILL RUNNING, then v8 came in and refuted it — the SECOND time in two
+               -- arcs (7689a3e was the first). A control set chosen by prediction tests
+               -- the prediction, not the change. Sweep every corpus, and do not write
+               -- "exactly and only" until the last one has reported.
+               -- The `top` marker moved on far more languages than that, and NO gate can
+               -- see it — snapshot.slim does not project it and graphdiff's coutcome is
+               -- resolution-only. Measured on a 3-call ruby file: top=3/not-top=0 before,
+               -- top=1/not-top=2 after, with the ruby gate reporting the graphs identical
+               -- (CART-0311: the projection a gate keeps is a claim about what matters,
+               -- and every field left out of it is a silent exemption).
+               -- ★ THE SHAPE OF THE BUG IS THE POINT. A union table is correct for
+               -- whichever language you last checked and silently partial for every
+               -- other, and the LANGUAGE FENCE cannot see it: a per-language TABLE is
+               -- the pattern the fence tells you to move to, and it cannot tell a
+               -- complete table from an incomplete one. specaudit now can, from both
+               -- directions — every entry must EXIST in the grammar, and every node type
+               -- the `functions` query is observed to capture as a def must be NAMED.
+               -- v118: ODIN GETS FINE FLOW (CART-0305). Odin labels NEITHER its
                -- procedure body NOR its parameters — a `procedure_declaration` holds a
                -- `procedure` WRAPPER which holds the `parameters` and the `block`, and
                -- odin's whole field list has no `body` — so both field-based readers

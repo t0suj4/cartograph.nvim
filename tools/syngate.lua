@@ -47,7 +47,7 @@ for _, n in ipairs(store.data.nodes) do
         local f = n.file or ''
         local oke, got = pcall(expr.of, store, n.id)
         if oke and got then
-            for _, d in ipairs(expr.gate(got.fl)) do
+            for _, d in ipairs(expr.gate(got.fl, got.lang)) do
                 gatebad[#gatebad + 1] = ('%s:%d reads≠use∪rmw missing=[%s] extra=[%s]')
                     :format(f, d.line, table.concat(d.missing, ','), table.concat(d.extra, ','))
             end

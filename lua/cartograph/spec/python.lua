@@ -18,6 +18,10 @@ return {
         ]],
         params_field = 'parameters',
         body_field = 'body',
+        fn_types = { function_definition = true, lambda = true },
+        -- `lambda` encloses, but the `functions` query mints only
+        -- function_definition — so it is not a sound flow stop (CART-0308).
+        fn_unminted = { lambda = true },
         is_method = function (_, def)
             local p = def:parent()
             while p do

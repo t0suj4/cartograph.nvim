@@ -68,6 +68,11 @@ return {
         ]=],
         -- Odin has no methods — every proc is free (UFCS is banked)
         is_method = function () return false end,
+        -- ONLY the declaration, deliberately: the `procedure` wrapper below is
+        -- also a named node, and including it would make an upward walk stop at
+        -- the wrapper — whose body_of/params_of hooks expect the DECLARATION and
+        -- would then find nothing. The narrower set is the correct one.
+        fn_types = { procedure_declaration = true },
         -- ★ ODIN LABELS NEITHER THE BODY NOR THE PARAMETERS. A
         -- `procedure_declaration` holds a `procedure` WRAPPER, and that holds the
         -- `parameters` and the `block` as positional children — odin's whole field

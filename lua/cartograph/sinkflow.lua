@@ -350,8 +350,15 @@ end
 local SOURCES = { _GET = true, _POST = true, _REQUEST = true,
     _COOKIE = true, _SERVER = true, _FILES = true }
 
-local BODY_STOP = { function_definition = true, method_declaration = true,
-    anonymous_function = true, arrow_function = true }
+-- php's scope set from php's OWN spec (CART-0308). This module declares
+-- `@langs php` and gates on `%.php$` at both walk entries, so one language is
+-- the whole claim and the accessor is exact rather than approximate.
+-- ★ WORTH KEEPING: this private copy was MORE ACCURATE than the declared one.
+-- It had `anonymous_function`; spec/php.lua had `anonymous_function_creation_
+-- expression`, a name the grammar had renamed, so the spec named nothing while
+-- the copy named the real node. The copies are not always the stale side —
+-- which is exactly why the fix is one owner plus an audit, not "trust the spec".
+local BODY_STOP = require('cartograph.providers.treesitter').fn_types('php')
 
 -- descendants of `node` of the given types, NOT descending into nested
 -- function scopes (a scope sees only its own statements)

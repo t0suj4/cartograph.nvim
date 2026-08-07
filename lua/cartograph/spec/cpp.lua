@@ -51,6 +51,10 @@ return {
         ]=],
         params_field = 'parameters',
         body_field = 'body',
+        -- a lambda is a function SCOPE, not a def: it never reaches the
+        -- `functions` query (no name), but "which function encloses this?"
+        -- must answer the lambda, not the member it sits inside.
+        fn_types = { function_definition = true, lambda_expression = true },
         litdata_types = { initializer_list = true },
         -- x.f() and x->f() are member dispatch: never a free function
         dot_calls_are_methods = true,

@@ -209,13 +209,18 @@ local function loop_node(root, line)
 end
 -- does the subtree contain a nested function definition? (localize-apply skips those —
 -- a nested closure complicates scope/shadowing; conservative)
-local FN_DEF = { function_definition = true, function_declaration = true,
-    method_declaration = true, arrow_function = true }
-local function has_nested_fn(n)
+-- Takes the language's OWN scope set rather than a private four-name copy
+-- (CART-0308). WIDENING IS THE SAFE DIRECTION HERE, which is what makes this one
+-- low-risk: a MISS means a nested closure goes unnoticed and localize-apply
+-- proceeds where it should have declined. The old table carried neither ruby's
+-- `method`, nor rust's `closure_expression`, nor go's `func_literal`, nor odin's
+-- `procedure_declaration` — so on those languages the conservative guard was not
+-- conservative, it was blind. syngate's localize rung is the fence.
+local function has_nested_fn(n, fnt)
     for c in n:iter_children() do
         if c:named() then
-            if FN_DEF[c:type()] then return true end
-            if has_nested_fn(c) then return true end
+            if fnt[c:type()] then return true end
+            if has_nested_fn(c, fnt) then return true end
         end
     end
     return false
@@ -268,7 +273,8 @@ function M.plan_localize(store, fn_id, opts)
     for _, lp in ipairs(loc.loops) do
         if not opts.line or lp.line == opts.line then
             local ln = loop_node(root, lp.line)
-            local nested = ln and has_nested_fn(ln)
+            local nested = ln and has_nested_fn(ln,
+                require('cartograph.providers.treesitter').fn_types(lang))
             local indent = (srclines[lp.line] or ''):match('^(%s*)') or ''
             for _, c in ipairs(lp.cands) do
                 local rootname = c.full:match('^([%w_]+)')

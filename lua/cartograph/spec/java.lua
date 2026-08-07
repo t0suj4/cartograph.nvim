@@ -286,6 +286,11 @@ return {
     ]=],
     params_field = 'parameters',
     body_field = 'body',
+    -- a CONSTRUCTOR is a function the shared table never named: it is 12.5% of
+    -- java's sampled def population and every one of them was invisible to
+    -- `expr.of` while the set was hardcoded elsewhere (CART-0306).
+    fn_types = { method_declaration = true, constructor_declaration = true,
+        lambda_expression = true },
     is_method = function () return true end,
     -- methods carry their class, `::` like php (and Java's own method-ref
     -- syntax): OwnerController::processFindForm
