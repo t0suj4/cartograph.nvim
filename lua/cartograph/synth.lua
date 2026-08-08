@@ -270,8 +270,43 @@ local function usage(e, p, sh, depth)
             local path = path_of(operand, p)
             if path then shape_at(sh, path).inspected = true end
         end
+        -- ── THE DOMAIN AXIS (CART-0319) ────────────────────────────────────
+        -- `p == 'read'` pins no SHAPE but it is real evidence about which VALUES reach
+        -- the parameter, and until now nothing recorded it. This is the `narrow` the
+        -- input hole's `rule='argv/annot/narrow'` has advertised since CART-0258.
+        --
+        -- ★ THE OBSERVED LITERALS ARE A LOWER BOUND, NEVER A CLOSURE, and no field here
+        -- says otherwise. Reading the 19 collapsing holes one by one showed three cases
+        -- that are IDENTICAL in the IR and differ only in intent: MEMBERSHIP
+        -- (`kind == 'param'`, a closed dispatch set), EXCLUSION (`v ~= nil`), and
+        -- BOUNDARY (`n == 1` in plural(), a landmark inside an OPEN domain). The
+        -- consumer body cannot tell them apart — `ffi_arr` names w==1 and w==2 while
+        -- the true domain is {1,2,4}, and only the PRODUCER's range closes it
+        -- (CART-0329). So the classification is REFUSED and the evidence recorded.
+        --
+        -- A comparison against a non-literal contributes NOTHING: synth.merge tests
+        -- `a == 'any'` and `a == b`, and the literals do not bound the set while `b` is
+        -- unknown. `expr.eval` answers only for literals, which is the whole check.
+        local function litrender(x)
+            local known, v = expr.eval(x)   -- `known`, NOT truthiness: `false` is a value
+            if not known then return nil end
+            if v == expr.NIL then return 'nil' end
+            if type(v) == 'string' then return ("'%s'"):format(v) end
+            return tostring(v)
+        end
+        local function domain(operand, other, key)
+            local path = path_of(operand, p)
+            if not path then return end          -- `type(p) == 'T'` lands here: a CALL
+            local r = litrender(other)           -- has no path, so no domain entry
+            if not r then return end
+            local at_ = shape_at(sh, path)
+            at_[key] = at_[key] or {}
+            at_[key][r] = true                   -- a SET: `kind == 'param'` twice is once
+        end
         if n.k == 'bin' and (n.op == '==' or n.op == '~=' or n.op == '!=') then
             mark(n.l); mark(n.r)
+            local key = n.op == '==' and 'eq' or 'ne'
+            domain(n.l, n.r, key); domain(n.r, n.l, key)
         end
         if n.k == 'call' and n.f and n.f.k == 'name' and n.f.n == 'type' then
             for _, a in ipairs(n.a or {}) do mark(a) end
@@ -433,15 +468,26 @@ M.RESERVED = require('cartograph.runoracle').RESERVED
 --- CART-0318 exists to stop repeating.
 function M.summary(sh)
     if not sh then return nil end
-    local f, m = {}, {}
-    for k in pairs(sh.fields or {}) do f[#f + 1] = k end
-    for k in pairs(sh.methods or {}) do m[#m + 1] = k end
-    table.sort(f); table.sort(m)
-    if sh.kind == 'any' and #f == 0 and #m == 0 and not sh.inspected then return nil end
+    local function sorted(t)
+        local k = {}
+        for x in pairs(t or {}) do k[#k + 1] = x end
+        table.sort(k)
+        return k
+    end
+    local f, m = sorted(sh.fields), sorted(sh.methods)
+    local is, isnt = sorted(sh.eq), sorted(sh.ne)
+    if sh.kind == 'any' and #f == 0 and #m == 0 and #is == 0 and #isnt == 0
+        and not sh.inspected then return nil end
     local why = {}
     for i, w in ipairs(sh.why or {}) do why[i] = w end
     return { shape = sh.kind, fields = f, methods = m,
-        tested = sh.inspected or nil, why = why }
+        tested = sh.inspected or nil, why = why,
+        -- THE DOMAIN AXIS (CART-0319), and it exists only when there is evidence.
+        -- `is`/`isnt` are the literals the body COMPARED against — a LOWER BOUND on
+        -- what reaches the parameter. There is deliberately no `closed` flag and no
+        -- membership/exclusion/boundary label: those three are identical in the IR and
+        -- the consumer body cannot tell them apart.
+        domain = (#is > 0 or #isnt > 0) and { is = is, isnt = isnt } or nil }
 end
 
 --- The BASIS line for a synthesized fill: what we chose and what the code said. This is the

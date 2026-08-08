@@ -48,6 +48,15 @@ local SRC = table.concat({
     -- `#v` alongside arithmetic really IS contradictory — `#5` raises — so this must
     -- keep conflicting rather than emit a value that dies
     'function M.sizednum(v) local n = #v return v + n end',
+    -- THE DOMAIN AXIS (CART-0319): `d == "a"` is membership evidence, `d ~= nil` is
+    -- exclusion, and `d == other` is neither — the literals do not bound the set while
+    -- `other` is unknown.
+    'function M.domain(d, other)',
+    '  if d == "a" then return 1 end',
+    '  if d ~= nil then return 2 end',
+    '  if d == other then return 3 end',
+    '  return 0',
+    'end',
     'return M',
 }, '\n') .. '\n'
 
@@ -377,13 +386,14 @@ test('holes: a constraint summary is flat, closed and free of working state', fu
     -- record, no consumer deciding what to ignore.
     local c = assert(synth.summary(shape('M.fields', 'p')))
     local allowed = { shape = true, fields = true, methods = true, tested = true,
-        why = true }
+        why = true, domain = true }
     for k in pairs(c) do ok(allowed[k], 'no key outside the closed set: ' .. k) end
     eq({ 'name', 'size' }, c.fields, 'sorted, so the record is stable')
-    -- and NO `domain` key: membership/exclusion/boundary is CART-0319's and is not
-    -- computed yet. Reserving the name would advertise a channel nothing fills, which
-    -- is the exact defect this ticket exists to stop repeating.
-    eq(nil, c.domain, 'a name may only claim what the check behind it performs')
+    -- DOMAIN PRESENT <=> EQUALITY EVIDENCE EXISTS (CART-0319). M.fields never compares
+    -- `p` against anything, so the key must be absent rather than an empty record — a
+    -- name may only claim what the check behind it performs, and an always-present
+    -- `domain = {}` would advertise a channel that found nothing as one that ran.
+    eq(nil, c.domain, 'no comparisons in the body, so no domain')
 
     -- nothing to say -> no record, because an empty one would read as a finding
     eq(nil, synth.summary(shape('M.passthru', 'v')))
@@ -449,5 +459,50 @@ test('synth: `#p` is a SIZED observation, not a table kind', function ()
     -- first line is worse than no value.
     eq('conflict', shape('M.sizednum', 'v').kind, '# and arithmetic still conflict')
     eq(nil, (synth.value(shape('M.sizednum', 'v'), 'v')), 'and the conflict is refused')
+    cleanup()
+end)
+
+test('synth: the DOMAIN axis records what was compared, and refuses to classify', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local c = assert(synth.summary(shape('M.domain', 'd')))
+    eq({ "'a'" }, c.domain.is, 'the equality literal')
+    eq({ 'nil' }, c.domain.isnt, 'and the inequality one, kept apart')
+
+    -- ★ `d == other` CONTRIBUTES NOTHING. synth.merge itself is the real-world case:
+    -- it tests a == 'any', a == 'string', a == 'table' AND a == b, and the literals do
+    -- not close the set while `b` is unknown.
+    ok(not vim.tbl_contains(c.domain.is, 'other'), 'a non-literal is not domain evidence')
+    eq(2, #c.domain.is + #c.domain.isnt, 'exactly two literals, no more')
+
+    -- and a type guard is a SHAPE fact, not a domain one — by construction, since
+    -- `type(g)` is a CALL and has no access path
+    eq(nil, (synth.summary(shape('M.guard', 'g')) or {}).domain)
+    cleanup()
+end)
+
+test('synth: a domain NEVER becomes a fill — it describes and refuses', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local holes = require 'cartograph.holes'
+    -- M.tag(t) compares t against "on" and nothing else. Collapse-to-a-value was
+    -- measured at 3.2%, so this channel was deliberately built as refusal-quality: the
+    -- fill path reads SHAPE alone and must never consume `is`/`isnt`.
+    local plan = assert(ch.plan(store, id_of('M.tag')))
+    local h
+    for _, x in ipairs(plan.holes) do if x.kind == 'input' then h = x end end
+    eq({ "'on'" }, h.constraint.domain.is, 'the domain is recorded')
+    ok(holes.refusal(h):find("compares `t` against 'on'", 1, true), holes.refusal(h))
+    ok(holes.refusal(h):find('observed, not exhaustive', 1, true),
+        'a lower bound, never a closure')
+
+    assert(synth.fill(store, plan))
+    for _, x in ipairs(plan.holes) do
+        if x.kind == 'input' then
+            ok(x.value:find('<synth:', 1, true),
+                'the value comes from SHAPE alone, not from the domain: ' .. x.value)
+            eq('claim', x.filled_tier, 'and nothing about it got stronger')
+        end
+    end
     cleanup()
 end)

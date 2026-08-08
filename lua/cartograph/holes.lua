@@ -14,8 +14,11 @@
 --             "nobody owns this" and "the owner failed" are different answers.
 --   constraint  INPUT holes only: what the body says about the parameter, as
 --             synth.summary's flat closed record { shape, fields, methods, tested,
---             why }. A THIRD STATE between filled and frontier (CART-0318) — it never
---             sets a tier, so a constrained hole still blocks and still errors.
+--             why, domain? }. A THIRD STATE between filled and frontier (CART-0318) —
+--             it never sets a tier, so a constrained hole still blocks and still
+--             errors. TWO AXES (CART-0323): SHAPE is what the value must BE, DOMAIN
+--             (`{ is, isnt }`, CART-0319) is which values were compared against — a
+--             lower bound, never a closure, and never classified.
 --
 -- WHAT BLOCKS EMISSION IS NARROWER THAN "FRONTIER", and M.blocking is the one place
 -- that decides it (the census and the emitter must agree on which functions are
@@ -126,6 +129,14 @@ function M.of(store, node, ctx)
                 why = ('@param declares %s — a CLAIM, docblocks lie (CART-0240)')
                     :format(tostring(ctx.doc.params[p])) }
         else
+            -- ★ WHAT `narrow` MEANS, now that it performs something (CART-0319).
+            -- The three channels this rule names are NOT three ways to fill:
+            --   argv    -> a tier (`measured`), an observed argument
+            --   annot   -> a tier (`claim`), a declared type
+            --   narrow  -> NO TIER, EVER. It describes and refuses: the constraint
+            --              below, and the refusal sentence built from it.
+            -- Narrowing was measured at 3.2% collapse-to-a-value, so selling it as a
+            -- fill channel would be the over-projection this whole tree was filed on.
             h = { kind = 'input', name = p, rule = 'argv/annot/narrow',
                 why = 'no observed literal, no declared type' }
         end
@@ -333,17 +344,35 @@ function M.refusal(h)
     if #c.methods > 0 then
         parts[#parts + 1] = 'answering :' .. table.concat(c.methods, '(), :') .. '()'
     end
-    if #parts == 0 then
-        -- `any` with nothing under it, but the body TESTS the value. Still a door, and a
-        -- DIFFERENT one: it says our arbitrary choice is not free, it picks a path.
+    -- THE DOMAIN, hedged in three words. `is`/`isnt` are what the body COMPARED
+    -- against — a lower bound, not a closure. The long version of why lives on
+    -- CART-0319, not on every HOLE() line a reader has to scan.
+    local name = tostring(h.name)
+    local said = {}
+    if #parts > 0 then
+        said[#said + 1] = ('USES `%s` as %s'):format(name, table.concat(parts, ' '))
+    end
+    local d = c.domain
+    if d and #d.is > 0 then
+        said[#said + 1] = ('compares `%s` against %s')
+            :format(name, table.concat(d.is, ', '))
+    end
+    if d and #d.isnt > 0 then
+        said[#said + 1] = ('tests `%s` ~= %s'):format(name, table.concat(d.isnt, ', '))
+    end
+    if #said == 0 then
+        -- `any` with nothing under it, but the body TESTS the value — against another
+        -- NAME, or through a `type()` we refused to read. Still a door, and a DIFFERENT
+        -- one: it says our arbitrary choice is not free, it picks a path.
         if c.tested then
             return ('%s — the body TESTS `%s`, so any value we pick decides which path'
-                .. ' runs'):format(base, tostring(h.name))
+                .. ' runs'):format(base, name)
         end
         return base
     end
-    return ('%s — but the body USES `%s` as %s%s'):format(base, tostring(h.name),
-        table.concat(parts, ' '), c.tested and ', and TESTS it' or '')
+    return ('%s — but the body %s%s'):format(base, table.concat(said, ', '),
+        d and ' (observed, not exhaustive)'
+            or (c.tested and ', and TESTS it' or ''))
 end
 
 --- Does this hole BLOCK emitting a test? Narrower than "frontier" on purpose:
