@@ -248,9 +248,19 @@ function M.blocks(store, opts)
                     grow[key][#grow[key] + 1] = o
                 end
             end
-            local best
-            for _, sub in pairs(grow) do
-                if #sub >= 2 and (not best or #sub > #best) then best = sub end
+            -- ★ THE TIE MUST BE BROKEN BY THE KEY, NOT BY HASH ORDER. `pairs` visits
+            -- `grow` in whatever order the table happens to hash, so with a bare
+            -- `#sub > #best` two equally-large extensions are decided by which one came
+            -- up first — and that decides which span is maximal, which decides what the
+            -- containment pass drops. Measured before this fix: the same tree at
+            -- `51e3c4a^` reported 482 groups on three runs and 481 on a fourth, same
+            -- code, same input. A detector whose OUTPUT SET moves between identical runs
+            -- cannot have a rank quoted against it. Keying the tie makes M.blocks a pure
+            -- function of its input again. (CART-0348)
+            local best, bestk
+            for k, sub in pairs(grow) do
+                if #sub >= 2 and (not best or #sub > #best
+                    or (#sub == #best and k < bestk)) then best, bestk = sub, k end
             end
             if best then occ, len = best, len + 1 else return occ, len end
         end
@@ -424,7 +434,15 @@ function M.blocks_report(groups)
             if a.extract.ok and a.extract.iface ~= b.extract.iface then
                 return a.extract.iface < b.extract.iface
             end
-            return a.len > b.len
+            if a.len ~= b.len then return a.len > b.len end
+            -- ★ TOTAL ORDER — and the tie band here is WIDER than it looks. `iface` is
+            -- only consulted when BOTH groups are extractable, so every DECLINED group
+            -- is ordered by (nfiles, copies, len) alone — and most groups are 2 copies
+            -- in 2 files. Without this key their relative order is whatever table.sort
+            -- happened to do. Same reasoning as sort_pairs: determinism, not opinion.
+            local ka = a[1] and ('%s:%d'):format(a[1].file, a[1].from_line or 0) or ''
+            local kb = b[1] and ('%s:%d'):format(b[1].file, b[1].from_line or 0) or ''
+            return ka < kb
         end)
         local crossfile, auto = 0, 0
         for _, g in ipairs(groups) do
@@ -629,10 +647,24 @@ local function try_pair(fns, i, j, max_dist, min_rows)
     return { dist = dist, shared = nmatch, a = fa, b = fb, ops = ops }
 end
 
+-- A pair's identity, purely for making the order TOTAL. See sort_pairs.
+local function pair_key(p)
+    return ('%s:%d\0%s:%d'):format(p.a.file, p.a.lines[1] or 0, p.b.file, p.b.lines[1] or 0)
+end
+
 local function sort_pairs(out)
     table.sort(out, function (x, y)
         if x.shared ~= y.shared then return x.shared > y.shared end
-        return x.dist < y.dist
+        if x.dist ~= y.dist then return x.dist < y.dist end
+        -- ★ TOTAL ORDER, or the rank is not a fact. (shared, dist) leaves WIDE ties —
+        -- measured on this repo at `51e3c4a^`: 36 pairs, and the (shared=9, dist=1)
+        -- band alone holds 5. table.sort is not stable, so the same pair came back at
+        -- rank 13 and rank 14 on two runs of the same input. A report that prints an
+        -- arbitrary order and calls it a ranking is asserting a comparison it never
+        -- made. This last key adds no ranking OPINION — it only makes the tie
+        -- deterministic, so "rank N" means the same thing twice. When it decides, the
+        -- honest reading is a BAND, which near_report now prints.
+        return pair_key(x) < pair_key(y)
     end)
     return out
 end
@@ -865,7 +897,22 @@ function M.near_report(pairs_, store)
     -- is left to the exact tier. Never a false match (the consistency guard).
     local L = { ('near-clones — at least %d pair(s)'):format(#pairs_),
         '(row sequences differing by ≤ max_dist edits; relative-local aligned, bijection-consistent)',
-        '(matched rows = shared template, differing rows = holes/params; mild lower bound — see loop-binder residual)', '' }
+        '(matched rows = shared template, differing rows = holes/params; mild lower bound — see loop-binder residual)',
+        '(#lo-hi is a rank BAND: the order ranks on (shared, dist) only, so every pair',
+        ' sharing those two numbers is genuinely unranked against the others. A range is',
+        ' the honest position — a point rank would be an ordering we never computed.)', '' }
+    -- the contiguous run of equal (shared, dist) each pair sits in — see the note above
+    local band_lo, band_hi = {}, {}
+    do
+        local i = 1
+        while i <= #pairs_ do
+            local j = i
+            while j < #pairs_ and pairs_[j + 1].shared == pairs_[i].shared
+                and pairs_[j + 1].dist == pairs_[i].dist do j = j + 1 end
+            for k = i, j do band_lo[k], band_hi[k] = i, j end
+            i = j + 1
+        end
+    end
     local srccache = {}
     local function srcline(f, ln)
         local lines = srccache[f.file]
@@ -881,10 +928,12 @@ function M.near_report(pairs_, store)
     end
     local TAG = { value = 'value-parameterizable', exact = 'EXACT (mergeable directly)',
         structural = 'structural (needs a human)' }
-    for _, p in ipairs(pairs_) do
+    for i, p in ipairs(pairs_) do
         local a = M.analyze_pair(p)
-        L[#L + 1] = ('■ %d edit(s), %d shared statement(s) — %s:')
-            :format(p.dist, p.shared, TAG[a.kind])
+        local pos = band_lo[i] == band_hi[i] and ('#%d'):format(band_lo[i])
+            or ('#%d-%d'):format(band_lo[i], band_hi[i])
+        L[#L + 1] = ('■ %s of %d · %d edit(s), %d shared statement(s) — %s:')
+            :format(pos, #pairs_, p.dist, p.shared, TAG[a.kind])
         L[#L + 1] = ('    %s  %s:%d'):format(p.a.name, p.a.file, p.a.lines[1] or 0)
         L[#L + 1] = ('    %s  %s:%d'):format(p.b.name, p.b.file, p.b.lines[1] or 0)
         -- the refined holes (the helper's parameters), anti-unified to the leaf

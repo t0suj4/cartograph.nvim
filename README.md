@@ -462,9 +462,14 @@ you from one rewrite site to the next, and the quickfix list is the work queue.
 The costly per-function index behind every tier is built once and cached by
 graph generation, so a focused query (`:CartographExtractHelper` on the function
 under the cursor) is instant after the first scan rather than re-reading the
-whole graph. Both clone reports are honest about their own confidence: the block
-tier marks short runs as likely-coincidental, and the near-clone count is stated
-as a lower bound, since a copy that inserts a local can drift past the matcher.
+whole graph. Both clone reports are honest about their own confidence. The
+near-clone count is stated as a lower bound, since a copy that inserts a local
+can drift past the matcher — and each pair's position is printed as a **band**
+(`#10-14 of 36`) rather than a point rank, because that tier orders on shared
+statements and edit distance alone, so every pair sharing those two numbers is
+genuinely unranked against the rest. Printing one of them as "12th" would assert
+a comparison that was never made: measured on this repo's own history, the same
+pair came back 13th on one run and 14th on the next, from identical input.
 
 ### The working set
 

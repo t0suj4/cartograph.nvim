@@ -153,6 +153,39 @@ test('clones: two bodies differing by ONE statement are a near-clone (1 hole)', 
     vim.fn.delete(root, 'rf')
 end)
 
+test('clones: tied near-clone pairs report a rank BAND, and the tie is broken deterministically', function ()
+    -- CART-0348. The near order ranks on (shared, dist) ONLY, and on this repo's own
+    -- history that leaves wide ties — the answer-key pair came back at rank 13 on one
+    -- run and 14 on the next, same input, because table.sort is not stable. Two things
+    -- are pinned here: the report must not claim a point rank it never computed, and
+    -- the residual order must at least be a FUNCTION of the input.
+    local function body(f, tail)
+        return ('  local y = %s(x)\n  local z = norm(y)\n  local w = pad(z)\n  %s(w)\n  return w')
+            :format(f, tail)
+    end
+    local root = proj {
+        -- two independent pairs, each 1 edit / 4 shared → they TIE with each other
+        ['a.lua'] = fn('one', 'x', body('trim', 'log')),
+        ['b.lua'] = fn('two', 'x', body('trim', 'warn')),
+        ['c.lua'] = fn('three', 'x', body('fetch', 'emit')),
+        ['d.lua'] = fn('four', 'x', body('fetch', 'push')),
+    }
+    local ps = clones.near(store, { max_dist = 2, min_rows = 4, min_shared = 2 })
+    ok(near_pair(ps, 'one', 'two') and near_pair(ps, 'three', 'four'), 'both pairs found')
+    local L = table.concat(clones.near_report(ps, store), '\n')
+    ok(L:find('#1-2 of ', 1, true), 'the tied pairs print a RANGE, not a made-up point rank')
+
+    -- and the tie itself resolves on the pair's location, so the order is reproducible
+    local first
+    for _, p in ipairs(ps) do
+        if not first and (p.a.name == 'one' or p.a.name == 'three'
+            or p.b.name == 'one' or p.b.name == 'three') then first = p end
+    end
+    ok(first and (first.a.file:find('a%.lua') or first.b.file:find('a%.lua')),
+        'a.lua/b.lua sorts before c.lua/d.lua — the residual order is a function of the input')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('clones: an exact clone is NOT reported as a near-clone (distance 0 excluded)', function ()
     local body = '  local a = load(src)\n  local b = trim(a)\n  local c = wrap(b)\n'
         .. '  persist(c)\n  return c'
