@@ -28,6 +28,18 @@ local SRC = table.concat({
     'function M.deepnum(o) return #o.list + o.count end',
     'function M.modulo(v) return v % 3 end',            -- `%` must not reach a format string
     'function M.both(x) return x.k + (x * 2) end',      -- CONFLICT: table and number
+    -- TYPE GUARDS (CART-0328). These bodies never index or call the parameter — the
+    -- guard is the ONLY evidence, which is exactly where `usage` used to return `any`
+    -- and `basis` went on to claim nothing in the body inspects it.
+    'function M.guard(g) if type(g) == "table" then return 1 end return 0 end',
+    'function M.guardfn(h) if type(h) == "function" then return 1 end return 0 end',
+    -- EXCLUSION, which must NOT fill: it says only what `k` is NOT
+    'function M.notfn(k) if type(k) ~= "function" then return 0 end return 1 end',
+    -- an UNREPRESENTABLE guard: `boolean` has no kind in M.KINDS, so it is left alone
+    -- rather than approximated by a nearby representable one
+    'function M.guardbool(b) if type(b) == "boolean" then return 1 end return 0 end',
+    -- a plain equality: pins no shape, but the body still TESTS the parameter
+    'function M.tag(t) if t == "on" then return 1 end return 0 end',
     'return M',
 }, '\n') .. '\n'
 
@@ -237,5 +249,51 @@ test('synth: the modulo operator does not reach a format string', function ()
     local sh = shape('M.modulo', 'v')
     eq('number', sh.kind)
     ok(#sh.why > 0 and sh.why[1]:find('%%'), 'the note survives: ' .. tostring(sh.why[1]))
+    cleanup()
+end)
+
+test('synth: a type() guard NAMES the shape, and only `==` may fill from one', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    -- `==` is membership: the body says what `g` IS, so a value of that shape runs the
+    -- guarded path rather than the fallthrough an arbitrary sentinel would take.
+    local g = shape('M.guard', 'g')
+    eq('table', g.kind, 'type(g) == "table"')
+    eq('{ }', assert(synth.value(g, 'g')))
+    eq('function', shape('M.guardfn', 'h').kind, 'type(h) == "function"')
+
+    -- ★ EXCLUSION MUST NOT FILL. `type(k) ~= "function"` says only what k is NOT. The
+    -- reading that makes it a function needs GUARD DOMINANCE (the early exit means the
+    -- rest runs only when it IS one), which narrow.lua computes and this walker cannot
+    -- see. Filling here would be a guess wearing evidence's clothes.
+    eq('any', shape('M.notfn', 'k').kind, '~= is exclusion, not membership')
+
+    -- an unrepresentable type is left alone, never approximated
+    eq('any', shape('M.guardbool', 'b').kind, 'boolean has no kind in M.KINDS')
+    cleanup()
+end)
+
+test('synth: basis may not claim non-inspection it did not check', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    -- THE DEFECT (CART-0328): every `any` shape used to open "nothing in the body
+    -- inspects `p`" — a statement about the WHOLE body, from a walker that only looked
+    -- for SHAPE requirements. Measured false for 70 of 1092 sentinel fills.
+    for _, c in ipairs({ { 'M.tag', 't' }, { 'M.notfn', 'k' }, { 'M.guardbool', 'b' } }) do
+        local sh = shape(c[1], c[2])
+        eq('any', sh.kind, c[1] .. ': no shape follows from a test')
+        ok(sh.inspected, c[1] .. ': the body TESTS ' .. c[2])
+        local b = synth.basis(sh, c[2])
+        ok(not b:find('nothing in the body inspects', 1, true),
+            c[1] .. ': must not claim non-inspection — ' .. b)
+        ok(b:find('TESTS it', 1, true), c[1] .. ': must say the choice picks a path — ' .. b)
+    end
+
+    -- and the genuinely uninspected case keeps the strong sentence, or the fix would
+    -- have cost the signal instead of correcting it
+    local pv = shape('M.passthru', 'v')
+    eq('any', pv.kind)
+    ok(not pv.inspected, 'passthru never tests v')
+    ok(synth.basis(pv, 'v'):find('nothing in the body inspects', 1, true))
     cleanup()
 end)

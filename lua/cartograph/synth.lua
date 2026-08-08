@@ -52,6 +52,14 @@ end
 -- misreading, and either way it is reported rather than resolved by picking a winner.
 M.KINDS = { any = 0, ['function'] = 1, number = 2, string = 3, table = 4, conflict = 9 }
 
+-- The `type()` results that name a shape we can BUILD A VALUE FOR (CART-0328).
+-- `boolean`, `nil`, `userdata` and `thread` are real answers with no kind in M.KINDS,
+-- and they are left alone rather than approximated: an unrepresentable constraint must
+-- not quietly become a nearby representable one. Keyed by the string the guard compares
+-- against, so this is also the closed list of guards that constrain anything.
+M.TYPE_GUARD = { table = 'table', string = 'string', number = 'number',
+    ['function'] = 'function' }
+
 local function merge(a, b)
     if not a or a == 'any' then return b end
     if not b or b == 'any' then return a end
@@ -119,6 +127,8 @@ end
 ---   sh.fields  name -> sub-shape (the names come free with the access, the types from here)
 ---   sh.methods name -> true, for `p:m()`
 ---   sh.why     the usages that decided it, so a reader can disagree with us
+---   sh.inspected  the body TESTS this path (compares or type-tests it) even where no
+---                 shape follows — the check that lets M.basis claim non-inspection
 local function usage(e, p, sh, depth)
     if depth > 6 then return end
     expr.walk(e, function (n)
@@ -187,6 +197,56 @@ local function usage(e, p, sh, depth)
             for _, a in ipairs(n.a or {}) do
                 put(a, 'table', n.f.n .. '(%s)')
             end
+        end
+        -- ── THE BODY TESTS THE VALUE (CART-0328) ────────────────────────────
+        -- `type(p) == 'table'` names the type outright, and in a body that never
+        -- indexes or calls `p` it is the ONLY evidence there is — which is exactly
+        -- where this walker used to return `any` and `M.basis` went on to claim
+        -- nothing in the body inspects it. Measured: 70 of the 1092 sentinel fills
+        -- carry a test like this.
+        --
+        -- ★ ONLY `==`. `type(p) ~= 'function'` is EXCLUSION — it says what `p` is NOT.
+        -- The reading that makes it a function (the guard is an early exit, so the
+        -- rest of the body runs only when it IS one) needs GUARD DOMINANCE, which
+        -- narrow.lua computes and this walker cannot see. Filling from an exclusion
+        -- would be a guess wearing evidence's clothes, and this module's whole point
+        -- is that the two are different.
+        if n.k == 'bin' and n.op == '==' then
+            local function typearg(x)
+                if x and x.k == 'call' and x.f and x.f.k == 'name' and x.f.n == 'type' then
+                    return x.a and x.a[1] or nil
+                end
+            end
+            local ta, lit = typearg(n.l), n.r
+            if not ta then ta, lit = typearg(n.r), n.l end
+            -- READ THE LITERAL THROUGH `expr.eval`, NOT `lit.v`. A str literal's `v` is
+            -- the RAW SOURCE TEXT INCLUDING ITS QUOTES ("raw text incl. quotes; eval
+            -- strips", expr.lua) — so `M.TYPE_GUARD[lit.v]` looks up `'table'` WITH the
+            -- quote characters and never matches. Measured: the rule silently did
+            -- nothing on all three equality guards before this. eval is the one place
+            -- that decides what a literal MEANS, and a second spelling of it here would
+            -- be a disagreement waiting to be found by whoever trusts the wrong one.
+            local kind
+            if ta and lit then
+                local known, val = expr.eval(lit)
+                if known and type(val) == 'string' then kind = M.TYPE_GUARD[val] end
+            end
+            if kind then put(ta, kind, 'type(%s) == ' .. kind) end
+        end
+        -- AND EVEN WHEN THE TEST CONSTRAINS NOTHING WE MUST NOT SAY IT DOES NOT
+        -- EXIST. `p == 'param'` pins no shape and `type(p) ~= 'function'` is refused
+        -- above, but both mean the body INSPECTS `p` and the arbitrary value we pick
+        -- decides which path runs. Recorded on the shape AT THE TESTED PATH, so a
+        -- test of `p.x` never speaks for `p`.
+        local function mark(operand)
+            local path = path_of(operand, p)
+            if path then shape_at(sh, path).inspected = true end
+        end
+        if n.k == 'bin' and (n.op == '==' or n.op == '~=' or n.op == '!=') then
+            mark(n.l); mark(n.r)
+        end
+        if n.k == 'call' and n.f and n.f.k == 'name' and n.f.n == 'type' then
+            for _, a in ipairs(n.a or {}) do mark(a) end
         end
     end)
 end
@@ -287,7 +347,19 @@ M.RESERVED = require('cartograph.runoracle').RESERVED
 --- The BASIS line for a synthesized fill: what we chose and what the code said. This is the
 --- sentence a reader uses to disagree with us, so it names the usages rather than asserting
 --- a type.
+---
+--- ★ AND IT MAY ONLY CLAIM WHAT `usage` CHECKED (CART-0328). This used to open "nothing
+--- in the body inspects `p`" for EVERY `any` shape — a statement about the whole body,
+--- from a walker that only ever looked for SHAPE requirements. Measured: false for 70 of
+--- the 1092 sentinel fills, where the body compares `p` against a literal or type-tests
+--- it. `sh.inspected` is the check behind the claim; without it the sentence is unearned.
 function M.basis(sh, name)
+    if sh.kind == 'any' and sh.inspected then
+        return ('no SHAPE requirement was found for `%s` — nothing indexes, calls or'
+            .. ' iterates it — but the body TESTS it, so this arbitrary value decides'
+            .. ' WHICH PATH runs and the choice is not free')
+            :format(tostring(name))
+    end
     if sh.kind == 'any' then
         return ('nothing in the body inspects `%s`, so ANY value runs and this one is'
             .. ' arbitrary — what it characterizes does not depend on the choice')
