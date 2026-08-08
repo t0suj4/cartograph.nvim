@@ -19,6 +19,17 @@ return {
         params_field = 'parameters',
         body_field = 'body',
         fn_types = { function_definition = true, lambda = true },
+        -- ── DYNAMIC DISPATCH: THE MEMBER IS RUNTIME STATE (CART-0345/0344) ──
+        -- `d[k]()` selects its callee at run time — the `dynamic` rung, "a call the
+        -- graph KNOWS IT CANNOT SEE", which is a different fact from `frontier`
+        -- ("we failed to resolve"). Undeclared here until now, so every such call
+        -- landed in frontier and any measurement of dynamic dispatch on a python
+        -- corpus would have reported it as absent.
+        -- ★ A LITERAL KEY IS NOT DYNAMIC: `d["lit"]()` names its member in
+        -- the source, and claiming we cannot see it would be a false negative
+        -- FACT. Node names verified by parsing a snippet per grammar, not guessed.
+        dynamic_callee_types = { subscript = true },
+        dynamic_callee_static_key = { string = true, integer = true, float = true },
         -- `lambda` encloses, but the `functions` query mints only
         -- function_definition — so it is not a sound flow stop (CART-0308).
         fn_unminted = { lambda = true },

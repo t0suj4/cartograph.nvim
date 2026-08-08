@@ -73,7 +73,17 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 121 -- v121: THE `dynamic` RUNG NEVER FIRED FOR AN INDEXED CALLEE
+M.VERSION = 122 -- v122: THE SAME RUNG, DECLARED FOR THE OTHER LANGUAGES (CART-0344).
+               -- Only 2 of 15 specs declared dynamic_callee_types, so measuring dynamic
+               -- dispatch on a js/python corpus would have read 0 for lua's old reason.
+               -- js `subscript_expression`, python `subscript`, php + the subscript form
+               -- alongside its existing `variable_name`; node names verified by parsing
+               -- a snippet per grammar rather than guessed. Measured after: python
+               -- django-oscar 3 real sites, javascript ZERO across 134k calls — the
+               -- indexed-callee form is RARE, and the php/ruby/js intuition is about
+               -- NAME-based dispatchers (send, call_user_func) that this field cannot
+               -- express.
+               -- v121: THE `dynamic` RUNG NEVER FIRED FOR AN INDEXED CALLEE
                -- (CART-0345). `fsm[event]()` selects its callee at run time, so no
                -- static answer exists — that is the `dynamic` rung, "a call the graph
                -- KNOWS IT CANNOT SEE", and it is a different fact from `frontier`,

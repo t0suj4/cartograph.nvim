@@ -200,6 +200,17 @@ return {
         params_field = 'parameters',
         body_field = 'body',
         fn_types = FN_TYPES,
+        -- ── DYNAMIC DISPATCH: THE MEMBER IS RUNTIME STATE (CART-0345/0344) ──
+        -- `obj[k]()` selects its callee at run time — the `dynamic` rung, "a call the
+        -- graph KNOWS IT CANNOT SEE", which is a different fact from `frontier`
+        -- ("we failed to resolve"). Undeclared here until now, so every such call
+        -- landed in frontier and any measurement of dynamic dispatch on a javascript
+        -- corpus would have reported it as absent.
+        -- ★ A LITERAL KEY IS NOT DYNAMIC: `obj["lit"]()` names its member in
+        -- the source, and claiming we cannot see it would be a false negative
+        -- FACT. Node names verified by parsing a snippet per grammar, not guessed.
+        dynamic_callee_types = { subscript_expression = true },
+        dynamic_callee_static_key = { string = true, number = true },
         -- ★ "MINTED" HAS TO MEAN *ALWAYS* MINTED, NOT SOMETIMES. The generator
         -- forms are never captured by the `functions` query above. But
         -- `function_expression` is worse than never — it is CONDITIONAL: minted

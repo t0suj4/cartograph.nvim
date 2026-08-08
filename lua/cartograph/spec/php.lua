@@ -173,7 +173,15 @@ return {
     indirect_calls = { call_user_func = 1, call_user_func_array = 1 },
     -- a variable in callee position is runtime state ($fn()) — by NODE
     -- TYPE: jQuery's $() is a plain identifier and must stay a call
-    dynamic_callee_types = { variable_name = true },
+    -- `$op()` was already here; `$a[$k]()` is the same fact through a subscript
+    -- (CART-0344). Node names verified by parsing a snippet, not guessed.
+    dynamic_callee_types = { variable_name = true, subscript_expression = true },
+    -- ★ A LITERAL KEY IS NOT DYNAMIC: `$a['lit']()` names its member in the
+    -- source. `$op()`'s callee is a variable_name whose key child is a `name`,
+    -- which is deliberately NOT in this set, so the existing php behaviour is
+    -- unchanged.
+    dynamic_callee_static_key = { string = true, encapsed_string = true,
+        integer = true },
     vars = [=[
         (program (expression_statement (assignment_expression
             left: (variable_name (name) @vname) right: (_) @value) @vdef))
