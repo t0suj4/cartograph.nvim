@@ -40,6 +40,14 @@ local SRC = table.concat({
     'function M.guardbool(b) if type(b) == "boolean" then return 1 end return 0 end',
     -- a plain equality: pins no shape, but the body still TESTS the parameter
     'function M.tag(t) if t == "on" then return 1 end return 0 end',
+    -- `#p` IS NOT A KIND (CART-0333): a Lua string answers it too. The two orders must
+    -- agree, because a walker sees usages in SOURCE order and a kind decided mid-walk
+    -- would depend on which came first.
+    'function M.sizedfirst(a) local n = #a return a:sub(1, n) end',
+    'function M.sizedlast(b) local x = b:sub(1, 1) return x, #b end',
+    -- `#v` alongside arithmetic really IS contradictory — `#5` raises — so this must
+    -- keep conflicting rather than emit a value that dies
+    'function M.sizednum(v) local n = #v return v + n end',
     'return M',
 }, '\n') .. '\n'
 
@@ -416,5 +424,30 @@ test('holes: a refusal with nothing to add is unchanged', function ()
             eq(x.why, holes.refusal(x))
         end
     end
+    cleanup()
+end)
+
+test('synth: `#p` is a SIZED observation, not a table kind', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    -- THE BUG (CART-0333): `#p` was recorded as table evidence, and merge then resolved
+    -- string-vs-table to table by a rule written for the `:method()` ambiguity. So a
+    -- parameter the body sliced with :sub() came out a TABLE, the synthesized value was
+    -- { sub = function () end }, and the spec RAN — against a stub — characterizing stub
+    -- behaviour while reading as a characterization of the real thing.
+    eq('string', shape('M.sizedfirst', 'a').kind, '#a then a:sub() -> string')
+    eq('string', shape('M.sizedlast', 'b').kind, 'b:sub() then #b -> string')
+
+    -- ORDER INDEPENDENCE is the reason it resolves after the walk rather than during it
+    eq(shape('M.sizedfirst', 'a').kind, shape('M.sizedlast', 'b').kind)
+
+    -- and `#` still fills in where nothing better answers: the old default survives
+    eq('table', shape('M.count', 't').kind, '#t alone is still a table')
+
+    -- ★ BUT IT MUST NOT SOFTEN A REAL CONTRADICTION. `#5` raises, so `#v` next to `v + n`
+    -- is genuinely incompatible and has to keep REFUSING — a value that dies at the
+    -- first line is worse than no value.
+    eq('conflict', shape('M.sizednum', 'v').kind, '# and arithmetic still conflict')
+    eq(nil, (synth.value(shape('M.sizednum', 'v'), 'v')), 'and the conflict is refused')
     cleanup()
 end)

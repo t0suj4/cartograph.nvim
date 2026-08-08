@@ -129,6 +129,8 @@ end
 ---   sh.why     the usages that decided it, so a reader can disagree with us
 ---   sh.inspected  the body TESTS this path (compares or type-tests it) even where no
 ---                 shape follows — the check that lets M.basis claim non-inspection
+---   sh.sized   the body takes `#` of this path. NOT a kind: string and table both
+---              answer it, so resolve_sized settles it after the walk (CART-0333)
 local function usage(e, p, sh, depth)
     if depth > 6 then return end
     expr.walk(e, function (n)
@@ -173,9 +175,24 @@ local function usage(e, p, sh, depth)
         elseif n.k == 'call' and n.f and path_of(n.f, p) then
             put(n.f, 'function', '%s()')
         elseif n.k == 'un' and n.op == '#' then
-            -- `#p` on a real table answers correctly, unlike on a sandbox sentinel where
-            -- __len never fires (5.1) — so synthesis is strictly SAFER here than a proxy.
-            put(n.e, 'table', '#%s')
+            -- ★ `#p` IS NOT A KIND (CART-0333). It answers on a Lua STRING as readily as
+            -- on a table — `#'abc'` is 3 — so recording it as table evidence let the
+            -- WEAKEST signal in this walker override the strongest: merge resolved
+            -- string-vs-table to table by a rule written for the `:method()` ambiguity,
+            -- and M.scan_type(s) came out "a table answering :gsub(), :match(), :sub()".
+            -- Measured before the fix: 229 table shapes carried `#p` in their evidence
+            -- and 23 were provably mis-shaped. Those specs still RAN — against a stub
+            -- table — which is why nothing raised and nobody saw it.
+            --
+            -- So it is a SIZED observation, resolved after the walk and only where
+            -- nothing better answers. The original justification is untouched: a real
+            -- value answers `#` correctly, unlike a sandbox sentinel where __len never
+            -- fires under 5.1, and an otherwise-unconstrained `#p` still becomes `{ }`.
+            local path = path_of(n.e, p)
+            if path then
+                shape_at(sh, path).sized = true
+                note(('#%s'):format(pname(p, path)))
+            end
         elseif n.k == 'un' and n.op == '-' then
             put(n.e, 'number', '-%s')
         elseif n.k == 'bin' then
@@ -267,6 +284,29 @@ function M.new()
     return { kind = 'any', fields = {}, methods = {}, why = {} }
 end
 
+--- RESOLVE THE `sized` OBSERVATION into a kind, once the whole body has been read
+--- (CART-0333). `#p` says only that the value answers `#`, which BOTH a string and a
+--- table do, so it may not compete with real kind evidence — it fills in only where
+--- nothing else answered.
+---
+---   any      -> table    the old behaviour, and still the right default
+---   string   -> string   `#'abc'` is 3; this is the case that was being broken
+---   number   -> CONFLICT `#5` raises, so this really is contradictory evidence and
+---   function -> CONFLICT must keep refusing rather than emit a value that dies
+---
+--- Deferred rather than decided in the walk because a walker sees usages in SOURCE
+--- order: `#s` before `s:sub()` and `s:sub()` before `#s` have to reach the same answer.
+local function resolve_sized(sh)
+    if type(sh) ~= 'table' then return end
+    if sh.sized then
+        if sh.kind == 'any' then sh.kind = 'table'
+        elseif sh.kind ~= 'string' and sh.kind ~= 'table' then
+            sh.kind = merge(sh.kind, 'table')
+        end
+    end
+    for _, sub in pairs(sh.fields or {}) do resolve_sized(sub) end
+end
+
 --- WHAT THE BODY REQUIRES OF ONE PARAMETER. Returns a shape (never nil — `any` is a real
 --- answer meaning "nothing in the body inspects it", which is the 47% case and the easiest
 --- one to fill). `rows` is the expression rows; pass them in so a caller sweeping a corpus
@@ -300,6 +340,7 @@ function M.shape_of_rows(rows, p)
             end
         end
     end
+    resolve_sized(sh)
     return sh
 end
 
