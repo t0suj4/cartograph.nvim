@@ -1438,8 +1438,10 @@ end
 -- `nvim --headless -l <spec>` or any Lua, because the point is that the SUBJECT's
 -- behaviour is characterized, not that our suite can host it.
 
+-- THE REFUSAL A READER ACTUALLY SEES, so it goes through holes.refusal rather than
+-- reading `why` raw: a constrained hole says what would satisfy it (CART-0321).
 local function hole_call(h)
-    return ('HOLE(%q, %q)'):format(h.id, (h.why or 'no evidence'):gsub('"', "'"))
+    return ('HOLE(%q, %q)'):format(h.id, holes.refusal(h):gsub('"', "'"))
 end
 
 --- THE UPVALUE WALK (CART-0286), emitted into the spec so it is self-contained. A
@@ -1638,7 +1640,7 @@ function M.preamble(plan)
     -- missing instead of Lua's own message about a module it never heard of
     for _, h in ipairs(plan.holes) do
         if h.kind == 'load' and not h.value then
-            add(('HOLE(%q, %q)'):format(h.id, (h.why or ''):gsub('"', "'")))
+            add(('HOLE(%q, %q)'):format(h.id, holes.refusal(h):gsub('"', "'")))
         end
     end
     if plan.subject.kind == 'member' then
@@ -1716,7 +1718,7 @@ function M.preamble(plan)
             else
                 add(('-- an absent dependency this spec cannot inject%s'):format(
                     h.stub and (' (declared ' .. h.stub .. ')') or ''))
-                add(('HOLE(%q, %q)'):format(h.id, (h.why or ''):gsub('"', "'")))
+                add(('HOLE(%q, %q)'):format(h.id, holes.refusal(h):gsub('"', "'")))
             end
         end
     end
@@ -1742,7 +1744,7 @@ function M.preamble(plan)
                 add(('_G[%q] = %s  -- fixture: %s'):format(h.name, h.value,
                     h.basis or ''))
             else
-                add(('HOLE(%q, %q)'):format(h.id, (h.why or ''):gsub('"', "'")))
+                add(('HOLE(%q, %q)'):format(h.id, holes.refusal(h):gsub('"', "'")))
             end
         end
     end
@@ -1961,7 +1963,7 @@ function M.report(plan)
         -- self-contradiction the filled rows had.
         add(('  %s %-22s %-9s %s'):format(mark, h.id,
             h.satisfied_by and 'env' or h.filled_tier or h.tier or 'FRONTIER',
-            h.satisfied_by or h.basis or h.why or ''), nil)
+            h.satisfied_by or h.basis or holes.refusal(h)), nil)
     end
     add('', nil)
     add('  + supplied or measured · = satisfied by the environment · ? a HOLE that'

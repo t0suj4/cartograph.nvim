@@ -381,3 +381,40 @@ test('holes: a constraint summary is flat, closed and free of working state', fu
     eq(nil, synth.summary(shape('M.passthru', 'v')))
     cleanup()
 end)
+
+test('holes: the refusal becomes a DOOR — it says what would satisfy the hole', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local holes = require 'cartograph.holes'
+    local plan = assert(ch.plan(store, id_of('M.custom')))
+    local h
+    for _, x in ipairs(plan.holes) do
+        if x.kind == 'input' and x.name == 'o' then h = x end
+    end
+    local r = holes.refusal(h)
+    ok(r:find('no observed literal', 1, true), 'the wall is still there: ' .. r)
+    ok(r:find('answering :render()', 1, true), 'and now a door: ' .. r)
+    ok(r:find('USES', 1, true) and not r:find('requires', 1, true),
+        'union wording, per CART-0320: ' .. r)
+
+    -- ★ AND `why` ITSELF IS UNTOUCHED. characterize parses this field with ANCHORED
+    -- patterns to recover an observed argument (`passes the string (.*)$`), so growing
+    -- it would break resolution while looking like a prose edit.
+    eq('no observed literal, no declared type', h.why)
+    cleanup()
+end)
+
+test('holes: a refusal with nothing to add is unchanged', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local holes = require 'cartograph.holes'
+    local plan = assert(ch.plan(store, id_of('M.passthru')))
+    for _, x in ipairs(plan.holes) do
+        if x.kind == 'input' then
+            -- no constraint at all: the sentence must not grow a decorative clause
+            eq(nil, x.constraint)
+            eq(x.why, holes.refusal(x))
+        end
+    end
+    cleanup()
+end)

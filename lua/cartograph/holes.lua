@@ -305,6 +305,47 @@ function M.of(store, node, ctx)
     return H
 end
 
+--- THE REFUSAL SENTENCE for a hole: `why`, plus what the body already tells us.
+---
+--- A HEDGE IS A DOOR ([[cartograph-explaining-a-finding]]). "no observed literal, no
+--- declared type" is a wall — it says only that we failed. "…but the body USES `node`
+--- as a table answering :type(), :named_child()" is a door: a reader supplies one in
+--- seconds. The hole still REFUSES; what changes is whether the refusal is actionable.
+---
+--- ★ THE CONSTRAINT IS RENDERED HERE AND NEVER APPENDED TO `why`, and that is not a
+--- style choice. characterize.lua parses this field with ANCHORED patterns —
+--- `h.why:match('passes the string (.*)$')` — to recover an observed argument. Growing
+--- `why` would break that silently, and the breakage would surface as a resolution bug
+--- rather than as the prose edit it was. The record keeps its shape; the sentence is a
+--- projection of it.
+---
+--- USES, NOT REQUIRES (CART-0320): a constraint is a UNION over the body's usages, and
+--- nothing here knows whether they can run on the same path.
+function M.refusal(h)
+    local base = h.why or 'no evidence'
+    local c = h.constraint
+    if not c then return base end
+    local parts = {}
+    if c.shape and c.shape ~= 'any' then parts[#parts + 1] = 'a ' .. c.shape end
+    if #c.fields > 0 then
+        parts[#parts + 1] = 'with .' .. table.concat(c.fields, ', .')
+    end
+    if #c.methods > 0 then
+        parts[#parts + 1] = 'answering :' .. table.concat(c.methods, '(), :') .. '()'
+    end
+    if #parts == 0 then
+        -- `any` with nothing under it, but the body TESTS the value. Still a door, and a
+        -- DIFFERENT one: it says our arbitrary choice is not free, it picks a path.
+        if c.tested then
+            return ('%s — the body TESTS `%s`, so any value we pick decides which path'
+                .. ' runs'):format(base, tostring(h.name))
+        end
+        return base
+    end
+    return ('%s — but the body USES `%s` as %s%s'):format(base, tostring(h.name),
+        table.concat(parts, ' '), c.tested and ', and TESTS it' or '')
+end
+
 --- Does this hole BLOCK emitting a test? Narrower than "frontier" on purpose:
 ---  · ORACLE never blocks — it is the hole a single RUN fills, and no static tier can
 ---    ever supply it. Counting it made the first headline answer the wrong question,
