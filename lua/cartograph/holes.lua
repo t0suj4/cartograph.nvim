@@ -7,11 +7,15 @@
 -- SEPARATELY will disagree, and the disagreement will be discovered by a reader who
 -- trusts the wrong one.
 --
--- hole = { kind, name, tier|nil, why, rule, hard?, stub?, hedged? }
+-- hole = { kind, name, tier|nil, why, rule, hard?, stub?, hedged?, constraint? }
 --   kind      input | oracle | dependency | fixture
 --   tier nil  = FRONTIER (no evidence edge)
 --   rule      which analysis OWNS filling it — recorded even when frontier, because
 --             "nobody owns this" and "the owner failed" are different answers.
+--   constraint  INPUT holes only: what the body says about the parameter, as
+--             synth.summary's flat closed record { shape, fields, methods, tested,
+--             why }. A THIRD STATE between filled and frontier (CART-0318) — it never
+--             sets a tier, so a constrained hole still blocks and still errors.
 --
 -- WHAT BLOCKS EMISSION IS NARROWER THAN "FRONTIER", and M.blocking is the one place
 -- that decides it (the census and the emitter must agree on which functions are
@@ -105,19 +109,39 @@ function M.of(store, node, ctx)
             end
         end
     end
+    -- LAZY, AND IT MUST STAY LAZY. holes -> synth -> runoracle -> characterize -> holes
+    -- is a cycle, and a top-level require here re-enters this module mid-load. The same
+    -- idiom synth.fill uses for characterize. Tidying it upward looks like housekeeping
+    -- and breaks the load order — the CART-0326 lesson, recorded here so it is not
+    -- re-learned.
+    local synth = require 'cartograph.synth'
     for i, p in ipairs(params) do
+        local h
         if litat[i] ~= nil then
-            H[#H + 1] = { kind = 'input', name = p, tier = 'measured',
+            h = { kind = 'input', name = p, tier = 'measured',
                 rule = 'argv', why = ('a call site passes the %s %s'):format(litk[i],
                     tostring(litat[i]):sub(1, 24)) }
         elseif ctx.doc and ctx.doc.params[p] then
-            H[#H + 1] = { kind = 'input', name = p, tier = 'claim', rule = 'annot',
+            h = { kind = 'input', name = p, tier = 'claim', rule = 'annot',
                 why = ('@param declares %s — a CLAIM, docblocks lie (CART-0240)')
                     :format(tostring(ctx.doc.params[p])) }
         else
-            H[#H + 1] = { kind = 'input', name = p, rule = 'argv/annot/narrow',
+            h = { kind = 'input', name = p, rule = 'argv/annot/narrow',
                 why = 'no observed literal, no declared type' }
         end
+        -- ── WHAT THE BODY SAYS ABOUT THIS PARAMETER (CART-0318) ─────────────
+        -- Carried on EVERY input hole, filled or not. On a frontier hole it is the
+        -- whole point — "no observed literal, no declared type" and "no value, but it
+        -- must answer .read() and be truthy" are different refusals, and the second is
+        -- discharged in seconds. On a FILLED hole it is free evidence a reader can
+        -- check the fill against, and on an `annot` one it is a docblock and a body
+        -- side by side.
+        --
+        -- ★ IT IS NOT A FILL AND MUST NEVER BECOME ONE. M.blocking reads `tier`, and a
+        -- constraint does not set one: a hole with a constraint is still a hole and
+        -- still ERRORS. Narrowing improves the refusal; it never discharges it.
+        h.constraint = synth.summary(synth.shape_of_rows(fl.stmts, p))
+        H[#H + 1] = h
     end
 
     -- 2. ORACLE hole — the expected value. Absent when the function provably returns

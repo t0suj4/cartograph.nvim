@@ -371,6 +371,38 @@ end
 
 M.RESERVED = require('cartograph.runoracle').RESERVED
 
+--- A shape as a FLAT, CLOSED, SERIALIZABLE record — what a HOLE carries (CART-0318).
+---
+--- WHY A PROJECTION AND NOT THE SHAPE ITSELF. A shape is recursive and carries working
+--- state (`seen`, the dedup set), and a hole record is read, printed and emitted. Handing
+--- the live structure out would put internals on a wire and make every consumer decide
+--- what to ignore. This is the ONE projection, owned by the module that owns what a shape
+--- MEANS, so a consumer never re-derives it — the rule holes.lua opens with.
+---
+--- NESTED FIELD SHAPES ARE DROPPED ON PURPOSE: the top-level names are what a REFUSAL
+--- needs to say ("must answer .opts"), and `p.opts.mode` belongs to the synthesized VALUE,
+--- not to the sentence explaining why we could not choose one.
+---
+--- Returns nil when there is nothing to say — no shape, no fields, no methods, and the
+--- body never tests it. A record that exists but is empty would read as a finding.
+---
+--- ★ THERE IS DELIBERATELY NO `domain` KEY. Membership/exclusion/boundary constraints are
+--- CART-0319's, and they are not computed yet. Reserving the name now would advertise a
+--- channel nothing fills — which is the exact defect (`rule='argv/annot/narrow'`) that
+--- CART-0318 exists to stop repeating.
+function M.summary(sh)
+    if not sh then return nil end
+    local f, m = {}, {}
+    for k in pairs(sh.fields or {}) do f[#f + 1] = k end
+    for k in pairs(sh.methods or {}) do m[#m + 1] = k end
+    table.sort(f); table.sort(m)
+    if sh.kind == 'any' and #f == 0 and #m == 0 and not sh.inspected then return nil end
+    local why = {}
+    for i, w in ipairs(sh.why or {}) do why[i] = w end
+    return { shape = sh.kind, fields = f, methods = m,
+        tested = sh.inspected or nil, why = why }
+end
+
 --- The BASIS line for a synthesized fill: what we chose and what the code said. This is the
 --- sentence a reader uses to disagree with us, so it names the usages rather than asserting
 --- a type.

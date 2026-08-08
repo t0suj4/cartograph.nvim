@@ -336,3 +336,48 @@ test('synth: a union of usages is described as USES, never as requires', functio
         'it says what it is: ' .. b)
     cleanup()
 end)
+
+test('holes: an input hole CARRIES the body constraint, and still blocks', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    local holes = require 'cartograph.holes'
+    local plan = assert(ch.plan(store, id_of('M.custom')))
+    local h
+    for _, x in ipairs(plan.holes) do
+        if x.kind == 'input' and x.name == 'o' then h = x end
+    end
+    ok(h, 'the input hole exists')
+    ok(h.constraint, 'and carries a constraint')
+    eq('table', h.constraint.shape)
+    eq({ 'render' }, h.constraint.methods, 'o:render() is what the body says')
+    ok(#h.constraint.why > 0, 'with the usage that decided it')
+
+    -- ★★ THE DISCIPLINE THE WHOLE TREE RESTS ON: narrowing improves the REFUSAL, it
+    -- never discharges the hole. A constraint sets no tier, so the hole still blocks
+    -- and an unfilled spec still FAILS (arc invariant 1). If this ever flips, every
+    -- number in the arc stops meaning what it says.
+    eq(nil, h.tier, 'a constraint is not evidence')
+    ok(holes.blocking(h), 'and a constrained hole is STILL BLOCKING')
+    cleanup()
+end)
+
+test('holes: a constraint summary is flat, closed and free of working state', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    -- The shape itself is recursive and carries `seen`, the dedup set. A hole record is
+    -- read, printed and emitted, so it gets a PROJECTION — one owner, one shape of
+    -- record, no consumer deciding what to ignore.
+    local c = assert(synth.summary(shape('M.fields', 'p')))
+    local allowed = { shape = true, fields = true, methods = true, tested = true,
+        why = true }
+    for k in pairs(c) do ok(allowed[k], 'no key outside the closed set: ' .. k) end
+    eq({ 'name', 'size' }, c.fields, 'sorted, so the record is stable')
+    -- and NO `domain` key: membership/exclusion/boundary is CART-0319's and is not
+    -- computed yet. Reserving the name would advertise a channel nothing fills, which
+    -- is the exact defect this ticket exists to stop repeating.
+    eq(nil, c.domain, 'a name may only claim what the check behind it performs')
+
+    -- nothing to say -> no record, because an empty one would read as a finding
+    eq(nil, synth.summary(shape('M.passthru', 'v')))
+    cleanup()
+end)
