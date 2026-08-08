@@ -394,8 +394,17 @@ function M.basis(sh, name)
     end
     local w = {}
     for i = 1, math.min(4, #sh.why) do w[i] = (sh.why[i]:gsub('^p', name)) end
-    return ('the body requires `%s` to be a %s (%s%s) — a MINIMAL value of that shape,'
-        .. ' chosen by us, so it exercises ONE path and the choice is ours not a caller\'s')
+    -- USES, NOT REQUIRES (CART-0320). The shape is a UNION over every usage in the body,
+    -- and a union is satisfiable — `merge` refuses the incompatible ones, and exactly 1
+    -- hole in this corpus conflicts — but SATISFIABLE IS NOT NECESSARY. 810 of 1378
+    -- shaped holes (58.8%) gather their shape from more than one row, and nothing here
+    -- knows whether those rows can run on the same path. "The body requires `p` to be a
+    -- table with .x and :m()" is a claim about every caller; what we checked is that
+    -- some path does each of those things. The word had to go.
+    return ('the body USES `%s` as a %s (%s%s) — the usages are UNIONED, so this is what'
+        .. ' SOME path does with it, not what every caller must supply. A MINIMAL value'
+        .. ' of that shape, chosen by us: it exercises ONE path and the choice is ours'
+        .. ' not a caller\'s')
         :format(tostring(name), sh.kind, table.concat(w, ', '),
             #sh.why > 4 and (', +' .. (#sh.why - 4) .. ' more') or '')
 end

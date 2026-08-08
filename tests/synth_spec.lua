@@ -321,3 +321,18 @@ test('synth: a control head carries its condition TWICE and is noted once', func
     eq('table', sh.kind)
     eq(1, #sh.why, 'one usage, one note: ' .. vim.inspect(sh.why))
 end)
+
+test('synth: a union of usages is described as USES, never as requires', function ()
+    if not ready() then skip('no lua parser') end
+    proj()
+    -- CART-0320. `merge` refuses incompatible usages, so a shape that survives IS
+    -- satisfiable by one value — but SATISFIABLE IS NOT NECESSARY. 810 of 1378 shaped
+    -- holes in our own corpus gather their shape from more than one row, and nothing
+    -- here knows whether those rows can run on the same path. So the basis may say what
+    -- SOME path does with the parameter and may not speak for every caller.
+    local b = synth.basis(shape('M.fields', 'p'), 'p')
+    ok(not b:find('requires', 1, true), 'no necessity claim over a union: ' .. b)
+    ok(b:find('USES', 1, true) and b:find('UNIONED', 1, true),
+        'it says what it is: ' .. b)
+    cleanup()
+end)
