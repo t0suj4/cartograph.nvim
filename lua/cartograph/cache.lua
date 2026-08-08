@@ -73,7 +73,15 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 122 -- v122: THE SAME RUNG, DECLARED FOR THE OTHER LANGUAGES (CART-0344).
+M.VERSION = 123 -- v123: A TEMPLATE THAT REUSES ITS HOST'S EXTENSION IS NOT THAT
+               -- LANGUAGE (CART-0347). `x.blade.php` ends in `.php`, so lang_for claimed
+               -- 96 Laravel templates per grocy. The php grammar does not ERROR on them —
+               -- no `<?php` tag means the whole file is inline text, has_error=false — so
+               -- they parsed "successfully" into 192 fabricated nodes named after
+               -- template directives, while the 1608 calls they contain stayed invisible.
+               -- A spec may now DISCLAIM a compound suffix (ext_disclaim). grocy -192
+               -- nodes, Δrefs 0 — nothing referenced them, because they were never real.
+               -- v122: THE SAME RUNG, DECLARED FOR THE OTHER LANGUAGES (CART-0344).
                -- Only 2 of 15 specs declared dynamic_callee_types, so measuring dynamic
                -- dispatch on a js/python corpus would have read 0 for lua's old reason.
                -- js `subscript_expression`, python `subscript`, php + the subscript form

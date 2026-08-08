@@ -992,7 +992,24 @@ local function lang_for(file)
     if not ext then return nil end
     for lang, spec in pairs(M.spec) do
         for _, e in ipairs(spec.exts) do
-            if e == ext then return lang, spec end
+            if e == ext then
+                -- ★ A SPEC MAY DISCLAIM A COMPOUND SUFFIX THAT REUSES ITS
+                -- EXTENSION (CART-0347). `x.blade.php` ends in `.php`, so this
+                -- claimed 96 Laravel templates per grocy — and the php grammar
+                -- does NOT error on them: a blade file has no `<?php` tag, so the
+                -- whole thing parses as inline text, `has_error=false`, one named
+                -- child. Valid php, semantically empty. What came out was 192
+                -- FABRICATED NODES (a module + a region per file) named after
+                -- template directives — `region @extends('layout.default')` — and
+                -- ZERO of the 1608 calls those templates actually contain.
+                -- Returning nil skips the file, which is the honest answer: we do
+                -- not have a blade grammar, and parsing a template as its host
+                -- language invents structure rather than finding it.
+                for _, d in ipairs(spec.ext_disclaim or {}) do
+                    if file:sub(-#d - 1) == '.' .. d then return nil end
+                end
+                return lang, spec
+            end
         end
     end
 end

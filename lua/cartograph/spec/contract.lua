@@ -91,6 +91,9 @@ M.SLOTS = {
                                    -- vocabulary itself is shared (CART-0240)
     recv_local = 'TYPES', recv_root = 'TYPES', recv_path = 'TYPES',
     litdata_types = 'TYPES',
+    -- compound suffixes that reuse this language's extension but are a DIFFERENT
+    -- language (`.blade.php`); claiming them fabricates structure (CART-0347)
+    ext_disclaim = 'CORE',
     dynamic_callee_types = 'TYPES', smt_query = 'TYPES',
     -- the KEY child that takes a dynamic callee BACK to static: `t['name']()`
     -- names its member in the source. Cross-language by construction — every

@@ -4283,3 +4283,29 @@ test('treesitter: an indexed callee is DYNAMIC, a literal-keyed one is not', fun
     eq(false, seen['M.plain'], 'and an ordinary call is untouched')
     vim.fn.delete(root, 'rf')
 end)
+
+test('treesitter: a template that reuses its host extension is NOT that language', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    -- CART-0347. `x.blade.php` ends in `.php`, so lang_for claimed 96 Laravel templates
+    -- per grocy — and the php grammar does NOT error on them: a blade file has no
+    -- `<?php` tag, so the whole file parses as inline text (has_error=false, one named
+    -- child). Valid php, semantically empty. What came out was 192 FABRICATED nodes, a
+    -- module + a region per file named after a template directive, while the 1608 calls
+    -- those templates contain stayed invisible. A silent parse success is worse than a
+    -- parse failure, because nothing anywhere says the file yielded nothing.
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(name, body)
+        local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(body); fd:close()
+    end
+    w('real.php', "<?php\nfunction realFn() { return 1; }\n")
+    w('page.blade.php', "@extends('layout.default')\n@php helper_call(); @endphp\n")
+    store.ingest(ts.extract(root))
+
+    local byfile = {}
+    for _, n in ipairs(store.data.nodes or {}) do
+        byfile[n.file] = (byfile[n.file] or 0) + 1
+    end
+    ok((byfile['real.php'] or 0) > 0, 'plain php still extracts: ' .. vim.inspect(byfile))
+    eq(nil, byfile['page.blade.php'], 'the template mints NOTHING: ' .. vim.inspect(byfile))
+    vim.fn.delete(root, 'rf')
+end)

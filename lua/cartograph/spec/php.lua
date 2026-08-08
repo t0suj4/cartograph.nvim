@@ -142,6 +142,12 @@ local PHP_GUARDS = {
 
 return {
     exts = { 'php' },
+    -- Laravel blade templates reuse the .php extension and are NOT php: no
+    -- `<?php` tag, so the grammar parses the whole file as inline text without
+    -- erroring and mints a region named after a `@directive` (CART-0347).
+    -- Cross-language by construction — a template convention that reuses its
+    -- host's extension is exactly what this field is for.
+    ext_disclaim = { 'blade.php' },
     -- BINDER NODES: see spec/lua.lua. `foreach ($t as $k => $v)` binds through a
     -- `pair`, or directly for `foreach ($t as $x)`.
     binders = {
