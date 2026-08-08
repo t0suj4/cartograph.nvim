@@ -394,6 +394,21 @@ return {
     write_gate = { variable_list = true, dot_index_expression = true,
         bracket_index_expression = true },
     is_write = lua_is_write,
+    -- ── DYNAMIC DISPATCH: THE MEMBER IS RUNTIME STATE (CART-0345) ────────────
+    -- `fsm[event]()` selects its callee at run time, so no static answer exists.
+    -- That is the `dynamic` rung — "a call the graph KNOWS IT CANNOT SEE" — and it
+    -- is a different fact from `frontier`, which says only that WE failed to
+    -- resolve. lua declared neither, so every such call landed in frontier:
+    -- measured 2 in bravest-new-world (both the FSM idiom that mod is built on)
+    -- and 11 here — ZERO of thirteen flagged.
+    dynamic_callee_types = { bracket_index_expression = true },
+    -- ★ A LITERAL KEY IS NOT DYNAMIC. `lsp.handlers['initialize']()` names its
+    -- member in the source, and calling that dynamic would claim we cannot see
+    -- something written down. Measured here: 11 literal-keyed callees against 11
+    -- computed ones — an even split, so a bare node-type set would have been wrong
+    -- half the time. The key is the LAST NAMED CHILD (base, key), which holds for
+    -- the bracket/subscript grammars this contract targets.
+    dynamic_callee_static_key = { string = true, number = true },
     -- a lua def name is FULLY SELF-CONTAINED (`function X.prototype:m` carries its
     -- own qualifier — no enclosing class block to truncate, unlike php/c). So tear
     -- only defs whose OWN subtree holds the error, not everything after the first

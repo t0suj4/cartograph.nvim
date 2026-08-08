@@ -92,6 +92,10 @@ M.SLOTS = {
     recv_local = 'TYPES', recv_root = 'TYPES', recv_path = 'TYPES',
     litdata_types = 'TYPES',
     dynamic_callee_types = 'TYPES', smt_query = 'TYPES',
+    -- the KEY child that takes a dynamic callee BACK to static: `t['name']()`
+    -- names its member in the source. Cross-language by construction — every
+    -- bracket/subscript grammar has literal keys (CART-0345)
+    dynamic_callee_static_key = 'TYPES',
     -- local-type inference ([[cartograph-local-type-inference]]): local_ret
     -- captures a set-once local's determining call (→ c.rt), methodsep is the
     -- return-typed method-key separator (Ret<sep>m) the generic pass reads.

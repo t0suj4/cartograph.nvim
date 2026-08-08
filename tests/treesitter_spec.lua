@@ -4246,3 +4246,40 @@ test('field alias: `local f = mod.field` makes a bare f() resolve into that modu
     eq(want, got and got.to, 'it resolves to the BOUND module member, not the decoy')
     vim.fn.delete(root, 'rf')
 end)
+
+test('treesitter: an indexed callee is DYNAMIC, a literal-keyed one is not', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- CART-0345. `fsm[event]()` selects its callee at run time, so no static answer
+    -- exists — that is the `dynamic` rung, "a call the graph KNOWS IT CANNOT SEE".
+    -- It is a different fact from `frontier`, which says only that WE failed to
+    -- resolve, and lua declared no dynamic_callee_types so every such call landed in
+    -- frontier. Measured before the fix: 2 in bravest-new-world (the FSM idiom that
+    -- mod is built on) and 11 in this repo — ZERO of thirteen flagged.
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local M = {}',
+        'function M.go(fsm, event, t, i)',
+        '  fsm[event](fsm)',            -- DYNAMIC: the member is runtime state
+        '  M.handlers["init"]()',       -- static: the member is written down
+        '  t[1]()',                     -- static: a numeric literal key
+        '  M.plain()',                  -- static: an ordinary call
+        'end',
+        'return M',
+    }, '\n') .. '\n')
+    fd:close()
+    store.ingest(ts.extract(root))
+
+    local seen = {}
+    for _, c in ipairs(store.data.calls or {}) do
+        seen[(c.full or c.callee or '?')] = c.dynamic and true or false
+    end
+    eq(true, seen['fsm[event]'], 'a computed member is dynamic: ' .. vim.inspect(seen))
+    -- ★ A LITERAL KEY IS NOT DYNAMIC. Claiming we cannot see a member that is
+    -- written down would be a false negative fact, and it is not a rare shape:
+    -- measured 11 literal-keyed callees against 11 computed ones in this repo.
+    eq(false, seen['M.handlers["init"]'], 'a quoted key names its member')
+    eq(false, seen['t[1]'], 'a numeric key too')
+    eq(false, seen['M.plain'], 'and an ordinary call is untouched')
+    vim.fn.delete(root, 'rf')
+end)

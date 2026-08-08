@@ -5213,6 +5213,18 @@ function M.extract(root, opts)
                     -- callee keeps its sigil: `→ $op` says what it is
                     local dynamic = spec.dynamic_callee_types
                         and spec.dynamic_callee_types[namen:type()] or nil
+                    -- A LITERAL KEY TAKES IT BACK TO STATIC (CART-0345):
+                    -- `handlers['init']()` names its member in the source, so
+                    -- claiming the graph cannot see it would be a false negative
+                    -- fact. The key is the LAST named child. Only consulted when
+                    -- the spec declares the set, so php's `$op()` is untouched.
+                    if dynamic and spec.dynamic_callee_static_key then
+                        local nk = namen:named_child_count()
+                        local key = nk > 0 and namen:named_child(nk - 1) or nil
+                        if key and spec.dynamic_callee_static_key[key:type()] then
+                            dynamic = nil
+                        end
+                    end
                     local callee = dynamic and full
                         or full:match('([%w_]+)$') or full
                     local sp = pos_of(calln)

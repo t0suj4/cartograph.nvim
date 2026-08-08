@@ -73,7 +73,22 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 120 -- v120: A FLOW STOP IS ONLY SOUND WHERE A NODE IS MINTED TO RECEIVE
+M.VERSION = 121 -- v121: THE `dynamic` RUNG NEVER FIRED FOR AN INDEXED CALLEE
+               -- (CART-0345). `fsm[event]()` selects its callee at run time, so no
+               -- static answer exists — that is the `dynamic` rung, "a call the graph
+               -- KNOWS IT CANNOT SEE", and it is a different fact from `frontier`,
+               -- which says only that WE failed. lua declared no dynamic_callee_types,
+               -- so every such call landed in frontier. Measured before: 2 in
+               -- bravest-new-world (both the FSM idiom that mod is built on) and 11
+               -- here — ZERO of thirteen flagged. A literal key is excluded, because
+               -- `handlers['init']()` names its member in the source: 11 literal-keyed
+               -- callees against 11 computed ones here, so a bare node-type set would
+               -- have been wrong half the time.
+               -- ZERO EDGES MOVE — isolated on bnw against a baseline saved at HEAD,
+               -- "graphs are identical (per-item)". The call RECORDS change (a flag,
+               -- and a dynamic callee keeps its full text as php's already did), which
+               -- is why a warm cache must miss rather than serve the old rung.
+               -- v120: A FLOW STOP IS ONLY SOUND WHERE A NODE IS MINTED TO RECEIVE
                -- THE ROWS (CART-0308). flow's nested-function stop was a hardcoded
                -- cross-language union, so it lacked ruby `method`, rust `function_item`
                -- and odin `procedure_declaration` — a nested function on those
