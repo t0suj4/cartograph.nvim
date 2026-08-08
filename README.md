@@ -426,7 +426,25 @@ clangd and lua-ls providers reduces to one field parameter, `clangd_bin` vs
 `luals_bin`). If a divergence is a shape difference — a different arity, an
 inserted statement, a local where the other has a field access — the pair is
 flagged *structural* and left to a human, because a value parameter can't
-capture it. And if anti-unification finds no real divergence at all (the
+capture it.
+
+One shape of *structural* is not a restructure at all, and the report calls it
+out: when an otherwise identical statement has a **literal on one side and a
+read on the other**, the copies may not have been parameterized — one of them
+may simply have gone stale. That is a bug report rather than a refactoring
+suggestion, and it comes free from an analysis already running. This repo's own
+history supplies the example: two copies of a scratch-window helper where one
+read the close key from config and the other hardcoded `'q'`, so that binding
+silently ignored a user's remap until the copies were folded together. The
+report states it as a question — *either that is the parameter, or the
+hardcoded copy is stale* — because nothing here establishes the two were ever
+equal; what it checked is a literal facing a read, in a row that diverges
+nowhere else. It is deliberately narrow: a row diverging in two places is two
+different statements, not one drifted one, and a `nil` is the absence of a
+value rather than a constant anyone forgot to update. On this tree it finds
+nothing, which is the honest answer.
+
+And if anti-unification finds no real divergence at all (the
 edit-distance came from renamed locals the function-global pass couldn't see
 through), the pair is really an exact clone and `:CartographMerge` applies
 directly. And for the cleanest case — a same-file, value-parameterizable pair

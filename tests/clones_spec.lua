@@ -153,6 +153,56 @@ test('clones: two bodies differing by ONE statement are a near-clone (1 hole)', 
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0349. One copy hardcodes what the other reads — the divergent row of a near-clone
+-- is either the helper's parameter or a stale copy, and we only ever said the first.
+local function drift_of(n1, n2, opts)
+    local p = near_pair(clones.near(store, opts or { max_dist = 2, min_rows = 4, min_shared = 2 }), n1, n2)
+    return p and clones.analyze_pair(p).drift or nil
+end
+
+test('clones: a literal facing a READ in an otherwise identical row is reported as possible drift', function ()
+    -- the real shape, from this repo's own 51e3c4a: one copy hardcoded 'q' for the close
+    -- key while its twin read it from config, so a user remap silently did not apply.
+    local function body(keyexpr)
+        return ('  local h = open(b)\n  local n = norm(h)\n  bind(\'n\', %s, b)\n'
+            .. '  log(n)\n  return n'):format(keyexpr)
+    end
+    local root = proj {
+        ['a.lua'] = fn('one', 'b', body('cfg.close')),
+        ['b.lua'] = fn('two', 'b', body("'q'")),
+    }
+    local d = drift_of('one', 'two')
+    ok(d and #d == 1, 'the hardcoded key is reported')
+    -- the quotes are part of `lit` ON PURPOSE. A str literal's `v` is raw source text,
+    -- which normally wants reading through expr.eval — but this value is for DISPLAY,
+    -- and "hardcodes 'q'" tells the reader it is a string where "hardcodes q" does not.
+    ok(d and d[1] and d[1].lit == "'q'", 'it names the literal that was hardcoded')
+    ok(d and d[1] and d[1].other == 'field', 'and what the other copy read instead')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: a nil literal is NOT drift, and neither is a row that diverges twice', function ()
+    -- nil is the ABSENCE of a value, so it is never the constant a name would have
+    -- supplied: `return nil` against `return e` is one path yielding nothing.
+    local root = proj {
+        ['a.lua'] = fn('one', 'b', '  local h = open(b)\n  local n = norm(h)\n  local r = pick(h)\n  log(n)\n  return r'),
+        ['b.lua'] = fn('two', 'b', '  local h = open(b)\n  local n = norm(h)\n  local r = nil\n  log(n)\n  return r'),
+    }
+    local d = drift_of('one', 'two')
+    ok(not d or #d == 0, 'a nil literal is not a hardcoded constant')
+    vim.fn.delete(root, 'rf')
+
+    -- and two different assignments that merely rhyme are not one drifted statement:
+    -- `info.isTitle = 1` vs `info.text = CLOSE` (Altoholic) diverges at the FIELD too.
+    local root2 = proj {
+        ['c.lua'] = fn('three', 'b', '  local i = mk(b)\n  local n = norm(i)\n  i.isTitle = 1\n  log(n)\n  return i'),
+        ['d.lua'] = fn('four', 'b', '  local i = mk(b)\n  local n = norm(i)\n  i.text = CLOSE\n  log(n)\n  return i'),
+    }
+    local d2 = drift_of('three', 'four')
+    ok(not d2 or #d2 == 0, 'a row diverging in TWO places is not the same statement')
+    vim.fn.delete(root2, 'rf')
+end)
+
 test('clones: tied near-clone pairs report a rank BAND, and the tie is broken deterministically', function ()
     -- CART-0348. The near order ranks on (shared, dist) ONLY, and on this repo's own
     -- history that leaves wide ties — the answer-key pair came back at rank 13 on one

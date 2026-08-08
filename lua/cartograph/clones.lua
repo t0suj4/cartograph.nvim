@@ -777,7 +777,18 @@ local function anti_unify(e1, e2, la, lb, holes)
     if e1 == nil or e2 == nil then
         holes[#holes + 1] = { kind = 'struct' }; return false
     end
-    if e1.k ~= e2.k then holes[#holes + 1] = { kind = 'struct' }; return false end
+    if e1.k ~= e2.k then
+        -- A struct hole is where the two copies stop having the same SHAPE, and until
+        -- now it recorded nothing but that fact. Keep the two sides: a shape divergence
+        -- is not always a restructure — when one side is a literal and the other reads a
+        -- name, the copies may have DRIFTED rather than been parameterized. M.drift
+        -- reads these; nothing else depends on the extra fields. (CART-0349)
+        holes[#holes + 1] = { kind = 'struct', a_k = e1.k, b_k = e2.k,
+            a = e1.k == 'lit' and tostring(e1.v) or nil, a_ty = e1.ty,
+            b = e2.k == 'lit' and tostring(e2.v) or nil, b_ty = e2.ty,
+            at_a = e1.at, at_b = e2.at }
+        return false
+    end
     local k = e1.k
     if k == 'lit' then
         if e1.ty == e2.ty and tostring(e1.v) == tostring(e2.v) then return true end
@@ -853,10 +864,15 @@ end
 ---   structural — a shape difference or an inserted/deleted statement; not a clean
 ---                value-parameterization (a callback/restructure, left to the human).
 function M.analyze_pair(pair)
-    local holes, insdel = {}, 0
+    local holes, insdel, rows = {}, 0, {}
     for _, o in ipairs(pair.ops) do
         if o.op == 'sub' then
-            anti_unify_row(pair.a.exprs[o.i], pair.b.exprs[o.j], pair.a.locals, pair.b.locals, holes)
+            -- per-ROW hole lists, then merged. The drift test below needs to know that a
+            -- row diverges in exactly ONE place, which a single shared list cannot say.
+            local rh = {}
+            anti_unify_row(pair.a.exprs[o.i], pair.b.exprs[o.j], pair.a.locals, pair.b.locals, rh)
+            rows[#rows + 1] = rh
+            for _, h in ipairs(rh) do holes[#holes + 1] = h end
         elseif o.op == 'ins' or o.op == 'del' then
             insdel = insdel + 1
         end
@@ -883,7 +899,37 @@ function M.analyze_pair(pair)
         end
     end
     local kind = structural and 'structural' or (#params == 0 and 'exact' or 'value')
-    return { kind = kind, holes = params, insdel = insdel }
+    -- ★ DRIFT: one copy HARDCODES what the other one READS. A struct hole says the two
+    -- copies stopped having the same shape, and the report has always read that as "a
+    -- restructure, left to the human". One shape of it is not a restructure at all:
+    -- exactly one side is a LITERAL and the other reads a name / field / call. Then the
+    -- copies may have been the same once and one of them was updated — the classic
+    -- copy-paste-and-forget. WHAT THIS CLAIMS IS ONLY WHAT IT CHECKED: a literal facing
+    -- a reference. It does NOT know the two were ever equal, so it reports a QUESTION.
+    -- THREE CONDITIONS, and each one was bought by a false positive on real code:
+    --  · the ROW must diverge in exactly one place. `info.isTitle = 1` against
+    --    `info.text = CLOSE` (Altoholic) is not one assignment with two values, it is two
+    --    different assignments — and the giveaway is that the row carries a FIELD hole as
+    --    well. Two holes in a row means the rows are not the same statement.
+    --  · exactly one side is a literal, and the other must READ something (name / field /
+    --    index / call). Literal against literal is already a clean parameter.
+    --  · the literal must not be `nil`. `return nil` against `return e` is one path
+    --    yielding nothing, not a constant somebody forgot to update — nil is the absence
+    --    of a value, so it is never the thing a name would have supplied.
+    local REF = { name = true, field = true, index = true, call = true }
+    local drift = {}
+    for _, rh in ipairs(rows) do
+        local h = #rh == 1 and rh[1] or nil
+        if h and h.kind == 'struct' and h.a_k and h.b_k then
+            local la, lb = h.a_k == 'lit', h.b_k == 'lit'
+            local lty = la and h.a_ty or h.b_ty
+            if la ~= lb and REF[la and h.b_k or h.a_k] and lty ~= 'nil' then
+                drift[#drift + 1] = { lit = la and h.a or h.b, lit_side = la and 'a' or 'b',
+                    other = la and h.b_k or h.a_k, at_a = h.at_a, at_b = h.at_b }
+            end
+        end
+    end
+    return { kind = kind, holes = params, insdel = insdel, drift = drift }
 end
 
 --- Human-readable report for M.near pairs. `store` is used to show the differing
@@ -936,6 +982,14 @@ function M.near_report(pairs_, store)
             :format(pos, #pairs_, p.dist, p.shared, TAG[a.kind])
         L[#L + 1] = ('    %s  %s:%d'):format(p.a.name, p.a.file, p.a.lines[1] or 0)
         L[#L + 1] = ('    %s  %s:%d'):format(p.b.name, p.b.file, p.b.lines[1] or 0)
+        -- ★ the divergence that may not be a parameter at all — see M.analyze_pair's
+        -- drift note. Phrased as a QUESTION, because nothing here established that the
+        -- two copies were ever equal; what it checked is a literal facing a read.
+        for _, d in ipairs(a.drift or {}) do
+            L[#L + 1] = ('      ★ one side HARDCODES %s where the other reads a %s, in an'
+                .. ' otherwise identical statement —'):format(tostring(d.lit), d.other)
+            L[#L + 1] = '        either that is the parameter, or the hardcoded copy is stale'
+        end
         -- the refined holes (the helper's parameters), anti-unified to the leaf
         for _, h in ipairs(a.holes) do
             L[#L + 1] = ('      param (%s): %s  ⇄  %s'):format(h.kind, tostring(h.a), tostring(h.b))
