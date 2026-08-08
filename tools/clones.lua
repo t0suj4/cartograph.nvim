@@ -38,7 +38,8 @@ local clones = require 'cartograph.clones'
 store.ingest(ts.extract(root))
 local lines
 if mode == 'blocks' then
-    lines = clones.blocks_report(clones.blocks(store, { min_len = min_len }))
+    lines = clones.blocks_report(
+        clones.classify_blocks(store, clones.blocks(store, { min_len = min_len })))
 elseif mode == 'near' then
     lines = clones.near_report(clones.near(store, { max_dist = max_dist }), store)
 else

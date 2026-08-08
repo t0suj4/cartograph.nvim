@@ -357,3 +357,36 @@ test('clones: findings mark an exact clone as a merge target', function ()
     ok(hit and hit.message:find('CartographMerge'), 'it points at the merge action')
     vim.fn.delete(root, 'rf')
 end)
+
+test('clones: block groups tier by EXTRACTABILITY, not by length', function ()
+    -- CART-0341. blocks_report tiered on `len >= 10` because length was the only signal
+    -- the block tier had — and length is the wrong axis: this repo's own extraction
+    -- commits are 5-25 duplicated lines per site, at or under any such floor. Measured
+    -- on the whole repo, extractability removes 501 of 586 groups (86%) by itself: a
+    -- block carrying a return, or nested in a loop, is not a candidate at ANY similarity.
+    proj { ['a.lua'] = table.concat({
+            'local M = {}',
+            'function M.one(t)',
+            '  local a = t.x',      -- a 3-statement run, extractable, narrow
+            '  local b = a + 1',
+            '  return b',
+            'end',
+            'function M.two(t)',
+            '  local a = t.x',
+            '  local b = a + 1',
+            '  return b',
+            'end',
+            'return M',
+    }, '\n') .. '\n' }
+    local groups = clones.classify_blocks(store, clones.blocks(store, { min_len = 2 }))
+    ok(#groups > 0, 'a block group was found')
+    for _, g in ipairs(groups) do
+        ok(g.extract ~= nil, 'every group is classified')
+        ok(g.nfiles ~= nil, 'and carries its file spread')
+        -- a group that cannot be extracted must SAY why rather than be silently ranked
+        if not g.extract.ok then ok(g.extract.reason, 'a refusal names its reason') end
+    end
+    local L = clones.blocks_report(groups)
+    ok(L[1]:find('EXTRACTABLE', 1, true), 'the header leads with extractability: ' .. L[1])
+    ok(not L[1]:find('solid', 1, true), 'and no longer with a length floor: ' .. L[1])
+end)

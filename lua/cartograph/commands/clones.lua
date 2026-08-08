@@ -32,10 +32,11 @@ function M.register(H)
     cmd('CartographBlockClones', function (o)
         local store = live() if not store then return end
         vim.notify('cartograph: scanning for block-structural clones…', vim.log.levels.INFO)
-        local groups = require('cartograph.clones').blocks(store,
-            { min_len = o.count ~= -1 and o.count or 6 })
-        scratch(require('cartograph.clones').blocks_report(groups))
-    end, { count = -1, desc = 'cartograph: block-structural clone groups — contiguous statement runs duplicated across/within functions (a clone INSIDE a function, which :CartographClones\' whole-function tier is blind to). Ranked by block length. [count] = min statements (default 6)' })
+        local cl = require 'cartograph.clones'
+        local groups = cl.blocks(store, { min_len = o.count ~= -1 and o.count or 6 })
+        -- classify before reporting: extractability is the tier, length is a detail
+        scratch(cl.blocks_report(cl.classify_blocks(store, groups)))
+    end, { count = -1, desc = 'cartograph: block-structural clone groups — contiguous statement runs duplicated across/within functions (a clone INSIDE a function, which :CartographClones\' whole-function tier is blind to). Ranked by whether the block can be EXTRACTED and how narrow the resulting helper signature would be; length is a detail, not the tier. [count] = min statements (default 6)' })
 
     -- ── near-clones: functions differing by a few edits (anti-unification) ──
     cmd('CartographNearClones', function (o)

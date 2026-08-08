@@ -384,6 +384,15 @@ the relinker's name-resolution loops — a copy that a text diff misses because
 the two have drifted in comments and whitespace, but whose *statement shape*
 is identical. Run it with `nvim -l tools/clones.lua --blocks`.
 
+Groups are ranked by whether the block can actually be **extracted** and how
+narrow the resulting helper would be — not by how long it is. Length was the
+only signal this tier used to have, and it is the wrong one: the real
+extractions in this repo's own history are 5–25 duplicated lines per site, at
+or under any sane length floor, while extractability alone rules out 159 of
+180 groups here (a run containing a `return` cannot be pulled out, at any
+similarity). A group that is refused says why — "the selection contains
+return/break/goto", not "short, likely coincidental".
+
 `:CartographNearClones` is the third tier — for copies that are *almost*
 identical. It finds functions whose statement sequences differ by only a few
 edits, aligning the two with an edit-distance backtrace: the matched rows are

@@ -305,9 +305,152 @@ function M.blocks(store, opts)
     return out
 end
 
+--- CLASSIFY block groups by whether they can actually be EXTRACTED, and how narrow the
+--- helper's signature would be (CART-0341). Annotates each group in place with
+---   g.extract = { ok = bool, iface = #params + #returns, reason = <why not> }
+---   g.nfiles  = how many distinct files the copies span
+--- and returns `groups`.
+---
+--- ★ WHY THIS AND NOT A LENGTH FLOOR. blocks_report has tiered on `len >= 10` because
+--- length was the only signal the block tier had. Length is the WRONG axis: measured on
+--- this repo, the real extractions in its own git history (bytecol's LE-u32 primitives
+--- across at/csr/fold, the scratch-window helper, `write` x10 across 14 spec files) are
+--- all 5-25 duplicated lines per site — at or UNDER the floor. Meanwhile extractability
+--- removes 501 of 586 groups (86%) on its own, which no threshold ever did: a block
+--- carrying a return/break, or nested inside a loop, is not a candidate at ANY similarity.
+---
+--- ★★ AND analyze_pair CANNOT DO THIS JOB, which is worth stating where someone would
+--- reach for it: M.blocks buckets windows by an EXACT window_key, so a group's members
+--- are structurally identical by construction and the anti-unifier would answer `exact`
+--- for every group. The divergence classifier belongs to the NEAR tier; the block tier's
+--- question is extractability.
+---
+--- Needs the store (extract.plan reads df / reaching / file content), which is why it is
+--- separate from M.blocks — that stays PURE and store-free.
+function M.classify_blocks(store, groups)
+    local dfmod = require 'cartograph.df'
+    local flowmod = require 'cartograph.flow'
+    local extract = require 'cartograph.extract'
+    local byname = {}
+    for _, n in ipairs(store.data.nodes or {}) do
+        if n.kind == 'function' or n.kind == 'method' then
+            byname[(n.file or '') .. '\31' .. (n.name or '')] = n
+        end
+    end
+    for _, g in ipairs(groups) do
+        local files, nf = {}, 0
+        for _, occ in ipairs(g) do
+            if not files[occ.file] then files[occ.file] = true; nf = nf + 1 end
+        end
+        g.nfiles = nf
+        -- ★ A REFUSAL MUST NAME ITS REASON, and there are TWO kinds here — the
+        -- transport layer's split, one level up. `reason` is the PLANNER declining
+        -- ("contains return/break"); `asked` false means we could not even put the
+        -- question (no node, no df, no rows). Leaving the second as a nil reason
+        -- would render an absence as silence, which is the defect this repo keeps
+        -- finding — and this comment exists because the test below caught me doing it.
+        local best, reason, asked = nil, nil, false
+        for _, occ in ipairs(g) do
+            local node = byname[(occ.file or '') .. '\31' .. (occ.name or '')]
+            -- ★ NOT `node and pcall(...)`. In Lua an `and` TRUNCATES a multi-value
+            -- expression to ONE value, so `local a, b = node and pcall(f)` binds b to
+            -- nil however well the call went — every occurrence then looked
+            -- unaskable and the whole report came back "could not ask" on 180 of 180
+            -- groups. The guard has to be a statement, not an operand.
+            local fl, df
+            if node then
+                local eok, eo = pcall(expr.of, store, node.id)
+                fl = eok and eo and eo.fl or nil
+                df = dfmod.get(node)
+            end
+            if fl and df and df.stmts then
+                local pok, plan = pcall(extract.plan, {
+                    df = df, sel = { first = occ.from_line, last = occ.to_line },
+                    fn_start = at.sl(node.range) + 1, body_end = at.el(node.range),
+                    file_lines = store.content(node),
+                    reaching = flowmod.reaching_cfg(fl),
+                    flow_rows = fl.stmts, fn_params = fl.params, name = 'candidate' })
+                asked = true
+                if pok and plan then
+                    if plan.ok then
+                        local iface = #(plan.params or {}) + #(plan.returns or {})
+                        if not best or iface < best then best = iface end
+                    elseif not reason then reason = plan.reason end
+                end
+            end
+        end
+        g.extract = { ok = best ~= nil, iface = best,
+            reason = best ~= nil and nil
+                or reason
+                or (asked and 'the planner returned no reason'
+                    or 'could not ask: no node, no df or no rows for any copy') }
+    end
+    return groups
+end
+
 --- Human-readable report lines for M.blocks groups.
 function M.blocks_report(groups)
     if #groups == 0 then return { 'block-structural clones: none' } end
+    -- ── CLASSIFIED: tier by EXTRACTABILITY, not length (CART-0341) ───────────
+    -- When the caller has run M.classify_blocks, length stops being the tier and
+    -- becomes a detail. A block carrying a return/break, or nested in a loop, is not
+    -- a candidate at any similarity — and the narrow-interface short ones the length
+    -- floor used to bury are exactly the shape this repo's own extraction commits
+    -- have (5-25 duplicated lines per site).
+    if groups[1] and groups[1].extract then
+        local NARROW = 3
+        table.sort(groups, function (a, b)
+            local ao, bo = a.extract.ok, b.extract.ok
+            if ao ~= bo then return ao end
+            if ao then
+                if a.extract.iface ~= b.extract.iface then
+                    return a.extract.iface < b.extract.iface
+                end
+                if (a.nfiles or 0) ~= (b.nfiles or 0) then
+                    return (a.nfiles or 0) > (b.nfiles or 0)
+                end
+            end
+            return a.len > b.len
+        end)
+        local strong, extractable = 0, 0
+        for _, g in ipairs(groups) do
+            if g.extract.ok then
+                extractable = extractable + 1
+                if g.extract.iface <= NARROW and (g.nfiles or 0) > 1 then
+                    strong = strong + 1
+                end
+            end
+        end
+        local L = {
+            ('block-structural clones — %d group(s): %d EXTRACTABLE (%d of them narrow'
+                .. ' and cross-file), %d not'):format(#groups, extractable, strong,
+                #groups - extractable),
+            '(ranked by helper-signature width, then how many files the copies span;',
+            ' block LENGTH is reported but is NOT the tier — this repo\'s own extraction',
+            ' commits are 5-25 duplicated lines per site, at or under any sane floor)',
+            '(* = extractable, ≤' .. NARROW .. ' params/returns, spans >1 file'
+                .. '   + = extractable   - = cannot be extracted, reason given)', '' }
+        for _, g in ipairs(groups) do
+            local mark = '-'
+            if g.extract.ok then
+                mark = (g.extract.iface <= NARROW and (g.nfiles or 0) > 1) and '*' or '+'
+            end
+            if g.extract.ok then
+                L[#L + 1] = ('%s %d copies in %d file(s), %d-statement block,'
+                    .. ' helper takes %d:'):format(mark, #g, g.nfiles or 0, g.len,
+                    g.extract.iface)
+            else
+                L[#L + 1] = ('%s %d copies in %d file(s), %d-statement block — NOT'
+                    .. ' extractable: %s'):format(mark, #g, g.nfiles or 0, g.len,
+                    g.extract.reason or 'no plan')
+            end
+            for _, m in ipairs(g) do
+                L[#L + 1] = ('    %s  %s:%d-%d'):format(m.name, m.file, m.from_line,
+                    m.to_line)
+            end
+        end
+        return L
+    end
     -- CONFIDENCE TIER (honesty): block matching is looser than whole-function, so a
     -- SHORT shared run is often coincidental structural rhyme (a guard+loop+return
     -- shape two unrelated functions happen to share). Measured on this codebase, blocks
