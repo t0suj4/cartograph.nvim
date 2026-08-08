@@ -1137,7 +1137,30 @@ M.BY_TIER = { run = 'measured', spec = 'claim', observed = 'measured',
     -- runs) needs no special channel: the filler passes tier='claim' and the weakest-link
     -- rule below takes it down, because "the code told us the shape" and "we picked
     -- something harmless" are different strengths and must not share a word.
-    synthesized = 'derived' }
+    synthesized = 'derived',
+    -- ★ VM (CART-0278): a value our own INTERPRETER computed by walking the function.
+    -- `derived`, NEVER `measured`, and settling that before any interpreter exists is
+    -- deliberate — a contract written after the engine gets bent to fit it.
+    --
+    -- The distinction the tier ladder is FOR: `measured` means the code DEMONSTRATED
+    -- this, by running. A VM result is our own computation about what the code would
+    -- do. Usually those agree, which is exactly why letting a VM fill at `measured`
+    -- is dangerous rather than merely wrong: it would turn a computation into an
+    -- observation invisibly, in the one place the arc exists to keep them apart, and
+    -- the value would almost always look right. Same fabrication the whole arc
+    -- prevents, one layer up.
+    --
+    -- NOTE `by` stays 'vm' regardless of how good the interpreter gets. The channel
+    -- records HOW and the tier records HOW STRONG (invariant 3): a VM that never
+    -- disagreed with a real run still computed rather than observed.
+    vm = 'derived' }
+
+--- Channels admissible for the ORACLE hole specifically. A VM is deliberately NOT
+--- here: invariant 4 says the oracle takes a RUN or a SPEC and never a prediction,
+--- and a computation of what the code would return is a prediction — a very good one,
+--- made by us, about the very thing the assertion is supposed to check. Admitting it
+--- would fuse the supply channel and the check channel, which is the failure the rule
+--- names. A VM may fill INPUTS, FIXTURES and ENV; the expected value stays observed.
 M.ORACLE_CHANNELS = { run = true, spec = true }
 
 --- THE LADDER, so a tier can be COMPARED rather than only printed. Strongest first.
