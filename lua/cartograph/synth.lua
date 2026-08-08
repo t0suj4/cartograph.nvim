@@ -132,7 +132,18 @@ end
 local function usage(e, p, sh, depth)
     if depth > 6 then return end
     expr.walk(e, function (n)
-        local function note(w) sh.why[#sh.why + 1] = w end
+        -- DEDUPED, which is what lets the CONDITION be walked on its own (CART-0326).
+        -- A control head carries its condition in `cond` AND in `rhs`, so reading both
+        -- visits the same expression twice; without this the basis line would read
+        -- "(p.x, p.x, p.y, p.y)". Collapsing identical usages loses nothing a reader
+        -- wanted — `p.x` three times says no more than `p.x` — and it makes the walk
+        -- IDEMPOTENT, so no future caller has to know which rows overlap.
+        local function note(w)
+            sh.seen = sh.seen or {}
+            if sh.seen[w] then return end
+            sh.seen[w] = true
+            sh.why[#sh.why + 1] = w
+        end
         -- CONSTRAIN the shape at whatever path the operand denotes
         local function put(operand, kind, fmt)
             local path = path_of(operand, p)
@@ -261,12 +272,28 @@ end
 --- one to fill). `rows` is the expression rows; pass them in so a caller sweeping a corpus
 --- materializes them once.
 ---
---- A ROW IS NOT A NODE. `s.expr` is `{ lhs = {…}, rhs = {…} }`, so walking the row visits
---- one node and stops — the blind spot that made the first measurement of this report 100%
---- unconstrained, and the same one already recorded against the length check. Walk the LISTS.
+--- A ROW IS NOT A NODE. `s.expr` is `{ lhs = {…}, rhs = {…}, cond = … }`, so walking the
+--- row visits one node and stops — the blind spot that made the first measurement of this
+--- report 100% unconstrained, and the same one already recorded against the length check.
+--- Walk the LISTS.
+---
+--- ── AND THE CONDITION, EXPLICITLY (CART-0326) ───────────────────────────────
+--- This used to read {lhs, rhs} only, which says every `if type(p) == 'table'` should be
+--- invisible here. MEASURED over 2466 input holes and 3209 cond-carrying rows: zero
+--- difference — because expr.harvest_row's `ctrlhead` branch puts EVERY non-body,
+--- non-clause child into `rhs`, the condition among them. So the condition arrived by a
+--- SECOND ROAD and this walker's coverage of conditions was entirely INCIDENTAL.
+---
+--- That is a coupling nothing tested and the duplication LOOKS redundant: `cond` is right
+--- there, and `rhs` repeating it reads like a bug. Tidying it away would have cost
+--- synthesis every condition in every corpus, silently — no gate covers it, and the
+--- census number would have moved with no attributable cause. Reading `cond` here makes
+--- the coverage intentional, and picks up the rows where it is the ONLY copy (`hint='cond'`
+--- post-loop re-emit and `casehead`, which carry an EMPTY rhs).
 function M.shape_of_rows(rows, p)
     local sh = M.new()
     for _, s in ipairs(rows or {}) do
+        if s.expr and s.expr.cond then usage(s.expr.cond, p, sh, 0) end
         for _, side in ipairs({ 'lhs', 'rhs' }) do
             for _, e in ipairs(s.expr and s.expr[side] or {}) do
                 usage(e, p, sh, 0)

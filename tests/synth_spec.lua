@@ -297,3 +297,27 @@ test('synth: basis may not claim non-inspection it did not check', function ()
     ok(synth.basis(pv, 'v'):find('nothing in the body inspects', 1, true))
     cleanup()
 end)
+
+test('synth: a row carrying ONLY a condition still constrains the shape', function ()
+    -- NO PARSER NEEDED, deliberately: this is a contract on how shape_of_rows reads a
+    -- ROW, and a hand-built row pins it independently of which construct happens to emit
+    -- a cond-only one today (`hint='cond'` post-loop re-emit and `casehead` — 2 rows in
+    -- our own corpus, so a source fixture would be pinning an accident).
+    local rows = { { expr = { lhs = {}, rhs = {},
+        cond = { k = 'field', n = 'planted', b = { k = 'name', n = 'p' } } } } }
+    local sh = synth.shape_of_rows(rows, 'p')
+    eq('table', sh.kind, 'the condition is read')
+    ok(sh.fields.planted, 'and so is the field it names')
+    ok(assert(synth.value(sh, 'p')):find('planted', 1, true), 'and it reaches the value')
+end)
+
+test('synth: a control head carries its condition TWICE and is noted once', function ()
+    -- expr.harvest_row's ctrlhead branch puts every non-body child into `rhs`, the
+    -- CONDITION among them — which is the only reason this walker ever saw a condition
+    -- before CART-0326. Now that `cond` is read explicitly the same expression arrives
+    -- twice, so the walk has to be idempotent or every basis line would stutter.
+    local e = { k = 'field', n = 'x', b = { k = 'name', n = 'p' } }
+    local sh = synth.shape_of_rows({ { expr = { lhs = {}, rhs = { e }, cond = e } } }, 'p')
+    eq('table', sh.kind)
+    eq(1, #sh.why, 'one usage, one note: ' .. vim.inspect(sh.why))
+end)
