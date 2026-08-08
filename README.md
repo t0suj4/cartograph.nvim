@@ -384,14 +384,22 @@ the relinker's name-resolution loops — a copy that a text diff misses because
 the two have drifted in comments and whitespace, but whose *statement shape*
 is identical. Run it with `nvim -l tools/clones.lua --blocks`.
 
-Groups are ranked by whether the block can actually be **extracted** and how
-narrow the resulting helper would be — not by how long it is. Length was the
-only signal this tier used to have, and it is the wrong one: the real
-extractions in this repo's own history are 5–25 duplicated lines per site, at
-or under any sane length floor, while extractability alone rules out 159 of
-180 groups here (a run containing a `return` cannot be pulled out, at any
-similarity). A group that is refused says why — "the selection contains
-return/break/goto", not "short, likely coincidental".
+Groups are ranked by **how many files the copies span**, not by how long the
+block is. Length was the only signal this tier used to have, and it is the
+wrong one: the real extractions in this repo's own history are 5–25 duplicated
+lines per site, at or under any sane length floor.
+
+Each group is also labelled with whether the extract verb can lift it
+automatically — `[auto, helper takes 2]` — or only a human can, with the verb's
+objection quoted: `[manual — the selection contains return/break/goto]`. That
+label is deliberately *not* part of the ranking. Checked against this repo's own
+git history, ranking on it buried the very seam the history certifies as real:
+the LE-u32 pack loop duplicated across `at.lua`, `csr.lua` and `fold.lua` sat at
+rank 183 of 479, refused because the block ends in a `return` — which is true
+for lifting a *fragment*, and irrelevant here, because the duplication is a
+whole function body whose return is the helper's return. That is precisely what
+the commit consolidating it did. A seam is duplication worth sharing; auto-
+extractability is whether one verb can do it for you.
 
 `:CartographNearClones` is the third tier — for copies that are *almost*
 identical. It finds functions whose statement sequences differ by only a few

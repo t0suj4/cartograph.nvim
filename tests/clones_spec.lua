@@ -387,6 +387,6 @@ test('clones: block groups tier by EXTRACTABILITY, not by length', function ()
         if not g.extract.ok then ok(g.extract.reason, 'a refusal names its reason') end
     end
     local L = clones.blocks_report(groups)
-    ok(L[1]:find('EXTRACTABLE', 1, true), 'the header leads with extractability: ' .. L[1])
+    ok(L[1]:find('span MORE THAN ONE FILE', 1, true), 'the header leads with spread: ' .. L[1])
     ok(not L[1]:find('solid', 1, true), 'and no longer with a length floor: ' .. L[1])
 end)

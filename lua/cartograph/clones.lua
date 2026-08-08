@@ -398,51 +398,60 @@ function M.blocks_report(groups)
     -- floor used to bury are exactly the shape this repo's own extraction commits
     -- have (5-25 duplicated lines per site).
     if groups[1] and groups[1].extract then
+        -- ★★ EXTRACTABILITY IS AN ANNOTATION, NOT A SORT KEY — CORRECTED AGAINST THE
+        -- ANSWER KEY. Ranking `ok` first sank the very seam this repo's own history
+        -- says was real: at `c2a4158^` the LE-u32 pack loop is duplicated across
+        -- at.lua / csr.lua / fold.lua, and BOTH groups landed at ranks 183 and 384 of
+        -- 479, refused with "the selection contains return/break/goto".
+        --
+        -- That refusal is CORRECT for its own question and the wrong question here.
+        -- extract.plan asks "can this FRAGMENT be lifted out in place", and a `return`
+        -- mid-function genuinely cannot. But the duplication here is a whole function
+        -- BODY, where the return IS the helper's return — which is exactly what the
+        -- human did, moving it into bytecol.M.pack_u32. A seam is duplication worth
+        -- sharing; auto-extractability is whether one particular verb can do it for
+        -- you. Conflating them hides real seams behind a tool limitation.
+        --
+        -- So: SPREAD first (a shape repeated across modules is the signal), then how
+        -- many copies, and extractability only as a tie-break and a label.
         local NARROW = 3
         table.sort(groups, function (a, b)
-            local ao, bo = a.extract.ok, b.extract.ok
-            if ao ~= bo then return ao end
-            if ao then
-                if a.extract.iface ~= b.extract.iface then
-                    return a.extract.iface < b.extract.iface
-                end
-                if (a.nfiles or 0) ~= (b.nfiles or 0) then
-                    return (a.nfiles or 0) > (b.nfiles or 0)
-                end
+            if (a.nfiles or 0) ~= (b.nfiles or 0) then
+                return (a.nfiles or 0) > (b.nfiles or 0)
+            end
+            if #a ~= #b then return #a > #b end
+            if a.extract.ok ~= b.extract.ok then return a.extract.ok end
+            if a.extract.ok and a.extract.iface ~= b.extract.iface then
+                return a.extract.iface < b.extract.iface
             end
             return a.len > b.len
         end)
-        local strong, extractable = 0, 0
+        local crossfile, auto = 0, 0
         for _, g in ipairs(groups) do
-            if g.extract.ok then
-                extractable = extractable + 1
-                if g.extract.iface <= NARROW and (g.nfiles or 0) > 1 then
-                    strong = strong + 1
-                end
-            end
+            if (g.nfiles or 0) > 1 then crossfile = crossfile + 1 end
+            if g.extract.ok then auto = auto + 1 end
         end
         local L = {
-            ('block-structural clones — %d group(s): %d EXTRACTABLE (%d of them narrow'
-                .. ' and cross-file), %d not'):format(#groups, extractable, strong,
-                #groups - extractable),
-            '(ranked by helper-signature width, then how many files the copies span;',
-            ' block LENGTH is reported but is NOT the tier — this repo\'s own extraction',
-            ' commits are 5-25 duplicated lines per site, at or under any sane floor)',
-            '(* = extractable, ≤' .. NARROW .. ' params/returns, spans >1 file'
-                .. '   + = extractable   - = cannot be extracted, reason given)', '' }
+            ('block-structural clones — %d group(s): %d span MORE THAN ONE FILE;'
+                .. ' %d the extract verb can lift automatically'):format(#groups,
+                crossfile, auto),
+            '(ranked by how many files the copies span, then how many copies. LENGTH is',
+            ' a detail, not the tier: this repo\'s own extraction commits are 5-25',
+            ' duplicated lines per site. And AUTO-EXTRACTABILITY is a label, not a rank —',
+            ' the LE-u32 seam it once buried was a whole function body the verb refuses',
+            ' and a human lifted in one commit.)',
+            '(* = spans >1 file   + = one file   [auto] = the verb can lift it,'
+                .. ' ≤' .. NARROW .. ' params   [manual] = a human can, the verb cannot)', '' }
         for _, g in ipairs(groups) do
-            local mark = '-'
+            local mark = (g.nfiles or 0) > 1 and '*' or '+'
             if g.extract.ok then
-                mark = (g.extract.iface <= NARROW and (g.nfiles or 0) > 1) and '*' or '+'
-            end
-            if g.extract.ok then
-                L[#L + 1] = ('%s %d copies in %d file(s), %d-statement block,'
-                    .. ' helper takes %d:'):format(mark, #g, g.nfiles or 0, g.len,
-                    g.extract.iface)
+                L[#L + 1] = ('%s %d copies in %d file(s), %d-statement block'
+                    .. '  [auto, helper takes %d]'):format(mark, #g, g.nfiles or 0,
+                    g.len, g.extract.iface)
             else
-                L[#L + 1] = ('%s %d copies in %d file(s), %d-statement block — NOT'
-                    .. ' extractable: %s'):format(mark, #g, g.nfiles or 0, g.len,
-                    g.extract.reason or 'no plan')
+                L[#L + 1] = ('%s %d copies in %d file(s), %d-statement block'
+                    .. '  [manual — the verb declines: %s]'):format(mark, #g,
+                    g.nfiles or 0, g.len, g.extract.reason or 'no plan')
             end
             for _, m in ipairs(g) do
                 L[#L + 1] = ('    %s  %s:%d-%d'):format(m.name, m.file, m.from_line,
