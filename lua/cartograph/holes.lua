@@ -383,8 +383,22 @@ end
 ---    a stub always exists; but a function that writes module state or mutates an
 ---    argument cannot be isolated by injection, and then it is a real wall.
 ---  · INPUT / FIXTURE always block: we can neither choose the value nor build the world.
+---  · A HOLE WE OURSELVES FILL never blocks — see M.answered.
+--- Does ANYTHING speak to this hole? `tier` is static evidence about what the hole IS;
+--- `filled_tier` is the strength of a fill we SUPPLIED. Two fields on purpose (invariant 3:
+--- the channel and the strength are separate), and every consumer wants the OR of them.
+--- ★ IT LIVES HERE BECAUSE IT HAD FOUR COPIES (CART-0287): holes.blocking, and three more in
+--- holecensus (the per-fn frontier count, the by-kind rotation, the evidence-tier rotation),
+--- all reading `tier` alone. So the census reported `env 1372, frontier 1372 (100%)` while the
+--- sandbox roster injected a fake for 246 of them — our own answer printed as the honest
+--- frontier, inverting the one distinction the census exists to draw. Fixing one copy moved
+--- nothing; that is what four copies buys you.
+---@param h table
+---@return string|nil  the tier that answers it, or nil if nothing does
+function M.answered(h) return h.tier or h.filled_tier or nil end
+
 function M.blocking(h)
-    if h.tier then return false end
+    if M.answered(h) then return false end
     if h.kind == 'oracle' then return false end
     if h.kind == 'dependency' and not h.hard then return false end
     return true

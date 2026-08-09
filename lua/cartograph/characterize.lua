@@ -656,6 +656,32 @@ local SANDBOX_SRC = {
     'end',
 }
 
+--- A STUB SYNTHESIZED FROM A DECLARED SIGNATURE (CART-0287), or nil to keep refusing.
+---
+--- The hole's own `why` already said this: "the profile declares (modname: string) -> unknown,
+--- so a stub of that shape would fill it". 294 of the 304 such holes on this tree are `require`.
+---
+--- ★ THE RULE IS "NO VALUE IS INVENTED", NOT A LIST OF TYPES, which is why it is this short.
+--- Exactly two shapes can be honoured without fabricating something:
+---   · `-> unknown` — the caller gets an IDENTITY, not a value: the OPAQUE SENTINEL, whose
+---     recorded uses ARE its identity (invariant 5). A stub returning `nil` here would
+---     TRUNCATE the trace at the first `if mod then` or index — precisely the defect io.open
+---     shipped and CART-0280 was written to fix. The sentinel continues and records instead.
+---   · a declared VOID — nothing to return, so nothing to invent.
+--- Everything else REFUSES, `any` included: a declared `string` gives the shape and not the
+--- string, and picking one is the fabrication this arc exists to make structurally impossible.
+---@param sig string|nil  the declared signature, e.g. `(modname: string) -> unknown`
+---@return string|nil source
+function M.stub_of(sig)
+    if type(sig) ~= 'string' then return nil end
+    local ret = sig:match('%->%s*(.+)$')
+    if not ret then return 'function () end' end          -- declared, returns nothing
+    if ret:match('^unknown%s*$') then                     -- an identity, not a value
+        return 'function () return ' .. M.OPAQUE .. ' end'
+    end
+    return nil                                            -- a shape is not a value
+end
+
 --- THE TIER OF AN INJECTED FAKE. `claim`, uniformly and deliberately: a fake is something we
 --- DECLARED, exactly like an annotation, and CART-0240 established that a declaration is the
 --- weakest evidence there is. A future fill could be stronger — a value RECORDED from a real
@@ -794,22 +820,48 @@ local function env_holes(store, node)
                     -- not fill an input hole. So it rides as an EDGE to what would fill this
                     -- ([[cartograph-explaining-a-finding]]), never as an invented value.
                     local declared = pm.member_sig and select(1, pm.member_sig(stdprof, nm:match('([%w_]+)$'), nm))
+                    -- A DECLARED SHAPE WE CAN HONOUR WITHOUT INVENTING A VALUE IS A FILL
+                    -- (CART-0287). The sentence below used to end "so a stub of that shape
+                    -- would fill it" and then not build one — the fix was sitting in our own
+                    -- explanation. M.stub_of decides; it refuses every shape whose honouring
+                    -- would require picking a value, so the frontier sentence still gets used.
+                    --
+                    -- ★ `require` IS HELD BACK, AND IT IS 294 OF THE 304 (CART-0365). The stub
+                    -- works and the sentinel behaves — but tests/raise_spec pins the OPPOSITE,
+                    -- with evidence: an unresolvable require is a PREMISE failure, and
+                    -- characterizing it freezes our incomplete premise into a test (it produced
+                    -- a false CHANGED on 2 corpus functions, because the "module not found"
+                    -- text embeds per-process search paths). A stub makes that raise vanish and
+                    -- the subject characterizes as though the module existed. MEASURED: a
+                    -- resolvable require and an absent one produce an IDENTICAL env hole here —
+                    -- no `hard`, no dependency row — so the safe case cannot be told from the
+                    -- unsafe one at this seam. Two hole KINDS claim `require` (env says isolate
+                    -- it, dependency says its absence is an injection point) and they disagree.
+                    -- That is a decision about what a characterization MEANS, not one to take
+                    -- silently inside a fill.
+                    local stub = not fake and declared and nm ~= 'require'
+                        and M.stub_of(declared.sig) or nil
+                    local fill = fake or stub
                     rows[#rows + 1] = {
                         kind = 'env', name = nm, rule = 'profile',
                         -- OUR DEFAULT FILL, at the tier a DECLARATION deserves. It is data,
                         -- replaceable by a better source, which is the whole argument for the
                         -- reframe: the same hole can be filled better later and nothing here
                         -- changes.
-                        value = fake or nil,
-                        by = fake and 'sandbox' or nil,
-                        filled_tier = fake and M.SANDBOX_TIER or nil,
+                        value = fill or nil,
+                        by = fill and 'sandbox' or nil,
+                        filled_tier = fill and M.SANDBOX_TIER or nil,
                         basis = fake and ("cartograph's own declared fake — the call is"
-                            .. ' RECORDED and the world is untouched') or nil,
+                                .. ' RECORDED and the world is untouched')
+                            or (stub and ('stub synthesized from the profile-declared %s —'
+                                .. ' an opaque identity, no value invented'):format(declared.sig))
+                            or nil,
                         declared = declared and declared.sig or nil,
-                        why = fake and 'injected: the call is recorded, not performed'
+                        why = fill and 'injected: the call is recorded, not performed'
                             or ((declared and ('the environment supplies this and we have no'
-                                .. ' fake for it. The profile declares %s, so a stub of that'
-                                .. ' shape would fill it'):format(declared.sig)
+                                .. ' fake for it. The profile declares %s, and no stub of that'
+                                .. ' shape can be built without inventing a return value')
+                                :format(declared.sig)
                             or 'the environment supplies this and we have no fake for it —'
                                 .. ' nothing we hold can say what it returns')),
                     }

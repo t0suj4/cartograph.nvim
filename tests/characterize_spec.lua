@@ -73,6 +73,23 @@ local SRC = table.concat({
     'return M',                                       -- 36
 }, '\n') .. '\n'
 
+-- CART-0287, kept OUT of SRC deliberately. `require` is an ENV hole the profile DECLARES
+-- as `(modname: string) -> unknown`, and its result is INDEXED and CALLED — so a stub
+-- returning nil would truncate the trace exactly as io.open's did. `vim.fn.mkdir` sits in
+-- the same function with NO declared shape and must keep refusing, so a fix cannot quietly
+-- fill both. Its own source because SRC is shared by the reach/gate tests, whose
+-- assertions are about that module's exact hole set — adding a function to it changed
+-- three of them.
+local ENV_SRC = table.concat({
+    'local M = {}',
+    'function M.viaRequire(k)',
+    '    vim.fn.mkdir("/tmp/x", "p")',
+    '    local mod = require("someplace.mod")',
+    '    return mod.pick(k)',
+    'end',
+    'return M',
+}, '\n') .. '\n'
+
 local root
 local function proj(src)
     root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
@@ -122,6 +139,62 @@ test('characterize: what the ENVIRONMENT supplies is not a hole, and says which'
     -- and the oracle is a hole no static tier can fill
     ok(h['oracle:<return>'], 'a value-returning fn has an oracle hole')
     eq(nil, h['oracle:<return>'].tier, 'which is FRONTIER by construction')
+    cleanup()
+end)
+
+-- CART-0287. The hole's own `why` already contained the fix: "the profile declares … so a
+-- stub of that shape would fill it". The mechanism is M.stub_of, and its rule is NO VALUE IS
+-- INVENTED: a declared void gets an empty stub, `-> unknown` gets the OPAQUE SENTINEL (an
+-- identity, not a value), and every other shape refuses. `require` is held back by name —
+-- see CART-0365 and the comment at the fill site; it is the 294-hole case and it collides
+-- with a refusal tests/raise_spec pins for a measured reason.
+test('characterize: stub_of invents no value — void and unknown only', function ()
+    eq('function () end', ch.stub_of('()'), 'a declared void has nothing to invent')
+    ok(ch.stub_of('(modname: string) -> unknown'):find(ch.OPAQUE, 1, true),
+        'an unknown return is an IDENTITY: the opaque sentinel, never nil — a nil truncates '
+        .. 'the trace at the first index, which is the defect io.open shipped')
+    eq(nil, ch.stub_of('(s: string) -> string, integer'), 'a declared TYPE is not a value')
+    eq(nil, ch.stub_of('(s: string) -> any'), 'and `any` least of all')
+    eq(nil, ch.stub_of(nil), 'no signature, no stub')
+end)
+
+test('characterize: an undeclared env call keeps refusing, and a FILLED one stops blocking',
+    function ()
+    if not ready() then skip('no lua parser') end
+    proj(ENV_SRC)
+    local plan = assert(ch.plan(store, id_of('M.viaRequire')))
+    local h = holes_by_id(plan)
+
+    -- NO declared shape: a stub would fabricate a return value, which the arc forbids.
+    local mk = h['env:vim.fn.mkdir']
+    ok(mk, 'the undeclared env call is a row')
+    eq(nil, mk.value, 'and stays UNFILLED — nothing we hold can say what it returns')
+    ok(mk.blocking, 'so it still blocks: the honest frontier is untouched')
+
+    -- require is declared but deliberately not stubbed (CART-0365), so it also still blocks
+    ok(h['env:require'], 'require is a row')
+    eq(nil, h['env:require'].value, 'and is HELD, pending the premise-vs-isolation decision')
+    cleanup()
+end)
+
+-- ★ A HOLE WE OURSELVES FILL IS NOT THE HONEST FRONTIER (CART-0287). `blocking` read only
+-- `tier` (static evidence) and never `filled_tier` (the strength of a fill we supplied), so
+-- every env hole the sandbox roster answers counted as blocking AND frontier — the census
+-- reported env 1372 / frontier 1372 (100%) on this tree while injecting a fake for 246.
+test('characterize: an env hole the sandbox roster answers does not block emission', function ()
+    if not ready() then skip('no lua parser') end
+    proj(table.concat({
+        'local M = {}',
+        'function M.save(p, s) local f = io.open(p, "w") f:write(s) f:close() return p end',
+        'return M',
+    }, '\n') .. '\n')
+    local plan = assert(ch.plan(store, id_of('M.save')))
+    local h = holes_by_id(plan)
+    local io_h = h['env:io.open']
+    ok(io_h, 'io.open is an env row')
+    eq('claim', io_h.filled_tier, 'answered by the roster, at the tier a declaration deserves')
+    ok(not io_h.blocking,
+        'and it does NOT block: a hole we inject a fake for is our answer, not the frontier')
     cleanup()
 end)
 

@@ -78,6 +78,7 @@ local synth = require 'cartograph.synth'
 -- ALIASED BEFORE THE SHADOW: the report section rebinds `holes` to the sweep's ROW LIST
 -- (`local holes, fns, skipped = sweep()`), so the module is out of reach down there.
 local blocking_of = holes.blocking
+local answered_of = holes.answered
 -- THE BASE RUNTIME'S SIGNATURES (CART-0266), loaded once. nil when no artifact
 -- ships for the language, and the report SAYS so — a stub gap and a missing
 -- signature SOURCE must not render the same way.
@@ -134,7 +135,14 @@ local function sweep()
                     -- must never share a word again.
                     if h.kind ~= 'oracle' and h.kind ~= 'effects'
                         and not (h.value or h.satisfied_by) then novalue = novalue + 1 end
-                    if not h.tier then
+                    -- FRONTIER = NOTHING speaks to this hole. `tier` is static evidence about
+                    -- what the hole IS; `filled_tier` is the strength of a fill we SUPPLIED,
+                    -- and either is something speaking. Reading only `tier` reported
+                    -- `env 1372, frontier 1372 (100%)` on this tree while the sandbox roster
+                    -- was injecting a fake for 246 of them — OUR OWN ANSWER counted as the
+                    -- honest frontier, which inverts the one distinction this census exists
+                    -- to draw (CART-0287).
+                    if not holes.answered(h) then
                         frontier = frontier + 1
                         -- What BLOCKS emission is narrower than "frontier":
                         --  · ORACLE      never blocks — it is the hole a single RUN
@@ -186,10 +194,11 @@ local function rotate(holes, axis)
     for _, h in ipairs(holes) do
         if depmode and h.rule == 'stdlib' then goto skip end
         if not depmode or h.kind == 'dependency' then
-        local k = h[key] or (key == 'tier' and 'FRONTIER' or '?')
+        -- a FILL is evidence too, so a filled hole is not tier-FRONTIER either
+        local k = h[key] or (key == 'tier' and (answered_of(h) or 'FRONTIER') or '?')
         g[k] = g[k] or { n = 0, frontier = 0 }
         g[k].n = g[k].n + 1
-        if not h.tier then g[k].frontier = g[k].frontier + 1 end
+        if not answered_of(h) then g[k].frontier = g[k].frontier + 1 end
         end
         ::skip::
     end
