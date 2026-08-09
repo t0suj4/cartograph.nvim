@@ -225,7 +225,7 @@ function Fold:refusals(subj)
     local out, k = {}, 0
     for r = lo, hi - 1 do
         if self.pred[r + 1] == M.PRED.refused then
-            local rule = floor(self.flag[r + 1] / 2) % 8
+            local rule = floor(self.flag[r + 1] / RULE_SHIFT) % 8
             k = k + 1; out[k] = M.RULE_NAME[rule] or 'other'
         end
     end
