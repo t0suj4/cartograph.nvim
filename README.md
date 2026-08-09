@@ -2646,9 +2646,18 @@ nvim --headless -u NONE -l tools/profile.lua ghost server
 # — statement-granular, so unlike --near the two sites need not sit in cloned
 # functions. Its yield is small (one finding across this repo, 82 WoW addons
 # and one other tree) and it is the heaviest of the four; large JS trees
+# THE FOLD QUEUE joins discovery to PLANNING: for each near-clone pair it asks
+# the extract verb for a plan and ranks by what the fold would COST — lines
+# removed minus added, hazards, params — so the order answers "what should I
+# fold next" rather than "what is biggest". Refusals are COUNTED ROWS with their
+# reason, because they are most of the work: on this tree 5 of 59 pairs plan, 14
+# refuse only for want of a destination module, and the 5 that plan predict a net
+# of +1 line. Ranking by size would have led with a fold that GROWS the file.
+
 # currently exhaust memory where --near copes.
 nvim --headless -u NONE -l tools/clones.lua --blocks
 nvim --headless -u NONE -l tools/clones.lua --near
+nvim --headless -u NONE -l tools/clones.lua --fold      # the fold QUEUE
 nvim --headless -u NONE -l tools/clones.lua --rowdrift
 # THE MATRIX: every parity/honesty invariant × every registered corpus, one
 # command — the push-time sweep. One inline extract per corpus feeds all the

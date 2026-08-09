@@ -11,6 +11,11 @@
 --              alpha-invariance; catches the extract↔relink resolve dup a fn-tier misses).
 --   --near     NEAR-clones: whole functions whose row sequences differ by ≤ max-dist edits
 --              (anti-unification — matched rows = shared template, differing rows = holes).
+--   --fold     NOT a tier either — THE QUEUE. Joins discovery to PLANNING: for every
+--              near-clone pair it asks the extract verb for a plan and ranks by what the
+--              fold would COST (lines removed minus added, hazards, params), with the
+--              refusals carried as reasons rather than dropped. Answers "what should I
+--              fold next" where the tiers answer "what is biggest" (CART-0371).
 --   --rowdrift NOT a clone tier — a DEFECT one. A literal that duplicates the value of a
 --              module constant, in a statement written elsewhere USING that constant by
 --              name. Statement-granular, so it sees what --near cannot: the two sites
@@ -35,6 +40,7 @@ while arg and arg[i] do
     elseif arg[i] == '--blocks' then mode = 'blocks'
     elseif arg[i] == '--near' then mode = 'near'
     elseif arg[i] == '--rowdrift' then mode = 'rowdrift'
+    elseif arg[i] == '--fold' then mode = 'fold'
     elseif arg[i] == '--min-len' then i = i + 1; min_len = tonumber(arg[i]) or min_len
     elseif arg[i] == '--max-dist' then i = i + 1; max_dist = tonumber(arg[i]) or max_dist
     else root = vim.fn.expand(arg[i]) end
@@ -52,6 +58,9 @@ if mode == 'blocks' then
         clones.classify_blocks(store, clones.blocks(store, { min_len = min_len })))
 elseif mode == 'near' then
     lines = clones.near_report(clones.near(store, { max_dist = max_dist }), store)
+elseif mode == 'fold' then
+    local fr = require 'cartograph.foldrank'
+    lines = fr.report(fr.rank(store, { max_dist = max_dist }))
 elseif mode == 'rowdrift' then
     lines = clones.row_drift_report(clones.row_drift(store))
 else

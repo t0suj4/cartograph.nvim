@@ -596,3 +596,36 @@ test('clones: block groups tier by EXTRACTABILITY, not by length', function ()
     ok(L[1]:find('span MORE THAN ONE FILE', 1, true), 'the header leads with spread: ' .. L[1])
     ok(not L[1]:find('solid', 1, true), 'and no longer with a length floor: ' .. L[1])
 end)
+
+-- CART-0371. THE FOLD QUEUE: join discovery to PLANNING and rank by what the fold COSTS.
+-- The tiers rank by size, which answers "what is biggest"; under an intent to fold the
+-- question is "what should I fold next", and only the plan knows.
+test('foldrank: ranks by the plan\'s own arithmetic, and a refusal is a counted ROW', function ()
+    local fr = require 'cartograph.foldrank'
+
+    -- delta is derived from the ops apply would really run: a pure INSERT has to0b < from0b
+    -- and removes nothing; a replacement removes to0b-from0b+1.
+    local plan = { files = { ['a.lua'] = { ops = {
+        { from0b = 10, to0b = 9, new = { 'l1', 'l2', 'l3' } },   -- insert 3, remove 0
+        { from0b = 20, to0b = 23, new = { 'call' } },            -- remove 4, add 1
+    } } } }
+    local added, removed, net = fr.delta(plan)
+    eq(3 + 1, added); eq(4, removed)
+    eq(0, net, 'four lines out, four in — a fold that pays for itself exactly')
+
+    -- a plan that CREATES a module counts those lines too, or a cross-file fold reads as
+    -- free when it is the most expensive kind
+    local p2 = { files = {}, create = { file = 'new.lua', lines = { 'a', 'b' } } }
+    local a2, r2, n2 = fr.delta(p2)
+    eq(2, a2); eq(0, r2); eq(2, n2, 'a created module is added lines, not a rounding error')
+
+    -- and the report states the TOTAL prediction, which is what makes a campaign checkable
+    local L = fr.report({ { a = 'x', b = 'y', helper = 'h', net = -3, added = 13,
+        removed = 16, nparams = 1, hazards = 0, file = 'f.lua' } },
+        { ['not value-parameterizable'] = 7 })
+    ok(L[1]:find('-3', 1, true), 'the headline carries the predicted net: ' .. L[1])
+    local joined = table.concat(L, '\n')
+    ok(joined:find('REFUSED', 1, true) and joined:find('7', 1, true),
+        'and the refusals are COUNTED, not dropped — they are most of the work')
+end)
+
