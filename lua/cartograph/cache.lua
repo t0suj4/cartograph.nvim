@@ -73,7 +73,35 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 123 -- v123: A TEMPLATE THAT REUSES ITS HOST'S EXTENSION IS NOT THAT
+M.VERSION = 124 -- v124: A THREE-PART `for`'s INIT CLAUSE IS NOT A BODY STATEMENT
+               -- (CART-0359). `for (let i = 0; i < n; i++)` emitted its header
+               -- initializer as a child of the loop, so it became the FIRST ROW OF THE
+               -- BODY — and every consumer asking "what runs each iteration" then got the
+               -- wrong answer on js/ts/cpp/java/php. LICM asked whether its value is the
+               -- same every iteration (it is — it runs once) and offered hoisting a JS
+               -- `let` out of the header, which breaks per-iteration binding: a closure
+               -- made in the body then sees the final value ([0,1,2] -> [3,3,3], measured
+               -- in node). Offered CERTIFIED and UNHEDGED, the worst presentation.
+               -- The init is now an ordinary SIBLING row emitted before the head, which is
+               -- what it is — `within()` is structural, so it stops being a loop member
+               -- with no special case downstream. Persisted flow rows change ORDER and
+               -- PARENT on those five languages, hence the bump.
+               -- ★ NO GATE RE-SAVE. The snapshot projection is nodes/edges/calls
+               -- (tools/snapshot.lua); `df` is not in it, and no node or edge moves —
+               -- this repartitions rows WITHIN a function. Verified byte-identical on both
+               -- clone corpora: self 77/253 + 169 blocks, jquery 231/236 + 156 blocks.
+               -- ★ IT ALSO BROKE THE LABELED PATH, WHICH IS THE COUPLING WORTH KEEPING IN
+               -- MIND: labeled_statement tagged `stmts[before + 1]`, assuming the first row
+               -- emitted IS the head. With an init emitted first, `continue outer` began
+               -- targeting `let i = 0`. emit() now RETURNS its head row and the label uses
+               -- it — caught by the suite, not by reasoning.
+               -- ★ SCOPED, and the residual is deliberate: lua's `for_numeric_clause` and
+               -- go's `for_clause` are body rows too, and equally wrongly, but they have no
+               -- sibling `condition` field so the discriminator does not reach them — and
+               -- they escape LICM by row KIND rather than by luck of position. Moving them
+               -- would reorder every lua function's rows for no soundness gain. The
+               -- INCREMENT stays a body row: it genuinely runs each iteration.
+               -- v123: A TEMPLATE THAT REUSES ITS HOST'S EXTENSION IS NOT THAT
                -- LANGUAGE (CART-0347). `x.blade.php` ends in `.php`, so lang_for claimed
                -- 96 Laravel templates per grocy. The php grammar does not ERROR on them —
                -- no `<?php` tag means the whole file is inline text, has_error=false — so

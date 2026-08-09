@@ -161,11 +161,23 @@ function M.licm(store, fn_id)
         end
         -- LOOP INDUCTION VARS: the `i`/`x` bound by the loop clause each iteration —
         -- a use of one is loop-VARYING (disqualify), unlike a field selector / free
-        -- global (which only HEDGES). Extracted STRUCTURALLY from the header text
-        -- (the names before `in` in a generic for, or before `=` in a numeric for) —
-        -- NOT via reaching, which spuriously resolves a rebinding loop var to a prior
-        -- same-named def (flow models loop vars as uses of the clause).
+        -- global (which only HEDGES). NOT via reaching, which spuriously resolves a
+        -- rebinding loop var to a prior same-named def (flow models loop vars as uses
+        -- of the clause).
+        --
+        -- ★ TWO SOURCES, AND THE STRUCTURAL ONE COMES FIRST (CART-0361). The head row's
+        -- own def set IS the loop's bound names wherever du produces them — js/ts/cpp
+        -- give `def=[i,j]` on the head of `for (let i = 0, j = n; …)`. The header-TEXT
+        -- scan below is a fallback for the languages whose head carries no def (lua's
+        -- `for i = 1, n` leaves both the head and its clause row with def={}), and it
+        -- is only an approximation: it is non-greedy to the FIRST `=`, so on that same
+        -- two-variable js header it captured `let i` and MISSED `j` entirely. With `j`
+        -- decremented by the increment (`i++, j--`), `const m = j * 2` in the body came
+        -- out INVARIANT and HOISTABLE — unsound, and predating CART-0359 (verified by
+        -- A/B against HEAD, not assumed). Taking the union can only ADD disqualifications,
+        -- which is the safe direction for a guard that blocks a rewrite.
         local loopvar = {}
+        for _, v in ipairs(rows[L].def or {}) do loopvar[v] = true end
         local hdr = lines[rows[L].l] or ''
         local vars = hdr:match('%f[%w]for%s+(.-)%s+in%f[%W]') or hdr:match('%f[%w]for%s+(.-)%s*=')
         if vars then

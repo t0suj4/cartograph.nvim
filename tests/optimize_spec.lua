@@ -110,6 +110,41 @@ test('licm: a fresh object/array is NOT hoistable, in Lua and in JavaScript alik
     ok(not inv.buf, 'js: an array literal too — the same defect with a different node name')
 end)
 
+-- CART-0359. A three-part for's INIT CLAUSE runs ONCE, before the loop — so "is its value
+-- the same every iteration?" is not a question about it, and no answer to it is right. It
+-- was modelled as the first statement of the body, came out invariant and hoistable, and
+-- hoisting a JS `let` out of a for-header breaks per-iteration binding: a closure made in
+-- the body then sees the final value (measured in node: [0,1,2] becomes [3,3,3]).
+test('licm: a C-style for header is not part of the loop body', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    ingest_ext('js', {
+        'function g(items) {',
+        '  for (let i = 0; i < items.length; i++) {',
+        '    keep(() => i);',
+        '  }',
+        '}',
+    })
+    local res, lp = sole_loop('g')
+    ok(not names(res, lp.invariant).i, 'the init clause is not a loop-invariant body row')
+    ok(not names(res, lp.hoistable).i, 'and so it is never offered as a hoist')
+end)
+
+-- CART-0361. The loop-variable guard was a header-TEXT scan, non-greedy to the first `=`,
+-- so a two-variable header gave up `j` — and `j` is decremented every iteration.
+test('licm: EVERY variable a loop header binds is loop-varying, not just the first', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    ingest_ext('js', {
+        'function g(items) {',
+        '  for (let i = 0, j = items.length; i < j; i++, j--) {',
+        '    const m = j * 2;',
+        '    keep(m);',
+        '  }',
+        '}',
+    })
+    local res, lp = sole_loop('g')
+    ok(not names(res, lp.invariant).m, 'a value computed from the SECOND loop variable varies')
+end)
+
 test('licm: an accumulator (read-modify-write) is NOT invariant', function ()
     if not ready('lua') then skip 'no lua parser' end
     -- the reaching rmw fix is what makes this correct: total reads its own prior

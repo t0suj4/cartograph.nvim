@@ -378,6 +378,43 @@ function M.build(fnnode, src, cfg)
     local stmts = {}
     local emit, region, clause -- fwd
 
+    -- ── the INIT CLAUSE of a three-part `for` (CART-0359) ────────────────────────
+    -- `for (let i = 0; i < n; i++)` has a header clause that runs ONCE, BEFORE the
+    -- loop. Emitted as a child of the loop it became the first row of the BODY, and
+    -- every consumer that asks "what runs each iteration" then got the wrong answer:
+    -- LICM asked whether its value is the same every iteration (it is), and offered
+    -- hoisting a JS `let` out of a for-header — which breaks per-iteration binding,
+    -- so a closure made in the body sees the final value. Certified, and unhedged.
+    -- It is returned here so the caller can emit it as an ORDINARY SIBLING before the
+    -- head, which is what it is: `within()` is structural, so it stops being a loop
+    -- member with no special case anywhere downstream, and as a plain sibling it
+    -- falls through to the head exactly once.
+    --
+    -- ★ SCOPED TO THE THREE-PART FORM ON PURPOSE. The discriminator needs a `body`
+    -- field (so an UNBRACED body — `for (…) f(i);`, which is why the emit-as-body
+    -- fallback exists at all — is never mistaken for a header clause) and a
+    -- `condition` field to sit before. That admits js/ts/cpp by their `initializer`
+    -- field and java/php positionally, and admits NOBODY else: lua's
+    -- `for_numeric_clause` and go's `for_clause` have no sibling `condition`, so they
+    -- keep their current modelling. They are body rows too, and wrongly, but they
+    -- escape LICM by row kind rather than by luck of position, and moving them would
+    -- reorder every lua function's rows for no soundness gain.
+    local function for_init(node)
+        if not node:field('body')[1] then return nil end
+        local init = node:field('initializer')[1]
+        if init then return init end
+        local cond = node:field('condition')[1]
+        if not cond then return nil end
+        -- java / php: the initializer carries no field name, so take the named child
+        -- that PRECEDES the condition (and is not a clause or the body).
+        for c in node:iter_children() do
+            if c:id() == cond:id() then return nil end
+            if c:named() and not COMMENT[c:type()]
+                and not BODY[c:type()] and not CLAUSE[c:type()] then return c end
+        end
+        return nil
+    end
+
     -- emit `node` as a statement row (parent/pol) and recurse its sub-regions
     function emit(node, parent, pol)
         local t = node:type()
@@ -400,15 +437,22 @@ function M.build(fnnode, src, cfg)
         if LABELED[t] then
             local lbl, inner = labeled_parts(node, src)
             if inner then
+                -- ★ ASK emit WHICH ROW IS THE HEAD; do not assume it is the first one
+                -- emitted. A three-part for emits its INIT clause first (CART-0359), so
+                -- `before + 1` would tag `let i = 0` as the labelled statement and every
+                -- `continue outer` would target it instead of the loop.
                 local before = #stmts
-                emit(inner, parent, pol)
-                if lbl and stmts[before + 1] then stmts[before + 1].label = lbl end
+                local head = emit(inner, parent, pol) or (before + 1)
+                if lbl and stmts[head] then stmts[head].label = lbl end
             else
                 stmts[#stmts + 1] = { l = line(node), c = startcol(node), kind = 'label',
                     parent = parent, pol = pol, def = {}, use = {}, t = t, label = lbl }
             end
             return
         end
+        -- the three-part for's init runs BEFORE the head, so it is emitted before it
+        local finit = (CTRL[t] and PRELOOP[t]) and for_init(node) or nil
+        if finit then emit(finit, parent, pol) end
         local idx = #stmts + 1
         local sb = CTRL[t] and true or false
         local d, u, sus, rmw = du(node, src, sb, ids, mods, FN)
@@ -448,7 +492,7 @@ function M.build(fnnode, src, cfg)
             -- use). Drop it from the control row; re-emit as a trailing row.
             if POST[t] then stmts[idx].def, stmts[idx].use = {}, {} end
             for gc in node:iter_children() do
-                if gc:named() and gc ~= cond then
+                if gc:named() and gc ~= cond and not (finit and gc:id() == finit:id()) then
                     local gt = gc:type()
                     if COMMENT[gt] then -- skip
                     elseif BODY[gt] then
@@ -467,6 +511,7 @@ function M.build(fnnode, src, cfg)
                     expr = cfg.expr and cfg.expr(cond, src, 'cond') or nil }
             end
         end
+        return idx -- the HEAD row of this statement, for the labeled path above
     end
 
     -- a block/region: its direct named children are statements. CLAUSE children

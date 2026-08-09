@@ -2317,7 +2317,20 @@ only Lua's spelling of a constructor — so a JavaScript object literal answered
 not allocate", which is a claim rather than an admission of ignorance, and the hoist
 came out certified. That set now carries every language's constructor whose shape has
 been verified against a real parse, and it is deliberately generous: an extra entry
-declines a legal rewrite, a missing one breaks a program. For the clean
+declines a legal rewrite, a missing one breaks a program.
+
+Two other things in that sentence turned out to be doing less work than they claimed,
+both found by re-reading the *other* rows of the one loop that exposed the first. A
+three-part `for`'s **init clause** was modelled as the opening statement of the loop
+body — so the lens asked whether a statement that runs once has the same value every
+iteration, answered yes, and offered to hoist it; in JavaScript that breaks `let`'s
+per-iteration binding and every closure made in the body sees the final value. The init
+is now an ordinary row before the loop, which is what it is. And "loop induction
+variables" were read off the header *text*, non-greedily up to the first `=`, so
+`for (let i = 0, j = n; …)` disclosed `i` and hid `j` — a value computed from `j` was
+certified invariant while `j--` ran every iteration. The loop head's own def set answers
+that structurally, and the text scan survives only for the languages whose head carries
+no def at all. For the clean
 (`*`) ones it prints a **hoist plan** — the exact statements to lift above the header —
 gated by an independent capture check (a hoisted `local` is only safe if its name lives
 nowhere outside the loop), so a value-invariant row whose *move* would collide is
