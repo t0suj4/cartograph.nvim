@@ -198,6 +198,46 @@ test('characterize: an env hole the sandbox roster answers does not block emissi
     cleanup()
 end)
 
+-- CART-0367. A function defined as a FIELD of a module-level table constructor is reachable
+-- as SUBJECT.<path> — the same answer reach_of already gives `function M.f()`, for a shape
+-- whose node name is bare (`is_method`, never `M.is_method`) so the member branch never saw
+-- it. MEASURED before building: 95 of 133 refusals on this tree, of which the dominant form
+-- is `return { f = function () end }` (87) — and `local M = { f = fn }`, the shape the
+-- parent ticket assumed, is ZERO.
+local TBL_SRC = table.concat({
+    'local function shared(x) return x + 1 end',
+    'return {',
+    '    plain = function (a) return a * 2 end,',
+    '    nested = { deep = function (b) return b - 1 end },',
+    '    uses = function (c) return shared(c) end,',
+    '}',
+}, '\n') .. '\n'
+
+test('characterize: a function that is a table-constructor FIELD is reached as SUBJECT.path',
+    function ()
+    if not ready() then skip('no lua parser') end
+    proj(TBL_SRC)
+
+    -- a field of the returned constructor needs NO reach hole at all: it is a member, the
+    -- same answer `function M.f()` already got, for a shape whose node name is bare
+    local p1 = assert(ch.plan(store, id_of('plain')))
+    eq(nil, holes_by_id(p1)['reach:plain'], 'a field of the returned table is not a reach HOLE')
+    eq('SUBJECT.plain', p1.subject and p1.subject.expr, 'and the access path is the field')
+
+    -- one level of nesting, because `return { sub = { f = … } }` is 17 of the measured 95
+    local p2 = assert(ch.plan(store, id_of('deep')))
+    eq('SUBJECT.nested.deep', p2.subject and p2.subject.expr, 'a nested field carries its whole path')
+
+    -- ★ AND THE FILE-LEVEL LOCAL BESIDE IT IS UNTOUCHED. `shared` is not a field of anything,
+    -- so it keeps whatever answer it had; claiming it would emit a spec whose SUBJECT is nil.
+    local p3 = assert(ch.plan(store, id_of('shared')))
+    ok(not tostring(p3.subject and p3.subject.expr or ''):find('SUBJECT.shared', 1, true),
+        'a plain file-level local is NOT claimed as a field: '
+        .. tostring(p3.subject and p3.subject.expr))
+    ok(holes_by_id(p3)['reach:shared'], 'it still carries its own reach row')
+    cleanup()
+end)
+
 test('characterize: a stdlib call is satisfied by the RUNTIME the spec runs in',
     function ()
     if not ready() then skip('no lua parser') end

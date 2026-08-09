@@ -302,6 +302,106 @@ end
 --- file-level locals against 618 nested closures, counted as ONE hole class with ONE
 --- refusal. Their ceilings are opposite — one is mechanically reachable, the other never
 --- can be — so one sentence for both was a number that described neither.
+--- A FUNCTION THAT IS A FIELD OF THE MODULE'S OWN TABLE (CART-0367). The `member` branch
+--- below answers `function M.f()` by reading the node's NAME, but a function written as a
+--- constructor field is named BARE — the extractor calls it `is_method`, never
+--- `M.is_method` — so that branch never saw it and every one fell through to reconstruction
+--- or refusal. Same reach, same proof obligation, different spelling.
+---
+--- ★ THE FORMS WERE ENUMERATED BEFORE THIS WAS BUILT, AND IT DECIDED THE SHAPE. Measured:
+--- `return { f = function () end }` 87 · one level of nesting 17 · `M.sub = {…}` 2 ·
+--- `local M = { f = fn }` ZERO — the form CART-0288 assumed does not occur on this tree at
+--- all. 95 of 133 refusals are reachable this way; building for the assumed shape would have
+--- shipped a no-op.
+---
+--- ★ KEYED BY POSITION, NEVER BY NAME. panes/concerns.lua holds EIGHT `ascend` closures in
+--- eight sub-tables, and keying on the name mapped all eight to one path. That is exactly
+--- the impostor `upvalue_chain`'s identity check exists to reject.
+---
+--- SOUNDNESS: the file must actually end in `return <root>` (or return the constructor
+--- itself), the key must be a literal, and the value must BE the closure at this node's
+--- line. Over-claiming here emits a spec whose SUBJECT is nil, which reads as a broken tool
+--- rather than the missing premise it is — so every step is checked, none assumed.
+--- ★ CACHED BY store.generation, THE EXISTING IDIOM (clones.lua build_index). `store` is a
+--- SINGLETON re-ingested in place, so a cache keyed on the store object alone survives the
+--- next ingest and answers about the PREVIOUS tree. It cost this build a debugging round:
+--- every test fixture is written to `m.lua`, so the first proj() cached an empty table for
+--- that path and every later fixture inherited it — a stale-cache miss that looks exactly
+--- like a derivation that does not fire.
+local field_reach_cache = nil
+local function field_reach(store, node)
+    -- LAZY, like every other cross-module require in this file: holes -> synth -> runoracle
+    -- -> characterize -> holes is a load cycle, and a top-level require re-enters mid-load
+    -- (the CART-0326 lesson, recorded in holes.lua).
+    local expr = require 'cartograph.expr'
+    if not field_reach_cache or field_reach_cache.gen ~= store.generation then
+        -- ★ THE MODULE NODE IS NOT IN store.by_file — that index holds functions and regions
+        -- only, which is why the first cut of this silently answered nil for every file. The
+        -- file -> module map is built ONCE per generation here rather than rescanned per file.
+        local mods = {}
+        for _, n in ipairs(store.data.nodes or {}) do
+            if n.kind == 'module' and n.file then mods[n.file] = n.id end
+        end
+        field_reach_cache = { gen = store.generation, byfile = {}, mods = mods }
+    end
+    local byfile = field_reach_cache.byfile
+    local t = byfile[node.file]
+    if t == nil then
+        t = {}
+        byfile[node.file] = t
+        local mid = field_reach_cache.mods[node.file]
+        local okm, mo = false, nil
+        if mid then okm, mo = pcall(expr.of_module, store, mid) end
+        local stmts = okm and mo and mo.fl and mo.fl.stmts or {}
+        -- what the file hands back: a NAME, or the constructor itself
+        local returns
+        for i = #stmts, 1, -1 do
+            if (stmts[i].t or ''):find('return') then
+                local e = stmts[i].expr and stmts[i].expr.rhs and stmts[i].expr.rhs[1]
+                if e then
+                    returns = (e.k == 'name' and e.n) or (e.k == 'table' and '\1tbl') or nil
+                end
+                break
+            end
+        end
+        if returns then
+            local function harvest(e, path, depth)
+                if depth > 4 then return end -- a stated bound, not a belief: deeper is unmeasured
+                for _, kid in ipairs(e.kids or {}) do
+                    if kid.k == 'pair' and kid.key and kid.key.k == 'lit' and kid.val then
+                        local sub = path .. '.' .. tostring(kid.key.v)
+                        if kid.val.k == 'fn' then
+                            local a = kid.val.at
+                            local ln = a and a.start and a.start.line
+                            if ln then t[ln] = sub end
+                        elseif kid.val.k == 'table' then
+                            harvest(kid.val, sub, depth + 1)
+                        end
+                    end
+                end
+            end
+            for _, s in ipairs(stmts) do
+                local lhs = (s.expr and s.expr.lhs) or {}
+                local e = (s.expr and s.expr.rhs) and s.expr.rhs[1]
+                if e and e.k == 'table' then
+                    if s.def and #s.def == 1 and s.def[1] == returns then
+                        harvest(e, 'SUBJECT', 1)
+                    elseif #lhs == 1 and lhs[1].k == 'field' then
+                        local dotted = expr.dotted(lhs[1])
+                        local root = dotted and dotted:match('^([^.]+)')
+                        if root and root == returns then
+                            harvest(e, 'SUBJECT' .. dotted:sub(#root + 1), 1)
+                        end
+                    elseif returns == '\1tbl' and (s.t or ''):find('return') then
+                        harvest(e, 'SUBJECT', 1)
+                    end
+                end
+            end
+        end
+    end
+    return t[at.sl(node.range)]
+end
+
 local function reach_of(store, node, lines)
     local root, member = (node.name or ''):match('^([%w_]+)%.([%w_]+)$')
     local returns_root = false
@@ -360,6 +460,18 @@ local function reach_of(store, node, lines)
                 .. ' function object, NOT the public surface'):format(
                 tostring(node.name), up.carrier,
                 #up.chain > 1 and (' via ' .. table.concat(up.chain, ' <- ')) or '') }
+    end
+    -- A FIELD OF THE MODULE'S OWN TABLE (CART-0367) — the real object the module built,
+    -- so it outranks a reconstruction (same bytes, but state WE supplied) and is checked
+    -- before it. Not before the upvalue walk: both hand back the real function, and that
+    -- one is already proven.
+    local fpath = field_reach(store, node)
+    if fpath then
+        return { kind = 'member', module = node.file, member = fpath:match('([^.]+)$'),
+            expr = fpath,
+            why = ('`%s` is a function-valued field of the table %s returns, reached at %s'
+                .. ' — the real object the module built, not a rebuild')
+                :format(tostring(node.name), node.file, fpath) }
     end
     -- NOTHING EXPORTED MENTIONS IT — which for a SCRIPT (tools/, tests/: no `return M` at
     -- all) is the normal case, not an anomaly. Reconstruction does not need an export.
