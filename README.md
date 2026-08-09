@@ -2596,6 +2596,19 @@ nvim --headless -u NONE -l tools/dfconsumers.lua
 # subtree walk, −43% flow.build) — MEASURE, don't guess (the obvious FFI
 # micro-opt profiled as pure noise).
 nvim --headless -u NONE -l tools/profile.lua ghost server
+# THE CLONE LADDER, and one DEFECT tier riding the same index. Default is
+# function-granular exact clones; --blocks is contiguous statement runs ranked
+# by how many files they span; --near is whole functions within a couple of
+# edits, each divergence named as the parameter it would become. --rowdrift is
+# not a clone tier at all: it reports a literal that duplicates the value of a
+# module constant, in a statement written elsewhere USING that constant by name
+# — statement-granular, so unlike --near the two sites need not sit in cloned
+# functions. Its yield is small (one finding across this repo, 82 WoW addons
+# and one other tree) and it is the heaviest of the four; large JS trees
+# currently exhaust memory where --near copes.
+nvim --headless -u NONE -l tools/clones.lua --blocks
+nvim --headless -u NONE -l tools/clones.lua --near
+nvim --headless -u NONE -l tools/clones.lua --rowdrift
 # THE MATRIX: every parity/honesty invariant × every registered corpus, one
 # command — the push-time sweep. One inline extract per corpus feeds all the
 # cheap columns (counts, validate, memory budget, df/flow parity, fold
