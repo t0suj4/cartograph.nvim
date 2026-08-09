@@ -91,9 +91,13 @@ local ENV_SRC = table.concat({
 }, '\n') .. '\n'
 
 local root
-local function proj(src)
+local function proj(src, extra)
     root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/m.lua', 'w')); fd:write(src or SRC); fd:close()
+    -- extra = { ['helper.lua'] = '...' } — a fixture that needs a REQUIRABLE sibling
+    for rel, text in pairs(extra or {}) do
+        local f2 = assert(io.open(root .. '/' .. rel, 'w')); f2:write(text); f2:close()
+    end
     local data = ts.extract(root)
     data.root = data.root or root
     store.ingest(data)
@@ -235,6 +239,58 @@ test('characterize: a function that is a table-constructor FIELD is reached as S
         'a plain file-level local is NOT claimed as a field: '
         .. tostring(p3.subject and p3.subject.expr))
     ok(holes_by_id(p3)['reach:shared'], 'it still carries its own reach row')
+    cleanup()
+end)
+
+-- CART-0365, user steer: "a decision to hand down to a user and have a reasonable default".
+-- A `require` the graph can ALIGN to a file is stubbed by default; one it cannot is REFUSED,
+-- and the refusal names the premise that discharges it. Measured on this tree: 1352 of 1356
+-- require sites align, so the refusal costs one hole and keeps the guard raise_spec earns.
+test('characterize: an ALIGNABLE require is stubbed by default', function ()
+    if not ready() then skip('no lua parser') end
+    proj(table.concat({
+        'local M = {}',
+        'function M.pick(k)',
+        '    local h = require("helper")',
+        '    return h.get(k)',
+        'end',
+        'return M',
+    }, '\n') .. '\n', { ['helper.lua'] = 'return { get = function (k) return k end }\n' })
+    local h = holes_by_id(assert(ch.plan(store, id_of('M.pick'))))['env:require']
+    ok(h, 'require is an env row')
+    ok(h.value, 'and it is FILLED, because the graph holds `helper`: ' .. tostring(h.why))
+    eq('claim', h.filled_tier, 'at the tier our own declared fake deserves')
+    ok(h.value:find(ch.OPAQUE, 1, true), 'the stub returns the sentinel, never nil')
+    ok(not h.blocking, 'so it does not block emission')
+    cleanup()
+end)
+
+test('characterize: an UNALIGNABLE require is refused, and the refusal names its discharge',
+    function ()
+    if not ready() then skip('no lua parser') end
+    proj(table.concat({
+        'local M = {}',
+        'function M.needs(p)',
+        '    local u = require("no.such.module.here")',
+        '    return u ~= nil',
+        'end',
+        'return M',
+    }, '\n') .. '\n')
+    local plan = assert(ch.plan(store, id_of('M.needs')))
+    local h = holes_by_id(plan)['env:require']
+    ok(h, 'require is an env row')
+    eq(nil, h.value, 'and it is NOT stubbed: stubbing asserts a module we cannot find exists')
+    ok(h.blocking, 'so it blocks — the premise failure raise_spec pins is preserved')
+    ok(h.why:find('no.such.module.here', 1, true), 'the refusal NAMES the module: ' .. h.why)
+
+    -- ★ AND THE USER CAN DISCHARGE IT, through the fill protocol that already ships. The
+    -- premise is theirs, so the tier drops to the weakest rank and travels into everything
+    -- the run observes through it.
+    ch.fill(plan, { ['env:require'] = { value = 'function () return nil end',
+        basis = 'the module ships with the mod and loads at runtime', by = 'agent' } })
+    local h2 = holes_by_id(plan)['env:require']
+    eq('agent-supplied', h2.filled_tier, 'a premise the USER supplied is the weakest evidence')
+    eq('agent-supplied', ch.env_tier(plan), 'and the environment tier carries it outward')
     cleanup()
 end)
 

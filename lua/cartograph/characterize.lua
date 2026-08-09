@@ -504,6 +504,25 @@ end
 --- THE ALIGNMENT IS THE DERIVATION: a `require 'a.b.c'` resolves to `a/b/c.lua`, so if
 --- the graph holds a file whose path ends that way, the package root is the prefix that
 --- remains. Nothing is guessed — a modname we cannot align is named in the refusal.
+--- Can the graph align a module NAME to a file it holds? `a.b.c` -> `a/b/c.lua` or
+--- `a/b/c/init.lua` — BOTH package forms, because checking only the first reports every
+--- directory-with-an-init as absent. Returns the path PREFIX (what package.path needs) or
+--- nil. ★ ONE OWNER: load_premise needs it to build the preamble and the require fill needs
+--- it to decide whether a stub asserts something we can see. A second copy of a rule this
+--- fiddly is a disagreement waiting to be found by whoever trusts the wrong one.
+local function module_aligns(store, m)
+    local want = (m:gsub('%.', '/')):gsub('%-', '%%-')
+    for rel in pairs(store.by_file or {}) do
+        if type(rel) == 'string' then
+            local pre = rel:match('^(.*)' .. want .. '%.lua$')
+                or rel:match('^(.*)' .. want .. '/init%.lua$')
+            if pre then return pre end
+        end
+    end
+    return nil
+end
+M.module_aligns = module_aligns
+
 local function load_premise(store, node, lines)
     local mods, order = {}, {}
     for _, l in ipairs(lines) do
@@ -519,15 +538,7 @@ local function load_premise(store, node, lines)
     local root = store.data.root
     local roots, missing = {}, {}
     for _, m in ipairs(order) do
-        local want = m:gsub('%.', '/')
-        local hit
-        for rel in pairs(store.by_file or {}) do
-            if type(rel) == 'string' then
-                local pre = rel:match('^(.*)' .. want:gsub('%-', '%%-') .. '%.lua$')
-                    or rel:match('^(.*)' .. want:gsub('%-', '%%-') .. '/init%.lua$')
-                if pre then hit = pre; break end
-            end
-        end
+        local hit = module_aligns(store, m)
         if hit then roots[hit] = true else missing[#missing + 1] = m end
     end
     if #missing > 0 then
@@ -919,6 +930,34 @@ local function env_holes(store, node)
     local pm = require 'cartograph.spec.profile'
     local stdprof = pm.load(pm.base_for('lua'))
     local sites = (store.topo and store.topo().sites) and store.topo():sites(node.id) or {}
+    -- ── THE require DECISION (CART-0365), decided by evidence, overridable by the user ──
+    -- DEFAULT: a require the graph can ALIGN to a file it holds is stubbed; one it cannot is
+    -- REFUSED, and the refusal names the module so the premise that discharges it is obvious.
+    -- Measured: 1352 of 1356 require sites on this tree align, so the refusal costs one hole
+    -- and KEEPS the guard tests/raise_spec earns — an unresolvable require is a PREMISE
+    -- failure, and stubbing it characterizes a function as though the module existed.
+    -- ★ WEAKEST LINK ACROSS THE FUNCTION: one env row covers every require in the body, so a
+    -- single unalignable module refuses the row. Stubbing the others would emit a spec that
+    -- runs past the one we cannot see.
+    -- ★ THE OVERRIDE NEEDS NO NEW MACHINERY: ch.fill(plan, {['env:require'] = {…, by='agent'}})
+    -- lands at tier `agent-supplied` (BY_TIER), the weakest rank, and env_tier carries it into
+    -- everything the run observed through it. That is the house pattern —
+    -- [[cartograph-hedge-resolution-writes]], and CART-0227's premise-dischargeable survey.
+    local req_missing
+    do
+        local argvm = require 'cartograph.argv'
+        for _, c in ipairs(sites) do
+            if callrec.callee(c) == 'require' then
+                local a = argvm.at(c, 1)
+                local m = a and a.k == 'lit' and a.v or nil
+                if type(m) ~= 'string' or m == '' then
+                    req_missing = req_missing or '<a computed module name>'
+                elseif not module_aligns(store, m) then
+                    req_missing = req_missing or m
+                end
+            end
+        end
+    end
     local rows, seen = {}, {}
     for _, c in ipairs(sites) do
         for _, nm in ipairs({ callrec.full(c) or callrec.callee(c), callrec.callee(c) }) do
@@ -951,7 +990,8 @@ local function env_holes(store, node)
                     -- it, dependency says its absence is an injection point) and they disagree.
                     -- That is a decision about what a characterization MEANS, not one to take
                     -- silently inside a fill.
-                    local stub = not fake and declared and nm ~= 'require'
+                    local stub = not fake and declared
+                        and (nm ~= 'require' or not req_missing)
                         and M.stub_of(declared.sig) or nil
                     local fill = fake or stub
                     rows[#rows + 1] = {
@@ -970,6 +1010,11 @@ local function env_holes(store, node)
                             or nil,
                         declared = declared and declared.sig or nil,
                         why = fill and 'injected: the call is recorded, not performed'
+                            or (nm == 'require' and req_missing and ('this graph cannot align'
+                                .. ' `%s` to a file it holds, and stubbing it would'
+                                .. ' characterize this function as though that module existed.'
+                                .. ' Supply the premise to discharge it: fill env:require with'
+                                .. " by='agent' (tier agent-supplied)"):format(req_missing))
                             or ((declared and ('the environment supplies this and we have no'
                                 .. ' fake for it. The profile declares %s, and no stub of that'
                                 .. ' shape can be built without inventing a return value')
