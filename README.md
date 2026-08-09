@@ -467,14 +467,36 @@ rather than nested: a literal facing an *expression* (`'q'` against
 `require('cartograph.config').keys.close`) is the near tier's to find, because
 one side is a whole call chain rather than a leaf.
 
-Its yield is small and stated rather than dressed up: across this repo, 82 WoW
-addons and one other tree, it has fired exactly once — on the `fold.lua` case
-above. It earns its place by being **silent when there is nothing** and by
-catching what no other tier can reach, not by volume. The constant must live at
-module scope in the *same file* as the site that reads it, which is the main
-reason for those zeros and the obvious next rung. It is also the heaviest tier
-here — two re-parses per file — so it is a dev-bench command, and large
-JavaScript trees currently exhaust memory where `--near` copes.
+A constant does not have to be a bare `local SHIFT = 2`. The two table-of-constants
+forms count too — `local C = { SHIFT = 2 }` and a module-scope `C.SHIFT = 2` — and a
+resolvable `C.SHIFT` is treated as a *single* blankable position rather than a field
+chain, because the thing it competes with on the other side is one literal. Which
+form to support was measured before it was built: across two 50-addon WoW batches and
+this repo, the table forms hold two to four times more constants than bare scalars,
+so reach went from 116 to 483 here and 1160 to 2934 on one batch.
+
+The size cap that comes with it is not a taste call, it separates two populations.
+Constructor tables are bimodal — small named-constant tables (`CTRL`, `ASSIGN_OP`)
+and large *data* tables. Of 17,510 constructor fields on one WoW batch, about 15,000
+live in nine tables: seven Atlas localisation tables and two game databases. Nobody
+hardcodes a copy of a localisation string by accident. Booleans are dropped for the
+same kind of reason, at the consumer rather than in the index: every `true` in the
+tree equals a `true` flag, so the value half of the gate stops discriminating and
+only the weak shape half is left.
+
+Its yield is small and stated rather than dressed up: across this repo, three of
+the four WoW batches (133 addons) and one other tree, it has fired exactly once —
+on the `fold.lua` case
+above, and tripling the reach did not add a second. It earns its place by being
+**silent when there is nothing** and by catching what no other tier can reach, not
+by volume. The constant must still live at module scope in the *same file* as the
+site that reads it; the cross-file hop was measured and deliberately not built,
+because the require-a-constants-module idiom appears zero times in either WoW batch
+and ten times here. It is also the heaviest tier here — two re-parses per file — so
+it is a dev-bench command, and large JavaScript trees currently exhaust memory where
+`--near` copes. On those trees the constant side is blind for a second reason: the
+expression layer knows only the Lua constructor spellings, so a JS `{ SHIFT: 2 }`
+harvests as an honest unknown and contributes nothing here yet.
 
 And if anti-unification finds no real divergence at all (the
 edit-distance came from renamed locals the function-global pass couldn't see

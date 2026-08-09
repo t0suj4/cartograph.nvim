@@ -15,6 +15,10 @@
 --              module constant, in a statement written elsewhere USING that constant by
 --              name. Statement-granular, so it sees what --near cannot: the two sites
 --              need not be in cloned functions (fold.lua's RULE_SHIFT, CART-0353).
+--              A constant is a scalar `local N = 2` OR a table-of-constants field, in
+--              both forms (`local C = {SHIFT=2}` and a module-scope `C.SHIFT = 2`) —
+--              measured to hold 2-4x more constants than scalars alone (CART-0355).
+--              Same file only; booleans and over-cap DATA tables are deliberately out.
 -- Defaults to the whole repo (lua + tests + tools), where the spec-helper duplication lives
 -- — the routine self-analysis scopes lua/ only, so this is the surface that SEES it.
 -- [[cartograph-record-fold-arc]] near-clone arc (exact + block + near tiers).

@@ -197,6 +197,67 @@ test('clones: row-drift needs BOTH halves — a matching row alone, or an equal 
     vim.fn.delete(root2, 'rf')
 end)
 
+-- CART-0355. The census said the table-of-constants idiom holds 3.1x more constants than
+-- bare scalars on this tree, so the row tier must see a CONSTRUCTOR FIELD as one blankable
+-- position — otherwise `C.SHIFT` (a field CHAIN) never shares a key with a bare literal.
+test('clones: a literal that IS a table-of-constants field, where a twin reads it, is row-drift', function ()
+    local root = proj {
+        ['a.lua'] = 'local C = { SHIFT = 2, NAME = "x" }\n'
+            .. 'local function good(f, r) local rank = math.floor(f[r] / C.SHIFT) % 8 return rank end\n'
+            .. 'local function bad(f, r) local rank = math.floor(f[r] / 2) % 8 return rank end\n'
+            .. 'return { good, bad }\n',
+    }
+    local d = clones.row_drift(store, { min_other = 1 })
+    ok(#d == 1, 'exactly one finding')
+    ok(d[1] and d[1].name == 'C.SHIFT', 'it names the DOTTED path, not just the field')
+    ok(d[1] and d[1].value == 2, 'and the value they share')
+    ok(d[1] and d[1].lit_line == 3, 'and points at the hardcoded site')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: the build-up form T.F = v is a constant too, and a boolean one never is', function ()
+    -- (a) `M.WIDTH = 64` written at module scope is the same idiom as the constructor.
+    local root = proj {
+        ['a.lua'] = 'local M = {}\nM.WIDTH = 64\n'
+            .. 'local function good(b) local x = pad(b, M.WIDTH) return x end\n'
+            .. 'local function bad(b) local y = pad(b, 64) return y end\nreturn M\n',
+    }
+    local d = clones.row_drift(store, { min_other = 1 })
+    ok(#d == 1 and d[1].name == 'M.WIDTH', 'a build-up assignment is indexed as a constant')
+    vim.fn.delete(root, 'rf')
+
+    -- (b) a BOOLEAN field is a set-membership flag, not a value a literal can be a stale
+    -- copy of — every `true` in the tree would match it, so the tier must not offer it.
+    local root2 = proj {
+        ['b.lua'] = 'local F = { ON = true }\n'
+            .. 'local function good(s) local x = mark(s, F.ON) return x end\n'
+            .. 'local function bad(s) local y = mark(s, true) return y end\nreturn F\n',
+    }
+    ok(#clones.row_drift(store, { min_other = 1 }) == 0, 'a boolean constant is not offered as drift')
+    vim.fn.delete(root2, 'rf')
+end)
+
+test('constfold: a rebound table field is poisoned, and a data table is over the cap', function ()
+    local constfold = require 'cartograph.constfold'
+    local big = {}
+    for i = 1, 40 do big[#big + 1] = ('K%d = %d'):format(i, i) end
+    local root = proj {
+        ['a.lua'] = 'local C = { SHIFT = 2 }\nC.SHIFT = 3\n'
+            .. 'local D = { KEEP = 7 }\n'
+            .. 'local BIG = { ' .. table.concat(big, ', ') .. ' }\n'
+            .. 'local function f() return C, D, BIG end\nreturn f\n',
+    }
+    local idx = constfold.literal_index(store, { max_fields = 20 })
+    local file
+    for f in pairs(idx) do if f:find('a%.lua') then file = f end end
+    local cd = file and idx[file] or {}
+    ok(cd['C.SHIFT'] == nil, 'a field rebound at module scope is POISONED, not its first value')
+    ok(cd['D.KEEP'] == 7, 'an untouched field is indexed under its dotted path')
+    ok(cd['BIG.K1'] == nil, 'a 40-entry data table is over the cap and indexed not at all')
+    ok(cd['BIG.K40'] == nil, 'not even its last field')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('constfold: the analysis-time literal index carries numbers, and poisons a rebind', function ()
     local constfold = require 'cartograph.constfold'
     local root = proj {

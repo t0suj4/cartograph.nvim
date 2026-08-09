@@ -1082,6 +1082,22 @@ end
 -- and everything else stays verbatim, so two rows share a bucket only if they are the
 -- same statement differing at that one position.
 
+-- The name a leaf reads a module constant under — a bare name, or the DOTTED path of a
+-- table-of-constants field (CART-0355) — or nil if this leaf is not a constant read.
+-- ★ BOOLEANS ARE NEVER OFFERED. A `true` in a set-membership table (`KNOWN = {x=true}`)
+-- is not a value a literal can be a stale COPY of: every `true` in the tree equals it, so
+-- the value half of the gate stops discriminating and only the shape half is left — which
+-- the tier's own doc records as far too weak alone. The INDEX still carries booleans (it
+-- is a general seam); the refusal belongs to this consumer, whose argument it is.
+local function const_read(node, cd)
+    if not (node and cd) then return nil end
+    local key = (node.k == 'name' and node.n) or (node.k == 'field' and expr.dotted(node)) or nil
+    if not key then return nil end
+    local v = cd[key]
+    if v == nil or type(v) == 'boolean' then return nil end
+    return key, v
+end
+
 -- canon with the `ord`-th leaf replaced by '?'; st.hit records the leaf it blanked.
 -- Locals are NEVER candidate leaves — two copies naming a local differently is
 -- alpha-renaming, which is the one divergence that carries no information.
@@ -1103,6 +1119,13 @@ local function bcanon(e, locals, slots, ctr, st)
     end
     if k == 'lit' then return leaf('L' .. (e.ty or '') .. ':' .. tostring(e.v), 'lit', e) end
     if k == 'field' then
+        -- ★ A RESOLVABLE CONSTANT CHAIN IS ONE LEAF, NOT A STRUCTURE. `C.SHIFT` must be
+        -- blankable as a whole, exactly as a bare `SHIFT` is: the position it competes
+        -- with on the other side is a bare LITERAL, and a literal is one leaf. Descending
+        -- here instead would key it as `F<base>.?` against the literal's `?` — different
+        -- buckets forever, and the tier would report nothing while looking correct.
+        local dot = st.cd and expr.dotted(e)
+        if dot and st.cd[dot] ~= nil then return leaf('N' .. dot, 'read', e) end
         local b = bcanon(e.b, locals, slots, ctr, st)
         return (e.method and 'M' or 'F') .. b .. '.' .. leaf(e.n, 'read', e)
     end
@@ -1128,8 +1151,8 @@ local function bcanon(e, locals, slots, ctr, st)
     return '?' .. (e.t or '') .. '(' .. table.concat(p, ',') .. ')'
 end
 
-local function brow(rw, locals, blank, all)
-    local slots, ctr, st = {}, { n = 0 }, { ord = 0, blank = blank, all = all }
+local function brow(rw, locals, blank, all, cd)
+    local slots, ctr, st = {}, { n = 0 }, { ord = 0, blank = blank, all = all, cd = cd }
     local function seq(list)
         local p = {}
         for _, e in ipairs(list or {}) do p[#p + 1] = bcanon(e, locals, slots, ctr, st) end
@@ -1172,7 +1195,7 @@ function M.row_drift(store, opts)
         for _, rw in ipairs(f.rows) do
             if rw.expr then
                 local all = {}
-                local _, nleaf = brow(rw.expr, f.locals, -1, all)
+                local _, nleaf = brow(rw.expr, f.locals, -1, all, cd)
                 -- a statement whose ONLY content is the varying leaf is not evidence
                 if nleaf - 1 >= min_other then
                     for i = 1, nleaf do
@@ -1184,10 +1207,9 @@ function M.row_drift(store, opts)
                         -- 5.2 GB and had not finished 50 WoW addons after two minutes;
                         -- the work is O(rows x leaves) STRINGS held at once.
                         local lf = all[i]
-                        local cand = lf and (lf.kind == 'lit'
-                            or (lf.node.k == 'name' and cd and cd[lf.node.n] ~= nil))
+                        local cand = lf and (lf.kind == 'lit' or const_read(lf.node, cd) ~= nil)
                         if cand then
-                            local key, _, hit = brow(rw.expr, f.locals, i)
+                            local key, _, hit = brow(rw.expr, f.locals, i, nil, cd)
                             if hit then
                                 local b = key .. '\1' .. i
                                 buckets[b] = buckets[b] or {}
@@ -1210,9 +1232,7 @@ function M.row_drift(store, opts)
             for _, lr in ipairs(lits) do
                 local known, lv = expr.eval(lr.hit.node)
                 for _, rr in ipairs(reads) do
-                    local nm = rr.hit.node.k == 'name' and rr.hit.node.n or nil
-                    local cd = nm and consts[rr.file]
-                    local cv = cd and cd[nm]
+                    local nm, cv = const_read(rr.hit.node, consts[rr.file])
                     -- ★ THE GATE: the literal must BE the constant's value
                     if known and cv ~= nil and cv == lv then
                         out[#out + 1] = { name = nm, value = cv, lit_file = lr.file,

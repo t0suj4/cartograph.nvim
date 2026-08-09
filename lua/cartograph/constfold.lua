@@ -21,6 +21,10 @@
 
 local M = {}
 
+--- Largest constructor table still treated as a table of CONSTANTS rather than DATA.
+--- The knee of a measured bimodal distribution, not a taste call — see literal_index.
+M.MAX_CONST_FIELDS = 20
+
 --- Record one same-file binding into a const index, maintaining the set-once
 --- gate. `sv` is the folded STRING value, or nil for a non-string / unfoldable
 --- binding. Symmetric poisoning: first non-string binding, or any differing
@@ -58,46 +62,106 @@ end
 --- evaluate (a call, a table, another name) is simply ABSENT — it is not a constant,
 --- and absent is the honest record of that.
 ---
+--- ★ TABLE-OF-CONSTANTS, both forms (CART-0355). A key may be a bare name OR a DOTTED
+--- PATH — `C.SHIFT` for `local C = { SHIFT = 2 }` (constructor) and for a module-scope
+--- `C.SHIFT = 2` (build-up). The census that motivated this counted, per corpus, the
+--- module-scope bindings of each idiom; the table form holds 3.1x more constants than
+--- bare scalars on this tree (180 -> 565) and +57%/+68% on two WoW batches, ALL same-file.
+---
+--- ★ THE SIZE CAP IS NOT A HEURISTIC, IT SEPARATES TWO POPULATIONS. Constructor tables are
+--- bimodal: small named-constant tables (CTRL, ASSIGN_OP, KNOWN — the class the one real
+--- row-drift finding came from) and large DATA tables. On 50 WoW addons the raw field count
+--- is 17510, of which ~15000 live in nine tables: seven Atlas locale tables (~1305 each),
+--- a 1871-entry recipe flag map and a 1754-entry spell table. Nobody hardcodes a copy of a
+--- localisation string by accident, and indexing them costs memory the row tier already
+--- cannot afford (CART-0356). `max_fields` is the knee measured on that distribution.
+---
 --- ★ WHAT "CONSTANT" HERE DOES NOT COVER, stated because the name overclaims otherwise:
 --- set-once is checked at MODULE SCOPE ONLY. A name assigned inside a function body — a
 --- `local count = 0` that some function increments — is an upvalue write this index never
 --- sees, and it will sit here as though it were the constant 0. No consumer has produced a
 --- false finding from it yet (row_drift additionally requires a matching twin statement),
 --- but the honest close is the WRITE AXIS, which already knows which names are written.
+--- The dotted form inherits exactly this limit: `C.SHIFT = 3` inside a function is invisible.
+---
+--- ★ AND IT IS LUA-SHAPED UNTIL CART-0357 CLOSES. expr's TABLE set holds only the Lua
+--- constructor spellings, so a JS `{ SHIFT: 2 }` / python dict / ruby hash harvests as the
+--- honest-unknown `?` and contributes NOTHING here. The zero is a detector gap, not an
+--- absence — closing 0357 extends this index to those languages for free.
 ---@param store table
----@return table { [file] = { [name] = any } }
-function M.literal_index(store)
+---@param opts table|nil  { max_fields = 20 }
+---@return table { [file] = { [name or dotted path] = any } }
+function M.literal_index(store, opts)
     local expr = require 'cartograph.expr'
+    local max_fields = (opts and opts.max_fields) or M.MAX_CONST_FIELDS
     local out = {}
+    -- SCALARS ONLY. expr.eval refuses tables/calls outright, but a bare `local t`
+    -- evaluates to the NIL SENTINEL, which is a table and would sit in the index as
+    -- though it were a value. A nil binding is not a constant — it is a declaration —
+    -- and nothing can be a hardcoded copy of it. (Measured: 33 such entries on 50 WoW
+    -- addons, every one a nil declaration.)
+    local function scalar(e)
+        local known, v = expr.eval(e)
+        local ty = type(v)
+        if not known or (ty ~= 'string' and ty ~= 'number' and ty ~= 'boolean') then return nil end
+        return v
+    end
     for _, n in ipairs(store.data.nodes) do
         if n.kind == 'module' and n.file then
             local ok, mo = pcall(expr.of_module, store, n.id)
             local stmts = ok and mo and mo.fl and mo.fl.stmts
             if stmts then
-                local cd, poisoned = out[n.file] or {}, {}
+                local cd, poisoned, deadbase = out[n.file] or {}, {}, {}
                 out[n.file] = cd
+                -- set-once, uniformly: a key already holding a DIFFERENT value is dead and
+                -- never recovers, and so is a key whose binding does not evaluate.
+                local function put(key, v)
+                    if poisoned[key] then return end
+                    if v == nil then poisoned[key] = true; cd[key] = nil
+                    elseif cd[key] == nil then cd[key] = v
+                    elseif cd[key] ~= v then poisoned[key] = true; cd[key] = nil end
+                end
+                -- a table REBOUND at module scope invalidates every field it ever held:
+                -- `C.SHIFT` is only a constant while C is the same table.
+                local function kill_base(base)
+                    deadbase[base] = true
+                    local pre = base .. '.'
+                    for k in pairs(cd) do
+                        if k:sub(1, #pre) == pre then poisoned[k] = true; cd[k] = nil end
+                    end
+                end
+                local bound = {}
                 for _, s in ipairs(stmts) do
-                    -- single-name single-value bindings only: a torn multi-assign
-                    -- (`local a, b = f()`) has no per-name literal to speak of
-                    if s.def and #s.def == 1 and s.expr and s.expr.rhs and #s.expr.rhs == 1
-                        and #(s.expr.lhs or {}) <= 1 then
-                        local name = s.def[1]
-                        local known, v = expr.eval(s.expr.rhs[1])
-                        -- SCALARS ONLY. expr.eval refuses tables/calls outright, but a
-                        -- bare `local t` evaluates to the NIL SENTINEL, which is a table
-                        -- and would sit in the index as though it were a value. A nil
-                        -- binding is not a constant — it is a declaration — and nothing
-                        -- can be a hardcoded copy of it. (Measured: 33 such entries on
-                        -- 50 WoW addons, every one a nil declaration.)
-                        local ty = type(v)
-                        if ty ~= 'string' and ty ~= 'number' and ty ~= 'boolean' then
-                            known = false; v = nil
+                    local lhs, rhs = (s.expr and s.expr.lhs) or {}, (s.expr and s.expr.rhs) or {}
+                    if s.def and #s.def == 1 and #rhs == 1 and #lhs <= 1 then
+                        -- single-name single-value bindings only: a torn multi-assign
+                        -- (`local a, b = f()`) has no per-name literal to speak of
+                        local name, e = s.def[1], rhs[1]
+                        if bound[name] then kill_base(name) end
+                        bound[name] = true
+                        if e.k == 'table' then
+                            -- (b1) CONSTRUCTOR. Collected first, then applied — a table
+                            -- over the cap must contribute NOTHING, not its first 20 fields.
+                            local fields, nf = {}, 0
+                            for _, kid in ipairs(e.kids or {}) do
+                                if kid.k == 'pair' and kid.key and kid.key.k == 'lit' then
+                                    local v = scalar(kid.val)
+                                    if v ~= nil then nf = nf + 1; fields[tostring(kid.key.v)] = v end
+                                end
+                            end
+                            if nf <= max_fields and not deadbase[name] then
+                                for k, v in pairs(fields) do put(name .. '.' .. k, v) end
+                            end
+                            put(name, nil) -- the table itself is not a scalar constant
+                        else
+                            put(name, scalar(e))
                         end
-                        if poisoned[name] then -- stays dead, never recovers
-                        elseif not known or v == nil then
-                            poisoned[name] = true; cd[name] = nil
-                        elseif cd[name] == nil then cd[name] = v
-                        elseif cd[name] ~= v then poisoned[name] = true; cd[name] = nil end
+                    elseif #lhs == 1 and #rhs == 1 and lhs[1].k == 'field' then
+                        -- (b2) BUILD-UP `T.F = v` at module scope. On one WoW batch this
+                        -- form outnumbered the constructor 986 to 270, so it is not a corner.
+                        local path = expr.dotted(lhs[1])
+                        local base = path and path:match('^([^.]+)')
+                        if path and base and not deadbase[base] then put(path, scalar(rhs[1])) end
                     end
                 end
             end
