@@ -494,9 +494,9 @@ site that reads it; the cross-file hop was measured and deliberately not built,
 because the require-a-constants-module idiom appears zero times in either WoW batch
 and ten times here. It is also the heaviest tier here — two re-parses per file — so
 it is a dev-bench command, and large JavaScript trees currently exhaust memory where
-`--near` copes. On those trees the constant side is blind for a second reason: the
-expression layer knows only the Lua constructor spellings, so a JS `{ SHIFT: 2 }`
-harvests as an honest unknown and contributes nothing here yet.
+`--near` copes. None of it is Lua-only: the expression layer learned the other
+languages' constructor spellings, and the same index finds 1,048 constants in Ghost
+where it had found 323.
 
 And if anti-unification finds no real divergence at all (the
 edit-distance came from renamed locals the function-global pass couldn't see
@@ -2311,7 +2311,13 @@ the same value every iteration, so it can be hoisted above the loop. Each is mar
 `*` (unconditionally hoistable) or `~` (invariant but hedged — a table-content read
 whose aliasing we can't rule out, or branch-guarded). It is deliberately conservative:
 allocations (`{}` — fresh identity each iteration), loop induction variables, and
-reassignments (which may be read before the write) are never certified. For the clean
+reassignments (which may be read before the write) are never certified. "Allocation"
+is a *structural* question asked of the expression IR, and until recently the IR knew
+only Lua's spelling of a constructor — so a JavaScript object literal answered "does
+not allocate", which is a claim rather than an admission of ignorance, and the hoist
+came out certified. That set now carries every language's constructor whose shape has
+been verified against a real parse, and it is deliberately generous: an extra entry
+declines a legal rewrite, a missing one breaks a program. For the clean
 (`*`) ones it prints a **hoist plan** — the exact statements to lift above the header —
 gated by an independent capture check (a hoisted `local` is only safe if its name lives
 nowhere outside the loop), so a value-invariant row whose *move* would collide is

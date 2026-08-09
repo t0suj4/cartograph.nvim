@@ -19,6 +19,14 @@ local function ingest(lines)
     store.ingest(ts.extract(root))
 end
 
+local function ingest_ext(ext, lines)
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.' .. ext, 'w'))
+    fd:write(table.concat(lines, '\n')); fd:close()
+    store.ingest(ts.extract(root))
+end
+
 local function fn_id(name)
     for _, n in ipairs(store.data.nodes) do
         if n.name == name then return n.id end
@@ -65,6 +73,41 @@ test('licm: a pure computation of pre-loop inputs is invariant + hoistable', fun
     local res, lp = sole_loop('f')
     ok(names(res, lp.invariant).k, 'k = base + 1 is loop-invariant')
     ok(names(res, lp.hoistable).k, 'k is unconditionally hoistable (*)')
+end)
+
+-- CART-0357. An allocation must never be hoisted: hoisting turns one fresh object per
+-- iteration into one shared object. That was guarded for Lua only, because expr's TABLE
+-- set held only the Lua constructor spellings, so a JS object literal harvested as the
+-- honest-unknown `?` and allocates() answered FALSE — a positive claim, not an unknown.
+-- The rewrite came out CERTIFIED and UNHEDGED, which is the worst way to be wrong.
+test('licm: a fresh object/array is NOT hoistable, in Lua and in JavaScript alike', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function f(items)',
+        '  for i = 1, #items do',
+        '    local cfg = { mode = 1 }',
+        '    keep(cfg, i)',
+        '  end',
+        'end',
+        'return { f }',
+    }
+    local res, lp = sole_loop('f')
+    ok(not names(res, lp.invariant).cfg, 'lua: a table constructor is not loop-invariant')
+
+    if not ready('javascript') then skip 'no javascript parser' end
+    ingest_ext('js', {
+        'function g(items) {',
+        '  for (let i = 0; i < items.length; i++) {',
+        '    const cfg = { mode: 1 };',
+        '    const buf = [1, 2];',
+        '    keep(cfg, buf, i);',
+        '  }',
+        '}',
+    })
+    local jres, jlp = sole_loop('g')
+    local inv = names(jres, jlp.invariant)
+    ok(not inv.cfg, 'js: an object literal is an allocation, not a loop-invariant value')
+    ok(not inv.buf, 'js: an array literal too — the same defect with a different node name')
 end)
 
 test('licm: an accumulator (read-modify-write) is NOT invariant', function ()

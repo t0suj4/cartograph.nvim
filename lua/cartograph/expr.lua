@@ -202,7 +202,43 @@ local CALL = { function_call = true, call_expression = true, call = true,
 local BIN = { binary_expression = true, binary_operation = true,
     comparison_operator = true, boolean_operator = true }
 local UN = { unary_expression = true, unary_operation = true }
-local TABLE = { table_constructor = true, table = true }
+-- CONSTRUCTOR / AGGREGATE-LITERAL nodes = the ALLOCATION marker (CART-0357). VERIFIED
+-- per language by parsing a snippet and asking which node is the PARENT of a PAIR-set
+-- node — the same discipline, and the same question, as the PAIR table below.
+--   lua           table_constructor          javascript/typescript/tsx  object, array
+--   python        dictionary, list, set      ruby                       hash, array
+--   php           array_creation_expression  rust    field_initializer_list, array_expression
+--   haskell       record   (the record UPDATE `r { a = 2 }` — an expression)
+--
+-- ★ THE FAILURE IS ASYMMETRIC HERE, WHICH IS WHY THIS SET MAY BE GENEROUS AND THE PAIR
+-- SET BELOW MUST NOT BE. A MISSING entry makes allocates() answer FALSE for a fresh
+-- object — and false is a positive claim, not an honest unknown — so optimize's
+-- `not allocates(r)` guard opens and LICM certifies hoisting an allocation out of a
+-- loop, which is semantics-changing. That is exactly what shipped for every non-Lua
+-- language until this list existed. An EXTRA entry only makes allocates() over-report,
+-- which refuses a legal rewrite: lossy, never wrong. So an immutable python `tuple` or
+-- a stack-allocated rust `[1,2]` belongs here even though hoisting it would have been
+-- safe — the cost of including them is a declined optimisation, and the cost of
+-- omitting them is a broken program.
+--
+-- ★ DELIBERATELY ABSENT, each verified and each for a reason:
+--   haskell `fields` / odin `struct_declaration` — these hold PAIR-set nodes but they are
+--     TYPE DECLARATIONS (`data R = R { a :: Int }`), not values. Nothing is allocated by
+--     writing one, and calling a declaration an allocation is a lie in the other direction.
+--   go `literal_value > keyed_element` and cpp `initializer_list > initializer_pair` —
+--     these DO reproduce now (the PAIR note below says they did not), but their pair nodes
+--     are not in PAIR, so adding the container alone buys nothing. Add both together, with
+--     a parse check, and decide the identity question first: a go struct literal and a C++
+--     aggregate init are VALUES, whereas a go map/slice literal is a fresh object.
+--   zig / java — no pair node reproduces (zig has struct_initializer / initializer_list,
+--     java array_initializer). Consistent with the PAIR note. Unverified stays out.
+local TABLE = { table_constructor = true, table = true,
+    object = true, array = true,                      -- javascript / typescript / tsx
+    dictionary = true, list = true, set = true, tuple = true,  -- python
+    hash = true,                                      -- ruby (array shared with js)
+    array_creation_expression = true,                 -- php
+    field_initializer_list = true, array_expression = true,    -- rust
+    record = true }                                   -- haskell record UPDATE
 local ALLOCFN = { function_definition = true, function_declaration = true,
     anonymous_function = true, arrow_function = true, lambda_expression = true }
 local VARARG = { vararg_expression = true, vararg = true, spread_element = true }

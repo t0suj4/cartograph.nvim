@@ -84,10 +84,11 @@ end
 --- but the honest close is the WRITE AXIS, which already knows which names are written.
 --- The dotted form inherits exactly this limit: `C.SHIFT = 3` inside a function is invisible.
 ---
---- ★ AND IT IS LUA-SHAPED UNTIL CART-0357 CLOSES. expr's TABLE set holds only the Lua
---- constructor spellings, so a JS `{ SHIFT: 2 }` / python dict / ruby hash harvests as the
---- honest-unknown `?` and contributes NOTHING here. The zero is a detector gap, not an
---- absence — closing 0357 extends this index to those languages for free.
+--- ★ NOT LUA-ONLY, since CART-0357 gave expr's TABLE set the other languages' constructor
+--- spellings. A JS/TS object, a python dict, a ruby hash and a php array all index here now.
+--- Measured on ghost the moment that landed: 323 constants -> 1048 (321 bare + 727 non-boolean
+--- dotted), with no change to this file. Worth remembering WHY the zero was there first: it
+--- read as "this corpus has no table constants", which is what a detector gap always reads as.
 ---@param store table
 ---@param opts table|nil  { max_fields = 20 }
 ---@return table { [file] = { [name or dotted path] = any } }

@@ -55,7 +55,18 @@ local function canon(e, locals, slots, ctr)
         return 'B' .. (e.op or '') .. '(' .. canon(e.l, locals, slots, ctr)
             .. ',' .. canon(e.r, locals, slots, ctr) .. ')'
     end
-    if k == 'table' then return 'T' end
+    -- ★ A CONSTRUCTOR'S CONTENTS ARE PART OF THE KEY (CART-0357). A bare 'T' says only
+    -- "an allocation happened here", so two functions returning DIFFERENT objects key
+    -- identically and are reported as exact clones. The schema carries the kids
+    -- deliberately (expr.lua: "its field VALUES/keys READ names — carry them as kids");
+    -- discarding them here was throwing away content the IR had already harvested.
+    -- Measured: on this tree it removes 4 manufactured groups (81 -> 77), and on jquery
+    -- it is what keeps 12 unrelated ajax test callbacks from being called one clone.
+    if k == 'table' then
+        local kp = {}
+        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = canon(c, locals, slots, ctr) end
+        return 'T(' .. table.concat(kp, ',') .. ')'
+    end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
     local parts = {}
@@ -574,7 +585,11 @@ local function rcanon(e, locals, acc)
     if k == 'bin' then
         return 'B' .. (e.op or '') .. '(' .. rcanon(e.l, locals, acc) .. ',' .. rcanon(e.r, locals, acc) .. ')'
     end
-    if k == 'table' then return 'T' end
+    if k == 'table' then -- contents are part of the key, as in canon above (CART-0357)
+        local kp = {}
+        for _, c in ipairs(e.kids or {}) do kp[#kp + 1] = rcanon(c, locals, acc) end
+        return 'T(' .. table.concat(kp, ',') .. ')'
+    end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
     local p = {}
