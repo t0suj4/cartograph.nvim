@@ -2,14 +2,19 @@
 --   nvim --headless -u NONE -l tools/clones.lua [dir] [--min-rows N]
 --                                               [--blocks [--min-len N]]
 --                                               [--near [--max-dist N]]
+--                                               [--rowdrift]
 -- Rides the shipped expression-IR (cartograph.expr) — two functions are clones iff
 -- their per-row canonical key sequences match, ALPHA-INVARIANT on locals (callees /
--- globals / operators / literals kept). Three tiers:
+-- globals / operators / literals kept). Three clone tiers + a defect tier:
 --   default    FUNCTION-granular exact-structural clones.
 --   --blocks   contiguous statement BLOCKS shared across/within functions (window-local
 --              alpha-invariance; catches the extract↔relink resolve dup a fn-tier misses).
 --   --near     NEAR-clones: whole functions whose row sequences differ by ≤ max-dist edits
 --              (anti-unification — matched rows = shared template, differing rows = holes).
+--   --rowdrift NOT a clone tier — a DEFECT one. A literal that duplicates the value of a
+--              module constant, in a statement written elsewhere USING that constant by
+--              name. Statement-granular, so it sees what --near cannot: the two sites
+--              need not be in cloned functions (fold.lua's RULE_SHIFT, CART-0353).
 -- Defaults to the whole repo (lua + tests + tools), where the spec-helper duplication lives
 -- — the routine self-analysis scopes lua/ only, so this is the surface that SEES it.
 -- [[cartograph-record-fold-arc]] near-clone arc (exact + block + near tiers).
@@ -25,6 +30,7 @@ while arg and arg[i] do
     if arg[i] == '--min-rows' then i = i + 1; min_rows = tonumber(arg[i]) or min_rows
     elseif arg[i] == '--blocks' then mode = 'blocks'
     elseif arg[i] == '--near' then mode = 'near'
+    elseif arg[i] == '--rowdrift' then mode = 'rowdrift'
     elseif arg[i] == '--min-len' then i = i + 1; min_len = tonumber(arg[i]) or min_len
     elseif arg[i] == '--max-dist' then i = i + 1; max_dist = tonumber(arg[i]) or max_dist
     else root = vim.fn.expand(arg[i]) end
@@ -42,6 +48,8 @@ if mode == 'blocks' then
         clones.classify_blocks(store, clones.blocks(store, { min_len = min_len })))
 elseif mode == 'near' then
     lines = clones.near_report(clones.near(store, { max_dist = max_dist }), store)
+elseif mode == 'rowdrift' then
+    lines = clones.row_drift_report(clones.row_drift(store))
 else
     lines = clones.report(clones.exact(store, { min_rows = min_rows }))
 end

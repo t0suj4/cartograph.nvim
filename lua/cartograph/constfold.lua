@@ -39,6 +39,73 @@ function M.record(index, file, name, sv)
     end
 end
 
+--- The ANALYSIS-TIME twin of the index above: every module-scope binding in the
+--- store whose right-hand side EVALUATES to a known literal, of ANY type.
+--- `{ [file] = { [name] = value } }`, where a value is whatever expr.eval yields
+--- (a string with its quotes already stripped, a number, a boolean).
+---
+--- ★ WHY THIS IS NOT M.record's INDEX, and must not become it. That one is built
+--- during extraction and its values are FOLDED INTO argv, which is why it is
+--- string-only: `k='lit'` carries the contract that `v` is a string exactly as it
+--- would be from a literal, and admitting numbers there would break every consumer
+--- that trusts it. This index is READ-ONLY — nothing is folded, nothing is written
+--- back into the graph — so it is free to carry numbers and booleans, which is the
+--- whole point: the case that motivated it is `local RULE_SHIFT = 2`. (CART-0352)
+---
+--- Same set-once honesty as M.record: a name bound more than once at module scope
+--- with differing values is POISONED and never recovers, because "the value of that
+--- name here" is then a question we cannot answer. A binding whose RHS does not
+--- evaluate (a call, a table, another name) is simply ABSENT — it is not a constant,
+--- and absent is the honest record of that.
+---
+--- ★ WHAT "CONSTANT" HERE DOES NOT COVER, stated because the name overclaims otherwise:
+--- set-once is checked at MODULE SCOPE ONLY. A name assigned inside a function body — a
+--- `local count = 0` that some function increments — is an upvalue write this index never
+--- sees, and it will sit here as though it were the constant 0. No consumer has produced a
+--- false finding from it yet (row_drift additionally requires a matching twin statement),
+--- but the honest close is the WRITE AXIS, which already knows which names are written.
+---@param store table
+---@return table { [file] = { [name] = any } }
+function M.literal_index(store)
+    local expr = require 'cartograph.expr'
+    local out = {}
+    for _, n in ipairs(store.data.nodes) do
+        if n.kind == 'module' and n.file then
+            local ok, mo = pcall(expr.of_module, store, n.id)
+            local stmts = ok and mo and mo.fl and mo.fl.stmts
+            if stmts then
+                local cd, poisoned = out[n.file] or {}, {}
+                out[n.file] = cd
+                for _, s in ipairs(stmts) do
+                    -- single-name single-value bindings only: a torn multi-assign
+                    -- (`local a, b = f()`) has no per-name literal to speak of
+                    if s.def and #s.def == 1 and s.expr and s.expr.rhs and #s.expr.rhs == 1
+                        and #(s.expr.lhs or {}) <= 1 then
+                        local name = s.def[1]
+                        local known, v = expr.eval(s.expr.rhs[1])
+                        -- SCALARS ONLY. expr.eval refuses tables/calls outright, but a
+                        -- bare `local t` evaluates to the NIL SENTINEL, which is a table
+                        -- and would sit in the index as though it were a value. A nil
+                        -- binding is not a constant — it is a declaration — and nothing
+                        -- can be a hardcoded copy of it. (Measured: 33 such entries on
+                        -- 50 WoW addons, every one a nil declaration.)
+                        local ty = type(v)
+                        if ty ~= 'string' and ty ~= 'number' and ty ~= 'boolean' then
+                            known = false; v = nil
+                        end
+                        if poisoned[name] then -- stays dead, never recovers
+                        elseif not known or v == nil then
+                            poisoned[name] = true; cd[name] = nil
+                        elseif cd[name] == nil then cd[name] = v
+                        elseif cd[name] ~= v then poisoned[name] = true; cd[name] = nil end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
 --- Fold a call list's argv IN PLACE against a same-file const index.
 --- Returns the number of argv slots folded (for measurement/provenance).
 ---@param calls table    the graph's call records (each with .file, .argv)

@@ -153,6 +153,68 @@ test('clones: two bodies differing by ONE statement are a near-clone (1 hole)', 
     vim.fn.delete(root, 'rf')
 end)
 
+-- CART-0353. The ROW tier: a literal duplicating a module constant, in a statement written
+-- elsewhere using the name. Neither half is sufficient alone, so both are pinned.
+test('clones: a literal that IS a module constant, where a twin statement reads it, is row-drift', function ()
+    -- the shape from our own fold.lua: RULE_SHIFT = 2, one site divides by the name and
+    -- another by a bare 2.
+    local root = proj {
+        ['a.lua'] = 'local SHIFT = 2\n'
+            .. 'local function good(f, r) local rank = math.floor(f[r] / SHIFT) % 8 return rank end\n'
+            .. 'local function bad(f, r) local rank = math.floor(f[r] / 2) % 8 return rank end\n'
+            .. 'return { good, bad }\n',
+    }
+    local d = clones.row_drift(store, { min_other = 1 })
+    ok(#d == 1, 'exactly one finding')
+    ok(d[1] and d[1].name == 'SHIFT', 'it names the constant being bypassed')
+    ok(d[1] and d[1].value == 2, 'and the value they share')
+    ok(d[1] and d[1].lit_line == 3, 'and points at the HARDCODED site, not the correct one')
+    ok(clones.row_drift_report(d)[1]:find('1 literal', 1, true), 'the report counts it')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('clones: row-drift needs BOTH halves — a matching row alone, or an equal value alone, is not enough', function ()
+    -- (a) the statements match with one leaf blanked, but the literal is NOT the constant's
+    -- value: `0` against QUIET (=80) is a deliberate difference, not a stale copy.
+    local root = proj {
+        ['a.lua'] = 'local QUIET = 80\n'
+            .. 'local function one(s) return defer(s, QUIET) end\n'
+            .. 'local function two(s) return defer(s, 0) end\n'
+            .. 'return { one, two }\n',
+    }
+    ok(#clones.row_drift(store, { min_other = 1 }) == 0, 'an unequal value is not drift')
+    vim.fn.delete(root, 'rf')
+
+    -- (b) the literal equals a module constant, but NO other statement reads it there —
+    -- otherwise every `2` in a file that happens to define `SHIFT = 2` would be a finding.
+    local root2 = proj {
+        ['b.lua'] = 'local SHIFT = 2\n'
+            .. 'local function one(f, r) local x = math.floor(f[r] / 2) % 8 return x end\n'
+            .. 'local function two(f, r) local y = math.ceil(f[r] * 2) + 8 return y end\n'
+            .. 'return { one, two }\n',
+    }
+    ok(#clones.row_drift(store, { min_other = 1 }) == 0, 'an equal value with no twin statement is not drift')
+    vim.fn.delete(root2, 'rf')
+end)
+
+test('constfold: the analysis-time literal index carries numbers, and poisons a rebind', function ()
+    local constfold = require 'cartograph.constfold'
+    local root = proj {
+        ['a.lua'] = 'local N = 2\nlocal S = "hi"\nlocal B = true\nlocal R = 1\nR = 9\n'
+            .. 'local C = compute()\nlocal function f() return N, S, B, R, C end\nreturn f\n',
+    }
+    local idx = constfold.literal_index(store)
+    local file
+    for f in pairs(idx) do if f:find('a%.lua') then file = f end end
+    local cd = file and idx[file] or {}
+    ok(cd.N == 2, 'a NUMBER is indexed (the extraction-time index is string-only)')
+    ok(cd.S == 'hi', 'a string arrives with its quotes stripped, via expr.eval')
+    ok(cd.B == true, 'a boolean is indexed')
+    ok(cd.C == nil, 'a call-valued binding is absent — it is not a constant')
+    ok(cd.R == nil, 'a name rebound at module scope is POISONED, not reported as its first value')
+    vim.fn.delete(root, 'rf')
+end)
+
 -- CART-0349. One copy hardcodes what the other reads — the divergent row of a near-clone
 -- is either the helper's parameter or a stale copy, and we only ever said the first.
 local function drift_of(n1, n2, opts)

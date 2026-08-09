@@ -1067,6 +1067,187 @@ function M.extract_proposal(pair, store)
     return L
 end
 
+-- ── ROW-DRIFT TIER ──────────────────────────────────────────────────────────
+-- The near tier finds drift only INSIDE near-clone functions: two whole bodies within
+-- two edits. But "one copy hardcodes what the other reads" is a property of a single
+-- STATEMENT, and the two statements need not sit in cloned functions at all. The case
+-- that forced this tier is in our own fold.lua, where `Fold:tier` divides by RULE_SHIFT
+-- and `Fold:refusals` divides by a literal 2 — different functions, one shared
+-- statement, structurally invisible to the near tier, and the near tier found nothing
+-- on this repo. (CART-0353)
+--
+-- ★ THE KEY IS WHAT MAKES OR BREAKS THIS. The first attempt abstracted every literal
+-- AND every read, which left pure SHAPE — and `kids['cond'][1]` collided with
+-- `calls[i][f]`, 8 findings on this tree, all noise. Here exactly ONE leaf is blanked
+-- and everything else stays verbatim, so two rows share a bucket only if they are the
+-- same statement differing at that one position.
+
+-- canon with the `ord`-th leaf replaced by '?'; st.hit records the leaf it blanked.
+-- Locals are NEVER candidate leaves — two copies naming a local differently is
+-- alpha-renaming, which is the one divergence that carries no information.
+local function bcanon(e, locals, slots, ctr, st)
+    if not e then return '_' end
+    local k = e.k
+    local function leaf(render, kind, node)
+        st.ord = st.ord + 1
+        if st.all then st.all[st.ord] = { kind = kind, node = node } end
+        if st.ord == st.blank then st.hit = { kind = kind, node = node }; return '?' end
+        return render
+    end
+    if k == 'name' then
+        if locals[e.n] then
+            if not slots[e.n] then ctr.n = ctr.n + 1; slots[e.n] = '#' .. ctr.n end
+            return slots[e.n]
+        end
+        return leaf('N' .. e.n, 'read', e)
+    end
+    if k == 'lit' then return leaf('L' .. (e.ty or '') .. ':' .. tostring(e.v), 'lit', e) end
+    if k == 'field' then
+        local b = bcanon(e.b, locals, slots, ctr, st)
+        return (e.method and 'M' or 'F') .. b .. '.' .. leaf(e.n, 'read', e)
+    end
+    if k == 'index' then
+        return 'I' .. bcanon(e.b, locals, slots, ctr, st) .. '[' .. bcanon(e.i, locals, slots, ctr, st) .. ']'
+    end
+    if k == 'call' then
+        local f = bcanon(e.f, locals, slots, ctr, st)
+        local p = {}
+        for _, a in ipairs(e.a or {}) do p[#p + 1] = bcanon(a, locals, slots, ctr, st) end
+        return 'C' .. f .. '(' .. table.concat(p, ',') .. ')'
+    end
+    if k == 'un' then return 'U' .. (e.op or '') .. bcanon(e.e, locals, slots, ctr, st) end
+    if k == 'bin' then
+        return 'B' .. (e.op or '') .. '(' .. bcanon(e.l, locals, slots, ctr, st)
+            .. ',' .. bcanon(e.r, locals, slots, ctr, st) .. ')'
+    end
+    if k == 'table' then return 'T' end
+    if k == 'fn' then return 'Fn' end
+    if k == 'vararg' then return 'V' end
+    local p = {}
+    for _, c in ipairs(e.kids or {}) do p[#p + 1] = bcanon(c, locals, slots, ctr, st) end
+    return '?' .. (e.t or '') .. '(' .. table.concat(p, ',') .. ')'
+end
+
+local function brow(rw, locals, blank, all)
+    local slots, ctr, st = {}, { n = 0 }, { ord = 0, blank = blank, all = all }
+    local function seq(list)
+        local p = {}
+        for _, e in ipairs(list or {}) do p[#p + 1] = bcanon(e, locals, slots, ctr, st) end
+        return table.concat(p, ',')
+    end
+    local key = seq(rw.lhs) .. '=' .. seq(rw.rhs)
+    if rw.cond then key = key .. ';C:' .. bcanon(rw.cond, locals, slots, ctr, st) end
+    return key, st.ord, st.hit
+end
+
+--- ROW-DRIFT: a literal that DUPLICATES the value of a module constant, standing where
+--- an otherwise identical statement elsewhere reads that constant by name.
+--- Returns findings { name, value, lit_file, lit_line, lit_fn, sites = {…} }.
+---
+--- TWO CONDITIONS, and NEITHER is sufficient alone — that is the whole design:
+---   · the statements must MATCH with one leaf blanked. On its own this is far too
+---     weak: measured on this tree it yields 7 candidates of which 1 is real.
+---   · the literal must EQUAL the value the name holds. On its own this is far too
+---     weak too — with `RULE_SHIFT = 2` in scope, every `2` in the file "equals a
+---     constant", which is most of them.
+--- Together they say something narrow and checkable: this statement is written
+--- elsewhere using the name, and this literal IS that name's value. Measured on this
+--- repo: 7 candidates -> 1 finding, and the finding was a real defect (fold.lua:228
+--- decoding rule bits by a bare 2 where its two siblings and the encoder use
+--- RULE_SHIFT).
+---
+--- WHAT IT CANNOT SEE, and the near tier can: a literal facing an EXPRESSION rather
+--- than a name (`'q'` against `require('cartograph.config').keys.close`) never shares a
+--- one-leaf-blanked key, because one side is a whole call chain. The two tiers are
+--- complementary, not nested — neither subsumes the other.
+---@param store table
+---@param opts table|nil  { max_bucket = 5, min_other = 2 }
+function M.row_drift(store, opts)
+    local max_bucket = (opts and opts.max_bucket) or 5
+    local min_other = (opts and opts.min_other) or 2
+    local consts = require('cartograph.constfold').literal_index(store)
+    local buckets = {}
+    for _, f in ipairs(collect_fns(store)) do
+        local cd = consts[f.file]
+        for _, rw in ipairs(f.rows) do
+            if rw.expr then
+                local all = {}
+                local _, nleaf = brow(rw.expr, f.locals, -1, all)
+                -- a statement whose ONLY content is the varying leaf is not evidence
+                if nleaf - 1 >= min_other then
+                    for i = 1, nleaf do
+                        -- ★ ONLY CANDIDATE POSITIONS GET A KEY. A finding needs a literal
+                        -- on one side and a read of a KNOWN module constant on the other,
+                        -- so any other leaf can never contribute and keying it is pure
+                        -- waste. This is not a heuristic — it drops positions that are
+                        -- unreachable by construction. Keying every leaf instead cost
+                        -- 5.2 GB and had not finished 50 WoW addons after two minutes;
+                        -- the work is O(rows x leaves) STRINGS held at once.
+                        local lf = all[i]
+                        local cand = lf and (lf.kind == 'lit'
+                            or (lf.node.k == 'name' and cd and cd[lf.node.n] ~= nil))
+                        if cand then
+                            local key, _, hit = brow(rw.expr, f.locals, i)
+                            if hit then
+                                local b = key .. '\1' .. i
+                                buckets[b] = buckets[b] or {}
+                                table.insert(buckets[b], { hit = hit, file = f.file, line = rw.l, fn = f.name })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local out = {}
+    for _, rows in pairs(buckets) do
+        -- a bucket collecting many sites is a language IDIOM, not a copied statement
+        if #rows >= 2 and #rows <= max_bucket then
+            local lits, reads = {}, {}
+            for _, r in ipairs(rows) do
+                if r.hit.kind == 'lit' then lits[#lits + 1] = r else reads[#reads + 1] = r end
+            end
+            for _, lr in ipairs(lits) do
+                local known, lv = expr.eval(lr.hit.node)
+                for _, rr in ipairs(reads) do
+                    local nm = rr.hit.node.k == 'name' and rr.hit.node.n or nil
+                    local cd = nm and consts[rr.file]
+                    local cv = cd and cd[nm]
+                    -- ★ THE GATE: the literal must BE the constant's value
+                    if known and cv ~= nil and cv == lv then
+                        out[#out + 1] = { name = nm, value = cv, lit_file = lr.file,
+                            lit_line = lr.line, lit_fn = lr.fn,
+                            sites = { { file = rr.file, line = rr.line, fn = rr.fn } } }
+                        break
+                    end
+                end
+            end
+        end
+    end
+    table.sort(out, function (a, b)
+        if a.lit_file ~= b.lit_file then return a.lit_file < b.lit_file end
+        return (a.lit_line or 0) < (b.lit_line or 0)
+    end)
+    return out
+end
+
+--- Human-readable report lines for M.row_drift findings.
+function M.row_drift_report(found)
+    if #found == 0 then return { 'row-drift: none' } end
+    local L = { ('row-drift — %d literal(s) that duplicate a module constant'):format(#found),
+        '(the same statement is written elsewhere using the NAME, and this literal IS',
+        ' that name\'s value — so the constant exists and this site bypasses it)', '' }
+    for _, d in ipairs(found) do
+        L[#L + 1] = ('■ %s:%d  in %s'):format(d.lit_file, d.lit_line or 0, d.lit_fn or '?')
+        L[#L + 1] = ('    hardcodes %s, which is `%s`'):format(tostring(d.value), d.name)
+        for _, s in ipairs(d.sites) do
+            L[#L + 1] = ('    the same statement uses the name at %s:%d  in %s')
+                :format(s.file, s.line or 0, s.fn or '?')
+        end
+    end
+    return L
+end
+
 --- Human-readable report lines for M.exact groups.
 function M.report(groups)
     if #groups == 0 then return { 'exact-structural clones: none' } end

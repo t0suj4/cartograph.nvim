@@ -444,6 +444,38 @@ different statements, not one drifted one, and a `nil` is the absence of a
 value rather than a constant anyone forgot to update. On this tree it finds
 nothing, which is the honest answer.
 
+That check only sees inside near-clone *functions*, and drift is a property of a
+single **statement** — so `nvim -l tools/clones.lua --rowdrift` is a second tier
+for the same defect, aimed where the first is blind. It buckets every statement
+by its own text with exactly one leaf blanked, so two rows meet only if they are
+the same statement differing at that one position, and then applies the
+condition that makes it precise: **the literal must equal the value the named
+constant actually holds**. Neither half works alone — a matching row on its own
+yields mostly noise, and "this literal equals a constant" on its own fires on
+every `2` in a file that defines a `2`. Together they say something narrow: this
+statement is written elsewhere using the name, and this literal *is* that name's
+value.
+
+The case that forced the tier is in this repo's own history. `fold.lua` defines
+`RULE_SHIFT = 2` because the rule occupies bits 1–3; two decode sites divide by
+`RULE_SHIFT`, the encoder multiplies by it, and one decode site divided by a
+bare `2`. Correct while the constant is 2, silently wrong the moment the bit
+layout moves — which is the single thing a named shift exists to prevent. The
+two functions involved are not clones of each other, so the near-clone tier
+cannot see it, and found nothing on this tree. The tiers are complementary
+rather than nested: a literal facing an *expression* (`'q'` against
+`require('cartograph.config').keys.close`) is the near tier's to find, because
+one side is a whole call chain rather than a leaf.
+
+Its yield is small and stated rather than dressed up: across this repo, 82 WoW
+addons and one other tree, it has fired exactly once — on the `fold.lua` case
+above. It earns its place by being **silent when there is nothing** and by
+catching what no other tier can reach, not by volume. The constant must live at
+module scope in the *same file* as the site that reads it, which is the main
+reason for those zeros and the obvious next rung. It is also the heaviest tier
+here — two re-parses per file — so it is a dev-bench command, and large
+JavaScript trees currently exhaust memory where `--near` copes.
+
 And if anti-unification finds no real divergence at all (the
 edit-distance came from renamed locals the function-global pass couldn't see
 through), the pair is really an exact clone and `:CartographMerge` applies
