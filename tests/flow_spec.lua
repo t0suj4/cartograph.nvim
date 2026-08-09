@@ -12,7 +12,8 @@ local function ready(lang)
 end
 
 local FN_TYPES = { function_definition = true, method_declaration = true,
-    function_declaration = true, method_definition = true, function_item = true }
+    function_declaration = true, method_definition = true, function_item = true,
+    method = true } -- ruby (CART-0363)
 
 -- parse `code` and return the first function-like node. `lang` defaults to php
 -- (with the <?php preamble); other langs take the code verbatim.
@@ -995,5 +996,49 @@ function f(xs) {
     end
     ok(#body >= 2, 'its body statements are ROWS of their own, not folded into the head: got '
         .. #body .. ' (' .. table.concat(body, ', ') .. ')')
+end)
+
+-- CART-0363, ruby. Its control nodes are spelled `if` / `unless` / `while` / `until` /
+-- `case` — no `_statement` suffix anywhere — and its region containers are `then` and `do`,
+-- not `block`. So ruby opened ZERO control structures: 2219 opaque on rails/activerecord
+-- alone, a shipped language with no intra-method control flow in the row model.
+local function rb(code)
+    local fn, src = parse_fn(code, 'ruby')
+    ok(fn, 'the ruby fixture parses to a method')
+    return flow.build(fn, src, { ctrl = tsspec.ruby.ctrl, preloop = tsspec.ruby.preloop,
+        body = tsspec.ruby.body, clause = tsspec.ruby.clause,
+        body_of = tsspec.ruby.body_of, params_of = tsspec.ruby.params_of,
+        pfield = tsspec.ruby.params_field, regime = tsspec.ruby.regime })
+end
+local function kids_of(fl, head)
+    local out = {}
+    for _, s in ipairs(fl.stmts) do if s.parent == head then out[#out + 1] = s.t end end
+    return out
+end
+local function head_of(fl, t)
+    for i, s in ipairs(fl.stmts) do if (s.t or '') == t then return i end end
+end
+
+test('flow: a ruby while opens its body', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(a)\n  while a\n    g(1)\n    g(2)\n  end\nend')
+    local h = head_of(fl, 'while')
+    ok(h, 'the while is a row')
+    ok(#kids_of(fl, h) >= 2, 'and its two body statements are rows: got '
+        .. #kids_of(fl, h) .. ' (' .. table.concat(kids_of(fl, h), ', ') .. ')')
+end)
+
+test('flow: a ruby if regions its then-branch, and elsif/else are CLAUSES', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(a, b)\n  if a\n    g(1)\n    g(2)\n  elsif b\n    g(3)\n'
+        .. '  else\n    g(4)\n  end\nend')
+    local h = head_of(fl, 'if')
+    ok(h, 'the if is a row')
+    local pols = {}
+    for _, s in ipairs(fl.stmts) do
+        if s.parent == h then pols[s.pol or '?'] = (pols[s.pol or '?'] or 0) + 1 end
+    end
+    ok((pols.body or 0) >= 2, 'the then-branch statements are body rows: ' .. (pols.body or 0))
+    ok(head_of(fl, 'elsif'), 'the elsif is its own clause row, not folded into the if')
 end)
 

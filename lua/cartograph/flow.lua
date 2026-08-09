@@ -372,13 +372,36 @@ function M.build(fnnode, src, cfg)
     -- ★ STASHED ON THE RECORD, because the CFG phases (M.successors and friends) are
     -- SEPARATE FUNCTIONS that ask "is this row a pre-condition loop?" of a row built here.
     -- A build-local set they cannot see is how the first cut of this crashed them.
-    local CTRL_, PRELOOP_ = CTRL, PRELOOP
-    if cfg.ctrl or cfg.preloop then
-        CTRL_, PRELOOP_ = {}, {}
-        for k, v in pairs(CTRL) do CTRL_[k] = v end
-        for k, v in pairs(PRELOOP) do PRELOOP_[k] = v end
-        for k, v in pairs(cfg.ctrl or {}) do CTRL_[k] = v end
-        for k, v in pairs(cfg.preloop or {}) do PRELOOP_[k] = v end
+    -- FOUR node classes, each a per-language extension of a base set. `ctrl` says "this is
+    -- a control statement", `preloop` "its test runs before the body", `body` "this node IS
+    -- a region of statements", `clause` "this is a sub-region with its own condition".
+    -- ★ RUBY NEEDED ALL FOUR AND THAT IS THE POINT: its control is `if`/`while`/`case`, its
+    -- REGIONS are `then`/`do` (not `block`), and its sub-regions are `elsif`/`else`/`when`.
+    -- Adding only `ctrl` opens the loop and then folds its whole body into one row, because
+    -- the container is not recognised as a region — measurably no better than before.
+    local CTRL_, PRELOOP_, BODY_, CLAUSE_ = CTRL, PRELOOP, BODY, CLAUSE
+    local function extend_set(base, extra)
+        if not extra then return base end
+        local out = {}
+        for k, v in pairs(base) do out[k] = v end
+        for k, v in pairs(extra) do out[k] = v end
+        return out
+    end
+    CTRL_ = extend_set(CTRL, cfg.ctrl)
+    PRELOOP_ = extend_set(PRELOOP, cfg.preloop)
+    BODY_ = extend_set(BODY, cfg.body)
+    CLAUSE_ = extend_set(CLAUSE, cfg.clause)
+    -- ★ `clause` IS A MAP, NOT A SET, and that is deliberate: clause() dispatches on WHICH
+    -- KIND of sub-region a node is, so a bare set would need two more spec keys to say it.
+    -- `{ elsif = 'elseif', ['else'] = 'else', when = 'case' }` — the value names the class.
+    -- A set entry (value `true`) still works and means "a clause with no special handling".
+    local ELSEIF_, CASE_ = ELSEIF, CASE
+    if cfg.clause then
+        ELSEIF_, CASE_ = extend_set(ELSEIF, {}), extend_set(CASE, {})
+        for k, v in pairs(cfg.clause) do
+            if v == 'elseif' then ELSEIF_[k] = true
+            elseif v == 'case' then CASE_[k] = true end
+        end
     end
     local FN = cfg.fn_types or FN_FALLBACK -- the nested-function stop (CART-0308)
     -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
@@ -426,7 +449,7 @@ function M.build(fnnode, src, cfg)
         for c in node:iter_children() do
             if c:id() == cond:id() then return nil end
             if c:named() and not COMMENT[c:type()]
-                and not BODY[c:type()] and not CLAUSE[c:type()] then return c end
+                and not BODY_[c:type()] and not CLAUSE_[c:type()] then return c end
         end
         return nil
     end
@@ -518,12 +541,12 @@ function M.build(fnnode, src, cfg)
             for gc in node:iter_children() do
                 if gc:named() and gc ~= cond and not (finit and gc:id() == finit:id())
                     and not (body_field and gc:id() ~= body_field:id()
-                             and not CLAUSE[gc:type()]) then
+                             and not CLAUSE_[gc:type()]) then
                     local gt = gc:type()
                     if COMMENT[gt] then -- skip
-                    elseif BODY[gt] then
+                    elseif BODY_[gt] then
                         region(gc, idx, 'body')          -- php block body / loop body
-                    elseif CLAUSE[gt] then
+                    elseif CLAUSE_[gt] then
                         clause(gc, idx)                  -- else/elseif/case/catch
                     else
                         emit(gc, idx, 'body')            -- lua inline body statement
@@ -548,7 +571,7 @@ function M.build(fnnode, src, cfg)
             if c:named() then
                 local ct = c:type()
                 if not COMMENT[ct] then
-                    if CLAUSE[ct] then clause(c, parent) else emit(c, parent, pol) end
+                    if CLAUSE_[ct] then clause(c, parent) else emit(c, parent, pol) end
                 end
             end
         end
@@ -557,7 +580,7 @@ function M.build(fnnode, src, cfg)
     -- a clause (else/elseif/case/catch): elseif is its own guard (control row);
     -- the rest region their statements under `parent`
     function clause(node, parent)
-        if CASE[node:type()] then
+        if CASE_[node:type()] then
             -- a switch case: the `value` label is a USE; the statement body is
             -- REGIONED as rows (was folded into the case row, hiding it from the
             -- fine model + blocking case CFG feasibility). break rows inside now
@@ -570,12 +593,12 @@ function M.build(fnnode, src, cfg)
             if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'casehead') end
             for c in node:iter_children() do
                 if c:named() and c ~= vf and not COMMENT[c:type()] then
-                    if BODY[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
+                    if BODY_[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
                 end
             end
             return
         end
-        if ELSEIF[node:type()] then
+        if ELSEIF_[node:type()] then
             -- an elseif is a guard (its condition) over a body: emit the control
             -- row (condition only, stop_body) and REGION its consequence as rows
             -- (was folded — the body statements were invisible). lua
@@ -586,13 +609,13 @@ function M.build(fnnode, src, cfg)
                 pol = 'elseif', def = d, use = u, t = node:type() }
             if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'ctrlhead') end
             local cons = node:field('consequence')[1] or node:field('body')[1]
-            if cons and BODY[cons:type()] then
+            if cons and BODY_[cons:type()] then
                 region(cons, idx, 'body')
             else -- fallback: region non-condition named children
                 local condn = node:field('condition')[1]
                 for c in node:iter_children() do
                     if c:named() and c ~= condn and not COMMENT[c:type()] then
-                        if BODY[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
+                        if BODY_[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
                     end
                 end
             end
@@ -609,12 +632,12 @@ function M.build(fnnode, src, cfg)
             -- python `except_clause` has no `body` field (the block is an unnamed
             -- child); fall back to the first BODY-type child.
             local b = node:field('body')[1]
-            if not (b and BODY[b:type()]) then
+            if not (b and BODY_[b:type()]) then
                 for c in node:iter_children() do
-                    if BODY[c:type()] then b = c break end
+                    if BODY_[c:type()] then b = c break end
                 end
             end
-            if b and BODY[b:type()] then region(b, idx, 'catch') end
+            if b and BODY_[b:type()] then region(b, idx, 'catch') end
             return
         end
         local ct = node:type()
@@ -622,10 +645,10 @@ function M.build(fnnode, src, cfg)
             or ct:find('catch') and 'catch' or ct:find('finally') and 'finally'
             or ct:find('default') and 'default' or 'clause'
         local b = node:field('body')[1]
-        if b and BODY[b:type()] then region(b, parent, pol) return end
+        if b and BODY_[b:type()] then region(b, parent, pol) return end
         for c in node:iter_children() do
             if c:named() and not COMMENT[c:type()] then
-                if BODY[c:type()] then region(c, parent, pol)
+                if BODY_[c:type()] then region(c, parent, pol)
                 else emit(c, parent, pol) end
             end
         end

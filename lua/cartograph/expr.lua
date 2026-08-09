@@ -975,7 +975,7 @@ function M.of(store, fn_id)
     local fn = fn_node(node, src, lang)
     if not fn then return nil end
     local cfg = { pfield = s.params_field, df_ids = s.df_ids, regime = s.regime,
-        ctrl = s.ctrl, preloop = s.preloop, -- CART-0363, per-language control nodes
+        ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
         mods = s.binding_modifiers, -- CART-0234
         body_of = s.body_of, params_of = s.params_of, -- CART-0305
         fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
@@ -1030,7 +1030,8 @@ function M.of_module(store, mod_id)
     local root = root_node(src, lang)
     if not root then return nil end
     local cfg = { seq = true, df_ids = s.df_ids, regime = s.regime,
-        ctrl = s.ctrl, preloop = s.preloop, -- CART-0363 (THREE cfg sites; all must agree)
+        ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
+                                            -- THREE cfg sites; all must agree
         mods = s.binding_modifiers, -- CART-0234
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'

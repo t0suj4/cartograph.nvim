@@ -121,6 +121,9 @@ M.SLOTS = {
     -- its BODY GETS NO ROWS AT ALL. `ctrl` adds the statement, `preloop` says its test
     -- runs BEFORE the body (zero-trip feasible, back-edge to the head).
     ctrl = 'ANALYSIS', preloop = 'ANALYSIS',
+    -- and the two REGION classes, needed the moment a language's containers are not
+    -- `block`: ruby regions with `then`/`do` and sub-regions with `elsif`/`else`/`when`.
+    body = 'ANALYSIS', clause = 'ANALYSIS',
     df_ids = 'ANALYSIS', merge_equations = 'ANALYSIS',
     binding_modifiers = 'ANALYSIS', -- declaration decorations that read nothing: lua
                                     -- `<const>`/`<close>`, whose node name collides with

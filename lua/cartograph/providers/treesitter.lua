@@ -537,6 +537,33 @@ M.spec.javascript.ctrl = { for_in_statement = true }   -- for…of AND for…in 
 M.spec.javascript.preloop = { for_in_statement = true }
 M.spec.typescript.ctrl = M.spec.javascript.ctrl
 M.spec.typescript.preloop = M.spec.javascript.preloop
+
+-- RUBY (CART-0363). Verified by parsing each form and reading the grammar's own names:
+--   if / unless   {condition, consequence -> `then`, alternative -> `elsif` | `else`}
+--   while / until {condition, body -> `do`}
+--   case          {value}, with `when` {pattern, body} children
+--   for           {pattern, value, body -> `do`}
+-- ★ ALL FOUR CLASSES ARE NEEDED. `ctrl` alone opens the loop and then folds its whole body
+-- into one row, because `then`/`do` are not `block` and so are not recognised as regions.
+-- Ruby opened ZERO control structures before this: 2219 opaque on rails/activerecord alone.
+M.spec.ruby.ctrl = { ['if'] = true, ['unless'] = true, ['while'] = true,
+    ['until'] = true, ['case'] = true, ['for'] = true,
+    -- THE MODIFIER FORMS ARE THE DOMINANT REMAINDER, not a corner: measured 738 `x if c`
+    -- and 311 `x unless c` on rails/activerecord alone, against 1575 rows the block forms
+    -- opened. `{condition, body}` where body is a single statement rather than a region —
+    -- the emit fallback handles that, which is the same path a C-family unbraced body takes.
+    -- cfg.lua already models both in its COND set (and unless_modifier in INVERTED), so this
+    -- brings the ROW model level with the dominance model rather than ahead of it.
+    if_modifier = true, unless_modifier = true }
+-- PRE-condition: the test runs before the body, so a zero-trip skip is feasible and the
+-- back-edge wires to the head. `until` is a while with an INVERTED condition, which cfg.lua
+-- already models (its INVERTED set) — the loop STRUCTURE is identical, so it belongs here.
+M.spec.ruby.preloop = { ['while'] = true, ['until'] = true, ['for'] = true }
+M.spec.ruby.body = { ['then'] = true, ['do'] = true }
+-- a MAP, not a set: the value names WHICH clause class, so clause() can dispatch without
+-- two more spec keys. `elsif` is a guard over a body (condition + consequence), `when` is a
+-- switch case (pattern + body), `else` is the plain alternative.
+M.spec.ruby.clause = { ['elsif'] = 'elseif', ['else'] = 'else', ['when'] = 'case' }
 M.spec.typescript.regime = M.spec.javascript.regime
 -- TS-ONLY declarations (interface/enum) — added to the typescript spec ALONE:
 -- these node types don't exist in the JS grammar, so they can't live in the
@@ -4684,7 +4711,8 @@ function M.extract(root, opts)
                     body_of = spec.body_of, params_of = spec.params_of, -- CART-0305
                     fn_types = M.flow_stop(lang), -- the nested-fn STOP, not the
                     -- enclosure set: only where a node is minted to hold the rows
-                    ctrl = spec.ctrl, preloop = spec.preloop, -- CART-0363
+                    ctrl = spec.ctrl, preloop = spec.preloop,
+                    body = spec.body, clause = spec.clause, -- CART-0363
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 padd('flow.build', _pf)
                 local dret, dretclass

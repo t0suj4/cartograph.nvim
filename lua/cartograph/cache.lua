@@ -86,10 +86,23 @@ M.VERSION = 125 -- v125: A LOOP FLOW CANNOT NAME IS A LOOP WHOSE BODY VANISHES
                -- in this same list: a hardcoded cross-language union is how the set came to
                -- hold one language's spelling in the first place. New spec keys `ctrl` and
                -- `preloop`, registered in the CLOSED contract (which caught them missing).
-               -- THIS BUMP COVERS js/ts/tsx `for_in_statement` ONLY. Ruby, cpp
-               -- `for_range_loop` and java `enhanced_for_statement` are the same defect and
-               -- are NOT in this change; ruby additionally needs its clause spellings and a
-               -- POST-vs-PRE decision, and its `each do` block is a different mechanism.
+               -- THIS BUMP COVERS js/ts/tsx `for_in_statement` AND RUBY. Ruby needed all
+               -- FOUR node classes, which is the finding: its control is `if`/`while`/`case`
+               -- (no `_statement` anywhere), its REGIONS are `then`/`do` rather than `block`,
+               -- and its sub-regions are `elsif`/`else`/`when`. Adding only `ctrl` opens the
+               -- loop and then folds its whole body into one row, because the container is
+               -- not recognised as a region — measurably no better than before.
+               -- `clause` is a MAP not a set (`{elsif='elseif', when='case'}`) because
+               -- clause() dispatches on WHICH kind of sub-region a node is; a bare set would
+               -- have needed two more spec keys to say the same thing.
+               --   rails/activerecord/lib   opened 0 -> 2624, opaque 2219 -> 2   (100% -> 0%)
+               --   rails/actionpack/lib     opened 3 ->  910, opaque  729 -> 3
+               -- The modifier forms were the dominant remainder, not a corner: 738 `x if c`
+               -- and 311 `x unless c` on activerecord against 1575 the block forms opened.
+               -- STILL OUT: `while_modifier`/`until_modifier` (2 and 1 sites; `begin…end
+               -- while` is POST-condition and that decision is not made here), cpp
+               -- `for_range_loop`, java `enhanced_for_statement`, and ruby `each do` blocks
+               -- (call-attached, execution count unknown — a different mechanism, part B).
                -- ★ AND A HEADER PART IS NOT A BODY STATEMENT: a for-of's `left`/`right` are
                -- fielded children that the body fallback would emit as rows appearing to run
                -- each iteration. Scoped to the spec-added types, so no lua/php/python row
