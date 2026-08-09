@@ -515,6 +515,28 @@ M.spec.typescript.exts = { 'ts' }
 M.spec.lua.regime = { variable_declaration = 'block', local_declaration = 'block',
     local_variable_declaration = 'block' }
 M.spec.javascript.regime = { lexical_declaration = 'block' } -- let/const; var = hoisted
+
+-- ── EXTRA CONTROL NODES, PER LANGUAGE (CART-0363) ────────────────────────────
+-- flow.lua's CTRL/PRELOOP sets are `*_statement`-shaped, which is one language's
+-- spelling. A control node absent from them is emitted as a PLAIN ROW and du then
+-- harvests its whole subtree, so THE BODY GETS NO ROWS AT ALL — no CFG, no
+-- per-statement def/use, nothing for df / reaching / liveness / LICM / untangle /
+-- extract / the clone tiers to read. MEASURED before this existed: ruby opened ZERO
+-- control structures (2219 opaque on rails/activerecord alone), ghost lost 594
+-- for-of/for-in sites and jquery 91.
+--
+-- ★ THREADED FROM THE SPEC RATHER THAN GROWN AS A UNION, which is the v120 precedent
+-- recorded in cache.lua: "flow's nested-function stop was a hardcoded cross-language
+-- union ... now threaded per-language from the spec". A union is how the set got one
+-- language's spelling in the first place.
+--
+-- `ctrl` = also a control statement (recurse its sub-regions).
+-- `preloop` = of those, the ones tested BEFORE the body, so a zero-trip skip is
+-- feasible and the back-edge wires to the head.
+M.spec.javascript.ctrl = { for_in_statement = true }   -- for…of AND for…in share the type
+M.spec.javascript.preloop = { for_in_statement = true }
+M.spec.typescript.ctrl = M.spec.javascript.ctrl
+M.spec.typescript.preloop = M.spec.javascript.preloop
 M.spec.typescript.regime = M.spec.javascript.regime
 -- TS-ONLY declarations (interface/enum) — added to the typescript spec ALONE:
 -- these node types don't exist in the JS grammar, so they can't live in the
@@ -4662,6 +4684,7 @@ function M.extract(root, opts)
                     body_of = spec.body_of, params_of = spec.params_of, -- CART-0305
                     fn_types = M.flow_stop(lang), -- the nested-fn STOP, not the
                     -- enclosure set: only where a node is minted to hold the rows
+                    ctrl = spec.ctrl, preloop = spec.preloop, -- CART-0363
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 padd('flow.build', _pf)
                 local dret, dretclass

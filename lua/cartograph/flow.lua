@@ -364,6 +364,22 @@ end
 function M.build(fnnode, src, cfg)
     cfg = cfg or {}
     local regimetab = cfg.regime or {}
+    -- ── PER-LANGUAGE CONTROL NODES (CART-0363) ──────────────────────────────────
+    -- CTRL/PRELOOP above are one language's SPELLING of "this is a control statement".
+    -- A language whose node is spelled otherwise had its whole body folded into one
+    -- opaque row. The spec supplies the rest; merged HERE, per build, so the module-level
+    -- tables stay the shared base and nothing leaks between languages.
+    -- ★ STASHED ON THE RECORD, because the CFG phases (M.successors and friends) are
+    -- SEPARATE FUNCTIONS that ask "is this row a pre-condition loop?" of a row built here.
+    -- A build-local set they cannot see is how the first cut of this crashed them.
+    local CTRL_, PRELOOP_ = CTRL, PRELOOP
+    if cfg.ctrl or cfg.preloop then
+        CTRL_, PRELOOP_ = {}, {}
+        for k, v in pairs(CTRL) do CTRL_[k] = v end
+        for k, v in pairs(PRELOOP) do PRELOOP_[k] = v end
+        for k, v in pairs(cfg.ctrl or {}) do CTRL_[k] = v end
+        for k, v in pairs(cfg.preloop or {}) do PRELOOP_[k] = v end
+    end
     local FN = cfg.fn_types or FN_FALLBACK -- the nested-function stop (CART-0308)
     -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
     -- BINDING MODIFIERS (CART-0234): per-language node types to skip entirely, because
@@ -428,7 +444,7 @@ function M.build(fnnode, src, cfg)
                     inner = c
                 end
             end
-            if inner and CTRL[inner:type()] then return emit(inner, parent, pol) end
+            if inner and CTRL_[inner:type()] then return emit(inner, parent, pol) end
         end
         -- labeled_statement (go/java/js/c): DEFINES a label over the wrapped
         -- statement — unwrap, emit the inner statement, and tag its HEAD row with
@@ -451,12 +467,12 @@ function M.build(fnnode, src, cfg)
             return
         end
         -- the three-part for's init runs BEFORE the head, so it is emitted before it
-        local finit = (CTRL[t] and PRELOOP[t]) and for_init(node) or nil
+        local finit = (CTRL_[t] and PRELOOP_[t]) and for_init(node) or nil
         if finit then emit(finit, parent, pol) end
         local idx = #stmts + 1
-        local sb = CTRL[t] and true or false
+        local sb = CTRL_[t] and true or false
         local d, u, sus, rmw = du(node, src, sb, ids, mods, FN)
-        stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL[t] and t or 'stmt',
+        stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL_[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
             suspend = sus or nil, -- yield/await = a Tier-1 continuation point (fused from du)
@@ -464,19 +480,19 @@ function M.build(fnnode, src, cfg)
             -- control-transfer label: TARGET on break/continue/goto, else the
             -- loop's OWN label (rust). def/use above are unaffected.
             label = (TRANSFER[t] and target_label(node, src))
-                or (CTRL[t] and loop_label(node, src)) or nil }
+                or (CTRL_[t] and loop_label(node, src)) or nil }
         -- CO-EMIT the expression IR at the row-birth point ([[cartograph-expression-layer]]):
         -- by here rust/labeled unwrapping is done and `node` IS the row's node, so
         -- row↔expr is 1:1 by construction. Off unless a consumer set cfg.expr (a
         -- harvester fn). CTRL rows are harvested below (flow knows POST-stripping +
         -- the body/clause boundary du stops at); plain rows here. The hot ingest path
         -- never even builds the closure.
-        if cfg.expr and not CTRL[t] then stmts[idx].expr = cfg.expr(node, src) end
-        if CTRL[t] then
+        if cfg.expr and not CTRL_[t] then stmts[idx].expr = cfg.expr(node, src) end
+        if CTRL_[t] then
             local cond = node:field('condition')[1]
                 or (SWITCH[t] and node:field('value')[1]) -- go switch: `value` is the switched expr
             -- loop feasibility flag (do{}while(0) / while(true) / rust loop)
-            if POST[t] or PRELOOP[t] then
+            if POST[t] or PRELOOP_[t] then
                 stmts[idx].const = (t == 'loop_expression') and true or const_cond(cond, src)
             end
             -- the head expr: 'ctrlhead' = condition + clause (skipping body — mirrors
@@ -491,8 +507,18 @@ function M.build(fnnode, src, cfg)
             -- var def'd in the body and read in the condition is not a free
             -- use). Drop it from the control row; re-emit as a trailing row.
             if POST[t] then stmts[idx].def, stmts[idx].use = {}, {} end
+            -- ★ A HEADER PART IS NOT A BODY STATEMENT. A for-of's `left`/`right` are fielded
+            -- children that are neither the condition nor the body, and the fallback below
+            -- emits any such child as a body row — so `for (const x of xs)` gained two
+            -- `identifier` rows that appear to execute each iteration. Scoped to the types the
+            -- SPEC added (cfg.ctrl): the base languages keep their current modelling, wrong or
+            -- not, so this change cannot move a lua/php/python row. Their header rows are
+            -- CART-0362's business, and moving them here would reorder every lua function.
+            local body_field = (cfg.ctrl and cfg.ctrl[t]) and node:field('body')[1] or nil
             for gc in node:iter_children() do
-                if gc:named() and gc ~= cond and not (finit and gc:id() == finit:id()) then
+                if gc:named() and gc ~= cond and not (finit and gc:id() == finit:id())
+                    and not (body_field and gc:id() ~= body_field:id()
+                             and not CLAUSE[gc:type()]) then
                     local gt = gc:type()
                     if COMMENT[gt] then -- skip
                     elseif BODY[gt] then
@@ -625,7 +651,7 @@ function M.build(fnnode, src, cfg)
     -- A sequence has no parameters: a chunk has no `parameters` field, so
     -- param_names would return {} anyway — skipped explicitly because asking a
     -- non-function for its parameters is a category error, not a lucky nil.
-    return { stmts = stmts, cfg = cfg,
+    return { stmts = stmts, cfg = cfg, preloop = PRELOOP_,
         params = (not cfg.seq)
             and param_names(fnnode, src, cfg.pfield, cfg.method or false, cfg.params_of) or {} }
 end
@@ -633,6 +659,12 @@ end
 --- coarse projection: df's partition — TOP-LEVEL statements, each aggregating
 --- its whole subtree's def/use (df's control-row semantics), with df's rules
 --- (def deduped; a name def'd in the coarse stmt is not also a use).
+-- The PRE-condition-loop set this flow record was built with. `build` merges the spec's
+-- per-language `preloop` into the base and stashes it; the CFG phases below are separate
+-- functions and cannot see a build-local (CART-0363). Falls back to the base for a record
+-- built before the field existed, or by a caller that passed no spec.
+local function PRELOOP_OF(flow) return (flow and flow.preloop) or PRELOOP end
+
 function M.coarse(flow)
     local stmts = flow.stmts
     -- map each row to its top-level ancestor (parent==0)
@@ -788,7 +820,7 @@ function M.successors(flow)
                 for pol, rr in pairs(kids) do
                     if pol ~= 'body' and pol ~= 'cond' then add(r, wire(rr, nxt, brk, cont, lbls)) end
                 end
-            elseif kids and PRELOOP[s.kind] then
+            elseif kids and PRELOOP_OF(flow)[s.kind] then
                 -- PRE-condition loop (while/for): test first → zero-trip skip,
                 -- suppressed when constant-true (while(true), rust `loop`).
                 local lb = s.label and extend(lbls, s.label, { brk = nxt, cont = r }) or lbls

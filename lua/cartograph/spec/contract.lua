@@ -116,6 +116,11 @@ M.SLOTS = {
     -- ANALYSIS: flow / df / effects semantics
     is_write = 'ANALYSIS', write_gate = 'ANALYSIS', guards = 'ANALYSIS',
     module_effects = 'ANALYSIS', dataflow = 'ANALYSIS', regime = 'ANALYSIS',
+    -- EXTRA CONTROL NODES, per language (CART-0363). flow's CTRL/PRELOOP are one
+    -- language's SPELLING; a control node absent from them is emitted as a plain row and
+    -- its BODY GETS NO ROWS AT ALL. `ctrl` adds the statement, `preloop` says its test
+    -- runs BEFORE the body (zero-trip feasible, back-edge to the head).
+    ctrl = 'ANALYSIS', preloop = 'ANALYSIS',
     df_ids = 'ANALYSIS', merge_equations = 'ANALYSIS',
     binding_modifiers = 'ANALYSIS', -- declaration decorations that read nothing: lua
                                     -- `<const>`/`<close>`, whose node name collides with

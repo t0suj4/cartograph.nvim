@@ -73,7 +73,32 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 124 -- v124: A THREE-PART `for`'s INIT CLAUSE IS NOT A BODY STATEMENT
+M.VERSION = 125 -- v125: A LOOP FLOW CANNOT NAME IS A LOOP WHOSE BODY VANISHES
+               -- (CART-0363). flow's CTRL/PRELOOP sets are `*_statement`-shaped — one
+               -- language's SPELLING — and a control node absent from them is emitted as a
+               -- PLAIN ROW, so du harvests its whole subtree and THE BODY GETS NO ROWS AT
+               -- ALL. Not a precision loss: no CFG, no per-statement def/use, nothing for
+               -- df / reaching / liveness / LICM / CSE / untangle / extract / the clone
+               -- tiers to read. MEASURED before: ghost 594 for-of/for-in sites folded,
+               -- jquery 91; ruby opened ZERO control structures (2219 opaque on
+               -- rails/activerecord alone).
+               -- ★ THREADED FROM THE SPEC, NOT GROWN AS A UNION — the v120 precedent below,
+               -- in this same list: a hardcoded cross-language union is how the set came to
+               -- hold one language's spelling in the first place. New spec keys `ctrl` and
+               -- `preloop`, registered in the CLOSED contract (which caught them missing).
+               -- THIS BUMP COVERS js/ts/tsx `for_in_statement` ONLY. Ruby, cpp
+               -- `for_range_loop` and java `enhanced_for_statement` are the same defect and
+               -- are NOT in this change; ruby additionally needs its clause spellings and a
+               -- POST-vs-PRE decision, and its `each do` block is a different mechanism.
+               -- ★ AND A HEADER PART IS NOT A BODY STATEMENT: a for-of's `left`/`right` are
+               -- fielded children that the body fallback would emit as rows appearing to run
+               -- each iteration. Scoped to the spec-added types, so no lua/php/python row
+               -- moves — verified byte-identical on this tree (exact 76/252, unchanged),
+               -- while jquery moves 231/236 -> 233/238 and its blocks 156 -> 162, which is
+               -- the point: a JS function's rows are now its statements.
+               -- NO GATE RE-SAVE: tools/snapshot.lua projects nodes/edges/calls, and this
+               -- repartitions rows WITHIN a function — no node or edge moves.
+               -- v124: A THREE-PART `for`'s INIT CLAUSE IS NOT A BODY STATEMENT
                -- (CART-0359). `for (let i = 0; i < n; i++)` emitted its header
                -- initializer as a child of the loop, so it became the FIRST ROW OF THE
                -- BODY — and every consumer asking "what runs each iteration" then got the

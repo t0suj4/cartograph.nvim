@@ -965,3 +965,35 @@ test('flow: goto jumps to its label target row (c)', function ()
     ok(has(cfg.succ, go, target), 'goto done → the cleanup() row under `done:`')
     ok(#cfg.succ[go] == 1, 'goto has ONLY the jump edge (no fall-through)')
 end)
+
+-- CART-0363. flow's CTRL set is `*_statement`-shaped, so a control node spelled otherwise is
+-- emitted as a PLAIN ROW and du harvests its whole subtree — the BODY GETS NO ROWS AT ALL.
+-- Measured before the fix: ruby opened ZERO control structures (2219 opaque on activerecord
+-- alone), and js/ts lost `for…of`/`for…in`, cpp `for_range_loop`, java `enhanced_for`.
+-- The set is now threaded PER LANGUAGE from the spec, the v120 precedent, rather than grown
+-- as a hardcoded cross-language union.
+test('flow: a JS for-of opens its body, like every other loop', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fn, src = parse_fn([[
+function f(xs) {
+    for (const x of xs) {
+        g(x);
+        h(x);
+    }
+}
+]], 'javascript')
+    ok(fn, 'the fixture parses to a function')
+    local fl = flow.build(fn, src, { ctrl = tsspec.javascript.ctrl,
+        preloop = tsspec.javascript.preloop, regime = tsspec.javascript.regime })
+    local head, body = nil, {}
+    for i, s in ipairs(fl.stmts) do
+        if (s.t or '') == 'for_in_statement' then head = i end
+    end
+    ok(head, 'the for-of is a row')
+    for _, s in ipairs(fl.stmts) do
+        if s.parent == head then body[#body + 1] = s.t end
+    end
+    ok(#body >= 2, 'its body statements are ROWS of their own, not folded into the head: got '
+        .. #body .. ' (' .. table.concat(body, ', ') .. ')')
+end)
+
