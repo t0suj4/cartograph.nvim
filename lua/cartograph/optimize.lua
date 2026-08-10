@@ -21,9 +21,10 @@ local callrec = require 'cartograph.callrec'
 local M = {}
 
 -- loop control heads (by raw node type `t`) — the set untangle.extract_candidates uses
-local LOOPISH = { for_statement = true, for_in_statement = true,
-    while_statement = true, repeat_statement = true, loop_statement = true,
-    loop_expression = true, foreach_statement = true }
+-- ★ THE PRIVATE LOOPISH TABLE IS GONE (CART-0383). Four modules each kept one and every
+-- PAIR of them disagreed; none knew the forms flow had opened; all four carried
+-- `loop_statement`, which no grammar we support spells. flow.loops_of(fl) is the one answer,
+-- and it is LANGUAGE-AWARE — js for-of and ruby while/until/for are loops only per spec.
 
 -- (allocating-call detection — deepcopy/setmetatable/… returning fresh identity — now
 -- lives in expr.allocates' KNOWN_ALLOC, applied structurally to the row's value.)
@@ -49,6 +50,7 @@ local function context(store, fn_id)
         return false
     end
     local heads = {}
+    local LOOPISH = require('cartograph.flow').loops_of(fl)
     for i = 1, n do if LOOPISH[rows[i].t or ''] then heads[#heads + 1] = i end end
     -- per-LINE impurity (a call with effects/hedges) + pure-callee names per line +
     -- the set of pure MODULE receiver names (`string` in string.format, `math` in

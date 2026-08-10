@@ -1379,3 +1379,34 @@ test('flow: a TRY head evaluates nothing — a container is not a computation', 
     eq(0, #(fl.stmts[h].use or {}), 'and uses nothing: use={'
         .. table.concat(fl.stmts[h].use or {}, ',') .. '}')
 end)
+
+-- ★ CART-0383. ONE ANSWER TO "IS THIS A LOOP". Four modules each held a private LOOPISH
+-- table — exprlint, optapply, optimize, untangle — and every PAIR of them disagreed
+-- (loop_expression; for_numeric/for_generic_statement; foreach_statement). None knew the
+-- forms flow had opened, so flow opened loops that LICM, CSE, the expression lints and
+-- untangle could not see. And all four carried `loop_statement`, which NO grammar we support
+-- spells — a phantom copied from set to set, which is the tell that they were duplicated
+-- rather than derived.
+test('flow: loops_of is language-aware, and the phantom is gone', function ()
+    local base = flow.loops_of(nil)
+    ok(base.while_statement and base.for_statement and base.repeat_statement,
+        'the base answer covers the common spellings')
+    ok(not base.loop_statement,
+        'loop_statement is in NO grammar we support — it must not be in the answer')
+    -- the forms this session opened are loops to every consumer, not just to flow
+    for _, t in ipairs { 'enhanced_for_statement', 'for_range_loop', 'for_expression',
+                         'while_expression' } do
+        ok(base[t], t .. ' is a loop — it was in none of the four private tables')
+    end
+    -- ★ do_statement is EXCLUDED on purpose: C spells do-while that way and lua spells a
+    -- plain `do…end` BLOCK that way, and only the presence of a condition tells them apart —
+    -- a question about the NODE, not the type. A set keyed by type must not pretend to answer.
+    ok(not base.do_statement, 'do_statement is ambiguous by TYPE, so it is not in the set')
+
+    local ts_ = require 'cartograph.providers.treesitter'
+    local js = flow.classes(ts_.spec.javascript or {}).loops
+    ok(js.for_in_statement, 'js for-of/for-in is a loop, via the spec')
+    ok(not base.for_in_statement, 'and it is NOT in the base answer — the set is per LANGUAGE')
+    local rb = flow.classes(ts_.spec.ruby or {}).loops
+    ok(rb['while'] and rb['until'] and rb['for'], 'ruby\'s own spellings are loops too')
+end)

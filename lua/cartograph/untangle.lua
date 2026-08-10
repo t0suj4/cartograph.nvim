@@ -749,9 +749,15 @@ end
 -- reads NESTED blocks too, because it works on reaching row-sets rather than
 -- source-line selections. It SUGGESTS the blocks; extract.plan stays the
 -- mechanical validator for the top-level ones (the disagreement oracle).
-local LOOPISH = { for_statement = true, for_in_statement = true,
-    while_statement = true, repeat_statement = true, loop_statement = true,
-    loop_expression = true, switch_statement = true, switch_expression = true }
+-- ★ THE PRIVATE LOOPISH TABLE IS GONE (CART-0383). Four modules each kept one and every
+-- PAIR of them disagreed; none knew the forms flow had opened; all four carried
+-- `loop_statement`, which no grammar we support spells. flow.loops_of(fl) is the one answer,
+-- and it is LANGUAGE-AWARE — js for-of and ruby while/until/for are loops only per spec.
+-- untangle's question is not quite "is this a loop": a `break` also escapes a SWITCH, so the
+-- enclosing-construct search unions the switches on top of flow's answer. The union is made
+-- at the CALL SITE, per language, rather than by keeping a second table.
+local BREAKABLE = { switch_statement = true, switch_expression = true,
+    expression_switch_statement = true, type_switch_statement = true, match_expression = true }
 local RET = { return_statement = true, throw_statement = true, raise_statement = true }
 local XFER = { break_statement = true, continue_statement = true, goto_statement = true }
 -- sub-clauses of an enclosing construct — not standalone candidates (you extract
@@ -867,9 +873,11 @@ function M.extract_candidates(store, fn_id)
                     local tgt = rows[r].label and gotomap[rows[r].label]
                     if not (tgt and B[tgt]) then escape = escape or 'goto leaves the block' end
                 elseif XFER[rk] then              -- break/continue: its loop must be inside B
+                    local LOOPISH = require('cartograph.flow').loops_of(fl)
                     local p, ok = rows[r].parent, false
                     while p and p ~= 0 do
-                        if LOOPISH[rows[p].t or ''] then ok = B[p] or false; break end
+                        local pt = rows[p].t or ''
+                        if LOOPISH[pt] or BREAKABLE[pt] then ok = B[p] or false; break end
                         p = rows[p].parent
                     end
                     if not ok then escape = escape or (rk:gsub('_statement', '') .. ' leaves the block') end

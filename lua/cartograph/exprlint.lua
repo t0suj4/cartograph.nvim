@@ -71,11 +71,10 @@ local PLAIN_ASSIGN = {
 -- rule declines those languages instead, and this comment is why (CART-0304).
 local CONCAT_OP = { lua = '..', php = '.' }
 
--- loop control heads (by raw node `t`) — mirrors optimize.LOOPISH
-local LOOPISH = { for_statement = true, for_in_statement = true,
-    while_statement = true, repeat_statement = true, loop_statement = true,
-    loop_expression = true, foreach_statement = true, for_numeric_statement = true,
-    for_generic_statement = true }
+-- ★ THE PRIVATE LOOPISH TABLE IS GONE (CART-0383). Four modules each kept one and every
+-- PAIR of them disagreed; none knew the forms flow had opened; all four carried
+-- `loop_statement`, which no grammar we support spells. flow.loops_of(fl) is the one answer,
+-- and it is LANGUAGE-AWARE — js for-of and ruby while/until/for are loops only per spec.
 -- self-comparison verdicts: op → (always true?) with the NaN caveat on ==/~=
 local SELFCMP = {
     ['=='] = { v = true, nan = true }, ['~='] = { v = false, nan = true },
@@ -176,6 +175,7 @@ function M.lint(store, fn_id)
             hedged = hedged or false, node = node }
     end
     -- ancestry: is row r inside a loop?
+    local LOOPISH = require('cartograph.flow').loops_of(got.fl)
     local function in_loop(r)
         local p = rows[r].parent
         while p and p ~= 0 do

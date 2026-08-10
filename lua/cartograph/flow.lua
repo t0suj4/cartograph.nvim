@@ -502,6 +502,22 @@ function M.classes(cfg)
         body = extend_set(BODY, cfg.body),
         clause = extend_set(CLAUSE, cfg.clause),
         elseif_ = elseif_, case = case_, post = POST, ifs = ifs,
+        -- ★ THE ONE ANSWER TO "IS THIS NODE A LOOP" (CART-0383). FOUR modules each held a
+        -- private LOOPISH table — exprlint, optapply, optimize, untangle — and measured, every
+        -- PAIR of them disagreed: on loop_expression, on for_numeric/for_generic_statement, on
+        -- foreach_statement. None knew `enhanced_for_statement`, `for_range_loop`,
+        -- `for_expression` or `while_expression`, so flow opened loops that LICM, CSE, the
+        -- expression lints and untangle could not see. All four also carried
+        -- `loop_statement`, which NO grammar we support spells — a phantom copied from set to
+        -- set, which is the tell that they were duplicated rather than derived.
+        -- ★ `do_statement` IS DELIBERATELY EXCLUDED. C spells do-while that way and lua
+        -- spells a plain `do…end` block that way, and only the presence of a CONDITION tells
+        -- them apart — a question about the NODE, not the type. Every consumer already
+        -- excluded it; a set keyed by type cannot answer it, so it must not pretend to.
+        loops = (function ()
+            local L = extend_set(extend_set(PRELOOP, cfg.preloop), { repeat_statement = true })
+            return L
+        end)(),
         try = try_, catch = catch_, clausemap = cfg.clause,
     }
 end
@@ -848,6 +864,18 @@ end
 local function PRELOOP_OF(flow) return (flow and flow.preloop) or PRELOOP end
 local function IFS_OF(flow) return (flow and flow.cls and flow.cls.ifs) or IF_T end
 local function TRY_OF(flow) return (flow and flow.cls and flow.cls.try) or TRY_T end
+
+--- "is this node type a LOOP", for the consumers that used to each keep their own answer
+--- (CART-0383). Language-aware via the record's class table; falls back to the base set.
+---@param fl table|nil  a flow record (M.build or M.record)
+---@return table  a set of node types
+function M.loops_of(fl)
+    if fl and fl.cls and fl.cls.loops then return fl.cls.loops end
+    local L = {}
+    for k in pairs(PRELOOP) do L[k] = true end
+    L.repeat_statement = true
+    return L
+end
 
 function M.coarse(flow)
     local stmts = flow.stmts

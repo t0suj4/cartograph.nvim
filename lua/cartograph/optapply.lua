@@ -204,16 +204,17 @@ end
 -- field or nil, never throws) AND is NOT shadowed by a local/param — so inserting
 -- `local f = M.f` above a loop is zero-trip-safe. A shadowed `math` (a possibly-nil
 -- local) would break that, so it's declined.
-local LOOPISH = { for_statement = true, for_in_statement = true, while_statement = true,
-    repeat_statement = true, loop_statement = true, foreach_statement = true,
-    for_numeric_statement = true, for_generic_statement = true }
+-- ★ THE PRIVATE LOOPISH TABLE IS GONE (CART-0383). Four modules each kept one and every
+-- PAIR of them disagreed; none knew the forms flow had opened; all four carried
+-- `loop_statement`, which no grammar we support spells. The set is now passed IN, from
+-- flow.loops_of(fl), so it is the same answer the row model used and it is language-aware.
 
 -- the loop node whose header starts on `line` (1-based), else nil
-local function loop_node(root, line)
+local function loop_node(root, line, loops)
     local found
     local function rec(n)
         if found then return end
-        if n:start() + 1 == line and LOOPISH[n:type()] then found = n; return end
+        if n:start() + 1 == line and loops[n:type()] then found = n; return end
         for c in n:iter_children() do if c:named() then rec(c) end end
     end
     rec(root)
@@ -284,7 +285,7 @@ function M.plan_localize(store, fn_id, opts)
     local ins, reps, moves, declined = {}, {}, {}, {}
     for _, lp in ipairs(loc.loops) do
         if not opts.line or lp.line == opts.line then
-            local ln = loop_node(root, lp.line)
+            local ln = loop_node(root, lp.line, require('cartograph.flow').loops_of(fl))
             local nested = ln and has_nested_fn(ln,
                 require('cartograph.providers.treesitter').fn_types(lang))
             local indent = (srclines[lp.line] or ''):match('^(%s*)') or ''
