@@ -71,7 +71,7 @@ if show then -- EXPLORER mode: dump divergence instances of a class, don't gate
     print('  census: ' .. dfp.census(r.cats))
     print('')
     if type(show) == 'string' then
-        for _, l in ipairs(dfp.show_instances(r.instances[show] or {}, show)) do print(l) end
+        for _, l in ipairs(dfp.show_instances(r.instances[show] or {}, show, tonumber(arg[4]) or 40)) do print(l) end
     else
         print('  pass a class name to --show to dump its instances, e.g.:')
         print('    df-over-collects | flow-over-collects | binding-as-use | receiver |')

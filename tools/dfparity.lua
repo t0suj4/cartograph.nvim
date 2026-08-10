@@ -98,12 +98,46 @@ M.EXPECTED = {
     -- tools/matrix.lua reports it as `~` (its own rule — gated where EXPECTED is
     -- calibrated, reported elsewhere), and tools/guards.lua prints self's census as
     -- context. The census for self is still WORTH LOOKING AT; it is just not a verdict.
-    php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13 },
+    -- ★★ RECALIBRATED 2026-08-10 (CART-0363) — `partition-mismatch` IS NOW EXPECTED ON
+    -- NINE CORPORA, and the number is a MEASUREMENT of how much more granular flow is than
+    -- the legacy independent df walk, not a defect count. TWO changes contributed:
+    --   1. part A's FOR-INIT SIBLING ROW (v124): a three-part `for` emits its init as a row
+    --      BEFORE the head, because the init runs ONCE and the head runs per-iteration.
+    --      That splits one coarse statement into two in EVERY language with `for_statement`
+    --      — which is why this appears on cpp/go/php/js as well as java.
+    --   2. this ticket's cpp `for_range_loop` + the JAVA CONTROL COMPLEX (enhanced-for,
+    --      switch_expression/switch_block/switch_rule, synchronized, try-with-resources).
+    --      Java switches were 100% opaque; opening them repartitions those bodies, and
+    --      try-with-resources emits its ACQUISITION as a row before the head, like a for-init.
+    --   3. ★ THE LOOP VARIABLE OF A COLLECTION LOOP IS NOW A DEF, not a use (flow's LOOPVAR).
+    --      It never was — java `for (String s : xs)`, cpp `for (auto &x : v)` and js
+    --      `for (const x of xs)` all reported `def={} use={s,xs}`, a READ of a variable
+    --      nothing defines. That is what moved `flow-over-collects` (libs 5 -> 300, jquery
+    --      0 -> 26, mootools 0 -> 28) and `df-over-collects` with it: the same single fact
+    --      counted on two axes, because the name left `use` as it entered `def`.
+    --      `disjoint` = 2 and `OTHER` = 3 on libs are RELABELLINGS of pre-existing closure
+    --      leaks, not new divergences: flow's def set was EMPTY before (a subset of df's,
+    --      hence `df-over-collects`), and a correct `{config}` simply stops being a subset.
+    --      Every sampled instance is flow-correct. The libs STRUCTURE gate also moved and was
+    --      re-saved: 10 calls `unresolved -> refused (fn-value)` in ScaleFunctionTests, all
+    --      on the enhanced-for variable `k` — nodes/edges/refs IDENTICAL, only call
+    --      disposition, and a named refusal beats the unknown bucket.
+    -- ★ THE DIRECTION WAS CHECKED, NOT ASSUMED, because "the gate moved" is not evidence of
+    -- which side is right. Every instance on cpp (993), libs (1064), go (22), php (29) and
+    -- synjava (5) has flow > df; flow < df occurs ZERO times. flow never LOSES a statement,
+    -- it only refuses to fold two into one. 969 of libs' 1064 differ by exactly +1.
+    -- ★ AND THIS SHIPPED RED. Part A landed in 929c35f/8b2d982 without recalibrating here, so
+    -- MATRIX/dfgate has been FAIL on main for every corpus with a three-part `for` since —
+    -- the second time this repo has carried an untracked red matrix (CART-0232 was the
+    -- first). The `struct`/`counts`/`fold`/`cache`/`par` columns stayed OK throughout, which
+    -- is why nothing else noticed: this moves the coarse PARTITION and nothing else.
+    php = { ['df-over-collects'] = 33, ['flow-over-collects'] = 13, ['partition-mismatch'] = 29 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than
     -- the label's line — a 1-line cosmetic label difference, def/use unchanged.
-    cpp = { ['line-skew'] = 11 },
-    go = { ['df-over-collects'] = 30, ['line-skew'] = 17 }, -- +3 @ v51 anon-callback fns (alpinejs); +line-skew (labels);
+    cpp = { ['line-skew'] = 8, ['partition-mismatch'] = 993 }, -- line-skew 11->8: a for-init row now heads the coarse stmt at the INIT's line, which is the loop's own line
+    go = { ['df-over-collects'] = 34, ['flow-over-collects'] = 6, ['OTHER'] = 1,
+        ['line-skew'] = 17, ['partition-mismatch'] = 22 }, -- +3 @ v51 anon-callback fns (alpinejs); +line-skew (labels);
     -- df-over-collects=27 closure-leaks; partition-mismatch=21 was the re-parse
     -- artifact (minified vendored JS), gone with stored flow.
     -- rust: all flow-MORE-correct — flow.du captures let/for/if-let bindings df
@@ -111,7 +145,7 @@ M.EXPECTED = {
     -- and bare bindings swap def/use (binding-as-use). 0 flow-invariant errors.
     rust = { ['binding-as-use'] = 363, ['df-over-collects'] = 1980,
         ['flow-over-collects'] = 1988 },
-    python = { ['df-over-collects'] = 3 }, -- closure-leak/dedup only
+    python = { ['df-over-collects'] = 4, ['flow-over-collects'] = 1 }, -- closure-leak/dedup, + ONE js file (django-oscar ships oscar/ui.js): `for (var level in …)` now DEFS `level`
     -- recalib 2026-08-07 (CART-0308, flow's nested-fn stop became per-language):
     -- 0 -> 2, both at active_support/deprecation/constant_accessor.rb:9 and both the
     -- SAME site — `extension = Module.new do … def const_missing … end`. Ruby's `method`
@@ -127,7 +161,7 @@ M.EXPECTED = {
     -- flow carries only `new`. Rows RELOCATED, not lost — and that distinction is the
     -- whole ticket, because a stop at an UNMINTED type deletes them instead. Measured
     -- when the two were conflated: ghost 6986 -> 28406, go 30 -> 1772.
-    ruby = { ['df-over-collects'] = 2 }, -- was {} (perfect parity)
+    ruby = { ['df-over-collects'] = 15, ['line-skew'] = 1 }, -- 2->15 @ part A: ruby's control OPENED (it had none), so df's flat walk now under-collects inside opened bodies. NO partition-mismatch: ruby has no three-part `for`. Was {} (perfect parity)
     -- ghost = the JS scale corpus; df-over-collects (closure-leak) dominates. The
     -- old partition/disjoint/flow-over-collects residual was the re-parse .ts-
     -- under-JS + node-resolution artifact — gone with stored flow (OTHER=3 left).
@@ -156,11 +190,14 @@ M.EXPECTED = {
     -- jquery/mootools/synjs/libs re-checked at the same time: all OK, so this was the only
     -- stale entry.
     ghost = { ['df-over-collects'] = 7094, ['OTHER'] = 9, ['receiver'] = 1 },
-    jquery = { ['df-over-collects'] = 12, ['OTHER'] = 2 },
-    mootools = {}, -- perfect parity (js archaeology tier)
+    jquery = { ['df-over-collects'] = 36, ['flow-over-collects'] = 26, ['OTHER'] = 2,
+        ['partition-mismatch'] = 35 },
+    mootools = { ['df-over-collects'] = 28, ['flow-over-collects'] = 28,
+        ['partition-mismatch'] = 36 }, -- was {} (perfect parity, js archaeology tier)
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
     -- grammar. All flow-more-correct (closure-leak + bindings df misses).
-    libs = { ['df-over-collects'] = 1588, ['flow-over-collects'] = 4 },
+    libs = { ['df-over-collects'] = 1727, ['flow-over-collects'] = 300, ['OTHER'] = 3,
+        ['disjoint'] = 2, ['partition-mismatch'] = 1064 },
     -- nio: the annotated-lua tier (CART-0240). Calibrated on arrival rather than
     -- left reporting `~`, because it is PINNED and a pinned corpus can hold a
     -- baseline — an uncalibrated row is a note forever and gates nothing.
@@ -168,8 +205,8 @@ M.EXPECTED = {
     -- synthetic corpora (tools/gen.lua): deterministic content, so these
     -- censuses are exact for (GEN_VERSION, seed) — recalibrate on gen bumps
     synlua = { ['df-over-collects'] = 49 }, -- closure-leak, flow-correct (@ gen v5)
-    synjava = {}, -- perfect parity
-    synjs = { ['df-over-collects'] = 294 }, -- closure-leak (arrows), flow-correct
+    synjava = { ['partition-mismatch'] = 5 }, -- was {} (perfect parity). ★ AND IT STILL SHOWS ONLY THE FOR-INIT SPLIT: the generated java fixture contains ZERO switch / enhanced-for / synchronized / try-with-resources, so the java GATE CORPUS could never have caught that java switches were 100% opaque. Filed separately.
+    synjs = { ['df-over-collects'] = 267, ['partition-mismatch'] = 8 }, -- closure-leak (arrows), flow-correct; 294->267 @ part A (for-of opened)
 }
 
 M.ORDER = { 'binding-as-use', 'df-over-collects', 'flow-over-collects',
