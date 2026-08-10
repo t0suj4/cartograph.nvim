@@ -218,8 +218,11 @@ local function run_row(name)
         if r.nfn == 0 then
             cell('dfpar', '--') -- no df-bearing functions (token provider)
         else
-            local d = { ('fns=%d stmts=%d ferr=%d · %s'):format(
-                r.nfn, r.nstmt, r.ferr, dfp.census(r.cats)) }
+            -- `unpaired` is printed BESIDE the compared count on purpose (CART-0381):
+            -- "0 divergences" must never be readable as "we compared nothing".
+            local d = { ('fns=%d stmts=%d%s ferr=%d · %s'):format(
+                r.nfn, r.nstmt, (r.nskip or 0) > 0 and (' unpaired=' .. r.nskip) or '',
+                r.ferr, dfp.census(r.cats)) }
             if r.ferr > 0 then
                 cell('dfpar', 'FAIL', d)
             elseif dfp.EXPECTED[name] then

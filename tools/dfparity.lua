@@ -88,6 +88,24 @@ local M = {}
 -- tools/guards.lua PRINTS self's census as context without gating on it, which is the
 -- right treatment for a number that legitimately moves.
 M.EXPECTED = {
+    -- ★★ RECALIBRATED 2026-08-10 (CART-0381): THE DEF/USE CHECK NOW RUNS ON EVERY FUNCTION.
+    -- It used to be the ELSE BRANCH of the partition check, so a function whose coarse
+    -- partition had moved was never def/use-compared at all -- and moving the partition is
+    -- exactly what opening a control form does. The gate stopped looking at a function
+    -- precisely when the change most likely broke it, which is how a collection loop's
+    -- variable shipped as a FREE USE (CART-0363). Statements are now paired by LINE, so a
+    -- partition change DEGRADES the comparison instead of skipping it, and what cannot be
+    -- paired is COUNTED and PRINTED as `unpaired=` beside the compared count -- "0
+    -- divergences" must never be readable as "we compared nothing".
+    -- The counts below rose because COVERAGE rose, not because anything regressed:
+    --   libs      stmts 22225 -> 26491 compared (+4266), df-over-collects 1727 -> 1814,
+    --             flow-over-collects 300 -> 312, unpaired 2388
+    --   synjs     269 -> 283 · php 33 -> 35 · mootools 28/28 -> 29/29 · jquery 26 -> 27
+    -- NO new CLASS appeared anywhere -- no binding-as-use, no disjoint -- and the newly
+    -- visible instances were sampled: enhanced-for LOOP VARIABLES flow defs and the legacy
+    -- df walk does not, and lambda CLOSURE LEAKS df attributes to the enclosing statement.
+    -- Both are the known flow-correct classes.
+
     -- NO `self` ENTRY, DELIBERATELY. It had one, and its comment trail had grown to 25
     -- lines recording ~30 separate recalibrations — "+11 df-over @ v50 const-fold, +4/+1
     -- @ v51 anon-fns, … +2 @ v57 proto-OOP self-typing" — each one us analysing our own
@@ -131,7 +149,7 @@ M.EXPECTED = {
     -- the second time this repo has carried an untracked red matrix (CART-0232 was the
     -- first). The `struct`/`counts`/`fold`/`cache`/`par` columns stayed OK throughout, which
     -- is why nothing else noticed: this moves the coarse PARTITION and nothing else.
-    php = { ['df-over-collects'] = 33, ['flow-over-collects'] = 13, ['partition-mismatch'] = 29 },
+    php = { ['df-over-collects'] = 35, ['flow-over-collects'] = 13, ['partition-mismatch'] = 29 },
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than
     -- the label's line — a 1-line cosmetic label difference, def/use unchanged.
@@ -190,13 +208,13 @@ M.EXPECTED = {
     -- jquery/mootools/synjs/libs re-checked at the same time: all OK, so this was the only
     -- stale entry.
     ghost = { ['df-over-collects'] = 7094, ['OTHER'] = 9, ['receiver'] = 1 },
-    jquery = { ['df-over-collects'] = 36, ['flow-over-collects'] = 26, ['OTHER'] = 2,
+    jquery = { ['df-over-collects'] = 36, ['flow-over-collects'] = 27, ['OTHER'] = 2,
         ['partition-mismatch'] = 35 },
-    mootools = { ['df-over-collects'] = 28, ['flow-over-collects'] = 28,
+    mootools = { ['df-over-collects'] = 29, ['flow-over-collects'] = 29,
         ['partition-mismatch'] = 36 }, -- was {} (perfect parity, js archaeology tier)
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
     -- grammar. All flow-more-correct (closure-leak + bindings df misses).
-    libs = { ['df-over-collects'] = 1727, ['flow-over-collects'] = 300, ['OTHER'] = 3,
+    libs = { ['df-over-collects'] = 1814, ['flow-over-collects'] = 312, ['OTHER'] = 3,
         ['disjoint'] = 2, ['partition-mismatch'] = 1064 },
     -- nio: the annotated-lua tier (CART-0240). Calibrated on arrival rather than
     -- left reporting `~`, because it is PINNED and a pinned corpus can hold a
@@ -207,7 +225,7 @@ M.EXPECTED = {
     synlua = { ['df-over-collects'] = 49 }, -- closure-leak, flow-correct (@ gen v5)
     synjava = { ['df-over-collects'] = 2, ['flow-over-collects'] = 2,
         ['partition-mismatch'] = 6 }, -- recalib @ gen v6 (CART-0377). It used to show ONLY the for-init split, because the generated java fixture contained ZERO switch / enhanced-for / synchronized / try-with-resources — the java GATE CORPUS could not have caught that java switches were 100% opaque. Ctrl.java now plants all 13 forms the grammar has, so the +1 partition-mismatch is try-with-resources' acquisition row and the flow-over-collects pair is the LOOP VARIABLE of an enhanced-for, which flow defs and the legacy df walk does not. Direction checked: flow > df in 6/6, flow < df zero times. Was {} (perfect parity) before part A.
-    synjs = { ['df-over-collects'] = 269, ['flow-over-collects'] = 2,
+    synjs = { ['df-over-collects'] = 283, ['flow-over-collects'] = 2,
         ['partition-mismatch'] = 8 }, -- closure-leak (arrows), flow-correct; 294->267 @ part A (for-of opened); +2/+2 @ gen v6 (CART-0377) = ctrl.js, whose for-of/for-in loop variables flow defs and df does not. ★ synjs held NO for_in_statement at all until v6, which is why the loop-variable def/use bug shipped through this gate untouched.
 }
 
@@ -267,7 +285,7 @@ function M.check(data, collect)
             table.insert(byfile[n.file], n)
         end
     end
-    local cats, ferr, nfn, nstmt, instances = {}, 0, 0, 0, {}
+    local cats, ferr, nfn, nstmt, nskip, instances = {}, 0, 0, 0, 0, {}
     local function record(c, info)
         if not c then return end
         cats[c] = (cats[c] or 0) + 1
@@ -315,33 +333,63 @@ function M.check(data, collect)
                             end
                             local co = flow.coarse(fl)
                             local dfs = df.get(n).stmts
+                            -- ── STRUCTURAL signals: index-aligned, unchanged ──────────────
                             if #co ~= #dfs then
                                 record('partition-mismatch', { file = file, l = atr.sl(n.range) + 1,
                                     note = ('%s: flow %d stmts vs df %d'):format(n.name or '?', #co, #dfs) })
                             else
                                 for i, cs in ipairs(co) do
-                                    local ds = dfs[i]
-                                    if cs.l ~= ds.l then
+                                    if cs.l ~= dfs[i].l then
                                         record('line-skew', { file = file, l = cs.l,
-                                            note = ('flow L%d vs df L%d'):format(cs.l, ds.l) })
+                                            note = ('flow L%d vs df L%d'):format(cs.l, dfs[i].l) })
+                                    end
+                                end
+                            end
+                            -- ★★ AND THE DEF/USE COMPARISON RUNS REGARDLESS (CART-0381).
+                            -- It used to be the ELSE BRANCH of the partition check, so the
+                            -- moment a change altered a function's coarse PARTITION — which
+                            -- is exactly what opening a control form does — that function's
+                            -- def/use stopped being compared at all. The gate stopped looking
+                            -- at a function precisely when the change most likely broke it,
+                            -- and that is how `for (const x of xs)` shipped with the loop
+                            -- variable as a FREE USE: dfparity had already classified those
+                            -- functions partition-mismatch and moved on. An outer check
+                            -- answering "different" is not a reason to stop asking the inner
+                            -- question — it is a reason to ask it differently.
+                            -- PAIR BY LINE, not by index, so a partition change DEGRADES the
+                            -- comparison instead of skipping it: statements that exist on
+                            -- both sides are still checked. A line that is not unique on both
+                            -- sides is UNPAIRABLE (minified code puts several statements on
+                            -- one line) and is COUNTED rather than silently dropped — an
+                            -- absence rendered as a clean number is the defect this fixes.
+                            local fbyl, dbyl, fdup, ddup = {}, {}, {}, {}
+                            for _, cs in ipairs(co) do
+                                if fbyl[cs.l] then fdup[cs.l] = true else fbyl[cs.l] = cs end
+                            end
+                            for _, ds in ipairs(dfs) do
+                                if dbyl[ds.l] then ddup[ds.l] = true else dbyl[ds.l] = ds end
+                            end
+                            for _, cs in ipairs(co) do -- IN ORDER, so --show is deterministic
+                                local ds = dbyl[cs.l]
+                                if (not ds) or fdup[cs.l] or ddup[cs.l] then
+                                    nskip = nskip + 1
+                                else
+                                    nstmt = nstmt + 1
+                                    local fd, fu = toset(cs.def), toset(cs.use)
+                                    local dd, du = toset(ds.def), toset(ds.use)
+                                    local srcline = lines[cs.l]
+                                    if eqset(fd, dd) and eqset(fu, du) then
+                                        -- agree
+                                    elseif eqset(fd, du) and eqset(fu, dd)
+                                        and (not empty(fd) or not empty(fu)) then
+                                        record('binding-as-use', { file = file, l = cs.l, src = srcline,
+                                            axis = 'def/use swap', flow = sortset(fd) .. ' / ' .. sortset(fu),
+                                            df = sortset(dd) .. ' / ' .. sortset(du) })
                                     else
-                                        nstmt = nstmt + 1
-                                        local fd, fu = toset(cs.def), toset(cs.use)
-                                        local dd, du = toset(ds.def), toset(ds.use)
-                                        local srcline = lines[cs.l]
-                                        if eqset(fd, dd) and eqset(fu, du) then
-                                            -- agree
-                                        elseif eqset(fd, du) and eqset(fu, dd)
-                                            and (not empty(fd) or not empty(fu)) then
-                                            record('binding-as-use', { file = file, l = cs.l, src = srcline,
-                                                axis = 'def/use swap', flow = sortset(fd) .. ' / ' .. sortset(fu),
-                                                df = sortset(dd) .. ' / ' .. sortset(du) })
-                                        else
-                                            record(classify_axis(fd, dd), { file = file, l = cs.l, src = srcline,
-                                                axis = 'def', flow = sortset(fd), df = sortset(dd) })
-                                            record(classify_axis(fu, du), { file = file, l = cs.l, src = srcline,
-                                                axis = 'use', flow = sortset(fu), df = sortset(du) })
-                                        end
+                                        record(classify_axis(fd, dd), { file = file, l = cs.l, src = srcline,
+                                            axis = 'def', flow = sortset(fd), df = sortset(dd) })
+                                        record(classify_axis(fu, du), { file = file, l = cs.l, src = srcline,
+                                            axis = 'use', flow = sortset(fu), df = sortset(du) })
                                     end
                                 end
                             end
@@ -351,7 +399,8 @@ function M.check(data, collect)
             end
         end
     end
-    return { cats = cats, ferr = ferr, nfn = nfn, nstmt = nstmt, instances = instances }
+    return { cats = cats, ferr = ferr, nfn = nfn, nstmt = nstmt, nskip = nskip,
+        instances = instances }
 end
 
 --- Render collected instances of a class as report lines (the `--show` output).

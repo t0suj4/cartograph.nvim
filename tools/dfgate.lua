@@ -81,8 +81,9 @@ if show then -- EXPLORER mode: dump divergence instances of a class, don't gate
 end
 
 local r = dfp.check(data)
-print(('dfgate %-6s fns=%d stmts=%d  flow-invariant-errors=%d')
-    :format(name, r.nfn, r.nstmt, r.ferr))
+print(('dfgate %-6s fns=%d stmts=%d%s  flow-invariant-errors=%d')
+    :format(name, r.nfn, r.nstmt,
+        (r.nskip or 0) > 0 and (' unpaired=' .. r.nskip) or '', r.ferr))
 print('  divergences: ' .. dfp.census(r.cats))
 
 local failed = false

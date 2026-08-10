@@ -55,8 +55,9 @@ if root == repo then
     local r = dfp.check(store.data)
     -- flow is now sourced from the STORED graph (df-strangler step 4), so this
     -- census validates the ACTUAL extracted+folded flow's coarse projection == df.
-    print(('df/flow parity (self): fns=%d stmts=%d flow-invariant-errors=%d · %s')
-        :format(r.nfn, r.nstmt, r.ferr, dfp.census(r.cats)))
+    print(('df/flow parity (self): fns=%d stmts=%d%s flow-invariant-errors=%d · %s')
+        :format(r.nfn, r.nstmt, (r.nskip or 0) > 0 and (' unpaired=' .. r.nskip) or '',
+            r.ferr, dfp.census(r.cats)))
     -- HARD-GATE only the churn-INSENSITIVE signal: flow's CFG
     -- (successors/liveness/reaching) must never THROW on valid code, no matter
     -- how the repo evolves. The census itself CHURNS with cartograph's own code
