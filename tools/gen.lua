@@ -56,7 +56,16 @@ local here = SELF:match('^(.*)/gen%.lua$')
 
 local function say(s) io.stdout:write(s .. '\n') end
 
-local M = { GEN_VERSION = 5 } -- v5: +lua STRING-KEYED REGISTRY idiom (stage-3
+local M = { GEN_VERSION = 6 } -- v6: +THE CONTROL BESTIARY for java and js (CART-0377).
+-- Measured with tools/ctrlcensus.lua --coverage, the synthetic tier could not gate control
+-- flow at all outside lua: synlua covered 7 of 7 lua forms, synjava 2 of 13 and synjs 3 of
+-- 10. So java's gate could never have failed on java switches opening NOTHING, and synjs
+-- held no `for_in_statement` — the exact form whose loop-variable def/use bug shipped. One
+-- extra file per language (Ctrl.java, ctrl.js), emitted AFTER the numbered modules so their
+-- draws are untouched: java 2/13 -> 13/13, js 3/10 -> 10/10, and the existing modules
+-- verified byte-identical to v5 by diff, not by assertion. lua output unchanged (its
+-- coverage was already complete), so synlua's calibrations carry.
+-- v5: +lua STRING-KEYED REGISTRY idiom (stage-3
 -- resolve_registry: LibStub:NewLibrary(CONST_KEY) register + LibStub("lit")
 -- retrieve, keyed want='registry' — also exercises const-fold of the register
 -- key). lua output changes (new sites); java/js byte-identical to v4 (additive).
@@ -1387,12 +1396,228 @@ function M.analysis(lang, nfiles, seed)
     return out
 end
 
+-- ══ THE CONTROL BESTIARY (CART-0377) ═════════════════════════════════════
+-- ★ A CORPUS WITH ZERO INSTANCES OF A FORM CANNOT GATE THAT FORM, however carefully the
+-- gate is calibrated. Measured with tools/ctrlcensus.lua --coverage, the synthetic tier was
+-- badly lopsided: synlua covered 7 of 7 lua control forms, but synjava covered 2 of 13 and
+-- synjs 3 of 10. So java's gate could not have caught that JAVA SWITCHES OPENED NOTHING
+-- (100% opaque, CART-0363), and synjs contained no `for_in_statement` at all — the very form
+-- whose loop-variable def/use bug SHIPPED. The generator's idiom mix was the resolution
+-- bestiary, which is what it was built for; control flow was never planted.
+--
+-- One extra file per language, emitted AFTER the numbered modules so their LCG draws are
+-- untouched and the existing output stays byte-identical (the min.js precedent, and the
+-- per-version identity claim every prior GEN_VERSION comment makes).
+--
+-- ★ AND THE BODIES CARRY KEYED CALL SITES, because a form that only has to PARSE gates
+-- almost nothing. The point is that the resolution/silent/key columns walk INSIDE a switch
+-- arm and a catch block. Control is NESTED inside control for the same reason: the measured
+-- headline of CART-0363 was that opening a container is worth more than the container
+-- (elasticsearch if_statement 8062 -> 8985, purely from what the containers had hidden).
+local function java_ctrl(ans)
+    local fname = 'Ctrl.java'
+    local B = {}
+    local function w(l) B[#B + 1] = l end
+    local function expect(callee, a)
+        a.file, a.line, a.callee = fname, #B, callee
+        ans[#ans + 1] = a
+    end
+    w('import java.util.List;')
+    w('import java.util.ArrayList;')
+    w('')
+    w('public class Ctrl {')
+    w('    static int step(int v) { return v + 1; }')
+    w('    static int twice(int v) { return v * 2; }')
+    w('    enum Mode { FAST, SLOW, OFF }')
+    w('')
+    -- enhanced-for (the dominant real form: 876 sites in elasticsearch/index), NESTED,
+    -- with a keyed call inside so the loop body is a resolution surface too
+    w('    static int overAll(List<String> xs, List<String> ys) {')
+    w('        int acc = 0;')
+    w('        for (String x : xs) {')
+    w('            for (String y : ys) {')
+    w('                acc = step(acc) + x.length() + y.length();')
+    expect('step', { want = 'to', target = 'Ctrl::step', tier = 'plain' })
+    w('            }')
+    w('        }')
+    w('        return acc;')
+    w('    }')
+    w('')
+    -- the CLASSIC switch: `case N:` groups with break + a default (switch_block_statement_group)
+    w('    static int classic(int m) {')
+    w('        int r = 0;')
+    w('        switch (m) {')
+    w('            case 1:')
+    w('                r = step(m);')
+    expect('step', { want = 'to', target = 'Ctrl::step', tier = 'plain' })
+    w('                break;')
+    w('            case 2:')
+    w('                r = twice(m);')
+    expect('twice', { want = 'to', target = 'Ctrl::twice', tier = 'plain' })
+    w('                break;')
+    w('            default:')
+    w('                r = -1;')
+    w('        }')
+    w('        return r;')
+    w('    }')
+    w('')
+    -- the ARROW switch: both a BLOCK-bodied rule and EXPRESSION-bodied ones. 82 of 92 real
+    -- switch_rules in the elasticsearch sample are expression-bodied, so a block-only
+    -- fixture would exercise the rarer path and call it covered.
+    w('    static int arrow(Mode m) {')
+    w('        int r;')
+    w('        switch (m) {')
+    w('            case FAST -> r = 1;')
+    w('            case SLOW -> {')
+    w('                r = twice(2);')
+    expect('twice', { want = 'to', target = 'Ctrl::twice', tier = 'plain' })
+    w('            }')
+    w('            default -> r = 0;')
+    w('        }')
+    w('        return r;')
+    w('    }')
+    w('')
+    -- while + do-while + a labelled continue, and a try/catch/finally around them
+    w('    static int loops(int n) {')
+    w('        int i = 0;')
+    w('        int acc = 0;')
+    w('        while (i < n) {')
+    w('            i = i + 1;')
+    w('            if (i == 3) { continue; }')
+    w('            acc = step(acc);')
+    expect('step', { want = 'to', target = 'Ctrl::step', tier = 'plain' })
+    w('        }')
+    w('        do {')
+    w('            acc = acc - 1;')
+    w('        } while (acc > n);')
+    w('        return acc;')
+    w('    }')
+    w('')
+    w('    static int guarded(List<String> xs) {')
+    w('        int acc = 0;')
+    w('        try {')
+    w('            for (String x : xs) {')
+    w('                acc = twice(x.length());')
+    expect('twice', { want = 'to', target = 'Ctrl::twice', tier = 'plain' })
+    w('            }')
+    w('        } catch (RuntimeException e) {')
+    w('            acc = -1;')
+    w('        } finally {')
+    w('            acc = acc + 1;')
+    w('        }')
+    w('        return acc;')
+    w('    }')
+    w('')
+    -- try-with-resources: the `resources` clause DEFINES a variable, which is why flow
+    -- emits it as a row BEFORE the head rather than dropping it as a header part
+    w('    static int withRes(java.io.Closeable c) {')
+    w('        int acc = 0;')
+    w('        try (java.io.Closeable r = c) {')
+    w('            acc = step(acc);')
+    expect('step', { want = 'to', target = 'Ctrl::step', tier = 'plain' })
+    w('        } catch (java.io.IOException e) {')
+    w('            acc = -1;')
+    w('        }')
+    w('        return acc;')
+    w('    }')
+    w('')
+    -- synchronized: control, but NOT a loop — it runs once, unconditionally
+    w('    static int locked(Object lock) {')
+    w('        int acc = 0;')
+    w('        synchronized (lock) {')
+    w('            acc = twice(1);')
+    expect('twice', { want = 'to', target = 'Ctrl::twice', tier = 'plain' })
+    w('        }')
+    w('        return acc;')
+    w('    }')
+    w('')
+    w('    static List<String> seed() { return new ArrayList<>(); }')
+    w('}')
+    return fname, table.concat(B, '\n') .. '\n', 10
+end
+
+local function js_ctrl(ans)
+    local fname = 'ctrl.js'
+    local B = {}
+    local function w(l) B[#B + 1] = l end
+    local function expect(callee, a)
+        a.file, a.line, a.callee = fname, #B, callee
+        ans[#ans + 1] = a
+    end
+    w('function cstep(v) { return v + 1; }')
+    w('function ctwice(v) { return v * 2; }')
+    w('')
+    -- ★ BOTH for-of AND for-in. They share the node type `for_in_statement`, and the form
+    -- whose loop variable was emitted as a free USE — a read of a variable nothing defines —
+    -- shipped because no synthetic corpus contained one.
+    w('function overAll(xs, obj) {')
+    w('    let acc = 0;')
+    w('    for (const x of xs) {')
+    w('        for (const kk in obj) {')
+    w('            acc = cstep(acc) + x.length + kk.length;')
+    expect('cstep', { want = 'to', target = 'cstep', tier = 'plain' })
+    w('        }')
+    w('    }')
+    w('    return acc;')
+    w('}')
+    w('')
+    w('function classify(m) {')
+    w('    let r = 0;')
+    w('    switch (m) {')
+    w('        case 1:')
+    w('            r = cstep(m);')
+    expect('cstep', { want = 'to', target = 'cstep', tier = 'plain' })
+    w('            break;')
+    w('        case 2:')
+    w('            r = ctwice(m);')
+    expect('ctwice', { want = 'to', target = 'ctwice', tier = 'plain' })
+    w('            break;')
+    w('        default:')
+    w('            r = -1;')
+    w('    }')
+    w('    return r;')
+    w('}')
+    w('')
+    w('function loops(n) {')
+    w('    let i = 0;')
+    w('    let acc = 0;')
+    w('    while (i < n) {')
+    w('        i = i + 1;')
+    w('        if (i === 3) { continue; }')
+    w('        acc = cstep(acc);')
+    expect('cstep', { want = 'to', target = 'cstep', tier = 'plain' })
+    w('    }')
+    w('    do {')
+    w('        acc = acc - 1;')
+    w('    } while (acc > n);')
+    w('    return acc;')
+    w('}')
+    w('')
+    w('function guarded(xs) {')
+    w('    let acc = 0;')
+    w('    try {')
+    w('        for (const x of xs) {')
+    w('            acc = ctwice(x.length);')
+    expect('ctwice', { want = 'to', target = 'ctwice', tier = 'plain' })
+    w('        }')
+    w('    } catch (e) {')
+    w('        acc = -1;')
+    w('    } finally {')
+    w('        acc = acc + 1;')
+    w('    }')
+    w('    return acc;')
+    w('}')
+    w('')
+    w('export { overAll, classify, loops, guarded };')
+    return fname, table.concat(B, '\n') .. '\n', 6
+end
+
 local LANGS = {
     lua = { gen = gen_lua_module,
         fname = function (k) return ('m%d.lua'):format(k) end },
-    java = { gen = gen_java_module,
+    java = { gen = gen_java_module, extras = { java_ctrl },
         fname = function (k) return ('M%d.java'):format(k) end },
-    js = { gen = gen_js_module, extra = js_min, cjs_last = true,
+    js = { gen = gen_js_module, extras = { js_min, js_ctrl }, cjs_last = true,
         tslang = 'javascript', -- the grammar name (CLI name stays js)
         fname = function (k) return ('m%d.js'):format(k) end },
 }
@@ -1412,8 +1637,10 @@ local function build(lang, nfiles, seed)
         out.order[k] = fname
         out.emitted = out.emitted + emitted
     end
-    if L.extra then -- a deliberate extra file (js: the minified module)
-        local fname, src, emitted = L.extra(out.answers)
+    -- deliberate EXTRA files, emitted after the numbered modules so their LCG draws are
+    -- untouched: js's minified one-liner, and each language's CONTROL BESTIARY (CART-0377)
+    for _, extra in ipairs(L.extras or (L.extra and { L.extra }) or {}) do
+        local fname, src, emitted = extra(out.answers)
         out.files[fname] = src
         out.order[#out.order + 1] = fname
         out.emitted = out.emitted + emitted

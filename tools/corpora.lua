@@ -295,7 +295,7 @@ return {
     -- MATERIALIZES a missing root by running the generator — so these
     -- gates run on any machine, no ~/git checkouts required.
     synlua = {
-        root = HOME .. '/.cache/cartograph-tools/syn/lua-g5-s1',
+        root = HOME .. '/.cache/cartograph-tools/syn/lua-g6-s1',
         synthetic = { lang = 'lua', seed = 1, files = 8 },
         lang = 'lua',
         expected = { refs = 117, nodes = 203 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +15 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. The generator already plants module-level require/registry calls, so this is the synthetic answer-key exercising the new owner (m1.lua::region@147 -> usec1). Prior: 102 -- recalibrated @ gen v5 (+registry idiom + RNG shift)
@@ -304,10 +304,10 @@ return {
             .. ' smt classes, requires, goto',
     },
     synjava = {
-        root = HOME .. '/.cache/cartograph-tools/syn/java-g5-s1',
+        root = HOME .. '/.cache/cartograph-tools/syn/java-g6-s1',
         synthetic = { lang = 'java', seed = 1, files = 8 },
         lang = 'java',
-        expected = { refs = 47, nodes = 87 }, -- calibrated @ gen v3, byte-identical @ v4
+        expected = { refs = 55, nodes = 99 }, -- recalib @ gen v6 (CART-0377): +12 nodes / +8 refs = Ctrl.java, the CONTROL BESTIARY. synjava covered 2 of java's 13 control forms (only if/for), so the java gate could never have failed on java switches opening NOTHING — now 13/13. The eight numbered modules are byte-identical to v5, verified by diff. Prior: refs 47, nodes 87 -- calibrated @ gen v3, byte-identical @ v4
         notes = 'synthetic java (gen.lua g2 seed 1): @Service impls = the'
             .. ' ONLY locally-testable F1 bean redirects; unique Builder<k>'
             .. ' chains = the positive rt-rounds path; enums, overloads,'
@@ -315,14 +315,15 @@ return {
     },
 
     synjs = {
-        root = HOME .. '/.cache/cartograph-tools/syn/js-g5-s1',
+        root = HOME .. '/.cache/cartograph-tools/syn/js-g6-s1',
         synthetic = { lang = 'js', seed = 1, files = 8 },
         lang = 'javascript',
-        expected = { refs = 162, nodes = 283 }, -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +8 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. ESM module bodies calling across files (m6.js::region@1 -> m1.js::fa1). Prior: 154 -- +6 @ v64 V2 ctor-typing (obj=new C → obj.calc→C.calc); +6 @ v62 B3 this.getv
-        notes = 'synthetic js (gen.lua g4 seed 1): hoisted fwd calls,'
+        expected = { refs = 167, nodes = 291 }, -- recalib @ gen v6 (CART-0377): +8 nodes / +5 refs = ctrl.js, the CONTROL BESTIARY. synjs covered 3 of js's 10 control forms and held NO `for_in_statement` — the exact form whose loop-variable def/use bug shipped (CART-0363) — so the js gate could not have caught it. Now 10/10, for-of AND for-in. The eight numbered modules + min.js are byte-identical to v5, verified by diff. Prior: refs 162, nodes 283 -- recalib 2026-07-31 (v107 MODULE-LEVEL OWNER): +8 refs (nodes unchanged) = top-level calls now owned by their statement-run REGION. Δrefs == edges added, 0 removed. ESM module bodies calling across files (m6.js::region@1 -> m1.js::fa1). Prior: 154 -- +6 @ v64 V2 ctor-typing (obj=new C → obj.calc→C.calc); +6 @ v62 B3 this.getv
+        notes = 'synthetic js (gen.lua g6 seed 1): hoisted fwd calls,'
             .. ' fn-value consts, let/var regimes, arrows, classes, ESM +'
             .. ' one CommonJS module, and min.js — a one-line minified'
-            .. ' module (the (l,c) column-spill exercise)',
+            .. ' module (the (l,c) column-spill exercise), + ctrl.js: every'
+            .. ' control form the grammar has, nested, with keyed call sites inside',
     },
 
     self = {

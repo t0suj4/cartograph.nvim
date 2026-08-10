@@ -21,15 +21,19 @@ local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
-local root, want_lang, maxfiles = nil, nil, 400
+local root, want_lang, maxfiles, coverage = nil, nil, 400, false
 local i = 1
 while arg and arg[i] do
     if arg[i] == '--lang' then i = i + 1; want_lang = arg[i]
     elseif arg[i] == '--files' then i = i + 1; maxfiles = tonumber(arg[i]) or maxfiles
+    elseif arg[i] == '--coverage' then coverage = true
     else root = vim.fn.expand(arg[i]) end
     i = i + 1
 end
-if not root then print('usage: ctrlcensus <dir> [--lang cpp] [--files N]'); os.exit(2) end
+if not root then
+    print('usage: ctrlcensus <dir> [--lang cpp] [--files N] [--coverage]')
+    os.exit(2)
+end
 
 local ts = require 'cartograph.providers.treesitter'
 local flow = require 'cartograph.flow'
@@ -107,6 +111,67 @@ for _, f in ipairs(files) do
     end
 end
 print(('parsed %d file(s)'):format(nparsed))
+
+-- ★ THE OTHER DIRECTION: WHICH CLASSIFIED FORMS DOES THIS CORPUS CONTAIN AT ALL?
+-- The gap census above asks what flow cannot see. This asks what the CORPUS cannot show —
+-- and it is the question that matters for a GATE. A corpus with zero instances of a form
+-- cannot fail on that form, ever, however carefully the gate is calibrated. Measured, that
+-- was not hypothetical: `synjava`, the java GATE corpus, contains zero switch, zero
+-- enhanced-for, zero synchronized and zero try-with-resources, so java's gate could not have
+-- caught that java switches opened NOTHING (CART-0377). Two other corpora the same session
+-- returned the same kind of clean, useless zero — luanti is pre-C++11, big-app.spring has no
+-- enhanced-for. A zero here is a statement about the WITNESS, not about the code.
+if coverage then
+    for lang, T in pairs(tally) do
+        local cls = classes_for(lang)
+        local want = {}
+        for t in pairs(cls.ctrl) do want[t] = 'ctrl' end
+        for t in pairs(cls.clause) do want[t] = want[t] or 'clause' end
+        -- ★ INTERSECT WITH THE GRAMMAR, or the ABSENT list is mostly noise. flow's sets are a
+        -- cross-language UNION, so a java corpus is trivially "missing" rust's `match_block`
+        -- and php's `foreach_statement` — reporting those as coverage gaps would bury the
+        -- real ones. The grammar's own symbol table says which forms this language even HAS,
+        -- so what remains is the honest question: the language has it, the corpus does not.
+        local grammar
+        do
+            local okl = pcall(vim.treesitter.language.add, lang)
+            local oki, info = false, nil
+            if okl then oki, info = pcall(vim.treesitter.language.inspect, lang) end
+            if oki and type(info) == 'table' and type(info.symbols) == 'table' then
+                grammar = info.symbols
+            end
+        end
+        local have, absent, offlang = {}, {}, 0
+        for t, role in pairs(want) do
+            if grammar and not grammar[t] then
+                offlang = offlang + 1        -- another language's spelling; not this corpus's job
+            else
+                local n = T[t] and T[t].n or 0
+                if n > 0 then have[#have + 1] = { t = t, n = n, role = role }
+                else absent[#absent + 1] = t end
+            end
+        end
+        table.sort(have, function (a, b) return a.n > b.n end)
+        table.sort(absent)
+        print('')
+        print(('── %s COVERAGE ── %d of %d form(s) THIS GRAMMAR HAS are present, %d ABSENT%s')
+            :format(lang, #have, #have + #absent, #absent,
+                grammar and '' or '  [no grammar symbols — cross-language union, read loosely]'))
+        for _, r in ipairs(have) do
+            print(('  %8d  %-34s (%s)'):format(r.n, r.t, r.role))
+        end
+        if #absent > 0 then
+            print('  ABSENT — this corpus CANNOT gate these, whatever the calibration says:')
+            local line = '   '
+            for _, t in ipairs(absent) do
+                if #line + #t > 92 then print(line); line = '   ' end
+                line = line .. ' ' .. t
+            end
+            if line ~= '   ' then print(line) end
+        end
+    end
+    return
+end
 
 for lang, T in pairs(tally) do
     local cls = classes_for(lang)

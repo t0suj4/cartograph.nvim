@@ -205,8 +205,10 @@ M.EXPECTED = {
     -- synthetic corpora (tools/gen.lua): deterministic content, so these
     -- censuses are exact for (GEN_VERSION, seed) — recalibrate on gen bumps
     synlua = { ['df-over-collects'] = 49 }, -- closure-leak, flow-correct (@ gen v5)
-    synjava = { ['partition-mismatch'] = 5 }, -- was {} (perfect parity). ★ AND IT STILL SHOWS ONLY THE FOR-INIT SPLIT: the generated java fixture contains ZERO switch / enhanced-for / synchronized / try-with-resources, so the java GATE CORPUS could never have caught that java switches were 100% opaque. Filed separately.
-    synjs = { ['df-over-collects'] = 267, ['partition-mismatch'] = 8 }, -- closure-leak (arrows), flow-correct; 294->267 @ part A (for-of opened)
+    synjava = { ['df-over-collects'] = 2, ['flow-over-collects'] = 2,
+        ['partition-mismatch'] = 6 }, -- recalib @ gen v6 (CART-0377). It used to show ONLY the for-init split, because the generated java fixture contained ZERO switch / enhanced-for / synchronized / try-with-resources — the java GATE CORPUS could not have caught that java switches were 100% opaque. Ctrl.java now plants all 13 forms the grammar has, so the +1 partition-mismatch is try-with-resources' acquisition row and the flow-over-collects pair is the LOOP VARIABLE of an enhanced-for, which flow defs and the legacy df walk does not. Direction checked: flow > df in 6/6, flow < df zero times. Was {} (perfect parity) before part A.
+    synjs = { ['df-over-collects'] = 269, ['flow-over-collects'] = 2,
+        ['partition-mismatch'] = 8 }, -- closure-leak (arrows), flow-correct; 294->267 @ part A (for-of opened); +2/+2 @ gen v6 (CART-0377) = ctrl.js, whose for-of/for-in loop variables flow defs and df does not. ★ synjs held NO for_in_statement at all until v6, which is why the loop-variable def/use bug shipped through this gate untouched.
 }
 
 M.ORDER = { 'binding-as-use', 'df-over-collects', 'flow-over-collects',
