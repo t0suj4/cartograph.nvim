@@ -73,7 +73,8 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 125 -- v125: A LOOP FLOW CANNOT NAME IS A LOOP WHOSE BODY VANISHES
+M.VERSION = 126 -- v126: cpp range-for, JAVA'S WHOLE SWITCH (100% OPAQUE), + A COLLECTION
+               -- LOOP'S VARIABLE IS A DEF (it was a free USE in java, cpp AND shipped js)
                -- (CART-0363). flow's CTRL/PRELOOP sets are `*_statement`-shaped — one
                -- language's SPELLING — and a control node absent from them is emitted as a
                -- PLAIN ROW, so du harvests its whole subtree and THE BODY GETS NO ROWS AT

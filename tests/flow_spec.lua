@@ -1042,3 +1042,199 @@ test('flow: a ruby if regions its then-branch, and elsif/else are CLAUSES', func
     ok(head_of(fl, 'elsif'), 'the elsif is its own clause row, not folded into the if')
 end)
 
+
+-- CART-0363, cpp + java. The remaining `*_statement`-shaped blind spots, found by
+-- tools/ctrlcensus.lua asking the tree STRUCTURALLY which region-containing nodes flow does
+-- not classify. Unlike ruby these go in the BASE sets: the node names are unique to their
+-- language among the ones we support, which is the criterion flow already documents for
+-- rust — and a base entry reaches all three cfg constructions without a threading hazard.
+local function jflow(code)
+    local fn, src = parse_fn(code, 'java')
+    ok(fn, 'the java fixture parses to a method')
+    return flow.build(fn, src, { regime = tsspec.java.regime })
+end
+
+test('flow: a java enhanced-for opens its body and drops its header parts', function ()
+    if not ready('java') then skip 'no java parser' end
+    local fl = jflow('class C { void f(java.util.List<String> xs) {\n'
+        .. '  for (String s : xs) { g(s); h(s); }\n} }')
+    local h = head_of(fl, 'enhanced_for_statement')
+    ok(h, 'the enhanced-for is a control row')
+    local kids = kids_of(fl, h)
+    ok(#kids == 2, 'exactly its two body statements are rows: got ' .. #kids
+        .. ' (' .. table.concat(kids, ', ') .. ')')
+    -- ★ AND NOT ITS HEADER. `type`/`name`/`value` are fielded children; the body fallback
+    -- would emit them as rows that appear to execute each iteration.
+    for _, t in ipairs(kids) do
+        ok(t ~= 'identifier' and t ~= 'type_identifier',
+            'a header part must not be a body row: ' .. t)
+    end
+end)
+
+test('flow: a java SWITCH opens at all — it was 100% opaque', function ()
+    if not ready('java') then skip 'no java parser' end
+    -- ★ THE SPELLING IS `switch_expression` EVEN AS A STATEMENT, and its container is
+    -- `switch_block`, not `block`. Both had to be found by probing the grammar: a census
+    -- that asks "contains a recognised region" cannot see a node whose region spelling is
+    -- ALSO unrecognised, which is the same blind spot that hid ruby's `then`/`do`.
+    local fl = jflow('class C { void f(int x) {\n'
+        .. '  switch (x) { case 1: g(); break; default: h(); }\n} }')
+    local h = head_of(fl, 'switch_expression')
+    ok(h, 'the switch is a control row')
+    local ncase, nstmt = 0, 0
+    for _, s in ipairs(fl.stmts) do
+        if s.kind == 'case' then ncase = ncase + 1 end
+        if (s.t or '') == 'expression_statement' then nstmt = nstmt + 1 end
+    end
+    eq(2, ncase, 'both arms are CASE rows (case 1 + default)')
+    ok(nstmt >= 2, 'and the statements inside them are rows of their own: ' .. nstmt)
+    -- the label is the case row's own use, NOT a statement row of its own
+    for _, s in ipairs(fl.stmts) do
+        ok((s.t or '') ~= 'switch_label', 'a switch_label does not execute, so it is no row')
+    end
+end)
+
+test('flow: a java ARROW switch opens each rule, block-bodied or not', function ()
+    if not ready('java') then skip 'no java parser' end
+    -- 82 of 92 switch_rules in the elasticsearch sample are EXPRESSION-bodied, so the
+    -- block-bodied form alone would not exercise the common case
+    local fl = jflow('class C { void f(int x) {\n'
+        .. '  switch (x) { case 1 -> g(); case 2 -> { h(); i(); } default -> j(); }\n} }')
+    ok(head_of(fl, 'switch_expression'), 'the arrow switch is a control row')
+    local ncase = 0
+    for _, s in ipairs(fl.stmts) do if s.kind == 'case' then ncase = ncase + 1 end end
+    eq(3, ncase, 'all three rules are CASE rows')
+end)
+
+test('flow: java try-with-resources acquires BEFORE the head, and keeps its catch', function ()
+    if not ready('java') then skip 'no java parser' end
+    local fl = jflow('class C { void f() {\n'
+        .. '  try (Res r = open()) { use(r); } catch (E e) { log(e); }\n} }')
+    local h = head_of(fl, 'try_with_resources_statement')
+    ok(h, 'the try-with-resources is a control row')
+    -- ★ THE RESOURCE IS NOT A HEADER PART TO DROP: it DEFINES `r`. It is emitted before the
+    -- head, exactly like a three-part for's init, so the def survives and is ordered right.
+    local res
+    for i, s in ipairs(fl.stmts) do
+        if (s.t or '') == 'resource_specification' then res = i end
+    end
+    ok(res and res < h, 'the resource acquisition is a row BEFORE the head (def of r kept)')
+    -- a catch row is keyed by KIND ('catch'), not by its raw node type
+    local ncatch = 0
+    for _, s in ipairs(fl.stmts) do if s.kind == 'catch' then ncatch = ncatch + 1 end end
+    eq(1, ncatch, 'and the catch is still its own clause row')
+end)
+
+test('flow: a java synchronized block opens its body', function ()
+    if not ready('java') then skip 'no java parser' end
+    local fl = jflow('class C { void f(Object lock) {\n'
+        .. '  synchronized (lock) { crit(); more(); }\n} }')
+    local h = head_of(fl, 'synchronized_statement')
+    ok(h, 'the synchronized statement is a control row')
+    eq(2, #kids_of(fl, h), 'its two body statements are rows, and the lock expression is not')
+end)
+
+test('flow: a cpp range-for opens its body', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    local fn, src = parse_fn('void f(std::vector<int> &v) {\n'
+        .. '  for (auto &x : v) { g(x); h(x); }\n}', 'cpp')
+    ok(fn, 'the cpp fixture parses to a function')
+    local fl = flow.build(fn, src, { regime = tsspec.cpp.regime })
+    local h = head_of(fl, 'for_range_loop')
+    ok(h, 'the range-for is a control row')
+    eq(2, #kids_of(fl, h), 'its two body statements are rows, its header parts are not')
+end)
+
+-- ★ THE FENCE THAT KEEPS THIS HONEST. A pre-condition loop must be marked PRELOOP or the
+-- CFG wires no zero-trip edge — the "opened but no better" failure ruby taught us, one
+-- layer down. Asked through flow.classes(), the single owner, never a second copy.
+test('flow: the new loop forms are PRE-condition (a zero-trip skip is feasible)', function ()
+    local cls = flow.classes({})
+    for _, t in ipairs { 'for_range_loop', 'enhanced_for_statement' } do
+        ok(cls.ctrl[t], t .. ' is a control statement')
+        ok(cls.preloop[t], t .. ' tests BEFORE the body — an empty collection skips it')
+    end
+    ok(cls.ctrl.synchronized_statement, 'synchronized is control')
+    ok(not cls.preloop.synchronized_statement,
+        'but NOT a loop — it runs once, unconditionally')
+    ok(cls.body.switch_block, "java's switch container is a region, not a leaf")
+end)
+
+-- ★ CART-0363. A COLLECTION LOOP BINDS ITS LOOP VARIABLE. Found by probing the head row's
+-- def/use rather than its shape — the structural tests above all passed while every one of
+-- these forms reported `def={} use={s,xs}`, a READ of a variable nothing defines. js for-of
+-- had SHIPPED that way in part A. The three-part `for` beside them was correct, which is
+-- why it hid, and dfparity structurally cannot catch it: its per-statement def/use check
+-- only runs when the coarse counts match, and they do not for these very functions.
+test('flow: a collection loop DEFS its loop variable, in every language that has one', function ()
+    local CASES = {
+        { lang = 'java', t = 'enhanced_for_statement', var = 's', iter = 'xs',
+          src = 'class C { void f(java.util.List<String> xs) { for (String s : xs) { g(s); } } }',
+          cfg = function () return { regime = tsspec.java.regime } end },
+        { lang = 'cpp', t = 'for_range_loop', var = 'x', iter = 'v',
+          src = 'void f(std::vector<int> &v) { for (auto &x : v) { g(x); } }',
+          cfg = function () return { regime = tsspec.cpp.regime } end },
+        { lang = 'javascript', t = 'for_in_statement', var = 'x', iter = 'xs',
+          src = 'function f(xs) { for (const x of xs) { g(x); } }',
+          cfg = function () return { ctrl = tsspec.javascript.ctrl,
+              preloop = tsspec.javascript.preloop, regime = tsspec.javascript.regime } end },
+    }
+    for _, c in ipairs(CASES) do
+        if ready(c.lang) then
+            local fn, src = parse_fn(c.src, c.lang)
+            local fl = flow.build(fn, src, c.cfg())
+            local head
+            for i, s in ipairs(fl.stmts) do if (s.t or '') == c.t then head = i end end
+            ok(head, c.lang .. ': the loop is a row')
+            if head then
+                local s = fl.stmts[head]
+                local d, u = {}, {}
+                for _, n in ipairs(s.def or {}) do d[n] = true end
+                for _, n in ipairs(s.use or {}) do u[n] = true end
+                ok(d[c.var], ('%s: `%s` is a DEF (the loop BINDS it) — got def={%s}')
+                    :format(c.lang, c.var, table.concat(s.def or {}, ',')))
+                ok(not u[c.var], c.lang .. ': and NOT also a free use of an outer name')
+                ok(u[c.iter], ('%s: the iterated collection `%s` stays a use')
+                    :format(c.lang, c.iter))
+            end
+        end
+    end
+end)
+
+-- ★ CART-0363. A LOOP READ BACK FROM THE STORE MUST STILL BE A LOOP. Extraction persists
+-- `flow = { stmts, params }` only, so the per-language sets M.build merged were LOST, and
+-- PRELOOP_OF fell through to the base table — a js `for…of` off the store had NO BACK EDGE
+-- from its body to its head, while a `while` beside it did. Missing a back edge is unsound,
+-- not imprecise: reaching and liveness then believe a def in the body never reaches the next
+-- iteration. flow.record now DERIVES the classes from the node's language.
+test('flow: a stored record still classifies a SPEC-added pre-condition loop', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local tsp = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.js', 'w'))
+    fd:write('function f(xs) {\n  before();\n  for (const x of xs) {\n    g(x);\n  }\n  after();\n}\n')
+    fd:close()
+    store.ingest(tsp.extract(root))
+    local seen = false
+    for _, n in ipairs(store.data.nodes) do
+        if flow.present(n) and n.name == 'f' then
+            seen = true
+            local fl = flow.record(n)
+            ok(fl.preloop, 'the record read back from the store carries its language classes')
+            ok(fl.preloop and fl.preloop.for_in_statement,
+                'including the SPEC-added for-of, which the base table does not have')
+            local cfg = flow.successors(fl)
+            local head
+            for i, s in ipairs(fl.stmts) do if (s.t or '') == 'for_in_statement' then head = i end end
+            local body
+            for i, s in ipairs(fl.stmts) do if s.parent == head then body = body or i end end
+            ok(head and body, 'the loop and its body are rows')
+            local back = false
+            for _, x in ipairs(cfg.succ[body] or {}) do if x == head then back = true end end
+            ok(back, 'and the body has a BACK EDGE to the head — it is a loop in the CFG too')
+        end
+    end
+    ok(seen, 'the fixture extracted a function with flow')
+    vim.fn.delete(root, 'rf')
+end)

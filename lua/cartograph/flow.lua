@@ -28,8 +28,10 @@ local tsutil = require 'cartograph.spec.tsutil'
 -- 32 sites across this file, the extractor, expr and narrow each had their own
 -- copy of the lua-only test (CART-0304).
 local COMMENT = tsutil.COMMENT
--- a region body: lua `block`, C/php `compound_statement`, JS/TS `statement_block`
-local BODY = { block = true, compound_statement = true, statement_block = true }
+-- a region body: lua `block`, C/php `compound_statement`, JS/TS `statement_block`,
+-- java `switch_block` (a switch's cases live in one, and it is NOT a `block`)
+local BODY = { block = true, compound_statement = true, statement_block = true,
+    switch_block = true }
 -- control statements: recurse into their sub-regions
 local CTRL = { if_statement = true, while_statement = true, for_statement = true,
     for_numeric_statement = true, for_generic_statement = true,
@@ -40,7 +42,21 @@ local CTRL = { if_statement = true, while_statement = true, for_statement = true
     -- rust control is EXPRESSIONS (wrapped in expression_statement — emit
     -- unwraps); node types are rust-unique so listing them is language-safe
     if_expression = true, while_expression = true, loop_expression = true,
-    for_expression = true, match_block = true }
+    for_expression = true, match_block = true,
+    -- ── CART-0363, cpp + java. Same language-unique criterion as rust above, so these
+    -- sit in the BASE set rather than the spec seam: a base entry reaches all THREE cfg
+    -- constructions (extraction, expr.of, expr.of_module) for free, and the three-way
+    -- agreement hazard is what cost part A a debugging round.
+    for_range_loop = true,                  -- cpp `for (auto &x : v)`
+    enhanced_for_statement = true,          -- java `for (String s : xs)`
+    -- ★ JAVA'S SWITCH IS `switch_expression` WHETHER OR NOT IT IS USED AS A VALUE, and its
+    -- container is `switch_block`, not `block`. Both spellings had to be found by PROBE:
+    -- the structural census could not flag it, because a census that asks "contains a
+    -- recognised region" is blind to a node whose region spelling is also unrecognised.
+    -- The same blind spot hid ruby's `then`/`do` bodies. Java switches were 100% opaque.
+    switch_expression = true,
+    synchronized_statement = true,          -- java `synchronized (lock) { … }`
+    try_with_resources_statement = true }   -- java try-with-resources (also in TRY_T)
 -- clause nodes carrying a sub-region's statements
 -- POST-condition loops: the condition runs AFTER the body
 local POST = { do_statement = true, repeat_statement = true }
@@ -49,13 +65,32 @@ local POST = { do_statement = true, repeat_statement = true }
 local PRELOOP = { while_statement = true, for_statement = true,
     for_numeric_statement = true, for_generic_statement = true,
     foreach_statement = true, while_expression = true, for_expression = true,
-    loop_expression = true } -- rust `loop {}` = infinite (const-true, no zero-trip)
-local TRY_T = { try_statement = true }
+    loop_expression = true, -- rust `loop {}` = infinite (const-true, no zero-trip)
+    -- CART-0363: both iterate a collection, so an EMPTY one is a zero-trip skip
+    for_range_loop = true, enhanced_for_statement = true }
+local TRY_T = { try_statement = true, try_with_resources_statement = true }
+-- ★ CONTROL FORMS WHOSE `body` FIELD IS THE WHOLE BODY, so every OTHER named child is a
+-- HEADER PART and must not be emitted as a statement that appears to run each iteration
+-- (the defect part A fixed for js for-of, where `for (const x of xs)` gained two bogus
+-- `identifier` rows). Their header uses still reach the control row through du(stop_body).
+-- Deliberately NOT a blanket rule over CTRL: the base languages keep their current
+-- modelling, wrong or not, so this cannot move a lua/php/python row (CART-0362's business).
+-- try-with-resources is deliberately ABSENT — its `resources` child DEFINES variables, and
+-- dropping it would lose the def. It is pre-emitted instead, exactly like a for-init.
+local BODYFIELD = { for_range_loop = true, enhanced_for_statement = true,
+    synchronized_statement = true }
+-- a clause whose case LABEL is a CHILD rather than a `value` field (java `switch_label`)
+local CASELABEL = { switch_label = true }
+-- control forms with an acquire step that runs BEFORE the head, like a three-part for's
+-- init: java try-with-resources' `resources` (it defines the resource variables)
+local PREFIELD = { try_with_resources_statement = 'resources' }
 local CLAUSE = { else_statement = true, elseif_statement = true,
     else_clause = true, elseif_clause = true, else_if_clause = true,
     elif_clause = true, -- python elif
     case_statement = true, default_statement = true,
     expression_case = true, default_case = true,
+    -- java: the classic `case 1: … break;` group and the arrow form `case 1 -> …`
+    switch_block_statement_group = true, switch_rule = true,
     catch_clause = true, except_clause = true, finally_clause = true }
 local ELSEIF = { elseif_statement = true, elseif_clause = true,
     else_if_clause = true, elif_clause = true } -- + python elif (ruby `if` isn't
@@ -67,7 +102,8 @@ local CATCH = { catch_clause = true, except_clause = true }
 -- that must be REGIONED as rows (not folded into the case row). C/php/java
 -- `case_statement`/`default_statement`, go `expression_case`/`default_case`.
 local CASE = { case_statement = true, default_statement = true,
-    expression_case = true, default_case = true }
+    expression_case = true, default_case = true,
+    switch_block_statement_group = true, switch_rule = true } -- java, both switch forms
 -- switch-like heads (the switched expr is under `value` for go, `condition`
 -- elsewhere; a `break` inside a case exits the switch, its join)
 local SWITCH = { switch_statement = true, expression_switch_statement = true,
@@ -200,6 +236,21 @@ local WRAP = { variable_list = true, variable_name = true,
 -- an array `size` or pointer `type_qualifier` (which are uses/non-names). So
 -- `SMesh *mesh = f()` and `char **pp`, `int arr[4]` all DEF the inner name.
 local DECLWRAP = { pointer_declarator = true, array_declarator = true }
+-- ★ A COLLECTION LOOP BINDS ITS LOOP VARIABLE, so that name is a DEF and not a use
+-- (CART-0363). Nothing here declares it the way a three-part `for` does: java's
+-- `for (String s : xs)` hangs a bare `name` FIELD, cpp's `for (auto &x : v)` a declarator
+-- CHILD with no field at all, and js's for-of a bare `left` — none is an ASSIGN or a DECL
+-- node, so du classed all three as USES. Measured before this fix, the head row of every
+-- collection loop read `def={} use={s,xs}`: a read of a variable nothing defines, which
+-- every consumer of that row (liveness, reaching_cfg, narrowing) then believed. The
+-- three-part `for` beside it was correct (`def={i}`), which is exactly why it hid — and
+-- dfparity cannot catch it, because its per-statement def/use comparison only runs when the
+-- coarse counts MATCH, and they do not for the functions holding these very forms.
+-- Value = the FIELD holding the binder; `false` = no field, take the non-header children.
+local LOOPVAR = { enhanced_for_statement = 'name', for_in_statement = 'left',
+    for_range_loop = false }
+-- cpp for_range_loop's non-binder fields; every other named child is the declarator
+local RANGE_HEAD = { 'type', 'right', 'body' }
 
 local function same(a, b)
     if not (a and b) then return false end
@@ -231,8 +282,20 @@ local function du(root, src, stop_body, ids, mods, FN)
     local sus = SUSPEND[root:type()] or false
     local function rec(node, defpos)
         local t = node:type()
-        local asgleft, decld, k, declist
-        if ASSIGN[t] then
+        local asgleft, decld, k, declist, rngskip
+        if LOOPVAR[t] ~= nil then
+            -- a collection loop's binder (see LOOPVAR): a FIELD where the grammar gives one,
+            -- otherwise every named child that is not part of the header
+            if LOOPVAR[t] then decld = node:field(LOOPVAR[t])[1]; k = 3
+            else
+                rngskip = {}
+                for _, f in ipairs(RANGE_HEAD) do
+                    local x = node:field(f)[1]
+                    if x then rngskip[x:id()] = true end
+                end
+                k = 8
+            end
+        elseif ASSIGN[t] then
             asgleft = node:field('left')[1] or node:field('name')[1] or node:child(0)
             k = 1
         elseif DECL[t] then
@@ -277,6 +340,7 @@ local function du(root, src, stop_body, ids, mods, FN)
                 elseif k == 7 then
                     cdefpos = false
                     for _, dd in ipairs(declist) do if same(c, dd) then cdefpos = true; break end end
+                elseif k == 8 then cdefpos = not rngskip[c:id()] -- cpp range-for declarator
                 else cdefpos = k end
                 if ids[ct] then
                     local nm = txt(c, src)
@@ -358,6 +422,53 @@ local function fn_body(fn)
     -- fall back to `fn` itself (that walks the parameters as bogus statements)
 end
 
+--- ★ THE ONE OWNER OF "WHAT COUNTS AS CONTROL IN THIS LANGUAGE" (CART-0363). The base sets
+--- above are one family's SPELLING; a language spelling it otherwise had its whole body
+--- folded into a single opaque row. The spec supplies the rest, merged HERE.
+---
+--- EXPORTED ON PURPOSE. This ticket exists because a SECOND copy of flow's CTRL had drifted
+--- (opaque.lua's, in the very probe measuring the fix), so anything that needs to know what
+--- flow opens must ask rather than restate it. `tools/ctrlcensus.lua` is the first caller.
+---
+--- FOUR node classes, each a per-language extension of a base set. `ctrl` says "this is a
+--- control statement", `preloop` "its test runs before the body", `body` "this node IS a
+--- region of statements", `clause` "this is a sub-region with its own condition".
+--- ★ RUBY NEEDED ALL FOUR AND THAT IS THE POINT: its control is `if`/`while`/`case`, its
+--- REGIONS are `then`/`do` (not `block`), and its sub-regions are `elsif`/`else`/`when`.
+--- Adding only `ctrl` opens the loop and then folds its whole body into one row, because the
+--- container is not recognised as a region — measurably no better than before.
+---@param cfg table|nil  the language cfg (spec.ctrl/.preloop/.body/.clause)
+---@return table  { ctrl, preloop, body, clause, elseif_, case, post }
+function M.classes(cfg)
+    cfg = cfg or {}
+    local function extend_set(base, extra)
+        if not extra then return base end
+        local out = {}
+        for k, v in pairs(base) do out[k] = v end
+        for k, v in pairs(extra) do out[k] = v end
+        return out
+    end
+    -- ★ `clause` IS A MAP, NOT A SET, and that is deliberate: clause() dispatches on WHICH
+    -- KIND of sub-region a node is, so a bare set would need two more spec keys to say it.
+    -- `{ elsif = 'elseif', ['else'] = 'else', when = 'case' }` — the value names the class.
+    -- A set entry (value `true`) still works and means "a clause with no special handling".
+    local elseif_, case_ = ELSEIF, CASE
+    if cfg.clause then
+        elseif_, case_ = extend_set(ELSEIF, {}), extend_set(CASE, {})
+        for k, v in pairs(cfg.clause) do
+            if v == 'elseif' then elseif_[k] = true
+            elseif v == 'case' then case_[k] = true end
+        end
+    end
+    return {
+        ctrl = extend_set(CTRL, cfg.ctrl),
+        preloop = extend_set(PRELOOP, cfg.preloop),
+        body = extend_set(BODY, cfg.body),
+        clause = extend_set(CLAUSE, cfg.clause),
+        elseif_ = elseif_, case = case_, post = POST,
+    }
+end
+
 -- cfg (the per-language seam — the config flow should CONSUME rather than
 -- hardcode, [[cartograph-df-strangler]]): { pfield=<params field>,
 -- regime=<scope-regime table/fn>, ... }. Absent → best-effort defaults.
@@ -379,30 +490,9 @@ function M.build(fnnode, src, cfg)
     -- REGIONS are `then`/`do` (not `block`), and its sub-regions are `elsif`/`else`/`when`.
     -- Adding only `ctrl` opens the loop and then folds its whole body into one row, because
     -- the container is not recognised as a region — measurably no better than before.
-    local CTRL_, PRELOOP_, BODY_, CLAUSE_ = CTRL, PRELOOP, BODY, CLAUSE
-    local function extend_set(base, extra)
-        if not extra then return base end
-        local out = {}
-        for k, v in pairs(base) do out[k] = v end
-        for k, v in pairs(extra) do out[k] = v end
-        return out
-    end
-    CTRL_ = extend_set(CTRL, cfg.ctrl)
-    PRELOOP_ = extend_set(PRELOOP, cfg.preloop)
-    BODY_ = extend_set(BODY, cfg.body)
-    CLAUSE_ = extend_set(CLAUSE, cfg.clause)
-    -- ★ `clause` IS A MAP, NOT A SET, and that is deliberate: clause() dispatches on WHICH
-    -- KIND of sub-region a node is, so a bare set would need two more spec keys to say it.
-    -- `{ elsif = 'elseif', ['else'] = 'else', when = 'case' }` — the value names the class.
-    -- A set entry (value `true`) still works and means "a clause with no special handling".
-    local ELSEIF_, CASE_ = ELSEIF, CASE
-    if cfg.clause then
-        ELSEIF_, CASE_ = extend_set(ELSEIF, {}), extend_set(CASE, {})
-        for k, v in pairs(cfg.clause) do
-            if v == 'elseif' then ELSEIF_[k] = true
-            elseif v == 'case' then CASE_[k] = true end
-        end
-    end
+    local cls = M.classes(cfg)
+    local CTRL_, PRELOOP_, BODY_, CLAUSE_ = cls.ctrl, cls.preloop, cls.body, cls.clause
+    local ELSEIF_, CASE_ = cls.elseif_, cls.case
     local FN = cfg.fn_types or FN_FALLBACK -- the nested-function stop (CART-0308)
     -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
     -- BINDING MODIFIERS (CART-0234): per-language node types to skip entirely, because
@@ -490,7 +580,10 @@ function M.build(fnnode, src, cfg)
             return
         end
         -- the three-part for's init runs BEFORE the head, so it is emitted before it
+        -- the three-part for's init runs BEFORE the head, and so does a try-with-resources'
+        -- `resources` acquisition — same shape, same treatment (CART-0363)
         local finit = (CTRL_[t] and PRELOOP_[t]) and for_init(node) or nil
+        if not finit and PREFIELD[t] then finit = node:field(PREFIELD[t])[1] end
         if finit then emit(finit, parent, pol) end
         local idx = #stmts + 1
         local sb = CTRL_[t] and true or false
@@ -537,7 +630,8 @@ function M.build(fnnode, src, cfg)
             -- SPEC added (cfg.ctrl): the base languages keep their current modelling, wrong or
             -- not, so this change cannot move a lua/php/python row. Their header rows are
             -- CART-0362's business, and moving them here would reorder every lua function.
-            local body_field = (cfg.ctrl and cfg.ctrl[t]) and node:field('body')[1] or nil
+            local body_field = ((cfg.ctrl and cfg.ctrl[t]) or BODYFIELD[t])
+                and node:field('body')[1] or nil
             for gc in node:iter_children() do
                 if gc:named() and gc ~= cond and not (finit and gc:id() == finit:id())
                     and not (body_field and gc:id() ~= body_field:id()
@@ -585,7 +679,16 @@ function M.build(fnnode, src, cfg)
             -- REGIONED as rows (was folded into the case row, hiding it from the
             -- fine model + blocking case CFG feasibility). break rows inside now
             -- surface — successors routes them to the switch join.
+            -- ★ THE LABEL IS NOT ALWAYS A FIELD. C/go spell it `value`; java hangs a
+            -- `switch_label` CHILD instead. Without this the label emitted as its own
+            -- statement row — a row for something that does not execute — and the case row
+            -- carried no uses at all.
             local vf = node:field('value')[1]
+            if not vf then
+                for c in node:iter_children() do
+                    if c:named() and CASELABEL[c:type()] then vf = c break end
+                end
+            end
             local d, u = du(vf, src, false, ids, mods, FN) -- default (no value) → {},{}
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'case', parent = parent,
@@ -1274,15 +1377,48 @@ end
 
 --- the whole flow record { stmts, params } (the shape successors/coarse/liveness/
 --- reaching_cfg consume). cfg is build-time only → not restored.
+-- ★ THE MERGED CLASSES ARE NOT PERSISTED, AND A LOOP THAT IS NOT A LOOP IS UNSOUND
+-- (CART-0363). Extraction stores `flow = { stmts, params }` only, so a record read back from
+-- the store lost the per-language sets M.build had merged, and PRELOOP_OF fell through to the
+-- BASE table. Measured: a js `for…of` read from the store had NO BACK EDGE from its body to
+-- its head (succ={after}, where a `while` beside it gave succ={head}), and the same held for
+-- every ruby loop. That is not imprecision — reaching and liveness then believe a def in the
+-- loop body never reaches the next iteration.
+-- DERIVED, NOT STORED: the sets are a pure function of the LANGUAGE, so persisting them would
+-- spend bytes per node on what a file extension answers — and M.classes is the one owner, so
+-- the derivation cannot drift from what M.build used. Cached per language.
+local cls_cache = {}
+local function classes_for_node(n)
+    local okts, ts = pcall(require, 'cartograph.providers.treesitter')
+    if not okts or type(ts.lang_of) ~= 'function' then return nil end
+    local lang = n.file and ts.lang_of(n.file)
+    if not lang then return nil end
+    if cls_cache[lang] == nil then
+        cls_cache[lang] = M.classes((ts.spec and ts.spec[lang]) or {})
+    end
+    return cls_cache[lang]
+end
+
 function M.record(n)
     if not n then return nil end
     local col = n._flow
+    local rec
     if col then
         local params = {}
         for i = 1, n._flowpn do params[i] = col.names[rd(col.pm, n._flowp0 + i)] end
-        return { stmts = M.rows(n), params = params }
+        rec = { stmts = M.rows(n), params = params }
+    else
+        rec = n.flow
     end
-    return n.flow
+    if rec and not rec.preloop then
+        local c = classes_for_node(n)
+        if c then
+            -- never MUTATE the stored record (it rides into the cache): copy the thin header
+            if col then rec.preloop = c.preloop
+            else rec = { stmts = rec.stmts, params = rec.params, preloop = c.preloop } end
+        end
+    end
+    return rec
 end
 
 --- fold every node's `.flow` record into one columnar store; drop the records.
