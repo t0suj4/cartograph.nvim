@@ -50,7 +50,7 @@ local here = SELF:match('^(.*)/matrix%.lua$')
 -- stdout (vim.system captures them per stream), so write it explicitly
 local function say(s) io.stdout:write(s .. '\n') end
 
-local COLS = { 'counts', 'valid', 'mem', 'dfpar', 'fold', 'silent',
+local COLS = { 'counts', 'valid', 'mem', 'rows', 'dfpar', 'fold', 'silent',
     'cache', 'key', 'struct', 'par' }
 -- the minutes-tier corpora (scale extracts); everything else is seconds
 local HEAVY = { server = true, v8 = true, sylius = true, ghost = true,
@@ -201,6 +201,29 @@ local function run_row(name)
                 { ('peak %.0f MB budget %d MB'):format(mb, corpus.budget_mb) })
         else
             cell('mem', '--')
+        end
+    end
+
+    -- ★ THE FINE ROW MODEL (CART-0389). No other column can see it: struct gates
+    -- nodes/edges/calls and opening a control form mints neither; dfpar gates the COARSE
+    -- projection, which groups a control row together with its body and so reads the same
+    -- whether the loop opened or not. Measured, 2522 rows and 988 opened control structures
+    -- could appear and vanish with every existing column green. Runs on the SHARED production
+    -- `data` -- flow rows are already there, so this costs a walk, not an extract.
+    if wanted('rows') then
+        local rc = dofile(here .. '/rowcensus.lua')
+        local r = rc.check(data)
+        if r.fns == 0 then
+            cell('rows', '--') -- no flow-bearing functions (token provider)
+        else
+            local d = { ('fns=%d · %s'):format(r.fns, rc.census(r.cats)) }
+            if rc.EXPECTED[name] then
+                local diffs = rc.diff(r.cats, rc.EXPECTED[name])
+                for _, l in ipairs(diffs) do d[#d + 1] = l end
+                cell('rows', #diffs == 0 and 'OK' or 'FAIL', d)
+            else
+                cell('rows', '~', d) -- ran, census not yet calibrated
+            end
         end
     end
 
