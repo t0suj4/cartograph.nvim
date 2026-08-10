@@ -180,13 +180,18 @@ M.EXPECTED = {
     python = { rows = 10754, opened = 2090, opaque = 0, catch = 158, elif_clause = 61,
         for_in_statement = 1, for_statement = 279, if_statement = 1441, try_statement = 144,
         while_statement = 6 },
-    rails = { rows = 10324, opened = 2135, opaque = 14, begin = 27, case = 15, catch = 48,
+    -- recalib @ CART-0387: a case SUBJECT and a when PATTERN are not rows (10324 -> 10257)
+    rails = { rows = 10257, opened = 2135, opaque = 14, begin = 27, case = 15, catch = 48,
         ['catch:opaque'] = 14, elsif = 50, ['if'] = 797, if_modifier = 952, unless = 41,
         unless_modifier = 157, when = 42, ['while'] = 6 },
     rspec = { rows = 262, opened = 6, opaque = 0, ['if'] = 1, if_modifier = 5 },
-    ruby = { rows = 5893, opened = 1115, opaque = 4, begin = 26, case = 60, catch = 48,
+    -- recalib @ CART-0387: rows 5893->5672. A ruby `case` SUBJECT and a `when` PATTERN are
+    -- not statements that execute, so they stopped being rows. `when:opaque` 0->3 is the
+    -- review question firing and CHECKED: all three are genuinely EMPTY arms
+    -- (`when Integer` / `when nil` with no body, a deliberate ruby no-op), not a regression.
+    ruby = { rows = 5672, opened = 1112, opaque = 7, ['when:opaque'] = 3, begin = 26, case = 60, catch = 48,
         ['catch:opaque'] = 4, elsif = 56, ['if'] = 390, if_modifier = 224, unless = 50,
-        unless_modifier = 105, ['until'] = 2, when = 143, ['while'] = 11 },
+        unless_modifier = 105, ['until'] = 2, when = 140, ['while'] = 11 },
     rust = { rows = 10986, opened = 1263, opaque = 1, case_statement = 9, for_expression = 146,
         if_expression = 685, if_statement = 1, loop_expression = 9, match_block = 190,
         match_expression = 190, while_expression = 33, ['while_expression:opaque'] = 1 },

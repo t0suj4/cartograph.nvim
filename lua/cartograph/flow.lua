@@ -480,12 +480,14 @@ function M.classes(cfg)
     -- `ctrl` for truthiness only (`cls.ctrl[t]`, `cfg.ctrl[t]`, `pairs`), verified by grep,
     -- so a string value is compatible everywhere. `true` = a control statement with no
     -- special role; 'if' = the successors IF branch (exhaustive-arm detection).
-    local ifs, try_ = IF_T, TRY_T
+    local ifs, try_, switch_ = IF_T, TRY_T, SWITCH
     if cfg.ctrl then
         ifs, try_ = extend_set(IF_T, {}), extend_set(TRY_T, {})
+        switch_ = extend_set(SWITCH, {})
         for k, v in pairs(cfg.ctrl) do
             if v == 'if' then ifs[k] = true
-            elseif v == 'try' then try_[k] = true end
+            elseif v == 'try' then try_[k] = true
+            elseif v == 'switch' then switch_[k] = true end
         end
     end
     -- CATCH is the fourth base-only set the CFG path held (after PRELOOP, IF_T, TRY_T):
@@ -518,7 +520,7 @@ function M.classes(cfg)
             local L = extend_set(extend_set(PRELOOP, cfg.preloop), { repeat_statement = true })
             return L
         end)(),
-        try = try_, catch = catch_, clausemap = cfg.clause,
+        try = try_, catch = catch_, clausemap = cfg.clause, switch = switch_,
     }
 end
 
@@ -546,7 +548,7 @@ function M.build(fnnode, src, cfg)
     local cls = M.classes(cfg)
     local CTRL_, PRELOOP_, BODY_, CLAUSE_ = cls.ctrl, cls.preloop, cls.body, cls.clause
     local ELSEIF_, CASE_ = cls.elseif_, cls.case
-    local CATCH_, CLAUSEMAP, TRY_ = cls.catch, cls.clausemap, cls.try
+    local CATCH_, CLAUSEMAP, TRY_, SWITCH_ = cls.catch, cls.clausemap, cls.try, cls.switch
     local FN = cfg.fn_types or FN_FALLBACK -- the nested-function stop (CART-0308)
     -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
     -- BINDING MODIFIERS (CART-0234): per-language node types to skip entirely, because
@@ -659,8 +661,13 @@ function M.build(fnnode, src, cfg)
         -- never even builds the closure.
         if cfg.expr and not CTRL_[t] then stmts[idx].expr = cfg.expr(node, src) end
         if CTRL_[t] then
+            -- ★ THE SWITCHED SUBJECT IS THE HEAD'S CONDITION, NOT A BODY STATEMENT. go spells
+            -- it `value` and so does ruby's `case`; without this the subject was emitted as a
+            -- row that appears to EXECUTE as an arm of its own (ruby `case a` gained an
+            -- `identifier` row with pol='body'). Read through the language-aware switch set,
+            -- so a language that declares the role gets it (CART-0387).
             local cond = node:field('condition')[1]
-                or (SWITCH[t] and node:field('value')[1]) -- go switch: `value` is the switched expr
+                or (SWITCH_[t] and node:field('value')[1])
             -- loop feasibility flag (do{}while(0) / while(true) / rust loop)
             if POST[t] or PRELOOP_[t] then
                 stmts[idx].const = (t == 'loop_expression') and true or const_cond(cond, src)
@@ -744,19 +751,41 @@ function M.build(fnnode, src, cfg)
             -- `switch_label` CHILD instead. Without this the label emitted as its own
             -- statement row — a row for something that does not execute — and the case row
             -- carried no uses at all.
-            local vf = node:field('value')[1]
-            if not vf then
+            -- ★ THE LABEL IS NOT ALWAYS A `value` FIELD, AND IT IS NOT ALWAYS ONE NODE.
+            -- C/go spell it `value`; java hangs a `switch_label` CHILD; ruby's `when` has a
+            -- `pattern` FIELD and `when 1, 2` has TWO of them. A label does not EXECUTE, so
+            -- every one of these must be a USE on the case row and NONE of them a body
+            -- statement — ruby's `pattern` was emitting as a row of its own.
+            -- ★ BY FIELD, NEVER BY THE TYPE NAME `pattern`: js, ts, tsx, python, java and
+            -- haskell all have a `pattern` node too (checked via language.inspect), so a base
+            -- set keyed on it would reach six languages that never asked (CART-0387).
+            local labels = {}
+            for _, f in ipairs({ 'value', 'pattern' }) do
+                for _, x in ipairs(node:field(f)) do labels[#labels + 1] = x end
+            end
+            if #labels == 0 then
                 for c in node:iter_children() do
-                    if c:named() and CASELABEL[c:type()] then vf = c break end
+                    if c:named() and CASELABEL[c:type()] then labels[#labels + 1] = c end
                 end
             end
-            local d, u = du(vf, src, false, ids, mods, FN) -- default (no value) → {},{}
+            local islabel = {}
+            for _, x in ipairs(labels) do islabel[x:id()] = true end
+            local vf = labels[1]
+            local d, u = {}, {}
+            do -- def/use over EVERY label, deduped
+                local ds, us = {}, {}
+                for _, x in ipairs(labels) do
+                    local xd, xu = du(x, src, false, ids, mods, FN)
+                    for _, nm in ipairs(xd) do if not ds[nm] then ds[nm] = true; d[#d + 1] = nm end end
+                    for _, nm in ipairs(xu) do if not us[nm] then us[nm] = true; u[#u + 1] = nm end end
+                end
+            end
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'case', parent = parent,
                 pol = 'case', def = d, use = u, t = node:type() }
             if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'casehead') end
             for c in node:iter_children() do
-                if c:named() and c ~= vf and not COMMENT[c:type()] then
+                if c:named() and not islabel[c:id()] and not COMMENT[c:type()] then
                     if BODY_[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
                 end
             end
@@ -864,6 +893,7 @@ end
 local function PRELOOP_OF(flow) return (flow and flow.preloop) or PRELOOP end
 local function IFS_OF(flow) return (flow and flow.cls and flow.cls.ifs) or IF_T end
 local function TRY_OF(flow) return (flow and flow.cls and flow.cls.try) or TRY_T end
+local function SWITCH_OF(flow) return (flow and flow.cls and flow.cls.switch) or SWITCH end
 
 --- "is this node type a LOOP", for the consumers that used to each keep their own answer
 --- (CART-0383). Language-aware via the record's class table; falls back to the base set.
@@ -1073,11 +1103,24 @@ function M.successors(flow)
                 if not hasfalse then add(r, nxt) end -- no else → condition may fall through
             elseif kids and t == 'do_statement' then
                 add(r, wire(kids['body'], nxt, brk, cont, lbls)) -- lua `do...end`: plain block
-            elseif kids and SWITCH[t] then
+            elseif kids and SWITCH_OF(flow)[t] then
                 -- switch: cases fall through in order; break exits the switch, so
                 -- the case bodies are wired with brk = nxt (the switch join).
+                -- ★ LANGUAGE-AWARE (CART-0387): ruby spells it `case`, so it never reached
+                -- this branch and fell to the generic one — which passes `brk` THROUGH, so a
+                -- `break` inside a ruby case escaped to the ENCLOSING LOOP instead of the
+                -- switch join. Reaching the branch fixes that for free.
                 for _, rr in pairs(kids) do add(r, wire(rr, nxt, nxt, cont, lbls)) end
-                add(r, nxt) -- no case matched (no default)
+                -- ★ AND AN EXHAUSTIVE SWITCH CANNOT BE SKIPPED, the same rule the IF branch
+                -- already applies: a `default`/`else` arm means control MUST enter one of the
+                -- arms, so the head does not also fall through. Without this the CFG claimed
+                -- every switch could be skipped entirely — and optapply's PRE is built on
+                -- exactly this exhaustiveness property.
+                local hasfalse = false
+                for _, pol in ipairs({ 'default', 'else' }) do
+                    if kids[pol] then hasfalse = true end
+                end
+                if not hasfalse then add(r, nxt) end -- no default → no arm may match
             elseif kids then -- match/try/other control head: sound over-approx
                 for _, rr in pairs(kids) do add(r, wire(rr, nxt, brk, cont, lbls)) end
                 add(r, nxt)

@@ -1410,3 +1410,67 @@ test('flow: loops_of is language-aware, and the phantom is gone', function ()
     local rb = flow.classes(ts_.spec.ruby or {}).loops
     ok(rb['while'] and rb['until'] and rb['for'], 'ruby\'s own spellings are loops too')
 end)
+
+-- ★ CART-0387. A ruby `case`: its SUBJECT and its `when` PATTERNS do not execute, and a case
+-- with an `else` is EXHAUSTIVE. Three defects in one construct, each a different mechanism.
+test('flow: a ruby case does not emit its subject or its patterns as statements', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb_succ('def f(a)\n  case a\n  when 1, 2\n    g(1)\n  else\n    g(2)\n  end\nend')
+    for _, s in ipairs(fl.stmts) do
+        ok((s.t or '') ~= 'pattern',
+            'a `when` PATTERN does not execute, so it is not a row')
+    end
+    -- the subject `a` is the head's condition, so it is a USE of the case row and not an
+    -- `identifier` body row of its own
+    local h = head_of(fl, 'case')
+    ok(h, 'the case is a control row')
+    local kids = kids_of(fl, h)
+    for _, t in ipairs(kids) do
+        ok(t ~= 'identifier', 'the switched subject is not a body statement: got ' .. t)
+    end
+    local u = {}
+    for _, n in ipairs(fl.stmts[h].use or {}) do u[n] = true end
+    ok(u.a, 'it is a USE on the head instead: use={'
+        .. table.concat(fl.stmts[h].use or {}, ',') .. '}')
+end)
+
+test('flow: a ruby case WITH an else is exhaustive; without one it falls through', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- ★ ruby's `case` never reached the SWITCH branch of successors (base-set again), so it
+    -- fell to the generic one -- which also passes `brk` THROUGH, meaning a `break` inside a
+    -- ruby case escaped to the ENCLOSING LOOP rather than the switch join.
+    local fl, cfg = rb_succ('def f(a)\n  before\n  case a\n  when 1\n    g(1)\n  else\n'
+        .. '    g(2)\n  end\n  after\nend')
+    local h = head_of(fl, 'case')
+    local after
+    for i, s in ipairs(fl.stmts) do if i > h and s.parent == 0 then after = after or i end end
+    ok(h and after, 'the case and the statement after it are rows')
+    local skips = false
+    for _, x in ipairs(cfg.succ[h] or {}) do if x == after then skips = true end end
+    ok(not skips, 'an else arm makes it exhaustive — no skip edge: succ={'
+        .. table.concat(cfg.succ[h] or {}, ',') .. '}')
+
+    local fl2, cfg2 = rb_succ('def f(a)\n  before\n  case a\n  when 1\n    g(1)\n  end\n'
+        .. '  after\nend')
+    local h2 = head_of(fl2, 'case')
+    local after2
+    for i, s in ipairs(fl2.stmts) do if i > h2 and s.parent == 0 then after2 = after2 or i end end
+    local falls = false
+    for _, x in ipairs(cfg2.succ[h2] or {}) do if x == after2 then falls = true end end
+    ok(falls, 'with NO else, no arm need match, so it still falls through')
+end)
+
+test('flow: the switch class is language-aware, and `pattern` is NOT a base name', function ()
+    local ts_ = require 'cartograph.providers.treesitter'
+    local rb = flow.classes(ts_.spec.ruby or {})
+    ok(rb.switch['case'], "ruby's `case` carries the switch role")
+    ok(flow.classes({}).switch.switch_statement, 'and the base spellings survive')
+    ok(not flow.classes({}).switch['case'], 'but `case` is NOT base — it is per language')
+    -- ★ `pattern` is in SIX grammars (js/ts/tsx/python/java/haskell), so the case label is
+    -- read from the FIELD, never from that type name. This asserts the intent, since a base
+    -- set keyed on it would silently reach five languages that never asked.
+    for _, cls in ipairs { flow.classes({}), rb } do
+        ok(not cls.clause.pattern, '`pattern` must never be a clause type')
+        ok(not cls.ctrl.pattern, '`pattern` must never be a control type')
+    end
+end)

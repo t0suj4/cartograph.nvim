@@ -554,7 +554,7 @@ M.spec.typescript.preloop = M.spec.javascript.preloop
 -- BOTH arms. Sound (over-approximate) but false, and optapply's PRE is built on exactly that
 -- exhaustiveness. The role lives on `ctrl` so it cannot drift away from it.
 M.spec.ruby.ctrl = { ['if'] = 'if', ['unless'] = 'if', ['while'] = true,
-    ['until'] = true, ['case'] = true, ['for'] = true,
+    ['until'] = true, ['case'] = 'switch', ['for'] = true,
     -- `begin … rescue … ensure … end`, role 'try': its handlers are reachable from any point
     -- in the body, which is what the TRY branch of successors models. It was `kind=stmt`
     -- before, so the WHOLE block folded into one row and body + handler had no rows at all

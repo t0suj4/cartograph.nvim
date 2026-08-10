@@ -73,7 +73,8 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 127 -- v127: RUBY begin/rescue/ensure was 100% OPAQUE too — one row, body and
+M.VERSION = 128 -- v128: a ruby `case` subject and a `when` PATTERN are not statements that
+               -- EXECUTE (CART-0387). v127: RUBY begin/rescue/ensure was 100% OPAQUE too — one row, body and
                -- handler with no rows at all — and `rescue E => e` now BINDS e (CART-0386).
                -- v126: cpp range-for, JAVA'S WHOLE SWITCH (100% OPAQUE), + A COLLECTION
                -- LOOP'S VARIABLE IS A DEF (it was a free USE in java, cpp AND shipped js)
