@@ -67,6 +67,22 @@ return {
             .. 'truth-validated — rung-2 fires on GetProductStockLocations (the '
             .. 'real SQLi), silent on the int-typed sibling; [[cartograph-taint-analysis]]',
     },
+    -- ★ MODERN C++, because the 7kaa row below CANNOT GATE THREE FORMS (CART-0385). Measured
+    -- with tools/ctrlcensus.lua --coverage, 7kaa has ZERO for_range_loop, try_statement and
+    -- catch_clause -- it is C-style C++ -- so the range-for support shipped in CART-0363 and
+    -- cpp exception flow had no corpus behind them at all. colobot-base covers 10 of 10 forms
+    -- the grammar has (259 range-for, 38 try, 39 catch) and its checkout is clean, which
+    -- azerothcore's is not (it writes .log files into the tree, and a dirty pin is no pin).
+    -- Kept ALONGSIDE 7kaa rather than replacing it: 7kaa is the calibrated quick tier, and a
+    -- corpus that lacks a form is still a fine witness for the forms it has.
+    cppmodern = {
+        root = HOME .. '/git/colobot/colobot-base/src',
+        repo = 'https://github.com/colobot/colobot',
+        rev = '018af35',
+        expected = { refs = 5606, nodes = 8074 }, -- calibrated 2026-08-11 @ colobot 018af35 (CART-0385, on arrival)
+        lang = 'cpp',
+        notes = 'modern C++ (208 files): range-for, try/catch, the forms 7kaa has none of',
+    },
     cpp = {
         root = HOME .. '/git/7kaa',
         repo = 'https://git.code.sf.net/p/skfans/7kaa',
