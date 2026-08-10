@@ -234,7 +234,7 @@ local DFID = { identifier = true, name = true }
 -- `reference_declarator` (C++ `Type &r`) has no `declarator` field — its only
 -- named child IS the inner declarator — so it rides the blanket WRAP path.
 local WRAP = { variable_list = true, variable_name = true,
-    reference_declarator = true }
+    reference_declarator = true, exception_variable = true } -- ruby `rescue … => e`
 -- C/C++ declarator wrappers WITH a `declarator` field (a `*`/`[]` around the
 -- declared name): def-position continues down that field, NOT to siblings like
 -- an array `size` or pointer `type_qualifier` (which are uses/non-names). So
@@ -310,6 +310,13 @@ local function du(root, src, stop_body, ids, mods, FN)
             k = 4 -- lua bare `local a, b` (no `=`): the variable_list is a DEF
         elseif t == 'catch_clause' then
             k = 5 -- catch(Type $e): the variable_name is a BINDING (DEF), type a use
+        elseif t == 'rescue' then
+            -- ★ ruby `rescue E => e`: the BINDING hangs under `exception_variable`, and the
+            -- `exceptions` sibling is a TYPE reference (a use). Without this `e` lands as a
+            -- free use — a read of a variable nothing defines, the same defect class as the
+            -- collection-loop variable (CART-0363). `rescue` is ruby-unique among the
+            -- grammars we support, the same criterion the rust and cpp entries use.
+            k = 9
         elseif t == 'declaration_command' then
             k = 6 -- bash `local/declare x`: a direct variable_name child is a DEF
         elseif defpos and DECLWRAP[t] then
@@ -345,6 +352,7 @@ local function du(root, src, stop_body, ids, mods, FN)
                     cdefpos = false
                     for _, dd in ipairs(declist) do if same(c, dd) then cdefpos = true; break end end
                 elseif k == 8 then cdefpos = not rngskip[c:id()] -- cpp range-for declarator
+                elseif k == 9 then cdefpos = (ct == 'exception_variable') -- ruby rescue binding
                 else cdefpos = k end
                 if ids[ct] then
                     local nm = txt(c, src)
@@ -472,10 +480,21 @@ function M.classes(cfg)
     -- `ctrl` for truthiness only (`cls.ctrl[t]`, `cfg.ctrl[t]`, `pairs`), verified by grep,
     -- so a string value is compatible everywhere. `true` = a control statement with no
     -- special role; 'if' = the successors IF branch (exhaustive-arm detection).
-    local ifs = IF_T
+    local ifs, try_ = IF_T, TRY_T
     if cfg.ctrl then
-        ifs = extend_set(IF_T, {})
-        for k, v in pairs(cfg.ctrl) do if v == 'if' then ifs[k] = true end end
+        ifs, try_ = extend_set(IF_T, {}), extend_set(TRY_T, {})
+        for k, v in pairs(cfg.ctrl) do
+            if v == 'if' then ifs[k] = true
+            elseif v == 'try' then try_[k] = true end
+        end
+    end
+    -- CATCH is the fourth base-only set the CFG path held (after PRELOOP, IF_T, TRY_T):
+    -- clause() reads it directly to give an exception clause its BINDING treatment. Derived
+    -- from the clause map's 'catch' role, so ruby's `rescue` reaches it (CART-0386).
+    local catch_ = CATCH
+    if cfg.clause then
+        catch_ = extend_set(CATCH, {})
+        for k, v in pairs(cfg.clause) do if v == 'catch' then catch_[k] = true end end
     end
     return {
         ctrl = extend_set(CTRL, cfg.ctrl),
@@ -483,6 +502,7 @@ function M.classes(cfg)
         body = extend_set(BODY, cfg.body),
         clause = extend_set(CLAUSE, cfg.clause),
         elseif_ = elseif_, case = case_, post = POST, ifs = ifs,
+        try = try_, catch = catch_, clausemap = cfg.clause,
     }
 end
 
@@ -510,6 +530,7 @@ function M.build(fnnode, src, cfg)
     local cls = M.classes(cfg)
     local CTRL_, PRELOOP_, BODY_, CLAUSE_ = cls.ctrl, cls.preloop, cls.body, cls.clause
     local ELSEIF_, CASE_ = cls.elseif_, cls.case
+    local CATCH_, CLAUSEMAP, TRY_ = cls.catch, cls.clausemap, cls.try
     local FN = cfg.fn_types or FN_FALLBACK -- the nested-function stop (CART-0308)
     -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
     -- BINDING MODIFIERS (CART-0234): per-language node types to skip entirely, because
@@ -640,6 +661,13 @@ function M.build(fnnode, src, cfg)
             -- var def'd in the body and read in the condition is not a free
             -- use). Drop it from the control row; re-emit as a trailing row.
             if POST[t] then stmts[idx].def, stmts[idx].use = {}, {} end
+            -- ★ A TRY HEAD EVALUATES NOTHING. It has no condition and no header — the
+            -- acquisition, if any, is its own row (PREFIELD) and the body/handlers are
+            -- theirs. For java/js/python that fell out for free, because du(stop_body) halts
+            -- at the `block` child; ruby's `begin` hangs its body statements DIRECTLY, so du
+            -- walked them and the head row claimed to def the exception variable and read
+            -- every name in the block. A container is not a computation.
+            if TRY_[t] then stmts[idx].def, stmts[idx].use = {}, {} end
             -- ★ A HEADER PART IS NOT A BODY STATEMENT. A for-of's `left`/`right` are fielded
             -- children that are neither the condition nor the body, and the fallback below
             -- emits any such child as a body row — so `for (const x of xs)` gained two
@@ -741,7 +769,7 @@ function M.build(fnnode, src, cfg)
             end
             return
         end
-        if CATCH[node:type()] then
+        if CATCH_[node:type()] then
             -- the header binds the exception var (DEF) and references the type
             -- (use); the body regions under it. Without this the caught var is
             -- unbound in the fine model and df's spurious use of it is unmatched.
@@ -761,9 +789,16 @@ function M.build(fnnode, src, cfg)
             return
         end
         local ct = node:type()
-        local pol = ct:find('else') and 'else' or ct:find('case') and 'case'
+        -- ★ THE CLAUSE MAP NAMES THE POL when it can. The name-substring fallback below only
+        -- works for languages that spell a clause after its role — ruby's `ensure` contains
+        -- neither "finally" nor any other tell, and would have landed as a generic 'clause',
+        -- which successors' TRY branch routes as an ordinary sibling instead of the
+        -- normal-completion path. A declared role beats a guess at the spelling.
+        local declared = CLAUSEMAP and CLAUSEMAP[ct]
+        local pol = (type(declared) == 'string' and declared ~= 'elseif' and declared) or nil
+        pol = pol or (ct:find('else') and 'else' or ct:find('case') and 'case'
             or ct:find('catch') and 'catch' or ct:find('finally') and 'finally'
-            or ct:find('default') and 'default' or 'clause'
+            or ct:find('default') and 'default' or 'clause')
         local b = node:field('body')[1]
         if b and BODY_[b:type()] then region(b, parent, pol) return end
         for c in node:iter_children() do
@@ -812,6 +847,7 @@ end
 -- built before the field existed, or by a caller that passed no spec.
 local function PRELOOP_OF(flow) return (flow and flow.preloop) or PRELOOP end
 local function IFS_OF(flow) return (flow and flow.cls and flow.cls.ifs) or IF_T end
+local function TRY_OF(flow) return (flow and flow.cls and flow.cls.try) or TRY_T end
 
 function M.coarse(flow)
     local stmts = flow.stmts
@@ -976,7 +1012,7 @@ function M.successors(flow)
                 for pol, rr in pairs(kids) do -- python for/while `else`, etc.
                     if pol ~= 'body' then add(r, wire(rr, nxt, brk, cont, lbls)) end
                 end
-            elseif kids and TRY_T[t] then
+            elseif kids and TRY_OF(flow)[t] then
                 -- exception edges: a throw may occur at ANY try-body point, so
                 -- every catch handler is reachable from every such point (sound).
                 -- finally (if present) is on the normal completion path; the

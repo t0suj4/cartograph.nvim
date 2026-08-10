@@ -179,7 +179,8 @@ M.EXPECTED = {
     -- flow carries only `new`. Rows RELOCATED, not lost — and that distinction is the
     -- whole ticket, because a stop at an UNMINTED type deletes them instead. Measured
     -- when the two were conflated: ghost 6986 -> 28406, go 30 -> 1772.
-    ruby = { ['df-over-collects'] = 15, ['line-skew'] = 1 }, -- 2->15 @ part A: ruby's control OPENED (it had none), so df's flat walk now under-collects inside opened bodies. NO partition-mismatch: ruby has no three-part `for`. Was {} (perfect parity)
+    ruby = { ['df-over-collects'] = 45, ['flow-over-collects'] = 31,
+        ['partition-mismatch'] = 5, ['line-skew'] = 22 }, -- recalib @ CART-0386: ruby `begin`/`rescue`/`ensure` was 100% OPAQUE (one row, body and handler with no rows at all) and now opens. flow-over-collects 0->31 = the EXCEPTION VARIABLE, which flow binds (`rescue E => e` defs `e`) and the legacy df walk does not; df-over-collects 15->45 is the SAME fact on the other axis, because `e` left `use` as it entered `def`. line-skew 1->22 and partition-mismatch 0->5 = a method-level `ensure` (`def … ensure … end`, no explicit begin) whose statements now get rows at THEIR OWN lines instead of folding into the `ensure` keyword's row. Direction checked: flow > df in 5/5, flow < df zero times. Prior: 2->15 @ part A (ruby's control OPENED, so df's flat walk under-collects inside opened bodies). Was {} (perfect parity)
     -- ghost = the JS scale corpus; df-over-collects (closure-leak) dominates. The
     -- old partition/disjoint/flow-over-collects residual was the re-parse .ts-
     -- under-JS + node-resolution artifact — gone with stored flow (OTHER=3 left).

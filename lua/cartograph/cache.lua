@@ -73,7 +73,9 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 126 -- v126: cpp range-for, JAVA'S WHOLE SWITCH (100% OPAQUE), + A COLLECTION
+M.VERSION = 127 -- v127: RUBY begin/rescue/ensure was 100% OPAQUE too — one row, body and
+               -- handler with no rows at all — and `rescue E => e` now BINDS e (CART-0386).
+               -- v126: cpp range-for, JAVA'S WHOLE SWITCH (100% OPAQUE), + A COLLECTION
                -- LOOP'S VARIABLE IS A DEF (it was a free USE in java, cpp AND shipped js)
                -- (CART-0363). flow's CTRL/PRELOOP sets are `*_statement`-shaped — one
                -- language's SPELLING — and a control node absent from them is emitted as a

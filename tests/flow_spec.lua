@@ -1308,3 +1308,74 @@ test('flow: the ctrl ROLE map keeps ifs a subset of ctrl, by construction', func
     -- the base classes are untouched when a language declares nothing
     ok(flow.classes({}).ifs.if_statement, 'the base IF set survives an empty cfg')
 end)
+
+-- ★ CART-0386. RUBY begin/rescue/ensure WAS 100% OPAQUE: `kind=stmt`, the whole block one
+-- row, body and handler with no rows at all — so no exception edge, no handler entry, and
+-- nothing inside visible to reaching, liveness, taint or any lint. 187 sites in
+-- activerecord/lib, 632 in discourse/app. And BOTH census modes were blind to it: --coverage
+-- reports only forms flow already classifies, and the gap census needs a RECOGNISED REGION
+-- child, which `begin`'s direct-statement children are not.
+test('flow: a ruby begin/rescue opens, and its handler is reachable from the body', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl, cfg = rb_succ('def f(a)\n  begin\n    g(a)\n  rescue ArgumentError => e\n'
+        .. '    h(e)\n  end\nend')
+    local h = head_of(fl, 'begin')
+    ok(h, 'the begin is a CONTROL row, not a folded statement')
+    local body, catch
+    for i, s in ipairs(fl.stmts) do
+        if s.parent == h and s.pol == 'body' then body = body or i end
+        if s.kind == 'catch' then catch = i end
+    end
+    ok(body, 'its body statements are rows of their own')
+    ok(catch, 'and the rescue is a catch row')
+    -- the exception edge: a raise may happen at any body point, so the handler is reachable
+    local reaches = false
+    for _, x in ipairs(cfg.succ[body] or {}) do if x == catch then reaches = true end end
+    ok(reaches, 'the handler is reachable FROM the body: succ={'
+        .. table.concat(cfg.succ[body] or {}, ',') .. '}')
+end)
+
+test('flow: `rescue E => e` BINDS e — it is a def, not a read of nothing', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- the same defect class as the collection-loop variable (CART-0363): a binder the
+    -- grammar spells its own way, which du classed as a use.
+    local fl = rb_succ('def f(a)\n  begin\n    g(a)\n  rescue ArgumentError => e\n'
+        .. '    h(e)\n  end\nend')
+    local catch
+    for i, s in ipairs(fl.stmts) do if s.kind == 'catch' then catch = i end end
+    ok(catch, 'the rescue is a catch row')
+    local d = {}
+    for _, n in ipairs(fl.stmts[catch].def or {}) do d[n] = true end
+    ok(d.e, 'the exception variable is a DEF — got def={'
+        .. table.concat(fl.stmts[catch].def or {}, ',') .. '}')
+    local u = {}
+    for _, n in ipairs(fl.stmts[catch].use or {}) do u[n] = true end
+    ok(not u.e, 'and not also a free use of an outer name')
+end)
+
+test('flow: a ruby `ensure` is the FINALLY pol, named by the clause map not by spelling',
+function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- ★ `ensure` contains no substring the name-based pol fallback could match, so without a
+    -- declared role it landed as a generic 'clause' and successors' TRY branch routed it as
+    -- an ordinary sibling instead of the normal-completion path.
+    local fl = rb_succ('def f(a)\n  begin\n    g(a)\n  rescue => e\n    h(e)\n  else\n'
+        .. '    k(1)\n  ensure\n    z(1)\n  end\n  after\nend')
+    local pols = {}
+    for _, s in ipairs(fl.stmts) do if s.pol then pols[s.pol] = (pols[s.pol] or 0) + 1 end end
+    ok((pols.finally or 0) >= 1, 'the ensure body is a `finally` row: pols = '
+        .. vim.inspect(pols))
+    ok((pols.catch or 0) >= 1, 'the rescue body is a `catch` row')
+    ok((pols['else'] or 0) >= 1, 'and the else arm keeps its own pol')
+end)
+
+test('flow: a TRY head evaluates nothing — a container is not a computation', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- ruby's `begin` hangs its body statements DIRECTLY (no block node), so du walked them
+    -- and the head row claimed to def the exception variable and read every name inside.
+    local fl = rb_succ('def f(a)\n  begin\n    g(a)\n  rescue => e\n    h(e)\n  end\nend')
+    local h = head_of(fl, 'begin')
+    eq(0, #(fl.stmts[h].def or {}), 'the begin head defs nothing')
+    eq(0, #(fl.stmts[h].use or {}), 'and uses nothing: use={'
+        .. table.concat(fl.stmts[h].use or {}, ',') .. '}')
+end)

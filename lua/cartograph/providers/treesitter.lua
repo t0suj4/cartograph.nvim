@@ -555,6 +555,11 @@ M.spec.typescript.preloop = M.spec.javascript.preloop
 -- exhaustiveness. The role lives on `ctrl` so it cannot drift away from it.
 M.spec.ruby.ctrl = { ['if'] = 'if', ['unless'] = 'if', ['while'] = true,
     ['until'] = true, ['case'] = true, ['for'] = true,
+    -- `begin … rescue … ensure … end`, role 'try': its handlers are reachable from any point
+    -- in the body, which is what the TRY branch of successors models. It was `kind=stmt`
+    -- before, so the WHOLE block folded into one row and body + handler had no rows at all
+    -- (CART-0386). 187 sites in activerecord/lib, 632 in discourse/app.
+    ['begin'] = 'try',
     -- THE MODIFIER FORMS ARE THE DOMINANT REMAINDER, not a corner: measured 738 `x if c`
     -- and 311 `x unless c` on rails/activerecord alone, against 1575 rows the block forms
     -- opened. `{condition, body}` where body is a single statement rather than a region —
@@ -570,7 +575,13 @@ M.spec.ruby.body = { ['then'] = true, ['do'] = true }
 -- a MAP, not a set: the value names WHICH clause class, so clause() can dispatch without
 -- two more spec keys. `elsif` is a guard over a body (condition + consequence), `when` is a
 -- switch case (pattern + body), `else` is the plain alternative.
-M.spec.ruby.clause = { ['elsif'] = 'elseif', ['else'] = 'else', ['when'] = 'case' }
+-- ★ THE VALUE NAMES THE ROLE, and for `rescue`/`ensure` it has to: neither spelling contains
+-- a tell the name-substring fallback could match, so `ensure` would have become a generic
+-- 'clause' that successors' TRY branch routes as an ordinary sibling rather than the
+-- normal-completion path. 'catch' also routes `rescue` to the BINDING treatment, so
+-- `rescue E => e` defs `e` instead of reading a variable nothing defines.
+M.spec.ruby.clause = { ['elsif'] = 'elseif', ['else'] = 'else', ['when'] = 'case',
+    ['rescue'] = 'catch', ['ensure'] = 'finally' }
 M.spec.typescript.regime = M.spec.javascript.regime
 -- TS-ONLY declarations (interface/enum) — added to the typescript spec ALONE:
 -- these node types don't exist in the JS grammar, so they can't live in the
