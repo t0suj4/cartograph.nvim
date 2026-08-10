@@ -1315,7 +1315,7 @@ function M.plan(store, fn_id, opts)
             end
         end
     end
-    return plan
+    return txn.protocol(plan, M.edits_for)
 end
 
 --- SUPPLY A PREMISE for one or more holes — the agent-facing half, and the same
@@ -2097,7 +2097,7 @@ end
 
 --- Dry run: (before, after) keyed by file, exactly as every other verb previews.
 function M.preview(store, plan)
-    return txn.dryrun(store, plan, M.edits_for(plan))
+    return txn.dryrun(store, plan)
 end
 
 --- Write it, verified. The spec must LOAD (a syntax gate on our own output — an
@@ -2123,7 +2123,7 @@ function M.apply(store, plan)
             desc = { name = plan.path, from = plan.fn } }
     end
     return txn.execute(store, plan,
-        { name = plan.path, from = plan.fn }, M.edits_for(plan))
+        { name = plan.path, from = plan.fn })
 end
 
 --- Every function a STAGED plan touches, characterized — the arc's first customer.

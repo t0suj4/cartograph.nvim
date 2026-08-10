@@ -603,29 +603,81 @@ end)
 test('foldrank: ranks by the plan\'s own arithmetic, and a refusal is a counted ROW', function ()
     local fr = require 'cartograph.foldrank'
 
-    -- delta is derived from the ops apply would really run: a pure INSERT has to0b < from0b
-    -- and removes nothing; a replacement removes to0b-from0b+1.
-    local plan = { files = { ['a.lua'] = { ops = {
-        { from0b = 10, to0b = 9, new = { 'l1', 'l2', 'l3' } },   -- insert 3, remove 0
-        { from0b = 20, to0b = 23, new = { 'call' } },            -- remove 4, add 1
-    } } } }
-    local added, removed, net = fr.delta(plan)
-    eq(3 + 1, added); eq(4, removed)
-    eq(0, net, 'four lines out, four in — a fold that pays for itself exactly')
+    -- CART-0375: the scorer is txn.delta, derived from the (before, after) TEXT the apply
+    -- would write — the ONE shape every verb shares. Score a real plan end to end.
+    proj { ['m.lua'] =
+        'local M = {}\n\nlocal function fmt_a(x)\n  local y = prep(x)\n  local z = norm(y)\n'
+        .. '  local w = encode(z, \'json\')\n  local o = wrap(w)\n  return o\nend\n\n'
+        .. 'local function fmt_b(a)\n  local b = prep(a)\n  local c = norm(b)\n'
+        .. '  local d = encode(c, \'yaml\')\n  local e = wrap(d)\n  return e\nend\n\nreturn M\n' }
+    local NEARQ = { max_dist = 2, min_rows = 4, min_shared = 3 }
+    local rows, refused = fr.rank(store, NEARQ)
+    ok(#rows > 0, 'the pair plans, so it is a scored row')
+    local r = rows[1]
+    eq(r.added - r.removed, r.net, 'net is the two halves, not an independent guess')
+    -- ★ THE FENCE AGAINST THE OLD DEFECT is that the halves are NON-ZERO. Measured, this
+    -- fold is exactly break-even (+7/-7): folding two five-row copies into a parameterized
+    -- helper pays for itself and no more, which is a real answer and worth stating. The bug
+    -- this replaces also produced net 0 — but with added = removed = 0, because it did not
+    -- recognise the plan at all. A break-even fold and an unrecognised one are the same
+    -- headline and opposite facts, so the halves are what must be asserted.
+    ok(r.added > 0 and r.removed > 0,
+        ('a scored fold MOVED lines (+%d/-%d) — a silent 0/0 is the unrecognised-shape bug')
+            :format(r.added, r.removed))
 
-    -- a plan that CREATES a module counts those lines too, or a cross-file fold reads as
-    -- free when it is the most expensive kind
-    local p2 = { files = {}, create = { file = 'new.lua', lines = { 'a', 'b' } } }
-    local a2, r2, n2 = fr.delta(p2)
-    eq(2, a2); eq(0, r2); eq(2, n2, 'a created module is added lines, not a rounding error')
+    -- and the number is the TEXT's, so it must agree with the diff of what apply writes
+    local cx = require 'cartograph.cloneextract'
+    local pair = clones.near(store, NEARQ)[1]
+    local plan = cx.plan(store, pair)
+    local before, after = cx.preview(store, plan)
+    local nb, na = 0, 0
+    for _, rel in ipairs(plan.touched) do
+        nb = nb + #vim.split(before[rel] == false and '' or before[rel], '\n', { plain = true })
+        na = na + #vim.split(after[rel], '\n', { plain = true })
+    end
+    local added, removed, net = require('cartograph.txn').delta(store, plan)
+    eq(na - nb, net, 'the predicted net IS the line-count difference of the written text')
+    eq(added - removed, net)
 
-    -- and the report states the TOTAL prediction, which is what makes a campaign checkable
+    -- ★ AND A PLAN IT CANNOT SCORE REFUSES, rather than scoring 0. This is the defect that
+    -- made the queue lie: a foreign plan shape read as a zero-cost fold, so 247 clonemerge
+    -- plans would have printed "247 folds, net 0" — a work list that looks complete.
+    local a2, why = require('cartograph.txn').delta(store, { verb = 'invented', touched = {} })
+    eq(nil, a2, 'a plan with no edit_of is UNSCORABLE, not free')
+    ok(tostring(why):find('plan protocol', 1, true), 'and it says why: ' .. tostring(why))
+
+    -- the report states the TOTAL prediction, which is what makes a campaign checkable
     local L = fr.report({ { a = 'x', b = 'y', helper = 'h', net = -3, added = 13,
         removed = 16, nparams = 1, hazards = 0, file = 'f.lua' } },
-        { ['not value-parameterizable'] = 7 })
+        { ['not value-parameterizable'] = 7 },
+        { { a = 'u', b = 'v', why = 'the edit callback RAISED' } })
     ok(L[1]:find('-3', 1, true), 'the headline carries the predicted net: ' .. L[1])
     local joined = table.concat(L, '\n')
     ok(joined:find('REFUSED', 1, true) and joined:find('7', 1, true),
         'and the refusals are COUNTED, not dropped — they are most of the work')
+    ok(joined:find('UNSCORED', 1, true) and joined:find('RAISED', 1, true),
+        'an unpriceable plan is its OWN category, in neither total')
+    ok(refused ~= nil, 'rank still reports the refusal tally')
+end)
+
+-- CART-0375. THE PLAN PROTOCOL: every write verb's plan carries its own edit callback, so a
+-- caller holding a plan can run it without knowing which module built it. That is the whole
+-- prerequisite for a campaign driver, and the fence that keeps it true is this test.
+test('plan protocol: every write verb stamps plan.edit_of', function ()
+    local txn = require 'cartograph.txn'
+    for _, mod in ipairs { 'cloneextract', 'clonemerge', 'extractapply', 'hoistclosure',
+                           'moveapply', 'optapply', 'reorder', 'characterize' } do
+        local m = require('cartograph.' .. mod)
+        eq('function', type(m.edits_for),
+            mod .. ' must expose edits_for under the protocol\'s ONE spelling')
+        -- and it is a pure function of the plan: constructing it must not need a store
+        local ok_, ef = pcall(m.edits_for, { touched = {} })
+        ok(ok_ and type(ef) == 'function',
+            mod .. '.edits_for must build from the plan alone (it is called at PLAN time now)')
+    end
+    -- the ladder refuses a plan that never joined, by name
+    local _, why = txn.execute(store, { verb = 'nope', touched = {} }, 'x')
+    ok(tostring(why):find('plan protocol', 1, true),
+        'and the ladder refuses an unstamped plan rather than calling a nil: ' .. tostring(why))
 end)
 

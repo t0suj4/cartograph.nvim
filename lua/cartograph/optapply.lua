@@ -193,9 +193,9 @@ function M.plan_cse(store, fn_id, opts)
             end
         end
     end
-    return { verb = 'optimize-cse', touched = { rel }, generation = store.generation,
+    return txn.protocol({ verb = 'optimize-cse', touched = { rel }, generation = store.generation,
         stamps = { [rel] = txn.disk_stamp(store.data.root, rel) }, rel = rel,
-        reps = reps, moves = moves, declined = declined }
+        reps = reps, moves = moves, declined = declined }, M.edits_for)
 end
 
 -- ── localize-upvalue apply ───────────────────────────────────────────────────
@@ -342,9 +342,9 @@ function M.plan_localize(store, fn_id, opts)
             end
         end
     end
-    return { verb = 'optimize-localize', touched = { node.file }, generation = store.generation,
+    return txn.protocol({ verb = 'optimize-localize', touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
-        reps = reps, ins = ins, moves = moves, declined = declined }
+        reps = reps, ins = ins, moves = moves, declined = declined }, M.edits_for)
 end
 
 -- POST-condition (repeat/do-while) or const-true loops run at least once → hoisting a
@@ -409,9 +409,9 @@ function M.plan_hoist(store, fn_id, opts)
             end
         end
     end
-    return { verb = 'optimize-hoist', touched = { node.file }, generation = store.generation,
+    return txn.protocol({ verb = 'optimize-hoist', touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
-        dels = dels, ins = ins, moves = moves, declined = declined }
+        dels = dels, ins = ins, moves = moves, declined = declined }, M.edits_for)
 end
 
 --- Build a PRE (partial-redundancy) plan: a pure computation in BOTH arms of an
@@ -468,13 +468,14 @@ function M.plan_pre(store, fn_id, opts)
             end
         end
     end
-    return { verb = 'optimize-pre', touched = { node.file }, generation = store.generation,
+    return txn.protocol({ verb = 'optimize-pre', touched = { node.file }, generation = store.generation,
         stamps = { [node.file] = txn.disk_stamp(store.data.root, node.file) }, rel = node.file,
-        reps = reps, ins = ins, moves = moves, declined = declined }
+        reps = reps, ins = ins, moves = moves, declined = declined }, M.edits_for)
 end
 
--- the edit callback for txn (single file: apply this plan's token-replacements)
-local function edit_of(plan)
+-- the edit callback for txn (single file: apply this plan's token-replacements). Named
+-- M.edits_for like every other verb's, so the protocol has ONE spelling (CART-0375).
+function M.edits_for(plan)
     return function (rel, before)
         if rel ~= plan.rel then return before end
         return txn.edit_file(before, plan.dels or {}, plan.reps or {}, plan.ins or {})
@@ -486,7 +487,7 @@ end
 --- @return table? before
 --- @return table? after
 function M.preview(store, plan)
-    local before, after, err = txn.dryrun(store, plan, edit_of(plan))
+    local before, after, err = txn.dryrun(store, plan)
     if not before then return { 'optapply: ' .. (err or 'dry-run failed') } end
     return txn.difftext(before, after, plan.touched), before, after
 end
@@ -544,7 +545,7 @@ function M.apply(store, plan)
         end
     end
     -- parse-clean on the dry-run result BEFORE committing anything
-    local before, after, derr = txn.dryrun(store, plan, edit_of(plan))
+    local before, after, derr = txn.dryrun(store, plan)
     if not before then return false, derr or 'dry-run failed' end
     if not parses_clean(after[plan.rel], lang_of(plan.rel)) then
         return false, 'the edit would not parse cleanly — refused'
@@ -554,7 +555,7 @@ function M.apply(store, plan)
     local waivers = {}
     for _, m in ipairs(plan.moves or {}) do if m.waived then waivers[#waivers + 1] = m.waived end end
     local desc = plan.verb .. (#waivers > 0 and (' under: ' .. table.concat(waivers, '; ')) or '')
-    local entry, why = txn.execute(store, plan, desc, edit_of(plan))
+    local entry, why = txn.execute(store, plan, desc)
     if not entry then return false, why end
     return true, entry, diff
 end

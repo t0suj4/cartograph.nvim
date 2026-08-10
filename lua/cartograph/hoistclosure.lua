@@ -123,14 +123,14 @@ function M.plan(store, closure_id)
     end
 
     local dst0 = at.sl(anchor.range) -- insert before the outermost enclosing fn
-    return {
+    return txn.protocol({
         verb = 'hoist-closure', generation = store.generation,
         file = node.file, name = short, anchor = anchor.name,
         src_s0 = s0, src_e0 = e0, src_lines = src_lines, dst0 = dst0,
         ref = store.ref_of(closure_id), fn_id = closure_id,
         touched = { node.file },
         stamps = { [node.file] = txn.disk_stamp(root, node.file) },
-    }
+    }, M.edits_for)
 end
 
 --- The edit callback: cut the nested closure and re-insert it (de-indented) before the
@@ -151,7 +151,7 @@ function M.edits_for(plan)
 end
 
 function M.preview(store, plan)
-    return txn.dryrun(store, plan, M.edits_for(plan))
+    return txn.dryrun(store, plan)
 end
 
 function M.apply(store, plan)
@@ -166,7 +166,7 @@ function M.apply(store, plan)
     if not (ok and parser and not parser:parse()[1]:root():has_error()) then
         return nil, 'the hoisted result does not parse — refusing'
     end
-    return txn.execute(store, plan, { name = plan.name, from = plan.anchor }, M.edits_for(plan))
+    return txn.execute(store, plan, { name = plan.name, from = plan.anchor })
 end
 
 return M

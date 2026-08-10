@@ -157,7 +157,7 @@ function M.plan(store, id)
         plan.stamps[f] = disk_stamp(root, f)
     end
     table.sort(plan.touched)
-    return plan
+    return txn.protocol(plan, M.edits_for)
 end
 
 -- one file's edits, bottom-up: the shared implementation in txn
@@ -184,13 +184,13 @@ function M.apply(store, plan)
         survivor = plan.survivor.ref, survivor_name = plan.survivor.name,
         removed = vim.tbl_map(function (r) return r.ref end, plan.removed),
         rewrites = #plan.rewrites,
-    }, M.edits_for(plan))
+    })
 end
 
 --- What :CartographApply would write, nothing written: the dry-run
 --- feeding the pre-apply diff.
 function M.preview(store, plan)
-    return txn.dryrun(store, plan, M.edits_for(plan))
+    return txn.dryrun(store, plan)
 end
 
 --- The verb's edit callback — shared verbatim by apply and preview.

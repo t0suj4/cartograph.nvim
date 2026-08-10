@@ -309,7 +309,7 @@ function M.plan_move(store, fn_id, from_line, to_line, through_line)
     local src_lines = {}
     for i = src_s0, src_e0 do src_lines[#src_lines + 1] = flines[i + 1] end
 
-    return {
+    return require('cartograph.txn').protocol({
         verb = 'reorder', generation = store.generation,
         file = rel_file, fn = m.node.name,
         src_s0 = src_s0, src_e0 = src_e0, dst0 = dst0, src_lines = src_lines,
@@ -318,7 +318,7 @@ function M.plan_move(store, fn_id, from_line, to_line, through_line)
         ref = store.ref_of(fn_id), fn_id = fn_id,
         touched = { rel_file },
         stamps = { [rel_file] = require('cartograph.txn').disk_stamp(root, rel_file) },
-    }
+    }, M.edits_for)
 end
 
 --- The edit callback: cut the source line range and re-insert it before the destination.
@@ -336,7 +336,7 @@ function M.edits_for(plan)
 end
 
 function M.preview(store, plan)
-    return require('cartograph.txn').dryrun(store, plan, M.edits_for(plan))
+    return require('cartograph.txn').dryrun(store, plan)
 end
 
 function M.apply(store, plan)
@@ -364,8 +364,7 @@ function M.apply(store, plan)
             return nil, 'the reordered result does not parse — refusing'
         end
     end
-    return txn.execute(store, plan, { fn = plan.fn, moved = plan.from_line .. '→' .. plan.to_line },
-        M.edits_for(plan))
+    return txn.execute(store, plan, { fn = plan.fn, moved = plan.from_line .. '→' .. plan.to_line })
 end
 
 return M

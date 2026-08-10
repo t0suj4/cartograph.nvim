@@ -93,9 +93,46 @@ function M.edit_file(text, dels, reps, ins)
     return table.concat(lines, '\n')
 end
 
+-- ★ THE PLAN PROTOCOL'S EDIT HALF (CART-0375). Every write verb's plan already carries the
+-- same header — { verb, generation, touched, stamps, hazards? } — and every one runs the same
+-- ladder here. The ONE thing that was NOT on the plan was `edit_of`, the
+-- (rel, before, all_before) -> after callback each verb kept as its own closure and handed in
+-- at the call site. A caller holding a plan therefore could not run it without knowing which
+-- module built it, and that is the whole blocker for a generic driver.
+--
+-- Now `plan.edit_of` is part of the protocol: every builder stamps it, and dryrun/execute
+-- default to it. An explicit argument still wins (a caller may substitute one), and a plan
+-- carrying neither REFUSES BY NAME rather than calling a nil — a verb that has not joined the
+-- protocol should say so here, not crash somewhere downstream.
+local function resolve_edit(plan, edit_of)
+    edit_of = edit_of or plan.edit_of
+    if type(edit_of) ~= 'function' then
+        return nil, ('the plan carries no edit_of (verb %s) — this verb has not joined the '
+            .. 'plan protocol'):format(tostring(plan.verb))
+    end
+    return edit_of
+end
+
+--- Stamp a freshly built plan with its own edit callback and hand it back — the one line
+--- every builder ends with, so joining the protocol is a single call rather than a convention
+--- to remember. `edits_for` must be a PURE function of the plan (every verb's is): the
+--- callback is now constructed at PLAN time and invoked at APPLY time, so anything it read
+--- from the store or the disk at construction would silently freeze here.
+---@param plan table
+---@param edits_for fun(plan: table): fun(rel: string, before: string|boolean, all: table): string?
+---@return table plan
+function M.protocol(plan, edits_for)
+    plan.edit_of = edits_for(plan)
+    return plan
+end
+
 --- Dry-run a plan: the same before-content read and edit callback the
 --- apply uses, but nothing written. Returns (before_map, after_map).
+--- `edit_of` is optional — the plan's own is used when it is omitted.
 function M.dryrun(store, plan, edit_of)
+    local nope
+    edit_of, nope = resolve_edit(plan, edit_of)
+    if not edit_of then return nil, nil, nope end
     local root = store.data.root
     local before = {}
     for _, rel in ipairs(plan.touched) do
@@ -113,6 +150,53 @@ function M.dryrun(store, plan, edit_of)
         after[rel] = edit_of(rel, before[rel], before)
     end
     return before, after
+end
+
+--- ★ THE PLAN PROTOCOL'S SCORING HALF (CART-0375): what this plan would do to the line count,
+--- for ANY verb. Derived from the same (before, after) text the apply writes, so there is
+--- exactly ONE shape to understand — text — instead of one per verb.
+---
+--- WHY THIS LIVES HERE AND NOT IN THE REPORT. `foldrank.delta` used to read
+--- `plan.files[rel].ops`, which is cloneextract's shape, and SILENTLY RETURNED 0 for all 247
+--- clonemerge plans — a fold queue that would have printed "247 folds, net 0", a work list
+--- that looks complete and is worthless. A scorer that does not recognise a plan must REFUSE,
+--- never score it zero: an absence rendered as a number is the same defect class as an absence
+--- rendered as silence. Hence (nil, why) on every failure path, and a pcall — CART-0372 is
+--- proof at least one verb's edit callback raises on real input, and a raise inside the scorer
+--- must be a refusal row, not a dead queue.
+---
+--- Returns (added, removed, net) — net < 0 means the tree shrinks — or (nil, why).
+---@param store table
+---@param plan table
+function M.delta(store, plan)
+    local edit_of, nope = resolve_edit(plan, nil)
+    if not edit_of then return nil, nope or 'no edit_of' end
+    -- dryrun reads DISK NOW, so a stale plan would score fresh text against stale offsets and
+    -- report a confident number for an edit that can no longer be applied.
+    if plan.generation and store.generation ~= plan.generation then
+        return nil, ('the plan is stale (gen %d -> %d) — re-plan')
+            :format(plan.generation, store.generation)
+    end
+    local ok, before, after, derr = pcall(M.dryrun, store, plan, edit_of)
+    if not ok then
+        return nil, 'the edit callback RAISED: ' .. tostring(before):gsub('^.*/', '')
+    end
+    if not before or not after then return nil, derr or 'the dry run produced nothing' end
+    local added, removed = 0, 0
+    for _, rel in ipairs(plan.touched) do
+        local b, a = before[rel], after[rel]
+        -- a callback that declines a file returns it unchanged (or nil, as characterize does)
+        if a ~= nil then
+            local bt = b == false and '' or b   -- `false` = a file the plan CREATES
+            if bt ~= a then
+                for _, h in ipairs(vim.diff(bt, a, { result_type = 'indices' }) or {}) do
+                    removed = removed + h[2]    -- count_a: lines the hunk drops
+                    added = added + h[4]        -- count_b: lines the hunk introduces
+                end
+            end
+        end
+    end
+    return added, removed, added - removed
 end
 
 --- A unified diff over (before, after) maps — what :CartographApply
@@ -172,6 +256,9 @@ end
 --- touched files back through refresh — the same machinery every save
 --- uses. Returns the journal entry, or nil + why.
 function M.execute(store, plan, desc, edit_of)
+    local nope
+    edit_of, nope = resolve_edit(plan, edit_of)
+    if not edit_of then return nil, nope end
     local root = store.data.root
     local before = {}
     for _, rel in ipairs(plan.touched) do

@@ -38,7 +38,7 @@ local txn = require 'cartograph.txn'
 --- own fields ride VERBATIM so extract.apply can consume the txn plan directly.
 local function stage(store, node, exp, how)
     local root = store.data.root
-    return {
+    return txn.protocol({
         verb = 'extract-fn', generation = store.generation,
         file = node.file, fn = node.name or '?', fn_id = node.id,
         ref = store.ref_of(node.id), how = how,
@@ -48,7 +48,7 @@ local function stage(store, node, exp, how)
         hazards = exp.hazards,
         touched = { node.file },
         stamps = { [node.file] = txn.disk_stamp(root, node.file) },
-    }
+    }, M.edits_for)
 end
 
 -- the enclosing function's frame, shared by every entry point: 1-based first
@@ -178,7 +178,7 @@ function M.edits_for(plan)
 end
 
 function M.preview(store, plan)
-    return txn.dryrun(store, plan, M.edits_for(plan))
+    return txn.dryrun(store, plan)
 end
 
 function M.apply(store, plan)
@@ -200,7 +200,7 @@ function M.apply(store, plan)
         return nil, 'the extracted result does not parse — refusing'
     end
     return txn.execute(store, plan,
-        { name = plan.name, from = plan.fn }, M.edits_for(plan))
+        { name = plan.name, from = plan.fn })
 end
 
 return M

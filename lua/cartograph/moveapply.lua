@@ -246,7 +246,7 @@ local function collect(store, ids, dest, plan)
         plan.stamps[f] = txn.disk_stamp(root, f)
     end
     table.sort(plan.touched)
-    return plan
+    return txn.protocol(plan, M.edits_for)
 end
 
 --- Build the MOVE plan from the staged move-set + destination.
@@ -387,14 +387,14 @@ function M.apply(store, plan)
     return txn.execute(store, plan, {
         moves = departed,
         dest = plan.dest,
-    }, M.edits_for(plan))
+    })
 end
 
 --- What :CartographApply would write, nothing written: the dry-run
 --- feeding the pre-apply diff.
 function M.preview(store, plan)
     local txn = require 'cartograph.txn'
-    return txn.dryrun(store, plan, M.edits_for(plan))
+    return txn.dryrun(store, plan)
 end
 
 --- The verb's edit callback — shared verbatim by apply and preview.

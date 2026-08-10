@@ -4,7 +4,7 @@
 --
 -- WHY THE JOIN IS THE WHOLE IDEA. The clone tiers rank by SIZE, which answers "what is the
 -- biggest duplication" — a question nobody asked. Under a stated intent to FOLD, the
--- question is "what should I fold next", and the answer is the plan's own arithmetic:
+-- question is "what should I fold next", and the answer is the plan's own prediction:
 -- lines removed minus lines added, hazards to verify, parameters introduced. Measured on
 -- this tree the two orders disagree, which is the argument for the report existing.
 --
@@ -19,43 +19,41 @@
 -- cheap wins and get none.
 --
 -- ★ THE DELTA IS A PREDICTION AND IT IS CHECKABLE. `net` is what the plan says it would do
--- to the line count, derived from the ops the apply path will really run — not an estimate.
+-- to the line count, derived by `txn.delta` from the (before, after) TEXT the apply path will
+-- really write — not an estimate, and not a per-verb formula that can misread a plan shape.
 -- If a fold campaign's total predicted `net` does not show up in the tree after applying, the
 -- campaign was wrong, which is the property [[cartograph-goal-vm-linker]] asks an intent to
 -- have. Nothing here writes; this is the ranking, not the verb.
 
 local M = {}
 
---- What a plan would do to the line count. Ops are { from0b, to0b, new }: a pure INSERT has
---- to0b < from0b (0 lines removed), a replacement removes to0b-from0b+1. Returns
---- (added, removed, net) where net < 0 means the tree shrinks.
----@param plan table
----@return integer added, integer removed, integer net
-function M.delta(plan)
-    local added, removed = 0, 0
-    for _, fe in pairs(plan.files or {}) do
-        for _, op in ipairs(fe.ops or {}) do
-            added = added + #(op.new or {})
-            if op.to0b >= op.from0b then removed = removed + (op.to0b - op.from0b + 1) end
-        end
-    end
-    if plan.create then added = added + #(plan.create.lines or {}) end
-    return added, removed, added - removed
-end
+-- ★ THE SCORER USED TO LIVE HERE, AND THAT WAS THE BUG (CART-0375). It read
+-- `plan.files[rel].ops` — cloneextract's shape — and so returned a confident 0 for every
+-- plan of every OTHER verb. Measured: all 247 clonemerge plans scored zero, which would have
+-- printed "247 folds, net 0": a work list that looks complete and is worthless. The owner is
+-- now `txn.delta`, which derives the number from the (before, after) TEXT the apply would
+-- write, so there is one shape to understand instead of one per verb — and a plan it cannot
+-- score REFUSES rather than scoring it zero.
 
 --- Rank near-clone pairs by what folding them would COST.
---- Returns (rows, refused) where a row is
+--- Returns (rows, refused, unscored) where a row is
 ---   { a, b, helper, net, added, removed, nparams, hazards, xfile }
---- sorted by net ascending (most shrinkage first), and `refused` is
----   { [reason] = count } — the honest other half.
+--- sorted by net ascending (most shrinkage first), `refused` is
+---   { [reason] = count } — the honest other half — and `unscored` is the third,
+--- narrower category: pairs the verb PLANNED but the scorer could not price. Those are
+--- neither wins nor refusals, and folding them into either would mis-state the queue.
 ---@param store table
 ---@param opts table|nil  { max_dist = 2, limit = <pairs to examine> }
 function M.rank(store, opts)
     opts = opts or {}
     local clones = require 'cartograph.clones'
     local ce = require 'cartograph.cloneextract'
-    local pairs_ = clones.near(store, { max_dist = opts.max_dist or 2 })
-    local rows, refused = {}, {}
+    local txn = require 'cartograph.txn'
+    -- the discovery thresholds ride through, so the queue can be widened the same way the
+    -- near TIER can — a queue that can only be asked one question is not a queue
+    local pairs_ = clones.near(store, { max_dist = opts.max_dist or 2,
+        min_rows = opts.min_rows, min_shared = opts.min_shared })
+    local rows, refused, unscored = {}, {}, {}
     for i, p in ipairs(pairs_) do
         if opts.limit and i > opts.limit then break end
         -- ★ pcall, BECAUSE A VERB THAT THROWS MUST NOT KILL THE QUEUE. Measured: plan
@@ -80,11 +78,18 @@ function M.rank(store, opts)
             elseif ok2 then why = (why2 or why) .. '  [survives a supplied destination]' end
         end
         if plan then
-            local added, removed, net = M.delta(plan)
-            rows[#rows + 1] = { a = p.a and p.a.name, b = p.b and p.b.name,
-                file = p.a and p.a.file, helper = plan.helper, net = net,
-                added = added, removed = removed, nparams = plan.nparams or 0,
-                hazards = #(plan.hazards or {}), xfile = plan.xfile or false }
+            local added, removed, net = txn.delta(store, plan)
+            if not added then
+                -- a plan we cannot price is NOT a zero-cost fold. Carry it as its own
+                -- category so the queue's total stays honest about what it left out.
+                unscored[#unscored + 1] = { a = p.a and p.a.name, b = p.b and p.b.name,
+                    why = tostring(removed) }
+            else
+                rows[#rows + 1] = { a = p.a and p.a.name, b = p.b and p.b.name,
+                    file = p.a and p.a.file, helper = plan.helper, net = net,
+                    added = added, removed = removed, nparams = plan.nparams or 0,
+                    hazards = #(plan.hazards or {}), xfile = plan.xfile or false }
+            end
         else
             -- COLLAPSE THE VARIABLE PART of a reason so the tally groups: several refusals
             -- embed the subject's own name ("`ser` body not liftable: …"), and counting
@@ -98,18 +103,18 @@ function M.rank(store, opts)
         if x.hazards ~= y.hazards then return x.hazards < y.hazards end -- then least to verify
         return tostring(x.helper) < tostring(y.helper)          -- total, so a rank is a fact
     end)
-    return rows, refused
+    return rows, refused, unscored
 end
 
 --- Human-readable report lines.
-function M.report(rows, refused)
+function M.report(rows, refused, unscored)
     local L = {}
     local planned_net = 0
     for _, r in ipairs(rows) do planned_net = planned_net + r.net end
     L[#L + 1] = ('fold queue — %d pair(s) a verb will plan, predicted net %+d line(s)')
         :format(#rows, planned_net)
     L[#L + 1] = '(ranked by what the FOLD costs, not by how big the duplication looks;'
-    L[#L + 1] = ' net is the plan\'s own arithmetic over the ops apply would run)'
+    L[#L + 1] = ' net is the line-count difference of the TEXT apply would write)'
     L[#L + 1] = ''
     for i, r in ipairs(rows) do
         L[#L + 1] = ('%2d. %+4d  %-22s %s <-> %s%s%s'):format(i, r.net, r.helper or '?',
@@ -128,6 +133,16 @@ function M.report(rows, refused)
         L[#L + 1] = 'A reason marked [survives a supplied destination] was RE-ASKED with one'
         L[#L + 1] = 'and is the BINDING constraint, not the first thing the verb wanted.'
         for _, e in ipairs(ord) do L[#L + 1] = ('  %4d  %s'):format(e.c, e.w) end
+    end
+    if #(unscored or {}) > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('UNSCORED — %d pair(s) the verb PLANNED but the scorer could not price,')
+            :format(#unscored)
+        L[#L + 1] = 'so they are in NEITHER total above. A plan that cannot be priced is not a'
+        L[#L + 1] = 'free fold: silently scoring it 0 is how a queue reads as complete (CART-0375).'
+        for _, u in ipairs(unscored) do
+            L[#L + 1] = ('       %s <-> %s: %s'):format(tostring(u.a), tostring(u.b), u.why)
+        end
     end
     return L
 end

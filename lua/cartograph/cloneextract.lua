@@ -364,7 +364,7 @@ function M.plan(store, pair, opts)
     for _, f in ipairs(plan.touched) do
         if not (plan.creates and plan.creates[f]) then plan.stamps[f] = txn.disk_stamp(root, f) end
     end
-    return plan
+    return txn.protocol(plan, M.edits_for)
 end
 
 --- The edit callback (pure splice) — shared by preview and apply.
@@ -388,7 +388,7 @@ function M.edits_for(plan)
 end
 
 function M.preview(store, plan)
-    return txn.dryrun(store, plan, M.edits_for(plan))
+    return txn.dryrun(store, plan)
 end
 
 function M.apply(store, plan)
@@ -427,7 +427,7 @@ function M.apply(store, plan)
     return txn.execute(store, plan, {
         helper = plan.helper, xfile = plan.xfile,
         a = plan.a.ref, b = plan.b.ref,
-    }, M.edits_for(plan))
+    })
 end
 
 return M
