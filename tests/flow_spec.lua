@@ -1474,3 +1474,82 @@ test('flow: the switch class is language-aware, and `pattern` is NOT a base name
         ok(not cls.ctrl.pattern, '`pattern` must never be a control type')
     end
 end)
+
+-- ★ CART-0390. JS/TS SWITCH BODIES WERE 100% OPAQUE — java's situation before CART-0363, one
+-- language over. js spells it `switch_statement > switch_body > switch_case / switch_default`
+-- and flow classified none of the three, so the body was emitted by the generic fallback as
+-- ONE plain row and every statement inside folded into it: a two-arm switch with four
+-- statements produced exactly TWO rows.
+test('flow: a js switch opens its arms, and their statements are rows', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fn, src = parse_fn('function f(a) {\n  switch (a) {\n    case 1: g(1); h(1); break;\n'
+        .. '    default: g(2);\n  }\n}', 'javascript')
+    local fl = flow.build(fn, src, { ctrl = tsspec.javascript.ctrl,
+        preloop = tsspec.javascript.preloop, body = tsspec.javascript.body,
+        clause = tsspec.javascript.clause, regime = tsspec.javascript.regime })
+    local h = head_of(fl, 'switch_statement')
+    ok(h, 'the switch is a control row')
+    local ncase, nstmt = 0, 0
+    for _, s in ipairs(fl.stmts) do
+        if s.kind == 'case' then ncase = ncase + 1 end
+        if (s.t or '') == 'expression_statement' then nstmt = nstmt + 1 end
+    end
+    eq(2, ncase, 'both arms are case rows (the case and the default)')
+    eq(3, nstmt, 'and all three statements inside them are rows of their own')
+    for _, s in ipairs(fl.stmts) do
+        ok((s.t or '') ~= 'switch_body',
+            'the switch BODY is a region, not a statement row that swallows the arms')
+    end
+end)
+
+test('flow: a DEFAULT arm is the one with no label, in every language', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    -- ★ The CASE branch used to stamp pol='case' on EVERY arm, so a C/java/php `default:` was
+    -- indistinguishable from a case arm and the exhaustiveness rule could not fire for those
+    -- languages at all. A default arm is decidable without another name set: it carries no
+    -- `value`, no `pattern` and no label child.
+    local fn, src = parse_fn('function f(a) {\n before();\n switch (a) {\n  case 1: g(1); break;\n'
+        .. '  default: g(2);\n }\n after();\n}', 'javascript')
+    local cfg_ = { ctrl = tsspec.javascript.ctrl, preloop = tsspec.javascript.preloop,
+        body = tsspec.javascript.body, clause = tsspec.javascript.clause,
+        regime = tsspec.javascript.regime }
+    local fl = flow.build(fn, src, cfg_)
+    local pols = {}
+    for _, s in ipairs(fl.stmts) do if s.kind == 'case' then pols[s.pol or '?'] = true end end
+    ok(pols['case'] and pols['default'],
+        'the labelled arm is `case` and the unlabelled one is `default`')
+
+    -- and that is what makes the switch exhaustive: no edge past it
+    local succ = flow.successors(fl).succ
+    local h = head_of(fl, 'switch_statement')
+    local after
+    for i, s in ipairs(fl.stmts) do if i > h and s.parent == 0 then after = after or i end end
+    local skips = false
+    for _, x in ipairs(succ[h] or {}) do if x == after then skips = true end end
+    ok(not skips, 'a switch WITH a default cannot be skipped: succ={'
+        .. table.concat(succ[h] or {}, ',') .. '}')
+
+    -- without a default it must still fall through
+    local fn2, src2 = parse_fn('function f(a) {\n before();\n switch (a) {\n  case 1: g(1); break;\n }\n'
+        .. ' after();\n}', 'javascript')
+    local fl2 = flow.build(fn2, src2, cfg_)
+    local succ2 = flow.successors(fl2).succ
+    local h2 = head_of(fl2, 'switch_statement')
+    local after2
+    for i, s in ipairs(fl2.stmts) do if i > h2 and s.parent == 0 then after2 = after2 or i end end
+    local falls = false
+    for _, x in ipairs(succ2[h2] or {}) do if x == after2 then falls = true end end
+    ok(falls, 'with no default, no arm need match, so it still falls through')
+end)
+
+test('flow: the js switch spelling stays in the SPEC — switch_case is zig and odin too', function ()
+    local ts_ = require 'cartograph.providers.treesitter'
+    ok(ts_.spec.javascript.body.switch_body, 'js declares its own body spelling')
+    ok(ts_.spec.javascript.clause.switch_case, 'and its own arm spelling')
+    -- ★ NOT a base entry: `switch_case` is ALSO zig and odin (checked across all 17 grammars),
+    -- so a base set would have silently re-modelled two other languages' switches. Same
+    -- lesson as `pattern`, which is in six.
+    ok(not flow.classes({}).clause.switch_case, 'switch_case is NOT in the base clause set')
+    ok(not flow.classes({}).body.switch_body, 'switch_body is NOT in the base body set')
+    ok(flow.classes(ts_.spec.typescript or {}).clause.switch_case, 'typescript inherits it')
+end)

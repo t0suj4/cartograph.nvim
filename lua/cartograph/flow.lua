@@ -780,9 +780,15 @@ function M.build(fnnode, src, cfg)
                     for _, nm in ipairs(xu) do if not us[nm] then us[nm] = true; u[#u + 1] = nm end end
                 end
             end
+            -- ★ A DEFAULT ARM IS THE ONE WITH NO LABEL, and that is decidable HERE without
+            -- another name set: `default:` / `switch_default` / go's `default_case` all carry
+            -- no value and no pattern. Marking it distinctly is what lets successors know a
+            -- switch is EXHAUSTIVE — the CASE branch used to stamp pol='case' on every arm,
+            -- so a C/java/php `default:` was indistinguishable from a case arm and the
+            -- exhaustiveness rule could not fire for those languages at all (CART-0390).
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'case', parent = parent,
-                pol = 'case', def = d, use = u, t = node:type() }
+                pol = (#labels == 0) and 'default' or 'case', def = d, use = u, t = node:type() }
             if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'casehead') end
             for c in node:iter_children() do
                 if c:named() and not islabel[c:id()] and not COMMENT[c:type()] then

@@ -535,8 +535,23 @@ M.spec.javascript.regime = { lexical_declaration = 'block' } -- let/const; var =
 -- feasible and the back-edge wires to the head.
 M.spec.javascript.ctrl = { for_in_statement = true }   -- for…of AND for…in share the type
 M.spec.javascript.preloop = { for_in_statement = true }
+-- ★ THE JS SWITCH BODY WAS 100% OPAQUE (CART-0390) — java's situation before CART-0363, one
+-- language over. js spells it `switch_statement > switch_body > switch_case / switch_default`,
+-- and flow classified NONE of the three, so the body was emitted by the generic fallback as
+-- ONE plain row and every statement inside folded into it. Measured: a two-arm switch with
+-- four statements produced exactly TWO rows.
+-- ★ IN THE SPEC, NOT THE BASE SETS, and that distinction is the whole `pattern` lesson again:
+-- `switch_body`/`switch_default` are js-family only, but `switch_case` IS ALSO ZIG AND ODIN
+-- (checked via language.inspect across all 17 grammars). A base entry would have silently
+-- re-modelled two other languages' switches. The seam exists for exactly this.
+M.spec.javascript.body = { switch_body = true }
+M.spec.javascript.clause = { switch_case = 'case', switch_default = 'case' }
+-- ('case' for BOTH: the arm-vs-default distinction is made by whether the arm has a LABEL,
+--  not by its spelling, so `switch_default` gets a proper case row like C's `default_statement`)
 M.spec.typescript.ctrl = M.spec.javascript.ctrl
 M.spec.typescript.preloop = M.spec.javascript.preloop
+M.spec.typescript.body = M.spec.javascript.body
+M.spec.typescript.clause = M.spec.javascript.clause
 
 -- RUBY (CART-0363). Verified by parsing each form and reading the grammar's own names:
 --   if / unless   {condition, consequence -> `then`, alternative -> `elsif` | `else`}
