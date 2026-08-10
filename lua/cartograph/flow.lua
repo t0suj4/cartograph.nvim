@@ -101,6 +101,10 @@ local CATCH = { catch_clause = true, except_clause = true }
 -- switch CASES: a label (`value` field = a use) guarding a body of statements
 -- that must be REGIONED as rows (not folded into the case row). C/php/java
 -- `case_statement`/`default_statement`, go `expression_case`/`default_case`.
+-- IF-shaped control: the successors branch that detects an EXHAUSTIVE false arm (an
+-- else/elseif) and withholds the skip edge. Declared HERE, beside the other class sets and
+-- above M.classes, because a local declared after a function body is invisible inside it.
+local IF_T = { if_statement = true, if_expression = true }
 local CASE = { case_statement = true, default_statement = true,
     expression_case = true, default_case = true,
     switch_block_statement_group = true, switch_rule = true } -- java, both switch forms
@@ -460,12 +464,25 @@ function M.classes(cfg)
             elseif v == 'case' then case_[k] = true end
         end
     end
+    -- ★ `ctrl` IS A MAP FROM NODE TYPE TO ROLE, not a bare set (CART-0382). `clause` set the
+    -- precedent and it is the right one here: a ROLE that lives on `ctrl` cannot drift away
+    -- from it. A sibling `ifs` key would have created a pair that can disagree — a type in
+    -- `ifs` but not `ctrl` never emits as control, so the entry dies silently — whereas
+    -- `ifs ⊆ ctrl` is true BY CONSTRUCTION when the role is the value. Every consumer reads
+    -- `ctrl` for truthiness only (`cls.ctrl[t]`, `cfg.ctrl[t]`, `pairs`), verified by grep,
+    -- so a string value is compatible everywhere. `true` = a control statement with no
+    -- special role; 'if' = the successors IF branch (exhaustive-arm detection).
+    local ifs = IF_T
+    if cfg.ctrl then
+        ifs = extend_set(IF_T, {})
+        for k, v in pairs(cfg.ctrl) do if v == 'if' then ifs[k] = true end end
+    end
     return {
         ctrl = extend_set(CTRL, cfg.ctrl),
         preloop = extend_set(PRELOOP, cfg.preloop),
         body = extend_set(BODY, cfg.body),
         clause = extend_set(CLAUSE, cfg.clause),
-        elseif_ = elseif_, case = case_, post = POST,
+        elseif_ = elseif_, case = case_, post = POST, ifs = ifs,
     }
 end
 
@@ -777,7 +794,11 @@ function M.build(fnnode, src, cfg)
     -- A sequence has no parameters: a chunk has no `parameters` field, so
     -- param_names would return {} anyway — skipped explicitly because asking a
     -- non-function for its parameters is a category error, not a lucky nil.
-    return { stmts = stmts, cfg = cfg, preloop = PRELOOP_,
+    -- ★ THE WHOLE CLASS TABLE RIDES ON THE RECORD, not just `preloop` (CART-0382). Two
+    -- persistence paths for two classes is exactly how the preloop bug happened: build
+    -- stashed one field, the store dropped it, and the CFG phases fell back to base. One
+    -- table, one accessor, one fallback.
+    return { stmts = stmts, cfg = cfg, preloop = PRELOOP_, cls = cls,
         params = (not cfg.seq)
             and param_names(fnnode, src, cfg.pfield, cfg.method or false, cfg.params_of) or {} }
 end
@@ -790,6 +811,7 @@ end
 -- functions and cannot see a build-local (CART-0363). Falls back to the base for a record
 -- built before the field existed, or by a caller that passed no spec.
 local function PRELOOP_OF(flow) return (flow and flow.preloop) or PRELOOP end
+local function IFS_OF(flow) return (flow and flow.cls and flow.cls.ifs) or IF_T end
 
 function M.coarse(flow)
     local stmts = flow.stmts
@@ -848,7 +870,6 @@ function M.coarse(flow)
 end
 
 -- ── CFG phase 2: successor edges over the fine rows ─────────────────────────
-local IF_T = { if_statement = true, if_expression = true }
 local RET_T = { return_statement = true, throw_statement = true,
     raise_statement = true }
 
@@ -976,7 +997,7 @@ function M.successors(flow)
                 for pol, rr in pairs(kids) do -- python try/except `else` etc.: sound over-approx
                     if pol ~= 'body' and pol ~= 'catch' and pol ~= 'finally' then add(r, wire(rr, after2, brk, cont, lbls)) end
                 end
-            elseif kids and IF_T[s.kind] then
+            elseif kids and IFS_OF(flow)[s.kind] then
                 add(r, wire(kids['body'], nxt, brk, cont, lbls))
                 local hasfalse = false
                 for _, pol in ipairs({ 'elseif', 'else' }) do
@@ -1410,12 +1431,13 @@ function M.record(n)
     else
         rec = n.flow
     end
-    if rec and not rec.preloop then
+    if rec and not rec.cls then
         local c = classes_for_node(n)
         if c then
             -- never MUTATE the stored record (it rides into the cache): copy the thin header
-            if col then rec.preloop = c.preloop
-            else rec = { stmts = rec.stmts, params = rec.params, preloop = c.preloop } end
+            if col then rec.cls, rec.preloop = c, c.preloop
+            else rec = { stmts = rec.stmts, params = rec.params,
+                preloop = c.preloop, cls = c } end
         end
     end
     return rec

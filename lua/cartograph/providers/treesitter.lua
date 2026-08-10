@@ -546,7 +546,14 @@ M.spec.typescript.preloop = M.spec.javascript.preloop
 -- ★ ALL FOUR CLASSES ARE NEEDED. `ctrl` alone opens the loop and then folds its whole body
 -- into one row, because `then`/`do` are not `block` and so are not recognised as regions.
 -- Ruby opened ZERO control structures before this: 2219 opaque on rails/activerecord alone.
-M.spec.ruby.ctrl = { ['if'] = true, ['unless'] = true, ['while'] = true,
+-- ★ A MAP FROM NODE TYPE TO ROLE, not a bare set (CART-0382). `true` = a control statement
+-- with no special role; 'if' = successors' IF branch, which detects an EXHAUSTIVE false arm
+-- and WITHHOLDS the skip edge. Ruby's `if` is spelled `if`, so it never matched flow's base
+-- IF_T (`if_statement`/`if_expression`) and fell to the generic branch, which adds an edge to
+-- every child AND to the next statement — so `if a … else … end` claimed control could skip
+-- BOTH arms. Sound (over-approximate) but false, and optapply's PRE is built on exactly that
+-- exhaustiveness. The role lives on `ctrl` so it cannot drift away from it.
+M.spec.ruby.ctrl = { ['if'] = 'if', ['unless'] = 'if', ['while'] = true,
     ['until'] = true, ['case'] = true, ['for'] = true,
     -- THE MODIFIER FORMS ARE THE DOMINANT REMAINDER, not a corner: measured 738 `x if c`
     -- and 311 `x unless c` on rails/activerecord alone, against 1575 rows the block forms
@@ -554,7 +561,7 @@ M.spec.ruby.ctrl = { ['if'] = true, ['unless'] = true, ['while'] = true,
     -- the emit fallback handles that, which is the same path a C-family unbraced body takes.
     -- cfg.lua already models both in its COND set (and unless_modifier in INVERTED), so this
     -- brings the ROW model level with the dominance model rather than ahead of it.
-    if_modifier = true, unless_modifier = true }
+    if_modifier = 'if', unless_modifier = 'if' }
 -- PRE-condition: the test runs before the body, so a zero-trip skip is feasible and the
 -- back-edge wires to the head. `until` is a while with an INVERTED condition, which cfg.lua
 -- already models (its INVERTED set) — the loop STRUCTURE is identical, so it belongs here.

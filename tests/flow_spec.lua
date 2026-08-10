@@ -1238,3 +1238,73 @@ test('flow: a stored record still classifies a SPEC-added pre-condition loop', f
     ok(seen, 'the fixture extracted a function with flow')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ★ CART-0382. THE CFG PHASES READ BASE SETS THE SPEC SEAM NEVER REACHED. `M.successors` is
+-- a SEPARATE function from `M.build`, and it matched IF-shaped control against a base
+-- `IF_T = { if_statement, if_expression }`. Ruby's is spelled `if` / `unless`, so it never
+-- matched and fell to the generic branch, which adds an edge to every child AND to the next
+-- statement — claiming control could skip BOTH arms of an if/else. Sound (an
+-- over-approximation) but false, and optapply's PRE rests on exactly that exhaustiveness.
+-- The role now lives ON `ctrl` as a MAP value, so `ifs ⊆ ctrl` holds by construction.
+local function rb_succ(code)
+    local fn, src = parse_fn(code, 'ruby')
+    ok(fn, 'the ruby fixture parses to a method')
+    local fl = flow.build(fn, src, { ctrl = tsspec.ruby.ctrl, preloop = tsspec.ruby.preloop,
+        body = tsspec.ruby.body, clause = tsspec.ruby.clause,
+        body_of = tsspec.ruby.body_of, params_of = tsspec.ruby.params_of,
+        regime = tsspec.ruby.regime })
+    return fl, flow.successors(fl)
+end
+
+test('flow: a ruby if/else is EXHAUSTIVE — no edge skipping both arms', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl, cfg = rb_succ('def f(a)\n  before\n  if a\n    g(1)\n  else\n    g(2)\n  end\n  after\nend')
+    local h = head_of(fl, 'if')
+    ok(h, 'the if is a control row')
+    -- the row AFTER the if at top level: control must reach it only THROUGH an arm
+    local after
+    for i, s in ipairs(fl.stmts) do if i > h and s.parent == 0 then after = after or i end end
+    ok(after, 'there is a statement after the if')
+    local skips = false
+    for _, x in ipairs(cfg.succ[h] or {}) do if x == after then skips = true end end
+    ok(not skips, 'an if WITH an else cannot fall through: succ={'
+        .. table.concat(cfg.succ[h] or {}, ',') .. '}')
+    eq(2, #(cfg.succ[h] or {}), 'exactly the two arms')
+end)
+
+test('flow: a ruby if with NO else still falls through, and an elsif carries it', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- ★ THE CASE THE FIX COULD SILENTLY BREAK. Withholding the skip edge is only correct
+    -- when a false arm EXISTS; with none, the condition must still reach the next statement.
+    local fl, cfg = rb_succ('def f(a)\n  before\n  if a\n    g(1)\n  end\n  after\nend')
+    local h = head_of(fl, 'if')
+    local after
+    for i, s in ipairs(fl.stmts) do if i > h and s.parent == 0 then after = after or i end end
+    local falls = false
+    for _, x in ipairs(cfg.succ[h] or {}) do if x == after then falls = true end end
+    ok(falls, 'no else → the condition may skip the body: succ={'
+        .. table.concat(cfg.succ[h] or {}, ',') .. '}')
+
+    -- and with an elsif but no else, the fall-through routes THROUGH the elsif guard
+    local fl2, cfg2 = rb_succ('def f(a, b)\n  before\n  if a\n    g(1)\n  elsif b\n    g(2)\n  end\n  after\nend')
+    local h2, e2 = head_of(fl2, 'if'), head_of(fl2, 'elsif')
+    ok(h2 and e2, 'both the if and the elsif are rows')
+    eq('elseif', fl2.stmts[e2].pol, 'the elsif is the if\'s FALSE arm, by pol')
+    local reaches = false
+    for _, x in ipairs(cfg2.succ[h2] or {}) do if x == e2 then reaches = true end end
+    ok(reaches, 'the if reaches the elsif guard')
+    ok(#(cfg2.succ[e2] or {}) >= 2, 'and the elsif itself carries the fall-through: succ={'
+        .. table.concat(cfg2.succ[e2] or {}, ',') .. '}')
+end)
+
+test('flow: the ctrl ROLE map keeps ifs a subset of ctrl, by construction', function ()
+    local cls = flow.classes({ ctrl = { myif = 'if', myplain = true } })
+    ok(cls.ifs.myif, 'a role-tagged entry joins the IF class')
+    ok(cls.ctrl.myif and cls.ctrl.myplain, 'and BOTH remain control statements')
+    ok(not cls.ifs.myplain, 'a plain entry does not')
+    for t in pairs(cls.ifs) do
+        ok(cls.ctrl[t], t .. ' is in ifs, so it must also be in ctrl — no drift pair')
+    end
+    -- the base classes are untouched when a language declares nothing
+    ok(flow.classes({}).ifs.if_statement, 'the base IF set survives an empty cfg')
+end)
