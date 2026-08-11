@@ -2618,6 +2618,22 @@ nvim --headless -u NONE -l tools/gate.lua server --save
 # checks flow.coarse still reproduces it — a pure regression oracle. Pins a
 # per-corpus labeled census; fails on any class delta.
 nvim --headless -u NONE -l tools/dfgate.lua cpp
+# ROW CENSUS: the FINE model's gate, and the one nothing else could give. `struct`
+# gates nodes/edges/calls and opening a control form mints neither; `dfpar` gates
+# the COARSE projection, which groups a control row together with its body and so
+# reads the same whether the loop opened or not. Measured, 2522 rows and 988 opened
+# control structures could appear and vanish with every other column green — which
+# is how a whole language's switch could be opaque for a long time. Runs as the
+# matrix `rows` column on the shared extract; a form that stops opening drives its
+# own key to zero, so the diff NAMES it (`for_range_loop 257→0 (GONE)`).
+nvim --headless -u NONE -l tools/matrix.lua cppmodern --cols rows
+# CONTROL CENSUS: which control forms does flow fail to open, which can this corpus
+# WITNESS at all, and what is being folded? Three modes, three different blind spots
+# — each of which has cost a real bug. Asks the tree structurally and reads
+# flow.classes(), never a private copy of the answer.
+nvim --headless -u NONE -l tools/ctrlcensus.lua ~/git/elasticsearch/libs --lang java
+nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --coverage   # can it gate this form?
+nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --folded     # one row hiding many
 # --show <class>: the divergence EXPLORER — dump a class's instances with source
 # + the flow={}/df={} sets (the fix-side view); no class lists the classes.
 nvim --headless -u NONE -l tools/dfgate.lua rust --show flow-over-collects
