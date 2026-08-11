@@ -186,18 +186,38 @@ M.EXPECTED = {
     python = { rows = 10754, opened = 2090, opaque = 0, catch = 158, elif_clause = 61,
         for_in_statement = 1, for_statement = 279, if_statement = 1441, try_statement = 144,
         while_statement = 6 },
+    -- ── recalib @ CART-0363 part B, all THREE ruby corpora ──────────────────────────────
+    -- ATTACHED BLOCKS (`do…end` / `{…}`) open, and CART-0397 restored the tail of every
+    -- NESTED elsif chain. Both are ROWS THAT DID NOT EXIST BEFORE, so every number here
+    -- rises and none falls — the review question ("did a form's opened count go DOWN, or a
+    -- `<form>:opaque` count go UP?") is answered by the shape of the delta itself.
+    -- rails: rows 10257->13852 (+35%), opened 2135->3609. `do_block`+`block` = 970 new
+    -- control rows; the other ~500 newly opened are control statements that live INSIDE a
+    -- block and so had no rows at all (if 797->977, if_modifier 952->1172, elsif 50->75).
+    -- `elsif:opaque` 0->1 is the review question firing, and CHECKED: cached_counting.rb:78
+    -- is a genuinely EMPTY arm (`elsif PG::ReadOnlySqlTransaction === ex` whose body is a
+    -- comment), not a form that went dark.
     -- recalib @ CART-0387: a case SUBJECT and a when PATTERN are not rows (10324 -> 10257)
-    rails = { rows = 10257, opened = 2135, opaque = 14, begin = 27, case = 15, catch = 48,
-        ['catch:opaque'] = 14, elsif = 50, ['if'] = 797, if_modifier = 952, unless = 41,
-        unless_modifier = 157, when = 42, ['while'] = 6 },
-    rspec = { rows = 262, opened = 6, opaque = 0, ['if'] = 1, if_modifier = 5 },
+    rails = { rows = 13852, opened = 3609, opaque = 22, begin = 35, block = 462, case = 17,
+        catch = 65, ['catch:opaque'] = 21, do_block = 508, elsif = 75, ['elsif:opaque'] = 1,
+        ['if'] = 977, if_modifier = 1172, unless = 54, unless_modifier = 190, when = 47,
+        ['while'] = 7 },
+    -- ★ rspec IS THE BLOCK-DENSEST CORPUS WE OWN, and it shows what the gap actually was:
+    -- an RSpec suite is `describe … do` / `it … do` all the way down, and it opened SIX
+    -- control structures across 123 functions. Now 33, of which 25 are the blocks.
+    rspec = { rows = 328, opened = 33, opaque = 0, block = 16, do_block = 9, ['if'] = 1,
+        if_modifier = 7 },
     -- recalib @ CART-0387: rows 5893->5672. A ruby `case` SUBJECT and a `when` PATTERN are
     -- not statements that execute, so they stopped being rows. `when:opaque` 0->3 is the
     -- review question firing and CHECKED: all three are genuinely EMPTY arms
     -- (`when Integer` / `when nil` with no body, a deliberate ruby no-op), not a regression.
-    ruby = { rows = 5672, opened = 1112, opaque = 7, ['when:opaque'] = 3, begin = 26, case = 60, catch = 48,
-        ['catch:opaque'] = 4, elsif = 56, ['if'] = 390, if_modifier = 224, unless = 50,
-        unless_modifier = 105, ['until'] = 2, when = 140, ['while'] = 11 },
+    -- …then @ part B: rows 5672->7745 (+37%), opened 1112->2027. `block:opaque` 0->1 is
+    -- CHECKED the same way — group.rb:112 is `Dir::Tmpname.create([…]) { }`, a literally
+    -- empty brace block, which is exactly what an honest opaque count is FOR.
+    ruby = { rows = 7745, opened = 2027, opaque = 11, ['when:opaque'] = 3, begin = 40,
+        block = 313, ['block:opaque'] = 1, case = 70, catch = 65, ['catch:opaque'] = 7,
+        do_block = 310, elsif = 78, ['if'] = 465, if_modifier = 298, unless = 69,
+        unless_modifier = 138, ['until'] = 4, when = 163, ['while'] = 14 },
     rust = { rows = 10986, opened = 1263, opaque = 1, case_statement = 9, for_expression = 146,
         if_expression = 685, if_statement = 1, loop_expression = 9, match_block = 190,
         match_expression = 190, while_expression = 33, ['while_expression:opaque'] = 1 },

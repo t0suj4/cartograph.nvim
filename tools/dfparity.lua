@@ -195,7 +195,20 @@ M.EXPECTED = {
     -- def={zz} use={a,q,w} where js's read use={a}). df now over-collects MORE because flow
     -- got MORE PRECISE. Sampled: every new instance is an `if`/`each` head whose flow def/use
     -- is the condition alone while the legacy walk still attributes the body.
-    ruby = { ['df-over-collects'] = 72, ['flow-over-collects'] = 31,
+    -- 72->61 @ CART-0363 part B, and DOWN is the notable part: the divergence SHRANK. Two
+    -- movers net out that way. (a) ATTACHED BLOCKS: a `|k, v|` block parameter is now BOUND,
+    -- so it leaves df's `use` while flow has neither — the coarse projection deliberately
+    -- does not take the binder DEF either, because it is scope-blind and a binding it cannot
+    -- scope would shadow every same-named method call in the rest of the method (37 calls
+    -- measured false; the reasoning lives at the skip in flow.M.coarse). (b) CART-0397:
+    -- ruby's NESTED elsif chain was truncated at the first link, so flow was MISSING names
+    -- df had — parameter_filter.rb:109 had lost a whole `extract_exact_line_key` guard.
+    -- ★ THAT SECOND HALF IS THE ONE TO REMEMBER: a df-over-collects instance is not always
+    -- df being coarse; it is sometimes FLOW HAVING NO ROW AT ALL, and the only way to tell
+    -- is to read the sample. flow-over-collects / partition-mismatch / line-skew are all
+    -- UNMOVED, so the single mover stays attributable — which is why the `for..in` binder
+    -- (CART-0393) and the loop modifiers (CART-0394) were filed rather than folded in here.
+    ruby = { ['df-over-collects'] = 61, ['flow-over-collects'] = 31,
         ['partition-mismatch'] = 5, ['line-skew'] = 22 }, -- recalib @ CART-0386: ruby `begin`/`rescue`/`ensure` was 100% OPAQUE (one row, body and handler with no rows at all) and now opens. flow-over-collects 0->31 = the EXCEPTION VARIABLE, which flow binds (`rescue E => e` defs `e`) and the legacy df walk does not; df-over-collects 15->45 is the SAME fact on the other axis, because `e` left `use` as it entered `def`. line-skew 1->22 and partition-mismatch 0->5 = a method-level `ensure` (`def … ensure … end`, no explicit begin) whose statements now get rows at THEIR OWN lines instead of folding into the `ensure` keyword's row. Direction checked: flow > df in 5/5, flow < df zero times. Prior: 2->15 @ part A (ruby's control OPENED, so df's flat walk under-collects inside opened bodies). Was {} (perfect parity)
     -- ghost = the JS scale corpus; df-over-collects (closure-leak) dominates. The
     -- old partition/disjoint/flow-over-collects residual was the re-parse .ts-

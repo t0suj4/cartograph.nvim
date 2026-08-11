@@ -73,7 +73,13 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 130 -- v130: du's stop_body read the BASE body/clause tables, so a ruby control
+M.VERSION = 131 -- v131: RUBY'S ATTACHED BLOCKS — `do…end` / `{…}` — open at all now, the
+               -- form 18-20% of ruby statements sit inside (CART-0363 part B). A whole block
+               -- was ONE row and its parameter was a free USE. Carries a second extraction
+               -- change: the expression IR held a SIXTH copy of the body/clause sets, so a
+               -- ruby control head's expr harvested its whole BODY while the row's own
+               -- def/use correctly stopped at the boundary.
+               -- v130: du's stop_body read the BASE body/clause tables, so a ruby control
                -- HEAD harvested its entire subtree's def/use (CART-0363).
                -- v129: JS/TS SWITCH BODIES WERE 100% OPAQUE — `switch_body` was one plain
                -- row and every arm folded into it (CART-0390).

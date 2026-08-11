@@ -293,8 +293,9 @@ end
 -- and CATCH before it; this is the FIFTH consumer holding a base set the spec never reached.
 local function du(root, src, stop_body, ids, mods, FN, stopset)
     ids = ids or DFID
-    if not root then return {}, {}, false, {} end
+    if not root then return {}, {}, false, {}, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
+    local blks = {} -- ATTACHED BLOCKS skipped on the way (see the 'always' stop below)
     local rmw, rmwseen = {}, {} -- read-modify-write LHS names (see the branch below)
     local sus = SUSPEND[root:type()] or false
     local function rec(node, defpos)
@@ -351,8 +352,25 @@ local function du(root, src, stop_body, ids, mods, FN, stopset)
               -- it invented a read of `const` from lua's `local x <const>` (CART-0234).
               -- Language-declared, because the node name means `a.b` in python.
               if mods and mods[ct] then goto skipchild end
-              if not FN[ct]
-                and not (stop_body and (stopset or DU_STOP)[ct]) then
+              -- ★ AN 'always' STOP IS AN ATTACHED BLOCK, AND du IS WHAT FINDS IT (part B).
+              -- A ruby `xs.each do |x| … end` hangs its block off a `call` that can sit
+              -- ANYWHERE inside the statement — `q = xs.map { … }` puts it under an
+              -- assignment's RHS — so the block cannot be found by asking the ROW's node for
+              -- a field. It has to be found by a walk, and this walk already runs, under
+              -- exactly the stop rules block emission needs (nested functions excluded,
+              -- sub-regions excluded when this is a control head). A SECOND walk over the
+              -- same nodes under the same stops is precisely what `sus` was fused in here to
+              -- stop being — measured ~33% of flow.build, itself 43-57% of the profile.
+              -- So the blocks handed back are BY CONSTRUCTION exactly the ones this row's
+              -- def/use excluded: one source of truth, and EVERY du caller (plain row,
+              -- control head, elseif, catch, case label, post-loop cond) gets block emission
+              -- from one line instead of each having to re-derive which stops to mirror.
+              -- `true` (body/clause) still stops only for a control head; 'always' stops
+              -- unconditionally, because an attached block is never part of the statement
+              -- carrying it, control head or not.
+              local st = (stopset or DU_STOP)[ct]
+              if st == 'always' then blks[#blks + 1] = c; goto skipchild end
+              if not FN[ct] and not (stop_body and st) then
                 if SUSPEND[ct] then sus = true end -- fused suspension detection
                 local cdefpos
                 if k == 1 then cdefpos = same(c, asgleft)
@@ -399,7 +417,7 @@ local function du(root, src, stop_body, ids, mods, FN, stopset)
         if not dseen[nm] and not useen[nm] then useen[nm] = true; use[#use + 1] = nm end
     end
     rec(root, false)
-    return def, use, sus, rmw
+    return def, use, sus, rmw, blks
 end
 
 
@@ -407,6 +425,17 @@ end
 -- for coarse-dep PARITY: the pfield container's leaves; php `variable_name`
 -- drops its `$`; a method seeds 'self' first; nested declarators (C params,
 -- pointers) descend to the first name. `pfield` comes from the language cfg.
+-- ★ A DESTRUCTURING BINDER BINDS EVERY NAME IN IT, NOT THE FIRST ONE. The wrapper rule
+-- below ("take the first identifier child") is right for `*rest` / `k: 1` / `x = f(z)`,
+-- where the first identifier IS the binder and the rest is a default expression — but for
+-- ruby's `|(a, b)|` it drops `b`, which then reads as a FREE USE of a name nothing defines.
+-- That is the same defect class as the collection-loop variable, the exception variable and
+-- the block parameter (CART-0363): a phantom free variable, believed by every consumer of
+-- the row. `destructured_parameter` is ruby-only across all 17 grammars (checked via
+-- language.inspect), the same criterion the `rescue` and cpp range-for entries use, so it is
+-- safe as a base entry. It also reaches ruby METHOD params (`def m((a, b))`), deliberately:
+-- one rule for one language's binder, not one for blocks and another for methods.
+local DESTRUCT = { destructured_parameter = true }
 local function param_names(fn, src, pfield, method, params_of)
     local out = method and { 'self' } or {}
     -- params_of: the POSITIONAL twin of pfield, for a grammar that does not label the
@@ -419,6 +448,16 @@ local function param_names(fn, src, pfield, method, params_of)
                 out[#out + 1] = txt(c, src)
             elseif t == 'variable_name' then
                 out[#out + 1] = txt(c, src):gsub('^%$', '')
+            elseif DESTRUCT[t] then
+                -- every name inside, at any nesting (`|(a, (b, c))|`)
+                local function collect(n)
+                    for id in n:iter_children() do
+                        local it = id:type()
+                        if it == 'identifier' then out[#out + 1] = txt(id, src)
+                        elseif DESTRUCT[it] then collect(id) end
+                    end
+                end
+                collect(c)
             elseif c:named() then
                 for id in c:iter_children() do
                     local it = id:type()
@@ -436,6 +475,39 @@ local function param_names(fn, src, pfield, method, params_of)
         end
     end
     return out
+end
+
+--- ★ THE BINDER RULE, EXPORTED, BECAUSE TWO SIDES HAVE TO AGREE ABOUT IT (CART-0363 part B).
+--- A block head's `|x, opt = f(z)|` splits into names it DEFINES and expressions it READS,
+--- and du and the expression harvest must draw that line in the same place or the expr
+--- self-gate fires. Measured before this existed: the head's expr read `x`, which du had
+--- correctly called a def — and the identical divergence is live today for java's
+--- enhanced-for and js's for-of loop variables, hidden because the gate's caller iterates
+--- only `kind == 'function'` and never sees a METHOD (filed separately).
+--- `names` is param_names' answer, unchanged. `values` is everything a binder WRAPPER holds
+--- after its first identifier — a default expression, which really is read.
+---@return string[] names, table[] values  (tree-sitter nodes)
+function M.binders(node, src, field)
+    local names = param_names(node, src, field, false)
+    local values = {}
+    local ps = field and node:field(field)[1]
+    if ps then
+        for c in ps:iter_children() do
+            local t = c:type()
+            if c:named() and t ~= 'identifier' and not DESTRUCT[t] then
+                local bound = false -- the FIRST identifier is the binder; the rest is a value
+                for x in c:iter_children() do
+                    if x:named() then
+                        -- @langs-ok reached only for a language that DECLARES a `blocks`
+                        -- spec key — ruby alone, whose binder leaves are `identifier`
+                        if not bound and x:type() == 'identifier' then bound = true
+                        else values[#values + 1] = x end
+                    end
+                end
+            end
+        end
+    end
+    return names, values
 end
 
 -- the function body region (php `body` field / lua block child)
@@ -534,6 +606,13 @@ function M.classes(cfg)
             return L
         end)(),
         try = try_, catch = catch_, clausemap = cfg.clause, switch = switch_,
+        -- ★ ATTACHED BLOCKS — the fifth class, and the only one with NO base member
+        -- (CART-0363 part B). A map <block node type> -> <field holding its binder list>,
+        -- because the value is needed anyway and a sibling key would be a drift pair
+        -- (the `ctrl`-role lesson). Ruby is the only language we support that has the
+        -- form at all; `block` is in EIGHT grammars — and in lua it IS the region
+        -- container — so this can only ever live in the spec, never in a base set.
+        blocks = cfg.blocks,
     }
 end
 
@@ -566,6 +645,18 @@ function M.build(fnnode, src, cfg)
     local DUSTOP = {}
     for t in pairs(BODY_) do DUSTOP[t] = true end
     for t in pairs(CLAUSE_) do DUSTOP[t] = true end
+    -- ATTACHED BLOCKS stop du UNCONDITIONALLY ('always'), control head or not, and come back
+    -- as its fifth return so the caller can emit them as rows of their own. Written LAST so
+    -- the stronger stop wins if a type were ever in both.
+    -- ★ M.coarse NEEDS NO CHANGE HERE, because it does not call du at all — it re-aggregates
+    -- the FINE rows into their top-level ancestor, so a block's names leave the call row and
+    -- arrive back on the coarse row through the block's new child rows. It DOES need one
+    -- change of its own, and the opposite of what looked right at first: the block
+    -- parameter's DEF is skipped there. Coarse is scope-blind by contract and cannot hold a
+    -- block-scoped binding, and admitting one made 37 call sites claim a false refusal. The
+    -- reasoning is written where the skip is.
+    local BLOCKS_ = cls.blocks
+    if BLOCKS_ then for t in pairs(BLOCKS_) do DUSTOP[t] = 'always' end end
     local FN = cfg.fn_types or FN_FALLBACK -- the nested-function stop (CART-0308)
     -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
     -- BINDING MODIFIERS (CART-0234): per-language node types to skip entirely, because
@@ -579,6 +670,15 @@ function M.build(fnnode, src, cfg)
     end
     local stmts = {}
     local emit, region, clause -- fwd
+
+    -- ★ ONE LINE PER du CALLER, AND THAT IS THE POINT (CART-0363 part B). du hands back the
+    -- attached blocks it declined to walk (its fifth return), so every row that owns a
+    -- def/use — plain statement, control head, elseif guard, rescue header, case label,
+    -- post-loop condition — gives its blocks rows here without re-deriving which stops to
+    -- mirror. `blks` is nil only for a du call this build predates; treated as empty.
+    local function emit_blocks(blks, idx)
+        for _, b in ipairs(blks or {}) do emit(b, idx, 'body') end
+    end
 
     -- ── the INIT CLAUSE of a three-part `for` (CART-0359) ────────────────────────
     -- `for (let i = 0; i < n; i++)` has a header clause that runs ONCE, BEFORE the
@@ -660,7 +760,7 @@ function M.build(fnnode, src, cfg)
         if finit then emit(finit, parent, pol) end
         local idx = #stmts + 1
         local sb = CTRL_[t] and true or false
-        local d, u, sus, rmw = du(node, src, sb, ids, mods, FN, DUSTOP)
+        local d, u, sus, rmw, blks = du(node, src, sb, ids, mods, FN, DUSTOP)
         stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL_[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
@@ -677,6 +777,12 @@ function M.build(fnnode, src, cfg)
         -- the body/clause boundary du stops at); plain rows here. The hot ingest path
         -- never even builds the closure.
         if cfg.expr and not CTRL_[t] then stmts[idx].expr = cfg.expr(node, src) end
+        -- ATTACHED BLOCKS, emitted as rows UNDER this one: a ruby `do…end` / `{…}` is a
+        -- region of statements that the statement carrying it merely PASSES — 18-20% of
+        -- ruby statements sit inside one, and until now the whole block was folded into the
+        -- call row. Emitted HERE, before any body/clause rows below, because a block in a
+        -- CONDITION (`while xs.any? { … }`) runs before the body does.
+        emit_blocks(blks, idx)
         if CTRL_[t] then
             -- ★ THE SWITCHED SUBJECT IS THE HEAD'S CONDITION, NOT A BODY STATEMENT. go spells
             -- it `value` and so does ruby's `case`; without this the subject was emitted as a
@@ -708,6 +814,35 @@ function M.build(fnnode, src, cfg)
             -- walked them and the head row claimed to def the exception variable and read
             -- every name in the block. A container is not a computation.
             if TRY_[t] then stmts[idx].def, stmts[idx].use = {}, {} end
+            -- ★ A BLOCK HEAD BINDS ITS PARAMETERS — and reading that off du would have
+            -- fabricated defs OR invented free uses, which is why it is read off
+            -- param_names instead (CART-0363 part B). `|x|` was a USE until now: the third
+            -- phantom free variable after the collection-loop variable and the exception
+            -- variable, and the same defect class — a read of a name nothing defines,
+            -- believed by liveness, reaching and narrowing alike.
+            -- THE TWO WAYS TO GET IT WRONG, both avoided here. Marking the whole
+            -- `block_parameters` subtree def-position (the LOOPVAR/WRAP route) turns
+            -- `|opt = f(z)|` into defs of `f` and `z` — a FABRICATED def, the worse of the
+            -- two failure modes. Taking only each wrapper's first identifier (the plain
+            -- param_names rule) drops `b` from `|(a, b)|` and leaves it a free use — hence
+            -- the DESTRUCT recursion added there. What is left over after subtracting the
+            -- binders is a genuine READ: a default expression is evaluated, so `f` and `z`
+            -- stay uses of the head row.
+            local bf = BLOCKS_ and BLOCKS_[t]
+            if bf then
+                local pd = param_names(node, src, bf, false)
+                local bound = {}
+                for _, nm in ipairs(pd) do bound[nm] = true end
+                local u2 = {}
+                for _, nm in ipairs(stmts[idx].use) do
+                    if not bound[nm] then u2[#u2 + 1] = nm end
+                end
+                stmts[idx].def, stmts[idx].use = pd, u2
+                -- (the COARSE projection must not take these defs — see M.coarse, which
+                --  recognises them from `cls.blocks[s.t]` rather than a stored flag: a
+                --  field would have to survive the fold, and a set the store drops is
+                --  precisely how PRELOOP broke)
+            end
             -- ★ A HEADER PART IS NOT A BODY STATEMENT. A for-of's `left`/`right` are fielded
             -- children that are neither the condition nor the body, and the fallback below
             -- emits any such child as a body row — so `for (const x of xs)` gained two
@@ -733,10 +868,12 @@ function M.build(fnnode, src, cfg)
                 end
             end
             if POST[t] and cond then
-                local cd, cu = du(cond, src, false, ids, mods, FN, DUSTOP)
-                stmts[#stmts + 1] = { l = line(cond), c = startcol(cond), kind = 'cond',
+                local cd, cu, _, _, cblk = du(cond, src, false, ids, mods, FN, DUSTOP)
+                local ci = #stmts + 1
+                stmts[ci] = { l = line(cond), c = startcol(cond), kind = 'cond',
                     parent = idx, pol = 'cond', def = cd, use = cu,
                     expr = cfg.expr and cfg.expr(cond, src, 'cond') or nil }
+                emit_blocks(cblk, ci)
             end
         end
         return idx -- the HEAD row of this statement, for the labeled path above
@@ -787,14 +924,14 @@ function M.build(fnnode, src, cfg)
             end
             local islabel = {}
             for _, x in ipairs(labels) do islabel[x:id()] = true end
-            local vf = labels[1]
-            local d, u = {}, {}
+            local d, u, lblk = {}, {}, {}
             do -- def/use over EVERY label, deduped
                 local ds, us = {}, {}
                 for _, x in ipairs(labels) do
-                    local xd, xu = du(x, src, false, ids, mods, FN, DUSTOP)
+                    local xd, xu, _, _, xb = du(x, src, false, ids, mods, FN, DUSTOP)
                     for _, nm in ipairs(xd) do if not ds[nm] then ds[nm] = true; d[#d + 1] = nm end end
                     for _, nm in ipairs(xu) do if not us[nm] then us[nm] = true; u[#u + 1] = nm end end
+                    for _, b in ipairs(xb or {}) do lblk[#lblk + 1] = b end
                 end
             end
             -- ★ A DEFAULT ARM IS THE ONE WITH NO LABEL, and that is decidable HERE without
@@ -807,6 +944,7 @@ function M.build(fnnode, src, cfg)
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'case', parent = parent,
                 pol = (#labels == 0) and 'default' or 'case', def = d, use = u, t = node:type() }
             if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'casehead') end
+            emit_blocks(lblk, idx)  -- a block inside a case LABEL (`when xs.any? { … }`)
             for c in node:iter_children() do
                 if c:named() and not islabel[c:id()] and not COMMENT[c:type()] then
                     if BODY_[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
@@ -819,32 +957,54 @@ function M.build(fnnode, src, cfg)
             -- row (condition only, stop_body) and REGION its consequence as rows
             -- (was folded — the body statements were invisible). lua
             -- `elseif_statement` / python `elif_clause`: body under `consequence`.
-            local d, u = du(node, src, true, ids, mods, FN, DUSTOP)
+            local d, u, _, _, eblk = du(node, src, true, ids, mods, FN, DUSTOP)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = node:type(), parent = parent,
                 pol = 'elseif', def = d, use = u, t = node:type() }
             if cfg.expr then stmts[idx].expr = cfg.expr(node, src, 'ctrlhead') end
+            emit_blocks(eblk, idx)  -- a block inside the guard (`elsif xs.any? { … }`)
+            -- ★ AN elsif CHAIN THAT NESTS WAS TRUNCATED AT THE FIRST LINK (found while
+            -- measuring part B; shipped by part A). lua, python and bash make their
+            -- elseif/elif clauses SIBLINGS of the `if`, so the loop that emits the if's
+            -- children walks the whole chain. RUBY NESTS: an `elsif` carries the next
+            -- `elsif`/`else` as its own `alternative`, and this branch regioned the
+            -- CONSEQUENCE and returned — so everything past the first `elsif` had NO ROWS.
+            -- MEASURED on `if a … elsif b … elsif c … else … end`: ruby produced 4 rows
+            -- where python's identical chain produced 7. Real code hit it — activesupport's
+            -- parameter_filter lost a whole `elsif` guard and its `else`.
+            -- ★ BY THE `alternative` FIELD, NEVER BY "any CLAUSE-typed child". The first cut
+            -- routed every CLAUSE child and BROKE BASH, because `case_statement` is in the
+            -- base CLAUSE set as C/php's switch ARM while bash spells its whole `case … esac`
+            -- CONTROL statement that way — so a bash `case` inside an elif started emitting
+            -- as a switch arm of the enclosing `if`. Same name-collision lesson as `pattern`
+            -- and `block`: ask the grammar for the FIELD that means "the rest of the chain".
+            -- ROUTED TO `parent`, NOT `idx`: the chain is semantically FLAT, and flat under
+            -- the `if` head is exactly what lua/python/bash already produce and what
+            -- successors' exhaustive-arm rule reads.
             local cons = node:field('consequence')[1] or node:field('body')[1]
+            local alt = node:field('alternative')[1]
             if cons and BODY_[cons:type()] then
                 region(cons, idx, 'body')
             else -- fallback: region non-condition named children
                 local condn = node:field('condition')[1]
                 for c in node:iter_children() do
-                    if c:named() and c ~= condn and not COMMENT[c:type()] then
+                    if c:named() and c ~= condn and c ~= alt and not COMMENT[c:type()] then
                         if BODY_[c:type()] then region(c, idx, 'body') else emit(c, idx, 'body') end
                     end
                 end
             end
+            if alt and CLAUSE_[alt:type()] then clause(alt, parent) end
             return
         end
         if CATCH_[node:type()] then
             -- the header binds the exception var (DEF) and references the type
             -- (use); the body regions under it. Without this the caught var is
             -- unbound in the fine model and df's spurious use of it is unmatched.
-            local d, u = du(node, src, true, ids, mods, FN, DUSTOP)
+            local d, u, _, _, kblk = du(node, src, true, ids, mods, FN, DUSTOP)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'catch', parent = parent,
                 pol = 'catch', def = d, use = u }
+            emit_blocks(kblk, idx)
             -- python `except_clause` has no `body` field (the block is an unnamed
             -- child); fall back to the first BODY-type child.
             local b = node:field('body')[1]
@@ -932,6 +1092,10 @@ end
 
 function M.coarse(flow)
     local stmts = flow.stmts
+    -- attached-block heads, DERIVED from the record's class table rather than read off a
+    -- per-row flag: a flag would have to survive the columnar fold, and a set the store
+    -- silently drops is exactly how PRELOOP broke (CART-0382). M.record attaches `cls`.
+    local BLK = flow.cls and flow.cls.blocks
     -- map each row to its top-level ancestor (parent==0)
     local top = {}
     for i, s in ipairs(stmts) do
@@ -953,8 +1117,27 @@ function M.coarse(flow)
                 su[t][nm] = true; use[t][#use[t] + 1] = nm
             end
         end
-        for _, nm in ipairs(s.def) do
-            if not sd[t][nm] then sd[t][nm] = true; def[t][#def[t] + 1] = nm end
+        -- ★ A BINDING THIS PROJECTION CANNOT SCOPE MUST NOT SHADOW (CART-0363 part B).
+        -- An attached block's parameter is scoped to the BLOCK, and coarse is by contract
+        -- "deliberately flat and scope-BLIND" — so a `|value|` admitted here becomes a
+        -- function-level binding, and every later bare `value` call in the method reads as
+        -- a call through a local. MEASURED: 37 calls across rails + activesupport moved
+        -- `unresolved` -> `refused (fn-value)`, and the two read by hand are both FALSE —
+        -- `Duration.new(value + …)` sits AFTER the block that binds `value`, and
+        -- `message_pack_pool.packer do |packer|` has the parameter shadowing the very
+        -- method the block is passed to. An unresolved call says "I do not know"; a refusal
+        -- says "it is a call through a local", which is a POSITIVE CLAIM and here a wrong
+        -- one — the failure mode this repo names everywhere else.
+        -- ★ THE TRADE IS DELIBERATE AND NAMED: the block parameter goes back to being a
+        -- free USE at the COARSE level, which is exactly parity with legacy df (it has no
+        -- such def either) — and the FINE model, the model of record, still binds it. So
+        -- the truth is not lost, only kept out of a projection that cannot hold it.
+        -- Its USES stay: `|opt = f(z)|` really does read f and z. Lifts when ruby block
+        -- scope lands (CART-0396), which is where this belongs.
+        if not (BLK and s.t and BLK[s.t]) then
+            for _, nm in ipairs(s.def) do
+                if not sd[t][nm] then sd[t][nm] = true; def[t][#def[t] + 1] = nm end
+            end
         end
     end
     local out = {}

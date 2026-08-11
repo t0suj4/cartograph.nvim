@@ -124,6 +124,11 @@ M.SLOTS = {
     -- and the two REGION classes, needed the moment a language's containers are not
     -- `block`: ruby regions with `then`/`do` and sub-regions with `elsif`/`else`/`when`.
     body = 'ANALYSIS', clause = 'ANALYSIS',
+    -- ATTACHED BLOCKS (part B): <block node type> -> <binder-list field>. Ruby's `do…end`
+    -- and `{…}` hang off a call ANYWHERE in a statement, so du stops at them and hands
+    -- them back to be emitted as rows of their own. `block` is in eight grammars, which
+    -- is exactly why this is a spec key and not a base set.
+    blocks = 'ANALYSIS',
     df_ids = 'ANALYSIS', merge_equations = 'ANALYSIS',
     binding_modifiers = 'ANALYSIS', -- declaration decorations that read nothing: lua
                                     -- `<const>`/`<close>`, whose node name collides with

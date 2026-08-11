@@ -1006,6 +1006,7 @@ local function rb(code)
     local fn, src = parse_fn(code, 'ruby')
     ok(fn, 'the ruby fixture parses to a method')
     return flow.build(fn, src, { ctrl = tsspec.ruby.ctrl, preloop = tsspec.ruby.preloop,
+        blocks = tsspec.ruby.blocks,
         body = tsspec.ruby.body, clause = tsspec.ruby.clause,
         body_of = tsspec.ruby.body_of, params_of = tsspec.ruby.params_of,
         pfield = tsspec.ruby.params_field, regime = tsspec.ruby.regime })
@@ -1040,6 +1041,169 @@ test('flow: a ruby if regions its then-branch, and elsif/else are CLAUSES', func
     end
     ok((pols.body or 0) >= 2, 'the then-branch statements are body rows: ' .. (pols.body or 0))
     ok(head_of(fl, 'elsif'), 'the elsif is its own clause row, not folded into the if')
+end)
+
+test('flow: a ruby elsif CHAIN does not stop at the first link', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- ★ RUBY NESTS ITS elsif; lua and python make theirs SIBLINGS of the `if`. So the loop
+    -- that walks the if's children covers their whole chain and covered exactly one link of
+    -- ruby's — everything past the first `elsif` had NO ROWS AT ALL. Measured before the
+    -- fix: 4 rows here where python's identical chain produced 7. Found by sampling a
+    -- df-parity delta, not by any gate: rows that were never emitted cannot be counted.
+    local fl = rb('def f(a, b, c)\n  if a\n    g(1)\n  elsif b\n    g(2)\n'
+        .. '  elsif c\n    g(3)\n  else\n    g(4)\n  end\nend')
+    local h = head_of(fl, 'if')
+    local n_elsif, n_else = 0, 0
+    for _, s in ipairs(fl.stmts) do
+        if s.t == 'elsif' then n_elsif = n_elsif + 1 end
+        if s.pol == 'else' then n_else = n_else + 1 end
+    end
+    eq(2, n_elsif, 'BOTH elsif guards are rows')
+    eq(1, n_else, 'and the else arm survives the chain')
+    eq(7, #fl.stmts, 'seven rows, the same as python for the same chain')
+    -- FLAT under the if head, which is the shape lua/python produce and successors reads
+    for _, s in ipairs(fl.stmts) do
+        if s.t == 'elsif' or s.pol == 'else' then
+            eq(h, s.parent, 'the chain hangs flat under the if head')
+        end
+    end
+end)
+
+-- ── CART-0363 part B: ATTACHED BLOCKS, the form ruby is actually written in ──────────
+-- Measured: activesupport 464 `do…end` + 403 brace blocks, 18% of statements inside one;
+-- activerecord 1200 + 708, 20%. Before this a whole block was ONE row — `xs.each do |x|
+-- g(x); h(x) end` came back as a single `call` row with use={xs,each,x,g,h} — so the
+-- LARGEST single population of ruby statements had no rows at all. And `x` was a USE: the
+-- third phantom free variable after the collection-loop variable and the exception variable.
+-- ★ THE SUITE IS THE ONLY GATE HERE. There is no ruby generator (CART-0377 installment B),
+-- so no synthetic corpus plants these forms and syngate cannot witness one.
+local function rowsat(fl, parent)
+    local out = {}
+    for i, s in ipairs(fl.stmts) do if s.parent == parent then out[#out + 1] = i end end
+    return out
+end
+local function joined(t) return table.concat(t or {}, ',') end
+
+test('flow: a ruby do-block opens its body and BINDS its parameter', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(xs)\n  xs.each do |x|\n    g(x)\n    h(x)\n  end\nend')
+    local h = head_of(fl, 'do_block')
+    ok(h, 'the block is a control row of its own')
+    eq('x', joined(fl.stmts[h].def), 'and its parameter is a DEF, not a free use')
+    eq(2, #rowsat(fl, h), 'its two body statements are rows: ' .. #rowsat(fl, h))
+    -- the carrying statement keeps only what IT evaluates
+    eq('xs,each', joined(fl.stmts[fl.stmts[h].parent].use),
+        'and the call row no longer harvests the whole block')
+end)
+
+test('flow: a ruby BRACE block is the same shape as a do-block', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(xs)\n  q = xs.map { |k, v| k + v }\n  q\nend')
+    local h = head_of(fl, 'block')
+    ok(h, 'the brace block is a control row')
+    eq('k,v', joined(fl.stmts[h].def), 'both parameters bind')
+    eq(1, #rowsat(fl, h), 'and its body is a row')
+end)
+
+test('flow: a ruby block with NO parameters binds nothing and still opens', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(o)\n  o.tap { g(1) }\nend')
+    local h = head_of(fl, 'block')
+    ok(h, 'the block opens')
+    eq('', joined(fl.stmts[h].def), 'and defs nothing')
+    eq(1, #rowsat(fl, h), 'its body statement is a row')
+end)
+
+test('flow: a ruby DESTRUCTURING parameter binds EVERY name in it', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- `b` used to be dropped (the wrapper rule takes the first identifier and stops), which
+    -- left it a free use — the very defect class this ticket is about, one level down.
+    local fl = rb('def f(xs)\n  xs.each_with_object({}) do |(a, b), memo|\n'
+        .. '    memo[a] = b\n  end\nend')
+    local h = head_of(fl, 'do_block')
+    ok(h, 'the block opens')
+    eq('a,b,memo', joined(fl.stmts[h].def), 'a, b AND memo all bind')
+end)
+
+test('flow: a ruby block parameter DEFAULT is read, while its name binds', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(xs)\n  xs.each do |w = ff(zz)|\n    g(w)\n  end\nend')
+    local h = head_of(fl, 'do_block')
+    ok(h, 'the block opens')
+    eq('w', joined(fl.stmts[h].def), 'the parameter binds')
+    eq('ff,zz', joined(fl.stmts[h].use), 'and its default expression is genuinely READ')
+end)
+
+test('flow: a block on an ASSIGNMENT RHS is found — it is not a field of the row', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- the block hangs off a `call` nested under the assignment, so nothing on the ROW's own
+    -- node names it. du finds it on the walk it was already making.
+    local fl = rb('def f(xs)\n  q = xs.map do |k|\n    k + 1\n  end\n  q\nend')
+    local h = head_of(fl, 'do_block')
+    ok(h, 'the nested block still opens')
+    local p = fl.stmts[h].parent
+    ok(p and p > 0 and joined(fl.stmts[p].def) == 'q',
+        'and its parent is the assignment row: def=' .. joined(fl.stmts[p] and fl.stmts[p].def))
+end)
+
+test('flow: a block inside a CONDITION is emitted before the body it guards', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(xs)\n  if xs.any? { |e| e > 1 }\n    r = 1\n  end\n  r\nend')
+    local h = head_of(fl, 'if')
+    local b = head_of(fl, 'block')
+    ok(h and b, 'both the if and the block are rows')
+    eq(h, fl.stmts[b].parent, 'the block hangs under the if head')
+    local body
+    for i, s in ipairs(fl.stmts) do
+        if s.parent == h and s.pol == 'body' and s.t ~= 'block' then body = body or i end
+    end
+    ok(body and b < body, 'and precedes the consequence: a condition runs first')
+end)
+
+test('flow: rescue/ensure INSIDE a block still get clause rows', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(xs)\n  xs.each do |v|\n    begin\n      t = 1\n'
+        .. '    rescue E => er\n      u = 2\n    end\n  end\nend')
+    local h = head_of(fl, 'do_block')
+    ok(h, 'the block opens')
+    local c
+    for i, s in ipairs(fl.stmts) do if s.kind == 'catch' then c = i end end
+    ok(c, 'the rescue is a catch row inside the block')
+    eq('er', joined(fl.stmts[c].def), 'and still binds its exception variable')
+end)
+
+test('flow: NESTED blocks nest, and the inner one binds its own parameter', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    local fl = rb('def f(as, bs)\n  as.each do |a1|\n    bs.each do |b1|\n'
+        .. '      c1 = a1 + b1\n    end\n  end\nend')
+    local heads = {}
+    for i, s in ipairs(fl.stmts) do if s.t == 'do_block' then heads[#heads + 1] = i end end
+    eq(2, #heads, 'two block rows')
+    local inner = fl.stmts[heads[2]]
+    ok(inner.parent > heads[1], 'the inner block hangs below the outer one')
+    eq('b1', joined(inner.def), 'and binds its own parameter')
+end)
+
+test('flow: a ruby block is a PRE-condition loop — the back edge is present', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- ★ THE MODELLING DECISION, fenced. A plain region would claim exactly-once, which is
+    -- UNSOUND for `each` (0..n) exactly as a missing back edge was for js for-of. Pre-loop
+    -- covers `each`, `tap` (once) and `lambda` (deferred) alike: the zero-trip skip admits
+    -- "never ran", the back edge admits "ran many times".
+    local fl = rb('def f(xs)\n  xs.each do |x|\n    g(x)\n  end\nend')
+    local h = head_of(fl, 'do_block')
+    ok(fl.preloop['do_block'], 'the record carries do_block as a PRE-condition loop')
+    ok(flow.loops_of(fl)['do_block'], 'and loops_of — the one owner — agrees')
+    local cfg = flow.successors(fl)
+    local back, skip = false, false
+    for i = h + 1, #fl.stmts do
+        for _, s in ipairs(cfg.succ[i] or {}) do if s == h then back = true end end
+    end
+    for _, s in ipairs(cfg.succ[h] or {}) do
+        if s ~= h + 1 then skip = true end -- past the body: the block may never run
+    end
+    ok(back, 'a body row wires back to the head (the loop may run again)')
+    ok(skip, 'and the head can skip the body entirely (an empty collection)')
 end)
 
 
@@ -1250,6 +1414,7 @@ local function rb_succ(code)
     local fn, src = parse_fn(code, 'ruby')
     ok(fn, 'the ruby fixture parses to a method')
     local fl = flow.build(fn, src, { ctrl = tsspec.ruby.ctrl, preloop = tsspec.ruby.preloop,
+        blocks = tsspec.ruby.blocks,
         body = tsspec.ruby.body, clause = tsspec.ruby.clause,
         body_of = tsspec.ruby.body_of, params_of = tsspec.ruby.params_of,
         regime = tsspec.ruby.regime })

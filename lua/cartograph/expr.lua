@@ -241,6 +241,17 @@ local TABLE = { table_constructor = true, table = true,
     record = true }                                   -- haskell record UPDATE
 local ALLOCFN = { function_definition = true, function_declaration = true,
     anonymous_function = true, arrow_function = true, lambda_expression = true }
+-- ★ THE ONE OWNER OF "WHAT IS A REGION / CLAUSE / ATTACHED BLOCK IN THIS LANGUAGE" is
+-- flow.classes, and this module used to keep its own base-only copy (see the BODY/CLAUSE
+-- tables further down, and the ★ note beside them for what that cost on ruby). Memoised per
+-- language because build_core consults it per node. Lazy requires: expr is loaded from both
+-- flow's callers and treesitter, so a module-level require here would close a cycle.
+local CLS_OF = setmetatable({}, { __index = function (t, lang)
+    local c = require('cartograph.flow').classes(
+        require('cartograph.providers.treesitter').spec[lang] or {})
+    rawset(t, lang, c)
+    return c
+end })
 local VARARG = { vararg_expression = true, vararg = true, spread_element = true }
 -- KEY-VALUE PAIRS inside a constructor (CART-0220). VERIFIED per language by
 -- parsing a snippet and reading the grammar's own node names — not guessed:
@@ -429,7 +440,15 @@ function build_core(node, src, lang)
         return { k = 'pair', key = key, val = val,
             kids = val and { key, val } or { key } }
     end
-    if ALLOCFN[t] then return { k = 'fn' } end -- NEVER descend a closure body (du doesn't either)
+    -- ★ AN ATTACHED BLOCK IS A CLOSURE LITERAL AND THE IR ALREADY HAS THE RIGHT SHAPE FOR
+    -- ONE. `xs.each do |x| … end` is syntactically an anonymous function passed to `each`,
+    -- and `{k='fn'}` is exactly "an allocation whose body is not this row's business" —
+    -- which is also what du now says, since the block's names live on the block's OWN rows.
+    -- Without this the call row's expr read the whole block while its `use` did not, and the
+    -- self-gate is the thing that would have caught it (had it ever been run on ruby).
+    if ALLOCFN[t] or (lang and CLS_OF[lang].blocks and CLS_OF[lang].blocks[t]) then
+        return { k = 'fn' } -- NEVER descend a closure body (du doesn't either)
+    end
     if VARARG[t] then return { k = 'vararg' } end
     -- honest unknown: keep the named children as kids so no name is hidden
     local kids = {}
@@ -536,6 +555,15 @@ local CLAUSE = { else_statement = true, elseif_statement = true, elseif_clause =
     else_clause = true, else_if_clause = true, elif_clause = true,
     case_statement = true, default_statement = true, expression_case = true,
     default_case = true, catch_clause = true, except_clause = true, finally_clause = true }
+-- ★ …AND THOSE TWO ARE THE SIXTH COPY OF FLOW'S CLASS SETS, ALREADY DRIFTED (part B).
+-- They hold the BASE spellings, so ruby's `then` and `do` are not in them, so a ruby control
+-- head's expression IR harvested its ENTIRE BODY while the row's own `use` correctly stopped
+-- at the boundary. Measured on an 8-line ruby fixture: the `if` head's expr read `r`, a name
+-- assigned in its consequence — SIX self-gate disagreements, in a language the self-gate has
+-- never been run on (syngate's corpora are lua/java/js). Same seam-feeds-one-function shape
+-- as PRELOOP, IF_T, TRY_T, CATCH and du's stop_body before it. So neither table is consulted
+-- any more when the language is known: `CLS_OF` (declared above build_core, which needs it)
+-- asks flow, the one owner. They remain as the `lang == nil` fallback — the lua-only fixtures.
 
 --- harvest a statement node into a row-expr record. `hint` (set by flow.build at the
 --- row-birth point, so flow's emit policy drives the boundary):
@@ -553,10 +581,28 @@ function M.harvest_row(node, src, hint, lang)
     if hint == 'ctrlhead' then
         local cond = node:field('condition')[1] or node:field('value')[1]
         local rhs = {}
+        -- the language's OWN region spellings, not the base ones (see CLS_OF above)
+        local cls = lang and CLS_OF[lang]
+        local B, C = (cls and cls.body) or BODY, (cls and cls.clause) or CLAUSE
+        local BLK = cls and cls.blocks
+        -- ★ AN ATTACHED BLOCK HEAD BINDS; IT DOES NOT READ. `|x|` is a DEF, so it belongs in
+        -- `lhs` (where a plain name is a pure target and reads nothing), not in `rhs` — else
+        -- the self-gate reports it as a read du never claimed. What a binder list genuinely
+        -- READS is its default expressions (`|opt = f(z)|` evaluates `f(z)`), and the split
+        -- between the two comes from flow.binders so du and this cannot draw it differently.
+        local bf = BLK and BLK[node:type()]
+        if bf then
+            local names, values = require('cartograph.flow').binders(node, src, bf)
+            local lhs, rhs2 = {}, {}
+            for _, n in ipairs(names) do lhs[#lhs + 1] = { k = 'name', n = n } end
+            for _, v in ipairs(values) do rhs2[#rhs2 + 1] = build(v, src, lang) end
+            return { lhs = lhs, rhs = rhs2 }
+        end
         for c in node:iter_children() do
             if c:named() then
                 local ct = c:type()
-                if not tsutil.COMMENT[ct] and not BODY[ct] and not CLAUSE[ct] then
+                if not tsutil.COMMENT[ct] and not B[ct] and not C[ct]
+                    and not (BLK and BLK[ct]) then
                     rhs[#rhs + 1] = build(c, src, lang)
                 end
             end
@@ -976,6 +1022,7 @@ function M.of(store, fn_id)
     if not fn then return nil end
     local cfg = { pfield = s.params_field, df_ids = s.df_ids, regime = s.regime,
         ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
+        blocks = s.blocks,                          -- attached blocks (part B)
         mods = s.binding_modifiers, -- CART-0234
         body_of = s.body_of, params_of = s.params_of, -- CART-0305
         fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
@@ -1031,7 +1078,7 @@ function M.of_module(store, mod_id)
     if not root then return nil end
     local cfg = { seq = true, df_ids = s.df_ids, regime = s.regime,
         ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
-                                            -- THREE cfg sites; all must agree
+        blocks = s.blocks,                  -- THREE cfg sites; all must agree
         mods = s.binding_modifiers, -- CART-0234
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'

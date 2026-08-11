@@ -597,6 +597,45 @@ M.spec.ruby.body = { ['then'] = true, ['do'] = true }
 -- `rescue E => e` defs `e` instead of reading a variable nothing defines.
 M.spec.ruby.clause = { ['elsif'] = 'elseif', ['else'] = 'else', ['when'] = 'case',
     ['rescue'] = 'catch', ['ensure'] = 'finally' }
+-- ── ATTACHED BLOCKS (CART-0363 part B) ──────────────────────────────────────────────
+-- ★ THE FORM RUBY IS ACTUALLY WRITTEN IN. Measured: activesupport 464 `do…end` + 403 brace
+-- blocks, 18% of its statements inside one; activerecord 1200 + 708, 20%. Until now a whole
+-- block was ONE row — `xs.each do |x| g(x); h(x) end` came back as a single `call` row with
+-- use={xs,each,x,g,h} — so the largest single population of ruby statements had no rows at
+-- all, exactly the condition part A removed for `if`/`while`/`case`/`begin`.
+-- ★ AND `x` WAS A USE. The block parameter is the THIRD phantom free variable this ticket
+-- found, after the collection-loop variable and the exception variable: a read of a name
+-- nothing defines, which liveness, reaching and narrowing all believe.
+--
+-- ★ MODELLED AS A PRE-CONDITION LOOP, WHICH IS THE ONE SOUND CHOICE FOR ALL THREE USES.
+-- A block is a loop body for `each` (0..n times), a once-runner for `tap`, and a DEFERRED
+-- body for `lambda`. A plain region would claim exactly-once, which is UNSOUND for `each` —
+-- the same way a missing back edge was for js for-of. Pre-condition covers all three: the
+-- zero-trip skip admits "never ran", the back edge admits "ran many times". A method ->
+-- semantics table (each=loop, tap=once, lambda=deferred) is the PRECISION refinement and
+-- belongs in a profile, not in the base model, where a wrong entry would be unsound.
+--
+-- ★ `block` IS IN EIGHT GRAMMARS — go java lua odin python ruby rust zig, checked via
+-- language.inspect — AND IN LUA IT IS THE REGION CONTAINER ITSELF. So this can only ever
+-- live in the spec. A base entry would have re-modelled seven other languages' bodies as
+-- ruby blocks. `do_block`/`block_body`/`body_statement`/`block_parameters` are ruby-only.
+M.spec.ruby.ctrl['do_block'] = true
+M.spec.ruby.ctrl['block'] = true
+M.spec.ruby.preloop['do_block'] = true
+M.spec.ruby.preloop['block'] = true
+-- the two block body containers. `body_statement` is also a METHOD's body, which is reached
+-- through fn_body's `body` FIELD and region()'s named-children walk — neither consults this
+-- set — and `begin` hangs its statements DIRECTLY (verified by parse), so adding it here
+-- moves nothing but the block case.
+M.spec.ruby.body['body_statement'] = true
+M.spec.ruby.body['block_body'] = true
+-- ★ THE FIFTH CLASS: <attached block type> -> <field holding its binder list>. A MAP because
+-- the field is needed anyway (the head's defs are read off it) and a sibling key would be a
+-- drift pair — the same argument that made `ctrl` a role map. flow's du stops at these
+-- UNCONDITIONALLY and hands them back, because a block can hang off a call ANYWHERE in the
+-- statement (`q = xs.map { … }` puts it under an assignment's RHS), so no field on the ROW's
+-- own node can find it.
+M.spec.ruby.blocks = { do_block = 'parameters', block = 'parameters' }
 M.spec.typescript.regime = M.spec.javascript.regime
 -- TS-ONLY declarations (interface/enum) — added to the typescript spec ALONE:
 -- these node types don't exist in the JS grammar, so they can't live in the
@@ -2842,6 +2881,17 @@ local function resolve_local_callable(cv, node_index, exact, addref, parent_fn)
     parent_fn = parent_fn or build_parent_fn(node_index)
     for i = 1, cv.n do
         local ccallee, cfn = cget(i, 'callee'), cget(i, 'fn')
+        -- ★ A RECEIVER-QUALIFIED CALL STILL REACHES HERE, AND IT SHOULD NOT — but the
+        -- obvious guard was MEASURED and is worse (CART-0398). This pass declines a call
+        -- with a dotted `full` (`a.b()`), because a member dispatch is not a call through a
+        -- local of the member's name; `full` is only the DOTTED spelling, and ruby
+        -- (dispatch-by-member-name) and zig (field calls) keep the receiver separately in
+        -- `recv`, so theirs fall through: `if match = message.match(/…/)` comes back refused
+        -- `fn-value`, a positive claim about a method on `message`, and false.
+        -- ADDING `and not cget(i, 'recv')` FIXES THAT AND FAILS THE SILENT GATE: 35 calls on
+        -- activesupport alone stop refusing and start being SILENT, which is the invariant
+        -- lint.lua names ("a call must RESOLVE or SPEAK a refusal"). The honest answer is a
+        -- receiver-shaped REFUSAL RULE, not silence, and that is a design change.
         if ccallee and not cget(i, 'full') and not cget(i, 'dynamic') and not cget(i, 'to')
             and not cget(i, 'refused') and cfn then
             local fn = node_index[cfn]
@@ -4746,6 +4796,7 @@ function M.extract(root, opts)
                     -- enclosure set: only where a node is minted to hold the rows
                     ctrl = spec.ctrl, preloop = spec.preloop,
                     body = spec.body, clause = spec.clause, -- CART-0363
+                    blocks = spec.blocks,                   -- attached blocks (part B)
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 padd('flow.build', _pf)
                 local dret, dretclass
