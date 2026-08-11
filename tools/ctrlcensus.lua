@@ -16,22 +16,45 @@
 -- ★ AND IT READS flow.classes(), NEVER A COPY. This ticket exists because a second copy of
 -- flow's CTRL had drifted — in the probe that was measuring the fix, which then reported the
 -- fix had not worked. An audit tool holding its own idea of the answer audits itself.
+--
+-- ── THREE MODES, THREE DIFFERENT BLIND SPOTS ────────────────────────────────────────────
+--   (default)   GAP: an unclassified node that CONTAINS A RECOGNISED REGION. Finds a control
+--               form flow cannot see — as long as its body spelling IS recognised.
+--   --coverage  WITNESS: which classified forms this corpus contains at all. A corpus with
+--               zero instances of a form cannot gate it, however well calibrated.
+--   --folded    CONTAINER: a node flow emits as ONE plain row while several statements hide
+--               inside it. This is the case NEITHER of the others can see, and it has now
+--               cost four real bugs — java's `switch_block`, ruby's `begin`, js's
+--               `switch_body`, and the `rows` column's own "has a child" test (CART-0391).
+--               The gap mode misses it because a container of UNRECOGNISED containers has no
+--               recognised region child; the coverage mode misses it because an unclassified
+--               form is not in the denominator.
+--
+-- ★ THE FOLDED TEST, AND WHY IT IS THIS ONE. The obvious candidate — "a control row with a
+-- single leaf child" — is MEASURED DEAD: 38-56% of all control rows (jquery 47%, 7kaa 38%,
+-- activesupport 56%), because `if (x) return;` and `x if c` legitimately have exactly one
+-- child. What discriminates a CONTAINER is that its node has >= 2 named children OF THE SAME
+-- control-ish TYPE — a list of arms looks like that and an expression does not. Measured:
+-- jquery 0 (its switch_body was just fixed), 7kaa 108 across 5 types dominated by
+-- preproc_ifdef/if/else/elif — which was ALREADY FILED as CART-0380, so the detector
+-- rediscovers a known real gap without being told about it.
 
 local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
-local root, want_lang, maxfiles, coverage = nil, nil, 400, false
+local root, want_lang, maxfiles, coverage, folded = nil, nil, 400, false, false
 local i = 1
 while arg and arg[i] do
     if arg[i] == '--lang' then i = i + 1; want_lang = arg[i]
     elseif arg[i] == '--files' then i = i + 1; maxfiles = tonumber(arg[i]) or maxfiles
     elseif arg[i] == '--coverage' then coverage = true
+    elseif arg[i] == '--folded' then folded = true
     else root = vim.fn.expand(arg[i]) end
     i = i + 1
 end
 if not root then
-    print('usage: ctrlcensus <dir> [--lang cpp] [--files N] [--coverage]')
+    print('usage: ctrlcensus <dir> [--lang cpp] [--files N] [--coverage | --folded]')
     os.exit(2)
 end
 
@@ -111,6 +134,89 @@ for _, f in ipairs(files) do
     end
 end
 print(('parsed %d file(s)'):format(nparsed))
+
+-- ── FOLDED CONTAINERS ───────────────────────────────────────────────────────────────────
+-- A node flow emits as ONE plain row while several statements hide inside it. See the header
+-- for why the test is "≥ 2 named children of the same control-ish type" and not the obvious
+-- lone-child heuristic (which is 38-56% of all control rows and therefore useless).
+if folded then
+    for lang, T in pairs(tally) do
+        local cls = classes_for(lang)
+        local rows, examples = {}, {}
+        for _, f in ipairs(files) do
+            if f.lang ~= lang then goto nextfile end
+            do
+                local fd = io.open(f.path, 'r')
+                if not fd then goto nextfile end
+                local src = fd:read('a'); fd:close()
+                local okl = pcall(vim.treesitter.language.add, lang)
+                if not okl then goto nextfile end
+                local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
+                if not (okp and parser) then goto nextfile end
+                local function walk(nd)
+                    local t = nd:type()
+                    -- classified nodes are flow's business, not a folded container; and the
+                    -- FUNCTION BODY is excluded because flow reaches it through the spec's
+                    -- `body_field` rather than by folding (measured: it was 31 of ruby's 35
+                    -- hits, a pure probe artifact).
+                    if nd:named() and not (cls.ctrl[t] or cls.clause[t] or cls.body[t]
+                        or cls.fn[t] or t == 'ERROR') then
+                        local bytype = {}
+                        for c in nd:iter_children() do
+                            if c:named() then bytype[c:type()] = (bytype[c:type()] or 0) + 1 end
+                        end
+                        for ct, cnt in pairs(bytype) do
+                            if cnt >= 2 and (cls.ctrl[ct] or cls.clause[ct]
+                                or ct:find('case') or ct:find('statement')) then
+                                rows[t] = (rows[t] or 0) + 1
+                                if not examples[t] then
+                                    examples[t] = ('%s:%d holds %d× %s'):format(
+                                        vim.fn.fnamemodify(f.path, ':t'),
+                                        (select(1, nd:range())) + 1, cnt, ct)
+                                end
+                                break
+                            end
+                        end
+                    end
+                    for c in nd:iter_children() do walk(c) end
+                end
+                -- walk from each FUNCTION BODY down, never the file root: a module-level
+                -- statement run is not a folded container either.
+                local fnset = cls.fn or {}
+                local function seek(nd)
+                    if fnset[nd:type()] then
+                        -- start at the body's CHILDREN, not the body itself: the fn body is
+                        -- reached through the spec's body_field, so flagging it would be a
+                        -- pure artifact (measured: 31 of ruby's first 35 hits).
+                        local b = nd:field('body')[1]
+                        if b then
+                            for c in b:iter_children() do if c:named() then walk(c) end end
+                        else
+                            for c in nd:iter_children() do if c:named() then walk(c) end end
+                        end
+                        return
+                    end
+                    for c in nd:iter_children() do if c:named() then seek(c) end end
+                end
+                seek(parser:parse()[1]:root())
+            end
+            ::nextfile::
+        end
+        local ord, tot = {}, 0
+        for t, c in pairs(rows) do ord[#ord + 1] = { t = t, c = c }; tot = tot + c end
+        table.sort(ord, function (a, b) return a.c > b.c end)
+        print('')
+        print(('── %s FOLDED ── %d candidate node(s), %d distinct type(s)')
+            :format(lang, tot, #ord))
+        if #ord == 0 then
+            print('   none — no unclassified node in this corpus is holding a list of arms')
+        end
+        for k = 1, math.min(12, #ord) do
+            print(('  %6d  %-32s e.g. %s'):format(ord[k].c, ord[k].t, examples[ord[k].t] or '?'))
+        end
+    end
+    return
+end
 
 -- ★ THE OTHER DIRECTION: WHICH CLASSIFIED FORMS DOES THIS CORPUS CONTAIN AT ALL?
 -- The gap census above asks what flow cannot see. This asks what the CORPUS cannot show —
