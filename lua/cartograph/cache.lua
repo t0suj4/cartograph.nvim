@@ -73,7 +73,9 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 129 -- v129: JS/TS SWITCH BODIES WERE 100% OPAQUE — `switch_body` was one plain
+M.VERSION = 130 -- v130: du's stop_body read the BASE body/clause tables, so a ruby control
+               -- HEAD harvested its entire subtree's def/use (CART-0363).
+               -- v129: JS/TS SWITCH BODIES WERE 100% OPAQUE — `switch_body` was one plain
                -- row and every arm folded into it (CART-0390).
                -- v128: a ruby `case` subject and a `when` PATTERN are not statements that
                -- EXECUTE (CART-0387). v127: RUBY begin/rescue/ensure was 100% OPAQUE too — one row, body and

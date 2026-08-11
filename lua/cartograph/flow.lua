@@ -256,6 +256,11 @@ local LOOPVAR = { enhanced_for_statement = 'name', for_in_statement = 'left',
 -- cpp for_range_loop's non-binder fields; every other named child is the declarator
 local RANGE_HEAD = { 'type', 'right', 'body' }
 
+-- the DEFAULT du stop: base body ∪ clause, used when a caller supplies no merged set
+local DU_STOP = {}
+for t in pairs(BODY) do DU_STOP[t] = true end
+for t in pairs(CLAUSE) do DU_STOP[t] = true end
+
 local function same(a, b)
     if not (a and b) then return false end
     local a1, a2, a3, a4 = a:range(); local b1, b2, b3, b4 = b:range()
@@ -278,7 +283,15 @@ end
 -- node set under the SAME stop-rules — a measured ~33% of flow.build spent
 -- re-traversing every statement just to usually return false). Set on any
 -- visited node whose type is in SUSPEND; the root is checked too.
-local function du(root, src, stop_body, ids, mods, FN)
+-- `stopset` = the MERGED body+clause types for this language. ★ IT USED TO BE THE BASE
+-- BODY/CLAUSE TABLES, read straight off the module (CART-0363), so du walked STRAIGHT THROUGH
+-- a region whose spelling the spec had supplied — ruby's `then` and `do`. Measured, a ruby
+-- `if` head reported def={zz} use={a,q,w}: the ENTIRE BODY harvested onto the head row, where
+-- js's correctly read use={a}. Every ruby control row's def/use was inflated with its whole
+-- subtree, which is also why the `try` head needed zeroing by hand in CART-0386 — that was
+-- the symptom, this is the cause. Same seam-feeds-one-function shape as PRELOOP, IF_T, TRY_T
+-- and CATCH before it; this is the FIFTH consumer holding a base set the spec never reached.
+local function du(root, src, stop_body, ids, mods, FN, stopset)
     ids = ids or DFID
     if not root then return {}, {}, false, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
@@ -339,7 +352,7 @@ local function du(root, src, stop_body, ids, mods, FN)
               -- Language-declared, because the node name means `a.b` in python.
               if mods and mods[ct] then goto skipchild end
               if not FN[ct]
-                and not (stop_body and (BODY[ct] or CLAUSE[ct])) then
+                and not (stop_body and (stopset or DU_STOP)[ct]) then
                 if SUSPEND[ct] then sus = true end -- fused suspension detection
                 local cdefpos
                 if k == 1 then cdefpos = same(c, asgleft)
@@ -549,6 +562,10 @@ function M.build(fnnode, src, cfg)
     local CTRL_, PRELOOP_, BODY_, CLAUSE_ = cls.ctrl, cls.preloop, cls.body, cls.clause
     local ELSEIF_, CASE_ = cls.elseif_, cls.case
     local CATCH_, CLAUSEMAP, TRY_, SWITCH_ = cls.catch, cls.clausemap, cls.try, cls.switch
+    -- the MERGED region set du must stop at (see du's header): base ∪ this language's
+    local DUSTOP = {}
+    for t in pairs(BODY_) do DUSTOP[t] = true end
+    for t in pairs(CLAUSE_) do DUSTOP[t] = true end
     local FN = cfg.fn_types or FN_FALLBACK -- the nested-function stop (CART-0308)
     -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
     -- BINDING MODIFIERS (CART-0234): per-language node types to skip entirely, because
@@ -643,7 +660,7 @@ function M.build(fnnode, src, cfg)
         if finit then emit(finit, parent, pol) end
         local idx = #stmts + 1
         local sb = CTRL_[t] and true or false
-        local d, u, sus, rmw = du(node, src, sb, ids, mods, FN)
+        local d, u, sus, rmw = du(node, src, sb, ids, mods, FN, DUSTOP)
         stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL_[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
@@ -716,7 +733,7 @@ function M.build(fnnode, src, cfg)
                 end
             end
             if POST[t] and cond then
-                local cd, cu = du(cond, src, false, ids, mods, FN)
+                local cd, cu = du(cond, src, false, ids, mods, FN, DUSTOP)
                 stmts[#stmts + 1] = { l = line(cond), c = startcol(cond), kind = 'cond',
                     parent = idx, pol = 'cond', def = cd, use = cu,
                     expr = cfg.expr and cfg.expr(cond, src, 'cond') or nil }
@@ -775,7 +792,7 @@ function M.build(fnnode, src, cfg)
             do -- def/use over EVERY label, deduped
                 local ds, us = {}, {}
                 for _, x in ipairs(labels) do
-                    local xd, xu = du(x, src, false, ids, mods, FN)
+                    local xd, xu = du(x, src, false, ids, mods, FN, DUSTOP)
                     for _, nm in ipairs(xd) do if not ds[nm] then ds[nm] = true; d[#d + 1] = nm end end
                     for _, nm in ipairs(xu) do if not us[nm] then us[nm] = true; u[#u + 1] = nm end end
                 end
@@ -802,7 +819,7 @@ function M.build(fnnode, src, cfg)
             -- row (condition only, stop_body) and REGION its consequence as rows
             -- (was folded — the body statements were invisible). lua
             -- `elseif_statement` / python `elif_clause`: body under `consequence`.
-            local d, u = du(node, src, true, ids, mods, FN)
+            local d, u = du(node, src, true, ids, mods, FN, DUSTOP)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = node:type(), parent = parent,
                 pol = 'elseif', def = d, use = u, t = node:type() }
@@ -824,7 +841,7 @@ function M.build(fnnode, src, cfg)
             -- the header binds the exception var (DEF) and references the type
             -- (use); the body regions under it. Without this the caught var is
             -- unbound in the fine model and df's spurious use of it is unmatched.
-            local d, u = du(node, src, true, ids, mods, FN)
+            local d, u = du(node, src, true, ids, mods, FN, DUSTOP)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'catch', parent = parent,
                 pol = 'catch', def = d, use = u }

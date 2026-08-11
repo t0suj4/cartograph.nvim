@@ -1553,3 +1553,47 @@ test('flow: the js switch spelling stays in the SPEC — switch_case is zig and 
     ok(not flow.classes({}).body.switch_body, 'switch_body is NOT in the base body set')
     ok(flow.classes(ts_.spec.typescript or {}).clause.switch_case, 'typescript inherits it')
 end)
+
+-- ★ CART-0363. `du`'s stop_body read the BASE body/clause tables, not the merged per-language
+-- ones, so it walked STRAIGHT THROUGH a region whose spelling the spec had supplied. Measured:
+-- a ruby `if` head reported def={zz} use={a,q,w} — its ENTIRE BODY harvested onto the head row
+-- — where js's correctly read use={a}. Every ruby control row's def/use was inflated with its
+-- whole subtree, which is also why the `try` head needed zeroing by hand in CART-0386: that
+-- was the symptom, this is the cause. The FIFTH consumer found holding a base set the spec
+-- never reached, after PRELOOP, IF_T, TRY_T and CATCH.
+test('flow: a control head evaluates its CONDITION, not its body — in every language', function ()
+    if not (ready('ruby') and ready('javascript')) then skip 'no ruby/js parser' end
+    local rbfl = rb_succ('def f(a)\n  if a\n    zz = q(1)\n    w(zz)\n  end\nend')
+    local h = head_of(rbfl, 'if')
+    ok(h, 'the ruby if is a control row')
+    eq(0, #(rbfl.stmts[h].def or {}),
+        'the head defs NOTHING — `zz` belongs to the body: def={'
+        .. table.concat(rbfl.stmts[h].def or {}, ',') .. '}')
+    local u = {}
+    for _, n in ipairs(rbfl.stmts[h].use or {}) do u[n] = true end
+    ok(u.a, 'it uses its condition')
+    ok(not u.q and not u.w, 'and NOT the callees inside its body: use={'
+        .. table.concat(rbfl.stmts[h].use or {}, ',') .. '}')
+
+    -- the js twin, which was always correct because its region spelling is in the base set
+    local fn, src = parse_fn('function f(a) {\n if (a) {\n  const zz = q(1);\n  w(zz);\n }\n}',
+        'javascript')
+    local jsfl = flow.build(fn, src, { ctrl = tsspec.javascript.ctrl,
+        preloop = tsspec.javascript.preloop, body = tsspec.javascript.body,
+        clause = tsspec.javascript.clause, regime = tsspec.javascript.regime })
+    local jh = head_of(jsfl, 'if_statement')
+    eq(#(jsfl.stmts[jh].use or {}), #(rbfl.stmts[h].use or {}),
+        'ruby and js now agree on how much a control head evaluates')
+end)
+
+test('flow: an ASSIGNMENT IN THE CONDITION still defs on the head', function ()
+    if not ready('ruby') then skip 'no ruby parser' end
+    -- the case the fix could have broken: stopping at the BODY must not stop at the CONDITION
+    local fl = rb_succ('def f(message)\n  if match = message.match(/x/)\n    match[1]\n  end\nend')
+    local h = head_of(fl, 'if')
+    local d, u = {}, {}
+    for _, n in ipairs(fl.stmts[h].def or {}) do d[n] = true end
+    for _, n in ipairs(fl.stmts[h].use or {}) do u[n] = true end
+    ok(d.match, '`match` is bound BY THE CONDITION, so the head defs it')
+    ok(u.message, 'and the condition\'s receiver is a use')
+end)
