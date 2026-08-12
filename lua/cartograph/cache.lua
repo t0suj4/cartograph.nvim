@@ -73,7 +73,11 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 132 -- v132: A JAVA LAMBDA IS A FUNCTION AND NOW HAS A NODE (CART-0406). flow
+M.VERSION = 133 -- v133: a blanked control head kept its `rmw` (CART-0405). flow zeroes a
+               -- TRY head's and a POST loop's def/use because a container is not a
+               -- computation — and a row's read census is `use ∪ rmw`, so the READ half of a
+               -- read-modify-write survived the blanking. Found by the ruby grid.
+               -- v132: A JAVA LAMBDA IS A FUNCTION AND NOW HAS A NODE (CART-0406). flow
                -- stops at `lambda_expression` on the promise that a node is MINTED to hold
                -- the rows; an anonymous class kept it, a lambda did not, so every lambda
                -- body had NO ROWS IN NO NODE. 1670 lambdas on elasticsearch/libs. Named

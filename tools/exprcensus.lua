@@ -171,17 +171,6 @@ M.EXPECTED = {
         ['missing:negated_command'] = 2, ['both:pipeline'] = 1, ['both:variable_assignment'] = 1,
         ['both:variable_assignments'] = 1, ['missing:command_substitution'] = 1,
         ['missing:while_statement'] = 1 },
-    -- recalib @ CART-0404: 114626 -> 53418, the single biggest cut this column has seen.
-    -- `binder:declaration` 75190 -> 3313: C's `declaration` is a LOCAL DECLARATION and the IR
-    -- did not know it, so every declared NAME read as a use while du called it a def.
-    -- ★ THE FIRST CUT WAS MEASURED WORSE AND KEPT ANYWAY WOULD HAVE BEEN A DISASTER: adding
-    -- `declaration` to the branch routed EVERY C/C++ declaration into a fallback that keeps
-    -- NAMES and drops everything else, so `Foo f(x);` lost the read of `x` — binder 75190->102
-    -- and missing 0->139174, a NET WORSE total from a change that was right about its target.
-    -- The fallback now claims a row only when every named child is ACCOUNTED FOR; anything
-    -- else falls through to the generic `?` path, which keeps the names. AN HONEST UNKNOWN
-    -- BEATS A CONFIDENT PARTIAL ANSWER. Residual missing:declaration 10667 + binder 3313 is
-    -- the C++ declarator long tail — still the next-biggest class, still on CART-0404.
     cpp = { total = 53418, ['extra:expression_statement'] = 21548,
         ['missing:declaration'] = 10667, ['extra:if_statement'] = 10557,
         ['binder:declaration'] = 3313, ['extra:declaration'] = 2774,
@@ -199,7 +188,6 @@ M.EXPECTED = {
         ['extra:comma_expression'] = 4, ['missing:command'] = 4, ['both:declaration'] = 3,
         ['binder:declaration_command'] = 1, ['both:pipeline'] = 1, ['missing:if_statement'] = 1,
         ['missing:list'] = 1, ['missing:variable_assignment'] = 1 },
-    -- recalib @ CART-0404: 45821 -> 33188 (same fix; see the cpp note).
     cppmodern = { total = 33188, ['extra:expression_statement'] = 23095,
         ['extra:if_statement'] = 4024, ['extra:declaration'] = 1923,
         ['missing:declaration'] = 1400, ['binder:ERROR'] = 686, ['binder:if_statement'] = 666,
@@ -252,9 +240,13 @@ M.EXPECTED = {
         ['extra:assignment_expression'] = 7, ['extra:for_in_statement'] = 6,
         ['binder:for_statement'] = 4, ['extra:sequence_expression'] = 3,
         ['binder:return_statement'] = 1, ['both:if_statement'] = 1 },
-    -- recalib @ CART-0404: 2230 -> 975 — libs carries .c/.rs files too.
-    libs = { total = 975, ['extra:try_with_resources_statement'] = 670,
-        ['missing:declaration'] = 129, ['extra:declaration'] = 23,
+    -- recalib @ CART-0405 (the ruby grid's findings, applied everywhere): 975 -> 305.
+    -- extra:try_with_resources_statement 670 -> 0. flow blanks a TRY head's def/use since
+    -- CART-0386 (a container is not a computation) and the expression harvest did not know;
+    -- it does now, by MIRRORING flow's rule rather than re-deriving it. The same change also
+    -- cleared the head's `rmw`, which the blanking had left behind — a row's read census is
+    -- `use u rmw`, so half the names survived a zeroing that meant to remove all of them.
+    libs = { total = 305, ['missing:declaration'] = 129, ['extra:declaration'] = 23,
         ['binder:class_declaration'] = 21, ['extra:expression_statement'] = 21,
         ['binder:for_statement'] = 18, ['binder:while_statement'] = 17,
         ['missing:local_variable_declaration'] = 16, ['binder:return_statement'] = 13,
@@ -286,24 +278,26 @@ M.EXPECTED = {
         ['extra:return_statement'] = 8, ['binder:expression_statement'] = 5,
         ['missing:expression_statement'] = 3, ['binder:variable_declaration'] = 1,
         ['extra:for_in_statement'] = 1, ['extra:for_statement'] = 1, ['missing:subscript'] = 1 },
-    rails = { total = 641, ['missing:assignment'] = 147, ['missing:call'] = 138,
+    -- recalib @ CART-0405: as ruby.
+    rails = { total = 606, ['missing:assignment'] = 147, ['missing:call'] = 138,
         ['missing:string'] = 83, ['binder:if'] = 55, ['binder:if_modifier'] = 49,
-        ['missing:binary'] = 40, ['extra:begin'] = 35, ['missing:conditional'] = 28,
-        ['binder:unless_modifier'] = 13, ['missing:if_modifier'] = 11,
-        ['missing:operator_assignment'] = 11, ['binder:elsif'] = 5, ['binder:unless'] = 5,
-        ['binder:operator_assignment'] = 3, ['missing:hash'] = 3, ['missing:if'] = 3,
-        ['missing:return'] = 3, ['missing:heredoc_body'] = 2, ['missing:unless_modifier'] = 2,
-        ['both:if'] = 1, ['both:if_modifier'] = 1, ['missing:unary'] = 1,
-        ['missing:while_modifier'] = 1, ['missing:yield'] = 1 },
+        ['missing:binary'] = 40, ['missing:conditional'] = 28, ['binder:unless_modifier'] = 13,
+        ['missing:if_modifier'] = 11, ['missing:operator_assignment'] = 11, ['binder:elsif'] = 5,
+        ['binder:unless'] = 5, ['binder:operator_assignment'] = 3, ['missing:hash'] = 3,
+        ['missing:if'] = 3, ['missing:return'] = 3, ['missing:heredoc_body'] = 2,
+        ['missing:unless_modifier'] = 2, ['both:if'] = 1, ['both:if_modifier'] = 1,
+        ['missing:unary'] = 1, ['missing:while_modifier'] = 1, ['missing:yield'] = 1 },
+    -- recalib @ CART-0405: as ruby.
     rspec = { total = 11, ['missing:assignment'] = 5, ['missing:call'] = 4, ['binder:call'] = 1,
         ['missing:string'] = 1 },
-    ruby = { total = 435, ['missing:call'] = 130, ['missing:conditional'] = 61,
-        ['missing:assignment'] = 56, ['missing:string'] = 52, ['extra:begin'] = 32,
-        ['binder:if'] = 26, ['missing:binary'] = 25, ['missing:if_modifier'] = 12,
-        ['binder:if_modifier'] = 7, ['binder:while'] = 6, ['binder:elsif'] = 5,
-        ['missing:unless_modifier'] = 5, ['binder:assignment'] = 4, ['missing:unary'] = 3,
-        ['both:unless_modifier'] = 2, ['missing:array'] = 2, ['missing:operator_assignment'] = 2,
-        ['binder:binary'] = 1, ['binder:case'] = 1, ['missing:hash'] = 1, ['missing:return'] = 1,
+    -- recalib @ CART-0405: the `begin` head no longer harvests its own body (see libs).
+    ruby = { total = 403, ['missing:call'] = 130, ['missing:conditional'] = 61,
+        ['missing:assignment'] = 56, ['missing:string'] = 52, ['binder:if'] = 26,
+        ['missing:binary'] = 25, ['missing:if_modifier'] = 12, ['binder:if_modifier'] = 7,
+        ['binder:while'] = 6, ['binder:elsif'] = 5, ['missing:unless_modifier'] = 5,
+        ['binder:assignment'] = 4, ['missing:unary'] = 3, ['both:unless_modifier'] = 2,
+        ['missing:array'] = 2, ['missing:operator_assignment'] = 2, ['binder:binary'] = 1,
+        ['binder:case'] = 1, ['missing:hash'] = 1, ['missing:return'] = 1,
         ['missing:while_modifier'] = 1 },
     rust = { total = 5525, ['extra:let_declaration'] = 1518,
         ['extra:expression_statement'] = 1501, ['extra:call_expression'] = 585,
@@ -322,7 +316,7 @@ M.EXPECTED = {
         ['binder:match_block'] = 1, ['both:struct_expression'] = 1,
         ['extra:type_cast_expression'] = 1, ['missing:case_item'] = 1, ['missing:pipeline'] = 1,
         ['missing:variable_assignment'] = 1 },
-    synjava = { total = 1, ['extra:try_with_resources_statement'] = 1 },
+    synjava = { total = 0 },
     synjs = { total = 30, ['extra:return_statement'] = 18, ['binder:statement_block'] = 10,
         ['extra:expression_statement'] = 2 },
     synlua = { total = 49, ['missing:variable_declaration'] = 35, ['missing:function_call'] = 6,

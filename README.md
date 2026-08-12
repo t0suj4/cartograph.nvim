@@ -2666,6 +2666,12 @@ nvim --headless -u NONE -l tools/matrix.lua libs --cols expr
 # perturbs one byte and requires the digest to move, because a check that cannot fire proves
 # nothing.
 nvim --headless -u NONE -l tools/gridgate.lua java
+# A SECOND LANGUAGE IS PART OF THE CLAIM — one language proves the emitter, not the design.
+# ruby has no braces, so no `unbraced` axis; its equivalent split is the MODIFIER form, and
+# its shells include `inblock` (an attached do…end, where 18-20% of ruby statements live).
+# It plants two cells that open tickets NAME but nobody had ever emitted: MODIFIER x LOOP
+# (CART-0394) and `for x in xs` (CART-0393).
+nvim --headless -u NONE -l tools/gridgate.lua ruby
 nvim --headless -u NONE -l tools/gridgate.lua java --show expr:try_with_resources_statement
 # --show <class>: the divergence EXPLORER — dump a class's instances with source
 # + the flow={}/df={} sets (the fix-side view); no class lists the classes.

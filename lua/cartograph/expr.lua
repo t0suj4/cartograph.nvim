@@ -649,6 +649,15 @@ function M.harvest_row(node, src, hint, lang)
         -- du, all read as names here until this existed. What a binder genuinely READS is a
         -- default expression (`|opt = f(z)|` evaluates `f(z)`), and the split comes from
         -- flow.head_binders so du and this cannot draw it differently.
+        -- ★ A TRY HEAD EVALUATES NOTHING, and flow has said so since CART-0386 — it blanks
+        -- the row's def/use because a container is not a computation. This side did not
+        -- know, and for java/js/python it did not matter: their `try` holds a `block`, which
+        -- the BODY skip below already excludes. RUBY'S `begin` HANGS ITS STATEMENTS DIRECTLY,
+        -- so the harvest walked the whole body and read every name in it while du read none.
+        -- MEASURED by the ruby grid on its first run: expr:begin = 190, every instance an
+        -- `inrescue` shell. The two sides agree by MIRRORING flow's rule, not by re-deriving
+        -- it — the same reason head_binders and case_labels are exported rather than copied.
+        if cls and cls.try and cls.try[node:type()] then return { lhs = {}, rhs = {} } end
         local bn, bskip, bvals = require('cartograph.flow').head_binders(node, src, cls)
         local lhs = {}
         if bn then

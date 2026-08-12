@@ -335,10 +335,225 @@ local function java(opts)
     end
     w('}')
     return { files = { [fname] = table.concat(B, '\n') .. '\n' },
-        cells = cells, skipped = skipped, file = fname, lang = 'java' }
+        cells = cells, skipped = skipped, file = fname, lang = 'java',
+        method_node = 'method_declaration', qualify = 'Grid::' }
 end
 
-local LANGS = { java = java }
+
+-- ── ruby ────────────────────────────────────────────────────────────────────────────────
+-- ★ THE SECOND LANGUAGE IS PART OF THE CLAIM. A one-language "matrix" proves the emitter
+-- works, not that the DESIGN does — and ruby is the language whose axes are already named on
+-- open tickets nobody has ever emitted a cell for: MODIFIER x LOOP (CART-0394, "the missing
+-- cell is the INTERSECTION") and `for x in xs` (CART-0393, the 4th phantom free variable).
+-- Both are FORMS here, so they stop being arguments and start being numbers.
+--
+-- Ruby has no braces, so there is no `unbraced` axis — its equivalent split is the MODIFIER
+-- form, which is a different node type rather than a different body shape. And its shells
+-- include `inblock`: an attached `do…end`, the form 18-20% of ruby statements sit inside
+-- (CART-0363 part B) and the ruby analogue of java's `inlambda`.
+local RUBY_FORMS = {
+    { id = 'ifs',        node = 'if',              chain = 3 },
+    { id = 'unlesss',    node = 'unless' },
+    { id = 'whiles',     node = 'while' },
+    { id = 'untils',     node = 'until' },
+    { id = 'forin',      node = 'for' },
+    { id = 'cases',      node = 'when',            chain = 3 },
+    { id = 'begins',     node = 'rescue',          chain = 3 },
+    { id = 'doblock',    node = 'do_block' },
+    { id = 'braceblock', node = 'block' },
+    -- the MODIFIERS. A modifier takes exactly ONE statement, so every body variant except
+    -- `one` is illegal — and that is recorded as a SKIP rather than quietly not emitted.
+    { id = 'ifmod',      node = 'if_modifier',     onebody = true },
+    { id = 'unlessmod',  node = 'unless_modifier', onebody = true },
+    { id = 'whilemod',   node = 'while_modifier',  onebody = true },
+    { id = 'untilmod',   node = 'until_modifier',  onebody = true },
+}
+local RUBY_SHELLS = { 'top', 'inloop', 'inif', 'inelse', 'inblock', 'inrescue' }
+local RUBY_BODIES = { 'empty', 'one', 'two', 'nest' }
+
+local function ruby(opts)
+    opts = opts or {}
+    local fname = 'grid.rb'
+    local B, cells, skipped = {}, {}, {}
+    local function w(l) B[#B + 1] = l end
+    local pad = function (n) return ('  '):rep(n) end
+
+    w('class Grid')
+    w('  def step(v)')
+    w('    v + 1')
+    w('  end')
+    w('  def twice(v)')
+    w('    v * 2')
+    w('  end')
+    w('')
+
+    local function cell(form, shell, body, chain)
+        local want = {}
+        local function claim(t) want[t] = (want[t] or 0) + 1 end
+        local name = ('c_%s_%s_%s_ch%d'):format(form, shell, body, chain)
+
+        local emit_form
+        local function emit_body(kind, ind)
+            if kind == 'empty' then return end
+            if kind == 'one' then w(pad(ind) .. 'acc = step(acc)') return end
+            if kind == 'two' then
+                w(pad(ind) .. 'acc = step(acc)')
+                w(pad(ind) .. 'acc = twice(acc)')
+                return
+            end
+            emit_form(form, 1, 'one', ind)
+        end
+
+        function emit_form(f, nchain, bodykind, ind)
+            local p = pad(ind)
+            if f == 'ifs' then
+                claim('if')
+                w(p .. 'if m > 0')
+                emit_body(bodykind, ind + 1)
+                for i = 2, nchain do
+                    claim('elsif')
+                    w(p .. 'elsif m > ' .. i)
+                    emit_body(bodykind, ind + 1)
+                end
+                if nchain > 1 then w(p .. 'else'); emit_body(bodykind, ind + 1) end
+                w(p .. 'end')
+            elseif f == 'unlesss' then
+                claim('unless')
+                w(p .. 'unless m > 0')
+                emit_body(bodykind, ind + 1)
+                w(p .. 'end')
+            elseif f == 'whiles' then
+                claim('while')
+                w(p .. 'while acc < 1')
+                emit_body(bodykind, ind + 1)
+                w(p .. '  break')
+                w(p .. 'end')
+            elseif f == 'untils' then
+                claim('until')
+                w(p .. 'until acc > 0')
+                emit_body(bodykind, ind + 1)
+                w(p .. '  break')
+                w(p .. 'end')
+            elseif f == 'forin' then
+                -- ★ CART-0393's cell: LOOPVAR has no ruby entry, so `x` may be a free USE
+                claim('for')
+                w(p .. 'for x in xs')
+                emit_body(bodykind, ind + 1)
+                w(p .. 'end')
+            elseif f == 'cases' then
+                claim('case')
+                w(p .. 'case m')
+                for i = 1, nchain do
+                    claim('when')
+                    w(p .. 'when ' .. i)
+                    emit_body(bodykind, ind + 1)
+                end
+                w(p .. 'else')
+                emit_body(bodykind, ind + 1)
+                w(p .. 'end')
+            elseif f == 'begins' then
+                claim('begin')
+                w(p .. 'begin')
+                emit_body(bodykind, ind + 1)
+                local ex = { 'ArgumentError', 'TypeError', 'RuntimeError' }
+                for i = 1, nchain do
+                    claim('rescue')
+                    w(p .. 'rescue ' .. ex[i] .. ' => e' .. i)
+                    emit_body(bodykind, ind + 1)
+                end
+                claim('ensure')
+                w(p .. 'ensure')
+                emit_body(bodykind, ind + 1)
+                w(p .. 'end')
+            elseif f == 'doblock' then
+                claim('do_block')
+                w(p .. 'xs.each do |x|')
+                emit_body(bodykind, ind + 1)
+                w(p .. 'end')
+            elseif f == 'braceblock' then
+                claim('block')
+                w(p .. 'xs.each { |x|')
+                emit_body(bodykind, ind + 1)
+                w(p .. '}')
+            elseif f == 'ifmod' then
+                claim('if_modifier'); w(p .. 'acc = step(acc) if m > 0')
+            elseif f == 'unlessmod' then
+                claim('unless_modifier'); w(p .. 'acc = step(acc) unless m > 0')
+            elseif f == 'whilemod' then
+                -- ★ CART-0394's cell: the four block loops and the two IF modifiers both
+                -- landed in part A, so every aggregate looked complete. This is the product.
+                claim('while_modifier'); w(p .. 'acc = step(acc) while m > 100')
+            elseif f == 'untilmod' then
+                claim('until_modifier'); w(p .. 'acc = step(acc) until m > 100')
+            else
+                error('genmatrix: no ruby emitter for form ' .. tostring(f))
+            end
+        end
+
+        w('  def ' .. name .. '(m, xs)')
+        w('    acc = 0')
+        if shell == 'top' then
+            emit_form(form, chain, body, 2)
+        elseif shell == 'inloop' then
+            claim('while')
+            w('    while acc < 1')
+            emit_form(form, chain, body, 3)
+            w('      break')
+            w('    end')
+        elseif shell == 'inif' then
+            claim('if')
+            w('    if m > 0')
+            emit_form(form, chain, body, 3)
+            w('    end')
+        elseif shell == 'inelse' then
+            claim('if')
+            w('    if m > 0')
+            w('      acc = step(acc)')
+            w('    else')
+            emit_form(form, chain, body, 3)
+            w('    end')
+        elseif shell == 'inblock' then
+            -- an attached do…end: 18-20% of ruby statements live inside one
+            claim('do_block')
+            w('    xs.each do |y|')
+            emit_form(form, chain, body, 3)
+            w('    end')
+        elseif shell == 'inrescue' then
+            claim('begin'); claim('rescue')
+            w('    begin')
+            w('      acc = step(acc)')
+            w('    rescue StandardError => e0')
+            emit_form(form, chain, body, 3)
+            w('    end')
+        end
+        w('    acc')
+        w('  end')
+        w('')
+        cells[#cells + 1] = { m = name, form = form, shell = shell,
+            body = body, chain = chain, want = want }
+    end
+
+    for _, F in ipairs(RUBY_FORMS) do
+        for _, shell in ipairs(RUBY_SHELLS) do
+            for _, body in ipairs(RUBY_BODIES) do
+                for chain = 1, (F.chain or 1) do
+                    if F.onebody and body ~= 'one' then
+                        skipped[#skipped + 1] = { form = F.id, shell = shell, body = body,
+                            chain = chain, why = 'a modifier takes exactly ONE statement' }
+                    else
+                        cell(F.id, shell, body, chain)
+                    end
+                end
+            end
+        end
+    end
+    w('end')
+    return { files = { [fname] = table.concat(B, '\n') .. '\n' },
+        cells = cells, skipped = skipped, file = fname, lang = 'ruby',
+        method_node = 'method', qualify = 'Grid#' }
+end
+
+local LANGS = { java = java, ruby = ruby }
 
 --- Emit the grid for `lang`. Pure: returns text, writes nothing.
 ---@param lang string

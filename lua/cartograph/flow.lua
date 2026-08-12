@@ -881,14 +881,20 @@ function M.build(fnnode, src, cfg)
             -- runs AFTER the body, so its def/use must be ordered after it (a
             -- var def'd in the body and read in the condition is not a free
             -- use). Drop it from the control row; re-emit as a trailing row.
-            if POST[t] then stmts[idx].def, stmts[idx].use = {}, {} end
+            -- ★ AND `rmw` TOO. A row's read census is `use ∪ rmw` — rmw holds the READ half
+            -- of a read-modify-write, which the df contract drops from `use` — so blanking
+            -- def/use and leaving rmw keeps exactly the names the blanking meant to remove.
+            -- Found by the ruby grid (CART-0405): the `begin` head came back def={} use={}
+            -- reads={} and the self-gate still said missing={acc}, because `acc = step(acc)`
+            -- in the body had put `acc` in the head's rmw. Two fields, one claim.
+            if POST[t] then stmts[idx].def, stmts[idx].use, stmts[idx].rmw = {}, {}, nil end
             -- ★ A TRY HEAD EVALUATES NOTHING. It has no condition and no header — the
             -- acquisition, if any, is its own row (PREFIELD) and the body/handlers are
             -- theirs. For java/js/python that fell out for free, because du(stop_body) halts
             -- at the `block` child; ruby's `begin` hangs its body statements DIRECTLY, so du
             -- walked them and the head row claimed to def the exception variable and read
             -- every name in the block. A container is not a computation.
-            if TRY_[t] then stmts[idx].def, stmts[idx].use = {}, {} end
+            if TRY_[t] then stmts[idx].def, stmts[idx].use, stmts[idx].rmw = {}, {}, nil end
             -- ★ A BLOCK HEAD BINDS ITS PARAMETERS — and reading that off du would have
             -- fabricated defs OR invented free uses, which is why it is read off
             -- param_names instead (CART-0363 part B). `|x|` was a USE until now: the third

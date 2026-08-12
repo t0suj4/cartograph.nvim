@@ -149,7 +149,7 @@ local root = parser:parse()[1]:root()
 -- method name -> node, so a cell is checked against ITS OWN subtree
 local mnode = {}
 local function findm(n)
-    if n:type() == 'method_declaration' then
+    if n:type() == (g1.method_node or 'method_declaration') then
         local nm = n:field('name')[1]
         if nm then mnode[vim.treesitter.get_node_text(nm, src)] = n end
     end
@@ -189,7 +189,7 @@ end
 -- flow's OWN answer to "what is control in this language", never a copy: the same lesson
 -- ctrlcensus records — an audit holding its own idea of the answer audits itself.
 local JCLS = flow.classes(ts.spec[lang] or {})
-local CTRLSET, CLAUSESET = JCLS.ctrl, JCLS.clause
+local CTRLSET, CLAUSESET, CLAUSEMAP = JCLS.ctrl, JCLS.clause, JCLS.clausemap
 store.ingest(ts.extract(dir))
 local bym = {}
 for _, nd in ipairs(store.data.nodes) do
@@ -198,7 +198,8 @@ end
 
 for _, c in ipairs(g1.cells) do
     -- java methods are CLASS-QUALIFIED in the node name (`Grid::c_ifs_top_one_ch1`)
-    local nd = bym[c.m] or bym['Grid::' .. c.m]
+    local Q = g1.qualify or 'Grid::'
+    local nd = bym[c.m] or bym[Q .. c.m]
     if not nd then
         record('rows:no-node', c.m)
     else
@@ -213,7 +214,7 @@ for _, c in ipairs(g1.cells) do
         -- turned 112 honest `norow` into 203 fabricated `opaque`, a bigger number that looked
         -- like a worse bug. Two sets, checked independently, summed at the end.
         local SETS = { (flow.record(nd) or {}).stmts or {} }
-        local sub = bym['Grid::lam_' .. c.m]
+        local sub = bym[Q .. 'lam_' .. c.m]
         if sub then SETS[#SETS + 1] = (flow.record(sub) or {}).stmts or {} end
         local nrows = 0
         for _, s in ipairs(SETS) do nrows = nrows + #s end
@@ -247,13 +248,26 @@ for _, c in ipairs(g1.cells) do
         -- link 1) would have shown here as want=3 rows=1: not "the form is missing" but "the
         -- form is there and SOME OF IT went dark", which no aggregate count can express.
         for t, want in pairs(c.want) do
-            if CTRLSET[t] or CLAUSESET[t] then
+            -- ★ A CLAUSE'S ROLE DECIDES HOW ITS ROW IS KEYED, AND SOME ROLES HAVE NO ROW AT
+            -- ALL. flow.clause gives a CASE arm `kind='case'` AND `t`, an elseif `kind=t`, a
+            -- CATCH `kind='catch'` and NO `t` — and for 'else'/'finally' it emits NO ROW,
+            -- regioning the statements under the parent with a `pol` instead. So ruby's
+            -- `ensure` is not a missing row, it is a role that never had one.
+            -- MEASURED before this distinction: the ruby grid's first run reported
+            -- norow:rescue=124 and norow:ensure=72 — 196 findings, every one of them THE
+            -- CHECK rather than flow. Second time this grid has cried wolf across a whole
+            -- axis (the `cond` leaf was the first), and the reason to keep chasing them down
+            -- is that a noisy oracle is how a real hole on that axis gets waved through.
+            local role = CLAUSEMAP and CLAUSEMAP[t]
+            local norow_by_design = role == 'else' or role == 'finally'
+            if (CTRLSET[t] or CLAUSESET[t]) and not norow_by_design then
                 local n2 = 0
                 for _, SS in ipairs(SETS) do
                 for _, s in ipairs(SS) do
-                    -- a CATCH clause row carries `kind`, not `t` (flow.clause sets no `t`
-                    -- on the binding branch); every other class keys by the node type
-                    if s.t == t or (t == 'catch_clause' and s.kind == 'catch') then
+                    -- key by the row's OWN spelling: `t` where flow set one, else the `kind`
+                    -- the clause role produced
+                    if s.t == t or (role == 'catch' and s.kind == 'catch')
+                        or (t == 'catch_clause' and s.kind == 'catch') then
                         n2 = n2 + 1
                     end
                 end
@@ -332,9 +346,31 @@ M.EXPECTED = {
     -- as an excuse: an UNBRACED body is over-collected onto the head by BOTH du and the IR,
     -- so the self-gate is silent on it. AGREEMENT IS NOT CORRECTNESS — a two-implementation
     -- oracle only finds the bugs the two implementations do not share.
+    -- ★ JAVA IS CLEAN. Every class the grid ever reported on it has been closed:
+    --   expr:if_statement 36  -> the else-if chain (CART-0405), fixed at first run
+    --   norow:* 112           -> a java LAMBDA had no node (CART-0406)
+    --   expr:try_with_resources_statement 30 -> flow blanks a TRY head's def/use and the
+    --       harvest did not know (CART-0400) — and the head kept its `rmw`, so blanking
+    --       def/use removed exactly the names the blanking meant to remove and no more
+    --   expr:do_statement 6   -> the SAME rmw bug on a POST loop (CART-0407)
+    -- A ZERO FROM A CHECK THAT HAS FIRED FIVE TIMES IS WORTH SOMETHING. The identity
+    -- selftest below is what keeps it worth something when the count stops moving.
     java = { hash = '532943eb84e361a3de536ffea543ea7d501c02551a28e349eea47f00854da353',
-        cells = 546, skipped = 119, ['expr:try_with_resources_statement'] = 30,
-        ['expr:do_statement'] = 6 },
+        cells = 546, skipped = 119 },
+    -- ★ RUBY IS THE SECOND LANGUAGE, and it exists to prove the DESIGN generalises rather
+    -- than the java emitter. It plants two cells that open tickets NAME but nobody had ever
+    -- emitted: MODIFIER x LOOP (CART-0394) and `for x in xs` (CART-0393).
+    -- The 12 below ARE CART-0394's cell, with a mechanism the ticket did not have: a loop
+    -- modifier is in NEITHER side's model, so du walks the whole statement (condition AND
+    -- body) while the expression harvest takes the CONDITION ALONE via its
+    -- `node:field('condition')` fallback for un-modelled control heads. Two different
+    -- guesses about the same node, and `missing={acc,step}` is the gap between them. Fixing
+    -- CART-0394 — putting the loop modifiers in ruby's ctrl — settles both sides at once.
+    -- `for x in xs` (CART-0393) is planted and currently AGREES: du and the IR both read `x`
+    -- as a use, so the self-gate is silent on it. AGREEMENT IS NOT CORRECTNESS.
+    ruby = { hash = '5b4cd48e623065ddcf932c1f3d1aad975fcf5caf9989d53cb5c49294fc4b5732',
+        cells = 384, skipped = 72,
+        ['expr:while_modifier'] = 6, ['expr:until_modifier'] = 6 },
 }
 local pin = M.EXPECTED[lang]
 if not pin then
