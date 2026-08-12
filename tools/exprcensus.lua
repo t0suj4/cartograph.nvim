@@ -139,26 +139,41 @@ end
 --       (`{ k = 2 }`) and a java ANNOTATION (`@SuppressWarnings`) as reads. Neither is a
 --       variable read; this side is du's, and fixing it moves the df census.
 --   binder:declaration                   CART-0404 — 1378 on elasticsearch, C/C++ only.
+--
+-- ── recalib @ CART-0405, the combinatorial grid's FIRST RUN ─────────────────────────────
+-- The grid (tools/genmatrix.lua + tools/gridgate.lua) fired on EVERY `c_ifs_*_ch2` and
+-- `_ch3` cell and on NO `_ch1` cell — which NAMES the axis, if x CHAIN-LENGTH, without
+-- anyone having to guess it. Java spells `else if` as a NESTED `if_statement`: neither a
+-- BODY nor a CLAUSE, so it fell through to build(), whose `?` path recurses every named
+-- child and swallowed the whole chain's BODIES.
+-- ★ AND THE FIRST FIX WAS MEASURED WRONG BEFORE IT SHIPPED. Skipping the nested child
+-- outright also drops its CONDITION, which du keeps — trading 36 `extra` for 51 `missing` on
+-- cpp and 12 on bash: a bigger disagreement wearing a different label. Recursing it as a
+-- 'ctrlhead' keeps the condition and drops the body, which is where du draws the line.
+-- NET: cpp 114631->114626 · bash 5737->5735, and on bash 32 rows moved `both` -> `missing`,
+-- which is flat in COUNT and strictly better in KIND (a two-sided disagreement became
+-- one-sided). Every other pinned corpus unmoved.
 M.EXPECTED = {
-    bash = { total = 5737, ['missing:command'] = 1126, ['binder:declaration_command'] = 916,
-        ['missing:variable_assignment'] = 897, ['missing:if_statement'] = 486,
-        ['missing:list'] = 338, ['both:if_statement'] = 309, ['both:declaration_command'] = 273,
+    bash = { total = 5735, ['missing:command'] = 1126, ['binder:declaration_command'] = 916,
+        ['missing:variable_assignment'] = 897, ['missing:if_statement'] = 518,
+        ['missing:list'] = 338, ['both:if_statement'] = 277, ['both:declaration_command'] = 273,
         ['missing:case_item'] = 199, ['missing:redirected_statement'] = 156, ['both:list'] = 151,
-        ['both:elif_clause'] = 135, ['missing:test_command'] = 94,
+        ['both:elif_clause'] = 133, ['missing:test_command'] = 94,
         ['missing:c_style_for_statement'] = 88, ['binder:if_statement'] = 87,
-        ['binder:list'] = 84, ['missing:elif_clause'] = 84, ['missing:case_statement'] = 62,
+        ['missing:elif_clause'] = 86, ['binder:list'] = 84, ['missing:case_statement'] = 62,
         ['both:do_group'] = 45, ['binder:elif_clause'] = 33, ['both:for_statement'] = 31,
         ['missing:do_group'] = 27, ['both:redirected_statement'] = 25,
         ['missing:for_statement'] = 16, ['binder:do_group'] = 11, ['binder:for_statement'] = 9,
         ['both:while_statement'] = 9, ['missing:string'] = 9, ['both:command'] = 7,
-        ['binder:while_statement'] = 5, ['missing:pipeline'] = 5, ['extra:if_statement'] = 4,
-        ['binder:command'] = 3, ['binder:redirected_statement'] = 2, ['extra:for_statement'] = 2,
-        ['extra:while_statement'] = 2, ['missing:negated_command'] = 2, ['both:pipeline'] = 1,
-        ['both:variable_assignment'] = 1, ['both:variable_assignments'] = 1,
-        ['missing:command_substitution'] = 1, ['missing:while_statement'] = 1 },
-    cpp = { total = 114631, ['binder:declaration'] = 75190,
-        ['extra:expression_statement'] = 21548, ['extra:if_statement'] = 10558,
-        ['extra:declaration'] = 2775, ['extra:for_statement'] = 737,
+        ['binder:while_statement'] = 5, ['missing:pipeline'] = 5, ['binder:command'] = 3,
+        ['binder:redirected_statement'] = 2, ['extra:for_statement'] = 2,
+        ['extra:if_statement'] = 2, ['extra:while_statement'] = 2,
+        ['missing:negated_command'] = 2, ['both:pipeline'] = 1, ['both:variable_assignment'] = 1,
+        ['both:variable_assignments'] = 1, ['missing:command_substitution'] = 1,
+        ['missing:while_statement'] = 1 },
+    cpp = { total = 114626, ['binder:declaration'] = 75190,
+        ['extra:expression_statement'] = 21548, ['extra:if_statement'] = 10557,
+        ['extra:declaration'] = 2775, ['extra:for_statement'] = 733,
         ['binder:expression_statement'] = 556, ['binder:if_statement'] = 520,
         ['extra:return_statement'] = 381, ['missing:preproc_if'] = 381,
         ['extra:compound_statement'] = 342, ['extra:preproc_ifdef'] = 327,
@@ -183,8 +198,8 @@ M.EXPECTED = {
         ['extra:assignment_expression'] = 2, ['missing:for_range_loop'] = 2,
         ['missing:if_statement'] = 2, ['binder:preproc_ifdef'] = 1, ['both:if_statement'] = 1,
         ['extra:preproc_ifdef'] = 1, ['missing:expression_statement'] = 1 },
-    go = { total = 35875, ['extra:expression_statement'] = 11245,
-        ['extra:short_var_declaration'] = 7713, ['extra:if_statement'] = 4439,
+    go = { total = 35824, ['extra:expression_statement'] = 11245,
+        ['extra:short_var_declaration'] = 7713, ['extra:if_statement'] = 4388,
         ['extra:return_statement'] = 3769, ['extra:assignment_statement'] = 2879,
         ['both:assignment_statement'] = 1536, ['missing:assignment_statement'] = 1196,
         ['extra:for_statement'] = 732, ['extra:range_clause'] = 543,
@@ -229,20 +244,19 @@ M.EXPECTED = {
         ['extra:assignment_expression'] = 7, ['extra:for_in_statement'] = 6,
         ['binder:for_statement'] = 4, ['extra:sequence_expression'] = 3,
         ['binder:return_statement'] = 1, ['both:if_statement'] = 1 },
-    libs = { total = 2472, ['binder:declaration'] = 1378,
-        ['extra:try_with_resources_statement'] = 663, ['extra:if_statement'] = 250,
-        ['extra:declaration'] = 23, ['binder:class_declaration'] = 21,
-        ['extra:expression_statement'] = 21, ['missing:local_variable_declaration'] = 21,
-        ['binder:for_statement'] = 18, ['binder:while_statement'] = 17,
-        ['binder:return_statement'] = 13, ['binder:block'] = 10,
+    libs = { total = 2222, ['binder:declaration'] = 1378,
+        ['extra:try_with_resources_statement'] = 663, ['extra:declaration'] = 23,
+        ['binder:class_declaration'] = 21, ['extra:expression_statement'] = 21,
+        ['missing:local_variable_declaration'] = 21, ['binder:for_statement'] = 18,
+        ['binder:while_statement'] = 17, ['binder:return_statement'] = 13, ['binder:block'] = 10,
         ['binder:local_variable_declaration'] = 8, ['missing:expression_statement'] = 5,
         ['extra:call_expression'] = 4, ['missing:match_arm'] = 3,
         ['binder:comma_expression'] = 2, ['binder:cond'] = 2, ['both:match_arm'] = 2,
         ['extra:if_expression'] = 2, ['extra:match_block'] = 2, ['extra:match_expression'] = 2,
         ['missing:preproc_if'] = 2, ['binder:if_statement'] = 1, ['binder:preproc_ifdef'] = 1,
         ['extra:return_statement'] = 1 },
-    mootools = { total = 1230, ['extra:expression_statement'] = 539,
-        ['extra:if_statement'] = 221, ['extra:return_statement'] = 196,
+    mootools = { total = 1228, ['extra:expression_statement'] = 539,
+        ['extra:if_statement'] = 219, ['extra:return_statement'] = 196,
         ['extra:variable_declaration'] = 135, ['extra:for_statement'] = 38,
         ['missing:variable_declaration'] = 26, ['binder:variable_declaration'] = 22,
         ['extra:for_in_statement'] = 16, ['both:variable_declaration'] = 14,

@@ -613,6 +613,21 @@ function M.harvest_row(node, src, hint, lang)
         local cls = lang and CLS_OF[lang]
         local B, C = (cls and cls.body) or BODY, (cls and cls.clause) or CLAUSE
         local BLK = cls and cls.blocks
+        -- ★ A NESTED CONTROL CHILD IS HARVESTED AS A HEAD, NOT AS AN EXPRESSION. Java (and
+        -- C, C++, js) spell `else if` as a NESTED `if_statement` in the `alternative` field —
+        -- neither a BODY nor a CLAUSE, so it fell through to build(), whose `?` path recurses
+        -- every named child and dragged the WHOLE chain's BODIES into the outer head's IR.
+        -- du walks the nested statement too but stops at ITS block, so what the two disagreed
+        -- about was exactly the chain's bodies — not its conditions.
+        -- ★ SO SKIPPING THE CHILD OUTRIGHT IS WRONG, AND MEASURED WRONG: it drops the nested
+        -- CONDITION, which du does keep, trading 36 `extra` for 51 `missing` on cpp and 12 on
+        -- bash. Recursing as a 'ctrlhead' keeps the condition and drops the body, which is
+        -- what du does — the boundary belongs at the same place on both sides.
+        -- ★ FOUND BY THE COMBINATORIAL GRID ON ITS FIRST RUN (CART-0405), the way only a grid
+        -- can: EVERY `c_ifs_*_ch2` and `_ch3` cell fired and NO `_ch1` cell did, which NAMES
+        -- the axis — if x CHAIN-LENGTH — without anyone having to guess it. The per-form
+        -- bestiary has an `else if`; it has exactly ONE link, so it never could.
+        local CT = (cls and cls.ctrl) or {}
         -- ★ A CONTROL HEAD THAT BINDS DOES NOT READ WHAT IT BINDS. ruby's `|x|`, java's
         -- `for (String x : xs)`, js's for-of `left`, cpp's range-for declarator: all DEFS in
         -- du, all read as names here until this existed. What a binder genuinely READS is a
@@ -631,7 +646,14 @@ function M.harvest_row(node, src, hint, lang)
                 local ct = c:type()
                 if not tsutil.COMMENT[ct] and not B[ct] and not C[ct]
                     and not (BLK and BLK[ct]) and not (bskip and bskip[c:id()]) then
-                    rhs[#rhs + 1] = build(c, src, lang)
+                    if CT[ct] then -- a nested head: its condition, never its body
+                        local sub = M.harvest_row(c, src, 'ctrlhead', lang)
+                        if sub.cond then rhs[#rhs + 1] = sub.cond end
+                        for _, e in ipairs(sub.rhs or {}) do rhs[#rhs + 1] = e end
+                        for _, e in ipairs(sub.lhs or {}) do lhs[#lhs + 1] = e end
+                    else
+                        rhs[#rhs + 1] = build(c, src, lang)
+                    end
                 end
             end
         end

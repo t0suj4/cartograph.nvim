@@ -2645,6 +2645,28 @@ nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --folded     # one row hid
 # rather than asserting zero, keyed by (axis, row type), because "2472 disagreements" is not
 # actionable and "1378 of them are C declarations" is. Four open classes, each with a ticket.
 nvim --headless -u NONE -l tools/matrix.lua libs --cols expr
+# COMBINATORIAL GRID: the bestiary plants each FORM once, and every bug the row model gave
+# up was at an INTERSECTION — elsif x CHAIN-LENGTH-2, block x CONDITION-POSITION, block x
+# ASSIGNMENT-RHS, rescue x INSIDE-A-BLOCK, modifier x LOOP. CART-0394 said it outright: "the
+# missing cell is the INTERSECTION, which no count asks about." So emit the CROSS PRODUCT —
+# FORM x SHELL x BODY x CHAIN, one method per cell, named by its coordinates — and feed it
+# the oracles that need NO answer key (a planted region must have rows; reads == use u rmw).
+# NOTHING IS PERSISTED: the generator is the artifact, minted into a tempdir per run and
+# minted TWICE to gate determinism, because a corpus regenerated per run makes a wobbly
+# emitter indistinguishable from a regression. `--out` is for a human reading a red cell.
+# It paid on its first run: EVERY `c_ifs_*_ch2`/`_ch3` cell fired and NO `_ch1` cell did,
+# which names the axis without anyone guessing it.
+# The grid's sha256 is PINNED beside its census, and that is not the same check as the
+# double-mint: two mints share ONE Lua state, so nondeterminism that is stable WITHIN a
+# process and varies BETWEEN them (a string-hash seed reaching a pairs(), an env var, a
+# clock) agrees with itself and passes. The digest is the only check spanning runs, machines
+# and days — the population a regenerate-every-time corpus actually lives in. It also answers
+# what the counts cannot: hash SAME + counts moved = the analyzer changed; hash MOVED = you
+# edited the grid, so the counts are a new baseline rather than a regression. A selftest
+# perturbs one byte and requires the digest to move, because a check that cannot fire proves
+# nothing.
+nvim --headless -u NONE -l tools/gridgate.lua java
+nvim --headless -u NONE -l tools/gridgate.lua java --show expr:try_with_resources_statement
 # --show <class>: the divergence EXPLORER — dump a class's instances with source
 # + the flow={}/df={} sets (the fix-side view); no class lists the classes.
 nvim --headless -u NONE -l tools/dfgate.lua rust --show flow-over-collects
