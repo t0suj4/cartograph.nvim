@@ -244,10 +244,16 @@ M.EXPECTED = {
         ['extra:assignment_expression'] = 7, ['extra:for_in_statement'] = 6,
         ['binder:for_statement'] = 4, ['extra:sequence_expression'] = 3,
         ['binder:return_statement'] = 1, ['both:if_statement'] = 1 },
-    libs = { total = 2222, ['binder:declaration'] = 1378,
-        ['extra:try_with_resources_statement'] = 663, ['extra:declaration'] = 23,
-        ['binder:class_declaration'] = 21, ['extra:expression_statement'] = 21,
-        ['missing:local_variable_declaration'] = 21, ['binder:for_statement'] = 18,
+    -- recalib @ CART-0406: total 2222->2230, and the SMALLNESS is the finding. 1579 new
+    -- function bodies (java lambdas, which had no node at all) arrived and brought EIGHT new
+    -- disagreements: +7 try-with-resources (CART-0400, already open) and +1 annotation
+    -- (CART-0403). Lambda bodies are ordinary statements, and the IR handles them as well as
+    -- it handles anything else — which is the useful thing to learn from a population that
+    -- had never been measured because it had never been extracted.
+    libs = { total = 2230, ['binder:declaration'] = 1378,
+        ['extra:try_with_resources_statement'] = 670, ['extra:declaration'] = 23,
+        ['missing:local_variable_declaration'] = 22, ['binder:class_declaration'] = 21,
+        ['extra:expression_statement'] = 21, ['binder:for_statement'] = 18,
         ['binder:while_statement'] = 17, ['binder:return_statement'] = 13, ['binder:block'] = 10,
         ['binder:local_variable_declaration'] = 8, ['missing:expression_statement'] = 5,
         ['extra:call_expression'] = 4, ['missing:match_arm'] = 3,

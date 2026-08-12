@@ -202,8 +202,22 @@ for _, c in ipairs(g1.cells) do
     if not nd then
         record('rows:no-node', c.m)
     else
-        local fl = flow.record(nd)
-        local S = fl and fl.stmts or {}
+        -- ★ A CELL'S ROWS CAN LIVE IN MORE THAN ONE NODE, and assuming otherwise would
+        -- have shown the CART-0406 fix as NO CHANGE AT ALL. A java lambda now MINTS its own
+        -- node — that IS the fix — so an `inlambda` cell's control rows sit under the
+        -- BINDING's name, not the method's. The emitter names that binding after the cell
+        -- exactly so this lookup can find it; a shared name would collide 112 cells into one
+        -- node and the grid would go green on the collision rather than on the fix.
+        -- ★ AND THE SETS STAY SEPARATE. `parent` is an INDEX INTO ITS OWN ROW ARRAY, so
+        -- concatenating two nodes' rows silently re-points every parent link — measured, it
+        -- turned 112 honest `norow` into 203 fabricated `opaque`, a bigger number that looked
+        -- like a worse bug. Two sets, checked independently, summed at the end.
+        local SETS = { (flow.record(nd) or {}).stmts or {} }
+        local sub = bym['Grid::lam_' .. c.m]
+        if sub then SETS[#SETS + 1] = (flow.record(sub) or {}).stmts or {} end
+        local nrows = 0
+        for _, s in ipairs(SETS) do nrows = nrows + #s end
+      for _, S in ipairs(SETS) do
         local haskid = {}
         for _, s in ipairs(S) do if s.parent and s.parent > 0 then haskid[s.parent] = true end end
         -- ★ EVERY CONTROL ROW WITH A NON-EMPTY BODY MUST HAVE CHILDREN. A control row with
@@ -223,7 +237,8 @@ for _, c in ipairs(g1.cells) do
                 record('opaque:' .. (s.t or s.kind), ('%s L%d'):format(c.m, s.l))
             end
         end
-        if #S == 0 then record('rows:empty', c.m) end
+      end
+        if nrows == 0 then record('rows:empty', c.m) end
         -- ★ THE STRONGEST CHECK: PLANTED, BUT IS THERE A ROW? The coverage pass proved the
         -- node type exists in the tree; this asks whether flow made a row for it. A form with
         -- no row is invisible to every consumer at once — no CFG, no def/use, no lint — and
@@ -234,12 +249,14 @@ for _, c in ipairs(g1.cells) do
         for t, want in pairs(c.want) do
             if CTRLSET[t] or CLAUSESET[t] then
                 local n2 = 0
-                for _, s in ipairs(S) do
+                for _, SS in ipairs(SETS) do
+                for _, s in ipairs(SS) do
                     -- a CATCH clause row carries `kind`, not `t` (flow.clause sets no `t`
                     -- on the binding branch); every other class keys by the node type
                     if s.t == t or (t == 'catch_clause' and s.kind == 'catch') then
                         n2 = n2 + 1
                     end
+                end
                 end
                 if n2 == 0 then record('norow:' .. t, ('%s wanted %d'):format(c.m, want))
                 elseif n2 < want then
@@ -315,14 +332,9 @@ M.EXPECTED = {
     -- as an excuse: an UNBRACED body is over-collected onto the head by BOTH du and the IR,
     -- so the self-gate is silent on it. AGREEMENT IS NOT CORRECTNESS — a two-implementation
     -- oracle only finds the bugs the two implementations do not share.
-    java = { hash = 'f87c19ad1e7f93db27471891874b396bc4af470d8a8ae1bb58bedd2b2b33ade7',
+    java = { hash = '532943eb84e361a3de536ffea543ea7d501c02551a28e349eea47f00854da353',
         cells = 546, skipped = 119, ['expr:try_with_resources_statement'] = 30,
-        ['norow:switch_expression'] = 18, ['norow:catch_clause'] = 16,
-        ['norow:if_statement'] = 15, ['norow:try_statement'] = 12,
-        ['norow:while_statement'] = 10, ['norow:switch_block_statement_group'] = 9,
-        ['norow:switch_rule'] = 9, ['expr:do_statement'] = 6, ['norow:do_statement'] = 5,
-        ['norow:enhanced_for_statement'] = 5, ['norow:for_statement'] = 5,
-        ['norow:synchronized_statement'] = 4, ['norow:try_with_resources_statement'] = 4 },
+        ['expr:do_statement'] = 6 },
 }
 local pin = M.EXPECTED[lang]
 if not pin then

@@ -272,9 +272,26 @@ end
 
 return {
     exts = { 'java' },
+    -- ★ A LAMBDA IS A FUNCTION AND IT HAD NO NODE, so its body had NO ROWS ANYWHERE
+    -- (CART-0406). `flow_stop('java')` contains `lambda_expression`, and treesitter.lua
+    -- documents what that means: "the nested-fn STOP, not the enclosure set: ONLY WHERE A
+    -- NODE IS MINTED TO HOLD THE ROWS". An anonymous CLASS keeps that promise — its `run`
+    -- appears in the graph — and a lambda broke it: du stopped there and nothing picked the
+    -- body up. The rows were not relocated, they were ABSENT.
+    -- MEASURED on elasticsearch/libs: 1670 lambdas, 94 of them holding a control form.
+    -- ★ THE POSITIONS AND THEIR NAMES ARE JS'S, because js already solved this for arrow
+    -- functions and a second convention would BE the drift:
+    --   a NAMED binding  `Runnable r = () -> {…}`  -> the declarator's name (also covers a
+    --                                                 FIELD initialiser: same node shape)
+    --   an ARGUMENT      `xs.forEach(x -> {…})`     -> `<callee>#cb`, via @adef
+    -- Deliberately NOT captured: a lambda in RETURN position. It has no name and no enclosing
+    -- call, so @adef would mint `fn#cb` — and in a graph keyed by name, a name carrying no
+    -- information is worse than an honest absence.
     functions = [=[
         (method_declaration name: (identifier) @name) @def
         (constructor_declaration name: (identifier) @name) @def
+        (variable_declarator name: (identifier) @name value: (lambda_expression) @def)
+        (argument_list (lambda_expression) @adef)
     ]=],
     calls = [=[
         (method_invocation name: (identifier) @name) @call

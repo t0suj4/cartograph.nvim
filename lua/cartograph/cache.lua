@@ -73,7 +73,12 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 131 -- v131: RUBY'S ATTACHED BLOCKS — `do…end` / `{…}` — open at all now, the
+M.VERSION = 132 -- v132: A JAVA LAMBDA IS A FUNCTION AND NOW HAS A NODE (CART-0406). flow
+               -- stops at `lambda_expression` on the promise that a node is MINTED to hold
+               -- the rows; an anonymous class kept it, a lambda did not, so every lambda
+               -- body had NO ROWS IN NO NODE. 1670 lambdas on elasticsearch/libs. Named
+               -- js's way: the declarator's name, or `<callee>#cb` in argument position.
+               -- v131: RUBY'S ATTACHED BLOCKS — `do…end` / `{…}` — open at all now, the
                -- form 18-20% of ruby statements sit inside (CART-0363 part B). A whole block
                -- was ONE row and its parameter was a free USE. Carries a second extraction
                -- change: the expression IR held a SIXTH copy of the body/clause sets, so a

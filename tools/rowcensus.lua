@@ -163,14 +163,17 @@ M.EXPECTED = {
     jquery = { rows = 3441, opened = 869, opaque = 6, catch = 9, ['catch:opaque'] = 5,
         for_in_statement = 31, for_statement = 56, if_statement = 713, try_statement = 14,
         while_statement = 46, ['while_statement:opaque'] = 1 },
-    libs = { rows = 50403, opened = 7383, opaque = 102, catch = 425, ['catch:opaque'] = 49,
-        ['cond:opaque'] = 21, do_statement = 21, enhanced_for_statement = 431,
-        for_statement = 1448, if_expression = 2, if_statement = 3409, match_block = 2,
-        match_expression = 2, switch_block_statement_group = 88,
-        ['switch_block_statement_group:opaque'] = 10, switch_expression = 48, switch_rule = 157,
-        synchronized_statement = 1, try_statement = 474, try_with_resources_statement = 642,
-        ['try_with_resources_statement:opaque'] = 21, while_statement = 233,
-        ['while_statement:opaque'] = 1 },
+    -- recalib @ CART-0406: +4680 rows / +151 opened = A JAVA LAMBDA NOW HAS A NODE, so its body
+    -- has rows at all. Every form rose and none fell — the shape of the delta IS the review
+    -- question's answer. `opaque` UNMOVED at 102, which is the sharper signal: 1579 new function
+    -- bodies arrived and not one of them opened a control form it then failed to region.
+    libs = { rows = 55083, opened = 7534, opaque = 102, if_statement = 3476,
+        for_statement = 1470, try_with_resources_statement = 649, try_statement = 490,
+        catch = 446, enhanced_for_statement = 441, while_statement = 234, switch_rule = 162,
+        switch_block_statement_group = 88, switch_expression = 50, ['catch:opaque'] = 49,
+        ['cond:opaque'] = 21, do_statement = 21, ['try_with_resources_statement:opaque'] = 21,
+        ['switch_block_statement_group:opaque'] = 10, if_expression = 2, match_block = 2,
+        match_expression = 2, synchronized_statement = 1, ['while_statement:opaque'] = 1 },
     mootools = { rows = 2100, opened = 513, opaque = 4, catch = 6, ['catch:opaque'] = 3,
         for_in_statement = 30, for_statement = 43, if_statement = 370, switch_case = 31,
         ['switch_case:opaque'] = 1, switch_default = 5, switch_statement = 11,

@@ -293,11 +293,16 @@ local function java(opts)
             -- where a node is MINTED to hold the rows"). Java mints one for an anonymous
             -- class method and NOT for a lambda, so this shell asks whether the promise
             -- holds. Measured before the axis existed: it does not — the body vanishes.
+            -- ★ THE BINDING IS NAMED AFTER THE CELL, and that is not cosmetic. Once a lambda
+            -- MINTS a node (CART-0406) its rows live under the binding's name, so a shared
+            -- `r` would give all 112 inlambda cells the same node and the per-cell check
+            -- could not tell them apart — the grid would go green on a collision. Every
+            -- coordinate that can own rows has to be addressable by its coordinates.
             claim('lambda_expression')
-            w('        Runnable r = () -> {')
+            w('        Runnable lam_' .. name .. ' = () -> {')
             emit_form(form, chain, body, 3)
             w('        };')
-            w('        r.run();')
+            w('        lam_' .. name .. '.run();')
         elseif shell == 'incatch' then
             claim('try_statement')
             claim('catch_clause')

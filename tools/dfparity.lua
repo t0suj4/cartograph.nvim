@@ -244,8 +244,17 @@ M.EXPECTED = {
         ['partition-mismatch'] = 36 }, -- was {} (perfect parity, js archaeology tier)
     -- libs = elasticsearch: java + native rust/cpp, each checked under its own
     -- grammar. All flow-more-correct (closure-leak + bindings df misses).
-    libs = { ['df-over-collects'] = 1814, ['flow-over-collects'] = 312, ['OTHER'] = 3,
-        ['disjoint'] = 2, ['partition-mismatch'] = 1064 },
+    -- recalib @ CART-0406: +153 / +10 / +19, and every number rose because 1579 FUNCTIONS
+    -- ARRIVED — java lambda bodies, which had no node and so were in NEITHER side's census
+    -- before. The classes are the ones already on file: sampled, the flow-over-collects
+    -- instances are collection-loop BINDERS (`for (T c : xs)` — flow defs `c`, the legacy
+    -- walk does not, CART-0363), now also visible inside lambda bodies. partition-mismatch
+    -- rises for the mechanical reason that a new function is a new partition to compare.
+    -- ★ NOTHING FELL, which is the review question: a df/flow divergence that DISAPPEARS when
+    -- a population becomes visible would mean the population was being counted somewhere it
+    -- did not belong.
+    libs = { ['df-over-collects'] = 1967, ['flow-over-collects'] = 322, ['OTHER'] = 3,
+        ['disjoint'] = 2, ['partition-mismatch'] = 1083 },
     -- nio: the annotated-lua tier (CART-0240). Calibrated on arrival rather than
     -- left reporting `~`, because it is PINNED and a pinned corpus can hold a
     -- baseline — an uncalibrated row is a note forever and gates nothing.

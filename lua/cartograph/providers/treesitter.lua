@@ -4896,18 +4896,25 @@ function M.extract(root, opts)
         -- an anonymous callback fn (arrow/function_expression passed as a call
         -- argument): name it after the call it is an argument to, for
         -- navigability (`forEach#cb`), then take handle_fn's anonymous path.
+        -- ★ THE CALL SPELLINGS ARE PER-LANGUAGE and this used to know only js's, so a java
+        -- lambda captured as @adef would have been named `fn#cb` — the same name for every
+        -- callback in the file (CART-0406). java spells the call `method_invocation` and
+        -- keeps the callee under `name`, not `function`. Kept as one table rather than a spec
+        -- key: it is two entries per language and the FIELD fallback chain below already
+        -- covers the difference, so a seam here would be ceremony around four names.
+        local ANONCALL = { call_expression = true, new_expression = true,     -- js/ts
+            method_invocation = true, object_creation_expression = true }     -- java
         local function handle_anon_fn(defn)
             local nm = 'fn'
             local args = defn:parent()
             local call = args and args:parent()
-            if call then
-                local ct = call:type()
-                if ct == 'call_expression' or ct == 'new_expression' then
-                    local f = call:field('function')[1]
-                        or call:field('constructor')[1]
-                    local seg = f and node_text(f, src):match('([%w_$]+)%s*$')
-                    if seg then nm = seg end
-                end
+            if call and ANONCALL[call:type()] then
+                local f = call:field('function')[1]
+                    or call:field('constructor')[1]
+                    or call:field('name')[1]      -- java: method_invocation.name
+                    or call:field('type')[1]      -- java: object_creation_expression.type
+                local seg = f and node_text(f, src):match('([%w_$]+)%s*$')
+                if seg then nm = seg end
             end
             handle_fn(defn, nil, nm .. '#cb')
         end
