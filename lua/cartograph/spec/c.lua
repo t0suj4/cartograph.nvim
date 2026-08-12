@@ -5,6 +5,15 @@
 -- c's by construction.
 
 return {
+    -- ★ C's `declaration` IS a local declaration and the expression IR did not know it
+    -- (CART-0404). `int a = 5;` fell past expr's LOCALDECL unwrap, so the declared NAME was
+    -- harvested as a READ while du correctly called it a def — 75190 rows on the cpp corpus,
+    -- 14429 on cppmodern, the single largest IR/du disagreement class there was.
+    -- ★ IN THE SPEC AND NOT A BASE TABLE, because `declaration` is a node type in NINE of the
+    -- seventeen grammars (c cpp haskell java javascript lua odin tsx typescript — several as
+    -- a SUPERTYPE, which is exactly the kind of distinction a name-keyed base set cannot
+    -- make). Same lesson as `pattern` in six and `block` in eight.
+    localdecl = { declaration = true },
         exts = { 'c', 'h' },
         functions = [[
             (function_definition

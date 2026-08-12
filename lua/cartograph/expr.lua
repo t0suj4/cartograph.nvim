@@ -562,6 +562,22 @@ local LOCALDECL = { variable_declaration = true, local_declaration = true,
 -- path below cannot serve these: it collects every NAME child as a target, which
 -- for a declarator would put the VALUE `x` in the lhs and leave rhs empty.
 local DECLARATOR = { variable_declarator = true, init_declarator = true }
+-- C/C++ wrap the declared name in a pointer/array declarator (`Foo *p`, `int a[4]`) — the
+-- same set du walks through with DECLWRAP, so the two find the same name.
+local DECLWRAP = { pointer_declarator = true, array_declarator = true }
+-- ★ THE LOCAL-DECLARATION SET, PER LANGUAGE (CART-0404). C spells it `declaration`, and
+-- `declaration` is a node type in NINE of the seventeen grammars — several of them as a
+-- SUPERTYPE, a distinction a name-keyed base set cannot make. So it lives in the spec
+-- (`spec.localdecl`) and merges here, memoised, exactly like CLS_OF above. Same lesson as
+-- `pattern` in six grammars and `block` in eight.
+local LOCALDECL_OF = setmetatable({}, { __index = function (t, lang)
+    local base = require('cartograph.providers.treesitter').spec[lang]
+    local out = {}
+    for k in pairs(LOCALDECL) do out[k] = true end
+    for k in pairs((base or {}).localdecl or {}) do out[k] = true end
+    rawset(t, lang, out)
+    return out
+end })
 local RET = { return_statement = true }
 -- sub-region boundaries harvest must NOT descend from a control HEAD (mirrors du's
 -- stop_body: the head owns its condition/clause, not the body or sibling clauses).
@@ -679,32 +695,67 @@ function M.harvest_row(node, src, hint, lang)
         end
     end
     -- lua `local x = e` wraps an assignment_statement; unwrap to it
-    if LOCALDECL[t] then
+    if (lang and LOCALDECL_OF[lang][t]) or LOCALDECL[t] then
         for c in node:iter_children() do
             if c:named() and ASSIGN[c:type()] then return M.harvest_row(c, src, nil, lang) end
         end
         -- a DECLARATOR child carries name/value as fields — split it like an assignment
+        -- ★ ALL OF THEM, NOT THE FIRST. This used to `return` inside the loop, which is right
+        -- for js/java (one declarator per statement is the idiom) and WRONG for C, where
+        -- `int c = g(n), d = 7;` is one `declaration` with two `init_declarator` children —
+        -- the second name and its initialiser both vanished from the row. du has always read
+        -- the declarator FIELD as a LIST (its k==7 branch); this now matches.
+        -- ★ AND IT UNWRAPS `Foo *p` / `int a[4]`: the declared name is inside a pointer or
+        -- array declarator, which is the same DECLWRAP walk du does, so the two arrive at the
+        -- same identifier instead of one of them reading the wrapper.
+        local dlhs, drhs, seen = {}, {}, false
         for c in node:iter_children() do
             if c:named() and DECLARATOR[c:type()] then
+                seen = true
                 local nm = c:field('name')[1] or c:field('declarator')[1]
+                while nm and DECLWRAP[nm:type()] do nm = nm:field('declarator')[1] end
                 local vl = c:field('value')[1]
-                if nm and vl then
-                    return { lhs = { build(nm, src, lang) }, rhs = { build(vl, src, lang) } }
-                end
+                if nm then dlhs[#dlhs + 1] = build(nm, src, lang) end
+                if vl then drhs[#drhs + 1] = build(vl, src, lang) end
+            elseif c:named() and DECLWRAP[c:type()] then
+                -- a declarator with NO initialiser (`Foo *p;`) hangs directly off the
+                -- declaration, with no init_declarator to wrap it
+                seen = true
+                local nm = c
+                while nm and DECLWRAP[nm:type()] do nm = nm:field('declarator')[1] end
+                if nm then dlhs[#dlhs + 1] = build(nm, src, lang) end
             end
         end
+        if seen and #dlhs > 0 then return { lhs = dlhs, rhs = drhs } end
         -- bare `local a, b` (no initializer): the names are defs, no value exprs
-        local lhs = {}
+        -- ★ THIS FALLBACK IS LOSSY BY CONSTRUCTION — it keeps NAMES and drops everything
+        -- else — and that was fine while only lua/js/java reached it, where a declaration
+        -- with no declarator really is just names. C++ broke the assumption: `Foo f(x);` is
+        -- a `declaration` whose declarator is a `function_declarator`, and dropping it loses
+        -- the READ of `x`. MEASURED when this branch first took C's `declaration`:
+        -- binder:declaration 75190 -> 102 (the fix working) but missing:declaration 0 ->
+        -- 139174 (the fallback swallowing shapes it does not model) — a NET WORSE number,
+        -- from a change that was right about the case it aimed at.
+        -- So the fallback now only claims a row when every named child is ACCOUNTED FOR;
+        -- anything else falls through to the generic `?` path below, which keeps the names
+        -- rather than inventing an lhs. An honest unknown beats a confident partial answer.
+        local lhs, all = {}, true
+        local tyf = node:field('type')[1]
         for c in node:iter_children() do
-            for _, tn in ipairs(list_children(c)) do
-                -- @langs-ok `variable_list` is lua's bare-`local a, b` target wrapper;
-                -- no other grammar in the roster wraps an initialiser-less declaration
-                if NAME[tn:type()] or tn:type() == 'variable_list' then
-                    lhs[#lhs + 1] = build(tn, src, lang)
+            if c:named() and not tsutil.is_comment(c) then
+                local cn = false
+                if tyf and c:id() == tyf:id() then cn = true end -- a TYPE reads no variable
+                for _, tn in ipairs(list_children(c)) do
+                    -- @langs-ok `variable_list` is lua's bare-`local a, b` target wrapper;
+                    -- no other grammar in the roster wraps an initialiser-less declaration
+                    if NAME[tn:type()] or tn:type() == 'variable_list' then
+                        lhs[#lhs + 1] = build(tn, src, lang); cn = true
+                    end
                 end
+                if not cn then all = false end
             end
         end
-        return { lhs = lhs, rhs = {} }
+        if all and #lhs > 0 then return { lhs = lhs, rhs = {} } end
     end
     if ASSIGN[t] then
         local left, right, lpos, rpos = assign_sides(node, src)

@@ -129,6 +129,10 @@ M.SLOTS = {
     -- them back to be emitted as rows of their own. `block` is in eight grammars, which
     -- is exactly why this is a spec key and not a base set.
     blocks = 'ANALYSIS',
+    -- LOCAL DECLARATIONS, per language: which node type IS a declaration statement, for the
+    -- expression harvest's name=value split. C spells it `declaration`, which is a node type
+    -- in NINE grammars (several as a SUPERTYPE) — so it cannot be a base name (CART-0404).
+    localdecl = 'ANALYSIS',
     df_ids = 'ANALYSIS', merge_equations = 'ANALYSIS',
     binding_modifiers = 'ANALYSIS', -- declaration decorations that read nothing: lua
                                     -- `<const>`/`<close>`, whose node name collides with
