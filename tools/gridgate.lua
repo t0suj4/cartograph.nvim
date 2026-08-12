@@ -186,6 +186,10 @@ for _, c in ipairs(g1.cells) do
 end
 
 -- ── 3+4. the ROW model and the expression IR, over the extracted grid ───────────────────
+-- flow's OWN answer to "what is control in this language", never a copy: the same lesson
+-- ctrlcensus records — an audit holding its own idea of the answer audits itself.
+local JCLS = flow.classes(ts.spec[lang] or {})
+local CTRLSET, CLAUSESET = JCLS.ctrl, JCLS.clause
 store.ingest(ts.extract(dir))
 local bym = {}
 for _, nd in ipairs(store.data.nodes) do
@@ -220,6 +224,29 @@ for _, c in ipairs(g1.cells) do
             end
         end
         if #S == 0 then record('rows:empty', c.m) end
+        -- ★ THE STRONGEST CHECK: PLANTED, BUT IS THERE A ROW? The coverage pass proved the
+        -- node type exists in the tree; this asks whether flow made a row for it. A form with
+        -- no row is invisible to every consumer at once — no CFG, no def/use, no lint — and
+        -- it is the exact condition CART-0363 spent a week removing from five languages.
+        -- ★ AND `underrow` IS THE CHAIN DETECTOR. CART-0397 (ruby's elsif truncated after
+        -- link 1) would have shown here as want=3 rows=1: not "the form is missing" but "the
+        -- form is there and SOME OF IT went dark", which no aggregate count can express.
+        for t, want in pairs(c.want) do
+            if CTRLSET[t] or CLAUSESET[t] then
+                local n2 = 0
+                for _, s in ipairs(S) do
+                    -- a CATCH clause row carries `kind`, not `t` (flow.clause sets no `t`
+                    -- on the binding branch); every other class keys by the node type
+                    if s.t == t or (t == 'catch_clause' and s.kind == 'catch') then
+                        n2 = n2 + 1
+                    end
+                end
+                if n2 == 0 then record('norow:' .. t, ('%s wanted %d'):format(c.m, want))
+                elseif n2 < want then
+                    record('underrow:' .. t, ('%s wanted %d got %d'):format(c.m, want, n2))
+                end
+            end
+        end
         local oke, got = pcall(expr.of, store, nd.id)
         if oke and got and got.fl then
             for _, d in ipairs(expr.gate(got.fl, got.lang)) do
@@ -272,9 +299,30 @@ M.EXPECTED = {
     -- too. Pinned rather than zeroed, for exactly the reason exprcensus is: an open class is
     -- not a reason to keep the number invisible.
     -- COVERAGE IS CLEAN: 0 cells failed to plant the node types they claim, at the exact
-    -- counts they claim — so the 280 numbers below are about the analyzer, not the emitter.
-    java = { hash = 'e680f20542833cb6ca0b355752dfef8aab531ba75c86d99461cd5f7e0f01a55f',
-        cells = 280, skipped = 24, ['expr:try_with_resources_statement'] = 20 },
+    -- counts they claim — so the numbers below are about the analyzer, not the emitter.
+    --
+    -- ── AXES WIDENED (same session): 280 -> 546 cells, and BOTH new axes fired ──────────
+    -- BODY += `unbraced` (`if (c) stmt;` with no block) and SHELL += inelse / indo /
+    -- inlambda. Two findings, each isolated to ONE product of two axes by its coordinates:
+    --   norow:* = 112, and EVERY instance is the `inlambda` shell (CART-0406). A java lambda
+    --     body has NO ROWS, IN NO NODE: flow stops at `lambda_expression` on the documented
+    --     promise that "a node is MINTED to hold the rows", and for java nothing mints one.
+    --     An anonymous class DOES get a node; a lambda does not. `norow` is a check no
+    --     aggregate can express — a census counts rows that exist.
+    --   expr:do_statement = 6, and every instance is `dowhile` x `unbraced` (CART-0407) —
+    --     the POST-loop's deliberately blank head expr meeting a body du does not stop at.
+    -- ★ AND ONE THING THE ORACLES CANNOT SEE, recorded here because a limit found late reads
+    -- as an excuse: an UNBRACED body is over-collected onto the head by BOTH du and the IR,
+    -- so the self-gate is silent on it. AGREEMENT IS NOT CORRECTNESS — a two-implementation
+    -- oracle only finds the bugs the two implementations do not share.
+    java = { hash = 'f87c19ad1e7f93db27471891874b396bc4af470d8a8ae1bb58bedd2b2b33ade7',
+        cells = 546, skipped = 119, ['expr:try_with_resources_statement'] = 30,
+        ['norow:switch_expression'] = 18, ['norow:catch_clause'] = 16,
+        ['norow:if_statement'] = 15, ['norow:try_statement'] = 12,
+        ['norow:while_statement'] = 10, ['norow:switch_block_statement_group'] = 9,
+        ['norow:switch_rule'] = 9, ['expr:do_statement'] = 6, ['norow:do_statement'] = 5,
+        ['norow:enhanced_for_statement'] = 5, ['norow:for_statement'] = 5,
+        ['norow:synchronized_statement'] = 4, ['norow:try_with_resources_statement'] = 4 },
 }
 local pin = M.EXPECTED[lang]
 if not pin then

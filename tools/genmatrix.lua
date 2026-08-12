@@ -51,21 +51,33 @@ local M = {}
 -- ── java ────────────────────────────────────────────────────────────────────────────────
 -- `node` = the tree-sitter type the form is claimed to plant. `chain` = how many links the
 -- form can carry (absent = 1). `nobody` = the BODY variants this form cannot legally take.
+-- ★ `unbraced` IS THE C-FAMILY AXIS, and it is not a corner: `if (c) stmt;` with no block.
+-- A braced body is a `block`, which flow's BODY set recognises and du stops at; an unbraced
+-- one is the statement itself, which neither does — so the head row harvests its own body.
+-- Illegal for the forms whose grammar REQUIRES a block (sync, try) and meaningless for a
+-- switch arm, which is a statement LIST rather than a single statement.
 local JAVA_FORMS = {
     { id = 'ifs',      node = 'if_statement',                  chain = 3 },
     { id = 'whiles',   node = 'while_statement' },
     { id = 'dowhile',  node = 'do_statement' },
     { id = 'for3',     node = 'for_statement' },
     { id = 'foreach',  node = 'enhanced_for_statement' },
-    { id = 'switchg',  node = 'switch_block_statement_group',  chain = 3, nobody = { empty = true } },
-    { id = 'switchr',  node = 'switch_rule',                   chain = 3, nobody = { empty = true } },
-    { id = 'trycatch', node = 'catch_clause',                  chain = 3 },
-    { id = 'tryres',   node = 'try_with_resources_statement' },
-    { id = 'sync',     node = 'synchronized_statement' },
+    { id = 'switchg',  node = 'switch_block_statement_group',  chain = 3,
+        nobody = { empty = true, unbraced = true } },
+    { id = 'switchr',  node = 'switch_rule',                   chain = 3,
+        nobody = { empty = true, unbraced = true } },
+    { id = 'trycatch', node = 'catch_clause',                  chain = 3,
+        nobody = { unbraced = true } },
+    { id = 'tryres',   node = 'try_with_resources_statement',  nobody = { unbraced = true } },
+    { id = 'sync',     node = 'synchronized_statement',        nobody = { unbraced = true } },
     { id = 'labeled',  node = 'labeled_statement' },
 }
-local SHELLS = { 'top', 'inloop', 'inif', 'incatch' }
-local BODIES = { 'empty', 'one', 'two', 'nest' }
+-- ★ SHELL IS "WHAT ENCLOSES THE FORM", and each entry is a DIFFERENT EMIT PATH, not decor.
+-- `inelse` is not `inif` (the alternative branch is reached by other code than the
+-- consequence); `indo` is a POST loop's body (the condition is re-emitted AFTER it);
+-- `inlambda` is a body flow stops at on the promise that something else mints a node for it.
+local SHELLS = { 'top', 'inloop', 'inif', 'inelse', 'indo', 'incatch', 'inlambda' }
+local BODIES = { 'empty', 'one', 'two', 'nest', 'unbraced' }
 
 --- emit the java grid. Returns { files = {name -> src}, cells = {...}, skipped = {...} }
 --- A cell is { m = <method name>, form, shell, body, chain, want = { [node type] = n } }.
@@ -98,7 +110,9 @@ local function java(opts)
         local emit_form -- fwd
         local function emit_body(kind, ind)
             if kind == 'empty' then return end
-            if kind == 'one' then w(pad(ind) .. 'acc = step(acc);') return end
+            if kind == 'one' or kind == 'unbraced' then
+                w(pad(ind) .. 'acc = step(acc);') return
+            end
             if kind == 'two' then
                 w(pad(ind) .. 'acc = step(acc);')
                 w(pad(ind) .. 'acc = twice(acc);')
@@ -106,45 +120,69 @@ local function java(opts)
             end
             emit_form(form, 1, 'one', ind) -- nest
         end
+        -- `unbraced` drops the braces the other variants carry. Kept as a pair of helpers so
+        -- every form opts in the same way and no form can half-support it.
+        local function ob(kind, p, head) -- open brace (or not)
+            w(p .. head .. (kind == 'unbraced' and '' or ' {'))
+        end
+        local function cb(kind, p, tail) -- close brace (or not)
+            if kind ~= 'unbraced' then w(p .. '}' .. (tail or '')) elseif tail then w(p .. tail) end
+        end
 
         function emit_form(f, nchain, bodykind, ind)
             local p = pad(ind)
             if f == 'ifs' then
                 claim('if_statement')
-                w(p .. 'if (m > 0) {')
-                emit_body(bodykind, ind + 1)
-                for i = 2, nchain do
-                    claim('if_statement') -- java spells `else if` as a NESTED if_statement
-                    w(p .. '} else if (m > ' .. i .. ') {')
+                if bodykind == 'unbraced' then
+                    -- the chain still chains; only the braces go
+                    w(p .. 'if (m > 0)')
                     emit_body(bodykind, ind + 1)
-                end
-                if nchain > 1 then
-                    w(p .. '} else {')
+                    for i = 2, nchain do
+                        claim('if_statement')
+                        w(p .. 'else if (m > ' .. i .. ')')
+                        emit_body(bodykind, ind + 1)
+                    end
+                    if nchain > 1 then
+                        w(p .. 'else')
+                        emit_body(bodykind, ind + 1)
+                    end
+                else
+                    w(p .. 'if (m > 0) {')
                     emit_body(bodykind, ind + 1)
+                    for i = 2, nchain do
+                        claim('if_statement') -- java spells `else if` as a NESTED if_statement
+                        w(p .. '} else if (m > ' .. i .. ') {')
+                        emit_body(bodykind, ind + 1)
+                    end
+                    if nchain > 1 then
+                        w(p .. '} else {')
+                        emit_body(bodykind, ind + 1)
+                    end
+                    w(p .. '}')
                 end
-                w(p .. '}')
             elseif f == 'whiles' then
                 claim('while_statement')
-                w(p .. 'while (acc < 1) {')
+                ob(bodykind, p, 'while (acc < 1)')
                 emit_body(bodykind, ind + 1)
-                w(p .. '    break;')
-                w(p .. '}')
+                if bodykind ~= 'unbraced' then w(p .. '    break;') end
+                cb(bodykind, p)
             elseif f == 'dowhile' then
                 claim('do_statement')
-                w(p .. 'do {')
+                ob(bodykind, p, 'do')
                 emit_body(bodykind, ind + 1)
-                w(p .. '} while (false);')
+                if bodykind == 'unbraced' then w(p .. 'while (false);')
+                else w(p .. '} while (false);') end
             elseif f == 'for3' then
                 claim('for_statement')
-                w(p .. 'for (int i = 0; i < 2; i++) {')
+                ob(bodykind, p, 'for (int i = 0; i < 2; i++)')
                 emit_body(bodykind, ind + 1)
-                w(p .. '}')
+                cb(bodykind, p)
             elseif f == 'foreach' then
                 claim('enhanced_for_statement')
-                w(p .. 'for (String x : xs) {')
+                ob(bodykind, p, 'for (String x : xs)')
                 emit_body(bodykind, ind + 1)
-                w(p .. '    acc += x.length();')
-                w(p .. '}')
+                if bodykind ~= 'unbraced' then w(p .. '    acc += x.length();') end
+                cb(bodykind, p)
             elseif f == 'switchg' then
                 claim('switch_expression')
                 w(p .. 'switch (m) {')
@@ -207,10 +245,10 @@ local function java(opts)
                 lbl = lbl + 1
                 claim('labeled_statement')
                 claim('while_statement')
-                w(p .. 'L' .. lbl .. ': while (acc < 1) {')
+                ob(bodykind, p, 'L' .. lbl .. ': while (acc < 1)')
                 emit_body(bodykind, ind + 1)
-                w(p .. '    break L' .. lbl .. ';')
-                w(p .. '}')
+                if bodykind ~= 'unbraced' then w(p .. '    break L' .. lbl .. ';') end
+                cb(bodykind, p)
             else
                 error('genmatrix: no java emitter for form ' .. tostring(f))
             end
@@ -234,6 +272,32 @@ local function java(opts)
             w('        if (m > 0) {')
             emit_form(form, chain, body, 3)
             w('        }')
+        elseif shell == 'inelse' then
+            -- ★ NOT THE SAME PATH AS `inif`: the ALTERNATIVE branch is reached by different
+            -- code than the consequence, and CART-0397 was a bug that lived only there.
+            claim('if_statement')
+            w('        if (m > 0) {')
+            w('            acc = step(acc);')
+            w('        } else {')
+            emit_form(form, chain, body, 3)
+            w('        }')
+        elseif shell == 'indo' then
+            -- a POST loop's body: its condition is re-emitted AFTER the body, so anything
+            -- ordering-sensitive sees a different row sequence here than in a pre-loop
+            claim('do_statement')
+            w('        do {')
+            emit_form(form, chain, body, 3)
+            w('        } while (false);')
+        elseif shell == 'inlambda' then
+            -- ★ flow STOPS at a lambda ("the nested-fn STOP, not the enclosure set: only
+            -- where a node is MINTED to hold the rows"). Java mints one for an anonymous
+            -- class method and NOT for a lambda, so this shell asks whether the promise
+            -- holds. Measured before the axis existed: it does not — the body vanishes.
+            claim('lambda_expression')
+            w('        Runnable r = () -> {')
+            emit_form(form, chain, body, 3)
+            w('        };')
+            w('        r.run();')
         elseif shell == 'incatch' then
             claim('try_statement')
             claim('catch_clause')
