@@ -510,6 +510,81 @@ function M.binders(node, src, field)
     return names, values
 end
 
+--- ★ WHAT A CONTROL HEAD BINDS, for the OTHER side of the row — the expression harvest
+--- (CART-0395). du and the IR must draw the def/read line in the same place or the expr
+--- self-gate fires, and MEASURED on the java bestiary it did: every `for (String x : xs)`
+--- head reported `extra={x}` — a def in du, a read in the IR. 430 instances on
+--- elasticsearch's libs, 3 on the synthetic corpus that is supposed to gate it.
+--- Returns (names, skip, values):
+---   names  — what the head DEFINES (goes in the row expr's `lhs`, where a plain name reads
+---            nothing), matching du's `def` for the same row
+---   skip   — node ids the harvest must NOT descend, because their leaves are those names
+---   values — nodes it must build ANYWAY (a binder wrapper's default expression is read)
+--- nil when this node type binds nothing, which is every language's ordinary control head.
+---
+--- ★ ONLY THE FORMS WHERE THE BINDER IS SELF-CONTAINED. java's try-with-resources binds too
+--- (`try (var r = open())`), but its `resources` child holds the INITIALIZERS as well, so
+--- skipping it would hide real reads and taking its leaves would fabricate defs from
+--- `new BufferedReader(…)`. That one needs a per-resource split and is filed, not guessed at
+--- here: a binder rule that is exact for four forms and approximate for a fifth is worse
+--- than one that declines the fifth.
+---@param node userdata  the control head node
+---@param src string
+---@param cls table|nil  the record's class table (M.classes), for the `blocks` map
+function M.head_binders(node, src, cls)
+    local t = node:type()
+    local blocks = cls and cls.blocks
+    if blocks and blocks[t] then                      -- ruby's `do…end` / `{…}` parameters
+        local names, values = M.binders(node, src, blocks[t])
+        local ps = node:field(blocks[t])[1]
+        return names, ps and { [ps:id()] = true } or {}, values
+    end
+    if LOOPVAR[t] == nil then return nil end
+    local nodes = {}
+    if LOOPVAR[t] then
+        local x = node:field(LOOPVAR[t])[1]           -- java `name`, js `left`
+        if x then nodes[1] = x end
+    else                                              -- cpp range-for: the declarator child
+        local hdr = {}
+        for _, f in ipairs(RANGE_HEAD) do
+            local x = node:field(f)[1]
+            if x then hdr[x:id()] = true end
+        end
+        for c in node:iter_children() do
+            if c:named() and not hdr[c:id()] then nodes[#nodes + 1] = c end
+        end
+    end
+    local names, skip = {}, {}
+    local function leaves(n)
+        if n:named() and n:child_count() == 0 then
+            -- @langs-ok reached only through LOOPVAR, whose forms exist in java/js/ts/cpp
+            -- alone — and in all four the collection loop's binder leaf is `identifier`
+            if n:type() == 'identifier' then names[#names + 1] = txt(n, src) end
+            return
+        end
+        for c in n:iter_children() do if c:named() then leaves(c) end end
+    end
+    for _, b in ipairs(nodes) do skip[b:id()] = true; leaves(b) end
+    return names, skip, {}
+end
+
+--- ★ THE CASE LABEL, EXPORTED FOR THE SAME REASON. flow.clause reads `value` ∪ `pattern` as
+--- a LIST and falls back to a `switch_label` CHILD (java hangs one); the expression harvest
+--- read only `node:field('value')` and so MISSED java's label entirely — `missing={FAST}` on
+--- the bestiary, a name du counts and the IR does not. One reader, two callers.
+function M.case_labels(node)
+    local labels = {}
+    for _, f in ipairs({ 'value', 'pattern' }) do
+        for _, x in ipairs(node:field(f)) do labels[#labels + 1] = x end
+    end
+    if #labels == 0 then
+        for c in node:iter_children() do
+            if c:named() and CASELABEL[c:type()] then labels[#labels + 1] = c end
+        end
+    end
+    return labels
+end
+
 -- the function body region (php `body` field / lua block child)
 local function fn_body(fn)
     local b = fn:field('body')[1]
@@ -913,15 +988,7 @@ function M.build(fnnode, src, cfg)
             -- ★ BY FIELD, NEVER BY THE TYPE NAME `pattern`: js, ts, tsx, python, java and
             -- haskell all have a `pattern` node too (checked via language.inspect), so a base
             -- set keyed on it would reach six languages that never asked (CART-0387).
-            local labels = {}
-            for _, f in ipairs({ 'value', 'pattern' }) do
-                for _, x in ipairs(node:field(f)) do labels[#labels + 1] = x end
-            end
-            if #labels == 0 then
-                for c in node:iter_children() do
-                    if c:named() and CASELABEL[c:type()] then labels[#labels + 1] = c end
-                end
-            end
+            local labels = M.case_labels(node) -- ONE reader; the expr harvest calls it too
             local islabel = {}
             for _, x in ipairs(labels) do islabel[x:id()] = true end
             local d, u, lblk = {}, {}, {}

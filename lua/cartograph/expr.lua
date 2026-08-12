@@ -252,6 +252,20 @@ local CLS_OF = setmetatable({}, { __index = function (t, lang)
     rawset(t, lang, c)
     return c
 end })
+-- ★ THE NESTED-FUNCTION STOP, THE SAME ONE du USES, for the same reason (CART-0395).
+-- ALLOCFN below is a five-name base list, so a nested body spelled anything else was walked
+-- straight into by the `?` honest-unknown path — and its names counted as reads of the
+-- enclosing row. MEASURED on elasticsearch/libs: a `return new Runnable() { @Override public
+-- void run() {…} }` made its `return` row read `Override, closeInternal, onClose, run,
+-- toString`, none of which du sees, because du stops at `method_declaration`. That is the
+-- bulk of a 1076-instance class. Reading the stop from `ts.flow_stop(lang)` makes the two
+-- sides agree BY CONSTRUCTION rather than by two lists happening to match — which is exactly
+-- the drift CART-0308 found between flow's FN set and this module's copy of it.
+local FNSTOP_OF = setmetatable({}, { __index = function (t, lang)
+    local s = require('cartograph.providers.treesitter').flow_stop(lang)
+    rawset(t, lang, s)
+    return s
+end })
 local VARARG = { vararg_expression = true, vararg = true, spread_element = true }
 -- KEY-VALUE PAIRS inside a constructor (CART-0220). VERIFIED per language by
 -- parsing a snippet and reading the grammar's own node names — not guessed:
@@ -446,7 +460,8 @@ function build_core(node, src, lang)
     -- which is also what du now says, since the block's names live on the block's OWN rows.
     -- Without this the call row's expr read the whole block while its `use` did not, and the
     -- self-gate is the thing that would have caught it (had it ever been run on ruby).
-    if ALLOCFN[t] or (lang and CLS_OF[lang].blocks and CLS_OF[lang].blocks[t]) then
+    if ALLOCFN[t] or (lang and (FNSTOP_OF[lang][t]
+        or (CLS_OF[lang].blocks and CLS_OF[lang].blocks[t]))) then
         return { k = 'fn' } -- NEVER descend a closure body (du doesn't either)
     end
     if VARARG[t] then return { k = 'vararg' } end
@@ -575,8 +590,21 @@ local CLAUSE = { else_statement = true, elseif_statement = true, elseif_clause =
 function M.harvest_row(node, src, hint, lang)
     if hint == 'cond' then return { lhs = {}, rhs = {}, cond = build(node, src, lang) } end
     if hint == 'casehead' then
-        local v = node:field('value')[1]
-        return { lhs = {}, rhs = {}, cond = v and build(v, src, lang) or nil }
+        -- ★ THE LABEL IS NOT ALWAYS A `value` FIELD, AND NOT ALWAYS ONE NODE (CART-0395).
+        -- C/go spell it `value`; java hangs a `switch_label` CHILD; ruby's `when 1, 2` has
+        -- TWO `pattern` fields. flow.clause has read all three since CART-0387 — this side
+        -- read `value` alone and so MISSED java's label entirely (`missing={FAST}` on the
+        -- bestiary: a name du counts and the IR does not). flow.case_labels is now the one
+        -- reader, so the two cannot drift apart again.
+        local labels = require('cartograph.flow').case_labels(node)
+        if #labels == 0 then return { lhs = {}, rhs = {} } end
+        if #labels == 1 then
+            return { lhs = {}, rhs = {}, cond = build(labels[1], src, lang) }
+        end
+        -- several labels guard the same arm: they are alternatives, all read
+        local rhs = {}
+        for _, x in ipairs(labels) do rhs[#rhs + 1] = build(x, src, lang) end
+        return { lhs = {}, rhs = rhs }
     end
     if hint == 'ctrlhead' then
         local cond = node:field('condition')[1] or node:field('value')[1]
@@ -585,29 +613,29 @@ function M.harvest_row(node, src, hint, lang)
         local cls = lang and CLS_OF[lang]
         local B, C = (cls and cls.body) or BODY, (cls and cls.clause) or CLAUSE
         local BLK = cls and cls.blocks
-        -- ★ AN ATTACHED BLOCK HEAD BINDS; IT DOES NOT READ. `|x|` is a DEF, so it belongs in
-        -- `lhs` (where a plain name is a pure target and reads nothing), not in `rhs` — else
-        -- the self-gate reports it as a read du never claimed. What a binder list genuinely
-        -- READS is its default expressions (`|opt = f(z)|` evaluates `f(z)`), and the split
-        -- between the two comes from flow.binders so du and this cannot draw it differently.
-        local bf = BLK and BLK[node:type()]
-        if bf then
-            local names, values = require('cartograph.flow').binders(node, src, bf)
-            local lhs, rhs2 = {}, {}
-            for _, n in ipairs(names) do lhs[#lhs + 1] = { k = 'name', n = n } end
-            for _, v in ipairs(values) do rhs2[#rhs2 + 1] = build(v, src, lang) end
-            return { lhs = lhs, rhs = rhs2 }
+        -- ★ A CONTROL HEAD THAT BINDS DOES NOT READ WHAT IT BINDS. ruby's `|x|`, java's
+        -- `for (String x : xs)`, js's for-of `left`, cpp's range-for declarator: all DEFS in
+        -- du, all read as names here until this existed. What a binder genuinely READS is a
+        -- default expression (`|opt = f(z)|` evaluates `f(z)`), and the split comes from
+        -- flow.head_binders so du and this cannot draw it differently.
+        local bn, bskip, bvals = require('cartograph.flow').head_binders(node, src, cls)
+        local lhs = {}
+        if bn then
+            for _, n in ipairs(bn) do lhs[#lhs + 1] = { k = 'name', n = n } end
+            for _, v in ipairs(bvals or {}) do rhs[#rhs + 1] = build(v, src, lang) end
+            -- a BLOCK head has nothing else to evaluate; a loop head still has its collection
+            if BLK and BLK[node:type()] then return { lhs = lhs, rhs = rhs } end
         end
         for c in node:iter_children() do
             if c:named() then
                 local ct = c:type()
                 if not tsutil.COMMENT[ct] and not B[ct] and not C[ct]
-                    and not (BLK and BLK[ct]) then
+                    and not (BLK and BLK[ct]) and not (bskip and bskip[c:id()]) then
                     rhs[#rhs + 1] = build(c, src, lang)
                 end
             end
         end
-        return { lhs = {}, rhs = rhs, cond = cond and build(cond, src, lang) or nil }
+        return { lhs = lhs, rhs = rhs, cond = cond and build(cond, src, lang) or nil }
     end
     local t = node:type()
     -- ★ AN `expression_statement` WRAPPING A PLAIN ASSIGNMENT, unwrapped exactly as

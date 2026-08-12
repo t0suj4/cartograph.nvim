@@ -43,7 +43,15 @@ local gatebad = {} -- expr self-gate disagreements (reads ≠ use∪rmw) — mus
 local function K(f, l) return (f or '') .. '\31' .. l end
 local function KR(f, l, r) return (f or '') .. '\31' .. l .. '\31' .. r end
 for _, n in ipairs(store.data.nodes) do
-    if n.kind == 'function' then
+    -- ★ FUNCTIONS *AND* METHODS (CART-0395). `kind == 'function'` alone excluded every
+    -- METHOD, which in java and ruby is essentially all code — so the exprgate's clean zero
+    -- below was a statement about lua FUNCTIONS, not about the expression IR. On THIS corpus
+    -- (generated lua) the widening moves almost nothing, and that is the fact worth
+    -- recording: the restriction cost nothing HERE and everything everywhere else, which is
+    -- exactly why nobody noticed. The corpus is the other half of the same problem —
+    -- gen.analysis is lua-only, so no java or js row has ever been through this gate. The
+    -- `expr` matrix column (tools/exprcensus.lua) is where the other languages are measured.
+    if n.kind == 'function' or n.kind == 'method' then
         local f = n.file or ''
         local oke, got = pcall(expr.of, store, n.id)
         if oke and got then

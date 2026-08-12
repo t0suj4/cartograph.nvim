@@ -2634,6 +2634,17 @@ nvim --headless -u NONE -l tools/matrix.lua cppmodern --cols rows
 nvim --headless -u NONE -l tools/ctrlcensus.lua ~/git/elasticsearch/libs --lang java
 nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --coverage   # can it gate this form?
 nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --folded     # one row hiding many
+# EXPRESSION CENSUS: the expression IR's gate, and until now it had none. `expr.gate` is a
+# real two-implementation oracle — `expr.reads(row)` (the identifier leaves the IR reads) vs
+# `row.use ∪ row.rmw` (du's read census over the same node), derived independently — so a
+# disagreement is a real bug on ONE side. The only runner calling it was syngate, over a
+# GENERATED LUA corpus, iterating `kind == 'function'`: two restrictions that compound, since
+# in java and ruby essentially all code is a METHOD. Its clean zero was a statement about lua
+# functions and was read as one about the IR. Pointed anywhere else it fires — cpp 114631,
+# cppmodern 45821, bash 5737, libs 2472, ruby 435 — so the column PINS a per-corpus census
+# rather than asserting zero, keyed by (axis, row type), because "2472 disagreements" is not
+# actionable and "1378 of them are C declarations" is. Four open classes, each with a ticket.
+nvim --headless -u NONE -l tools/matrix.lua libs --cols expr
 # --show <class>: the divergence EXPLORER — dump a class's instances with source
 # + the flow={}/df={} sets (the fix-side view); no class lists the classes.
 nvim --headless -u NONE -l tools/dfgate.lua rust --show flow-over-collects
@@ -2677,7 +2688,8 @@ nvim --headless -u NONE -l tools/clones.lua --fold      # the fold QUEUE
 nvim --headless -u NONE -l tools/clones.lua --rowdrift
 # THE MATRIX: every parity/honesty invariant × every registered corpus, one
 # command — the push-time sweep. One inline extract per corpus feeds all the
-# cheap columns (counts, validate, memory budget, df/flow parity, fold
+# cheap columns (counts, validate, memory budget, the fine ROW census, the
+# EXPRESSION-IR census, df/flow parity, fold
 # round-trip, silent-local gap, cold==warm cache); only `par` pays for a
 # second extraction (inline==parallel, in a pristine child process — the
 # previously unswept oracle: it found a real inline≠parallel divergence on

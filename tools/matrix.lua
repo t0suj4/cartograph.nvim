@@ -50,7 +50,7 @@ local here = SELF:match('^(.*)/matrix%.lua$')
 -- stdout (vim.system captures them per stream), so write it explicitly
 local function say(s) io.stdout:write(s .. '\n') end
 
-local COLS = { 'counts', 'valid', 'mem', 'rows', 'dfpar', 'fold', 'silent',
+local COLS = { 'counts', 'valid', 'mem', 'rows', 'expr', 'dfpar', 'fold', 'silent',
     'cache', 'key', 'struct', 'par' }
 -- the minutes-tier corpora (scale extracts); everything else is seconds
 local HEAVY = { server = true, v8 = true, sylius = true, ghost = true,
@@ -223,6 +223,51 @@ local function run_row(name)
                 cell('rows', #diffs == 0 and 'OK' or 'FAIL', d)
             else
                 cell('rows', '~', d) -- ran, census not yet calibrated
+            end
+        end
+    end
+
+    -- ★ THE EXPRESSION IR (CART-0395), and the argument is CART-0389's one column over.
+    -- `expr.gate` is a real two-implementation oracle — `expr.reads(row)` vs `use ∪ rmw`,
+    -- derived independently over the same node — and NOTHING RAN IT ON A REAL CORPUS.
+    -- syngate calls it over a generated LUA corpus, iterating `kind == 'function'`, and
+    -- prints a clean zero that was read as a statement about the IR rather than about lua
+    -- functions. Pointed anywhere else it fires: elasticsearch 3128, activesupport 450, and
+    -- 88 across the three SYNTHETIC corpora this matrix already pins.
+    -- PINNED, NOT ASSERTED ZERO, for rowcensus's reason: four open defect classes cannot
+    -- block the number from being visible. The review question is directional — a count that
+    -- ROSE is a new disagreement; a class that GOES is a fix.
+    if wanted('expr') then
+        local ec = dofile(here .. '/exprcensus.lua')
+        -- a SHIM store over the shared production `data` — expr.of needs node lookup and
+        -- file content, not a second ingest (which would double the peak the mem column
+        -- measures). One-file line cache: extract emits nodes file by file.
+        local nidx = {}
+        for _, nn in ipairs(data.nodes or {}) do nidx[nn.id] = nn end
+        local cf, cl
+        local shim = { data = data, node = function (id) return nidx[id] end,
+            content = function (n)
+                if not (n and n.file) then return nil end
+                if n.file ~= cf then
+                    cf = n.file
+                    local p = corpus.root .. '/' .. n.file
+                    cl = vim.fn.filereadable(p) == 1 and vim.fn.readfile(p) or nil
+                end
+                return cl
+            end }
+        local okc, r = pcall(ec.check, shim)
+        if not okc then
+            cell('expr', '--', { 'census raised: ' .. tostring(r):gsub('^.*/', '') })
+        elseif (r.fns + r.methods) == 0 then
+            cell('expr', '--') -- no expression-bearing functions (token provider)
+        else
+            local d = { ('fns=%d methods=%d · %s'):format(r.fns, r.methods, ec.census(r.cats)) }
+            if ec.EXPECTED[name] then
+                local diffs = ec.diff(r.cats, ec.EXPECTED[name])
+                for _, l in ipairs(diffs) do d[#d + 1] = l end
+                cell('expr', #diffs == 0 and 'OK' or 'FAIL', d)
+            else
+                cell('expr', '~', d) -- ran, census not yet calibrated
             end
         end
     end
