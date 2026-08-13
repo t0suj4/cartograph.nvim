@@ -2644,6 +2644,7 @@ nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --folded     # one row hid
 # cppmodern 45821, bash 5737, libs 2472, ruby 435 — so the column PINS a per-corpus census
 # rather than asserting zero, keyed by (axis, row type), because "2472 disagreements" is not
 # actionable and "1378 of them are C declarations" is. Four open classes, each with a ticket.
+# (the census core is tools/exprcensus.lua; the column reads it off the shared extract)
 nvim --headless -u NONE -l tools/matrix.lua libs --cols expr
 # COMBINATORIAL GRID: the bestiary plants each FORM once, and every bug the row model gave
 # up was at an INTERSECTION — elsif x CHAIN-LENGTH-2, block x CONDITION-POSITION, block x
@@ -2665,6 +2666,8 @@ nvim --headless -u NONE -l tools/matrix.lua libs --cols expr
 # edited the grid, so the counts are a new baseline rather than a regression. A selftest
 # perturbs one byte and requires the digest to move, because a check that cannot fire proves
 # nothing.
+# (the EMITTER is tools/genmatrix.lua — pure, no GEN_VERSION, writes nothing;
+#  tools/gridgate.lua is the runner that mints it and applies the five checks)
 nvim --headless -u NONE -l tools/gridgate.lua java
 # A SECOND LANGUAGE IS PART OF THE CLAIM — one language proves the emitter, not the design.
 # ruby has no braces, so no `unbraced` axis; its equivalent split is the MODIFIER form, and
