@@ -2646,6 +2646,23 @@ nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --folded     # one row hid
 # actionable and "1378 of them are C declarations" is. Four open classes, each with a ticket.
 # (the census core is tools/exprcensus.lua; the column reads it off the shared extract)
 nvim --headless -u NONE -l tools/matrix.lua libs --cols expr
+# …AND THE CENSUS CORE IS ALSO A COMMAND, which it documented for a week without being one:
+# the file was a pure library, so the invocation in its own header PRINTED NOTHING AND EXITED
+# 0 — from a census tool, indistinguishable from "no disagreements found" (CART-0409). It runs
+# now, guarded on arg[0] so `matrix`'s dofile of the same module stays inert.
+#   --show <class>    the instances of one (axis:rowtype) class, with the SOURCE LINE
+#   --bucket <class>  every instance normalised (identifiers→x, numbers→0) and counted, so a
+#                     10000-instance class names its own top shapes instead of being read 40
+#                     at a time. A SAMPLING AID, not an oracle — what it surfaces gets probed
+#                     directly before anything is changed.
+# It paid for itself on the first run. CART-0404 called cpp `missing:declaration` 10667 "the
+# single biggest IR/du gap"; the bucket showed the same three header rows repeating, and the
+# class is 414 DISTINCT rows counted 25.8× — a C++ class body parsed as C becomes one
+# function_definition that every method in the header resolves to (CART-0410). The census now
+# prints `instances/distinct` and orders by distinct, because the inflation is PER-CLASS
+# (25.8× here, 1.0× for binder:if_statement) and so it corrupted the RANKING, not just the
+# magnitude. Pins stay keyed on instances; two numbers, neither pretending to be the other.
+nvim --headless -u NONE -l tools/exprcensus.lua cpp --bucket missing:declaration
 # COMBINATORIAL GRID: the bestiary plants each FORM once, and every bug the row model gave
 # up was at an INTERSECTION — elsif x CHAIN-LENGTH-2, block x CONDITION-POSITION, block x
 # ASSIGNMENT-RHS, rescue x INSIDE-A-BLOCK, modifier x LOOP. CART-0394 said it outright: "the

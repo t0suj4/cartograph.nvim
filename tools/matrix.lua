@@ -261,7 +261,14 @@ local function run_row(name)
         elseif (r.fns + r.methods) == 0 then
             cell('expr', '--') -- no expression-bearing functions (token provider)
         else
-            local d = { ('fns=%d methods=%d · %s'):format(r.fns, r.methods, ec.census(r.cats)) }
+            -- INSTANCES and DISTINCT ROWS are different numbers and the pin is on the first
+            -- (CART-0410): M.check iterates functions, so a row reachable from several
+            -- function nodes is counted once per node — 25.8× on cpp's missing:declaration,
+            -- 1.0× on binder:if_statement. Reporting only the inflated one is what let a
+            -- ranking artifact be read as "the single biggest gap" for a week.
+            local dist = ec.distinct(r.instances)
+            local d = { ('fns=%d methods=%d · %s'):format(r.fns, r.methods,
+                ec.census_distinct(r.cats, dist)) }
             if ec.EXPECTED[name] then
                 local diffs = ec.diff(r.cats, ec.EXPECTED[name])
                 for _, l in ipairs(diffs) do d[#d + 1] = l end

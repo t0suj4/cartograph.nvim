@@ -89,6 +89,58 @@ function M.census(cats)
     return table.concat(parts, ' ')
 end
 
+--- ★ HOW MANY ROWS ARE ACTUALLY BEHIND A COUNT (CART-0410). `cats` counts INSTANCES, and
+--- M.check iterates FUNCTIONS: a row reachable from several function nodes is counted once
+--- per node. On the cpp corpus that is not a rounding error — `missing:declaration` is 10667
+--- instances over 414 distinct (file,line) rows, 25.8×, because a C++ class body parsed as C
+--- becomes ONE function_definition that every method in the header resolves to.
+---
+--- ★ AND THE INFLATION IS PER-CLASS, WHICH IS WHY IT CORRUPTS THE RANKING, not just the
+--- magnitude: 1.0× for binder:if_statement against 25.8× here. The two classes CART-0404
+--- called "the single biggest IR/du gap" are the two MOST duplicated in the census; by
+--- distinct rows they are mid-table. A census whose classes inflate at different rates
+--- cannot be read as a priority order, and nothing said so for the first nineteen corpora.
+---
+--- Deliberately NOT folded into `cats`: every EXPECTED pin is keyed on instances, and
+--- re-keying would move all nineteen at once for a reporting change. Two numbers, both
+--- printed, neither pretending to be the other.
+---@return table  { [class] = distinct row count, total = distinct across all classes }
+function M.distinct(instances)
+    local out, all = { total = 0 }, {}
+    for class, list in pairs(instances or {}) do
+        local seen, n = {}, 0
+        for _, it in ipairs(list) do
+            local key = (it.file or '?') .. ':' .. tostring(it.l)
+            if not seen[key] then seen[key] = true; n = n + 1 end
+            all[class .. '|' .. key] = true
+        end
+        out[class] = n
+    end
+    for _ in pairs(all) do out.total = out.total + 1 end
+    return out
+end
+
+--- Census one-liner with the distinct split — `class=instances/distinct`, and a class whose
+--- two numbers agree prints one. Ordered by DISTINCT rows, because that is the ranking a
+--- reader wants and the instance ranking is the one that misled CART-0404.
+function M.census_distinct(cats, dist)
+    local parts = { ('disagreements=%d rows=%d'):format(cats.total or 0, dist.total or 0) }
+    local ord = {}
+    for k, v in pairs(cats) do
+        if k ~= 'total' then ord[#ord + 1] = { k = k, v = v, d = dist[k] or 0 } end
+    end
+    table.sort(ord, function (a, b)
+        if a.d ~= b.d then return a.d > b.d end
+        if a.v ~= b.v then return a.v > b.v end
+        return a.k < b.k
+    end)
+    for _, e in ipairs(ord) do
+        parts[#parts + 1] = e.k .. '=' .. (e.v == e.d and tostring(e.v)
+            or ('%d/%d'):format(e.v, e.d))
+    end
+    return table.concat(parts, ' ')
+end
+
 --- Diff against a pinned census; returns report lines (empty = agree).
 --- Mirrors rowcensus.diff / dfparity.diff exactly.
 function M.diff(cats, expected)
@@ -323,5 +375,151 @@ M.EXPECTED = {
         ['missing:return_statement'] = 4, ['missing:elseif_statement'] = 2, ['missing:cond'] = 1,
         ['missing:if_statement'] = 1 },
 }
+
+-- ── THE RUNNER (CART-0409) ──────────────────────────────────────────────────────────────
+-- The header above documented this CLI from the day the module shipped. IT DID NOT EXIST:
+-- the file was `local M = {}` … `return M`, and under `nvim -l` a module that only returns a
+-- table is a SUCCESSFUL NO-OP. So the documented command printed nothing and exited 0 —
+-- which from a census tool is indistinguishable from "no disagreements found". A gate that
+-- cannot fire proves nothing; a gate that cannot RUN says something false.
+--
+-- ★ THE GUARD IS LOAD-BEARING, NOT DEFENSIVE. tools/matrix.lua:241 consumes this module by
+-- `dofile`, so an unguarded script body would execute inside every `--cols expr` row, and
+-- `arg` there is MATRIX's argv — it would re-extract a corpus of its own choosing mid-row.
+-- Keying on arg[0] (the script nvim was pointed at) is what separates "invoked" from
+-- "required": direct invocation runs, dofile stays inert, and no caller has to opt out.
+local invoked = arg and arg[0]
+    and vim.fn.fnamemodify(arg[0], ':p') == vim.fn.fnamemodify(
+        debug.getinfo(1, 'S').source:sub(2), ':p')
+
+if invoked then
+    local here = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h')
+    local bench = dofile(here .. '/bench.lua')
+    bench.bootstrap()
+
+    local target, want_lang, show, bucket, cap = nil, nil, nil, nil, 40
+    local i = 1
+    while arg and arg[i] do
+        if arg[i] == '--lang' then i = i + 1; want_lang = arg[i]
+        elseif arg[i] == '--show' then i = i + 1; show = arg[i]
+        elseif arg[i] == '--bucket' then i = i + 1; bucket = arg[i]
+        elseif arg[i] == '--cap' then i = i + 1; cap = tonumber(arg[i]) or cap
+        else target = arg[i] end
+        i = i + 1
+    end
+    if not target then
+        print('usage: exprcensus <corpus|dir> [--lang <l>] [--show <class>]'
+            .. ' [--bucket <class>] [--cap N]')
+        print('  <class> is an (axis:rowtype) key from the census, e.g. missing:declaration')
+        os.exit(2)
+    end
+
+    local corpus = bench.corpus(target)
+    local data = bench.extract(target)
+
+    -- the same SHIM the matrix column builds — node lookup + file content over the shared
+    -- extract, not a second ingest. Kept identical on purpose: a sampling tool that saw a
+    -- different store than the pinned column would answer a different question.
+    local nidx = {}
+    for _, nn in ipairs(data.nodes or {}) do nidx[nn.id] = nn end
+    local cf, cl
+    local shim = { data = data, node = function (id) return nidx[id] end,
+        content = function (n)
+            if not (n and n.file) then return nil end
+            if n.file ~= cf then
+                cf = n.file
+                local p = corpus.root .. '/' .. n.file
+                cl = vim.fn.filereadable(p) == 1 and vim.fn.readfile(p) or nil
+            end
+            return cl
+        end }
+
+    local r = M.check(shim)
+
+    -- --lang filters INSTANCES by the provider's own answer for the file, never by
+    -- extension: `lang_of` is what decided the parse, so anything else is a second opinion.
+    if want_lang then
+        local ts = require 'cartograph.providers.treesitter'
+        local keep, cats = {}, { total = 0 }
+        for key, list in pairs(r.instances) do
+            for _, it in ipairs(list) do
+                if ts.lang_of(corpus.root .. '/' .. (it.file or '')) == want_lang then
+                    local L = keep[key]; if not L then L = {}; keep[key] = L end
+                    L[#L + 1] = it
+                    cats[key] = (cats[key] or 0) + 1
+                    cats.total = cats.total + 1
+                end
+            end
+        end
+        r.instances, r.cats = keep, cats
+    end
+
+    local dist = M.distinct(r.instances)
+    print(('%s  fns=%d methods=%d%s'):format(target, r.fns, r.methods,
+        want_lang and ('  [lang=' .. want_lang .. ']') or ''))
+    print('  ' .. M.census_distinct(r.cats, dist))
+    if (r.cats.total or 0) > (dist.total or 0) then
+        print(('  ↑ %d instance(s) over %d distinct row(s) — %.1f× — a row is counted once'
+            .. ' per enclosing function'):format(r.cats.total, dist.total,
+            r.cats.total / math.max(1, dist.total)))
+    end
+
+    if M.EXPECTED[target] and not want_lang then
+        local d = M.diff(r.cats, M.EXPECTED[target])
+        print(#d == 0 and '  PINNED: matches' or ('  PINNED: %d class(es) moved'):format(#d))
+        for _, l in ipairs(d) do print(l) end
+    end
+
+    -- reading the SOURCE LINE is the point of --show: the census says "10667 declarations",
+    -- and a declaration's SHAPE is what decides which branch of the harvest owns it.
+    local function srcline(it)
+        local p = corpus.root .. '/' .. (it.file or '')
+        if vim.fn.filereadable(p) ~= 1 then return nil end
+        local ls = vim.fn.readfile(p, '', it.l or 0)
+        return ls and ls[it.l] and vim.trim(ls[it.l]) or nil
+    end
+
+    if show then
+        for _, l in ipairs(M.show_instances(r.instances[show], show, cap)) do print(l) end
+        print('')
+        print('── with source ──')
+        for k = 1, math.min(cap, #(r.instances[show] or {})) do
+            local it = r.instances[show][k]
+            print(('%s:%d  %s'):format(it.file, it.l, srcline(it) or '<unreadable>'))
+        end
+    end
+
+    -- ★ BUCKETING IS A SAMPLING AID, NOT AN ORACLE. It normalises the source line
+    -- (identifiers→x, numbers→0, strings→s) and counts shapes, so a 10000-instance class
+    -- names its own top forms instead of being read 40 at a time. It can merge genuinely
+    -- different constructs that happen to normalise alike — which is why the shapes it
+    -- surfaces get PROBED DIRECTLY before anything is changed. The last cut on CART-0404
+    -- failed by reasoning about shapes nobody had counted.
+    if bucket then
+        local list = r.instances[bucket] or {}
+        local tally, ex = {}, {}
+        for _, it in ipairs(list) do
+            local s = srcline(it)
+            if s then
+                local norm = s:gsub('"[^"]*"', 's'):gsub("'[^']*'", 's')
+                    :gsub('%d+', '0'):gsub('[%a_][%w_]*', 'x'):gsub('%s+', ' ')
+                tally[norm] = (tally[norm] or 0) + 1
+                if not ex[norm] then ex[norm] = ('%s:%d  %s'):format(it.file, it.l, s) end
+            end
+        end
+        local ord = {}
+        for k, v in pairs(tally) do ord[#ord + 1] = { k = k, v = v } end
+        table.sort(ord, function (a, b)
+            if a.v ~= b.v then return a.v > b.v end
+            return a.k < b.k -- ties by shape, so the report is deterministic
+        end)
+        print('')
+        print(('── %s: %d instance(s) in %d shape(s) ──'):format(bucket, #list, #ord))
+        for k = 1, math.min(cap, #ord) do
+            print(('%6d  %s'):format(ord[k].v, ord[k].k))
+            print(('        e.g. %s'):format(ex[ord[k].k]))
+        end
+    end
+end
 
 return M
