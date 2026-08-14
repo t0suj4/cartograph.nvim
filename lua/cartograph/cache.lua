@@ -73,7 +73,20 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 134 -- v134: A C++ HEADER NAMED `.h` WAS PARSED AS C (CART-0410). spec/c.lua
+M.VERSION = 135 -- v135: AN UNBRACED CONTROL BODY LEAKED INTO ITS HEAD ROW (CART-0414).
+               -- Every body test was a TYPE test, so `if (c) x = 1;` — whose body is a bare
+               -- `expression_statement` in the `consequence` position — was not recognised
+               -- as a body at all, and the head row walked into it. BOTH sides then folded
+               -- the body's name onto the head, in DIFFERENT categories: du as a DEF (a
+               -- control head that assigns something) and the IR as a READ. That category
+               -- disagreement is the only reason the gate caught it — dfparity compares df
+               -- against flow and both are built from this same walk, so the leak itself
+               -- was ungated. 985 instances / 947 distinct rows on 7kaa, the largest class
+               -- in the census once CART-0402 stopped masking it. Fixed by asking the
+               -- GRAMMAR for the body FIELD (flow.body_children, called by BOTH sides) —
+               -- the CART-0397 elsif fix one construct over. A body is a ROLE;
+               -- `compound_statement` is one spelling of it.
+               -- v134: A C++ HEADER NAMED `.h` WAS PARSED AS C (CART-0410). spec/c.lua
                -- claims `.h` and cpp claims only .hpp/.hh/.hxx, so every C++ project using
                -- the ordinary convention had ALL its headers parsed with the C grammar —
                -- where `class Foo { … }` is not an error but reads as type + declarator

@@ -208,36 +208,15 @@ M.EXPECTED = {
     -- is to read the sample. flow-over-collects / partition-mismatch / line-skew are all
     -- UNMOVED, so the single mover stays attributable — which is why the `for..in` binder
     -- (CART-0393) and the loop modifiers (CART-0394) were filed rather than folded in here.
-    ruby = { ['df-over-collects'] = 61, ['flow-over-collects'] = 31,
-        ['partition-mismatch'] = 5, ['line-skew'] = 22 }, -- recalib @ CART-0386: ruby `begin`/`rescue`/`ensure` was 100% OPAQUE (one row, body and handler with no rows at all) and now opens. flow-over-collects 0->31 = the EXCEPTION VARIABLE, which flow binds (`rescue E => e` defs `e`) and the legacy df walk does not; df-over-collects 15->45 is the SAME fact on the other axis, because `e` left `use` as it entered `def`. line-skew 1->22 and partition-mismatch 0->5 = a method-level `ensure` (`def … ensure … end`, no explicit begin) whose statements now get rows at THEIR OWN lines instead of folding into the `ensure` keyword's row. Direction checked: flow > df in 5/5, flow < df zero times. Prior: 2->15 @ part A (ruby's control OPENED, so df's flat walk under-collects inside opened bodies). Was {} (perfect parity)
-    -- ghost = the JS scale corpus; df-over-collects (closure-leak) dominates. The
-    -- old partition/disjoint/flow-over-collects residual was the re-parse .ts-
-    -- under-JS + node-resolution artifact — gone with stored flow (OTHER=3 left).
-    -- v51 anon-callback fns: their bodies (previously covered by NO fn) now get
-    -- their own df/flow, surfacing catalogued closure-leak (df-over-collects) +
-    -- pre-existing flow/dfreg diffs (OTHER) in now-covered code. ferr=0 (additive).
-    -- recalib 2026-07-19: 6982→6986 (+4 df-over-collects) = v52-v88 JS/TS-pivot
-    -- closure-leak catch-up, never re-gated (matrix couldn't complete pre-P1;
-    -- dfpar is matrix-only). df/flow extraction untouched by P0/P1; ferr=0,
-    -- categories unchanged. Same prior-work debt as ghost's count recalib.
-    -- recalib 2026-08-02: 6986→7094 (+108 df-over-collects), ATTRIBUTED BY BISECT to
-    -- b73d63e (v104, "JS/TS: a member-target function literal is a def") — the ONLY cut
-    -- that moves it. Measured on the pinned checkout, one run per rev:
-    --     b73d63e~1  fns=26141 stmts=99679  df-over-collects=6986   <- the old pin, exact
-    --     b73d63e    fns=26425 stmts=101616 df-over-collects=7094
-    --     969cd67~1 / 969cd67 (v107 module-level owner)  7094, unchanged
-    -- So `X.y = function(){}` becoming a def added 284 functions and 1937 statements to
-    -- ghost's df-bearing population, and the extra rows carry the SAME catalogued
-    -- closure-leak — the mechanism the v51 note above describes ("their bodies, previously
-    -- covered by NO fn, now get their own df/flow"). New fns leak a little above average
-    -- (108/284 = 0.38 vs the corpus's 0.267 per fn), which is what function LITERALS should
-    -- do: they are the callbacks. ferr=0, OTHER and receiver unchanged, so additive
-    -- coverage and not a regression. v104 re-saved pinned counts and struct baselines for
-    -- six corpora but not this table — the same "dfpar is matrix-only" debt as the line
-    -- above, and the reason CART-0232 found the sweep already red.
-    -- jquery/mootools/synjs/libs re-checked at the same time: all OK, so this was the only
-    -- stale entry.
-    ghost = { ['df-over-collects'] = 7094, ['OTHER'] = 9, ['receiver'] = 1 },
+    ruby = { ['df-over-collects'] = 59, ['flow-over-collects'] = 48, ['line-skew'] = 22, ['partition-mismatch'] = 5 }, -- recalib 2026-08-15 (v135 UNBRACED BODY, CART-0414): a ruby
+    -- MODIFIER (`x unless c`) has a `body` field, so the head's du walk now stops
+    -- there — which also removed a DOUBLE EMISSION of any block attached to the
+    -- modified statement (rows 7745->7734, every dropped row a duplicate). The
+    -- pairing shifts with the duplicates gone. DIRECTION CHECKED, not assumed:
+    -- sampled instances are all flow-correct — `other = other.x if other.y` gives
+    -- flow={comparable_time,other,respond_to?} against df={comparable_time,
+    -- respond_to?}, and `rescue LoadError => e` gives flow def={e} against df {}.
+    -- flow > df in every sample; flow < df never.
     jquery = { ['df-over-collects'] = 36, ['flow-over-collects'] = 27, ['OTHER'] = 2,
         ['partition-mismatch'] = 35 },
     mootools = { ['df-over-collects'] = 29, ['flow-over-collects'] = 29,

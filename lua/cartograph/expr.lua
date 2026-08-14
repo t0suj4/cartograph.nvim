@@ -708,11 +708,20 @@ function M.harvest_row(node, src, hint, lang)
             -- a BLOCK head has nothing else to evaluate; a loop head still has its collection
             if BLK and BLK[node:type()] then return { lhs = lhs, rhs = rhs } end
         end
+        -- ★ AND A BODY IS A ROLE, NOT A TYPE (CART-0414). Every skip below is a TYPE test,
+        -- so an UNBRACED body — `if (c) x = 1;` — is a bare `expression_statement` that
+        -- none of them name, and the head harvested it: 985 instances on 7kaa, the largest
+        -- class in the census once the selector fix stopped masking it. flow.body_children
+        -- asks the GRAMMAR for the body FIELD, and this side calls it rather than
+        -- re-deriving — the same reason head_binders and case_labels are exported. A
+        -- mirrored rule is one rule; two rules that agree today are two rules.
+        local bodyc = require('cartograph.flow').body_children(node, CT, C)
         for c in node:iter_children() do
             if c:named() then
                 local ct = c:type()
                 if not tsutil.COMMENT[ct] and not B[ct] and not C[ct]
-                    and not (BLK and BLK[ct]) and not (bskip and bskip[c:id()]) then
+                    and not (BLK and BLK[ct]) and not (bskip and bskip[c:id()])
+                    and not (bodyc and bodyc[c:id()]) then
                     if CT[ct] then -- a nested head: its condition, never its body
                         local sub = M.harvest_row(c, src, 'ctrlhead', lang)
                         if sub.cond then rhs[#rhs + 1] = sub.cond end

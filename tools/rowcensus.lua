@@ -184,9 +184,9 @@ M.EXPECTED = {
     php = { rows = 22372, opened = 5016, opaque = 282, case_statement = 434,
         ['case_statement:opaque'] = 276, catch = 13, ['cond:opaque'] = 4,
         default_statement = 78, ['default_statement:opaque'] = 1, do_statement = 4,
-        else_if_clause = 38, for_statement = 47, foreach_statement = 538, if_statement = 3617,
-        ['if_statement:opaque'] = 1, switch_statement = 123, try_statement = 13,
-        while_statement = 111 },
+        else_if_clause = 38, for_statement = 47, foreach_statement = 538,
+        if_statement = 3617, ['if_statement:opaque'] = 1, switch_statement = 123,
+        try_statement = 13, while_statement = 111 },
     python = { rows = 10754, opened = 2090, opaque = 0, catch = 158, elif_clause = 61,
         for_in_statement = 1, for_statement = 279, if_statement = 1441, try_statement = 144,
         while_statement = 6 },
@@ -202,8 +202,8 @@ M.EXPECTED = {
     -- is a genuinely EMPTY arm (`elsif PG::ReadOnlySqlTransaction === ex` whose body is a
     -- comment), not a form that went dark.
     -- recalib @ CART-0387: a case SUBJECT and a when PATTERN are not rows (10324 -> 10257)
-    rails = { rows = 13852, opened = 3609, opaque = 22, begin = 35, block = 462, case = 17,
-        catch = 65, ['catch:opaque'] = 21, do_block = 508, elsif = 75, ['elsif:opaque'] = 1,
+    rails = { rows = 13816, opened = 3592, opaque = 22, begin = 35, block = 447, case = 17,
+        catch = 65, ['catch:opaque'] = 21, do_block = 506, elsif = 75, ['elsif:opaque'] = 1,
         ['if'] = 977, if_modifier = 1172, unless = 54, unless_modifier = 190, when = 47,
         ['while'] = 7 },
     -- ★ rspec IS THE BLOCK-DENSEST CORPUS WE OWN, and it shows what the gap actually was:
@@ -218,10 +218,10 @@ M.EXPECTED = {
     -- …then @ part B: rows 5672->7745 (+37%), opened 1112->2027. `block:opaque` 0->1 is
     -- CHECKED the same way — group.rb:112 is `Dir::Tmpname.create([…]) { }`, a literally
     -- empty brace block, which is exactly what an honest opaque count is FOR.
-    ruby = { rows = 7745, opened = 2027, opaque = 11, ['when:opaque'] = 3, begin = 40,
-        block = 313, ['block:opaque'] = 1, case = 70, catch = 65, ['catch:opaque'] = 7,
-        do_block = 310, elsif = 78, ['if'] = 465, if_modifier = 298, unless = 69,
-        unless_modifier = 138, ['until'] = 4, when = 163, ['while'] = 14 },
+    ruby = { rows = 7734, opened = 2022, opaque = 11, begin = 40, block = 311,
+        ['block:opaque'] = 1, case = 70, catch = 65, ['catch:opaque'] = 7, do_block = 309,
+        elsif = 78, ['if'] = 465, if_modifier = 298, unless = 67, unless_modifier = 138,
+        ['until'] = 4, when = 163, ['when:opaque'] = 3, ['while'] = 14 },
     rust = { rows = 10986, opened = 1263, opaque = 1, case_statement = 9, for_expression = 146,
         if_expression = 685, if_statement = 1, loop_expression = 9, match_block = 190,
         match_expression = 190, while_expression = 33, ['while_expression:opaque'] = 1 },

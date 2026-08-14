@@ -1762,3 +1762,62 @@ test('flow: an ASSIGNMENT IN THE CONDITION still defs on the head', function ()
     ok(d.match, '`match` is bound BY THE CONDITION, so the head defs it')
     ok(u.message, 'and the condition\'s receiver is a use')
 end)
+
+-- ── an unbraced control body is still a body (CART-0414) ──────────────────────────
+
+test('flow: an UNBRACED control body does not leak into its head row', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    -- Every body test used to be a TYPE test, and `compound_statement` is only one
+    -- SPELLING of a body. `if (c) x = 1;` puts a bare `expression_statement` in the
+    -- `consequence` field, which no type test named — so the head walked into it and
+    -- BOTH sides folded the body's name onto the head, in different categories: du as
+    -- a DEF (a control head that assigns something!) and the IR as a READ. Only the
+    -- category disagreement was catchable; the leak itself was ungated, because
+    -- dfparity compares df against flow and both come from this same walk.
+    local fn, src2 = parse_fn(table.concat({
+        'void go(int desPos, int last_ele) {',
+        '   int cur_pos = 0;',
+        '   if ( desPos >= 1 && desPos <= last_ele )',
+        '      cur_pos = desPos;',
+        '   while ( desPos > 2 )',
+        '      cur_pos = desPos;',
+        '}',
+    }, '\n'), 'cpp')
+    local fl = flow.build(fn, src2, { regime = tsspec.cpp.regime })
+    local heads, bodies = 0, 0
+    for _, s in ipairs(fl.stmts) do
+        if s.t == 'if_statement' or s.t == 'while_statement' then
+            heads = heads + 1
+            eq(0, #(s.def or {}), ('a control head DEFS nothing (line %s, def={%s})')
+                :format(tostring(s.l), table.concat(s.def or {}, ',')))
+        elseif s.t == 'expression_statement' then
+            bodies = bodies + 1
+        end
+    end
+    eq(2, heads, 'both control heads are rows')
+    -- ★ AND THE BODY STILL GETS ITS OWN ROW. The stop must not delete what it skips —
+    -- "rows that were never emitted cannot be counted" is the standing failure mode.
+    eq(2, bodies, 'each unbraced body is still its own row')
+end)
+
+test('flow: an `else if` chain keeps every link CONDITION on a head row', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    -- The body-field stop deliberately EXCLUDES a field child that is itself a control
+    -- form: `else if` is a nested if_statement in the `alternative` field, and its
+    -- CONDITION belongs to a head row. Skipping it outright is the regression CART-0405
+    -- measured when a first cut dropped the child instead of recursing it (36 `extra`
+    -- traded for 51 `missing` on cpp), so this asserts the conditions survive.
+    local fn, src2 = parse_fn(table.concat({
+        'void f(int a, int b, int c) {',
+        '   int r = 0;',
+        '   if (a) r = 1; else if (b) r = 2; else if (c) r = 3;',
+        '}',
+    }, '\n'), 'cpp')
+    local fl = flow.build(fn, src2, { regime = tsspec.cpp.regime })
+    local seen = {}
+    for _, s in ipairs(fl.stmts) do
+        for _, u in ipairs(s.use or {}) do seen[u] = true end
+    end
+    ok(seen.a and seen.b and seen.c,
+        'every link condition is read by some row: ' .. vim.inspect(seen))
+end)

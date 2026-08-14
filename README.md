@@ -2836,6 +2836,29 @@ nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no sn
 # (+57%). ★ THE NODE DELTA HAS OPPOSITE SIGNS on those two (7kaa's headers declare, v8's
 # define inline) and only the REFS direction agrees across both, which is the one to read.
 
+# AN UNBRACED CONTROL BODY IS STILL A BODY (CART-0414) — every body test was a TYPE test,
+# and `compound_statement` is only one SPELLING of a body. `if (c) x = 1;` puts a bare
+# `expression_statement` in the `consequence` field, which no type test names, so the head
+# row walked into it and BOTH sides folded the body's name onto the head — du as a DEF (a
+# control head that assigns something) and the IR as a READ. The category disagreement is
+# the ONLY reason this was catchable: dfparity compares df against flow and both are built
+# from that same walk, so the leak itself was ungated. 985 instances / 947 distinct rows on
+# 7kaa, the largest class in the census once the selector fix stopped masking it.
+# The fix asks the GRAMMAR for the body FIELD (`flow.body_children`, called by du AND by the
+# expression harvest) — the CART-0397 elsif fix one construct over.
+#   · A field child that is itself a CONTROL FORM is deliberately NOT stopped: `else if` is a
+#     nested if_statement in `alternative`, and its CONDITION belongs to the head row.
+#   · ★ WHICH IS WHY THE STOP IS PER NODE, NOT PER ROOT. Computed once for the root, du kept
+#     reading the chain LINK's unbraced body while the IR correctly stopped — 18 java grid
+#     cells, EVERY ONE an `unbraced_ch2`/`ch3`. The grid found the intersection it exists to
+#     find: the bug was neither "unbraced" nor "chain" but their product.
+#   · ★ AND IT DE-DUPLICATED RUBY. A modifier (`x unless c`) has a `body` field, so the head
+#     used to walk the modified statement and collect its attached block a SECOND time —
+#     ruby rows 7745→7734, and every dropped row is a verified duplicate.
+# dfparity moves on ruby only, DIRECTION CHECKED not assumed: flow > df in every sampled
+# instance (`other = other.x if other.y` → flow keeps `other`, df drops it; `rescue E => e` →
+# flow defs `e`, df defs nothing), flow < df never.
+
 # A FIELD SELECTOR IS NOT A VARIABLE READ, AND THE IR SAID IT WAS (CART-0402) — the
 # single largest defect the expression census ever held, and its size was invisible because
 # the census is keyed by (axis, ROW TYPE): one cause firing under many row types is reported

@@ -231,6 +231,50 @@ local DECL = { init_declarator = true, variable_declarator = true }
 -- double-count; but variable_name still propagates def-position (WRAP).
 local DFID = { identifier = true, name = true }
 
+-- ★★ A BODY IS A ROLE, AND `compound_statement` IS ONE SPELLING OF IT (CART-0414).
+-- Every body test here was a TYPE test, so an UNBRACED body — `if (c) x = 1;` — was not
+-- recognised as a body at all and the head row walked straight into it. Both sides then
+-- folded the body's name onto the head, in different categories: du as a DEF (a control
+-- head that assigns something), the IR as a READ. The gate saw them disagree about the
+-- CATEGORY and so caught it; nothing would have caught the leak itself, because dfparity
+-- compares df against flow and both are built from this same walk.
+-- MEASURED on 7kaa: 985 instances / 947 distinct rows, the largest class in the census
+-- once CART-0402 stopped masking it.
+--
+-- ★ SO ASK THE GRAMMAR FOR THE FIELD, which is exactly the CART-0397 elsif fix one
+-- construct over. Probed, and they agree: c/cpp/java/js spell the unbraced consequence
+-- `consequence=expression_statement` and the unbraced loop body `body=expression_statement`;
+-- php spells an if's body `body`. Hence three field names, not a guess.
+local BODY_FIELDS = { 'body', 'consequence', 'alternative' }
+
+--- The children of `node` that ARE its body, identified by FIELD rather than by type.
+--- Returns an id-keyed set, or nil when there are none.
+---
+--- ★ A FIELD CHILD THAT IS ITSELF A CONTROL FORM OR A CLAUSE IS DELIBERATELY EXCLUDED.
+--- `else if` is a NESTED if_statement in the `alternative` field (java/c/cpp/js), and its
+--- CONDITION belongs to the head row — du walks it and stops at ITS body, and the IR
+--- recurses it as a 'ctrlhead'. Stopping at it outright would drop that condition, which
+--- is the regression CART-0405 measured when the first cut skipped the child instead of
+--- recursing it (36 `extra` traded for 51 `missing` on cpp). A clause likewise owns its
+--- own row. What is left is precisely the bare-statement body this exists for.
+---@param ctrlset table?  the language's merged ctrl set (cls.ctrl)
+---@param clauseset table? the language's merged clause set (cls.clause)
+function M.body_children(node, ctrlset, clauseset)
+    local CT, CL = ctrlset or CTRL, clauseset or CLAUSE
+    local out
+    for _, f in ipairs(BODY_FIELDS) do
+        local v = node:field(f)[1]
+        if v then
+            local vt = v:type()
+            if not CT[vt] and not CL[vt] then
+                out = out or {}
+                out[v:id()] = true
+            end
+        end
+    end
+    return out
+end
+
 --- The leaf-name set du counts as a read for a language: DFID plus that language's
 --- `df_ids` extension. EXPORTED because the expression IR needs the SAME answer at
 --- harvest time (CART-0402), and a private copy is how this codebase keeps growing
@@ -306,7 +350,7 @@ end
 -- subtree, which is also why the `try` head needed zeroing by hand in CART-0386 — that was
 -- the symptom, this is the cause. Same seam-feeds-one-function shape as PRELOOP, IF_T, TRY_T
 -- and CATCH before it; this is the FIFTH consumer holding a base set the spec never reached.
-local function du(root, src, stop_body, ids, mods, FN, stopset)
+local function du(root, src, stop_body, ids, mods, FN, stopset, ctrlset, clauseset)
     ids = ids or DFID
     if not root then return {}, {}, false, {}, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
@@ -315,6 +359,15 @@ local function du(root, src, stop_body, ids, mods, FN, stopset)
     local sus = SUSPEND[root:type()] or false
     local function rec(node, defpos)
         local t = node:type()
+        -- ★ THE BODY-FIELD STOP IS PER NODE, NOT PER ROOT (CART-0414). An `else if`
+        -- chain is a NESTED if_statement in the `alternative` field, deliberately NOT
+        -- stopped (its CONDITION belongs to this head) — so the walk descends into it,
+        -- and the LINK's own unbraced body has to be stopped there too. Computing the
+        -- set once for the root left du reading `acc, step` out of every chain link's
+        -- body while the IR correctly stopped: 18 cells of the java grid, EVERY ONE an
+        -- `unbraced_ch2`/`ch3`, which is exactly the intersection the grid exists for.
+        local bodyc = (stop_body and ctrlset and ctrlset[t])
+            and M.body_children(node, ctrlset, clauseset) or nil
         local asgleft, decld, k, declist, rngskip
         if LOOPVAR[t] ~= nil then
             -- a collection loop's binder (see LOOPVAR): a FIELD where the grammar gives one,
@@ -385,6 +438,12 @@ local function du(root, src, stop_body, ids, mods, FN, stopset)
               -- carrying it, control head or not.
               local st = (stopset or DU_STOP)[ct]
               if st == 'always' then blks[#blks + 1] = c; goto skipchild end
+              -- ★ AND BY FIELD, not only by type (CART-0414): an UNBRACED body is a bare
+              -- `expression_statement` in the `consequence`/`body` position, which no type
+              -- test names. It is NOT appended to `blks` — the caller's own child loop
+              -- already emits it as a row (verified: the body row survives this stop), so
+              -- re-emitting it here would double it.
+              if stop_body and bodyc and bodyc[c:id()] then goto skipchild end
               if not FN[ct] and not (stop_body and st) then
                 if SUSPEND[ct] then sus = true end -- fused suspension detection
                 local cdefpos
@@ -845,7 +904,8 @@ function M.build(fnnode, src, cfg)
         if finit then emit(finit, parent, pol) end
         local idx = #stmts + 1
         local sb = CTRL_[t] and true or false
-        local d, u, sus, rmw, blks = du(node, src, sb, ids, mods, FN, DUSTOP)
+        local d, u, sus, rmw, blks = du(node, src, sb, ids, mods, FN, DUSTOP,
+            CTRL_, CLAUSE_)
         stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL_[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
@@ -1040,7 +1100,8 @@ function M.build(fnnode, src, cfg)
             -- row (condition only, stop_body) and REGION its consequence as rows
             -- (was folded — the body statements were invisible). lua
             -- `elseif_statement` / python `elif_clause`: body under `consequence`.
-            local d, u, _, _, eblk = du(node, src, true, ids, mods, FN, DUSTOP)
+            local d, u, _, _, eblk = du(node, src, true, ids, mods, FN, DUSTOP,
+                CTRL_, CLAUSE_)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = node:type(), parent = parent,
                 pol = 'elseif', def = d, use = u, t = node:type() }
@@ -1083,7 +1144,8 @@ function M.build(fnnode, src, cfg)
             -- the header binds the exception var (DEF) and references the type
             -- (use); the body regions under it. Without this the caught var is
             -- unbound in the fine model and df's spurious use of it is unmatched.
-            local d, u, _, _, kblk = du(node, src, true, ids, mods, FN, DUSTOP)
+            local d, u, _, _, kblk = du(node, src, true, ids, mods, FN, DUSTOP,
+                CTRL_, CLAUSE_)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'catch', parent = parent,
                 pol = 'catch', def = d, use = u }
