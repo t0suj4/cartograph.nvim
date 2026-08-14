@@ -10,7 +10,13 @@
 -- construct the harvest doesn't model becomes `?`, never a lie):
 --   { k='lit',   ty='num'|'str'|'bool'|'nil', v=<value> }
 --   { k='name',  n='x' }
---   { k='field', b=<expr>, n='sel', method=<bool> }   -- a.b / a:b
+--   { k='field', b=<expr>, n='sel', method=<bool>, selid=<bool> }  -- a.b / a:b
+--       `selid` = does du count this SELECTOR as an identifier leaf in this language?
+--       A property of the GRAMMAR, not of the code: lua/java/python/ruby/php/odin/zig
+--       spell the `k` in `a.k` with a type in their `ids` set, while c/cpp/go/rust/js/
+--       ts spell it `field_identifier`/`property_identifier`, which du never counts.
+--       Recorded at BUILD time because that is the only point where the selector's
+--       node TYPE is in hand — by `reads` there is only a string (CART-0402).
 --   { k='index', b=<expr>, i=<expr> }                 -- a[b]
 --   { k='call',  f=<expr>, a={<expr>...}, method=<bool> }
 --   { k='un',    op='-'|'not'|'#'|..., e=<expr> }
@@ -296,6 +302,40 @@ local build, build_core
 
 -- OPERAND nodes = named, non-COMMENT children. Comments are named children, so a
 -- `--` between operands of a multi-line expression would otherwise shift
+-- ★ DOES du COUNT THIS SELECTOR? (CART-0402) The `k` in `a.k` is a leaf du reads only
+-- when the grammar spells it with a type in that language's `ids` set — `identifier` in
+-- lua/java/python/ruby/odin/zig and `name` in php, but `field_identifier` in c/cpp/go/
+-- rust and `property_identifier` in js/ts, neither of which du has ever counted. The IR
+-- counted it UNCONDITIONALLY, which is a LUA-SHAPED ASSUMPTION INSIDE A LANGUAGE-AGNOSTIC
+-- IR — the closed schema's own defect one level down: the schema is language-agnostic and
+-- the reads function was not.
+--
+-- The set comes from flow.leaf_ids, never a local copy: du is the other implementation in
+-- this two-implementation oracle, and an oracle whose two sides read different copies of
+-- the same rule tests the copies.
+-- LAZY, for the reason `modset` above already gives: `spec` is required further down
+-- this file, so touching it here would read a nil GLOBAL and quietly answer false for
+-- every language — which in THIS function means "no selector is ever an identifier",
+-- i.e. the absence-as-falseness failure the ticket is about, reintroduced by the fix.
+-- ★ AND AN UNKNOWN LANGUAGE FALLS BACK TO du's DEFAULT SET, NOT TO `false`. Returning
+-- false for a nil lang would mean "no selector is ever an identifier" — the same
+-- absence-as-falseness the paragraph above warns about, committed by the fix for it.
+-- (It cost one red spec: a harness that builds a lua flow without threading lang, where
+-- `t.k = b` correctly reads `k`.) `leaf_ids(nil)` is DFID — identifier/name — which is
+-- exactly what du falls back to for a spec with no df_ids, so the two sides still agree.
+local IDS_OF = {}
+local function sel_is_id(seln, lang)
+    if not seln then return false end
+    local key = lang or '\0default'
+    local ids = IDS_OF[key]
+    if not ids then
+        if lang then specs = specs or require('cartograph.providers.treesitter').spec end
+        ids = require('cartograph.flow').leaf_ids(lang and (specs[lang] or {}).df_ids or nil)
+        IDS_OF[key] = ids
+    end
+    return ids[seln:type()] == true
+end
+
 -- `named_child(N)` onto the comment and drop the real operand ([[self-gate found
 -- this]]). Filtering comments makes operand extraction position-stable.
 local function operands(node)
@@ -379,13 +419,15 @@ function build_core(node, src, lang)
     if FIELD[t] and not VETO(lang, t) then
         local o = operands(node)
         if o[1] and o[2] then
-            return { k = 'field', b = build(o[1], src, lang), n = txt(o[2], src), method = false }
+            return { k = 'field', b = build(o[1], src, lang), n = txt(o[2], src),
+                method = false, selid = sel_is_id(o[2], lang) }
         end
     end
     if METHOD[t] and not VETO(lang, t) then
         local o = operands(node)
         if o[1] and o[2] then
-            return { k = 'field', b = build(o[1], src, lang), n = txt(o[2], src), method = true }
+            return { k = 'field', b = build(o[1], src, lang), n = txt(o[2], src),
+                method = true, selid = sel_is_id(o[2], lang) }
         end
     end
     if INDEX[t] and not VETO(lang, t) then
@@ -946,7 +988,13 @@ local function expr_reads(e, acc)
     if not e then return end
     local k = e.k
     if k == 'name' then acc[e.n] = true
-    elseif k == 'field' then expr_reads(e.b, acc); if e.n and e.n ~= '' then acc[e.n] = true end
+    elseif k == 'field' then
+        expr_reads(e.b, acc)
+        -- the SELECTOR counts only where du counts it — `selid`, decided at build time
+        -- from the grammar (CART-0402). Unconditionally counting it was 88% of the cpp
+        -- census: `a->action_para` reported a read of `action_para`, which du has never
+        -- claimed and which is not a variable in any of these languages.
+        if e.selid and e.n and e.n ~= '' then acc[e.n] = true end
     elseif k == 'index' then expr_reads(e.b, acc); expr_reads(e.i, acc)
     elseif k == 'call' then expr_reads(e.f, acc); for _, a in ipairs(e.a) do expr_reads(a, acc) end
     elseif k == 'un' then expr_reads(e.e, acc)

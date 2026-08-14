@@ -230,6 +230,21 @@ local DECL = { init_declarator = true, variable_declarator = true }
 -- an inner `name` — count the inner name only (df does), else `$x` AND `x`
 -- double-count; but variable_name still propagates def-position (WRAP).
 local DFID = { identifier = true, name = true }
+
+--- The leaf-name set du counts as a read for a language: DFID plus that language's
+--- `df_ids` extension. EXPORTED because the expression IR needs the SAME answer at
+--- harvest time (CART-0402), and a private copy is how this codebase keeps growing
+--- two-answers bugs — `.h` (CART-0410) and `ext_disclaim` (CART-0412) inside one
+--- week, and a sixth copy of the control classes before those. One owner, asked.
+---@param df_ids table?  the language's spec.df_ids (nil = the default set)
+function M.leaf_ids(df_ids)
+    if not df_ids then return DFID end
+    local ids = {}
+    for k in pairs(DFID) do ids[k] = true end
+    for k in pairs(df_ids) do ids[k] = true end
+    return ids
+end
+
 -- def-position passes THROUGH these transparent wrappers to the inner name.
 -- `reference_declarator` (C++ `Type &r`) has no `declarator` field — its only
 -- named child IS the inner declarator — so it rides the blanket WRAP path.
@@ -737,12 +752,7 @@ function M.build(fnnode, src, cfg)
     -- BINDING MODIFIERS (CART-0234): per-language node types to skip entirely, because
     -- they decorate a declaration and read nothing. Threaded exactly like df_ids.
     local mods = cfg.mods
-    local ids = DFID
-    if cfg.df_ids then
-        ids = {}
-        for k in pairs(DFID) do ids[k] = true end
-        for k in pairs(cfg.df_ids) do ids[k] = true end
-    end
+    local ids = M.leaf_ids(cfg.df_ids)
     local stmts = {}
     local emit, region, clause -- fwd
 

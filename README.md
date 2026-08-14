@@ -2836,6 +2836,29 @@ nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no sn
 # (+57%). ★ THE NODE DELTA HAS OPPOSITE SIGNS on those two (7kaa's headers declare, v8's
 # define inline) and only the REFS direction agrees across both, which is the one to read.
 
+# A FIELD SELECTOR IS NOT A VARIABLE READ, AND THE IR SAID IT WAS (CART-0402) — the
+# single largest defect the expression census ever held, and its size was invisible because
+# the census is keyed by (axis, ROW TYPE): one cause firing under many row types is reported
+# as many classes and ranked as none of them. `expr_reads` counted the `k` in `a.k`
+# UNCONDITIONALLY. du counts it only where the grammar spells it with a type in that
+# language's `ids` set — `identifier` in lua/java/python/ruby/odin/zig, `name` in php, but
+# `field_identifier` in c/cpp/go/rust and `property_identifier` in js/ts. A LUA-SHAPED
+# ASSUMPTION INSIDE A LANGUAGE-AGNOSTIC IR: the closed schema's own defect one level down,
+# where the SCHEMA is language-agnostic and the reads function was not.
+# The fix records `selid` on the field node at BUILD time — the only point where the
+# selector's node TYPE is in hand; by `reads` there is only a string — and takes the ids set
+# from `flow.leaf_ids`, never a private copy, because du is the OTHER implementation in this
+# two-implementation oracle and an oracle whose sides read different copies tests the copies.
+#   cpp 39752→3156 (92%) · cppmodern 30913→986 (97%) · go 35668→2939 · mootools 1232→37 ·
+#   jquery 1780→104 · rust 5525→834 · grocy 4742→248 · python 341→10 · libs 304→255
+#   UNCHANGED, exactly as the per-language probe predicted: java, ruby, lua, php, odin, zig,
+#   bash, and both gridgates — whose selectors du already counts.
+# ★ WHICH SIDE IS RIGHT IS STILL OPEN. This makes the IR implement the SAME RULE as du, so
+# the gate now tests "both sides implement the ids spec" and is deliberately blind on this
+# axis. Whether a member name should be a variable read AT ALL is a du-model question —
+# semantically it is not one in any of these languages — and it stays ticketed rather than
+# being quietly settled by a green gate.
+
 # A CACHE KEY MUST BE AS FINE AS THE ANSWER (CART-0412) — the same defect, one field over,
 # and the reason the language decision is now split in two. `elang_for`/`parse_lang_for`
 # memoize on the BARE EXTENSION, while `ext_disclaim` (the CART-0347 fix that stops a
