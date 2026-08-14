@@ -25,6 +25,10 @@
 --   { k='pair',  key=<expr>, val=<expr>? }            -- a constructor's k=v entry;
 --       `key` is a str lit when the property name is KNOWN, an expression when the
 --       key is computed. `kids` carries both halves so kids-walkers still see them.
+--   { k='assign', t=<target>, v=<value>, kids={t,v} } -- an assignment used as a VALUE
+--       (`a = b = c`, a for-init comma list). The TARGET is a def, not a read — which is
+--       the whole reason this is a kind and not a `?` (CART-0415). Augmented forms
+--       (`a += b`) stay on the `?` path: they DO read their target.
 --   { k='fn' }                                        -- ALLOCATION (closure)
 --   { k='vararg' }
 --   { k='?', t=<node type>, kids={<expr>...} }         -- honest unknown; kids keep
@@ -302,6 +306,16 @@ local build, build_core
 
 -- OPERAND nodes = named, non-COMMENT children. Comments are named children, so a
 -- `--` between operands of a multi-line expression would otherwise shift
+local ASSIGN = { assignment_statement = true, assignment = true,
+    assignment_expression = true, augmented_assignment_expression = true,
+    variable_assignment = true }
+-- ASSIGN minus the augmented forms — the ones whose target is written and NOT read.
+-- Ruby's `operator_assignment` is in neither table: ruby `x += 1` is unmodelled
+-- today, and widening that here would be a separate change with its own measurement
+-- (CART-0316).
+local PLAIN_ASSIGN = { assignment_statement = true, assignment = true,
+    assignment_expression = true, variable_assignment = true }
+
 -- ★ DOES du COUNT THIS SELECTOR? (CART-0402) The `k` in `a.k` is a leaf du reads only
 -- when the grammar spells it with a type in that language's `ids` set — `identifier` in
 -- lua/java/python/ruby/odin/zig and `name` in php, but `field_identifier` in c/cpp/go/
@@ -506,6 +520,25 @@ function build_core(node, src, lang)
         or (CLS_OF[lang].blocks and CLS_OF[lang].blocks[t]))) then
         return { k = 'fn' } -- NEVER descend a closure body (du doesn't either)
     end
+    -- ★ AN ASSIGNMENT IN AN EXPRESSION POSITION (CART-0415). C spells `a = b = c` as
+    -- `a = (b = c)` and a for-init comma list as a chain of assignment_expressions, so the
+    -- inner assignment reaches build() as a value. It used to land on the `?` path below —
+    -- which is HONEST (it keeps both names) and still wrong for `reads`, because a `?`'s
+    -- kids are walked uniformly and one of them is in DEF POSITION. `?` is for constructs
+    -- the harvest does not model; an assignment is very much modellable.
+    -- PLAIN_ASSIGN, not ASSIGN: an augmented form (`a += b`) genuinely READS its target, so
+    -- it keeps falling through to `?`, where both kids are read — which is correct there.
+    -- `kids` is carried for the same reason `pair` carries it: kids-walkers keep seeing
+    -- both halves, so a consumer that has never heard of this kind loses nothing.
+    if PLAIN_ASSIGN[t] then
+        local o = operands(node)
+        local tgt = node:field('left')[1] or o[1]
+        local val = node:field('right')[1] or o[2]
+        if tgt and val then
+            local T, V = build(tgt, src, lang), build(val, src, lang)
+            return { k = 'assign', t = T, v = V, kids = { T, V } }
+        end
+    end
     if VARARG[t] then return { k = 'vararg' } end
     -- honest unknown: keep the named children as kids so no name is hidden
     local kids = {}
@@ -581,15 +614,6 @@ local function list_children(node) -- the named exprs of a *_list (or the node i
     return { node }
 end
 
-local ASSIGN = { assignment_statement = true, assignment = true,
-    assignment_expression = true, augmented_assignment_expression = true,
-    variable_assignment = true }
--- ASSIGN minus the augmented forms — the ones whose target is written and NOT read.
--- Ruby's `operator_assignment` is in neither table: ruby `x += 1` is unmodelled
--- today, and widening that here would be a separate change with its own measurement
--- (CART-0316).
-local PLAIN_ASSIGN = { assignment_statement = true, assignment = true,
-    assignment_expression = true, variable_assignment = true }
 -- statement wrappers: grammars that make an assignment an EXPRESSION need a
 -- statement node around it (js, python, c, java, go).
 local STMT_WRAP = { expression_statement = true }
@@ -1003,6 +1027,7 @@ end
 -- dot/method field SELECTOR counts (du counts the `k` identifier in `a.k`); an
 -- allocation/`?` recurses its operands. This is the leaf census the self-gate
 -- reconciles with du — NOT the semantic variable set (a field selector isn't a var).
+local target_reads -- fwd: an `assign`'s target is a DEF, and target_reads knows the rule
 local function expr_reads(e, acc)
     if not e then return end
     local k = e.k
@@ -1014,6 +1039,7 @@ local function expr_reads(e, acc)
         -- census: `a->action_para` reported a read of `action_para`, which du has never
         -- claimed and which is not a variable in any of these languages.
         if e.selid and e.n and e.n ~= '' then acc[e.n] = true end
+    elseif k == 'assign' then target_reads(e.t, acc); expr_reads(e.v, acc)
     elseif k == 'index' then expr_reads(e.b, acc); expr_reads(e.i, acc)
     elseif k == 'call' then expr_reads(e.f, acc); for _, a in ipairs(e.a) do expr_reads(a, acc) end
     elseif k == 'un' then expr_reads(e.e, acc)
@@ -1026,7 +1052,7 @@ end
 
 -- the READS of an lhs TARGET: a plain name is a DEF (not read); a field/index target
 -- reads its base + key + selector (`t.k = v` reads t and the selector k).
-local function target_reads(e, acc)
+function target_reads(e, acc)
     if not e then return end
     if e.k == 'name' then return end -- pure def
     expr_reads(e, acc)

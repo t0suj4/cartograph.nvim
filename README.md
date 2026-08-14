@@ -2836,6 +2836,29 @@ nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no sn
 # (+57%). ★ THE NODE DELTA HAS OPPOSITE SIGNS on those two (7kaa's headers declare, v8's
 # define inline) and only the REFS direction agrees across both, which is the one to read.
 
+# AN ASSIGNMENT USED AS A VALUE IS NOT A READ OF ITS TARGET (CART-0415). C spells
+# `a = b = c` as `a = (b = c)` and a for-init comma list as a chain of assignment
+# expressions, so the inner assignment reaches the harvest as a VALUE — and its target was
+# counted as a read. The largest remaining cluster, and again ONE cause across several
+# classes so none of them ranked: binder:expression_statement 387 + binder:comma_expression
+# 217 + binder:for_statement 134 distinct rows on cpp.
+#   · ★ THE `?` WAS DOING ITS JOB. `x1a = x1b = x1` harvested as an honest unknown that KEEPS
+#     BOTH NAMES, exactly as the closed schema promises. The defect is that a `?`'s kids are
+#     walked UNIFORMLY and one of them sits in DEF POSITION — and `?` is for constructs the
+#     harvest does not model, while an assignment is very much modellable. So the schema
+#     gained a kind rather than `reads` gaining a special case:
+#         { k='assign', t=<target>, v=<value>, kids={t,v} }
+#     `kids` for the same reason `pair` carries it (kids-walkers lose nothing); the target
+#     routes through target_reads, which already knew `a[i] = v` reads `a` and `i`.
+#   · PLAIN_ASSIGN, not ASSIGN: an augmented form (`a += b`) genuinely READS its target and
+#     keeps falling through to `?`, where both kids are read — correct there.
+# cpp 2578→1488 (42%, and 1373→501 DISTINCT rows) · jquery 1780→22 across the arc ·
+# haskell→0 · php −11% · ruby −11% · rails −14% · libs −18%. No cache bump: harvest only.
+# ★ AND go ROSE, 2938→3055, which is filed rather than re-pinned over (CART-0416): du folds
+# a type-switch binding onto every `case`, and an assignment INSIDE A CLOSURE was being
+# counted by both sides. Fixing ONE side of a shared error makes the number go UP — which is
+# the hazard of a two-implementation oracle, and why the direction is not the thing to read.
+
 # CONDITIONAL COMPILATION IS CONTROL FLOW, at a different phase (CART-0380). `#if` /
 # `#ifdef` / `#elif` / `#else` CONTAIN statements and flow classified none of them, so their
 # bodies were attributed to the enclosing function AS IF UNCONDITIONAL — an `#if A / #else`
