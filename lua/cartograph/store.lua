@@ -165,6 +165,16 @@ end
 ---@param data table
 function M.ingest(data, opts)
     M.data    = data
+    -- ★ RE-ADOPT WHAT `.h` MEANT WHEN THIS GRAPH WAS BUILT (CART-0410). A cache load
+    -- lands here with no tree walk behind it, and every on-demand re-parse afterwards
+    -- (expr/lens/optimize) asks the provider what language a path is. Without this the
+    -- analysis side would answer with the process default while the graph was built
+    -- with the other one — the two-answers bug this ticket exists to remove, moved to
+    -- a new seam. A graph predating the field carries none, and `set_h_lang(nil)`
+    -- falls back to 'c', which is what those graphs were built with.
+    pcall(function ()
+        require('cartograph.providers.treesitter').set_h_lang(data and data.h_lang)
+    end)
     M.toc     = nil -- load-order manifest; cartograph.toc.attach() sets it
     M._frontier_cache = {}
     M._content_cache = {}

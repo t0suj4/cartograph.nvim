@@ -1108,9 +1108,65 @@ end
 
 -- ── extraction ───────────────────────────────────────────────────────────────
 
+-- ★★ WHAT `.h` MEANS IS A PROPERTY OF THE TREE, NOT OF THE EXTENSION (CART-0410).
+-- spec/c.lua claims `.h` and spec/cpp.lua claims only .hpp/.hh/.hxx — so every C++
+-- project that names its headers `.h`, which is most of them, had every header parsed
+-- with the C grammar. `class Foo { … }` is not a syntax error in C: `class Foo` reads
+-- as type + declarator and the body reads as its compound_statement, so THE WHOLE
+-- CLASS BECOMES ONE function_definition and every method prototype inside it resolves
+-- to that one node, inheriting the class's field list as its own statement rows.
+-- MEASURED on 7kaa: ~3700 fabricated `function` nodes across 189 headers, and the
+-- expression census counted one class's rows 25.8 times over.
+--
+-- ★ AND UNCONDITIONAL `.h → cpp` IS A NO-GO, MEASURED, NOT ASSUMED. Def nodes in `.h`
+-- files, same corpus, two processes:
+--     openfirmware (pure C)  2196 → 2050   (-232 real decls, +86 mostly garbage)
+--     gforth       (pure C)  6189 → 6157
+--     7kaa         (C++)     5634 → 2514   (the fabrication leaving)
+-- The C++ grammar loses real declarations on real C headers — a run of file-scope
+-- `int curcol;` swallowed after one construct puts the parser in an error state.
+--
+-- So the rule is REPO SHAPE: a tree containing any C++ source names its headers C++,
+-- and a pure-C tree pays nothing because it never triggers. Decided ONCE from the full
+-- file list, which is also why it is not derived per-file or per-shard — a shard
+-- holding only `include/` sees no `.cpp` and would answer C for a C++ repo.
+local CXX_SRC = { cpp = true, cc = true, cxx = true, hpp = true, hh = true, hxx = true }
+local H_LANG = 'c' -- until a tree says otherwise; `.h` stays in c.exts as the default
+
+-- the two by-EXTENSION memos, declared here because set_h_lang below must clear them
+-- (their own commentary lives at their original definition sites further down)
+local EXT_ELANG = {} -- ext -> { lang|false, spec|false }
+local EXT_PLANG = {} -- ext -> lang|false
+
+--- The language `.h` means for a tree, from its FULL file list. Pure — the caller
+--- decides when to ask, so a worker can be handed the parent's answer instead.
+function M.h_lang_for(files)
+    for _, f in ipairs(files or {}) do
+        local e = f:match('%.([%w]+)$')
+        if e and CXX_SRC[e:lower()] then return 'cpp' end
+    end
+    return 'c'
+end
+
+--- Adopt a tree's answer. ★ THIS IS THE ONE THING THAT MAKES THE BY-EXTENSION MEMOS
+--- STALE, so it is the one thing that clears them — see the note above EXT_ELANG.
+function M.set_h_lang(v)
+    v = (v == 'cpp') and 'cpp' or 'c'
+    if v ~= H_LANG then
+        H_LANG = v
+        EXT_ELANG['h'], EXT_PLANG['h'] = nil, nil
+    end
+    return H_LANG
+end
+
+function M.h_lang() return H_LANG end
+
 local function lang_for(file)
     local ext = file:match('%.([%w]+)$')
     if not ext then return nil end
+    -- the repo-shape override, ahead of the registry scan (see above). No spec
+    -- disclaims `.h`, so nothing is skipped by taking this early exit.
+    if ext == 'h' then return H_LANG, M.spec[H_LANG] end
     for lang, spec in pairs(M.spec) do
         for _, e in ipairs(spec.exts) do
             if e == ext then
@@ -1153,9 +1209,17 @@ end
 -- legally imports JS (allowJs) and SFC scripts import both.
 -- memoized by EXTENSION: elang_for runs once per call site during
 -- resolution (87k on server), and lang_for underneath is a spec-registry
--- scan. The registry is static (no runtime spec mutation), so the memo
--- cannot go stale.
-local EXT_ELANG = {} -- ext -> { lang|false, spec|false }
+-- scan.
+--
+-- ★ THE OLD CLAIM HERE — "the registry is static, so the memo cannot go stale" — was
+-- true about the REGISTRY and is the wrong question. What matters is whether the KEY
+-- is as fine as the ANSWER, and twice it has not been:
+--   · `.h` now depends on the TREE, not the extension (CART-0410). `set_h_lang` is the
+--     single writer and clears this memo and EXT_PLANG when the answer changes.
+--   · `ext_disclaim` depends on the FULL FILENAME — `x.php` and `v.blade.php` share the
+--     key `php` and must not share the answer. STILL BROKEN, filed as CART-0412: today
+--     whichever is resolved first decides for both, in whichever direction.
+-- (declared above, next to set_h_lang, so the writer can reach it)
 local function elang_for(file)
     local ext = file:match('%.([%w]+)$') or ''
     local hit = EXT_ELANG[ext]
@@ -1186,8 +1250,8 @@ end
 -- "TS is the JS spec under another PARSER" the elang_for comment describes.
 -- Extraction (lang_for, not elang_for) already parses .ts under typescript;
 -- this is the analysis-side counterpart. Containers keep elang_for's host
--- grammar (their region trees are JS). Memoized by extension like elang_for.
-local EXT_PLANG = {}
+-- grammar (their region trees are JS). Memoized by extension like elang_for —
+-- EXT_PLANG is declared next to set_h_lang, which is its invalidator.
 local function parse_lang_for(file)
     local ext = file:match('%.([%w]+)$') or ''
     local hit = EXT_PLANG[ext]
@@ -3073,6 +3137,20 @@ function M.parse_lang(file)
     return parse_lang_for(file)
 end
 
+--- Is this file a CONTAINER (one file, several language regions — vue/svelte SFC)?
+---
+--- ★ EXPORTED BECAUSE `parse_lang` ANSWERS FOR A CONTAINER AND THE ANSWER IS A TRAP
+--- (CART-0410). `parse_lang('App.vue')` returns `javascript` — correct for "which
+--- grammar parses the SCRIPT REGION", and catastrophic for a caller that reads it as
+--- "parse this FILE as javascript": an SFC's template and style are not JS, so a
+--- whole-file re-parse invents structure the way parsing a blade template as php does
+--- (see lang_for's ext_disclaim comment — same defect, one layer up).
+--- A caller that re-parses WHOLE FILES must exclude containers; extraction does not,
+--- because it walks the injection regions instead.
+function M.is_container(file)
+    return file ~= nil and container_for(file) ~= nil
+end
+
 -- a NEW file's obligatory first lines (extract-module creates files)
 function M.file_header(file)
     if elang_for(file) == 'php' then return { '<?php', '' } end
@@ -4542,6 +4620,16 @@ function M.extract(root, opts)
         files, minified = list_files(root, opts and opts.subdirs, tp)
         padd('list_files', _plf)
     end
+    -- ★ WHAT `.h` MEANS, DECIDED ONCE, FROM THE WHOLE TREE (CART-0410). The rule needs
+    -- the FULL file list, and a worker never has one — `opts.files` is a BATCH, and a
+    -- batch of `include/*.h` contains no C++ source and would answer C for a C++ repo.
+    -- So the parent decides and threads `opts.h_lang` down, exactly as it threads
+    -- transport and packs, and for the same reason the comment above gives: a
+    -- module-level registry cannot reach a spawned process.
+    -- opts.fileset is the parent's full list when one was passed (demand extraction).
+    M.set_h_lang(opts and opts.h_lang
+        or M.h_lang_for(opts and opts.fileset or files))
+
     local fileset = {}
     for _, f in ipairs(opts and opts.fileset or files) do fileset[f] = true end
     for _, f in ipairs(files) do fileset[f] = true end
@@ -4561,6 +4649,12 @@ function M.extract(root, opts)
     -- eviction key, so no content hash needed). store.stale() compares.
     local data = { schema = 1, root = root, provider = 'treesitter',
         capabilities = { calls = true, litdata = true, df = 'lite' },
+        -- CARRIED ON THE GRAPH so a later re-parse agrees with the build (CART-0410).
+        -- Analysis re-parses (expr, lens, optimize) run long after extraction and often
+        -- in another process off a CACHE LOAD, with only a repo-relative path in hand —
+        -- they cannot re-derive this, and deriving it from a loaded SHARD would be
+        -- wrong anyway (a shard can be all headers). store.ingest re-adopts it.
+        h_lang = M.h_lang(),
         nodes = {}, edges = {}, calls = {}, stamps = {} }
     local nodes, edges, calls = data.nodes, data.edges, data.calls
     local no_parser = {}

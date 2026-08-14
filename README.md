@@ -2811,6 +2811,31 @@ nvim --headless -u NONE -l tools/specaudit.lua              # default corpus set
 nvim --headless -u NONE -l tools/specaudit.lua ruby rails   # explicit corpora
 nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no snapshot
 
+# WHAT `.h` MEANS IS A PROPERTY OF THE TREE, not of the extension (CART-0410). spec/c.lua
+# claims `.h`; spec/cpp.lua claims only .hpp/.hh/.hxx — so every C++ project using the
+# ordinary convention had ALL its headers parsed with the C grammar. `class Foo { … }` is
+# not a syntax error in C: `class Foo` reads as type + declarator and the body as its
+# compound_statement, so THE WHOLE CLASS BECOMES ONE function_definition and every method
+# prototype inside resolves to that node, inheriting the class's field list as its rows.
+# The rule is REPO SHAPE — a tree holding any .cpp/.cc/.cxx/.hpp/.hh/.hxx names its headers
+# C++ — decided ONCE from the full file list, carried on the graph as `data.h_lang`, and
+# re-adopted by store.ingest so a later re-parse agrees with the build.
+#   · UNCONDITIONAL `.h → cpp` WAS MEASURED AND REJECTED: on real C headers the C++ grammar
+#     LOSES real declarations (openfirmware 2196 → 2050 def nodes — a run of file-scope
+#     `int curcol;` swallowed once one construct puts the parser in an error state). A
+#     pure-C tree must pay nothing, and under a shape rule it never triggers.
+#   · THE PARENT DECIDES, ALWAYS. A worker sees a BATCH, and a batch of `include/*.h` holds
+#     no C++ source — it would answer C for a C++ repo. Deriving it at INGEST is wrong one
+#     level down for the same reason: the store is SHARDED, and a shard can be all headers.
+#   · AND THE PARENT MUST ADOPT WHAT IT SHIPS. Relink runs in the parent, and its
+#     never-cross-language gate asks the language per node; threading the value to workers
+#     while leaving the parent on the default gave nodes 9024 == 9024 against inline and
+#     refs 8073 vs 9229. A divergence in ONE column, with the others agreeing.
+# MEASURED: 7kaa nodes 12144→9024 (−3120 fabricated `function` nodes) with refs 8040→9229;
+# v8 — 1813 .h against 1267 .cc, more header than source — nodes +17393 and refs +42677
+# (+57%). ★ THE NODE DELTA HAS OPPOSITE SIGNS on those two (7kaa's headers declare, v8's
+# define inline) and only the REFS direction agrees across both, which is the one to read.
+
 # LANGUAGE FENCE — the audit that exists because four of these shipped in one arc and
 # not one was caught by a test. A module that serves several grammars can hardcode a
 # single grammar's vocabulary (`node:type() == 'if_statement'`, `stmt.t ==

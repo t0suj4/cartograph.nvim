@@ -416,10 +416,14 @@ function M.demand(file)
     local s = M._session
     if not (s and s.phase == 1) or s.arrived[file] then return false end
     local ts = require 'cartograph.providers.treesitter'
+    -- h_lang EXPLICITLY (CART-0410): `files` here is ONE file, and what `.h` means is a
+    -- property of the whole tree. s.fileset would answer correctly today, but only
+    -- because it happens to be the parent's full list — stating it is what keeps a
+    -- future narrowing of fileset from silently re-deciding the language.
     local chunk = ts.extract(s.root,
         { files = { file }, fileset = s.fileset, skip_idpass = true,
             abs = s.abs, packs = s.packs, profile = s.profile,
-            transport = s.transport })
+            h_lang = s.h_lang, transport = s.transport })
     merge_chunk(s, chunk)
     s.arrived[file] = true -- even if unreadable: don't retry per descend
     if s.on_chunk then s.on_chunk(s.done, s.total, s.acc) end
@@ -464,11 +468,28 @@ function M.extract(root, o)
     if o.packs == nil and not o.roots then
         o.packs = require('cartograph.shapes').packs_for(root)
     end
+    -- ★ DECIDED ONCE IN THE PARENT, FROM THE FULL LIST (CART-0410), for the same
+    -- reason packs and profile are: a worker sees a BATCH, and a batch of headers
+    -- contains no C++ source, so a worker deriving this itself would answer C for a
+    -- C++ repo and produce a chunk parsed against a different grammar than its
+    -- siblings. Rides to every worker as one explicit value.
+    o.h_lang = o.h_lang or ts.h_lang_for(files)
+    -- ★ AND THE PARENT MUST ADOPT IT TOO, not merely ship it. In the parallel path the
+    -- parent never calls ts.extract — workers do — so its own H_LANG stayed at the
+    -- default while the chunks came back parsed as C++. RELINK RUNS HERE, and its
+    -- never-cross-language gate asks elang_for(file) per node: headers answered `c`
+    -- against `cpp` definitions, and the families did not match. MEASURED on 7kaa
+    -- before this line existed: nodes agreed with inline exactly (9024 == 9024, so the
+    -- threading was working) while refs came out 8073 against inline's 9229. A
+    -- divergence that shows up ONLY in refs is a resolution-side reader that was never
+    -- told, and node equality is what makes it look fine.
+    ts.set_h_lang(o.h_lang)
+
     local nw = math.min(o.workers or M.default_workers(),
         math.max(1, math.ceil(#files / M.BATCH)))
     if nw < 2 then
         o.on_done(ts.extract(root, { files = files, abs = abs, packs = o.packs,
-            profile = o.profile, transport = tstack }))
+            profile = o.profile, h_lang = o.h_lang, transport = tstack }))
         return
     end
     local rtp = worker_rtp()
@@ -484,12 +505,14 @@ function M.extract(root, o)
         -- one explicit value decided in the parent, so no worker re-derives it and
         -- none can disagree about which environment it is resolving against
         profile = o.profile,
+        h_lang = o.h_lang, -- the merged graph carries it, as the inline build does
         capabilities = { calls = true, litdata = true, df = 'lite' },
         nodes = {}, edges = {}, calls = {}, stamps = {}, fn_ranges = {},
         mentions = {}, _no_parser = {} }
     local s = { root = root, fileset = files, acc = acc, arrived = {}, abs = abs,
         on_chunk = o.on_chunk, done = 0, total = #ordered, phase = 1,
-        packs = o.packs, profile = o.profile, transport = tstack, wmetrics = {} }
+        packs = o.packs, profile = o.profile, h_lang = o.h_lang,
+        transport = tstack, wmetrics = {} }
     M._session = s
 
     -- record-fold PEAK arc, step 2-live (gated CARTOGRAPH_MERGECOLS): fold each
@@ -672,7 +695,7 @@ function M.extract(root, o)
         for _, fb in ipairs(failed) do -- sequential fallback, honest
             merge_chunk(s, ts.extract(root, { files = fb,
                 fileset = files, skip_idpass = true, abs = abs, packs = o.packs,
-                profile = o.profile,
+                profile = o.profile, h_lang = o.h_lang,
                 transport = tstack }))
         end
         canonicalize()
@@ -725,6 +748,7 @@ function M.extract(root, o)
         spawn({ phase = 'parse', root = root, files = b,
             fileset = files, rtp = rtp, roots = o.roots, packs = o.packs,
             profile = o.profile,
+            h_lang = o.h_lang, -- the parent's whole-tree answer (CART-0410)
             transport = tspec, -- the serialisable half; the worker rebuilds it
             foldstore = s.foldstore }, -- worker folds df/flow + ships the store once
             function (chunk, res)

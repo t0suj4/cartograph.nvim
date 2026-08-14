@@ -4309,3 +4309,93 @@ test('treesitter: a template that reuses its host extension is NOT that language
     eq(nil, byfile['page.blade.php'], 'the template mints NOTHING: ' .. vim.inspect(byfile))
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── what `.h` means is a property of the TREE (CART-0410) ──────────────────────────
+
+test('treesitter: a C++ header named .h is parsed as C++, not C', function ()
+    if not (has_parser('c') and has_parser('cpp')) then skip 'no c/cpp parser' end
+    -- spec/c.lua claims `.h`; spec/cpp.lua claims only .hpp/.hh/.hxx. So every C++
+    -- project using the ordinary convention had ALL its headers parsed with the C
+    -- grammar — and `class Foo { … }` is NOT an error in C: `class Foo` reads as
+    -- type + declarator and the body as its compound_statement, so the whole class
+    -- becomes ONE function_definition that every method prototype inside resolves
+    -- to, inheriting the class's field list as its own rows.
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(name, body)
+        local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(body); fd:close()
+    end
+    w('thing.h', table.concat({
+        'class Thing',
+        '{',
+        'public:',
+        '    int   width;',
+        '    int   height;',
+        '    void  init(int w, int h);',
+        '    int   area();',
+        '};',
+    }, '\n') .. '\n')
+    w('thing.cpp', 'void Thing::init(int w, int h) { width = w; height = h; }\n')
+    store.ingest(ts.extract(root))
+
+    eq('cpp', store.data.h_lang, 'the graph CARRIES the decision, for later re-parses')
+    local kinds = {}
+    for _, n in ipairs(store.data.nodes or {}) do
+        if n.file == 'thing.h' then kinds[n.kind] = (kinds[n.kind] or 0) + 1 end
+    end
+    -- under the C misparse the header minted free-floating `function` nodes for the
+    -- prototypes; under C++ a prototype is a DECLARATION and mints no definition
+    eq(nil, kinds['function'], 'no fabricated free functions in the header: '
+        .. vim.inspect(kinds))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('treesitter: a pure-C tree keeps .h as C — the fix costs it nothing', function ()
+    if not (has_parser('c') and has_parser('cpp')) then skip 'no c/cpp parser' end
+    -- The reason this is a REPO-SHAPE rule and not `.h → cpp` outright: measured on
+    -- real C headers, the C++ grammar LOSES real declarations (openfirmware 2196 →
+    -- 2050 def nodes, a run of file-scope `int x;` swallowed after one construct puts
+    -- the parser in an error state). A tree with no C++ source must never pay that.
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(name, body)
+        local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(body); fd:close()
+    end
+    w('api.h', 'int currow;\nint curcol;\nvoid api_init(void);\n')
+    w('api.c', 'void api_init(void) { currow = 0; }\n')
+    store.ingest(ts.extract(root))
+
+    eq('c', store.data.h_lang, 'no C++ source in the tree → .h stays C')
+    local names = {}
+    for _, n in ipairs(store.data.nodes or {}) do
+        if n.file == 'api.h' then names[n.name or '?'] = true end
+    end
+    ok(names.currow and names.curcol,
+        'the file-scope declarations survive: ' .. vim.inspect(names))
+    vim.fn.delete(root, 'rf')
+end)
+
+test('treesitter: the .h decision invalidates BOTH by-extension memos', function ()
+    -- elang_for and parse_lang_for each memoize on the bare extension, and their
+    -- comment used to argue that could never go stale ("the registry is static").
+    -- True about the registry, and the wrong question: the key must be as fine as
+    -- the answer. set_h_lang is the single writer and the single invalidator.
+    local before = ts.h_lang()
+    ts.set_h_lang('c')
+    eq('c', ts.lang_of('x.h'));    eq('c', ts.parse_lang('x.h'))
+    ts.set_h_lang('cpp')
+    eq('cpp', ts.lang_of('x.h'));  eq('cpp', ts.parse_lang('x.h'))
+    ts.set_h_lang('c')
+    eq('c', ts.lang_of('x.h'));    eq('c', ts.parse_lang('x.h'))
+    eq('c', ts.lang_of('x.c'), '.c is never touched by the override')
+    ts.set_h_lang(before)
+end)
+
+test('treesitter: the shape rule reads the WHOLE list, never a batch', function ()
+    -- A worker sees a BATCH. A batch of include/*.h contains no C++ source, so a
+    -- worker deriving this itself would answer C for a C++ repo and ship a chunk
+    -- parsed against a different grammar than its siblings. The parent decides.
+    eq('c',   ts.h_lang_for { 'a.c', 'b.h' })
+    eq('cpp', ts.h_lang_for { 'a.cpp', 'b.h' })
+    eq('cpp', ts.h_lang_for { 'src/a.cc', 'include/b.h' })
+    eq('c',   ts.h_lang_for { 'include/only.h' }, 'a headers-only batch is NOT evidence')
+    eq('c',   ts.h_lang_for {})
+end)

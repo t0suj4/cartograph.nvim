@@ -73,7 +73,17 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 133 -- v133: a blanked control head kept its `rmw` (CART-0405). flow zeroes a
+M.VERSION = 134 -- v134: A C++ HEADER NAMED `.h` WAS PARSED AS C (CART-0410). spec/c.lua
+               -- claims `.h` and cpp claims only .hpp/.hh/.hxx, so every C++ project using
+               -- the ordinary convention had ALL its headers parsed with the C grammar —
+               -- where `class Foo { … }` is not an error but reads as type + declarator
+               -- plus a compound_statement, i.e. the whole class becomes ONE
+               -- function_definition that every method prototype resolves to. ~3700
+               -- fabricated `function` nodes on 7kaa alone. Now a REPO-SHAPE decision
+               -- (`data.h_lang`): a tree holding any C++ source names its headers C++.
+               -- Unconditional .h→cpp was MEASURED and rejected — it costs real
+               -- declarations on real C headers (openfirmware 2196→2050 def nodes).
+               -- v133: a blanked control head kept its `rmw` (CART-0405). flow zeroes a
                -- TRY head's and a POST loop's def/use because a container is not a
                -- computation — and a row's read census is `use ∪ rmw`, so the READ half of a
                -- read-modify-write survived the blanking. Found by the ruby grid.

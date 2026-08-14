@@ -44,12 +44,25 @@ local builtins = require 'cartograph.builtins'
 
 local M = {}
 
-local spec = require('cartograph.providers.treesitter').spec
-local EXT = {}
+local ts = require('cartograph.providers.treesitter')
+local spec = ts.spec
+-- ONE OWNER FOR "WHAT LANGUAGE IS THIS FILE" (CART-0410). The SUPPORT set is this
+-- module's own (it rewrites, so it needs a body_field); the LANGUAGE is the
+-- provider's. `parse_lang`, not `lang_of`, because this module RE-PARSES and lang_of
+-- folds typescript/tsx into the javascript resolution family — verified identical to
+-- the private table it replaces on all 27 registered extensions.
+local SUPPORTED = {}
 for lang, s in pairs(spec) do
-    if s.body_field and s.exts then for _, e in ipairs(s.exts) do EXT[e] = lang end end
+    if s.body_field then SUPPORTED[lang] = true end
 end
-local function lang_of(file) return EXT[(file or ''):match('%.(%w+)$') or ''] end
+-- the container guard RESTORES a refusal: vue/svelte are in no spec's `exts`, so the
+-- private table returned nil for them, while parse_lang answers with the SCRIPT
+-- REGION's grammar. This module rewrites whole files — it must not claim an SFC.
+local function lang_of(file)
+    if not file or ts.is_container(file) then return nil end
+    local lang = ts.parse_lang(file)
+    return (lang and SUPPORTED[lang]) and lang or nil
+end
 
 -- ── hedge resolution ([[cartograph-hedge-resolution-writes]]) ─────────────────
 -- A decline is a HEDGE; the caller DISCHARGES it by supplying the missing premise at

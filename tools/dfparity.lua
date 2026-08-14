@@ -153,7 +153,7 @@ M.EXPECTED = {
     -- cpp/go line-skew = the control-transfer LABEL unwrap (v33): a labeled loop /
     -- C label target now heads its own coarse row at the LOOP's line rather than
     -- the label's line — a 1-line cosmetic label difference, def/use unchanged.
-    cpp = { ['line-skew'] = 8, ['partition-mismatch'] = 993 },
+    cpp = { ['line-skew'] = 8, ['partition-mismatch'] = 995 },
     -- ★ MODERN C++ (CART-0385), calibrated ON ARRIVAL because it is PINNED and a pinned
     -- corpus can hold a baseline -- an uncalibrated row is a note forever and gates nothing
     -- (nio's rule). It exists because 7kaa has ZERO for_range_loop / try_statement /
@@ -163,8 +163,8 @@ M.EXPECTED = {
     -- (`for (const auto& mode : modes)` -> flow={mode} df={}), which is precisely the support
     -- this corpus was registered to witness. The single OTHER is one 2800-line function whose
     -- try statement differs on two names out of ~100.
-    cppmodern = { ['df-over-collects'] = 309, ['flow-over-collects'] = 219, ['OTHER'] = 1,
-        ['partition-mismatch'] = 265, ['line-skew'] = 6 }, -- line-skew 11->8: a for-init row now heads the coarse stmt at the INIT's line, which is the loop's own line
+    cppmodern = { OTHER = 1, ['df-over-collects'] = 276, ['flow-over-collects'] = 221,
+        ['line-skew'] = 3, ['partition-mismatch'] = 268 }, -- line-skew 11->8: a for-init row now heads the coarse stmt at the INIT's line, which is the loop's own line
     go = { ['df-over-collects'] = 34, ['flow-over-collects'] = 6, ['OTHER'] = 1,
         ['line-skew'] = 17, ['partition-mismatch'] = 22 }, -- +3 @ v51 anon-callback fns (alpinejs); +line-skew (labels);
     -- df-over-collects=27 closure-leaks; partition-mismatch=21 was the re-parse
@@ -253,8 +253,8 @@ M.EXPECTED = {
     -- ★ NOTHING FELL, which is the review question: a df/flow divergence that DISAPPEARS when
     -- a population becomes visible would mean the population was being counted somewhere it
     -- did not belong.
-    libs = { ['df-over-collects'] = 1967, ['flow-over-collects'] = 322, ['OTHER'] = 3,
-        ['disjoint'] = 2, ['partition-mismatch'] = 1083 },
+    libs = { OTHER = 3, ['df-over-collects'] = 1972, disjoint = 2, ['flow-over-collects'] = 322,
+        ['partition-mismatch'] = 1083 },
     -- nio: the annotated-lua tier (CART-0240). Calibrated on arrival rather than
     -- left reporting `~`, because it is PINNED and a pinned corpus can hold a
     -- baseline — an uncalibrated row is a note forever and gates nothing.

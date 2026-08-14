@@ -1089,13 +1089,40 @@ local spec = ts.spec
 -- `spec.fn_types` for the same question, so two modules gave two answers about
 -- which function encloses the same node. Now there is one owner per language and
 -- the spec audit checks it (CART-0306).
-local EXT = {} -- file ext → lang key in spec (only those with a body-bearing flow)
+-- ★★ THE SUPPORT FILTER IS OURS; THE LANGUAGE IS NOT (CART-0410). This used to be a
+-- private ext→lang table, i.e. A SECOND COPY OF THE ANSWER — the same defect the
+-- comment directly above describes for fn_types, one field over. It cost a real bug:
+-- the provider and this module both decided what a file's language is, so nothing
+-- could make them disagree LOUDLY, and when `.h` turned out to be wrong it was wrong
+-- in two places independently.
+--
+-- ★ AND THE OWNER IS `parse_lang`, NOT `lang_of`. lang_of folds typescript/tsx into
+-- the javascript RESOLUTION family; this module RE-PARSES, and TS syntax errors out
+-- under the JS grammar. VERIFIED EXT-BY-EXT before the swap: the old table agreed
+-- with parse_lang on all 27 registered extensions and with lang_of on 25 — the two
+-- exceptions being exactly .ts and .tsx. So this substitution is behaviour-identical
+-- today and, unlike the copy, follows the provider when the provider learns something.
+local SUPPORTED = {} -- langs with a body-bearing flow
 for lang, s in pairs(spec) do
     -- body_of is the POSITIONAL twin of body_field (CART-0305): a language that
     -- reaches its body by descent is just as supported as one that names it.
-    if (s.body_field or s.body_of) and s.exts then
-        for _, e in ipairs(s.exts) do EXT[e] = lang end
-    end
+    if s.body_field or s.body_of then SUPPORTED[lang] = true end
+end
+
+--- The language to RE-PARSE `file` as, or nil when this layer does not support it.
+---
+--- ★ THE CONTAINER GUARD IS NOT DEFENSIVE, IT RESTORES A REFUSAL. The private table
+--- this replaces was built from spec `exts`, and vue/svelte are in NO spec's exts —
+--- so containers resolved to nil and this layer refused them. `parse_lang` answers
+--- `javascript` for them (the SCRIPT REGION's grammar), so routing without this guard
+--- would silently START parsing whole SFCs as JS. ★ MY EXT-BY-EXT VERIFICATION MISSED
+--- IT BECAUSE IT ITERATED THE 27 REGISTERED SPEC EXTS — and a container is precisely
+--- an extension no spec claims. A check over the wrong population, in the change that
+--- exists to fix a check over the wrong population.
+local function lang_of_file(file)
+    if not file or ts.is_container(file) then return nil end
+    local lang = ts.parse_lang(file)
+    return (lang and SUPPORTED[lang]) and lang or nil
 end
 
 local function fn_node(node, src, lang)
@@ -1124,7 +1151,7 @@ end
 function M.of(store, fn_id)
     local node = store.node and store.node(fn_id)
     if not node or not node.file then return nil end
-    local lang = EXT[node.file:match('%.(%w+)$') or '']
+    local lang = lang_of_file(node.file)
     if not lang or not spec[lang] then return nil end
     local s = spec[lang]
     local src = table.concat(store.content(node) or {}, '\n')
@@ -1170,9 +1197,9 @@ end
 function M.of_module(store, mod_id)
     local node = store.node and store.node(mod_id)
     if not (node and node.file and node.kind == 'module') then return nil end
-    -- the SAME supported-language set as M.of (EXT is built from the langs that
-    -- declare a body_field flow), so this never claims a language M.of refuses
-    local lang = EXT[node.file:match('%.(%w+)$') or '']
+    -- the SAME resolution as M.of (one helper, one support set), so this never
+    -- claims a language M.of refuses
+    local lang = lang_of_file(node.file)
     if not lang or not spec[lang] then return nil end
     local s = spec[lang]
     -- a MISSING file must refuse, not report an empty module. store.content
