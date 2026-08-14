@@ -700,6 +700,16 @@ function M.harvest_row(node, src, hint, lang)
         -- `inrescue` shell. The two sides agree by MIRRORING flow's rule, not by re-deriving
         -- it — the same reason head_binders and case_labels are exported rather than copied.
         if cls and cls.try and cls.try[node:type()] then return { lhs = {}, rhs = {} } end
+        -- ★ A HEAD-ONLY FORM EVALUATES EXACTLY ITS HEAD FIELD (CART-0380). Conditional
+        -- compilation hangs its statements DIRECTLY under the directive, so the child loop
+        -- below — which skips by TYPE — has nothing to skip and would harvest the whole
+        -- branch, exactly as ruby's `begin` did before CART-0386. Mirrored from flow, not
+        -- re-derived: `false` means the form has no head at all (`#else`).
+        local hf = require('cartograph.flow').head_field(node:type())
+        if hf ~= nil then
+            local h = hf and node:field(hf)[1] or nil
+            return { lhs = {}, rhs = {}, cond = h and build(h, src, lang) or nil }
+        end
         local bn, bskip, bvals = require('cartograph.flow').head_binders(node, src, cls)
         local lhs = {}
         if bn then

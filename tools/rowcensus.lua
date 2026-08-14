@@ -135,15 +135,17 @@ M.EXPECTED = {
     bash = { rows = 9439, opened = 1430, opaque = 0, case_statement = 82, catch = 1,
         elif_clause = 273, for_statement = 66, if_statement = 977, try_statement = 1,
         while_statement = 30 },
-    cpp = { rows = 78202, opened = 18827, opaque = 253, case_statement = 1704,
-        ['case_statement:opaque'] = 238, ['cond:opaque'] = 12, do_statement = 12,
-        for_statement = 2119, if_statement = 14513, ['if_statement:opaque'] = 3,
-        switch_statement = 313, while_statement = 166 },
-    cppmodern = { rows = 63362, opened = 12990, opaque = 364, case_statement = 651,
+    cpp = { rows = 81377, opened = 20038, opaque = 261, case_statement = 1753,
+        ['case_statement:opaque'] = 241, ['cond:opaque'] = 12, do_statement = 12,
+        for_statement = 2224, if_statement = 14871, ['if_statement:opaque'] = 3,
+        preproc_elif = 22, preproc_else = 86, preproc_if = 118, ['preproc_if:opaque'] = 1,
+        preproc_ifdef = 457, ['preproc_ifdef:opaque'] = 4, switch_statement = 318,
+        while_statement = 177 },
+    cppmodern = { rows = 63383, opened = 12999, opaque = 364, case_statement = 651,
         ['case_statement:opaque'] = 355, catch = 42, ['cond:opaque'] = 5, do_statement = 5,
-        for_range_loop = 259, for_statement = 623, if_statement = 11192,
-        ['if_statement:opaque'] = 4, switch_statement = 86, try_statement = 41,
-        while_statement = 91 },
+        for_range_loop = 259, for_statement = 623, if_statement = 11193,
+        ['if_statement:opaque'] = 4, preproc_else = 3, preproc_if = 3, preproc_ifdef = 2,
+        switch_statement = 86, try_statement = 41, while_statement = 91 },
     -- go / mootools / synjs recalib @ CART-0390: js/ts SWITCH BODIES now open (they were
     -- one opaque `switch_body` row). switch_case/switch_default are NEW keys; if_statement
     -- also rises, which is control NESTED INSIDE the bodies that were folded. go moves
@@ -167,10 +169,11 @@ M.EXPECTED = {
     -- has rows at all. Every form rose and none fell — the shape of the delta IS the review
     -- question's answer. `opaque` UNMOVED at 102, which is the sharper signal: 1579 new function
     -- bodies arrived and not one of them opened a control form it then failed to region.
-    libs = { rows = 55149, opened = 7544, opaque = 102, catch = 446, ['catch:opaque'] = 49,
+    libs = { rows = 55182, opened = 7555, opaque = 102, catch = 446, ['catch:opaque'] = 49,
         ['cond:opaque'] = 21, do_statement = 21, enhanced_for_statement = 441,
-        for_statement = 1476, if_expression = 2, if_statement = 3480, match_block = 2,
-        match_expression = 2, switch_block_statement_group = 88,
+        for_statement = 1476, if_expression = 2, if_statement = 3482, match_block = 2,
+        match_expression = 2, preproc_elif = 3, preproc_else = 3, preproc_if = 2,
+        preproc_ifdef = 1, switch_block_statement_group = 88,
         ['switch_block_statement_group:opaque'] = 10, switch_expression = 50,
         switch_rule = 162, synchronized_statement = 1, try_statement = 490,
         try_with_resources_statement = 649, ['try_with_resources_statement:opaque'] = 21,

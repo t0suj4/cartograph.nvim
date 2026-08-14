@@ -1821,3 +1821,41 @@ test('flow: an `else if` chain keeps every link CONDITION on a head row', functi
     ok(seen.a and seen.b and seen.c,
         'every link condition is read by some row: ' .. vim.inspect(seen))
 end)
+
+test('flow: conditional compilation opens as a branch, head reads only its condition', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    -- CART-0380. `#if` hangs its statements DIRECTLY under the directive — there is no
+    -- block — so du's type-based body stop had nothing to stop at and the head row
+    -- harvested the whole branch, while the body statements got no rows of their own.
+    -- Worse, an `#if / #else` pair read as BOTH bodies running in sequence. Opening
+    -- them as alternative branches is a sound over-approximation; deciding WHICH branch
+    -- is live is the banked `#if` evaluator, which would NARROW this, not replace it.
+    local fn, src2 = parse_fn(table.concat({
+        'void f(int a) {',
+        '   int r = 0;',
+        '#if defined ENABLE_NLS',
+        '   r = setlocale(a);',
+        '#elif defined X',
+        '   r = alt(a);',
+        '#else',
+        '   r = fallback(a);',
+        '#endif',
+        '   use(r);',
+        '}',
+    }, '\n'), 'cpp')
+    local fl = flow.build(fn, src2, { regime = tsspec.cpp.regime })
+    local heads, bodies = {}, 0
+    for _, s in ipairs(fl.stmts) do
+        if s.t == 'preproc_if' or s.t == 'preproc_elif' or s.t == 'preproc_else' then
+            heads[s.t] = setof(s.use or {})
+        elseif s.pol == 'body' then bodies = bodies + 1 end
+    end
+    ok(heads.preproc_if and heads.preproc_elif and heads.preproc_else,
+        'each directive is a head row')
+    -- the head evaluates its CONDITION and nothing else — no body name may appear
+    ok(heads.preproc_if.ENABLE_NLS, '#if reads its condition')
+    ok(not heads.preproc_if.setlocale, '#if head does NOT read its body')
+    ok(heads.preproc_elif.X and not heads.preproc_elif.alt, '#elif reads only its condition')
+    ok(not next(heads.preproc_else), '#else evaluates nothing at all')
+    eq(3, bodies, 'each branch body is regioned as its own row')
+end)

@@ -47,6 +47,21 @@ local CTRL = { if_statement = true, while_statement = true, for_statement = true
     -- sit in the BASE set rather than the spec seam: a base entry reaches all THREE cfg
     -- constructions (extraction, expr.of, expr.of_module) for free, and the three-way
     -- agreement hazard is what cost part A a debugging round.
+    -- ── CART-0380: CONDITIONAL COMPILATION IS CONTROL FLOW, at a different phase.
+    -- `preproc_*` node types exist only in the c/cpp grammars, so this is the same
+    -- language-unique criterion as rust and for_range_loop above.
+    -- ★ TODAY'S MODELLING IS STRICTLY WORSE THAN A BRANCH: the body is attributed to the
+    -- enclosing function AS IF UNCONDITIONAL, so `#if A / #else / #endif` reads as BOTH
+    -- bodies running in sequence. Opening them as alternative branches is a sound
+    -- over-approximation and it is the machinery every other conditional already gets.
+    -- ★ AND IT DOES NOT NEED THE `#if` EVALUATOR. Deciding WHICH branch is live is the
+    -- banked TU-walk ([[cartograph-cpp-tu-walk]]); that would NARROW this, not replace it.
+    -- The ticket sat at P3 for a year on the premise that the evaluator had to come
+    -- first — the cheap half was separable all along.
+    -- MEASURED on 7kaa: 156 folded containers in 200 files (ctrlcensus --folded), and 383
+    -- distinct rows of the expression census spread across FOUR classes, so none of them
+    -- ranked (the same classification-hides-a-cause trap as CART-0402).
+    preproc_if = true, preproc_ifdef = true,
     for_range_loop = true,                  -- cpp `for (auto &x : v)`
     enhanced_for_statement = true,          -- java `for (String s : xs)`
     -- ★ JAVA'S SWITCH IS `switch_expression` WHETHER OR NOT IT IS USED AS A VALUE, and its
@@ -79,6 +94,14 @@ local TRY_T = { try_statement = true, try_with_resources_statement = true }
 -- dropping it would lose the def. It is pre-emitted instead, exactly like a for-init.
 local BODYFIELD = { for_range_loop = true, enhanced_for_statement = true,
     synchronized_statement = true }
+-- ★ THE MIRROR OF BODYFIELD (CART-0380): control forms whose HEAD is exactly one FIELD, so
+-- every OTHER named child is a BODY statement. Conditional compilation hangs its statements
+-- DIRECTLY under the directive — there is no block — which is the ruby-`begin` shape: du's
+-- type-based body stop has nothing to stop at, so the head row harvested the whole branch.
+-- `false` = the form has no head at all (`#else`), which blanks it the way a TRY head is
+-- blanked: a container is not a computation.
+local HEADFIELD = { preproc_if = 'condition', preproc_elif = 'condition',
+    preproc_ifdef = 'name', preproc_ifndef = 'name', preproc_else = false }
 -- a clause whose case LABEL is a CHILD rather than a `value` field (java `switch_label`)
 local CASELABEL = { switch_label = true }
 -- control forms with an acquire step that runs BEFORE the head, like a three-part for's
@@ -91,9 +114,16 @@ local CLAUSE = { else_statement = true, elseif_statement = true,
     expression_case = true, default_case = true,
     -- java: the classic `case 1: … break;` group and the arrow form `case 1 -> …`
     switch_block_statement_group = true, switch_rule = true,
-    catch_clause = true, except_clause = true, finally_clause = true }
+    catch_clause = true, except_clause = true, finally_clause = true,
+    -- cpp conditional-compilation alternatives (CART-0380), c/cpp-unique spellings
+    preproc_elif = true, preproc_else = true }
 local ELSEIF = { elseif_statement = true, elseif_clause = true,
-    else_if_clause = true, elif_clause = true } -- + python elif (ruby `if` isn't
+    else_if_clause = true, elif_clause = true,
+    -- cpp conditional-compilation chain links (CART-0380): `#elif` carries the next
+    -- link in its own `alternative`, exactly like ruby's nested `elsif`, and `#else`
+    -- is the terminal link. Routing them here gets the head row + regioned body +
+    -- chain-walk for free rather than re-deriving any of it.
+    preproc_elif = true, preproc_else = true } -- + python elif (ruby `if` isn't
     -- in CTRL yet, so ruby `elsif` is out of scope — left folded, parity-clean)
 -- exception handlers (bind an exception var, then region a body): java/php/JS
 -- `catch_clause`, python `except_clause`
@@ -274,6 +304,12 @@ function M.body_children(node, ctrlset, clauseset)
     end
     return out
 end
+
+--- The HEAD FIELD of a head-only control form, or nil when the form is not one
+--- (CART-0380). Returns `false` for a form with NO head (`#else`). Exported so the
+--- expression harvest asks rather than re-derives — the same reason head_binders,
+--- case_labels, body_children and leaf_ids are exported.
+function M.head_field(t) return HEADFIELD[t] end
 
 --- The leaf-name set du counts as a read for a language: DFID plus that language's
 --- `df_ids` extension. EXPORTED because the expression IR needs the SAME answer at
@@ -904,8 +940,22 @@ function M.build(fnnode, src, cfg)
         if finit then emit(finit, parent, pol) end
         local idx = #stmts + 1
         local sb = CTRL_[t] and true or false
-        local d, u, sus, rmw, blks = du(node, src, sb, ids, mods, FN, DUSTOP,
-            CTRL_, CLAUSE_)
+        -- ★ A HEAD-ONLY FORM IS WALKED AT ITS HEAD FIELD, NOT AT ITSELF (CART-0380).
+        -- `#if COND` hangs its statements directly under the directive, so a type-based
+        -- body stop has nothing to stop at and the head would harvest the whole branch —
+        -- the same shape as ruby's `begin` (CART-0386). Walking the condition alone is
+        -- exact rather than a blanking, because unlike a `try` head this one DOES evaluate
+        -- something. `false` (an `#else`) has no head: nothing to walk.
+        local hfd = HEADFIELD[t]
+        local dunode = node
+        if hfd ~= nil then dunode = hfd and node:field(hfd)[1] or nil end
+        local d, u, sus, rmw, blks
+        if dunode then
+            d, u, sus, rmw, blks = du(dunode, src, sb, ids, mods, FN, DUSTOP,
+                CTRL_, CLAUSE_)
+        else
+            d, u, sus, rmw, blks = {}, {}, false, nil, {}
+        end
         stmts[idx] = { l = line(node), c = startcol(node), kind = CTRL_[t] and t or 'stmt',
             parent = parent, pol = pol, def = d, use = u,
             regime = regimetab[t] or 'function', t = t, -- t = raw node type (CFG terminators)
@@ -934,8 +984,14 @@ function M.build(fnnode, src, cfg)
             -- row that appears to EXECUTE as an arm of its own (ruby `case a` gained an
             -- `identifier` row with pol='body'). Read through the language-aware switch set,
             -- so a language that declares the role gets it (CART-0387).
-            local cond = node:field('condition')[1]
-                or (SWITCH_[t] and node:field('value')[1])
+            local hf = HEADFIELD[t]
+            local cond
+            if hf ~= nil then                       -- a HEAD-ONLY form (CART-0380)
+                cond = hf and node:field(hf)[1] or nil
+            else
+                cond = node:field('condition')[1]
+                    or (SWITCH_[t] and node:field('value')[1])
+            end
             -- loop feasibility flag (do{}while(0) / while(true) / rust loop)
             if POST[t] or PRELOOP_[t] then
                 stmts[idx].const = (t == 'loop_expression') and true or const_cond(cond, src)
@@ -1003,6 +1059,9 @@ function M.build(fnnode, src, cfg)
             -- CART-0362's business, and moving them here would reorder every lua function.
             local body_field = ((cfg.ctrl and cfg.ctrl[t]) or BODYFIELD[t])
                 and node:field('body')[1] or nil
+            -- a HEAD-ONLY form has no `body` field at all: every named child that is not
+            -- the head and not a clause IS a body statement, which is what the generic
+            -- loop below already does once body_field stays nil.
             for gc in node:iter_children() do
                 if gc:named() and gc ~= cond and not (finit and gc:id() == finit:id())
                     and not (body_field and gc:id() ~= body_field:id()
@@ -1100,8 +1159,15 @@ function M.build(fnnode, src, cfg)
             -- row (condition only, stop_body) and REGION its consequence as rows
             -- (was folded — the body statements were invisible). lua
             -- `elseif_statement` / python `elif_clause`: body under `consequence`.
-            local d, u, _, _, eblk = du(node, src, true, ids, mods, FN, DUSTOP,
-                CTRL_, CLAUSE_)
+            -- a HEAD-ONLY link (`#elif COND`, `#else`) is walked at its head field, for
+            -- the reason the CTRL head gives: its statements hang directly under it.
+            local hfe = HEADFIELD[node:type()]
+            local dn = node
+            if hfe ~= nil then dn = hfe and node:field(hfe)[1] or nil end
+            local d, u, _, _, eblk = {}, {}, nil, nil, {}
+            if dn then
+                d, u, _, _, eblk = du(dn, src, true, ids, mods, FN, DUSTOP, CTRL_, CLAUSE_)
+            end
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = node:type(), parent = parent,
                 pol = 'elseif', def = d, use = u, t = node:type() }

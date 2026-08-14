@@ -2836,6 +2836,28 @@ nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no sn
 # (+57%). ★ THE NODE DELTA HAS OPPOSITE SIGNS on those two (7kaa's headers declare, v8's
 # define inline) and only the REFS direction agrees across both, which is the one to read.
 
+# CONDITIONAL COMPILATION IS CONTROL FLOW, at a different phase (CART-0380). `#if` /
+# `#ifdef` / `#elif` / `#else` CONTAIN statements and flow classified none of them, so their
+# bodies were attributed to the enclosing function AS IF UNCONDITIONAL — an `#if A / #else`
+# pair read as BOTH bodies running in sequence — and the directive's own row harvested every
+# name in the branch. Opened now like any other conditional: a head row carrying ONLY the
+# condition, the body regioned, `#elif`/`#else` as chain links.
+#   · THE STATEMENTS HANG DIRECTLY UNDER THE DIRECTIVE — there is no block — which is ruby's
+#     `begin` shape, where a TYPE-based body stop has nothing to stop at. Hence HEADFIELD,
+#     the mirror of BODYFIELD: forms whose head is exactly one FIELD (`condition`, or `name`
+#     for `#ifdef`), so every other named child is a body statement. `false` = no head at
+#     all (`#else`), which evaluates nothing.
+#   · ★ THE `#if` EVALUATOR IS STILL BANKED and this does not need it. Deciding WHICH branch
+#     is live is the TU-walk; it would NARROW this, not replace it. The ticket sat at P3 for
+#     a year on the premise that the evaluator had to come first — the cheap half was
+#     separable all along, which is the no-go ledger's own worst-death category.
+#   · ★ AND IT WAS FOUND BY `ctrlcensus --folded`, the mode built for exactly this after
+#     java's switch_block and ruby's begin: 156 candidates in 200 of 7kaa's files across four
+#     types. THAT MODE NOW REPORTS ZERO on the same corpus.
+# MEASURED: cpp rows 78202→81377 (+3175 previously-invisible rows), opened 18827→20038, and
+# the control INSIDE those bodies surfaces with them (if_statement +358, for_statement +105).
+# expr `binder:preproc_ifdef` 114→0 GONE. `counts` and `dfpar` unmoved.
+
 # AN UNBRACED CONTROL BODY IS STILL A BODY (CART-0414) — every body test was a TYPE test,
 # and `compound_statement` is only one SPELLING of a body. `if (c) x = 1;` puts a bare
 # `expression_statement` in the `consequence` field, which no type test names, so the head

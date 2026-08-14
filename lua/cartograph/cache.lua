@@ -73,7 +73,19 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 135 -- v135: AN UNBRACED CONTROL BODY LEAKED INTO ITS HEAD ROW (CART-0414).
+M.VERSION = 136 -- v136: CONDITIONAL COMPILATION IS CONTROL FLOW (CART-0380). `#if` /
+               -- `#ifdef` / `#elif` / `#else` contain STATEMENTS and flow classified none of
+               -- them, so the bodies were attributed to the enclosing function AS IF
+               -- UNCONDITIONAL — an `#if A / #else` pair read as both bodies running in
+               -- sequence — and the directive's own row harvested every name in the branch.
+               -- 156 folded containers in 200 of 7kaa's files (ctrlcensus --folded); 383
+               -- distinct rows of the expression census, spread across FOUR classes so none
+               -- of them ranked. Now opened like any other conditional: a head row carrying
+               -- ONLY the condition (a new HEADFIELD rule — the mirror of BODYFIELD, for
+               -- forms whose statements hang directly under the directive), the body
+               -- regioned, `#elif`/`#else` as chain links. THE `#if` EVALUATOR IS STILL
+               -- BANKED: deciding which branch is LIVE would narrow this, not replace it.
+               -- v135: AN UNBRACED CONTROL BODY LEAKED INTO ITS HEAD ROW (CART-0414).
                -- Every body test was a TYPE test, so `if (c) x = 1;` — whose body is a bare
                -- `expression_statement` in the `consequence` position — was not recognised
                -- as a body at all, and the head row walked into it. BOTH sides then folded
