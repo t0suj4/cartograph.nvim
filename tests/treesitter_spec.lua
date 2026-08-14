@@ -4399,3 +4399,39 @@ test('treesitter: the shape rule reads the WHOLE list, never a batch', function 
     eq('c',   ts.h_lang_for { 'include/only.h' }, 'a headers-only batch is NOT evidence')
     eq('c',   ts.h_lang_for {})
 end)
+
+test('treesitter: a disclaimed suffix is decided PER FILE, in either order', function ()
+    -- CART-0412. elang_for/parse_lang_for memoize on the BARE EXTENSION, while the
+    -- ext_disclaim test reads the FULL FILENAME — so `x.php` and `v.blade.php` shared
+    -- one cache key and could not have different answers. Whichever resolved first
+    -- decided for both: order A restored exactly the fabrication CART-0347 removed,
+    -- order B blanked every real php file in the process. Both directions wrong, and
+    -- which one you got depended on walk order.
+    --
+    -- The fix is structural, not a special case: cache the by-EXTENSION half (plus the
+    -- disclaim list) and run the per-FILE test on every call. A cache key must be as
+    -- fine as the answer it stores.
+    for _, order in ipairs({ { 'a.php', 'a.blade.php' }, { 'b.blade.php', 'b.php' } }) do
+        -- a fresh process is not available inside one spec run, and the memo is what is
+        -- under test — so assert BOTH orders against the same warm memo, which is
+        -- strictly harder than the two-process reproduction that found it.
+        for _, f in ipairs(order) do
+            -- NOT `cond and nil or 'php'` — in Lua that yields 'php' on BOTH branches,
+            -- because `and nil` falls straight through to the `or`. Written that way
+            -- first, and it asserted the opposite of the intent for the template.
+            local want
+            if not f:match('%.blade%.php$') then want = 'php' end
+            eq(want, ts.lang_of(f), 'lang_of ' .. f .. ' after ' .. table.concat(order, ','))
+            eq(want, ts.parse_lang(f), 'parse_lang ' .. f)
+        end
+    end
+end)
+
+test('treesitter: caching the disclaim decision would poison the extension', function ()
+    -- the specific regression: resolving a template FIRST must not teach the memo that
+    -- `php` means nothing. This is the direction that silently blanks a language, and
+    -- a blanked language extracts nothing — absence rendered as silence.
+    eq(nil, ts.parse_lang('tpl/first.blade.php'))
+    eq('php', ts.parse_lang('src/Real.php'), 'the template must not have poisoned .php')
+    eq(nil, ts.lang_of('tpl/second.blade.php'), 'and the real file must not un-disclaim it')
+end)

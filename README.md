@@ -2836,6 +2836,19 @@ nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no sn
 # (+57%). ★ THE NODE DELTA HAS OPPOSITE SIGNS on those two (7kaa's headers declare, v8's
 # define inline) and only the REFS direction agrees across both, which is the one to read.
 
+# A CACHE KEY MUST BE AS FINE AS THE ANSWER (CART-0412) — the same defect, one field over,
+# and the reason the language decision is now split in two. `elang_for`/`parse_lang_for`
+# memoize on the BARE EXTENSION, while `ext_disclaim` (the CART-0347 fix that stops a
+# Laravel `.blade.php` being parsed as php) reads the FULL FILENAME. So `x.php` and
+# `v.blade.php` shared one cache key and could not hold different answers: whichever
+# resolved FIRST decided for both. Order A restored exactly the 192-fabricated-node
+# template parse that fix removed; order B returned nil for EVERY real php file in the
+# process — a whole language going dark, which looks identical to a repo with no php in it.
+# Now the memo holds the by-EXTENSION half plus the disclaim list, and the per-FILE suffix
+# test runs on every call (a few compares against a list that is empty for every language
+# but php). ★ STALENESS WAS NEVER THE RISK — the registry really is static, and the old
+# comment said so, about the wrong thing.
+
 # LANGUAGE FENCE — the audit that exists because four of these shipped in one arc and
 # not one was caught by a test. A module that serves several grammars can hardcode a
 # single grammar's vocabulary (`node:type() == 'if_statement'`, `stmt.t ==

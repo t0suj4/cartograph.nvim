@@ -1161,34 +1161,59 @@ end
 
 function M.h_lang() return H_LANG end
 
+-- ★★ THE QUESTION SPLITS IN TWO, AND CONFLATING THEM WAS A BUG (CART-0412).
+-- "which spec claims this EXTENSION" depends on nothing but the extension and is
+-- worth caching. "does this spec DISCLAIM this particular FILE" depends on the whole
+-- filename and must be asked every time. They used to be one function behind one
+-- by-extension memo, which meant the first `.php` file resolved decided for every
+-- `.blade.php` after it AND VICE VERSA — restoring CART-0347's fabrication in one
+-- direction, blanking every real php file in the other, picked by walk order.
+--
+-- ★ THE RULE THIS ENCODES: a cache key must be as fine as the answer. Staleness was
+-- never the risk here — the registry really is static — and the old comment argued
+-- exactly that, about the wrong thing.
+local EXT_BASE = {} -- ext -> { lang|false, spec|false, disclaim|false }
+local function base_for(ext)
+    local hit = EXT_BASE[ext]
+    if hit then return hit[1] or nil, hit[2] or nil, hit[3] or nil end
+    local lang, spec
+    for l, s in pairs(M.spec) do
+        for _, e in ipairs(s.exts) do
+            if e == ext then lang, spec = l, s; break end
+        end
+        if lang then break end
+    end
+    EXT_BASE[ext] = { lang or false, spec or false,
+        (spec and spec.ext_disclaim) or false }
+    return lang, spec, spec and spec.ext_disclaim or nil
+end
+
+--- ★ A SPEC MAY DISCLAIM A COMPOUND SUFFIX THAT REUSES ITS EXTENSION (CART-0347).
+--- `x.blade.php` ends in `.php`, so the registry claimed 96 Laravel templates per
+--- grocy — and the php grammar does NOT error on them: a blade file has no `<?php`
+--- tag, so the whole thing parses as inline text, `has_error=false`, one named child.
+--- Valid php, semantically empty. What came out was 192 FABRICATED NODES (a module +
+--- a region per file) named after template directives — `region
+--- @extends('layout.default')` — and ZERO of the 1608 calls those templates contain.
+--- Refusing the file is the honest answer: we do not have a blade grammar, and parsing
+--- a template as its host language invents structure rather than finding it.
+--- PER FILE, NEVER MEMOIZED BY EXTENSION — that is the whole of CART-0412.
+local function disclaims(file, discl)
+    for _, d in ipairs(discl or {}) do
+        if file:sub(-#d - 1) == '.' .. d then return true end
+    end
+    return false
+end
+
 local function lang_for(file)
     local ext = file:match('%.([%w]+)$')
     if not ext then return nil end
     -- the repo-shape override, ahead of the registry scan (see above). No spec
     -- disclaims `.h`, so nothing is skipped by taking this early exit.
     if ext == 'h' then return H_LANG, M.spec[H_LANG] end
-    for lang, spec in pairs(M.spec) do
-        for _, e in ipairs(spec.exts) do
-            if e == ext then
-                -- ★ A SPEC MAY DISCLAIM A COMPOUND SUFFIX THAT REUSES ITS
-                -- EXTENSION (CART-0347). `x.blade.php` ends in `.php`, so this
-                -- claimed 96 Laravel templates per grocy — and the php grammar
-                -- does NOT error on them: a blade file has no `<?php` tag, so the
-                -- whole thing parses as inline text, `has_error=false`, one named
-                -- child. Valid php, semantically empty. What came out was 192
-                -- FABRICATED NODES (a module + a region per file) named after
-                -- template directives — `region @extends('layout.default')` — and
-                -- ZERO of the 1608 calls those templates actually contain.
-                -- Returning nil skips the file, which is the honest answer: we do
-                -- not have a blade grammar, and parsing a template as its host
-                -- language invents structure rather than finding it.
-                for _, d in ipairs(spec.ext_disclaim or {}) do
-                    if file:sub(-#d - 1) == '.' .. d then return nil end
-                end
-                return lang, spec
-            end
-        end
-    end
+    local lang, spec, discl = base_for(ext)
+    if not lang or disclaims(file, discl) then return nil end
+    return lang, spec
 end
 
 -- container files: one FILE, several language regions (vue/svelte SFCs).
@@ -1214,21 +1239,31 @@ end
 -- ★ THE OLD CLAIM HERE — "the registry is static, so the memo cannot go stale" — was
 -- true about the REGISTRY and is the wrong question. What matters is whether the KEY
 -- is as fine as the ANSWER, and twice it has not been:
---   · `.h` now depends on the TREE, not the extension (CART-0410). `set_h_lang` is the
+--   · `.h` depends on the TREE, not the extension (CART-0410). `set_h_lang` is the
 --     single writer and clears this memo and EXT_PLANG when the answer changes.
---   · `ext_disclaim` depends on the FULL FILENAME — `x.php` and `v.blade.php` share the
---     key `php` and must not share the answer. STILL BROKEN, filed as CART-0412: today
---     whichever is resolved first decides for both, in whichever direction.
+--   · `ext_disclaim` depends on the FULL FILENAME — `x.php` and `v.blade.php` share
+--     the key `php` and must NOT share the answer (CART-0412). So what is cached is
+--     the by-extension half only, WITH the disclaim list; the per-file test runs on
+--     every call, hit or miss. Cheap: a handful of suffix compares against a list
+--     that is empty for every language but php.
 -- (declared above, next to set_h_lang, so the writer can reach it)
 local function elang_for(file)
     local ext = file:match('%.([%w]+)$') or ''
     local hit = EXT_ELANG[ext]
-    if hit then return hit[1] or nil, hit[2] or nil end
-    local lang, spec
+    if hit then
+        if disclaims(file, hit[3] or nil) then return nil end
+        return hit[1] or nil, hit[2] or nil
+    end
+    local lang, spec, discl
     if CONTAINERS[ext] then
         lang, spec = 'javascript', M.spec.javascript
+    elseif ext == 'h' then
+        lang, spec = H_LANG, M.spec[H_LANG]
     else
-        lang, spec = lang_for(file)
+        -- base_for, NOT lang_for: the memo must hold the UNDISCLAIMED answer, or the
+        -- first `.blade.php` seen would cache `nil` for every `.php` behind it —
+        -- which is the bug this structure exists to make unrepresentable.
+        lang, spec, discl = base_for(ext)
         -- typescript AND tsx fold to the javascript RESOLUTION family + spec (one
         -- language across .js/.jsx/.ts/.tsx); the real PARSER differs per file
         -- (parse_lang_for keeps typescript/tsx). .jsx is already 'javascript'.
@@ -1236,7 +1271,8 @@ local function elang_for(file)
             lang, spec = 'javascript', M.spec.javascript
         end
     end
-    EXT_ELANG[ext] = { lang or false, spec or false }
+    EXT_ELANG[ext] = { lang or false, spec or false, discl or false }
+    if disclaims(file, discl) then return nil end
     return lang, spec
 end
 
@@ -1252,17 +1288,29 @@ end
 -- this is the analysis-side counterpart. Containers keep elang_for's host
 -- grammar (their region trees are JS). Memoized by extension like elang_for —
 -- EXT_PLANG is declared next to set_h_lang, which is its invalidator.
+-- Same two-halves structure as elang_for (CART-0412): the memo holds the
+-- UNDISCLAIMED by-extension answer plus the disclaim list; the per-file suffix test
+-- runs on every call. A blade template must refuse here too — this is the entry point
+-- every on-demand RE-PARSE uses (lens, forms, optimize, expr), which is precisely
+-- where the loss direction of that bug was live.
 local function parse_lang_for(file)
     local ext = file:match('%.([%w]+)$') or ''
     local hit = EXT_PLANG[ext]
-    if hit ~= nil then return hit or nil end
-    local plang
+    if hit then
+        if disclaims(file, hit[2] or nil) then return nil end
+        return hit[1] or nil
+    end
+    local plang, discl
     if CONTAINERS[ext] then
         plang = 'javascript'
+    elseif ext == 'h' then
+        plang = H_LANG
     else
-        plang = lang_for(file) -- the REAL registered grammar (typescript for .ts)
+        -- base_for, not lang_for: cache the undisclaimed answer (see elang_for)
+        plang, _, discl = base_for(ext) -- the REAL registered grammar (typescript for .ts)
     end
-    EXT_PLANG[ext] = plang or false
+    EXT_PLANG[ext] = { plang or false, discl or false }
+    if disclaims(file, discl) then return nil end
     return plang
 end
 
