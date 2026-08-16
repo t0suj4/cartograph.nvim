@@ -765,15 +765,28 @@ for _, name in ipairs(names) do
         -- states apart, and say the code is a SIGNAL when it looks like one, because a
         -- 137 that prints as "137" is one lookup away from being understood and a 137 that
         -- prints as "failed" is not.
-        local code = proc and proc.code
+        local code, sig = proc and proc.code, proc and proc.signal
         local why
+        -- ★★ `code` ALONE LAUNDERS A KILL INTO A CLEAN EXIT. A row child SIGKILLed by the
+        -- OOM killer or a deadline arrives here with signal=9 and code=0, so the first
+        -- version of this branch printed "exited 0 but emitted no @@MATRIX line — a
+        -- REPORTING failure, not a crash" for a process that had been SHOT. That sentence
+        -- was true about what the parent SAW and false about what happened.
+        -- ★ Read the SIGNAL first, always: it is the only field that distinguishes "the
+        -- child chose to stop" from "the child was stopped". Third layer in this one
+        -- ticket to lose a death on the way to a reader — after `$?` through a pipe and a
+        -- sweep harness with no rc column — and the lesson each time is the same: BEFORE
+        -- improving how a status is printed, check that the status is TRUE, or the better
+        -- message just states the wrong thing more clearly.
         if not proc then why = 'no process was started'
-        elseif code == 0 then
-            why = 'the row process exited 0 but emitted no @@MATRIX line — it ran and said'
-                .. ' nothing, which is a REPORTING failure, not a crash'
+        elseif type(sig) == 'number' and sig ~= 0 then
+            why = ('the row process was KILLED by signal %d — a timeout or an OOM looks'
+                .. ' like this, and it is NOT a clean exit however `code` reads'):format(sig)
         elseif type(code) == 'number' and code > 128 then
-            why = ('the row process was KILLED by signal %d (exit %d) — a timeout or an OOM'
-                .. ' looks like this'):format(code - 128, code)
+            why = ('the row process was KILLED by signal %d (exit %d)'):format(code - 128, code)
+        elseif code == 0 then
+            why = 'the row process exited 0 (signal 0) but emitted no @@MATRIX line — it'
+                .. ' really did run and say nothing, which is a REPORTING failure'
         else why = ('the row process exited %s'):format(tostring(code)) end
         res = { corpus = name, err = why .. (proc and proc.stderr and #proc.stderr > 0
             and ': ' .. proc.stderr:sub(-400) or '') }
