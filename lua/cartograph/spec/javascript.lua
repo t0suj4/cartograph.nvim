@@ -316,7 +316,11 @@ return {
         -- `shorthand_property_identifier` is one letter apart and is a genuine READ that
         -- is ALSO missing — deliberately not fixed here, it moves the use axis (CART-0418).
         df_ids = { identifier = true, name = true,
-            shorthand_property_identifier_pattern = true },
+            shorthand_property_identifier_pattern = true,
+            -- and its LITERAL sibling, one letter shorter, which REFERENCES rather than
+            -- binds: `const o = {a}` reads `a`. Both were missing, and because both sides
+            -- missed the literal one the self-gate could not see it (CART-0418).
+            shorthand_property_identifier = true },
         stdlib_prefixes = { 'console.', 'JSON.', 'Object.', 'Array.', 'Math.',
             'Promise.', 'window.', 'document.', 'chrome.' },
         -- the WORKSPACE PACKAGE (nearest package.json ancestor) scopes

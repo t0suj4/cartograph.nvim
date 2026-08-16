@@ -1304,6 +1304,19 @@ An aliased import binds the **alias**: `import {N2 as N3}` binds `N3`, and `N2` 
 export of the other module, so it is neither a local binding nor a local read. The module
 linkage rides the import edge, which is unaffected.
 
+And a shorthand property in an object **literal** is a *read*: `const o = {a}` desugars to
+`{a: a}`, so it references `a`. Its pattern-position sibling is one letter longer and
+*binds* instead, and only that one had ever been declared — 5047 occurrences in ghost's
+JavaScript, 509 in its TypeScript, zero in jquery and mootools.
+
+> Neither `du` nor the expression IR recorded it, which is why `expr.gate` — a genuine
+> two-implementation oracle — reported **clean** on a fixture built to expose it. A gate
+> like this finds only the bugs the two implementations do not *share*.
+
+Still missing, and countable only once the shorthand was fixed: a **spread** in an object
+literal (`{...base, extra}`) is read by `du` and not by the IR. Three node names, three
+semantics, and fixing any one of them cannot reveal the others.
+
 ### Receiver-path agreement
 
 A call `a.b.m()` and a candidate named `b.m` agree on the *receiver*, which the

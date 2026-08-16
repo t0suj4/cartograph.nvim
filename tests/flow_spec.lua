@@ -2015,3 +2015,30 @@ test('flow: an import statement DEFINES what it binds, and the alias is the bind
     ok(d.NS, 'a namespace import binds')
     ok(not u.NS, 'a namespace import is not a use')
 end)
+
+-- ★★ CART-0418: A SHORTHAND PROPERTY IN AN OBJECT LITERAL IS A READ. `{a}` desugars to
+-- `{a: a}`, so it reads `a` — and neither du nor the expression IR recorded it, because the
+-- binder in a PATTERN (`shorthand_property_identifier_pattern`) and the reference in a
+-- LITERAL (`shorthand_property_identifier`) are one letter apart in the grammar and only
+-- the first was ever declared.
+--
+-- ★ THE SELF-GATE WAS SILENT ON IT BY CONSTRUCTION: both implementations missed it, so
+-- `expr.gate` reported 0 disagreements for the fixture below. A two-implementation oracle
+-- only finds the bugs the two implementations do not SHARE — agreement is not correctness.
+test('flow: a shorthand property in an object LITERAL is a read', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fl, src = seqrows({
+        'const o = {a, b: c};',
+        'const p = {seen};',
+    }, 'javascript')
+
+    local d, u = dur(fl, src, '{a, b: c}')
+    ok(d.o, 'the declared name still binds')
+    ok(u.a, 'the SHORTHAND property reads its variable')
+    ok(u.c, 'an explicit pair value is still read')
+    ok(not u.b, 'the KEY of an explicit pair is not a read')
+    ok(not d.a, 'a shorthand property in a LITERAL binds nothing — it is a reference')
+
+    d, u = dur(fl, src, '{seen}')
+    ok(u.seen, 'the read is recorded wherever the literal appears')
+end)

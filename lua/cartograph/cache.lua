@@ -73,7 +73,20 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 137 -- v137: A DESTRUCTURING PATTERN BINDS NAMES, AND EVERY ONE WAS LOST
+M.VERSION = 138 -- v138: A SHORTHAND PROPERTY IN AN OBJECT LITERAL IS A READ (CART-0418).
+               -- `{a}` desugars to `{a: a}` and reads `a`; neither du nor the expression IR
+               -- recorded it, because the binder in a PATTERN
+               -- (`shorthand_property_identifier_pattern`) and the reference in a LITERAL
+               -- (`shorthand_property_identifier`) are ONE LETTER APART in the grammar and
+               -- only the first was ever declared. 5047 js + 509 ts occurrences on ghost;
+               -- jquery and mootools hold ZERO, which is the containment proof.
+               -- ★ THE SELF-GATE WAS SILENT BY CONSTRUCTION — both implementations missed
+               -- it, so `expr.gate` reported 0 on a fixture built to expose it. A
+               -- two-implementation oracle only finds the bugs the two do not SHARE, and
+               -- agreement is not correctness. Fixing both sides took the ghost census
+               -- 2214 -> 1772 (binder:expression_statement -436, both: -47, missing: +45).
+               -- No graph movement: nodes/edges/calls identical, only flow `use` sets.
+               -- v137: A DESTRUCTURING PATTERN BINDS NAMES, AND EVERY ONE WAS LOST
                -- (CART-0358). `const {k: ren} = src` stored `def=[] use=[ren,src]` — the
                -- bound name was not merely missing, it was counted as a READ OF THE
                -- STATEMENT THAT DEFINES IT, so a module's own imports read as live-in and

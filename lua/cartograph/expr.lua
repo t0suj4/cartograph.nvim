@@ -429,7 +429,16 @@ function build_core(node, src, lang)
         elseif lty == 'nil' then v = NIL end
         return { k = 'lit', ty = lty, v = v }
     end
-    if NAME[t] then return { k = 'name', n = txt(node, src) } end
+    -- ★ A SHORTHAND PROPERTY IN AN OBJECT LITERAL IS A REFERENCE (CART-0418). `{a}` is
+    -- `{a: a}`, so it READS `a`. Its pattern-position sibling is one letter longer
+    -- (`shorthand_property_identifier_pattern`) and BINDS instead — handled by
+    -- `binder_fields`, and the two must not be confused. Base-set rather than per-language
+    -- because the node name is javascript's alone across the 17 loaded grammars, and
+    -- because BOTH sides move together here: js `df_ids` gains the same name, so the
+    -- self-gate stays a test of the rule and not of one copy of it.
+    if NAME[t] or t == 'shorthand_property_identifier' then
+        return { k = 'name', n = txt(node, src) }
+    end
     if t == 'variable_name' then -- php $x: the inner name is the variable
         local inner = node:named_child(0)
         return { k = 'name', n = (txt(inner or node, src):gsub('^%$', '')) }
