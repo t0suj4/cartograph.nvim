@@ -2042,3 +2042,30 @@ test('flow: a shorthand property in an object LITERAL is a read', function ()
     d, u = dur(fl, src, '{seen}')
     ok(u.seen, 'the read is recorded wherever the literal appears')
 end)
+
+-- ★★ CART-0422: A SPREAD IS NOT A VARARG. js spells `{...base}` / `[...xs]` / `f(...args)`
+-- with `spread_element`, which the IR mapped to the `vararg` KIND — correct for lua's
+-- `...`, which names nothing, and wrong for js, where the spread carries an OPERAND that is
+-- read. du counted it all along (the operand is a plain identifier), so the IR simply lost
+-- it: the same lua-shaped-assumption-in-a-language-agnostic-IR shape as the field selector
+-- one construct over. All THREE positions were affected, not just the object literal the
+-- ticket was filed from.
+test('flow: a spread reads its operand, in an object, an array and a call', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fl, src = seqrows({
+        'const o = {...base, extra};',
+        'const a = [...xs, y];',
+        'const c = f(...args, z);',
+        'const v = {...rest};',
+    }, 'javascript')
+
+    local d, u = dur(fl, src, '{...base, extra}')
+    ok(u.base, 'object spread: the operand is read')
+    ok(u.extra and d.o, 'object spread: the shorthand and the binding still hold')
+
+    d, u = dur(fl, src, '[...xs, y]')
+    ok(u.xs and u.y, 'array spread: the operand is read alongside the plain element')
+
+    d, u = dur(fl, src, 'f(...args, z)')
+    ok(u.args and u.f and u.z, 'call spread: the operand is read alongside callee and arg')
+end)

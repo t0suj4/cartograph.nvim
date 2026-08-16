@@ -229,14 +229,18 @@ M.EXPECTED = {
     cppmodern = { total = 146, ['binder:declaration'] = 106, ['binder:if_statement'] = 25,
         ['missing:declaration'] = 11, ['missing:for_range_loop'] = 2,
         ['binder:compound_statement'] = 1, ['both:declaration'] = 1 },
-    go = { total = 3055, ['missing:assignment_statement'] = 2748, ['missing:type_case'] = 68,
-        ['missing:for_clause'] = 58, ['missing:expression_statement'] = 38,
+    -- recalib 2026-08-16 (CART-0422, A SPREAD IS NOT A VARARG): -2. go was NOT expected to
+    -- move — the fix was described as js-only — but `VARARG` is a BASE set, so any grammar
+    -- with a spread-ish node carrying an operand rides it. The direction settles it: two
+    -- rows where du counted the operand and the IR did not, now agreeing. Prior: 3055.
+    go = { total = 3053, ['missing:assignment_statement'] = 2748, ['missing:type_case'] = 68,
+        ['missing:for_clause'] = 58, ['missing:expression_statement'] = 37,
         ['extra:type_switch_statement'] = 37, ['extra:if_statement'] = 22,
         ['missing:short_var_declaration'] = 13, ['missing:type_switch_statement'] = 13,
         ['missing:defer_statement'] = 9, ['missing:send_statement'] = 9,
         ['binder:for_statement'] = 8, ['both:type_switch_statement'] = 8,
         ['binder:expression_statement'] = 5, ['missing:declaration_command'] = 3,
-        ['missing:if_statement'] = 3, ['extra:for_statement'] = 2, ['missing:command'] = 2,
+        ['missing:if_statement'] = 2, ['extra:for_statement'] = 2, ['missing:command'] = 2,
         ['missing:declaration'] = 2, ['missing:return_statement'] = 2,
         ['missing:variable_assignment'] = 2, ['binder:declaration_command'] = 1,
         ['missing:list'] = 1, ['missing:var_declaration'] = 1 },

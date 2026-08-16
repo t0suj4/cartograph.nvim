@@ -1313,9 +1313,16 @@ JavaScript, 509 in its TypeScript, zero in jquery and mootools.
 > two-implementation oracle — reported **clean** on a fixture built to expose it. A gate
 > like this finds only the bugs the two implementations do not *share*.
 
-Still missing, and countable only once the shorthand was fixed: a **spread** in an object
-literal (`{...base, extra}`) is read by `du` and not by the IR. Three node names, three
-semantics, and fixing any one of them cannot reveal the others.
+A **spread** reads its operand too, and that one was a wrong *kind* rather than a missing
+case: `spread_element` was mapped to `vararg`, a kid-less leaf. Correct for Lua's `...`,
+which names nothing; wrong for `{...base}` / `[...xs]` / `f(...args)`, which all carry an
+operand. A spread is now a vararg only when it has none.
+
+> The same lua-shaped assumption inside a language-agnostic IR as the field selector one
+> construct over — a kind chosen against one language and silently wrong for the rest.
+
+The three read-forms are one node (`spread_element`); the two bind-forms — `...rest` in a
+parameter list, `[p, ...tail]` — are `rest_pattern`, covered by `binder_fields`.
 
 ### Receiver-path agreement
 

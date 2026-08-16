@@ -288,6 +288,14 @@ local FNSTOP_OF = setmetatable({}, { __index = function (t, lang)
     rawset(t, lang, s)
     return s
 end })
+-- A TRUE VARARG IS A KID-LESS LEAF — lua's `...`, which names nothing. js's
+-- `spread_element` shares the SPELLING and not the semantics: `{...base}` / `[...xs]` /
+-- `f(...args)` all carry an OPERAND that is READ, and mapping them here made every one of
+-- those reads vanish while du counted them (CART-0422).
+-- ★ A LUA-SHAPED ASSUMPTION INSIDE A LANGUAGE-AGNOSTIC IR, which is CART-0402's shape
+-- exactly one construct over: the kind was right for the language it was written against
+-- and silently wrong for every other. So `spread_element` is a vararg ONLY when it has no
+-- operand — which in js it never does, and the test costs nothing where it does.
 local VARARG = { vararg_expression = true, vararg = true, spread_element = true }
 -- KEY-VALUE PAIRS inside a constructor (CART-0220). VERIFIED per language by
 -- parsing a snippet and reading the grammar's own node names — not guessed:
@@ -560,7 +568,15 @@ function build_core(node, src, lang)
             return { k = 'assign', t = T, v = V, kids = { T, V } }
         end
     end
-    if VARARG[t] then return { k = 'vararg' } end
+    if VARARG[t] then
+        local op = operands(node)[1]
+        -- an operand means this is a SPREAD, not a vararg: model it as the honest unknown
+        -- with the operand as a kid, so every traversal that walks kids sees the read.
+        -- Not a pass-through to the operand: `...base` is not `base`, and `is_pure`/`canon`
+        -- must keep treating it as unmodelled rather than as a plain name.
+        if op then return { k = '?', t = t, kids = { build(op, src, lang) } } end
+        return { k = 'vararg' }
+    end
     -- honest unknown: keep the named children as kids so no name is hidden
     local kids = {}
     for c in node:iter_children() do
