@@ -256,10 +256,18 @@ local function run_row(name)
                 return cl
             end }
         local okc, r = pcall(ec.check, shim)
+        -- ★★ A CRASH IS NOT AN ABSENCE (CART-0423). Both branches below used to emit the
+        -- same neutral `--`, so a census that RAISED read exactly like a Forth corpus that
+        -- honestly has no expressions — and a reader scanning the column for red saw
+        -- neither. A raise is a FAILURE of this column and must be red; an empty subject
+        -- set is a fact about the corpus and must SAY SO rather than render as a bare dash.
+        -- The same conflation one layer up is what hid four timed-out corpora for a whole
+        -- sweep: a harness that cannot report its own failure manufactures silence.
         if not okc then
-            cell('expr', '--', { 'census raised: ' .. tostring(r):gsub('^.*/', '') })
+            cell('expr', 'FAIL', { 'census RAISED: ' .. tostring(r):gsub('^.*/', '') })
         elseif (r.fns + r.methods) == 0 then
-            cell('expr', '--') -- no expression-bearing functions (token provider)
+            cell('expr', '--', { ('no expression-bearing subjects (fns=%d methods=%d) —'
+                .. ' this corpus cannot gate the expression IR'):format(r.fns, r.methods) })
         else
             -- INSTANCES and DISTINCT ROWS are different numbers and the pin is on the first
             -- (CART-0410): M.check iterates functions, so a row reachable from several
@@ -750,10 +758,25 @@ for _, name in ipairs(names) do
         end
     end
     if not res then
-        res = { corpus = name, err = ('row process failed (code %s)%s')
-            :format(proc and tostring(proc.code) or 'no-proc',
-                proc and proc.stderr and #proc.stderr > 0
-                    and ': ' .. proc.stderr:sub(-400) or '') }
+        -- ★ "row process failed (code 0)" IS A SELF-CONTRADICTION, and it was the printed
+        -- text for the case that matters most (CART-0423): the child EXITED CLEANLY and
+        -- emitted no @@MATRIX line. That is a REPORTING failure, not a crash, and it reads
+        -- completely differently — a crash has a stack, this has a silence. Name the three
+        -- states apart, and say the code is a SIGNAL when it looks like one, because a
+        -- 137 that prints as "137" is one lookup away from being understood and a 137 that
+        -- prints as "failed" is not.
+        local code = proc and proc.code
+        local why
+        if not proc then why = 'no process was started'
+        elseif code == 0 then
+            why = 'the row process exited 0 but emitted no @@MATRIX line — it ran and said'
+                .. ' nothing, which is a REPORTING failure, not a crash'
+        elseif type(code) == 'number' and code > 128 then
+            why = ('the row process was KILLED by signal %d (exit %d) — a timeout or an OOM'
+                .. ' looks like this'):format(code - 128, code)
+        else why = ('the row process exited %s'):format(tostring(code)) end
+        res = { corpus = name, err = why .. (proc and proc.stderr and #proc.stderr > 0
+            and ': ' .. proc.stderr:sub(-400) or '') }
     end
 
     if res.skip then
