@@ -4939,6 +4939,7 @@ function M.extract(root, opts)
                     ctrl = spec.ctrl, preloop = spec.preloop,
                     body = spec.body, clause = spec.clause, -- CART-0363
                     blocks = spec.blocks,                   -- attached blocks (part B)
+                    binder_fields = spec.binder_fields,     -- destructuring/imports (CART-0358)
                     regime = spec.regime, method = method and lang == 'lua' }) or nil
                 padd('flow.build', _pf)
                 local dret, dretclass

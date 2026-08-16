@@ -150,6 +150,28 @@ M.SLOTS = {
     -- never as `def`, so without this a loop-bound receiver reads as a free name —
     -- which put a local into externals' "real porting work" group until declared.
     binders = 'ANALYSIS',
+    -- DESTRUCTURING + IMPORT BINDERS (CART-0358): which children of a pattern-ish node
+    -- are in DEF position. Distinct from `binders` above, which names whole node types
+    -- whose contents bind; this is FIELD-PRECISE, because a pattern has children that
+    -- genuinely READ — an object_assignment_pattern's `right` (`{dv = fallback}` reads
+    -- fallback) and a computed_property_name key (`{[dyn]: computed}` reads dyn). A
+    -- blanket "everything under a pattern binds" fabricates a def for each AND loses a
+    -- real read, which is the wrong direction twice over.
+    -- Value: `true` = every named child binds; an ORDERED FIELD LIST = the first field
+    -- present binds (js `import_specifier` is {'alias','name'} — `N2 as N3` binds N3,
+    -- while N2 names an export of the OTHER module and is no local name at all).
+    -- An entry makes the node decide def-position for its children UNCONDITIONALLY, so
+    -- ONE table serves both roles: an `import_statement` ORIGINATES def-position and an
+    -- `object_pattern` PROPAGATES it. That is safe only because every node named here is
+    -- binding-only BY GRAMMAR (the `_pattern` suffix and the import cluster) — a node
+    -- that can also appear in a value position must never be listed.
+    binder_fields = 'ANALYSIS',
+    -- the node type that may WRAP a binding target in this language (js
+    -- `parenthesized_expression`): `({body: b} = await x)` is the only way to destructure
+    -- into EXISTING bindings, because a statement may not begin with `{`. A bare type test
+    -- for it is a language assumption — the name exists in 14 grammars and not in haskell,
+    -- ruby or scheme — so the language fence refuses one, correctly.
+    binder_paren = 'ANALYSIS',
     string_sinks = 'ANALYSIS',
 
     -- QUIRKS (quarantine): single-language shims. Rule — each carries a comment

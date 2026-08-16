@@ -175,6 +175,18 @@ local function VETO(lang, t)
     local m = modset(lang)
     return m ~= nil and m[t] == true
 end
+-- DESTRUCTURING/IMPORT BINDERS (CART-0358) — the same declared fact du reads, reached the
+-- same LAZY way and for the same reason as `modset` above: `spec` is required further down
+-- this file, so a direct reference here compiles to a nil GLOBAL and silently disables the
+-- consumer. Returns (binder_fields, leaf-ids) so a caller gets both halves of the rule or
+-- neither.
+local function binderset(lang)
+    if not lang then return nil end
+    specs = specs or require('cartograph.providers.treesitter').spec
+    local s = specs and specs[lang]
+    if not (s and s.binder_fields) then return nil end
+    return s.binder_fields, require('cartograph.flow').leaf_ids(s.df_ids), s.binder_paren
+end
 
 -- A declaration modifier standing in an assignment TARGET list. It binds nothing, reads
 -- nothing, and the def side already reports the name it modifies — so it is not an
@@ -558,6 +570,25 @@ function build(node, src, lang)
     end
     return e
 end
+
+-- A BINDER IS A NAME even when its node type is outside the base NAME set — js spells the
+-- binder of `const {SHIFT} = …` (the commonest destructuring form) as a
+-- `shorthand_property_identifier_pattern`, which `build` models as an opaque `?`. Leaving
+-- it opaque hands every consumer an unknown TARGET for a name we can plainly read.
+--
+-- ★ AND THIS DELIBERATELY DOES NOT LIVE INSIDE `build` (CART-0358). Widening the GLOBAL
+-- leaf rule to each language's `df_ids` fixed the targets and simultaneously made those
+-- leaves readable INSIDE opaque `?` subtrees — a nested callback that the IR descends and
+-- du stops at — converting a PRE-EXISTING IR over-reach into 30+ fresh gate findings on
+-- ghost. The widening is only sound where a node is KNOWN to be a binder, which is here.
+-- A capability that widens WHICH leaves you can name is a test of every stage downstream.
+local function build_binder(node, src, lang)
+    local e = build(node, src, lang)
+    if type(e) == 'table' and e.k ~= 'name' then
+        return { k = 'name', n = txt(node, src), at = e.at }
+    end
+    return e
+end
 M.build = build
 
 -- ── per-row harvest ──────────────────────────────────────────────────────────
@@ -782,9 +813,44 @@ function M.harvest_row(node, src, hint, lang)
     -- would make reads={x,1} disagree with use∪rmw={x} — trading a fixed gate
     -- finding for a new one (CART-0314).
     if STMT_WRAP[t] then
+        -- ★ THE ASSIGNMENT CAN SIT INSIDE PARENTHESES (CART-0358). `({body: b} = await x)`
+        -- is the only way to destructure into EXISTING bindings, because a statement may
+        -- not begin with `{` — so js wraps it, the unwrap below looked for an assignment
+        -- CHILD and found a `parenthesized_expression`, and the whole row fell to the `?`
+        -- default where every binder read as a use. du was never affected: its walk
+        -- descends every child and meets the pattern regardless of what encloses it.
+        -- A STRUCTURAL WALK AND A POSITIONAL READ DO NOT FAIL ON THE SAME INPUTS, which is
+        -- the whole reason the two-implementation gate earns its keep.
+        local _, _, wrapt = binderset(lang)
+        for c in node:iter_children() do
+            if wrapt and c:named() and c:type() == wrapt then
+                local inner = c:named_child(0)
+                if inner and PLAIN_ASSIGN[inner:type()] then
+                    return M.harvest_row(inner, src, nil, lang)
+                end
+            end
+        end
         for c in node:iter_children() do
             if c:named() and PLAIN_ASSIGN[c:type()] then
                 return M.harvest_row(c, src, nil, lang)
+            end
+        end
+    end
+    -- ★ AN IMPORT STATEMENT IS A BINDING STATEMENT (CART-0358). It fell to the `?` default,
+    -- whose kids made every imported name a READ — so a module's own imports came back as
+    -- reads of names nothing defines, i.e. external-surface material. The row is its
+    -- binders and nothing else: the module path is a string, not a name, and the linkage
+    -- rides the import EDGE. Keyed on the same declared `binder_fields` du uses, so a
+    -- language that declares no import binders is untouched.
+    do
+        local bindf, bids = binderset(lang)
+        if bindf and bindf[t] then
+            local bn, br = require('cartograph.flow').pattern_binders(node, bindf, bids)
+            if #bn > 0 or #br > 0 then
+                local ilhs, irhs = {}, {}
+                for _, x in ipairs(bn) do ilhs[#ilhs + 1] = build_binder(x, src, lang) end
+                for _, x in ipairs(br) do irhs[#irhs + 1] = build(x, src, lang) end
+                return { lhs = ilhs, rhs = irhs }
             end
         end
     end
@@ -809,7 +875,19 @@ function M.harvest_row(node, src, hint, lang)
                 local nm = c:field('name')[1] or c:field('declarator')[1]
                 while nm and DECLWRAP[nm:type()] do nm = nm:field('declarator')[1] end
                 local vl = c:field('value')[1]
-                if nm then dlhs[#dlhs + 1] = build(nm, src, lang) end
+                -- ★ A DESTRUCTURING PATTERN IS N TARGETS, NOT ONE OPAQUE ONE (CART-0358).
+                -- `build` has no pattern case, so the whole `{a, b}` came back as a `?`
+                -- whose kids made every BOUND name read as a USE — the IR half of the same
+                -- defect du had. Expanded through flow's own rule so the two cannot draw
+                -- it differently, and the pattern's genuine reads (a default's right side,
+                -- a computed key) join the RHS, exactly where du counts them as uses.
+                local bindf, bids = binderset(lang)
+                if nm and bindf and bindf[nm:type()] then
+                    local bn, br = require('cartograph.flow')
+                        .pattern_binders(nm, bindf, bids)
+                    for _, x in ipairs(bn) do dlhs[#dlhs + 1] = build_binder(x, src, lang) end
+                    for _, x in ipairs(br) do drhs[#drhs + 1] = build(x, src, lang) end
+                elseif nm then dlhs[#dlhs + 1] = build(nm, src, lang) end
                 if vl then drhs[#drhs + 1] = build(vl, src, lang) end
             elseif c:named() and DECLWRAP[c:type()] then
                 -- a declarator with NO initialiser (`Foo *p;`) hangs directly off the
@@ -854,9 +932,37 @@ function M.harvest_row(node, src, hint, lang)
     if ASSIGN[t] then
         local left, right, lpos, rpos = assign_sides(node, src)
         local lhs, rhs = {}, {}
+        local abindf, abids, awrapt = binderset(lang)
         for _, tn in ipairs(lpos or list_children(left)) do
             -- a declaration MODIFIER in a target list is not a target (CART-0234)
-            if not is_modifier(lang, tn) then lhs[#lhs + 1] = build(tn, src, lang) end
+            if is_modifier(lang, tn) then goto nexttarget end
+            -- ★ AN ASSIGNMENT TARGET CAN BE A PATTERN TOO — `[a, b] = [b, a]` (CART-0358).
+            -- du keys on the PATTERN node, so it covers the declarator, the assignment and
+            -- a js `catch` alike; the IR has three separate construction paths, and fixing
+            -- only the declarator one made the gate WORSE, not better: du started defining
+            -- these binders while the IR still READ them, so `binder:expression_statement`
+            -- ROSE by 37 on ghost. Fixing one side of a shared error moves the number the
+            -- wrong way — the disagreement is the thing to drive to zero, not either side.
+            --
+            -- ★ AND THE TARGET CAN BE PARENTHESISED: `({body: b} = await agent…)` is the
+            -- idiomatic way to destructure into EXISTING bindings, because a statement may
+            -- not begin with `{`. du never noticed — its walk descends every child and
+            -- meets the pattern regardless of what wraps it — so the wrapper stayed
+            -- invisible until the IR had to find that same node BY POSITION. A structural
+            -- walk and a positional read do not fail on the same inputs, which is exactly
+            -- what makes the two-implementation gate worth running.
+            while awrapt and tn and tn:type() == awrapt do
+                local inner = tn:named_child(0)
+                if not inner then break end
+                tn = inner
+            end
+            if abindf and abindf[tn:type()] then
+                local bn, br = require('cartograph.flow')
+                    .pattern_binders(tn, abindf, abids)
+                for _, x in ipairs(bn) do lhs[#lhs + 1] = build_binder(x, src, lang) end
+                for _, x in ipairs(br) do rhs[#rhs + 1] = build(x, src, lang) end
+            else lhs[#lhs + 1] = build(tn, src, lang) end
+            ::nexttarget::
         end
         for _, vn in ipairs(rpos or list_children(right)) do rhs[#rhs + 1] = build(vn, src, lang) end
         return { lhs = lhs, rhs = rhs }
@@ -1254,6 +1360,7 @@ function M.of(store, fn_id)
         ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
         blocks = s.blocks,                          -- attached blocks (part B)
         mods = s.binding_modifiers, -- CART-0234
+        binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
         body_of = s.body_of, params_of = s.params_of, -- CART-0305
         fn_types = ts.flow_stop(lang), -- the STOP set, not enclosure (CART-0308)
         method = (node.kind == 'method') and lang == 'lua',
@@ -1310,6 +1417,7 @@ function M.of_module(store, mod_id)
         ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
         blocks = s.blocks,                  -- THREE cfg sites; all must agree
         mods = s.binding_modifiers, -- CART-0234
+        binder_fields = s.binder_fields, -- destructuring/imports (CART-0358)
         expr = function (n, ns, hint) return M.harvest_row(n, ns, hint, lang) end }
     local flow = require 'cartograph.flow'
     return { fl = flow.build(root, src, cfg), lang = lang, node = node,

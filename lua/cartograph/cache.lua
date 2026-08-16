@@ -73,7 +73,28 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 136 -- v136: CONDITIONAL COMPILATION IS CONTROL FLOW (CART-0380). `#if` /
+M.VERSION = 137 -- v137: A DESTRUCTURING PATTERN BINDS NAMES, AND EVERY ONE WAS LOST
+               -- (CART-0358). `const {k: ren} = src` stored `def=[] use=[ren,src]` — the
+               -- bound name was not merely missing, it was counted as a READ OF THE
+               -- STATEMENT THAT DEFINES IT, so a module's own imports read as live-in and
+               -- every destructured binding was external-surface material. TWO wrong
+               -- behaviours by spelling, which is why no single symptom could census the
+               -- population: the SHORTHAND form vanished silently (its binder is a
+               -- `shorthand_property_identifier_pattern`, in nobody's ids set) while
+               -- renames, arrays, rest and imports LEAKED AS USES.
+               -- Fixed with a declared per-language `binder_fields` — FIELD-precise,
+               -- because two children of a pattern genuinely read (a default's `right`,
+               -- a computed key) and a blanket rule fabricates a def for each while losing
+               -- a real read. It keys on the PATTERN nodes rather than the declarator, so
+               -- all three sites that hand def-position to a pattern are covered by
+               -- construction: a declarator, an ASSIGNMENT (`[a, b] = [b, a]`), and a js
+               -- `catch ({message})` — which reaches it with def-position FALSE, and binds
+               -- anyway. Destructured PARAMS came along for the same reason.
+               -- MEASURED on ghost before the fix: 2732 patterns binding 4413 names, of
+               -- which 1466 sites / 2094 names are destructured `require()` imports — the
+               -- population the const-index census read as ZERO. jquery and mootools hold
+               -- ZERO patterns, which is the containment proof: a pre-ES6 tree must not move.
+               -- v136: CONDITIONAL COMPILATION IS CONTROL FLOW (CART-0380). `#if` /
                -- `#ifdef` / `#elif` / `#else` contain STATEMENTS and flow classified none of
                -- them, so the bodies were attributed to the enclosing function AS IF
                -- UNCONDITIONAL — an `#if A / #else` pair read as both bodies running in

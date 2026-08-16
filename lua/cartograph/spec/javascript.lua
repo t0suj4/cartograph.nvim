@@ -284,6 +284,39 @@ return {
         -- df doesn't track JS locals so the destructured `const [x,setX]=…` hook
         -- setters would name-match a global without this.
         local_decls = { lexical_declaration = true, variable_declaration = true },
+        -- ★ DESTRUCTURING AND IMPORTS BIND NAMES (CART-0358). Every one of them was lost:
+        -- `const {k: ren} = src` gave `def=[] use=[ren,src]` — the bound name counted as a
+        -- READ OF THE STATEMENT THAT DEFINES IT. Two wrong behaviours by spelling, which is
+        -- why no single symptom could census the population: the SHORTHAND form vanished
+        -- entirely (its binder is `shorthand_property_identifier_pattern`, in nobody's ids
+        -- set) while renames, arrays and rest LEAKED AS USES. Measured on ghost: 2732
+        -- patterns binding 4413 names, of which 1466 sites / 2094 names are destructured
+        -- `require()` imports — the population the const-index census read as ZERO.
+        --
+        -- FIELD-PRECISE, from the grammar's own output, because two children of a pattern
+        -- genuinely READ: `object_assignment_pattern`'s `right` and a `computed_property_name`
+        -- key (reached by NOT being the `value` field of its pair_pattern, so it needs no
+        -- entry — the absence of a rule is what makes it a read).
+        binder_fields = {
+            object_pattern = true, array_pattern = true, rest_pattern = true,
+            pair_pattern = { 'value' },              -- the KEY is not a name at all
+            object_assignment_pattern = { 'left' },  -- `right` is a default EXPRESSION
+            -- imports. The linkage itself rides the import EDGE (the @path capture in
+            -- import_query, which is unconditional), so nothing is lost by the foreign
+            -- name of an aliased specifier ceasing to be a phantom local read.
+            import_statement = true, import_clause = true,
+            named_imports = true, namespace_import = true,
+            import_specifier = { 'alias', 'name' },  -- `N2 as N3` binds N3
+        },
+        -- a binding target may be PARENTHESISED: `({body: b} = await x)`, the only way to
+        -- destructure into existing bindings. du never needed this — its walk descends
+        -- every child and meets the pattern regardless of the wrapper.
+        binder_paren = 'parenthesized_expression',
+        -- the shorthand PATTERN binder is a name; its object-LITERAL sibling
+        -- `shorthand_property_identifier` is one letter apart and is a genuine READ that
+        -- is ALSO missing — deliberately not fixed here, it moves the use axis (CART-0418).
+        df_ids = { identifier = true, name = true,
+            shorthand_property_identifier_pattern = true },
         stdlib_prefixes = { 'console.', 'JSON.', 'Object.', 'Array.', 'Math.',
             'Promise.', 'window.', 'document.', 'chrome.' },
         -- the WORKSPACE PACKAGE (nearest package.json ancestor) scopes

@@ -1268,6 +1268,42 @@ every pre-ES6 library uses, `define(["./core"], function (jQuery) { … })` pass
 namespace itself as a parameter, and vetoing those removed 36 of jquery's 52 new defs
 — its whole `jQuery.*` surface.
 
+### Destructuring and imports bind names (JS/TS)
+
+`const {k: ren} = src` used to record `def=[] use=[ren,src]` — the bound name was not
+merely missing, it was counted as a **read of the statement that defines it**. Everything
+keyed on def/use was wrong there: liveness, reaching, the scope model, unused-binding
+lints, and the linker, which saw a module's own imports as reads of names nothing defines
+and filed them as external surface.
+
+Two different wrong behaviours by spelling, which is why no single symptom could count the
+population — the shorthand form vanished silently (its binder is a
+`shorthand_property_identifier_pattern`, absent from every leaf-name set), while renames,
+arrays, rest and imports leaked as uses.
+
+| ghost | patterns | bound names |
+|---|---|---|
+| javascript | 2732 (7.5% of declarators) | **4413** |
+| of which destructured `require()` | 1466 | 2094 |
+| typescript | 137 | 217 + 788 bound by `import` |
+| jquery / mootools | **0** | — (pre-ES6; they must not move, and don't) |
+
+A language declares `binder_fields`: which children of a pattern are in **def position**.
+It is field-precise, because two children of a pattern genuinely *read* — an
+`object_assignment_pattern`'s `right` (`{dv = fallback}`) and a computed key
+(`{[dyn]: computed}`). A blanket "everything under a pattern binds" fabricates a def for
+each *and* loses a real read.
+
+The rule keys on the **pattern node**, not the declarator, so all three sites that hand
+def-position to a pattern are covered by construction: a declarator, an assignment
+(`[a, b] = [b, a]`), and a `catch ({message})` — which arrives with def-position *false*
+and binds anyway. Destructured parameters come along for the same reason. `du` and the
+expression IR read one exported rule (`flow.pattern_binders`), so the two cannot drift.
+
+An aliased import binds the **alias**: `import {N2 as N3}` binds `N3`, and `N2` names an
+export of the other module, so it is neither a local binding nor a local read. The module
+linkage rides the import edge, which is unaffected.
+
 ### Receiver-path agreement
 
 A call `a.b.m()` and a candidate named `b.m` agree on the *receiver*, which the

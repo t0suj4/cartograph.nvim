@@ -386,8 +386,9 @@ end
 -- subtree, which is also why the `try` head needed zeroing by hand in CART-0386 — that was
 -- the symptom, this is the cause. Same seam-feeds-one-function shape as PRELOOP, IF_T, TRY_T
 -- and CATCH before it; this is the FIFTH consumer holding a base set the spec never reached.
-local function du(root, src, stop_body, ids, mods, FN, stopset, ctrlset, clauseset)
-    ids = ids or DFID
+local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
+    local ids = (lang and lang.ids) or DFID
+    local mods, bindf = lang and lang.mods, lang and lang.binder_fields
     if not root then return {}, {}, false, {}, {} end
     local def, use, dseen, useen = {}, {}, {}, {}
     local blks = {} -- ATTACHED BLOCKS skipped on the way (see the 'always' stop below)
@@ -404,8 +405,48 @@ local function du(root, src, stop_body, ids, mods, FN, stopset, ctrlset, clauses
         -- `unbraced_ch2`/`ch3`, which is exactly the intersection the grid exists for.
         local bodyc = (stop_body and ctrlset and ctrlset[t])
             and M.body_children(node, ctrlset, clauseset) or nil
-        local asgleft, decld, k, declist, rngskip
-        if LOOPVAR[t] ~= nil then
+        local asgleft, decld, k, declist, rngskip, bindset, bindskip
+        -- ★★ A DESTRUCTURING PATTERN DECIDES DEF-POSITION FOR ITS OWN CHILDREN (CART-0358),
+        -- and it does so UNCONDITIONALLY — this branch is first, and it ignores the incoming
+        -- `defpos`. That is what makes ONE table cover three sites that had nothing in
+        -- common before: a declarator hands def-position to the pattern (k=3), an ASSIGNMENT
+        -- hands it to the same pattern node (k=1, `[a, b] = [b, a]`), and a js `catch
+        -- ({message})` hands it to NOTHING (k=5 tests for `variable_name`, which js does not
+        -- spell) — yet all three bind. A declarator-shaped fix would have caught one of the
+        -- three. Safe only because every node listed is binding-only BY GRAMMAR: the
+        -- `_pattern` suffix and the import cluster never appear in a value position.
+        --
+        -- Before this, the walk reached the pattern with defpos=true and then dropped it at
+        -- `k = defpos and WRAP[t] or false` (a pattern is in no WRAP set), so every bound
+        -- name fell through to `use` — a DEF counted as a READ OF THE STATEMENT DEFINING IT.
+        local bf = bindf and bindf[t]
+        if bf then
+            bindset, bindskip = {}, {}
+            if bf == true then
+                for c in node:iter_children() do
+                    if c:named() then bindset[c:id()] = true end
+                end
+            else
+                -- an ORDERED field list: the FIRST field present binds, and the OTHERS
+                -- LISTED ARE SKIPPED ENTIRELY — neither def nor use. The fields in one
+                -- list all name the SAME binding in different namespaces, so exactly one
+                -- of them is a local name and the rest are not local READS either. js
+                -- `import_specifier` is {'alias','name'}: `N2 as N3` binds N3, and N2
+                -- names an export of the OTHER module. Leaving N2 as a use would
+                -- re-fabricate the very phantom-read this change removes, and the module
+                -- linkage does not need it — the import EDGE carries that, from
+                -- import_query's @path capture, which is unconditional.
+                local taken
+                for _, f in ipairs(bf) do
+                    local x = node:field(f)[1]
+                    if x then
+                        if taken then bindskip[x:id()] = true
+                        else bindset[x:id()] = true; taken = true end
+                    end
+                end
+            end
+            k = 10
+        elseif LOOPVAR[t] ~= nil then
             -- a collection loop's binder (see LOOPVAR): a FIELD where the grammar gives one,
             -- otherwise every named child that is not part of the header
             if LOOPVAR[t] then decld = node:field(LOOPVAR[t])[1]; k = 3
@@ -456,6 +497,9 @@ local function du(root, src, stop_body, ids, mods, FN, stopset, ctrlset, clauses
               -- it invented a read of `const` from lua's `local x <const>` (CART-0234).
               -- Language-declared, because the node name means `a.b` in python.
               if mods and mods[ct] then goto skipchild end
+              -- a LISTED-BUT-NOT-CHOSEN binder field (the foreign name of an
+              -- aliased import): not a binding, and not a local read either.
+              if bindskip and bindskip[c:id()] then goto skipchild end
               -- ★ AN 'always' STOP IS AN ATTACHED BLOCK, AND du IS WHAT FINDS IT (part B).
               -- A ruby `xs.each do |x| … end` hangs its block off a `call` that can sit
               -- ANYWHERE inside the statement — `q = xs.map { … }` puts it under an
@@ -483,7 +527,8 @@ local function du(root, src, stop_body, ids, mods, FN, stopset, ctrlset, clauses
               if not FN[ct] and not (stop_body and st) then
                 if SUSPEND[ct] then sus = true end -- fused suspension detection
                 local cdefpos
-                if k == 1 then cdefpos = same(c, asgleft)
+                if k == 10 then cdefpos = bindset[c:id()] or false -- pattern/import binder
+                elseif k == 1 then cdefpos = same(c, asgleft)
                 elseif k == 3 then cdefpos = same(c, decld)
                 elseif k == 4 then cdefpos = (ct == 'variable_list'
                     or ct == 'identifier')
@@ -638,6 +683,59 @@ end
 --- `new BufferedReader(…)`. That one needs a per-resource split and is filed, not guessed at
 --- here: a binder rule that is exact for four forms and approximate for a fifth is worse
 --- than one that declines the fifth.
+--- What a DESTRUCTURING PATTERN (or an import statement) BINDS, and what it READS —
+--- BY THE SAME RULE `du` APPLIES, which is the entire point of exporting it (CART-0358).
+--- du computes def/use over these nodes and the expression IR has to model the same row;
+--- two implementations of one rule is how `expr.fn_node` and the provider ended up giving
+--- different answers about which function encloses a node (CART-0306), and how five copies
+--- of the frontier predicate happened (CART-0308).
+---
+--- Returns (names, reads): binder NODES, and the sub-expressions that genuinely read.
+--- A pattern child is one of three things and never two — the binder (a name, or a nested
+--- pattern to descend), a listed-but-not-chosen alternate (skipped entirely: the foreign
+--- name of an aliased import), or a READ (an `object_assignment_pattern`'s default, a
+--- computed key). A bare leaf outside `ids` is dropped rather than read, mirroring du:
+--- a `pair_pattern`'s `property_identifier` key is not a variable in any of these
+--- languages, so it is neither a def nor a use.
+---@param node userdata  the pattern / import node
+---@param bindf table|nil  the language's `binder_fields`
+---@param ids table|nil  the language's leaf-name set (defaults to DFID)
+function M.pattern_binders(node, bindf, ids)
+    ids = ids or DFID
+    local names, reads = {}, {}
+    local function rec(n)
+        local bf = bindf and bindf[n:type()]
+        local bindset, bindskip = {}, {}
+        if bf == true then
+            for c in n:iter_children() do
+                if c:named() then bindset[c:id()] = true end
+            end
+        elseif bf then
+            local taken
+            for _, f in ipairs(bf) do
+                local x = n:field(f)[1]
+                if x then
+                    if taken then bindskip[x:id()] = true
+                    else bindset[x:id()] = true; taken = true end
+                end
+            end
+        end
+        for c in n:iter_children() do
+            if c:named() and not bindskip[c:id()] then
+                local ct = c:type()
+                if bindset[c:id()] then
+                    if bindf[ct] then rec(c)                    -- a nested pattern
+                    elseif ids[ct] then names[#names + 1] = c end
+                elseif not (c:named_child_count() == 0 and not ids[ct]) then
+                    reads[#reads + 1] = c                        -- a genuine read
+                end
+            end
+        end
+    end
+    rec(node)
+    return names, reads
+end
+
 ---@param node userdata  the control head node
 ---@param src string
 ---@param cls table|nil  the record's class table (M.classes), for the `blocks` map
@@ -846,8 +944,13 @@ function M.build(fnnode, src, cfg)
     -- leaf-name set = DFID + the language's df_ids extension (bash variable_name)
     -- BINDING MODIFIERS (CART-0234): per-language node types to skip entirely, because
     -- they decorate a declaration and read nothing. Threaded exactly like df_ids.
-    local mods = cfg.mods
     local ids = M.leaf_ids(cfg.df_ids)
+    -- ★ THE PER-LANGUAGE NODE TABLES TRAVEL AS ONE BUNDLE (CART-0358 folded this).
+    -- `ids`, `mods` and `binder_fields` are all node-keyed language data read at a single
+    -- point in the walk, and du already carried nine positional arguments — a tenth would
+    -- have meant nil-padding at three of the six call sites, which is how a caller ends up
+    -- passing the wrong table. One bundle, passed unchanged by every caller.
+    local lang = { ids = ids, mods = cfg.mods, binder_fields = cfg.binder_fields }
     local stmts = {}
     local emit, region, clause -- fwd
 
@@ -951,7 +1054,7 @@ function M.build(fnnode, src, cfg)
         if hfd ~= nil then dunode = hfd and node:field(hfd)[1] or nil end
         local d, u, sus, rmw, blks
         if dunode then
-            d, u, sus, rmw, blks = du(dunode, src, sb, ids, mods, FN, DUSTOP,
+            d, u, sus, rmw, blks = du(dunode, src, sb, lang, FN, DUSTOP,
                 CTRL_, CLAUSE_)
         else
             d, u, sus, rmw, blks = {}, {}, false, nil, {}
@@ -1078,7 +1181,7 @@ function M.build(fnnode, src, cfg)
                 end
             end
             if POST[t] and cond then
-                local cd, cu, _, _, cblk = du(cond, src, false, ids, mods, FN, DUSTOP)
+                local cd, cu, _, _, cblk = du(cond, src, false, lang, FN, DUSTOP)
                 local ci = #stmts + 1
                 stmts[ci] = { l = line(cond), c = startcol(cond), kind = 'cond',
                     parent = idx, pol = 'cond', def = cd, use = cu,
@@ -1130,7 +1233,7 @@ function M.build(fnnode, src, cfg)
             do -- def/use over EVERY label, deduped
                 local ds, us = {}, {}
                 for _, x in ipairs(labels) do
-                    local xd, xu, _, _, xb = du(x, src, false, ids, mods, FN, DUSTOP)
+                    local xd, xu, _, _, xb = du(x, src, false, lang, FN, DUSTOP)
                     for _, nm in ipairs(xd) do if not ds[nm] then ds[nm] = true; d[#d + 1] = nm end end
                     for _, nm in ipairs(xu) do if not us[nm] then us[nm] = true; u[#u + 1] = nm end end
                     for _, b in ipairs(xb or {}) do lblk[#lblk + 1] = b end
@@ -1166,7 +1269,7 @@ function M.build(fnnode, src, cfg)
             if hfe ~= nil then dn = hfe and node:field(hfe)[1] or nil end
             local d, u, _, _, eblk = {}, {}, nil, nil, {}
             if dn then
-                d, u, _, _, eblk = du(dn, src, true, ids, mods, FN, DUSTOP, CTRL_, CLAUSE_)
+                d, u, _, _, eblk = du(dn, src, true, lang, FN, DUSTOP, CTRL_, CLAUSE_)
             end
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = node:type(), parent = parent,
@@ -1210,7 +1313,7 @@ function M.build(fnnode, src, cfg)
             -- the header binds the exception var (DEF) and references the type
             -- (use); the body regions under it. Without this the caught var is
             -- unbound in the fine model and df's spurious use of it is unmatched.
-            local d, u, _, _, kblk = du(node, src, true, ids, mods, FN, DUSTOP,
+            local d, u, _, _, kblk = du(node, src, true, lang, FN, DUSTOP,
                 CTRL_, CLAUSE_)
             local idx = #stmts + 1
             stmts[idx] = { l = line(node), c = startcol(node), kind = 'catch', parent = parent,

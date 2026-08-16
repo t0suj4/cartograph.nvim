@@ -1859,3 +1859,159 @@ test('flow: conditional compilation opens as a branch, head reads only its condi
     ok(not next(heads.preproc_else), '#else evaluates nothing at all')
     eq(3, bodies, 'each branch body is regioned as its own row')
 end)
+
+-- ★★ CART-0358: A DESTRUCTURING PATTERN BINDS NAMES, and every one of them was lost.
+--
+-- `const {k: ren} = src` gave `def=[] use=[ren,src]` — the bound name was not merely
+-- missing, it was counted as a READ OF THE STATEMENT THAT DEFINES IT. Two different wrong
+-- behaviours by spelling, which is why no single symptom could census the population: the
+-- SHORTHAND form (`{SHIFT}`) vanished entirely (its binder is a
+-- `shorthand_property_identifier_pattern`, in nobody's ids set), while renames, arrays and
+-- rest LEAKED AS USES.
+--
+-- The rules are FIELD-precise, from the grammar's own output, because a blanket
+-- "everything under a pattern is a binder" is wrong in two places that both read real
+-- variables: an object_assignment_pattern's `right` (`{dv = fallback}` READS fallback) and
+-- a computed_property_name key (`{[dyn]: computed}` READS dyn).
+local function parse_seq(code, lang)
+    local src = table.concat(code, '\n')
+    return vim.treesitter.get_string_parser(src, lang):parse()[1]:root(), src
+end
+local function seqrows(code, lang)
+    local root, src = parse_seq(code, lang)
+    local s = tsspec[lang]
+    return flow.build(root, src, { seq = true, df_ids = s.df_ids, regime = s.regime,
+        ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause,
+        blocks = s.blocks, mods = s.binding_modifiers,
+        binder_fields = s.binder_fields, binder_skip = s.binder_skip }), src
+end
+-- def/use sets of the row whose source text contains `needle`.
+-- NB a row's `l` is 1-BASED (so is `.c`) — the same off-by-one the CSE cut paid for once
+-- already. Indexing the line table with `l + 1` reads the NEXT statement, so every
+-- assertion fails against a row that is not the one under test, and the failure looks
+-- exactly like the analyzer being wrong.
+local function dur(fl, src, needle)
+    local lines = vim.split(src, '\n', { plain = true })
+    for _, r in ipairs(fl.stmts) do
+        if (lines[r.l or 0] or ''):find(needle, 1, true) then
+            return setof(r.def or {}), setof(r.use or {})
+        end
+    end
+    return {}, {}
+end
+
+test('flow: a destructuring pattern DEFINES its binders, in every spelling', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fl, src = seqrows({
+        'const {SHIFT} = require("./o");',
+        'const {k: ren} = src;',
+        'const [p, , q] = arr;',
+        'const {outer: {inner}} = deep;',
+        'const {keep, ...rest} = big;',
+    }, 'javascript')
+
+    local d, u = dur(fl, src, '{SHIFT}')
+    ok(d.SHIFT, 'shorthand: SHIFT is a DEF')
+    ok(not u.SHIFT, 'shorthand: SHIFT is not also a use')
+    ok(u.require, 'shorthand: the initializer is still read')
+
+    d, u = dur(fl, src, '{k: ren}')
+    ok(d.ren, 'rename: the VALUE side binds')
+    ok(not u.ren, 'rename: the binder is not a use')
+    ok(not d.k and not u.k, 'rename: the KEY is neither a def nor a use')
+    ok(u.src, 'rename: the initializer is read')
+
+    d, u = dur(fl, src, '[p, , q]')
+    ok(d.p and d.q, 'array: both binders def (a hole binds nothing)')
+    ok(not u.p and not u.q, 'array: neither binder is a use')
+    ok(u.arr, 'array: the initializer is read')
+
+    d, u = dur(fl, src, '{outer: {inner}}')
+    ok(d.inner, 'nested: the inner binder defs')
+    ok(not d.outer and not u.outer, 'nested: the outer KEY is neither')
+
+    d, u = dur(fl, src, '...rest')
+    ok(d.keep and d.rest, 'rest: both the plain binder and the rest binder def')
+    ok(not u.rest, 'rest: the rest binder is not a use')
+end)
+
+-- ★ THE TWO PLACES A PATTERN GENUINELY READS. A blanket rule fabricates a def here and
+-- loses a real read — the direction of error that matters, since a fabricated def enters
+-- reaching sets and a lost read makes a live variable look dead.
+test('flow: a pattern default and a computed key are READS, not binders', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fl, src = seqrows({
+        'const {dv = fallback} = opts;',
+        'const {[dyn]: computed} = obj;',
+    }, 'javascript')
+
+    local d, u = dur(fl, src, 'dv = fallback')
+    ok(d.dv, 'default: the left side binds')
+    ok(u.fallback, 'default: the RIGHT side is a real READ')
+    ok(not d.fallback, 'default: the right side is not a def')
+    ok(u.opts, 'default: the initializer is read')
+
+    d, u = dur(fl, src, '[dyn]')
+    ok(d.computed, 'computed key: the value side binds')
+    ok(u.dyn, 'computed key: the KEY EXPRESSION is a real READ')
+    ok(not d.dyn, 'computed key: the key expression is not a def')
+end)
+
+-- ★ A PATTERN IN ASSIGNMENT POSITION IS THE SAME OBJECT. The fix keys on the PATTERN
+-- nodes, not on the declarator, so every site that hands def-position to a pattern is
+-- covered by construction — a declarator-only fix would have caught one of three.
+test('flow: destructuring binds in assignment position and in a catch clause', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    -- NOT seq mode: these live in a FUNCTION BODY, and a module-level sequence build stops
+    -- at the function, so the rows under test would simply not exist and every assertion
+    -- would fail against an empty set — a missing row and a wrong row look identical here.
+    local fn, src = parse_fn(table.concat({
+        'function f() {',
+        '  [a, b] = [b, a];',
+        '  try {',
+        '    g();',
+        '  } catch ({message}) {',      -- its OWN line: a try and its catch share a line
+        '    h(message);',              -- otherwise, and `dur` would match the try row
+        '  }',
+        '}',
+    }, '\n'), 'javascript')
+    local s = tsspec.javascript
+    local fl = flow.build(fn, src, { df_ids = s.df_ids, regime = s.regime,
+        ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause,
+        blocks = s.blocks, mods = s.binding_modifiers,
+        binder_fields = s.binder_fields })
+    local d = dur(fl, src, '[a, b] =')
+    ok(d.a and d.b, 'assignment-position array pattern defines both binders')
+    local d2, u2 = dur(fl, src, 'catch ({message})')
+    ok(d2.message, 'a destructured catch parameter binds')
+    ok(not u2.message, 'the catch binder is not a use of itself')
+end)
+
+-- ★ AN IMPORT BINDS TOO, and it was the same failure: `import D from './m'` gave
+-- `def=[] use=[D]`, so a module's own imports read as LIVE-IN to the module and every
+-- import was external-surface material. The ALIAS is the local binding — `N2 as N3` binds
+-- N3, and N2 names an export of the OTHER module, so it is not a local read either. The
+-- module linkage is carried by the import EDGE (spec/javascript.lua's @path capture),
+-- which is unconditional and unaffected by this.
+test('flow: an import statement DEFINES what it binds, and the alias is the binder', function ()
+    if not ready('javascript') then skip 'no javascript parser' end
+    local fl, src = seqrows({
+        'import D from "./m";',
+        'import {N1, N2 as N3} from "./m";',
+        'import * as NS from "./m";',
+    }, 'javascript')
+
+    local d, u = dur(fl, src, 'import D')
+    ok(d.D, 'a default import binds its name')
+    ok(not u.D, 'a default import is not a use')
+
+    d, u = dur(fl, src, 'N2 as N3')
+    ok(d.N1, 'a plain named import binds')
+    ok(d.N3, 'an ALIASED named import binds the ALIAS')
+    ok(not d.N2, 'the foreign name is not a local binding')
+    ok(not u.N2, 'and it is not a local read either')
+
+    d, u = dur(fl, src, '* as NS')
+    ok(d.NS, 'a namespace import binds')
+    ok(not u.NS, 'a namespace import is not a use')
+end)
