@@ -75,6 +75,9 @@ do
         elseif a == '--par-dump' then
             i = i + 1
             opts.pardump = arg[i]
+        elseif a == '--file' then
+            i = i + 1
+            opts.file = arg[i]
         elseif a == '--cols' then
             i = i + 1
             opts.cols = {}
@@ -85,7 +88,38 @@ do
         i = i + 1
     end
 end
-local function wanted(col) return not opts.cols or opts.cols[col] end
+-- ── --file: SCOPE EVERY COLUMN AT ONCE (CART-0429) ────────────────────────────────────
+--
+-- ★ WHY IT LIVES HERE AND NOT IN THE CENSUS TOOLS. I filed this as "--file on rowcensus /
+-- ctrlcensus / dfparity" and the premise was wrong: rowcensus and dfparity have NO CLI at
+-- all — they are libraries matrix drives — and ctrlcensus is a standalone script with its
+-- own extraction whose `--files N` is a CAP, not a filter. THE TOOL THAT OWNS THEIR EXTRACT
+-- IS THIS ONE, so one flag here scopes every column instead of four flags scoping one each.
+--
+-- ★★ AND A SCOPED ROW IS NOT A GATE. Every baseline in this file is a CORPUS-WIDE claim:
+-- `expected` refs/nodes, `budget_mb`, the rows/expr/dfpar EXPECTED pins, the saved struct
+-- baseline. Comparing a two-file extract against any of them produces a red cell that means
+-- nothing, which is worse than no cell — so:
+--   REPORTED, NOT GATED (`~`): rows, expr, dfpar — the census still PRINTS, which is the
+--     whole point of a scoped run, it just stops pretending to be a verdict. `~` already
+--     means exactly this here ("ran, census not yet calibrated").
+--   NOT APPLICABLE (`--`): counts, mem, key, struct — nothing meaningful survives scoping,
+--     and `par` because bench.extract_parallel would re-extract the WHOLE corpus and
+--     compare it against a subset, i.e. a guaranteed false FAIL.
+--   STILL GATED: valid, fold, silent, cache — INTRINSIC checks. Referential integrity,
+--     fold round-trip, silent-local and cold==warm are properties of whatever graph they
+--     are handed, so a subset is a perfectly good subject for them.
+local SCOPE_UNGATED = { rows = true, expr = true, dfpar = true }
+local SCOPE_NA = { counts = true, mem = true, key = true, struct = true, par = true }
+local SCOPE_NOTE = { 'SCOPED (--file): a corpus-wide baseline cannot judge a subset' }
+
+-- `--file` also SKIPS the not-applicable columns rather than merely refusing their verdict:
+-- `par` would otherwise re-extract the WHOLE corpus to compare against a subset, paying the
+-- most expensive column in the file for a cell that cannot mean anything.
+local function wanted(col)
+    if opts.file and SCOPE_NA[col] then return false end
+    return not opts.cols or opts.cols[col]
+end
 
 -- ── row mode: one corpus, all columns, one JSON line ────────────────────
 
@@ -151,14 +185,42 @@ local function run_row(name)
     end
 
     local cells = {}
-    local function cell(col, s, d) cells[col] = { s = s, d = d } end
+    -- ★ ONE CHOKEPOINT FOR THE SCOPED VERDICT. Every column reports through `cell`, so the
+    -- downgrade lives here rather than in eight column bodies — there is no way to add a
+    -- ninth baseline-comparing column that forgets to honour `--file`, because it cannot
+    -- report without passing through this function. The DETAIL is kept: a `~` row still
+    -- prints its census, which is the entire point of scoping.
+    local function cell(col, s, d)
+        if opts.file and SCOPE_UNGATED[col] and (s == 'OK' or s == 'FAIL') then s = '~' end
+        cells[col] = { s = s, d = d }
+    end
+    if opts.file then
+        for col in pairs(SCOPE_NA) do
+            if not opts.cols or opts.cols[col] then cells[col] = { s = '--', d = SCOPE_NOTE } end
+        end
+    end
 
     -- ★ THE MATRIX IS A GATE, SO IT IS EXPLICITLY COLD (CART-0429). bench honours
     -- $CARTOGRAPH_BENCH_WARM so a dev loop can reuse a cache; a sweep that produces
     -- PASS/FAIL must never inherit that from the environment. ★ AND THE `cache` COLUMN
     -- BELOW WOULD GO CIRCULAR IF IT DID — it exists to prove warm == cold, which it cannot
     -- do while reading the warm graph as its own baseline.
-    local data, stats = bench.extract(name, { cold = true })
+    local xopts = { cold = true }
+    if opts.file then
+        local corpus0 = bench.corpus(name)
+        local all = require('cartograph.providers.treesitter')
+            .list_files(corpus0.root, corpus0.subdirs)
+        local keep = {}
+        for _, f in ipairs(all or {}) do
+            if f:match(opts.file) then keep[#keep + 1] = f end
+        end
+        if #keep == 0 then
+            return { corpus = name, err = ('--file %q matched none of %d files (it is a LUA'
+                .. ' PATTERN, not a glob)'):format(opts.file, #(all or {})) }
+        end
+        xopts.files = keep
+    end
+    local data, stats = bench.extract(name, xopts)
     local c = require('cartograph.census').take(data)
 
     -- GRACEFUL DEGRADE (perf-cut P1 follow-on): a corpus whose extract alone
@@ -301,7 +363,13 @@ local function run_row(name)
         cell('dfpar', '--', DH_NOTE)
     elseif wanted('dfpar') then
         local dfp = dofile(here .. '/dfparity.lua')
-        local ldata = bench.extract(name, { legacy_df = true })
+        -- ★ THE SECOND EXTRACT MUST INHERIT THE SCOPE TOO. dfpar re-extracts with the legacy
+        -- df path, and leaving `files` off here made a scoped run report the WHOLE corpus in
+        -- this column (fns=8381 beside a 433-node graph) and pay zig's full 107s extract for
+        -- it. One flag, every extract in the row — a scope that reaches all but one call
+        -- site is a scope that silently lies in exactly one column.
+        local ldata = bench.extract(name,
+            { legacy_df = true, cold = true, files = xopts.files })
         local r = dfp.check(ldata)
         if r.nfn == 0 then
             cell('dfpar', '--') -- no df-bearing functions (token provider)
@@ -687,6 +755,16 @@ local function build_cmd(name)
     local cmd = { vim.v.progpath, '--headless', '-u', 'NONE', '-l', SELF,
         name, '--row' }
     if opts.save then cmd[#cmd + 1] = '--save' end
+    -- ★ THE ROW RUNS IN A CHILD, SO EVERY FLAG THAT CHANGES THE ROW MUST BE FORWARDED.
+    -- Omitting this made `--file` a silent no-op: the parent trimmed the column list and
+    -- printed a scoped-looking header while the child extracted the WHOLE corpus and
+    -- compared it against the full pins — 410s, `nodes 9768`, and an `expr OK` that was a
+    -- verdict about zig rather than about the one file asked for. A flag the parent
+    -- understands and the child does not is worse than an unimplemented flag.
+    if opts.file then
+        cmd[#cmd + 1] = '--file'
+        cmd[#cmd + 1] = opts.file
+    end
     if opts.cols then
         cmd[#cmd + 1] = '--cols'
         cmd[#cmd + 1] = table.concat(colnames, ',')

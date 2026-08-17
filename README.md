@@ -2848,6 +2848,22 @@ nvim --headless -u NONE -l tools/matrix.lua --quick      # seconds-tier only
 nvim --headless -u NONE -l tools/matrix.lua libs server  # named rows
 nvim --headless -u NONE -l tools/matrix.lua --cols par   # one column
 nvim --headless -u NONE -l tools/matrix.lua --save       # re-baseline structs
+# SCOPE THE WHOLE GRID TO ONE FILE (CART-0429) — the dev loop for anything that changes the
+# harvest: every column at once, on the file you are actually working on.
+nvim --headless -u NONE -l tools/matrix.lua zig --file 'InternPool%.zig$'
+#   zig  1.6s  valid OK · rows ~ · expr ~ · dfpar ~ · fold -- · silent OK · cache OK
+#   (a full zig row is ~135s; nodes 433 instead of 9768)
+# ★★ A SCOPED ROW IS NOT A GATE, so the verdicts say so. Every baseline here is a
+# CORPUS-WIDE claim — `expected` refs/nodes, `budget_mb`, the rows/expr/dfpar pins, the
+# saved struct baseline — and judging a two-file extract by any of them yields a red cell
+# that means nothing, which is worse than no cell. So: rows/expr/dfpar go `~` (REPORTED,
+# NOT GATED — the census still prints, which is the whole point, it just stops pretending
+# to be a verdict); counts/mem/key/struct/par go `--` and are SKIPPED, `par` because it
+# would re-extract the whole corpus to compare against a subset; and valid/fold/silent/
+# cache STILL GATE, because referential integrity, the fold round-trip, silent-local and
+# cold==warm are INTRINSIC — a subset is a perfectly good subject for them.
+# The downgrade lives in the one function every column reports through, so a ninth
+# baseline-comparing column cannot be added that forgets to honour it.
 # THE DEV LOOP IS COLD BY DEFAULT, AND THAT IS THE POINT (CART-0429). `bench.extract` goes
 # straight to the provider and never consults the cache, because A GATE MUST NOT VERIFY A
 # CACHED ARTIFACT — CART-0245 is the proof it matters: a warm zig graph once carried 4122
