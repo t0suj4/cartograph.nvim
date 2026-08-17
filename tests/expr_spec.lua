@@ -361,3 +361,66 @@ test('expr: released, and re-parsed — the cache holds exactly one file', funct
     ok(expr.of(store, id), 'after release it parses again')
     eq(1, expr.parse_stats().miss - p1.miss, 'a released cache is cold again')
 end)
+
+
+-- ── scoped extraction (CART-0429) ────────────────────────────────────────────
+-- ★★ WHAT `--file` CLAIMS, AND WHAT THIS ACTUALLY TESTS. Scoping the census filters
+-- EXTRACTION (the provider's `opts.files`) — the only place the loop really collapses, 135s
+-- to 3.1s on zig. The hazard that buys is INCOMPLETE CROSS-FILE RESOLUTION: a name defined
+-- in an excluded file does not resolve, and a node's KIND can depend on that (a function
+-- attached to a class declared elsewhere becomes a `method` only if the class is seen).
+-- So the invariant is narrower than "same answer": A FILE'S OWN SUBJECTS MUST BE IDENTICAL
+-- WHETHER OR NOT ITS NEIGHBOURS WERE EXTRACTED.
+--
+-- ★ THE FIRST VERSION OF THIS SPEC ASSERTED NOTHING. It compared census ROWS, and clean
+-- lua produces ZERO disagreements (ten probed constructs, all 0 — lua is the language the
+-- IR was built against, CART-0224). Both sides were empty, every loop body was skipped, and
+-- it passed green. Hence the explicit non-vacuity assertions below: the fixture must
+-- produce subjects in BOTH files, and the scope must be shown to have excluded one.
+test('exprcensus: a scoped extraction gives a file the same subjects as the full corpus', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    local ts_ = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local a = assert(io.open(root .. '/a.lua', 'w'))
+    a:write('local M = {}\n'
+        .. 'function M.f(t)\n  local x = t.k\n  for i, v in ipairs(t) do x = x + v end\n'
+        .. '  return x\nend\n'
+        .. 'function M.g(o)\n  o.n = o.n + 1\n  return o\nend\nreturn M\n')
+    a:close()
+    -- b.lua holds NAMED functions so it contributes subjects of its own — otherwise
+    -- "the scope excluded the neighbour" is true for the wrong reason
+    local b = assert(io.open(root .. '/b.lua', 'w'))
+    b:write('local A = require "a"\n'
+        .. 'local B = {}\nfunction B.h(z)\n  return A.f(z) + A.g(z).n\nend\n'
+        .. 'function B.i(z)\n  return B.h(z) * 2\nend\nreturn B\n')
+    b:close()
+
+    -- subjects, keyed the way the census picks them: kind + file + name
+    local function subjects(opts)
+        local out, byfile = {}, {}
+        for _, n in ipairs(ts_.extract(root, opts).nodes or {}) do
+            if n.kind == 'function' or n.kind == 'method' then
+                local k = ('%s|%s|%s'):format(n.kind, n.file or '?', n.name or '?')
+                out[k] = true
+                byfile[n.file or '?'] = (byfile[n.file or '?'] or 0) + 1
+            end
+        end
+        return out, byfile
+    end
+
+    local full, fcount = subjects(nil)
+    local scoped, scount = subjects { files = { 'a.lua' } }
+
+    -- NON-VACUITY, both directions — this spec is worthless without them
+    ok((fcount['a.lua'] or 0) > 0, 'the fixture puts subjects in a.lua')
+    ok((fcount['b.lua'] or 0) > 0, 'and subjects in b.lua, so exclusion means something')
+    eq(nil, scount['b.lua'], 'the scoped extraction really excluded b.lua')
+    eq(fcount['a.lua'], scount['a.lua'], 'a.lua keeps every subject when scoped')
+
+    -- THE INVARIANT: identical subject IDENTITY for the scoped file, kind included
+    for k in pairs(full) do
+        if k:find('|a%.lua|') then ok(scoped[k], 'scoped run kept subject ' .. k) end
+    end
+    for k in pairs(scoped) do ok(full[k], 'scoped run invented no subject: ' .. k) end
+end)

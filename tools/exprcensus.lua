@@ -487,24 +487,68 @@ if invoked then
     bench.bootstrap()
 
     local target, want_lang, show, bucket, cap = nil, nil, nil, nil, 40
+    local only = nil
     local i = 1
     while arg and arg[i] do
         if arg[i] == '--lang' then i = i + 1; want_lang = arg[i]
         elseif arg[i] == '--show' then i = i + 1; show = arg[i]
         elseif arg[i] == '--bucket' then i = i + 1; bucket = arg[i]
+        elseif arg[i] == '--file' then i = i + 1; only = arg[i]
         elseif arg[i] == '--cap' then i = i + 1; cap = tonumber(arg[i]) or cap
         else target = arg[i] end
         i = i + 1
     end
     if not target then
         print('usage: exprcensus <corpus|dir> [--lang <l>] [--show <class>]'
-            .. ' [--bucket <class>] [--cap N]')
+            .. ' [--bucket <class>] [--file <pat>] [--cap N]')
         print('  <class> is an (axis:rowtype) key from the census, e.g. missing:declaration')
+        print('  --file <pat>  SCOPE the run to files whose path matches the lua pattern.')
+        print('                Filters EXTRACTION, not just the census — measured 135s -> 2.8s')
+        print('                on zig. A scoped run is NOT comparable to a pin (see below).')
         os.exit(2)
     end
 
     local corpus = bench.corpus(target)
-    local data = bench.extract(target)
+
+    -- ── --file: SCOPE THE LOOP (CART-0429) ─────────────────────────────────────────────
+    -- ★★ IT HAS TO REACH EXTRACTION OR IT IS A LIE. Filtering SUBJECTS after the fact would
+    -- save only the census (zig: 52.9s) and leave the extract (106.8s) — a 33% win sold as
+    -- a 48× one. The provider already takes an explicit `opts.files` (workers batch with
+    -- it), so the filter threads all the way down and the loop really does collapse.
+    --
+    -- WHY THIS EXISTS: `bench.extract` never consults the cache — correct for a GATE, since
+    -- a cache can mask the bug being gated, but it means every iteration on an analyzer
+    -- re-pays a full extraction. Scoping is the honest way to get a fast loop without
+    -- teaching the gate path to trust a cache.
+    --
+    -- ⚠⚠ AND A SCOPED RUN IS NOT A PIN. A subset extraction has INCOMPLETE CROSS-FILE
+    -- RESOLUTION: a name defined in an excluded file does not resolve, and node KINDS can
+    -- depend on that (a function attached to a class declared elsewhere). The per-row gate
+    -- verdict is intra-file — `expr.of` re-parses the enclosing file and `expr.gate`
+    -- compares reads against du over the same node — so a file's own rows are expected to
+    -- match its share of the full run, and that is VERIFIED below rather than assumed.
+    -- What must never happen is a scoped total being read as a corpus number, so the pin
+    -- comparison is REFUSED outright and the banner says SCOPED on every line that matters.
+    local opts
+    if only then
+        local ts = require 'cartograph.providers.treesitter'
+        local all = ts.list_files(corpus.root, corpus.subdirs)
+        local keep = {}
+        for _, f in ipairs(all or {}) do
+            if f:match(only) then keep[#keep + 1] = f end
+        end
+        if #keep == 0 then
+            print(('--file %q matched NONE of %d files under %s')
+                :format(only, #(all or {}), corpus.root))
+            print('  (it is a LUA PATTERN, not a glob: use "%.zig$" not "*.zig")')
+            os.exit(2)
+        end
+        print(('SCOPED: --file %q matched %d of %d files — NOT a corpus census, pin'
+            .. ' comparison refused'):format(only, #keep, #(all or {})))
+        opts = { files = keep }
+    end
+
+    local data = bench.extract(target, opts)
 
     -- the same SHIM the matrix column builds — node lookup + file content over the shared
     -- extract, not a second ingest. Kept identical on purpose: a sampling tool that saw a
@@ -563,10 +607,16 @@ if invoked then
             r.cats.total / math.max(1, dist.total)))
     end
 
-    if M.EXPECTED[target] and not want_lang then
+    -- ⚠ `only` REFUSES the pin, and refusing is the whole point: a scoped run's total is a
+    -- statement about the files it saw, and the pin is a statement about the corpus. Letting
+    -- them meet would print "PINNED: 22 class(es) moved" for a run that deliberately looked
+    -- at two files — a red gate that means nothing, which is worse than no gate at all.
+    if M.EXPECTED[target] and not want_lang and not only then
         local d = M.diff(r.cats, M.EXPECTED[target])
         print(#d == 0 and '  PINNED: matches' or ('  PINNED: %d class(es) moved'):format(#d))
         for _, l in ipairs(d) do print(l) end
+    elseif M.EXPECTED[target] and only then
+        print('  PINNED: not compared — this run is SCOPED (--file)')
     end
 
     -- reading the SOURCE LINE is the point of --show: the census says "10667 declarations",
