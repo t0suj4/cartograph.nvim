@@ -2719,6 +2719,50 @@ nvim --headless -u NONE -l tools/matrix.lua libs --cols expr
 # (25.8× here, 1.0× for binder:if_statement) and so it corrupted the RANKING, not just the
 # magnitude. Pins stay keyed on instances; two numbers, neither pretending to be the other.
 nvim --headless -u NONE -l tools/exprcensus.lua cpp --bucket missing:declaration
+# …AND FOUR CORPORA COULD NEVER RUN IT AT ALL (CART-0423). zig, odin, v8 and wow printed
+# NOTHING — not a header, not a zero, not an error — and exited 0. Four of thirty-seven,
+# silently absent from every sweep since the census shipped, and nothing distinguished "no
+# output" from "found zero" from "never ran". The exit code was laundered twice over: the
+# harness read `$?` through a pipe, and `proc.code` reads 0 for a child killed by a signal,
+# so a SIGKILL rendered as a clean exit. THEY WERE RUNNING OUT OF MEMORY.
+# The cause is that `expr.of` re-parses the WHOLE ENCLOSING FILE once per subject — right
+# for one interactive visit, quadratic-ish for a consumer sweeping every function in a file.
+# MEASURED: one tree-sitter parse costs 21-53 BYTES OF RSS PER SOURCE BYTE (16.9 MB for
+# zig's InternPool.zig, 564 MB for its 11 MB CodeGen.zig), and the census's growth INSIDE a
+# file matched the isolated per-parse cost exactly. zig died 21.7s in, at subject 570 of
+# 8590. Never slow — just fatal.
+# ★ AND THE LUA GC COULD NOT SEE ANY OF IT: while RSS tripled, the Lua heap FELL, 834->465
+# MB, because a tree-sitter tree's Lua footprint is ~0 and its cost is C-side. Collecting
+# every 20 subjects recovered only ~30% and STILL DIED — measured, so "collect harder" was
+# never the fix. The parse had to stop happening.
+# THE FIX IS TWO HALVES, and each is inert without the other: expr keeps a ONE-ENTRY parse
+# cache keyed on the SOURCE ITSELF (identical bytes, identical tree — a stale hit is
+# impossible by construction, so there is no lifetime to get wrong), and the census walks
+# BY FILE so consecutive subjects hit it. Extraction already emits nodes file by file, which
+# is exactly why relying on that would be wrong: it would work everywhere until a corpus
+# arrived unordered and degrade silently. The order is explicit and the hit rate reported.
+#   php    982 MB -> 183 MB, 13.6s -> 4.1s      zig   OOM at 5983 MB -> 2471 MB, 52.9s
+#   go    2743 MB -> 659 MB, 38.2s -> 13.5s     odin  OOM at 4377 MB -> 1636 MB, 23.0s
+# Identical censuses on every corpus that already ran (php 857, go 3053) — a pure
+# performance change that is also 2.8x faster, because the re-parse was the wall clock too.
+# ★ ONE THING GOT WORSE BEFORE IT GOT BETTER, and it is worth stating: releasing the tree
+# per file and COLLECTING per file took go from 38s to 179s — 923 full collections. The
+# trigger is now the quantity that actually drives the peak, SOURCE BYTES released, with a
+# budget derived from the measured 21-53 B/byte rather than picked.
+# All four corpora are pinned for the first time: zig 16088, odin 16585, wow 3261, and v8
+# 165533 instances over 10274 DISTINCT rows (16.1× — CART-0410's header duplication at full
+# size, so rank v8's work by the distinct column, never by that total). None is a regression;
+# they are first sightings of numbers that were always there.
+# ★ AND THE FIRST ONE READ REFUTED THE STORY ITS NAME SUGGESTED. zig is 87% one class,
+# `binder:variable_declaration` = 14002 over 14002 distinct rows, which looked like the
+# vanished-binder family CART-0358 fixed for JS destructuring. It is not. Every instance is
+# `missing={} extra={<the declared name>}` on an ordinary declaration — `const ip =
+# &zcu.intern_pool;` — i.e. the row's own TARGET harvested as a READ. That is the INVERSE:
+# du is right, the IR over-reads, and it is CART-0404 (the C/C++ declaration row reads what
+# it declares) in a third language. v8's `binder:declaration` 30547/3859 is the same defect
+# in C++ at a scale the cpp corpus never showed. A CLASS'S COUNT AND ITS STORY ARE TWO
+# FINDINGS; this one took 53 seconds of `--show` to keep from hardening the wrong one.
+nvim --headless -u NONE -l tools/exprcensus.lua zig --show binder:variable_declaration
 # COMBINATORIAL GRID: the bestiary plants each FORM once, and every bug the row model gave
 # up was at an INTERSECTION — elsif x CHAIN-LENGTH-2, block x CONDITION-POSITION, block x
 # ASSIGNMENT-RHS, rescue x INSIDE-A-BLOCK, modifier x LOOP. CART-0394 said it outright: "the

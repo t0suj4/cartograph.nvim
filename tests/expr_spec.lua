@@ -312,3 +312,52 @@ test('lua 5.4 attribute: a binding modifier is neither a field nor a read (CART-
         eq('b', rhs and rhs.n, 'with its selector intact')
     end
 end)
+
+-- ── the parse cache (CART-0423) ──────────────────────────────────────────────
+-- ★ WHY THESE ARE GATES AND NOT A BENCHMARK. `expr.of` re-parses the enclosing file per
+-- subject; a sweeping consumer pays that once per FUNCTION, which made four corpora
+-- unrunnable (21–53 bytes of RSS per source byte, per parse). The cache fixes it, and a
+-- refactor that silently breaks reuse would restore the old cost with IDENTICAL RESULTS —
+-- invisible to every other spec in this file and to the census's own pins. The only thing
+-- that can catch it is a counter, so the counter is asserted.
+test('expr: a second subject in the same file reuses the parsed tree', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest {
+        'local function one(a) return a + 1 end',
+        'local function two(b) return b + 2 end',
+        'local function three(c) return c + 3 end',
+    }
+    expr.parse_release()
+    local p0 = expr.parse_stats()
+    for _, name in ipairs { 'one', 'two', 'three' } do
+        local id = fn_id(name)
+        ok(id and expr.of(store, id), 'expr.of resolved ' .. name)
+    end
+    local p1 = expr.parse_stats()
+    -- THREE subjects, ONE file: exactly one parse, and the concat is paid once too
+    eq(1, p1.miss - p0.miss, 'one parse for three subjects in one file')
+    eq(2, p1.hit - p0.hit, 'the other two reused the tree')
+    eq(1, p1.concat - p0.concat, 'and the source string is built once, not per subject')
+end)
+
+test('expr: released, and re-parsed — the cache holds exactly one file', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    ingest { 'local function only(a) return a end' }
+    local id = fn_id('only')
+    expr.parse_release()
+
+    local p0 = expr.parse_stats()
+    ok(expr.of(store, id), 'first call parses')
+    eq(1, expr.parse_stats().miss - p0.miss, 'a cold cache is a miss')
+
+    -- release returns the BYTES dropped, which is what lets a sweeping consumer trigger a
+    -- collect on released source rather than on a per-item reflex (that reflex, measured,
+    -- cost 4.7x on go)
+    local freed = expr.parse_release()
+    ok(freed > 0, 'release reports the source bytes it dropped')
+    eq(0, expr.parse_release(), 'releasing twice drops nothing the second time')
+
+    local p1 = expr.parse_stats()
+    ok(expr.of(store, id), 'after release it parses again')
+    eq(1, expr.parse_stats().miss - p1.miss, 'a released cache is cold again')
+end)

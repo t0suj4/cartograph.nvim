@@ -34,6 +34,41 @@
 
 local M = {}
 
+--- ★★ WHY THIS WALKS BY FILE (CART-0423). The census was UNRUNNABLE on four of the
+--- thirty-seven corpora — zig, odin, v8 and wow produced no output at all, and the exit
+--- code was laundered so it read as a clean zero rather than a death. MEASURED: they run
+--- OUT OF MEMORY. `expr.of` re-parses the whole enclosing file once per subject, one parse
+--- costs 21–53 bytes of RSS per source byte, and the census's growth rate inside a file
+--- matched the isolated per-parse cost exactly (16.9 MB/subject in zig's InternPool.zig,
+--- both ways). zig died 21.7 s in, at subject 570 of 8590 — never slow, just fatal.
+---
+--- ★ THE ORDER IS HALF THE FIX. expr's parse cache holds ONE tree, so it only pays when
+--- consecutive subjects share a file. Extraction already emits nodes file by file — which
+--- is exactly why relying on that would be the WRONG shape: it would work on every corpus
+--- that happens to be ordered and degrade silently to the old cost on one that is not,
+--- which is unobservable from the outside until a corpus dies. So the grouping is made
+--- explicit, and the cache's hit rate is reported (`M.parse_stats`) rather than assumed.
+---
+--- STABLE, and that matters beyond tidiness: buckets are keyed in FIRST-APPEARANCE order
+--- and nodes keep their order within a bucket, so an already-grouped corpus is walked in
+--- exactly the order it was before. `instances` lists keep their existing order and
+--- `--show` output does not move for a change that is pure performance.
+local function by_file(nodes)
+    local order, buckets = {}, {}
+    for _, n in ipairs(nodes or {}) do
+        -- ★ FUNCTIONS *AND* METHODS. The single-word restriction that hid all of this.
+        if n.kind == 'function' or n.kind == 'method' then
+            -- a node with no file still gets a bucket: expr.of refuses it, and dropping
+            -- it here instead would change WHICH subjects are attempted
+            local key = n.file or '\0nofile'
+            local b = buckets[key]
+            if not b then b = {}; buckets[key] = b; order[#order + 1] = key end
+            b[#b + 1] = n
+        end
+    end
+    return order, buckets
+end
+
 --- Census the expr self-gate over an extracted graph.
 --- Returns { fns, methods, total, cats } where `cats` is the DIFFABLE map (mirrors
 --- rowcensus.check / dfparity.check so a caller can treat all three identically).
@@ -43,9 +78,14 @@ function M.check(store)
     local cats = { total = 0 }
     local fns, methods = 0, 0
     local instances = {}
-    for _, n in ipairs(store.data.nodes or {}) do
-        -- ★ FUNCTIONS *AND* METHODS. The single-word restriction that hid all of this.
-        if n.kind == 'function' or n.kind == 'method' then
+    local order, buckets = by_file(store.data.nodes)
+    -- counters are PROCESS-cumulative (the cache outlives any one call), so this call's
+    -- share is a delta — otherwise a second corpus in the same process reports the first
+    -- one's hits as its own
+    local p0 = expr.parse_stats()
+    local freed = 0
+    for _, fkey in ipairs(order) do
+        for _, n in ipairs(buckets[fkey]) do
             local ok, got = pcall(expr.of, store, n.id)
             if ok and got and got.fl then
                 if n.kind == 'method' then methods = methods + 1 else fns = fns + 1 end
@@ -69,9 +109,33 @@ function M.check(store)
                 end
             end
         end
+        -- ★ RELEASE AT THE BOUNDARY, then collect ON A BYTE BUDGET. Two measurements
+        -- decided the pair, and neither alone was enough: an ISOLATED re-parse loop with a
+        -- forced collect held RSS flat (28.8 MB over 20 iterations vs 350.3 without),
+        -- while the real census with a collect every 20 subjects and NO release recovered
+        -- only ~30% and still died. Dropping the reference is what lets the collection
+        -- work at all.
+        --
+        -- ★ BUT COLLECTING PER FILE COSTS MORE THAN IT SAVES — MEASURED, and it is the one
+        -- thing in this change that made anything WORSE. go has 923 files, and a full
+        -- collect after each took the census from 38 s to 179 s, a 4.7× slowdown, for a
+        -- peak that was already down to the extract's. So the trigger is the quantity that
+        -- actually drives the peak: SOURCE BYTES released since the last collect.
+        --
+        -- The budget is derived, not picked: a parse costs a MEASURED 21–53 bytes of RSS
+        -- per source byte, so 8 MB of released source is at most ~400 MB of dead tree
+        -- awaiting collection — comfortably under any corpus budget, while a small-file
+        -- corpus now collects a handful of times instead of once per file. A single file
+        -- larger than the budget (zig's 11 MB CodeGen.zig) trips it on its own, which is
+        -- exactly the case that needs it.
+        freed = freed + expr.parse_release()
+        if freed >= 8 * 1024 * 1024 then collectgarbage(); freed = 0 end
     end
+    local p1 = expr.parse_stats()
     return { fns = fns, methods = methods, total = cats.total, cats = cats,
-        instances = instances }
+        instances = instances,
+        parse = { hit = p1.hit - p0.hit, miss = p1.miss - p0.miss,
+            concat = p1.concat - p0.concat } }
 end
 
 --- Census one-liner (stable order: total first, then classes by descending count).
@@ -267,6 +331,31 @@ M.EXPECTED = {
         ['binder:sequence_expression'] = 1, ['binder:variable_declaration'] = 1 },
     nio = { total = 34, ['missing:return_statement'] = 15, ['missing:variable_declaration'] = 9,
         ['missing:assignment_statement'] = 6, ['missing:function_call'] = 4 },
+    -- ★★ FIRST PIN EVER (CART-0423). odin could not be censused at ALL until the per-file
+    -- parse landed — it ran out of memory at subject 4150 of 32370 and reported nothing,
+    -- so this corpus has been listed, extracted and pinned for `counts` while contributing
+    -- ZERO to the expression census since the census shipped. 16585 is not a regression;
+    -- it is the first sight of a number that was always there.
+    -- ★ READ IT WITH CART-0427 IN HAND: 66.7% of odin's 32370 subjects live in six
+    -- GENERATED files, so these classes are weighted by a code generator's idiom, not by
+    -- odin's. `missing:assignment_statement` 6490 is the same wound as CART-0304 (odin
+    -- harvested 0 of 23178 assignments) seen from the census side.
+    odin = { total = 16585, ['missing:assignment_statement'] = 6490,
+        ['missing:member_expression'] = 3783, ['missing:switch_case'] = 3553,
+        ['missing:call_expression'] = 668, ['missing:return_statement'] = 522,
+        ['missing:if_statement'] = 517, ['missing:defer_statement'] = 221,
+        ['missing:switch_statement'] = 186, ['missing:block'] = 134,
+        ['missing:when_statement'] = 120, ['both:switch_statement'] = 83,
+        ['extra:switch_statement'] = 76, ['missing:for_statement'] = 54,
+        ['missing:or_return_expression'] = 47, ['missing:label_statement'] = 33,
+        ['missing:update_statement'] = 30, ['missing:struct_declaration'] = 22,
+        ['binder:expression_statement'] = 16, ['missing:else_if_clause'] = 7,
+        ['missing:const_declaration'] = 6, ['missing:binary_expression'] = 3,
+        ['missing:case_statement'] = 2, ['missing:or_break_expression'] = 2,
+        ['missing:variable_assignment'] = 2, ['missing:variable_declaration'] = 2,
+        ['binder:for_statement'] = 1, ['both:else_if_clause'] = 1,
+        ['missing:case_item'] = 1, ['missing:declaration_command'] = 1,
+        ['missing:range_expression'] = 1, ['missing:var_declaration'] = 1 },
     php = { total = 857, ['binder:expression_statement'] = 437, ['missing:pair'] = 140,
         ['missing:foreach_statement'] = 139, ['missing:expression_statement'] = 103,
         ['missing:return_statement'] = 31, ['missing:if_statement'] = 5,
@@ -301,6 +390,79 @@ M.EXPECTED = {
     synlua = { total = 49, ['missing:variable_declaration'] = 35, ['missing:function_call'] = 6,
         ['missing:return_statement'] = 4, ['missing:elseif_statement'] = 2,
         ['missing:cond'] = 1, ['missing:if_statement'] = 1 },
+    -- ★★ FIRST PIN EVER (CART-0423), and the FOURTH and last of the corpora that could not
+    -- be censused at all. v8 is also the one that says the per-file parse was not merely a
+    -- big-file fix: it never hit a CodeGen.zig-sized file, it died on 146k subjects.
+    -- ⚠ READ `total` WITH THE DISTINCT COUNT BESIDE IT: 165533 instances over 10274 DISTINCT
+    -- rows — 16.1×, the highest of any corpus. That is CART-0410's wound at full size: a .h
+    -- C++ header parsed as C becomes ONE function_definition that every method in the header
+    -- resolves to, so a row is counted once per enclosing function. `missing:preproc_
+    -- function_def` is 77685 instances over 1403 rows (55×) and `binder:declaration` 30547
+    -- over 3859 (7.9×) — the inflation is PER-CLASS, so this list is NOT a priority order.
+    -- Rank v8's work by the distinct column the CLI prints, never by these numbers.
+    -- Pinned on instances anyway, because every other pin is, and re-keying would move all
+    -- twenty-three at once for a reporting change.
+    v8 = { total = 165533, ['missing:preproc_function_def'] = 77685,
+        ['binder:declaration'] = 30547, ['missing:declaration'] = 20791,
+        ['binder:compound_statement'] = 17461, ['missing:expression_statement'] = 7157,
+        ['missing:if_statement'] = 4169, ['missing:case_statement'] = 3643,
+        ['missing:preproc_def'] = 1871, ['binder:if_statement'] = 1470,
+        ['missing:for_range_loop'] = 192, ['both:declaration'] = 156,
+        ['binder:namespace_definition'] = 133, ['missing:compound_statement'] = 47,
+        ['binder:ERROR'] = 37, ['both:expression_statement'] = 35,
+        ['binder:while_statement'] = 33, ['binder:expression_statement'] = 27,
+        ['both:compound_statement'] = 24, ['extra:if_statement'] = 14,
+        ['missing:return_statement'] = 12, ['binder:for_statement'] = 10,
+        ['both:if_statement'] = 7, ['binder:template_declaration'] = 6,
+        ['missing:static_assert_declaration'] = 4,
+        ['missing:assignment_expression'] = 1, ['missing:attributed_statement'] = 1 },
+    -- ★★ FIRST PIN EVER (CART-0423). wow is the third corpus the per-file parse unlocked.
+    -- ★ AND IT IS THE ONE THAT SAYS THE FIX IS NOT ABOUT BIG FILES. wow is 353 addons of
+    -- ordinary-sized Lua — it died on VOLUME (39748 subjects), not on any single enormous
+    -- file the way zig did, and the same change carries both. Its shape is also the
+    -- cleanest evidence that the census's classes are language-idiom-driven rather than
+    -- size-driven: three `missing` classes hold 99% of it, and `missing:function_call` 945
+    -- is the string-dispatch idiom [[wow-addons-corpus]] keeps this corpus for.
+    -- ⚠⚠ AND NOTHING SWEEPS THIS PIN — I ADDED IT AND THEN MEASURED THAT (CART-0428).
+    -- matrix's default roster is "every corpus with PINNED EXPECTED COUNTS" (matrix.lua:627,
+    -- gated on `v.expected`). corpora.lua leaves wow's `counts` unpinned DELIBERATELY,
+    -- because it is a LOCAL addon tree that drifts as addons update. So wow is not in the
+    -- 31-corpus sweep, and this number is only ever compared when a human names wow.
+    -- ★ WHICH MEANS AN EQUALITY PIN IS THE WRONG SHAPE HERE, not merely an unswept one.
+    -- matrix.lua:632 already argues it for `self`: a LIVING corpus goes red by DRIFT rather
+    -- than by regression, "the worst kind of gate, because the only way to green it is to
+    -- re-save, which blesses whatever drifted unread" — and the answer there was a RATCHET
+    -- (a count that may not RISE), asserted by dogfood.lua. That is what wow wants too.
+    -- Kept as a recorded number, NOT presented as gated, until someone builds the ratchet.
+    wow = { total = 3261, ['missing:assignment_statement'] = 1367,
+        ['missing:function_call'] = 945, ['missing:variable_declaration'] = 905,
+        ['missing:return_statement'] = 42, ['missing:for_generic_clause'] = 1,
+        ['missing:for_statement'] = 1 },
+    -- ★★ FIRST PIN EVER (CART-0423), same story as odin: zig died at subject 570 of 8590
+    -- and reported nothing, so its 16088 disagreements have been invisible since the
+    -- census shipped. NOT a regression — a first sighting.
+    -- ★ AND THE HEADLINE IS ONE CLASS: `binder:variable_declaration` = 14002, 87% of the
+    -- whole corpus, over 14002 DISTINCT rows (1.0×, no inflation — this is real breadth).
+    -- ★★ IT IS CART-0404 IN A THIRD LANGUAGE, not a destructuring gap. PROBED, because the
+    -- class NAME invites the wrong story: every instance is `missing={} extra={<the declared
+    -- name>}` on an ordinary single-name declaration — `const ip = &zcu.intern_pool;`,
+    -- `var n: usize = 0;`. The row's own TARGET is being harvested as a READ. That is the
+    -- INVERSE of the vanished-binder family (CART-0358 / CART-0420), where a binder's names
+    -- were LOST; here du is right and the IR over-reads. zig has essentially no correct
+    -- declaration handling, which is why one class is 87% of a corpus.
+    -- Pinned, not asserted zero, for rowcensus's reason: an open class is not a reason to
+    -- keep the count invisible.
+    zig = { total = 16088, ['binder:variable_declaration'] = 14002,
+        ['extra:switch_expression'] = 812, ['binder:block_expression'] = 498,
+        ['binder:switch_case'] = 298, ['missing:variable_declaration'] = 237,
+        ['binder:block'] = 94, ['binder:if_statement'] = 40,
+        ['binder:declaration'] = 25, ['binder:expression_statement'] = 14,
+        ['binder:comptime_statement'] = 13, ['extra:for_statement'] = 13,
+        ['extra:while_statement'] = 12, ['extra:if_statement'] = 11,
+        ['binder:defer_statement'] = 5, ['binder:errdefer_statement'] = 4,
+        ['binder:compound_statement'] = 4, ['extra:identifier'] = 2,
+        ['binder:for_range_loop'] = 1, ['binder:return_expression'] = 1,
+        ['extra:while_expression'] = 1, ['missing:expression_statement'] = 1 },
 }
 
 -- ── THE RUNNER (CART-0409) ──────────────────────────────────────────────────────────────
@@ -384,6 +546,16 @@ if invoked then
     local dist = M.distinct(r.instances)
     print(('%s  fns=%d methods=%d%s'):format(target, r.fns, r.methods,
         want_lang and ('  [lang=' .. want_lang .. ']') or ''))
+    -- ★ THE CACHE'S HIT RATE IS PRINTED, NOT ASSUMED (CART-0423). The by-file walk and the
+    -- one-entry parse cache are useless apart, and a silent no-hit degrades to EXACTLY the
+    -- old cost — which is how four corpora came to be unrunnable without anyone noticing.
+    -- `miss` is the number of PARSES: it should track the file count, and a miss count
+    -- near the subject count means the grouping stopped working. That is the whole proof.
+    if r.parse then
+        print(('  parse: %d hit / %d miss (parses) / %d concat — %.1f%% reuse'):format(
+            r.parse.hit, r.parse.miss, r.parse.concat,
+            100 * r.parse.hit / math.max(1, r.parse.hit + r.parse.miss)))
+    end
     print('  ' .. M.census_distinct(r.cats, dist))
     if (r.cats.total or 0) > (dist.total or 0) then
         print(('  ↑ %d instance(s) over %d distinct row(s) — %.1f× — a row is counted once'

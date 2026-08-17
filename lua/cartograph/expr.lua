@@ -1349,24 +1349,108 @@ local function lang_of_file(file)
     return (lang and SUPPORTED[lang]) and lang or nil
 end
 
-local function fn_node(node, src, lang)
+-- ── the one-entry parse cache (CART-0423) ──────────────────────────────────
+--
+-- ★ THE MEASUREMENT THAT FORCED IT. This layer re-parses the WHOLE FILE once per
+-- subject, which is right for a single interactive visit and quadratic-ish for a
+-- consumer that sweeps every function in a file. MEASURED: one tree-sitter parse
+-- costs 21–53 BYTES OF RSS PER SOURCE BYTE — 16.9 MB for zig's InternPool.zig,
+-- 564 MB for its 11 MB CodeGen.zig — and the census's growth rate inside a file
+-- (16.9 MB/subject) equals the isolated per-parse cost EXACTLY, so the re-parse
+-- was the whole of it. zig and odin died at 6 GB; nothing else was near.
+--
+-- ★★ AND THE LUA GC CANNOT SEE ANY OF IT. The allocation is tree-sitter's, C-side:
+-- while RSS tripled the Lua heap FELL, 834 → 465 MB. Forcing a collection every 20
+-- subjects recovered only ~30% and still died — measured, not assumed. So this could
+-- never have been fixed by collecting harder; the parse had to stop happening.
+--
+-- ★ WHY IT IS KEYED ON CONTENT AND NOT ON A FILE PATH. A path key needs a lifetime
+-- and an invalidation story, and gets one wrong the first time a buffer changes
+-- under a live cockpit. Keying on the source ITSELF makes a stale hit impossible by
+-- construction: identical bytes, identical tree, no lifetime to get wrong. The cost
+-- is one comparison, against a parse that costs megabytes.
+--
+-- TWO KEYS, cheapest first. `lines` is the table `store.content` handed back: when a
+-- caller holds one file's lines across its subjects (matrix's shim does, and so does
+-- the census), identity alone answers and we skip the `table.concat` as well — which
+-- on CodeGen.zig is an 11 MB string per subject that no longer gets built. When the
+-- store returns a fresh table each call the identity misses and the STRING compare
+-- still saves the parse, so a store that does not cooperate loses the concat and
+-- keeps the win that matters.
+--
+-- ONE ENTRY, deliberately: the point is to bound retention, and holding N trees to
+-- serve a walk that only ever looks at one file is the same bug in a new place.
+local pc = { hit = 0, miss = 0, concat = 0 }
+
+--- Drop the cached tree. A sweeping consumer calls this at a FILE BOUNDARY so the
+--- outgoing tree is released BEFORE the next one is parsed, instead of holding both
+--- across the handover — 564 MB of overlap on zig's largest file.
+---
+--- Returns the SOURCE BYTES just released, which is the only honest proxy a caller has
+--- for how much C-side memory is now collectable: the Lua GC cannot see a tree-sitter
+--- tree (measured: heap 1.4 MB while RSS grew 337 MB), so a consumer deciding when to
+--- collect has to count what the GC will not.
+---@return integer bytes  source bytes of the dropped tree, 0 if nothing was cached
+function M.parse_release()
+    local n = pc.src and #pc.src or 0
+    pc.lines, pc.src, pc.lang, pc.root, pc.parser = nil, nil, nil, nil, nil
+    return n
+end
+
+--- Cache counters, so a consumer can PROVE the cache engaged rather than assume it.
+--- A silent no-hit degrades to exactly the old behaviour, which is the failure mode
+--- this codebase keeps paying for — so the number is reportable.
+function M.parse_stats() return { hit = pc.hit, miss = pc.miss, concat = pc.concat } end
+
+--- The tree ROOT for `src`, reusing the cached tree when the bytes are identical.
+--- `lines` is optional and only ever a FAST PATH — the string compare is the truth.
+local function parse_root(src, lang, lines)
+    if pc.root and pc.lang == lang and (
+            (lines ~= nil and rawequal(pc.lines, lines)) or pc.src == src) then
+        pc.hit = pc.hit + 1
+        return pc.root
+    end
+    pc.miss = pc.miss + 1
+    -- release BEFORE parsing: two trees alive at once is the peak we are cutting
+    M.parse_release()
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
     if not ok then return nil end
-    local root = parser:parse()[1]:root()
+    local tree = parser:parse()[1]
+    local root = tree and tree:root() or nil
+    if not root then return nil end
+    -- the PARSER is kept alive alongside the root: a TSNode is only valid while its
+    -- tree is, and the tree's owner is the parser
+    pc.lines, pc.src, pc.lang, pc.root, pc.parser = lines, src, lang, root, parser
+    return root
+end
+
+--- The source for `node`, skipping the concat when the cached tree already holds it.
+--- Returns (src, lines) — `src` is nil only when the file is unreadable, which the
+--- caller must keep distinguishing from an empty one.
+---
+--- ★ THE ONE ASSUMPTION THE "no stale hit" CONSTRUCTION RESTS ON. The string compare is
+--- exact and needs nothing; the `rawequal` fast path additionally assumes a store never
+--- re-serves the SAME table with DIFFERENT bytes. VERIFIED for every store that exists:
+--- `store.content` keys its cache on the transport stamp and replaces the entry with a
+--- fresh `readfile` table when the stamp moves — it never mutates lines in place — and the
+--- matrix/census shims re-read into a new table per file. So identity inherits exactly
+--- store.content's stamp guarantee, no weaker. A future store that hands back a mutated
+--- buffer-backed table would break this path and only this path.
+local function file_src(store, node)
+    local lines = store.content(node)
+    if lines == nil then return nil, nil end
+    if pc.src and rawequal(pc.lines, lines) then return pc.src, lines end
+    pc.concat = pc.concat + 1
+    return table.concat(lines, '\n'), lines
+end
+
+local function fn_node(node, root, lang)
+    if not root then return nil end
     local d = root:named_descendant_for_range(at.sl(node.range), at.sc(node.range),
         at.el(node.range), at.ec(node.range))
     local fnt = ts.fn_types(lang)
     while d do if fnt[d:type()] then return d end; d = d:parent() end
     return nil
-end
-
---- The tree ROOT for a whole file — a module's statement sequence, where fn_node
---- would look for an enclosing function and find none.
-local function root_node(src, lang)
-    local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
-    if not ok then return nil end
-    local tree = parser:parse()[1]
-    return tree and tree:root() or nil
 end
 
 --- the focused fn's flow record WITH per-row `.expr` harvested (aligned 1:1). INC 1
@@ -1378,8 +1462,13 @@ function M.of(store, fn_id)
     local lang = lang_of_file(node.file)
     if not lang or not spec[lang] then return nil end
     local s = spec[lang]
-    local src = table.concat(store.content(node) or {}, '\n')
-    local fn = fn_node(node, src, lang)
+    -- `or ''` keeps M.of's existing answer for an unreadable file: an empty source
+    -- parses to a childless root, fn_node finds no enclosing function, and this
+    -- returns nil. of_module refuses EXPLICITLY because it would otherwise report
+    -- "no statements"; here the refusal already falls out, so nothing changes.
+    local src, lines = file_src(store, node)
+    src = src or ''
+    local fn = fn_node(node, parse_root(src, lang, lines), lang)
     if not fn then return nil end
     local cfg = { pfield = s.params_field, df_ids = s.df_ids, regime = s.regime,
         ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
@@ -1433,10 +1522,9 @@ function M.of_module(store, mod_id)
     -- concat to '', parse to a childless root, and hand back a record with zero
     -- rows — an unreadable file rendered as "this module has no statements",
     -- which is the absence-as-silence class this codebase keeps paying for.
-    local lines = store.content(node)
-    if not lines then return nil end
-    local src = table.concat(lines, '\n')
-    local root = root_node(src, lang)
+    local src, lines = file_src(store, node)
+    if not src then return nil end
+    local root = parse_root(src, lang, lines)
     if not root then return nil end
     local cfg = { seq = true, df_ids = s.df_ids, regime = s.regime,
         ctrl = s.ctrl, preloop = s.preloop, body = s.body, clause = s.clause, -- CART-0363
