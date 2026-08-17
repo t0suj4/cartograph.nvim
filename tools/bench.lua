@@ -161,7 +161,60 @@ function M.median(f, n, ...)
         min = walls[1], max = walls[#walls], runs = n }
 end
 
+-- ── the WARM dev loop (CART-0429) ─────────────────────────────────────────────────────
+--
+-- ★ WHY THE DEFAULT IS COLD AND STAYS COLD. `M.extract` has always gone straight to the
+-- provider, never to the cache, and that is CORRECT FOR A GATE: a cache can mask the very
+-- bug being gated, and CART-0245 is the proof it has happened — a warm zig graph carried
+-- 4122 edges into nodes that were never saved while the `valid` column stayed green,
+-- because validate ran on the COLD graph and nothing ran it on the artifact the cache
+-- produced. So warm is OPT-IN, gates opt OUT explicitly, and what warm serves is VALIDATED
+-- before it is handed back.
+--
+-- ★ WHAT IT BUYS: measured, a repeat extract of an UNCHANGED corpus costs the same as the
+-- first (12.30s -> 11.48s on go — no reuse at all), and zig is 106.8s on EVERY invocation.
+-- A dev iterating on an analyzer re-pays that every run.
+--
+-- TWO WAYS IN, and `cold` beats both: `opts.warm`, else $CARTOGRAPH_BENCH_WARM=1 for a whole
+-- shell session. ★ THE ENV VAR IS EXACTLY WHY `opts.cold` EXISTS — a dev who exports it and
+-- then runs the matrix must not silently gate on a cached artifact, so THE GATE TOOLS SAY
+-- COLD rather than trusting the environment not to say warm. An opt-out that depends on
+-- nobody having opted in is not an opt-out.
+local WARM_REFUSING = { 'files', 'defs_only', 'dataflow_only', 'index_only', 'subdirs',
+    'legacy_df' }
+
+--- May this extract be served from / written to the corpus cache?
+--- Returns (true) or (false, reason). The reason is PRINTED, never swallowed: a run that
+--- asked for warm and silently went cold is indistinguishable from one where warm did not
+--- help, and that is the class of silence this repo keeps paying for.
+local function warm_ok(opts)
+    local asked
+    if opts and opts.warm ~= nil then asked = opts.warm
+    else asked = vim.env.CARTOGRAPH_BENCH_WARM == '1' end
+    -- ★ SILENT UNLESS A REQUEST WAS DENIED. The matrix passes `cold` on all 31 rows, so
+    -- announcing every one would bury the case that matters — a dev who exported the env
+    -- var and needs to know THIS run ignored it. Say nothing when nobody asked.
+    if opts and opts.cold then
+        return false, asked and 'the caller asked for a COLD extract (overriding warm)' or nil
+    end
+    if not asked then return false end
+    -- ★ A NON-CANONICAL EXTRACT MUST NOT TOUCH THE CORPUS CACHE, IN EITHER DIRECTION.
+    -- `--file` is the sharp case this ships beside: a scoped extract holds a SUBSET of the
+    -- corpus, so WRITING it would poison the cache for every later reader, and READING the
+    -- full cache would silently undo the scoping the caller just asked for. Same for the
+    -- defs_only / dataflow_only / index_only shapes — a different graph under one key.
+    for _, k in ipairs(WARM_REFUSING) do
+        if opts and opts[k] ~= nil then
+            return false, ('opts.%s makes this a NON-CANONICAL extract'):format(k)
+        end
+    end
+    return true
+end
+
 --- The common case: bootstrapped, measured extract of a corpus.
+--- `opts.warm` (or $CARTOGRAPH_BENCH_WARM=1) serves an incremental warm open when one is
+--- available; `opts.cold` refuses warm outright and wins over both. `stats.warm` records
+--- which path ran, so a caller that reports timings can say WHICH NUMBER IT MEASURED.
 function M.extract(name_or_root, opts)
     M.bootstrap()
     local c = M.corpus(name_or_root)
@@ -171,8 +224,51 @@ function M.extract(name_or_root, opts)
     -- overlay packs (rails): a corpus declares its framework packs; thread them
     -- into extraction opts so the composed spec is used
     if c.packs then opts = vim.tbl_extend('keep', { packs = c.packs }, opts or {}) end
+
+    local want, why = warm_ok(opts)
+    if why then print('bench: COLD — ' .. why) end
+    if want then
+        local cache = require 'cartograph.cache'
+        -- cache.open is the INCREMENTAL open: it validates stamps, re-extracts the files
+        -- that changed, drops deleted ones, and returns nil when there is nothing usable.
+        -- It also refuses a VERSION mismatch and a profile-overridden graph, so an
+        -- extraction-behaviour change invalidates this path for free.
+        -- the note comes out through an upvalue, NOT a second return: M.measure returns
+        -- (result, stats, all), so `local d, note = M.measure(...)` silently binds `note`
+        -- to the STATS table — which is how the first cut printed "WARM — table: 0x…".
+        local note
+        local data, stats = M.measure(function ()
+            local d, n = cache.open(c.root)
+            note = n
+            return d
+        end)
+        if data then
+            -- ★★ VALIDATE WHAT WARM SERVES (CART-0245). The `valid` column checks the COLD
+            -- graph; a warm graph that never meets validate is exactly how 4122 dangling
+            -- edges shipped green. Measured cost 0–205 ms (v8 worst, against a 178s
+            -- extract), so this is affordable on the path whose whole point is speed.
+            local vr = require('cartograph.validate').check(data)
+            if vr.ok then
+                -- ★ REPORT THE WARM OPEN'S REAL COST, not a fabricated zero. The first cut
+                -- measured an empty closure to manufacture a stats table, which would have
+                -- had every warm run claim ~0s for work that genuinely reads and decodes
+                -- every shard. A timing this path prints must be a timing of this path.
+                stats.corpus, stats.warm = c, true
+                print(('bench: WARM — %s'):format(note or 'cache open'))
+                return data, stats
+            end
+            -- a bad warm graph is a CACHE bug, not a reason to fail the caller: say so
+            -- loudly and fall through to the cold path, which is always correct
+            print('bench: WARM GRAPH INVALID, falling back to COLD — '
+                .. require('cartograph.validate').report(vr))
+        end
+    end
+
     local data, stats = M.measure(function () return prov.extract(c.root, opts) end)
-    stats.corpus = c
+    stats.corpus, stats.warm = c, false
+    -- write the cache only for a CANONICAL extract that asked for warm, so the next
+    -- iteration is the fast one. A gate never reaches here (it never asked).
+    if want then pcall(function () require('cartograph.cache').save(data) end) end
     return data, stats
 end
 

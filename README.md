@@ -2848,6 +2848,29 @@ nvim --headless -u NONE -l tools/matrix.lua --quick      # seconds-tier only
 nvim --headless -u NONE -l tools/matrix.lua libs server  # named rows
 nvim --headless -u NONE -l tools/matrix.lua --cols par   # one column
 nvim --headless -u NONE -l tools/matrix.lua --save       # re-baseline structs
+# THE DEV LOOP IS COLD BY DEFAULT, AND THAT IS THE POINT (CART-0429). `bench.extract` goes
+# straight to the provider and never consults the cache, because A GATE MUST NOT VERIFY A
+# CACHED ARTIFACT — CART-0245 is the proof it matters: a warm zig graph once carried 4122
+# edges into nodes that were never saved while the `valid` column stayed green, since
+# validate ran on the COLD graph and nothing ran it on what the cache produced.
+# The cost is real though. MEASURED: a repeat extract of an UNCHANGED corpus buys nothing
+# (go 12.30s -> 11.48s), and zig is 106.8s on EVERY invocation — so iterating on an
+# analyzer re-pays a full extraction every run.
+# So warm is OPT-IN, per call or per shell, and it VALIDATES what it serves before handing
+# it back (0-205 ms, measured, against extracts of tens of seconds):
+CARTOGRAPH_BENCH_WARM=1 nvim --headless -u NONE -l tools/exprcensus.lua go
+#   bench: WARM — warm open — 922 files unchanged
+#   go  fns=4143 methods=4067 · disagreements=3053 · PINNED: matches   26.7s -> 13.1s
+# ★ GATES SAY `cold` EXPLICITLY rather than trusting the environment not to say warm — an
+# opt-out that depends on nobody having opted in is not an opt-out. tools/gate.lua and
+# tools/matrix.lua both pass it, and the matrix would otherwise make its own `cache` column
+# CIRCULAR: that column exists to prove warm == cold, which it cannot do while reading the
+# warm graph as its own baseline.
+# ★ AND A NON-CANONICAL EXTRACT NEVER TOUCHES THE CORPUS CACHE, in either direction —
+# `--file`, defs_only, dataflow_only, index_only, legacy_df. A scoped extract holds a
+# SUBSET: writing it would poison the cache for every later reader, and reading the full
+# cache would silently undo the scoping the caller just asked for. It says so out loud:
+#   bench: COLD — opts.files makes this a NON-CANONICAL extract
 # GENERATED-CODE fuzz bed: synthesize a corpus (seeded, deterministic, valid
 # by construction — tree-sitter parse-clean, lua additionally load()-asserted)
 # and let the matrix's invariant columns judge it. The third oracle kind: not

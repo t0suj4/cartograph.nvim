@@ -68,7 +68,13 @@ if parallel then
         data._callstore = nil
     end
 else
-    data, stats = bench.extract(name)
+    -- ★ A GATE IS COLD, ALWAYS AND EXPLICITLY (CART-0429). bench honours
+    -- $CARTOGRAPH_BENCH_WARM for the dev loop, so a developer who exported it in this shell
+    -- must not have their GATE quietly verify a cached artifact instead of a fresh extract.
+    -- Saying `cold` here beats the env; an opt-out that relies on nobody having opted in is
+    -- not an opt-out. CART-0245 is why it matters: a warm graph once carried 4122 dangling
+    -- edges into nodes that were never saved while the checks stayed green.
+    data, stats = bench.extract(name, { cold = true })
 end
 print(bench.fmt(stats) .. (parallel and '  [parallel]' or ''))
 if parallel then

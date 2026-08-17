@@ -153,7 +153,12 @@ local function run_row(name)
     local cells = {}
     local function cell(col, s, d) cells[col] = { s = s, d = d } end
 
-    local data, stats = bench.extract(name)
+    -- ★ THE MATRIX IS A GATE, SO IT IS EXPLICITLY COLD (CART-0429). bench honours
+    -- $CARTOGRAPH_BENCH_WARM so a dev loop can reuse a cache; a sweep that produces
+    -- PASS/FAIL must never inherit that from the environment. ★ AND THE `cache` COLUMN
+    -- BELOW WOULD GO CIRCULAR IF IT DID — it exists to prove warm == cold, which it cannot
+    -- do while reading the warm graph as its own baseline.
+    local data, stats = bench.extract(name, { cold = true })
     local c = require('cartograph.census').take(data)
 
     -- GRACEFUL DEGRADE (perf-cut P1 follow-on): a corpus whose extract alone
