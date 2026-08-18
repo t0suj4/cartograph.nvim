@@ -924,6 +924,55 @@ function M.harvest_row(node, src, hint, lang)
             end
         end
         if seen and #dlhs > 0 then return { lhs = dlhs, rhs = drhs } end
+        -- ★ A FLAT DECLARATION: `names = value` with NO declarator node at all (CART-0404).
+        -- zig spells `const x: u31 = f(i);` as a `variable_declaration` whose children are
+        -- the bare identifier, an optional `type` FIELD, the `=` token and the initialiser —
+        -- no `init_declarator`, no `variable_declarator`, nothing for the loop above to key
+        -- on. So `seen` stayed false, the lossy fallback below refused it (correctly: a
+        -- builtin_function is not a NAME), and the row fell to the generic `?` path, which
+        -- reads every identifier it meets — INCLUDING THE DECLARED NAME. 14002 distinct rows,
+        -- 87% of zig's entire census and the largest single class in any corpus.
+        --
+        -- ★★ AND THE MACHINERY FOR IT WAS ONE BRANCH AWAY, BUILT FOR ANOTHER LANGUAGE.
+        -- `assign_sides`'s positional fallback splits on the assignment OPERATOR TOKEN and
+        -- returns N targets / M values; it exists because odin's `assignment_statement`
+        -- carries no fields either (CART-0304). A zig `variable_declaration` is that same
+        -- syntactic shape wearing a declaration's name, and zig.lua's own import walk
+        -- already reads it exactly this way (`if t == '=' then eq = true`). So this is not a new
+        -- zig-shaped rule inside a language-agnostic IR — it is the operator split, reused,
+        -- which is also what makes it agree with du instead of merely disagreeing less.
+        --
+        -- ★ IT CANNOT FIRE FOR THE SHAPES THAT MADE THIS TICKET'S FIRST CUT WORSE. Both
+        -- earlier paths win first, and this one needs an assignment OPERATOR: C's
+        -- `Foo f(x);` and `int a, b;` have none, so they still reach the honest fallback
+        -- below and the `?` path. The failure mode that cost 139174 rows was a fallback
+        -- claiming shapes it did not model; this one claims only `<targets> = <values>`.
+        do
+            local _, _, before, after = assign_sides(node, src)
+            if before and after then
+                -- ★ THE DECLARED TYPE IS A READ, NOT A DROP — and that is a zig fact, not a
+                -- taste. `const items: []const Inst.Ref = @ptrCast(…)` has du reading
+                -- {Inst, Ref}: in zig a type IS a value (`const T = struct {…}`), so naming
+                -- one really is a read of that binding. The fallback below drops types
+                -- because C's `int` is a KEYWORD and names nothing — right there, wrong
+                -- here. Dropping it cost 5 `missing:{Inst,Ref}` rows on one file, which is
+                -- how the difference surfaced at all. `field` returns a LIST because a
+                -- grammar may hang more than one.
+                local tys, frhs = {}, {}
+                for _, ty in ipairs(node:field('type')) do
+                    tys[ty:id()] = true
+                    frhs[#frhs + 1] = build(ty, src, lang)
+                end
+                local flhs = {}
+                for _, tn in ipairs(before) do
+                    if not tys[tn:id()] then flhs[#flhs + 1] = build(tn, src, lang) end
+                end
+                for _, tn in ipairs(after) do
+                    if not tys[tn:id()] then frhs[#frhs + 1] = build(tn, src, lang) end
+                end
+                if #flhs > 0 then return { lhs = flhs, rhs = frhs } end
+            end
+        end
         -- bare `local a, b` (no initializer): the names are defs, no value exprs
         -- ★ THIS FALLBACK IS LOSSY BY CONSTRUCTION — it keeps NAMES and drops everything
         -- else — and that was fine while only lua/js/java reached it, where a declaration

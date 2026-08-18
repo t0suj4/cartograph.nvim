@@ -424,3 +424,65 @@ test('exprcensus: a scoped extraction gives a file the same subjects as the full
     end
     for k in pairs(scoped) do ok(full[k], 'scoped run invented no subject: ' .. k) end
 end)
+
+-- ── zig's FLAT DECLARATION: `names = value`, no declarator node (CART-0404) ──────────────
+--
+-- ★★ WHY THIS IS GATED AND WHAT WOULD MAKE IT RED. zig spells `const x: T = y;` as a
+-- `variable_declaration` whose children are the bare identifier, an optional `type` FIELD,
+-- the `=` token and the initialiser — no `init_declarator`, no `variable_declarator`. Every
+-- earlier path in the LOCALDECL branch keys on one of those, so the row fell to the generic
+-- `?` walk, which reads every identifier it meets INCLUDING THE DECLARED NAME: 14002 distinct
+-- rows, 87% of zig's whole expression census and the largest single class in any corpus.
+-- These assert `harvest_row` DIRECTLY (via `expr.reads`, which is exactly what the self-gate
+-- compares against du's `use ∪ rmw`) rather than asserting a census agreed — a census can
+-- agree because both sides are wrong, which is how this defect survived: see the last case.
+local function zig_reads(line)
+    local src = 'fn f(index: usize, raw: u32, it: It) void {\n    ' .. line .. '\n}'
+    local root = vim.treesitter.get_string_parser(src, 'zig'):parse()[1]:root()
+    local found
+    local function rec(n)
+        if found then return end
+        if n:type() == 'variable_declaration' then found = n; return end
+        for c in n:iter_children() do if c:named() then rec(c) end end
+    end
+    rec(root)
+    if not found then return nil end
+    return table.concat(expr.reads(expr.harvest_row(found, src, nil, 'zig')), ',')
+end
+
+test('expr: a zig declaration does NOT read the name it declares', function ()
+    if not ready('zig') then skip 'no zig parser' end
+    -- RED IF: the flat-declaration split stops firing and the row falls back to the `?`
+    -- walk — every one of these grows the declared name, which IS the 14002-row defect.
+    eq('raw', zig_reads('const x = @backingInt(raw);'), 'plain declaration reads only its value')
+    eq('raw', zig_reads('const low: u31 = @truncate(raw);'), 'a builtin type contributes no name')
+    eq('pair', zig_reads('const a, const b = pair();'),
+        'BOTH binders of a destructuring declaration are targets, not reads')
+    eq('raw', zig_reads('_ = raw;'), "zig's discard idiom: `_` is the target, `raw` the read")
+end)
+
+test('expr: a zig declared TYPE is a READ, because in zig a type is a value', function ()
+    if not ready('zig') then skip 'no zig parser' end
+    -- ★ THE OPPOSITE OF THE C RULE, and the difference is not taste: `int` is a KEYWORD and
+    -- names nothing, while `Inst.Ref` is a real reference to the `Inst` binding — du reads
+    -- both names, and dropping the type cost 5 `missing:{Inst,Ref}` rows on one file.
+    -- RED IF: the type field is dropped again (or, worse, added to the LHS as a target).
+    eq('Inst,Ref,extra,it', zig_reads('const items: []const Inst.Ref = @ptrCast(it.extra);'),
+        'the type names are read, alongside the initialiser')
+    eq('Type,fromInterned,raw', zig_reads('const ty: Type = .fromInterned(raw);'),
+        'a bare type identifier is read too')
+end)
+
+test('expr: `var i: usize = index` reads index and NOT i — the row that exposed du', function ()
+    if not ready('zig') then skip 'no zig parser' end
+    -- ★★ THIS IS THE SPEC THAT STAYS MEANINGFUL WHEN SOMEONE LATER FIXES DU (CART-0431).
+    -- du records this row as `def={i,index} use={}` — it treats a bare-identifier initialiser
+    -- as a second BINDER, so a PARAMETER appears to be redefined here. Before the fix the two
+    -- sides AGREED, because the IR's `?` walk read both names too: two wrong sides agreeing is
+    -- exactly what a two-implementation gate exists to break, and it took fixing this side to
+    -- expose the other. So this assertion is about the IR alone and must not be relaxed to
+    -- match whatever du says today.
+    -- RED IF: the IR starts reading `i` again (the `?` fallback returning), or stops reading
+    -- `index` (a bare-identifier value mistaken for a second target).
+    eq('index', zig_reads('var i: usize = index;'))
+end)

@@ -268,7 +268,21 @@ end
 --   missing:*  on lua/java               CART-0403 — du counts a table-constructor KEY
 --       (`{ k = 2 }`) and a java ANNOTATION (`@SuppressWarnings`) as reads. Neither is a
 --       variable read; this side is du's, and fixing it moves the df census.
---   binder:declaration                   CART-0404 — 1378 on elasticsearch, C/C++ only.
+--   binder:declaration                   CART-0404 — the DECLARATOR long tail: cpp 110,
+--       cppmodern 106, v8 3859 distinct rows. C/C++ only, and it is what is LEFT after the
+--       flat-declaration split below; the shapes here have an `init_declarator` and no `=`
+--       at declaration level (`Foo f(x);`, `Foo f{x};`), which is why the split cannot reach
+--       them. ★ The header said "1378 on elasticsearch, C/C++ only" for five days after zig
+--       became the biggest instance of the same defect — a doc line is a claim too.
+--   binder:variable_declaration          CART-0404, THE ZIG HALF, FIXED — 14002 -> 1371 (zig
+--       total 16088 -> 3456, 78.5% of the corpus's census). zig's declaration is FLAT:
+--       `const x: T = y;` has no declarator node, so the row fell to the generic `?` walk,
+--       which reads every identifier including THE DECLARED NAME. The fix reuses the
+--       operator split built for odin's field-less assignments (CART-0304); the type is a
+--       READ, because in zig a type IS a value. ★ The 1371 that remain are DU's side
+--       (CART-0431): du treats a bare-identifier initialiser as a second binder, so
+--       `var i: usize = index;` records `def={i,index} use={}` and a PARAMETER looks
+--       redefined. Before the fix the two sides AGREED here, both reading the declared name.
 --
 -- ── recalib @ CART-0405, the combinatorial grid's FIRST RUN ─────────────────────────────
 -- The grid (tools/genmatrix.lua + tools/gridgate.lua) fired on EVERY `c_ifs_*_ch2` and
@@ -466,9 +480,19 @@ M.EXPECTED = {
     -- declaration handling, which is why one class is 87% of a corpus.
     -- Pinned, not asserted zero, for rowcensus's reason: an open class is not a reason to
     -- keep the count invisible.
-    zig = { total = 16088, ['binder:variable_declaration'] = 14002,
+    -- ★ RE-PINNED @ CART-0404's zig half: total 16088 -> 3456, `binder:variable_declaration`
+    -- 14002 -> 1371, `missing:variable_declaration` 237 -> 236. Every other class UNMOVED and
+    -- NO NEW CLASS APPEARED — which is the check this ticket's first C/C++ cut failed, where
+    -- fixing the aimed-at class minted 139174 rows of another and the NET went up 56%.
+    -- ★ THE 1371 THAT REMAIN ARE PINNED, NOT ASSERTED ZERO, AND THEY ARE DU'S SIDE
+    -- (CART-0431): du treats a bare-identifier initialiser as a second BINDER, so
+    -- `var i: usize = index;` records `def={i,index} use={}` and a PARAMETER looks redefined
+    -- at that line. Before this fix the two sides AGREED on those rows, both reading the
+    -- declared name — two wrong sides agreeing, which is precisely what a two-implementation
+    -- gate exists to break. Driving this number to 0 is a DU change and moves the df census.
+    zig = { total = 3456, ['binder:variable_declaration'] = 1371,
         ['extra:switch_expression'] = 812, ['binder:block_expression'] = 498,
-        ['binder:switch_case'] = 298, ['missing:variable_declaration'] = 237,
+        ['binder:switch_case'] = 298, ['missing:variable_declaration'] = 236,
         ['binder:block'] = 94, ['binder:if_statement'] = 40,
         ['binder:declaration'] = 25, ['binder:expression_statement'] = 14,
         ['binder:comptime_statement'] = 13, ['extra:for_statement'] = 13,

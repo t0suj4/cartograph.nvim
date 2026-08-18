@@ -2763,6 +2763,36 @@ nvim --headless -u NONE -l tools/exprcensus.lua cpp --bucket missing:declaration
 # in C++ at a scale the cpp corpus never showed. A CLASS'S COUNT AND ITS STORY ARE TWO
 # FINDINGS; this one took 53 seconds of `--show` to keep from hardening the wrong one.
 nvim --headless -u NONE -l tools/exprcensus.lua zig --show binder:variable_declaration
+# ★★ FIXED (CART-0404's zig half): zig 16088 -> 3456, `binder:variable_declaration`
+# 14002 -> 1371, and 78.5% of a corpus's census went with it. NO OTHER CLASS MOVED AND NO NEW
+# CLASS APPEARED — the check this ticket's first C/C++ cut failed, where fixing the aimed-at
+# class minted 139174 rows of another and the net went UP 56%.
+# THE CAUSE: zig's declaration is FLAT. `const x: T = y;` is a `variable_declaration` whose
+# children are the bare identifier, an optional `type` FIELD, the `=` token and the
+# initialiser — no `init_declarator`, no `variable_declarator`, so every earlier path in the
+# LOCALDECL branch had nothing to key on and the row fell to the generic `?` walk, which
+# reads every identifier it meets INCLUDING THE DECLARED NAME.
+# ★★ AND THE MACHINERY WAS ONE BRANCH AWAY, BUILT FOR ANOTHER LANGUAGE. `assign_sides`'s
+# positional fallback splits on the assignment OPERATOR TOKEN and returns N targets / M
+# values; it exists because odin's `assignment_statement` carries no fields (CART-0304). A
+# zig `variable_declaration` is that same syntactic shape wearing a declaration's name — so
+# this is the operator split reused, not a new zig-shaped rule inside a language-agnostic IR,
+# which is also why it AGREES with du rather than merely disagreeing less.
+# ★ THE DECLARED TYPE IS A READ, AND THAT IS A ZIG FACT: `const items: []const Inst.Ref =
+# …` has du reading {Inst, Ref}, because in zig a type IS a value (`const T = struct {…}`).
+# C's `int` is a KEYWORD and names nothing, so the older fallback drops types — right there,
+# wrong here, and dropping it cost 5 `missing:{Inst,Ref}` rows on one file.
+# ★ IT CANNOT FIRE WHERE THE FIRST CUT WENT WRONG: the path needs an assignment OPERATOR and
+# no declarator, so C's `Foo f(x);` and `int a, b;` still reach the honest fallback. MEASURED
+# CONTAINMENT: odin PINNED matches (its declarations are `const_declaration`/`var_declaration`,
+# not in LOCALDECL), 21 quick-tier rows all green, and rust's `binder:let_declaration` is 3 —
+# rust is NOT over-reading its declared names, so the defect is specific to the FLAT shape.
+# ★ THE 1371 THAT REMAIN ARE DU'S SIDE (CART-0431), pinned and visible rather than asserted
+# to zero: du treats a bare-identifier initialiser as a second BINDER, so `var i: usize =
+# index;` records `def={i,index} use={}` and a PARAMETER looks redefined at that line. Before
+# this fix the two sides AGREED on those rows, both reading the declared name. TWO WRONG SIDES
+# AGREEING IS WHAT A TWO-IMPLEMENTATION GATE EXISTS TO BREAK, and it took fixing one side to
+# expose the other — which is the argument for the gate, not a footnote to it.
 # COMBINATORIAL GRID: the bestiary plants each FORM once, and every bug the row model gave
 # up was at an INTERSECTION — elsif x CHAIN-LENGTH-2, block x CONDITION-POSITION, block x
 # ASSIGNMENT-RHS, rescue x INSIDE-A-BLOCK, modifier x LOOP. CART-0394 said it outright: "the
