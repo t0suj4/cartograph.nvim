@@ -60,6 +60,22 @@ return {
             (type_definition declarator: (type_identifier) @typedef) @def
         ]],
         params_field = 'parameters',
+        -- ★★ A `function_definition` HAS NO `parameters` FIELD, so `params_field` alone found
+        -- NOTHING and EVERY c/cpp function carried an EMPTY param list — silently, for as long as
+        -- the spec has existed (CART-0438). The list hangs one level down, on the
+        -- `function_declarator`, and through a pointer/reference wrapper for `int *f(int a)`.
+        -- ★ THE INNERMOST declarator, not the first: a C++20 constrained constructor nests a
+        -- SECOND `function_declarator` whose `parameters` is the misparsed member-init args
+        -- (CART-0435), so the outermost one answers the wrong list. Same descent the name walk
+        -- makes, for the same reason.
+        params_of = function (def)
+            local d, last = def:field('declarator')[1], nil
+            while d do
+                if d:type() == 'function_declarator' then last = d end
+                d = d:field('declarator')[1]
+            end
+            return last and last:field('parameters')[1] or nil
+        end,
         body_field = 'body',
         fn_types = { function_definition = true },
         is_method = function () return false end,

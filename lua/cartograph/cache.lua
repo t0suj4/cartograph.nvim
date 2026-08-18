@@ -73,7 +73,27 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 141 -- v141: TWO PARALLEL FIXES, ONE BUMP — the version is a SHARED COUNTER, so
+M.VERSION = 142 -- v142: TWO PARALLEL FIXES AGAIN, ONE BUMP — same protocol, same reason.
+               -- (a) CART-0438: C AND C++ FUNCTIONS HAD NO PARAMETERS AT ALL, always.
+               -- `params_field = 'parameters'` names a field a `function_definition` does not
+               -- have — the list hangs on the `function_declarator` one level down. Declared
+               -- `params_of` for both (descending to the INNERMOST declarator, since a
+               -- constrained ctor nests a misparsed outer one), and made `fn_params` honour
+               -- the hook it had been ignoring. ★ A HOOK HONOURED BY ONE OF ITS TWO READERS
+               -- IS WORSE THAN NO HOOK: flow's `param_names` consulted `params_of`, this one
+               -- did not, so odin declared it, got parameters in its FLOW and none on its
+               -- NODES, silently, for as long as the hook has existed.
+               -- (b) CART-0439: A MACRO BETWEEN `class` AND ITS NAME DISSOLVED THE CLASS.
+               -- `class V8_EXPORT_PRIVATE Foo : public Base {…}` parsed as a
+               -- `function_definition` — macro as the class name, real name in an ERROR, base
+               -- class as the declarator, class body as a FUNCTION BODY. New `src_repair`
+               -- spec slot blanks the macro WITH SPACES and re-parses to a fixpoint, so the
+               -- repair is LENGTH-PRESERVING and every byte range still addresses the raw
+               -- file; the repaired tree IS the control tree, so no query changed.
+               -- v8: 866 wreck sites -> 65, nodes -12151, refs -7623.
+               -- ★★ AND BOTH CALIBRATED cpp CORPORA ARE ZERO-DIFF — neither uses an export
+               -- macro — so this was invisible to every gate that watches C++.
+               -- v141: TWO PARALLEL FIXES, ONE BUMP — the version is a SHARED COUNTER, so
                -- it is the one thing two workers must not each decide. Both change what the
                -- extractor emits, so both need the same invalidation and neither owns it.
                -- (a) CART-0404, the C/C++ half of "the declaration row READS what it

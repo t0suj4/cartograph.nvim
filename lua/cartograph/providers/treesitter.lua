@@ -1228,7 +1228,12 @@ local function fn_locals(def, spec, src)
 end
 
 local function fn_params(def, spec, src, method)
-    local ps = spec.params_field and def:field(spec.params_field)[1]
+    -- ★ `params_of` IS THE POSITIONAL TWIN OF `params_field`, and this reader did not consult
+    -- it while flow's `param_names` did (CART-0438). A hook honoured by ONE of its two
+    -- readers is worse than no hook: odin's flow got its parameters and its NODES did not,
+    -- and nothing said so.
+    local ps = (spec.params_field and def:field(spec.params_field)[1])
+        or (spec.params_of and spec.params_of(def))
     local out = method and { 'self' } or {}
     if ps then
         for _, c in inext, ps, -1 do
@@ -6125,20 +6130,44 @@ function M.extract(root, opts)
                 end
             end
             local tsroot
-            local rawtree = raw_parse(lang, src) -- keep referenced: nodes
-            -- below live only as long as their tree does
-            local _pp = pstart()
-            if rawtree then
-                tsroot = rawtree:root()
-            else
-                local okp, parser = pcall(vim.treesitter.get_string_parser, src, lang)
-                if not okp then
-                    no_parser[lang] = true
-                    goto next_file
+            local rawtree, keepparser -- keep referenced: nodes below live
+            -- only as long as their tree (and its owning parser) does
+            local function parse_into()
+                local _pp = pstart()
+                rawtree = raw_parse(lang, src)
+                if rawtree then
+                    tsroot = rawtree:root()
+                else
+                    local okp, parser =
+                        pcall(vim.treesitter.get_string_parser, src, lang)
+                    if not okp then padd('parse', _pp) return false end
+                    keepparser = parser
+                    tsroot = parser:parse()[1]:root()
                 end
-                tsroot = parser:parse()[1]:root()
+                padd('parse', _pp)
+                return true
             end
-            padd('parse', _pp)
+            if not parse_into() then
+                no_parser[lang] = true
+                goto next_file
+            end
+            -- ★★ SOURCE REPAIR, ITERATED (CART-0439). A spec may declare a shape its
+            -- grammar CANNOT parse and hand back length-preserving repaired bytes;
+            -- see spec/cpp.lua's `src_repair` for the case that forced it (a macro
+            -- between `class` and its name dissolves the class, every method, the base
+            -- clause and the access specifiers, in one). The hook is handed the TREE,
+            -- not the text, so the repair is gated on the parse being demonstrably
+            -- wrong — and it costs one extra parse only for the files that are.
+            -- Bounded: a repair that does not converge (v8's EXPORT_TEMPLATE_DECLARE(…)
+            -- can never become a class) must not spin.
+            if spec.src_repair then
+                for _ = 1, 4 do
+                    local fixed = spec.src_repair(tsroot, src)
+                    if not fixed then break end
+                    src = fixed
+                    if not parse_into() then break end
+                end
+            end
             stamp(file)
             nodes[#nodes + 1] = { id = file, name = file, kind = 'module', file = file,
                 range = pos_of(tsroot), order = -1,

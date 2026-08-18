@@ -25,6 +25,124 @@ return {
     -- is why it belongs in this declared key and not in a base table: `storage_class_specifier`
     -- is a c/cpp node type and a name-keyed base set cannot say so.
     binding_modifiers = { storage_class_specifier = true, type_qualifier = true },
+    -- ★★ A MACRO BETWEEN `class` AND ITS NAME DISSOLVES THE WHOLE CLASS (CART-0439).
+    -- `class V8_EXPORT_PRIVATE Foo : public Base { … };` does not parse as a class at
+    -- all: the class_specifier TERMINATES AT THE MACRO (which becomes its `name`), the
+    -- real name falls into an ERROR or a bare declarator, and the class BODY becomes a
+    -- function_definition's compound_statement — so the class node, every method, the
+    -- base clause and the access specifiers are all gone at once, and every member is
+    -- harvested as a FREE FUNCTION. 903 declarations in v8 alone (611 V8_EXPORT_PRIVATE,
+    -- 205 V8_NODISCARD, …), and it is the DOMINANT class-declaration idiom of any C++
+    -- library with an export macro. src/objects/tagged.h: 59 functions, ZERO classes.
+    --
+    -- THE REPAIR IS THE ONE THE GRAMMAR CANNOT DO: blank the macro token with SPACES and
+    -- re-parse. Length-preserving, so every byte offset, line and column is unchanged —
+    -- the repaired tree is byte-for-byte addressable exactly as the raw one — and the
+    -- resulting tree is the CONTROL tree, so `interface`, `qualify`, `is_method`,
+    -- `block_skip` and flow all work unmodified. A query-level fix could only ever mint
+    -- the class node back; it could not turn a labeled_statement into an access
+    -- specifier or a compound_statement into a field_declaration_list.
+    --
+    -- ★ THE GATE IS STRUCTURAL, AND IT FIRES ONLY WHERE THE PARSE IS ALREADY WRONG —
+    -- which is why this needs NO macro list and no SCREAMING_CAPS heuristic, and cannot
+    -- fabricate. A function_definition whose `type:` is a BODYLESS class/struct/union
+    -- specifier is either this wreck or a genuine elaborated-type return
+    -- (`class JitPage* JitPage() { … }`, `struct Foo make() { … }`) — and the genuine one
+    -- is exactly the case whose declarator unwraps to a function_declarator with no ERROR
+    -- sitting BEFORE it. The ERROR-before-declarator test is load-bearing: v8's
+    -- `class V8_EXPORT_PRIVATE AsmCallableType : public NON_EXPORTED_BASE(ZoneObject)`
+    -- parses its BASE CLAUSE as the function_declarator, so declarator shape alone would
+    -- have called 55 of 250 measured wrecks genuine.
+    --
+    -- Iterated to a fixpoint by the caller: `class V8_EXPORT_PRIVATE V8_NODISCARD Foo`
+    -- needs two rounds, and `extern template class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)`
+    -- never converges to a class — the `name` requirement stops it after one.
+    src_repair = function (root, src)
+        -- ★ A PLAIN-TEXT SUPERSET FILTER FIRST, because the tree walk is paid by every
+        -- C++ file and collected by almost none. The wreck ALWAYS reads
+        -- `class <ident> <ident>` in the bytes (the macro then the real name), so a
+        -- file without that text cannot hold one. MEASURED: it rejects 93% of colobot's
+        -- 467 C++ files and 94% of 7kaa's 514 before any tree is walked, and what
+        -- survives costs 2.9% / 4.0% of a cold extract. A superset — it can only save
+        -- work, never skip a hit.
+        if not (src:find('%f[%w_]class%s+[%a_][%w_]*%s+[%a_]')
+                or src:find('%f[%w_]struct%s+[%a_][%w_]*%s+[%a_]')
+                or src:find('%f[%w_]union%s+[%a_][%w_]*%s+[%a_]')) then
+            return nil
+        end
+        local hits
+        local function fn_declarator(d)
+            while d do
+                local t = d:type()
+                if t == 'function_declarator' then return true end
+                if t ~= 'pointer_declarator' and t ~= 'reference_declarator' then
+                    return false
+                end
+                d = d:field('declarator')[1]
+            end
+            return false
+        end
+        local function scan (n)
+            if n:type() == 'function_definition' then
+                local ty = n:field('type')[1]
+                local tt = ty and ty:type()
+                if (tt == 'class_specifier' or tt == 'struct_specifier'
+                        or tt == 'union_specifier')
+                    and ty:field('name')[1] and #ty:field('body') == 0 then
+                    local decl = n:field('declarator')[1]
+                    local genuine = fn_declarator(decl)
+                    if genuine and decl then
+                        -- …unless an ERROR sits between the specifier and the
+                        -- declarator: then the "function declarator" is a mangled
+                        -- base clause, not a signature.
+                        local _, _, db = decl:start()
+                        for c in n:iter_children() do
+                            if c:type() == 'ERROR' then
+                                local _, _, eb = c:start()
+                                if eb < db then genuine = false break end
+                            end
+                        end
+                    end
+                    if not genuine then
+                        local nm = ty:field('name')[1]
+                        local _, _, sb = nm:start()
+                        local _, _, eb = nm:end_()
+                        -- ★★ AND IS THE SPECIFIER'S `name` REALLY THE MACRO? A wreck can
+                        -- ALSO come from a macro in the BASE CLAUSE
+                        -- (`struct TSCallDescriptor : public NON_EXPORTED_BASE(ZoneObject)`,
+                        -- 5 sites measured), where the specifier's name is the REAL CLASS
+                        -- NAME and blanking it DESTROYS it — measured: it cost
+                        -- operations.h its EffectHandler struct and both its methods. The
+                        -- tell is what follows the name: another identifier means the name
+                        -- was a macro and the real one is next; `:`/`{`/`(`/`<` means the
+                        -- name is the class and the damage is downstream, which this
+                        -- repair does not claim to fix. `final` is a class-virt-specifier,
+                        -- not a name — the one keyword this has to know.
+                        local body = n:field('body')[1]
+                        local bb = eb
+                        if body then local _, _, b = body:start(); bb = b end
+                        local after = src:sub(eb + 1, bb):gsub('^%s+', '')
+                        if after:match('^[A-Za-z_]') and not after:match('^final%f[%W]')
+                        then
+                            hits = hits or {}
+                            hits[#hits + 1] = { sb, eb }
+                        end
+                    end
+                end
+            end
+            for c in n:iter_children() do
+                if c:named() or c:type() == 'ERROR' then scan(c) end
+            end
+        end
+        scan(root)
+        if not hits then return nil end
+        -- blank back-to-front so earlier offsets stay valid
+        table.sort(hits, function (a, b) return a[1] > b[1] end)
+        for _, h in ipairs(hits) do
+            src = src:sub(1, h[1]) .. (' '):rep(h[2] - h[1]) .. src:sub(h[2] + 1)
+        end
+        return src
+    end,
         exts = { 'cpp', 'hpp', 'cc', 'hh', 'cxx', 'hxx' },
         functions = [=[
             (function_definition
@@ -67,6 +185,22 @@ return {
             (type_definition declarator: (type_identifier) @typedef) @def
         ]=],
         params_field = 'parameters',
+        -- ★★ A `function_definition` HAS NO `parameters` FIELD, so `params_field` alone found
+        -- NOTHING and EVERY c/cpp function carried an EMPTY param list — silently, for as long as
+        -- the spec has existed (CART-0438). The list hangs one level down, on the
+        -- `function_declarator`, and through a pointer/reference wrapper for `int *f(int a)`.
+        -- ★ THE INNERMOST declarator, not the first: a C++20 constrained constructor nests a
+        -- SECOND `function_declarator` whose `parameters` is the misparsed member-init args
+        -- (CART-0435), so the outermost one answers the wrong list. Same descent the name walk
+        -- makes, for the same reason.
+        params_of = function (def)
+            local d, last = def:field('declarator')[1], nil
+            while d do
+                if d:type() == 'function_declarator' then last = d end
+                d = d:field('declarator')[1]
+            end
+            return last and last:field('parameters')[1] or nil
+        end,
         body_field = 'body',
         -- a lambda is a function SCOPE, not a def: it never reaches the
         -- `functions` query (no name), but "which function encloses this?"

@@ -4349,6 +4349,146 @@ test('treesitter: a C++ header named .h is parsed as C++, not C', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+-- ── CART-0439: a MACRO between `class` and its NAME dissolves the whole class ──
+--
+-- THE SHAPE GUARDED: `class V8_EXPORT_PRIVATE Foo : public Base { … };` — an export /
+-- attribute macro sitting between the `class` keyword and the class name. The cpp
+-- grammar terminates the class_specifier AT THE MACRO (which becomes the specifier's
+-- `name`), the real class name falls into an ERROR or a bare declarator, and the class
+-- BODY becomes a function_definition's compound_statement whose access specifiers are
+-- labeled_statements. 903 declarations in v8 alone, and the dominant class-declaration
+-- idiom of any C++ library with an export macro.
+--
+-- THE RED CONDITION: without spec/cpp.lua's `src_repair`, this fixture yields ZERO class
+-- nodes and ZERO method nodes — every member is harvested as a FREE FUNCTION, and the
+-- class, its methods, its base clause and its access specifiers do not exist at all.
+-- (Measured on v8's src/objects/tagged.h: 59 functions, 0 classes, 0 methods.)
+test('treesitter: a macro before the class name does not dissolve the class', function ()
+    if not (has_parser('c') and has_parser('cpp')) then skip 'no c/cpp parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(name, body)
+        local fd = assert(io.open(root .. '/' .. name, 'w')); fd:write(body); fd:close()
+    end
+    -- a .cc is required for the repo-shape rule to answer `cpp` for the .h
+    w('use.cc', 'int use() { return 0; }\n')
+    w('macro.h', table.concat({
+        'class LIB_EXPORT Widget : public Base {',
+        ' public:',
+        '  int area() { return w * h; }',
+        '  void init(int a, int b) { w = a; h = b; }',
+        ' private:',
+        '  int w;',
+        '  int h;',
+        '};',
+    }, '\n') .. '\n')
+    -- NEGATIVE CONTROL 1: an ordinary class must keep exactly the nodes it has today.
+    w('plain.h', table.concat({
+        'class Widget2 : public Base {',
+        ' public:',
+        '  int area() { return w * h; }',
+        '  void init(int a, int b) { w = a; h = b; }',
+        ' private:',
+        '  int w;',
+        '};',
+    }, '\n') .. '\n')
+    -- NEGATIVE CONTROL 2: a function whose RETURN TYPE is an elaborated type specifier
+    -- is the one other thing that parses as `function_definition` with a bodyless
+    -- class/struct specifier in its `type:` field. It must stay a function and must
+    -- NOT have its return type blanked.
+    w('elab.h', table.concat({
+        'struct Point make_point() { return Point(); }',
+        'class JitPage* jit_page() { return page_; }',
+    }, '\n') .. '\n')
+    store.ingest(ts.extract(root))
+    eq('cpp', store.data.h_lang, 'the .cc makes this a C++ tree')
+
+    local byfile = {}
+    for _, n in ipairs(store.data.nodes or {}) do
+        local f = byfile[n.file] or { kinds = {}, names = {} }
+        byfile[n.file] = f
+        f.kinds[n.kind .. (n.ctype and ('/' .. n.ctype) or '')] =
+            (f.kinds[n.kind .. (n.ctype and ('/' .. n.ctype) or '')] or 0) + 1
+        f.names[n.name] = n
+    end
+    local m, pl, el = byfile['macro.h'], byfile['plain.h'], byfile['elab.h']
+
+    -- THE FIX: the class is a class, and its members are ITS methods.
+    ok(m.names['Widget'] and m.names['Widget'].ctype == 'struct',
+        'the class node exists: ' .. vim.inspect(m.kinds))
+    ok(m.names['Widget::area'], 'Widget::area is a qualified method: '
+        .. vim.inspect(vim.tbl_keys(m.names)))
+    ok(m.names['Widget::init'], 'Widget::init is a qualified method')
+    eq('method', m.names['Widget::area'].kind, 'and it is a METHOD, not a free function')
+    eq(nil, m.names['area'], 'no bare free-function twin survives')
+    eq(nil, m.names['LIB_EXPORT'], 'the macro is never mistaken for the class')
+
+    -- NEGATIVE CONTROL 1: the plain class is untouched — same shape as the macro one.
+    ok(pl.names['Widget2'] and pl.names['Widget2'].ctype == 'struct', 'plain class kept')
+    ok(pl.names['Widget2::area'] and pl.names['Widget2::init'], 'plain methods kept')
+    eq(m.kinds['method'], pl.kinds['method'],
+        'the repaired class mints exactly the method count the ordinary one does')
+
+    -- NEGATIVE CONTROL 2: elaborated-type returns stay free functions, none dissolved.
+    ok(el.names['make_point'] and el.names['make_point'].kind == 'function',
+        'struct-returning function stays a function: ' .. vim.inspect(el.kinds))
+    ok(el.names['jit_page'] and el.names['jit_page'].kind == 'function',
+        'class-pointer-returning function stays a function')
+    eq(nil, el.kinds['var/struct'], 'and neither mints a phantom class')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ★ THE OTHER HALF OF THE SAME GUARD, at the spec level: the repair is LENGTH-
+-- PRESERVING (every byte offset, line and column in the graph must still address the
+-- raw file) and it must FIRE ONLY on a parse that is already wrong — it is gated on the
+-- tree, not on a macro list, so a well-formed construct must never reach it.
+test('treesitter: cpp src_repair is length-preserving and fires only on a wreck', function ()
+    if not has_parser('cpp') then skip 'no cpp parser' end
+    local cpp = require 'cartograph.spec.cpp'
+    local function repair(src)
+        local moved = false
+        for _ = 1, 4 do
+            local r = vim.treesitter.get_string_parser(src, 'cpp'):parse()[1]:root()
+            local fixed = cpp.src_repair(r, src)
+            if not fixed then break end
+            src, moved = fixed, true
+        end
+        return src, moved
+    end
+    local fires = {
+        'class LIB_EXPORT Foo { void m(); };\n',
+        'class LIB_EXPORT Foo : public Base { public: void m(); };\n',
+        'template <typename T>\nclass LIB_PTR Tagged<T> : public B { public: void m(); };\n',
+        -- two macros need two rounds; the fixpoint loop is why the caller iterates
+        'class LIB_EXPORT LIB_NODISCARD Foo { public: void m(); };\n',
+    }
+    for _, src in ipairs(fires) do
+        local out, moved = repair(src)
+        ok(moved, 'repaired: ' .. src)
+        eq(#src, #out, 'LENGTH PRESERVED (every range still addresses the raw file)')
+        local r = vim.treesitter.get_string_parser(out, 'cpp'):parse()[1]:root()
+        ok(r:sexpr():find('class_specifier name: (type_identifier)', 1, true)
+            or r:sexpr():find('class_specifier name: (template_type', 1, true),
+            'and it parses as a class now: ' .. r:sexpr():sub(1, 120))
+    end
+    local quiet = {
+        'class Foo : public Base { public: void m(); };\n',   -- ordinary class
+        'struct Foo make() { return Foo(); }\n',               -- elaborated return
+        'class JitPage* JitPage() { return jit_page_; }\n',    -- ptr elaborated return
+        'class LIB_EXPORT Foo;\n',                             -- forward declaration
+        -- the class name is REAL here; the wreck comes from a macro in the BASE
+        -- CLAUSE, and blanking the name would DESTROY it (measured: it cost v8's
+        -- operations.h its EffectHandler struct and both its methods)
+        'struct TSCallDescriptor : public NON_EXPORTED_BASE(ZoneObject) { int f; };\n',
+        -- `final` is a class-virt-specifier, not the class name
+        'class PackNode final : public NON_EXPORTED_BASE(ZoneObject) { int f; };\n',
+    }
+    for _, src in ipairs(quiet) do
+        local r = vim.treesitter.get_string_parser(src, 'cpp'):parse()[1]:root()
+        eq(nil, cpp.src_repair(r, src), 'must NOT fire on: ' .. src)
+    end
+end)
+
+
 test('treesitter: a pure-C tree keeps .h as C — the fix costs it nothing', function ()
     if not (has_parser('c') and has_parser('cpp')) then skip 'no c/cpp parser' end
     -- The reason this is a REPO-SHAPE rule and not `.h → cpp` outright: measured on

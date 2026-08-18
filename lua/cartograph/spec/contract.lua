@@ -42,6 +42,14 @@ M.SLOTS = {
     vars = 'CORE',                 -- variable-def capture
     mention_types = 'CORE',        -- node types that count as call mentions
     indirect_calls = 'CORE',       -- dispatch-through-value call forms
+    -- L0 REPAIR: a length-preserving rewrite of the SOURCE BYTES, applied between the
+    -- first parse and the real one, for a shape the grammar cannot parse at all. CORE
+    -- because it is part of the grammar binding — it decides what tree every other
+    -- slot in this contract is reading. Handed the TREE (not the text) so a repair is
+    -- gated on the parse being demonstrably broken, and returns nil when there is
+    -- nothing to fix. Length-preserving is the contract: every range in the graph is
+    -- an offset into the repaired bytes and must still address the raw file.
+    src_repair = 'CORE',
 
     -- SCOPE&KEY: how names scope, qualify, key; the stdlib tail gate (until L2)
     scope = 'SCOPE&KEY', scopes = 'SCOPE&KEY',
