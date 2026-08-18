@@ -2069,3 +2069,65 @@ test('flow: a spread reads its operand, in an object, an array and a call', func
     d, u = dur(fl, src, 'f(...args, z)')
     ok(u.args and u.f and u.z, 'call spread: the operand is read alongside callee and arg')
 end)
+
+-- ── zig's FLAT declaration: du's DEF-POSITION rule (CART-0431) ───────────────────────────
+--
+-- ★★ WHY THESE EXIST. flow's `k = 4` branch says EVERY direct `identifier` child of a
+-- `variable_declaration` is def-position. That is exactly right for lua, which reaches the
+-- branch only for a declaration with NO operator (`local x = 1` hangs an
+-- `assignment_statement` that re-dispatches as ASSIGN), and wrong for zig, which is FLAT —
+-- name, type and value all sit at depth one. `var i: usize = index;` recorded
+-- `def={i,index} use={}`: A PARAMETER'S INCOMING DEFINITION KILLED at that line and the read
+-- of it never counted, wrong for reaching-definitions and liveness in the STORED rows.
+-- ★ AND NO CENSUS COULD SEE IT: the expression IR's `?` fallback read both names too, so the
+-- self-gate reported agreement. These assert du DIRECTLY, which is the only way a shared
+-- miss ever becomes visible. The last spec is the negative control — lua is the language
+-- whose branch this change edits.
+local function zig_du(line)
+    local fn, src = parse_fn('fn f(index: usize, raw: u32, it: It) void {\n    '
+        .. line .. '\n}', 'zig')
+    local fl = flow.build(fn, src, { pfield = 'parameters' })
+    for _, s in ipairs(fl.stmts or {}) do
+        if s.kind == 'variable_declaration' or s.t == 'variable_declaration' then
+            return ('def={%s} use={%s}'):format(table.concat(s.def or {}, ','),
+                table.concat(s.use or {}, ','))
+        end
+    end
+    return nil
+end
+
+test('flow: a zig declaration DEFS its name and USES its initialiser', function ()
+    if not ready('zig') then skip 'no zig parser' end
+    -- RED IF: the flat split stops firing — `index` returns to the def set, which is the
+    -- CART-0431 defect: a parameter killed by a statement that only reads it.
+    eq('def={i} use={index}', zig_du('var i: usize = index;'),
+        'a bare-identifier initialiser is a READ, not a second binder')
+    eq('def={x} use={raw}', zig_du('const x = raw;'), 'and the same without a type')
+    -- ★ THE TYPE IS A USE, NOT A DEF. In zig a type IS a value, so naming one is a read of
+    -- that binding — the IR side asserts the mirror of this in expr_spec.
+    eq('def={result} use={T}', zig_du('var result: T = undefined;'),
+        'a type names a binding; `undefined` is a keyword and names nothing')
+    -- RED IF: the split were done on a LITERAL `=` instead of the operator SET — zig spells
+    -- a compound assignment as a `variable_declaration` too, and the target must stay a def.
+    eq('def={n} use={raw}', zig_du('n += raw;'),
+        'a COMPOUND operator splits the same way, and its target is still def-position')
+end)
+
+test('flow: lua bare `local a, b` still defs BOTH — the negative control', function ()
+    if not ready('lua') then skip 'no lua parser' end
+    -- ★ THE LANGUAGE WHOSE BRANCH WAS EDITED. lua reaches `k = 4` with NO operator token, so
+    -- the flat split must never fire for it. RED IF: the operator scan starts matching
+    -- something lua carries, at which point `local a, b` silently stops binding.
+    local fn, src = parse_fn('local function f(p)\n  local a, b\n  a = p\n  return a, b\nend\n',
+        'lua')
+    local fl = flow.build(fn, src, { pfield = 'parameters' })
+    -- `kind` is the ROW class ('stmt') and `t` is the NODE TYPE — reading them as
+    -- interchangeable made the first cut of this spec match nothing and report `nil`, which
+    -- is the failure a negative control is supposed to have: it went red immediately, on my
+    -- own mistake, which is more than most green specs ever prove about themselves.
+    local found
+    for _, s in ipairs(fl.stmts or {}) do
+        if s.t == 'variable_declaration' then found = table.concat(s.def or {}, ',') end
+    end
+    eq('a,b', found, 'a declaration with no initialiser binds every name in its list')
+end)

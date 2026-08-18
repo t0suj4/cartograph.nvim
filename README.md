@@ -2787,12 +2787,33 @@ nvim --headless -u NONE -l tools/exprcensus.lua zig --show binder:variable_decla
 # CONTAINMENT: odin PINNED matches (its declarations are `const_declaration`/`var_declaration`,
 # not in LOCALDECL), 21 quick-tier rows all green, and rust's `binder:let_declaration` is 3 —
 # rust is NOT over-reading its declared names, so the defect is specific to the FLAT shape.
-# ★ THE 1371 THAT REMAIN ARE DU'S SIDE (CART-0431), pinned and visible rather than asserted
-# to zero: du treats a bare-identifier initialiser as a second BINDER, so `var i: usize =
-# index;` records `def={i,index} use={}` and a PARAMETER looks redefined at that line. Before
-# this fix the two sides AGREED on those rows, both reading the declared name. TWO WRONG SIDES
-# AGREEING IS WHAT A TWO-IMPLEMENTATION GATE EXISTS TO BREAK, and it took fixing one side to
-# expose the other — which is the argument for the gate, not a footnote to it.
+# ★★ AND THE 1371 THAT REMAINED WERE DU'S SIDE (CART-0431), NOW ALSO FIXED — zig
+# 3456 -> 1495, so 16088 -> 1495 across the pair: 90.7% of a corpus's census, from two
+# changes that had to be made in that ORDER. du's `k = 4` said every direct `identifier`
+# child of a declaration is def-position — right for lua, which reaches that branch only
+# for a declaration with NO operator (`local x = 1` hangs an `assignment_statement` that
+# re-dispatches as ASSIGN), and wrong for zig, where name, type and value all sit at depth
+# one. `var i: usize = index;` stored `def={i,index} use={}`: A PARAMETER'S INCOMING
+# DEFINITION KILLED AT THAT LINE and the read of it never counted, so reaching-definitions
+# and liveness were wrong for zig, silently, in the STORED rows (cache VERSION 139).
+# ★★ TWO WRONG SIDES AGREEING IS WHAT A TWO-IMPLEMENTATION GATE EXISTS TO BREAK, and this
+# gate could not: the IR's `?` fallback read both names, so it reported agreement. Fixing the
+# IR is what exposed du — the argument for the gate, not a footnote to it, and the same
+# lesson cache v138 recorded one version earlier.
+# ★★ AND ONLY ONE OF THE TEN CLASSES THAT MOVED IS THE ONE EITHER TICKET NAMED:
+# binder:block_expression 498 -> 285, binder:switch_case 298 -> 132, binder:block 94 -> 58,
+# missing:variable_declaration 236 -> 0. A REGION row's def set was inflated by the
+# declarations inside it, because one rule decided def-position for every identifier the walk
+# reached. A defect measured on one node type was never confined to it.
+# ★ BOTH SIDES NOW SPLIT A FLAT DECLARATION ON THE SAME ASSIGN_OP TOKEN, and that table has
+# ONE OWNER (`flow.ASSIGN_TOK`) — a second copy is exactly the "kept in step" arrangement
+# that let the two disagree for as long as they did. MEASURED WHY IT MUST BE THE OPERATOR SET
+# AND NOT A LITERAL `=`: a first cut testing `'='` put three rows back, because zig spells
+# `extra_index += items.len;` as a `variable_declaration` too. The rows it broke were not the
+# rows it fixed, so the TOTAL held still at 4 while every row underneath it changed — A COUNT
+# THAT HOLDS STILL IS NOT A COUNT THAT MEANS NOTHING CHANGED.
+# ★ CONTAINMENT, PROBED ACROSS 15 GRAMMARS: only zig reaches `k = 4` WITH an operator. lua
+# reaches it with none (both its forms), and the other thirteen never reach it at all.
 # COMBINATORIAL GRID: the bestiary plants each FORM once, and every bug the row model gave
 # up was at an INTERSECTION — elsif x CHAIN-LENGTH-2, block x CONDITION-POSITION, block x
 # ASSIGNMENT-RHS, rescue x INSIDE-A-BLOCK, modifier x LOOP. CART-0394 said it outright: "the

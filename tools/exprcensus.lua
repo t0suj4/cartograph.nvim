@@ -279,10 +279,18 @@ end
 --       `const x: T = y;` has no declarator node, so the row fell to the generic `?` walk,
 --       which reads every identifier including THE DECLARED NAME. The fix reuses the
 --       operator split built for odin's field-less assignments (CART-0304); the type is a
---       READ, because in zig a type IS a value. ★ The 1371 that remain are DU's side
---       (CART-0431): du treats a bare-identifier initialiser as a second binder, so
---       `var i: usize = index;` records `def={i,index} use={}` and a PARAMETER looks
---       redefined. Before the fix the two sides AGREED here, both reading the declared name.
+--       READ, because in zig a type IS a value.
+--   binder:variable_declaration          CART-0431, THE DU HALF, ALSO FIXED — 1371 -> 74,
+--       and it took NINE OTHER CLASSES with it (block_expression 498 -> 285, switch_case
+--       298 -> 132, `missing:variable_declaration` 236 -> 0): zig total 3456 -> 1495, and
+--       16088 -> 1495 across the pair. du's `k = 4` said every direct `identifier` child of
+--       a declaration is def-position — right for lua, which reaches that branch only
+--       without an operator, and wrong for zig, where name, type and value all sit at depth
+--       1: `var i: usize = index;` stored `def={i,index} use={}`, KILLING A PARAMETER'S
+--       incoming definition and never counting the read.
+--       ★★ THE GATE WAS SILENT ON IT BECAUSE BOTH SIDES WERE WRONG. Fixing the IR is what
+--       exposed du. The two now split a flat declaration on the same ASSIGN_OP token, and
+--       that table has ONE OWNER (`flow.ASSIGN_TOK`) rather than a copy on each side.
 --
 -- ── recalib @ CART-0405, the combinatorial grid's FIRST RUN ─────────────────────────────
 -- The grid (tools/genmatrix.lua + tools/gridgate.lua) fired on EVERY `c_ifs_*_ch2` and
@@ -484,22 +492,28 @@ M.EXPECTED = {
     -- 14002 -> 1371, `missing:variable_declaration` 237 -> 236. Every other class UNMOVED and
     -- NO NEW CLASS APPEARED — which is the check this ticket's first C/C++ cut failed, where
     -- fixing the aimed-at class minted 139174 rows of another and the NET went up 56%.
-    -- ★ THE 1371 THAT REMAIN ARE PINNED, NOT ASSERTED ZERO, AND THEY ARE DU'S SIDE
-    -- (CART-0431): du treats a bare-identifier initialiser as a second BINDER, so
-    -- `var i: usize = index;` records `def={i,index} use={}` and a PARAMETER looks redefined
-    -- at that line. Before this fix the two sides AGREED on those rows, both reading the
-    -- declared name — two wrong sides agreeing, which is precisely what a two-implementation
-    -- gate exists to break. Driving this number to 0 is a DU change and moves the df census.
-    zig = { total = 3456, ['binder:variable_declaration'] = 1371,
-        ['extra:switch_expression'] = 812, ['binder:block_expression'] = 498,
-        ['binder:switch_case'] = 298, ['missing:variable_declaration'] = 236,
-        ['binder:block'] = 94, ['binder:if_statement'] = 40,
-        ['binder:declaration'] = 25, ['binder:expression_statement'] = 14,
-        ['binder:comptime_statement'] = 13, ['extra:for_statement'] = 13,
-        ['extra:while_statement'] = 12, ['extra:if_statement'] = 11,
-        ['binder:defer_statement'] = 5, ['binder:errdefer_statement'] = 4,
-        ['binder:compound_statement'] = 4, ['extra:identifier'] = 2,
-        ['binder:for_range_loop'] = 1, ['binder:return_expression'] = 1,
+    -- ★ RE-PINNED AGAIN @ CART-0431, du's half: 3456 -> 1495, and 16088 -> 1495 across the
+    -- pair — 90.7% of this corpus's census, from two changes that had to be made in that
+    -- ORDER. TEN classes moved, ALL DOWNWARD, two GONE, and again no new class appeared.
+    -- ★★ AND ONLY ONE OF THE TEN IS THE CLASS EITHER TICKET NAMED. `binder:block_expression`
+    -- 498 -> 285, `binder:switch_case` 298 -> 132, `binder:block` 94 -> 58: a region row's
+    -- def set was inflated by the declarations INSIDE it, because the same `k = 4` rule
+    -- decided def-position for every identifier the walk reached. A defect measured on one
+    -- node type was never confined to it, and the count that names a class is a LOWER bound
+    -- on the change fixing it makes.
+    -- ★ The 74 that remain are pinned, NOT asserted zero — the residual shapes have not been
+    -- read yet, and a class nobody has looked at is exactly what this pin exists to keep
+    -- visible rather than to bless.
+    zig = { total = 1495, ['extra:switch_expression'] = 812,
+        ['binder:block_expression'] = 285, ['binder:switch_case'] = 132,
+        ['binder:variable_declaration'] = 74, ['binder:block'] = 58,
+        ['binder:if_statement'] = 40,
+        ['binder:declaration'] = 25, ['binder:comptime_statement'] = 13,
+        ['extra:for_statement'] = 13, ['extra:while_statement'] = 12,
+        ['extra:if_statement'] = 11, ['binder:expression_statement'] = 8,
+        ['binder:compound_statement'] = 4, ['binder:errdefer_statement'] = 2,
+        ['extra:identifier'] = 2, ['binder:defer_statement'] = 1,
+        ['binder:for_range_loop'] = 1,
         ['extra:while_expression'] = 1, ['missing:expression_statement'] = 1 },
 }
 

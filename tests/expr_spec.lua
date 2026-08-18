@@ -475,13 +475,15 @@ end)
 
 test('expr: `var i: usize = index` reads index and NOT i — the row that exposed du', function ()
     if not ready('zig') then skip 'no zig parser' end
-    -- ★★ THIS IS THE SPEC THAT STAYS MEANINGFUL WHEN SOMEONE LATER FIXES DU (CART-0431).
-    -- du records this row as `def={i,index} use={}` — it treats a bare-identifier initialiser
-    -- as a second BINDER, so a PARAMETER appears to be redefined here. Before the fix the two
-    -- sides AGREED, because the IR's `?` walk read both names too: two wrong sides agreeing is
-    -- exactly what a two-implementation gate exists to break, and it took fixing this side to
-    -- expose the other. So this assertion is about the IR alone and must not be relaxed to
-    -- match whatever du says today.
+    -- ★★ THIS SPEC WAS WRITTEN TO STAY MEANINGFUL WHEN DU WAS LATER FIXED — AND DU WAS FIXED
+    -- THE SAME DAY (CART-0431, cache v139). du USED TO record this row as `def={i,index}
+    -- use={}`, treating a bare-identifier initialiser as a second BINDER, so a PARAMETER
+    -- appeared to be redefined here; it now records `def={i} use={index}`. The assertion
+    -- below did not change and must not be relaxed to match whatever du says today: it is
+    -- about the IR alone, which is the whole reason it survived the other side moving.
+    -- ★ Before either fix the two sides AGREED here, because the IR's `?` walk read both
+    -- names too — two wrong sides agreeing is exactly what a two-implementation gate exists
+    -- to break, and it took fixing this side to expose the other.
     -- RED IF: the IR starts reading `i` again (the `?` fallback returning), or stops reading
     -- `index` (a bare-identifier value mistaken for a second target).
     eq('index', zig_reads('var i: usize = index;'))

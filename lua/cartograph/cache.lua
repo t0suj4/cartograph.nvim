@@ -73,7 +73,27 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 138 -- v138: A SHORTHAND PROPERTY IN AN OBJECT LITERAL IS A READ (CART-0418).
+M.VERSION = 139 -- v139: A ZIG DECLARATION'S INITIALISER WAS RECORDED AS A SECOND BINDER
+               -- (CART-0431). flow's `k = 4` says EVERY direct `identifier` child of a
+               -- `variable_declaration` is def-position — exactly right for lua, which
+               -- reaches that branch only for a declaration with NO operator (`local x = 1`
+               -- hangs an `assignment_statement` that re-dispatches as ASSIGN), and wrong
+               -- for zig, which is FLAT: name, type and value all sit at depth 1. So
+               -- `var i: usize = index;` stored `def={i,index} use={}` and A PARAMETER WAS
+               -- KILLED AT THAT LINE — its incoming definition dead, the read of it never
+               -- counted. Reaching-definitions, liveness and everything layered on them were
+               -- wrong for zig, silently, in the stored rows.
+               -- ★ THE SELF-GATE WAS SILENT BY CONSTRUCTION HERE TOO, one release after
+               -- v138 said it: the expression IR's `?` fallback read both names, so the two
+               -- implementations AGREED on these rows. Fixing the IR (CART-0404, 4989e55) is
+               -- what exposed du. Both sides now split a flat declaration on the same
+               -- ASSIGN_OP token — the same question of the same node, not two tables kept
+               -- in step. zig Air.zig 51 -> 1 disagreements.
+               -- ★ CONTAINMENT, PROBED ACROSS 15 GRAMMARS: only zig reaches `k = 4` WITH an
+               -- operator. lua reaches it with none (both its forms), and the other thirteen
+               -- never reach it at all — so no other language's stored rows can move.
+               -- No graph movement: nodes/edges/calls identical, only flow def/use sets.
+               -- v138: A SHORTHAND PROPERTY IN AN OBJECT LITERAL IS A READ (CART-0418).
                -- `{a}` desugars to `{a: a}` and reads `a`; neither du nor the expression IR
                -- recorded it, because the binder in a PATTERN
                -- (`shorthand_property_identifier_pattern`) and the reference in a LITERAL

@@ -252,6 +252,19 @@ local FN_FALLBACK = { function_definition = true, function_declaration = true,
     lambda_expression = true, constructor_declaration = true }
 -- def-position roots (df's dfk): the assignment left / declarator names are
 -- DEFS; everything else is a USE
+-- ★ THE ASSIGNMENT OPERATOR TOKENS, AND THIS MODULE OWNS THEM (CART-0431). du's
+-- flat-declaration split below and the expression IR's must land on THE SAME TOKEN, so
+-- `expr.lua` reads this table rather than holding its own copy: the sides then agree because
+-- they ask the same question of the same node, not because someone kept two tables in step.
+-- ★ Which is not a style preference — it is this exact bug's shape one level up. `=` alone
+-- is not enough either: zig spells `extra_index += items.len;` as a `variable_declaration`,
+-- and a scan that does not know `+=` drops the row to a fallback that reads its target.
+-- (expr requires flow; flow never requires expr, so this direction has no cycle.)
+M.ASSIGN_TOK = { ['='] = true, [':='] = true, ['+='] = true, ['-='] = true,
+    ['*='] = true, ['/='] = true, ['%='] = true, ['||='] = true, ['&&='] = true,
+    ['|='] = true, ['&='] = true, ['^='] = true, ['<<='] = true, ['>>='] = true,
+    ['**='] = true, ['//='] = true, ['??='] = true, ['.='] = true }
+local ASSIGN_TOK = M.ASSIGN_TOK
 local ASSIGN = { assignment_statement = true, assignment = true,
     assignment_expression = true, augmented_assignment_expression = true,
     variable_assignment = true }
@@ -405,7 +418,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
         -- `unbraced_ch2`/`ch3`, which is exactly the intersection the grid exists for.
         local bodyc = (stop_body and ctrlset and ctrlset[t])
             and M.body_children(node, ctrlset, clauseset) or nil
-        local asgleft, decld, k, declist, rngskip, bindset, bindskip
+        local asgleft, decld, k, declist, rngskip, bindset, bindskip, flatskip
         -- ★★ A DESTRUCTURING PATTERN DECIDES DEF-POSITION FOR ITS OWN CHILDREN (CART-0358),
         -- and it does so UNCONDITIONALLY — this branch is first, and it ignores the incoming
         -- `defpos`. That is what makes ONE table cover three sites that had nothing in
@@ -467,6 +480,40 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
             decld = node:field('pattern')[1]; k = 3 -- rust `let <pat> = …`
         elseif t == 'variable_declaration' or t == 'local_declaration' then
             k = 4 -- lua bare `local a, b` (no `=`): the variable_list is a DEF
+            -- ★★ …AND `k = 4` SAYS EVERY DIRECT `identifier` CHILD IS A DEF, WHICH IS A
+            -- LUA-SHAPED RULE IN A LANGUAGE-AGNOSTIC WALK (CART-0431). lua reaches this
+            -- branch only for a declaration with NO `=` — `local x = 1` hangs an
+            -- `assignment_statement` child that re-dispatches as ASSIGN — so "every
+            -- identifier binds" is exactly right there. zig's `variable_declaration` is
+            -- FLAT: `var i: usize = index;` puts the NAME, the TYPE and the VALUE all at
+            -- depth 1, so du recorded `def={i,index} use={}` and A PARAMETER APPEARED
+            -- REDEFINED at that line — its incoming definition killed, the read of it not
+            -- counted at all. Silent in every census, and wrong for reaching-definitions,
+            -- liveness and everything layered on them.
+            --
+            -- ★ IT WAS INVISIBLE BECAUSE THE OTHER SIDE WAS ALSO WRONG. The expression IR's
+            -- `?` fallback read both names too (CART-0404), so the self-gate AGREED on these
+            -- rows. Fixing the IR is what exposed this; two wrong sides agreeing is what a
+            -- two-implementation gate exists to break.
+            --
+            -- So a declaration that HAS an `=` splits there: only children BEFORE the
+            -- operator can bind, and the `type` field never binds. Both are position facts
+            -- about the same token the IR's `assign_sides` splits on, so the two agree BY
+            -- CONSTRUCTION rather than by two tables being kept in step. A declaration with
+            -- no `=` is untouched, which is every lua node that reaches here.
+            local past = false
+            for c in node:iter_children() do
+                if not c:named() then
+                    if ASSIGN_TOK[txt(c, src)] then past = true end
+                elseif past then
+                    flatskip = flatskip or {}
+                    flatskip[c:id()] = true
+                end
+            end
+            for _, ty in ipairs(node:field('type')) do
+                flatskip = flatskip or {}
+                flatskip[ty:id()] = true
+            end
         elseif t == 'catch_clause' then
             k = 5 -- catch(Type $e): the variable_name is a BINDING (DEF), type a use
         elseif t == 'rescue' then
@@ -531,7 +578,7 @@ local function du(root, src, stop_body, lang, FN, stopset, ctrlset, clauseset)
                 elseif k == 1 then cdefpos = same(c, asgleft)
                 elseif k == 3 then cdefpos = same(c, decld)
                 elseif k == 4 then cdefpos = (ct == 'variable_list'
-                    or ct == 'identifier')
+                    or ct == 'identifier') and not (flatskip and flatskip[c:id()])
                 elseif k == 5 then cdefpos = (ct == 'variable_name')
                 elseif k == 6 then cdefpos = (ct == 'variable_name')
                 elseif k == 7 then

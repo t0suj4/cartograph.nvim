@@ -618,10 +618,14 @@ M.build = build
 
 -- ── per-row harvest ──────────────────────────────────────────────────────────
 -- assignment left/right targets (fields for php/js, node types for lua)
-local ASSIGN_OP = { ['='] = true, [':='] = true, ['+='] = true, ['-='] = true,
-    ['*='] = true, ['/='] = true, ['%='] = true, ['||='] = true, ['&&='] = true,
-    ['|='] = true, ['&='] = true, ['^='] = true, ['<<='] = true, ['>>='] = true,
-    ['**='] = true, ['//='] = true, ['??='] = true, ['.='] = true }
+-- ★ ONE OWNER, IN flow (CART-0431). Both the positional `assign_sides` split below and the
+-- FLAT-DECLARATION split in harvest_row must land on the same token du's `k = 4` branch
+-- splits on, and a second copy of this table is precisely the "kept in step" arrangement
+-- that let du and the IR disagree about a zig declaration for as long as they did. Resolved
+-- lazily so module load order stays free; flow never requires expr.
+local ASSIGN_OP = setmetatable({}, { __index = function (_, k)
+    return require('cartograph.flow').ASSIGN_TOK[k]
+end })
 local function assign_sides(node, src)
     local left = node:field('left')[1]
     local right = node:field('right')[1] or node:field('value')[1]
@@ -948,8 +952,34 @@ function M.harvest_row(node, src, hint, lang)
         -- below and the `?` path. The failure mode that cost 139174 rows was a fallback
         -- claiming shapes it did not model; this one claims only `<targets> = <values>`.
         do
-            local _, _, before, after = assign_sides(node, src)
-            if before and after then
+            -- ★ THE SPLIT IS DONE HERE RATHER THAN THROUGH `assign_sides` (CART-0431), and
+            -- the reason is a row du found first: `var result: T = undefined;` has NO NAMED
+            -- CHILD after the operator — zig's `undefined` is a keyword token — so
+            -- assign_sides, which requires operands on BOTH sides (it was written for odin's
+            -- `v, ok := m[k]`), declined the row and the TYPE's read was lost. du reads `T`.
+            -- ★★ AND WRITING THE SCAN OUT HERE IS THE POINT, NOT A COST: flow's `k = 4`
+            -- branch now runs the same walk over the same operator set to decide DEF
+            -- position, so the two implementations split at the same token BY CONSTRUCTION
+            -- rather than by two tables being kept in step. That is the one duplication this
+            -- gate rewards — the sides must AGREE, and they agree because they ask the same
+            -- question of the same node, not because someone remembered to update both.
+            -- ★ IT IS ASSIGN_OP AND NOT A LITERAL `=`, MEASURED: my first cut tested `'='`
+            -- and put three rows BACK — zig spells `extra_index += items.len;` as a
+            -- `variable_declaration` too, so a compound operator that the scan does not
+            -- recognise drops the whole row to the `?` walk, which reads the target. The
+            -- rows it broke were not the rows it fixed, so the TOTAL barely moved (4 -> 4)
+            -- while every row underneath it changed: a count that holds still is not a count
+            -- that means nothing changed.
+            local before, after, past = {}, {}, false
+            for c in node:iter_children() do
+                if not c:named() then
+                    if ASSIGN_OP[vim.treesitter.get_node_text(c, src)] then past = true end
+                elseif not tsutil.is_comment(c) then
+                    local into = past and after or before
+                    into[#into + 1] = c
+                end
+            end
+            if past then
                 -- ★ THE DECLARED TYPE IS A READ, NOT A DROP — and that is a zig fact, not a
                 -- taste. `const items: []const Inst.Ref = @ptrCast(…)` has du reading
                 -- {Inst, Ref}: in zig a type IS a value (`const T = struct {…}`), so naming
