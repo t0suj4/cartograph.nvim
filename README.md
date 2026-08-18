@@ -2848,6 +2848,29 @@ nvim --headless -u NONE -l tools/matrix.lua --quick      # seconds-tier only
 nvim --headless -u NONE -l tools/matrix.lua libs server  # named rows
 nvim --headless -u NONE -l tools/matrix.lua --cols par   # one column
 nvim --headless -u NONE -l tools/matrix.lua --save       # re-baseline structs
+# A PER-ROW DEADLINE, so a WEDGED corpus renders as a named death instead of a stall
+# (CART-0429 — folded in from the CART-0423 verification harness, whose only real advantage
+# over this file was `timeout 2400` per invocation; its rc column is NOT folded, because a
+# shell reading `$?` through `timeout` cannot see a signal at all while the ERR path here
+# reads `proc.signal` first). 2400s is that harness's measured-safe number: all 37 corpora
+# ran under it without one trip, against a largest measured row of 174.4s.
+nvim --headless -u NONE -l tools/matrix.lua --timeout 600   # tighter deadline
+nvim --headless -u NONE -l tools/matrix.lua --timeout 0     # no deadline at all
+#   zig  ERR
+#   zig: the row hit its 5s DEADLINE (--timeout) and was SIGKILLed 10s later, having
+#        ignored the TERM — it did not FAIL, it never finished (code 0, signal 9)
+# ★★ `vim.system{timeout=}` IS A REQUEST, NOT A DEADLINE, and the first cut of this shipped
+# on that assumption: it sends SIGTERM, does not escalate, and an `nvim --headless -l` child
+# DOES NOT DIE ON TERM — measured, a child given 2s ran its full 20s of work, printed its
+# output and exited on its own, while the parent reported `code = 124`. So `matrix zig
+# --timeout 5` printed `timeout 5s/row` in its own header and then a green 118.8s row. The
+# probe that green-lit it used `sleep` as the child, which dies on TERM; the real child is
+# the one that doesn't. ★★ AND 124 IS THE PARENT'S INTENT, NOT THE CHILD'S FATE — it is set
+# when the timer fires whether or not the kill landed, so it reads identically for "killed
+# at the deadline" and "ignored the deadline and finished fine". The escalation is therefore
+# owned here (TERM, then SIGKILL after a 10s grace) and the ERR text reads the flag set by
+# the code that does the killing, never an exit status: a hard-killed row arrives as
+# `code 0 signal 9`, which is exactly what an OOM kill looks like.
 # SCOPE THE WHOLE GRID TO ONE FILE (CART-0429) — the dev loop for anything that changes the
 # harvest: every column at once, on the file you are actually working on.
 nvim --headless -u NONE -l tools/matrix.lua zig --file 'InternPool%.zig$'
@@ -2864,6 +2887,22 @@ nvim --headless -u NONE -l tools/matrix.lua zig --file 'InternPool%.zig$'
 # cold==warm are INTRINSIC — a subset is a perfectly good subject for them.
 # The downgrade lives in the one function every column reports through, so a ninth
 # baseline-comparing column cannot be added that forgets to honour it.
+# AND THE PARSE CACHE'S REUSE RATE PRINTS UNDER THE GRID, one line per row (the folded
+# harness's other half). `miss` IS the parse count, so the by-file walk's claim is that it
+# TRACKS THE FILE COUNT — which is why the file count is printed beside it, here and in
+# exprcensus: a bare "89.5% reuse" can be checked against nothing.
+#   go      7346 hit   866 miss over   866 file(s)  89.5% reuse
+#   zig      370 hit     1 miss over     1 file(s)  99.7% reuse   (--file, one file)
+# ★ IT PRINTS UNCONDITIONALLY, AND THAT IS THE FOLD: the details section suppresses a cell's
+# detail when the cell is OK, so hanging this off the `expr` column would have hidden it on
+# exactly the green rows the old harness showed it on — a fold that only reports when
+# something else is already red is a drop wearing a fold's name.
+# ★ REPORTED, NOT GATED, deliberately: a miss also happens once per SUBJECT in a file that
+# fails to parse (`expr.parse_root` counts the miss before its pcall and caches nothing on
+# failure), so the same two numbers mean "the grouping regressed" and "this corpus has an
+# unparseable file" and a threshold here would be an invention. What makes it worth printing
+# is that the census output is IDENTICAL under both: the performance defect that cost four
+# corpora their census for months is invisible to every verdict in this grid.
 # THE DEV LOOP IS COLD BY DEFAULT, AND THAT IS THE POINT (CART-0429). `bench.extract` goes
 # straight to the provider and never consults the cache, because A GATE MUST NOT VERIFY A
 # CACHED ARTIFACT — CART-0245 is the proof it matters: a warm zig graph once carried 4122

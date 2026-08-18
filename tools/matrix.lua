@@ -1,7 +1,8 @@
 -- The MATRIX runner: corpus × invariant, one command, one grid.
 --
 --   nvim --headless -u NONE -l tools/matrix.lua [<corpus>...] [--quick]
---        [--cols a,b,c] [--save] [--jobs N] [--mem-mb M]
+--        [--cols a,b,c] [--save] [--jobs N] [--mem-mb M] [--timeout S]
+--        [--file <lua-pattern>]
 --
 -- Every "these two computations must agree" claim the repo makes, swept
 -- across the corpus registry in ONE run — the push-time sweep that used to
@@ -72,6 +73,9 @@ do
         elseif a == '--mem-mb' then
             i = i + 1
             opts.mem_mb = tonumber(arg[i])
+        elseif a == '--timeout' then
+            i = i + 1
+            opts.timeout = tonumber(arg[i])
         elseif a == '--par-dump' then
             i = i + 1
             opts.pardump = arg[i]
@@ -185,6 +189,7 @@ local function run_row(name)
     end
 
     local cells = {}
+    local parse -- the expr column's parse-cache reuse (see the `expr` column below)
     -- ★ ONE CHOKEPOINT FOR THE SCOPED VERDICT. Every column reports through `cell`, so the
     -- downgrade lives here rather than in eight column bodies — there is no way to add a
     -- ninth baseline-comparing column that forgets to honour `--file`, because it cannot
@@ -342,6 +347,7 @@ local function run_row(name)
             -- 1.0× on binder:if_statement. Reporting only the inflated one is what let a
             -- ranking artifact be read as "the single biggest gap" for a week.
             local dist = ec.distinct(r.instances)
+            parse = r.parse
             local d = { ('fns=%d methods=%d · %s'):format(r.fns, r.methods,
                 ec.census_distinct(r.cats, dist)) }
             if ec.EXPECTED[name] then
@@ -676,7 +682,7 @@ local function run_row(name)
         end
     end
 
-    return { corpus = name, cells = cells, wall = stats.wall,
+    return { corpus = name, cells = cells, wall = stats.wall, parse = parse,
         -- extraction-floor facts for generated-corpus callers (tools/gen.lua):
         -- a syntax-error wipeout would leave every invariant vacuously green
         fns = (c.nodes.by_kind['function'] or 0)
@@ -736,8 +742,55 @@ for _, col in ipairs(COLS) do
     if wanted(col) then colnames[#colnames + 1] = col end
 end
 local JOBS = math.max(1, opts.jobs or 4) -- bounded parallel pool (see below)
-say(('matrix: %d corpora × %s%s  [jobs %d]'):format(#names,
-    table.concat(colnames, ','), opts.save and '  [--save]' or '', JOBS))
+
+-- ── PER-ROW DEADLINE (CART-0429) ────────────────────────────────────────────────────────
+--
+-- ★ THE ONLY CLOCK IN THIS FILE USED TO BE THE POOL'S. `vim.wait` bounded the WHOLE sweep
+-- at four hours and no individual row had a deadline, so a wedged corpus could not produce
+-- a timeout — it stalled the sweep, and then rendered, four hours later, as "no process was
+-- started", which is simply FALSE about a process that had been started and was still
+-- running. Nothing downstream could name a death that nothing upstream could inflict.
+--
+-- This is the half of the CART-0423 verification harness (sweep4.sh) worth folding in. The
+-- other half — an rc column — is NOT folded, because this file's naming is already the
+-- better one: a shell reading `$?` through `timeout` cannot see a signal at all, while the
+-- ERR branch below reads `proc.signal` FIRST. A grid column printing `0` on thirty green
+-- rows would be vestigial; the surface for a row's status here is ERR + wall.
+--
+-- ★ THE NUMBER IS THE FOLDED HARNESS'S, AND IT IS A MEASUREMENT. 2400 s is the deadline all
+-- 37 corpora ran under in that sweep without one trip, against a largest MEASURED row of
+-- 174.4 s (v8, five columns) — roughly 14× margin, which is the point: a deadline exists to
+-- catch a WEDGE, and one tight enough to fire on a slow-but-live row would be a false FAIL
+-- on the biggest corpus, i.e. the wrong-population trap one more time. `--timeout S`
+-- overrides it and `--timeout 0` disables it.
+--
+-- ★★ AND `vim.system{timeout=}` IS NOT A DEADLINE — IT IS A REQUEST. MEASURED, and it cost
+-- two wrong cuts of this change to find out. It sends SIGTERM and does NOT escalate, and an
+-- `nvim --headless -l` child DOES NOT DIE ON TERM: a child given a 2 s timeout ran its full
+-- 20 s of work, printed its output, and exited on its own — while the parent reported
+-- `code = 124`. My first cut passed `timeout` and trusted `code == 124` to name the death,
+-- so `matrix zig --timeout 5` printed `timeout 5s/row` in its own header and then a green
+-- 118.8 s row. It probed clean beforehand only because the probe's child was `sleep`, which
+-- dies on TERM; the real child is the one that doesn't.
+--
+-- ★★ AND 124 IS THE PARENT'S INTENT, NOT THE CHILD'S FATE. It is set when the timer fires
+-- whether or not the kill landed — so the one field the first cut chose as its discriminator
+-- reads identically for "killed at the deadline" and "ignored the deadline and finished
+-- fine". A harness must not infer from an exit code what it already KNOWS: `timedout` below
+-- is set by the code that does the killing, which is the only witness that cannot be wrong.
+--
+-- So the escalation is OWNED here: TERM at the deadline, SIGKILL after GRACE. Verified on
+-- the same TERM-surviving child — 4.00 s instead of 20, `code = 0 signal = 9`, empty stdout.
+-- ★ Note that signature: a hard-killed row arrives as code 0, which is precisely the
+-- laundering the ERR branch below already warns about, and precisely what an OOM kill looks
+-- like. GRACE is pure margin (10 s against a 2400 s deadline, 240×); it exists so a row that
+-- is merely SLOW rather than wedged can still shut down and flush, and the measured cost of
+-- not escalating at all is that the deadline does nothing whatsoever.
+local TIMEOUT = opts.timeout or 2400
+local GRACE = 10 -- seconds between the TERM and the SIGKILL
+say(('matrix: %d corpora × %s%s  [jobs %d%s]'):format(#names,
+    table.concat(colnames, ','), opts.save and '  [--save]' or '', JOBS,
+    TIMEOUT > 0 and (', timeout %ds/row'):format(TIMEOUT) or ', NO row deadline'))
 
 local W = 14 -- corpus column width
 local head = { ('%-' .. W .. 's %7s'):format('corpus', 'wall') }
@@ -794,24 +847,62 @@ local MEM_BUDGET = opts.mem_mb or math.floor(total_mb * 0.5)
 local function weight(name) return (reg[name] and reg[name].budget_mb) or 500 end
 
 local procs = {} -- name -> raw vim.SystemCompleted (parsed after the pool drains)
+-- ★ `procs` IS SET IN on_exit, so its absence means "did not FINISH", not "did not START".
+-- Conflating those is what printed "no process was started" for a row that was running at
+-- that very moment. `launched` is the field that tells them apart.
+local launched, timedout, hardkill, timers = {}, {}, {}, {}
 local running, finished, inflight_mb = 0, 0, 0
 local function launch(name)
     running = running + 1
+    launched[name] = true
     inflight_mb = inflight_mb + weight(name)
     -- on_exit runs in a fast context: only stash the raw result + a stderr tick
     -- (pure io/Lua, no vim API); all parsing/rendering happens after the wait
-    vim.system(build_cmd(name), { text = true }, function (proc)
+    local obj = vim.system(build_cmd(name), { text = true }, function (proc)
         procs[name] = proc
         running = running - 1
         inflight_mb = inflight_mb - weight(name)
         finished = finished + 1
+        for _, t in ipairs(timers[name] or {}) do
+            if not t:is_closing() then t:stop(); t:close() end
+        end
+        timers[name] = nil
         io.stderr:write(('  [%d/%d] %s\n'):format(finished, #names, name))
+    end)
+    if TIMEOUT <= 0 then return end
+    timers[name] = {}
+    -- uv timers, not vim.system's `timeout`, for the reason argued above. Both steps are
+    -- guarded on `procs[name]`: a row that finished normally is never signalled, and the
+    -- handles are closed from on_exit so a completed row leaves nothing armed.
+    local function at(sec, fn)
+        local t = assert(vim.uv.new_timer())
+        table.insert(timers[name], t)
+        t:start(sec * 1000, 0, function ()
+            if not t:is_closing() then t:stop(); t:close() end
+            if procs[name] then return end
+            fn()
+        end)
+    end
+    at(TIMEOUT, function ()
+        timedout[name] = true
+        pcall(function () obj:kill(15) end)
+    end)
+    at(TIMEOUT + GRACE, function ()
+        hardkill[name] = true
+        pcall(function () obj:kill(9) end)
     end)
 end
 -- pump: keep the pool full under BOTH the job count and the memory budget,
 -- scanning past a corpus that doesn't fit so it never head-of-line-blocks a
 -- smaller one behind it. Relaunches from the wait callback as slots/RAM free.
-vim.wait(3600 * 1000 * 4, function ()
+-- ★ THE ROW DEADLINE MUST BE THE BINDING CLOCK, so the pool's wait is DERIVED from it
+-- rather than left at a flat four hours. 31 rows at jobs 4, each hitting a 2400 s deadline,
+-- is ~5.2 h of makespan: a flat 4 h would expire FIRST and truncate live rows into exactly
+-- the stall the deadline was added to remove — the pool cutting in ahead of the per-row
+-- clock is the same bug wearing the other clock's coat.
+local POOL_WAIT = math.max(3600 * 1000 * 4,
+    TIMEOUT > 0 and (math.ceil(#names / JOBS) + 1) * TIMEOUT * 1000 or 0)
+vim.wait(POOL_WAIT, function ()
     while running < JOBS and #pending > 0 do
         local pick
         if running == 0 then
@@ -829,6 +920,7 @@ end, 25)
 
 local anyfail, anysoft = false, false
 local details = {}
+local parselines = {} -- the folded census log (see below the grid)
 for _, name in ipairs(names) do
     io.stdout:write(('%-' .. W .. 's '):format(name)); io.stdout:flush()
     local proc = procs[name]
@@ -861,7 +953,23 @@ for _, name in ipairs(names) do
         -- sweep harness with no rc column — and the lesson each time is the same: BEFORE
         -- improving how a status is printed, check that the status is TRUE, or the better
         -- message just states the wrong thing more clearly.
-        if not proc then why = 'no process was started'
+        -- ★ THE DEADLINE BRANCH GOES ABOVE THE SIGNAL BRANCH, and it reads OUR OWN FLAG
+        -- rather than the child's exit status. A row we hard-killed arrives as code 0 /
+        -- signal 9 — identical to an OOM kill — so the signal-first branch below, correct
+        -- for everything else, would report a deadline as "KILLED by signal 9 — a timeout
+        -- or an OOM looks like this". It does. And here we are the ones who know which.
+        if not proc then
+            why = launched[name]
+                and ('the row was LAUNCHED and was STILL RUNNING when the pool deadline'
+                    .. ' expired — it was not killed and no result was ever collected')
+                or ('the row was NEVER LAUNCHED — it was still queued when the pool'
+                    .. ' deadline expired')
+        elseif timedout[name] then
+            why = ('the row hit its %ds DEADLINE (--timeout) and was %s — it did not FAIL,'
+                .. ' it never finished (code %s, signal %s)'):format(TIMEOUT,
+                    hardkill[name] and ('SIGKILLed %ds later, having ignored the TERM')
+                        :format(GRACE) or 'terminated',
+                    tostring(code), tostring(sig))
         elseif type(sig) == 'number' and sig ~= 0 then
             why = ('the row process was KILLED by signal %d — a timeout or an OOM looks'
                 .. ' like this, and it is NOT a clean exit however `code` reads'):format(sig)
@@ -873,6 +981,18 @@ for _, name in ipairs(names) do
         else why = ('the row process exited %s'):format(tostring(code)) end
         res = { corpus = name, err = why .. (proc and proc.stderr and #proc.stderr > 0
             and ': ' .. proc.stderr:sub(-400) or '') }
+    end
+
+    -- ★ THE EDGE THE OWNED ESCALATION CREATES: the deadline fired, TERM was sent, and the
+    -- row finished and REPORTED inside the grace window anyway. Its numbers are a completed
+    -- row's and are fine — but it overran a limit this run declared, and a green cell would
+    -- be the only trace. Say it, and make the run soft-fail so the exit code carries it.
+    if timedout[name] and res and not res.err then
+        details[#details + 1] = { name, { ('★ the %ds DEADLINE fired for this row, which then'
+            .. ' finished and reported inside the %ds grace window — the cells below are a'
+            .. ' COMPLETED row\'s, but it overran the limit this run declared')
+            :format(TIMEOUT, GRACE) } }
+        anysoft = true
     end
 
     if res.skip then
@@ -899,6 +1019,7 @@ for _, name in ipairs(names) do
             end
         end
         io.stdout:write(table.concat(line, ' ') .. '\n')
+        if res.parse then parselines[#parselines + 1] = { name, res.parse } end
         if #rowdet > 0 then
             if res.info then rowdet[#rowdet + 1] = res.info end
             details[#details + 1] = { name, rowdet }
@@ -910,6 +1031,36 @@ for _, d in ipairs(details) do
     say('')
     say(d[1] .. ':')
     for _, l in ipairs(d[2]) do say('  ' .. l) end
+end
+
+-- ── the parse-cache reuse log (CART-0429) ───────────────────────────────────────────────
+--
+-- The second half of the folded harness. ★ IT PRINTS UNCONDITIONALLY, AND THAT IS THE FOLD:
+-- the details section above suppresses a cell's detail when the cell is OK, so hanging this
+-- off the `expr` column's detail lines would have hidden it on exactly the green rows the
+-- old harness showed it on — a fold that only reports when something else is already red is
+-- a drop wearing a fold's name.
+--
+-- ★ REPORTED, NOT GATED, and deliberately: `miss` IS the parse count, so the by-file walk's
+-- claim is that it tracks the FILE count — but a miss also happens once per SUBJECT in a
+-- file that fails to parse (`expr.parse_root` counts the miss before its pcall and caches
+-- nothing on failure). The same two numbers therefore mean "the grouping regressed" and
+-- "this corpus has an unparseable file", so a threshold here would be an invention. What
+-- makes it worth printing at all is that the census output is IDENTICAL under both — the
+-- performance defect that cost four corpora their census for months is invisible to every
+-- verdict in this grid, and visible in this one line.
+if #parselines > 0 then
+    say('')
+    say('parse cache (expr column) — `miss` IS the parse count; the by-file walk\'s claim'
+        .. ' is that it tracks FILES:')
+    for _, e in ipairs(parselines) do
+        local pp = e[2]
+        say(('  %-' .. W .. 's %7d hit %6d miss over %5d file(s)  %5.1f%% reuse%s'):format(
+            e[1], pp.hit or 0, pp.miss or 0, pp.files or 0,
+            100 * (pp.hit or 0) / math.max(1, (pp.hit or 0) + (pp.miss or 0)),
+            (pp.nofile or 0) > 0
+                and (' · %d subject(s) with no file'):format(pp.nofile) or ''))
+    end
 end
 
 say('')

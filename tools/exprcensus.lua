@@ -53,6 +53,7 @@ local M = {}
 --- and nodes keep their order within a bucket, so an already-grouped corpus is walked in
 --- exactly the order it was before. `instances` lists keep their existing order and
 --- `--show` output does not move for a change that is pure performance.
+local NOFILE = '\0nofile' -- the one bucket that is not a file (see below)
 local function by_file(nodes)
     local order, buckets = {}, {}
     for _, n in ipairs(nodes or {}) do
@@ -60,7 +61,7 @@ local function by_file(nodes)
         if n.kind == 'function' or n.kind == 'method' then
             -- a node with no file still gets a bucket: expr.of refuses it, and dropping
             -- it here instead would change WHICH subjects are attempted
-            local key = n.file or '\0nofile'
+            local key = n.file or NOFILE
             local b = buckets[key]
             if not b then b = {}; buckets[key] = b; order[#order + 1] = key end
             b[#b + 1] = n
@@ -132,10 +133,23 @@ function M.check(store)
         if freed >= 8 * 1024 * 1024 then collectgarbage(); freed = 0 end
     end
     local p1 = expr.parse_stats()
+    -- ★ THE REUSE RATE IS ONLY READABLE BESIDE THE FILE COUNT (CART-0429). `miss` IS the
+    -- parse count, and the by-file walk's whole claim is that it TRACKS THE FILE COUNT — so
+    -- a bare "99.7% reuse" can be checked against nothing, while "1 miss over 1 file" can be
+    -- checked at a glance. A corpus whose misses run well ahead of its files has either lost
+    -- the grouping or is failing to PARSE: `parse_root` counts the miss BEFORE its pcall and
+    -- caches nothing on failure, so an unparseable file misses once per SUBJECT rather than
+    -- once per file. Which is also why this is REPORTED AND NOT GATED — the same two numbers
+    -- mean "the walk regressed" and "this corpus has an unparseable file", and the census
+    -- output is IDENTICAL either way, so nothing else in the harness can see it at all.
+    local nfiles, nofile = 0, 0
+    for _, k in ipairs(order) do
+        if k == NOFILE then nofile = #buckets[k] else nfiles = nfiles + 1 end
+    end
     return { fns = fns, methods = methods, total = cats.total, cats = cats,
         instances = instances,
         parse = { hit = p1.hit - p0.hit, miss = p1.miss - p0.miss,
-            concat = p1.concat - p0.concat } }
+            concat = p1.concat - p0.concat, files = nfiles, nofile = nofile } }
 end
 
 --- Census one-liner (stable order: total first, then classes by descending count).
@@ -596,8 +610,12 @@ if invoked then
     -- `miss` is the number of PARSES: it should track the file count, and a miss count
     -- near the subject count means the grouping stopped working. That is the whole proof.
     if r.parse then
-        print(('  parse: %d hit / %d miss (parses) / %d concat — %.1f%% reuse'):format(
-            r.parse.hit, r.parse.miss, r.parse.concat,
+        print(('  parse: %d hit / %d miss (parses) over %d file(s)%s / %d concat'
+            .. ' — %.1f%% reuse'):format(
+            r.parse.hit, r.parse.miss, r.parse.files or 0,
+            (r.parse.nofile or 0) > 0
+                and (' + %d subject(s) with no file'):format(r.parse.nofile) or '',
+            r.parse.concat,
             100 * r.parse.hit / math.max(1, r.parse.hit + r.parse.miss)))
     end
     print('  ' .. M.census_distinct(r.cats, dist))
