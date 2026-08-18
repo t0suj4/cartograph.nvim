@@ -124,6 +124,127 @@ end
 -- locals → all call sites here are unchanged.
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
+
+--- The NAME text of a declarator capture, with whitespace squeezed out.
+---
+--- ★★ A `qualified_identifier` WHOSE `::` IS A *MISSING* TOKEN IS A MISPARSE, NOT A
+--- QUALIFIED NAME (CART-0434). tree-sitter's error recovery inserts a ZERO-WIDTH `::` where
+--- the grammar demanded one, so the node LOOKS qualified and its separator has EMPTY TEXT.
+--- Every genuine qualified name — `ns::f`, `a::b::c`, `C<T>::m`, `i::MaybeHandle<i::String>`
+--- — carries a `::` token with real text. Squeezing the whitespace out of a misparsed one
+--- FABRICATES a symbol:
+---
+---     ZIG_EXTERN_C LLVMTargetMachineRef ZigLLVMCreateTargetMachine(…);   // zig_llvm.h:107
+---       cpp: function_declarator > qualified_identifier
+---              namespace_identifier "LLVMTargetMachineRef"   <- the RETURN TYPE
+---              identifier           "ZigLLVMCreateTargetMachine"
+---       -> node named `LLVMTargetMachineRefZigLLVMCreateTargetMachine`
+---
+--- The macro eats the type slot, so the next two identifiers look like `ns name`. Worse than
+--- a wrong name: the return type is presented as a NAMESPACE, so qualified resolution hunts
+--- for a member of something that does not exist and every caller of the real function
+--- resolves to nothing. The honest name is the TRAILING identifier — what a C parse of the
+--- same bytes produces, where the type lands in an ERROR node and the declarator is clean.
+---
+--- ★★ AND THE FIRST CUT OF THIS TESTED THE WRONG THING — "does the TEXT contain `::`" —
+--- which is true of the zig case and FALSE OF v8's whole class, where the glued-on return
+--- type is itself qualified or templated:
+---
+---     V8_WARN_UNUSED_RESULT MaybeLocal<Function> ScriptCompiler::CompileFunction(…)
+---       -> qualified_identifier "MaybeLocal<Function> ScriptCompiler::CompileFunction"
+---          contains `::`, so a text test passes it straight through
+---
+--- I measured zig, cpp and cppmodern, found 1 + 2 + 0, and called it small. v8 — the corpus
+--- the ticket itself named as the gate — was the population that had the answer. THE
+--- STRUCTURAL SIGNAL IS EXACT WHERE THE TEXT ONE IS NOT: read the token, not the string.
+---
+--- The unglue drops everything up to and INCLUDING the missing separator, so a real
+--- qualifier behind one survives: `ScriptCompiler::CompileFunction`, not `CompileFunction`.
+---
+--- ★★ AND THE MISSING SEPARATOR IS NOT ALWAYS AT THE TOP — v8 again, second correction:
+---
+---     V8_WARN_UNUSED_RESULT
+---     inline i::MaybeHandle<i::String> NewString(…)
+---       qualified_identifier "i::MaybeHandle<i::String> NewString"   <- `::` here is REAL
+---         namespace_identifier "i" · [::] · qualified_identifier
+---            "MaybeHandle<i::String> NewString"                      <- `::` here is MISSING
+---
+--- A return type that is ITSELF qualified puts a real separator above the fabricated one, so
+--- checking this node's own children finds nothing and the whole glued string is returned.
+--- The walk therefore descends the LAST named child looking for a deeper missing token, and
+--- the answer is everything after the DEEPEST one: `NewString`, since every level above it
+--- is the return type. ★ Twice now the fix was right about the case it was written against
+--- and blind one shape over — both times v8 held the shape, and both times the correction
+--- came from MEASURING it rather than from re-reading the code.
+--- ★ IT CANNOT FIRE ON REAL C++ by construction — a written `::` is never zero-width.
+--- ONE recursive walk for both shapes, because they are two spellings of one recovery and
+--- each of them can sit at ANY depth: a qualified return type puts a real separator above the
+--- fabricated one (`std::optional<T> OS::method`), so a check of the top node's children
+--- finds nothing in either form. Returns the corrected text, or nil when nothing is glued.
+local function qname(namen, src)
+    -- ★★ THE DEEPEST SIGNAL WINS, AND THAT ORDERING IS THE WHOLE FUNCTION. Two macros before
+    -- a qualified template return type put BOTH shapes in one node, at different depths:
+    --
+    --     V8_NOINLINE V8_PRESERVE_MOST std::pair<IntType, uint32_t> read_leb_slowpath(…)
+    --       qualified_identifier
+    --         namespace_identifier "V8_PRESERVE_MOST"    <- the second macro, as a namespace
+    --         ERROR "std"                                <- SHAPE 2, at the top
+    --         [tok] :: "::"  (real)
+    --         qualified_identifier "pair<…> read_leb_slowpath"
+    --           template_type · [tok] :: ""  MISSING     <- SHAPE 1, one level down
+    --           identifier "read_leb_slowpath"
+    --
+    -- Checking this level first answered `std::pair<IntType,uint32_t>read_leb_slowpath` —
+    -- it stripped one macro and glued the rest. EVERYTHING ABOVE THE DEEPEST SIGNAL IS
+    -- RETURN TYPE, so the descent has to come before either local test. Measured: fixing the
+    -- nested case without this made the v8 residual go 15 -> 17, because three names that had
+    -- been fully glued became half-glued and my detector counts both the same.
+    local last
+    for c in namen:iter_children() do if c:named() then last = c end end
+    -- @langs-ok `qualified_identifier` is a CPP-ONLY node type; the comparison
+    -- being false in every other grammar is exactly what confines this unglue to
+    -- C++ misparses, and they fall through to the plain squeezed text (the
+    -- @langs-ok cpp-only node type; false in every other grammar BY DESIGN
+    if last and last:type() == 'qualified_identifier' then
+        local deep = qname(last, src)
+        if deep then return deep end
+    end
+    -- shape 1: a MISSING (zero-width) `::` — everything after it is the real name
+    local past, tail = false, nil
+    for c in namen:iter_children() do
+        if not c:named() then
+            if c:type() == '::' and node_text(c, src) == '' then past = true end
+        elseif past then tail = c; break end
+    end
+    if tail then
+        -- @langs-ok `qualified_identifier` is a CPP-ONLY node type; the comparison
+        -- being false in every other grammar is exactly what confines this unglue to
+        -- C++ misparses, and they fall through to the plain squeezed text (the
+        -- @langs-ok cpp-only node type; false in every other grammar BY DESIGN
+        return (tail:type() == 'qualified_identifier' and qname(tail, src))
+            or (node_text(tail, src):gsub('%s+', ''))
+    end
+    -- shape 2: an ERROR child — the real name starts there
+    local parts, seen = {}, false
+    for c in namen:iter_children() do
+        if not seen and c:named() and c:type() == 'ERROR' then seen = true end
+        if seen then parts[#parts + 1] = node_text(c, src) end
+    end
+    if seen and #parts > 0 then return (table.concat(parts):gsub('%s+', '')) end
+    return nil
+end
+
+local function name_text(namen, src)
+    -- @langs-ok `qualified_identifier` is a CPP-ONLY node type; the comparison
+    -- being false in every other grammar is exactly what confines this unglue to
+    -- C++ misparses, and they fall through to the plain squeezed text (the
+    -- @langs-ok cpp-only node type; false in every other grammar BY DESIGN
+    if namen:type() == 'qualified_identifier' then
+        local fixed = qname(namen, src)
+        if fixed then return fixed end
+    end
+    return (node_text(namen, src):gsub('%s+', ''))
+end
 local inext = tsutil.inext
 local refusal = tsutil.refusal
 
@@ -4872,7 +4993,7 @@ function M.extract(root, opts)
                     and defn:parent():type() ~= spec.toplevel_parent) then
                 local name = aname
                 if not name then
-                    name = node_text(namen, src):gsub('%s+', '')
+                    name = name_text(namen, src)
                     if spec.qualify then name = spec.qualify(name, defn, src) end
                 end
                 local sp = pos_of(defn)
@@ -5121,7 +5242,7 @@ function M.extract(root, opts)
         -- the CATEGORY capture node; cat its capture name.
         local function handle_iface(defn, namen, cat)
             if defn and namen then
-                local name = node_text(namen, src):gsub('%s+', '')
+                local name = name_text(namen, src)
                 local sp = pos_of(defn)
                 local torn = torn_of(defn, sp)
                 if cat == 'proto' or cat == 'macrofn' then
@@ -5496,7 +5617,7 @@ function M.extract(root, opts)
                 end
                 if calln and namen
                     and not (spec.call_skip or {})[node_text(namen, src)] then
-                    local full = node_text(namen, src):gsub('%s+', '')
+                    local full = name_text(namen, src)
                     -- method-ness reads the SOURCE text: a receiver-aware
                     -- rewrite below must not shift the implicit-self arg
                     local method = full:find(':') ~= nil

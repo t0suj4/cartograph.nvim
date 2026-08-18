@@ -2814,6 +2814,49 @@ nvim --headless -u NONE -l tools/exprcensus.lua zig --show binder:variable_decla
 # THAT HOLDS STILL IS NOT A COUNT THAT MEANS NOTHING CHANGED.
 # ★ CONTAINMENT, PROBED ACROSS 15 GRAMMARS: only zig reaches `k = 4` WITH an operator. lua
 # reaches it with none (both its forms), and the other thirteen never reach it at all.
+# ★★ AND GATING THAT CHANGE TURNED UP A FABRICATED SYMBOL (CART-0434, cache v140). zig's
+# `struct` column was RED — verified pre-existing by stashing, byte-identical without the
+# change — on a node named `LLVMTargetMachineRefZigLLVMCreateTargetMachine`, which exists
+# nowhere. An extern-C MACRO eats the return-type slot, so the cpp grammar reads the next two
+# identifiers as a namespace and a name:
+#   ZIG_EXTERN_C LLVMTargetMachineRef ZigLLVMCreateTargetMachine(…);   // zig_llvm.h:107
+# Worse than a wrong name: the RETURN TYPE is presented as a NAMESPACE, so qualified
+# resolution hunts a member of something that does not exist and every caller of the real
+# function resolves to nothing.
+# ★ ONE CAUSE — a MACRO or a LINE BREAK hiding the return type — AND tree-sitter RECOVERS
+# THREE DIFFERENT WAYS, sharing no signal between them:
+#   1. a MISSING (zero-width) `::` token   ZIG_EXTERN_C LLVMTargetMachineRef Zf(…)
+#   2. an ERROR child, the `::` REAL       V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object>
+#                                          Accessors::ReplaceAccessorWithDataProperty(…)
+#   3. BOTH, at different DEPTHS           V8_NOINLINE V8_PRESERVE_MOST std::pair<…>
+#                                          read_leb_slowpath(…)
+# so `qname` descends FIRST and then tests this level, because EVERYTHING ABOVE THE DEEPEST
+# SIGNAL IS RETURN TYPE. It keeps a real qualifier behind the signal —
+# `ScriptCompiler::CompileFunction`, never `CompileFunction` — and cannot fire on well-formed
+# C++ by construction: a written `::` is never zero-width and an ERROR is a failed parse.
+# ★★ FIVE CORRECTIONS, AND THE MOST USEFUL MEASUREMENT WAS THE ONE THAT WENT UP. Testing the
+# current level before descending answered `std::pair<IntType,uint32_t>read_leb_slowpath` —
+# one macro stripped, the rest still glued — and the v8 residual went 15 -> 17, because three
+# FULLY glued names became HALF glued and a detector scores those the same. That is a
+# different error from the other four: they MISSED A SHAPE, this one found a real shape IN
+# THE WRONG ORDER, and re-reading the code would have called it correct — it WAS correct, at
+# the level it was looking at.
+# ★★ EVERY COMPLETENESS CLAIM I MADE FROM REASONING WAS FALSE ("small", "gone"); every one
+# from the detector held. THE DETECTOR MUST BE BLIND TO WHICH SHAPES THE FIX HANDLES: mine
+# was "a `>` immediately followed by a letter" — two minutes to write, knowing nothing about
+# the fix — and it caught a missed shape three times and a wrong traversal order once.
+# I had measured zig 1, cpp 2, cppmodern 0 and called it small: THE POPULATION I MEASURED WAS
+# NOT THE POPULATION WITH THE ANSWER, and v8 is the corpus the ticket itself named.
+# ★ AND THE FIRST PROBE COUNTED TEXTS WHILE THE GATE COUNTS NODES — cpp's two hits are in
+# VARIABLE declarations that never become a node name, which is why its baseline stayed
+# green. Only the node-level number is the blast radius.
+# RESULT: v8's glued qualified-identifier names 0, zig's `struct` RED -> GREEN against the
+# EXISTING baseline with no --save, cpp/cppmodern unmoved. The 14 v8 names still carrying a
+# fabricated shape are OTHER defects — C++20 `requires`-clause constructors (CART-0435) and
+# a body/macro/parameter-list stored as a name (CART-0436) — filed, not folded in.
+# ★ The spec that matters is the NEGATIVE CONTROL: a real `ns::f` must never be truncated to
+# `f`, which would break C++ member resolution on every corpus — a far bigger blast radius
+# than the bug being fixed.
 # COMBINATORIAL GRID: the bestiary plants each FORM once, and every bug the row model gave
 # up was at an INTERSECTION — elsif x CHAIN-LENGTH-2, block x CONDITION-POSITION, block x
 # ASSIGNMENT-RHS, rescue x INSIDE-A-BLOCK, modifier x LOOP. CART-0394 said it outright: "the

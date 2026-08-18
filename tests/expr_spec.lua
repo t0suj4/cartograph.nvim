@@ -488,3 +488,137 @@ test('expr: `var i: usize = index` reads index and NOT i — the row that expose
     -- `index` (a bare-identifier value mistaken for a second target).
     eq('index', zig_reads('var i: usize = index;'))
 end)
+
+-- ── a misparsed `qualified_identifier` must not FABRICATE a symbol (CART-0434) ───────────
+--
+-- ★★ THE GUARD IS `::`, AND THE NEGATIVE CONTROL IS THE IMPORTANT HALF. C++ spells
+-- qualification with `::` in every form — a definition, a prototype, a nested namespace, a
+-- template member — so a `qualified_identifier` whose text has none is the parser recovering
+-- from something it could not read. An extern-C macro eats the type slot, the next two
+-- identifiers read as `ns name`, and squeezing the whitespace out named a real zig header's
+-- function `LLVMTargetMachineRefZigLLVMCreateTargetMachine`: a symbol that exists nowhere,
+-- with the RETURN TYPE presented as a namespace, so every caller of the real function
+-- resolved to nothing.
+-- ★ RED IF the unglue starts firing on a REAL qualified name — `ns::f` truncated to `f`
+-- would silently break C++ member resolution on every corpus, which is a far larger blast
+-- radius than the bug being fixed. That is what the second test is for.
+local function cpp_nodes(text)
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/u.cpp', 'w'))
+    fd:write(text); fd:close()
+    local data = ts.extract(root)
+    local names = {}
+    for _, n in ipairs(data.nodes or {}) do
+        if n.kind == 'function' or n.kind == 'method' then names[n.name] = true end
+    end
+    vim.fn.delete(root, 'rf')
+    return names
+end
+
+test('extract: a macro-typed C prototype keeps its OWN name, not the return type glued on',
+    function ()
+        if not ready('cpp') then skip 'no cpp parser' end
+        local n = cpp_nodes('#define ZIG_EXTERN_C extern "C"\n'
+            .. 'ZIG_EXTERN_C LLVMTargetMachineRef ZigLLVMCreateTargetMachine(int T);\n')
+        ok(n['ZigLLVMCreateTargetMachine'], 'the prototype is named after the function')
+        eq(nil, n['LLVMTargetMachineRefZigLLVMCreateTargetMachine'],
+            'and NOT after the return type glued to it — that symbol exists nowhere')
+    end)
+
+test('extract: a glued-on QUALIFIED return type is dropped, the real qualifier kept',
+    function ()
+        if not ready('cpp') then skip 'no cpp parser' end
+        -- ★★ THE CASE THE FIRST CUT MISSED, and v8 is where it lives: when the glued-on
+        -- return type is itself qualified or templated, the node's TEXT contains `::` and a
+        -- text-based guard passes it straight through. The signal is the MISSING (zero-width)
+        -- `::` token, and the unglue must keep the REAL qualifier behind it.
+        -- RED IF: the guard goes back to searching the text, or the unglue takes the trailing
+        -- identifier instead of everything after the missing separator (which would yield
+        -- `CompileFunction` and lose the class).
+        local n = cpp_nodes('#define V8_WARN_UNUSED_RESULT __attribute__((warn_unused_result))\n'
+            .. 'V8_WARN_UNUSED_RESULT MaybeLocal<Function> ScriptCompiler::CompileFunction(int a)'
+            .. ' { return a; }\n')
+        ok(n['ScriptCompiler::CompileFunction'], 'the real qualifier survives the unglue')
+        eq(nil, n['MaybeLocal<Function>ScriptCompiler::CompileFunction'],
+            'and the return type is not glued to the front of it')
+        eq(nil, n['CompileFunction'], 'nor is the class stripped along with the return type')
+    end)
+
+test('extract: a QUALIFIED return type puts a real :: above the fabricated one', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    -- ★★ THE SECOND v8 SHAPE, and the reason the unglue descends. When the return type is
+    -- itself qualified (`i::MaybeHandle<i::String>`), the OUTER `::` is real and the MISSING
+    -- one is nested inside it — so a check of the top node's own children finds nothing and
+    -- the whole glued string survives. Everything above the deepest missing separator is
+    -- return type; the name is what follows it.
+    -- RED IF: the walk stops looking after the top level, which is where it stopped twice.
+    local n = cpp_nodes('#define V8_WARN_UNUSED_RESULT __attribute__((warn_unused_result))\n'
+        .. 'V8_WARN_UNUSED_RESULT\n'
+        .. 'inline i::MaybeHandle<i::String> NewString(int factory) { return factory; }\n')
+    ok(n['NewString'], 'the function is named after itself')
+    eq(nil, n['i::MaybeHandle<i::String>NewString'], 'not after its qualified return type')
+end)
+
+test('extract: a return type on its OWN LINE parks the class in an ERROR node', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    -- ★★ THE THIRD SHAPE, AND IT SHARES NO SIGNAL WITH THE FIRST TWO. When the return type
+    -- sits on its own line — how v8 writes a long signature — there is NO missing `::`: the
+    -- parser parks the CLASS in an ERROR node and keeps a real separator. The name therefore
+    -- starts AT the ERROR; everything before it is return type.
+    -- RED IF: the unglue only ever looks for a missing token, which is where it stopped for
+    -- three cuts of this fix while six v8 names stayed fabricated.
+    local n = cpp_nodes('#define V8_WARN_UNUSED_RESULT __attribute__((warn_unused_result))\n'
+        .. 'V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object>\n'
+        .. 'Accessors::ReplaceAccessorWithDataProperty(int isolate) { return isolate; }\n')
+    ok(n['Accessors::ReplaceAccessorWithDataProperty'], 'the class and method survive')
+    eq(nil, n['MaybeDirectHandle<Object>Accessors::ReplaceAccessorWithDataProperty'],
+        'and the return type is not glued to the front')
+end)
+
+test('extract: a QUALIFIED return type hides the ERROR one level down too', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    -- ★★ THE SAME NESTING TRAP, NOW FOR THE ERROR SHAPE — and the fourth time on this fix
+    -- that a rule was right at the top level and blind one level down. `std::optional<T>` is
+    -- itself qualified, so the top node's `::` is real and its children hold no ERROR; the
+    -- ERROR is inside the nested qualified_identifier.
+    -- RED IF: either shape's detector stops descending. Both must, and for the same reason.
+    local n = cpp_nodes('#include <optional>\nstruct H {};\n'
+        .. 'std::optional<H>\nOS::CreateSharedMemoryHandleForTesting(int a) { return {}; }\n')
+    ok(n['OS::CreateSharedMemoryHandleForTesting'], 'the class and method survive')
+    eq(nil, n['std::optional<H>OS::CreateSharedMemoryHandleForTesting'],
+        'and the qualified return type is not glued to the front')
+end)
+
+test('extract: BOTH misparse shapes in one node — the deepest signal wins', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    -- ★★ TWO macros before a qualified template return type put an ERROR at the top AND a
+    -- missing `::` one level down. Answering from the shallower one strips a single macro and
+    -- glues the rest — measured: it made v8's residual go UP, 15 -> 17, because three fully
+    -- glued names became half-glued and a detector counts both the same.
+    -- RED IF: either local test runs before the descent. Everything above the DEEPEST signal
+    -- is return type, so the descent must come first.
+    local n = cpp_nodes('#define V8_NOINLINE __attribute__((noinline))\n'
+        .. '#define V8_PRESERVE_MOST\n#include <utility>\n'
+        .. 'V8_NOINLINE V8_PRESERVE_MOST std::pair<int, unsigned> read_leb_slowpath(int pc)'
+        .. ' { return {pc, 0}; }\n')
+    ok(n['read_leb_slowpath'], 'the function is named after itself')
+    eq(nil, n['std::pair<int,unsigned>read_leb_slowpath'], 'not half-stripped')
+    eq(nil, n['V8_PRESERVE_MOSTstd::pair<int,unsigned>read_leb_slowpath'], 'nor unstripped')
+end)
+
+test('extract: a REAL qualified name keeps its qualification — the negative control',
+    function ()
+        if not ready('cpp') then skip 'no cpp parser' end
+        -- RED IF: the unglue drops its `::` guard and truncates every qualified definition
+        -- to its trailing identifier. `ns::f` is the shape that must survive untouched.
+        -- ★ the fixture holds ONLY the definition. My first cut also declared the prototype
+        -- inside `namespace ns { int f(int a); }`, and the spec went red asserting no node
+        -- named `f` — correctly: that prototype IS a node named `f`, captured by the header
+        -- interface query. The spec was wrong, not the code, and it is worth the two lines
+        -- to say so: a negative control that goes red on the FIXTURE has still done its job,
+        -- because it proved the assertion was reachable at all.
+        local n = cpp_nodes('int ns::f(int a) { return a; }\n')
+        ok(n['ns::f'], 'a definition qualified with :: keeps the qualifier')
+        eq(nil, n['f'], 'and is NOT truncated to its trailing identifier')
+    end)

@@ -73,7 +73,23 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 139 -- v139: A ZIG DECLARATION'S INITIALISER WAS RECORDED AS A SECOND BINDER
+M.VERSION = 140 -- v140: A MISPARSED `qualified_identifier` FABRICATED A SYMBOL (CART-0434).
+               -- C++ spells qualification with `::`, always — so a `qualified_identifier`
+               -- whose text has none is the parser recovering, and its two identifiers are
+               -- NOT a namespace and a name. An extern-C macro eats the type slot
+               -- (`ZIG_EXTERN_C LLVMTargetMachineRef ZigLLVMCreateTargetMachine(…)`), the
+               -- next two identifiers read as `ns name`, and squeezing the whitespace out
+               -- named the node `LLVMTargetMachineRefZigLLVMCreateTargetMachine` — a symbol
+               -- that exists nowhere, presenting the RETURN TYPE as a namespace. Every
+               -- caller of the real function resolved to nothing.
+               -- ★ Only `struct` could see it: the node/edge/ref TOTALS are identical, so a
+               -- RENAMED node is invisible to every count column. It is the one oracle in
+               -- the matrix that compares IDENTITY rather than COUNT, and this had been
+               -- sitting red in a HEAVY row outside `--quick`.
+               -- ★ Cannot fire on real C++ by construction (the guard is `::`). MEASURED
+               -- over ~1000 C/C++ files: zig 1, cpp 2 (`WIND_PERIOD jb`, a macro-as-type in
+               -- 7kaa), cppmodern 0. Small, and every one a symbol that does not exist.
+               -- v139: A ZIG DECLARATION'S INITIALISER WAS RECORDED AS A SECOND BINDER
                -- (CART-0431). flow's `k = 4` says EVERY direct `identifier` child of a
                -- `variable_declaration` is def-position — exactly right for lua, which
                -- reaches that branch only for a declaration with NO operator (`local x = 1`
