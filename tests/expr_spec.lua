@@ -622,3 +622,45 @@ test('extract: a REAL qualified name keeps its qualification — the negative co
         ok(n['ns::f'], 'a definition qualified with :: keeps the qualifier')
         eq(nil, n['f'], 'and is NOT truncated to its trailing identifier')
     end)
+
+-- ── a C++20 requires-clause vs the constructor's name (CART-0435) ────────────
+-- A CONSTRAINED CONSTRUCTOR nests one `function_declarator` inside another, and the cpp
+-- spec's `declarator: (_) @name` captures the INNER one — so the stored name is the whole
+-- signature: parameter list, `requires` clause and member-initializer list. Fourteen such
+-- names in v8's handles.h / maybe-handles.h / tagged.h, and a constructor named
+-- `Handle::Handle(Handle<S>handle)requires(…):HandleBase` can never be resolved to.
+-- ★ THE GRAMMAR DOES PLACE `requires_clause` — this is not a pre-C++20 parser, and
+-- CART-0434's qualified_identifier recovery cannot see it (the capture is a declarator, not
+-- a qualified name). What it gets wrong is the member-init list: `: HandleBase` is eaten
+-- into the requires_clause and its `(handle)` is left over as a second parameter_list, which
+-- is what forces the second declarator level.
+-- ★ THE MACRO IN THE TYPE SLOT IS LOAD-BEARING IN THE FIXTURE: without `V8_INLINE` the
+-- parser reads a constructor, parks `: Base(x)` in a field_initializer_list and the bug does
+-- not reproduce. Measured — my first fixture came back green on unfixed code.
+test('extract: a C++20 requires-clause is not glued into the constructor NAME', function ()
+    if not ready('cpp') then skip 'no cpp parser' end
+    -- RED IF: the name capture stops descending through nested function_declarators — either
+    -- spelling of the constraint, `requires(expr)` and the paren-less `requires expr`,
+    -- produces the identical two-level shape and both must survive it.
+    local n = cpp_nodes('#define V8_INLINE inline\n'
+        .. 'template <typename T>\nclass Handle {\n public:\n'
+        .. '  template <typename S>\n  V8_INLINE Handle(Handle<S> handle)\n'
+        .. '    requires(is_subtype_v<S, T>)\n      : HandleBase(handle) {}\n};\n'
+        .. 'class Tagged {\n public:\n  template <typename U>\n'
+        .. '  V8_INLINE constexpr explicit Tagged(Address ptr)\n'
+        .. '    requires std::is_same_v<This, MaybeObject>\n      : Base(ptr) {}\n};\n'
+        .. 'class Widget {\n public:\n  V8_INLINE Widget(int a) : count_(a) {}\n'
+        .. '  int count_;\n};\n'
+        .. 'int ns::f(int a) { return a; }\n')
+    ok(n['Handle::Handle'], 'the constrained constructor is named after itself')
+    eq(nil, n['Handle::Handle(Handle<S>handle)requires(is_subtype_v<S,T>):HandleBase'],
+        'and NOT after its entire signature — that symbol exists nowhere')
+    ok(n['Tagged::Tagged'], 'the paren-less constraint spelling too')
+    eq(nil, n['Tagged(Addressptr)requiresstd::is_same_v<This,MaybeObject>:Base'],
+        'whose glued name also loses the class, because `std::` looks like qualification')
+    -- NEGATIVE CONTROLS. An ordinary constructor with a member-initializer list does NOT
+    -- nest its declarator, and an ordinary qualified definition is untouched by any of this.
+    -- RED IF: the descent starts firing on the one-level shape and truncates real names.
+    ok(n['Widget::Widget'], 'an ordinary constructor keeps the name it has today')
+    ok(n['ns::f'], 'and a qualified definition keeps its qualifier')
+end)

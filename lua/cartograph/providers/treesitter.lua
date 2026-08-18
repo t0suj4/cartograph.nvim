@@ -234,7 +234,46 @@ local function qname(namen, src)
     return nil
 end
 
+--- ★★ A NAME THAT IS ITSELF A DECLARATOR IS NOT A NAME (CART-0435). A C++20 CONSTRAINED
+--- constructor — `requires` after the parameter list, then a member-initializer list —
+--- nests one `function_declarator` inside another, and `declarator: (_) @name` in the cpp
+--- spec's `functions`/`interface` queries happily captures the inner one:
+---
+---     V8_INLINE Handle(Handle<S> handle)
+---       requires(is_subtype_v<S, T>)
+---         : HandleBase(handle) {}
+---
+---     function_definition
+---       type: type_identifier "V8_INLINE"           <- the macro takes the type slot
+---       declarator: function_declarator             <- the OUTER one
+---         declarator: function_declarator           <- @name captures THIS
+---           declarator: identifier "Handle"         <- the name actually is HERE
+---           parameters: parameter_list "(Handle<S> handle)"
+---           requires_clause "requires(…) : HandleBase"
+---         parameters: parameter_list "(handle)"     <- the member-init ARGS, misparsed
+---
+--- ★ THE GRAMMAR DOES PLACE `requires_clause` — this is not a pre-C++20 parser, and the
+--- ERROR-node recovery CART-0434 added for `qualified_identifier` cannot see this at all
+--- (the captured node is a `function_declarator`, never a qualified name). What the grammar
+--- gets wrong is the MEMBER-INITIALIZER LIST: `: HandleBase` is swallowed into the
+--- requires_clause and its argument list `(handle)` is left over as a second parameter_list,
+--- which is what forces the second declarator level. BOTH spellings of the constraint —
+--- `requires(expr)` and the paren-less `requires std::is_same_v<This, MaybeObject>` — produce
+--- the identical signature, so one descent covers both.
+--- ★ AN ORDINARY CONSTRUCTOR NEVER NESTS: `Widget(int a) : count_(a) {}` puts the
+--- field_initializer_list beside the declarator, one level, and this loop does not fire.
+--- Measured: 14 fabricated names in v8's handles.h / maybe-handles.h / tagged.h, 0 after.
+--- ★ ONLY `function_declarator`. A function returning a function pointer nests through
+--- `parenthesized_declarator`/`pointer_declarator` and is named `(*makeFn(inta))` today —
+--- the same class of defect, a different (unmeasured) population, its own ticket.
 local function name_text(namen, src)
+    -- @langs-ok `function_declarator` is a C/CPP-ONLY node type; the comparison is false in
+    -- every other grammar BY DESIGN, which is what confines this descent to C++ misparses
+    while namen:type() == 'function_declarator' do
+        local inner = namen:field('declarator')[1]
+        if not inner then break end
+        namen = inner
+    end
     -- @langs-ok `qualified_identifier` is a CPP-ONLY node type; the comparison
     -- being false in every other grammar is exactly what confines this unglue to
     -- C++ misparses, and they fall through to the plain squeezed text (the

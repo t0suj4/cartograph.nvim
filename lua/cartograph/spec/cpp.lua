@@ -17,6 +17,14 @@ return {
     -- a SUPERTYPE, which is exactly the kind of distinction a name-keyed base set cannot
     -- make). Same lesson as `pattern` in six and `block` in eight.
     localdecl = { declaration = true },
+    -- ★ A STORAGE CLASS AND A CV-QUALIFIER DECORATE A DECLARATION AND READ NOTHING
+    -- (CART-0404). `static String str;` has no `init_declarator` and no declarator wrapper,
+    -- so it reaches the IR's lossy fallback, which claims a row only when EVERY named child
+    -- is accounted for — and `static` was not, so the row fell to the generic `?` walk that
+    -- reads the DECLARED NAME. Same category as lua's `<const>`/`<close>` (CART-0234), which
+    -- is why it belongs in this declared key and not in a base table: `storage_class_specifier`
+    -- is a c/cpp node type and a name-keyed base set cannot say so.
+    binding_modifiers = { storage_class_specifier = true, type_qualifier = true },
         exts = { 'cpp', 'hpp', 'cc', 'hh', 'cxx', 'hxx' },
         functions = [=[
             (function_definition

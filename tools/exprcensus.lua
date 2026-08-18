@@ -318,17 +318,25 @@ M.EXPECTED = {
         ['missing:while_statement'] = 2, ['binder:while_statement'] = 1,
         ['both:redirected_statement'] = 1, ['missing:command_substitution'] = 1,
         ['missing:variable_assignments'] = 1 },
-    cpp = { total = 1488, ['missing:preproc_def'] = 858, ['missing:declaration'] = 469,
-        ['binder:declaration'] = 110, ['missing:preproc_function_def'] = 22,
+    -- ★ RE-PINNED @ CART-0404's C/C++ half: `binder:declaration` cpp 110 -> 1 and
+    -- cppmodern 106 -> 1, `both:declaration` GONE. TWO defects, both C++-only shapes that a
+    -- set written against C could not have: a REFERENCE declarator (`Config &c = x;`), and a
+    -- declaration MODIFIER with no initialiser (`static String str;`). No new class either.
+    cpp = { total = 1379, ['missing:preproc_def'] = 858, ['missing:declaration'] = 469,
+        ['binder:declaration'] = 1, ['missing:preproc_function_def'] = 22,
         ['binder:if_statement'] = 6, ['binder:compound_statement'] = 5,
         ['missing:declaration_command'] = 5, ['missing:command'] = 4,
         ['binder:for_statement'] = 2, ['missing:expression_statement'] = 2,
         ['binder:declaration_command'] = 1, ['both:pipeline'] = 1,
         ['missing:if_statement'] = 1, ['missing:list'] = 1,
         ['missing:variable_assignment'] = 1 },
-    cppmodern = { total = 146, ['binder:declaration'] = 106, ['binder:if_statement'] = 25,
-        ['missing:declaration'] = 11, ['missing:for_range_loop'] = 2,
-        ['binder:compound_statement'] = 1, ['both:declaration'] = 1 },
+    -- ★ pinned from the FINAL state, not a mid-arc reading: my first attempt wrote 41,
+    -- measured after the reference-declarator fix and BEFORE the modifier one, and the pin
+    -- went red on its own next run. `binder:declaration` reaches 0 here — cppmodern is C++
+    -- throughout, so both C++-only shapes were its whole residual.
+    cppmodern = { total = 40, ['binder:if_statement'] = 25,
+        ['missing:declaration'] = 12, ['missing:for_range_loop'] = 2,
+        ['binder:compound_statement'] = 1 },
     -- recalib 2026-08-16 (CART-0422, A SPREAD IS NOT A VARARG): -2. go was NOT expected to
     -- move — the fix was described as js-only — but `VARARG` is a BASE set, so any grammar
     -- with a spread-ish node carrying an operand rides it. The direction settles it: two
@@ -438,12 +446,19 @@ M.EXPECTED = {
     -- Rank v8's work by the distinct column the CLI prints, never by these numbers.
     -- Pinned on instances anyway, because every other pin is, and re-keying would move all
     -- twenty-three at once for a reporting change.
-    v8 = { total = 165533, ['missing:preproc_function_def'] = 77685,
-        ['binder:declaration'] = 30547, ['missing:declaration'] = 20791,
+    -- ★ RE-PINNED @ CART-0404's C/C++ half. `binder:declaration` 30547 -> 11289 instances,
+    -- and 3859 -> 462 DISTINCT rows — this was the ticket's own named gate, an 88% cut of the
+    -- class it was opened for. `both:declaration` 156 -> 0.
+    -- ★ AND `missing:declaration` ROSE BY EXACTLY 156, WHICH IS NOT A REGRESSION: it is the
+    -- same 156 rows, moved from `both` to `missing`. A two-sided disagreement became
+    -- one-sided — flat in COUNT and strictly better in KIND, the same shape CART-0405
+    -- recorded on bash. Reading the rise without the fall would have called this a loss.
+    v8 = { total = 146275, ['missing:preproc_function_def'] = 77685,
+        ['binder:declaration'] = 11289, ['missing:declaration'] = 20947,
         ['binder:compound_statement'] = 17461, ['missing:expression_statement'] = 7157,
         ['missing:if_statement'] = 4169, ['missing:case_statement'] = 3643,
         ['missing:preproc_def'] = 1871, ['binder:if_statement'] = 1470,
-        ['missing:for_range_loop'] = 192, ['both:declaration'] = 156,
+        ['missing:for_range_loop'] = 192,
         ['binder:namespace_definition'] = 133, ['missing:compound_statement'] = 47,
         ['binder:ERROR'] = 37, ['both:expression_statement'] = 35,
         ['binder:while_statement'] = 33, ['binder:expression_statement'] = 27,

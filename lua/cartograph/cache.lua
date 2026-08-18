@@ -73,7 +73,30 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 140 -- v140: A MISPARSED `qualified_identifier` FABRICATED A SYMBOL (CART-0434).
+M.VERSION = 141 -- v141: TWO PARALLEL FIXES, ONE BUMP — the version is a SHARED COUNTER, so
+               -- it is the one thing two workers must not each decide. Both change what the
+               -- extractor emits, so both need the same invalidation and neither owns it.
+               -- (a) CART-0404, the C/C++ half of "the declaration row READS what it
+               -- declares". TWO defects, both C++-only shapes a set written against C could
+               -- not have: a REFERENCE declarator (`Config &c = x;`) and a declaration
+               -- MODIFIER with no initialiser (`static String str;`, now via the declared
+               -- `spec.binding_modifiers` key rather than a base table).
+               --   cpp binder:declaration 110 -> 1 · cppmodern 106 -> 0 · v8 3859 -> 462
+               --   DISTINCT rows (30547 -> 11289 instances); `both:declaration` 156 -> 0.
+               -- ★ v8's `missing:declaration` rose by EXACTLY 156 — the same rows, moved
+               -- from `both` to `missing`: two-sided became one-sided, flat in count and
+               -- better in kind. Reading the rise without the fall would call it a loss.
+               -- ★ AND ADDING `reference_declarator` TO THE SET DID NOTHING: the unwrap
+               -- walks by FIELD and that node has no `declarator` field, unlike pointer and
+               -- array. SET MEMBERSHIP IS NOT ACCESS, and the null result — a total holding
+               -- still after a change that should move it — is the only thing that said so.
+               -- (b) CART-0435, C++20 constrained-template constructors. A macro in the type
+               -- slot makes the grammar mis-split `requires(…) : Base` and nest a SECOND
+               -- `function_declarator`, so `declarator: (_) @name` captured the whole
+               -- signature: `Handle::Handle(Handle<S>handle)requires(…):HandleBase`. The
+               -- name descends nested function_declarators before anything else looks at it.
+               -- 14 -> 0 in the three v8 headers; 7kaa and colobot node dumps diff 0 lines.
+               -- v140: A MISPARSED `qualified_identifier` FABRICATED A SYMBOL (CART-0434).
                -- C++ spells qualification with `::`, always — so a `qualified_identifier`
                -- whose text has none is the parser recovering, and its two identifiers are
                -- NOT a namespace and a name. An extern-C macro eats the type slot

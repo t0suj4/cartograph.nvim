@@ -690,7 +690,17 @@ local LOCALDECL = { variable_declaration = true, local_declaration = true,
 local DECLARATOR = { variable_declarator = true, init_declarator = true }
 -- C/C++ wrap the declared name in a pointer/array declarator (`Foo *p`, `int a[4]`) — the
 -- same set du walks through with DECLWRAP, so the two find the same name.
-local DECLWRAP = { pointer_declarator = true, array_declarator = true }
+-- ★ AND IN A REFERENCE DECLARATOR, WHICH C DOES NOT HAVE (CART-0404). `Config &tempConfig =
+-- config;` is `init_declarator(reference_declarator(identifier), value)` — identical in shape
+-- to the pointer case one line above, and absent from this set because the set was written
+-- against C, where `&` in a declarator does not exist. So the unwrap loop stopped at the
+-- wrapper, `build` fell to its `?` path, and the DECLARED NAME was read: the whole
+-- `binder:declaration` residual on the cpp corpus is `Type &name = value`.
+-- ★ du needs no matching change — it reaches the name through the `declarator`-FIELD list
+-- (its k=7 branch) rather than by unwrapping, which is why this is a one-sided defect and
+-- why the census could see it at all.
+local DECLWRAP = { pointer_declarator = true, array_declarator = true,
+    reference_declarator = true }
 -- ★ THE LOCAL-DECLARATION SET, PER LANGUAGE (CART-0404). C spells it `declaration`, and
 -- `declaration` is a node type in NINE of the seventeen grammars — several of them as a
 -- SUPERTYPE, a distinction a name-keyed base set cannot make. So it lives in the spec
@@ -902,7 +912,16 @@ function M.harvest_row(node, src, hint, lang)
             if c:named() and DECLARATOR[c:type()] then
                 seen = true
                 local nm = c:field('name')[1] or c:field('declarator')[1]
-                while nm and DECLWRAP[nm:type()] do nm = nm:field('declarator')[1] end
+                -- ★ …AND `reference_declarator` HAS NO `declarator` FIELD (CART-0404), while
+                -- `pointer_declarator` and `array_declarator` both do. Adding it to DECLWRAP
+                -- alone changed NOTHING — the walk is by FIELD, so membership without a
+                -- matching accessor just made `nm` nil and the row fell through unchanged.
+                -- A NULL RESULT IS WHAT SURFACED IT: the census total held still after a fix
+                -- that should have moved it, which is only readable if you re-measure a
+                -- one-line change instead of assuming it landed.
+                while nm and DECLWRAP[nm:type()] do
+                    nm = nm:field('declarator')[1] or nm:named_child(0)
+                end
                 local vl = c:field('value')[1]
                 -- ★ A DESTRUCTURING PATTERN IS N TARGETS, NOT ONE OPAQUE ONE (CART-0358).
                 -- `build` has no pattern case, so the whole `{a, b}` came back as a `?`
@@ -1021,6 +1040,11 @@ function M.harvest_row(node, src, hint, lang)
             if c:named() and not tsutil.is_comment(c) then
                 local cn = false
                 if tyf and c:id() == tyf:id() then cn = true end -- a TYPE reads no variable
+                -- ...and so does a declaration MODIFIER, per the language's own declared set
+                -- (`spec.binding_modifiers`): `static`, `const`, lua's `<close>`. Accounting
+                -- for them is what lets an initialiser-less declaration claim its row here
+                -- instead of falling to the `?` walk that reads the name it declares.
+                if is_modifier(lang, c) then cn = true end
                 for _, tn in ipairs(list_children(c)) do
                     -- @langs-ok `variable_list` is lua's bare-`local a, b` target wrapper;
                     -- no other grammar in the roster wraps an initialiser-less declaration
