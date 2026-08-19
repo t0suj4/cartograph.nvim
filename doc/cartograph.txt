@@ -805,7 +805,7 @@ tests/lensbar_spec.lua, so it cannot drift from the code.
   fn            statements detail lints
   block         statements detail
   region        statements detail
-  files         flat tree
+  files         flat layers
   file          members live
 
   statements  each altitude's normal view: the code's statements in order

@@ -59,7 +59,8 @@ local SIGN = {
 
 local M = {
     view = { level = 'files', file = nil, fn = nil },
-    files_mode = 'flat', -- 'flat' (alphabetical) | 'tree' (include tree); <Tab> toggles
+    files_mode = 'flat', -- 'flat' (alphabetical) | 'layers' (by condensation
+    -- level, load order first — see render_files_layers); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
     line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
@@ -129,7 +130,7 @@ end
 --- @return string[]|nil modes  every mode of this altitude, cycling order
 --- @return string|nil active   the one in effect (nil iff modes is nil)
 function M.modes()
-    if M.view.level == 'files' then return { 'flat', 'tree' }, M.files_mode end
+    if M.view.level == 'files' then return { 'flat', 'layers' }, M.files_mode end
     local set = lens_set(M.view.level)
     if not set then return nil end
     return set, cur_lens()
@@ -527,39 +528,68 @@ local function render_files_load(ctx)
     end
 end
 
--- Include tree: files organized by who requires whom. Roots are the files
--- nothing requires (entry points / orphans); a file already shown appears dim
--- with `…` and is not expanded again (which also makes require-cycles safe).
-local function render_files_tree(ctx)
-    local shown = {}
-    local function add(file, depth)
-        if shown[file] then
-            file_row(ctx, file, depth, true)
-            return
-        end
-        shown[file] = true
-        file_row(ctx, file, depth)
-        local kids = {}
-        for _, k in ipairs(store.topo():imports_out(file)) do kids[#kids + 1] = k end
-        table.sort(kids)
-        for _, k in ipairs(kids) do add(k, depth + 1) end
+-- THE LAYER ROSTER (was: the include tree). A drawn tree's DEPTH is not a
+-- property of a file — it records which path the walk took to reach it.
+-- Measured on the user's own capture and on two corpora: 524 files rendered
+-- 3353 rows; config_api.php appeared at 23 DISTINCT depths (1..26); 37% of
+-- mantis's files and 50% of our own were drawn at more than one. And the
+-- casualty that mattered was SEARCH — `/config_api.php` matched 252 rows in the
+-- tree against 2 in the flat list, so `n` walked duplicates of one file, while
+-- a 42-column indent pushed the names off a 30-column pane entirely.
+--
+-- Depth becomes single-valued once the CYCLES ARE CONDENSED, and then it is
+-- small and it MEANS something: mantis is not 26 deep, it is a 57-file mutually
+-- recursive core with 93 files layered THREE levels around it; our own lua/ is
+-- genuinely 16 with a largest cycle of 6. The drawn number could not tell those
+-- two shapes apart — both said 26 — which is the test a display has to pass.
+--
+-- So: one component at a time, ascending level, which for imports READS AS LOAD
+-- ORDER (level 0 requires nobody). The level goes in the NUMBER COLUMN, not the
+-- indent — it is derived, so it does not belong in the searchable text — and a
+-- multi-file component announces itself, because "these N files are mutually
+-- recursive" is the most interesting fact the old tree hid by drawing it as
+-- depth. The condensation is free: it is the same scc.condense the shipped
+-- require-cycle lint already runs.
+--
+-- ONE ROW PER FILE, TOTAL, NO INDENT. `/` over this buffer is the browser's
+-- best feature (user, unprompted: "beats file search commands") and it only
+-- works if every file is here exactly once.
+local function render_files_layers(ctx)
+    local scc = require 'cartograph.scc'
+    local topo = store.topo()
+    local ids, adj = {}, {}
+    for _, f in ipairs(store.files) do ids[#ids + 1] = f end
+    table.sort(ids) -- determinism: condense() iterates this list
+    for _, f in ipairs(ids) do adj[f] = topo:imports_out(f) end
+    local con = scc.condense(adj, ids)
+    local lv = scc.levels(con, adj)
+    local order = {}
+    for ci = 1, con.n do
+        table.sort(con.members[ci])
+        order[#order + 1] = ci
     end
-    -- entry points first among the roots, then the accidental ones
-    local roots = {}
-    for _, f in ipairs(store.files) do
-        if #store.topo():imports_in(f) == 0 then roots[#roots + 1] = f end
-    end
-    table.sort(roots, function (a, b)
-        local ea, eb = store.is_entrypoint(a), store.is_entrypoint(b)
-        if ea ~= eb then return ea end
-        return a < b
+    table.sort(order, function (x, y)
+        if lv.level[x] ~= lv.level[y] then return lv.level[x] < lv.level[y] end
+        return con.members[x][1] < con.members[y][1]
     end)
-    for _, f in ipairs(roots) do add(f, 0) end
-    -- anything left is only reachable through a cycle: show it as a root too
-    for _, f in ipairs(store.files) do
-        if not shown[f] then add(f, 0) end
+    for _, ci in ipairs(order) do
+        local m = con.members[ci]
+        if #m > 1 then
+            -- chrome, so THE BUDGET LAW applies to it: the first cut of this
+            -- row said "mutually recursive" too and rendered 41 columns into a
+            -- 30-column pane — the exact silent clip the law exists to stop,
+            -- introduced by the commit that was fixing clipping
+            ctx.lines[#ctx.lines + 1] = ('── cycle: %d files ──'):format(#m)
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+            ctx.line_sep[#ctx.lines] = true -- chrome: hover keeps the preview
+        end
+        for _, f in ipairs(m) do
+            file_row(ctx, f)
+            ctx.vnums[#ctx.lines] = tostring(lv.level[ci])
+        end
     end
 end
+
 
 local function render_file(ctx, file)
     -- THE DIRECTORY IS DISCLOSED HERE. Roster rows carry the shortest UNIQUE
@@ -2079,8 +2109,9 @@ function M.render()
     elseif v.level == 'fn' and cur_lens() == 'lints' then
         render_lints(ctx, v.fn)
     elseif v.level == 'files' then
-        if M.files_mode == 'tree' then
-            if store.toc then render_files_load(ctx) else render_files_tree(ctx) end
+        if M.files_mode == 'layers' then
+            -- a DECLARED load order (a toc) beats a derived one
+            if store.toc then render_files_load(ctx) else render_files_layers(ctx) end
         else
             render_files(ctx)
         end

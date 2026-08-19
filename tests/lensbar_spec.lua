@@ -70,10 +70,10 @@ end)
 test('modes: the files altitude answers with its DISPLAY modes, not nil', function ()
     restore()
     symbols.view = { level = 'files' }
-    symbols.files_mode = 'tree'
+    symbols.files_mode = 'layers'
     local set, active = symbols.modes()
-    eq({ 'flat', 'tree' }, set, 'flat/tree is what <Tab> cycles here')
-    eq('tree', active)
+    eq({ 'flat', 'layers' }, set, 'flat/layers is what <Tab> cycles here')
+    eq('layers', active)
     restore()
 end)
 
@@ -131,13 +131,13 @@ test('strip: the mark is text, so it survives a monochrome terminal', function (
     restore()
 end)
 
-test('strip: the files altitude shows flat/tree with the active one marked',
+test('strip: the files altitude shows flat/layers with the active one marked',
     function ()
     restore()
     symbols.view = { level = 'files' }
-    symbols.files_mode = 'tree'
+    symbols.files_mode = 'layers'
     local s = plain(symbols.winbar())
-    ok(s:find('[tree]', 1, true), s)
+    ok(s:find('[layers]', 1, true), s)
     ok(s:find('flat', 1, true), s)
     restore()
 end)

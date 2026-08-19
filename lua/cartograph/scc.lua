@@ -70,4 +70,36 @@ function M.condense(adj, ids)
     return { comp = comp, members = members, n = #members }
 end
 
+--- LONGEST-PATH LEVEL per component — the only depth an import/call graph
+--- actually has. Depth measured by WALKING is not a property of a node: it
+--- records which path the walk took to reach it (measured on mantis, 37% of
+--- files were drawn at more than one depth and config_api.php at 23 of them;
+--- on our own lua/, 50%). Condense the cycles first and it becomes single-
+--- valued, and much smaller: mantis's drawn 26 is really 3.
+---
+--- One forward pass, no recursion: condense() emits components in reverse
+--- topological order, so every successor of `ci` already has a level.
+--- Level 0 is a component that reaches nothing — for imports, a file that
+--- requires nobody, which makes ascending level READ AS LOAD ORDER.
+--- Returns { level = {ci -> n}, max = n }.
+function M.levels(con, adj)
+    local level, max = {}, 0
+    for ci = 1, con.n do
+        local m = 0
+        for _, id in ipairs(con.members[ci]) do
+            for _, w in ipairs(adj[id] or {}) do
+                local cw = con.comp[w]
+                -- a successor OUTSIDE the id set has no component: not ours to level
+                if cw and cw ~= ci then
+                    local l = (level[cw] or 0) + 1
+                    if l > m then m = l end
+                end
+            end
+        end
+        level[ci] = m
+        if m > max then max = m end
+    end
+    return { level = level, max = max }
+end
+
 return M

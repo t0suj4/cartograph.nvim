@@ -122,15 +122,22 @@ A cockpit of independent panes over a shared state store:
   gutter signs). Inside a file, runs of top-level statements between function
   definitions roll up into **regions** (`≡`, named by their first source line
   — a constants preamble reads as one row); a region descends into its
-  declarations. `<Tab>` toggles the top level between the flat list and the
-  **include tree** — files nested under whoever requires them, roots being
-  the entry points nothing requires; a file already shown appears dim with
-  `…` instead of expanding again (require-cycle safe). **Entry points** are
-  first-class: files matching `setup{ entrypoints = {...} }` patterns
-  (defaults cover the Factorio lifecycle — `control.lua`, `data.lua`,
+  declarations. `<Tab>` toggles the top level between the flat list and
+  **layers** — the same one row per file, ordered by how deep the file sits in
+  the import graph once its CYCLES ARE CONDENSED, level 0 (requires nobody)
+  first, so the roster reads as load order. The level shows in the number
+  column, not as an indent: an indent would be the walk's path, not the file's
+  depth. A mutually recursive group is announced (`── cycle: 57 files ──`) and
+  its members run contiguously, because "these files are a cycle" is the fact a
+  drawn tree hides by rendering it as depth. This replaced an include tree that
+  nested each file under every requirer: on mantis it drew 524 files as 3353
+  rows up to 26 levels deep, `/config_api.php` matched 252 of them, and the
+  indent pushed names off the pane — while the real condensed depth was 3.
+  **Entry points** are first-class: files matching `setup{ entrypoints = {...} }`
+  patterns (defaults cover the Factorio lifecycle — `control.lua`, `data.lua`,
   `settings.lua`, the `-updates`/`-final-fixes` variants — plus `main.lua`)
-  get a `▶` sign instead of the `○` orphan warning, and sort first among
-  the tree's roots; a file opens into **all its definitions** in source order —
+  get a `▶` sign instead of the `○` orphan warning; a file opens into
+  **all its definitions** in source order —
   functions, methods, *and* module-level vars/fields, so the whole file is
   navigable; a function opens into its **statement-level locals** (from the
   data flow), where hovering a row highlights the real line in the source

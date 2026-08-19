@@ -76,12 +76,95 @@ end)
 
 test('width: every file row fits the budget at every files mode', function ()
     tree()
-    for _, mode in ipairs({ 'flat', 'tree' }) do
+    for _, mode in ipairs({ 'flat', 'layers' }) do
         symbols.files_mode = mode
         local lines = render('files')
         local w, worst = widest(lines)
         ok(w <= 30, ('%s mode: widest row = %d — %s'):format(mode, w, tostring(worst)))
     end
+    symbols.files_mode = 'flat'
+end)
+
+-- ── the LAYER roster: what replaced the include tree ────────────────────────
+-- Reported from the browser: 524 files rendered 3353 rows, `/config_api.php`
+-- matched 252 of them, and a 42-column indent left rows blank in a 30-column
+-- pane. The measured cause was that a drawn tree's DEPTH is not a property of a
+-- file (37% of mantis's files, 50% of ours, were drawn at more than one depth;
+-- config_api.php at 23). These pin the three properties that fix made load-
+-- bearing. RED before it: the old renderer expanded every root.
+
+--- Two leaves, one layer above them, and a 3-file CYCLE — the shape a fixture
+--- without cycles cannot fence at all. THE NAMES FIGHT THE LAYERING ON PURPOSE:
+--- alphabetical order is the exact REVERSE of level order, so a test that passes
+--- under the flat renderer is not testing this one. (Written after the first cut
+--- of these specs stayed green with the layer roster stashed out.)
+local function layered()
+    local function imp(a, b) return { kind = 'import', from = a, to = b } end
+    store.ingest({ schema = 1, root = '/x', nodes = {
+        mod('z_leaf_a.lua'), mod('z_leaf_b.lua'), mod('m_mid.lua'),
+        mod('a_ring1.lua'), mod('a_ring2.lua'), mod('a_ring3.lua'),
+    }, edges = {
+        imp('m_mid.lua', 'z_leaf_a.lua'), imp('m_mid.lua', 'z_leaf_b.lua'),
+        imp('a_ring1.lua', 'a_ring2.lua'), imp('a_ring2.lua', 'a_ring3.lua'),
+        imp('a_ring3.lua', 'a_ring1.lua'), imp('a_ring1.lua', 'm_mid.lua'),
+    } })
+end
+
+test('layers: EVERY file appears EXACTLY once — `/` over the pane is a total search',
+    function ()
+    layered()
+    symbols.files_mode = 'layers'
+    local lines = render('files')
+    local seen, dups = {}, {}
+    for r = 1, #lines do
+        local f = symbols.line_file[r]
+        if f then
+            if seen[f] then dups[#dups + 1] = f end
+            seen[f] = true
+        end
+    end
+    eq({}, dups)                        -- the old tree drew a shared file 5.9x on average
+    eq(6, vim.tbl_count(seen))          -- and every file is still here
+    -- 6 files + the one cycle announcement, and nothing else: the flat renderer
+    -- would give exactly 6, so this row count is what makes the test discriminate
+    eq(7, #lines)
+    symbols.files_mode = 'flat'
+end)
+
+test('layers: level ASCENDS, so the roster reads as load order', function ()
+    layered()
+    symbols.files_mode = 'layers'
+    local lines = render('files')
+    local at = {}
+    for r = 1, #lines do
+        local f = symbols.line_file[r]
+        if f then at[f] = r end
+    end
+    -- a leaf requires nobody, so it comes first; mid needs the leaves; the ring
+    -- needs mid. Depth is the CONDENSED one: the three ring files share a level
+    -- and so are adjacent, in any order among themselves.
+    ok(at['z_leaf_a.lua'] < at['m_mid.lua'], 'leaves before what requires them')
+    ok(at['m_mid.lua'] < at['a_ring1.lua'], 'and before the component above')
+    local ring = { at['a_ring1.lua'], at['a_ring2.lua'], at['a_ring3.lua'] }
+    table.sort(ring)
+    eq(ring[1] + 2, ring[3], 'a cycle renders as one contiguous run')
+    symbols.files_mode = 'flat'
+end)
+
+test('layers: a cycle ANNOUNCES itself, and the announcement fits the budget',
+    function ()
+    layered()
+    symbols.files_mode = 'layers'
+    local lines = render('files')
+    local said
+    for _, l in ipairs(lines) do if l:find('cycle', 1, true) then said = l end end
+    ok(said, 'the mutually-recursive component is named, not drawn as depth')
+    ok(said:find('3', 1, true), 'and says how many files: ' .. tostring(said))
+    -- the row that was written to FIX clipping must not itself clip: the first
+    -- cut of it read "── cycle: N files, mutually recursive ──" at 41 columns
+    ok(vim.fn.strdisplaywidth(said) <= 30,
+        ('the cycle row is chrome and obeys the budget: %d cols'):format(
+            vim.fn.strdisplaywidth(said)))
     symbols.files_mode = 'flat'
 end)
 
