@@ -41,6 +41,75 @@ local function enclosing_region(node)
     return reg
 end
 
+-- ── ALTERNATE VIEWS of the subject ───────────────────────────────────────────
+-- This pane has only ever rendered ONE thing about its subject: the source. A
+-- view names a different RENDERING of the same subject, so `M.ctx` stays the
+-- single owner of what is showing and the restore path is untouched.
+--
+-- The first one exists because the files altitude is the case the source pane
+-- cannot serve: a whole file is not a recognition anchor, and what a file row
+-- actually has — its PLACE in the import graph — is exactly what the 30-column
+-- browser cannot hold. Measured across two corpora, a file's ONE-LEVEL
+-- neighbourhood is 6 rows at the median and 36 at p90 (max 91), so it fits here
+-- whole, untruncated, both directions at once, and descending stops being blind.
+-- The payload is a TABLE (`view = { name = 'nbhd' }`) so a later view can carry
+-- parameters — a second hop, a direction filter — without a migration.
+local VIEWS = {}
+
+--- The module NODE for a file path. A module's id is usually the path itself,
+--- but that is a provider convention, not a guarantee — so look it up.
+function M._module_of(file)
+    for _, x in ipairs(store.by_file[file] or {}) do
+        if x.kind == 'module' then return x.id end
+    end
+    return file
+end
+
+local function defs_in(file)
+    local n = 0
+    for _, x in ipairs(store.by_file[file] or {}) do
+        if x.kind ~= 'module' then n = n + 1 end
+    end
+    return n
+end
+
+--- Returns `lines, rows` where `rows[buffer_row] = file`, so a jump from a
+--- preview row goes where the row plainly says it goes.
+function VIEWS.nbhd(node)
+    local lines, rows = { node.name or node.id, '' }, {}
+    -- A lazy or unparsed module's imports are UNKNOWN, not absent: rendering
+    -- `requires (0)` there would be a fabricated fact, the same invented
+    -- absence the browser refuses everywhere else.
+    if node.lazy or node.unparsed then
+        lines[#lines + 1] = node.lazy
+            and '  (lazy — its imports are unknown until it is loaded)'
+            or  '  (unparsed — its imports are unknown, not absent)'
+        return lines, rows
+    end
+    local topo = store.topo()
+    local function section(title, list, empty)
+        table.sort(list)
+        lines[#lines + 1] = ('%s (%d)'):format(title, #list)
+        if #list == 0 then
+            lines[#lines + 1] = '    ' .. empty
+        else
+            local w = 0
+            for _, f in ipairs(list) do w = math.max(w, #f) end
+            for _, f in ipairs(list) do
+                local d = defs_in(f)
+                lines[#lines + 1] = ('    %-' .. w .. 's   %d def%s')
+                    :format(f, d, d == 1 and '' or 's')
+                rows[#lines] = f
+            end
+        end
+        lines[#lines + 1] = ''
+    end
+    section('requires', topo:imports_out(node.id), 'nothing')
+    section('required by', topo:imports_in(node.id),
+        'nobody — an entry point, or an orphan')
+    return lines, rows
+end
+
 -- Lines for a node's body: a hard-context header + the real source range.
 local function body_lines(node)
     if not node then return { '(nothing)' } end
@@ -187,6 +256,16 @@ end
 local function bind_nav(buf, which)
     local keys = require('cartograph.config').keys
     vim.keymap.set('n', keys.jump, function ()
+        -- in an alternate view the rows are not source: a row that plainly
+        -- names a file is a DOOR to it, so follow it rather than refusing
+        local vr = M._view_rows
+        if vr then
+            local f = vr[vim.api.nvim_win_get_cursor(vim.api.nvim_get_current_win())[1]]
+            local n = f and (store.node(f) or store.node(M._module_of(f)))
+            if n then return store.pivot(n.id) end
+            return vim.notify('cartograph: this row is not a file',
+                vim.log.levels.INFO)
+        end
         local node = which()
         if not node then return end
         local win = vim.api.nvim_get_current_win()
@@ -205,7 +284,13 @@ local function bind_nav(buf, which)
             or 'cartograph: no known callee under the cursor',
             why and vim.log.levels.WARN or vim.log.levels.INFO)
     end, { buffer = buf, desc = 'cartograph: jump to the definition under the cursor' })
-    vim.keymap.set('n', keys.open_file, function () goto_real(vim.api.nvim_get_current_win(), which()) end,
+    vim.keymap.set('n', keys.open_file, function ()
+        local win = vim.api.nvim_get_current_win()
+        local vr = M._view_rows
+        local f = vr and vr[vim.api.nvim_win_get_cursor(win)[1]]
+        local n = f and (store.node(f) or store.node(M._module_of(f)))
+        goto_real(win, n or (not vr and which() or nil))
+    end,
         { buffer = buf, desc = 'cartograph: open the real file here' })
     -- (parameter-origin tracing lived here via the retired trace pane; the
     -- sources axis will re-home it — see the cartograph-trace-axes design)
@@ -295,6 +380,7 @@ end
 function M.render(id)
     local node = store.node(id)
     M.cur, M.ctx = node, nil
+    M._view, M._view_rows = nil, nil
     set_lines(M.buf, body_lines(node))
     scroll_top(M.win_top) -- a fresh body starts at its header
 end
@@ -302,6 +388,9 @@ end
 ---@param hl {file:string, ranges:table}?
 function M.highlight(hl)
     if not vim.api.nvim_buf_is_valid(M.buf) then return end
+    -- an alternate view's lines are GENERATED: source ranges do not address
+    -- them, so painting one here would highlight an arbitrary row
+    if M._view then return end
     vim.api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
     local shown = M.ctx or M.cur
     if not hl or not shown or hl.file ~= shown.file then return end
@@ -318,12 +407,21 @@ function M.context(ctx)
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
     local prev = M.ctx
     M.ctx = ctx and store.node(ctx.node) or nil
+    M._view, M._view_rows = nil, nil
     if not M.ctx then
         if prev then -- restore the focused body only if a context was showing
             set_lines(M.buf, body_lines(M.cur))
             scroll_top(M.win_top)
         end
         return
+    end
+    local render = ctx.view and ctx.view.name and VIEWS[ctx.view.name]
+    if render then
+        local lines, rows = render(M.ctx, ctx.view)
+        M._view, M._view_rows = ctx.view.name, rows
+        set_lines(M.buf, lines)
+        scroll_top(M.win_top)
+        return -- `ranges` address source, not this
     end
     set_lines(M.buf, body_lines(M.ctx))
     scroll_top(M.win_top)

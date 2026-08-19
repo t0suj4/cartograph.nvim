@@ -179,7 +179,9 @@ end
 
 -- ── C. HOVER DISPOSITION ────────────────────────────────────────────────────
 local NO_NODE_HOVER = {
-    files  = 'file rows are not node rows (the ● taught us line_file is too wide)',
+    files  = 'file rows are not node rows (the ● taught us line_file is too'
+        .. ' wide); hover previews the file\'s one-level NEIGHBOURHOOD in the'
+        .. ' source pane instead — see panes/source.lua VIEWS.nbhd',
     protos = 'a prototype is not a graph node: its anchor is a module + a line,'
         .. ' so hover previews the declaring line',
     proto  = 'override rows are source positions in the declaring module, as fn',

@@ -103,6 +103,15 @@ declarations), `callers` / `used-by` / `sites`, `table`, `refused`,
   set by a **pivot** (`<CR>`, or `l` where descending enters something).
 - **context** — the transient hover preview that takes over the source pane,
   restored when you move off. *The view follows the eye; focus follows intent.*
+  A context may name a **view** — a different rendering of the same subject —
+  for the case where source is not the useful answer. The first is the files
+  altitude's **neighbourhood**: hovering a file row shows, at full width and
+  untruncated, what that file requires and what requires it, one hop, each
+  neighbour with its def count, so descending is not blind. A whole file is not
+  a recognition anchor, and one hop is small enough to render whole (measured:
+  6 rows at the median, 36 at p90). `<C-]>`/`gf` on a neighbour row goes there —
+  a row that names a file is a door to it. A module that has not been read (lazy,
+  unparsed) reports its imports **unknown**, never a rendered zero.
 - **descend** (`l`) / **ascend** (`h`) change altitude; **step** (`j`/`k`)
   moves within a view and **steps out** at a block edge.
 - **peek** — after an ascend the source pane lingers on where you were until

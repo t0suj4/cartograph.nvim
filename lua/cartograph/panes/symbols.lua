@@ -2759,6 +2759,22 @@ function M.attach(win)
                     else
                         store.set_context(nil)
                     end
+                elseif M.view.level == 'files' then
+                    -- A file row's "source" is not its text: a whole file is
+                    -- not a recognition anchor, and the browser already lists
+                    -- its defs one descend away. What the row HAS and the
+                    -- 30-column pane cannot hold is its PLACE — who it requires
+                    -- and who requires it. One level, both directions, whole
+                    -- (measured: 6 rows at the median, 36 at p90). Descending
+                    -- from here is then not blind, which is the point.
+                    if M.line_sep[r] then return end -- chrome: keep the preview
+                    local f = M.line_file[r]
+                    local mid = f and module_id(f)
+                    if mid and store.node(mid) then
+                        store.set_context({ node = mid, view = { name = 'nbhd' } })
+                    else
+                        store.set_context(nil)
+                    end
                 elseif M.view.level == 'fn' or M.view.level == 'block' then
                     local l = M.line_stmt[r]
                     local fnid = M.view.level == 'fn' and M.view.fn
