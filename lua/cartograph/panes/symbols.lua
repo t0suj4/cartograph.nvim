@@ -1333,23 +1333,86 @@ local function render_state(ctx, state)
 end
 
 -- Inside a block: its declarations (the var nodes within the block's range).
+-- A REGION is the browser's FOLD over a run of top-level statements between two
+-- function definitions — "easier to skip past a series of statements mixed in
+-- with function definitions, while still having an option to descend into that
+-- region to reach the statements" (user). The skip half worked; the descent half
+-- did not. This listed the region's `var` DECLARATIONS and nothing else, so
+-- mantis's wiki.php — 24 lines, six requires, an if/else, ten calls — descended
+-- into three rows, and its own empty note admitted the hole:
+-- "(no declarations — calls / control flow only)".
+--
+-- The reason it could not do better is that a region has no ANALYSIS attached:
+-- measured, 0 of 1,076 regions across three corpora carry df OR flow, against
+-- 100% of functions. So the statements come from the SOURCE, on demand, through
+-- forms' run mode (a region spans siblings, so it is not a node). The calls come
+-- from the FILE axis rather than the owner axis, because a file-scope call
+-- record has no owner — `fn` is nil on 36% of mantis's call sites (CART-0455),
+-- which is why render_block's `sites(fnid)` idiom cannot be reused as-is here.
 local function render_region(ctx, id)
     local node = store.node(id)
     if not node then ctx.lines[1] = '(gone)'; return end
     ctx.lines[1] = ('≡ %s'):format(node.name or '?')
     ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
-    local s, e = atr.sl(node.range), atr.el(node.range)
+    local sr, sc, er, ec = atr.sl(node.range), atr.sc(node.range),
+        atr.el(node.range), atr.ec(node.range)
+    -- vars DECLARED in the run, by line: the row that declares one keeps its
+    -- identity, so descending still opens the var
+    local var_at = {}
     for _, n in ipairs(store.by_file[node.file] or {}) do
-        if n.kind == 'var' and atr.sl(n.range) >= s and atr.sl(n.range) <= e then
-            ctx.lines[#ctx.lines + 1] = ('  · %s'):format(n.name or '?')
-            ctx.marks[#ctx.lines] = { { 2, 3, 'CartographDim' } }
-            ctx.vnums[#ctx.lines] = tostring(atr.sl(n.range) + 1)
-            ctx.line_node[#ctx.lines] = n.id
-            ctx.node_line[n.id]       = #ctx.lines
+        if n.kind == 'var' and atr.sl(n.range) >= sr and atr.sl(n.range) <= er then
+            var_at[atr.sl(n.range)] = n
+        end
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local forms = ts.forms(store.abspath(node), sr, sc, er, ec, { run = true })
+    -- the earliest call whose head lies inside a form is that form's call.
+    -- Same shape as render_block's `primary`, sourced by FILE — see above.
+    local calls = store.topo():calls_of(node.file)
+    local function primary(f)
+        local best
+        for _, c in ipairs(calls) do
+            local a = c.at
+            if a and (atr.sl(a) > f.sr or (atr.sl(a) == f.sr and atr.sc(a) >= f.sc))
+                and (atr.sl(a) < f.er or (atr.sl(a) == f.er and atr.sc(a) < f.ec)) then
+                if not best or atr.sl(a) < atr.sl(best.at)
+                    or (atr.sl(a) == atr.sl(best.at) and atr.sc(a) < atr.sc(best.at)) then
+                    best = c
+                end
+            end
+        end
+        return best
+    end
+    for _, f in ipairs(forms) do
+        local v = var_at[f.sr]
+        -- fitted, unlike the block view's rows: a statement's FRONT carries the
+        -- signal, so fit_text elides the tail AND marks it. Not a new overflow
+        -- class (the source pane holds the line whole, via line_stmt).
+        local indent = f.branch and '  ▸ ' or '    '
+        ctx.lines[#ctx.lines + 1] = indent .. M.fit_text(f.text, indent)
+        ctx.vnums[#ctx.lines] = tostring(f.sr + 1)
+        ctx.line_stmt[#ctx.lines] = f.sr + 1
+        if v then
+            ctx.line_node[#ctx.lines] = v.id
+            ctx.node_line[v.id]       = #ctx.lines
+        end
+        if f.branch then
+            ctx.line_block[#ctx.lines] =
+                ('%s%d%d%d%d'):format(id, f.sr, f.sc, f.er, f.ec)
+            ctx.marks[#ctx.lines] = { { 0, 4, 'CartographSection' } }
+        else
+            local c = primary(f)
+            if c then
+                ctx.line_calls[#ctx.lines] = { c }
+                ctx.marks[#ctx.lines] = { { 0, -1,
+                    c.to and 'CartographTitle' or 'CartographDim' } }
+            end
         end
     end
     if #ctx.lines == 1 then
-        ctx.lines[2] = '  (no declarations — calls / control flow only)'
+        -- a run with no statements the parser recognises: say which, since the
+        -- old note ("no declarations") described a hole rather than the subject
+        ctx.lines[2] = '  (no statements here — the source may not have parsed)'
         ctx.marks[2] = { { 0, -1, 'CartographDim' } }
     end
 end
@@ -1577,7 +1640,11 @@ local function detail_scope() -- -> node, sr, sc, er, ec, has_df, fnid
     elseif lvl == 'region' then
         local n = store.node(M.view.region); if not n then return end
         local r = n.range
-        return n, atr.sl(r), atr.sc(r), atr.el(r), atr.ec(r), nil, nil
+        -- a region spans SIBLINGS, so detail needs forms' run mode for the same
+        -- reason the statements lens does — without it the range resolves to the
+        -- run's first statement and the lens reads "(no detail here)" over a
+        -- 24-line script
+        return n, atr.sl(r), atr.sc(r), atr.el(r), atr.ec(r), nil, nil, true
     end
 end
 -- ── the LENS PILOT: a per-fn report as rows ──────────────────────────────────
@@ -2025,12 +2092,12 @@ local function render_proto(ctx, key)
 end
 
 local function render_detail(ctx)
-    local n, sr, sc, er, ec, df, fnid = detail_scope()
+    local n, sr, sc, er, ec, df, fnid, run = detail_scope()
     if not n then ctx.lines[1] = '(gone)'; return end
     ctx.lines[1] = ('≡ %s'):format(n.name or '?')
     ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
     local ts = require 'cartograph.providers.treesitter'
-    local stmts = ts.detail(store.abspath(n), sr, sc, er, ec)
+    local stmts = ts.detail(store.abspath(n), sr, sc, er, ec, run and { run = true })
     if #stmts == 0 then
         ctx.lines[2] = '  (no detail here)'; ctx.marks[2] = { { 0, -1, 'CartographDim' } }
         return

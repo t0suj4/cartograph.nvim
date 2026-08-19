@@ -3497,6 +3497,15 @@ end
 -- flow's scope-correct CFG reaching, so a shadowed name resolves by def ROW
 -- without a separate on-demand binder resolver. [[cartograph-df-strangler]])
 
+--- One form record. The form's OWN text (first line), so several forms sharing
+--- a source line read distinctly; whitespace collapsed and truncated.
+local function form_rec(node, src, lisp)
+    local sr, sc, er, ec = node:range()
+    return { sr = sr, sc = sc, er = er, ec = ec,
+        text = node_text(node, src):gsub('%s+', ' '):gsub('^%s*', ''):sub(1, 80),
+        branch = #child_forms(node, lisp) > 0 }
+end
+
 --- The node spanning an EXACT range. `named_descendant_for_range` answers the
 --- ENCLOSING node whenever the range's end is not inside its own node — a
 --- go/odin case arm's range runs on to the NEXT arm's indent, so the probe
@@ -3527,15 +3536,19 @@ local function node_for_range(root, sr, sc, er, ec)
 end
 
 --- Immediate sub-forms of a form in `file`, for the browser's block descent.
---- Two modes:
+--- Three modes:
 ---   * EXACT node — pass the full range (sr,sc,er,ec) of a known node (a
 ---     function's body, or a sub-form returned by a previous call).
 ---   * POSITION — pass only (sr,sc): the enclosing STATEMENT at that point
 ---     (walking up but stopping before its block), e.g. a df row's line.
+---   * RUN — pass a range plus `{ run = true }`: the top-level statements
+---     INSIDE that range, for a subject that is a run of siblings rather than a
+---     node (a region). Explicit because it cannot be inferred: a one-statement
+---     run and that statement itself are the same range.
 --- Returns a list of { sr, sc, er, ec (0-based, ec exclusive), text, branch },
 --- branch = true when that sub-form has its own sub-forms (descend again).
 --- Recomputed on demand — nothing is cached in the graph.
-function M.forms(file, sr, sc, er, ec)
+function M.forms(file, sr, sc, er, ec, opts)
     local _, spec = elang_for(file)
     local lang = parse_lang_for(file) -- TS parses under typescript, not js
     if not (lang and spec) then return {} end
@@ -3549,6 +3562,30 @@ function M.forms(file, sr, sc, er, ec)
     local lisp = LISP_LANGS[lang] or false
 
     local n
+    if opts and opts.run then
+        -- RUN MODE. A sibling run is not a node: a region — the browser's fold
+        -- over a stretch of top-level statements between two function
+        -- definitions — spans several siblings, and nothing in the tree carries
+        -- exactly that range. The probe answers the enclosing `program` (whose
+        -- forms would be the whole file) and the start-anchored climb answers
+        -- the run's FIRST statement (whose forms are nothing). Neither is the
+        -- run. So the caller, who knows it is asking about a run, says so — a
+        -- heuristic here would have to guess between "this range IS one node,
+        -- show me inside it" and "this range is a run, show me its members",
+        -- and those are the same range whenever a run has one member.
+        local host = root:named_descendant_for_range(sr, sc, er, math.max(sc, ec - 1))
+        local out = {}
+        for _, c in inext, host, -1 do
+            if c:named() and not tsutil.is_comment(c) then
+                local csr, csc, cer, cec = c:range()
+                if (csr > sr or (csr == sr and csc >= sc))
+                    and (cer < er or (cer == er and cec <= ec)) then
+                    out[#out + 1] = form_rec(c, src, lisp)
+                end
+            end
+        end
+        return out
+    end
     if er then
         -- exact node spanning the given range (ec exclusive -> inclusive probe)
         n = node_for_range(root, sr, sc, er, ec)
@@ -3592,14 +3629,7 @@ function M.forms(file, sr, sc, er, ec)
     if lisp and drop_first_list and subs[1] then table.remove(subs, 1) end
 
     local out = {}
-    for _, s in ipairs(subs) do
-        local ssr, ssc, ser, sec = s:range()
-        -- the form's OWN text (first line), so several forms sharing a source
-        -- line read distinctly; whitespace collapsed, truncated
-        local text = node_text(s, src):gsub('%s+', ' '):gsub('^%s*', ''):sub(1, 80)
-        out[#out + 1] = { sr = ssr, sc = ssc, er = ser, ec = sec, text = text,
-            branch = #child_forms(s, lisp) > 0 }
-    end
+    for _, s in ipairs(subs) do out[#out + 1] = form_rec(s, src, lisp) end
     return out
 end
 
@@ -3660,7 +3690,7 @@ end
 --- The detail-lens rows for a code range: each top-level statement with its
 --- detail items (a conditional's condition; a call's arguments). Same on-demand
 --- parse as M.forms; returns { {sr,sc,er,ec,text, items={...}}, ... }.
-function M.detail(file, sr, sc, er, ec)
+function M.detail(file, sr, sc, er, ec, opts)
     local _, spec = elang_for(file)
     local lang = parse_lang_for(file) -- TS parses under typescript, not js
     if not (lang and spec) then return {} end
@@ -3684,7 +3714,26 @@ function M.detail(file, sr, sc, er, ec)
             else break end
         end
     end
-    local stmts = child_forms(n, lisp)
+    -- a RUN (a region) is not a node — same reason as M.forms, same answer, and
+    -- the same HOST: the node containing the whole range, not the one
+    -- node_for_range picks (its start-anchored climb lands on the run's FIRST
+    -- statement, whose children are one expression — which is what this lens
+    -- showed for a 24-line script before the host was taken from the range)
+    local stmts
+    if opts and opts.run then
+        stmts = {}
+        local host = root:named_descendant_for_range(sr, sc, er, math.max(sc, ec - 1))
+        for _, c in inext, host, -1 do
+            if c:named() and not tsutil.is_comment(c) then
+                local csr, csc, cer, cec = c:range()
+                if (csr > sr or (csr == sr and csc >= sc))
+                    and (cer < er or (cer == er and cec <= ec)) then
+                    stmts[#stmts + 1] = c
+                end
+            end
+        end
+    end
+    stmts = stmts or child_forms(n, lisp)
     local out = {}
     for _, s in ipairs(stmts) do
         local a, b, c, d = s:range()

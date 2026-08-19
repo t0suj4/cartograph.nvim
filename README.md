@@ -130,8 +130,14 @@ A cockpit of independent panes over a shared state store:
   Top level is the **file tree** (one row per file, with usage-classification
   gutter signs). Inside a file, runs of top-level statements between function
   definitions roll up into **regions** (`≡`, named by their first source line
-  — a constants preamble reads as one row); a region descends into its
-  declarations. `<Tab>` toggles the top level between the flat list and
+  — a constants preamble reads as one row) so a run of script code can be
+  skipped past; a region descends into **its statements**, each anchored to its
+  source line, compound ones descendable again and call rows going to the
+  callee. A region carries no dataflow (measured: 0 of 1,076 across three
+  corpora, against 100% of functions), so those statements come from the source
+  on demand — `forms`' RUN mode, since a region spans siblings and is therefore
+  not a node — and their calls from the file axis, because a file-scope call
+  record has no owner. `<Tab>` toggles the top level between the flat list and
   **layers** — the same one row per file, ordered by how deep the file sits in
   the import graph once its CYCLES ARE CONDENSED, level 0 (requires nobody)
   first, so the roster reads as load order. The level shows in the number
