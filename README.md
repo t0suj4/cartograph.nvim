@@ -84,10 +84,14 @@ a time; `l`/`h` change altitude:
 `files → file → fn → block`, plus side-views `region` (a region's
 declarations), `callers` / `used-by` / `sites`, `table`, `refused`,
 `registrations`, `states`, `working set`.
-- **block** — the view you descend a compound statement (`if`/`for`, a nested
-  lisp call) or a function body into; derived on demand from the source.
+- **block** — the view you descend a compound statement (`if`/`for`/`switch`, a
+  nested lisp call) or a function body into; derived on demand from the source.
 - **form** — one nested statement or call, a row in a block view (not a graph
-  node).
+  node). A switch's ARMS are forms of their own — `case 1:` stays one row and
+  its statements are one descent further in, rather than being flattened into
+  the switch or (as they were until CART-0449, in every grammar but python)
+  unreachable. An arm that falls through to the next carries no statements and
+  says so by being a leaf.
 - **lens** — a way of reading the current altitude's rows, cycled with
   `<Tab>`/`<S-Tab>`. fn/block/region offer `statements` (default) and `detail`
   (arguments, conditions, var/field reads); fn also offers `lints`. The pane's
@@ -3083,6 +3087,34 @@ nvim --headless -u NONE -l tools/specaudit.lua              # default corpus set
 nvim --headless -u NONE -l tools/specaudit.lua ruby rails   # explicit corpora
 nvim --headless -u NONE -l tools/specaudit.lua --extract    # extract when no snapshot
 
+# ★★ AND A MACRO BETWEEN `class` AND ITS NAME DISSOLVES THE CLASS EVEN WHEN THE GRAMMAR IS
+# RIGHT (CART-0439). `class V8_EXPORT_PRIVATE Foo : public Base { … }` parses as a
+# `function_definition` whose TYPE is the macro, whose real name sits in an ERROR node, whose
+# BASE CLASS is the declarator and whose class BODY is a function body — so every constructor
+# and inline method comes out a FREE FUNCTION NAMED AFTER ITS CLASS. With no base clause the
+# ERROR vanishes entirely, so `has_error()` cannot see it.
+# THE REPAIR IS A NEW SPEC SLOT, `src_repair` (spec/contract.lua, implemented in spec/cpp.lua,
+# called at the extraction parse seam): blank the offending macro WITH SPACES and re-parse to
+# a fixpoint. ★ LENGTH-PRESERVING IS THE WHOLE DESIGN — every byte offset, line and column is
+# unchanged, so all graph ranges still address the RAW file, and the repaired tree IS the
+# control tree: `interface`, `qualify`, `is_method`, `block_skip` and flow work UNMODIFIED and
+# no query changed. It fires only where the parse is ALREADY broken, so it cannot fabricate.
+# A plain-text superset prefilter rejects 93-94% of C++ files before any tree walk; measured
+# cost 2.9-4.0% of a cold extract. v8: 866 wreck sites -> 65, nodes -12151, refs -7623 (8341
+# fabricated free functions became qualified methods ON THE SAME LINE; the rest are prototypes
+# which, inside a REAL class, are `field_declaration`s and mint nothing — CART-0410's 7kaa
+# signature).
+# ★★ AND BOTH CORPORA THAT GATE C++ ARE ZERO-DIFF (TSGAP-0007): neither colobot nor 7kaa uses
+# an export macro, so a defect deleting containers across 483 files of the SCALE corpus was
+# invisible to every C++ gate. THE CORPORA THAT GATE A LANGUAGE WERE CHOSEN BEFORE ANYONE
+# KNEW WHICH IDIOMS WOULD MATTER.
+# ★ AND C/C++ FUNCTIONS HAD NO PARAMETERS AT ALL, always (CART-0438). `params_field =
+# 'parameters'` names a field a `function_definition` does not have — the list hangs on the
+# `function_declarator` one level down. Both now declare `params_of`, descending to the
+# INNERMOST declarator (a constrained ctor nests a misparsed outer one). ★ THE HOOK ALREADY
+# EXISTED AND ONLY ONE OF ITS TWO READERS CONSULTED IT: flow's `param_names` did, the node
+# builder did not, so odin declared `params_of` in CART-0304, got parameters in its FLOW and
+# none on its NODES — silently, because nothing compares the two readers.
 # WHAT `.h` MEANS IS A PROPERTY OF THE TREE, not of the extension (CART-0410). spec/c.lua
 # claims `.h`; spec/cpp.lua claims only .hpp/.hh/.hxx — so every C++ project using the
 # ordinary convention had ALL its headers parsed with the C grammar. `class Foo { … }` is

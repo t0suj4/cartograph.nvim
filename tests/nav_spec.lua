@@ -282,6 +282,57 @@ test('nav: descend a compound statement into its inner forms (block view)', func
     vim.fn.delete(root, 'rf')
 end)
 
+-- REPORTED FROM THE BROWSER (mantis, auth_process_plain_password): descending
+-- `$t_login_method = config_get_global( 'login_method' )` landed two lines down
+-- on the `if` that REASSIGNS that local, instead of on config_get_global. The
+-- word under the cursor is a row's own def, and the go-to-definition search,
+-- finding none EARLIER, ran forward and took a later write. A definition is
+-- never ahead of you.
+test('nav: descending a row whose word it DEFINES follows the call, not a later write', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\nfunction M.f(x)\n  local v = M.g(x)\n  if x then\n    v = x\n  end\n'
+        .. '  return v\nend\nfunction M.g(x) return x end\nreturn M\n')
+    fd:close()
+    local data = ts.extract(root)
+    store.ingest(data)
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+
+    local f
+    for _, n in ipairs(data.nodes) do if n.name == 'M.f' then f = n end end
+    store.pivot(f.id); symbols.show('fn', f.id)
+    local cb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.descend then cb = m.callback end
+    end
+    -- the FIRST statement row (`v ← g`), cursor on the name it defines — where
+    -- the browser puts it, and the name the row leads with
+    local target
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_stmtidx[r] == 1 then target = r break end
+    end
+    ok(target, 'the defining statement has a row')
+    local text = vim.api.nvim_buf_get_lines(symbols.buf, target - 1, target, false)[1]
+    local col = text:find('%f[%w]v%f[%W]')
+    ok(col, 'the row leads with the local it defines')
+    pcall(vim.api.nvim_win_set_cursor, wsym, { target, col - 1 })
+    cb()
+    -- RED before the fix: level stays 'fn' on M.f, cursor moved to the `if` row
+    eq('fn', symbols.view.level)
+    eq('M.g', store.node(symbols.view.fn).name)
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
 test('nav: hovering a caller with several call sites highlights them all', function ()
     if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
     local symbols = require 'cartograph.panes.symbols'

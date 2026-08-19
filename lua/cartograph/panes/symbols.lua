@@ -3010,11 +3010,20 @@ function M.attach(win)
         -- (a parameter's origin / a dynamic callee's dispatch trace lived here
         -- via the retired trace pane; the sources axis will re-home them —
         -- see the cartograph-trace-axes design)
-        -- a local: jump to its defining statement (latest before this row)
-        local i, df = M.line_stmtidx[r], dfa.present(node)
-        if word and i and df then
+        -- a local: jump to its defining statement (latest before this row).
+        -- NOT when the word is what THIS statement defines — the definition is
+        -- the row you are on, so the search runs FORWARD and lands on a later
+        -- re-assignment. (mantis: descending `$t_login_method = config_get_global(…)`
+        -- landed two lines down on the `if` that reassigns it, instead of on
+        -- config_get_global. Reported from the browser.)
+        local i = M.line_stmtidx[r]
+        if word and i and dfa.present(node) then
             local best, stmts = nil, dfa.stmts(node)
-            for j = 1, #stmts do
+            local own = false
+            for _, d in ipairs(stmts[i] and stmts[i].def or {}) do
+                if d == word then own = true break end
+            end
+            for j = 1, own and 0 or #stmts do
                 if j ~= i then
                     for _, d in ipairs(stmts[j].def) do
                         if d == word and (j < i or not best) then best = j end

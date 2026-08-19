@@ -277,6 +277,91 @@ test('forms: one level of nested statements / forms, on demand', function ()
     vim.fn.delete(root, 'rf')
 end)
 
+-- REPORTED FROM THE BROWSER (mantis, core/authentication_api.php): the rows of a
+-- switch could not be entered — the fn lens rolls a switch up into one statement
+-- row, and descending it asked forms() for the arms and got NOTHING. The
+-- complaint was PHP; the hole was POLYGLOT. Before the fix these are the counts,
+-- and they are the RED condition of this spec:
+--   php / java / go / odin / rust / ruby   the switch had NO forms at all
+--   c / cpp / js / zig                     arms listed, every one a DEAD LEAF
+--   python                                 worked (its arms hide behind a block)
+-- so python is the pin that the fix must not move, and lua's if/else below is
+-- the control that the clause rules do not leak into ordinary branches.
+test('forms: a switch arm is a form, and its statements are one level in', function ()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    -- (file, source, the switch's 0-based row)
+    local langs = {
+        { 'php', 'a.php', '<?php\nfunction f($x){\n  switch($x){\n    case 1:\n      g();\n      gg();\n    default:\n      h();\n  }\n}\n', 2 },
+        { 'c', 'a.c', 'void f(int x){\n  switch(x){\n    case 1:\n      g();\n      gg();\n    default:\n      h();\n  }\n}\n', 1 },
+        { 'java', 'A.java', 'class A {\n  void f(int x){\n    switch(x){\n      case 1:\n        g();\n        gg();\n      default:\n        h();\n    }\n  }\n}\n', 2 },
+        { 'javascript', 'a.js', 'function f(x){\n  switch(x){\n    case 1:\n      g();\n      gg();\n    default:\n      h();\n  }\n}\n', 1 },
+        { 'go', 'a.go', 'package p\nfunc f(x int){\n  switch x {\n  case 1:\n    g()\n    gg()\n  default:\n    h()\n  }\n}\n', 2 },
+        { 'rust', 'a.rs', 'fn f(x: i32){\n  match x {\n    1 => { g(); gg(); }\n    _ => { h(); }\n  }\n}\n', 1 },
+        { 'ruby', 'a.rb', 'def f(x)\n  case x\n  when 1\n    g\n    gg\n  else\n    h\n  end\nend\n', 1 },
+        { 'python', 'a.py', 'def f(x):\n    match x:\n        case 1:\n            g()\n            gg()\n        case _:\n            h()\n', 1 },
+        { 'zig', 'a.zig', 'fn f(x: u8) void {\n  switch (x) {\n    1 => { g(); gg(); },\n    else => { h(); },\n  }\n}\n', 1 },
+        { 'odin', 'a.odin', 'f :: proc(x: int) {\n  switch x {\n  case 1:\n    g()\n    gg()\n  case:\n    h()\n  }\n}\n', 1 },
+    }
+    local ran = 0
+    for _, l in ipairs(langs) do
+        local lang, file, src, row = l[1], l[2], l[3], l[4]
+        if has_parser(lang) then
+            ran = ran + 1
+            put(file, src)
+            local arms = ts.forms(root .. '/' .. file, row)
+            eq(2, #arms)                                  -- the two arms, not their statements
+            ok(arms[1].branch, lang .. ': an arm is descendable')
+            local body = {}
+            for _, g in ipairs(ts.forms(root .. '/' .. file,
+                arms[1].sr, arms[1].sc, arms[1].er, arms[1].ec)) do
+                body[#body + 1] = g.text:gsub('[;()]', ''):gsub('%s+$', '')
+            end
+            -- the LABEL is not one of them: `case 1:` yields g and gg, never `1`
+            eq({ 'g', 'gg' }, body)
+        end
+    end
+    ok(ran >= 3, 'at least three grammars exercised, not a lua-only fence')
+
+    -- a fall-through arm with no statements of its own is a LEAF, honestly
+    -- empty — the shape that must not be fabricated into a branch
+    if has_parser('php') then
+        put('b.php', '<?php\nfunction f($x){\n  switch($x){\n    case 1:\n    case 2:\n      g();\n  }\n}\n')
+        local arms = ts.forms(root .. '/b.php', 2)
+        eq(2, #arms)
+        ok(not arms[1].branch, 'an empty fall-through case is a leaf')
+        ok(arms[2].branch, 'the arm that carries the body is the branch')
+    end
+
+    -- The DETAIL lens rides the same range the block view handed out, so <Tab>
+    -- on an arm must detail THAT arm. go and odin are where this bites: their
+    -- arm ranges run on to the NEXT arm's indent, so a whole-range probe
+    -- resolves to the switch and details the arms you came FROM.
+    for _, l in ipairs({ { 'go', 'a.go', 2 }, { 'odin', 'a.odin', 1 } }) do
+        if has_parser(l[1]) then
+            local file = root .. '/' .. l[2]
+            local arms = ts.forms(file, l[3])
+            local t = {}
+            for _, d in ipairs(ts.detail(file, arms[1].sr, arms[1].sc, arms[1].er, arms[1].ec)) do
+                t[#t + 1] = (d.text:gsub('[;()]', ''):gsub('%s+$', ''))
+            end
+            eq({ 'g', 'gg' }, t)
+        end
+    end
+
+    -- CONTROL: an ordinary if/else is untouched by the clause rules — its
+    -- bodies stay flattened, and the condition is NOT a form
+    if has_parser('lua') then
+        put('c.lua', 'local function f(x)\n  if x then\n    g()\n    gg()\n  else\n    h()\n  end\nend\n')
+        local t = {}
+        for _, s2 in ipairs(ts.forms(root .. '/c.lua', 1)) do t[#t + 1] = s2.text end
+        eq({ 'g()', 'gg()', 'h()' }, t)
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
 test('treesitter: haskell — equations merge, where stays interior, imports', function ()
     -- the parser lives in nvim-treesitter's dir; tests run with bare rtp
     local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')

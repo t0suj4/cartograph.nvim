@@ -3392,13 +3392,49 @@ local SUBSTMT_BLOCKS = {
     block = true, compound_statement = true, statement_block = true,
     suite = true, do_block = true, declaration_list = true,
     field_declaration_list = true, class_body = true, switch_body = true,
+    -- php/java `switch_block`, rust `match_block`; ruby's `then` is the BODY
+    -- wrapper of a when/if — a block, not a clause, its children ARE the
+    -- statements — and `body_statement` is a ruby method's body.
+    switch_block = true, match_block = true, ['then'] = true,
+    body_statement = true,
 }
 local SUBSTMT_CLAUSES = {
     else_statement = true, elseif_statement = true, else_clause = true,
     elif_clause = true, elseif_clause = true, catch_clause = true,
-    finally_clause = true, ['then'] = true, do_statement = true,
+    finally_clause = true, do_statement = true,
     case_statement = true, switch_case = true, when_entry = true,
 }
+-- A CASE is a place you GO, not a wrapper to see through: it stays ONE form of
+-- its own (so a switch reads as its arms) and its body statements are its DIRECT
+-- children — `case 1: g(); break;` has no block between them. Checked BEFORE the
+-- clause set, which two of these are also in.
+-- NB langaudit cannot fence this: it reads `x:type() == 'literal'` comparisons,
+-- and a TABLE of node types is correct-by-construction to it. The attribution on
+-- each line is the only record of which grammar the name came from.
+local SUBSTMT_CASES = {
+    case_statement = true, default_statement = true,             -- php, c, cpp
+    switch_case = true, switch_default = true,                   -- js/ts, zig, odin
+    switch_block_statement_group = true, switch_rule = true,      -- java (`:` and `->`)
+    expression_case = true, type_case = true, default_case = true, -- go
+    match_arm = true,                                            -- rust
+    when = true, ['else'] = true,                                -- ruby
+    case_clause = true,                                          -- python
+}
+-- Wrappers a compound form hides behind in expression-oriented grammars: rust's
+-- `match` is an EXPRESSION, so a bare `match x { … }` statement is an
+-- expression_statement around a match_expression and the arms sit two levels
+-- down. Seen THROUGH; never a form of their own.
+local SUBSTMT_TRANSPARENT = { expression_statement = true, match_expression = true }
+-- Where a case's LABEL ends and its body begins. Grammars mark it three ways and
+-- a case may use any one, so all three are consulted: a separator TOKEN (php/c/
+-- js/go/odin/python `:`, rust/zig `=>`, java's arrow form `->`), a label NODE of
+-- its own (java's `switch_label`), or a named FIELD (ruby's `when`). The field
+-- cannot be read blind — php's `case_statement.value` is the LABEL while rust's
+-- `match_arm.value` is the BODY, so one blanket field rule would drop the body
+-- of one language to keep the label of another.
+local CLAUSE_SEP = { [':'] = true, ['=>'] = true, ['->'] = true }
+local CLAUSE_LABEL_TYPE = { switch_label = true } -- java
+local CLAUSE_LABEL_FIELD = { when = 'pattern' }   -- ruby
 -- lisp: nesting is child LIST forms, not blocks
 local LISP_LANGS = { scheme = true, commonlisp = true, clojure = true, fennel = true, janet = true }
 -- top-of-file containers whose named children are statements (position mode)
@@ -3419,21 +3455,40 @@ local function child_forms(node, lisp)
         end
         return out
     end
-    local function scan(n)
+    -- `case` is true when `n` IS a case clause: then its own children are the
+    -- body, so they are emitted from here -- everything past the label.
+    local function scan(n, case)
+        local past, label = true, nil
+        if case then
+            for _, c in inext, n, -1 do
+                if not c:named() and CLAUSE_SEP[c:type()] then past = false break end
+            end
+            local f = CLAUSE_LABEL_FIELD[n:type()]
+            if f then label = n:field(f)[1] end
+        end
         for _, c in inext, n, -1 do
-            if c:named() and not tsutil.is_comment(c) then
+            if not c:named() then
+                if CLAUSE_SEP[c:type()] then past = true end
+            elseif not tsutil.is_comment(c) then
                 local t = c:type()
                 if SUBSTMT_BLOCKS[t] then
                     for _, g in inext, c, -1 do
                         if g:named() and not tsutil.is_comment(g) then out[#out + 1] = g end
                     end
+                elseif SUBSTMT_CASES[t] then
+                    out[#out + 1] = c -- an arm is a form, not a wrapper
                 elseif SUBSTMT_CLAUSES[t] then
                     scan(c)
+                elseif SUBSTMT_TRANSPARENT[t] and not case then
+                    scan(c) -- see through it to the block/arms inside
+                elseif case and past and not CLAUSE_LABEL_TYPE[t]
+                    and not (label and c:equal(label)) then
+                    out[#out + 1] = c
                 end
             end
         end
     end
-    scan(node)
+    scan(node, SUBSTMT_CASES[node:type()] or false)
     return out
 end
 
@@ -3441,6 +3496,35 @@ end
 -- with df-strangler step-5 fine half: extract.plan, its last consumer, now takes
 -- flow's scope-correct CFG reaching, so a shadowed name resolves by def ROW
 -- without a separate on-demand binder resolver. [[cartograph-df-strangler]])
+
+--- The node spanning an EXACT range. `named_descendant_for_range` answers the
+--- ENCLOSING node whenever the range's end is not inside its own node — a
+--- go/odin case arm's range runs on to the NEXT arm's indent, so the probe
+--- answers `switch` and both the block view and its detail lens hand back the
+--- arms you descended FROM. Detect that (the answer does not begin where the
+--- range does), re-probe from the START and climb to the widest node that
+--- begins there and still fits. Narrowed to that case on purpose: probing from
+--- the start unconditionally regresses lua's nested `if`, where a `block` and
+--- the `if_statement` inside it share a range and the climb takes the outer,
+--- which child_forms cannot answer for.
+local function node_for_range(root, sr, sc, er, ec)
+    local n = root:named_descendant_for_range(sr, sc, er, math.max(sc, ec - 1))
+    if not n then return nil end
+    local nsr, nsc = n:range()
+    if nsr == sr and nsc == sc then return n end
+    local a = root:named_descendant_for_range(sr, sc, sr, sc)
+    while a and a:parent() do
+        local psr, psc, per, pec = a:parent():range()
+        if psr == sr and psc == sc and (per < er or (per == er and pec <= ec)) then
+            a = a:parent()
+        else break end
+    end
+    if a then
+        local asr, asc = a:range()
+        if asr == sr and asc == sc then return a end
+    end
+    return n
+end
 
 --- Immediate sub-forms of a form in `file`, for the browser's block descent.
 --- Two modes:
@@ -3467,12 +3551,13 @@ function M.forms(file, sr, sc, er, ec)
     local n
     if er then
         -- exact node spanning the given range (ec exclusive -> inclusive probe)
-        n = root:named_descendant_for_range(sr, sc, er, math.max(sc, ec - 1))
+        n = node_for_range(root, sr, sc, er, ec)
     else
         -- position mode: the statement that STARTS on row `sr` — the child of
         -- a block/root that begins there (indentation-agnostic; col ignored)
         local function find_stmt(node)
             local container = SUBSTMT_BLOCKS[node:type()] or ROOT_TYPES[node:type()]
+                or SUBSTMT_CASES[node:type()] -- a case holds its statements directly
             for _, c in inext, node, -1 do
                 if c:named() and not tsutil.is_comment(c) then
                     local csr, _, cer = c:range()
@@ -3585,7 +3670,11 @@ function M.detail(file, sr, sc, er, ec)
     local tree = parser:parse()[1]; if not tree then return {} end
     local root = tree:root()
     local lisp = LISP_LANGS[lang] or false
-    local n = root:named_descendant_for_range(sr, sc, er or sr, er and math.max(sc, ec - 1) or sc)
+    -- the detail lens rides the SAME range the block view handed out, so it
+    -- needs the same resolution — otherwise <Tab> on a go/odin arm details the
+    -- switch you came from
+    local n = er and node_for_range(root, sr, sc, er, ec)
+        or root:named_descendant_for_range(sr, sc, sr, sc)
     if not n then return {} end
     if not er then
         while n:parent() do
