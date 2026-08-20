@@ -3403,6 +3403,12 @@ local SUBSTMT_CLAUSES = {
     elif_clause = true, elseif_clause = true, catch_clause = true,
     finally_clause = true, do_statement = true,
     case_statement = true, switch_case = true, when_entry = true,
+    -- php AND odin spell the `elseif` KEYWORD `else_if_clause`, one underscore
+    -- away from the `elseif_clause` above; ruby spells it `elsif`. Both were
+    -- absent, so those branches' bodies had no descent route, and both were found
+    -- by navcensus (CART-0458) rather than by reading the table — which is the
+    -- point: a name set is only as complete as the last person to edit it.
+    else_if_clause = true, elsif = true,
 }
 -- A CASE is a place you GO, not a wrapper to see through: it stays ONE form of
 -- its own (so a switch reads as its arms) and its body statements are its DIRECT
@@ -3457,7 +3463,13 @@ local function child_forms(node, lisp)
     end
     -- `case` is true when `n` IS a case clause: then its own children are the
     -- body, so they are emitted from here -- everything past the label.
-    local function scan(n, case)
+    -- `host` is the type of the node we were ASKED about, so a child of that same
+    -- type is an `else if` WRITTEN AS TWO WORDS and must be seen through. It needs
+    -- no name list, which is why it is threaded rather than tabled: the grammars
+    -- disagree about where the nested if hangs (php/js/c/cpp/zig/rust put it under
+    -- an else_clause, java/go make it the outer if's own child) and agree that it
+    -- is spelled the same as its host.
+    local function scan(n, case, host)
         local past, label = true, nil
         if case then
             for _, c in inext, n, -1 do
@@ -3478,9 +3490,11 @@ local function child_forms(node, lisp)
                 elseif SUBSTMT_CASES[t] then
                     out[#out + 1] = c -- an arm is a form, not a wrapper
                 elseif SUBSTMT_CLAUSES[t] then
-                    scan(c)
+                    scan(c, false, host)
                 elseif SUBSTMT_TRANSPARENT[t] and not case then
-                    scan(c) -- see through it to the block/arms inside
+                    scan(c, false, host) -- see through it to the block/arms inside
+                elseif host and t == host and not case then
+                    scan(c, false, host) -- `} else if (...) {`: the same form again
                 elseif case and past and not CLAUSE_LABEL_TYPE[t]
                     and not (label and c:equal(label)) then
                     out[#out + 1] = c
@@ -3488,7 +3502,7 @@ local function child_forms(node, lisp)
             end
         end
     end
-    scan(node, SUBSTMT_CASES[node:type()] or false)
+    scan(node, SUBSTMT_CASES[node:type()] or false, node:type())
     return out
 end
 

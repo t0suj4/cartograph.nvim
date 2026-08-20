@@ -2731,6 +2731,13 @@ nvim --headless -u NONE -l tools/navcensus.lua <dir> --vocab    # what it calls 
 # java 176, ruby 180, rust 546, js/php/go/python/odin 11-47 — and lua ZERO, the one
 # language we navigate every day. Re-run after every fix: a cause leaving the report
 # can uncover the next one behind it rather than emptying the count.
+# FIRST FIX OFF IT (CART-0458): `else if` written as TWO WORDS lost its whole body in
+# every language admitting the spelling, because the nested if matched no table entry.
+# The grammars disagree about where it hangs (php/js/c/cpp/zig/rust under an
+# else_clause, java/go as the outer if's own child) and agree it is spelled the same as
+# its host, so the rule is "see through a child of the HOST's own type" — no name list.
+# php 28→0 · js 29→0 · cpp 220→49 · java 176→101 · go 47→32. ruby stayed 180: its traps
+# sit behind a shallower cause, which is the re-run rule doing its job.
 # EXPRESSION CENSUS: the expression IR's gate, and until now it had none. `expr.gate` is a
 # real two-implementation oracle — `expr.reads(row)` (the identifier leaves the IR reads) vs
 # `row.use ∪ row.rmw` (du's read census over the same node), derived independently — so a

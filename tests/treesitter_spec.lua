@@ -278,6 +278,79 @@ test('forms: one level of nested statements / forms, on demand', function ()
 end)
 
 -- REPORTED FROM THE BROWSER (mantis, core/authentication_api.php): the rows of a
+-- `else if` WRITTEN AS TWO WORDS lost its whole body, in every language that
+-- admits the spelling (CART-0458, found by tools/navcensus.lua). The nested
+-- if matched no entry in child_forms's tables, so the scan dropped it. Before the
+-- fix, the forms of the chain below — measured, and this is the RED condition:
+--   php / js / c / cpp / java / go / ruby   `a` only, the else-if AND else lost
+--   php `elseif` / odin `else if`           `a | d`, the middle branch lost
+--   lua `elseif` / python `elif`            already right — the pins that must not move
+-- The grammars disagree about WHERE the nested if hangs (php/js/c/cpp under an
+-- else_clause, java/go as the outer if's own child) and agree that it is spelled
+-- the same as its host, so the rule is "see through a child of the host's own
+-- type" and needs no name list. Two names WERE missing though: php and odin spell
+-- the `elseif` keyword `else_if_clause` (the table held `elseif_clause`, one
+-- underscore away) and ruby spells it `elsif`.
+test('forms: an `else if` written as two words keeps its body', function ()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    -- (lang, file, source, the if's 0-based row, expected forms)
+    local FLAT = { 'a', 'b', 'bb', 'd' }
+    local langs = {
+        { 'php', 'a.php', '<?php\nfunction f($x){\n  if($x==1){ a(); }\n  else if($x==2){ b(); bb(); }\n  else { d(); }\n}\n', 2, FLAT },
+        { 'php', 'k.php', '<?php\nfunction f($x){\n  if($x==1){ a(); }\n  elseif($x==2){ b(); bb(); }\n  else { d(); }\n}\n', 2, FLAT },
+        { 'javascript', 'a.js', 'function f(x){\n  if(x==1){ a(); }\n  else if(x==2){ b(); bb(); }\n  else { d(); }\n}\n', 1, FLAT },
+        { 'c', 'a.c', 'void f(int x){\n  if(x==1){ a(); }\n  else if(x==2){ b(); bb(); }\n  else { d(); }\n}\n', 1, FLAT },
+        { 'cpp', 'a.cpp', 'void f(int x){\n  if(x==1){ a(); }\n  else if(x==2){ b(); bb(); }\n  else { d(); }\n}\n', 1, FLAT },
+        { 'java', 'A.java', 'class A { void f(int x){\n  if(x==1){ a(); }\n  else if(x==2){ b(); bb(); }\n  else { d(); }\n} }\n', 1, FLAT },
+        { 'go', 'a.go', 'package p\nfunc f(x int){\n  if x==1 { a() } else if x==2 { b(); bb() } else { d() }\n}\n', 2, FLAT },
+        { 'odin', 'a.odin', 'f :: proc(x: int) {\n  if x==1 { a() } else if x==2 { b(); bb() } else { d() }\n}\n', 1, FLAT },
+        { 'lua', 'a.lua', 'local function f(x)\n  if x==1 then a()\n  elseif x==2 then b() bb()\n  else d() end\nend\n', 1, FLAT },
+        { 'python', 'a.py', 'def f(x):\n    if x==1:\n        a()\n    elif x==2:\n        b()\n        bb()\n    else:\n        d()\n', 1, FLAT },
+        -- ruby's bare `else` is an ARM (it is the same keyword as a case/when
+        -- else, and SUBSTMT_CASES is checked first), so it stays ONE row you
+        -- descend into rather than being flattened. The elsif is still opened.
+        { 'ruby', 'a.rb', 'def f(x)\n  if x==1\n    a\n  elsif x==2\n    b\n    bb\n  else\n    d\n  end\nend\n', 1,
+          { 'a', 'b', 'bb', 'else d' } },
+        -- rust is DELIBERATELY absent: its `if` is an if_expression under an
+        -- expression_statement, and child_forms sees THROUGH a transparent node
+        -- it is handed rather than opening it, so a rust if has no forms at all
+        -- and this rule cannot be observed there. That is CART-0457, a different
+        -- bug, and navcensus keeps reporting it.
+    }
+    local ran = 0
+    for _, l in ipairs(langs) do
+        local lang, file, src, row, want = l[1], l[2], l[3], l[4], l[5]
+        if has_parser(lang) then
+            ran = ran + 1
+            put(file, src)
+            local got = {}
+            for _, f in ipairs(ts.forms(root .. '/' .. file, row)) do
+                got[#got + 1] = f.text:gsub('[;()]', ''):gsub('%s+$', '')
+            end
+            eq(want, got)
+        end
+    end
+    ok(ran >= 3, 'at least three grammars exercised, not a lua-only fence')
+
+    -- NEGATIVE CONTROL: the rule must not leak into ordinary nesting. A nested if
+    -- inside a BLOCK is a child of the block, not of the if, so it stays ONE
+    -- descendable row — flattening it would erase the branch the reader is looking
+    -- for and make every deep function one long list.
+    if has_parser('c') then
+        put('n.c', 'void f(int x){\n  if(x==1){ if(x==2){ a(); } }\n}\n')
+        local nested = ts.forms(root .. '/n.c', 1)
+        eq(1, #nested)
+        ok(nested[1].branch, 'a nested if is a branch, not its statements')
+        put('m.c', 'void f(int x){\n  if(x==1){ a(); }\n  else { if(x==2){ b(); } }\n}\n')
+        local braced = ts.forms(root .. '/m.c', 1)
+        eq(2, #braced)   -- `a();` and the whole inner if — the else is seen through,
+        ok(braced[2].branch, 'but its braced if is still one row')
+    end
+end)
+
 -- switch could not be entered — the fn lens rolls a switch up into one statement
 -- row, and descending it asked forms() for the arms and got NOTHING. The
 -- complaint was PHP; the hole was POLYGLOT. Before the fix these are the counts,
