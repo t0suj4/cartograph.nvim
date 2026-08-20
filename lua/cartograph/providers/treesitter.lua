@@ -3492,6 +3492,36 @@ local function child_forms(node, lisp)
     return out
 end
 
+--- The descent step itself, for the NAVIGATION CENSUS (tools/navcensus.lua).
+--- Exported rather than copied: ctrlcensus exists because a second copy of
+--- flow's control set had drifted inside the probe that was measuring the fix,
+--- which then reported the fix had not worked. An audit holding its own idea of
+--- the answer audits itself, so the census walks THIS function -- the one the
+--- browser descends with.
+--- Takes the LANGUAGE, not the lisp flag: which languages nest by child lists
+--- is this file's knowledge, and a caller that had to answer it would be holding
+--- exactly the second copy this export exists to avoid.
+--- @param node userdata  a TSNode
+--- @param lang string    the grammar the node was parsed with
+--- @return userdata[] the immediate sub-forms
+function M.child_forms(node, lang)
+    local lisp = LISP_LANGS[lang] or false
+    -- THE ROOT IS THE ONE NODE child_forms CANNOT ANSWER FOR, and the browser
+    -- never asks: it enters a file at the fn/region level, so the file's own
+    -- statements arrive from the symbol list, not from a descent. A census that
+    -- walks the whole file needs that first step, and taking it as "the root's
+    -- named children" here keeps the census from owning a ROOT_TYPES copy. Lisp
+    -- needs no special case -- its child-list rule already answers for the root.
+    if not lisp and not node:parent() then
+        local out = {}
+        for _, c in inext, node, -1 do
+            if c:named() and not tsutil.is_comment(c) then out[#out + 1] = c end
+        end
+        return out
+    end
+    return child_forms(node, lisp)
+end
+
 -- (binder_at — the scope-model shadow-attribution service — was RETIRED here
 -- with df-strangler step-5 fine half: extract.plan, its last consumer, now takes
 -- flow's scope-correct CFG reaching, so a shadowed name resolves by def ROW

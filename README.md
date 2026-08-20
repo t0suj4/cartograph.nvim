@@ -2716,6 +2716,21 @@ nvim --headless -u NONE -l tools/matrix.lua cppmodern --cols rows
 nvim --headless -u NONE -l tools/ctrlcensus.lua ~/git/elasticsearch/libs --lang java
 nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --coverage   # can it gate this form?
 nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --folded     # one row hiding many
+# NAVIGATION CENSUS: what can the BROWSER not descend into? The same question one
+# altitude out — ctrlcensus asks which control forms FLOW fails to open, this asks
+# which forms a DESCENT cannot reach. Every navigation hole so far was found by a
+# user pressing the key and getting silence; `child_forms` is a pure function, so
+# reachability is computable and needs no answer key: the walk that finds the holes
+# builds its own vocabulary of what a statement is (and a second calibration by
+# ratio, or every nested call in ruby is a finding). Reports the CAUSE — the
+# shallowest link where the route dies — not the symptom. EVIDENCE, not a gate.
+nvim --headless -u NONE -l tools/navcensus.lua ~/git/mantisbt/core --lang php
+nvim --headless -u NONE -l tools/navcensus.lua <dir> --chain    # the path to each trap
+nvim --headless -u NONE -l tools/navcensus.lua <dir> --vocab    # what it calls a statement
+# First run, 40 files per corpus: zig 9491 trapped statements, scheme 584, cpp 220,
+# java 176, ruby 180, rust 546, js/php/go/python/odin 11-47 — and lua ZERO, the one
+# language we navigate every day. Re-run after every fix: a cause leaving the report
+# can uncover the next one behind it rather than emptying the count.
 # EXPRESSION CENSUS: the expression IR's gate, and until now it had none. `expr.gate` is a
 # real two-implementation oracle — `expr.reads(row)` (the identifier leaves the IR reads) vs
 # `row.use ∪ row.rmw` (du's read census over the same node), derived independently — so a

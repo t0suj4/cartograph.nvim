@@ -287,6 +287,43 @@ end)
 --   python                                 worked (its arms hide behind a block)
 -- so python is the pin that the fix must not move, and lua's if/else below is
 -- the control that the clause rules do not leak into ordinary branches.
+-- ts.child_forms is the descent STEP, exported for tools/navcensus.lua (CART-0456) —
+-- the census that finds what the browser cannot descend into. It walks THIS function
+-- rather than a copy, because ctrlcensus exists to record what a second copy of the
+-- answer costs. Two properties the census leans on, pinned here so the export cannot
+-- drift into something that only looks like the browser's descent:
+--   * a ROOT (no parent) answers the file's top-level statements. The browser never
+--     asks — it enters at a fn or region row — so nothing else would catch a
+--     regression here, and the census reads an empty answer as a clean corpus.
+--   * a FUNCTION node answers its BODY's statements. That is the census's seed, and
+--     the reason it is a seed: jquery reported 0 traps in 115 files when the walk
+--     started at the root alone, because every file is one IIFE.
+test('child_forms: the root answers a file, a function answers its body', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    local src = 'local a = 1\nlocal function f(x)\n  local b = 2\n  return b\nend\nf(a)\n'
+    local root = vim.treesitter.get_string_parser(src, 'lua'):parse()[1]:root()
+    local top = ts.child_forms(root, 'lua')
+    eq(3, #top)                              -- local a, the function, the call
+    local fn
+    for _, n in ipairs(top) do
+        -- ANCHORED, not `match('function')`: `f(a)` is a `function_call`, so the loose
+        -- pattern took the call as the function and the spec failed on an empty body —
+        -- a spec failing for an unrelated reason, which is at least the safe direction.
+        if n:type() == 'function_declaration' then fn = n end
+    end
+    ok(fn, 'a function is one of the top-level forms')
+    local body = {}
+    for _, n in ipairs(ts.child_forms(fn, 'lua')) do body[#body + 1] = n:type() end
+    eq({ 'variable_declaration', 'return_statement' }, body)
+
+    -- lisp needs no root special case: its child-list rule already answers for the root
+    if has_parser('scheme') then
+        local lroot = vim.treesitter.get_string_parser(
+            '(define (f x) (+ x 1))\n(display (f 2))\n', 'scheme'):parse()[1]:root()
+        eq(2, #ts.child_forms(lroot, 'scheme'))
+    end
+end)
+
 test('forms: a switch arm is a form, and its statements are one level in', function ()
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local function put(f, t)
