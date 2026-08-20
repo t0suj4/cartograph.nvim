@@ -278,6 +278,42 @@ test('forms: one level of nested statements / forms, on demand', function ()
 end)
 
 -- REPORTED FROM THE BROWSER (mantis, core/authentication_api.php): the rows of a
+-- python dropped every EXCEPT HANDLER (CART-0460), and only that. Its `else_clause`
+-- and `finally_clause` were already in the clause set under names it happens to
+-- SHARE with other grammars, so a try statement showed its body, its else and its
+-- finally, and silently lost the handlers between them — the one and only python
+-- cause in the census. `except*` (PEP 654) is a different node again, probed rather
+-- than assumed: `except_group_clause`.
+test('forms: a python try shows its handlers, not just its else and finally', function ()
+    if not has_parser('python') then skip 'no python parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    put('a.py', table.concat({
+        'def f(x):',
+        '    try:',
+        '        a()',
+        '    except ValueError as e:',
+        '        c()',
+        '        d()',
+        '    except Exception:',
+        '        e2()',
+        '    else:',
+        '        g()',
+        '    finally:',
+        '        h()',
+    }, '\n') .. '\n')
+    local got = {}
+    for _, f in ipairs(ts.forms(root .. '/a.py', 1)) do got[#got + 1] = f.text end
+    eq({ 'a()', 'c()', 'd()', 'e2()', 'g()', 'h()' }, got)
+
+    put('g.py', 'def f(x):\n    try:\n        a()\n    except* ValueError:\n        b()\n        c()\n')
+    local grp = {}
+    for _, f in ipairs(ts.forms(root .. '/g.py', 1)) do grp[#grp + 1] = f.text end
+    eq({ 'a()', 'b()', 'c()' }, grp)
+end)
+
 -- java had FOUR bodies nobody had ever named (CART-0459). `class_body` was in the
 -- block set from the start, so a METHOD worked and everything shaped like one did
 -- not: a CONSTRUCTOR's statements were 79 traps in 40 files of elasticsearch, the

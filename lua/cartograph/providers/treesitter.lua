@@ -3443,6 +3443,12 @@ local SUBSTMT_CLAUSES = {
     -- by navcensus (CART-0458) rather than by reading the table — which is the
     -- point: a name set is only as complete as the last person to edit it.
     else_if_clause = true, elsif = true,
+    -- python's `except`, and PEP 654's `except*` (probed: the node is
+    -- `except_group_clause`). Its `else_clause` and `finally_clause` were already here
+    -- under names it happens to SHARE with other grammars, so a try statement showed
+    -- its body, its else and its finally and silently dropped every HANDLER — the one
+    -- and only python cause in the census (CART-0460).
+    except_clause = true, except_group_clause = true,
 }
 -- A CASE is a place you GO, not a wrapper to see through: it stays ONE form of
 -- its own (so a switch reads as its arms) and its body statements are its DIRECT

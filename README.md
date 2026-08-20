@@ -2763,6 +2763,11 @@ nvim --headless -u NONE -l tools/navcensus.lua <dir> --vocab    # what it calls 
 # `enum_body_declarations` (pure grammar: its children belong to the enum's own list).
 # The enum-name collision is sidestepped rather than fought — `enum_body` is java's
 # alone. The one survivor is an anonymous class in a return, which is CART-0462.
+# FIFTH FIX (CART-0460): python 11 → 0, two names (`except_clause`, and `except*` is
+# `except_group_clause` — probed, not assumed). Its `else_clause` and `finally_clause`
+# were already in the set under names it SHARES with other grammars, so a try showed
+# its body, its else and its finally and dropped only the handlers between them: a
+# partially-correct answer in the middle of a construct, with nothing marking the gap.
 # EXPRESSION CENSUS: the expression IR's gate, and until now it had none. `expr.gate` is a
 # real two-implementation oracle — `expr.reads(row)` (the identifier leaves the IR reads) vs
 # `row.use ∪ row.rmw` (du's read census over the same node), derived independently — so a
