@@ -3810,125 +3810,49 @@ function M.forms(file, sr, sc, er, ec, opts)
     return out
 end
 
--- argument-list containers and conditional statements, for the detail lens
-local ARG_LISTS = { arguments = true, argument_list = true }
-local COND_TYPES = { if_statement = true, elseif_statement = true,
-    while_statement = true, repeat_statement = true, switch_statement = true,
-    ['for_statement'] = true, for_in_statement = true, when = true }
-
--- One row of detail text: whitespace collapsed (a row IS one line) and length
--- BOUNDED, because a generated statement can be arbitrarily long. The bound MARKS
--- itself — an unmarked cut reads as the whole statement, and a consumer that fits
--- to a narrower budget only hides that while its budget stays under this bound.
-local DETAIL_MAX = 80
-local function bounded(s)
-    if vim.fn.strchars(s) <= DETAIL_MAX then return s end
-    return vim.fn.strcharpart(s, 0, DETAIL_MAX - 1) .. '…'
-end
-
--- a statement's DETAIL items: for a conditional, its condition; otherwise the
--- arguments of any calls it makes (not descending into nested blocks — those
--- belong to the block lens). Each item is { kind='cond'|'arg', sr,sc,er,ec, text }.
-local function detail_items(stmt, src)
-    local items = {}
-    local function mk(kind, n)
-        local a, b, c, d = n:range()
-        items[#items + 1] = { kind = kind, sr = a, sc = b, er = c, ec = d,
-            text = bounded(node_text(n, src):gsub('%s+', ' '):gsub('^%s*', '')) }
-    end
-    if COND_TYPES[stmt:type()] then
-        local cond = stmt:field('condition')[1]
-        if not cond then
-            for _, c in inext, stmt, -1 do
-                if c:named() and not tsutil.is_comment(c)
-                    and not SUBSTMT_BLOCKS[c:type()] then cond = c break end
-            end
-        end
-        if cond then mk('cond', cond) end
-        return items -- the body is the block lens's concern, not the detail's
-    end
-    local function walk(n)
-        for _, c in inext, n, -1 do
-            if c:named() and not tsutil.is_comment(c) and not SUBSTMT_BLOCKS[c:type()] then
-                if ARG_LISTS[c:type()] then
-                    for _, a in inext, c, -1 do
-                        if a:named() and not tsutil.is_comment(a) then mk('arg', a) end
-                    end
-                else
-                    walk(c)
-                end
-            end
-        end
-    end
-    walk(stmt)
-    return items
-end
-
---- The detail-lens rows for a code range: each top-level statement with its
---- detail items (a conditional's condition; a call's arguments). Same on-demand
---- parse as M.forms; returns { {sr,sc,er,ec,text, items={...}}, ... }.
-function M.detail(file, sr, sc, er, ec, opts)
+--- Every NAME MENTION in a source range, in source order, for the row-local pick
+--- (CART-0471: reaching a variable inside a call is a POSITION question, not a
+--- containment one). The type set is `spec.mention_types` -- the SAME declared set
+--- the mention collector resolves with, so the pick can only offer names the graph
+--- could have an opinion about, and no new per-language table is minted (php `name`,
+--- haskell `variable`, bash `word`/`variable_name`, scheme `symbol`, identifier
+--- elsewhere).
+--- @return {text:string, sr:integer, sc:integer, er:integer, ec:integer}[]
+function M.names(file, sr, sc, er, ec)
     local _, spec = elang_for(file)
-    local lang = parse_lang_for(file) -- TS parses under typescript, not js
+    local lang = parse_lang_for(file)
     if not (lang and spec) then return {} end
-    local src = transport.read_source(file); if not src then return {} end
+    local src = transport.read_source(file)
+    if not src then return {} end
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
     if not ok then return {} end
-    local tree = parser:parse()[1]; if not tree then return {} end
-    local root = tree:root()
-    local lisp = LISP_LANGS[lang] or false
-    -- the detail lens rides the SAME range the block view handed out, so it
-    -- needs the same resolution — otherwise <Tab> on a go/odin arm details the
-    -- switch you came from
-    local n = er and node_for_range(root, sr, sc, er, ec)
-        or root:named_descendant_for_range(sr, sc, sr, sc)
-    if not n then return {} end
-    if not er then
-        while n:parent() do
-            local pr, pc = n:parent():start()
-            if pr == sr and pc == sc and not SUBSTMT_BLOCKS[n:parent():type()] then
-                n = n:parent()
-            else break end
-        end
-    end
-    -- a RUN (a region) is not a node — same reason as M.forms, same answer, and
-    -- the same HOST: the node containing the whole range, not the one
-    -- node_for_range picks (its start-anchored climb lands on the run's FIRST
-    -- statement, whose children are one expression — which is what this lens
-    -- showed for a 24-line script before the host was taken from the range)
-    local stmts
-    if opts and opts.run then
-        stmts = {}
-        local host = root:named_descendant_for_range(sr, sc, er, math.max(sc, ec - 1))
-        for _, c in inext, host, -1 do
-            if c:named() and not tsutil.is_comment(c) then
-                local csr, csc, cer, cec = c:range()
-                if (csr > sr or (csr == sr and csc >= sc))
-                    and (cer < er or (cer == er and cec <= ec)) then
-                    stmts[#stmts + 1] = c
-                end
+    local tree = parser:parse()[1]
+    if not tree then return {} end
+    local idt = spec.mention_types or { identifier = true }
+    local out, seen = {}, {}
+    local function walk(n)
+        local nsr, nsc, ner, nec = n:range()
+        if ner < sr or nsr > er then return end -- no overlap with the asked range
+        if n:named() and idt[n:type()] then
+            local inside = (nsr > sr or (nsr == sr and nsc >= sc))
+                and (ner < er or (ner == er and nec <= ec))
+            local k = nsr .. ',' .. nsc
+            if inside and not seen[k] then
+                seen[k] = true
+                out[#out + 1] = { text = node_text(n, src), sr = nsr, sc = nsc,
+                    er = ner, ec = nec }
             end
         end
+        for c in n:iter_children() do walk(c) end
     end
-    stmts = stmts or child_forms(n, lisp)
-    local out = {}
-    for _, s in ipairs(stmts) do
-        local a, b, c, d = s:range()
-        out[#out + 1] = { sr = a, sc = b, er = c, ec = d,
-            -- collapsed to one line (a row IS one line) and BOUNDED, because a
-            -- generated statement can be arbitrarily long. The bound MARKS itself:
-            -- an unmarked cut here reads as the whole statement, and the pane's own
-            -- budget fit only hides it while the budget stays under this bound.
-            text = bounded(node_text(s, src):gsub('%s+', ' '):gsub('^%s*', '')),
-            items = detail_items(s, src) }
-    end
+    walk(tree:root())
+    table.sort(out, function(a, b)
+        if a.sr ~= b.sr then return a.sr < b.sr end
+        return a.sc < b.sc
+    end)
     return out
 end
 
--- parse a container file and return its host-language trees in
--- DETERMINISTIC position order (the LanguageTree child table has no
--- stable iteration order; worker output must equal inline output).
--- nil for plain files, so callers can fall back to the single root.
 local function container_trees(parser, clang)
     if not clang then return nil end
     -- injection queries may use nvim-treesitter's CUSTOM directives

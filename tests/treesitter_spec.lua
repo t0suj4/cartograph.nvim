@@ -669,22 +669,6 @@ test('forms: a switch arm is a form, and its statements are one level in', funct
         ok(arms[2].branch, 'the arm that carries the body is the branch')
     end
 
-    -- The DETAIL lens rides the same range the block view handed out, so <Tab>
-    -- on an arm must detail THAT arm. go and odin are where this bites: their
-    -- arm ranges run on to the NEXT arm's indent, so a whole-range probe
-    -- resolves to the switch and details the arms you came FROM.
-    for _, l in ipairs({ { 'go', 'a.go', 2 }, { 'odin', 'a.odin', 1 } }) do
-        if has_parser(l[1]) then
-            local file = root .. '/' .. l[2]
-            local arms = ts.forms(file, l[3])
-            local t = {}
-            for _, d in ipairs(ts.detail(file, arms[1].sr, arms[1].sc, arms[1].er, arms[1].ec)) do
-                t[#t + 1] = (d.text:gsub('[;()]', ''):gsub('%s+$', ''))
-            end
-            eq({ 'g', 'gg' }, t)
-        end
-    end
-
     -- CONTROL: an ordinary if/else is untouched by the clause rules — its
     -- bodies stay flattened, and the condition is NOT a form
     if has_parser('lua') then

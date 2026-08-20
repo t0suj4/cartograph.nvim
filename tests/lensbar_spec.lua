@@ -55,12 +55,15 @@ end
 
 -- ── one list, published and cycled ───────────────────────────────────────────
 
-test('modes: the fn altitude publishes its three lenses, active first by default',
+-- (the `detail` lens retired with CART-0472: a row's names are a LEVEL now, not a
+-- lens, so fn is down to two views and block/region to one — which is why they
+-- publish no set at all rather than a set of one.)
+test('modes: the fn altitude publishes its two lenses, active first by default',
     function ()
     restore()
     symbols.view = { level = 'fn' }
     local set, active = symbols.modes()
-    eq({ 'statements', 'detail', 'lints' }, set)
+    eq({ 'statements', 'lints' }, set)
     eq('statements', active, 'no explicit lens = the altitude default')
     symbols.view = { level = 'fn', lens = 'lints' }
     local _, act2 = symbols.modes()
@@ -110,15 +113,14 @@ end)
 test('strip: the active lens is bracketed and the others are named plainly',
     function ()
     restore()
-    local s = bar('fn', 'detail')
-    ok(s:find('[detail]', 1, true), 'the active lens is bracketed: ' .. s)
+    local s = bar('fn', 'lints')
+    ok(s:find('[lints]', 1, true), 'the active lens is bracketed: ' .. s)
     ok(s:find('statements', 1, true), 'the other lenses are still named: ' .. s)
-    ok(s:find('lints', 1, true), 'the other lenses are still named: ' .. s)
     ok(not s:find('[statements]', 1, true), 'only one is marked active: ' .. s)
     -- and the mark MOVES with the lens
-    local t = bar('fn', 'lints')
-    ok(t:find('[lints]', 1, true), t)
-    ok(not t:find('[detail]', 1, true), t)
+    local t = bar('fn', 'statements')
+    ok(t:find('[statements]', 1, true), t)
+    ok(not t:find('[lints]', 1, true), t)
     restore()
 end)
 
@@ -191,9 +193,9 @@ test('strip: too narrow to list them all → the active one plus a COUNT', funct
     restore()
     config.symbols_width = 14
     local s = bar('fn', 'statements')
-    ok(s:find('+2', 1, true),
+    ok(s:find('+1', 1, true),
         'the withheld modes are COUNTED, never silently dropped: ' .. s)
-    ok(not s:find('detail', 1, true), 'the list itself is gone, not truncated: ' .. s)
+    ok(not s:find('lints', 1, true), 'the list itself is gone, not truncated: ' .. s)
     ok(vim.fn.strdisplaywidth(s) <= 14, 'and it fits: ' .. s)
     restore()
 end)
@@ -204,7 +206,7 @@ test('strip: squeezed further, the KEY hint goes before the count does', functio
     local wide = bar('fn', 'statements')
     config.symbols_width = 12
     local tight = bar('fn', 'statements')
-    ok(tight:find('+2', 1, true), 'the count is the last thing to go: ' .. tight)
+    ok(tight:find('+1', 1, true), 'the count is the last thing to go: ' .. tight)
     ok(vim.fn.strdisplaywidth(tight) <= 12, 'and it still fits: ' .. tight)
     ok(#tight <= #wide, 'the tighter budget did not grow the strip')
     restore()
@@ -233,8 +235,8 @@ end)
 test('strip: an UNBOUND cycle key names no key at all', function ()
     restore()
     config.keys.cycle = false
-    local s = bar('fn', 'detail')
-    ok(s:find('[detail]', 1, true), 'the lenses are still listed: ' .. s)
+    local s = bar('fn', 'lints')
+    ok(s:find('[lints]', 1, true), 'the lenses are still listed: ' .. s)
     ok(not s:find('⇥', 1, true), 'but nothing claims a key: ' .. s)
     restore()
 end)
@@ -339,9 +341,9 @@ test('strip: render() paints the winbar on the pane window', function ()
         'the window carries the strip for the lens it is showing: ' .. painted)
 
     -- and it FOLLOWS the lens, rather than being set once at attach
-    symbols.view = { level = 'fn', fn = fn_id, lens = 'detail' }
+    symbols.view = { level = 'fn', fn = fn_id, lens = 'statements' }
     symbols.render()
-    eq(true, plain(vim.wo[win].winbar):find('[detail]', 1, true) ~= nil,
+    eq(true, plain(vim.wo[win].winbar):find('[statements]', 1, true) ~= nil,
         'the strip re-derives on every render')
 
     vim.api.nvim_win_close(win, true)

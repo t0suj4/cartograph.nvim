@@ -49,6 +49,7 @@ function M.ui()
     link('CartographDim',      'Comment')    -- locations, counts, frontier reasons
     link('CartographLit',      'String')     -- literal values (trace answers)
     link('CartographMarker',   'Special')    -- expand/collapse markers
+    link('CartographPick',     'IncSearch')  -- a row-local name pick's labels
     link('CartographFrontier', 'WarningMsg') -- the ⊘ frontier marker
     link('CartographCone',       'Special')  -- ● a node inside the active cone
     link('CartographConeAnchor', 'Todo')     -- ◆ the cone's anchor node

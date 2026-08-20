@@ -2773,6 +2773,43 @@ nvim --headless -u NONE -l tools/navcensus.lua <dir> --vocab    # what it calls 
 # the row; a vector keeps its own row because it is a collection, not a sigil. Quoted
 # DATA is descendable on purpose — user direction: any collection literal is structure,
 # and an INTERPRETATION of it is a separate offered layer (CART-0467/0468).
+# REACHING A NAME INSIDE A ROW (CART-0471), which is what the detail lens was built
+# for. Reaching `y` in `q(y, x + 1)` is a POSITION question — a token at a column —
+# and a lens answered it with containment: a mode switch, a scan of indented item
+# rows, then a descend.
+# ★ THE BROWSER'S OWN VERB WAS ALREADY RIGHT AND ONLY HALF-WIRED: descend_fn_row has
+# always resolved THE WORD UNDER THE CURSOR (a callee, then a module var), while the
+# block and region altitudes had no word logic at all — block took the row's first
+# resolvable callee whatever the cursor was on, and region only handled a var row.
+# They share it now, so "go to this name" needs no key of its own. Names come from
+# `spec.mention_types` — the declared set the mention collector already resolves with
+# — and each resolves BY RANGE off the var use edges, which answers shadowing for
+# free: a local has no use edge covering it.
+# The LABEL PICK (`keys.pick`, UNBOUND — a label motion is not a vim idiom and does
+# not squat on a vim key) stays for the rows a cursor word cannot serve: a flattened
+# summary row, whose names are not at their source positions. It labels the line in
+# the SOURCE pane, which has the real columns — a browser row's text is collapsed and
+# elided, so a name's column there addresses nothing. Measured p90 is 9 names per
+# line, so the digits alone label nine rows in ten.
+# AND THE DETAIL LENS IS RETIRED (CART-0472, user: "maybe the detail lens would allow
+# descending into a row which would offer navigating symbols within and step like
+# statement otherwise"). A row's names are a LEVEL below it now, not a lens beside
+# it: `descend` on a statement that names more than one resolvable thing opens
+# them, j/k steps them and steps OUT at the edges — which needed nothing built,
+# because step() already did that and was merely gated to the block altitude. The
+# rows are ts.names, so the lens's hand-written arg/cond/var kinds — its ceiling,
+# and why it lost a ternary's condition and every nested call's argument — are gone
+# with it. A statement whose ONLY resolvable name is its single callee still
+# descends straight into the callee: a one-row level would be a detour.
+# Retiring it deleted the lens set entry, the renderer, `line_detail` and its two
+# descend branches, the provider's whole `detail()` machinery (119 lines: DETAIL_MAX,
+# bounded, ARG_LISTS, COND_TYPES, detail_items) and four specs' worth of
+# expectations — including the doc's own lens table, which `lensbar_spec` checks
+# against the code, so the retirement could not be half-done.
+# ★ And it found a dead end by accident: a REGION's ▸ rows carried a block key that
+# the region branch never read, so the marker promised a descent and delivered
+# nothing. The new region branch could never run — an earlier one already won — and
+# dead code is how the bug announced itself.
 # ★ The census caught two bugs in its own fix: the unquotes come in two families
 # (`unsyntax`/`unsyntax_splicing` inside a quasisyntax, not `unquote`), and the lisp
 # signature heuristic ate real content the moment quoted forms became forms — it was

@@ -34,9 +34,17 @@ local LENS_SETS = {
     -- dead-end scratch buffer. It cost nothing but a renderer because
     -- exprlint.lint() already returns RECORDS and report() is only a formatter
     -- over them — the conversion is free wherever that split already exists.
-    fn     = { 'statements', 'detail', 'lints' },
-    block  = { 'statements', 'detail' },
-    region = { 'statements', 'detail' },
+    --
+    -- ★ `detail` IS GONE (CART-0472). It existed because there was no way to reach a
+    -- variable inside a call, and it answered that POSITION question with a LENS: a
+    -- mode switch, a scan of indented items, then a descend. Its two jobs are both
+    -- covered now — the cursor word resolves a name at every altitude, and a row's
+    -- names are a LEVEL below it (`syms`), which steps like statements because it
+    -- shares step()'s step-out. Its hand-written item kinds (arg/cond/var) were also
+    -- its ceiling: they lost a ternary's condition and every nested call's arguments,
+    -- while ts.names has no taxonomy to be incomplete. block and region are left with
+    -- ONE view, so they leave this table entirely rather than declare a set of one.
+    fn     = { 'statements', 'lints' },
 }
 
 local ns       = vim.api.nvim_create_namespace('cartograph_symbols_dep')
@@ -64,8 +72,8 @@ local M = {
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
     line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
     line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
-    line_detail = {}, line_proto = {}, line_lint = {}, line_act = {},
-    line_hushed = {}, line_unread = {},
+    line_proto = {}, line_lint = {}, line_act = {},
+    line_hushed = {}, line_unread = {}, line_syms = {},
     -- what a row is ABOUT (a node id), which is NOT what `l` does here: a
     -- caller row is about the using function but descends into its
     -- occurrences. Keeping the two apart is the whole point — hover, descend,
@@ -1623,6 +1631,9 @@ end
 -- arguments and a conditional's condition (from treesitter.detail, `l` descends
 -- into the element's forms), plus the module vars/fields the statement reads
 -- (from the data flow; `l` opens the var's usage sites). Derived on demand.
+-- The current altitude's SUBJECT and its range: (node, sr, sc, er, ec, has_df, fnid,
+-- run). Named for the detail lens it was written for; that lens is gone (CART-0472)
+-- and the one caller left is the name pick, which wants the fnid to resolve against.
 local function detail_scope() -- -> node, sr, sc, er, ec, has_df, fnid
     local lvl = M.view.level
     if lvl == 'fn' then
@@ -1647,6 +1658,227 @@ local function detail_scope() -- -> node, sr, sc, er, ec, has_df, fnid
         return n, atr.sl(r), atr.sc(r), atr.el(r), atr.ec(r), nil, nil, true
     end
 end
+--- WHICH ALTITUDE A VAR OPENS AT: its members if it has any, its literal data if it
+--- carries some, else its usage sites. Module-level and shared, because the same
+--- subject reached two ways must land in the same place -- the pick forced `var` for
+--- a while and a table-valued var then opened its sites through one route and its
+--- data through the other.
+function M.var_level(id)
+    if #table_members(id) > 0 then return 'tbl' end
+    local n = store.node(id)
+    if n and type(n.data) == 'table' then return 'lit' end
+    return 'var'
+end
+
+-- ── the SYMBOLS altitude: a row's NAMES, one level down ──────────────────────
+-- USER (CART-0472): "maybe the detail lens would allow descending into a row which
+-- would offer navigating symbols within and step like statement otherwise". Which is
+-- the answer the detail lens was reaching for: reaching a name inside a statement is
+-- not a LENS on the statement list, it is a LEVEL below the row -- so it uses the
+-- vocabulary every other level uses (l enters, j/k steps, h returns) instead of a
+-- mode switch and a scan of indented items.
+--
+-- The rows are ts.names, i.e. the SPEC's declared mention types, so there is no
+-- hand-written item taxonomy to have holes in: the detail lens knew `arg`, `cond` and
+-- `var`, which is why it lost a ternary's condition and every nested call's arguments.
+-- A name is a name.
+--
+-- "step like statement otherwise" needed nothing built: step(dir) already steps OUT
+-- to the parent at the first/last row, it was simply gated to the block altitude.
+
+--- The key a syms level is entered with: owner id + the statement's range, in the
+--- same shape as a block key (an ec of -1 means "to the end of the line").
+local function syms_key(id, sr) return ('%s\31%d\31%d\31%d\31%d'):format(id, sr, 0, sr, -1) end
+
+--- The names in a syms key's range, each resolved the way the pick resolves them.
+--- Shared with pick_items: one answer to "what names are on this row and what do they
+--- point at", so the two routes cannot disagree.
+--- @return {text:string, sr:integer, sc:integer, ec:integer, id:string?, kind:string?}[]
+--- @return string|nil file, string|nil abs, table|nil owner
+function M.syms_of(key)
+    local id, sr, sc, er, ec = (key or ''):match('^(.-)\31(%-?%d+)\31(%-?%d+)\31(%-?%d+)\31(%-?%d+)$')
+    local n = id and store.node(id)
+    if not n then return {} end
+    sr, sc, er, ec = tonumber(sr), tonumber(sc), tonumber(er), tonumber(ec)
+    local abs = store.abspath(n)
+    if not abs then return {} end
+    local ts = require 'cartograph.providers.treesitter'
+    local out = {}
+    for _, nm in ipairs(ts.names(abs, sr, sc, er, ec >= 0 and ec or math.huge)) do
+        local vid = M.var_at_pos(id, nm.sr, nm.sc)
+        local item = { text = nm.text, sr = nm.sr, sc = nm.sc, ec = nm.ec }
+        if vid then
+            item.id, item.kind = vid, 'var'
+        else
+            -- a CALL at this name: the call records carry their own head position,
+            -- so the callee is matched by place, not by spelling
+            for _, c in ipairs(store.topo():calls_of(n.file) or {}) do
+                local a = c.at
+                if a and atr.sl(a) == nm.sr and atr.sc(a) == nm.sc and c.to
+                    and store.node(c.to) then
+                    item.id, item.kind = c.to, 'fn'
+                    break
+                end
+            end
+        end
+        out[#out + 1] = item
+    end
+    return out, n.file, abs, n
+end
+
+--- The syms level's rows: the statement as a header, then one row per name with what
+--- it points at. An unresolved name is NOT hidden -- it says so, because "this name
+--- has no node" is an answer (a local, a field, an unparsed callee) and a silently
+--- shorter list would read as "the statement has fewer names than it does".
+local function render_syms(ctx, key)
+    local items, _, abs, owner = M.syms_of(key)
+    if not owner then ctx.lines[1] = '(gone)'; return end
+    local sr = tonumber((key or ''):match('^.-\31(%-?%d+)')) or 0
+    local src = abs and vim.fn.readfile(abs, '', sr + 1) or {}
+    local text = (src[sr + 1] or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    ctx.lines[1] = ('≡ %s'):format(M.fit_text(text, '≡ '))
+    ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
+    ctx.line_stmt[1] = sr + 1
+    if #items == 0 then
+        ctx.lines[2] = '  (no names here)'
+        ctx.marks[2] = { { 0, -1, 'CartographDim' } }
+        return
+    end
+    for _, it in ipairs(items) do
+        local target = it.id and store.node(it.id)
+        local tail = target and ('  → %s'):format(target.name or '?')
+            or '  (no node)'
+        ctx.lines[#ctx.lines + 1] = '    ' .. it.text .. tail
+        ctx.vnums[#ctx.lines] = tostring(it.sr + 1)
+        ctx.line_stmt[#ctx.lines] = it.sr + 1
+        ctx.line_syms[#ctx.lines] = it
+        if target then
+            ctx.line_node[#ctx.lines] = it.id
+            ctx.node_line[it.id] = #ctx.lines
+        end
+        ctx.marks[#ctx.lines] = { { 0, 4 + #it.text,
+            target and 'CartographTitle' or 'CartographDim' },
+            { 4 + #it.text, -1, 'CartographDim' } }
+    end
+end
+
+-- ── the ROW-LOCAL NAME PICK ──────────────────────────────────────────────────
+-- WHY THIS IS NOT A LENS (CART-0471, user: "I wanted detail lens because there was
+-- no way to reach variables inside function calls but it's so clunky, maybe I
+-- approached it from the wrong direction"). Reaching `y` in `q(y, x + 1)` is a
+-- POSITION question -- a token at a column -- and the detail lens answered it with a
+-- CONTAINMENT mechanism, so it cost a mode switch, a scan of indented item rows and
+-- a descend, three steps for what vim's `gd` does in one. And because its item kinds
+-- were hand-written (arg / cond / var) the coverage had holes exactly there: no
+-- ternary condition or arms, and only the args of TOP-LEVEL calls.
+--
+-- So the pick is not an altitude and not a lens: it works on ANY row that carries a
+-- source line, which is every statement, form, arm, detail item and lint row, rather
+-- than only the three altitudes that have lenses.
+--
+-- THE RANGE IS THE ROW'S OWN LINE, deliberately not the row's full range: a branch
+-- row spans its whole body, and labelling a 50-line function's every name is not a
+-- pick. A branch row's line is its HEADER, whose names are the condition's -- which
+-- is what a reader looking at that row is asking about.
+
+--- Resolve a name POSITION to a var node, by RANGE rather than by name. The use
+--- edges already carry their occurrence ranges, so the position IS the answer -- and
+--- that dodges the shadowing question the detail lens has to ask by hand (a local
+--- named like a module var simply has no use edge covering it).
+--- The var a NAME POSITION reads, by RANGE off the use edges -- shared by the pick
+--- and the symbols altitude so the two routes cannot disagree about a name.
+function M.var_at_pos(fnid, sr, sc)
+    if not fnid then return nil end
+    for _, u in ipairs(store.topo():var_uses_detail(fnid) or {}) do
+        for _, r in ipairs(u.at or {}) do
+            if atr.sl(r) == sr and (not atr.oneline(r)
+                or (sc >= atr.sc(r) and sc < atr.ec(r))) then
+                return u.to
+            end
+        end
+    end
+end
+
+--- The names on row `r`, each with what it resolves to. Pure: no UI, so a spec can
+--- ask the same question the keymap does.
+--- @return {text:string, sr:integer, sc:integer, ec:integer, label:string, id:string?}[]
+--- @return string|nil file  the absolute path the positions address
+function M.pick_items(r)
+    local line = M.line_stmt[r]
+    if not line then return {}, nil end
+    local id = M.row_subject(r)
+    local n = id and store.node(id)
+    if not n then return {}, nil end
+    -- TWO SPELLINGS OF THE SAME FILE, and they are not interchangeable: the parse
+    -- needs the ABSOLUTE path, while the panes compare against a node's own `file`
+    -- (workspace-relative) -- so returning the abspath made the source pane refuse
+    -- every label as "a different file".
+    local abs = store.abspath(n)
+    if not abs then return {}, nil end
+    local file = n.file
+    local sr = line - 1
+    local labels = require('cartograph.config').pick_labels or '123456789'
+    local ts = require 'cartograph.providers.treesitter' -- required per use, as the
+                                                         -- other on-demand re-parse
+                                                         -- callers here do
+    local _, _, _, _, _, _, fnid = detail_scope()
+    fnid = fnid or n.id -- a region carries its own var use edges; asking about a
+                        -- subject that has none simply resolves nothing
+    local out = {}
+    for i, nm in ipairs(ts.names(abs, sr, 0, sr, math.huge)) do
+        local lb = labels:sub(i, i)
+        if lb == '' then break end -- no silent tail: the caller reports the drop
+        out[#out + 1] = { text = nm.text, sr = nm.sr, sc = nm.sc, ec = nm.ec,
+            label = lb, id = M.var_at_pos(fnid, nm.sr, nm.sc) }
+    end
+    return out, file
+end
+
+--- Label the row's names in the source pane, read one label, and go. An unresolved
+--- name still MOVES THE SOURCE CURSOR to it and says so: that is the honest half of
+--- the answer (the user asked to REACH the variable, and reaching its token is what
+--- the graph can promise when it has no node for it).
+function M.pick_cursor()
+    local r = vim.api.nvim_win_get_cursor(0)[1]
+    local items, file = M.pick_items(r)
+    if #items == 0 then
+        vim.notify('cartograph: no names on this row', vim.log.levels.INFO)
+        return
+    end
+    -- DROP ANY HOVER TAKEOVER FIRST. Moving the cursor onto a row that declares a
+    -- var hands the source pane to "the other end" (hover_node's context), so the
+    -- pane is showing a DIFFERENT body than the row we are labelling and every
+    -- label would refuse. Clearing restores the focused body, which is the one this
+    -- row belongs to.
+    store.set_context(nil)
+    local landed = store.set_labels({ file = file, items = items })
+    if landed == 0 then
+        vim.notify('cartograph: the source pane is not showing this line', vim.log.levels.WARN)
+        return
+    end
+    if landed < #items then
+        vim.notify(('cartograph: %d of %d names are off-screen')
+            :format(#items - landed, #items), vim.log.levels.INFO)
+    end
+    vim.cmd('redraw')
+    local ok, ch = pcall(vim.fn.getcharstr)
+    store.set_labels(nil)
+    if not ok or ch == nil or ch == '\27' then return end
+    for _, it in ipairs(items) do
+        if it.label == ch then
+            if it.id and store.node(it.id) then
+                return M.show(M.var_level(it.id), it.id)
+            end
+            store.set_highlight({ file = file, ranges = {
+                { start = { line = it.sr, char = it.sc },
+                  ['end'] = { line = it.sr, char = it.ec } } } })
+            vim.notify(("cartograph: `%s` — no node (a local, a field, or unresolved)")
+                :format(it.text), vim.log.levels.INFO)
+            return
+        end
+    end
+end
+
 -- ── the LENS PILOT: a per-fn report as rows ──────────────────────────────────
 -- Rows are FINDINGS, one per row, each anchored to its statement line so the
 -- existing fn-level hover previews it with no new dispatch. The report's PROSE
@@ -2091,89 +2323,17 @@ local function render_proto(ctx, key)
     end
 end
 
-local function render_detail(ctx)
-    local n, sr, sc, er, ec, df, fnid, run = detail_scope()
-    if not n then ctx.lines[1] = '(gone)'; return end
-    ctx.lines[1] = ('≡ %s'):format(n.name or '?')
-    ctx.marks[1] = { { 0, #'≡', 'CartographDim' }, { #'≡', -1, 'CartographTitle' } }
-    local ts = require 'cartograph.providers.treesitter'
-    local stmts = ts.detail(store.abspath(n), sr, sc, er, ec, run and { run = true })
-    if #stmts == 0 then
-        ctx.lines[2] = '  (no detail here)'; ctx.marks[2] = { { 0, -1, 'CartographDim' } }
-        return
-    end
-    -- module vars a statement reads, by statement start line (descendable) —
-    -- from the fn's use edges (fn altitude only). A name the function DEFINES
-    -- (a param or a local) shadows any module var of that name: the read is
-    -- the local, so a name-matched use edge to the module var is a false
-    -- positive — skip it, or descending it would open a global's usages.
-    local vars_by_line, locals = {}, {}
-    if fnid then
-        local fnode = store.node(fnid)
-        for _, p in ipairs(fnode and fnode.params or {}) do locals[p] = true end
-        if df then
-            for _, s in ipairs(dfa.stmts(node)) do
-                for _, d in ipairs(s.def or {}) do locals[d] = true end
-            end
-        end
-        for _, u in ipairs(store.topo():var_uses_detail(fnid)) do
-            local vn = store.node(u.to)
-            if vn and not locals[vn.name] then
-                for _, r in ipairs(u.at or {}) do
-                    vars_by_line[atr.sl(r)] = vars_by_line[atr.sl(r)] or {}
-                    vars_by_line[atr.sl(r)][u.to] = true
-                end
-            end
-        end
-    end
-    for _, st in ipairs(stmts) do
-        ctx.lines[#ctx.lines + 1] = '  ' .. M.fit_text(st.text, '  ')
-        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
-        ctx.line_stmt[#ctx.lines] = st.sr + 1
-        for _, it in ipairs(st.items) do
-            local icon = it.kind == 'cond' and '? ' or '· '
-            ctx.lines[#ctx.lines + 1] = '      ' .. icon
-                .. M.fit_text(it.text, '      ' .. icon)
-            ctx.line_stmt[#ctx.lines] = it.sr + 1
-            ctx.line_detail[#ctx.lines] = { kind = it.kind,
-                key = ('%s\31%d\31%d\31%d\31%d'):format(fnid or n.id, it.sr, it.sc, it.er, it.ec) }
-        end
-        -- module vars/fields this statement reads (fn altitude): descend -> uses
-        local seen = {}
-        for line, vs in pairs(vars_by_line) do
-            if line >= st.sr and line <= st.er then
-                for vid in pairs(vs) do
-                    if not seen[vid] then
-                        seen[vid] = true
-                        local vn = store.node(vid)
-                        if vn then
-                            -- a var row is an IDENTITY, so it elides the middle
-                            ctx.lines[#ctx.lines + 1] = '      → '
-                                .. M.fit_identity(vn.name or vid, '      → ', '')
-                            ctx.marks[#ctx.lines] = { { 0, 8, 'CartographDim' } }
-                            ctx.line_stmt[#ctx.lines] = st.sr + 1 -- anchor to its statement
-                            ctx.line_detail[#ctx.lines] = { kind = 'var', id = vid }
-                        end
-                    end
-                end
-            end
-        end
-    end
-end
-
 function M.render()
     if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return end
     local ctx = { lines = {}, marks = {}, vnums = {}, signs = {},
         line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
         line_stmtidx = {}, line_calls = {}, line_site = {}, line_callers = {}, line_vars = {},
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
-        line_regfor = {}, line_block = {}, line_detail = {}, line_proto = {},
+        line_regfor = {}, line_block = {}, line_proto = {},
         line_lint = {}, line_act = {}, line_hushed = {}, line_unread = {},
-        line_about = {}, line_kind = {} }
+        line_about = {}, line_kind = {}, line_syms = {} }
     local v = M.view
-    if LENS_SETS[v.level] and cur_lens() == 'detail' then
-        render_detail(ctx)
-    elseif v.level == 'fn' and cur_lens() == 'lints' then
+    if v.level == 'fn' and cur_lens() == 'lints' then
         render_lints(ctx, v.fn)
     elseif v.level == 'files' then
         if M.files_mode == 'layers' then
@@ -2193,6 +2353,7 @@ function M.render()
     elseif v.level == 'refused' then render_refused(ctx, M._refused_call)
     elseif v.level == 'regfor' then render_regfor(ctx, v.regfor)
     elseif v.level == 'occs' then render_occs(ctx, v.occs)
+    elseif v.level == 'syms' then render_syms(ctx, v.syms)
     elseif v.level == 'lit' then render_lit(ctx, v.lit)
     elseif v.level == 'states' then render_states(ctx)
     elseif v.level == 'state' then render_state(ctx, v.state)
@@ -2212,9 +2373,10 @@ function M.render()
     M.line_group, M.line_sep, M.line_state = ctx.line_group, ctx.line_sep, ctx.line_state
     M.line_trans, M.line_lit = ctx.line_trans, ctx.line_lit
     M.line_regfor, M.line_block = ctx.line_regfor, ctx.line_block
-    M.line_detail, M.line_proto = ctx.line_detail, ctx.line_proto
+    M.line_proto = ctx.line_proto
     M.line_lint, M.line_act = ctx.line_lint, ctx.line_act
     M.line_hushed, M.line_unread = ctx.line_hushed, ctx.line_unread
+    M.line_syms = ctx.line_syms
     M.line_about, M.line_kind = ctx.line_about, ctx.line_kind
 
     -- names come from arbitrary source text; a row must stay one row
@@ -2381,6 +2543,7 @@ function M.subject(kind)
     local v = M.view
     local def = (v.level == 'fn' and v.fn)
         or (v.level == 'block' and (v.block or ''):match('^(.-)\31'))
+        or (v.level == 'syms' and (v.syms or ''):match('^(.-)\31'))
         or (v.level == 'region' and v.region)
         or (v.level == 'tbl' and v.tbl)
         or (v.level == 'var' and v.var)
@@ -2565,6 +2728,7 @@ function M.show(level, ctx_val)
         elseif level == 'lit' then M.view.lit = ctx_val
         elseif level == 'live' then M.view.live = ctx_val
         elseif level == 'block' then M.view.block = ctx_val
+        elseif level == 'syms' then M.view.syms = ctx_val
         elseif level == 'state' then M.view.state = ctx_val
         elseif level == 'proto' then M.view.proto = ctx_val
         elseif level == 'lintact' then M.view.lintact = ctx_val
@@ -2798,10 +2962,23 @@ function M.attach(win)
                 end
                 M.emit_view() -- the selected row may have changed (deduped)
                 if M.NODE_HOVER[M.view.level] then
-                    if not M.hover_node(r)
-                        and M.view.level == 'state' and M.line_trans[r] then
-                        -- a transition's "source" is its line in the spec
-                        spec_context(M.line_trans[r])
+                    if not M.hover_node(r) then
+                        if M.view.level == 'state' and M.line_trans[r] then
+                            -- a transition's "source" is its line in the spec
+                            spec_context(M.line_trans[r])
+                        elseif M.view.level == 'region' and M.line_stmt[r] then
+                            -- a region's STATEMENT rows are not node rows, and this
+                            -- branch used to end here: hover_node declined and
+                            -- nothing happened, so the source kept whatever the last
+                            -- row had lit. They highlight their line, as fn does.
+                            local n = store.node(M.view.region)
+                            if n then
+                                local l = M.line_stmt[r]
+                                store.set_highlight({ file = n.file, ranges = {
+                                    { start = { line = l - 1, char = 0 },
+                                      ['end'] = { line = l, char = 0 } } } })
+                            end
+                        end
                     end
                 elseif M.view.level == 'states' then
                     -- a state's "source" is the spec lines that mention it
@@ -2841,6 +3018,27 @@ function M.attach(win)
                         store.set_context({ node = mid, view = { name = 'nbhd' } })
                     else
                         store.set_context(nil)
+                    end
+                elseif M.view.level == 'syms' then
+                    -- ★ A NAME ROW HIGHLIGHTS THE NAME, WHERE IT IS. Reported: "it
+                    -- doesn't highlight the same way statements do" -- because syms
+                    -- was in the node-hover class, so hovering a resolved name TOOK
+                    -- OVER the source pane with the def it points at, throwing the
+                    -- statement you are reading off the screen. A statement row
+                    -- highlights its line; a name row highlights its own columns,
+                    -- which is the same rule at a finer grain. The def is still one
+                    -- `descend` away, which is where it belongs.
+                    local it = M.line_syms[r]
+                    local n = store.node(M.subject('def'))
+                    if n and it then
+                        store.set_highlight({ file = n.file, ranges = {
+                            { start = { line = it.sr, char = it.sc },
+                              ['end'] = { line = it.sr, char = it.ec } } } })
+                    elseif n and M.line_stmt[r] then -- the header row
+                        local l = M.line_stmt[r]
+                        store.set_highlight({ file = n.file, ranges = {
+                            { start = { line = l - 1, char = 0 },
+                              ['end'] = { line = l, char = 0 } } } })
                     end
                 elseif M.view.level == 'fn' or M.view.level == 'block' then
                     local l = M.line_stmt[r]
@@ -2965,12 +3163,7 @@ function M.attach(win)
     -- left, restore it (cursor row and all); a different descend branches,
     -- which invalidates the forward memory — the two-stack h/l pair.
     -- a var with members is a TABLE: descend shows them; a scalar shows sites
-    local function enter_var(id)
-        if #table_members(id) > 0 then return 'tbl' end
-        local n = store.node(id)
-        if n and type(n.data) == 'table' then return 'lit' end
-        return 'var'
-    end
+    local enter_var = M.var_level
     local function enter(level, ctxval, pivot_id)
         M._stepout, M._ghost = nil, nil -- a descent abandons pending step-out / ghost
         push_trail()
@@ -3084,6 +3277,90 @@ function M.attach(win)
             init = e + 1
         end
     end
+    --- The cursor WORD on a source-backed row -> a callee, or a var. Shared by the
+    --- block and region altitudes, which had no word logic at all; the fn altitude
+    --- keeps its own richer chain (it also handles a local's defining statement and
+    --- the compound-row redirect).
+    --- The browser column is NOT the source column -- a row's text is indented,
+    --- whitespace-collapsed and truncated -- so the word is matched by TEXT against
+    --- the line's names and then resolved by RANGE off the use edges. Returns true
+    --- when it acted.
+    local function descend_row_word(r)
+        local col  = vim.api.nvim_win_get_cursor(win)[2]
+        local text = vim.api.nvim_buf_get_lines(M.buf, r - 1, r, false)[1] or ''
+        local word = word_at(text, col)
+        if not word or word == '' then return false end
+        for _, c in ipairs(M.line_calls[r] or {}) do
+            if c.callee == word and c.to and store.node(c.to) then
+                store.set_context(nil); enter('fn', c.to, c.to); return true
+            end
+        end
+        local items = M.pick_items(r)
+        for _, it in ipairs(items) do
+            if it.text == word and it.id and store.node(it.id) then
+                enter(enter_var(it.id), it.id, it.id); return true
+            end
+        end
+        return false
+    end
+
+    --- The symbols key for row `r`, plus how many of its names RESOLVE. Used twice:
+    --- to decide whether the level is worth opening at all, and to open it.
+    local function syms_at(r)
+        local sl = M.line_stmt[r]
+        local id = M.subject('def') or M.row_subject(r)
+        if not (sl and id and store.node(id)) then return nil, 0, 0 end
+        local key = syms_key(id, sl - 1)
+        local items = M.syms_of(key)
+        local n = 0
+        for _, it in ipairs(items) do if it.id then n = n + 1 end end
+        return key, #items, n
+    end
+
+    --- ★ WHEN THE NAMES BEAT THE SHORTCUT. A statement row used to descend into its
+    --- ONLY resolvable callee, which was the right answer while a row led nowhere
+    --- else -- and `return helper()` still wants exactly that, since the only name it
+    --- has IS the callee and a one-row level would be a detour. But `q(cfg, x + 1)`
+    --- names three things and resolves two, and jumping to `q` there hid `cfg`
+    --- entirely: that is the hole the detail lens was built to work around. So the
+    --- level wins when it has MORE THAN ONE resolvable name, and the shortcut keeps
+    --- the case it was always right about.
+    local function syms_worth(r)
+        local key, _, nres = syms_at(r)
+        return (nres > 1) and key or nil
+    end
+
+    --- Enter the symbols level for row `r`, if it has any names at all. Refuses
+    --- silently for a row with no source line (a header, an announcement) and for a
+    --- statement that names nothing -- an empty level is not an answer.
+    local function enter_syms(r)
+        local key, total = syms_at(r)
+        if not key or total == 0 then return end
+        enter('syms', key)
+    end
+
+    --- A row IN the symbols level: go to what the name points at. An unresolved
+    --- name still shows itself in the source and says why it has no node -- the
+    --- honest half of "reach this name".
+    local function descend_syms_row(r)
+        local it = M.line_syms[r]
+        if not it then return end
+        if it.id and store.node(it.id) then
+            store.set_context(nil)
+            if it.kind == 'fn' then return enter('fn', it.id, it.id) end
+            return enter(M.var_level(it.id), it.id, it.id)
+        end
+        local id = M.subject('def')
+        local n = id and store.node(id)
+        if n then
+            store.set_highlight({ file = n.file, ranges = {
+                { start = { line = it.sr, char = it.sc },
+                  ['end'] = { line = it.sr, char = it.ec } } } })
+        end
+        vim.notify(("cartograph: `%s` — no node (a local, a field, or unresolved)")
+            :format(it.text), vim.log.levels.INFO)
+    end
+
     local function descend_fn_row(r)
         local node = store.node(M.view.fn)
         if not node then return end
@@ -3160,14 +3437,22 @@ function M.attach(win)
                 end
             end
         end
-        -- 5. fallback: the statement's only resolvable callee
+        -- 5. the statement's own NAMES, one level in (CART-0472) -- when it names
+        -- more than one resolvable thing. Reached only after the cursor-word steps,
+        -- so it never shadows a callee or a var the cursor is actually on.
+        local sk = syms_worth(r)
+        if sk then return enter('syms', sk) end
+        -- 6. fallback: the statement's only resolvable callee
         local sole
         for _, c in ipairs(M.line_calls[r] or {}) do
             if c.to and store.node(c.to) then sole = (sole == nil) and c or false end
         end
         if sole and sole ~= false then
-            enter('fn', sole.to, sole.to)
+            return enter('fn', sole.to, sole.to)
         end
+        -- 7. LAST: the names, even when none of them resolve -- "this statement names
+        -- x and y, and neither has a node" is an answer; nothing happening is not.
+        enter_syms(r)
     end
     -- a row in a live-value view: a sub-table descends deeper (the live
     -- altitude), a resolved function ref focuses the def it dispatches to.
@@ -3246,17 +3531,6 @@ function M.attach(win)
         -- has no case for, which is the explanation the row could not fit
         local unread = M.line_unread[r]
         if unread then return enter('unread', unread, unread) end
-        -- detail lens: an arg/cond row descends into that element's forms (the
-        -- block lens); a var row opens the var's usage sites
-        local d = M.line_detail[r]
-        if d then
-            if d.kind == 'var' and store.node(d.id) then
-                return enter('var', d.id, d.id)
-            elseif d.key then
-                return enter('block', d.key)
-            end
-            return
-        end
         if M.view.level == 'protos' then
             local key = M.line_proto[r]
             if key then return enter('proto', key) end
@@ -3305,9 +3579,22 @@ function M.attach(win)
             end
         elseif M.view.level == 'region' then
             local n = store.node(M.line_node[r])
-            if n and n.kind == 'var' then
-                descend_var(n)
+            if n and n.kind == 'var' then return descend_var(n) end
+            -- ★ AND A BRANCH ROW WAS A DEAD END HERE. render_region sets line_block
+            -- on every ▸ row, and this branch never read it -- so a region's nested
+            -- forms rendered with a marker that promised a descent and delivered
+            -- nothing. Found by adding a `region` branch further down the chain and
+            -- noticing it could never run: the earlier one already wins.
+            if M.line_block[r] then return enter('block', M.line_block[r]) end
+            if descend_row_word(r) then return end
+            local sk = syms_worth(r)
+            if sk then return enter('syms', sk) end
+            for _, c in ipairs(M.line_calls[r] or {}) do
+                if c.to and store.node(c.to) then
+                    store.set_context(nil); return enter('fn', c.to, c.to)
+                end
             end
+            enter_syms(r)
         elseif M.view.level == 'var' or M.view.level == 'callers' then
             local g = M.line_group[r]
             if g then -- descend into this function's occurrences
@@ -3379,6 +3666,16 @@ function M.attach(win)
         elseif M.view.level == 'block' then
             -- a ▸ form opens its own nested forms; a leaf call enters its callee
             if M.line_block[r] then return enter('block', M.line_block[r]) end
+            -- THE WORD UNDER THE CURSOR FIRST, the way the fn altitude has always
+            -- done it (a callee under the cursor, then a var under the cursor).
+            -- Without it this altitude took the row's FIRST resolvable callee
+            -- whatever the cursor was on -- so a form row was reachable but the
+            -- names inside it were not, which is the hole the detail lens was built
+            -- to work around (CART-0471). A form row IS source text, so the cursor
+            -- word is meaningful here; only the flattened summary rows need labels.
+            if descend_row_word(r) then return end
+            local sk = syms_worth(r)
+            if sk then return enter('syms', sk) end
             for _, c in ipairs(M.line_calls[r] or {}) do
                 if c.to and store.node(c.to) then
                     store.set_context(nil); return enter('fn', c.to, c.to)
@@ -3392,6 +3689,9 @@ function M.attach(win)
                         ('%s\31%d\31%s'):format(c.fn or '', c.line, c.callee))
                 end
             end
+            enter_syms(r)
+        elseif M.view.level == 'syms' then
+            descend_syms_row(r)
         elseif M.view.level == 'regfor' then
             -- a registrant row: open its module at the reference site
             local f = M.line_file[r]
@@ -3726,7 +4026,7 @@ function M.attach(win)
     end
     local function step(dir)
         M._ghost = nil -- a manual move abandons a ghosted lens node
-        if M.view.level ~= 'block' and not M._stepout then
+        if M.view.level ~= 'block' and M.view.level ~= 'syms' and not M._stepout then
             return vim.cmd('normal! ' .. vim.v.count1 .. (dir == 1 and 'j' or 'k'))
         end
         if M._stepout then
@@ -3764,8 +4064,8 @@ function M.attach(win)
     -- (Shadows <C-i>-forward here — terminals conflate Tab/C-i.)
     -- what identifies a row across a lens switch: its source line + a stable tag
     local function row_tag(r)
-        local d = M.line_detail[r]
-        if d then return d.key or (d.id and 'var\31' .. d.id) or d.kind end
+        local it = M.line_syms[r]
+        if it then return ('sym\31%s\31%d'):format(it.text, it.sc) end
         return M.line_node[r]
     end
     local function row_desc(r)
@@ -3837,6 +4137,10 @@ function M.attach(win)
         else
             cycle_lens(step)
         end
+    end
+    if keys.pick then
+        vim.keymap.set('n', keys.pick, gestured('pick', M.pick_cursor),
+            { buffer = M.buf, nowait = true, desc = 'cartograph: pick a name on this row' })
     end
     vim.keymap.set('n', keys.cycle, gestured('cycle', function () cycle(1) end),
         { buffer = M.buf, desc = 'cartograph: cycle the altitude mode / lens' })

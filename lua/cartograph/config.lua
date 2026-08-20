@@ -148,10 +148,13 @@ M.profile = false
 
 -- ascending (h) in the symbols pane: does the source pane follow the view
 -- you land on IMMEDIATELY, or keep showing where you were until you MOVE?
--- Default false — h is a cheap "peek up" that keeps the descended body on
--- screen; the first j/k commits the source pane to the view you ascended to.
--- true = re-sync the instant you ascend.
-M.sync_on_ascend = false
+-- Default TRUE — ascend and both panes agree at once. It shipped false, on the
+-- theory that h is a cheap "peek up" and the body you came from is what you
+-- still want to read; USE SAID OTHERWISE (CART-0473). The panes disagreed for
+-- one keystroke and every ascent made you remember which of the two states you
+-- were in, which is a worse tax than the re-render it saved.
+-- false = keep the peek: the descended body stays until the first j/k.
+M.sync_on_ascend = true
 
 -- cross-link code's SQL entities to a live database's tables:
 -- { source = '<mcp name>', prefix = 'wp_'? } (prefix auto-detects)
@@ -218,7 +221,21 @@ M.keys = {
     set_prev   = false,
     cone_in    = false,     -- cone: ancestors (what REACHES this)
     cone_out   = false,     -- cone: descendants (what this REACHES)
+    -- The NAME PICK labels every name on the row and jumps to the one you press.
+    -- UNBOUND for the same reason as the four above: it is not a vim verb, and the
+    -- browser's own verb for "go to this name" is already `descend` with the cursor
+    -- ON the name. The pick is for the rows where that cannot work -- a flattened
+    -- summary row, where the names are not at their source columns -- and for
+    -- reaching a name without moving the cursor onto it first. Bind it if you want
+    -- it: setup{ keys = { pick = ',n' } }
+    pick       = false,
 }
+
+--- The label alphabet for the row-local name pick, in order. DIGITS FIRST on
+--- purpose: they occupy the same physical keys on qwerty and on programmer dvorak,
+--- and a measured p90 of 9 names per line means the digits alone answer nine rows
+--- in ten. Letters carry the tail (max measured: 28 names on one line).
+M.pick_labels = '123456789abcdefghijklmnopqrstuvwxyz'
 
 -- Entry points: files EXPECTED to have no inbound require (a runtime loads
 -- them directly). They classify as 'entry' (▶) instead of 'orphan' (○ — the

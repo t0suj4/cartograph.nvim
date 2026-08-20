@@ -133,7 +133,10 @@ test('nav: ascending back to a function view re-focuses it (source follows)', fu
     vim.cmd('tabclose')
 end)
 
-test('nav: ascend defers the source resync until the next move (peek up)', function ()
+-- the PEEK is opt-in since CART-0473 (`sync_on_ascend = false`): ascending used to
+-- keep the descended body on screen until the first j/k, and living with it said the
+-- panes disagreeing for one keystroke costs more than the re-render it saves.
+test('nav: with sync_on_ascend = false, ascend defers the resync (peek up)', function ()
     local symbols = require 'cartograph.panes.symbols'
     local config  = require 'cartograph.config'
     config.sync_on_ascend = false
@@ -175,6 +178,7 @@ test('nav: ascend defers the source resync until the next move (peek up)', funct
     eq('M.caller', source.cur and source.cur.name)
     ok(symbols._resync == nil, 'resync consumed')
 
+    config.sync_on_ascend = true -- restore the DEFAULT for later tests
     vim.cmd('tabclose')
 end)
 
@@ -204,7 +208,7 @@ test('nav: sync_on_ascend = true resyncs the source pane immediately', function 
     eq('M.caller', source.cur and source.cur.name)
     ok(symbols._resync == nil, 'no deferred resync armed')
 
-    config.sync_on_ascend = false -- restore the default for later tests
+    config.sync_on_ascend = true -- (the default; this test set it explicitly anyway)
     vim.cmd('tabclose')
 end)
 
@@ -502,14 +506,20 @@ test('nav: h after a block step-out returns through the caller list it came from
     vim.fn.delete(root, 'rf')
 end)
 
-test('nav: the detail lens shows args/conditions/reads and rides the trail', function ()
+-- THE SYMBOLS LEVEL (CART-0472), which replaced the detail lens. A statement that
+-- names more than one resolvable thing descends into its NAMES; j/k steps them and
+-- steps out at the edges like a block; descend on a name goes to it. Two invariants
+-- carried over from the lens this replaced: a local the function SHADOWS must not
+-- show up as the module var of that name (resolution is by RANGE, so it cannot), and
+-- ascending restores the lens you were in.
+test('nav: a statement descends into its NAMES, and the trail comes back', function ()
     if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
     local symbols = require 'cartograph.panes.symbols'
     local ts = require 'cartograph.providers.treesitter'
     local keys = require('cartograph.config').keys
     local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
     local fd = assert(io.open(root .. '/m.lua', 'w'))
-    fd:write('local M = {}\nlocal cfg = {}\nfunction M.f(x)\n  local y = M.g(x, cfg.width)\n'
+    fd:write('local M = {}\nlocal cfg = {}\nfunction M.f(x)\n  local y = M.g(x, cfg)\n'
         .. '  if x > 0 then\n    M.h(y)\n  end\nend\n'
         .. 'function M.g(a, b) return a end\nfunction M.h(z) return z end\nreturn M\n')
     fd:close()
@@ -525,102 +535,74 @@ test('nav: the detail lens shows args/conditions/reads and rides the trail', fun
     for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do K[m.lhs] = m.callback end
     local function press(k) vim.api.nvim_set_current_win(wsym); K[k]() end
 
-    store.pivot(f.id); symbols.show('fn', f.id)
-    press(keys.cycle) -- statements -> detail
-    eq('detail', symbols.view.lens)
-    local kinds = {}
+    store.set_focus(f.id); store.pivot(f.id); symbols.show('fn', f.id)
+    -- the `local y = M.g(x, cfg)` row: cursor at column 0, so no cursor-word step
+    -- claims it and the level is what the row offers
+    local target
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        local d = symbols.line_detail[r]
-        if d then kinds[d.kind] = true end
+        if symbols.line_stmt[r] == 4 then target = r break end
     end
-    ok(kinds.arg and kinds.cond and kinds.var, 'detail rows: arguments, condition, var read')
-
-    -- the → var rows are MODULE reads only: a param/local the fn shadows (x, y)
-    -- must NOT appear (else descending it would open a global's usages)
-    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        local d = symbols.line_detail[r]
-        if d and d.kind == 'var' then
-            local nm = store.node(d.id) and store.node(d.id).name
-            ok(nm ~= 'x' and nm ~= 'y', 'a shadowed local is not shown as a module var (' .. tostring(nm) .. ')')
-        end
-    end
-
-    -- descend an argument -> the block lens on that element (lens reset to default)
-    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        if symbols.line_detail[r] and symbols.line_detail[r].kind == 'arg' then
-            vim.api.nvim_win_set_cursor(wsym, { r, 2 }); break
-        end
-    end
+    ok(target, 'the statement has a row')
+    vim.api.nvim_win_set_cursor(wsym, { target, 0 })
     press(keys.descend)
-    eq('block', symbols.view.level)
-    ok(symbols.view.lens == nil, 'the descended view starts at its default lens')
+    eq('syms', symbols.view.level)
 
-    -- ascend -> the detail lens is restored from the trail
+    local names, byname = {}, {}
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local it = symbols.line_syms[r]
+        if it then names[#names + 1] = it.text; byname[it.text] = { row = r, it = it } end
+    end
+    ok(vim.tbl_contains(names, 'cfg'), 'the module var is a row: ' .. vim.inspect(names))
+    ok(vim.tbl_contains(names, 'y'), 'so is the local it defines')
+    -- a local the fn shadows resolves to NOTHING, so descending it can never open
+    -- the module var of that name
+    ok(not byname.y.it.id, 'a local has no node')
+    ok(not (byname.x and byname.x.it.id), 'nor does a param')
+    ok(byname.cfg.it.id and store.node(byname.cfg.it.id).name == 'cfg',
+        'the module var resolves')
+
+    -- ★ AND IT HIGHLIGHTS LIKE A STATEMENT DOES, one grain finer. Reported: "it
+    -- doesn't highlight the same way statements do" -- syms was in the node-hover
+    -- class, so hovering a resolved name TOOK OVER the source pane with the def it
+    -- points at and threw the statement you were reading off the screen. A name row
+    -- highlights its OWN COLUMNS; the header highlights the line.
+    local hls = {}
+    store.on_highlight(function (hl)
+        if hl and hl.ranges and hl.ranges[1] then
+            local rg = hl.ranges[1]
+            hls[#hls + 1] = ('%d:%d-%d'):format(rg.start.line, rg.start.char, rg['end'].char)
+        end
+    end)
+    local function hover(r)
+        hls = {}
+        vim.api.nvim_win_set_cursor(wsym, { r, 0 })
+        vim.api.nvim_exec_autocmds('CursorMoved', { buffer = symbols.buf })
+        vim.wait(120, function () return #hls > 0 end)
+        return hls[#hls]
+    end
+    local hcfg = hover(byname.cfg.row)
+    eq(('%d:%d-%d'):format(byname.cfg.it.sr, byname.cfg.it.sc, byname.cfg.it.ec), hcfg)
+    ok(source.ctx == nil, 'a name row does not take the source pane over')
+
+    -- j/k walks the names, and past the last one it steps OUT like a block does
+    vim.api.nvim_win_set_cursor(wsym, { byname.cfg.row, 0 })
+    press(keys.descend)
+    eq('lit', symbols.view.level)          -- cfg carries table data
     press(keys.ascend)
-    eq('fn', symbols.view.level)
-    eq('detail', symbols.view.lens)
+    eq('syms', symbols.view.level, 'ascend returns to the names')
+    press(keys.ascend)
+    eq('fn', symbols.view.level, 'and then to the statement list')
 
-    -- the <C-o> jumplist ENTRY does NOT carry the lens (trail only): a jump lands
-    -- at the altitude's default. Asserted on the entry store.pivot records, not on
-    -- loc_provider.get() — the provider is shared with the callers that carry a
-    -- position across a REBUILD (refresh, re-ingest, re-attach), where the user
-    -- never moved and the lens MUST survive. Testing the mechanism instead of the
-    -- intent is what let :CartographUndo silently drop you out of a lens.
-    eq('detail', store.loc_provider.get().lens) -- the full location KEEPS it now
-
-    -- position survives a lens switch: on an arg row, cycling to statements
-    -- ghost-anchors to the arg's enclosing statement, and cycling BACK restores
-    -- the exact arg row
-    local argrow
-    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        if symbols.line_detail[r] and symbols.line_detail[r].kind == 'arg' then argrow = r end
-    end
-    vim.api.nvim_win_set_cursor(wsym, { argrow, 2 })
-    local argline = symbols.line_stmt[argrow]
-    -- BACKWARD, because the fn lens set has three entries now (statements /
-    -- detail / lints): the assertion is about the ghost round-trip, not about a
-    -- two-element set, so the direction is what has to be explicit
-    press(keys.cycle_back) -- detail -> statements: the arg is gone, ghost to its statement
-    eq('statements', symbols.view.lens or 'statements')
-    eq(argline, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]]) -- same statement line
-    press(keys.cycle) -- back to detail: the arg row is restored exactly
-    local back = vim.api.nvim_win_get_cursor(wsym)[1]
-    ok(symbols.line_detail[back] and symbols.line_detail[back].kind == 'arg',
-        'cycling back restored the arg row')
-
-    -- cycling FOLLOWS the current position, not a stale one: move to the LAST
-    -- detail row, cycle to statements -> it lands on THAT statement's line
-    -- (regression: a stale per-lens memory jumped back to an earlier row)
-    local last = vim.api.nvim_buf_line_count(symbols.buf)
-    vim.api.nvim_win_set_cursor(wsym, { last, 2 })
-    local lastline = symbols.line_stmt[last]
-    press(keys.cycle_back) -- detail -> statements
-    eq(lastline, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]])
-    press(keys.cycle) -- back to detail
-
-    -- a var read in two statements (M here) shares a tag; the round-trip must
-    -- restore the OCCURRENCE we were on, not the first with that tag
-    local vrows = {}
-    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        local d = symbols.line_detail[r]
-        if d and d.kind == 'var' then vrows[#vrows + 1] = r end
-    end
-    if #vrows >= 2 then
-        local later = vrows[#vrows] -- a later occurrence (different statement line)
-        local lline = symbols.line_stmt[later]
-        vim.api.nvim_win_set_cursor(wsym, { later, 2 })
-        press(keys.cycle_back); press(keys.cycle) -- statements and back
-        local b = vim.api.nvim_win_get_cursor(wsym)[1]
-        ok(symbols.line_detail[b] and symbols.line_detail[b].kind == 'var'
-            and symbols.line_stmt[b] == lline,
-            'the round-trip restored the var occurrence we were on, not a namesake')
-    end
+    -- the trail restores the LENS you were in, not just the altitude
+    press(keys.cycle)
+    eq('lints', symbols.view.lens)
+    vim.api.nvim_win_set_cursor(wsym, { 1, 0 })
+    press(keys.cycle)
+    eq('statements', symbols.view.lens, 'two lenses now, so cycle returns')
 
     vim.cmd('tabclose')
     vim.fn.delete(root, 'rf')
 end)
-
--- ── <C-]> jump resolution ───────────────────────────────────────────────────
 
 local function occ(l, c1, c2)
     return { start = { line = l, char = c1 }, ['end'] = { line = l, char = c2 } }
@@ -650,4 +632,110 @@ end)
 test('jump: no uses edges -> nil', function ()
     graph({ node('f', 'f') })
     eq(nil, source.resolve_jump(store.node('f'), 0, 0, 'anything'))
+end)
+
+-- THE ROW-LOCAL NAME PICK (CART-0471). The detail lens existed because there was
+-- no way to reach a variable inside a call, and it answered a POSITION question
+-- with a containment mechanism: a mode switch, a scan of indented rows, then a
+-- descend. The pick asks the row instead. Two things this pins, both of which are
+-- the reason it is cheap: the names come from the SPEC's declared mention types
+-- (not a new table), and a name resolves BY RANGE off the use edges the graph
+-- already carries -- which answers the shadowing question for free, since a local
+-- simply has no use edge covering it.
+test('pick: a row\'s names, resolved by range, labelled digits first', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    -- a module var read INSIDE a call argument, beside a local of the same shape
+    fd:write('local M = {}\nlocal cfg = { a = 1 }\nfunction M.f(x)\n  q(cfg, x + 1)\nend\n'
+        .. 'function q(a, b) return a, b end\nreturn M\n')
+    fd:close()
+    local data = ts.extract(root)
+    store.ingest(data)
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+
+    local f
+    for _, n in ipairs(data.nodes) do if n.name == 'M.f' then f = n end end
+    ok(f, 'the fixture has M.f')
+    -- set_focus, not just pivot: the SOURCE pane renders on focus (a real descent
+    -- goes through enter() -> browser_pivot, which does both), and labels can only
+    -- land in a body the pane is actually showing.
+    store.set_focus(f.id); store.pivot(f.id); symbols.show('fn', f.id)
+    local target
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_stmt[r] == 4 then target = r break end -- the `q(cfg, x + 1)` line
+    end
+    ok(target, 'the call statement has a row')
+
+    local items, file = symbols.pick_items(target)
+    local texts = {}
+    for _, it in ipairs(items) do texts[#texts + 1] = it.text end
+    eq({ 'q', 'cfg', 'x' }, texts)               -- source order, mention types only
+    eq(store.node(f.id).file, file)   -- the panes' spelling, not the abspath
+    eq('1', items[1].label)                      -- digits first: same keys on dvorak
+    eq('2', items[2].label)
+    local by = {}
+    for _, it in ipairs(items) do by[it.text] = it end
+    ok(by.cfg.id and store.node(by.cfg.id), 'the module var resolves by range')
+    eq('cfg', store.node(by.cfg.id).name)
+    ok(not by.x.id, 'a PARAM has no module-var use edge covering it, so it stays unresolved')
+
+    -- and the labels reach the source pane: the pane is showing M.f, so every
+    -- position on this line lands. A pane showing something else must refuse.
+    -- (pick_cursor drops a hover takeover before labelling for this reason; here
+    -- the takeover is cleared directly, since the spec calls the channel itself.)
+    store.set_context(nil)
+    -- FIXTURE SETUP, not the thing under test: in a session the source pane renders
+    -- on a focus crossing, and this spec's pane is created after the focus is already
+    -- where it wants it. Render it directly so the assertions below are about the
+    -- LABELS, not about pane wiring.
+    source.render(f.id)
+    eq(#items, store.set_labels({ file = file, items = items }))
+    eq(0, store.set_labels({ file = '/nowhere.lua', items = items }))
+    store.set_labels(nil)
+
+    -- END TO END, the part pick_items cannot prove: press a label, land. `2` is
+    -- `cfg` -- the module var read inside the call argument, which is the case the
+    -- detail lens was built for and the reason this exists.
+    vim.api.nvim_set_current_win(wsym)
+    pcall(vim.api.nvim_win_set_cursor, wsym, { target, 0 })
+    vim.api.nvim_feedkeys('2', 'n', false)
+    symbols.pick_cursor()
+    -- `cfg` carries table DATA, so it opens at its LITERAL altitude: the pick obeys
+    -- the browser's own var_level rule rather than forcing `var`, or the same subject
+    -- would land in two different places depending on how you reached it.
+    eq('lit', symbols.view.level)
+    eq('cfg', store.node(symbols.view.lit).name)
+
+    -- ...AND THE SAME NAME BY THE BROWSER'S OWN VERB, no key of its own: `descend`
+    -- with the cursor ON the word. The fn altitude has always resolved the cursor
+    -- word (a callee, then a var); the block and region altitudes had NO word logic
+    -- at all and took the row's first resolvable callee whatever the cursor was on.
+    symbols.show('fn', f.id)
+    local brow
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_stmt[r] == 4 then brow = r break end
+    end
+    local cb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.descend then cb = m.callback end
+    end
+    -- into the statement's own forms first, so the row below is a BLOCK row
+    local btext = vim.api.nvim_buf_get_lines(symbols.buf, brow - 1, brow, false)[1]
+    local ccol = btext:find('cfg')
+    ok(ccol, 'the row shows the name: ' .. tostring(btext))
+    pcall(vim.api.nvim_win_set_cursor, wsym, { brow, ccol - 1 })
+    cb()
+    eq('lit', symbols.view.level)
+    eq('cfg', store.node(symbols.view.lit).name)
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
 end)

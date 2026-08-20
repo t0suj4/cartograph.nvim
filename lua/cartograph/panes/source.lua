@@ -365,6 +365,10 @@ function M.create()
     vim.api.nvim_create_autocmd('ColorScheme', { callback = hl.setup })
     store.on_focus(function (id) M.render(id) end)
     store.on_highlight(function (hlv) M.highlight(hlv) end)
+    store.on_labels('source', function (payload)
+        if not payload then M.clear_labels(); return 0 end
+        return M.labels(payload.file, payload.items)
+    end)
     store.on_context(function (ctx) M.context(ctx) end)
     bind_nav(buf, function () return M.ctx or M.cur end)
     return buf
@@ -383,6 +387,51 @@ function M.render(id)
     M._view, M._view_rows = nil, nil
     set_lines(M.buf, body_lines(node))
     scroll_top(M.win_top) -- a fresh body starts at its header
+end
+
+local ns_pick = vim.api.nvim_create_namespace('cartograph_source_pick')
+
+--- LABEL source positions in the shown body, for the browser's row-local name pick
+--- (CART-0471). Overlay labels sit ON the first character of each name, the way a
+--- leap-style motion does, because THE BROWSER ROW CANNOT CARRY THEM: its text is
+--- whitespace-collapsed and elided by fit_text, so a name's column there does not
+--- address the source. This pane holds the real columns.
+---
+--- Returns HOW MANY LANDED, and the caller must not offer a pick for the rest: a
+--- promised label the user cannot see is the "absence rendered as silence" defect
+--- pointed at the controls. Two ways a label cannot land -- an alternate VIEW's
+--- lines are GENERATED, so source ranges do not address them (the same guard
+--- highlight() takes), and a position outside the shown body has no row.
+---@param file string
+---@param items {sr:integer, sc:integer, label:string}[]
+---@return integer landed
+function M.labels(file, items)
+    if not (M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return 0 end
+    M.clear_labels()
+    if M._view then return 0 end
+    local shown = M.ctx or M.cur
+    if not shown or shown.file ~= file then return 0 end
+    local n, first = 0, nil
+    for _, it in ipairs(items) do
+        local row = buf_row(shown, it.sr)
+        if row then
+            local ok = pcall(vim.api.nvim_buf_set_extmark, M.buf, ns_pick, row, it.sc, {
+                virt_text = { { it.label, 'CartographPick' } },
+                virt_text_pos = 'overlay', hl_mode = 'combine', priority = 200 })
+            if ok then
+                n = n + 1
+                first = first or row
+            end
+        end
+    end
+    if first then ensure_visible(M.win_top, first) end
+    return n
+end
+
+function M.clear_labels()
+    if M.buf and vim.api.nvim_buf_is_valid(M.buf) then
+        vim.api.nvim_buf_clear_namespace(M.buf, ns_pick, 0, -1)
+    end
 end
 
 ---@param hl {file:string, ranges:table}?

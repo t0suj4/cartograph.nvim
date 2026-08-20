@@ -116,6 +116,7 @@ local NOT_A_CONCERN = {
     fn     = 'containment',
     block  = 'containment',
     region = 'containment',
+    syms   = 'containment: a statement\'s own names, one level in',
     var    = 'a DEF altitude that happens to show a relation (its subject and'
         .. ' inverse are structural) — shares the empty fix, not an entry',
     tbl    = 'a def altitude, as var',
@@ -192,6 +193,9 @@ local NO_NODE_HOVER = {
     unread = 'unmodelled CONSTRUCTS, not defs: each row anchors to its own source'
         .. ' byte-range (expr nodes carry .at), previewed as a site',
     fn     = 'statement rows highlight the source line instead',
+    syms   = 'a NAME row highlights the name WHERE IT IS (its own columns), not the'
+        .. ' def it points at: hovering must not throw the statement you are reading'
+        .. ' off the screen. Same rule as fn, one grain finer',
     block  = 'as fn',
     callers = 'site rows: the site renderer previews the position',
     occs   = 'site rows, as callers',

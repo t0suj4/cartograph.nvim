@@ -1558,6 +1558,34 @@ end
 -- context channel: "the other end of the hovered edge" to show in the BOTTOM
 -- source view. For a `uses` entry that's the callee's definition; for a `used by`
 -- entry it's the caller's body, and `ranges` are the call site(s) inside it.
+--- LABEL channel, for the browser's row-local name pick (CART-0471). Same shape as
+--- the highlight channel with one difference: it COLLECTS what its subscribers
+--- return, because the pick must know how many labels actually landed. A pane can
+--- refuse to label (an alternate view's lines are generated; a position outside the
+--- body it shows has no row), and promising a pick for a label the user cannot see
+--- is "absence rendered as silence" pointed at the controls. nil clears.
+--- ★ KEYED, AND IT REDUCES BY MAX -- both because this channel RETURNS something,
+--- which its fire-and-forget siblings do not. Keyed: a pane re-attaches (a new
+--- window, a re-open) and an append-only list would then hold several subscribers
+--- for the ONE singleton pane -- harmless for highlight, but it multiplied the label
+--- count by eleven in the test suite. Max, not sum: the pick asks "can the user SEE
+--- these labels", so the best-served pane is the answer, and a pane that refused
+--- (an alternate view, a position outside the body it shows) contributes 0 without
+--- dragging the answer down.
+M._label_subs = {}
+---@param key string  one subscriber per key; re-registering replaces
+---@param fn fun(payload:{file:string, items:table}?):integer?
+function M.on_labels(key, fn) M._label_subs[key] = fn end
+---@return integer landed  the best-served pane's count
+function M.set_labels(payload)
+    local n = 0
+    for _, fn in pairs(M._label_subs) do
+        local ok, got = pcall(fn, payload)
+        if ok and type(got) == 'number' and got > n then n = got end
+    end
+    return n
+end
+
 M._ctx_subs = {}
 ---@param fn fun(ctx: {node:string, ranges:table?}?)
 --- Subscribe to context (hover) changes. Returns an unsubscribe function,
@@ -2017,7 +2045,11 @@ end
 -- stale. Single-band sessions never call these, so the common path is
 -- byte-identical (the gating invariant).
 M.SESSION_GLOBAL = { _subs = true, _redraw_subs = true, _hl_subs = true,
-    _ctx_subs = true, _plan_subs = true, _fact_producers = true, loc_provider = true }
+    _ctx_subs = true, _plan_subs = true, _fact_producers = true, loc_provider = true,
+    -- _label_subs belongs here for the same reason as its siblings: a pane's
+    -- subscription is SESSION wiring, not graph content, and leaving it out meant a
+    -- re-ingest silently unwired the name pick (found by its own spec).
+    _label_subs = true }
 M.BAND_TRANSIENT = { _topo = true, _fold = true, _topo_gen = true, _ws_bfs = true,
     _post = true, _post_gen = true, _scopes = true, _scopes_gen = true }
 

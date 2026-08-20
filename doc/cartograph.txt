@@ -780,10 +780,70 @@ unbound until you ask for them:
   set_prev      (unbound) previous working-set member
   cone_in       (unbound) cone: what REACHES this (:CartographCone)
   cone_out      (unbound) cone: what this REACHES
+  pick          (unbound) label every NAME on this row and jump to the one you
+                          press. The browser's own verb for "go to this name"
+                          is `descend` with the cursor ON it, which needs no
+                          key at all; the pick is for the rows where that
+                          cannot work (a flattened summary row, whose names are
+                          not at their source columns) and for reaching a name
+                          without moving the cursor there first. Labels are
+                          drawn in the SOURCE pane, which has the real columns,
+                          and the alphabet is `pick_labels` — digits first, so
+                          it reads the same on qwerty and on dvorak. A name
+                          with no node still moves the source cursor onto it
+                          and says why it has none.
 >
     require('cartograph').setup { keys = { mark = ',m', set_view = ',M',
-      set_next = ']w', set_prev = '[w', cone_in = ',c', cone_out = ',C' } }
+      set_next = ']w', set_prev = '[w', cone_in = ',c', cone_out = ',C',
+      pick = ',n' } }
 <
+
+ASCENDING                                                   *cartograph-ascend*
+
+`ascend` (h) takes you out one level, back to the row you descended from — and the
+source pane follows at once, so both panes agree about where you are. It did not
+always: ascending used to hold the body you came from on screen until your first
+`j`/`k`, on the theory that `h` is a cheap peek upward. Living with it said
+otherwise, and the peek is now opt-in:
+>
+    require('cartograph').setup { sync_on_ascend = false }
+<
+With it off, `h` keeps the descended body in the source pane and the first move in
+the browser commits the pane to the view you ascended to.
+
+Ascending also restores the LENS you were in at that level, not just the altitude,
+because the lens is part of where you were.
+
+A ROW'S NAMES                                              *cartograph-symbols*
+
+`descend` on a statement takes you into whatever it leads to, in this order: its
+own nested statements if it has any, then a callee or a variable named UNDER THE
+CURSOR, then — when the statement names more than one resolvable thing — its
+NAMES, as rows:
+>
+    ≡ q(cfg, x + 1)
+        q    → q
+        cfg  → cfg
+        x    (no node)
+<
+`j`/`k` steps them and steps OUT at either end, the way a block's rows do, so
+walking off the list puts you back on the statements. `descend` on a name goes to
+what it points at; a name with no node says so and shows itself in the source
+pane rather than doing nothing — a local, a field, or a callee the graph could
+not resolve are all real answers.
+
+The names are the ones the language's own spec declares as mentions, so nothing
+here is a hand-kept list that can fall behind a grammar. Each is resolved by
+POSITION against the graph's use edges, which is why a local that shadows a
+module variable resolves to nothing rather than to the module variable: no use
+edge covers that spot.
+
+A statement whose only resolvable name IS its single callee skips the level and
+descends straight into the callee — a one-row level would be a detour, and that
+shortcut was right long before this existed.
+
+`keys.pick` (|cartograph-keys-unbound|) labels the same names in place, for the
+rows where a cursor word cannot work.
 
 THE LENSES OF AN ALTITUDE                                   *cartograph-lenses*
 
@@ -791,7 +851,7 @@ An altitude can show the same subject in more than one way. `cycle` (<Tab>)
 moves between them, `cycle_back` (<S-Tab>) the other way, and the pane's winbar
 names them so you never have to press a key to find out what is there:
 >
-    ⇥ statements [detail] lints
+    ⇥ [statements] lints
 <
 The bracketed one is in effect. An altitude with a single view says `— one view
 here` rather than drawing nothing, because blank chrome cannot be told from
@@ -802,17 +862,16 @@ This table is checked against lua/cartograph/panes/symbols.lua by
 tests/lensbar_spec.lua, so it cannot drift from the code.
 
   altitude      lenses ~
-  fn            statements detail lints
-  block         statements detail
-  region        statements detail
+  fn            statements lints
   files         flat layers
   file          members live
 
+`block` and `region` have ONE view each and so publish no list: the winbar says
+`— one view here`. There used to be a `detail` lens listing the fine-grained
+elements of a statement — arguments, conditions, var reads — and it is GONE; its
+job is |cartograph-symbols| now.
+
   statements  each altitude's normal view: the code's statements in order
-  detail      the fine-grained descendable elements a statement contains —
-              arguments, conditions, var and field reads. A row here elides
-              its TAIL to fit (see |cartograph-budget|); the full text is one
-              hover away in the source pane
   lints       :CartographExpr's findings as ROWS instead of a scratch buffer.
               `l` on a finding descends into its actions (|cartograph-suppression|)
   flat        the file roster, alphabetical, shortest unique path suffix
