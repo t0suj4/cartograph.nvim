@@ -278,6 +278,49 @@ test('forms: one level of nested statements / forms, on demand', function ()
 end)
 
 -- REPORTED FROM THE BROWSER (mantis, core/authentication_api.php): the rows of a
+-- scheme's QUOTE SIGILS are punctuation, not levels (CART-0461). 575 of its 584
+-- trapped forms sat behind quasisyntax, quasiquote or syntax -- guile's macro
+-- TEMPLATES, i.e. code being built -- and the last 9 behind a plain `'`, which is
+-- DATA. Both open: a collection literal is structure, and the browser draws
+-- structure. USER DIRECTION, and it settles the question the ticket asked: support
+-- descendable data, including collection literals, in every language.
+--   ★ AND THE UNQUOTES COME IN TWO FAMILIES. `,`/`,@` in a quasiquote are
+--   unquote/unquote_splicing; `#,`/`#,@` in a QUASISYNTAX are unsyntax/
+--   unsyntax_splicing, separate node types. The first pair alone left 178 of the 546,
+--   and navcensus named the other two in one run -- the fix's own gap, found by the
+--   tool the fix came from.
+test('forms: scheme sees through a quote sigil, and a literal is descendable', function ()
+    if not has_parser('scheme') then skip 'no scheme parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local src = table.concat({
+        '(define-syntax my-cond',
+        '  (syntax-rules ()',
+        "    ((_ a b) #`(begin #,@(fold f '() a) b))))",
+        "(define roman '((1000 #\\M) (500 #\\D)))",
+        '(define v #(1 2 (3 4)))',
+        '(define (g x) `(lambda ,x (h ,x)))',
+    }, '\n') .. '\n'
+    local fd = assert(io.open(root .. '/a.scm', 'w')); fd:write(src); fd:close()
+    local function forms(row)
+        local out = {}
+        for _, f in ipairs(ts.forms(root .. '/a.scm', row)) do out[#out + 1] = f.text end
+        return out
+    end
+    -- a define-syntax keeps its transformer: the first list is only a SIGNATURE when
+    -- it sits immediately after the head, and here the head is followed by a NAME
+    eq({ "(syntax-rules () ((_ a b) #`(begin #,@(fold f '() a) b)))" }, forms(0))
+    eq({ '((1000 #\\M) (500 #\\D))' }, forms(3))   -- quoted DATA, descendable
+    eq({ '#(1 2 (3 4))' }, forms(4))                -- a vector keeps its own row
+    eq({ '(lambda ,x (h ,x))' }, forms(5))          -- quasiquoted code
+    -- ...while a real signature is still dropped: `(g x)` is not a body form
+    local g = forms(5)
+    ok(not vim.tbl_contains(g, '(g x)'), 'the signature list is not a form')
+    -- one level down, the unsyntax splice inside the template is reachable
+    local tmpl = ts.forms(root .. '/a.scm', 0)[1]
+    local clauses = ts.forms(root .. '/a.scm', tmpl.sr, tmpl.sc, tmpl.er, tmpl.ec)
+    ok(#clauses >= 2, 'the syntax-rules clauses are forms: ' .. #clauses)
+end)
+
 -- python dropped every EXCEPT HANDLER (CART-0460), and only that. Its `else_clause`
 -- and `finally_clause` were already in the clause set under names it happens to
 -- SHARE with other grammars, so a try statement showed its body, its else and its

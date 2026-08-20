@@ -3488,6 +3488,14 @@ local CLAUSE_LABEL_TYPE = { switch_label = true } -- java
 local CLAUSE_LABEL_FIELD = { when = 'pattern' }   -- ruby
 -- lisp: nesting is child LIST forms, not blocks
 local LISP_LANGS = { scheme = true, commonlisp = true, clojure = true, fennel = true, janet = true }
+-- the quote sigils and their unquotes: a wrapper the descent looks THROUGH
+-- ★ THE UNQUOTES COME IN TWO FAMILIES AND I GUESSED ONE. `,`/`,@` inside a quasiquote
+-- are `unquote`/`unquote_splicing`; `#,`/`#,@` inside a QUASISYNTAX are `unsyntax`/
+-- `unsyntax_splicing`, separate node types. Adding only the first pair left 178 of
+-- scheme's 546 traps and the census named the other two in one run -- the fix's own
+-- gap, found by the tool the fix came from.
+local LISP_QUOTE = { quote = true, quasiquote = true, syntax = true, quasisyntax = true,
+    unquote = true, unquote_splicing = true, unsyntax = true, unsyntax_splicing = true }
 -- top-of-file containers whose named children are statements (position mode)
 local ROOT_TYPES = { chunk = true, program = true, source_file = true,
     translation_unit = true, module = true, block = true, ['end'] = true }
@@ -3499,11 +3507,32 @@ local function child_forms(node, lisp)
     local out = {}
     if lisp then
         -- every child list is a nested form (the caller drops the signature
-        -- list of a def/lambda); bare symbols/atoms are leaves, not forms
-        for _, c in inext, node, -1 do
-            -- @langs-ok scheme `list` — the s-expression node, scheme-only by construction
-            if c:named() and c:type() == 'list' then out[#out + 1] = c end
+        -- list of a def/lambda); bare symbols/atoms are leaves, not forms.
+        -- A QUOTE SIGIL IS PUNCTUATION, not a level: `'`, `#'`, `` ` ``, `#\`` and the
+        -- unquotes inside them each wrap the form they quote, and the wrapper carries no
+        -- information a row could show that its content does not. Seeing through them is
+        -- what opens guile's macro TEMPLATES (CART-0461): 575 of scheme's 584 trapped
+        -- forms sat behind quasisyntax, quasiquote or syntax, i.e. behind `#`(begin
+        -- #,@(fold ...))` -- code being built, holding lambdas and conditionals.
+        -- The remaining 9 sat behind a plain `'`, which is DATA -- a literal alist -- and
+        -- it is descendable on purpose: a collection literal is structure, and the
+        -- browser draws structure ([[cartograph-vision]]: a general graph viewer).
+        -- A VECTOR is not punctuation, so it keeps its row and descends like a list.
+        local function emit_lisp(n)
+            for _, c in inext, n, -1 do
+                if c:named() then
+                    local t = c:type()
+                    -- @langs-ok scheme `list`/`vector` and the four quote sigils --
+                    -- s-expression node types, scheme-only by construction
+                    if t == 'list' or t == 'vector' then
+                        out[#out + 1] = c
+                    elseif LISP_QUOTE[t] then
+                        emit_lisp(c)
+                    end
+                end
+            end
         end
+        emit_lisp(node)
         return out
     end
     -- A block's statements, for a block met as a CHILD or handed in as the node
@@ -3765,7 +3794,16 @@ function M.forms(file, sr, sc, er, ec, opts)
     end
 
     local subs = child_forms(n, lisp)
-    if lisp and drop_first_list and subs[1] then table.remove(subs, 1) end
+    -- ...and it is the signature only if it sits IMMEDIATELY AFTER THE HEAD. Dropping
+    -- the first list unconditionally was safe only while a quoted form could not be a
+    -- form at all: the moment the quote sigils opened (CART-0461), `(define roman
+    -- '((1000 #\M) ...))` had its alist taken for an argument list and
+    -- `(define-syntax c (syntax-rules ...))` lost its whole transformer. Second named
+    -- child or it stays.
+    if lisp and drop_first_list and subs[1] then
+        local second = n:named_child(1)
+        if second and second:equal(subs[1]) then table.remove(subs, 1) end
+    end
 
     local out = {}
     for _, s in ipairs(subs) do out[#out + 1] = form_rec(s, src, lisp) end

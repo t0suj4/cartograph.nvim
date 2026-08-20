@@ -2768,6 +2768,15 @@ nvim --headless -u NONE -l tools/navcensus.lua <dir> --vocab    # what it calls 
 # were already in the set under names it SHARES with other grammars, so a try showed
 # its body, its else and its finally and dropped only the handlers between them: a
 # partially-correct answer in the middle of a construct, with nothing marking the gap.
+# SIXTH FIX (CART-0461): scheme 546 → 0. A quote sigil is PUNCTUATION, not a level, so
+# `'`, `#'`, `` ` ``, `#\`` and their unquotes are seen through and the form they wrap is
+# the row; a vector keeps its own row because it is a collection, not a sigil. Quoted
+# DATA is descendable on purpose — user direction: any collection literal is structure,
+# and an INTERPRETATION of it is a separate offered layer (CART-0467/0468).
+# ★ The census caught two bugs in its own fix: the unquotes come in two families
+# (`unsyntax`/`unsyntax_splicing` inside a quasisyntax, not `unquote`), and the lisp
+# signature heuristic ate real content the moment quoted forms became forms — it was
+# only ever correct because the descent was closed.
 # EXPRESSION CENSUS: the expression IR's gate, and until now it had none. `expr.gate` is a
 # real two-implementation oracle — `expr.reads(row)` (the identifier leaves the IR reads) vs
 # `row.use ∪ row.rmw` (du's read census over the same node), derived independently — so a
