@@ -3398,6 +3398,10 @@ local SUBSTMT_BLOCKS = {
     switch_block = true, match_block = true, ['then'] = true,
     body_statement = true,
 }
+-- Named children of a block that are NOT statements. ruby's do_block carries its
+-- `|x|` parameter list beside the body; the parameters have a home in the detail lens
+-- and the signature, not in a list of statements.
+local PARAM_SKIP = { block_parameters = true }
 local SUBSTMT_CLAUSES = {
     else_statement = true, elseif_statement = true, else_clause = true,
     elif_clause = true, elseif_clause = true, catch_clause = true,
@@ -3461,6 +3465,23 @@ local function child_forms(node, lisp)
         end
         return out
     end
+    -- A block's statements, for a block met as a CHILD or handed in as the node
+    -- itself. Two subtractions: a PARAMETER list is not a statement (ruby's do_block
+    -- holds `block_parameters` beside its body, and it was rendering as a `|x|` row --
+    -- which the navigation census cannot see, because a census of what is MISSING is
+    -- blind to what is spurious), and a block whose only remaining child is another
+    -- block is a pure WRAPPER, so it flattens (ruby `do_block > body_statement`).
+    local function emit_block(b)
+        local kids = {}
+        for _, g in inext, b, -1 do
+            if g:named() and not tsutil.is_comment(g) and not PARAM_SKIP[g:type()] then
+                kids[#kids + 1] = g
+            end
+        end
+        if #kids == 1 and SUBSTMT_BLOCKS[kids[1]:type()] then return emit_block(kids[1]) end
+        for _, g in ipairs(kids) do out[#out + 1] = g end
+    end
+
     -- `case` is true when `n` IS a case clause: then its own children are the
     -- body, so they are emitted from here -- everything past the label.
     -- `host` is the type of the node we were ASKED about, so a child of that same
@@ -3484,15 +3505,21 @@ local function child_forms(node, lisp)
             elseif not tsutil.is_comment(c) then
                 local t = c:type()
                 if SUBSTMT_BLOCKS[t] then
-                    for _, g in inext, c, -1 do
-                        if g:named() and not tsutil.is_comment(g) then out[#out + 1] = g end
-                    end
+                    emit_block(c)
                 elseif SUBSTMT_CASES[t] then
                     out[#out + 1] = c -- an arm is a form, not a wrapper
                 elseif SUBSTMT_CLAUSES[t] then
                     scan(c, false, host)
                 elseif SUBSTMT_TRANSPARENT[t] and not case then
-                    scan(c, false, host) -- see through it to the block/arms inside
+                    -- see through it to the block/arms inside -- but KEEP IT if there
+                    -- is nothing in there. A transparent node exists to be looked past
+                    -- when it wraps a control form (rust's `match` under an
+                    -- expression_statement); when it wraps a plain call it IS the
+                    -- statement, and looking past it dropped the entire body of every
+                    -- braceless `if (x) a();` (CART-0457).
+                    local before = #out
+                    scan(c, false, host)
+                    if #out == before then out[#out + 1] = c end
                 elseif host and t == host and not case then
                     scan(c, false, host) -- `} else if (...) {`: the same form again
                 elseif case and past and not CLAUSE_LABEL_TYPE[t]
@@ -3502,7 +3529,29 @@ local function child_forms(node, lisp)
             end
         end
     end
-    scan(node, SUBSTMT_CASES[node:type()] or false, node:type())
+    -- ★ THE NODE ITSELF. Every rule above reads the node's CHILDREN, so a block or a
+    -- transparent wrapper HANDED IN was a dead end: ruby's `do |x|` body row, a bare
+    -- `{ }` scope block in c++, and rust's whole if/for/while family (an if_expression
+    -- under an expression_statement) all descended into nothing. The navigation census
+    -- found all three as one family (CART-0457); they are one fix because the scan
+    -- never asked what it was standing ON.
+    local entry = node
+    while SUBSTMT_TRANSPARENT[entry:type()] do
+        local only
+        for _, c in inext, entry, -1 do
+            if c:named() and not tsutil.is_comment(c) then
+                if only then only = nil break end -- more than one: do not guess
+                only = c
+            end
+        end
+        if not only then break end
+        entry = only
+    end
+    if SUBSTMT_BLOCKS[entry:type()] then
+        emit_block(entry)
+        return out
+    end
+    scan(entry, SUBSTMT_CASES[entry:type()] or false, entry:type())
     return out
 end
 

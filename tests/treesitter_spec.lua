@@ -278,6 +278,59 @@ test('forms: one level of nested statements / forms, on demand', function ()
 end)
 
 -- REPORTED FROM THE BROWSER (mantis, core/authentication_api.php): the rows of a
+-- THE NODE ITSELF (CART-0457). Every rule in child_forms reads a node's CHILDREN,
+-- so a block or a transparent wrapper HANDED IN as the subject was a dead end —
+-- one family, found as one by the navigation census, three symptoms:
+--   ruby   a `do |x| ... end` body rendered as ONE leaf row (plus a `|x|` row)
+--   c/cpp  a bare `{ }` scope block, and every braceless `if (x) a();` body
+--   rust   the whole if/for/while family (an if_expression under an
+--          expression_statement, seen through to nothing)
+-- Census delta on the fix: ruby 180 -> 76, rust 528 -> 38, cpp 49 -> 14, java
+-- 101 -> 95, and lua stayed 0.
+test('forms: a block or a wrapper handed in as the subject opens', function ()
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function put(f, t)
+        local fd = assert(io.open(root .. '/' .. f, 'w')); fd:write(t); fd:close()
+    end
+    -- (lang, file, source, row of the subject, expected forms)
+    local langs = {
+        -- a ruby block: the body opens, and the PARAMETERS are not a statement
+        { 'ruby', 'a.rb', 'def f(xs)\n  xs.each do |x|\n    a(x)\n    b(x)\n  end\nend\n',
+          1, { 'a(x)', 'b(x)' } },
+        -- a bare scope block is a subject in its own right
+        { 'cpp', 'a.cpp', 'void f(int x){\n  {\n    int y = 1;\n    g(y);\n  }\n}\n',
+          1, { 'int y = 1;', 'g(y);' } },
+        -- rust: `for` is an expression under an expression_statement
+        { 'rust', 'a.rs', 'fn f(x: i32){\n  for i in 0..x {\n    a(i);\n    b(i);\n  }\n}\n',
+          1, { 'a(i);', 'b(i);' } },
+        -- a braceless body is the statement, not something to look past
+        { 'c', 'b.c', 'void f(int x){\n  if(x) a();\n}\n', 1, { 'a();' } },
+    }
+    local ran = 0
+    for _, l in ipairs(langs) do
+        local lang, file, src, row, want = l[1], l[2], l[3], l[4], l[5]
+        if has_parser(lang) then
+            ran = ran + 1
+            put(file, src)
+            local got = {}
+            for _, f in ipairs(ts.forms(root .. '/' .. file, row)) do
+                got[#got + 1] = f.text:gsub('%s+$', '')
+            end
+            eq(want, got)
+        end
+    end
+    ok(ran >= 3, 'at least three grammars exercised, not a lua-only fence')
+
+    -- NEGATIVE CONTROL. Seeing through a wrapper must not dissolve an ordinary
+    -- call statement: `foo()` alone has no sub-forms, and the answer is an honest
+    -- EMPTY, not the call listed as its own child (which would make every leaf
+    -- look descendable and every descent one row deep forever).
+    if has_parser('lua') then
+        put('c.lua', 'local function f()\n  g(1)\nend\n')
+        eq(0, #ts.forms(root .. '/c.lua', 1))
+    end
+end)
+
 -- `else if` WRITTEN AS TWO WORDS lost its whole body, in every language that
 -- admits the spelling (CART-0458, found by tools/navcensus.lua). The nested
 -- if matched no entry in child_forms's tables, so the scan dropped it. Before the

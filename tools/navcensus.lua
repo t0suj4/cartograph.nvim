@@ -245,6 +245,16 @@ for _, f in ipairs(files) do
                     -- nothing while the top one holds. So the census names the link to fix
                     -- FIRST, and must be RE-RUN after each fix: a cause leaving the report can
                     -- uncover the next one below it rather than emptying the count.
+                    --
+                    -- ★★ AND THE TOTAL IS NOT MONOTONE UNDER A FIX, so read the CAUSE LIST,
+                    -- never the total. Measured on CART-0457: opening blocks took zig from
+                    -- 9491 traps to 16778 while REMOVING its largest cause outright
+                    -- (`block ! variable_declaration`, 7579) — because every newly reachable
+                    -- statement enriches V, more types cross the ratio gate, and the census
+                    -- can suddenly SEE traps it had no vocabulary for. A count that goes up is
+                    -- the detector getting better eyes, not the browser getting worse. The
+                    -- progress signal is a cause LEAVING the list; ruby 180->76, rust 528->38
+                    -- and cpp 49->14 in the same run say it plainly.
                     pair = path[i]:type() .. ' ! ' .. path[i + 1]:type()
                     break
                 end

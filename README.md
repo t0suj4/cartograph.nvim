@@ -2738,6 +2738,14 @@ nvim --headless -u NONE -l tools/navcensus.lua <dir> --vocab    # what it calls 
 # its host, so the rule is "see through a child of the HOST's own type" — no name list.
 # php 28→0 · js 29→0 · cpp 220→49 · java 176→101 · go 47→32. ruby stayed 180: its traps
 # sit behind a shallower cause, which is the re-run rule doing its job.
+# SECOND FIX (CART-0457): THE NODE ITSELF. Every rule in child_forms reads a node's
+# CHILDREN, so a block or a transparent wrapper handed in as the subject was a dead
+# end — ruby's `do |x|` body, a bare `{ }` scope block, a braceless `if (x) a();`, and
+# rust's whole if/for/while family (an if_expression under an expression_statement).
+# One rule, three symptoms: ruby 180→76 · rust 528→38 · cpp 49→14 · java 101→95.
+# ★★ AND ZIG WENT 9491→16778 WHILE LOSING ITS LARGEST CAUSE OUTRIGHT: every newly
+# reachable statement enriches the census's vocabulary, so it can suddenly SEE traps it
+# had no words for. The total is NOT monotone under a fix — read the cause list.
 # EXPRESSION CENSUS: the expression IR's gate, and until now it had none. `expr.gate` is a
 # real two-implementation oracle — `expr.reads(row)` (the identifier leaves the IR reads) vs
 # `row.use ∪ row.rmw` (du's read census over the same node), derived independently — so a
