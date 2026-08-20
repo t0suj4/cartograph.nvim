@@ -51,6 +51,7 @@ vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
 local root, want_lang, maxfiles, ratio, nex, vocab, chain = nil, nil, 400, 0.5, 3, false, false
+local ncauses = 10
 local i = 1
 while arg and arg[i] do
     if arg[i] == '--lang' then i = i + 1; want_lang = arg[i]
@@ -59,12 +60,13 @@ while arg and arg[i] do
     elseif arg[i] == '--examples' then i = i + 1; nex = tonumber(arg[i]) or nex
     elseif arg[i] == '--vocab' then vocab = true
     elseif arg[i] == '--chain' then chain = true
+    elseif arg[i] == '--causes' then i = i + 1; ncauses = tonumber(arg[i]) or ncauses
     else root = vim.fn.expand(arg[i]) end
     i = i + 1
 end
 if not root then
     print('usage: navcensus <dir> [--lang php] [--files N] [--ratio F] [--examples N]'
-        .. ' [--vocab] [--chain]')
+        .. ' [--vocab] [--chain] [--causes N]')
     os.exit(2)
 end
 
@@ -374,10 +376,12 @@ for lang, R in pairs(rows) do
     table.sort(cl, function(a, b) return a.n > b.n or (a.n == b.n and a.k < b.k) end)
     if #cl > 0 then
         print(('   CAUSES (reached ! first unreached), %d distinct:'):format(#cl))
-        for i = 1, math.min(#cl, 10) do
+        for i = 1, math.min(#cl, ncauses) do
             print(('   %6d  %-46s %s'):format(cl[i].n, cl[i].k, cex[lang .. cl[i].k] or ''))
         end
-        if #cl > 10 then print(('          ... %d more cause(s) not shown'):format(#cl - 10)) end
+        if #cl > ncauses then
+            print(('          ... %d more cause(s) not shown (--causes N)'):format(#cl - ncauses))
+        end
     end
     grand = grand + tier('CONTAINER (parent holds >= 2 statements)', R, lang, true)
     tier('WEAK (single-child parent; mostly expression nesting)', weak[lang] or {}, lang, false)

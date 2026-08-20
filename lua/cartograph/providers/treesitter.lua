@@ -3397,11 +3397,29 @@ local SUBSTMT_BLOCKS = {
     -- statements — and `body_statement` is a ruby method's body.
     switch_block = true, match_block = true, ['then'] = true,
     body_statement = true,
+    -- zig (and `struct_declaration` is odin's spelling too), from the navigation
+    -- census (CART-0463). zig's grammar wraps a body TWICE -- `if_statement >
+    -- block_expression > block` -- and names a container declaration as the VALUE of a
+    -- variable declaration: `const S = struct { ... }`. Both read as blocks here, and
+    -- the wrapper flattens because emit_block collapses a block whose only remaining
+    -- child is another block.
+    -- NOT `enum_declaration`: JAVA SPELLS ITS ENUM THAT WAY TOO, and there the node
+    -- holds modifiers and a name beside its enum_body, so opening it would put a
+    -- `Foo` row and a body row where a member list belongs. zig's enum members stay
+    -- unreachable for now (60 traps, filed) rather than trading a silence for junk.
+    block_expression = true, labeled_type_expression = true,
+    struct_declaration = true, union_declaration = true, opaque_declaration = true,
 }
 -- Named children of a block that are NOT statements. ruby's do_block carries its
 -- `|x|` parameter list beside the body; the parameters have a home in the detail lens
 -- and the signature, not in a list of statements.
-local PARAM_SKIP = { block_parameters = true }
+-- A label hangs BESIDE the thing it labels, in four spellings: zig `block_label`
+-- (`outer:` / `blk:`), c and cpp `statement_identifier`, go `label_name`. Java spells
+-- it plain `identifier` and is deliberately NOT here -- ruby's bare `private` is an
+-- identifier that IS a statement, and this set is consulted for every language.
+-- (No field name to lean on either: only c/cpp declare `label:`, probed.)
+local PARAM_SKIP = { block_parameters = true, block_label = true,
+    statement_identifier = true, label_name = true }
 local SUBSTMT_CLAUSES = {
     else_statement = true, elseif_statement = true, else_clause = true,
     elif_clause = true, elseif_clause = true, catch_clause = true,
@@ -3434,7 +3452,12 @@ local SUBSTMT_CASES = {
 -- `match` is an EXPRESSION, so a bare `match x { … }` statement is an
 -- expression_statement around a match_expression and the arms sit two levels
 -- down. Seen THROUGH; never a form of their own.
-local SUBSTMT_TRANSPARENT = { expression_statement = true, match_expression = true }
+-- zig's labeled_statement wraps BOTH a labeled loop (`outer: for (...) |i| {`) and a
+-- plain braced block (an `else { }` parses as a labeled_statement with no label), and
+-- transparent answers for both: as a child it is kept as the LABEL row, and descending
+-- that row unwraps past the label to the loop or the block.
+local SUBSTMT_TRANSPARENT = { expression_statement = true, match_expression = true,
+    labeled_statement = true }
 -- Where a case's LABEL ends and its body begins. Grammars mark it three ways and
 -- a case may use any one, so all three are consulted: a separator TOKEN (php/c/
 -- js/go/odin/python `:`, rust/zig `=>`, java's arrow form `->`), a label NODE of
@@ -3539,7 +3562,10 @@ local function child_forms(node, lisp)
     while SUBSTMT_TRANSPARENT[entry:type()] do
         local only
         for _, c in inext, entry, -1 do
-            if c:named() and not tsutil.is_comment(c) then
+            -- PARAM_SKIP is subtracted here for the same reason as in emit_block: a
+            -- label is not a candidate body, and counting it would make zig's
+            -- labeled_statement look like two children and stop the unwrap.
+            if c:named() and not tsutil.is_comment(c) and not PARAM_SKIP[c:type()] then
                 if only then only = nil break end -- more than one: do not guess
                 only = c
             end

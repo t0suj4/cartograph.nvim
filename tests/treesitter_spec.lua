@@ -278,6 +278,60 @@ test('forms: one level of nested statements / forms, on demand', function ()
 end)
 
 -- REPORTED FROM THE BROWSER (mantis, core/authentication_api.php): the rows of a
+-- zig was the worst language in the navigation census — 9491 trapped statements in
+-- 40 files of ~/git/zig/src, 33 causes (CART-0463) — and the reason is grammatical:
+-- it wraps a body TWICE (`if_statement > block_expression > block`), hangs a label
+-- beside the thing it labels (`outer: for`, and an `else { }` parses as a
+-- labeled_statement with no label at all), and names a container declaration as the
+-- VALUE of a variable declaration (`const S = struct { ... }`). None of those shapes
+-- were in any table, so all six subjects below descended into NOTHING.
+test('forms: zig bodies, labels and container declarations open', function ()
+    if not has_parser('zig') then skip 'no zig parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local src = table.concat({
+        'fn f(x: u8) void {',
+        '    if (x == 1) { a(); b(); }',
+        '    else { c(); }',
+        '    outer: for (0..x) |i| { d(i); e(i); }',
+        '    blk: while (x > 0) { g(); h(); }',
+        '}',
+        'const S = struct {',
+        '    a: u8,',
+        '    fn m(self: S) void { p(); q(); }',
+        '};',
+        'const U = union { x: u8, y: u16 };',
+        'const T = blk: { const t = 1; break :blk t; };',
+    }, '\n') .. '\n'
+    local fd = assert(io.open(root .. '/a.zig', 'w')); fd:write(src); fd:close()
+    local function forms(row)
+        local out = {}
+        for _, f in ipairs(ts.forms(root .. '/a.zig', row)) do
+            out[#out + 1] = f.text:gsub('%s+$', '')
+        end
+        return out
+    end
+    -- both branches, flat, as every other language reads an if/else
+    eq({ 'a();', 'b();', 'c();' }, forms(1))
+    -- a LABELLED loop: the label is not a statement and does not add a level
+    eq({ 'd(i);', 'e(i);' }, forms(3))
+    eq({ 'g();', 'h();' }, forms(4))
+    -- a container declaration's MEMBERS, and a method is descendable further
+    local members = ts.forms(root .. '/a.zig', 6)
+    eq(2, #members)
+    eq('a: u8', members[1].text)
+    ok(members[2].branch, 'a method in a struct is a branch')
+    eq({ 'x: u8', 'y: u16' }, forms(10))
+    -- a labeled BLOCK as a value: `const T = blk: { ... }`
+    eq({ 'const t = 1;', 'break :blk t;' }, forms(11))
+
+    -- NOT FIXED, and deliberately not pinned: an expression-form control node is
+    -- still never openable, so `const y = switch (x) { ... }` and even a STATEMENT
+    -- whose body is one (`while (it.next()) |v| switch (v) { ... }`, `else |err|
+    -- switch (err) { ... }`) descend into nothing. That is CART-0462, and it is what
+    -- zig's remaining 6414 traps are: the census went 16778 -> 6414 here while its
+    -- three top causes vanished.
+end)
+
 -- THE NODE ITSELF (CART-0457). Every rule in child_forms reads a node's CHILDREN,
 -- so a block or a transparent wrapper HANDED IN as the subject was a dead end —
 -- one family, found as one by the navigation census, three symptoms:

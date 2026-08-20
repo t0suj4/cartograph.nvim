@@ -2746,6 +2746,16 @@ nvim --headless -u NONE -l tools/navcensus.lua <dir> --vocab    # what it calls 
 # ★★ AND ZIG WENT 9491→16778 WHILE LOSING ITS LARGEST CAUSE OUTRIGHT: every newly
 # reachable statement enriches the census's vocabulary, so it can suddenly SEE traps it
 # had no words for. The total is NOT monotone under a fix — read the cause list.
+# THIRD FIX (CART-0463): zig's three grammatical peculiarities — a body wrapped TWICE
+# (`if_statement > block_expression > block`), a label hanging beside what it labels
+# (`outer: for`, and an `else { }` that parses as a labeled_statement with no label),
+# and a container declaration as the VALUE of a variable declaration (`const S =
+# struct {...}`). 16778 → 6414, all three top causes gone; the label spellings
+# (c/cpp `statement_identifier`, go `label_name`) opened labelled loops in three more
+# languages nobody was aiming at. Then back UP to 8403, honestly: `enum_declaration`
+# is java's spelling too, and there it holds modifiers and a name beside its body, so
+# opening it would FABRICATE two rows per java enum. Refusing costs zig 2014 traps and
+# is filed as CART-0466 — one name, two grammar shapes, and the tables are global.
 # EXPRESSION CENSUS: the expression IR's gate, and until now it had none. `expr.gate` is a
 # real two-implementation oracle — `expr.reads(row)` (the identifier leaves the IR reads) vs
 # `row.use ∪ row.rmw` (du's read census over the same node), derived independently — so a
