@@ -2756,6 +2756,13 @@ nvim --headless -u NONE -l tools/navcensus.lua <dir> --vocab    # what it calls 
 # is java's spelling too, and there it holds modifiers and a name beside its body, so
 # opening it would FABRICATE two rows per java enum. Refusing costs zig 2014 traps and
 # is filed as CART-0466 — one name, two grammar shapes, and the tables are global.
+# FOURTH FIX (CART-0459): java 95 → 1. `class_body` had been in the block set from the
+# start, so a METHOD worked and everything shaped like one did not — a CONSTRUCTOR's
+# statements were the largest single java cause (79), and enum / interface /
+# annotation-type members had no route either. Four names, plus a SPLICE set for
+# `enum_body_declarations` (pure grammar: its children belong to the enum's own list).
+# The enum-name collision is sidestepped rather than fought — `enum_body` is java's
+# alone. The one survivor is an anonymous class in a return, which is CART-0462.
 # EXPRESSION CENSUS: the expression IR's gate, and until now it had none. `expr.gate` is a
 # real two-implementation oracle — `expr.reads(row)` (the identifier leaves the IR reads) vs
 # `row.use ∪ row.rmw` (du's read census over the same node), derived independently — so a

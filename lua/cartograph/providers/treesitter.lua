@@ -3409,7 +3409,19 @@ local SUBSTMT_BLOCKS = {
     -- unreachable for now (60 traps, filed) rather than trading a silence for junk.
     block_expression = true, labeled_type_expression = true,
     struct_declaration = true, union_declaration = true, opaque_declaration = true,
+    -- java's FOUR OTHER bodies (CART-0459). `class_body` was here from the start and
+    -- the rest never were, so a CONSTRUCTOR's statements -- 79 traps in 40 files of
+    -- elasticsearch, the largest single java cause -- had no route in at all, while the
+    -- method beside it worked.
+    constructor_body = true, enum_body = true, interface_body = true,
+    annotation_type_body = true,
 }
+-- A block whose children belong to the ENCLOSING list rather than to a row of their own:
+-- java's enum_body holds `enum_body_declarations` beside its constants, and that node is
+-- pure grammar -- a row for it would read as a second copy of the methods below it. This
+-- is deliberately a named set and not a general rule: splicing every block-inside-a-block
+-- would dissolve a bare `{ }` scope in c++ into its parent, which is a real construct.
+local SPLICE_BLOCKS = { enum_body_declarations = true }
 -- Named children of a block that are NOT statements. ruby's do_block carries its
 -- `|x|` parameter list beside the body; the parameters have a home in the detail lens
 -- and the signature, not in a list of statements.
@@ -3502,7 +3514,9 @@ local function child_forms(node, lisp)
             end
         end
         if #kids == 1 and SUBSTMT_BLOCKS[kids[1]:type()] then return emit_block(kids[1]) end
-        for _, g in ipairs(kids) do out[#out + 1] = g end
+        for _, g in ipairs(kids) do
+            if SPLICE_BLOCKS[g:type()] then emit_block(g) else out[#out + 1] = g end
+        end
     end
 
     -- `case` is true when `n` IS a case clause: then its own children are the

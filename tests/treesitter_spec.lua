@@ -278,6 +278,44 @@ test('forms: one level of nested statements / forms, on demand', function ()
 end)
 
 -- REPORTED FROM THE BROWSER (mantis, core/authentication_api.php): the rows of a
+-- java had FOUR bodies nobody had ever named (CART-0459). `class_body` was in the
+-- block set from the start, so a METHOD worked and everything shaped like one did
+-- not: a CONSTRUCTOR's statements were 79 traps in 40 files of elasticsearch, the
+-- largest single java cause in the whole census, and an enum's or interface's or
+-- annotation type's members had no route in either. The static initializer beside
+-- them worked all along, because its body happens to be a plain `block` — which is
+-- exactly why nobody noticed.
+test('forms: java constructor, enum, interface and annotation bodies open', function ()
+    if not has_parser('java') then skip 'no java parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local src = table.concat({
+        'class A {',
+        '  static int s;',
+        '  static { s = 1; g(); }',
+        '  A(int x) { this.x = x; p(); }',
+        '  enum E { X, Y; void m(){ a(); b(); } }',
+        '  interface I { int f(); default int g(){ return 1; } }',
+        '  @interface Ann { String v(); }',
+        '}',
+    }, '\n') .. '\n'
+    local fd = assert(io.open(root .. '/A.java', 'w')); fd:write(src); fd:close()
+    local function forms(row)
+        local out = {}
+        for _, f in ipairs(ts.forms(root .. '/A.java', row)) do
+            out[#out + 1] = f.text:gsub('%s+$', '')
+        end
+        return out
+    end
+    eq({ 's = 1;', 'g();' }, forms(2))                 -- the one that always worked
+    eq({ 'this.x = x;', 'p();' }, forms(3))            -- constructor_body
+    -- an enum: its constants AND its methods, in one list. enum_body_declarations is
+    -- SPLICED rather than given a row of its own — it is pure grammar, and a row for
+    -- it would read as a second copy of the method under it.
+    eq({ 'X', 'Y', 'void m(){ a(); b(); }' }, forms(4))
+    eq({ 'int f();', 'default int g(){ return 1; }' }, forms(5))
+    eq({ 'String v();' }, forms(6))                    -- annotation_type_body
+end)
+
 -- zig was the worst language in the navigation census — 9491 trapped statements in
 -- 40 files of ~/git/zig/src, 33 causes (CART-0463) — and the reason is grammatical:
 -- it wraps a body TWICE (`if_statement > block_expression > block`), hangs a label
