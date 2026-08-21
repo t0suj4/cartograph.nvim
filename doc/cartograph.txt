@@ -829,15 +829,27 @@ Members are of three shapes, and each descends the way its shape implies: a
 function goes to its body, a file to its own altitude, a write SITE to the
 position (landing through the containment chain, |cartograph-site|).
 
-HOW AXES APPEAR is switchable, because it is an open question: >
+TWO AXES THAT ARE EASY TO CONFUSE. `callers` and `reached by` walk the same
+edges — calls — at different depths: `callers` is direct, `reached by` is the
+transitive closure (cycle-safe, and never listing the subject itself). `registered
+by` is a different edge entirely: what keeps this function alive WITHOUT calling
+it, a dispatch table or load-time data, and its rows name MODULES rather than
+functions. The cone walks calls only, so a function that is registered and never
+called has an empty `reached by` — which is why that emptiness says so, naming
+the registration instead of rendering a bare zero.
 
-    require('cartograph').setup { axes = 'doors' }  " default
-    require('cartograph').setup { axes = 'lens' }
+THE BAND HAS TWO WIDTHS, and switching them is not a descent. `default` shows the
+CHEAP axes and ends with a row saying how many are held back and which — `⋯ 2 more
+(reaches, reached by)`. `descend` on that row widens the band in place; the
+altitude does not change. The line between the two is not taste: a door renders on
+every cursor move and shows its count, so the axes held back are the ones whose
+count costs a traversal (the fn altitude renders in 6.08 ms with the two cones and
+4.49 ms without). >
+
+    require('cartograph').setup { axes = 'default' }  " default
+    require('cartograph').setup { axes = 'all' }      " never hold any back
+    require('cartograph').setup { axes = false }      " no axis rows at all
 <
-`doors` gives every axis its own row with its own count — the counts are all
-visible without a keypress, at one row of the subject's budget each. `lens` gives
-one row (`⋯ axes (N)`) that opens the axis altitude, where <Tab> switches between
-axes — one row of budget, and the individual counts are a keypress away.
 
 DESCENDING A SITE                                             *cartograph-site*
 

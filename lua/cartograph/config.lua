@@ -243,17 +243,18 @@ M.keys = {
 --- in ten. Letters carry the tail (max measured: 28 names on one line).
 M.pick_labels = '123456789abcdefghijklmnopqrstuvwxyz'
 
--- HOW DECLARED AXES APPEAR ON THEIR SUBJECT — the A/B (CART-0482). The axes
--- themselves are declared once (panes/axes.lua) and both arms render the same
--- rows from the same counts; only the door differs.
---   'doors' one row per axis, each naming the relation and carrying its count.
---           The shape callers already had, and the one the counts are visible in
---           without a keypress. Costs a row per axis and computes every count on
---           every render.
---   'lens'  ONE row (how many axes), opening the axis altitude where <Tab>
---           switches between them. Costs one row and one count — and hides the
---           individual counts behind a keypress.
-M.axes = 'doors'
+-- THE AXIS BAND on a subject's altitude (CART-0482). Every declared axis gets a
+-- row naming the relation and carrying its count — the shape that won the A/B
+-- outright; the one-aggregate-door alternative hid every count behind a keypress.
+--   'default' the cheap axes only, plus a row saying how many are held back and
+--             which. The line is `walk` (a count that costs a traversal), not
+--             taste: measured 6.08 ms vs 4.49 ms per render on mantis.
+--   'all'     every axis of the subject, always.
+--   false     no axis rows at all — they spend rows the statements also want, so
+--             "none" has to be sayable. The axis altitude stays reachable.
+-- This is the band's INITIAL width; the toggle row switches it live, and the
+-- value is read at render time, so setting it by hand and redrawing also works.
+M.axes = 'default'
 
 -- Entry points: files EXPECTED to have no inbound require (a runtime loads
 -- them directly). They classify as 'entry' (▶) instead of 'orphan' (○ — the

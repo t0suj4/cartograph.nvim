@@ -68,6 +68,19 @@ function M.up_of_node(id, store)
     return 'file', n.file, { node = id }
 end
 
+--- The REGION holding a line in a file, or nil. A site in module-level data (a
+--- registration, a dispatch-table entry) belongs to the region that contains it,
+--- which is where the browser can show it in context -- the file altitude only
+--- lists defs, so landing there means landing on row 1.
+function M.region_at(file, line0, store)
+    for _, n in ipairs(store.by_file[file] or {}) do
+        if n.kind == 'region' and atr.sl(n.range) <= line0
+            and atr.el(n.range) >= line0 then
+            return n.id
+        end
+    end
+end
+
 --- A DEF altitude (fn / region / tbl) is contained by its file, on its own row.
 --- The nil-node case keeps the current file rather than guessing: `M.show('file',
 --- nil)` leaves M.view.file alone, which is what the hand-written branch did.

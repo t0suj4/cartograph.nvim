@@ -107,7 +107,15 @@ M.REGISTRY = {
         view_key = 'regfor',
         subject  = function (key) return key end,
         ascend   = function (key) return 'fn', key end,
-        hover    = 'node',
+        -- ★ A SITE, NOT A NODE. These rows name the registering MODULE, and a
+        -- module node's id IS its file path -- so hovering one as a NODE
+        -- previewed the top of the file, which is where a module's range starts
+        -- ("the registered by rows preview the beginning of the file, it's
+        -- rather confusing"). The row has the registration's exact range in
+        -- line_site all along, and its own label prints `m.lua:7`. Third
+        -- altitude with this defect (syms, axis, regfor): whenever a row is
+        -- ABOUT a container but ANCHORED at a position, the position wins.
+        hover    = 'site',
         empty    = {
             computed   = '(no registrations — nothing keeps this alive but its callers)',
             uncomputed = needs_edges,

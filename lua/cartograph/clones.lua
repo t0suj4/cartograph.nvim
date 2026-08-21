@@ -69,9 +69,23 @@ local function canon(e, locals, slots, ctr)
     end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
+    -- ★ AN EMBEDDED ASSIGNMENT, and the reason it CRASHED here rather than
+    -- keying badly: `t` is the tree-sitter type STRING on every kind except
+    -- `assign`, where the schema uses it for the assignment TARGET (a node).
+    -- The fallthrough concatenated it. Same collision class as the expr
+    -- attribute collision (a field name meaning two things), and unreachable
+    -- from a lua corpus BECAUSE LUA HAS NO ASSIGNMENT EXPRESSION -- measured
+    -- present in php, c and javascript, absent in python (the walrus builds a
+    -- different node). Every clone tier over any of those languages raised
+    -- "attempt to concatenate a table value" on the first such body.
+    if k == 'assign' then
+        return 'A(' .. canon(e.t, locals, slots, ctr) .. ','
+            .. canon(e.v, locals, slots, ctr) .. ')'
+    end
     local parts = {}
     for _, c in ipairs(e.kids or {}) do parts[#parts + 1] = canon(c, locals, slots, ctr) end
-    return '?' .. (e.t or '') .. '(' .. table.concat(parts, ',') .. ')'
+    return '?' .. (type(e.t) == 'string' and e.t or '') .. '('
+        .. table.concat(parts, ',') .. ')'
 end
 
 -- one row (lhs = rhs [; cond]) canonicalized, sharing the function's slot map
@@ -592,9 +606,13 @@ local function rcanon(e, locals, acc)
     end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
+    if k == 'assign' then -- see canon: `t` is the TARGET here, not a type string
+        return 'A(' .. rcanon(e.t, locals, acc) .. ',' .. rcanon(e.v, locals, acc) .. ')'
+    end
     local p = {}
     for _, c in ipairs(e.kids or {}) do p[#p + 1] = rcanon(c, locals, acc) end
-    return '?' .. (e.t or '') .. '(' .. table.concat(p, ',') .. ')'
+    return '?' .. (type(e.t) == 'string' and e.t or '') .. '('
+        .. table.concat(p, ',') .. ')'
 end
 
 -- (relative row-keys, per-row local-name sequences) for a fn, memoized on its index entry
@@ -1161,9 +1179,14 @@ local function bcanon(e, locals, slots, ctr, st)
     if k == 'table' then return 'T' end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
+    if k == 'assign' then -- see canon: `t` is the TARGET here, not a type string
+        return 'A(' .. bcanon(e.t, locals, slots, ctr, st) .. ','
+            .. bcanon(e.v, locals, slots, ctr, st) .. ')'
+    end
     local p = {}
     for _, c in ipairs(e.kids or {}) do p[#p + 1] = bcanon(c, locals, slots, ctr, st) end
-    return '?' .. (e.t or '') .. '(' .. table.concat(p, ',') .. ')'
+    return '?' .. (type(e.t) == 'string' and e.t or '') .. '('
+        .. table.concat(p, ',') .. ')'
 end
 
 local function brow(rw, locals, blank, all, cd)

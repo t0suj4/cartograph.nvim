@@ -200,6 +200,10 @@ local NO_NODE_HOVER = {
     callers = 'site rows: the site renderer previews the position',
     occs   = 'site rows, as callers',
     var    = 'site rows, as callers',
+    regfor = 'a registrant row NAMES a module but is ANCHORED where the'
+        .. ' registration is written, and a module node\'s range starts at the'
+        .. ' top of its file — hovering it as a node previewed line 1'
+        .. ' ("rather confusing", reported). Site rows, as callers',
     states = 'transition rows preview the spec, via line_trans',
     lit    = 'literal rows are values, not defs',
     live   = 'OPEN DECISION: runtime values, idiom is var_context (bench 0b)',

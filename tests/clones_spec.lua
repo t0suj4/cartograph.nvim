@@ -681,3 +681,47 @@ test('plan protocol: every write verb stamps plan.edit_of', function ()
         'and the ladder refuses an unstamped plan rather than calling a nil: ' .. tostring(why))
 end)
 
+
+-- ★ AN EMBEDDED ASSIGNMENT CRASHED EVERY CLONE TIER, and no lua corpus could
+-- ever have caught it: LUA HAS NO ASSIGNMENT EXPRESSION. `t` is the tree-sitter
+-- type STRING on every expression kind except `assign`, where the schema uses it
+-- for the assignment TARGET — a node — so the canonicalizers' fallthrough did
+-- `'?' .. e.t` and raised "attempt to concatenate a table value" on the first
+-- `while( $row = fetch() )` it met. Measured present in php, c and javascript.
+-- Three tiers, three copies of the same fallthrough, so this asserts all three.
+test('clones: an embedded assignment keys instead of crashing (php/c/js)', function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'php') then skip 'no php parser' end
+    local clones = require 'cartograph.clones'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.php', 'w'))
+    fd:write('<?php\nfunction fetch_all( $r ) {\n  $out = array();\n'
+        .. '  while( $row = db_fetch( $r ) ) { $out[] = $row; }\n  return $out;\n}\n'
+        -- a second body with the SAME shape: the tiers must also still WORK,
+        -- not merely survive — a fix that keyed everything to '?' would pass a
+        -- crash test and report every function as a clone of every other
+        .. 'function load_all( $q ) {\n  $acc = array();\n'
+        .. '  while( $rec = db_fetch( $q ) ) { $acc[] = $rec; }\n  return $acc;\n}\n'
+        .. 'function unrelated( $x ) {\n  $y = $x + 1;\n  $z = $y * 2;\n'
+        .. '  return $z - 3;\n}\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    for _, tier in ipairs({ 'exact', 'blocks', 'near' }) do
+        local ok_, err = pcall(clones[tier], store, {})
+        ok(ok_, tier .. ' does not crash: ' .. tostring(err))
+    end
+    ok(pcall(clones.findings, store, {}), 'and neither does the findings surface')
+    -- the two while-loop bodies are alpha-equivalent, the third is not
+    local groups = clones.exact(store, { min_rows = 3 })
+    local found
+    for _, g in ipairs(groups) do
+        if #g >= 2 then
+            local names = {}
+            for _, m in ipairs(g) do names[m.name] = true end
+            if names.fetch_all and names.load_all then found = g end
+        end
+    end
+    ok(found, 'the two same-shaped bodies group as clones')
+    eq(2, found and #found, 'and the unrelated one is NOT in the group')
+    vim.fn.delete(root, 'rf')
+end)

@@ -69,6 +69,8 @@ local SIGN = {
 
 local M = {
     view = { level = 'files', file = nil, fn = nil },
+    axes_mode = 'default', -- 'default' (the cheap axes) | 'all'; the band's WIDTH,
+    -- switched by its own toggle row, never by entering anything
     files_mode = 'flat', -- 'flat' (alphabetical) | 'layers' (by condensation
     -- level, load order first — see render_files_layers); <Tab> toggles
     line_node = {}, node_line = {}, line_file = {}, file_header = {}, line_stmt = {},
@@ -115,17 +117,6 @@ for level in pairs(concerns.node_hover_levels()) do M.NODE_HOVER[level] = true e
 local function lens_set(level)
     if level == 'file' and store.data and store.data.provider == 'self' then
         return { 'members', 'live' }
-    end
-    -- ARM B of the axis A/B (config.axes = 'lens'): this altitude's LENSES ARE
-    -- the axes, so one door reaches all of them and <Tab> switches. In arm A
-    -- ('doors') there is no set here -- every axis has its own door on the
-    -- subject and this altitude shows the one you opened. The arms differ ONLY
-    -- here and in the door rows: same declarations, counts and empties, so the
-    -- comparison is of PRESENTATION and nothing else.
-    if level == 'axis' and config.axes == 'lens' then
-        local name, subject = axes.split(M.view.axis)
-        local set = axes.of(store.node(subject))
-        return #set > 0 and set or (name and { name })
     end
     return LENS_SETS[level]
 end
@@ -239,27 +230,29 @@ local function module_id(file)
     return n and n.id
 end
 
--- ── THE A/B: HOW AXES APPEAR ON THEIR SUBJECT ───────────────────────────────
--- ARM A ('doors', default): one row per axis, each naming the relation and
---   carrying its count -- the shape the user singled out as working ("attached
---   to the function and it names the axis it's descending"). Costs one row per
---   axis of the subject's row budget, and every count is computed on EVERY
---   render, which for a `walk` axis is a traversal.
--- ARM B ('lens'): ONE row, one count (how many axes), opening the axis altitude
---   where <Tab> switches between them. Costs one row and one cheap count -- and
---   hides every individual count behind a keypress.
--- Both call this; nothing else differs. Returns the rows appended.
+-- ── THE AXIS BAND ───────────────────────────────────────────────────────────
+-- One row per axis, each naming the relation and carrying its count -- the shape
+-- the user singled out as working ("attached to the function and it names the
+-- axis it's descending"), and the arm that WON the A/B outright ("lens are
+-- worse"). The lens arm is retired: one aggregate door hid every count behind a
+-- keypress, which is the one thing the doors do better and the only asymmetry
+-- the measurement found (keystrokes were a wash, 3 counts visible vs 0).
+--
+-- WHAT SURVIVED FROM IT is the user's own synthesis: the band has TWO WIDTHS,
+-- and switching them is not a descent. `default` shows the cheap axes; `all`
+-- adds the ones whose count costs a traversal (measured: 6.08 ms vs 4.49 ms per
+-- render on mantis, which IS the cost of the two cones' counts). The band says
+-- how many it is holding back, on a row that toggles it -- an action row, like
+-- suppress, so it needs no key of its own and discloses itself.
 local function door_rows(ctx, node)
-    local names = axes.of(node)
-    if #names == 0 then return 0 end
-    if config.axes == 'lens' then
-        local text = ('⋯ axes (%d)'):format(#names)
-        ctx.lines[#ctx.lines + 1] = text
-        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
-        ctx.line_axis[#ctx.lines] = axes.key(names[1], node.id)
-        ctx.line_about[#ctx.lines] = node.id
-        return 1
-    end
+    -- OFF is a third answer, and it has to be sayable: the doors cost rows of a
+    -- budget the statements also want. An unrecognised value used to mean the
+    -- full band silently.
+    if not config.axes or config.axes == 'off' then return 0 end
+    local wide = M.axes_mode == 'all' or config.axes == 'all'
+    local names = axes.of(node, wide)
+    local held = not wide and axes.held_back(node) or nil
+    if #names == 0 and not held then return 0 end
     for _, name in ipairs(names) do
         local e = axes.AXES[name]
         -- A DOOR MUST NOT SHOW A FABRICATED ZERO: on a thin index the relation
@@ -273,6 +266,25 @@ local function door_rows(ctx, node)
             n and 'CartographSection' or 'CartographFrontier' } }
         ctx.line_axis[#ctx.lines] = axes.key(name, node.id)
         ctx.line_about[#ctx.lines] = node.id
+    end
+    -- THE WIDTH TOGGLE. Not a descent into anything: it widens the band it is
+    -- part of, and says what is behind it by name so the held-back axes are
+    -- disclosed rather than merely absent.
+    if held then
+        local labels = {}
+        for _, n in ipairs(held) do labels[#labels + 1] = axes.AXES[n].label end
+        ctx.lines[#ctx.lines + 1] = ('⋯ %d more (%s)'):format(#held,
+            table.concat(labels, ', '))
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.line_act[#ctx.lines] = { verb = 'axes_wide' }
+        ctx.line_about[#ctx.lines] = node.id
+        return #names + 1
+    elseif wide and axes.held_back(node) ~= nil then
+        ctx.lines[#ctx.lines + 1] = '⋯ fewer axes'
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
+        ctx.line_act[#ctx.lines] = { verb = 'axes_narrow' }
+        ctx.line_about[#ctx.lines] = node.id
+        return #names + 1
     end
     return #names
 end
@@ -991,8 +1003,11 @@ local function render_regfor(ctx, id)
         -- a decision"; measured 80/80 resolvable, so there was no decision.)
         ctx.line_about[#ctx.lines] = r.from
         if line then
+            -- every occurrence rides along: one module can register the same
+            -- function from several places in its data, and the label can only
+            -- print the first
             ctx.line_site[#ctx.lines] = { fn = r.from, file = r.from,
-                line = line, range = at }
+                line = line, range = at, ranges = r.at, reg = true }
         end
     end
     if #regs == 0 then
@@ -1237,11 +1252,6 @@ end
 -- site (descend to the position, which lands through the containment chain).
 local function render_axis(ctx, key)
     local name, subject = axes.split(key)
-    -- ARM B: the lens IS which axis, so it overrides the key's own name. In arm
-    -- A there is no lens set at this altitude and the key always wins.
-    if config.axes == 'lens' and M.view.lens and axes.AXES[M.view.lens] then
-        name = M.view.lens
-    end
     local e, sub = axes.AXES[name or ''], store.node(subject)
     if not (e and sub) then ctx.lines[1] = '(gone)'; return end
     local rows = e.rows(store, subject) or {}
@@ -1251,7 +1261,11 @@ local function render_axis(ctx, key)
     ctx.marks[1] = { { 0, #head, 'CartographTitle' }, { #head, -1, 'CartographDim' } }
     ctx.line_about[1] = subject
     if #rows == 0 then
-        ctx.lines[2] = '  ' .. (why and ('⚠ ' .. why) or note)
+        -- the axis's OWN sentence for its empty case beats the generic one: an
+        -- inbound cone that is empty because the subject is REGISTERED rather
+        -- than called is not the same fact as a function nothing reaches
+        local own = not why and e.note and e.note(store, subject)
+        ctx.lines[2] = '  ' .. (why and ('⚠ ' .. why) or own or note)
         ctx.marks[2] = { { 0, -1, why and 'CartographFrontier' or 'CartographDim' } }
         return
     end
@@ -1598,25 +1612,33 @@ local function render_fn(ctx, id)
             .. require('cartograph.ladder').summary(lad)
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
     end
+    -- ★ NOT ctx.lines[3]. These used to be written BY INDEX, on the assumption
+    -- that row 3 is free -- and it stopped being free the moment anything was
+    -- appended above them. `◆ registered by (N)` is appended at 3 whenever a fn
+    -- has registrants, and the inputs line then OVERWROTE ITS TEXT while
+    -- line_regfor stayed on the row: the door was invisible and `l` on
+    -- "inputs:" silently opened the registrants. Shipped that way since regfor
+    -- existed; found because the axis doors landed in the same slot and only two
+    -- of three appeared (CART-0482 lens check). Append, like everything else.
     local df = dfa.get(node)
     if not df then
         if node.unparsed then
-            ctx.lines[3] = '  (unparsed source — landed by text search)'
-            ctx.marks[3] = { { 0, -1, 'CartographDim' } }
+            ctx.lines[#ctx.lines + 1] = '  (unparsed source — landed by text search)'
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
         else
             -- no statement-level dataflow (e.g. scheme): descend into the
             -- body's forms (the block view), derived on demand from the source
-            ctx.lines[3] = '▸ forms'
-            ctx.marks[3] = { { 0, -1, 'CartographSection' } }
+            ctx.lines[#ctx.lines + 1] = '▸ forms'
+            ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
             local r = node.range
-            ctx.line_block[3] = ('%s\31%d\31%d\31%d\31%d'):format(id,
+            ctx.line_block[#ctx.lines] = ('%s\31%d\31%d\31%d\31%d'):format(id,
                 atr.sl(r), atr.sc(r), atr.el(r), atr.ec(r))
         end
         return
     end
-    ctx.lines[3] = #df.inputs > 0 and M.append_list('inputs:', ' ', df.inputs)
-        or 'inputs: (none)'
-    ctx.marks[3] = { { 0, -1, 'CartographDim' } }
+    ctx.lines[#ctx.lines + 1] = #df.inputs > 0
+        and M.append_list('inputs:', ' ', df.inputs) or 'inputs: (none)'
+    ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
     -- callees AND module-var reads per STATEMENT, so rows can name them as
     -- descend targets. df statements are the body's top-level ones; anything
     -- nested in an if/for body belongs to the last statement starting at or
@@ -3263,14 +3285,15 @@ function M.attach(win)
                             { start = { line = l - 1, char = 0 }, ['end'] = { line = l, char = 0 } } } })
                     end
                 elseif M.view.level == 'var' or M.view.level == 'callers'
-                    or M.view.level == 'occs' then
+                    or M.view.level == 'occs' or M.view.level == 'regfor' then
                     if M.line_sep[r] then return end -- chrome: keep the preview
                     -- hover a site -> preview it highlighted; a group row (a
                     -- function that uses the entity several times) -> preview
                     -- that function with EVERY occurrence highlighted at once
                     local s = M.line_site[r]
                     local g = M.line_group[r]
-                    if s then store.set_context({ node = s.fn, ranges = { s.range } })
+                    if s then store.set_context({ node = s.fn,
+                        ranges = s.ranges or { s.range } })
                     elseif g then
                         local ranges = {}
                         for _, st in ipairs(g.sites or {}) do
@@ -3813,6 +3836,12 @@ function M.attach(win)
     local function perform_action(act)
         local sup = require 'cartograph.suppress'
         local plan, why
+        -- the axis band's width: a display toggle, so it answers here and
+        -- returns rather than falling through to the suppression machinery
+        if act.verb == 'axes_wide' or act.verb == 'axes_narrow' then
+            M.axes_mode = act.verb == 'axes_wide' and 'all' or 'default'
+            return M.render()
+        end
         if act.verb == 'suppress' then
             plan, why = sup.plan(store, act.file, act.lnum, act.rule)
         elseif act.verb == 'unsuppress' then
@@ -4051,9 +4080,19 @@ function M.attach(win)
         elseif M.view.level == 'syms' then
             descend_syms_row(r)
         elseif M.view.level == 'regfor' then
-            -- a registrant row: open its module at the reference site
+            -- a registrant row: open its module AT THE REFERENCE SITE. The
+            -- comment here always said "at the reference site" and the code
+            -- entered the file altitude at row 1 -- the same confusion the hover
+            -- had. The site is a line in module-level data, so the region that
+            -- holds it is where it lives (CART-0482 feedback).
+            local st = M.line_site[r]
             local f = M.line_file[r]
-            if f then store.set_context(nil); enter('file', f) end
+            store.set_context(nil)
+            if st and st.line then
+                local rid = altitudes.region_at(st.file, st.line, store)
+                if rid then return enter('region', rid, nil, st.line + 1) end
+            end
+            if f then enter('file', f) end
         end
     end
     -- the working set: mark what you're working on; M is the way back

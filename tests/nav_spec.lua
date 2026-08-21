@@ -1060,3 +1060,85 @@ test('nav: descending an occurrence lands on the statement that holds it', funct
     vim.cmd('tabclose')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ★ THE ROW-3 CLOBBER (found checking the axes' lens arm, CART-0482). render_fn
+-- wrote its inputs line BY INDEX -- ctx.lines[3] -- on the assumption that row 3
+-- is free. It stopped being free the moment anything was appended above it: a fn
+-- with registrants gets `◆ registered by (N)` at 3, and the inputs line
+-- overwrote its TEXT while line_regfor stayed on the row. So the door was
+-- invisible and `l` on "inputs:" silently opened the registrants. Every row
+-- appends now, and this pins it: what a row SAYS and what it DOES must agree.
+test('nav: a fn with registrants shows its registered-by door, not an inputs line',
+    function ()
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    -- registered via a dispatch table (so it HAS registrants) and with a body
+    -- that yields dataflow (so the inputs line exists too) — the collision
+    fd:write('local M = {}\nlocal function handler(x) local y = x + 1 return y end\n'
+        .. 'M.tbl = { on_tick = handler }\nreturn M\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    local h; for _, n in ipairs(data.nodes) do if n.name == 'handler' then h = n end end
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    symbols.axes_mode = 'all' -- the WIDE band: every declared axis has a door
+    store.set_focus(h.id); store.pivot(h.id); symbols.show('fn', h.id)
+    local function line(r) return vim.api.nvim_buf_get_lines(symbols.buf, r - 1, r, false)[1] or '' end
+    -- the row that CARRIES the regfor mark must be the row that SAYS it
+    local rrow
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_regfor[r] then rrow = r end
+    end
+    ok(rrow, 'the registered-by door exists')
+    ok(line(rrow):find('registered by', 1, true),
+        'and its text is its own, not an inputs line: ' .. line(rrow))
+    -- and every declared axis door is visible, not just the ones past row 3
+    local seen = {}
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local a = symbols.line_axis[r]
+        if a then seen[a:match('^(.-)\31')] = line(r) end
+    end
+    for _, name in ipairs({ 'callees', 'reaches', 'reached_by' }) do
+        ok(seen[name], name .. ' has a visible door')
+        ok(seen[name]:find('%('), name .. ' shows a count: ' .. tostring(seen[name]))
+    end
+
+    -- ...and the NARROW band holds the expensive ones back, on a row that says so
+    symbols.axes_mode = 'default'; symbols.render()
+    local toggle, wide_seen = nil, {}
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_axis[r] then wide_seen[#wide_seen + 1] = r end
+        local a = symbols.line_act[r]
+        if a and a.verb == 'axes_wide' then toggle = r end
+    end
+    eq(1, #wide_seen, 'one cheap axis door')
+    ok(toggle, 'and a row that says how many are held back')
+    ok(line(toggle):find('2 more', 1, true), line(toggle))
+    ok(line(toggle):find('reached by', 1, true), 'naming them: ' .. line(toggle))
+    -- l on it WIDENS the band; it is not a descent (the altitude does not change)
+    local cb2
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.descend then cb2 = m.callback end
+    end
+    vim.api.nvim_set_current_win(wsym)
+    pcall(vim.api.nvim_win_set_cursor, wsym, { toggle, 0 })
+    cb2()
+    eq('fn', symbols.view.level, 'widening is not a descent')
+    eq('all', symbols.axes_mode)
+    local n = 0
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if symbols.line_axis[r] then n = n + 1 end
+    end
+    eq(3, n, 'and every axis now has its door')
+    symbols.axes_mode = 'default'
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)

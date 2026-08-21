@@ -26,6 +26,13 @@
 --                  so a transitive axis makes the doors arm pay a BFS per
 --                  cursor move while the one-door arm pays nothing. Declared so
 --                  the presentation can memoize it and the A/B can measure it.
+--   note           (store, id) -> string|nil, an honest sentence for the EMPTY
+--                  case. A zero on an inbound axis is the dangerous kind: the
+--                  cone walks CALL edges only, so a function kept alive by a
+--                  REGISTRATION (a dispatch table, load-time data) has no
+--                  callers and an empty cone while being perfectly live. The
+--                  note names the other half of the alibi rather than leaving
+--                  the reader with a zero that reads as dead.
 --   inverse        the axis you land on if you follow this one and come back
 --                  (a declaration, not a copy -- `imports` and `imported_by`
 --                  are two entries, and the cone's inverse is the other cone)
@@ -121,6 +128,15 @@ M.AXES = {
         glyph = '∵', label = 'reached by', on = 'fn', inverse = 'reaches',
         walk = true,
         rows = function (store, id) return cone_rows(store, id, 'in') end,
+        -- an empty INBOUND cone on a registered function is not deadness
+        note = function (store, id)
+            local regs = store.topo():registrants_detail(id)
+            if #regs == 0 then return nil end
+            local who = {}
+            for _, r in ipairs(regs) do who[#who + 1] = r.from end
+            return ('nothing CALLS it — it is registered by %s (the ◆ door), and'
+                .. ' this cone walks calls only'):format(table.concat(who, ', '))
+        end,
     },
     imports = {
         glyph = '⇥', label = 'imports', on = 'module', inverse = 'imported_by',
@@ -190,12 +206,32 @@ M.AXES = {
 }
 
 --- The axes that hang off this node, in door order.
-function M.of(node)
+--- @param all boolean|nil  include the ones a DEFAULT band leaves out
+function M.of(node, all)
     local kind = M.subject_kind(node)
     if not kind then return {} end
     local out = {}
     for _, name in ipairs(M.ORDER) do
-        if M.AXES[name].on == kind then out[#out + 1] = name end
+        local e = M.AXES[name]
+        if e.on == kind and (all or not e.walk) then out[#out + 1] = name end
+    end
+    return out
+end
+
+--- WHAT THE DEFAULT BAND LEAVES OUT, and why the line is `walk` rather than
+--- taste: a door renders on EVERY cursor move and shows its count, so the
+--- expensive axes are the ones whose count is a traversal. Measured on mantis,
+--- the fn altitude renders in 6.08 ms with the two cones and 4.49 ms without —
+--- so "default" is not a curated favourite list, it is the cheap half, and the
+--- band says how many it is holding back rather than hiding the fact.
+function M.held_back(node)
+    local all, def = M.of(node, true), M.of(node)
+    if #all == #def then return nil end
+    local out = {}
+    for _, name in ipairs(all) do
+        local shown = false
+        for _, d in ipairs(def) do if d == name then shown = true end end
+        if not shown then out[#out + 1] = name end
     end
     return out
 end

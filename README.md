@@ -126,8 +126,9 @@ declarations), `callers` / `used-by` / `sites`, `table`, `refused`,
   count: **callers**, **callees**, **reaches**/**reached by** (the transitive
   cone), **imports**/**imported by** on a module, **writes** on a var. `l` opens
   the members; a count that cannot be computed reads `unavailable`, never `0`.
-  How they appear is switchable while the question is open — `axes = 'doors'`
-  (one row and one count each) or `axes = 'lens'` (one row, `<Tab>` switches).
+  The band has two widths: `default` shows the cheap axes and a row naming how
+  many it holds back (`⋯ 2 more (reaches, reached by)`) which widens in place —
+  the line is a count that costs a traversal, not taste.
 - **trail** — the `h`/`l` structural path (return the way you came), distinct
   from the **jumplist** (`<C-o>`/`<C-i>`, which records pivots).
 - **cockpit** — the whole tab: the **browser**, the **source pane**, the

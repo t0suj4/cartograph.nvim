@@ -155,25 +155,49 @@ end)
 test('hover: the node-row altitudes come from the registry, not a hand list',
     function ()
     local levels = concerns.node_hover_levels()
-    ok(levels.regfor, 'a registrant row is a module NODE row')
     ok(levels.refused, 'a candidate row is a def NODE row')
     ok(not levels.callers, 'a caller row is a SITE row (the site renderer previews it)')
     ok(not levels.occs, 'an occurrence row is a SITE row')
+    ok(not levels.regfor, 'a registrant row is a SITE row too: it names a module,'
+        .. ' but it is ANCHORED where the registration is written')
     -- and the pane's class is that, plus the non-concern altitudes
-    ok(symbols.NODE_HOVER.regfor, 'the pane picked regfor up from the registry')
+    ok(symbols.NODE_HOVER.refused, 'the pane picked refused up from the registry')
     ok(symbols.NODE_HOVER.ws, 'and keeps the non-concern members')
 end)
 
-test('hover: a regfor row previews the registering MODULE', function ()
-    -- THE BUG: hover_node read line_node alone, and a regfor row carries only
-    -- line_about — so the whole altitude previewed nothing. A module node's id
-    -- IS its file path, so the row is about a real node like any other.
-    reset({ fn('m.lua::f', 'f'), mod('reg.lua') }, { level = 'regfor', regfor = 'm.lua::f' })
+test('hover: hover_node falls back to what a row is ABOUT when it is not a node',
+    function ()
+    -- THE ORIGINAL BUG: hover_node read line_node alone, so a row carrying only
+    -- line_about previewed NOTHING. The fallback is the fix and it is still the
+    -- mechanism for every node-hover altitude whose rows are not themselves defs.
+    reset({ fn('m.lua::f', 'f'), mod('reg.lua') }, { level = 'ws' })
     store.set_focus('m.lua::f')
     store.set_context(nil)
     symbols.line_about = { [2] = 'reg.lua' }
     eq('reg.lua', symbols.hover_node(2))
     eq('reg.lua', store.context and store.context.node)
+end)
+
+test('regfor: a registrant row is anchored at the REGISTRATION, not the file head',
+    function ()
+    -- reported: "the registered by rows preview the beginning of the file, it's
+    -- rather confusing". A module node's range starts at the top of its file, so
+    -- previewing the row as a NODE showed line 1 -- while the row's own label
+    -- prints `reg.lua:8` and line_site has held the exact range all along. The
+    -- class is the fix; this pins the row carrying what a site preview needs.
+    reset({ fn('m.lua::f', 'f'), mod('reg.lua') },
+        { level = 'regfor', regfor = 'm.lua::f' })
+    store.reg_by['m.lua::f'] = { { from = 'reg.lua', at = { R(7), R(9) } } }
+    symbols.create(); symbols.win = nil -- a buffer with no window: the row MAPS
+    symbols.render()                    -- are what this asserts, not the pixels
+    local srow
+    for r = 1, 8 do if symbols.line_site[r] then srow = r end end
+    ok(srow, 'the registrant row carries a site')
+    local st = symbols.line_site[srow]
+    eq('reg.lua', st.file)
+    eq(7, st.line, 'the line the registration is written on, not 0')
+    eq(2, #st.ranges, 'and EVERY occurrence, since one module can register twice')
+    ok(st.reg, 'marked as a registration site')
 end)
 
 test('hover: line_node still wins over line_about (what a row IS beats what it is about)',
@@ -427,11 +451,27 @@ test('axes: of() offers only the axes that hang off THIS subject', function ()
     local fn = { kind = 'function' }
     local var = { kind = 'var' }
     local mod = { kind = 'module' }
-    eq(3, #axreg.of(fn))   -- callees, reaches, reached_by
-    eq(2, #axreg.of(mod))  -- imports, imported by
-    eq(1, #axreg.of(var))  -- writes
-    eq(0, #axreg.of({ kind = 'region' }))
+    eq(3, #axreg.of(fn, true))   -- callees, reaches, reached_by
+    eq(2, #axreg.of(mod, true))  -- imports, imported by
+    eq(1, #axreg.of(var, true))  -- writes
+    eq(0, #axreg.of({ kind = 'region' }, true))
+    eq('callees', axreg.of(fn, true)[1])
+end)
+
+test('axes: the DEFAULT band is the cheap half, and says what it holds back',
+    function ()
+    -- the line is `walk`, not taste: a door renders on every cursor move and
+    -- shows its count, so the axes whose count is a TRAVERSAL are the ones the
+    -- narrow band leaves out (measured 6.08 vs 4.49 ms/render on mantis).
+    local fn = { kind = 'function' }
+    eq(1, #axreg.of(fn), 'only callees is cheap enough for the default band')
     eq('callees', axreg.of(fn)[1])
+    local held = axreg.held_back(fn)
+    eq(2, #held)
+    eq('reaches', held[1]); eq('reached_by', held[2])
+    -- a subject with no expensive axis holds nothing back, so no toggle row
+    eq(nil, axreg.held_back({ kind = 'var' }))
+    eq(nil, axreg.held_back({ kind = 'module' }))
 end)
 
 test('axes: a key round-trips, and an unknown axis yields no rows', function ()
@@ -489,4 +529,23 @@ test('axes: a thin index makes the COUNT unavailable, never a zero', function ()
     store.is_index_only = real
     eq(nil, unavail, 'unavailable, not 0')
     ok(why and why:find('index%-only'), 'and it says why')
+end)
+
+test('axes: an empty inbound CONE on a registered fn says why, not nothing',
+    function ()
+    -- the cone walks CALL edges only, so a function kept alive by a registration
+    -- (a dispatch table) has no callers and an empty reached_by while being
+    -- perfectly live. "reached by (0)" there reads as dead; the axis names the
+    -- other half of the alibi instead.
+    reset({ mod('m.lua'), fn('m.lua::handler', 'handler') })
+    store.reg_by['m.lua::handler'] = { { from = 'm.lua', at = {} } }
+    local rows, e = axreg.rows(axreg.key('reached_by', 'm.lua::handler'), store)
+    eq(0, #rows)
+    local note = e.note(store, 'm.lua::handler')
+    ok(note and note:find('registered by m.lua', 1, true), 'names the registrant: '
+        .. tostring(note))
+    ok(note:find('calls only', 1, true), 'and says what the cone walks')
+    -- a fn with no registrants gets no special sentence (the generic empty note)
+    reset({ mod('m.lua'), fn('m.lua::lonely', 'lonely') })
+    eq(nil, e.note(store, 'm.lua::lonely'))
 end)
