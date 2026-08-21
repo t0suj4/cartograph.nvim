@@ -312,3 +312,78 @@ test('empty: needs_edges is exported so `var` can share the fix', function ()
     ok(concerns.needs_edges(stub(true)), 'unavailable on the thin index')
     eq(nil, concerns.needs_edges(stub(false)))
 end)
+
+-- ── THE CONTAINMENT DECLARATION (CART-0481) ─────────────────────────────────
+-- What ENCLOSES each altitude used to be an eleven-branch if/elseif inside the
+-- ascend keymap, i.e. unreachable from a spec and unfenced by anything. Two of
+-- those branches were written the same day `H` was, and one altitude (`syms`)
+-- had NO branch at all — invisible because the trail always answers before
+-- containment does. The registry is the declaration; navaudit's disposition D
+-- fences membership; this holds the ANSWERS.
+local altreg = require 'cartograph.panes.altitudes'
+
+test('altitudes: every entry is exactly one of up / root', function ()
+    local nup, nroot = 0, 0
+    for level, e in pairs(altreg.REGISTRY) do
+        ok(not (e.up and e.root), level .. ' declares one of up/root, not both')
+        ok(e.up or e.root, level .. ' declares something')
+        if e.up then
+            nup = nup + 1
+            ok(type(e.up) == 'function', level .. ' declares up as a function')
+        else
+            nroot = nroot + 1
+            ok(type(e.root) == 'string', level .. ' says WHY it is a root')
+        end
+    end
+    eq(19, nup)
+    eq(3, nroot) -- files, protos, ws
+end)
+
+test('altitudes: a relation altitude does NOT restate its inverse', function ()
+    -- concerns.ascend is the same fact; a hand-written entry here would shadow
+    -- it and the two would drift. They are folded in from that declaration.
+    for level in pairs(concerns.REGISTRY) do
+        ok(altreg.of(level).from_concern,
+            level .. ' takes its containment from concerns.ascend')
+    end
+    local lvl, key, anchor = altreg.of('callers').up('m.lua::f')
+    eq('fn', lvl); eq('m.lua::f', key); eq(2, anchor.row)
+end)
+
+test('altitudes: a ranged key surfaces onto the statement that holds it', function ()
+    reset({ mod('m.lua'), fn('m.lua::f', 'f', 'm.lua', 3) })
+    -- block and syms spell their keys the same way, deliberately: one answer
+    for _, level in ipairs({ 'block', 'syms' }) do
+        local lvl, key, anchor = altreg.of(level).up('m.lua::f' .. SEP .. '9' .. SEP
+            .. '0' .. SEP .. '-1' .. SEP .. '-1', store)
+        eq('fn', lvl, level .. ' surfaces to its function')
+        eq('m.lua::f', key)
+        eq(10, anchor.line, level .. ' lands on the 1-based line of its range')
+    end
+    -- a key whose owner is gone surfaces to the tree rather than an empty view
+    eq('files', altreg.of('block').up('m.lua::gone' .. SEP .. '2', store))
+end)
+
+test('altitudes: a value tree pops ONE path segment, then leaves the tree',
+    function ()
+    reset({ mod('m.lua'), { id = 'm.lua::var:cfg@1', name = 'cfg', kind = 'var',
+        file = 'm.lua', range = R(1), order = 1 } })
+    local key = 'm.lua::var:cfg@1' .. SEP .. 'a' .. SEP .. 'b'
+    local lvl, up, anchor = altreg.of('lit').up(key, store)
+    eq('lit', lvl)
+    eq('m.lua::var:cfg@1' .. SEP .. 'a', up, 'one segment up')
+    eq(key, anchor.lit, 'with the cursor on the row we came from')
+    -- at the root the tree is left entirely: the var's own place in the file
+    lvl, up = altreg.of('lit').up('m.lua::var:cfg@1', store)
+    eq('file', lvl); eq('m.lua', up)
+    -- live rows ARE lit rows, and answer identically — in their OWN tree
+    local llvl, lup = altreg.of('live').up(key, store)
+    eq('live', llvl); eq('m.lua::var:cfg@1' .. SEP .. 'a', lup)
+end)
+
+test('altitudes: a module surfaces to its file with no row of its own', function ()
+    reset({ mod('m.lua') })
+    local lvl, key, anchor = altreg.up_of_node('m.lua', store)
+    eq('file', lvl); eq('m.lua', key)
+    eq(nil, anchor, 'a module has no row inside its own file view')
+end)

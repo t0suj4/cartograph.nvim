@@ -113,7 +113,13 @@ declarations), `callers` / `used-by` / `sites`, `table`, `refused`,
   a row that names a file is a door to it. A module that has not been read (lazy,
   unparsed) reports its imports **unknown**, never a rendered zero.
 - **descend** (`l`) / **ascend** (`h`) change altitude; **step** (`j`/`k`)
-  moves within a view and **steps out** at a block edge.
+  moves within a view and **steps out** at a block edge. A row that names a
+  **site** (an occurrence, a call) lands you *on its line* — descending the
+  containment chain when an altitude folds that line into a compound
+  statement. `h` is history (one press back, however many altitudes the landing
+  crossed); `H` breaks off the trail and goes up by containment instead — an
+  answer each altitude **declares** (`panes/altitudes.lua`), so an altitude
+  cannot ship without saying what encloses it.
 - **peek** — after an ascend the source pane lingers on where you were until
   you move (deferred re-sync); immediate for same-location moves.
 - **trail** — the `h`/`l` structural path (return the way you came), distinct

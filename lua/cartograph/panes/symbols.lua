@@ -18,6 +18,7 @@ local dfa    = require 'cartograph.df'
 local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
 local concerns = require 'cartograph.panes.concerns'
+local altitudes = require 'cartograph.panes.altitudes'
 
 -- file level shows functions and BLOCKS (runs of top-level statements rolled
 -- up under their first line); the individual vars live one level down
@@ -781,8 +782,34 @@ local function render_var(ctx, id)
     -- `var` is not a concern entry (its subject and inverse are structural), but
     -- its rows come from the same use edges the thin index lacks, so it shares
     -- the fabrication fix rather than being the one altitude left lying
-    render_sites(ctx, node, '·', 'used by · ' .. a.label, sites,
+    -- ★ THE CLASSIFICATION LEADS AND "used by" TAKES THE COUNT. render_sites appends
+    -- `(N)` to whatever label it is handed, so `used by · const` rendered as
+    -- `used by · const (5)` -- and it was read as "five const/write uses" (reported:
+    -- "I was confused there, I thought that was write use"). The count belongs to the
+    -- rows below it, which are READS, so it has to sit next to the words that name
+    -- them.
+    render_sites(ctx, node, '·', a.label .. ' · used by', sites,
         '(no reads found — writes only, or dynamic access)', concerns.needs_edges(store))
+    -- WHO WRITES IT. The rows above are readers ONLY -- the empty note even names
+    -- "writes only" as a reason for having none, so for a written var the whole story
+    -- could be a write and never appear on this altitude. The atlas already has the
+    -- writers: it counts them to classify the var at all.
+    local wseen, wrows = {}, {}
+    for _, wid in ipairs(a.writers or {}) do
+        local wn = not wseen[wid] and store.node(wid)
+        if wn then wseen[wid] = true; wrows[#wrows + 1] = wn end
+    end
+    if #wrows > 0 then
+        ctx.lines[#ctx.lines + 1] = ''
+        ctx.lines[#ctx.lines + 1] = ('writes (%d):'):format(#wrows)
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
+        ctx.line_sep[#ctx.lines] = true -- chrome: keep the preview, as elsewhere
+        for _, wn in ipairs(wrows) do
+            ctx.lines[#ctx.lines + 1] = '  ƒ ' .. M.fit_identity(wn.name or '?', '  ƒ ')
+            ctx.line_node[#ctx.lines] = wn.id
+            ctx.node_line[wn.id] = #ctx.lines
+        end
+    end
     -- the FIELD decomposition (on demand, ~ms with warm parses): a
     -- multi-writer var often blurs per-field ownership — show it
     local fa = atlas.fields(store, id)
@@ -1709,7 +1736,64 @@ function M.syms_of(key)
         local item = { text = nm.text, sr = nm.sr, sc = nm.sc, ec = nm.ec }
         if vid then
             item.id, item.kind = vid, 'var'
-        else
+        elseif dfa.present(n) then
+            -- ★ A LOCAL IS NOT AN UNRESOLVED NAME. Reported against mantis's
+            -- require_api: `$g_core_path` (a global) answered and `$p_api_name` /
+            -- `$t_new_globals` (a param and a local) read "(no node)" beside it --
+            -- while the fn altitude's cursor-word descent has ALWAYS jumped a local
+            -- to its defining statement. Same name, two routes, two answers.
+            -- The rule is the fn altitude's: the nearest def BEFORE this statement,
+            -- or -- when this statement is the one that defines it -- the next def
+            -- AFTER, since pointing at the row you are standing on says nothing.
+            -- ★ df's `l` IS 1-BASED and a name's range is 0-based. Comparing them
+            -- raw silently never matches, so `here` was always nil and a name this
+            -- statement DEFINES could not be told from one defined above it. It read
+            -- as correct on mantis, where df folds the enclosing `if` and there is no
+            -- statement on the name's line anyway -- the wrong code and the right
+            -- answer, which is how an off-by-one survives a probe.
+            local stmts = dfa.stmts(n)
+            local here
+            for i, st in ipairs(stmts) do
+                if st.l == nm.sr + 1 then here = i break end
+            end
+            local own = false
+            for _, d in ipairs(here and stmts[here] and stmts[here].def or {}) do
+                if d == nm.text then own = true break end
+            end
+            local best
+            for i, st in ipairs(stmts) do
+                for _, d in ipairs(st.def or {}) do
+                    if d == nm.text and i ~= here then
+                        if own then
+                            if i > (here or 0) and not best then best = i end
+                        elseif not here or i < here then
+                            best = i
+                        end
+                    end
+                end
+            end
+            if best then
+                -- def_line is 0-BASED, like every other range in this module
+                item.kind, item.def_stmt, item.def_line = 'local', best, stmts[best].l - 1
+            elseif own then
+                -- defined by THIS statement and nowhere else: the answer is that you
+                -- are looking at its definition. Saying "(no node)" here was the same
+                -- defect in miniature -- a local reading as unresolved beside a
+                -- global that resolved.
+                item.kind = 'here'
+            end
+        end
+        if not (item.id or item.def_line) then
+            -- a PARAMETER has no def row and no node, and "(no node)" beside a
+            -- resolved global is exactly the inconsistency this whole fix is about:
+            -- the row must say WHAT it is. Its declaration is the signature, which
+            -- is the header you are already looking at, so there is nothing to
+            -- descend to -- naming it is the whole answer.
+            for _, pn in ipairs(n.params or {}) do
+                if pn == nm.text then item.kind = 'param' break end
+            end
+        end
+        if not item.id and item.kind ~= 'local' then
             -- a CALL at this name: the call records carry their own head position,
             -- so the callee is matched by place, not by spelling
             for _, c in ipairs(store.topo():calls_of(n.file) or {}) do
@@ -1747,6 +1831,9 @@ local function render_syms(ctx, key)
     for _, it in ipairs(items) do
         local target = it.id and store.node(it.id)
         local tail = target and ('  → %s'):format(target.name or '?')
+            or (it.def_line and ('  ← %d'):format(it.def_line + 1))
+            or (it.kind == 'param' and '  (param)')
+            or (it.kind == 'here' and '  (defined here)')
             or '  (no node)'
         ctx.lines[#ctx.lines + 1] = '    ' .. it.text .. tail
         ctx.vnums[#ctx.lines] = tostring(it.sr + 1)
@@ -1757,7 +1844,7 @@ local function render_syms(ctx, key)
             ctx.node_line[it.id] = #ctx.lines
         end
         ctx.marks[#ctx.lines] = { { 0, 4 + #it.text,
-            target and 'CartographTitle' or 'CartographDim' },
+            (target or it.def_line) and 'CartographTitle' or 'CartographDim' },
             { 4 + #it.text, -1, 'CartographDim' } }
     end
 end
@@ -3152,6 +3239,65 @@ function M.attach(win)
         if loc.row then pcall(vim.api.nvim_win_set_cursor, M.win, { loc.row, 2 }) end
     end
     local function push_trail() M.trail[#M.trail + 1] = view_loc() end
+    -- LAND ON A SOURCE LINE in the view just rendered. A row that names a SITE
+    -- (an occurrence, a use) points at a line, and arriving at the top of the
+    -- enclosing function throws that away -- the hover on the very same row
+    -- highlights the exact range, so the descent was losing information the
+    -- eye already had (CART-0480). Anchors are `line_stmt` (1-based); an
+    -- occurrence nested inside a compound statement has no row of its own, so
+    -- the nearest anchor AT OR ABOVE it is the statement that contains it --
+    -- the fn altitude's own rule for nested lines ("anything nested in an
+    -- if/for body belongs to the last statement starting at or before its
+    -- line"). Iterates in row order, not pairs(): two rows may share an anchor
+    -- and the landing has to be the same one every time.
+    local function row_for_line(line1)
+        if not (line1 and M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+        local best
+        for r = 1, vim.api.nvim_buf_line_count(M.buf) do
+            local l = M.line_stmt[r]
+            if l == line1 then return r end
+            if l and l < line1 and (not best or l > M.line_stmt[best]) then best = r end
+        end
+        return best
+    end
+    --- The containment key one level DOWN from row `r`, or nil if the row is a
+    --- leaf. Two spellings of the same thing: a row that already carries a block
+    --- key (a `▸` form, a bodyless fn's `forms` row), and a df statement row,
+    --- whose compound-ness is a question for the source (this is descend_fn_row's
+    --- step 0, shared so the landing and the keypress cannot disagree).
+    local function block_key_at(r)
+        if M.line_block[r] then return M.line_block[r] end
+        if M.view.level ~= 'fn' then return nil end
+        local node, sl = store.node(M.view.fn), M.line_stmt[r]
+        if not (node and sl) then return nil end
+        if #require('cartograph.providers.treesitter')
+            .forms(store.abspath(node), sl - 1) == 0 then return nil end
+        return ('%s\31%d\31%d\31%d\31%d'):format(node.id, sl - 1, 0, -1, -1)
+    end
+    -- LAND DEEP. The altitude you arrive at may FOLD the line you were pointed
+    -- at into a compound statement's row -- an `if` collapses its whole body
+    -- onto one -- so stopping at the nearest anchor above still left you looking
+    -- at the wrong line ("it still doesn't land there if it's within an if
+    -- block"). Keep descending the containment chain while a deeper level holds
+    -- the line. Each step PUSHES THE TRAIL, so `h` walks back out exactly the
+    -- way you came in: the return path is the landing's by-product, not an
+    -- afterthought, and no pivot is needed (the descent already focused the fn).
+    -- Bounded: a chain is nesting depth, and a malformed key must not spin.
+    local function land_on_line(line1)
+        for _ = 1, 16 do
+            local r = row_for_line(line1)
+            if not r then return end
+            pcall(vim.api.nvim_win_set_cursor, M.win, { r, 2 })
+            if M.line_stmt[r] == line1 then break end
+            local key = block_key_at(r)
+            if not key then break end
+            push_trail()
+            M.trail[#M.trail].landed = true -- injected by the landing, not by a
+                                            -- keypress: `H` tears the run off whole
+            M.show('block', key)  -- renders synchronously: the rows below are fresh
+        end
+        vim.api.nvim_exec_autocmds('CursorMoved', { buffer = M.buf })
+    end
     -- browser-initiated pivots must not clear the trail (see on_focus)
     local function browser_pivot(id)
         M._resync, M._stepout, M._ghost = nil, nil, nil -- a pivot cancels pending state
@@ -3164,7 +3310,10 @@ function M.attach(win)
     -- which invalidates the forward memory — the two-stack h/l pair.
     -- a var with members is a TABLE: descend shows them; a scalar shows sites
     local enter_var = M.var_level
-    local function enter(level, ctxval, pivot_id)
+    -- `land` (1-based source line) is honoured only on the FRESH show: on the
+    -- restore path the saved row is where you were when you pressed h, and that
+    -- has to keep winning or the two-stack h/l memory stops being a memory.
+    local function enter(level, ctxval, pivot_id, land)
         M._stepout, M._ghost = nil, nil -- a descent abandons pending step-out / ghost
         push_trail()
         if pivot_id then browser_pivot(pivot_id) end
@@ -3175,6 +3324,7 @@ function M.attach(win)
         else
             M.fwd_trail = {}
             M.show(level, ctxval)
+            if land then land_on_line(land) end
         end
     end
     -- an unresolved name may live in an UNPARSED bundle (*.min.js): find
@@ -3304,6 +3454,21 @@ function M.attach(win)
         return false
     end
 
+    --- ★ THE FILE A SUBJECT LIVES IN WAS UNREACHABLE FROM IT. Reported from the var
+    --- altitude, on the header row: "I would expect descending inside the file, so I
+    --- can look what else is here". A function can reach its file by ASCENDING, but
+    --- only when the trail is empty -- `h` is journey-back first, so arriving at a
+    --- var from one of its usages and pressing h returns to that usage, and the file
+    --- that DECLARES the var has no route at all. The header row of a node altitude
+    --- had no descent either, so it is free to mean this: go to where this lives.
+    local function enter_declaring_file(r)
+        local id = M.row_subject(r) or M.subject('def')
+        local n = id and store.node(id)
+        if not (n and n.file) then return end
+        store.set_context(nil)
+        enter('file', n.file)
+    end
+
     --- The symbols key for row `r`, plus how many of its names RESOLVE. Used twice:
     --- to decide whether the level is worth opening at all, and to open it.
     local function syms_at(r)
@@ -3350,6 +3515,37 @@ function M.attach(win)
             if it.kind == 'fn' then return enter('fn', it.id, it.id) end
             return enter(M.var_level(it.id), it.id, it.id)
         end
+        if it.kind == 'param' then
+            -- ★ A PARAMETER IS NOT A DEAD END. Reported from the browser: "Still
+            -- can't descend here", standing on `p_api_name  (param)`. Naming it was
+            -- half the answer -- the other half is that a parameter's question is
+            -- WHERE ITS VALUE COMES FROM, and that is the call sites of the function
+            -- it belongs to. So it descends into callers, the altitude that already
+            -- previews each site with its arguments in view.
+            -- (The richer answer -- the ARGUMENT AT THIS POSITION per site, which
+            -- argv already records as {k='lit', v=…} / {k='expr'} -- is the sources
+            -- axis, filed rather than smuggled in here.)
+            local id = M.subject('def')
+            local n = id and store.node(id)
+            if n and n.kind == 'function' then
+                store.set_context(nil)
+                return enter('callers', id)
+            end
+        end
+        if it.def_line then
+            -- a LOCAL's definition is a STATEMENT in the body we came from, so going
+            -- to it is the ascent we would have made anyway plus a landing: the same
+            -- move the fn altitude makes for a cursor word, from one level in.
+            if #M.trail > 0 then
+                local loc = table.remove(M.trail)
+                store.set_highlight(nil)
+                store.set_context(nil)
+                restore_loc(loc)
+                arm_or_sync()
+                land_on_line(it.def_line + 1)
+            end
+            return
+        end
         local id = M.subject('def')
         local n = id and store.node(id)
         if n then
@@ -3369,12 +3565,8 @@ function M.attach(win)
         -- their source positions, so a word under the cursor would descend
         -- into whatever callee it happens to spell (bnw: the first `if` landed
         -- in launch_platform_info). Reveal the structure instead.
-        local sl = M.line_stmt[r]
-        if sl and #require('cartograph.providers.treesitter')
-            .forms(store.abspath(node), sl - 1) > 0 then
-            return enter('block',
-                ('%s\31%d\31%d\31%d\31%d'):format(node.id, sl - 1, 0, -1, -1))
-        end
+        local bkey = block_key_at(r)
+        if bkey then return enter('block', bkey) end
         local col  = vim.api.nvim_win_get_cursor(win)[2]
         local text = vim.api.nvim_buf_get_lines(M.buf, r - 1, r, false)[1] or ''
         local word = word_at(text, col)
@@ -3452,6 +3644,7 @@ function M.attach(win)
         end
         -- 7. LAST: the names, even when none of them resolve -- "this statement names
         -- x and y, and neither has a node" is an answer; nothing happening is not.
+        if not M.line_stmt[r] then return enter_declaring_file(r) end
         enter_syms(r)
     end
     -- a row in a live-value view: a sub-table descends deeper (the live
@@ -3605,13 +3798,20 @@ function M.attach(win)
             local s = M.line_site[r]
             if s and store.node(s.fn) then
                 store.set_context(nil)
-                enter('fn', s.fn, s.fn)
+                return enter('fn', s.fn, s.fn, s.line and s.line + 1)
             end
+            -- a WRITES row: the function that sets this var
+            local wn = store.node(M.line_node[r])
+            if wn and r > 1 and STAGEABLE[wn.kind] then
+                store.set_context(nil)
+                return enter('fn', wn.id, wn.id)
+            end
+            enter_declaring_file(r)
         elseif M.view.level == 'occs' then
             local s = M.line_site[r]
             if s and store.node(s.fn) then
                 store.set_context(nil)
-                enter('fn', s.fn, s.fn)
+                enter('fn', s.fn, s.fn, s.line and s.line + 1)
             end
         elseif M.view.level == 'refused' then
             -- a candidate row: jump into that def (a real fork taken)
@@ -3821,130 +4021,70 @@ function M.attach(win)
     end), { buffer = M.buf, nowait = true, desc = 'cartograph: pivot here (focus without zooming)' })
     -- ascending lands the cursor ON what we came from (the file-manager rule),
     -- not on the first row of the wider view
-    vim.keymap.set('n', keys.ascend, gestured('ascend', function ()
+    -- h IS HISTORY, H IS CONTAINMENT (user's steer, CART-0480). A landing chain
+    -- descends several altitudes on one `l`, and `h` is left exactly as it was:
+    -- ONE PRESS RETURNS YOU WHERE YOU CAME FROM. That is what "the way you came"
+    -- always meant -- the levels the landing added were never keypresses, so
+    -- making h retrace them one at a time turned one gesture into three and
+    -- broke the contract the trail exists to keep. Going UP the containment tree
+    -- instead is the other verb: `ascend_structural` breaks off the trail and
+    -- asks the graph what encloses this, which from a use inside an `if` is that
+    -- `if`'s row in its function.
+    local function ascend_once(structural)
         -- a pending block step-out is provisional: h returns INTO the block
         if M._stepout then return return_into_block() end
         if #M.trail == 0 and M.view.level == 'files' then return end
         -- remember exactly where we left, so l can return there (row and all)
         M.fwd_trail[#M.fwd_trail + 1] = view_loc()
         -- journey-back: return the way you came (l pushed it); structural
-        -- ascent is the fallback for places you jumped into
-        if #M.trail > 0 then
+        -- ascent is the fallback for places you jumped into -- and what H asks
+        -- for outright
+        if #M.trail > 0 and not structural then
+            -- one KEYPRESS back: drop the levels the landing injected on the
+            -- way in, so h lands on the row that was descended, not on the
+            -- chain's waypoints
+            while #M.trail > 1 and M.trail[#M.trail].landed do
+                table.remove(M.trail)
+            end
             local loc = table.remove(M.trail)
             store.set_highlight(nil)
             store.set_context(nil)
             restore_loc(loc)
             return arm_or_sync() -- defer the def-pane resync to the next move
         end
-        local function region_of(v)
-            for _, n in ipairs(store.by_file[v.file] or {}) do
-                if n.kind == 'region' and atr.sl(n.range) <= atr.sl(v.range)
-                    and atr.el(n.range) >= atr.el(v.range) then
-                    return n
-                end
-            end
-        end
-        local function surface_to_var(v)
-            local blk = v and region_of(v)
-            if blk then
-                M.show('region', blk.id)
-                local r = M.node_line[v.id]
+        -- STRUCTURAL: THE DECLARED ANSWER. Eleven hand-written branches lived
+        -- here, two of them added the same day H was (block's row, syms's whole
+        -- existence) -- which is the shape concerns.lua was written to stop:
+        -- "every one of those lists was incomplete for at least one altitude".
+        -- The answer is now one lookup per altitude, fenced by navaudit's
+        -- containment disposition ([[cartograph.panes.altitudes]], CART-0481).
+        store.set_context(nil); store.set_highlight(nil)
+        local e = altitudes.of(M.view.level)
+        if not (e and e.up) then return arm_or_sync() end -- a root: stay put
+        local lvl, key, anchor = e.up(altitudes.key_of(M.view.level, M.view), store,
+            { anchor = M.fsm_anchor() })
+        if not lvl then return arm_or_sync() end
+        M.show(lvl, key)
+        -- the anchor forms are a CLOSED set (see the registry header): each is
+        -- "which row means the place I came from", and `line` goes through the
+        -- landing so a folded compound statement opens on the way.
+        if anchor then
+            if anchor.row then
+                pcall(vim.api.nvim_win_set_cursor, win, { anchor.row, 0 })
+            elseif anchor.line then
+                land_on_line(anchor.line)
+            elseif anchor.node then
+                local r = M.node_line[anchor.node]
                 if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
-            elseif v then
-                M.show('file', v.file)
             else
-                M.show('files')
-            end
-        end
-        if M.view.level == 'lit' then
-            -- pop one path segment; at the root, surface onto the var itself
-            store.set_context(nil)
-            local parts = vim.split(M.view.lit or '', '\31')
-            if #parts > 1 then
-                local child = table.concat(parts, '\31')
-                table.remove(parts)
-                M.show('lit', table.concat(parts, '\31'))
                 for r = 1, vim.api.nvim_buf_line_count(M.buf) do
-                    local e = M.line_lit[r]
-                    if e and e.key == child then
+                    local hit = (anchor.file and M.line_file[r] == anchor.file)
+                        or (anchor.state and M.line_state[r] == anchor.state)
+                        or (anchor.lit and (M.line_lit[r] or {}).key == anchor.lit)
+                    if hit then
                         pcall(vim.api.nvim_win_set_cursor, win, { r, 2 })
                         break
                     end
-                end
-            else
-                surface_to_var(store.node(parts[1]))
-            end
-        elseif M.view.level == 'state' then
-            store.set_context(nil)
-            local st = M.view.state
-            M.show('states')
-            for r = 1, vim.api.nvim_buf_line_count(M.buf) do
-                if M.line_state[r] == st then
-                    pcall(vim.api.nvim_win_set_cursor, win, { r, 2 })
-                    break
-                end
-            end
-        elseif M.view.level == 'states' then
-            -- the states altitude hangs below the spec var: surface into its
-            -- block with the cursor on it (files is the no-model fallback)
-            store.set_context(nil)
-            surface_to_var(M.fsm_anchor())
-        elseif M.view.level == 'ws' then
-            store.set_context(nil)
-            M.show('files')
-        elseif M.view.level == 'protos' then
-            -- a concern INDEX is a root: there is nothing structurally above it,
-            -- so h leaves for the one tree that is always there
-            store.set_context(nil)
-            M.show('files')
-        elseif concerns.of(M.view.level) then
-            -- THE INVERSE, declared: every relation altitude reconstructed its
-            -- ascend target by parsing its own key (occs branched on the key's
-            -- `kind` to choose var-vs-callers; refused/regfor matched the fn
-            -- out). Four copies of one idea, now one lookup.
-            store.set_context(nil)
-            local e = concerns.of(M.view.level)
-            local level, key = e.ascend(M.view[e.view_key])
-            -- a key that no longer names a node means the thing we hung below
-            -- is gone: surface to the file tree rather than an empty view
-            if level and (not key or store.node(key)) then
-                M.show(level, key)
-                if e.ascend_row then
-                    pcall(vim.api.nvim_win_set_cursor, win, { e.ascend_row, 0 })
-                end
-            else
-                M.show('files')
-            end
-        elseif M.view.level == 'var' then
-            store.set_context(nil)
-            local id = M.view.var
-            M.show('region', M.view.region)
-            local r = M.node_line[id]
-            if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
-        elseif M.view.level == 'block' then
-            -- a body descent hangs below its function: surface back to it
-            store.set_context(nil); store.set_highlight(nil)
-            local fnid = (M.view.block or ''):match('^(.-)\31')
-            if fnid and store.node(fnid) then M.show('fn', fnid)
-            else M.show('files') end
-        elseif M.view.level == 'fn' or M.view.level == 'region'
-            or M.view.level == 'tbl' then
-            store.set_highlight(nil)
-            local id = (M.view.level == 'fn' and M.view.fn)
-                or (M.view.level == 'region' and M.view.region) or M.view.tbl
-            local n = store.node(id)
-            M.show('file', n and n.file or M.view.file)
-            local r = M.node_line[id]
-            if r then pcall(vim.api.nvim_win_set_cursor, win, { r, 2 }) end
-        elseif M.view.level == 'file' then
-            local from = M.view.file
-            M.show('files')
-            -- numeric scan: in tree mode a file can appear twice; land on the
-            -- first (expanded) occurrence, deterministically
-            for r = 1, vim.api.nvim_buf_line_count(M.buf) do
-                if M.line_file[r] == from then
-                    pcall(vim.api.nvim_win_set_cursor, win, { r, 0 })
-                    break
                 end
             end
         end
@@ -3952,7 +4092,14 @@ function M.attach(win)
         -- fn, var -> block, …) re-syncs the def pane to that node too — at
         -- once or on the next move, per config.sync_on_ascend
         arm_or_sync()
-    end), { buffer = M.buf, desc = 'cartograph: ascend (to file / to file tree)' })
+    end
+    vim.keymap.set('n', keys.ascend, gestured('ascend', ascend_once),
+        { buffer = M.buf, desc = 'cartograph: ascend (to file / to file tree)' })
+    if keys.ascend_structural then
+        vim.keymap.set('n', keys.ascend_structural, gestured('ascend-structural', function ()
+            ascend_once(true)
+        end), { buffer = M.buf, desc = 'cartograph: ascend by CONTAINMENT (off the trail)' })
+    end
 
     -- j/k as a depth-first walk of the form tree. Inside a block they move
     -- among its forms; at the FIRST/LAST form they STEP OUT to the parent —

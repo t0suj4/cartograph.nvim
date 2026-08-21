@@ -192,6 +192,12 @@ M.keys = {
     ascend     = 'h',       -- symbols: zoom out (function -> file -> file tree);
     descend    = 'l',       -- symbols: zoom in — h/l are free in a linear list
                             -- (<CR> also descends, like the tree's pivot)
+    -- h is HISTORY, H is CONTAINMENT. h returns the way you came (one press per
+    -- descent, however many altitudes that descent crossed); H breaks off the
+    -- trail and goes up by what ENCLOSES this — from a use inside an `if`, that
+    -- `if`'s row in its function. It takes vim's H (top of screen) in THIS PANE
+    -- ONLY, where the rows are an altitude and not a screenful; false gives it back.
+    ascend_structural = 'H',
     down       = 'j',       -- symbols: next row; at a block's last row it steps
     up         = 'k',       -- OUT to the parent (and k mirrors upward)
     cycle      = '<Tab>',   -- symbols: cycle the altitude's lens / files view mode

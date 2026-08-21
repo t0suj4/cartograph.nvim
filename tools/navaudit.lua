@@ -231,6 +231,50 @@ for _ in pairs(symbols.NODE_HOVER) do nh = nh + 1 end
 print(('  %d altitudes in the node-hover class, %d explicitly out'):format(nh,
     (function () local n = 0 for _ in pairs(NO_NODE_HOVER) do n = n + 1 end return n end)()))
 
+-- ── D. CONTAINMENT DISPOSITION ──────────────────────────────────────────────
+-- Every altitude must say what ENCLOSES it (`up`) or why nothing does (`root`).
+-- This is the disposition that was MISSING while the answer lived in an
+-- if/elseif: `syms` had no branch at all and nobody could tell, because the
+-- trail answers before containment ever does. The check is deliberately the
+-- same shape as B and C — declared, or explicitly not applicable, ratchet 0.
+print('\n== D. CONTAINMENT DISPOSITION: every altitude declares what contains it ==')
+local altreg = require 'cartograph.panes.altitudes'
+local nup, nroot = 0, 0
+for lvl in pairs(altitudes) do
+    local e = altreg.of(lvl)
+    if not e then
+        fail(('ALTITUDE %s has NO containment disposition: give it an `up` in'
+            .. ' panes/altitudes.lua, or a `root` saying why nothing contains it')
+            :format(lvl))
+    elseif e.up and e.root then
+        fail(('ALTITUDE %s declares BOTH an `up` and a `root` — one is a leftover')
+            :format(lvl))
+    elseif not e.up and not e.root then
+        fail(('ALTITUDE %s has an EMPTY containment entry'):format(lvl))
+    elseif e.up then nup = nup + 1
+    else nroot = nroot + 1 end
+end
+for lvl in pairs(altreg.REGISTRY) do
+    if not altitudes[lvl] then
+        fail(('DEAD altitudes.REGISTRY entry %q — symbols.lua never dispatches on it')
+            :format(lvl))
+    end
+end
+-- a relation altitude must NOT restate its inverse here: concerns.ascend is the
+-- one source, folded in at load. A hand-written entry beside a concern entry is
+-- the second-source-of-truth bug this file exists to prevent.
+for lvl in pairs(concerns.REGISTRY) do
+    local e = altreg.of(lvl)
+    if e and not e.from_concern then
+        fail(('ALTITUDE %s is a CONCERN but declares its own containment: it would'
+            .. ' shadow concerns.ascend, which is the same fact'):format(lvl))
+    elseif e and e.view_key ~= concerns.REGISTRY[lvl].view_key then
+        fail(('ALTITUDE %s disagrees with its concern about WHICH view field holds'
+            .. ' its key'):format(lvl))
+    end
+end
+print(('  %d altitudes: %d declare a container, %d are roots'):format(nup + nroot, nup, nroot))
+
 -- ── report ──────────────────────────────────────────────────────────────────
 print('')
 if #fails > 0 then

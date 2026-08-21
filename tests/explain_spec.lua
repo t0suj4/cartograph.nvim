@@ -295,10 +295,17 @@ end)
 
 -- ── a dead `l` says so ───────────────────────────────────────────────────────
 
-test('refusal: `l` on a title row SPEAKS instead of doing nothing silently',
+-- ★ THE THIRD REPORT ON THIS ROW CHANGED THE ANSWER. `l` on a title row was dead,
+-- so it was made to SPEAK ("nothing below it") -- reported twice, from `ƒ isTable`
+-- (fn) and `≡ local script,…` (region). The third report came from the var altitude
+-- and said what it should DO instead: "I would expect descending inside the file, so
+-- I can look what else is here". A title row is the subject, not a child, so it has
+-- no natural "down" -- and the file the subject LIVES IN was otherwise unreachable
+-- from it (a function can ascend to its file, but only with an empty trail: `h` is
+-- journey-back first). So the title row means "where this lives" now, and the speech
+-- is left for rows that genuinely have nothing, which the test below pins.
+test('refusal: `l` on a title row goes to the file the subject lives in',
     function ()
-    -- Reported twice, from `ƒ isTable` (fn) and `≡ local script,…` (region), both
-    -- row 1, both with byte-identical before/after rows in the entry.
     local id = project()
     vim.cmd('vsplit')
     symbols.buf = nil
@@ -318,11 +325,9 @@ test('refusal: `l` on a title row SPEAKS instead of doing nothing silently',
         require('cartograph.config').keys.descend, true, false, true), 'x', false)
     vim.notify = real
 
-    eq('fn', symbols.view.level, 'nothing moved, which is correct here')
-    ok(#said > 0, 'but it SAID so: silence reads as broken')
-    local text = table.concat(said, ' ')
-    ok(text:find('nothing below', 1, true), text)
-    ok(text:find('fn', 1, true), 'and names the view you are in: ' .. text)
+    eq('file', symbols.view.level, 'the title row goes to where the subject lives')
+    eq(store.node(id).file, symbols.view.file)
+    eq(0, #said, 'and it does not also talk about it: the move IS the answer')
     store.loc_provider = nil
     vim.cmd('close')
 end)

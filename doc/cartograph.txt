@@ -742,6 +742,9 @@ NAVIGATION ~
   forward       <C-i>     jumplist forward
   open_file     gf        open the real file at this entry
   ascend        h         symbols: zoom out (function -> file -> tree)
+  ascend_structural H     symbols: zoom out by CONTAINMENT instead of
+                          history — off the trail (|cartograph-site|);
+                          false gives vim's H back
   descend       l         symbols: zoom in
   down          j         symbols: next row; at a block's last row it
                           steps OUT to the parent
@@ -798,6 +801,46 @@ unbound until you ask for them:
       pick = ',n' } }
 <
 
+A TITLE ROW                                                  *cartograph-title*
+
+Row 1 of an altitude is its SUBJECT, not one of its children — `ƒ require_api`,
+`· g_core_path`, `≡ <first line>` — so there is nothing under it in the direction
+`descend` normally goes. It means "where this lives" instead: `descend` on a title
+row opens the FILE the subject is declared in, so you can see what else is there.
+
+That route matters most where nothing else offers it. A var's rows are its USAGES,
+and `ascend` is journey-back before it is structural — arrive at a var from one of
+its usages and `h` returns to that usage, so the file that declares it would
+otherwise have no route from it at all.
+
+Where the subject has no file to go to, `descend` on the title row SAYS so rather
+than doing nothing: silence reads as broken (|cartograph-refusals|).
+
+DESCENDING A SITE                                             *cartograph-site*
+
+A row that names a SITE — one occurrence of a var, one call in a caller — points
+at a line, and `descend` lands you on it: not at the top of the enclosing
+function, but on the row that is the line itself. Where the line is nested inside
+a compound statement that an altitude folds onto one row — a use inside an `if` —
+the landing keeps descending the containment chain until it reaches it, so one
+keypress can cross more than one altitude.
+
+Every step of that chain is recorded, so nothing about the way back is guessed:
+`h` returns to the occurrence list you started from in ONE press, however many
+altitudes the landing crossed. Nothing is pivoted on the way down — the focus is
+the function you descended into, as with any other descent.
+
+`h` IS HISTORY, `H` IS CONTAINMENT. `h` is unchanged by any of this: one press
+returns you where you came from, whether the descent crossed one altitude or
+three, because the levels a landing adds were never keypresses. Going UP instead
+of BACK is the other verb: `H` breaks off the trail and asks what encloses this —
+from a use inside an `if`, that `if`'s row in its function; from a row's names,
+the statement they are in. Where you jumped in rather than descended, `h` already
+answers structurally, so there `H` and `h` agree.
+
+`ascend` then `descend` still puts you back on the row you left rather than
+re-landing, because journey-back memory outranks the landing.
+
 ASCENDING                                                   *cartograph-ascend*
 
 `ascend` (h) takes you out one level, back to the row you descended from — and the
@@ -821,22 +864,36 @@ own nested statements if it has any, then a callee or a variable named UNDER THE
 CURSOR, then — when the statement names more than one resolvable thing — its
 NAMES, as rows:
 >
-    ≡ q(cfg, x + 1)
-        q    → q
-        cfg  → cfg
-        x    (no node)
+    ≡ $t_local = g( $g_cfg, $p_name );
+        t_local  (defined here)
+        g        → g
+        g_cfg    → g_cfg
+        p_name   (param)
 <
+Every row says what its name IS, because "(no node)" beside a resolved global is
+not an answer:
+
+  → name          a global, a module variable or a callee: its own node, and
+                  `descend` goes there
+  ← 281           a local: the line of the statement that DEFINES it, and
+                  `descend` takes you to that statement. Dataflow folds a control
+                  statement together with its body, so for a local assigned
+                  inside an `if` the answer is the `if` — which is the row you
+                  would descend anyway
+  (defined here)  this statement is the definition
+  (param)         declared in the signature you are already under
+  (no node)       nothing the graph knows: a field, a builtin, a superglobal, or
+                  a callee it could not resolve. The name still shows itself in
+                  the source pane
+
 `j`/`k` steps them and steps OUT at either end, the way a block's rows do, so
-walking off the list puts you back on the statements. `descend` on a name goes to
-what it points at; a name with no node says so and shows itself in the source
-pane rather than doing nothing — a local, a field, or a callee the graph could
-not resolve are all real answers.
+walking off the list puts you back on the statements.
 
 The names are the ones the language's own spec declares as mentions, so nothing
-here is a hand-kept list that can fall behind a grammar. Each is resolved by
-POSITION against the graph's use edges, which is why a local that shadows a
-module variable resolves to nothing rather than to the module variable: no use
-edge covers that spot.
+here is a hand-kept list that can fall behind a grammar. A global is resolved by
+POSITION against the graph's use edges, which is why a local that shadows a module
+variable is a LOCAL here and not the module variable: no use edge covers that
+spot.
 
 A statement whose only resolvable name IS its single callee skips the level and
 descends straight into the callee — a one-row level would be a detour, and that

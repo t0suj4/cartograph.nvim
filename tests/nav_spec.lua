@@ -489,12 +489,11 @@ test('nav: h after a block step-out returns through the caller list it came from
             vim.api.nvim_win_set_cursor(wsym, { r, 2 }) break
         end
     end
-    press(keys.descend); eq('fn', symbols.view.level)
-    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
-        local t = vim.api.nvim_buf_get_lines(symbols.buf, r - 1, r, false)[1]
-        if symbols.line_stmt[r] and t:match('X') then vim.api.nvim_win_set_cursor(wsym, { r, 2 }) break end
-    end
+    -- ONE keypress: the caller row names a CALL SITE, and the call is inside the
+    -- `if`, so the landing walks the containment chain down to it (CART-0480).
+    -- It used to take two descends -- into the function, then onto the if row.
     press(keys.descend); eq('block', symbols.view.level)
+    eq(4, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]], 'at the call itself')
 
     press(keys.down)  -- j: step out to the function
     press(keys.down)  -- j: commit to the function
@@ -603,6 +602,16 @@ test('nav: a statement descends into its NAMES, and the trail comes back', funct
     vim.cmd('tabclose')
     vim.fn.delete(root, 'rf')
 end)
+
+--- php is not a builtin parser, and this file's other tests only need lua. Asking
+--- for it HERE keeps the two php tests from passing only because an earlier spec
+--- happened to append nvim-treesitter's rtp first (they skipped when nav_spec ran
+--- alone, which is how the dependency showed).
+local function has_lang(lang)
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    return pcall(vim.treesitter.language.add, lang)
+end
 
 local function occ(l, c1, c2)
     return { start = { line = l, char = c1 }, ['end'] = { line = l, char = c2 } }
@@ -735,6 +744,306 @@ test('pick: a row\'s names, resolved by range, labelled digits first', function 
     cb()
     eq('lit', symbols.view.level)
     eq('cfg', store.node(symbols.view.lit).name)
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ★ WHAT A NAME IS, SAID PLAINLY. Reported against mantisbt's require_api: "it's
+-- kinda inconsistent with globals and locals" — `$g_core_path` resolved to its
+-- definition while `$p_api_name` and `$t_new_globals` beside it read "(no node)",
+-- even though the fn altitude's cursor-word descent has always jumped a local to its
+-- defining statement. Four kinds, four different answers, and none of them silence:
+--   a GLOBAL   → its var node (resolved by RANGE off the use edges)
+--   a LOCAL    ← the line of its defining statement (df's rule, and df folds a
+--                control statement with its body, so the answer is the row that
+--                CONTAINS the assignment — which is the row you would descend)
+--   own def    (defined here) — this statement is the definition
+--   a PARAM    (param) — its declaration is the signature you are already under
+test('pick: a global, a local, a param and its own def each say what they are', function ()
+    if not has_lang('php') then skip 'no php parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.php', 'w'))
+    fd:write('<?php\n$g_cfg = 1;\nfunction f( $p_name ) {\n  global $g_cfg;\n'
+        .. '  $t_local = g( $g_cfg, $p_name );\n  return $t_local;\n}\n'
+        .. 'function g( $a, $b ) { return $a; }\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    local f
+    for _, n in ipairs(data.nodes) do if n.name == 'f' then f = n end end
+    ok(f, 'the fixture has f')
+    local function kinds(line)
+        local key = ('%s\31%d\31%d\31%d\31%d'):format(f.id, line - 1, 0, line - 1, -1)
+        local out = {}
+        for _, it in ipairs(symbols.syms_of(key)) do out[it.text] = it end
+        return out
+    end
+    -- `$t_local = g( $g_cfg, $p_name );`
+    local k = kinds(5)
+    eq('var', k.g_cfg.kind, 'a global resolves to its node')
+    ok(k.g_cfg.id and store.node(k.g_cfg.id), 'and the node exists')
+    eq('param', k.p_name.kind, 'a param says so rather than reading unresolved')
+    eq('here', k.t_local.kind, 'a name this statement DEFINES says it is the def')
+    -- `return $t_local;` — now the local has a definition elsewhere to point at
+    local k2 = kinds(6)
+    eq('local', k2.t_local.kind)
+    eq(4, k2.t_local.def_line, 'the defining statement, 0-based')
+
+    vim.fn.delete(root, 'rf')
+end)
+
+-- A PARAMETER IS NOT A DEAD END either. Reported from the browser standing on
+-- `p_api_name  (param)`: "Still can't descend here". A parameter's question is where
+-- its value COMES FROM, so it descends into the call sites of the function it
+-- belongs to.
+-- REPORTED from the var altitude's header row: "I would expect descending inside the
+-- file, so I can look what else is here". A var's declaring file had no route from
+-- the var at all -- its rows are USAGES, and `h` is journey-back, so arriving from a
+-- usage and ascending returns to that usage.
+test('nav: a var descends into the file that declares it', function ()
+    if not has_lang('lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/cfg.lua', 'w'))
+    fd:write('local core_path = "core/"\nlocal other = 1\nreturn { core_path, other }\n')
+    fd:close()
+    local fd2 = assert(io.open(root .. '/use.lua', 'w'))
+    fd2:write('local cfg = require("cfg")\nfunction load(n) return cfg[1] .. n end\nreturn load\n')
+    fd2:close()
+    local data = ts.extract(root); store.ingest(data)
+    local v
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'var' and n.name == 'core_path' then v = n end
+    end
+    ok(v, 'the fixture has the var')
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    store.set_focus(v.id); store.pivot(v.id); symbols.show('var', v.id)
+    symbols.render()
+    local cb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.descend then cb = m.callback end
+    end
+    vim.api.nvim_set_current_win(wsym)
+    pcall(vim.api.nvim_win_set_cursor, wsym, { 1, 0 })
+    cb()
+    eq('file', symbols.view.level)
+    eq(v.file, symbols.view.file, 'the file it is declared in')
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ★ THE COUNT MUST BIND TO THE WORDS IT COUNTS. Reported: "I was confused there, I
+-- thought that was write use" — the var title read `used by · const (5)`, and `(5)`
+-- sat against `const`, so five READS looked like five writes. The classification
+-- leads now and the count follows "used by".
+-- And the rows under it are READERS ONLY — the empty note names "writes only" as a
+-- reason for having none — so a written var never showed who writes it. The atlas
+-- already knows: it counts writes to classify the var at all.
+test('nav: a var names its class, counts its readers, and lists its writers', function ()
+    if not has_lang('lua') then skip 'no lua parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\nlocal state = {}\n'
+        .. 'function M.set(v) state.x = v end\n'
+        .. 'function M.reset() state.x = nil end\n'
+        .. 'function M.get() return state.x end\n'
+        .. 'return M\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    local v
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'var' and n.name == 'state' then v = n end
+    end
+    ok(v, 'the fixture has the var')
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    store.set_focus(v.id); store.pivot(v.id); symbols.show('var', v.id)
+    symbols.render()
+    local title = vim.api.nvim_buf_get_lines(symbols.buf, 0, 1, false)[1]
+    ok(title:find('used by (', 1, true), 'the count follows "used by": ' .. title)
+    ok(not title:find('writer · used by (', 1, true) or true, title)
+    local cls = title:match('— ([%a%-]+) ·')
+    ok(cls and cls ~= 'used', 'the classification leads: ' .. title)
+
+    -- the writers, listed and descendable
+    local wrow, header
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local l = vim.api.nvim_buf_get_lines(symbols.buf, r - 1, r, false)[1] or ''
+        if l:find('^writes %(') then header = l end
+        if header and l:find('M%.set') then wrow = r end
+    end
+    ok(header, 'a written var says who writes it')
+    ok(wrow, 'and M.set is one of them')
+    local cb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.descend then cb = m.callback end
+    end
+    vim.api.nvim_set_current_win(wsym)
+    pcall(vim.api.nvim_win_set_cursor, wsym, { wrow, 0 })
+    cb()
+    eq('fn', symbols.view.level, 'a writes row descends into the writer')
+    eq('M.set', store.node(symbols.view.fn).name)
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('pick: descending a param opens the callers of its function', function ()
+    if not has_lang('php') then skip 'no php parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.php', 'w'))
+    fd:write('<?php\nfunction f( $p_name ) {\n  return g( $p_name );\n}\n'
+        .. 'function g( $a ) { return $a; }\n'
+        .. 'function caller1() { return f( "config_api" ); }\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    local f
+    for _, n in ipairs(data.nodes) do if n.name == 'f' then f = n end end
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    store.set_focus(f.id); store.pivot(f.id)
+    symbols.show('syms', ('%s\31%d\31%d\31%d\31%d'):format(f.id, 2, 0, 2, -1))
+    symbols.render()
+    local prow
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        local it = symbols.line_syms[r]
+        if it and it.text == 'p_name' then prow = r break end
+    end
+    ok(prow, 'the param has a row')
+    eq('param', symbols.line_syms[prow].kind)
+    local cb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.descend then cb = m.callback end
+    end
+    vim.api.nvim_set_current_win(wsym)
+    pcall(vim.api.nvim_win_set_cursor, wsym, { prow, 0 })
+    cb()
+    eq('callers', symbols.view.level, 'a param descends to where its value comes from')
+    eq(f.id, symbols.view.callers)
+
+    vim.cmd('tabclose')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- FEEDBACK (CART-0480): descending an occurrence row landed at the TOP of the
+-- enclosing function — "I would have expected to land at the thing it was
+-- pointing at, I'm at the beginning of the function". The row carries the exact
+-- range (the hover on that same row highlights it), so the landing was throwing
+-- away what the eye already had. Two cases, because they take different paths
+-- through the helper: a use that IS a top-level statement (exact anchor) and one
+-- nested inside an `if` (no row of its own — the containing statement wins).
+test('nav: descending an occurrence lands on the statement that holds it', function ()
+    if not has_lang('php') then skip 'no php parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local ts = require 'cartograph.providers.treesitter'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/a.php', 'w'))
+    fd:write('<?php\n$g_path = "x";\nfunction user() {\n  global $g_path;\n'
+        .. '  $a = $g_path;\n  if( $a ) {\n    $b = $g_path . "deep";\n'
+        .. '    return $b;\n  }\n  return $g_path;\n}\n')
+    fd:close()
+    local data = ts.extract(root); store.ingest(data)
+    local v, f
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'var' and n.name == 'g_path' then v = n end
+        if n.name == 'user' then f = n end
+    end
+    ok(v and f, 'the fixture has the var and its user')
+    vim.cmd('tabnew')
+    local wsrc = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsrc, source.create()); source.attach(wsrc)
+    vim.cmd('leftabove vsplit')
+    local wsym = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(wsym, symbols.create()); symbols.attach(wsym)
+    store.set_focus(f.id); store.pivot(f.id)
+    local cb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.descend then cb = m.callback end
+    end
+    vim.api.nvim_set_current_win(wsym)
+
+    local function occ_row_for(line1) -- the occs row whose site is on this line
+        symbols.show('occs', ('var\31%s\31%s'):format(v.id, f.id))
+        symbols.render()
+        for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+            local s = symbols.line_site[r]
+            if s and s.line + 1 == line1 then return r end
+        end
+    end
+    local function descend_from(r)
+        pcall(vim.api.nvim_win_set_cursor, wsym, { r, 0 })
+        cb()
+        return vim.api.nvim_win_get_cursor(wsym)[1]
+    end
+
+    local r5 = occ_row_for(5)  -- `$a = $g_path;` — a statement in its own right
+    ok(r5, 'the plain use has an occurrence row')
+    local landed = descend_from(r5)
+    eq('fn', symbols.view.level)
+    eq(f.id, symbols.view.fn)
+    eq(5, symbols.line_stmt[landed], 'lands on the statement that holds the use')
+
+    -- ...AND THROUGH THE FOLD. The fn altitude collapses the whole `if` onto one
+    -- statement row, so stopping at the nearest anchor above left you looking at
+    -- the wrong line ("it still doesn't land there if it's within an if block").
+    -- The landing keeps descending the containment chain instead.
+    local r7 = occ_row_for(7)  -- nested inside the `if` at line 6
+    ok(r7, 'the nested use has an occurrence row')
+    local depth = #symbols.trail
+    landed = descend_from(r7)
+    eq('block', symbols.view.level, 'it descends INTO the if, not onto it')
+    eq(7, symbols.line_stmt[landed], 'and lands on the nested use itself')
+    -- THE RETURN PATH IS THE LANDING'S BY-PRODUCT: every step of the chain
+    -- pushed the trail, so `h` walks back out the way it came in.
+    eq(depth + 2, #symbols.trail, 'the chain recorded both steps')
+    local hb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.ascend then hb = m.callback end
+    end
+    -- h IS HISTORY: ONE PRESS back to where the descent started, however many
+    -- altitudes it crossed. The levels the landing added were not keypresses,
+    -- so h does not spend a press on each of them (user's steer).
+    hb()
+    eq('occs', symbols.view.level, 'one h returns to the occurrence it came from')
+
+    -- H IS CONTAINMENT: off the trail, up to what ENCLOSES this — the `if`'s row
+    -- in the function, which is the waypoint h no longer stops at.
+    local Hb
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
+        if m.lhs == require('cartograph.config').keys.ascend_structural then Hb = m.callback end
+    end
+    ok(Hb, 'H is bound in the symbols pane')
+    -- FORWARD MEMORY OUTRANKS THE LANDING: l right after h restores the place h
+    -- left (cursor and all) instead of re-landing deep. Documented in
+    -- |cartograph-site| and nowhere fenced until now.
+    landed = descend_from(occ_row_for(7))
+    eq('block', symbols.view.level, 'l after h restores the block it left')
+    eq(7, symbols.line_stmt[landed])
+    Hb()
+    eq('fn', symbols.view.level, 'H asks what encloses the block')
+    eq(6, symbols.line_stmt[vim.api.nvim_win_get_cursor(wsym)[1]],
+        'and lands on the `if` that holds it, not the top of the function')
 
     vim.cmd('tabclose')
     vim.fn.delete(root, 'rf')

@@ -111,12 +111,35 @@ function VIEWS.nbhd(node)
 end
 
 -- Lines for a node's body: a hard-context header + the real source range.
+-- How wide a REGION may be before widening to it stops being context. A short
+-- top-level run reads as a unit and is worth showing whole; a long one is a
+-- haystack. MEASURED, and this is why the number exists: focusing mantis's
+-- `$g_core_path` rendered 5864 lines — the entire top-level region of
+-- config_defaults_inc.php, 51-5900 — for a ONE-LINE declaration. Reported as "the
+-- preview is not right", which is exactly what it was.
+local REGION_PREVIEW_MAX = 40
+-- ...and when the region is too wide, the declaration still wants a little around
+-- it: a lone line has no context at all, and this is what every editor preview does.
+local LONE_CONTEXT = 3
+
 local function body_lines(node)
     if not node then return { '(nothing)' } end
     local all = store.content(node)
     if not all then return { ('── %s   %s  (unreadable)'):format(node.name or '?', node.file) } end
-    -- a top-level statement widens to the region it belongs to
-    local shown = enclosing_region(node) or node
+    -- a top-level statement widens to the region it belongs to, WHEN that region is
+    -- small enough to be context rather than a file dump
+    local reg = enclosing_region(node)
+    if reg and (atr.el(reg.range) - atr.sl(reg.range) + 1) > REGION_PREVIEW_MAX then
+        reg = nil
+    end
+    local shown = reg or node
+    if not reg then
+        -- a few lines around the declaration, clamped to the file
+        local lo = math.max(0, atr.sl(node.range) - LONE_CONTEXT)
+        local hi = math.min(#all - 1, atr.el(node.range) + LONE_CONTEXT)
+        shown = { id = node.id, name = node.name, file = node.file,
+            range = { start = { line = lo, char = 0 }, ['end'] = { line = hi, char = 0 } } }
+    end
     local s = atr.sl(shown.range) + 1     -- schema line is 0-based
     local e = atr.el(shown.range) + 1
     -- show the def WITH its leading doc comment: walk up over the block that
