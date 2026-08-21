@@ -243,6 +243,18 @@ M.keys = {
 --- in ten. Letters carry the tail (max measured: 28 names on one line).
 M.pick_labels = '123456789abcdefghijklmnopqrstuvwxyz'
 
+-- HOW DECLARED AXES APPEAR ON THEIR SUBJECT — the A/B (CART-0482). The axes
+-- themselves are declared once (panes/axes.lua) and both arms render the same
+-- rows from the same counts; only the door differs.
+--   'doors' one row per axis, each naming the relation and carrying its count.
+--           The shape callers already had, and the one the counts are visible in
+--           without a keypress. Costs a row per axis and computes every count on
+--           every render.
+--   'lens'  ONE row (how many axes), opening the axis altitude where <Tab>
+--           switches between them. Costs one row and one count — and hides the
+--           individual counts behind a keypress.
+M.axes = 'doors'
+
 -- Entry points: files EXPECTED to have no inbound require (a runtime loads
 -- them directly). They classify as 'entry' (▶) instead of 'orphan' (○ — the
 -- warning), and sort first among the include tree's roots. Lua patterns,

@@ -19,6 +19,7 @@ local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
 local concerns = require 'cartograph.panes.concerns'
 local altitudes = require 'cartograph.panes.altitudes'
+local axes = require 'cartograph.panes.axes'
 
 -- file level shows functions and BLOCKS (runs of top-level statements rolled
 -- up under their first line); the individual vars live one level down
@@ -75,6 +76,7 @@ local M = {
     line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
     line_proto = {}, line_lint = {}, line_act = {},
     line_hushed = {}, line_unread = {}, line_syms = {},
+    line_axis = {}, -- a row that is an AXIS DOOR: the key it opens
     -- what a row is ABOUT (a node id), which is NOT what `l` does here: a
     -- caller row is about the using function but descends into its
     -- occurrences. Keeping the two apart is the whole point — hover, descend,
@@ -113,6 +115,17 @@ for level in pairs(concerns.node_hover_levels()) do M.NODE_HOVER[level] = true e
 local function lens_set(level)
     if level == 'file' and store.data and store.data.provider == 'self' then
         return { 'members', 'live' }
+    end
+    -- ARM B of the axis A/B (config.axes = 'lens'): this altitude's LENSES ARE
+    -- the axes, so one door reaches all of them and <Tab> switches. In arm A
+    -- ('doors') there is no set here -- every axis has its own door on the
+    -- subject and this altitude shows the one you opened. The arms differ ONLY
+    -- here and in the door rows: same declarations, counts and empties, so the
+    -- comparison is of PRESENTATION and nothing else.
+    if level == 'axis' and config.axes == 'lens' then
+        local name, subject = axes.split(M.view.axis)
+        local set = axes.of(store.node(subject))
+        return #set > 0 and set or (name and { name })
     end
     return LENS_SETS[level]
 end
@@ -225,6 +238,45 @@ local function module_id(file)
     local n = store.node(file)
     return n and n.id
 end
+
+-- ── THE A/B: HOW AXES APPEAR ON THEIR SUBJECT ───────────────────────────────
+-- ARM A ('doors', default): one row per axis, each naming the relation and
+--   carrying its count -- the shape the user singled out as working ("attached
+--   to the function and it names the axis it's descending"). Costs one row per
+--   axis of the subject's row budget, and every count is computed on EVERY
+--   render, which for a `walk` axis is a traversal.
+-- ARM B ('lens'): ONE row, one count (how many axes), opening the axis altitude
+--   where <Tab> switches between them. Costs one row and one cheap count -- and
+--   hides every individual count behind a keypress.
+-- Both call this; nothing else differs. Returns the rows appended.
+local function door_rows(ctx, node)
+    local names = axes.of(node)
+    if #names == 0 then return 0 end
+    if config.axes == 'lens' then
+        local text = ('⋯ axes (%d)'):format(#names)
+        ctx.lines[#ctx.lines + 1] = text
+        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
+        ctx.line_axis[#ctx.lines] = axes.key(names[1], node.id)
+        ctx.line_about[#ctx.lines] = node.id
+        return 1
+    end
+    for _, name in ipairs(names) do
+        local e = axes.AXES[name]
+        -- A DOOR MUST NOT SHOW A FABRICATED ZERO: on a thin index the relation
+        -- has no answer, and "(0)" would read as "this calls nothing". The count
+        -- is nil there and the door says so, as a frontier.
+        local n = axes.count(name, node.id, store)
+        local text = ('%s %s (%s)'):format(e.glyph, e.label,
+            n and tostring(n) or 'unavailable')
+        ctx.lines[#ctx.lines + 1] = text
+        ctx.marks[#ctx.lines] = { { 0, -1,
+            n and 'CartographSection' or 'CartographFrontier' } }
+        ctx.line_axis[#ctx.lines] = axes.key(name, node.id)
+        ctx.line_about[#ctx.lines] = node.id
+    end
+    return #names
+end
+
 
 -- Relationship tints: dependencies (things the focus uses) in green, dependents
 -- (things that use the focus) in amber; depth-1 saturated, depth-2 muted. Each
@@ -624,6 +676,12 @@ local function render_file(ctx, file)
     ctx.file_header[file] = hrow
     local sign = SIGN[store.classify(file)]
     if sign then ctx.signs[#ctx.signs + 1] = { row = hrow - 1, sign = sign } end
+    -- the module's declared AXES (imports / imported by). These already existed
+    -- as a SOURCE-PANE view (hover shows the file's one-level neighbourhood);
+    -- as axes they become rows you can step and descend, which is the arm-zero
+    -- this A/B is really measured against.
+    local mid = module_id(file)
+    if mid and store.node(mid) then door_rows(ctx, store.node(mid)) end
     for _, n in ipairs(shown_defs(file)) do
         local icon = ICON[n.kind] or '?'
         ctx.lines[#ctx.lines + 1] = ('  %s %s'):format(icon, n.name or '?')
@@ -790,26 +848,14 @@ local function render_var(ctx, id)
     -- them.
     render_sites(ctx, node, '·', a.label .. ' · used by', sites,
         '(no reads found — writes only, or dynamic access)', concerns.needs_edges(store))
-    -- WHO WRITES IT. The rows above are readers ONLY -- the empty note even names
-    -- "writes only" as a reason for having none, so for a written var the whole story
-    -- could be a write and never appear on this altitude. The atlas already has the
-    -- writers: it counts them to classify the var at all.
-    local wseen, wrows = {}, {}
-    for _, wid in ipairs(a.writers or {}) do
-        local wn = not wseen[wid] and store.node(wid)
-        if wn then wseen[wid] = true; wrows[#wrows + 1] = wn end
-    end
-    if #wrows > 0 then
-        ctx.lines[#ctx.lines + 1] = ''
-        ctx.lines[#ctx.lines + 1] = ('writes (%d):'):format(#wrows)
-        ctx.marks[#ctx.lines] = { { 0, -1, 'CartographSection' } }
-        ctx.line_sep[#ctx.lines] = true -- chrome: keep the preview, as elsewhere
-        for _, wn in ipairs(wrows) do
-            ctx.lines[#ctx.lines + 1] = '  ƒ ' .. M.fit_identity(wn.name or '?', '  ƒ ')
-            ctx.line_node[#ctx.lines] = wn.id
-            ctx.node_line[wn.id] = #ctx.lines
-        end
-    end
+    -- WHO WRITES IT, now an AXIS rather than a subsection. The rows above are
+    -- readers ONLY -- the empty note even names "writes only" as a reason for
+    -- having none, so for a written var the whole story could be a write and
+    -- never appear here. It was a hand-rolled section with no door and no
+    -- declared inverse, which is exactly the un-declared half of uses/used-by
+    -- (CART-0482): the writers list is one row per WRITE SITE now, behind a
+    -- door that names the axis and counts it, like every other relation.
+    door_rows(ctx, node)
     -- the FIELD decomposition (on demand, ~ms with warm parses): a
     -- multi-writer var often blurs per-field ownership — show it
     local fa = atlas.fields(store, id)
@@ -1184,6 +1230,58 @@ end
 
 -- One function's occurrences of the entity (the sites-view drill-down):
 -- rows are real source lines. key = kind \31 entity id \31 using-fn id.
+-- ── THE AXIS ALTITUDE: one renderer for every declared relation ─────────────
+-- The rows come from the axis declaration, so adding an axis costs a
+-- declaration and no renderer. Three row kinds, because the four axis KINDS
+-- were chosen to differ: a node (descend into it), a file (descend into it), a
+-- site (descend to the position, which lands through the containment chain).
+local function render_axis(ctx, key)
+    local name, subject = axes.split(key)
+    -- ARM B: the lens IS which axis, so it overrides the key's own name. In arm
+    -- A there is no lens set at this altitude and the key always wins.
+    if config.axes == 'lens' and M.view.lens and axes.AXES[M.view.lens] then
+        name = M.view.lens
+    end
+    local e, sub = axes.AXES[name or ''], store.node(subject)
+    if not (e and sub) then ctx.lines[1] = '(gone)'; return end
+    local rows = e.rows(store, subject) or {}
+    local note, why = concerns.empty_of('axis', store)
+    local head = ('%s %s of %s'):format(e.glyph, e.label, sub.name or '?')
+    ctx.lines[1] = ('%s (%s)'):format(head, why and 'unavailable' or tostring(#rows))
+    ctx.marks[1] = { { 0, #head, 'CartographTitle' }, { #head, -1, 'CartographDim' } }
+    ctx.line_about[1] = subject
+    if #rows == 0 then
+        ctx.lines[2] = '  ' .. (why and ('⚠ ' .. why) or note)
+        ctx.marks[2] = { { 0, -1, why and 'CartographFrontier' or 'CartographDim' } }
+        return
+    end
+    for _, m in ipairs(rows) do
+        if m.site then
+            ctx.lines[#ctx.lines + 1] = '  ' .. M.fit_identity(m.name or '?', '  ')
+                .. (m.guarded and '  (guarded)' or '')
+            ctx.vnums[#ctx.lines] = tostring((m.line or 0) + 1)
+            ctx.line_site[#ctx.lines] = { fn = m.fn, file = m.file,
+                line = m.line, range = m.range, def = m.def, var = m.var,
+                ranges = m.ranges }
+            ctx.line_about[#ctx.lines] = m.fn or m.var
+        elseif m.file then
+            ctx.lines[#ctx.lines + 1] = '  ' .. M.fit_identity(M.shortpath(m.file), '  ')
+                .. (m.sideeffect and '  (side effect)' or '')
+            ctx.line_file[#ctx.lines] = m.file
+            ctx.line_kind[#ctx.lines] = 'file'
+        else
+            local n = store.node(m.node)
+            local icon = ICON[n and n.kind] or 'ƒ'
+            ctx.lines[#ctx.lines + 1] = ('  %s %s'):format(icon,
+                M.fit_identity(m.name or '?', '  ' .. icon .. ' '))
+            ctx.marks[#ctx.lines] = { { 2, 2 + #icon, 'CartographDim' } }
+            ctx.vnums[#ctx.lines] = n and tostring(atr.sl(n.range) + 1) or nil
+            ctx.line_node[#ctx.lines] = m.node
+            ctx.node_line[m.node] = #ctx.lines
+        end
+    end
+end
+
 local function render_occs(ctx, key)
     local kind, entity, fnid = key:match('^(.-)\31(.-)\31(.*)$')
     local en, fn = store.node(entity), store.node(fnid)
@@ -1488,6 +1586,10 @@ local function render_fn(ctx, id)
         ctx.lines[#ctx.lines + 1] = '◆ registered (annotation / dispatch field)'
         ctx.marks[#ctx.lines] = { { 0, -1, 'CartographDim' } }
     end
+    -- the declared AXES of this function (callees / the two cones). `callers`
+    -- keeps its own hand-written door above: it is the exemplar being copied and
+    -- the CONTROL in the A/B, present identically in both arms.
+    door_rows(ctx, node)
     -- the epistemic ladder for THIS fn's outgoing calls: how much of
     -- what it does is proven vs guessed vs unseeable, at a glance
     local lad = require('cartograph.ladder').tally(store, id)
@@ -2418,7 +2520,7 @@ function M.render()
         line_group = {}, line_sep = {}, line_state = {}, line_trans = {}, line_lit = {},
         line_regfor = {}, line_block = {}, line_proto = {},
         line_lint = {}, line_act = {}, line_hushed = {}, line_unread = {},
-        line_about = {}, line_kind = {}, line_syms = {} }
+        line_about = {}, line_kind = {}, line_syms = {}, line_axis = {} }
     local v = M.view
     if v.level == 'fn' and cur_lens() == 'lints' then
         render_lints(ctx, v.fn)
@@ -2440,6 +2542,7 @@ function M.render()
     elseif v.level == 'refused' then render_refused(ctx, M._refused_call)
     elseif v.level == 'regfor' then render_regfor(ctx, v.regfor)
     elseif v.level == 'occs' then render_occs(ctx, v.occs)
+    elseif v.level == 'axis' then render_axis(ctx, v.axis)
     elseif v.level == 'syms' then render_syms(ctx, v.syms)
     elseif v.level == 'lit' then render_lit(ctx, v.lit)
     elseif v.level == 'states' then render_states(ctx)
@@ -2465,6 +2568,7 @@ function M.render()
     M.line_hushed, M.line_unread = ctx.line_hushed, ctx.line_unread
     M.line_syms = ctx.line_syms
     M.line_about, M.line_kind = ctx.line_about, ctx.line_kind
+    M.line_axis = ctx.line_axis
 
     -- names come from arbitrary source text; a row must stay one row
     for i, l in ipairs(ctx.lines) do
@@ -2812,6 +2916,7 @@ function M.show(level, ctx_val)
         elseif level == 'refused' then M.view.refused = ctx_val
         elseif level == 'regfor' then M.view.regfor = ctx_val
         elseif level == 'occs' then M.view.occs = ctx_val
+        elseif level == 'axis' then M.view.axis = ctx_val
         elseif level == 'lit' then M.view.lit = ctx_val
         elseif level == 'live' then M.view.live = ctx_val
         elseif level == 'block' then M.view.block = ctx_val
@@ -3053,6 +3158,27 @@ function M.attach(win)
                         if M.view.level == 'state' and M.line_trans[r] then
                             -- a transition's "source" is its line in the spec
                             spec_context(M.line_trans[r])
+                        elseif M.view.level == 'axis' then
+                            -- an axis renders three row shapes and only ONE of
+                            -- them is a node row, so hover_node declines on the
+                            -- other two and nothing happened: a write site lit
+                            -- nothing, a file row lit nothing. Same defect syms
+                            -- had, same cure — preview what the row IS.
+                            local st2 = M.line_site[r]
+                            local f2 = M.line_file[r]
+                            if st2 then
+                                -- every occurrence of this writer's edge at
+                                -- once: the row is the FUNCTION, so lighting one
+                                -- range would pick a winner among equals
+                                store.set_highlight({ file = st2.file,
+                                    ranges = st2.ranges or { st2.range } })
+                            elseif f2 then
+                                local mid2 = module_id(f2)
+                                if mid2 and store.node(mid2) then
+                                    store.set_context({ node = mid2,
+                                        view = { name = 'nbhd' } })
+                                end
+                            end
                         elseif M.view.level == 'region' and M.line_stmt[r] then
                             -- a region's STATEMENT rows are not node rows, and this
                             -- branch used to end here: hover_node declined and
@@ -3724,6 +3850,11 @@ function M.attach(win)
         -- has no case for, which is the explanation the row could not fit
         local unread = M.line_unread[r]
         if unread then return enter('unread', unread, unread) end
+        -- an AXIS DOOR: a row naming a relation and its count. Altitude-
+        -- independent like the doors above, because a door is a property of the
+        -- ROW, not of where it happens to be rendered (CART-0482).
+        local ax = M.line_axis[r]
+        if ax then return enter('axis', ax) end
         if M.view.level == 'protos' then
             local key = M.line_proto[r]
             if key then return enter('proto', key) end
@@ -3807,6 +3938,33 @@ function M.attach(win)
                 return enter('fn', wn.id, wn.id)
             end
             enter_declaring_file(r)
+        elseif M.view.level == 'axis' then
+            -- three row kinds, one per member shape the axes declare
+            local st = M.line_site[r]
+            if st and st.def and st.var then
+                -- the DEFINITION site: module-level code has no owning function,
+                -- so it goes where the var LIVES — the declared containment
+                -- answer, landing on the line (CART-0482 feedback)
+                store.set_context(nil)
+                local lvl, key = altitudes.up_of_node(st.var, store)
+                if lvl then
+                    enter(lvl, key, nil, st.line and st.line + 1)
+                end
+                return
+            end
+            if st and store.node(st.fn) then
+                store.set_context(nil)
+                return enter('fn', st.fn, st.fn, st.line and st.line + 1)
+            end
+            local n = store.node(M.line_node[r])
+            if n then
+                store.set_context(nil)
+                if n.kind == 'var' then return descend_var(n) end
+                if n.kind == 'region' then return enter('region', n.id, n.id) end
+                if STAGEABLE[n.kind] then return enter('fn', n.id, n.id) end
+            end
+            local f = M.line_file[r]
+            if f then store.set_context(nil); return enter('file', f) end
         elseif M.view.level == 'occs' then
             local s = M.line_site[r]
             if s and store.node(s.fn) then

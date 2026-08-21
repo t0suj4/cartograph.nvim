@@ -122,6 +122,12 @@ declarations), `callers` / `used-by` / `sites`, `table`, `refused`,
   cannot ship without saying what encloses it.
 - **peek** — after an ascend the source pane lingers on where you were until
   you move (deferred re-sync); immediate for same-location moves.
+- **axes** — a relation as a row on its subject, naming itself and carrying its
+  count: **callers**, **callees**, **reaches**/**reached by** (the transitive
+  cone), **imports**/**imported by** on a module, **writes** on a var. `l` opens
+  the members; a count that cannot be computed reads `unavailable`, never `0`.
+  How they appear is switchable while the question is open — `axes = 'doors'`
+  (one row and one count each) or `axes = 'lens'` (one row, `<Tab>` switches).
 - **trail** — the `h`/`l` structural path (return the way you came), distinct
   from the **jumplist** (`<C-o>`/`<C-i>`, which records pivots).
 - **cockpit** — the whole tab: the **browser**, the **source pane**, the

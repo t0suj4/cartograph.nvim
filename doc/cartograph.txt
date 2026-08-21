@@ -816,6 +816,29 @@ otherwise have no route from it at all.
 Where the subject has no file to go to, `descend` on the title row SAYS so rather
 than doing nothing: silence reads as broken (|cartograph-refusals|).
 
+AXES: A RELATION YOU CAN DESCEND                               *cartograph-axes*
+
+An AXIS is a relation rendered as a row on its subject — the row names the
+relation and carries its count, and `descend` opens the members. `callers` is the
+original; the declared set adds `callees`, `reaches`/`reached by` (the transitive
+cone), `imports`/`imported by` on a module, and `writes` on a var. A count that
+cannot be computed says `unavailable` rather than `0`, because a thin index has
+no call graph and a rendered zero would read as "this calls nothing".
+
+Members are of three shapes, and each descends the way its shape implies: a
+function goes to its body, a file to its own altitude, a write SITE to the
+position (landing through the containment chain, |cartograph-site|).
+
+HOW AXES APPEAR is switchable, because it is an open question: >
+
+    require('cartograph').setup { axes = 'doors' }  " default
+    require('cartograph').setup { axes = 'lens' }
+<
+`doors` gives every axis its own row with its own count — the counts are all
+visible without a keypress, at one row of the subject's budget each. `lens` gives
+one row (`⋯ axes (N)`) that opens the axis altitude, where <Tab> switches between
+axes — one row of budget, and the individual counts are a keypress away.
+
 DESCENDING A SITE                                             *cartograph-site*
 
 A row that names a SITE — one occurrence of a var, one call in a caller — points

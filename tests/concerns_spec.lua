@@ -61,7 +61,7 @@ test('registry: every entry declares all five answers (the totality fence)',
     -- callers, occs, regfor, refused + proto (the compartment pilot) + the three
     -- lint altitudes: lintact (one finding's actions), suppressed and unread (the
     -- two doors behind the lints lens's counts)
-    eq(8, n)
+    eq(9, n) -- + axis (CART-0482: one entry for the whole declared family)
 end)
 
 test('registry: lintact is about its fn and returns to it', function ()
@@ -219,7 +219,7 @@ test('empty: an EDGE-derived concern is unavailable on a thin index, and says so
             ok(why ~= e.empty.computed, level .. ' does NOT reuse the computed note')
         end
     end
-    eq(4, n) -- callers, occs, regfor, refused: the four built from edges
+    eq(5, n) -- callers, occs, regfor, refused + axis: built from edges
 end)
 
 test('empty: a concern with a DIFFERENT precondition reports its own reason',
@@ -335,7 +335,7 @@ test('altitudes: every entry is exactly one of up / root', function ()
             ok(type(e.root) == 'string', level .. ' says WHY it is a root')
         end
     end
-    eq(19, nup)
+    eq(20, nup) -- + axis, folded in from its concern
     eq(3, nroot) -- files, protos, ws
 end)
 
@@ -386,4 +386,107 @@ test('altitudes: a module surfaces to its file with no row of its own', function
     local lvl, key, anchor = altreg.up_of_node('m.lua', store)
     eq('file', lvl); eq('m.lua', key)
     eq(nil, anchor, 'a module has no row inside its own file view')
+end)
+
+-- ── THE AXIS REGISTRY (CART-0482) ───────────────────────────────────────────
+-- Four kinds chosen to DIFFER, so a view designed against `callers` alone
+-- cannot pass for general: node rows, file rows, site rows, and a transitive
+-- cone. Both arms of the presentation A/B render from these declarations, so
+-- what is asserted here is what both arms show.
+local axreg = require 'cartograph.panes.axes'
+
+test('axes: every declaration is total, and the kinds differ', function ()
+    local kinds = {}
+    for _, name in ipairs(axreg.ORDER) do
+        local e = axreg.AXES[name]
+        ok(e, name .. ' is in ORDER and declared')
+        ok(type(e.glyph) == 'string' and #e.glyph > 0, name .. ' has a glyph')
+        ok(type(e.label) == 'string', name .. ' has a label')
+        ok(e.on == 'fn' or e.on == 'module' or e.on == 'var',
+            name .. ' declares its subject kind')
+        ok(type(e.rows) == 'function', name .. ' declares rows')
+        kinds[e.on] = true
+    end
+    eq(6, #axreg.ORDER)
+    ok(kinds.fn and kinds.module and kinds.var, 'all three subject kinds are covered')
+    -- the cone declares that COUNTING it costs a traversal: the doors arm pays
+    -- that on every render, which is half of what the A/B measures
+    ok(axreg.AXES.reaches.walk and axreg.AXES.reached_by.walk,
+        'the transitive axes declare themselves walks')
+    ok(not axreg.AXES.callees.walk, 'a slice axis does not')
+end)
+
+test('axes: the inverse is declared, not derived from the name', function ()
+    eq('imported_by', axreg.AXES.imports.inverse)
+    eq('imports', axreg.AXES.imported_by.inverse)
+    eq('reached_by', axreg.AXES.reaches.inverse)
+    eq('callers', axreg.AXES.callees.inverse) -- the exemplar it mirrors
+end)
+
+test('axes: of() offers only the axes that hang off THIS subject', function ()
+    local fn = { kind = 'function' }
+    local var = { kind = 'var' }
+    local mod = { kind = 'module' }
+    eq(3, #axreg.of(fn))   -- callees, reaches, reached_by
+    eq(2, #axreg.of(mod))  -- imports, imported by
+    eq(1, #axreg.of(var))  -- writes
+    eq(0, #axreg.of({ kind = 'region' }))
+    eq('callees', axreg.of(fn)[1])
+end)
+
+test('axes: a key round-trips, and an unknown axis yields no rows', function ()
+    local key = axreg.key('callees', 'm.lua::f')
+    local name, subject = axreg.split(key)
+    eq('callees', name); eq('m.lua::f', subject)
+    reset({ mod('m.lua'), fn('m.lua::f', 'f') })
+    eq(nil, axreg.rows(axreg.key('nosuch', 'm.lua::f'), store))
+end)
+
+test('axes: the writes axis counts the DEFINITION, so it is never a false zero',
+    function ()
+    -- reported on mantis: `✎ writes (0)` on $g_core_path, whose own source line
+    -- is an assignment. The use edges skip the def-line mention on purpose (that
+    -- is what makes `const` mean "never assigned AGAIN"), so the axis puts it
+    -- back, marked. Sound because a var node only EXISTS when it was
+    -- initialized: a bare `local plain` produces no node at all.
+    reset({ mod('m.lua'), { id = 'm.lua::var:cfg@2', name = 'cfg', kind = 'var',
+        file = 'm.lua', range = R(2), order = 2 } })
+    local rows = axreg.rows(axreg.key('writes', 'm.lua::var:cfg@2'), store)
+    eq(1, #rows, 'a var with no write EDGES still has its definition')
+    ok(rows[1].def, 'and the row says which one it is')
+    ok(rows[1].name:find('definition', 1, true), 'in words, on the row')
+    eq(2, rows[1].line)
+    eq(1, axreg.count('writes', 'm.lua::var:cfg@2', store))
+end)
+
+test('axes: writes counts WRITERS, not occurrences (rw is per edge)', function ()
+    -- `rw` is the union over an edge's occurrence ranges, so a function that both
+    -- reads and writes a var carries rw=3 on ALL of them: a row per range claimed
+    -- four writes where a php lazy-init getter has one. The axis counts what the
+    -- atlas counts (edges), and every range rides along for the hover.
+    reset({ mod('m.lua'), fn('m.lua::get', 'get'),
+        { id = 'm.lua::var:c@1', name = 'c', kind = 'var', file = 'm.lua',
+          range = R(1), order = 1 } })
+    store.var_usedby['m.lua::var:c@1'] = { { from = 'm.lua::get', rw = 3, gw = 3,
+        at = { R(4), R(5), R(6) } } } -- reads AND writes, three occurrences
+    local rows = axreg.rows(axreg.key('writes', 'm.lua::var:c@1'), store)
+    eq(2, #rows, 'the definition and ONE writer, not one row per occurrence')
+    eq('get', rows[2].name)
+    ok(rows[2].guarded, 'a fully guarded write says so (the lazy-init shape)')
+    eq(3, #rows[2].ranges, 'and keeps every occurrence for the hover')
+end)
+
+test('axes: a thin index makes the COUNT unavailable, never a zero', function ()
+    -- a door showing "(0)" on a graph with no call edges is a fabricated none —
+    -- the same defect the concern registry's two-halved empty exists to prevent,
+    -- and it would be told by BOTH arms, so it has to be stopped in the registry
+    reset({ mod('m.lua'), fn('m.lua::f', 'f') })
+    local thin, real = false, store.is_index_only -- RESTORE it: the store owns
+    store.is_index_only = function () return thin end -- this, other specs read it
+    eq(0, axreg.count('callees', 'm.lua::f', store))
+    thin = true
+    local unavail, why = axreg.count('callees', 'm.lua::f', store), axreg.unavailable(store)
+    store.is_index_only = real
+    eq(nil, unavail, 'unavailable, not 0')
+    ok(why and why:find('index%-only'), 'and it says why')
 end)

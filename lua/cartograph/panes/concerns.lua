@@ -207,6 +207,35 @@ M.REGISTRY = {
 
     -- a REFUSAL as a place: the rule that refused a call and the candidates it
     -- refused between. key = fn \31 line \31 callee.
+    -- THE AXIS FAMILY (CART-0482): one entry for every declared relation, whose
+    -- key is `<axis>\31<subject>`. The axis registry says what the members ARE;
+    -- this says what the altitude IS -- and the reason it is one entry rather
+    -- than six is that the five answers below do not vary per axis. Where an
+    -- axis differs (row kind, cardinality, whether counting costs a traversal)
+    -- it differs in panes/axes.lua, which is the whole point of the split.
+    axis = {
+        view_key = 'axis',
+        subject  = function (key)
+            local _, subject = require('cartograph.panes.axes').split(key)
+            return subject
+        end,
+        ascend   = function (key)
+            -- back to the subject's OWN altitude, whichever kind it is: a
+            -- relation hangs off its subject (the FSM-anchor law)
+            local axes = require 'cartograph.panes.axes'
+            local name, subject = axes.split(key)
+            local e = axes.AXES[name or '']
+            if not e then return 'files' end
+            if e.on == 'module' then return 'file', subject end
+            if e.on == 'var' then return 'var', subject end
+            return 'fn', subject
+        end,
+        hover    = 'node',
+        empty    = {
+            computed = 'no members on this axis — the relation holds none here',
+            uncomputed = needs_edges,
+        },
+    },
     refused = {
         view_key = 'refused',
         -- MEASURED MISSING: M.subject returned nil here while the ascend

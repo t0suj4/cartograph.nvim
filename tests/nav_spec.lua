@@ -880,23 +880,35 @@ test('nav: a var names its class, counts its readers, and lists its writers', fu
     local cls = title:match('— ([%a%-]+) ·')
     ok(cls and cls ~= 'used', 'the classification leads: ' .. title)
 
-    -- the writers, listed and descendable
-    local wrow, header
+    -- THE WRITES AXIS (CART-0482). This was a hand-rolled subsection with no
+    -- door and no count; it is now a declared axis, so the var altitude carries
+    -- a door that names it and counts its SITES, and the members live one
+    -- descend away like every other relation's.
+    local drow
     for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
         local l = vim.api.nvim_buf_get_lines(symbols.buf, r - 1, r, false)[1] or ''
-        if l:find('^writes %(') then header = l end
-        if header and l:find('M%.set') then wrow = r end
+        if l:find('writes %(%d') then drow = r end
     end
-    ok(header, 'a written var says who writes it')
-    ok(wrow, 'and M.set is one of them')
+    ok(drow, 'a written var has a writes DOOR with a count')
+    ok(not (vim.api.nvim_buf_get_lines(symbols.buf, drow - 1, drow, false)[1] or '')
+        :find('writes %(0%)'), 'and never a zero: the definition is a write too')
     local cb
     for _, m in ipairs(vim.api.nvim_buf_get_keymap(symbols.buf, 'n')) do
         if m.lhs == require('cartograph.config').keys.descend then cb = m.callback end
     end
     vim.api.nvim_set_current_win(wsym)
+    pcall(vim.api.nvim_win_set_cursor, wsym, { drow, 0 })
+    cb()
+    eq('axis', symbols.view.level, 'the door opens the axis')
+    local wrow
+    for r = 1, vim.api.nvim_buf_line_count(symbols.buf) do
+        if (vim.api.nvim_buf_get_lines(symbols.buf, r - 1, r, false)[1] or '')
+            :find('M%.set') then wrow = r end
+    end
+    ok(wrow, 'M.set is one of the write sites')
     pcall(vim.api.nvim_win_set_cursor, wsym, { wrow, 0 })
     cb()
-    eq('fn', symbols.view.level, 'a writes row descends into the writer')
+    eq('fn', symbols.view.level, 'a write site descends into the writer')
     eq('M.set', store.node(symbols.view.fn).name)
 
     vim.cmd('tabclose')
