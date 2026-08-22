@@ -112,7 +112,13 @@ local function file_rows(_, recs, key)
         if f and not seen[f] then
             seen[f] = true
             out[#out + 1] = { file = f, name = f,
-                sideeffect = type(r) == 'table' and r.sideeffect or nil }
+                sideeffect = type(r) == 'table' and r.sideeffect or nil,
+                -- ONCE-NESS (CART-0510) rides the row because a reader deciding
+                -- whether a var in this file is set-once needs to know whether
+                -- the file itself runs once. `false` is the interesting value:
+                -- nil means the language does not discriminate, and marking that
+                -- would claim a fact nobody asked for.
+                rerun = type(r) == 'table' and r.once == false or nil }
         end
     end
     table.sort(out, function (a, b) return a.file < b.file end)
@@ -152,7 +158,10 @@ M.AXES = {
     imported_by = {
         glyph = '⇤', label = 'imported by', on = 'module', inverse = 'imports',
         rows = function (store, id)
-            return file_rows(store, store.topo():imports_in(id), 'from')
+            -- the DETAIL accessor: the bare imports_in flattens each record to
+            -- its `from` id, so every per-site fact (sideeffect, once, soft,
+            -- site) was being read off a string and silently coming back nil
+            return file_rows(store, store.topo():imports_in_detail(id), 'from')
         end,
     },
     -- THE WRITE AXIS. atlas.classify already counts these to label the var at

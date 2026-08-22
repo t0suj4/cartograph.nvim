@@ -78,6 +78,15 @@ M.SLOTS = {
     resolve_import = 'IMPORTS', import_query = 'IMPORTS',
     import_call = 'IMPORTS', import_bind = 'IMPORTS', import_line = 'IMPORTS',
     import_pats = 'IMPORTS', import_call_like = 'IMPORTS', scan_imports = 'IMPORTS',
+    -- WHAT KIND OF IMPORT THE SITE IS (CART-0510), keyed on the import
+    -- expression's NODE TYPE: { once = <re-executes?>, soft = <failure is
+    -- non-fatal?> }. Declared ONLY where the site's own syntax discriminates --
+    -- php's four require/include forms, bash's `source`. NOT declared for a
+    -- module system that is always-once (go, rust, js): `once = true` there
+    -- would be a claim about the RUNTIME, not about the site, i.e. a promise
+    -- fact minted from a blanket assertion -- the guarantee slot
+    -- [[cartograph-stdlib-profile]] was refused. Absence means NOT ASKED.
+    import_kinds = 'IMPORTS',
     field_alias = 'IMPORTS',        -- `local f = mod.field`: binds a MEMBER of an
                                     -- imported module to a local (CART-0237)
     std_aliases = 'IMPORTS',        -- per-file names bound to the stdlib (std-alias disposition)

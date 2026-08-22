@@ -313,11 +313,39 @@ return {
     block_skip = { php_tag = true, class_declaration = true,
         interface_declaration = true, trait_declaration = true },
     litdata_types = { array_creation_expression = true },
+    -- ★ php IS the language where this fact lives: four forms, two independent
+    -- bits, and the graph collapsed all four into one edge until CART-0510.
+    -- `once` = does a second execution re-run the file (so a var inside it is
+    -- assigned once PER INCLUSION, which is what makes a set-once claim about it
+    -- unsound). `soft` = failure warns instead of aborting, which is what makes
+    -- the include CONDITIONAL and caps a stitch closure at an over-approximation.
+    import_kinds = {
+        require_once_expression = { once = true },
+        require_expression      = { once = false },
+        include_once_expression = { once = true,  soft = true },
+        include_expression      = { once = false, soft = true },
+    },
     import_query = [=[
         (require_once_expression (string) @path)
         (require_expression (string) @path)
         (include_once_expression (string) @path)
         (include_expression (string) @path)
+        ; ★ THE PARENTHESISED FORM, and it is the one everyone writes.
+        ; `require_once( 'x' )` parses as require_once_expression ->
+        ; parenthesized_expression -> string, so the four DIRECT-CHILD patterns
+        ; above match only the bare `require_once 'x';` spelling and mantis's 185
+        ; literal require_once('core.php') produced ZERO import edges (CART-0483,
+        ; whose cause this corrects -- it was read as a path-resolution edge case
+        ; and is actually the whole parenthesised half of php file inclusion).
+        ; @path stays on the STRING, not on the alternation, so resolve_import
+        ; still receives a quoted literal and not "( 'x' )".
+        ; A computed path (`require_once( $dir . 'x' )`) nests a binary_expression
+        ; instead and is deliberately still unmatched: that is the non-enumerable
+        ; include, and it is the case that must stay a frontier.
+        (require_once_expression (parenthesized_expression (string) @path))
+        (require_expression (parenthesized_expression (string) @path))
+        (include_once_expression (parenthesized_expression (string) @path))
+        (include_expression (parenthesized_expression (string) @path))
         (namespace_use_clause (qualified_name) @path)
         (base_clause (name) @path)
         (base_clause (qualified_name) @path)

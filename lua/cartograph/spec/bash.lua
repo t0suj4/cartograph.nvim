@@ -66,6 +66,13 @@ return {
         -- relative to the sourcing file, then the root, then a unique
         -- basename (ambiguity refuses, as everywhere). Runtime cwd is the
         -- honest unknowable; this is the conventional layout.
+        -- THE SECOND LANGUAGE WHERE THE SITE DISCRIMINATES, and it is the
+        -- honest end of the axis: `source` / `.` have no memoization at all, so
+        -- sourcing a file in a loop re-executes it every pass. The `@path`'s
+        -- enclosing node here is the `command` itself (see the bounded ancestor
+        -- walk in the provider) -- one entry covers both spellings, because the
+        -- query's #any-of? predicate already decided which commands match.
+        import_kinds = { command = { once = false } },
         import_query = [=[
             ((command name: (command_name (word) @_kw) argument: (word) @path)
                 (#any-of? @_kw "source" "."))

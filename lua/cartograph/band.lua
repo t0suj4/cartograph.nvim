@@ -132,6 +132,18 @@ function Band:var_used_by_detail(id)
     return (idx and idx.var_usedby[id]) or {}
 end
 
+--- Import records: WHO INCLUDES `id`, and HOW ({from, sideeffect, once, soft,
+--- site}). The bare `imports_in` flattens these to `from` ids at the S_BWD seam,
+--- which is why `sideeffect` had never rendered on an imported-by row since the
+--- day it was written — the field was read from a string. It is also the input a
+--- boundary summary needs: k inclusion sites aggregate here, and once-ness is
+--- what decides whether a set-once claim about anything in the included file
+--- survives (CART-0510).
+function Band:imports_in_detail(id)
+    local idx = self:_idx()
+    return (idx and idx.imports_in[id]) or {}
+end
+
 --- Reg records: the registrations that keep `id` alive ({from, at}) — who
 --- registers it, with the site spans (the alibi with its evidence).
 function Band:registrants_detail(id)

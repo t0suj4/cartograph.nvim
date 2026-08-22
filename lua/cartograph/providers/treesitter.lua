@@ -5898,14 +5898,61 @@ function M.extract(root, opts)
                             node_text(pathn, src), importable, file, root)
                         if target and target ~= file then
                             local bind = bindn and node_text(bindn, src) or nil
+                            -- WHAT KIND OF IMPORT IS THIS SITE (CART-0510)?
+                            -- A BOUNDED ANCESTOR WALK, because @path sits at a
+                            -- different depth in every language's query and the
+                            -- capture name cannot carry two independent bits:
+                            --   php   (require_once_expression (string) @path)
+                            --         -> the kind node is the PARENT
+                            --   bash  (command … argument: (word) @path)
+                            --         -> also the parent (the #any-of? already
+                            --            decided which commands match)
+                            --   js    (call_expression … arguments: (…) @path)
+                            --         -> `arguments` is the parent, so the kind
+                            --            node is TWO up. That counter-example is
+                            --            why one level is not enough and three is.
+                            -- The table only names import-expression types, so a
+                            -- walk that finds nothing sets NOTHING: absence means
+                            -- "this language's syntax does not discriminate",
+                            -- never "once".
+                            local kind
+                            if spec.import_kinds then
+                                local n2, hops = pathn, 0
+                                while n2 and hops <= 3 do
+                                    kind = spec.import_kinds[n2:type()]
+                                    if kind then break end
+                                    n2, hops = n2:parent(), hops + 1
+                                end
+                            end
                             local idx = at_site[site]
                             if idx then
                                 if bind and not edges[idx].bind then
                                     edges[idx].bind = bind
                                 end
+                                -- MERGE LIKE `bind`: several patterns match one
+                                -- site (a CJS require matches its declaration AND
+                                -- the bare call), and only some carry a kind. Test
+                                -- `once == nil` — "not asked" — because a kindless
+                                -- pattern landing first must not block a real
+                                -- `once = false`, which is a POSITIVE answer.
+                                if kind and edges[idx].once == nil then
+                                    edges[idx].once = kind.once
+                                    edges[idx].soft = kind.soft
+                                    edges[idx].site = in_function(pathn, spec)
+                                        and 'fn' or 'file'
+                                end
                             else
-                                edges[#edges + 1] = { from = file, to = target,
+                                local e = { from = file, to = target,
                                     kind = 'import', bind = bind }
+                                -- all three fields together or none: setting
+                                -- `site` on a site whose KIND is unknown would
+                                -- claim half a fact
+                                if kind then
+                                    e.once, e.soft = kind.once, kind.soft
+                                    e.site = in_function(pathn, spec)
+                                        and 'fn' or 'file'
+                                end
+                                edges[#edges + 1] = e
                                 at_site[site] = #edges
                             end
                         end

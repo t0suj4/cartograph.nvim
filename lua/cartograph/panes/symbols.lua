@@ -1284,6 +1284,10 @@ local function render_axis(ctx, key)
         elseif m.file then
             ctx.lines[#ctx.lines + 1] = '  ' .. M.fit_identity(M.shortpath(m.file), '  ')
                 .. (m.sideeffect and '  (side effect)' or '')
+                -- `include` / `source` re-execute, so this file's module-level
+                -- code runs once PER INCLUSION -- which is what makes a
+                -- set-once claim about anything in it unsound (CART-0510)
+                .. (m.rerun and '  (re-runs)' or '')
             ctx.line_file[#ctx.lines] = m.file
             ctx.line_kind[#ctx.lines] = 'file'
         else

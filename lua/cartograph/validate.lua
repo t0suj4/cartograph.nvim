@@ -71,6 +71,16 @@ M.EDGE_FIELDS = {
     bind = true, -- import edges: the local name the import binds (v8);
                  -- absent from the 17-corpus inventory until SE exercised it
     sideeffect = true, -- import edges: required for effect, no binding
+    -- import edges, from spec.import_kinds (CART-0510). TRI-STATE, and the
+    -- absence is load-bearing: nil = this language's syntax does not
+    -- discriminate, NOT "once". `once=false` is a positive fact (the verb
+    -- re-executes), which is what makes a set-once claim about a var inside a
+    -- multiply-included file unsound.
+    once = true, -- does a second execution re-run the target?
+    soft = true, -- is failure non-fatal (so the include is CONDITIONAL)?
+    site = true, -- 'file' | 'fn': php `include` inside a function body binds the
+                 -- target's file-scope vars as that function's LOCALS, so the
+                 -- same library text has different variable semantics per site
     rw = true, -- the write axis (use edges): 1 read / 2 write / 3 both
     gw = true, -- guard chain of the writes: 1 some-unguarded / 2 all-guarded
                -- / 3 all-set-once (absence-guarded: commutative)

@@ -98,7 +98,15 @@ local function idx_edge(T, e)
         T.edge_tier[e.from .. '\31' .. e.to] = tier.of(e)
     elseif e.kind == 'import' then
         T.imports_in[e.to] = T.imports_in[e.to] or {}
-        table.insert(T.imports_in[e.to], { from = e.from, sideeffect = e.sideeffect == true })
+        -- WHO INCLUDES ME, AND HOW (CART-0510). The inbound record is the input
+        -- to a boundary summary -- k inclusion sites aggregate here -- so the
+        -- per-site facts have to survive indexing or they are extracted and
+        -- immediately dropped. `sideeffect` is normalized to a boolean because it
+        -- is a two-state fact; once/soft/site pass through RAW because they are
+        -- TRI-STATE and nil means "this language's syntax does not discriminate".
+        table.insert(T.imports_in[e.to], { from = e.from,
+            sideeffect = e.sideeffect == true,
+            once = e.once, soft = e.soft, site = e.site })
         T.imports_out[e.from] = T.imports_out[e.from] or {}
         table.insert(T.imports_out[e.from], e.to)
     elseif e.kind == 'use' then

@@ -829,6 +829,15 @@ Members are of three shapes, and each descends the way its shape implies: a
 function goes to its body, a file to its own altitude, a write SITE to the
 position (landing through the containment chain, |cartograph-site|).
 
+AN IMPORT ROW SAYS HOW IT IMPORTS, where the language's syntax distinguishes it.
+`(side effect)` marks an import required for its effect rather than a binding, and
+`(re-runs)` marks one that executes the target again — php `include`/`require`
+against `include_once`/`require_once`, bash `source`. It is not decoration: a file
+that runs again assigns its module-level variables again, so `set-once` about
+anything inside it is not a claim the graph can make. Where a language's syntax
+does not distinguish (a module system that is always-once), the row says nothing
+rather than guessing — absence here means NOT ASKED.
+
 A WRITER CAN BE THE MODULE ITSELF. Code at file scope — a php config assignment, a
 lua module body building its own table — writes and reads like any function does,
 and those rows say `(file scope)` before the path so they cannot be mistaken for a

@@ -36,7 +36,18 @@ function M.slim(data)
     for i, e in ipairs(data.edges or {}) do
         edges[i] = { from = e.from, to = e.to, kind = e.kind,
             inferred = e.inferred or nil, proven = e.proven or nil,
-            xlang = e.xlang or nil, sideeffect = e.sideeffect or nil }
+            xlang = e.xlang or nil, sideeffect = e.sideeffect or nil,
+            -- IMPORT KIND (CART-0510). Carried because the faithfulness
+            -- invariant demands it: a field no gate can see is a field whose
+            -- regression is invisible — the instrument lesson from the scope
+            -- model's step 2, where hedges were absent from slim and the gate
+            -- read vacuously identical.
+            -- ★ NO `or nil` HERE, unlike every field above. Those are two-state,
+            -- so collapsing false to absent loses nothing. `once` is TRI-STATE:
+            -- false means "asked, and it re-executes" and nil means "this
+            -- language's syntax does not discriminate". `e.once or nil` would
+            -- erase the positive answer and make the two indistinguishable.
+            once = e.once, soft = e.soft, site = e.site }
     end
     for i, c in ipairs(data.calls or {}) do
         calls[i] = { file = c.file, line = c.line, callee = c.callee,

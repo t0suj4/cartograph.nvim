@@ -73,7 +73,27 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 143 -- v143: CART-0479 — A FILE-SCOPE MENTION NOW HAS AN OWNER.
+M.VERSION = 144 -- v144: CART-0510 — AN IMPORT EDGE NOW SAYS WHAT KIND OF IMPORT IT IS.
+               -- php's import_query captured require_once / require / include_once /
+               -- include into ONE `@path`, so all four produced an IDENTICAL edge and the
+               -- graph could not tell a library included once from one included k times.
+               -- Consequence, and it is a soundness one: a `set-once` or `const` claim about
+               -- a var inside a multiply-included file is UNSOUND — it is assigned once PER
+               -- INCLUSION. That is the state atlas wrong for a THIRD distinct reason
+               -- (CART-0478 empty evidence · CART-0479 missing attribution · this).
+               -- New spec key `import_kinds`, keyed on the import expression's NODE TYPE,
+               -- found by a BOUNDED ancestor walk (js's @path sits two levels under its
+               -- call_expression, which is why one level is not enough). Three tri-state
+               -- fields: `once` (does a second execution re-run it), `soft` (is failure
+               -- non-fatal, i.e. is the include CONDITIONAL — what caps a stitch closure),
+               -- `site` ('fn' when the include is inside a function body, where php binds
+               -- the target's file-scope vars as that function's LOCALS).
+               -- ★ DECLARED FOR php AND bash ONLY, and the omission is the design: `once =
+               -- true` on a go/rust/js edge would be a claim about the RUNTIME rather than
+               -- about the site — a promise fact minted from a blanket assertion, which is
+               -- the guarantee slot the stdlib profile was refused. nil means NOT ASKED.
+               -- Fields on existing edges, zero new edges: every `expected` count holds.
+               -- (previous) v143: CART-0479 — A FILE-SCOPE MENTION NOW HAS AN OWNER.
                -- reduce_mentions hung every var use edge on the enclosing function, and
                -- `fn_at` is nil at file scope, so the mention was DROPPED — while the
                -- fn-ref branch twenty lines above had always fallen back to the FILE node
