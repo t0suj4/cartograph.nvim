@@ -492,6 +492,24 @@ return {
     ]],
     params_field = 'parameters',
     body_field = 'body',
+    -- see spec/php.lua for what these two are for. `_G[k]` is lua's index form;
+    -- `rawget(_G, k)` / `rawset(_G, k, v)` are the CALL spellings and are not
+    -- modelled here -- a call is a different IR shape, and rawset is already
+    -- CART-0490's (definition by call) rather than this one's.
+    global_table = { _G = true },
+    concat_op = '..',
+    -- ★ NO `global_scope_vars` HERE, AND IT IS A REFUSAL WITH A MEASUREMENT
+    -- BEHIND IT. lua's file-scope vars split on one keyword: `local x = 1` is
+    -- invisible to _G, bare `x = 1` is not -- and a var node records neither
+    -- (`exported` is set by handle_fn only, so every var carries nil = "never
+    -- asked"). Measured on ~/work/wow_addons, resolving anyway FABRICATES:
+    -- `_G["OnTooltipSetItem"]` in four separate addons resolved to
+    -- Panda/GemTooltip.lua's `local OnTooltipSetItem`, which is not in _G at
+    -- all, while !swatter's `SetItemRef = …` (no keyword, genuinely global) was
+    -- right for the same reason. One correct hit does not license the other
+    -- four. Unblocked by CART-0500: once a var's binding FORM is recorded,
+    -- `exported` becomes answerable for vars and this becomes per-node instead
+    -- of per-language.
     -- `function_definition` is BOTH the anonymous form and the value half of
     -- `M.f = function () … end`, so the two types cover every lua fn scope.
     fn_types = { function_declaration = true, function_definition = true },

@@ -2729,6 +2729,35 @@ nvim --headless -u NONE -l tools/matrix.lua cppmodern --cols rows
 nvim --headless -u NONE -l tools/ctrlcensus.lua ~/git/elasticsearch/libs --lang java
 nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --coverage   # can it gate this form?
 nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --folded     # one row hiding many
+# KEY-ACCESS CENSUS: which functions turn a string ARGUMENT into a variable
+# access, and which variables their call sites name? mantis reads its whole
+# configuration as `config_get_global( 'db_type' )`, so `$g_db_type` occurs
+# exactly twice in the repository -- a docblock and its definition -- and no
+# mention pass can find a read that is spelled as data. The transform is DERIVED
+# from the accessor's own body (`$GLOBALS['g_' . $p_option]` -> arg 1, prefix
+# 'g_'), never declared: a hand-written convention is an authored guess, and a
+# wrong one fabricates reads corpus-wide. The direction falls out of the index
+# POSITION, which is the argument for deriving stated as a fact -- config_set_global
+# assigns the global table and derives as a writer; config_set writes the database
+# and derives as not an accessor at all. Mints nothing: it reports what minting
+# would claim. EVIDENCE, not a gate.
+nvim --headless -u NONE -l tools/keyaccess.lua ~/git/mantisbt
+nvim --headless -u NONE -l tools/keyaccess.lua <dir> --sites 40   # sample the reads
+# mantis (full tree): 12 accessors (4 derived, 8 forwarders through resolved
+# calls), 2317 call sites, 1981 resolving to exactly one var across 412 distinct
+# vars -- and only 130 of those 1981 SITES land on a var that already had a use
+# edge (20 of the 412 vars), which is the canary: a large overlap would mean the
+# roster is re-finding syntactic reads and the yield is inflated. 114 dynamic and 59
+# ambiguous names resolve to NOTHING and are counted, because a roster that hides
+# its frontier reads as complete. Read the buckets in this order: AMBIGUOUS and
+# NO NODE say whether the transform is wrong; ALREADY HAD EDGES says whether the
+# yield is inflated; DYNAMIC is why the roster is a lower bound.
+# CONTROLS ARE PART OF THE RUN: cartograph's own lua derives ZERO accessors, and
+# wow_addons is why lua resolves nothing at all -- `_G["OnTooltipSetItem"]` in
+# four addons resolved to one addon's `local OnTooltipSetItem`, which is not in
+# _G. php guarantees a file-scope var IS in the global table; lua's difference is
+# one keyword that no var node records, so lua sites are counted BLOCKED.
+
 # NAVIGATION CENSUS: what can the BROWSER not descend into? The same question one
 # altitude out — ctrlcensus asks which control forms FLOW fails to open, this asks
 # which forms a DESCENT cannot reach. Every navigation hole so far was found by a

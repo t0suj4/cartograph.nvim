@@ -195,6 +195,18 @@ return {
     ]=],
     params_field = 'parameters',
     body_field = 'body',
+    -- ACCESS BY STRING KEY ([[cartograph-keyaccess]]): the table through which a
+    -- variable can be reached by NAME, and the operator that builds that name.
+    -- Together they are all keyaccess needs to DERIVE an accessor's transform
+    -- from its own body -- mantis's `$GLOBALS['g_' . $p_option]` -- instead of
+    -- being told the convention, which is the difference between reading the
+    -- code and guessing it. php's `$$name` is a second spelling, not modelled.
+    global_table = { GLOBALS = true },
+    concat_op = '.',
+    -- a php file-scope assignment IS a global: `$x = 1;` outside any function is
+    -- exactly `$GLOBALS['x']`, with no keyword to distinguish. So a derived name
+    -- may resolve to a file-scope var node here.
+    global_scope_vars = true,
     -- `anonymous_function`, NOT `anonymous_function_creation_expression`: the
     -- grammar renamed it and the dead entry sat here unnoticed, because nothing
     -- audits a TABLE of node types the way a query gets compiled (CART-0306).

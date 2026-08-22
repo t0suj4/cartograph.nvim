@@ -122,6 +122,20 @@ M.SLOTS = {
     aperture_query = 'EMITTERS',
 
     -- ANALYSIS: flow / df / effects semantics
+    -- ACCESS BY STRING KEY (CART-0504): the table through which a variable is
+    -- reachable BY NAME, and the operator that builds that name. Two facts, and
+    -- deliberately only two: they are what keyaccess needs to DERIVE an
+    -- accessor's transform from its own body (`$GLOBALS['g_' . $p_option]`)
+    -- rather than be told the convention. A declared convention would be an
+    -- authored guess, and a wrong one fabricates reads corpus-wide.
+    global_table = 'ANALYSIS', concat_op = 'ANALYSIS',
+    -- ...and whether a FILE-SCOPE var is unconditionally reachable through that
+    -- table. php: yes, `$x = 1;` at file scope IS `$GLOBALS['x']`. lua: NO, and
+    -- the difference is one keyword (`local x` is invisible to _G, bare `x = 1`
+    -- is not) that no var node records -- `exported` is set by handle_fn only,
+    -- so a var carries nil, which means "never asked" and must never be read as
+    -- yes. Absent = a derived name is NOT resolved in this language.
+    global_scope_vars = 'ANALYSIS',
     is_write = 'ANALYSIS', write_gate = 'ANALYSIS', guards = 'ANALYSIS',
     module_effects = 'ANALYSIS', dataflow = 'ANALYSIS', regime = 'ANALYSIS',
     -- EXTRA CONTROL NODES, per language (CART-0363). flow's CTRL/PRELOOP are one
