@@ -1142,3 +1142,35 @@ test('nav: a fn with registrants shows its registered-by door, not an inputs lin
     vim.cmd('tabclose')
     vim.fn.delete(root, 'rf')
 end)
+
+test('axis: a NODE row renders as its symbol, not as its file (CART-0520)', function ()
+    -- ★ A REGRESSION FENCE for a defect that shipped with the axis registry and
+    -- hid for a day. `node_rows` carries `file` as well as `node` (the hover needs
+    -- it), and render_axis tested `m.file` FIRST -- so every callee and every cone
+    -- member rendered as the containing FILE's name, repeated once per member,
+    -- with `line_node` unset so hover and descend did nothing. A row's shape is
+    -- not "which field exists", it is which field is MOST SPECIFIC.
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'm.lua', {
+        'local function leaf_a() return 1 end',
+        'local function leaf_b() return 2 end',
+        'local function hub()',
+        '    return leaf_a() + leaf_b()',
+        'end',
+        'return { hub = hub }',
+    })
+    local sym = require 'cartograph.panes.symbols'
+    store.ingest(require('cartograph.providers.treesitter').extract(root))
+    sym.create(); sym.win = nil
+    store.set_focus('m.lua::hub@2')
+    sym.show('axis', 'callees\31m.lua::hub@2')
+    sym.render()
+    local text = table.concat(
+        vim.api.nvim_buf_get_lines(sym.buf, 0, -1, false), '\n')
+    ok(text:match('leaf_a'), 'the callee is named: ' .. text)
+    ok(text:match('leaf_b'), 'both of them')
+    local n = 0
+    for _ in pairs(sym.line_node or {}) do n = n + 1 end
+    eq(2, n, 'and each row IS a node, so hover and descend work')
+    vim.fn.delete(root, 'rf')
+end)

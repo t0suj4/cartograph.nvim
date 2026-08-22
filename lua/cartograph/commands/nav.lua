@@ -81,10 +81,14 @@ function M.register(H)
     end, { desc = 'cartograph: detect the tree structures (call-dominator + subsystem) hiding in the graph' })
 
     -- ── graph-ops with no vim idiom: commands, bind your own leader keys
-    cmd('CartographMark', function ()
+    -- `!` marks EVERY symbol row in the view, which is how a set gets filled from
+    -- an axis: stand on `callees` or `reaches` and take the whole thing at once
+    cmd('CartographMark', function (o)
         local store = live() if not store then return end
-        require('cartograph.panes.symbols').ws_toggle_cursor()
-    end, { desc = 'cartograph: toggle the cursor row in the working set' })
+        local sym = require 'cartograph.panes.symbols'
+        if o.bang then sym.ws_toggle_view() else sym.ws_toggle_cursor() end
+    end, { bang = true,
+        desc = 'cartograph: toggle the cursor row in the working set; ! toggles every symbol row in the view' })
 
     cmd('CartographWorkingSet', function ()
         local store = live() if not store then return end

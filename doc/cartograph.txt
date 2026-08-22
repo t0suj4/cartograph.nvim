@@ -101,8 +101,16 @@ NAVIGATING AND OVERLAYS                                    *cartograph-cmd-nav*
                               (call-dominator + subsystem)
   :CartographHeat             toggle the hub/heat overlay: fan-in/out
                               and role (symbols pane only)
-  :CartographMark             toggle the cursor row's subject in the
-                              working set (see |cartograph-subject|)
+  :CartographMark[!]          toggle the cursor row's subject in the
+                              working set (see |cartograph-subject|); `!`
+                              toggles EVERY symbol row in the view, which is
+                              how a set gets filled from an axis — stand on
+                              `callees` or `reaches` and take the whole thing.
+                              A half-marked view is COMPLETED rather than
+                              inverted, so adding a second axis to a set does
+                              not remove the first. Standing at the working-set
+                              altitude, `:CartographLint!` then runs over
+                              exactly what you marked.
   :CartographWorkingSet       open the working-set view
   :CartographWorkspace        open the workspace — ad-hoc Lua against
                               the loaded graph; a returned node list is

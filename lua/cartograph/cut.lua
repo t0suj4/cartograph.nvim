@@ -99,7 +99,20 @@ end
 function M.of_frame(store, level, key)
     if not level or not key then return nil end
     if level == 'file' then return M.of_file(store, key) end
-    if level == 'files' or level == 'protos' or level == 'ws' then return nil end
+    -- ★ THE WORKING SET IS A CUT (CART-0520). It is the one "root" altitude with a
+    -- subject after all -- a user-declared node set is exactly what an entry point
+    -- supplies, and `of_nodes` existed with no caller until this line. Standing at
+    -- `ws`, `:CartographLint!` runs over the symbols you marked. Grain is `set`,
+    -- which lint.CLOSURE does not list, so promise rules still refuse: an
+    -- arbitrary union of nodes holds nobody's whole search space.
+    if level == 'ws' then
+        local ids = {}
+        for _, n in ipairs(store.ws_list and store.ws_list() or {}) do
+            if n and n.id then ids[#ids + 1] = n.id end
+        end
+        return M.of_nodes(store, ids, ('working set (%d)'):format(#ids))
+    end
+    if level == 'files' or level == 'protos' then return nil end
     -- a relation/data altitude's key is not a node id; its SUBJECT is, and the
     -- containment registry already knows how to get there
     if store.node(key) then return M.of_node(store, key) end

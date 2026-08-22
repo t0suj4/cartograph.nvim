@@ -1314,6 +1314,14 @@ local function render_axis(ctx, key)
         ctx.marks[2] = { { 0, -1, why and 'CartographFrontier' or 'CartographDim' } }
         return
     end
+    -- ★ DISPATCH ON THE MOST SPECIFIC FIELD FIRST (CART-0520 found this). A NODE
+    -- row carries `file` too -- the hover needs it -- so testing `m.file` before
+    -- `m.node` sent every callee and every cone member down the FILE branch: the
+    -- rows rendered as the containing file's name, repeated once per member, and
+    -- `line_node` was never set, so hover and descend on them did nothing. Present
+    -- since the axis registry shipped, and invisible until something else needed
+    -- `line_node` off an axis view. A row's SHAPE is not "which field exists", it
+    -- is which field is most specific -- site, then node, then file.
     for _, m in ipairs(rows) do
         if m.site then
             ctx.lines[#ctx.lines + 1] = '  ' .. M.fit_identity(m.name or '?', '  ')
@@ -1323,6 +1331,15 @@ local function render_axis(ctx, key)
                 line = m.line, range = m.range, def = m.def, var = m.var,
                 ranges = m.ranges }
             ctx.line_about[#ctx.lines] = m.fn or m.var
+        elseif m.node then
+            local n = store.node(m.node)
+            local icon = ICON[n and n.kind] or 'ƒ'
+            ctx.lines[#ctx.lines + 1] = ('  %s %s'):format(icon,
+                M.fit_identity(m.name or '?', '  ' .. icon .. ' '))
+            ctx.marks[#ctx.lines] = { { 2, 2 + #icon, 'CartographDim' } }
+            ctx.vnums[#ctx.lines] = n and tostring(atr.sl(n.range) + 1) or nil
+            ctx.line_node[#ctx.lines] = m.node
+            ctx.node_line[m.node] = #ctx.lines
         elseif m.file then
             ctx.lines[#ctx.lines + 1] = '  ' .. M.fit_identity(M.shortpath(m.file), '  ')
                 .. (m.sideeffect and '  (side effect)' or '')
@@ -1332,15 +1349,6 @@ local function render_axis(ctx, key)
                 .. (m.rerun and '  (re-runs)' or '')
             ctx.line_file[#ctx.lines] = m.file
             ctx.line_kind[#ctx.lines] = 'file'
-        else
-            local n = store.node(m.node)
-            local icon = ICON[n and n.kind] or 'ƒ'
-            ctx.lines[#ctx.lines + 1] = ('  %s %s'):format(icon,
-                M.fit_identity(m.name or '?', '  ' .. icon .. ' '))
-            ctx.marks[#ctx.lines] = { { 2, 2 + #icon, 'CartographDim' } }
-            ctx.vnums[#ctx.lines] = n and tostring(atr.sl(n.range) + 1) or nil
-            ctx.line_node[#ctx.lines] = m.node
-            ctx.node_line[m.node] = #ctx.lines
         end
     end
 end
@@ -2899,6 +2907,47 @@ end
 --- calls this when the user binds one). Reports the name either way: at a
 --- relation or fn altitude the mark lands on the altitude's subject, which has
 --- no row of its own to carry the ● — a silent toggle there looks like a no-op.
+--- MARK EVERY NODE ROW IN THIS VIEW (CART-0520). The working set's only way in
+--- was one row at a time, which made it a chore rather than the natural OUTPUT of
+--- navigation -- and every axis already produces a SET: callees, the transitive
+--- cone, imports, imported-by, registrants.
+---
+--- ★ IT IS NOT "FILL FROM AN AXIS", IT IS "MARK WHAT IS ON SCREEN", and the
+--- generalisation costs nothing: at the `callees` axis it takes the callees, at
+--- `reaches` the whole cone, at a file its defs, at `tbl` its members. `line_node`
+--- is published per render, so the rows ARE the set and no traversal is repeated
+--- -- which also settles the cheap-vs-`walk` worry the axis registry raises: a
+--- cone's BFS was already paid to draw the rows you are looking at.
+---
+--- Toggles as a whole, mirroring `m`: if every row is already marked it UNMARKS
+--- them (subtract), otherwise it adds the missing ones (union). Two of the three
+--- set operations for one verb; INTERSECT has no gesture and is left out rather
+--- than given a bad one.
+function M.ws_toggle_view()
+    local ids, order = {}, {}
+    for _, id in pairs(M.line_node or {}) do
+        if not ids[id] then ids[id] = true; order[#order + 1] = id end
+    end
+    if #order == 0 then
+        return vim.notify('cartograph: no symbol rows in this view to mark',
+            vim.log.levels.INFO)
+    end
+    local all_marked = true
+    for _, id in ipairs(order) do
+        if not store.ws_has(id) then all_marked = false break end
+    end
+    local n = 0
+    for _, id in ipairs(order) do
+        if store.ws_has(id) == all_marked then store.ws_toggle(id); n = n + 1 end
+    end
+    vim.notify(('cartograph: %s %d symbol(s) %s the working set (%s)'):format(
+        all_marked and 'unmarked' or 'marked', n,
+        all_marked and 'from' or 'in', M.view.level), vim.log.levels.INFO)
+    local loc = store.loc_provider and store.loc_provider.get()
+    M.render()
+    if loc and store.loc_provider then store.loc_provider.set(loc) end
+end
+
 function M.ws_toggle_cursor()
     local id, from = M.row_subject()
     if not id then
