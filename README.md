@@ -1401,6 +1401,23 @@ proposes a conversation:
 | **calibration-bound** | a count dominated by a known calibration question | no — triage before trusting it |
 | **annotation** | not a defect at all; it labels structure for readers and views | no |
 
+**And every rule declares which way its evidence runs**, which is a different
+question from what a finding is worth — it decides whether the rule can be pointed
+at part of a codebase at all:
+
+| quantifier | what a finding asserts | may it be clipped to a subset? |
+|---|---|---|
+| **witness** | something EXISTS — a cycle, a raw seam read, a taint path, a clone | **yes** — it under-reports, which is the safe direction |
+| **promise** | an ABSENCE — no caller, no release, no registration, no guard | **no** — absence inside the subset would read as absence everywhere, so it must look outside and hedge |
+
+18 of the 33 rules are witness and 15 are promise. The two axes are independent and
+all four combinations exist — `silent-drop` is authoritative *and* witness,
+`dead-function` suggestive *and* promise — so a spec pins one rule in each cell to
+stop them collapsing into one field. Classification comes from the message a rule
+emits, never its name: `null-deref` sounds like a sighting and is a promise, because
+what it reports is a *missing* guard; `silent-drop` sounds like an absence and is a
+witness, because the resolver already looked and recorded the answer on the call.
+
 The bar for *authoritative* is positive justification, not absence of doubt: mistaking
 a proposal for a defect fails builds for doing the right thing, while mistaking a
 defect rule for a proposal only loses a gate. So the set is small and deliberately

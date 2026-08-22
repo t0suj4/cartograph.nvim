@@ -938,6 +938,95 @@ end
 M.DISPOSITIONS = { authoritative = true, suggestive = true, calibration = true,
     annotation = true }
 
+-- ── QUANTIFIER: WHICH WAY THE EVIDENCE RUNS, declared per rule (CART-0513) ───
+-- The second per-rule declaration, living here because it answers the sibling
+-- question: `disposition` says how much a finding is WORTH, `quantifier` says what
+-- shape of claim it IS. [[cartograph-witness-and-promise]]
+--
+--   witness   the finding asserts that something EXISTS — a cycle, a raw seam
+--             read, a taint path, a clone. One sighting is the whole claim, and
+--             more sightings add nothing to any one of them.
+--   promise   the finding asserts an ABSENCE — no caller, no release, no
+--             registration, no guard. Refutable by one counterexample and
+--             confirmable never.
+--
+-- ★★ WHY IT IS WORTH DECLARING: IT DECIDES WHETHER THE RULE MAY BE SCOPED.
+-- Running an analysis over a SUBSET of the graph needs a policy for evidence
+-- outside the boundary, and which policies are legal is not a preference —
+--   a WITNESS rule may be CLIPPED (pretend the outside is absent). It then
+--   under-reports, which is the safe direction and costs nothing but recall.
+--   a PROMISE rule may NOT. Clipping it FABRICATES: absence inside the scope
+--   reads as absence everywhere, so a function whose only caller is out of scope
+--   becomes "dead" and a var whose only writer is out of scope becomes `const`.
+--   It must HEDGE (look outside, mark any finding whose support crosses) or emit
+--   its premises as demands.
+-- So `M.policies` below is DERIVED from this field and never declared: n + m
+-- declarations, not an n×m matrix ([[cartograph-scope-boundaries]]).
+--
+-- ★ AND IT IS NOT THE SAME AXIS AS `disposition`, however much the two rhyme.
+-- All four combinations are populated, and here is one of each so nobody collapses
+-- them: silent-drop is authoritative+witness · dead-confined authoritative+promise
+-- · sql suggestive+witness · dead-function suggestive+promise.
+--
+-- CLASSIFY FROM WHAT A FINDING ASSERTS, NEVER FROM THE RULE'S NAME. Read the
+-- message it emits: "never read", "no callers", "names no handler", "without a
+-- release", "with no null-guard" are all promises however the rule is titled, and
+-- `null-deref` reads like a sighting until you notice its message is about a
+-- MISSING guard. Where a rule emits both shapes — route-audit reports "never
+-- registered" (promise) beside "registered in more than one place" (witness) —
+-- declare the STRICTER one. A wrong `promise` costs recall under scoping; a wrong
+-- `witness` licenses a clip that fabricates, and those are not symmetric.
+M.QUANTIFIERS = { witness = true, promise = true }
+
+--- Which boundary policies may this rule run under? DERIVED, never declared.
+--- @return table { clip = bool, hedge = true, refuse = true }
+function M.policies(rule)
+    local q = type(rule) == 'table' and rule.quantifier or rule
+    -- hedge and refuse are always legal: looking outside and marking, or
+    -- declining, cannot turn a true finding false. Only CLIP is gated.
+    return { clip = q == 'witness', hedge = true, refuse = true }
+end
+
+--- The rules that a scope may CLIP — i.e. the ones scopable today at zero
+--- honesty cost, which is the population step 3 of the scope-boundary design
+--- should wire first.
+function M.clippable()
+    local out = {}
+    for _, r in ipairs(M.rules) do
+        if M.policies(r).clip then out[#out + 1] = r.name end
+    end
+    table.sort(out)
+    return out
+end
+
+-- ── WHO INVOKES lint.run, AND WITH WHAT SCOPE (CART-0513) ────────────────────
+-- ★ EVERY ROW SAYS `corpus`, AND THAT IS THE FINDING. Scope is part of the call
+-- convention, not a mode — but `M.run` has never taken one, so every entry point
+-- gets the whole store by omission. A table where every row reads the same makes
+-- "corpus" visible as an omission rather than a decision, and the test below fails
+-- when a NEW caller ships without declaring what it supplies.
+--
+-- `natural` is what the entry point could supply from its own context, and is
+-- documentation until step 3 wires it — not a promise that it will.
+--
+-- NOTE THE ROW THAT LOOKS LIKE A SCOPE AND IS NOT: annotcensus and guards pass
+-- `opts.only`, which filters WHICH RULES RUN, never what they run OVER. That is
+-- exactly the confusion this design dissolves — a rule filter is not a scope.
+M.ENTRY_POINTS = {
+    { at = 'lua/cartograph/lsp.lua',            supplies = 'corpus',
+      natural = 'the open buffer, or the workspace folder' },
+    { at = 'lua/cartograph/dogfood.lua',        supplies = 'corpus',
+      natural = 'corpus — correct already: it is a whole-tree dashboard' },
+    { at = 'lua/cartograph/commands/lint.lua',  supplies = 'corpus',
+      natural = "the browser's current frame subject (M.trail already holds it)" },
+    { at = 'tools/annotcensus.lua',             supplies = 'corpus',
+      natural = 'corpus; passes `only`, a RULE filter and not a scope' },
+    { at = 'tools/guards.lua',                  supplies = 'corpus',
+      natural = 'corpus; passes `only`, a RULE filter and not a scope' },
+    { at = 'tools/matrix.lua',                  supplies = 'corpus',
+      natural = 'corpus — one row per corpus is the whole point' },
+}
+
 -- ── DEAD BY CONSTRUCTION (CART-0249) ─────────────────────────────────────────────
 -- dead-function below is SUGGESTIVE for a stated reason: "an entry point, an export, or a
 -- dynamically dispatched target reads as dead". For a FILE-LOCAL the confinement fact closes
@@ -1148,45 +1237,45 @@ local function annotation_findings(store)
 end
 
 M.rules = {
-    { name = 'resource-leak', severity = 'warn', disposition = 'suggestive',
+    { name = 'resource-leak', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         -- recovered all 3 luanti oracles, but it is CONVENTION-specific: precision on
         -- known positives is not evidence of no false positives off-convention
         run = resource_leak_findings },
-    { name = 'member-leak', severity = 'warn', disposition = 'suggestive',
+    { name = 'member-leak', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         run = member_leak_findings },
-    { name = 'null-deref', severity = 'warn', disposition = 'suggestive',
+    { name = 'null-deref', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         -- the message says `possible` and the nilflow lattice hedges: a guard we do
         -- not model reads as unguarded
         run = null_deref_findings },
-    { name = 'silent-drop', severity = 'warn', disposition = 'authoritative',
+    { name = 'silent-drop', severity = 'warn', quantifier = 'witness', disposition = 'authoritative',
         -- its own comment: "a residual finding of ANY length is a real regression" —
         -- the resolver resolves-or-refuses these, so a survivor is a resolver bug
         run = silent_drop_findings },
-    { name = 'seam-guard', severity = 'warn', disposition = 'authoritative',
+    { name = 'seam-guard', severity = 'warn', quantifier = 'witness', disposition = 'authoritative',
         -- the original gated count: a raw wide-index read outside band.lua/store.lua
         -- is wrong by definition, not by judgement
         run = seam_findings },
-    { name = 'truncation', severity = 'info', disposition = 'authoritative',
+    { name = 'truncation', severity = 'info', quantifier = 'witness', disposition = 'authoritative',
         -- AST-precise (2+ targets, one and/or rhs whose operand is a call) and the
         -- semantics are unambiguous: the second target silently becomes nil. Three
         -- real bugs in one day of our own development
         run = truncation_findings },
-    { name = 'require-cycle', severity = 'info', disposition = 'suggestive',
+    { name = 'require-cycle', severity = 'info', quantifier = 'witness', disposition = 'suggestive',
         -- HEDGED BY ITS OWN COMMENT: import edges do not record load-time vs lazy, so
         -- a cycle is "fragile IF load-time", not a certain bug
         run = cycle_findings },
-    { name = 'sql', severity = 'info', disposition = 'suggestive', run = sql_findings },
-    { name = 'sink-concat', severity = 'warn', disposition = 'suggestive',
+    { name = 'sql', severity = 'info', quantifier = 'witness', disposition = 'suggestive', run = sql_findings },
+    { name = 'sink-concat', severity = 'warn', quantifier = 'witness', disposition = 'suggestive',
         run = function (store) return require('cartograph.sinkflow').findings(store) end },
-    { name = 'sink-source', severity = 'warn', disposition = 'suggestive',
+    { name = 'sink-source', severity = 'warn', quantifier = 'witness', disposition = 'suggestive',
         run = function (store) return require('cartograph.sinkflow').source_findings(store) end },
-    { name = 'sink-reach', severity = 'warn', disposition = 'suggestive',
+    { name = 'sink-reach', severity = 'warn', quantifier = 'witness', disposition = 'suggestive',
         run = function (store) return require('cartograph.sinkflow').reach_findings(store) end },
     {
         -- the state atlas's lint face: state that is written but never
         -- read is dead weight — or reached dynamically in a way the graph
         -- cannot see, so the hedge is spoken, severity stays info
-        name = 'dead-state', severity = 'info', disposition = 'suggestive',
+        name = 'dead-state', severity = 'info', quantifier = 'promise', disposition = 'suggestive',
         run = function (store)
             local out = {}
             local census = require('cartograph.atlas').census(store)
@@ -1207,7 +1296,7 @@ M.rules = {
         -- code queries but the database lacks are typos or missing
         -- migrations; tables the database holds but nothing queries are
         -- dead weight. The wiretap shape, at the schema boundary.
-        name = 'db-audit', severity = 'warn', disposition = 'suggestive',
+        name = 'db-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         -- AUTHORITATIVE CANDIDATE: it compares code against a declared schema, so a
         -- reference to a column that does not exist may be a defect by construction.
         -- Left suggestive until someone reads it and can justify the promotion.
@@ -1240,7 +1329,7 @@ M.rules = {
         -- naming an unregistered route is a render-time error waiting; a
         -- registered route nothing names is dead surface; a cross-file
         -- name collision resolves silently in Django and loudly here
-        name = 'route-audit', severity = 'warn', disposition = 'suggestive',
+        name = 'route-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         -- AUTHORITATIVE CANDIDATE, same reasoning as db-audit (declared routes).
 
         run = function (store)
@@ -1282,7 +1371,7 @@ M.rules = {
         -- SILENT no-op (the handler never runs, no error); a handler nothing
         -- notifies is dead; an include pointing at a missing file breaks at
         -- runtime. The notify no-op is the classic footgun (a typo'd name).
-        name = 'ansible-audit', severity = 'warn', disposition = 'suggestive',
+        name = 'ansible-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         run = function (store)
             local a = store.data.ansible
             if not a then return {} end
@@ -1311,7 +1400,7 @@ M.rules = {
         -- name appears nowhere else in the role (tasks, handlers, jinja). A
         -- soft signal — a var could still be read via hostvars/lookup — so
         -- INFO, but on a large role it surfaces accumulated cruft.
-        name = 'ansible-vars', severity = 'info', disposition = 'suggestive',
+        name = 'ansible-vars', severity = 'info', quantifier = 'promise', disposition = 'suggestive',
         run = function (store)
             local a = store.data.ansible
             if not a then return {} end
@@ -1324,45 +1413,45 @@ M.rules = {
             return out
         end,
     },
-    { name = 'layering', severity = 'info', disposition = 'suggestive',
+    { name = 'layering', severity = 'info', quantifier = 'witness', disposition = 'suggestive',
         -- a DOMINANT-direction heuristic: a against-the-grain import may be correct
         run = layering_findings },
-    { name = 'clone', severity = 'info', disposition = 'calibration', -- CART-0196
+    { name = 'clone', severity = 'info', quantifier = 'witness', disposition = 'calibration', -- CART-0196
         run = clone_findings },
-    { name = 'access-point', severity = 'info', disposition = 'annotation',
+    { name = 'access-point', severity = 'info', quantifier = 'witness', disposition = 'annotation',
         -- not a defect: it MARKS node.access so views treat fan-in as plumbing
         run = access_point_findings },
-    { name = 'registry-audit', severity = 'warn', disposition = 'suggestive',
+    { name = 'registry-audit', severity = 'warn', quantifier = 'witness', disposition = 'suggestive',
         run = registry_audit_findings },
     -- the environment's OWN idioms, reimplemented in the project (CART-0226). An
     -- ANNOTATION, not a defect: a library providing its own event layer is a deliberate
     -- abstraction. What it states is the fact a reader needs — this name is not the
     -- platform's. Requires the active profile to declare `templates`, so it is silent
     -- for every environment that does not.
-    { name = 'idiom-shadow', severity = 'info', disposition = 'annotation',
+    { name = 'idiom-shadow', severity = 'info', quantifier = 'witness', disposition = 'annotation',
         run = function (store)
             local prof = store.data and store.data.profile
                 and require('cartograph.spec.profile').load(store.data.profile)
             return require('cartograph.greenspun').idiom_shadows(store.data,
                 prof and prof.templates or nil)
         end },
-    { name = 'pair-audit', severity = 'warn', disposition = 'suggestive',
+    { name = 'pair-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         run = pair_audit_findings },
-    { name = 'schema-mirror', severity = 'info', disposition = 'calibration', -- CART-0196
+    { name = 'schema-mirror', severity = 'info', quantifier = 'witness', disposition = 'calibration', -- CART-0196
         run = mirror_findings },
-    { name = 'greenspun', severity = 'info', disposition = 'suggestive',
+    { name = 'greenspun', severity = 'info', quantifier = 'witness', disposition = 'suggestive',
         -- THE NAMED CASE: suggestive by design; a user-supplied TEMPLATE is what would
         -- make it authoritative ([[greenspun-is-suggestive]])
         run = greenspun_findings },
-    { name = 'dynamic-dispatch', severity = 'info', disposition = 'suggestive',
+    { name = 'dynamic-dispatch', severity = 'info', quantifier = 'witness', disposition = 'suggestive',
         run = dynamic_findings },
-    { name = 'load-order', severity = 'warn', disposition = 'authoritative',
+    { name = 'load-order', severity = 'warn', quantifier = 'promise', disposition = 'authoritative',
         -- the manifest IS the load order (store.toc), so this is read from DATA, not
         -- inferred: a load-time call into a later-loading file hits nil
         run = load_order_findings },
-    { name = 'listener-audit', severity = 'warn', disposition = 'suggestive',
+    { name = 'listener-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         run = listener_findings },
-    { name = 'swallowed-type', severity = 'info', disposition = 'calibration',
+    { name = 'swallowed-type', severity = 'info', quantifier = 'witness', disposition = 'calibration',
         -- `calibration` IS THE MEASURED LABEL, not a placeholder — CART-0227 sampled the
         -- wrong-rate this comment used to be waiting on. What the count measures is the
         -- PRECISION of whole-graph unique-name matching (the `M` in "M type is swallowed"
@@ -1385,17 +1474,17 @@ M.rules = {
     {   -- the PROVABLE tier (CART-0249): three premises, so a finding is a defect by
         -- construction. Beside dead-function, not replacing it — a rule carries ONE
         -- disposition, and the suggestive tier still has a job wherever we cannot know.
-        name = 'dead-confined', severity = 'warn', disposition = 'authoritative',
+        name = 'dead-confined', severity = 'warn', quantifier = 'promise', disposition = 'authoritative',
         run = dead_confined_findings,
     },
     {   -- a NAME check, not a type check — see annotation_findings for why that is
         -- what makes it authoritative, and for the three soundness exclusions
-        name = 'annotation-mismatch', severity = 'warn',
+        name = 'annotation-mismatch', severity = 'warn', quantifier = 'promise',
         disposition = 'authoritative',
         run = annotation_findings,
     },
     {
-        name = 'dead-function', severity = 'warn', disposition = 'suggestive',
+        name = 'dead-function', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         -- an entry point, an export, or a dynamically dispatched target reads as dead
 
         run = function (store)
@@ -1425,7 +1514,7 @@ M.rules = {
         end,
     },
     {
-        name = 'redundant-require', severity = 'warn', disposition = 'suggestive',
+        name = 'redundant-require', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
         -- AUTHORITATIVE CANDIDATE: it fires off store.classify(file)=='deadimport', a
         -- derived FACT rather than a heuristic. Held back only because 'has no effect'
         -- depends on the effect analysis being complete for that language.
@@ -1442,7 +1531,7 @@ M.rules = {
         end,
     },
     {
-        name = 'call-cycle', severity = 'warn', disposition = 'suggestive',
+        name = 'call-cycle', severity = 'warn', quantifier = 'witness', disposition = 'suggestive',
         -- a cycle is a FACT, but mutual recursion is legal: the defect is a judgement
 
         run = function (store)

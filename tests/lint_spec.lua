@@ -442,3 +442,82 @@ test('dead-confined: provable only with all three premises', function ()
     eq(nil, dsug['dead.lua'], 'one function, one disposition')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── THE QUANTIFIER FENCE (CART-0513) ────────────────────────────────────────
+-- The sibling of the disposition fence above, and it exists for a sharper reason:
+-- disposition decides how much a finding is WORTH, quantifier decides whether the
+-- rule may be SCOPED at all. A witness rule may be clipped to a subset and merely
+-- under-report; a promise rule clipped to a subset FABRICATES, because absence
+-- inside the scope reads as absence everywhere. So an undeclared rule is not a
+-- documentation gap, it is a rule nobody can safely scope.
+test('lint: every rule DECLARES which way its evidence runs', function ()
+    local lint = require 'cartograph.lint'
+    local missing, bad = {}, {}
+    for _, r in ipairs(lint.rules) do
+        if r.quantifier == nil then missing[#missing + 1] = r.name
+        elseif not lint.QUANTIFIERS[r.quantifier] then
+            bad[#bad + 1] = r.name .. '=' .. tostring(r.quantifier)
+        end
+    end
+    eq({}, missing, 'a new rule must decide: witness (asserts existence) or'
+        .. ' promise (asserts absence)')
+    eq({}, bad, 'and it must be one of the declared quantifiers')
+    ok(#lint.rules >= 25, 'sanity: the registry was actually read')
+end)
+
+test('lint: the boundary policy is DERIVED from the quantifier, not declared', function ()
+    local lint = require 'cartograph.lint'
+    -- the n+m collapse made executable: no rule declares its policies, and no
+    -- (rule x policy) cell is authored anywhere
+    eq({ clip = true, hedge = true, refuse = true }, lint.policies('witness'))
+    eq({ clip = false, hedge = true, refuse = true }, lint.policies('promise'),
+        'a promise rule may hedge or refuse — never clip')
+    -- and it reads a rule table as happily as a bare string
+    for _, r in ipairs(lint.rules) do
+        eq(r.quantifier == 'witness', lint.policies(r).clip, r.name)
+    end
+    local clip = lint.clippable()
+    ok(#clip > 0 and #clip < #lint.rules,
+        ('the split is real: %d of %d rules are clip-legal'):format(#clip, #lint.rules))
+end)
+
+test('lint: quantifier and disposition are DIFFERENT axes', function ()
+    local lint = require 'cartograph.lint'
+    -- all four combinations are populated, so a reader cannot collapse the two
+    -- fields into one. If this ever fails, the classification has drifted toward
+    -- "authoritative means witness", which it does not.
+    local seen = {}
+    for _, r in ipairs(lint.rules) do
+        seen[r.disposition .. '/' .. r.quantifier] = r.name
+    end
+    for _, k in ipairs({ 'authoritative/witness', 'authoritative/promise',
+        'suggestive/witness', 'suggestive/promise' }) do
+        ok(seen[k], 'no rule is ' .. k .. ' — the axes may have collapsed')
+    end
+end)
+
+test('lint: every CALLER of lint.run declares the scope it supplies', function ()
+    local lint = require 'cartograph.lint'
+    -- ★ THE FENCE THAT MATTERS MORE THAN THE TABLE. Scope is part of the call
+    -- convention, so a new entry point that ships without saying what it supplies
+    -- is the defect — and today every row reads `corpus`, which is the omission
+    -- made visible rather than a decision. The population is read from SOURCE, not
+    -- from the table, so the table cannot go stale in the silent direction.
+    local declared = {}
+    for _, e in ipairs(lint.ENTRY_POINTS) do
+        declared[e.at] = e
+        ok(e.supplies, e.at .. ' must say what scope it supplies')
+    end
+    local root = vim.fn.getcwd()
+    local found, undeclared = {}, {}
+    local cmd = 'cd ' .. vim.fn.shellescape(root)
+        .. " && grep -rlF -e \"lint').run(\" -e 'lint.run(' lua tools 2>/dev/null"
+    for _, rel in ipairs(vim.fn.systemlist(cmd)) do
+        if rel ~= '' and rel ~= 'lua/cartograph/lint.lua' then
+            found[#found + 1] = rel
+            if not declared[rel] then undeclared[#undeclared + 1] = rel end
+        end
+    end
+    ok(#found >= 4, 'sanity: the call sites were actually found (' .. #found .. ')')
+    eq({}, undeclared, 'a caller of lint.run that does not declare its scope')
+end)
