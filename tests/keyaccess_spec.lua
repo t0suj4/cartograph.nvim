@@ -205,3 +205,98 @@ test('keyaccess: a language without the global-scope guarantee resolves NOTHING'
     eq(0, st.nonode, 'which is a different fact and must not absorb it')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── CONSUMPTION (CART-0507): the reads become visible, nothing is minted ─────
+
+test('keyaccess: the read index is memoized per GRAPH IDENTITY', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    -- deriving an accessor re-parses its file (~525 ms on mantis), so the index
+    -- must be built once and must not outlive the graph it describes
+    local root = mkroot('m.php', '<?php\n'
+        .. "$g_theme = 'dark';\n"
+        .. 'function opt( $p_name ) {\n'
+        .. "    return $GLOBALS['g_' . $p_name];\n"
+        .. '}\n'
+        .. 'function show() { return opt( \'theme\' ); }\n')
+    local data = ingest(root)
+    local id = 'm.php::var:g_theme@1'
+    local a = keyaccess.read_index(store)
+    local b = keyaccess.read_index(store)
+    ok(a == b, 'the same graph yields the SAME table (memoized, not rebuilt)')
+    eq(1, #keyaccess.reads_of(store, id))
+    eq('g_theme', keyaccess.reads_of(store, id)[1].name)
+    -- a fresh ingest is a new graph, so the memo must not answer for it
+    store.ingest({ root = '/x', nodes = {}, edges = {}, calls = {} })
+    ok(keyaccess.read_index(store) ~= a, 'a re-ingest gets a fresh index')
+    local _ = data
+    vim.fn.delete(root, 'rf')
+end)
+
+test('keyaccess: the atlas counts a derived read only when ASKED', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local atlas = require 'cartograph.atlas'
+    local root = mkroot('a.php', '<?php\n'
+        .. "$g_theme = 'dark';\n"
+        .. 'function opt( $p_name ) {\n'
+        .. "    return $GLOBALS['g_' . $p_name];\n"
+        .. '}\n'
+        .. 'function show() { return opt( \'theme\' ); }\n')
+    ingest(root)
+    local id = 'a.php::var:g_theme@1'
+    local off = atlas.classify(store, id)
+    eq(0, off.nr, 'default is unchanged: no caller pays for the re-parse silently')
+    eq(nil, off.dnr)
+    local on = atlas.classify(store, id, { derived = true })
+    eq(1, on.nr, 'asked, the string-keyed read counts as the read it is')
+    eq(1, on.dnr, 'and is reported separately, because the label cannot carry it')
+    eq('const', on.label, 'the label does NOT change: reads never threaten constancy')
+    eq(off.label, on.label, 'const on nothing -> const on evidence is a STRENGTHENING')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('keyaccess: a var read ONLY by key is not dead state', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    -- the label-FLIP case, which is rare and real: written by a function, read
+    -- only through the accessor. Measured population on mantis: exactly one var.
+    local atlas = require 'cartograph.atlas'
+    local root = mkroot('d.php', '<?php\n'
+        .. "$g_count = 0;\n"
+        .. 'function bump() {\n'
+        .. '    global $g_count;\n'
+        .. '    $g_count = $g_count + 1;\n'
+        .. '}\n'
+        .. 'function opt( $p_name ) {\n'
+        .. "    return $GLOBALS['g_' . $p_name];\n"
+        .. '}\n'
+        .. 'function report() { return opt( \'count\' ); }\n')
+    ingest(root)
+    local id = 'd.php::var:g_count@1'
+    local on = atlas.classify(store, id, { derived = true })
+    ok(on.dnr and on.dnr >= 1, 'the keyed read is found')
+    ok(on.label ~= 'dead',
+        'a promise ("written but never read") must not ignore a read it can see')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('keyaccess: the var altitude shows a derived read, naming its accessor', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local symbols = require 'cartograph.panes.symbols'
+    local root = mkroot('v.php', '<?php\n'
+        .. "$g_theme = 'dark';\n"
+        .. 'function opt_get( $p_name ) {\n'
+        .. "    return $GLOBALS['g_' . $p_name];\n"
+        .. '}\n'
+        .. 'function show() { return opt_get( \'theme\' ); }\n')
+    ingest(root)
+    symbols.create(); symbols.win = nil
+    store.set_focus('v.php::var:g_theme@1')
+    symbols.show('var', 'v.php::var:g_theme@1')
+    symbols.render()
+    local text = table.concat(
+        vim.api.nvim_buf_get_lines(symbols.buf, 0, -1, false), '\n')
+    ok(text:match('by key'), 'the title says where the evidence came from: ' .. text)
+    ok(text:match('opt_get'), 'and a row NAMES its accessor, so a derived read is'
+        .. ' not mistaken for a syntactic one: ' .. text)
+    ok(text:match('~'), 'marked derived per row')
+    vim.fn.delete(root, 'rf')
+end)

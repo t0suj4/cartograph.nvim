@@ -829,6 +829,17 @@ Members are of three shapes, and each descends the way its shape implies: a
 function goes to its body, a file to its own altitude, a write SITE to the
 position (landing through the containment chain, |cartograph-site|).
 
+A READ CAN BE SPELLED AS DATA, and those rows say so. Where a codebase reaches a
+variable through an accessor — `config_get_global( 'db_type' )` rather than
+`$g_db_type` — no mention pass can find the read, so the variable reads as unused
+while being read from hundreds of places. Those rows appear under the var's own
+altitude marked `~ via <accessor>('<key>')`, and the title carries the count
+(`const · 11 by key`). The mark is not decoration: a derived read is found by
+reading the accessor's own body, so it must stay distinguishable from a read the
+parser saw directly. They are shown, never minted as edges — the graph has nowhere
+to record where an edge came from yet, and an edge that cannot say would launder
+one kind of claim as the other.
+
 AN IMPORT ROW SAYS HOW IT IMPORTS, where the language's syntax distinguishes it.
 `(side effect)` marks an import required for its effect rather than a binding, and
 `(re-runs)` marks one that executes the target again — php `include`/`require`

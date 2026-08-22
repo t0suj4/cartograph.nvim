@@ -1278,7 +1278,15 @@ M.rules = {
         name = 'dead-state', severity = 'info', quantifier = 'promise', disposition = 'suggestive',
         run = function (store)
             local out = {}
-            local census = require('cartograph.atlas').census(store)
+            -- ★ ASK FOR THE DERIVED READS (CART-0507). "written but never read" is
+            -- a PROMISE, and a promise that ignores refuting evidence it could
+            -- have consulted is WRONG rather than conservative -- a var read only
+            -- as `config_get('x')` is read. MEASURED DELTA: exactly ONE finding on
+            -- mantis, because the ladder reaches `const` before `dead` and the
+            -- string-keyed population is overwhelmingly unwritten. Wired for
+            -- correctness, not for the number; the cost is ~525 ms once per graph
+            -- and only when this rule runs.
+            local census = require('cartograph.atlas').census(store, { derived = true })
             for _, v in ipairs(census.vars.dead) do
                 local n = store.node(v.id)
                 out[#out + 1] = {

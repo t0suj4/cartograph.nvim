@@ -2759,6 +2759,14 @@ nvim --headless -u NONE -l tools/ctrlcensus.lua <dir> --folded     # one row hid
 # and derives as not an accessor at all. Mints nothing: it reports what minting
 # would claim. EVIDENCE, not a gate.
 nvim --headless -u NONE -l tools/keyaccess.lua ~/git/mantisbt
+# The reads are CONSUMED, not minted: the var altitude lists them as a marked
+# group (`~ via config_get_global('db_type')`, with `(file scope)` on the 46% that
+# are module-level), and the state atlas counts them when ASKED
+# (`atlas.classify(store, id, { derived = true })`, default off so nothing pays the
+# ~525ms index build silently). On mantis that turns 409 of 2044 `const` labels from
+# resting on NOTHING to resting on evidence, and removes one false `dead` finding.
+# Nothing becomes an edge: a use edge carries no provenance field, so a derived read
+# in the same channel would be indistinguishable from a syntactic one.
 nvim --headless -u NONE -l tools/keyaccess.lua <dir> --sites 40   # sample the reads
 # mantis (full tree): 12 accessors (4 derived, 8 forwarders through resolved
 # calls), 2317 call sites, 1981 resolving to exactly one var across 412 distinct

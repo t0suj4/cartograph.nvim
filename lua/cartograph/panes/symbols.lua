@@ -849,9 +849,36 @@ local function render_var(ctx, id)
                 internal = member }
         end
     end
+    -- ★ STRING-KEYED READS ARE READS, and they belong in this list (CART-0507).
+    -- A var read only as `config_get_global( 'db_type' )` shows "used by (0)"
+    -- today, because no mention pass can find a read that is spelled as data --
+    -- and on mantis that is 412 vars, 392 of which have no use edge at all. The
+    -- rows are a SEPARATE GROUP and each one NAMES ITS ACCESSOR, because "read as
+    -- 'db_type' via config_get_global" is the fact; a bare line number would make
+    -- a derived read indistinguishable from a syntactic one, which is the
+    -- laundering that keeps keyaccess from minting edges at all
+    -- ([[cartograph-witness-and-promise]] / CART-0494).
+    -- 46% of these sites are at FILE SCOPE, so they take CART-0479's answer: the
+    -- owner is the MODULE and the row says so rather than showing a bare path.
+    local keyaccess = require 'cartograph.keyaccess'
+    local dsites = keyaccess.reads_of(store, id)
+    for _, k in ipairs(dsites) do
+        local accn = store.node(k.acc)
+        local via = accn and accn.name or k.acc
+        sites[#sites + 1] = {
+            fn = k.fn or k.file,
+            name = (k.fn and (store.node(k.fn) and store.node(k.fn).name or k.fn)
+                or axes.scope_label(k.file or '?'))
+                .. ("  ~ via %s('%s')"):format(via:match('[^:]+$') or via,
+                    (k.name or ''):gsub('^g_', '')),
+            file = k.file, line = k.line or 0,
+            range = { start = { line = k.line or 0, char = 0 },
+                ['end'] = { line = k.line or 0, char = 0 } },
+            derived = true }
+    end
     -- the state atlas label rides the title: what KIND of state is this
     local atlas = require 'cartograph.atlas'
-    local a = atlas.classify(store, id)
+    local a = atlas.classify(store, id, { derived = true })
     -- `var` is not a concern entry (its subject and inverse are structural), but
     -- its rows come from the same use edges the thin index lacks, so it shares
     -- the fabrication fix rather than being the one altitude left lying
@@ -861,7 +888,12 @@ local function render_var(ctx, id)
     -- "I was confused there, I thought that was write use"). The count belongs to the
     -- rows below it, which are READS, so it has to sit next to the words that name
     -- them.
-    render_sites(ctx, node, '·', a.label .. ' · used by', sites,
+    -- the title carries the derived COUNT rather than a hedge glyph: a derived
+    -- read does not weaken `const` (reads never threaten constancy, writes do,
+    -- and there are none), so `const~` would imply a doubt that does not exist.
+    -- What it says instead is where the evidence came from.
+    local lbl = a.label .. (a.dnr and (' · %d by key'):format(a.dnr) or '')
+    render_sites(ctx, node, '·', lbl .. ' · used by', sites,
         '(no reads found — writes only, or dynamic access)', concerns.needs_edges(store))
     -- WHO WRITES IT, now an AXIS rather than a subsection. The rows above are
     -- readers ONLY -- the empty note even names "writes only" as a reason for

@@ -388,4 +388,38 @@ function M.sites(store, accs)
     return sites, stats
 end
 
+-- ── the read index: var -> the sites that name it ───────────────────────────
+-- Derivation costs ~525 ms on mantis (accessors 407, sites 117) because deriving
+-- an accessor re-parses its file through expr.of. That is once per graph and far
+-- too much per render, so the index is MEMOIZED ON GRAPH IDENTITY (store.data's
+-- own table) exactly like the axis cone memo: a re-ingest hands out a new table,
+-- so the memo cannot outlive the graph it describes and no stamp is needed --
+-- the key IS the thing that would have to change.
+local index = setmetatable({}, { __mode = 'k' })
+
+--- var id -> array of sites naming it, built once per graph. Lazy: nothing pays
+--- for this until a consumer asks.
+function M.read_index(store)
+    local g = store.data
+    if not g then return {} end
+    local per = index[g]
+    if not per then
+        per = {}
+        for _, s in ipairs((M.sites(store))) do
+            local l = per[s.var]
+            if l then l[#l + 1] = s else per[s.var] = { s } end
+        end
+        index[g] = per
+    end
+    return per
+end
+
+--- The string-keyed reads of one var: `{ name, acc, fn, file, line, rw }`.
+--- `name` is the DERIVED variable name, `acc` the accessor the site called --
+--- which is what a row has to show, because "read as 'db_type' via
+--- config_get_global" is the whole fact and the bare line number is not.
+function M.reads_of(store, var_id)
+    return M.read_index(store)[var_id] or {}
+end
+
 return M

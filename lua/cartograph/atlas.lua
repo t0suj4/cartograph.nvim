@@ -28,7 +28,22 @@ M.LABELS = { 'const', 'dead', 'set-once', 'single-writer', 'multi-writer',
 
 --- Classify one var by its use edges. Returns
 --- { label, nr, nw, writers = {fn ids}, gw = min guard tier of writes }.
-function M.classify(store, id)
+--- @param opts table|nil  { derived = true } -> also count STRING-KEYED reads
+---   ([[cartograph-keyaccess]]). OPT-IN, and default-off is deliberate: this
+---   consults an index that re-parses accessor files (~525 ms once on mantis),
+---   and turning it on silently would change one caller's findings without anyone
+---   deciding. A caller that wants the truth asks for it.
+---
+---   ★ WHAT IT ACTUALLY CHANGES, measured on mantis before it was built, because
+---   the obvious guess was wrong: the ladder tests `nw == 0 -> const` BEFORE
+---   `nr == 0 -> dead`, so the 392 vars whose only readers are string-keyed were
+---   already `const` and STAY `const`. What they gain is EVIDENCE -- `const` on
+---   nothing becomes `const` on seven reads, which is the distinction CART-0478
+---   exists to make. The label-flip population (`dead` -> a writer label, i.e. a
+---   var written by a fn and read only by key) is exactly ONE var on mantis.
+---   Small, and still worth wiring: a promise rule that ignores refuting evidence
+---   it could have consulted is wrong, not conservative.
+function M.classify(store, id, opts)
     local nr, nw, unk, gwmin = 0, 0, false, nil
     local writers = {}
     for _, u in ipairs(store.topo():var_used_by_detail(id)) do
@@ -45,6 +60,16 @@ function M.classify(store, id)
             end
         end
     end
+    -- derived reads are READS: a call with a literal key was SEEN, so each is a
+    -- witness, and they enter the ladder on the same footing. They are counted
+    -- separately as well (`dnr`) because a reader is owed the difference between a
+    -- read spelled as an identifier and one spelled as data -- the label does not
+    -- carry it, the rows do.
+    local dnr = 0
+    if opts and opts.derived then
+        dnr = #require('cartograph.keyaccess').reads_of(store, id)
+        nr = nr + dnr
+    end
     local label
     if unk then label = 'unclassified'
     elseif nw == 0 then label = 'const'
@@ -52,7 +77,13 @@ function M.classify(store, id)
     elseif gwmin == 3 then label = 'set-once'
     elseif nw == 1 then label = 'single-writer'
     else label = 'multi-writer' end
-    return { label = label, nr = nr, nw = nw, writers = writers, gw = gwmin }
+    -- NO `~` ON THE LABEL, deliberately. A derived read does not weaken `const`:
+    -- reads never threaten constancy, writes do, and there are none. What the
+    -- reads change is const-on-nothing -> const-with-evidence, a STRENGTHENING.
+    -- So the honest surface is a count ("const · 7 reads (7 via config_get)") and
+    -- per-row marks, not a hedge glyph implying doubt about the label.
+    return { label = label, nr = nr, nw = nw, writers = writers, gw = gwmin,
+        dnr = dnr > 0 and dnr or nil }
 end
 
 -- ── the FIELD atlas: one var, decomposed per field, on demand ────────────
@@ -191,7 +222,8 @@ end
 --- The whole graph's census: counts per label + the var lists.
 --- Synthetic/browse-only vars (sql entities, C interface types) excluded,
 --- mirroring the resolver's own var vocabulary.
-function M.census(store)
+--- @param opts table|nil  threaded to classify (see `derived`)
+function M.census(store, opts)
     local counts, vars = {}, {}
     for _, l in ipairs(M.LABELS) do counts[l] = 0; vars[l] = {} end
     local total = 0
@@ -199,10 +231,10 @@ function M.census(store)
         if n.kind == 'var' and not n.sql and not n.ctype
             and n.id:sub(1, 5) ~= 'sql::' then
             total = total + 1
-            local c = M.classify(store, n.id)
+            local c = M.classify(store, n.id, opts)
             counts[c.label] = counts[c.label] + 1
             table.insert(vars[c.label], { id = n.id, name = n.name,
-                file = n.file, nr = c.nr, nw = c.nw })
+                file = n.file, nr = c.nr, nw = c.nw, dnr = c.dnr })
         end
     end
     return { total = total, counts = counts, vars = vars }
