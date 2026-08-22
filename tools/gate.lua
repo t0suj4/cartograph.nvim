@@ -141,6 +141,21 @@ else
         print(('vs baseline (tool %s @ %s, corpus @ %s%s):'):format(
             meta.rev or '?', meta.when or '?', meta.corpus_rev or '?',
             meta.corpus_dirty and ' DIRTY' or ''))
+        -- ── THE TOOL SIDE OF THE SAME QUESTION (CART-0502) ───────────────────
+        -- Everything below asks whether the CORPUS held still. Nothing asked
+        -- whether the TOOL did, and the failure that made this a P1 was on that
+        -- side: 17 of 37 baselines predated three extraction changes, so every
+        -- diff they printed was a MIXTURE while reading as attributable. The
+        -- number that answers it is cache.VERSION -- the extraction-behaviour
+        -- epoch a rev cannot stand in for, because most commits do not touch
+        -- extraction and VERSION is exactly the ones that do.
+        --
+        -- ADVISORY ONLY, deliberately: a stale baseline is not a regression, it
+        -- is an unreadable measurement, and the reader is the one who decides
+        -- whether to resave. The gating logic below is untouched.
+        local tv_epoch, tv_dirty = snapshot.tool_verdict(meta)
+        if tv_dirty then print('  NOTE: ' .. tv_dirty) end
+        if tv_epoch then print('  NOTE: ' .. tv_epoch) end
         -- Only PINNED-AND-MATCHING or UNPINNED corpora reach here (a pinned corpus
         -- whose checkout moved exited 2 above). For an unpinned one the baseline is a
         -- saved snapshot, so whether a diff is EVIDENCE depends on whether the corpus

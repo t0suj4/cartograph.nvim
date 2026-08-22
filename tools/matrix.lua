@@ -633,6 +633,16 @@ local function run_row(name)
                 local dirty = (meta.corpus_dirty and true or false)
                     or (corpus.git and corpus.git.dirty and true or false)
                 local advisory = (not corpus.rev) and (unknown or drifted or dirty)
+                -- ★ THE TOOL SIDE, and here it changes a LABEL that was wrong
+                -- (CART-0502). Every branch below asks whether the CORPUS moved,
+                -- and when the answer is no the detail line concludes 'extractor
+                -- drift' — which is a LIE when the baseline predates an
+                -- extraction VERSION bump: the diff is then a MIXTURE of that
+                -- change and yours, and 17 of 37 baselines were in exactly that
+                -- state. The verdict is untouched (a pinned diff still FAILS);
+                -- only the sentence naming the cause is corrected, because
+                -- 'extractor drift' sends the reader to the wrong commit.
+                local stale, tooldirty = snapshot.tool_verdict(meta)
                 if det then
                     table.insert(det, 1, unknown
                         and ('corpus identity UNRECORDABLE (baseline %s, now %s) —'
@@ -643,7 +653,8 @@ local function run_row(name)
                                 :format(meta.corpus_rev or '?', now or '?')
                             or (dirty
                                 and 'corpus has UNCOMMITTED changes — diff is CONTEXT'
-                                or 'extractor drift')))
+                                or stale or 'extractor drift')))
+                    if tooldirty then table.insert(det, 2, tooldirty) end
                 end
                 cell('struct', gd.empty(d) and 'OK' or (advisory and '~' or 'FAIL'), det)
             end

@@ -66,15 +66,44 @@ local function path_for(name)
     return M.dir .. '/' .. name .. '.snapshot.mpack'
 end
 
+--- THE TOOL SIDE OF A BASELINE'S IDENTITY (CART-0502). The corpus side has three
+--- recorded facts and a note for each (rev / unrecordable / dirty); the tool side
+--- recorded a bare `rev-parse HEAD` and nothing else, and that asymmetry is what
+--- makes a stale baseline print a diff that reads as attributable.
+---
+--- `cache_version` is cache.VERSION -- the EXTRACTION-BEHAVIOUR epoch, the number
+--- every stale-baseline post-mortem is written in ("v134 parsed a .h header as
+--- C++"). A git rev cannot answer "should this baseline still be believed?": most
+--- commits do not touch extraction and VERSION is exactly the ones that do.
+---
+--- `tool_dirty` is the missing peer of corpus_dirty, and it is SCOPED TO lua/ +
+--- tools/ on purpose. An unscoped `status --porcelain` is dirty on this machine
+--- permanently (agent skill files, editor droppings), and a note that always fires
+--- is the cry-wolf failure gate.lua's own comments warn about. Uncommitted
+--- extraction code is the case worth naming: a baseline saved from that tree
+--- stamps a CLEAN rev and is thereafter indistinguishable from a real one.
+local function tool_identity()
+    local rev = vim.fn.systemlist({ 'git', '-C', REPO,
+        'rev-parse', '--short', 'HEAD' })[1]
+    local st = vim.fn.systemlist({ 'git', '-C', REPO, 'status', '--porcelain',
+        '--', 'lua', 'tools' })
+    local dirty = false
+    for _, l in ipairs(st or {}) do if l:match('%S') then dirty = true break end end
+    local okv, cache = pcall(require, 'cartograph.cache')
+    return rev, dirty, okv and cache.VERSION or nil
+end
+
 --- Save a slim snapshot under a name. Records the repo rev so a later diff
 --- can say WHICH version the baseline came from. Returns the path.
 function M.save(name, data, meta)
     vim.fn.mkdir(M.dir, 'p')
-    local rev = vim.fn.systemlist({ 'git', '-C', REPO,
-        'rev-parse', '--short', 'HEAD' })[1]
+    local rev, dirty, cver = tool_identity()
     local blob = vim.mpack.encode({
-        version = 1,
-        meta = vim.tbl_extend('force', { rev = rev, when = os.date('!%Y-%m-%dT%H:%M:%SZ') },
+        version = 1, -- the SNAPSHOT FORMAT version; the extraction epoch is
+                     -- meta.cache_version, and conflating the two is the bug
+                     -- this comment exists to prevent
+        meta = vim.tbl_extend('force', { rev = rev, when = os.date('!%Y-%m-%dT%H:%M:%SZ'),
+            tool_dirty = dirty or nil, cache_version = cver },
             meta or {}),
         data = M.slim(data),
     })
@@ -85,6 +114,37 @@ function M.save(name, data, meta)
     fd:close()
     assert(os.rename(tmp, path), 'snapshot: rename failed for ' .. path)
     return path
+end
+
+--- THE TOOL-SIDE VERDICT on a loaded baseline: can it vouch for the extraction
+--- era it was written in? Returns (epoch, dirty), each a sentence or nil.
+--- Computed here rather than at each printer because gate.lua and matrix.lua were
+--- already two copies of the CORPUS-side reasoning, and the second copy is where
+--- a rule drifts (matrix's own comment says it MIRRORS gate's three cases).
+---   epoch — the baseline predates the tree's cache.VERSION, so any diff against
+---           it MIXES that extraction change with the reader's own. A MISSING
+---           field is UNKNOWN, not a mismatch: every baseline written before the
+---           field existed lacks it, and calling that drift would flag the whole
+---           roster once, loudly, for nothing.
+---   dirty — the baseline was saved from a tree with uncommitted lua/tools
+---           changes, so its rev names a commit that never produced it.
+function M.tool_verdict(meta)
+    if type(meta) ~= 'table' then return nil, nil end
+    local okv, cache = pcall(require, 'cartograph.cache')
+    local nowv = okv and cache.VERSION or nil
+    local epoch
+    if nowv and not meta.cache_version then
+        epoch = ('baseline records no extraction VERSION (tree is at %d) — written'
+            .. ' before the field existed; resave to make it answerable'):format(nowv)
+    elseif nowv and meta.cache_version ~= nowv then
+        epoch = ('baseline written at extraction VERSION %s, tree is at %d — a diff'
+            .. ' against it MIXES that change with yours')
+            :format(tostring(meta.cache_version), nowv)
+    end
+    local dirty = meta.tool_dirty and ('baseline was saved from a tree with'
+        .. ' UNCOMMITTED lua/tools changes — its rev names a commit that never'
+        .. ' produced it') or nil
+    return epoch, dirty
 end
 
 --- Load a snapshot: returns data, meta — or nil, why (missing/corrupt = a
