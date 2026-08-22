@@ -521,3 +521,72 @@ test('lint: every CALLER of lint.run declares the scope it supplies', function (
     ok(#found >= 4, 'sanity: the call sites were actually found (' .. #found .. ')')
     eq({}, undeclared, 'a caller of lint.run that does not declare its scope')
 end)
+
+-- ── THE DENOMINATOR (CART-0512) ─────────────────────────────────────────────
+test('lint: every PROMISE rule declares what it had to search', function ()
+    local lint = require 'cartograph.lint'
+    local missing, bad = {}, {}
+    for _, r in ipairs(lint.rules) do
+        if r.quantifier == 'promise' then
+            if r.closed_over == nil then missing[#missing + 1] = r.name
+            elseif not lint.CLOSED_OVER[r.closed_over] then
+                bad[#bad + 1] = r.name .. '=' .. tostring(r.closed_over)
+            end
+        elseif r.closed_over ~= nil then
+            -- a witness rule clips regardless, so declaring a denominator for one
+            -- would be a field with no reader
+            bad[#bad + 1] = r.name .. ' is a witness and declares closed_over'
+        end
+    end
+    eq({}, missing, 'a promise rule must say whether its search space is a fn, a'
+        .. ' file, or the corpus — that is what decides if a cut can hold it')
+    eq({}, bad, 'and the value must be one of the declared spaces')
+end)
+
+test('lint: a promise clips when the CUT CONTAINS its denominator', function ()
+    local lint = require 'cartograph.lint'
+    -- the coarse rule stays the conservative default: asked without a grain, a
+    -- promise never clips
+    eq(false, lint.policies({ quantifier = 'promise', closed_over = 'fn' }).clip)
+    -- a fn-cut holds a fn-denominator; a file-cut holds it too
+    local fnrule = { quantifier = 'promise', closed_over = 'fn' }
+    eq(true, lint.policies(fnrule, 'fn').clip)
+    eq(true, lint.policies(fnrule, 'file').clip)
+    -- but a REGION is finer than a function and does NOT contain one, which is why
+    -- CLOSURE is a declared relation and not a numeric ladder
+    eq(false, lint.policies(fnrule, 'region').clip)
+    eq(false, lint.policies(fnrule, 'node').clip)
+    -- a file-denominator needs a file-cut
+    local frule = { quantifier = 'promise', closed_over = 'file' }
+    eq(false, lint.policies(frule, 'fn').clip, 'a function does not hold its file')
+    eq(true, lint.policies(frule, 'file').clip)
+    -- and a corpus denominator is never held by a cut
+    local crule = { quantifier = 'promise', closed_over = 'corpus' }
+    for _, g in ipairs({ 'node', 'fn', 'region', 'file', 'set' }) do
+        eq(false, lint.policies(crule, g).clip, 'corpus denominator at ' .. g)
+    end
+    -- a witness clips at every grain, denominator or not
+    eq(true, lint.policies({ quantifier = 'witness' }, 'node').clip)
+end)
+
+test('lint: the refinement fixes the inversion it was filed for', function ()
+    local lint = require 'cartograph.lint'
+    -- ★ THE COST OF THE COARSE RULE, as a test. At a FUNCTION the scoped lint
+    -- refused the four rules whose whole question is about that function while
+    -- permitting corpus-shaped ones. Two of the four are fn-closed and become
+    -- legal here; the other two turned out to be FILE-closed when their
+    -- implementations were read, so they become legal at a file cut instead.
+    local at_fn, at_file = {}, {}
+    for _, n in ipairs(lint.clippable('fn')) do at_fn[n] = true end
+    for _, n in ipairs(lint.clippable('file')) do at_file[n] = true end
+    ok(at_fn['resource-leak'], 'resource-leak walks ONE function\'s rows')
+    ok(at_fn['annotation-mismatch'], "and @param is checked against that fn's own list")
+    ok(not at_fn['null-deref'], 'null-deref iterates MODULE nodes, so a fn is not enough')
+    ok(at_file['null-deref'], 'but a file cut holds it')
+    ok(at_file['member-leak'], 'same for member-leak, which says "anywhere" and means the file')
+    ok(at_file['dead-confined'],
+        'and dead-confined is file-closed BY ITS OWN PREMISES: exported==false,'
+        .. ' escapes==false, the name occurs once in its file')
+    ok(not at_file['dead-function'],
+        'while dead-function asks band:n_callers — a corpus query, never clippable')
+end)

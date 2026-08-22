@@ -42,10 +42,16 @@ local M = {}
 
 --- The granularity ladder, coarsest last. A scope CONTAINS another when its own
 --- granularity is at least as coarse and its spans cover it.
-M.GRAINS = { fn = 1, region = 2, file = 3, set = 4, corpus = 5 }
+M.GRAINS = { node = 1, fn = 2, region = 2, file = 3, set = 4, corpus = 5 }
 
+-- ★ `var` IS ITS OWN GRAIN, not `fn`. A var-cut's span is the variable's own
+-- extent -- often a single line -- so calling it `fn` would tell lint.CLOSURE the
+-- cut holds a whole function when it holds one binding, and a promise closed over
+-- a function would clip inside it and FABRICATE. `node` is unlisted in CLOSURE, so
+-- no promise ever clips there: the wrong answer in this direction invents findings,
+-- the wrong answer in the other only loses them.
 local KIND_GRAIN = { ['function'] = 'fn', method = 'fn', region = 'region',
-    tbl = 'region', module = 'file', var = 'fn' }
+    tbl = 'region', module = 'file', var = 'node' }
 
 --- A scope over one node's own extent.
 --- @return table { grain, label, spans = { {file, sl, el} } }  (0-based lines)

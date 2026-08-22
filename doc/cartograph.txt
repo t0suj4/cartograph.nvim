@@ -368,11 +368,15 @@ LINT                                                      *cartograph-cmd-lint*
   :CartographLint[!]          graph-aware lint -> quickfix; `!` CUTS THE RUN to
                               the browser's current frame — the function, region
                               or file you are standing in. Rules that assert an
-                              ABSENCE (no caller, no release, no registration) are
-                              REFUSED rather than clipped, and the refusal is
-                              reported: a subset cannot support a claim about what
-                              does not exist, because the counterexample may be
-                              outside the cut. Each finding then carries the cut
+                              ABSENCE (no caller, no release, no registration) run
+                              only when the cut HOLDS EVERYTHING THEY SEARCHED --
+                              a function for `resource-leak`, a file for
+                              `null-deref`, the whole call graph for
+                              `dead-function`, which is therefore never scopable.
+                              The rest are REFUSED rather than clipped and the
+                              refusal names the space it could not hold, because a
+                              subset cannot support a claim about what does not
+                              exist when the counterexample may lie outside it. Each finding then carries the cut
                               that produced it, so two runs at two altitudes stay
                               distinguishable.
   :CartographLintFix          apply the current quickfix entry's annotation

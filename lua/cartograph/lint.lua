@@ -978,22 +978,60 @@ M.DISPOSITIONS = { authoritative = true, suggestive = true, calibration = true,
 -- `witness` licenses a clip that fabricates, and those are not symmetric.
 M.QUANTIFIERS = { witness = true, promise = true }
 
+-- ── THE DENOMINATOR: what a promise had to search (CART-0512) ────────────────
+-- The witness/promise split is sound but COARSE, and the coarseness had a visible
+-- cost: at a FUNCTION, `:CartographLint!` refused null-deref, resource-leak,
+-- member-leak and annotation-mismatch -- the four rules whose whole question is
+-- about that function -- while permitting require-cycle, layering, clone and
+-- greenspun, which are corpus-shaped and near-meaningless there. The scoped lint
+-- declined everything local and allowed everything global.
+--
+-- The fix is one step finer: a promise is clip-legal when THE CUT CONTAINS ITS
+-- DENOMINATOR. So each promise rule declares what it had to search.
+--
+-- ★ READ FROM THE IMPLEMENTATION, NOT THE MESSAGE, and that changed three answers
+-- from what the ticket guessed. member-leak SAYS "never released anywhere" and
+-- iterates MODULE nodes -- its denominator is the FILE, not the class. null-deref
+-- reads like an intra-function guard search and also iterates module nodes: FILE.
+-- resource-leak really is per-function (it walks one fn's rows). And the nicest
+-- one: dead-confined's denominator is the FILE, because its premises ARE
+-- file-locality -- exported == false, escapes == false, the name occurs exactly
+-- once in its file, a file-keyed shadow test. The most authoritative dead-code
+-- rule is clip-legal at file granularity precisely because it proved its own
+-- locality first.
+M.CLOSED_OVER = { fn = true, file = true, corpus = true }
+
+--- Which CUT GRAINS contain a denominator of each kind. A RELATION, declared, not
+--- a numeric ladder: `region` is finer than `fn` and does NOT contain one, so an
+--- ordering would get it backwards. An unlisted grain (`set`, `node`, `region`)
+--- yields no clip -- conservative, and an under-report is the safe direction.
+M.CLOSURE = {
+    fn     = { fn = true, file = true },   -- a fn-cut IS one function; a file holds it
+    file   = { file = true },
+    corpus = {},                            -- nothing but the corpus, and that is not a cut
+}
+
 --- Which boundary policies may this rule run under? DERIVED, never declared.
+--- @param grain string|nil  the CUT's granularity; nil = ask conservatively
 --- @return table { clip = bool, hedge = true, refuse = true }
-function M.policies(rule)
-    local q = type(rule) == 'table' and rule.quantifier or rule
+function M.policies(rule, grain)
+    local t = type(rule) == 'table'
+    local q = t and rule.quantifier or rule
     -- hedge and refuse are always legal: looking outside and marking, or
     -- declining, cannot turn a true finding false. Only CLIP is gated.
-    return { clip = q == 'witness', hedge = true, refuse = true }
+    if q == 'witness' then return { clip = true, hedge = true, refuse = true } end
+    -- a promise clips only when the cut demonstrably holds everything it searched
+    local co = t and rule.closed_over
+    local ok = (grain and co and M.CLOSURE[co] and M.CLOSURE[co][grain]) == true
+    return { clip = ok, hedge = true, refuse = true }
 end
 
---- The rules that a scope may CLIP — i.e. the ones scopable today at zero
---- honesty cost, which is the population step 3 of the scope-boundary design
---- should wire first.
-function M.clippable()
+--- The rules a cut of this GRAIN may clip. Without a grain, the conservative
+--- answer: the witness rules only.
+function M.clippable(grain)
     local out = {}
     for _, r in ipairs(M.rules) do
-        if M.policies(r).clip then out[#out + 1] = r.name end
+        if M.policies(r, grain).clip then out[#out + 1] = r.name end
     end
     table.sort(out)
     return out
@@ -1242,13 +1280,13 @@ local function annotation_findings(store)
 end
 
 M.rules = {
-    { name = 'resource-leak', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+    { name = 'resource-leak', severity = 'warn', quantifier = 'promise', closed_over = 'fn', disposition = 'suggestive',
         -- recovered all 3 luanti oracles, but it is CONVENTION-specific: precision on
         -- known positives is not evidence of no false positives off-convention
         run = resource_leak_findings },
-    { name = 'member-leak', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+    { name = 'member-leak', severity = 'warn', quantifier = 'promise', closed_over = 'file', disposition = 'suggestive',
         run = member_leak_findings },
-    { name = 'null-deref', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+    { name = 'null-deref', severity = 'warn', quantifier = 'promise', closed_over = 'file', disposition = 'suggestive',
         -- the message says `possible` and the nilflow lattice hedges: a guard we do
         -- not model reads as unguarded
         run = null_deref_findings },
@@ -1280,7 +1318,7 @@ M.rules = {
         -- the state atlas's lint face: state that is written but never
         -- read is dead weight — or reached dynamically in a way the graph
         -- cannot see, so the hedge is spoken, severity stays info
-        name = 'dead-state', severity = 'info', quantifier = 'promise', disposition = 'suggestive',
+        name = 'dead-state', severity = 'info', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         run = function (store)
             local out = {}
             -- ★ ASK FOR THE DERIVED READS (CART-0507). "written but never read" is
@@ -1309,7 +1347,7 @@ M.rules = {
         -- code queries but the database lacks are typos or missing
         -- migrations; tables the database holds but nothing queries are
         -- dead weight. The wiretap shape, at the schema boundary.
-        name = 'db-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+        name = 'db-audit', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         -- AUTHORITATIVE CANDIDATE: it compares code against a declared schema, so a
         -- reference to a column that does not exist may be a defect by construction.
         -- Left suggestive until someone reads it and can justify the promotion.
@@ -1342,7 +1380,7 @@ M.rules = {
         -- naming an unregistered route is a render-time error waiting; a
         -- registered route nothing names is dead surface; a cross-file
         -- name collision resolves silently in Django and loudly here
-        name = 'route-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+        name = 'route-audit', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         -- AUTHORITATIVE CANDIDATE, same reasoning as db-audit (declared routes).
 
         run = function (store)
@@ -1384,7 +1422,7 @@ M.rules = {
         -- SILENT no-op (the handler never runs, no error); a handler nothing
         -- notifies is dead; an include pointing at a missing file breaks at
         -- runtime. The notify no-op is the classic footgun (a typo'd name).
-        name = 'ansible-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+        name = 'ansible-audit', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         run = function (store)
             local a = store.data.ansible
             if not a then return {} end
@@ -1413,7 +1451,7 @@ M.rules = {
         -- name appears nowhere else in the role (tasks, handlers, jinja). A
         -- soft signal — a var could still be read via hostvars/lookup — so
         -- INFO, but on a large role it surfaces accumulated cruft.
-        name = 'ansible-vars', severity = 'info', quantifier = 'promise', disposition = 'suggestive',
+        name = 'ansible-vars', severity = 'info', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         run = function (store)
             local a = store.data.ansible
             if not a then return {} end
@@ -1448,7 +1486,7 @@ M.rules = {
             return require('cartograph.greenspun').idiom_shadows(store.data,
                 prof and prof.templates or nil)
         end },
-    { name = 'pair-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+    { name = 'pair-audit', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         run = pair_audit_findings },
     { name = 'schema-mirror', severity = 'info', quantifier = 'witness', disposition = 'calibration', -- CART-0196
         run = mirror_findings },
@@ -1458,11 +1496,11 @@ M.rules = {
         run = greenspun_findings },
     { name = 'dynamic-dispatch', severity = 'info', quantifier = 'witness', disposition = 'suggestive',
         run = dynamic_findings },
-    { name = 'load-order', severity = 'warn', quantifier = 'promise', disposition = 'authoritative',
+    { name = 'load-order', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'authoritative',
         -- the manifest IS the load order (store.toc), so this is read from DATA, not
         -- inferred: a load-time call into a later-loading file hits nil
         run = load_order_findings },
-    { name = 'listener-audit', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+    { name = 'listener-audit', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         run = listener_findings },
     { name = 'swallowed-type', severity = 'info', quantifier = 'witness', disposition = 'calibration',
         -- `calibration` IS THE MEASURED LABEL, not a placeholder — CART-0227 sampled the
@@ -1487,17 +1525,17 @@ M.rules = {
     {   -- the PROVABLE tier (CART-0249): three premises, so a finding is a defect by
         -- construction. Beside dead-function, not replacing it — a rule carries ONE
         -- disposition, and the suggestive tier still has a job wherever we cannot know.
-        name = 'dead-confined', severity = 'warn', quantifier = 'promise', disposition = 'authoritative',
+        name = 'dead-confined', severity = 'warn', quantifier = 'promise', closed_over = 'file', disposition = 'authoritative',
         run = dead_confined_findings,
     },
     {   -- a NAME check, not a type check — see annotation_findings for why that is
         -- what makes it authoritative, and for the three soundness exclusions
-        name = 'annotation-mismatch', severity = 'warn', quantifier = 'promise',
+        name = 'annotation-mismatch', severity = 'warn', quantifier = 'promise', closed_over = 'fn',
         disposition = 'authoritative',
         run = annotation_findings,
     },
     {
-        name = 'dead-function', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+        name = 'dead-function', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         -- an entry point, an export, or a dynamically dispatched target reads as dead
 
         run = function (store)
@@ -1527,7 +1565,7 @@ M.rules = {
         end,
     },
     {
-        name = 'redundant-require', severity = 'warn', quantifier = 'promise', disposition = 'suggestive',
+        name = 'redundant-require', severity = 'warn', quantifier = 'promise', closed_over = 'corpus', disposition = 'suggestive',
         -- AUTHORITATIVE CANDIDATE: it fires off store.classify(file)=='deadimport', a
         -- derived FACT rather than a heuristic. Held back only because 'has no effect'
         -- depends on the effect analysis being complete for that language.
@@ -1586,7 +1624,7 @@ function M.run(store, opts)
     local findings, refused = {}, {}
     for _, rule in ipairs(M.rules) do
         if not only or only[rule.name] then
-            if sc and not M.policies(rule).clip then
+            if sc and not M.policies(rule, sc.grain).clip then
                 -- ★ THE ILLEGAL CELL IS UNREACHABLE, NOT DISCOURAGED. A promise
                 -- rule asks whether something does NOT exist, and clipping it to a
                 -- subset fabricates: the only caller of a dead function may be
@@ -1595,7 +1633,9 @@ function M.run(store, opts)
                 -- admits) decides legality, and this is that decision executing.
                 refused[#refused + 1] = { rule = rule.name,
                     quantifier = rule.quantifier,
-                    why = 'asserts an absence — a scope cannot support one' }
+                    closed_over = rule.closed_over,
+                    why = ('asserts an absence over %s — this %s cut cannot hold it')
+                        :format(rule.closed_over or 'an unstated space', sc.grain) }
             else
                 for _, f in ipairs(rule.run(store)) do
                     -- `not sc` FIRST: the unscoped path must not touch `cut` at

@@ -1408,9 +1408,19 @@ at part of a codebase at all:
 | quantifier | what a finding asserts | may it be clipped to a subset? |
 |---|---|---|
 | **witness** | something EXISTS — a cycle, a raw seam read, a taint path, a clone | **yes** — it under-reports, which is the safe direction |
-| **promise** | an ABSENCE — no caller, no release, no registration, no guard | **no** — absence inside the subset would read as absence everywhere, so it must look outside and hedge |
+| **promise** | an ABSENCE — no caller, no release, no registration, no guard | **only if the cut holds everything it searched** — otherwise absence inside the subset would read as absence everywhere |
 
-18 of the 33 rules are witness and 15 are promise. The two axes are independent and
+18 of the 33 rules are witness and 15 are promise. A promise also declares *what
+it had to search*, because that decides whether a cut can hold it: `resource-leak`
+walks one function's rows, `null-deref` and `member-leak` iterate a file's, and
+`dead-function` asks the whole call graph. So a cut at a function may clip 20 of
+the 33 rules, a cut at a file 23, and the ten whose denominator is the corpus are
+never clippable at all. That was measured against the implementations rather than
+the messages, and it moved three answers: `member-leak` says "never released
+anywhere" and searches a *file*; `dead-confined` is file-closed by its own premises
+(`exported == false`, `escapes == false`, the name occurs once in its file), which
+makes the most authoritative dead-code rule scopable precisely because it proved
+its own locality first. The two axes are independent and
 all four combinations exist — `silent-drop` is authoritative *and* witness,
 `dead-function` suggestive *and* promise — so a spec pins one rule in each cell to
 stop them collapsing into one field. Classification comes from the message a rule
