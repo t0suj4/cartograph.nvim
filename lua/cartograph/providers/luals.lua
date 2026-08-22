@@ -13,6 +13,7 @@
 -- as they help hover.
 
 local atr = require 'cartograph.at'
+local lsppos = require 'cartograph.lsppos'
 local M = {}
 
 local function find_bin()
@@ -149,8 +150,8 @@ function M.enrich(data, opts)
             answered[n.id] = true
             for _, loc in ipairs(res.result) do
                 local ffile = vim.uri_to_fname(loc.uri):sub(#root + 2)
-                local line = loc.range.start.line
-                local ch = loc.range.start.character
+                local line = lsppos.sl(loc.range)
+                local ch = lsppos.sc(loc.range)
                 for _, c in ipairs(sites[ffile .. '\31' .. line] or {}) do
                     if ch >= atr.sc(c.at) and ch < atr.ec(c.at) then
                         matched[c] = matched[c] or {}
@@ -290,8 +291,8 @@ function M.enrich_async(data, opts, on_done)
                     answered[n.id] = true
                     for _, loc in ipairs(result) do
                         local ffile = vim.uri_to_fname(loc.uri):sub(#root + 2)
-                        local line = loc.range.start.line
-                        local ch = loc.range.start.character
+                        local line = lsppos.sl(loc.range)
+                        local ch = lsppos.sc(loc.range)
                         for _, c in ipairs(sites[ffile .. '\31' .. line] or {}) do
                             if ch >= atr.sc(c.at) and ch < atr.ec(c.at) then
                                 matched[c] = matched[c] or {}

@@ -9,6 +9,7 @@
 
 local oracle = require 'cartograph.oracle'
 local fieldlink = require 'cartograph.fieldlink'
+local lsppos = require 'cartograph.lsppos'
 
 local M = {}
 
@@ -52,11 +53,11 @@ local function def_of(result, root)
     local loc = result and result[1]
     if not loc then return nil end
     local uri = loc.targetUri or loc.uri
-    local rng = loc.targetSelectionRange or loc.targetRange or loc.range
+    local rng = lsppos.range(loc)
     if not (uri and rng) then return nil end
     local path = vim.uri_to_fname(uri)
     local rel = path:sub(#root + 2) -- strip "root/"
-    return { file = rel, line = rng.start.line + 1 }
+    return { file = rel, line = lsppos.sl(rng) + 1 }
 end
 
 --- Harvest field-resolution disagreements against lua-ls. Calls on_done(stats, why)

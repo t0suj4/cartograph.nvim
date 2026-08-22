@@ -9,6 +9,7 @@ local census = require 'cartograph.census'
 local lint = require 'cartograph.lint'
 local lsp = require 'cartograph.lsp'
 local atr = require 'cartograph.at'
+local lsppos = require 'cartograph.lsppos'
 local callrec = require 'cartograph.callrec'
 
 local M = {}
@@ -55,7 +56,7 @@ local function serving_consistency(store)
                 local wu, wl = vim.uri_from_fname(store.abs(n.file)), atr.sl(n.range)
                 local hit = false
                 for _, loc in ipairs(res or {}) do
-                    if loc.uri == wu and loc.range.start.line == wl then hit = true; break end
+                    if loc.uri == wu and lsppos.line(loc) == wl then hit = true; break end
                 end
                 if hit then consistent = consistent + 1
                 elseif #mis < 8 then

@@ -86,7 +86,7 @@ function M.take(data)
             if r then hedge, refused, ext = r.hedge, r.refused, r.ext end
         else
             local call = calls[i]
-            to, prov, hedge = call.to, call.prov, call.hedge
+            to, prov, hedge = callrec.to(call), callrec.prov(call), call.hedge
             refused, dynamic, ext = call.refused, call.dynamic, call.ext
         end
         c.calls.total = c.calls.total + 1
@@ -108,7 +108,8 @@ function M.take(data)
                     callee, full = callcols.get(cc, 'callee', i), callcols.get(cc, 'full', i)
                 else
                     local call = calls[i]
-                    file, line, callee, full = call.file, call.line, call.callee, call.full
+                    file, line = callrec.file(call), callrec.line(call)
+                    callee, full = callrec.callee(call), callrec.full(call)
                 end
                 r.sites[#r.sites + 1] = ('%s:%d %s'):format(file or '?',
                     (line or 0) + 1, callee or full or '?')

@@ -16,8 +16,21 @@ config.seams = {
     { name = 'at', -- range coords fold behind atr.sl/sc/el/ec
         patterns = { '%.start%.line', '%.start%.char',
             "%['end'%]%.line", "%['end'%]%.char" },
+        -- AN OWNER IS A FILE THAT PRODUCES THE REPRESENTATION, and there are two
+        -- kinds here, both earned rather than waived (CART-0502):
+        --   THE FOLDERS -- callcols/segment read `r.start.line` in order to WRITE
+        --   the sl/sc/el/ec columns the accessors then read. Routing them through
+        --   atr would be circular: they are the producer of the folded form, so
+        --   the raw read IS their job (at.lua is in this list for that reason).
+        --   THE OTHER REPRESENTATION -- lsppos.lua owns the LSP WIRE range, whose
+        --   shape is identical and whose `.line` is spelled the same, so a pattern
+        --   scan cannot tell it from ours. See lsppos.lua's header: the rejected
+        --   alternative was exempting whole FILES that read both representations
+        --   three lines apart.
         owners = { '^lua/cartograph/providers/', '^lua/cartograph/at%.lua$',
-            '^lua/cartograph/validate%.lua$', '^tests/', '^tools/' } },
+            '^lua/cartograph/validate%.lua$',
+            '^lua/cartograph/callcols%.lua$', '^lua/cartograph/segment%.lua$',
+            '^lua/cartograph/lsppos%.lua$', '^tests/', '^tools/' } },
     { name = 'df', -- statement dataflow folds behind dfa.*
         patterns = { '%.df%.stmts', '%.df%.inputs' },
         -- store.lua dropped out at step 6: ingest no longer rebuilds df (it is
@@ -26,8 +39,11 @@ config.seams = {
             '^tests/', '^tools/' } },
     { name = 'argv', -- argument shapes fold behind argv.n/at/str
         patterns = { '%.argv%[', '%.args%[' },
+        -- callview.lua is the REPRESENTATION-NEUTRAL call accessor: its record arm
+        -- is `calls[i].argv[j][f]` by definition, which is what makes its columnar
+        -- arm swappable. Owner for the same reason argv.lua is.
         owners = { '^lua/cartograph/providers/', '^lua/cartograph/argv%.lua$',
-            '^tests/', '^tools/' } },
+            '^lua/cartograph/callview%.lua$', '^tests/', '^tools/' } },
 }
 
 local ts = require 'cartograph.providers.treesitter'

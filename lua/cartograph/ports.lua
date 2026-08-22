@@ -18,6 +18,8 @@
 -- resolved OR frontier), which is broader than externals' corpus-wide "resolves to
 -- nothing" (it includes refs that DID resolve, just across a band).
 
+local callrec = require 'cartograph.callrec'
+
 local M = {}
 
 -- default band = the file's directory subtree at `depth` (a proxy for the scope
@@ -95,14 +97,15 @@ function M.surface(data, band_of)
     -- NEEDS: a call whose resolution target is NOT in this band — cross-band
     -- resolved (records the target band) or a frontier (no target: the honest
     -- unknown a cross-band link might satisfy). A same-band resolution is not a need.
-    for _, c in ipairs(data.calls or {}) do
-        if c.file then
-            local key = c.full or c.callee
+    for _, c in callrec.each(data) do
+        local cfile = callrec.file(c)
+        if cfile then
+            local key = callrec.full(c) or callrec.callee(c)
             if key then
-                local sb = band_of(c.file)
+                local sb = band_of(cfile)
                 local to
-                if c.to then
-                    local t = node_index[c.to]
+                if callrec.to(c) then
+                    local t = node_index[callrec.to(c)]
                     if t and t.file and not t.external then to = band_of(t.file) end
                 end
                 if to ~= sb then -- cross-band (to set) OR frontier (to nil)

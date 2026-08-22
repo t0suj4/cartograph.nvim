@@ -216,7 +216,7 @@ function M.of(store, node, ctx)
     -- what names the injection point. Take both, plus `full`'s first segment.
     local injroot = {}
     for _, c in ipairs(sites) do
-        if not c.to then
+        if not callrec.to(c) then
             for _, nm in ipairs({ callrec.callee(c), callrec.full(c) }) do
                 if nm then
                     injroot[nm] = true
@@ -227,7 +227,7 @@ function M.of(store, node, ctx)
         end
     end
     for _, c in ipairs(sites) do
-        if not c.to then                      -- no resolved target = outside/unresolved
+        if not callrec.to(c) then             -- no resolved target = outside/unresolved
             local nm = callrec.callee(c) or '?'
             if not seend[nm] then
                 seend[nm] = true

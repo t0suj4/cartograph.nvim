@@ -372,7 +372,7 @@ local function field_reach(store, node)
                         local sub = path .. '.' .. tostring(kid.key.v)
                         if kid.val.k == 'fn' then
                             local a = kid.val.at
-                            local ln = a and a.start and a.start.line
+                            local ln = a and at.sl(a)
                             if ln then t[ln] = sub end
                         elseif kid.val.k == 'table' then
                             harvest(kid.val, sub, depth + 1)

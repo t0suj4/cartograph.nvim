@@ -543,8 +543,8 @@ function M.apply(store, plan)
     if not text then return false, 'cannot read ' .. plan.rel end
     local lines = vim.split(text, '\n', { plain = true })
     for _, r in ipairs(plan.reps or {}) do
-        local sl0 = r.at.start.line -- 0-based line
-        local cur = (lines[sl0 + 1] or ''):sub(r.at.start.char + 1, r.at['end'].char)
+        local sl0 = at.sl(r.at) -- 0-based line
+        local cur = (lines[sl0 + 1] or ''):sub(at.sc(r.at) + 1, at.ec(r.at))
         if cur ~= r.old then
             return false, ('span drifted at %s:%d (expected `%s`, found `%s`) — re-plan')
                 :format(plan.rel, sl0 + 1, r.old, cur)

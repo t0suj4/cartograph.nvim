@@ -251,7 +251,7 @@ function M.registries(data, opts)
         local c = allcalls[i]
         local dynamic, callee
         if cc then dynamic, callee = callcols.get(cc, 'dynamic', i), callcols.get(cc, 'callee', i)
-        else dynamic, callee = c.dynamic, c.callee end
+        else dynamic, callee = c.dynamic, callrec.callee(c) end
         if not dynamic and callee then
             local bv = by_verb[callee]
             if not bv then bv = {}; by_verb[callee] = bv end
@@ -589,7 +589,7 @@ local function callee_index(data)
         for i = 1, ncalls do
             local callee, full
             if cc then callee, full = callcols.get(cc, 'callee', i), callcols.get(cc, 'full', i)
-            else local c = allcalls[i]; callee, full = c.callee, c.full end
+            else local c = allcalls[i]; callee, full = callrec.callee(c), callrec.full(c) end
             if callee then
                 local b = idx[callee]; if not b then b = {}; idx[callee] = b end
                 b[#b + 1] = i
