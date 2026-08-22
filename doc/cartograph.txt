@@ -365,7 +365,16 @@ ANALYSING THE FOCUSED FUNCTION                        *cartograph-cmd-analysis*
 
 LINT                                                      *cartograph-cmd-lint*
 
-  :CartographLint             graph-aware lint -> quickfix
+  :CartographLint[!]          graph-aware lint -> quickfix; `!` CUTS THE RUN to
+                              the browser's current frame — the function, region
+                              or file you are standing in. Rules that assert an
+                              ABSENCE (no caller, no release, no registration) are
+                              REFUSED rather than clipped, and the refusal is
+                              reported: a subset cannot support a claim about what
+                              does not exist, because the counterexample may be
+                              outside the cut. Each finding then carries the cut
+                              that produced it, so two runs at two altitudes stay
+                              distinguishable.
   :CartographLintFix          apply the current quickfix entry's annotation
   :CartographLintSigns        publish lint findings as in-buffer signs
   :CartographLintClear        clear the in-buffer lint signs

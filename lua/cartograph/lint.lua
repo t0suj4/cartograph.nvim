@@ -1017,8 +1017,13 @@ M.ENTRY_POINTS = {
       natural = 'the open buffer, or the workspace folder' },
     { at = 'lua/cartograph/dogfood.lua',        supplies = 'corpus',
       natural = 'corpus — correct already: it is a whole-tree dashboard' },
-    { at = 'lua/cartograph/commands/lint.lua',  supplies = 'corpus',
-      natural = "the browser's current frame subject (M.trail already holds it)" },
+    -- ★ THE ONE ROW THAT NO LONGER SAYS `corpus` (CART-0514). `:CartographLint!`
+    -- cuts at the browser's current frame — `scope.of_frame` reads
+    -- symbols.view.level plus the key the altitudes registry declares, which is
+    -- the same view table the pane navigates with. The plain command still
+    -- supplies the corpus, so nothing changed for anyone who did not ask.
+    { at = 'lua/cartograph/commands/lint.lua',  supplies = 'corpus | frame',
+      natural = "the browser's current frame subject — WIRED" },
     { at = 'tools/annotcensus.lua',             supplies = 'corpus',
       natural = 'corpus; passes `only`, a RULE filter and not a scope' },
     { at = 'tools/guards.lua',                  supplies = 'corpus',
@@ -1568,14 +1573,44 @@ M.rules = {
 ---@param store table
 ---@param opts { only:table? }?  optional set of rule names to include
 ---@return table[]  { {rule, severity, file, line, message}, ... }
+--- @param opts table|nil
+---   only   = { [rule name] = true }  WHICH RULES RUN (not a scope)
+---   scope  = a cartograph.cut        WHAT THEY RUN OVER (CART-0514)
+--- @return table findings
+--- @return table refused  { { rule, quantifier, why } } — the rules a SCOPE made
+---   illegal. Second return, so every existing caller is untouched.
 function M.run(store, opts)
     local only = opts and opts.only
-    local findings = {}
+    local sc = opts and opts.scope
+    local cut = sc and require 'cartograph.cut'
+    local findings, refused = {}, {}
     for _, rule in ipairs(M.rules) do
         if not only or only[rule.name] then
-            for _, f in ipairs(rule.run(store)) do
-                f.rule, f.severity = rule.name, f.severity or rule.severity
-                findings[#findings + 1] = f
+            if sc and not M.policies(rule).clip then
+                -- ★ THE ILLEGAL CELL IS UNREACHABLE, NOT DISCOURAGED. A promise
+                -- rule asks whether something does NOT exist, and clipping it to a
+                -- subset fabricates: the only caller of a dead function may be
+                -- outside the cut, and then "dead" is a lie the scope invented.
+                -- The pair (what the entry point supplies, what the analysis
+                -- admits) decides legality, and this is that decision executing.
+                refused[#refused + 1] = { rule = rule.name,
+                    quantifier = rule.quantifier,
+                    why = 'asserts an absence — a scope cannot support one' }
+            else
+                for _, f in ipairs(rule.run(store)) do
+                    -- `not sc` FIRST: the unscoped path must not touch `cut` at
+                    -- all, and it is the path every existing caller takes
+                    if not sc or cut.contains(store, sc, f.file, f.line) then
+                        f.rule, f.severity = rule.name, f.severity or rule.severity
+                        -- ★ THE FINDING CARRIES ITS SCOPE (the INVERSION LAW:
+                        -- every stage declares its inverse). Without this field
+                        -- the same rule run at two altitudes produces answers
+                        -- nothing can tell apart, which is the provenance hole
+                        -- that keeps derived reads from being minted as edges.
+                        if sc then f.scope = sc.label end
+                        findings[#findings + 1] = f
+                    end
+                end
             end
         end
     end
@@ -1583,7 +1618,7 @@ function M.run(store, opts)
         if a.file ~= b.file then return a.file < b.file end
         return a.line < b.line
     end)
-    return findings
+    return findings, refused
 end
 
 return M

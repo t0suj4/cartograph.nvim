@@ -15,11 +15,42 @@ function M.register(H)
 
     local SEV = { warn = 'W', info = 'I' }
 
-    cmd('CartographLint', function ()
+    -- `!` SCOPES THE RUN TO WHERE YOU ARE STANDING (CART-0514). The browser's
+    -- current frame already IS a node set -- the altitude stage of the
+    -- concern pipeline emits one -- and this is the first consumer to receive it
+    -- rather than render it. Rules that assert an ABSENCE are refused rather
+    -- than clipped, and the refusal is reported, because a scope that silently
+    -- dropped them would answer a question it cannot answer.
+    cmd('CartographLint', function (o)
         local store = live() if not store then return end
-        local findings = require('cartograph.lint').run(store)
+        local scope, title
+        if o.bang then
+            local sym = require 'cartograph.panes.symbols'
+            local alt = require 'cartograph.panes.altitudes'
+            local lvl = sym.view and sym.view.level
+            scope = require('cartograph.cut').of_frame(store, lvl,
+                lvl and alt.key_of(lvl, sym.view))
+            if not scope then
+                return vim.notify(('cartograph: the %s altitude has no subject to'
+                    .. ' scope to — run :CartographLint for the whole corpus')
+                    :format(lvl or '?'), vim.log.levels.WARN)
+            end
+            title = 'cartograph lint — ' .. scope.label
+        end
+        local findings, refused =
+            require('cartograph.lint').run(store, { scope = scope })
+        -- the refusals are the design working, so they are SAID, not swallowed
+        if scope and #refused > 0 then
+            local names = {}
+            for i = 1, math.min(#refused, 4) do names[#names + 1] = refused[i].rule end
+            vim.notify(('cartograph: %d rule(s) refused for this scope — they assert'
+                .. ' an absence, which a subset cannot support (%s%s)')
+                :format(#refused, table.concat(names, ', '),
+                    #refused > 4 and ', …' or ''), vim.log.levels.INFO)
+        end
         if #findings == 0 then
-            return vim.notify('cartograph: no lint findings', vim.log.levels.INFO)
+            return vim.notify(('cartograph: no lint findings%s')
+                :format(scope and (' in ' .. scope.label) or ''), vim.log.levels.INFO)
         end
         local qf = {}
         for _, f in ipairs(findings) do
@@ -28,9 +59,10 @@ function M.register(H)
                 text = ('[%s] %s'):format(f.rule, f.message),
                 user_data = f.fix }
         end
-        vim.fn.setqflist({}, ' ', { title = 'cartograph lint', items = qf })
+        vim.fn.setqflist({}, ' ', { title = title or 'cartograph lint', items = qf })
         vim.cmd('copen')
-    end, { desc = 'cartograph: graph-aware lint (dead code, redundant requires, call cycles) -> quickfix' })
+    end, { bang = true,
+        desc = 'cartograph: graph-aware lint (dead code, redundant requires, call cycles) -> quickfix; ! scopes to the current frame' })
 
     -- apply the quick fix (an annotation line) of the CURRENT qf entry
     cmd('CartographLintFix', function ()
