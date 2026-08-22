@@ -52,6 +52,13 @@ local M = {}
 --- other. Returns nil when the axis IS computable.
 function M.unavailable(store) return concerns.needs_edges(store) end
 
+--- HOW A MODULE READS IN A LIST OF FUNCTIONS. A file-scope use edge's `from` is
+--- the MODULE node (CART-0479), and a module's name IS its path -- so the row
+--- would sit unlabelled among function names looking exactly like a file row.
+--- That confusion was reported twice this week from two other surfaces, so the
+--- marker LEADS: the row says what kind of writer this is before it says which.
+function M.scope_label(file) return '(file scope) ' .. file end
+
 local STAGEABLE = { ['function'] = true, method = true }
 
 --- Which subject kind an axis hangs off, from the node.
@@ -188,7 +195,9 @@ M.AXES = {
                     local fn = store.node(u.from)
                     local first = u.at and u.at[1]
                     out[#out + 1] = { site = true, fn = u.from,
-                        name = fn and fn.name or u.from,
+                        name = fn and fn.kind == 'module'
+                            and M.scope_label(fn.file or u.from)
+                            or (fn and fn.name or u.from),
                         file = fn and fn.file,
                         line = first and atr.sl(first) or 0,
                         range = first, ranges = u.at,

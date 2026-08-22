@@ -839,8 +839,11 @@ local function render_var(ctx, id)
         local fn = store.node(u.from)
         local member = fn and fn.name
             and (fn.name:sub(1, #p1) == p1 or fn.name:sub(1, #p2) == p2) or nil
+        -- a MODULE reader is file-scope code, and it says so (see axes.scope_label)
+        local who = fn and fn.kind == 'module'
+            and axes.scope_label(fn.file or u.from) or (fn and fn.name or u.from)
         for _, r in ipairs(u.at) do
-            sites[#sites + 1] = { fn = u.from, name = fn and fn.name or u.from,
+            sites[#sites + 1] = { fn = u.from, name = who,
                 short = member and fn.name:sub(#(node.name or '') + 1) or nil,
                 file = fn and fn.file, line = atr.sl(r), range = r,
                 internal = member }

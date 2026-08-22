@@ -73,7 +73,28 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 142 -- v142: TWO PARALLEL FIXES AGAIN, ONE BUMP — same protocol, same reason.
+M.VERSION = 143 -- v143: CART-0479 — A FILE-SCOPE MENTION NOW HAS AN OWNER.
+               -- reduce_mentions hung every var use edge on the enclosing function, and
+               -- `fn_at` is nil at file scope, so the mention was DROPPED — while the
+               -- fn-ref branch twenty lines above had always fallen back to the FILE node
+               -- for the same reason. Three gates had to open, not one: two in extract that
+               -- read "this file has functions" as a proxy for "a mention could have an
+               -- owner" (so a php config file was never even scanned), and the early return
+               -- in reduce_mentions itself. mantis: use edges 1474 -> 3382, and vars whose
+               -- state-atlas label rested on NO EDGE AT ALL 2131 -> 605 of 2537.
+               -- ★ ADDITIVE-ONLY, CHECKED: ref/reg/import counts and every occurrence
+               -- total are byte-identical; the whole delta is 1908 use edges whose `from`
+               -- is a module. That is only true because the FN-REF half kept the old gate
+               -- (CART-0501) — opening it too took reg 751 -> 4047, and 97% of mantis reg
+               -- occurrences are in CALL position, not registration position (CART-0499:
+               -- `iscall` is a hardcoded four-name list that php and java are not in).
+               -- ★ AND THE SKIP HAD TO WIDEN, or the fix would fabricate: a mention on ANY
+               -- same-file homonym's def line is now skipped, because `local x = 1` /
+               -- `local x = 2` mints two nodes, both mentions resolve to the FIRST, and the
+               -- second def line would have claimed a lua SHADOW was a re-assignment.
+               -- Under-reports php rival re-assignments until CART-0500 gives the specs a
+               -- declaration-vs-assignment axis.
+               -- (previous) v142: TWO PARALLEL FIXES AGAIN, ONE BUMP — same protocol, same reason.
                -- (a) CART-0438: C AND C++ FUNCTIONS HAD NO PARAMETERS AT ALL, always.
                -- `params_field = 'parameters'` names a field a `function_definition` does not
                -- have — the list hangs on the `function_declarator` one level down. Declared

@@ -4978,3 +4978,111 @@ test('treesitter: caching the disclaim decision would poison the extension', fun
     eq('php', ts.parse_lang('src/Real.php'), 'the template must not have poisoned .php')
     eq(nil, ts.lang_of('tpl/second.blade.php'), 'and the real file must not un-disclaim it')
 end)
+
+-- ── CART-0479: a FILE-SCOPE mention has an owner ───────────────────────────
+-- Every var use edge used to hang off the enclosing function, and `fn_at` is
+-- nil at file scope, so module-level reads and writes were DROPPED. Measured
+-- consequence on mantis: 2131 of 2537 vars had no use edge of any kind and the
+-- state atlas read `const` over the empty set. The fn-ref branch in the same
+-- loop had always fallen back to the FILE node; these tests pin that the var
+-- branch now does too, and pin the two things that must NOT move with it.
+
+--- every use edge into `to`, as { [from] = rw }
+local function uses_into(data, to)
+    local out = {}
+    for _, e in ipairs(data.edges) do
+        if e.kind == 'use' and e.to == to then out[e.from] = e.rw or true end
+    end
+    return out
+end
+
+local function var_id(data, name)
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'var' and n.name == name then return n.id end
+    end
+end
+
+test('file scope: a php module-level read/write is a use edge FROM THE MODULE', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    local root = mkroot('cfg.php', '<?php\n'
+        .. "$g_root = '/srv';\n"                      -- def line: not a use
+        .. "$g_tmp = $g_root . '/tmp';\n"             -- file-scope READ of g_root
+        .. "$g_root = '/opt';\n"                      -- see the rival note below
+        .. 'function get_tmp() {\n'
+        .. '    global $g_tmp;\n'
+        .. '    return $g_tmp;\n'
+        .. '}\n')
+    local data = ts.extract(root)
+    local root_id, tmp_id = var_id(data, 'g_root'), var_id(data, 'g_tmp')
+    ok(root_id and tmp_id, 'both globals are var nodes')
+    -- THE MODULE IS THE READER. Its node id IS the file path, so `from` stays a
+    -- resolvable node id and every consumer that does store.node(u.from) gets a
+    -- node with a `.file` — which is what makes lsp references land in the right
+    -- document and the browser able to preview the row.
+    eq(1, uses_into(data, root_id)['cfg.php'], 'g_root is READ at file scope (rw=1)')
+    -- and the function half is untouched: it still owns its own edge
+    local into_tmp = uses_into(data, tmp_id)
+    ok(into_tmp['cfg.php::get_tmp@4'], 'the function still owns its read of g_tmp')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('file scope: a file with NO functions is scanned at all', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    -- THE GATE, not the fallback. Two places in extract read "this file has
+    -- functions" as a proxy for "a mention could have an owner", so a pure
+    -- config file — the shape that holds the most module state in a php app —
+    -- never had its mentions collected, and the fallback would have been dead
+    -- code for exactly the files that needed it.
+    local root = mkroot('defaults.php', '<?php\n'
+        .. "$g_base = '/var/www';\n"
+        .. "$g_cache = $g_base . '/cache';\n")
+    local data = ts.extract(root)
+    local base = var_id(data, 'g_base')
+    eq(1, uses_into(data, base)['defaults.php'],
+        'a var-only file still produces the read edge')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('file scope: a lua SHADOW is not a re-assignment', function ()
+    if not has_parser('lua') then skip 'no lua parser' end
+    -- THE FABRICATION THIS FIX HAD TO AVOID. `local x = 1` / `local x = 2` mints
+    -- two var nodes; the mention loop resolves BOTH mentions to the first, so
+    -- the second def line would have arrived as a write claiming x@0 was
+    -- reassigned. Lua says it is a new binding. Whether a redefinition is a
+    -- shadow or a re-assignment is CART-0500's spec axis; until it exists the
+    -- skip is widened to any same-file homonym's def line, which under-reports
+    -- rather than fabricating.
+    local root = mkroot('sh.lua', 'local x = 1\nprint(x)\nlocal x = 2\nprint(x)\n')
+    local data = ts.extract(root)
+    local first
+    for _, n in ipairs(data.nodes) do
+        if n.kind == 'var' and n.name == 'x' and not first then first = n.id end
+    end
+    ok(first, 'the first binding is a node')
+    local rw = uses_into(data, first)['sh.lua']
+    ok(rw, 'file-scope reads of x do attach')
+    eq(1, rw, 'READ only — no write edge claims the shadow reassigned it')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('file scope: opening the gate did NOT open the fn-ref half', function ()
+    if not has_parser('php') then skip 'no php parser' end
+    -- CART-0501, and it is a scoping decision worth pinning rather than a
+    -- feature: letting the fn-ref branch run for newly-gated files took mantis
+    -- from 751 reg edges to 4047, and 97% of its reg occurrences are in CALL
+    -- position, not registration position — because `iscall` is a hardcoded
+    -- four-name list that php's `function_call_expression` is not in
+    -- (CART-0499). Scaling a known-wrong classification 5.4x is not coverage.
+    -- DELETE THIS TEST when CART-0499 lands and CART-0501 removes the guard.
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'api.php', { '<?php', 'function unique_worker() { return 1; }' })
+    write(root, 'data.php', { '<?php', "$g_map = array( 'go' => 'unique_worker' );",
+        '$g_ref = unique_worker;' })
+    local data = ts.extract(root)
+    for _, e in ipairs(data.edges) do
+        ok(not (e.kind == 'reg' and e.from == 'data.php'),
+            'a var-only file mints no reg edge while the guard stands')
+    end
+    ok(var_id(data, 'g_map'), 'but its vars are still nodes')
+    vim.fn.delete(root, 'rf')
+end)

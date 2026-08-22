@@ -302,11 +302,21 @@ function M.splice(data, rels, deleted)
                     drop = true
                     killpair[e.from .. '\31' .. e.to] = true
                 end
-            elseif e.kind == 'reg' and candidates[e.from] then
+            elseif (e.kind == 'reg' or e.kind == 'use')
+                and candidates[e.from] then
                 -- module-level registration edges are id-pass artifacts
                 -- too (from = the FILE, so cand_fns misses them); the pass
                 -- below rebuilds them wholesale, and a surviving copy
                 -- DOUBLES its occurrences (the refresh-sweep spec's find)
+                --
+                -- ★ `use` JOINED THIS BRANCH WITH CART-0479, and the hazard is
+                -- the one the sentence above already names. A file-scope var
+                -- mention now mints a use edge FROM THE FILE, which `cand_fns`
+                -- (functions only) cannot see -- so refreshing a php config
+                -- file would have kept the old module->var edge, the rebuilt
+                -- pass would have added its occurrences again, and the write
+                -- axis would have shown every file-scope assignment twice.
+                -- Same class, same cure, and it is fenced by the same spec.
                 drop = true
             end
             if not drop then edges2[#edges2 + 1] = e end

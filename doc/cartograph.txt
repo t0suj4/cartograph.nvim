@@ -829,6 +829,13 @@ Members are of three shapes, and each descends the way its shape implies: a
 function goes to its body, a file to its own altitude, a write SITE to the
 position (landing through the containment chain, |cartograph-site|).
 
+A WRITER CAN BE THE MODULE ITSELF. Code at file scope — a php config assignment, a
+lua module body building its own table — writes and reads like any function does,
+and those rows say `(file scope)` before the path so they cannot be mistaken for a
+file row. The DEFINITION is a row too, marked as such: a var's own line is an
+assignment, so leaving it out made `writes (0)` a claim about a variable whose
+source line assigns it.
+
 TWO AXES THAT ARE EASY TO CONFUSE. `callers` and `reached by` walk the same
 edges — calls — at different depths: `callers` is direct, `reached by` is the
 transitive closure (cycle-safe, and never listing the subject itself). `registered

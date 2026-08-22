@@ -4353,11 +4353,50 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     end
 end
 
+--- WHICH FILES DEFINE A VAR, derived from the lookups the pass already holds
+--- rather than threaded alongside `fn_ranges`. Four call paths supply that table
+--- (fused inline, refresh, the parallel accumulator, the demand materializer)
+--- and a fifth field would have to survive worker serialization on one of them;
+--- `var_named` is already on all four, so the answer is a fold over it.
+--- Memoized on L, which lives exactly as long as one pass.
+--- NARROW CAVEAT: under `narrow` (the demand path) var_named is name-filtered,
+--- so this set is too -- a file whose only var is outside the wanted name set
+--- reads as having none. That path materializes one file for one query and its
+--- mentions were already narrowed; noted rather than papered over.
+local function var_files(L)
+    local s = L._varfiles
+    if not s then
+        s = {}
+        for _, lst in pairs(L.var_named or {}) do
+            for _, v in ipairs(lst) do s[v.file] = true end
+        end
+        L._varfiles = s
+    end
+    return s
+end
+
 --- Replay the id-pass decisions over a collected buffer: pure lookups
 --- against L (the same callback contract id_pass always took).
 local function reduce_mentions(file, buf, L)
-    local ranges = L.fn_ranges[file]
-    if not ranges then return end
+    -- NO EARLY RETURN ON A FILE WITHOUT FUNCTIONS. `fn_at` below is allowed to
+    -- answer nil now (the mention belongs to the module), so an empty extent
+    -- list is a working input rather than a reason to stop -- and stopping here
+    -- was the third gate, after the two in extract, that made a php config
+    -- file's file-scope writes unreachable (CART-0479).
+    local ranges = L.fn_ranges[file] or {}
+    -- ...but the FN-REF half of this pass stays scoped to files that always had
+    -- it. Opening the gate for var-only files scaled `reg` edges on mantis from
+    -- 751 to 4047, and the new ones are not registrations: mantis page scripts
+    -- are top-level CALLS (`require_api(…)`, `gpc_get_int(…)`), and they reach
+    -- the fn-ref branch because `iscall` below is a hardcoded four-name list
+    -- that php's `function_call_expression` and java's `method_invocation` are
+    -- not in, so `callee` is never set for either language (CART-0499). Fixing
+    -- that is entangled with owner-less call sites (CART-0455: 36% of mantis
+    -- calls have no owning function, so their reg edge is today the only record
+    -- the call happened) and it is not this ticket's fact. So: var mentions get
+    -- the widened gate, fn references keep the old one, and `reg` counts do not
+    -- move. CART-0501 holds the measured version of the other half.
+    local fnref_ok = L.fn_ranges[file] ~= nil
     local fnrefs = buf.fnrefs
     local names = buf.names
     local function fn_at(line)
@@ -4412,7 +4451,7 @@ local function reduce_mentions(file, buf, L)
         local bound = flags % MF_SCOPED >= MF_BOUND
         local callee = flags % MF_BOUND >= MF_CALLEE
         local eligible = flags % MF_CALLEE >= MF_ELIGIBLE
-        if eligible and not callee and fnrefs then
+        if eligible and not callee and fnrefs and fnref_ok then
             local u = L.fn_unique[name]
             if u and L.scopes and L.scopes[u.file] ~= L.scopes[file] then
                 u = nil -- unique, but across a boundary
@@ -4473,9 +4512,41 @@ local function reduce_mentions(file, buf, L)
                 -- bound never crosses the file boundary
                 if not (scoped and bound) then var = cands[1] end
             end
-            if var and not (var.file == file and sr == var.line) then
-                local from = fn_at(sr)
-                if from then
+            -- A MENTION ON *ANY* SAME-FILE HOMONYM'S DEF LINE IS NOT A USE.
+            -- The skip used to name only the RESOLVED candidate's line, which
+            -- was enough while a file-scope mention was dropped anyway. It is
+            -- not enough now: `local x = 1` … `local x = 2` in one lua chunk
+            -- mints two var nodes, the loop above resolves both mentions to the
+            -- FIRST, and the second one's own def line would arrive here as a
+            -- write claiming x@1 was reassigned. Lua says it was not -- that is
+            -- a NEW binding shadowing the old -- so the edge would be a
+            -- fabrication, and cartograph's own tree holds 90 such pairs.
+            -- Whether a redefinition is a re-assignment (php `$g = …` twice) or
+            -- a shadow (lua `local` twice) is the declaration-vs-assignment
+            -- axis the specs do not carry yet (CART-0500), so this widens the
+            -- SKIP: php rival re-assignments stay invisible as writes until
+            -- then. Under-reporting is the safe direction; a colliding claim
+            -- fabricates. [[cartograph-expr-attribute-collision]]
+            local ownline = false
+            if var then
+                for _, v in ipairs(cands) do
+                    if v.file == file and sr == v.line then ownline = true break end
+                end
+            end
+            if var and not ownline then
+                -- ★ A FILE-SCOPE MENTION BELONGS TO THE MODULE. `fn_at` is nil
+                -- for a mention outside every function extent, and this branch
+                -- used to drop it -- while the fn-ref branch twenty lines above
+                -- has always fallen back to the FILE node for the same reason
+                -- ("referenced from top-level DATA"). The consequence measured
+                -- on mantis: 2129 of 2537 vars had NO use edge of any kind and
+                -- the state atlas read `const` over the empty set, 84% of every
+                -- var the browser can open. A module node's id IS its file
+                -- path, so `from` stays a resolvable node id either way.
+                -- (The `do` is what the `if from then` guard became: `from`
+                -- can no longer be nil, and the block still scopes k/e.)
+                local from = fn_at(sr) or file
+                do
                     local k = from .. '\31' .. var.id
                     local e = useEdge[k]
                     if not e then
@@ -4574,7 +4645,8 @@ local function id_pass(root, files, L, abs, tp)
     tp = tp or transport
     abs = abs or function (f) return root .. '/' .. f end
     for _, file in ipairs(files) do
-        if L.fn_ranges[file] then
+        -- same widening as the fused gate: a var-only file has mentions
+        if L.fn_ranges[file] or var_files(L)[file] then
             local lang, spec = lang_for(file)
             local clang = container_for(file)
             if clang then lang, spec = 'javascript', M.spec.javascript end
@@ -5144,6 +5216,7 @@ function M.extract(root, opts)
                                -- set-once scalar-string bindings; false=poisoned)
     local lastFn = {}          -- file -> last emitted fn node (equation merging)
     local fnRanges = {}        -- file -> { {s=line, e=line, id=id}, ... }
+    local varFiles = {}       -- file -> true if it DEFINES a var (a mention target)
     local mentions = {}        -- file -> packed mention buffer (Stage B)
     local pending = {}         -- unresolved references, matched after all files
 
@@ -5488,6 +5561,28 @@ function M.extract(root, opts)
                     if not torn then
                         varsByName[name] = varsByName[name] or {}
                         table.insert(varsByName[name], nodes[#nodes])
+                        -- THIS FILE HAS SOMETHING A MENTION CAN ATTACH TO. The
+                        -- mention gates below used to read "has functions", as
+                        -- a proxy for "a mention could have an owner" -- true
+                        -- while every use edge hung off a function, and that is
+                        -- what CART-0479 killed: a file-scope mention now
+                        -- attributes to the MODULE, so a var-only file (a php
+                        -- config, a lua data table) has mentions worth reducing
+                        -- and was skipped before its first one was read.
+                        --
+                        -- ★ INSIDE `not torn`, DELIBERATELY, and it must stay
+                        -- in lockstep with the ONE predicate on the other side:
+                        -- M.lookups indexes a var into `var_named` iff
+                        -- `not n.torn and not n.sql and not n.ctype`. The fused
+                        -- extract reads THIS set and the standalone id pass
+                        -- (refresh, workers) derives its own from var_named, so
+                        -- any difference between the two is an inline-vs-refresh
+                        -- divergence -- a file scanned by one path and not the
+                        -- other, which is the exact shape the parity gates
+                        -- exist to catch. ctype vars never reach handle_var
+                        -- (handle_iface mints those) and sql vars are minted by
+                        -- a later pass, so `not torn` is the whole difference.
+                        varFiles[file] = true
                     end
                     -- CONST-FOLD index (ladder step 1): a set-once STRING
                     -- literal binding lets identifier args fold to k='lit'
@@ -6292,7 +6387,7 @@ function M.extract(root, opts)
             end
             extract_calls(file, r.lang, r.spec, src, r.root)
         end
-        if fnRanges[file] then
+        if fnRanges[file] or varFiles[file] then
             local buf = mention_buf(M.spec.javascript)
             for ri, r in ipairs(regions) do
                 collect_mentions(buf, r.root, src, r.spec, regdfs[ri],
@@ -6443,10 +6538,16 @@ function M.extract(root, opts)
             extract_calls(file, lang, spec, src, tsroot)
             padd('extract_calls', _pc)
             -- fusion Stage B: mentions ride the SAME tree — the id pass
-            -- never parses again (files without functions stay out, the
-            -- same gate the id pass always had). df rides the same walk
-            -- via dfreg (registered by extract_defs above).
-            if fnRanges[file] then
+            -- never parses again. df rides the same walk via dfreg
+            -- (registered by extract_defs above).
+            -- THE GATE IS "HAS A MENTION TARGET", not "has functions". It read
+            -- `fnRanges[file]` for as long as every use edge needed an owning
+            -- function, and a file with only file-scope vars therefore never
+            -- had its mentions collected -- so the fix in reduce_mentions
+            -- (attribute to the module) would have been dead code for exactly
+            -- the files that carry the most module state (CART-0479: mantis's
+            -- config_defaults_inc.php defines the globals the whole app reads).
+            if fnRanges[file] or varFiles[file] then
                 local buf = mention_buf(spec)
                 local escset = escpend and escpend[1] and {} or nil
                 local _pm = pstart()
