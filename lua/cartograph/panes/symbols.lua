@@ -893,8 +893,18 @@ local function render_var(ctx, id)
     -- and there are none), so `const~` would imply a doubt that does not exist.
     -- What it says instead is where the evidence came from.
     local lbl = a.label .. (a.dnr and (' · %d by key'):format(a.dnr) or '')
+    -- THE EMPTY NOTE HAS TO MATCH THE LABEL. "writes only, or dynamic access" is
+    -- the right sentence for a var whose READS are missing -- and wrong for an
+    -- `unobserved` one, which has no writes either, so it named a reason that
+    -- cannot apply (CART-0478). An unobserved var's note names what WOULD have
+    -- been invisible instead, which is the honest half: absence of a witness is
+    -- not evidence of absence.
+    local empty = a.label == 'unobserved'
+        and '(nothing observed — no reads, no writes; a dynamic or string-keyed'
+            .. ' access would not appear here)'
+        or '(no reads found — writes only, or dynamic access)'
     render_sites(ctx, node, '·', lbl .. ' · used by', sites,
-        '(no reads found — writes only, or dynamic access)', concerns.needs_edges(store))
+        empty, concerns.needs_edges(store))
     -- WHO WRITES IT, now an AXIS rather than a subsection. The rows above are
     -- readers ONLY -- the empty note even names "writes only" as a reason for
     -- having none, so for a written var the whole story could be a write and

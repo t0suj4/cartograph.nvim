@@ -829,6 +829,15 @@ Members are of three shapes, and each descends the way its shape implies: a
 function goes to its body, a file to its own altitude, a write SITE to the
 position (landing through the containment chain, |cartograph-site|).
 
+A VAR WITH NO EVIDENCE SAYS SO. The state label on a var's own altitude —
+`const`, `set-once`, `single-writer`, `multi-writer`, `dead` — is read off use
+edges, and where there are none it now reads `unobserved` rather than `const`.
+That is not pedantry: `const` is a positive claim about immutability and an empty
+set cannot support one, so the strongest word on the ladder was being handed to
+the vars we knew least about. `unobserved` is distinct from `unclassified`, which
+means the edges exist and this language ships no write classifier — no edges
+against unreadable edges.
+
 A READ CAN BE SPELLED AS DATA, and those rows say so. Where a codebase reaches a
 variable through an accessor — `config_get_global( 'db_type' )` rather than
 `$g_db_type` — no mention pass can find the read, so the variable reads as unused

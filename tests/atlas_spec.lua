@@ -141,3 +141,64 @@ test('atlas fields: a whole-var write hedges every field claim', function ()
     ok(fa.whole.nw > 0, 'the rebind lands in the whole bucket as a write')
     ok(fa.fields.a.hedged, '...and hedges the per-field claim')
 end)
+
+-- ── ABSENCE IS NOT EVIDENCE (CART-0478) ─────────────────────────────────────
+test('atlas: no use edge at all is UNOBSERVED, never const', function ()
+    -- `nw == 0 -> const` was tested before any evidence check, so a var with
+    -- nothing read, nothing written and nothing known got the STRONGEST word on
+    -- the ladder. Measured: every zero-evidence var was labelled const, 605 of
+    -- 605 on mantis, 81% of all vars carrying the label.
+    store.ingest({
+        root = '/x',
+        nodes = { node('SEEN'), node('NOTHING'), node('r1', 'function') },
+        edges = { use('r1', 'SEEN', 1) },
+        calls = {},
+    })
+    eq('const', atlas.classify(store, 'SEEN').label,
+        'a var that is read and never written is genuinely const')
+    eq('unobserved', atlas.classify(store, 'NOTHING').label,
+        'a var with no edge at all claims nothing')
+    eq(0, atlas.classify(store, 'NOTHING').nr)
+end)
+
+test('atlas: UNOBSERVED and UNCLASSIFIED are different facts', function ()
+    -- the boundary is NO EDGES vs UNREADABLE EDGES. jquery has 38 vars with
+    -- edges whose rw is nil (javascript ships no write classifier) and NONE of
+    -- them is unobserved -- a probe that tested `nr == 0 and nw == 0` instead
+    -- conflated the two and reported 38 of jquery's 41 vars as unobserved.
+    store.ingest({
+        root = '/x',
+        nodes = { node('NOEDGE'), node('UNREADABLE'), node('r1', 'function') },
+        edges = { { from = 'r1', to = 'UNREADABLE', kind = 'use', at = { R } } },
+        calls = {},
+    })
+    eq('unobserved', atlas.classify(store, 'NOEDGE').label)
+    eq('unclassified', atlas.classify(store, 'UNREADABLE').label,
+        'an edge we cannot read is not an absent edge')
+end)
+
+test('atlas: a DERIVED read is evidence, so it lifts unobserved', function ()
+    -- and it only counts when asked: the browser and dead-state ask, so what a
+    -- reader sees relabelled on mantis is 213 vars rather than 605
+    local keyaccess = require 'cartograph.keyaccess'
+    store.ingest({ root = '/x', nodes = { node('BYKEY') }, edges = {}, calls = {} })
+    eq('unobserved', atlas.classify(store, 'BYKEY').label)
+    -- stub the read index for this graph: the derivation itself is pinned in
+    -- keyaccess_spec, what matters here is that classify CONSULTS it
+    local idx = keyaccess.read_index(store)
+    idx['BYKEY'] = { { name = 'BYKEY', acc = 'a', file = 'm.php', line = 1 } }
+    eq('const', atlas.classify(store, 'BYKEY', { derived = true }).label,
+        'a string-keyed read is a read, so the var is const WITH evidence')
+    eq('unobserved', atlas.classify(store, 'BYKEY').label,
+        'and the default still does not pay for the index')
+end)
+
+test('atlas: unobserved is in the public label set, so a census counts it', function ()
+    local seen = {}
+    for _, l in ipairs(atlas.LABELS) do seen[l] = true end
+    ok(seen.unobserved, 'the new state needs a NAME, not a nil')
+    store.ingest({ root = '/x', nodes = { node('A'), node('B') }, edges = {}, calls = {} })
+    local c = atlas.census(store)
+    eq(2, c.counts.unobserved)
+    eq(0, c.counts.const, 'and it is not double-counted as const')
+end)

@@ -249,8 +249,15 @@ test('keyaccess: the atlas counts a derived read only when ASKED', function ()
     local on = atlas.classify(store, id, { derived = true })
     eq(1, on.nr, 'asked, the string-keyed read counts as the read it is')
     eq(1, on.dnr, 'and is reported separately, because the label cannot carry it')
-    eq('const', on.label, 'the label does NOT change: reads never threaten constancy')
-    eq(off.label, on.label, 'const on nothing -> const on evidence is a STRENGTHENING')
+    eq('const', on.label, 'reads never threaten constancy, so the label is const')
+    -- ★ A KNOWING FLIP (CART-0478). This pair used to assert off.label ==
+    -- on.label, both `const` -- which was true only because `nw == 0 -> const`
+    -- was tested before any evidence check, so a var with NOTHING got the
+    -- strongest word on the ladder. Now the default says `unobserved` (nothing
+    -- was seen) and asking says `const` (a read was seen), which is a strictly
+    -- better pair: the two answers differ exactly where the evidence differs.
+    eq('unobserved', off.label,
+        'unasked, there is no evidence, so no claim is made')
     vim.fn.delete(root, 'rf')
 end)
 

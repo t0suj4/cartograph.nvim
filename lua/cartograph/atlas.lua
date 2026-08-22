@@ -13,6 +13,8 @@
 --   multi-writer   contended state: the reorder/race attention list
 --   unclassified   some use edge carries no rw (a language without the
 --                  write classifier) — unknown, never guessed
+--   unobserved     NO use edge at all, and no derived read when one was asked
+--                  for: nothing was seen, so nothing is claimed (CART-0478)
 --
 -- Pure consumer: no extraction change, every fact already in the graph.
 
@@ -24,7 +26,34 @@
 local M = {}
 
 M.LABELS = { 'const', 'dead', 'set-once', 'single-writer', 'multi-writer',
-    'unclassified' }
+    'unclassified', 'unobserved' }
+
+-- ── WHY `unobserved` EXISTS (CART-0478) ─────────────────────────────────────
+-- `nw == 0 -> const` was tested BEFORE any evidence check, so a var with NO use
+-- edge of any kind -- nothing read, nothing written, nothing known -- got the
+-- STRONGEST WORD ON THE LADDER. `const` is a positive claim about immutability,
+-- and an empty set cannot support one: the honesty invariant is that ABSENCE IS
+-- NOT EVIDENCE, violated here in the loudest possible way.
+--
+-- MEASURED, and the population is what makes this a fix rather than a downgrade.
+-- Every zero-evidence var was labelled `const`, 605 of 605 on mantis:
+--     corpus              vars   const today   zero evidence   asking keyaccess
+--     mantisbt            2537   2044 (81%)         605              213
+--     cartograph (lua)     847    691               1                1
+--     grocy                171     92              29               29
+--     jquery                41      2               0                0
+-- The browser and the dead-state lint both ASK for derived reads, so what a reader
+-- actually sees relabelled on mantis is 213 vars, not 605 -- the rest are `const`
+-- with evidence behind them now (CART-0479 gave file-scope mentions an owner,
+-- CART-0507 made string-keyed reads visible). Doing this ticket FIRST, before
+-- either of those, would have hedged ~2000 knowable facts.
+--
+-- ★ IT IS A DIFFERENT FACT FROM `unclassified`, and the boundary is NO EDGES vs
+-- UNREADABLE EDGES. jquery has 38 vars with edges whose `rw` is nil (javascript
+-- ships no write classifier) -- those are `unclassified`, which already says
+-- "unknown, never guessed", and NONE of them is unobserved. A probe that tested
+-- `nr == 0 and nw == 0` instead conflated the two and reported jquery as 38
+-- unobserved out of 41; the predicate is the EDGE COUNT, not the counters.
 
 --- Classify one var by its use edges. Returns
 --- { label, nr, nw, writers = {fn ids}, gw = min guard tier of writes }.
@@ -46,7 +75,9 @@ M.LABELS = { 'const', 'dead', 'set-once', 'single-writer', 'multi-writer',
 function M.classify(store, id, opts)
     local nr, nw, unk, gwmin = 0, 0, false, nil
     local writers = {}
+    local nedge = 0
     for _, u in ipairs(store.topo():var_used_by_detail(id)) do
+        nedge = nedge + 1
         local rw = u.rw
         if not rw then
             unk = true
@@ -71,7 +102,10 @@ function M.classify(store, id, opts)
         nr = nr + dnr
     end
     local label
-    if unk then label = 'unclassified'
+    -- THE EVIDENCE CHECK COMES FIRST. Everything below it reads a COUNT, and a
+    -- count of zero over an empty set is not a fact about the code.
+    if nedge == 0 and dnr == 0 then label = 'unobserved'
+    elseif unk then label = 'unclassified'
     elseif nw == 0 then label = 'const'
     elseif nr == 0 then label = 'dead'
     elseif gwmin == 3 then label = 'set-once'
