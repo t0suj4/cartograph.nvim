@@ -9,6 +9,18 @@ local inext = tsutil.inext
 local refusal = tsutil.refusal
 
 return {
+    -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
+    -- CALLEE NAME, as a field name or a named-child index. Replaces a
+    -- hardcoded four-name or-chain inline in the provider that php, java,
+    -- bash, rust macros, ruby and haskell were all missing from -- so a call
+    -- to a corpus-unique function became a fn REFERENCE and minted a `reg`
+    -- edge ("kept alive by top-level DATA"), a different fact. 96.6% of
+    -- mantisbt's reg occurrences were mislabelled calls.
+    call_positions = {
+        command_name = 0, -- ★ NOT `command`: `command`'s `name` field holds a
+        -- command_name NODE, and the identifier sits one level further down as
+        -- its child 0. The ticket named `command` and would have matched nothing
+    },
         exts = { 'sh', 'bash' },
         functions = [=[
             (function_definition name: (word) @name) @def

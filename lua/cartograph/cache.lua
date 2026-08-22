@@ -73,7 +73,50 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 144 -- v144: CART-0510 — AN IMPORT EDGE NOW SAYS WHAT KIND OF IMPORT IT IS.
+M.VERSION = 145 -- v145: CALL POSITION IS A PER-LANGUAGE FACT, AND SIX LANGUAGES WERE
+               -- MISSING FROM THE LIST (CART-0499). Whether an identifier sits in call
+               -- position was decided by ONE inline or-chain of four grammar node-type
+               -- names, plus `nt == 'list'` for a sexp head. A language whose call
+               -- spelling was absent never marked a call-position identifier as callee,
+               -- so a call to a corpus-unique function fell through to the fn-REFERENCE
+               -- branch: it minted a `reg` edge ("this function is kept alive by
+               -- top-level DATA"), which is a different fact, AND a second `ref` edge
+               -- beside the one resolution already had.
+               -- Now declared per spec (`call_positions`: parent type -> the child
+               -- holding the callee, a field name or a named-child index), registered in
+               -- spec/contract.lua so specaudit can see it. EVERY ENTRY PROBED against
+               -- the real grammar rather than transcribed — which caught that bash's
+               -- callee is `command_name`'s child 0, not `command`'s `name` field (that
+               -- field holds the command_name NODE), so the obvious entry would have
+               -- matched nothing.
+               -- MISSING: php (3 forms), java, bash, rust macros. AND TWO THE TICKET DID
+               -- NOT KNOW: ruby and haskell were IN the old list, but the test only tried
+               -- the `function` and `name` fields — ruby names it `method` and haskell's
+               -- is an unnamed child 0 — so their callees were never marked either.
+               -- ★★ MEASURED ON FULL mantisbt (513 php files; the php GATE corpus is
+               -- core/ only and holds 25 of the 2681 occurrences, so it could never have
+               -- fenced this — CART-0506): reg edges 751 -> 27, occurrences 2681 -> 99,
+               -- and 96.6% of the removed ones were in call position. INVARIANT CHECKED,
+               -- not predicted: of 724 removed (file -> target) pairs, ZERO orphans —
+               -- every one keeps a surviving edge from the same file, because
+               -- own_module_calls (v107) already records a resolved module-level call
+               -- from its enclosing REGION. That is the entanglement the ticket was
+               -- filed with, and it was already built. The 22 surviving reg edges keep
+               -- all 99 occurrences: genuine registrations, untouched.
+               -- ★★ AND EVERY AFFECTED CALL SITE WAS COUNTED TWICE. ref occurrences on
+               -- mantisbt 35793 -> 25216, and the shrinking pairs halve EXACTLY:
+               -- filter_form_api -> lang_get 360 -> 180, bug_api -> db_param 212 -> 106,
+               -- email_api -> log_event 146 -> 73 — against 180 / 106 / 73 call sites in
+               -- the source. The fn-ref branch and resolution were both recording it.
+               -- ★★ THE `list` RULE WAS LEAKING ACROSS LANGUAGES. `nt == 'list'` meant a
+               -- SEXP HEAD, and haskell's LIST LITERAL is the same node-type name — so
+               -- the first element of every haskell list was marked a callee and its
+               -- reference silently dropped (`chars = [backspace,tab,…]` lost only
+               -- `backspace`; `mkDataType "…" [conMkFixed]` lost `conMkFixed`). +7 ref
+               -- edges on the haskell corpus are that fix. Same hazard CART-0466 names
+               -- for the descent tables: one node-type name, two grammar shapes, and a
+               -- global table cannot say which.
+               -- v144: CART-0510 — AN IMPORT EDGE NOW SAYS WHAT KIND OF IMPORT IT IS.
                -- php's import_query captured require_once / require / include_once /
                -- include into ONE `@path`, so all four produced an IDENTICAL edge and the
                -- graph could not tell a library included once from one included k times.

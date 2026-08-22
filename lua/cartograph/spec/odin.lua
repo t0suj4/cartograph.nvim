@@ -59,6 +59,16 @@ local function odin_context(node, src)
 end
 
 return {
+    -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
+    -- CALLEE NAME, as a field name or a named-child index. Replaces a
+    -- hardcoded four-name or-chain inline in the provider that php, java,
+    -- bash, rust macros, ruby and haskell were all missing from -- so a call
+    -- to a corpus-unique function became a fn REFERENCE and minted a `reg`
+    -- edge ("kept alive by top-level DATA"), a different fact. 96.6% of
+    -- mantisbt's reg occurrences were mislabelled calls.
+    call_positions = {
+        call_expression = 'function', -- g(1)
+    },
         exts = { 'odin' },
         functions = [=[
             (procedure_declaration . (identifier) @name) @def

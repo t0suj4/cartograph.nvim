@@ -4050,6 +4050,13 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     local dfid = spec.df_ids
     local modskip = spec.binding_modifiers -- CART-0234
     local escnv = esc and spec.escape_nonvalue -- CART-0236
+    -- WHICH PARENT NODE TYPES HOLD A CALLEE NAME, declared per language rather
+    -- than guessed from a global list (CART-0499). Same shape as escape_nonvalue
+    -- above and keyed the same way — on the PARENT type, which is what the walk
+    -- has in hand — because the four-name `or` chain this replaces was inline in
+    -- the provider, where nothing could audit it: langaudit cannot see a table of
+    -- node-type names (CART-0451) and it certainly cannot see an or-chain.
+    local callpos = spec.call_positions
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
     local scoped = scopes and MF_SCOPED or 0
@@ -4083,9 +4090,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 bodyctx.stmts = {}
             end
         end
-        local iscall = nt == 'call_expression' or nt == 'function_call'
-            or nt == 'call' or nt == 'apply'
-        local head = nt == 'list' -- sexp head IS the callee (no fields)
+        local callk = callpos and callpos[nt]
         -- df def positions are THIS node's gift to its children:
         -- assignment lefts, declarators, transparent wrappers
         local asgleft, decld, dfk, declist
@@ -4190,9 +4195,18 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             if idt[ct] and (cnamed or cnamed == nil and c:named()) then
                 if name == nil then name = node_text(c, src) end
                 local sr, sc, er, ec = c:range()
-                local callee = iscall
-                    and (n:field('function')[1] == c or n:field('name')[1] == c)
-                    or head -- the mention guard already proved c named
+                -- THE CALLEE TEST, from the declaration. `callk` is a FIELD NAME
+                -- or a named-child INDEX (see spec/contract.lua); the index form
+                -- is for grammars that give the position no field at all — a
+                -- sexp's head, a rust macro name, bash's command_name — and it
+                -- also costs nothing, where field() allocates a table per call.
+                -- This is now ONE field() lookup instead of the two the old chain
+                -- did for every mention inside any call node.
+                local callee = false
+                if callk ~= nil then
+                    callee = (type(callk) == 'number' and n:named_child(callk)
+                        or n:field(callk)[1]) == c
+                end
                 if escnv and not callee then
                     -- a value mention unless the grammar says this position is
                     -- not one. `nt` is the PARENT type (n is c's parent), which is
@@ -4386,16 +4400,20 @@ local function reduce_mentions(file, buf, L)
     local ranges = L.fn_ranges[file] or {}
     -- ...but the FN-REF half of this pass stays scoped to files that always had
     -- it. Opening the gate for var-only files scaled `reg` edges on mantis from
-    -- 751 to 4047, and the new ones are not registrations: mantis page scripts
-    -- are top-level CALLS (`require_api(…)`, `gpc_get_int(…)`), and they reach
-    -- the fn-ref branch because `iscall` below is a hardcoded four-name list
-    -- that php's `function_call_expression` and java's `method_invocation` are
-    -- not in, so `callee` is never set for either language (CART-0499). Fixing
-    -- that is entangled with owner-less call sites (CART-0455: 36% of mantis
-    -- calls have no owning function, so their reg edge is today the only record
-    -- the call happened) and it is not this ticket's fact. So: var mentions get
-    -- the widened gate, fn references keep the old one, and `reg` counts do not
-    -- move. CART-0501 holds the measured version of the other half.
+    -- 751 to 4047 (CART-0501 holds that measurement, and it must be RE-RUN: it
+    -- was taken while `iscall` was still blind to php, so most of those 4047
+    -- were mislabelled calls that v145 has since removed).
+    -- ★ THE ENTANGLEMENT THIS COMMENT USED TO CLAIM IS GONE. It said fixing the
+    -- call-position list was blocked on owner-less call sites, because "the reg
+    -- edge is today the only record the call happened". It was not:
+    -- own_module_calls (v107) already adds a REF EDGE FROM THE ENCLOSING REGION
+    -- for every resolved module-level call — measured on full mantisbt, 10949
+    -- owner-less resolved calls and exactly 10949 region-sourced ref
+    -- occurrences. So v145 named the call positions on its own, and of 724
+    -- removed (file -> target) reg pairs ZERO were left without a surviving
+    -- edge. What CART-0455 still owns is the `fn` FIELD (own_module_calls adds
+    -- an edge and never sets it), which is why no altitude can list those calls
+    -- — a different fact from reachability, and not touched here.
     local fnref_ok = L.fn_ranges[file] ~= nil
     local fnrefs = buf.fnrefs
     local names = buf.names

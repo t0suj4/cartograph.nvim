@@ -365,6 +365,18 @@ local function toc_scope(file, _, root)
 end
 
 return {
+    -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
+    -- CALLEE NAME, as a field name or a named-child index. Replaces a
+    -- hardcoded four-name or-chain inline in the provider that php, java,
+    -- bash, rust macros, ruby and haskell were all missing from -- so a call
+    -- to a corpus-unique function became a fn REFERENCE and minted a `reg`
+    -- edge ("kept alive by top-level DATA"), a different fact. 96.6% of
+    -- mantisbt's reg occurrences were mislabelled calls.
+    call_positions = {
+        function_call = 'name', -- foo(1) -- the only bare call form; `t.m(2)` puts the
+        -- name under dot_index_expression, which escape_nonvalue already
+        -- classifies as a KEY rather than a value read
+    },
     exts = { 'lua' },
     -- BINDER NODES ([[cartograph-cross-project]]): node types that BIND names, so a
     -- loop variable is known to be local. Neither df's `def` nor the expression IR

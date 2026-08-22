@@ -9,6 +9,17 @@ local node_text = tsutil.node_text
 local inext = tsutil.inext
 
 return {
+    -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
+    -- CALLEE NAME, as a field name or a named-child index. Replaces a
+    -- hardcoded four-name or-chain inline in the provider that php, java,
+    -- bash, rust macros, ruby and haskell were all missing from -- so a call
+    -- to a corpus-unique function became a fn REFERENCE and minted a `reg`
+    -- edge ("kept alive by top-level DATA"), a different fact. 96.6% of
+    -- mantisbt's reg occurrences were mislabelled calls.
+    call_positions = {
+        apply = 0, -- g 1 -- `apply` WAS in the old list with the same defect as
+        -- ruby: the callee is child 0 (a `variable`), not a field
+    },
         exts = { 'hs' },
         functions = [=[
             (function name: (variable) @name) @def

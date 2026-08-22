@@ -24,6 +24,16 @@ local FN_TYPES = {
 }
 
 return {
+    -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
+    -- CALLEE NAME, as a field name or a named-child index. Replaces a
+    -- hardcoded four-name or-chain inline in the provider that php, java,
+    -- bash, rust macros, ruby and haskell were all missing from -- so a call
+    -- to a corpus-unique function became a fn REFERENCE and minted a `reg`
+    -- edge ("kept alive by top-level DATA"), a different fact. 96.6% of
+    -- mantisbt's reg occurrences were mislabelled calls.
+    call_positions = {
+        call_expression = 'function', -- foo(1) -- shared by ts/tsx
+    },
         exts = { 'js', 'mjs', 'cjs', 'jsx' }, -- the JS grammar handles JSX
         -- BINDER NODES: see spec/lua.lua. `for (const g of t)` binds g as a direct
         -- identifier child; a classic `for` binds inside its initializer.

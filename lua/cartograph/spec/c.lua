@@ -5,6 +5,16 @@
 -- c's by construction.
 
 return {
+    -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
+    -- CALLEE NAME, as a field name or a named-child index. Replaces a
+    -- hardcoded four-name or-chain inline in the provider that php, java,
+    -- bash, rust macros, ruby and haskell were all missing from -- so a call
+    -- to a corpus-unique function became a fn REFERENCE and minted a `reg`
+    -- edge ("kept alive by top-level DATA"), a different fact. 96.6% of
+    -- mantisbt's reg occurrences were mislabelled calls.
+    call_positions = {
+        call_expression = 'function', -- g(1)
+    },
     -- ★ C's `declaration` IS a local declaration and the expression IR did not know it
     -- (CART-0404). `int a = 5;` fell past expr's LOCALDECL unwrap, so the declared NAME was
     -- harvested as a READ while du correctly called it a def — 75190 rows on the cpp corpus,

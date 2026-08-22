@@ -141,6 +141,18 @@ local PHP_GUARDS = {
 }
 
 return {
+    -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
+    -- CALLEE NAME, as a field name or a named-child index. Replaces a
+    -- hardcoded four-name or-chain inline in the provider that php, java,
+    -- bash, rust macros, ruby and haskell were all missing from -- so a call
+    -- to a corpus-unique function became a fn REFERENCE and minted a `reg`
+    -- edge ("kept alive by top-level DATA"), a different fact. 96.6% of
+    -- mantisbt's reg occurrences were mislabelled calls.
+    call_positions = {
+        function_call_expression = 'function', -- foo(1)
+        member_call_expression = 'name', -- $o->m(2) -- the method NAME, not the receiver
+        scoped_call_expression = 'name', -- C::s(3)
+    },
     exts = { 'php' },
     -- Laravel blade templates reuse the .php extension and are NOT php: no
     -- `<?php` tag, so the grammar parses the whole file as inline text without

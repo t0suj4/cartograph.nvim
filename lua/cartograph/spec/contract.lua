@@ -61,6 +61,13 @@ M.SLOTS = {
                                    -- the other half of exported_def, since a
                                    -- file-local's VALUE can still leave (CART-0230).
                                    -- Only the index-only front-ends call it now
+    call_positions = 'SCOPE&KEY',  -- parent type -> the child holding a CALLEE
+                                   -- NAME (field name or named-child index). Was
+                                   -- an or-chain inline in the provider, which
+                                   -- is worse than CART-0451's unauditable spec
+                                   -- TABLE: there was nothing to audit at all,
+                                   -- and six languages were silently missing
+                                   -- (CART-0499)
     escape_nonvalue = 'SCOPE&KEY', -- the same rule as a parent-type veto table, so
                                    -- the mention walk answers it as a rider and no
                                    -- file is traversed twice (CART-0236)

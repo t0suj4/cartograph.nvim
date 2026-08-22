@@ -331,6 +331,18 @@ local function ruby_ctor_binds(tsroot, src, finders)
 end
 
 return {
+    -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
+    -- CALLEE NAME, as a field name or a named-child index. Replaces a
+    -- hardcoded four-name or-chain inline in the provider that php, java,
+    -- bash, rust macros, ruby and haskell were all missing from -- so a call
+    -- to a corpus-unique function became a fn REFERENCE and minted a `reg`
+    -- edge ("kept alive by top-level DATA"), a different fact. 96.6% of
+    -- mantisbt's reg occurrences were mislabelled calls.
+    call_positions = {
+        call = 'method', -- ★ `call` WAS in the old global list, but the old test
+        -- only tried the `function` and `name` fields -- ruby names it `method`,
+        -- so ruby's callees were never marked either. Not in the ticket
+    },
         exts = { 'rb' },
         functions = [=[
             (method name: (_) @name) @def

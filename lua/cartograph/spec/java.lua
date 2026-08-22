@@ -271,6 +271,16 @@ local function java_var_type(sm, ident, from, fields_only)
 end
 
 return {
+    -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
+    -- CALLEE NAME, as a field name or a named-child index. Replaces a
+    -- hardcoded four-name or-chain inline in the provider that php, java,
+    -- bash, rust macros, ruby and haskell were all missing from -- so a call
+    -- to a corpus-unique function became a fn REFERENCE and minted a `reg`
+    -- edge ("kept alive by top-level DATA"), a different fact. 96.6% of
+    -- mantisbt's reg occurrences were mislabelled calls.
+    call_positions = {
+        method_invocation = 'name', -- g(1) / this.h(2) / K.s(3) all name it here
+    },
     exts = { 'java' },
     -- ★ A LAMBDA IS A FUNCTION AND IT HAD NO NODE, so its body had NO ROWS ANYWHERE
     -- (CART-0406). `flow_stop('java')` contains `lambda_expression`, and treesitter.lua
