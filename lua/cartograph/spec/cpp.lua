@@ -8,6 +8,12 @@ local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 
 return {
+    is_write = tsutil.cfamily_is_write,
+    -- the PREFILTER: every immediate parent type a write mention can have here.
+    -- Without it the classifier is never invoked (v147 shipped that mistake).
+    write_gate = { assignment_expression = true, update_expression = true,
+        field_expression = true, subscript_expression = true,
+        pointer_expression = true, qualified_identifier = true },
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not

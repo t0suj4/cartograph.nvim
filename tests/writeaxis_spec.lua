@@ -234,3 +234,42 @@ test('writeaxis: a bracket key names a field, or honestly says it is dynamic', f
     -- the whole-var entry exists as a READ only (`return t`)
     ok(flds[''] and flds[''] % 4 == 1, 'whole-var access is a read here')
 end)
+
+-- ★ THE C FAMILY, shared by c.lua and cpp.lua from one tsutil helper because the
+-- two grammars spell every write form identically. It was the LARGEST population
+-- with no write facts — 2073 var nodes on the cpp corpus, 686 on cppmodern — and it
+-- was missing from the census because the `zig` corpus's numbers, which are C++
+-- (that corpus being the zig compiler), had been read as zig's (CART-0538).
+test('writeaxis: c/cpp — one node type for = and +=, and declarations that BIND', function ()
+    local SRC = [[
+int g = 0;
+struct S { int f; int *p; };
+void m(S *s, S o, int a[], int *p) {
+    g = 1;
+    g += 2;
+    o.f = 3;
+    s->f = 4;
+    a[0] = 5;
+    *p = 6;
+    g++;
+    --g;
+    int x = 7;
+    int y;
+    y = a[g];
+    s->p[1] = 8;
+}
+]]
+    for _, lang in ipairs({ 'c', 'cpp' }) do
+        check(lang, SRC,
+            -- `o.f` and `s->f` are ONE node type (field_expression) and both halves
+            -- ride; `*p` rides through pointer_expression; `s->p[1]` climbs a field
+            -- chain into a subscript
+            { '4:g', '5:g', '6:o', '6:f', '7:s', '7:f', '8:a', '9:p', '10:g', '11:g',
+              '14:y', '15:s', '15:p' },
+            -- `int x = 7` (init_declarator) and `int y;` (declaration) BIND — the
+            -- second is CART-0537's initializer-less case one language over — and
+            -- `a[g]` in value position reads the array AND the index
+            -- 12 `int x = 7;` and 13 `int y;` are both declarations
+            { '12:x', '13:y', '14:a', '14:g' })
+    end
+end)

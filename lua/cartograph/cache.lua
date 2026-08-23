@@ -73,7 +73,37 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 154 -- v154: A JAVA FIELD WITHOUT AN INITIALIZER IS STILL A FIELD
+M.VERSION = 155 -- v155: THE C FAMILY ANSWERS THE WRITE QUESTION (CART-0532), and it was
+               -- the largest population left — 2073 var nodes on the cpp corpus (.h 1181
+               -- · .cpp 829 · .c 31) and 686 on cppmodern, all carrying no rw / gw / gp /
+               -- flds. One `tsutil.cfamily_is_write` shared by c.lua and cpp.lua, since
+               -- the two grammars spell every write form identically — the same reason
+               -- chain_eq/optext_is live in tsutil rather than twice.
+               -- ★★ AND IT WAS MISSING FROM THE CENSUS BECAUSE OF A WRONG POPULATION IN MY
+               -- OWN TICKET: the `zig` corpus's 35 vars and 52 use edges are C++ (that
+               -- corpus is the zig COMPILER), and CART-0532 listed them as zig's. zig
+               -- itself declares no `vars` query at all, so it has no var nodes and the
+               -- write axis there is structurally inert — a correct zig classifier was
+               -- built, measured to fire ZERO times, and reverted rather than shipped
+               -- (CART-0538).
+               -- FORMS, all parsed: field_expression covers `o.f` AND `s->f` (one node
+               -- type), qualified_identifier covers `N::q`, pointer_expression covers
+               -- `*p`, subscript_expression writes the array while the index reads —
+               -- and cpp wraps that index in a `subscript_argument_list`, so an index
+               -- mention never even reaches the arm. `=` and `+=` are one node type.
+               -- init_declarator (`int x = 7;`) and declaration (`int y;`) BIND, which
+               -- keeps set-once reachable; the second is CART-0537's initializer-less
+               -- case one language over, and it matters here because HEADERS HOLD MORE
+               -- VARS THAN SOURCES on this corpus.
+               -- DISTRIBUTION, the check v147 taught: 79 write-only + 89 read+write of
+               -- 949 use edges. Ladder, cpp's 2073 vars: `unclassified 193 · unobserved
+               -- 1880` becomes `const 86 · single-writer 32 · multi-writer 33 · dead 4 ·
+               -- unclassified 38 · unobserved 1880`.
+               -- ★ 1880 OF 2073 STAY UNOBSERVED — 90.7%, and that is a different finding
+               -- worth its own look: most cpp vars have no use edge at all, which for a
+               -- corpus whose headers outnumber its sources is what a per-file analysis
+               -- without include resolution should be expected to say. Not touched here.
+               -- v154: A JAVA FIELD WITHOUT AN INITIALIZER IS STILL A FIELD
                -- (CART-0537). The `vars` query required `value: (_)`, so a field declared
                -- and assigned elsewhere was invisible as a var. MEASURED FIRST, which is
                -- what the ticket asked: 1130 of 2656 field declarators on libs have no

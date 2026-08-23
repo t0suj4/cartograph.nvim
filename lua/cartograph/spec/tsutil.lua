@@ -152,6 +152,51 @@ function M.optext_is(n, _, want)
     return false
 end
 
+--- IS THIS MENTION A WRITE, for the C FAMILY (CART-0532). Shared by c.lua and
+--- cpp.lua because the two grammars spell every write form identically — the same
+--- reason chain_eq/optext_is live here rather than in lua.lua and php.lua twice.
+--- Declared as a PAIR with each spec's `write_gate`, which the suite enforces.
+---
+--- MEASURED BEFORE BUILDING: c/cpp is the largest population with no write facts —
+--- 2073 var nodes on the cpp corpus (.h 1181 · .cpp 829 · .c 31) and 686 on
+--- cppmodern, all carrying no `rw`, no `gw`, no `gp`, no `flds`. It was missing from
+--- the write-axis census entirely because the `zig` corpus's 35 vars and 52 use
+--- edges — which ARE C++, that corpus being the zig compiler — had been read as
+--- zig's (CART-0538).
+---
+--- THE BINDINGS ARE `init_declarator` (`int x = 7;`) and `declaration` (`int x;`),
+--- neither of which is a write: that is what keeps set-once reachable, and the
+--- initializer-less form is CART-0537's case one language over (`extern int x;` in
+--- a header, where headers hold MORE vars than sources on this corpus).
+function M.cfamily_is_write(c, n)
+    local cur, p = c, n
+    while p do
+        local pt = p:type()
+        if pt == 'field_expression' or pt == 'qualified_identifier'
+            or pt == 'pointer_expression' then
+            -- `o.f` · `s->f` (one node type for both) · `N::q` · `*p`. Every level
+            -- of a nested chain rides, as in lua/go/java.
+            cur, p = p, p:parent()
+        elseif pt == 'subscript_expression' then
+            -- `a[i] = v` writes a; the INDEX reads. cpp wraps the index in a
+            -- `subscript_argument_list`, so an index mention never even reaches
+            -- this arm — it breaks out below and fails the assignment test.
+            if p:field('argument')[1] ~= cur then return false end
+            cur, p = p, p:parent()
+        else
+            break
+        end
+    end
+    if not p then return false end
+    local pt = p:type()
+    if pt == 'assignment_expression' then
+        return p:named_child(0) == cur -- one node type for `=` and `+=`
+    elseif pt == 'update_expression' then
+        return true -- g++ / --g
+    end
+    return false
+end
+
 -- descend through parenthesized wrappers to the inner expression
 function M.unparen(n)
     while n and n:type() == 'parenthesized_expression' do n = n:named_child(0) end
