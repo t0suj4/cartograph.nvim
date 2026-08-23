@@ -73,7 +73,36 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 155 -- v155: THE C FAMILY ANSWERS THE WRITE QUESTION (CART-0532), and it was
+M.VERSION = 156 -- v156: JAVASCRIPT ANSWERS THE WRITE QUESTION (CART-0532) — the largest
+               -- population of the whole arc, and the one I nearly declared inert. ghost
+               -- carries 7804 .js + 942 .ts var nodes and 34577 + 1279 use edges, every
+               -- one with no rw / gw / gp / flds. One spec covers js, ts and tsx.
+               -- ★★ JUDGED BY THE WRONG CORPUS, ALMOST: jquery has 0 var nodes and
+               -- mootools 7, so the small js corpora say "nothing to classify". That is
+               -- CART-0538's mistake in reverse — reading a language's population off
+               -- whichever corpus is named for it. ghost is the one that answers, and it
+               -- is 8790 vars.
+               -- FORMS, all parsed: `=` and `+=` are DIFFERENT node types (as in rust,
+               -- unlike go/java/c); member_expression nests; subscript_expression writes
+               -- the array while the index reads — and js does NOT wrap the index the way
+               -- cpp does, so both mentions reach the same arm and the object test is what
+               -- separates them; DESTRUCTURING targets (object_pattern / array_pattern /
+               -- rest_pattern / pair_pattern) are climbed, and the same node types under a
+               -- `variable_declarator` are a BINDING, which is what testing the top rather
+               -- than the parent gets right.
+               -- DISTRIBUTION: 262 write-only + 335 read+write of 35911 use edges.
+               -- LADDER, ghost's 8790 vars: `unclassified 7955 · unobserved 835` becomes
+               -- `const 7736 · single-writer 76 · multi-writer 96 · dead 9 ·
+               -- unclassified 38 · unobserved 835`. 7917 vars gain a named rung — the
+               -- largest movement of the arc.
+               -- ★ AND IT BROKE THE FOURTH STALE ASSERTION: writes_spec's honest-absence
+               -- test ("no classifier -> rw stays ABSENT, not read") had encoded
+               -- JAVASCRIPT as the language without one. Moving it to ruby produced a SKIP
+               -- — ruby's three corpora hold ONE var node — which is worse than a failure
+               -- because a skip reads like a pass. It now tests the MECHANISM: strip a
+               -- classifier from a language that has one and require absence. Coverage can
+               -- reach every language without that going stale or vacuous.
+               -- v155: THE C FAMILY ANSWERS THE WRITE QUESTION (CART-0532), and it was
                -- the largest population left — 2073 var nodes on the cpp corpus (.h 1181
                -- · .cpp 829 · .c 31) and 686 on cppmodern, all carrying no rw / gw / gp /
                -- flds. One `tsutil.cfamily_is_write` shared by c.lua and cpp.lua, since

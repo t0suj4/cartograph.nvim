@@ -38,7 +38,13 @@ local function mentions(lang, src)
         for c in n:iter_children() do
             if c:named() then
                 local t = c:type()
-                if t == 'identifier' or t == 'field_identifier' then
+                -- property_identifier is js's member name and
+                -- shorthand_property_identifier_pattern its destructuring target;
+                -- a harness that collects only `identifier` reports them as
+                -- MISSING rather than wrong, which reads like a classifier bug
+                if t == 'identifier' or t == 'field_identifier'
+                    or t == 'property_identifier'
+                    or t == 'shorthand_property_identifier_pattern' then
                     out[#out + 1] = { line = select(1, c:range()) + 1,
                         text = vim.treesitter.get_node_text(c, src),
                         parent = n:type(),
@@ -193,15 +199,19 @@ end)
 -- eight languages captured no field at all — and python's case is the sharpest:
 -- it had 909 flds ENTRIES and zero NAMES, every one the '' whole-var key.
 test('writeaxis: a language with a member form and a write classifier captures FIELDS', function ()
-    local want = { 'python', 'go', 'java', 'rust' }
+    local want = { 'python', 'go', 'java', 'rust', 'javascript', 'c', 'cpp' }
     for _, lang in ipairs(want) do
         local sp = ts.spec[lang]
         ok(sp.member_positions ~= nil, lang .. ' declares a member form')
         ok(sp.is_write ~= nil, lang .. ' declares a write classifier')
     end
     -- and the gate is INERT without the classifier, which is why widening it
-    -- alone measured zero before v147: the attachment site is inside `if wmode`
-    for _, lang in ipairs({ 'ruby', 'zig', 'javascript', 'haskell' }) do
+    -- alone measured zero before v147: the attachment site is inside `if wmode`.
+    -- WHAT IS LEFT, and each for a reason rather than an oversight: ruby, whose
+    -- corpora hold ONE var node in total; haskell, which declares no vars query;
+    -- zig, which declares none either — a correct zig classifier was built,
+    -- measured to fire zero times, and reverted (CART-0538).
+    for _, lang in ipairs({ 'ruby', 'haskell', 'zig' }) do
         eq(nil, ts.spec[lang].is_write)
     end
 end)
@@ -272,4 +282,33 @@ void m(S *s, S o, int a[], int *p) {
             -- 12 `int x = 7;` and 13 `int y;` are both declarations
             { '12:x', '13:y', '14:a', '14:g' })
     end
+end)
+
+-- ★ JAVASCRIPT (and ts/tsx, one spec): the largest population of the arc — ghost
+-- carries 8750 var nodes and 35856 use edges. Nearly missed, because jquery has 0
+-- var nodes and mootools 7: judging a language by the corpus named for it is the
+-- zig mistake in reverse (CART-0538).
+test('writeaxis: javascript — two assignment types, destructuring targets, and let BINDS', function ()
+    check('javascript', [[
+let g = 0;
+function m(o, a) {
+    g = 2;
+    g += 3;
+    o.prop = 4;
+    a[0] = 5;
+    o.inner.deep = 6;
+    g++;
+    let x = 7;
+    x = a[g];
+    ({ q } = o);
+    [w] = a;
+    o["lit"] = 9;
+}
+]],
+        { '3:g', '4:g', '5:o', '5:prop', '6:a', '7:o', '7:inner', '7:deep', '8:g',
+          '10:x', '11:q', '12:w', '13:o' },
+        -- `let g` and `let x` BIND · `a[g]` in value position reads the array AND
+        -- the index (js does not wrap the index, so both reach the same arm) ·
+        -- the RHS of a destructuring assignment reads
+        { '1:g', '9:x', '10:a', '10:g', '11:o', '12:a' })
 end)

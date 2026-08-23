@@ -23,7 +23,61 @@ local FN_TYPES = {
     generator_function = true, generator_function_declaration = true,
 }
 
+-- IS THIS MENTION A WRITE? (CART-0532) The largest population of the whole arc:
+-- ghost carries 7804 .js + 942 .ts var nodes and 34577 + 1279 use edges, every one
+-- of them with no rw / gw / gp / flds. One spec covers js, ts and tsx.
+--
+-- ★ AND I NEARLY CONCLUDED JAVASCRIPT WAS INERT, from the small corpora — jquery
+-- has 0 var nodes and mootools 7. That is the zig mistake in reverse (CART-0538):
+-- judging a language by whichever corpus happens to be named for it. ghost is the
+-- one that answers.
+local function js_is_write(c, n)
+    local cur, p = c, n
+    while p do
+        local pt = p:type()
+        if pt == 'member_expression' then
+            cur, p = p, p:parent() -- `o.prop = v`, nesting through `o.inner.deep`
+        elseif pt == 'subscript_expression' then
+            -- `a[i] = v` writes a; the INDEX reads — and js does NOT wrap the
+            -- index (unlike cpp's subscript_argument_list), so both mentions
+            -- arrive here and the object test is what separates them
+            if p:field('object')[1] ~= cur then return false end
+            cur, p = p, p:parent()
+        elseif pt == 'object_pattern' or pt == 'array_pattern'
+            or pt == 'object_assignment_pattern' or pt == 'rest_pattern'
+            or pt == 'pair_pattern' then
+            -- destructuring TARGETS: `({q} = o)` · `[w] = a` · `{a: b} = o`.
+            -- The same node types appear under a variable_declarator for
+            -- `const {q} = o`, which is a BINDING — climbing and then testing the
+            -- top is what tells the two apart.
+            cur, p = p, p:parent()
+        elseif pt == 'parenthesized_expression' then
+            cur, p = p, p:parent() -- `({q} = o)` needs the parens to be transparent
+        else
+            break
+        end
+    end
+    if not p then return false end
+    local pt = p:type()
+    if pt == 'assignment_expression' or pt == 'augmented_assignment_expression' then
+        return p:named_child(0) == cur -- js spells `=` and `+=` as DIFFERENT types
+    elseif pt == 'update_expression' then
+        return true -- g++ / --g
+    end
+    -- variable_declarator (let/const/var, incl. destructuring) BINDS
+    return false
+end
+
 return {
+    is_write = js_is_write,
+    -- the PREFILTER: every immediate parent type a write mention can have.
+    -- Without it the classifier is never invoked (v147 shipped that mistake).
+    write_gate = { assignment_expression = true,
+        augmented_assignment_expression = true, update_expression = true,
+        member_expression = true, subscript_expression = true,
+        object_pattern = true, array_pattern = true,
+        object_assignment_pattern = true, rest_pattern = true,
+        pair_pattern = true },
     -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
     -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
     -- the two answer different questions: a member name is a NAME (and must not

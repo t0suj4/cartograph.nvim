@@ -160,15 +160,37 @@ test('writes: rw survives the fold, both Band backends agree', function ()
     eq(nil, f:tier(s, o, fold.PRED.use), 'tier is ref-only; use-row rw bits never read as a tier')
 end)
 
+-- THE HONEST-ABSENCE INVARIANT: a language with no write classifier must leave
+-- `rw` ABSENT, never default it to "read". Absence is what lets atlas say
+-- `unclassified` instead of minting `const` over a pass that never ran — the
+-- fabrication v147 shipped when it declared `is_write` without `write_gate`.
+-- ★★ AND IT NO LONGER NAMES A LANGUAGE, deliberately. This test used JAVASCRIPT
+-- until v156 gave it a classifier — the fourth stale assertion the write-axis arc
+-- broke, because each one had encoded "language X has none" as the fact under test.
+-- Trying RUBY next produced a SKIP ("no use edge in this fixture shape"), which is
+-- worse than a failure: ruby's three corpora hold ONE var node in total, so it can
+-- never demonstrate anything here, and a skip reads like a pass.
+-- So the invariant is tested on the MECHANISM: take a language that HAS a
+-- classifier, remove it for the duration, and require `rw` to be absent rather
+-- than defaulted to "read". Coverage can now grow to every language without this
+-- going stale or vacuous.
 test('writes: no classifier -> rw stays ABSENT, not read', function ()
-    if not ready('javascript') then skip 'no javascript parser' end
-    local root = mkroot('m.js', table.concat({
-        'const state = {};',
-        'function writer() { state.x = 1; }',
-        'module.exports = { writer };',
-    }, '\n'))
-    local data = ts.extract(root)
-    local rw, found = rw_of(data, 'writer', 'state')
-    if not found then skip 'no js use edge in this fixture shape' end
-    eq(nil, rw, 'javascript has no write classifier: mode must be absent')
+    if not ready('lua') then skip 'no lua parser' end
+    local spec = ts.spec.lua
+    local saved_w, saved_g = spec.is_write, spec.write_gate
+    spec.is_write, spec.write_gate = nil, nil
+    local ok_, res = pcall(function ()
+        local root = mkroot('m.lua', table.concat({
+            'local state = {}',
+            'function writer() state.x = 1 end',
+            'return { writer = writer }',
+        }, '\n'))
+        local data = ts.extract(root)
+        local rw, found = rw_of(data, 'writer', 'state')
+        return { rw = rw, found = found }
+    end)
+    spec.is_write, spec.write_gate = saved_w, saved_g -- restore before asserting
+    ok(ok_, tostring(res))
+    ok(res.found, 'the fixture yields a use edge (else this test proves nothing)')
+    eq(nil, res.rw, 'no classifier: mode must be ABSENT, never a claimed read')
 end)
