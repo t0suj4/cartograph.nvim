@@ -73,7 +73,33 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 151 -- v151: FIELD CAPTURE IS DECLARED, NOT HARDCODED (CART-0530). Which
+M.VERSION = 152 -- v152: A BRACKET WRITE IS NOT A REBIND (CART-0533). v151 declared the
+               -- DOT forms of field capture and left the BRACKET forms hardcoded — lua's
+               -- `bracket_index_expression` and php's `subscript_expression`, nothing
+               -- else. So `atanTab[i] = StrictMath.atan(x)` against
+               -- `private static final double[] atanTab` recorded a WHOLE-VAR write: a
+               -- claimed REBIND of a field the java compiler forbids rebinding.
+               -- FOUND BY RUNNING THE IMMUTABILITY ORACLE BACKWARDS — a var whose
+               -- declaration carries the language's immutability modifier and that the
+               -- write axis reports as REBOUND is a bug with no ground truth needed.
+               -- libs: 47 such vars. After this: 2.
+               -- ★★ TEN LANGUAGES SPELL ONE CONCEPT SIX WAYS, which is what a hardcoded
+               -- list cannot survive: the bracket OBJECT is `array` (java), `operand`
+               -- (go), `object` (zig, js), `value` (python), `argument` (c, cpp) or a bare
+               -- child 0 (lua, php, rust). Now `spec.index_positions`, registered in
+               -- contract.lua, SEPARATE from member_positions because the questions
+               -- differ: a member name is a NAME (and must never be matched against the
+               -- bare-name function index), a bracket key is an EXPRESSION whose mention
+               -- is a genuine value read.
+               -- libs write edges: field-qualified 4 -> 51, whole-var 199 -> 152.
+               -- wow (lua) 8230/5394 — IDENTICAL, the control this time really is one.
+               -- ★ THE 2 SURVIVORS ARE A DIFFERENT DEFECT and are filed, not hidden: a
+               -- file with SEVERAL same-named declarations collapses them onto one var
+               -- node (`static final ObjectParser PARSER` once per nested class, a param
+               -- named `vectors` beside a field of that name). Java makes that idiomatic,
+               -- so it is systematic rather than incidental — and it is var IDENTITY, not
+               -- field capture.
+               -- v151: FIELD CAPTURE IS DECLARED, NOT HARDCODED (CART-0530). Which
                -- field a mention accesses was gated on a four-name set — lua's two and
                -- php's two — so EIGHT languages captured nothing. The DOT forms now fold
                -- in from `spec.member_positions`, so a language declaring a member form

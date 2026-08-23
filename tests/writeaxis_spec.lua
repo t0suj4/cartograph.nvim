@@ -205,3 +205,32 @@ test('writeaxis: a language with a member form and a write classifier captures F
         eq(nil, ts.spec[lang].is_write)
     end
 end)
+
+-- ★ BRACKET KEYS, and the fabrication that nearly shipped (CART-0533). Generalising
+-- the bracket arm from a hardcoded two-name list to spec.index_positions took java's
+-- `atanTab[i] = v` from a claimed REBIND of a `final` array (47 such in libs) to a
+-- field-qualified write. The near-miss: an EMPTY string literal key has no content
+-- child, so falling back to the node's own text yields the QUOTES as a field name —
+-- and the un-quoted reading is the empty string, which IS the whole-var sentinel.
+-- Caught by ONE changed edge on a 2.27M-line lua control, visible only because
+-- CART-0531 put the field count in the signature.
+test('writeaxis: a bracket key names a field, or honestly says it is dynamic', function ()
+    local ts_ = require 'cartograph.providers.treesitter'
+    local data = ts_.extract(vim.fn.getcwd() .. '/tests/fixtures/bracketkey')
+    local flds
+    for _, e in ipairs(data.edges or {}) do
+        if e.kind == 'use' and (e.to or ''):find('var:t@', 1, true) then flds = e.flds end
+    end
+    ok(flds, 'the fixture yields one use edge with field facts')
+    local function w(f) return flds[f] and flds[f] % 4 >= 2 end
+    ok(w('named'), 'a DOT member names its field')
+    ok(w('lit'), 'a string-literal key names its field')
+    ok(w('[]'), 'a dynamic key says so')
+    -- the empty-string key must land in '[]' and NOT invent a name; in particular
+    -- it must not become a whole-var WRITE, which is what would confuse a mutation
+    -- with a rebind
+    eq(nil, flds["''"])
+    ok(not w(''), 'no whole-var write: the empty key did not become the sentinel')
+    -- the whole-var entry exists as a READ only (`return t`)
+    ok(flds[''] and flds[''] % 4 == 1, 'whole-var access is a read here')
+end)

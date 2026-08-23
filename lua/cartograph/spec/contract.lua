@@ -61,6 +61,11 @@ M.SLOTS = {
                                    -- the other half of exported_def, since a
                                    -- file-local's VALUE can still leave (CART-0230).
                                    -- Only the index-only front-ends call it now
+    index_positions = 'SCOPE&KEY', -- parent type -> the OBJECT child of a
+                                   -- BRACKET-style access. Its sibling is the
+                                   -- KEY, which is an expression, so this is a
+                                   -- different question from member_positions
+                                   -- and gets its own slot. CART-0533
     member_positions = 'SCOPE&KEY', -- parent type -> the child holding a MEMBER
                                    -- NAME (a name reached through a receiver).
                                    -- OPTIONAL, unlike call_positions: a language

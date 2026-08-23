@@ -430,16 +430,17 @@ end
 -- Language-generic over the IDXC types; php unwraps the $ sigil.
 --- WHICH FIELD does this mention access — i.e. the mention is the OBJECT of a
 --- member access, and this returns the member's name (or '[]' for a dynamic key).
---- @param mempos table|nil  spec.member_positions: the DOT-style forms, declared
----   per language. Before CART-0530 the whole gate was a hardcoded four-name set
----   (lua's two + php's two), so EIGHT languages captured no fields at all — and
----   for java that was not merely coarse: every write landed on the whole-var
----   key, which is a REBIND, including 154 server vars whose `final` makes a
----   rebind a compile error (CART-0533's census). The bracket arms below stay
----   hardcoded on purpose: their key is an EXPRESSION, not a member name, so
----   member_positions deliberately excludes them and generalising them needs its
----   own declaration.
-local function mention_field(c, n, src, mempos)
+--- @param mempos table|nil  spec.member_positions — the DOT forms (`o.NAME`)
+--- @param idxpos table|nil  spec.index_positions — the BRACKET forms (`o[key]`)
+--- Both were once one hardcoded four-name set (lua's two + php's two), so eight
+--- languages captured nothing. Two tables rather than one because the questions
+--- differ: a member name is a NAME, a bracket key is an EXPRESSION. And ten
+--- languages spell the bracket object SIX ways (array / operand / object / value /
+--- argument / bare child 0), which is what a hardcoded list cannot survive:
+--- java's `array_access` was missing, so `atanTab[i] = v` against a `final` array
+--- recorded a WHOLE-VAR write — a claimed rebind of something the compiler
+--- forbids rebinding (CART-0533).
+local function mention_field(c, n, src, mempos, idxpos)
     local p = n
     -- @langs-ok php/bash `$var` mention shape; the other grammars use a plain identifier, handled by the arm above
     if p:type() == 'variable_name' then c = p; p = p:parent() end
@@ -455,12 +456,30 @@ local function mention_field(c, n, src, mempos)
         if mc == nil or mc == c then return nil end -- c IS the member, not the object
         return node_text(mc, src)
     end
-    if t == 'bracket_index_expression' or t == 'subscript_expression' then
-        if p:named_child(0) ~= c then return nil end
-        local k = p:named_child(1)
-        -- @langs-ok a STRING key in a bracket index (`t["k"]`); the grammars lacking `string` name it `string_literal` and do not index by string literal syntactically
-        if k and k:type() == 'string' then
-            local inner = k:named_child(0)
+    -- THE DECLARED BRACKET FORMS. `c` must be the OBJECT; its sibling is the KEY,
+    -- and a STRING literal key names a field while anything else is dynamic.
+    local ik = idxpos and idxpos[t]
+    if ik ~= nil then
+        local obj = type(ik) == 'number' and p:named_child(ik) or p:field(ik)[1]
+        if obj == nil or obj ~= c then return nil end -- c is the KEY: a read
+        local key
+        for i = 0, p:named_child_count() - 1 do
+            local ch = p:named_child(i)
+            if ch ~= obj then key = ch break end
+        end
+        -- the type NAME is matched loosely on purpose: grammars spell it `string`,
+        -- `string_literal`, `interpreted_string_literal`. A miss costs '[]' — the
+        -- honest dynamic answer — never a wrong field name.
+        if key and key:type():find('string', 1, true) then
+            local inner = key:named_child(0)
+            -- ★ NO FALLBACK TO THE NODE'S OWN TEXT. An EMPTY string literal has no
+            -- content child, and `node_text` would hand back the quotes — a
+            -- fabricated field name. Worse, the un-quoted reading is the empty
+            -- string, which IS the whole-var sentinel, so `t[''] = nil` would
+            -- record a whole-var WRITE: exactly the rebind-vs-mutation confusion
+            -- this change exists to remove. Caught by ONE changed edge on the lua
+            -- control (Skillet's AceComm `del(t)` does `t[''] = nil`), visible
+            -- only because CART-0531 put the field count in the signature.
             if inner then return node_text(inner, src) end
         end
         return '[]'
@@ -4065,9 +4084,13 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     -- not in member_positions); the DOT forms are folded in from the spec, so a
     -- language declaring a member form gets field capture for free instead of
     -- waiting for someone to remember this table (CART-0530).
-    local FLDGATE = { bracket_index_expression = true,
-        subscript_expression = true, variable_name = true }
+    -- WHICH PARENT TYPES CARRY A FIELD ACCESS — folded in from BOTH declarations,
+    -- so a language gets field capture by declaring its forms rather than by
+    -- someone remembering this table. `variable_name` is php's sigil wrapper and
+    -- has no other home.
+    local FLDGATE = { variable_name = true }
     for nt in pairs(spec.member_positions or {}) do FLDGATE[nt] = true end
+    for nt in pairs(spec.index_positions or {}) do FLDGATE[nt] = true end
     local dfid = spec.df_ids
     local modskip = spec.binding_modifiers -- CART-0234
     local escnv = esc and spec.escape_nonvalue -- CART-0236
@@ -4084,6 +4107,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     -- and its "free when not MF_WRITE" is no help here: the LHS of
     -- `private.Hook.X = X` is exactly a member name in write position).
     local mempos = spec.member_positions
+    local idxpos = spec.index_positions -- the BRACKET forms (CART-0533)
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
     local scoped = scopes and MF_SCOPED or 0
@@ -4272,7 +4296,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 -- per use edge (e.flds). Gated on the parent type: zero
                 -- cost for plain mentions.
                 if FLDGATE[nt] then
-                    local fname = mention_field(c, n, src, mempos)
+                    local fname = mention_field(c, n, src, mempos, idxpos)
                     if fname then
                         local fidx = nidx[fname]
                         if not fidx then

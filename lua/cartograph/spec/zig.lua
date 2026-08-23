@@ -455,6 +455,20 @@ local function zig_std_aliases(tsroot, src)
 end
 
 return {
+    -- INDEX POSITIONS (CART-0533): parent node type -> the child holding the
+    -- OBJECT of a BRACKET-style access. Separate from `member_positions` because
+    -- the two answer different questions: a member name is a NAME (and must not
+    -- be matched against the bare-name function index), while a bracket key is an
+    -- EXPRESSION and the mention inside it is a genuine value read.
+    -- ★ TEN LANGUAGES SPELL ONE CONCEPT SIX WAYS — array / operand / object /
+    -- value / argument / bare child 0 — which is why this is declared and not
+    -- hardcoded. It was hardcoded, and java's `array_access` was absent, so
+    -- `atanTab[i] = v` against `private static final double[] atanTab` recorded a
+    -- WHOLE-VAR write: a claimed REBIND of a `final` field, which is a compile
+    -- error. 47 of those in libs alone.
+    index_positions = {
+        index_expression = 'object', -- s[i]
+    },
     -- MEMBER-NAME POSITIONS (CART-0529): parent node type -> the child holding a
     -- MEMBER NAME, i.e. a name that is reached THROUGH A RECEIVER. Same shape as
     -- `call_positions`, and read for the opposite purpose: a mention here must
