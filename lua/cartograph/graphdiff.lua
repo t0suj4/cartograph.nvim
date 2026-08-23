@@ -45,6 +45,15 @@ local function esig(e)
         -- make that invariant fail for a snapshot that is perfectly faithful.
         .. (function (n) return n and ('x' .. n) or '' end)(
             e.nat or e.atn or (e.at and #e.at) or nil)
+        -- THE WRITE AXIS, in the signature for the same reason the count is: a
+        -- language declaring `spec.is_write` changes rw/gw/gp/flds on every use
+        -- edge it has, and without this the whole axis lands invisibly (CART-0532).
+        -- `w-` is the honest rendering of ABSENT: no classifier ran, which is a
+        -- different fact from a measured read.
+        .. (e.rw and (' w' .. e.rw) or ' w-')
+        .. (e.gw and ('g' .. e.gw) or '')
+        .. (e.gp ~= nil and ('p' .. tostring(e.gp)) or '')
+        .. (e.nflds and ('f' .. e.nflds) or '')
 end
 
 -- edge identity = endpoints + kind; multiple call sites legitimately produce

@@ -190,3 +190,41 @@ test('snapshot: save stamps the projection version', function ()
     local _, meta = snapshot.load('spec')
     eq(snapshot.SLIM_VERSION, meta.slim_version)
 end)
+
+-- ★ THE WRITE AXIS IS FENCED (CART-0532). v147 gave python `rw` on 909 use edges
+-- and moved 575 var labels from `unclassified` to `const`, and all 37 gates
+-- printed "graphs are identical" — the projection carried no write facts at all.
+test('snapshot: a write-axis change is VISIBLE to the diff', function ()
+    local a = fat_data()
+    local b = fat_data()
+    b.edges[1].rw = 2 -- the same edge, now known to be a WRITE
+    local d = gd.diff(snapshot.slim(a), snapshot.slim(b))
+    ok(not gd.empty(d), 'gaining a write classification is a difference')
+    eq(1, #d.edges.changed)
+    -- ABSENT renders as `w-`, because "no classifier ran" is a different fact
+    -- from "measured, and it reads"
+    ok(d.edges.changed[1]:find('w-') and d.edges.changed[1]:find('w2'),
+        d.edges.changed[1])
+end)
+
+test('snapshot: gp is TRI-STATE across the projection', function ()
+    local a, b, c = fat_data(), fat_data(), fat_data()
+    b.edges[1].gp = false -- computed, and the writes DISAGREED
+    c.edges[1].gp = 2     -- computed, and every write agreed on param 2
+    eq(nil, snapshot.slim(a).edges[1].gp)
+    eq(false, snapshot.slim(b).edges[1].gp)
+    eq(2, snapshot.slim(c).edges[1].gp)
+    -- and all three are distinguishable, which `e.gp or nil` would have broken
+    ok(not gd.empty(gd.diff(snapshot.slim(a), snapshot.slim(b))), 'nil vs false')
+    ok(not gd.empty(gd.diff(snapshot.slim(b), snapshot.slim(c))), 'false vs 2')
+end)
+
+test('snapshot: the field map is fenced by CARDINALITY, not contents', function ()
+    local a, b = fat_data(), fat_data()
+    a.edges[1].flds = { [''] = 1 }            -- whole-var only
+    b.edges[1].flds = { [''] = 1, name = 2 }  -- a NAMED field appeared
+    eq(1, snapshot.slim(a).edges[1].nflds)
+    eq(2, snapshot.slim(b).edges[1].nflds)
+    ok(not gd.empty(gd.diff(snapshot.slim(a), snapshot.slim(b))),
+        'field capture switching on is visible')
+end)

@@ -38,7 +38,14 @@ test('graphdiff: an attr flip is CHANGED, not add+remove', function ()
     eq(0, #d.edges.added)
     eq(0, #d.edges.removed)
     eq(1, #d.edges.changed)
-    ok(d.edges.changed[1]:find('~ => proven'), d.edges.changed[1])
+    -- the two SIDES, not one exact substring: the signature grew a write-axis
+    -- term (CART-0532), so `~ => proven` became `~ w- => proven w-`. What this
+    -- test is about is that a trust flip lands in `changed` rather than
+    -- add+remove, and that both tiers are named — matching the whole rendering
+    -- would make every future signature term look like a regression here.
+    local before, after = d.edges.changed[1]:match('(.*) => (.*)$')
+    ok(before and before:find('~', 1, true), tostring(d.edges.changed[1]))
+    ok(after and after:find('proven', 1, true), tostring(d.edges.changed[1]))
 end)
 
 test('graphdiff: duplicate pairs are counted, not set-membered', function ()

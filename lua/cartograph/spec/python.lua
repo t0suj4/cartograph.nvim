@@ -8,7 +8,61 @@ local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 local inext = tsutil.inext
 
+-- IS THIS MENTION A WRITE? (CART-0532) The third language to answer, after lua
+-- and php — and until it did, python's 913 use edges carried NO `rw`, no `gw`,
+-- no `gp` and no `flds`, because all four hang off one `if wmode then` in the
+-- reduce. Absence read as `unclassified` rather than as "never written", so
+-- nothing lied; the cost was precision (effects keys a write summary per-VAR
+-- instead of per-FIELD, so two functions touching different fields of one
+-- object read as conflicting).
+--
+-- Shape follows lua_is_write / php_is_write exactly: walk UP through the
+-- member-access wrappers that a write chain may pass through, then ask what the
+-- top sits in. EVERY FORM BELOW WAS PARSED, not recalled — python spells its
+-- targets with five different node types and two of them are wrappers.
+local function python_is_write(c, n)
+    local cur, p = c, n
+    while p do
+        local pt = p:type()
+        if pt == 'attribute' then
+            -- `o.NAME = v`: object AND field both ride the chain, as in lua's
+            -- dot_index_expression and php's member_access_expression
+            cur, p = p, p:parent()
+        elseif pt == 'subscript' then
+            -- `t[k] = v` writes t; the KEY is a read (`t[k]` where c is k)
+            if p:named_child(0) ~= cur then return false end
+            cur, p = p, p:parent()
+        elseif pt == 'pattern_list' or pt == 'tuple_pattern'
+            or pt == 'list_pattern' or pt == 'list_splat_pattern' then
+            -- destructuring wrappers: `a, b = f()` · `c, *rest = g()`. They are
+            -- target-position by construction, so keep climbing.
+            cur, p = p, p:parent()
+        else
+            break
+        end
+    end
+    if not p then return false end
+    local pt = p:type()
+    if pt == 'assignment' or pt == 'augmented_assignment' then
+        -- child 0 is the target; `y: int = 2` inserts a `type` child AFTER it,
+        -- so the index is stable across the annotated form
+        return p:named_child(0) == cur
+    elseif pt == 'named_expression' then -- the walrus, `w := h()`
+        return p:named_child(0) == cur
+    elseif pt == 'for_statement' then
+        -- the loop target is a write to the name: at module level it rebinds a
+        -- global. The ITERATED expression is child 1 and stays a read.
+        return p:named_child(0) == cur
+    elseif pt == 'as_pattern_target' then -- `with open(p) as fh`
+        return true
+    elseif pt == 'delete_statement' then  -- `del x` / `del t[k]`
+        return true
+    end
+    return false
+end
+
 return {
+    is_write = python_is_write,
     -- MEMBER-NAME POSITIONS (CART-0529): parent node type -> the child holding a
     -- MEMBER NAME, i.e. a name that is reached THROUGH A RECEIVER. Same shape as
     -- `call_positions`, and read for the opposite purpose: a mention here must

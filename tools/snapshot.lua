@@ -40,7 +40,7 @@ end)()
 --- must be able to say which INSTRUMENT wrote it, not only which extractor.
 --- Bump this whenever slim's field set changes, and the gate will ask for a
 --- re-save instead of printing a storm.
-M.SLIM_VERSION = 2 -- v2: `nat`, the occurrence count (CART-0531)
+M.SLIM_VERSION = 3 -- v3: the WRITE AXIS (rw/gw/gp/nflds) — CART-0532
 
 --- The slim projection of a data table (pure; input untouched).
 function M.slim(data)
@@ -79,7 +79,23 @@ function M.slim(data)
             -- openfirmware / postscript / bwipp and hide every change above the
             -- cap — the same blindness this field exists to remove, one level
             -- down.
-            nat = e.atn or (e.at and #e.at) or nil }
+            nat = e.atn or (e.at and #e.at) or nil,
+            -- ★ THE WRITE AXIS (CART-0532). Four facts that live or die together,
+            -- because all four hang off one `if wmode then` in the reduce — so a
+            -- language gaining or losing `spec.is_write` moves all of them at once
+            -- and the roster must be able to see it. It could not: v147 gave
+            -- python `rw` on 909 use edges and moved 575 var labels from
+            -- `unclassified` to `const`, and every one of the 37 gates printed
+            -- "graphs are identical".
+            -- COUNTS, NOT CONTENTS, for flds — the same call `nat` makes for the
+            -- occurrence list. The map's WEIGHT is the reason (84456 edges carry
+            -- one on wow); its cardinality still catches capture switching on or
+            -- off, which is the regression that actually happens.
+            -- `gp` WITHOUT `or nil`: it is TRI-STATE like `once` above. `false`
+            -- means the param predicate was computed and the writes DISAGREED,
+            -- which is a measured fact, and `nil` means nobody asked.
+            rw = e.rw, gw = e.gw, gp = e.gp,
+            nflds = e.flds and vim.tbl_count(e.flds) or nil }
     end
     for i, c in ipairs(data.calls or {}) do
         calls[i] = { file = c.file, line = c.line, callee = c.callee,

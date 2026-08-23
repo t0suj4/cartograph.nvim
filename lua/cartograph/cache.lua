@@ -73,7 +73,40 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 146 -- v146: A DEFINITION-SIDE MEMBER KEY IS NOT A REFERENCE (CART-0529).
+M.VERSION = 147 -- v147: PYTHON ANSWERS THE WRITE QUESTION (CART-0532). The write axis
+               -- is ONE gate in the reduce — `if wmode then`, i.e. `spec.is_write ~= nil`
+               -- — and FOUR facts hang off it together: e.rw (read/write/both), e.gw
+               -- (guard class), e.gp (the param predicate) and e.flds (per-field facts).
+               -- Until this, TWO of fifteen languages declared it. Measured over use
+               -- edges: php 441/441, lua (wow) 84456/84456, and python 913, go 1555, java
+               -- 3467, rust 206, zig 52 all carrying NOTHING on any of the four.
+               -- ★ IT HID BECAUSE ABSENCE DEGRADES GRACEFULLY HERE — the one axis where
+               -- it does. atlas.classify reads a missing `rw` as `unclassified`, never as
+               -- "never written" (CART-0478), so no var was ever wrongly called const. The
+               -- cost was precision: effects.lua keys a write summary on `var\31field`
+               -- when flds exist and `var\31` when they do not, so two functions touching
+               -- DIFFERENT fields of one object read as conflicting — and that summary is
+               -- what reorder / untangle / optimize consult.
+               -- ★★ THE LADDER MOVED, which is the metric that matters rather than an edge
+               -- count: django-oscar's 657 vars go from `unclassified 577 · unobserved 80`
+               -- to `const 575 · unclassified 2 · unobserved 80`. 575 vars — 87.5% of every
+               -- var the browser can open in python — move from "I cannot classify this" to
+               -- a named rung. `unobserved` correctly does NOT move: 80 vars have no edges
+               -- at all, which is a different fact and stays one.
+               -- EVERY FORM PARSED BEFORE IT WAS WRITTEN DOWN, and two would have been
+               -- wrong from memory: python spells destructuring targets with WRAPPER nodes
+               -- (`pattern_list` for `a, b = f()`, `list_splat_pattern` for `*rest`) that a
+               -- classifier reading only the immediate parent misses, and `subscript`
+               -- appears on BOTH sides — `t[k] = 5` writes t while k reads, and `z = t[k]`
+               -- reads all three. tests/pywrite_spec pins all 27 mentions of 13 forms.
+               -- ★ FIELD NAMES ARE STILL ABSENT for python (909 flds entries, 0 named):
+               -- naming them needs the field-capture gate to know python's `attribute` /
+               -- `subscript`, which is CART-0530 — correctly BLOCKED behind this, because
+               -- widening that gate was inert while wmode did not exist. Measured, not
+               -- assumed: widening it alone produced zero.
+               -- go (1555 edges) and java (3467) are the next increments, one language per
+               -- VERSION so the roster delta stays attributable.
+               -- v146: A DEFINITION-SIDE MEMBER KEY IS NOT A REFERENCE (CART-0529).
                -- The fn-ref branch matches a bare mention against L.fn_unique, a
                -- CORPUS-WIDE index of BARE names. It never asked whether the mention is
                -- reached through a RECEIVER — so `exports.foo = foo` recorded the KEY and
