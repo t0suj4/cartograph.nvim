@@ -642,7 +642,8 @@ local function run_row(name)
                 -- state. The verdict is untouched (a pinned diff still FAILS);
                 -- only the sentence naming the cause is corrected, because
                 -- 'extractor drift' sends the reader to the wrong commit.
-                local stale, tooldirty = snapshot.tool_verdict(meta)
+                local stale, tooldirty, projstale = snapshot.tool_verdict(meta)
+                stale = projstale or stale -- a stale PROJECTION explains more
                 if det then
                     table.insert(det, 1, unknown
                         and ('corpus identity UNRECORDABLE (baseline %s, now %s) —'

@@ -153,7 +153,10 @@ else
         -- ADVISORY ONLY, deliberately: a stale baseline is not a regression, it
         -- is an unreadable measurement, and the reader is the one who decides
         -- whether to resave. The gating logic below is untouched.
-        local tv_epoch, tv_dirty = snapshot.tool_verdict(meta)
+        local tv_epoch, tv_dirty, tv_proj = snapshot.tool_verdict(meta)
+        -- the PROJECTION note leads: it is the one that explains a whole-graph
+        -- diff produced by no extractor change at all
+        if tv_proj then print('  NOTE: ' .. tv_proj) end
         if tv_dirty then print('  NOTE: ' .. tv_dirty) end
         if tv_epoch then print('  NOTE: ' .. tv_epoch) end
         -- Only PINNED-AND-MATCHING or UNPINNED corpora reach here (a pinned corpus

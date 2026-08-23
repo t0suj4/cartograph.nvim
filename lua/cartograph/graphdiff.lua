@@ -19,10 +19,32 @@ local M = {}
 -- gd.diff applies this SYMMETRICALLY to both sides, so a current baseline
 -- stays green; only a baseline PREDATING a corpus's tinf edges needs one
 -- re-save (--save) — the deliberate re-baseline (roadmap P0.3).
+-- ★ THE OCCURRENCE COUNT IS PART OF THE SIGNATURE (CART-0531). Until v147 the
+-- signature carried only trust attributes, so an extraction change that altered
+-- HOW MANY TIMES an edge was seen was invisible to every gate: all 37 printed
+-- "graphs are identical". It had already hidden a large defect — v145 found that
+-- every call site in the affected languages was recorded TWICE (mantisbt ref
+-- occurrences 35793 -> 25216, pairs halving exactly against the call sites in the
+-- source), and nothing on the roster moved for that half of the change. It was
+-- found by a hand-written probe, looking for something else.
+-- NIL IS NOT ZERO, the tri-state rule this file already lives by: an edge kind
+-- that carries no occurrence list at all (`nil`) is a different fact from one
+-- whose list is empty (`0`), and collapsing them would make an edge that LOST
+-- its last occurrence indistinguishable from one that never had a list.
+-- The count CHURNS with the corpus, which the pinned/unpinned split already
+-- handles: an unpinned corpus that cannot certify it held still is advisory
+-- anyway, and a pinned one has fixed source, so its counts are as stable as its
+-- endpoints.
 local function esig(e)
     return (e.conf and 'confirmed' or e.proven and 'proven' or e.xlang and 'xlang'
         or e.tinf and 'typed' or e.stdlib and 'stdlib' or e.inferred and '~' or 'matched')
         .. (e.sideeffect and '!' or '')
+        -- READ EITHER SHAPE. gate/matrix diff slim-vs-slim (`nat`), and the
+        -- faithfulness spec diffs the FAT table against a loaded slim one, where
+        -- one side still carries the `at` list itself. Reading only `nat` would
+        -- make that invariant fail for a snapshot that is perfectly faithful.
+        .. (function (n) return n and ('x' .. n) or '' end)(
+            e.nat or e.atn or (e.at and #e.at) or nil)
 end
 
 -- edge identity = endpoints + kind; multiple call sites legitimately produce

@@ -26,6 +26,22 @@ local REPO = (function ()
     return src:match('^(.*)/tools/snapshot%.lua$') or vim.fn.getcwd()
 end)()
 
+--- THE PROJECTION VERSION (CART-0531). Distinct from BOTH the blob format
+--- version (`version = 1`, the on-disk envelope) and cache.VERSION (the
+--- extraction epoch). It answers a third question the other two cannot: WHICH
+--- SET OF FACTS did the instrument keep?
+---
+--- It exists because adding `nat` proved the gap the hard way. A baseline written
+--- by the previous projection lacks the field, so every edge with occurrences
+--- diffs as `matched => matchedx1` — 1103 phantom changes on jquery alone — and
+--- the epoch note stays SILENT, because the extractor did not change. A reader
+--- would see thousands of differences with no explanation and reasonably conclude
+--- extractor regression. Exactly CART-0502's failure one layer up: the baseline
+--- must be able to say which INSTRUMENT wrote it, not only which extractor.
+--- Bump this whenever slim's field set changes, and the gate will ask for a
+--- re-save instead of printing a storm.
+M.SLIM_VERSION = 2 -- v2: `nat`, the occurrence count (CART-0531)
+
 --- The slim projection of a data table (pure; input untouched).
 function M.slim(data)
     local nodes, edges, calls = {}, {}, {}
@@ -47,7 +63,23 @@ function M.slim(data)
             -- false means "asked, and it re-executes" and nil means "this
             -- language's syntax does not discriminate". `e.once or nil` would
             -- erase the positive answer and make the two indistinguishable.
-            once = e.once, soft = e.soft, site = e.site }
+            once = e.once, soft = e.soft, site = e.site,
+            -- HOW MANY TIMES this edge was seen (CART-0531). The `at` list itself
+            -- is fat and stays dropped; its LENGTH is the cheap half and the only
+            -- part an instrument reads. Without it the gate could not see v145's
+            -- double-counting or v146's fix — both changed occurrence counts by
+            -- thousands and every corpus reported "identical".
+            -- `e.at and #e.at or nil` on purpose: nil means this edge kind carries
+            -- no occurrence list, 0 means it has one and it is empty. Same
+            -- tri-state trap as `once` above.
+            -- ★ `atn` FIRST, and it is not a nicety: the TOKENS provider caps
+            -- the kept list at 8 occurrences and records the true total in
+            -- e.atn (providers/tokens.lua MAX_AT). Counting #at there would
+            -- report 8 for every heavily-referenced edge in gforth /
+            -- openfirmware / postscript / bwipp and hide every change above the
+            -- cap — the same blindness this field exists to remove, one level
+            -- down.
+            nat = e.atn or (e.at and #e.at) or nil }
     end
     for i, c in ipairs(data.calls or {}) do
         calls[i] = { file = c.file, line = c.line, callee = c.callee,
@@ -103,7 +135,8 @@ function M.save(name, data, meta)
                      -- meta.cache_version, and conflating the two is the bug
                      -- this comment exists to prevent
         meta = vim.tbl_extend('force', { rev = rev, when = os.date('!%Y-%m-%dT%H:%M:%SZ'),
-            tool_dirty = dirty or nil, cache_version = cver },
+            tool_dirty = dirty or nil, cache_version = cver,
+            slim_version = M.SLIM_VERSION },
             meta or {}),
         data = M.slim(data),
     })
@@ -117,7 +150,8 @@ function M.save(name, data, meta)
 end
 
 --- THE TOOL-SIDE VERDICT on a loaded baseline: can it vouch for the extraction
---- era it was written in? Returns (epoch, dirty), each a sentence or nil.
+--- era it was written in, and for the FIELD SET it recorded? Returns (epoch,
+--- dirty, projection), each a sentence or nil.
 --- Computed here rather than at each printer because gate.lua and matrix.lua were
 --- already two copies of the CORPUS-side reasoning, and the second copy is where
 --- a rule drifts (matrix's own comment says it MIRRORS gate's three cases).
@@ -141,10 +175,20 @@ function M.tool_verdict(meta)
             .. ' against it MIXES that change with yours')
             :format(tostring(meta.cache_version), nowv)
     end
+    -- THE PROJECTION CHECK COMES FIRST, and it must, because it EXPLAINS a diff
+    -- the other two notes cannot: a stale projection makes every edge with
+    -- occurrences look changed while the extractor is provably untouched.
+    local proj
+    if (meta.slim_version or 1) ~= M.SLIM_VERSION then
+        proj = ('baseline was written by snapshot projection v%s and this is v%d —'
+            .. ' it records a DIFFERENT SET OF FIELDS, so the diff below is mostly'
+            .. ' the missing ones and not the extractor. Re-save it')
+            :format(tostring(meta.slim_version or 1), M.SLIM_VERSION)
+    end
     local dirty = meta.tool_dirty and ('baseline was saved from a tree with'
         .. ' UNCOMMITTED lua/tools changes — its rev names a commit that never'
         .. ' produced it') or nil
-    return epoch, dirty
+    return epoch, dirty, proj
 end
 
 --- Load a snapshot: returns data, meta — or nil, why (missing/corrupt = a

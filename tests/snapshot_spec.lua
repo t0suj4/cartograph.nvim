@@ -110,3 +110,83 @@ test('snapshot: the tool verdict names the era, and MISSING is not MISMATCHED', 
     ok(d4 and d4:find('UNCOMMITTED'), tostring(d4))
     eq(nil, (snapshot.tool_verdict(nil)))
 end)
+
+-- ★ THE OCCURRENCE COUNT IS A FENCED FACT (CART-0531). It was not, and the blind
+-- spot had already hidden a real defect: v145 found every call site in the
+-- affected languages recorded TWICE, and all 37 gates read "graphs are
+-- identical" through it.
+test('snapshot: an occurrence-count change is VISIBLE to the diff', function ()
+    local a = fat_data()
+    local b = fat_data()
+    -- same endpoints, same kind, same trust — one more sighting
+    -- a LIST of ranges, which is the contract (validate iterates ipairs(e.at));
+    -- the fixture above writes edges[1].at as a single range, so slim it first
+    a.edges[1].at = { { start = { line = 4, char = 2 }, ['end'] = { line = 4, char = 5 } } }
+    b.edges[1].at = { { start = { line = 4, char = 2 }, ['end'] = { line = 4, char = 5 } },
+        { start = { line = 9, char = 2 }, ['end'] = { line = 9, char = 5 } } }
+    local d = gd.diff(snapshot.slim(a), snapshot.slim(b))
+    ok(not gd.empty(d), 'a second occurrence of the same edge is a difference')
+    eq(1, #d.edges.changed)
+    ok(d.edges.changed[1]:find('x1') and d.edges.changed[1]:find('x2'),
+        'the report names both counts: ' .. tostring(d.edges.changed[1]))
+    -- and the identity is untouched: not reported as an add/remove
+    eq(0, #d.edges.added)
+    eq(0, #d.edges.removed)
+end)
+
+test('snapshot: NIL occurrences is not ZERO occurrences', function ()
+    local a = fat_data()
+    local b = fat_data()
+    b.edges[2].at = {} -- has a list, and it is empty
+    -- edges[2] carries no `at` at all in the fixture, so this is exactly the
+    -- tri-state pair: absent vs present-and-empty. Collapsing them would hide an
+    -- edge that LOST its last occurrence.
+    local sa, sb = snapshot.slim(a), snapshot.slim(b)
+    eq(nil, sa.edges[2].nat)
+    eq(0, sb.edges[2].nat)
+    ok(not gd.empty(gd.diff(sa, sb)), 'absent and empty are distinguishable')
+end)
+
+-- ★ THE CAP. providers/tokens.lua keeps at most 8 occurrences per edge and puts
+-- the true total in e.atn. Counting the kept list there would read 8 for every
+-- heavily-referenced edge in the four stack-language corpora and hide every
+-- change above the cap — this fence, defeated one level down.
+test('snapshot: a CAPPED occurrence list reports its true total, not the cap', function ()
+    local a = fat_data()
+    a.edges[1].at = { { start = { line = 1, char = 0 }, ['end'] = { line = 1, char = 3 } } }
+    a.edges[1].atn = 41 -- seen 41 times, 1 kept
+    eq(41, snapshot.slim(a).edges[1].nat)
+    local b = fat_data()
+    b.edges[1].at = a.edges[1].at
+    b.edges[1].atn = 42
+    ok(not gd.empty(gd.diff(snapshot.slim(a), snapshot.slim(b))),
+        'a change ABOVE the cap is visible')
+end)
+
+-- ★ THE PROJECTION VERSION (CART-0531), and why it is a THIRD question. Adding
+-- `nat` made every baseline written by the older projection diff as
+-- `matched => matchedx1` on every edge with occurrences — 1103 phantom changes on
+-- jquery — while the EPOCH note stayed silent, correctly, because the extractor
+-- had not changed. Without this the reader sees thousands of differences and no
+-- explanation, and concludes extractor regression.
+test('snapshot: a stale PROJECTION is its own verdict, separate from the epoch', function ()
+    local V = require('cartograph.cache').VERSION
+    local _, _, proj = snapshot.tool_verdict({ cache_version = V,
+        slim_version = snapshot.SLIM_VERSION })
+    eq(nil, proj) -- current projection: silent
+    local e2, d2, p2 = snapshot.tool_verdict({ cache_version = V, slim_version = 1 })
+    ok(p2 and p2:find('DIFFERENT SET OF FIELDS'), tostring(p2))
+    -- and it does NOT masquerade as either of the other two facts
+    eq(nil, e2)
+    eq(nil, d2)
+    -- a baseline written before the field existed reads as v1, not as current
+    local _, _, p3 = snapshot.tool_verdict({ cache_version = V })
+    ok(p3 and p3:find('v1'), 'absent slim_version reads as the first projection')
+end)
+
+test('snapshot: save stamps the projection version', function ()
+    snapshot.dir = vim.fn.tempname()
+    snapshot.save('spec', fat_data())
+    local _, meta = snapshot.load('spec')
+    eq(snapshot.SLIM_VERSION, meta.slim_version)
+end)
