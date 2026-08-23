@@ -73,7 +73,52 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 150 -- v150: RUST ANSWERS THE WRITE QUESTION (CART-0532). Declared as a
+M.VERSION = 151 -- v151: FIELD CAPTURE IS DECLARED, NOT HARDCODED (CART-0530). Which
+               -- field a mention accesses was gated on a four-name set — lua's two and
+               -- php's two — so EIGHT languages captured nothing. The DOT forms now fold
+               -- in from `spec.member_positions`, so a language declaring a member form
+               -- gets field capture without anyone remembering this table.
+               -- MEASURED, use/ref/reg edges carrying flds:
+               --   php     441 (6.5%)  ->   441   UNCHANGED — the control
+               --   python    0         ->   909 (29.0%), 1014 distinct field names
+               --   go        0         ->  1526 (13.4%), 1580 names
+               --   java      0         ->  3442 (22.8%), 3459 names   (libs)
+               --   rust      0         ->   206 (7.3%),   210 names
+               --   ruby · zig · js · haskell   0 -> 0
+               -- ★ THAT LAST ROW IS THE ORDERING WORKING, not a miss: the attachment site
+               -- is inside `if wmode then`, so the gate is INERT without a write
+               -- classifier. Those four have no `is_write` yet (CART-0532), which is why
+               -- widening the gate alone was measured to produce zero before v147.
+               -- python is the sharpest case: it already had 909 flds ENTRIES and ZERO
+               -- named fields — every one the '' whole-var key — because the gate did not
+               -- know `attribute`. Now 1014 names.
+               -- ★★ AND THIS DOES NOT YET FIX THE MISLABEL IT WAS PROMOTED FOR. CART-0533
+               -- measured 49 libs / 154 server vars declared `final` that the write axis
+               -- reports as WRITTEN, because `negativeBuckets.cachedCountsSum = null`
+               -- writes THROUGH a final binding. The field facts now say exactly that —
+               -- `flds: cachedCountsSum=6(rw2) numBuckets=1(rw1)`, no whole-var write —
+               -- but atlas.classify reads the EDGE-level `rw`, which is the union over
+               -- occurrences, so the label is still multi-writer. The distinction is in
+               -- the data and the consumer does not read it. Filed.
+               -- ★★ AND LUA IS NOT THE PURE CONTROL I EXPECTED — 4368 wow edges changed,
+               -- all `f<N> => f<N+1>`. Deriving from member_positions ADDED
+               -- `method_index_expression`, which the old hardcoded set did not have, so
+               -- `f:SetScript(...)` now registers as an access to member `SetScript`
+               -- where before it registered nothing. Verified at source
+               -- (!!!Zoom!!!/mod.lua's `f:RegisterEvent` / `f:SetScript`, ACP's
+               -- `CLR:Colorize`). KEPT, because it is correct on the field's own
+               -- definition — "which member of this var was touched" — and because lua's
+               -- `escape_nonvalue` ALREADY classifies method_index_expression's child 1
+               -- as the key position, so the two expressions of the rule now agree
+               -- instead of disagreeing. Effects is unaffected: a method call is a READ
+               -- (rw1) and the write summary only keys on rw>=2. But it was not an
+               -- intended part of this change, and the write classification itself DID
+               -- hold — wow's field-qualified/whole-var write split is 8230/5394 before
+               -- and after.
+               -- The BRACKET forms stay hardcoded here: their key is an EXPRESSION rather
+               -- than a member name, which is why member_positions excludes them, and
+               -- generalising them needs a declaration of its own.
+               -- v150: RUST ANSWERS THE WRITE QUESTION (CART-0532). Declared as a
                -- PAIR, as the suite now requires. rust spells `=` and `+=` as DIFFERENT
                -- node types (assignment_expression / compound_assignment_expr), unlike
                -- go and java which use one; field_expression NESTS, so `s.inner.deep = v`

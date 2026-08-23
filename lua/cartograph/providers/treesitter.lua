@@ -428,16 +428,32 @@ end
 -- the immediate FIELD of a base-position mention (`state.x` at the state
 -- mention -> 'x'; computed keys -> '[]'; not a field access -> nil).
 -- Language-generic over the IDXC types; php unwraps the $ sigil.
-local function mention_field(c, n, src)
+--- WHICH FIELD does this mention access — i.e. the mention is the OBJECT of a
+--- member access, and this returns the member's name (or '[]' for a dynamic key).
+--- @param mempos table|nil  spec.member_positions: the DOT-style forms, declared
+---   per language. Before CART-0530 the whole gate was a hardcoded four-name set
+---   (lua's two + php's two), so EIGHT languages captured no fields at all — and
+---   for java that was not merely coarse: every write landed on the whole-var
+---   key, which is a REBIND, including 154 server vars whose `final` makes a
+---   rebind a compile error (CART-0533's census). The bracket arms below stay
+---   hardcoded on purpose: their key is an EXPRESSION, not a member name, so
+---   member_positions deliberately excludes them and generalising them needs its
+---   own declaration.
+local function mention_field(c, n, src, mempos)
     local p = n
     -- @langs-ok php/bash `$var` mention shape; the other grammars use a plain identifier, handled by the arm above
     if p:type() == 'variable_name' then c = p; p = p:parent() end
     if not p then return nil end
     local t = p:type()
-    if t == 'dot_index_expression' or t == 'member_access_expression' then
-        if p:named_child(0) ~= c then return nil end
-        local f = p:named_child(1)
-        return f and node_text(f, src) or '[]'
+    -- THE DECLARED DOT FORMS. `c` is the object exactly when it is NOT the
+    -- member-name child, and then that child names the field. This subsumes
+    -- lua's dot_index_expression and php's member_access_expression, which used
+    -- to be spelled out here, and adds js/python/go/rust/zig/java/c/cpp/odin.
+    local mk = mempos and mempos[t]
+    if mk ~= nil then
+        local mc = type(mk) == 'number' and p:named_child(mk) or p:field(mk)[1]
+        if mc == nil or mc == c then return nil end -- c IS the member, not the object
+        return node_text(mc, src)
     end
     if t == 'bracket_index_expression' or t == 'subscript_expression' then
         if p:named_child(0) ~= c then return nil end
@@ -4044,9 +4060,14 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     local wgate, is_write, guards = spec.write_gate, spec.is_write, spec.guards
     local wq, wqn = {}, 0 -- queued write mentions (stride 5, see below)
     local nm = buf.nm or 0 -- mention ordinal (continues across region calls)
-    local FLDGATE = { dot_index_expression = true, bracket_index_expression = true,
-        member_access_expression = true, subscript_expression = true,
-        variable_name = true }
+    -- WHICH PARENT TYPES CARRY A FIELD ACCESS. The bracket forms and php's
+    -- `variable_name` sigil are listed (their key is an expression, so they are
+    -- not in member_positions); the DOT forms are folded in from the spec, so a
+    -- language declaring a member form gets field capture for free instead of
+    -- waiting for someone to remember this table (CART-0530).
+    local FLDGATE = { bracket_index_expression = true,
+        subscript_expression = true, variable_name = true }
+    for nt in pairs(spec.member_positions or {}) do FLDGATE[nt] = true end
     local dfid = spec.df_ids
     local modskip = spec.binding_modifiers -- CART-0234
     local escnv = esc and spec.escape_nonvalue -- CART-0236
@@ -4251,7 +4272,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                 -- per use edge (e.flds). Gated on the parent type: zero
                 -- cost for plain mentions.
                 if FLDGATE[nt] then
-                    local fname = mention_field(c, n, src)
+                    local fname = mention_field(c, n, src, mempos)
                     if fname then
                         local fidx = nidx[fname]
                         if not fidx then

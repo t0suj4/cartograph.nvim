@@ -187,3 +187,21 @@ fn f(s: &mut S, a: &mut [i32], p: &mut i32) {
         -- position reads the array AND the index
         { '4:x', '11:y', '11:a', '11:x' })
 end)
+
+-- ★ FIELD CAPTURE IS DERIVED FROM member_positions (CART-0530), not from a
+-- hardcoded list. Before v151 the gate named lua's two forms and php's two, so
+-- eight languages captured no field at all — and python's case is the sharpest:
+-- it had 909 flds ENTRIES and zero NAMES, every one the '' whole-var key.
+test('writeaxis: a language with a member form and a write classifier captures FIELDS', function ()
+    local want = { 'python', 'go', 'java', 'rust' }
+    for _, lang in ipairs(want) do
+        local sp = ts.spec[lang]
+        ok(sp.member_positions ~= nil, lang .. ' declares a member form')
+        ok(sp.is_write ~= nil, lang .. ' declares a write classifier')
+    end
+    -- and the gate is INERT without the classifier, which is why widening it
+    -- alone measured zero before v147: the attachment site is inside `if wmode`
+    for _, lang in ipairs({ 'ruby', 'zig', 'javascript', 'haskell' }) do
+        eq(nil, ts.spec[lang].is_write)
+    end
+end)
