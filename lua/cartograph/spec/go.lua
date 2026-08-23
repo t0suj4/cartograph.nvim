@@ -7,7 +7,70 @@
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 
+-- IS THIS MENTION A WRITE? (CART-0532) The fourth language to answer, after lua,
+-- php and python. Until it did, go's 1555 use edges carried no `rw`, no `gw`, no
+-- `gp` and no `flds` — all four hang off one `if wmode then` in the reduce.
+--
+-- go's shape is the most regular of the four and the one place it is SUBTLE is
+-- BINDING vs WRITE, which go spells three ways and only one of them is a write:
+--   x := 6          short_var_declaration   BINDS
+--   var y = 7       var_declaration/var_spec BINDS
+--   g = 1           assignment_statement     WRITES
+-- The same split lua has for `local x = v`, and getting it wrong would report
+-- every declaration as a write and make `set-once` unreachable.
+--
+-- EVERY FORM PARSED, including the two anonymous operators: a `range_clause`
+-- carries `:=` (binds) or `=` (writes) as an UNNAMED child, so the node types
+-- alone cannot tell those two apart.
+local function go_is_write(c, n)
+    local cur, p = c, n
+    while p do
+        local pt = p:type()
+        if pt == 'selector_expression' then
+            cur, p = p, p:parent() -- `o.F = v`: object and field both ride
+        elseif pt == 'index_expression' then
+            -- `m[k] = v` writes m; the KEY is a read
+            if p:named_child(0) ~= cur then return false end
+            cur, p = p, p:parent()
+        elseif pt == 'unary_expression' then
+            cur, p = p, p:parent() -- `*o.P = v`: the deref rides the chain
+        elseif pt == 'expression_list' then
+            -- go wraps BOTH sides of an assignment in one of these, so this is
+            -- only a step: the side is decided by the parent check below
+            cur, p = p, p:parent()
+        else
+            break
+        end
+    end
+    if not p then return false end
+    local pt = p:type()
+    if pt == 'assignment_statement' then
+        -- child 0 is the LEFT expression_list; arriving here from the right one
+        -- fails this test, which is what makes `a, b = b, a` read correctly
+        return p:named_child(0) == cur
+    elseif pt == 'inc_statement' or pt == 'dec_statement' then
+        return true -- g++ / g--
+    elseif pt == 'range_clause' then
+        -- `for i := range s` BINDS i; `for g = range s` WRITES g. The operator
+        -- is an anonymous child, so the distinction is invisible to node types.
+        if p:named_child(0) ~= cur then return false end -- the iterated s reads
+        for ch in p:iter_children() do
+            if not ch:named() and ch:type() == '=' then return true end
+        end
+        return false
+    end
+    -- short_var_declaration / var_spec and everything else: a BINDING or a read
+    return false
+end
+
 return {
+    is_write = go_is_write,
+    -- the PREFILTER, and it is not optional: without it collect_mentions never
+    -- calls the classifier at all (see python.lua's note). Every immediate
+    -- parent type a go write mention can have.
+    write_gate = { expression_list = true, selector_expression = true,
+        index_expression = true, unary_expression = true,
+        inc_statement = true, dec_statement = true, range_clause = true },
     -- MEMBER-NAME POSITIONS (CART-0529): parent node type -> the child holding a
     -- MEMBER NAME, i.e. a name that is reached THROUGH A RECEIVER. Same shape as
     -- `call_positions`, and read for the opposite purpose: a mention here must

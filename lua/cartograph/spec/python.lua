@@ -63,6 +63,17 @@ end
 
 return {
     is_write = python_is_write,
+    -- ★ THE PREFILTER `is_write` IS USELESS WITHOUT. collect_mentions computes
+    -- `wgate and wgate[nt] and is_write(c, n)`, so a spec that declares the
+    -- classifier and NOT the gate never calls it: every mention classifies as a
+    -- READ, and `wmode` is still true — which means atlas mints `const` over a
+    -- write detection that never ran. Every IMMEDIATE PARENT type a write
+    -- mention can have must be listed here; the classifier does the rest.
+    write_gate = { assignment = true, augmented_assignment = true,
+        attribute = true, subscript = true, pattern_list = true,
+        tuple_pattern = true, list_pattern = true, list_splat_pattern = true,
+        for_statement = true, as_pattern_target = true,
+        delete_statement = true, named_expression = true },
     -- MEMBER-NAME POSITIONS (CART-0529): parent node type -> the child holding a
     -- MEMBER NAME, i.e. a name that is reached THROUGH A RECEIVER. Same shape as
     -- `call_positions`, and read for the opposite purpose: a mention here must

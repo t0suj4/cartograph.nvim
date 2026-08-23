@@ -73,7 +73,33 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 147 -- v147: PYTHON ANSWERS THE WRITE QUESTION (CART-0532). The write axis
+M.VERSION = 148 -- v148: v147 SHIPPED `const` OVER A WRITE PASS THAT NEVER RAN, and go
+               -- joins (CART-0532). `is_write` is the CLASSIFIER; `spec.write_gate` is the
+               -- parent-type PREFILTER that decides whether it is ever called —
+               -- collect_mentions computes `wgate and wgate[nt] and is_write(c, n)`. v147
+               -- declared python's classifier and NOT its gate, so the classifier was never
+               -- invoked.
+               -- ★★ AND THAT IS WORSE THAN INERT, because `wmode` is `spec.is_write ~= nil`:
+               -- the write axis switched ON, every mention classified as a READ, and
+               -- atlas.classify minted `const` — "never assigned again" — over a write
+               -- detection that had not executed. MEASURED on django-oscar: 22 of the 575
+               -- vars v147 called const have real writers (18 single-writer, 4
+               -- multi-writer). Exactly the fabrication CART-0478 exists to prevent, and I
+               -- shipped it one version after quoting that lesson.
+               -- CORRECTED LADDERS (657 python / 879 go vars):
+               --   python  const 553 · single-writer 18 · multi-writer 4 · unclassified 2
+               --           · unobserved 80        (v147 claimed const 575)
+               --   go      const 693 · single-writer 15 · multi-writer 9 · unclassified 17
+               --           · unobserved 145
+               -- go's write edges: 32 write-only + 13 read+write, from zero.
+               -- ★ THE FENCE THAT WOULD HAVE CAUGHT IT, now in tests/pywrite_spec and
+               -- verified to discriminate (remove write_gate -> 2 failures): a spec must
+               -- declare `is_write` and `write_gate` TOGETHER OR NOT AT ALL, and the gate
+               -- must cover every immediate-parent type the classifier answers TRUE for.
+               -- spec/contract.lua registers the two fields independently and cannot say
+               -- they are a PAIR — the same "registered is not correct" gap CART-0530's
+               -- fourth form names.
+               -- v147: PYTHON ANSWERS THE WRITE QUESTION (CART-0532). The write axis
                -- is ONE gate in the reduce — `if wmode then`, i.e. `spec.is_write ~= nil`
                -- — and FOUR facts hang off it together: e.rw (read/write/both), e.gw
                -- (guard class), e.gp (the param predicate) and e.flds (per-field facts).
