@@ -73,7 +73,33 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 153 -- v153: THE NEAREST SAME-FILE DECLARATION WINS, NOT THE FIRST
+M.VERSION = 154 -- v154: A JAVA FIELD WITHOUT AN INITIALIZER IS STILL A FIELD
+               -- (CART-0537). The `vars` query required `value: (_)`, so a field declared
+               -- and assigned elsewhere was invisible as a var. MEASURED FIRST, which is
+               -- what the ticket asked: 1130 of 2656 field declarators on libs have no
+               -- initializer — 42.5%. Minted now from a second pattern using the
+               -- negated-field assertion `!value` (no overlap to dedup), carrying `decl`
+               -- — the field a C prototype already uses for "declared, not defined",
+               -- reused rather than inventing a synonym.
+               -- ★★ THE POPULATION IS NOT RANDOM, which is why this matters more than the
+               -- percentage: `private final byte[] idPage;` is assigned in a CONSTRUCTOR,
+               -- so the invisible 42.5% was enriched in exactly the cases the write axis
+               -- has most to say about. libs' ladder: single-writer 83 -> 987,
+               -- multi-writer 45 -> 221, const barely moving (1221 -> 1243), vars
+               -- 1547 -> 2640. Every java var-level number quoted before this — the
+               -- ladder, the declared-immutable census — was over ~57% of the field
+               -- population.
+               -- ★ THE CAPTURE IS EXPLICIT, not inferred from a nil value node: three
+               -- specs' vars queries capture no @value at all, so deriving
+               -- declaration-ness from absence would silently mark their vars too. A
+               -- language opts in by writing the pattern.
+               -- ★ AND THE WRITE AXIS HAD TO STOP CLAIMING A WRITE THERE. Its
+               -- `(definition)` row rested on "a var node's range spans its initializer,
+               -- so every var with a node was written where it was born" — true until
+               -- now. A `decl` var's row says "declared — assigned elsewhere" and is not
+               -- a write site. Dropping the row instead would leave the axis silent about
+               -- the declaration entirely.
+               -- v153: THE NEAREST SAME-FILE DECLARATION WINS, NOT THE FIRST
                -- (CART-0505). One file can hold several vars of one name — java makes it
                -- idiomatic, a `static final … PARSER` per NESTED CLASS — and taking
                -- `cands[1]` handed every mention in the file to whichever was emitted

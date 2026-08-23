@@ -379,9 +379,20 @@ return {
         (method_invocation name: (identifier) @name) @call
         (object_creation_expression type: (type_identifier) @name) @call
     ]=],
+    -- ★ TWO PATTERNS, because 42.5% of java's fields have NO INITIALIZER (1130 of
+    -- 2656 declarators on libs) and the single value-requiring pattern made every
+    -- one of them invisible as a var (CART-0537). `!value` is the negated-field
+    -- assertion, so the second pattern matches exactly the complement — no overlap
+    -- to dedup. A `@vdecl` var carries `decl`, the field a C prototype already uses
+    -- for "declared, not defined".
+    -- WHY IT MATTERS MORE THAN THE PERCENTAGE SUGGESTS: `private final byte[]
+    -- idPage;` is assigned in a CONSTRUCTOR, so the invisible population is
+    -- enriched in the SET-ONCE cases — the rung with the most to say.
     vars = [=[
         (field_declaration declarator: (variable_declarator
             name: (identifier) @vname value: (_) @value)) @vdef
+        (field_declaration declarator: (variable_declarator
+            name: (identifier) @vname !value)) @vdecl
     ]=],
     params_field = 'parameters',
     body_field = 'body',

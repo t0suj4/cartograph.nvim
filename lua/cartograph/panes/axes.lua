@@ -180,14 +180,23 @@ M.AXES = {
             -- mean "never assigned again" rather than "never assigned" -- so the
             -- axis has to put it back, marked, or the count is a lie by omission.
             -- MEASURED, and it is why this is sound rather than a guess: a var
-            -- node's range SPANS ITS INITIALIZER, and a declaration with no
-            -- initializer produces no var node at all (`local plain` in lua,
-            -- `plain: int` in python: nothing). So every var that HAS a node was
+            -- node's range SPANS ITS INITIALIZER, so a var born with a value was
             -- written where it was born.
+            -- ★ AND SINCE CART-0537 THAT IS NO LONGER EVERY VAR. A declaration with
+            -- no initializer used to produce no node at all; java now mints one
+            -- (`private final byte[] idPage;` — 42.5% of its field declarators),
+            -- marked `decl`, the same field a C prototype uses for "declared, not
+            -- defined". Such a row must NOT claim a write: nothing is assigned
+            -- there, and the assignment is in a constructor somewhere below. It is
+            -- still worth a row — it is where the var IS — so the row says what it
+            -- is instead of being dropped, which would leave the axis silent about
+            -- the declaration entirely.
             local n = store.node(id)
             if n then
-                out[#out + 1] = { site = true, def = true, var = id,
-                    name = (n.name or '?') .. '  (definition)',
+                out[#out + 1] = { site = true, def = not n.decl or nil, var = id,
+                    decl = n.decl,
+                    name = (n.name or '?') .. (n.decl
+                        and '  (declared — assigned elsewhere)' or '  (definition)'),
                     file = n.file, line = atr.sl(n.range), range = n.range }
             end
             -- ★ ONE ROW PER WRITING FUNCTION, not per occurrence. `rw` is a

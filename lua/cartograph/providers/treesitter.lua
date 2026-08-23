@@ -5655,7 +5655,16 @@ function M.extract(root, opts)
             end
             handle_fn(defn, nil, nm .. '#cb')
         end
-        local function handle_var(defn, namen, valn)
+        --- @param declonly boolean|nil  a DECLARATION with no initializer, from a
+        --- `@vdecl` capture. It is a var (named, typed, in scope) but nothing was
+        --- assigned HERE, so it carries `decl` — the same field a C prototype or an
+        --- interface method already uses for "declared, not defined". Measured on
+        --- libs: 1130 of 2656 java field declarators have no initializer (42.5%),
+        --- and they were invisible as vars because the query required a value
+        --- (CART-0537). The population is not random — `private final byte[] idPage;`
+        --- is assigned in a constructor, so the missing 42.5% is ENRICHED in exactly
+        --- the set-once cases the write axis has most to say about.
+        local function handle_var(defn, namen, valn, declonly)
             if defn and namen and not in_function(defn, spec)
                 and not (spec.toplevel_parent and defn:parent()
                     and defn:parent():type() ~= spec.toplevel_parent) then
@@ -5673,7 +5682,7 @@ function M.extract(root, opts)
                     local torn = torn_of(defn, sp)
                     nodes[#nodes + 1] = { id = id, name = name, kind = 'var',
                         file = file, range = sp, order = sp.start.line,
-                        torn = torn,
+                        torn = torn, decl = declonly or nil,
                         data = type(d) == 'table' and d or nil }
                     if not torn then
                         varsByName[name] = varsByName[name] or {}
@@ -5860,7 +5869,7 @@ function M.extract(root, opts)
         local q = parse_query(lang, combined)
         if q then
             for _, match in q:iter_matches(tsroot, src, 0, -1) do
-                local defn, namen, vdefn, vnamen, valn, adefn
+                local defn, namen, vdefn, vnamen, valn, adefn, vdecln
                 local childn, parentn, catn, cat, cvarn, cctorn, smtn
                 for id, ns in pairs(match) do
                     local capn = q.captures[id]
@@ -5869,6 +5878,7 @@ function M.extract(root, opts)
                     elseif capn == 'adef' then adefn = n
                     elseif capn == 'name' then namen = n
                     elseif capn == 'vdef' then vdefn = n
+                    elseif capn == 'vdecl' then vdecln = n
                     elseif capn == 'vname' then vnamen = n
                     elseif capn == 'value' then valn = n
                     elseif capn == 'child' then childn = n
@@ -5886,6 +5896,12 @@ function M.extract(root, opts)
                     handle_super(childn, parentn)
                 elseif vdefn and vnamen then
                     handle_var(vdefn, vnamen, valn)
+                elseif vdecln and vnamen then
+                    -- an EXPLICIT capture rather than "valn happened to be nil":
+                    -- three specs' vars queries capture no @value at all, so
+                    -- inferring declaration-ness from absence would silently mark
+                    -- their vars too. A language opts in by writing the pattern.
+                    handle_var(vdecln, vnamen, nil, true)
                 elseif defn and catn then
                     handle_iface(defn, catn, cat)
                 elseif defn and namen then
