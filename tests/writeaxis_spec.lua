@@ -164,3 +164,26 @@ test('writeaxis: go — the same name written and read on one line', function ()
     eq(2, w)
     eq(2, r)
 end)
+
+test('writeaxis: rust — two assignment node types, nested fields, and `let` binds', function ()
+    check('rust', [[
+static mut G: i32 = 0;
+
+fn f(s: &mut S, a: &mut [i32], p: &mut i32) {
+    let mut x = 1;
+    x = 2;
+    x += 3;
+    s.field = 4;
+    a[0] = 5;
+    *p = 6;
+    s.inner.deep = 7;
+    let y = a[x];
+    G = 8;
+}
+]],
+        { '5:x', '6:x', '7:s', '7:field', '8:a', '9:p', '10:s', '10:inner',
+          '10:deep', '12:G' },
+        -- `let mut x = 1` BINDS even with the mutable_specifier · `a[x]` in value
+        -- position reads the array AND the index
+        { '4:x', '11:y', '11:a', '11:x' })
+end)

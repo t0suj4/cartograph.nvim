@@ -73,7 +73,33 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 149 -- v149: JAVA ANSWERS THE WRITE QUESTION (CART-0532), the largest
+M.VERSION = 150 -- v150: RUST ANSWERS THE WRITE QUESTION (CART-0532). Declared as a
+               -- PAIR, as the suite now requires. rust spells `=` and `+=` as DIFFERENT
+               -- node types (assignment_expression / compound_assignment_expr), unlike
+               -- go and java which use one; field_expression NESTS, so `s.inner.deep = v`
+               -- rides two levels; an index READS while its array writes; and
+               -- let_declaration BINDS even with its own `mutable_specifier` child.
+               -- ★★ ZERO WRITES, AND FOR ONCE THAT IS PROVABLY HONEST. 206 use edges, all
+               -- reads, ladder `const 51 · unobserved 4` from `unclassified 51`. An
+               -- all-const ladder is the exact signature of v147's classifier-that-never-
+               -- fired, so it was not taken on trust: ripgrep contains ZERO `static mut`
+               -- against 94 static/const items, and in rust a `const` or non-`mut`
+               -- `static` CANNOT be assigned — it is a compile error. So the absence of
+               -- writes is the language's guarantee showing through, not a detector
+               -- failing, and `const` here is the right label rather than a vacuous one.
+               -- ★ WHICH MAKES RUST THE ONE LANGUAGE WHERE THIS RUNG IS CITED RATHER THAN
+               -- INFERRED — a declared immutability the compiler already checked, i.e. the
+               -- citation channel [[cartograph-witness-and-promise]] wants and
+               -- [[cartograph-type-erasure-oracle]] calls a free answer key. Filed
+               -- separately; not claimed by this version, which still derives `const` from
+               -- "no write edges" like everywhere else.
+               -- zig is NOT in this version on purpose: its grammar parses `x = 2;`,
+               -- `s.f = 4;` and `const y = 4;` as the SAME node type
+               -- (variable_declaration), so declaration-vs-assignment is decided only by
+               -- the presence of a leading anonymous `var`/`const` token. That needs its
+               -- own verification pass, and v139 already records this node type biting
+               -- once before.
+               -- v149: JAVA ANSWERS THE WRITE QUESTION (CART-0532), the largest
                -- population left — 3467 use edges on `libs` alone, 5x that on `server`.
                -- Declared as a PAIR (is_write + write_gate), which v148's fence now
                -- requires: field_access and array_access ride the write chain (`this.f`,

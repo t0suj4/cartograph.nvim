@@ -4,11 +4,52 @@
 -- @langs rust — a spec IS one grammar's mapping, so every node type here is
 -- rust's by construction.
 
+-- IS THIS MENTION A WRITE? (CART-0532) The sixth language, and the second
+-- smallest population — 206 use edges on the rust corpus. Declared as a PAIR
+-- (is_write + write_gate), which the suite now requires: v147 shipped a
+-- classifier without its gate, so it was never called, and because `wmode` is
+-- `spec.is_write ~= nil` the axis switched on anyway and reported everything as a
+-- READ — atlas then minted `const` over a write pass that had not run.
+local function rust_is_write(c, n)
+    local cur, p = c, n
+    while p do
+        local pt = p:type()
+        if pt == 'field_expression' then
+            -- `s.field = v`, and it NESTS: `s.inner.deep = v` is a
+            -- field_expression whose own child is one, so both halves of every
+            -- level ride the chain
+            cur, p = p, p:parent()
+        elseif pt == 'index_expression' then
+            if p:named_child(0) ~= cur then return false end -- the INDEX reads
+            cur, p = p, p:parent()
+        elseif pt == 'unary_expression' then
+            cur, p = p, p:parent() -- `*p = v`: the deref rides
+        else
+            break
+        end
+    end
+    if not p then return false end
+    local pt = p:type()
+    if pt == 'assignment_expression' or pt == 'compound_assignment_expr' then
+        -- rust spells `=` and `+=` as DIFFERENT node types, unlike go and java
+        return p:named_child(0) == cur
+    end
+    -- let_declaration BINDS (and carries its own `mutable_specifier` child, so
+    -- `let mut x = 1` is still a binding); rust has no ++/--.
+    return false
+end
+
 local tsutil = require 'cartograph.spec.tsutil'
 local node_text = tsutil.node_text
 local inext = tsutil.inext
 
 return {
+    is_write = rust_is_write,
+    -- the PREFILTER: every immediate parent type a rust write mention can have.
+    -- Without it the classifier is never invoked (see the note on it).
+    write_gate = { assignment_expression = true, compound_assignment_expr = true,
+        field_expression = true, index_expression = true,
+        unary_expression = true },
     -- MEMBER-NAME POSITIONS (CART-0529): parent node type -> the child holding a
     -- MEMBER NAME, i.e. a name that is reached THROUGH A RECEIVER. Same shape as
     -- `call_positions`, and read for the opposite purpose: a mention here must
