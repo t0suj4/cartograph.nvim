@@ -111,28 +111,8 @@ test('pywrite: a subscript key reads, and a subscript in value position reads', 
     eq(true, byline[13]['z'])
 end)
 
--- ★★ THE PAIR RULE, and it exists because v147 shipped without it. `is_write` is
--- a CLASSIFIER and `write_gate` is the parent-type PREFILTER that decides whether
--- it is ever called: collect_mentions computes
---     wgate and wgate[nt] and is_write(c, n)
--- so a spec declaring the classifier alone never calls it. Worse than inert:
--- `wmode` is `spec.is_write ~= nil`, so the write axis switches ON and classifies
--- EVERY mention as a READ — and atlas mints `const` ("never assigned again") over
--- a write detection that never ran. On django-oscar that was 22 vars labelled
--- const with real writers, exactly the fabrication CART-0478 exists to prevent.
--- The contract registers the two fields independently and cannot say they are a
--- PAIR; this test says it.
-test('pywrite: is_write and write_gate are declared TOGETHER or not at all', function ()
-    local ts_ = require 'cartograph.providers.treesitter'
-    local lonely = {}
-    for lang, sp in pairs(ts_.spec) do
-        if (sp.is_write ~= nil) ~= (sp.write_gate ~= nil) then
-            lonely[#lonely + 1] = ('%s (is_write=%s write_gate=%s)'):format(
-                lang, tostring(sp.is_write ~= nil), tostring(sp.write_gate ~= nil))
-        end
-    end
-    eq({}, lonely)
-end)
+-- (the PAIR RULE and the gate-coverage check live in writeaxis_spec, which
+-- applies them to every language rather than just this one)
 
 -- and the gate must actually COVER the classifier: every immediate-parent type
 -- the classifier can answer TRUE for has to be in the gate, or that form is

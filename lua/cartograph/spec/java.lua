@@ -270,7 +270,49 @@ local function java_var_type(sm, ident, from, fields_only)
     end
 end
 
+-- IS THIS MENTION A WRITE? (CART-0532) The fifth language to answer, and the
+-- largest population left: 3467 use edges on `libs` alone.
+--
+-- DECLARED AS A PAIR with write_gate below — v147 shipped python's classifier
+-- WITHOUT its gate, the classifier was therefore never called, and because
+-- `wmode` is `spec.is_write ~= nil` the axis still switched on and reported every
+-- mention as a READ. atlas then minted `const` over a write pass that had not
+-- run. tests/pywrite_spec fences the pair now; this comment is the other half.
+local function java_is_write(c, n)
+    local cur, p = c, n
+    while p do
+        local pt = p:type()
+        if pt == 'field_access' then
+            -- `this.f = v` · `o.f = v` · `K.g = v`: object and field both ride,
+            -- as in lua's dot_index_expression and go's selector_expression
+            cur, p = p, p:parent()
+        elseif pt == 'array_access' then
+            -- `a[i] = v` writes a; the INDEX is a read
+            if p:named_child(0) ~= cur then return false end
+            cur, p = p, p:parent()
+        else
+            break
+        end
+    end
+    if not p then return false end
+    local pt = p:type()
+    if pt == 'assignment_expression' then
+        return p:named_child(0) == cur -- child 0 is the target, `+=` included
+    elseif pt == 'update_expression' then
+        return true -- g++ / --g, both spelled the same node
+    end
+    -- variable_declarator (a local OR a field declaration) BINDS a name and
+    -- writes nothing, which is what keeps `set-once` reachable; everything else
+    -- is a read.
+    return false
+end
+
 return {
+    is_write = java_is_write,
+    -- the PREFILTER: every immediate parent type a java write mention can have.
+    -- Without it the classifier above is never invoked (see the note on it).
+    write_gate = { assignment_expression = true, field_access = true,
+        array_access = true, update_expression = true },
     -- MEMBER-NAME POSITIONS (CART-0529): parent node type -> the child holding a
     -- MEMBER NAME, i.e. a name that is reached THROUGH A RECEIVER. Same shape as
     -- `call_positions`, and read for the opposite purpose: a mention here must

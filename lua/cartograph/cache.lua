@@ -73,7 +73,23 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 148 -- v148: v147 SHIPPED `const` OVER A WRITE PASS THAT NEVER RAN, and go
+M.VERSION = 149 -- v149: JAVA ANSWERS THE WRITE QUESTION (CART-0532), the largest
+               -- population left — 3467 use edges on `libs` alone, 5x that on `server`.
+               -- Declared as a PAIR (is_write + write_gate), which v148's fence now
+               -- requires: field_access and array_access ride the write chain (`this.f`,
+               -- `o.f`, `K.g` — both halves, as in lua and go), an array INDEX reads,
+               -- update_expression covers `g++` and `--g`, and `variable_declarator`
+               -- BINDS — for a local AND for a field declaration — which is what keeps
+               -- `set-once` reachable.
+               -- LADDER, libs' 1547 vars: `unclassified 1377 · unobserved 170` becomes
+               -- `const 1221 · single-writer 83 · multi-writer 45 · dead 3 ·
+               -- unclassified 25 · unobserved 170`. 1352 vars gain a named rung.
+               -- ★ AND THE DISTRIBUTION IS THE CHECK v147 TAUGHT: 104 write-only + 99
+               -- read+write edges of 3467. A classifier that never fires produces an
+               -- all-const ladder, which is exactly how v147's half-declaration looked —
+               -- so a realistic spread of writers is the evidence the pass RAN, and a
+               -- suspiciously clean one is evidence it did not.
+               -- v148: v147 SHIPPED `const` OVER A WRITE PASS THAT NEVER RAN, and go
                -- joins (CART-0532). `is_write` is the CLASSIFIER; `spec.write_gate` is the
                -- parent-type PREFILTER that decides whether it is ever called —
                -- collect_mentions computes `wgate and wgate[nt] and is_write(c, n)`. v147
