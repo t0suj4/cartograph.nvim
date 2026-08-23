@@ -4597,9 +4597,30 @@ local function reduce_mentions(file, buf, L)
         end
         local cands = L.var_named[name]
         if cands then
+            -- THE NEAREST SAME-FILE DECLARATION, not the first one in the list
+            -- (CART-0505). One file can hold several vars of one name — java
+            -- makes it idiomatic, a `static final … PARSER` per NESTED CLASS —
+            -- and taking `cands[1]` gave every mention in the file to whichever
+            -- happened to be emitted first: ObjectParserTests.java's
+            -- `var:PARSER@811` collected occurrences from line 817 to 1198,
+            -- across several classes. Measured populations: 215 same-file links
+            -- in libs, 14113 in wow, 0 in django-oscar.
+            -- ABOVE WINS, THEN BELOW. The declaration preceding the use is the
+            -- one lexical scoping would pick in every language here; the
+            -- nearest-below fallback is for java, whose fields are visible to
+            -- methods written above them. Distance, not list order, either way —
+            -- `cands` order is node-emission order and nothing promises it.
             local var
-            for _, v in ipairs(cands) do
-                if v.file == file then var = v break end
+            do
+                local up, down
+                for _, v in ipairs(cands) do
+                    if v.file == file then
+                        if v.line <= sr then
+                            if not up or v.line > up.line then up = v end
+                        elseif not down or v.line < down.line then down = v end
+                    end
+                end
+                var = up or down
             end
             if not var and #cands == 1
                 and not (L.scopes and L.scopes[cands[1].file]
