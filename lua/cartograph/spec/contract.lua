@@ -61,6 +61,13 @@ M.SLOTS = {
                                    -- the other half of exported_def, since a
                                    -- file-local's VALUE can still leave (CART-0230).
                                    -- Only the index-only front-ends call it now
+    member_positions = 'SCOPE&KEY', -- parent type -> the child holding a MEMBER
+                                   -- NAME (a name reached through a receiver).
+                                   -- OPTIONAL, unlike call_positions: a language
+                                   -- may genuinely have no member form (bash,
+                                   -- haskell, scheme) or spell it as a call node
+                                   -- it already declares (ruby's `call`).
+                                   -- CART-0529
     call_positions = 'SCOPE&KEY',  -- parent type -> the child holding a CALLEE
                                    -- NAME (field name or named-child index). Was
                                    -- an or-chain inline in the provider, which

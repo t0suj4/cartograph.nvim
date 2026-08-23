@@ -24,6 +24,22 @@ local FN_TYPES = {
 }
 
 return {
+    -- MEMBER-NAME POSITIONS (CART-0529): parent node type -> the child holding a
+    -- MEMBER NAME, i.e. a name that is reached THROUGH A RECEIVER. Same shape as
+    -- `call_positions`, and read for the opposite purpose: a mention here must
+    -- NOT be matched against the corpus-wide unique-function index, because a
+    -- bare name match says nothing about which object the receiver holds.
+    -- Measured on wow_addons: 724 of 2988 reg occurrences (24.2%) sat in member
+    -- position, and the sample held outright cross-file fabrication
+    -- (`db.ResetProfile = DBObjectLib.ResetProfile` pointing at an unrelated
+    -- addon's local ResetProfile).
+    -- ★ BRACKET FORMS ARE DELIBERATELY ABSENT (`t[k]`, `t["k"]`, subscript_*):
+    -- their key is an EXPRESSION, so the mention inside is a genuine value read
+    -- and vetoing it would lose a real reference. Only dot-style member NAMES
+    -- belong here.
+    member_positions = {
+        member_expression = 'property', -- o.NAME -- shared by ts/tsx
+    },
     -- CALL POSITIONS (CART-0499): parent node type -> which child holds the
     -- CALLEE NAME, as a field name or a named-child index. Replaces a
     -- hardcoded four-name or-chain inline in the provider that php, java,

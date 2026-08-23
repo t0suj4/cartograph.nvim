@@ -73,7 +73,41 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 145 -- v145: CALL POSITION IS A PER-LANGUAGE FACT, AND SIX LANGUAGES WERE
+M.VERSION = 146 -- v146: A DEFINITION-SIDE MEMBER KEY IS NOT A REFERENCE (CART-0529).
+               -- The fn-ref branch matches a bare mention against L.fn_unique, a
+               -- CORPUS-WIDE index of BARE names. It never asked whether the mention is
+               -- reached through a RECEIVER — so `exports.foo = foo` recorded the KEY and
+               -- the reference as two occurrences of one edge, and `mog.filt.scroll =
+               -- CreateFrame(…)` recorded an occurrence of a reference to an unrelated
+               -- vendored library's local `scroll`.
+               -- Declared as `spec.member_positions` (parent type -> the child holding a
+               -- MEMBER NAME), registered in spec/contract.lua, OPTIONAL because a
+               -- language may have no member form (bash/haskell/scheme) or spell it as a
+               -- call node it already declares (ruby's `call`). Shipped out of band like
+               -- buf.fld, not as a mention flag: the flag byte is FULL, and MF_GW's
+               -- free-when-not-WRITE bits are no help precisely because the case that
+               -- matters IS a write.
+               -- ★★ THE WRITE-POSITION HALF ONLY, AND THE MEASUREMENT IS WHY. Vetoing
+               -- EVERY member name dropped 283 reg edges on wow_addons — and opening the
+               -- source showed them to be mostly GENUINE: `Prat:SetModuleDefaults(module,
+               -- …)` against `function SetModuleDefaults(self, …)`, and
+               -- `core.add_junk_to_tooltip(…)` in a file whose target literally assigns
+               -- `core.add_junk_to_tooltip = add_junk_to_tooltip`. A blanket veto trades a
+               -- handful of fabrications for hundreds of real edges, which is the wrong
+               -- direction. A member name being ASSIGNED TO is different IN KIND: it is a
+               -- definition-side key and cannot be a reference to the function whose name
+               -- it borrows. That subset removes ZERO edges.
+               -- MEASURED: wow reg occurrences 2988 -> 2906 (-82, 0 edges lost, 2045 ->
+               -- 2045 pairs), ref occurrences 115040 -> 114985. php 4 · self 368 member-key
+               -- writes that would have minted. Six languages are structurally unaffected
+               -- (rust/go/odin/ruby/zig/java set `id_fn_refs = false`, so the branch never
+               -- runs for them at all).
+               -- ★ AND IT IS UNFENCEABLE BY THE ROSTER: snapshot.slim carries no
+               -- occurrence counts, so every gate reads "identical" through this change —
+               -- the same blindness that hid v145's double-counting until a hand-written
+               -- probe found it. Filed, with slim's own comment as the argument:
+               -- "a field no gate can see is a field whose regression is invisible".
+               -- v145: CALL POSITION IS A PER-LANGUAGE FACT, AND SIX LANGUAGES WERE
                -- MISSING FROM THE LIST (CART-0499). Whether an identifier sits in call
                -- position was decided by ONE inline or-chain of four grammar node-type
                -- names, plus `nt == 'list'` for a sexp head. A language whose call

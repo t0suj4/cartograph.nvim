@@ -4057,6 +4057,12 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
     -- the provider, where nothing could audit it: langaudit cannot see a table of
     -- node-type names (CART-0451) and it certainly cannot see an or-chain.
     local callpos = spec.call_positions
+    -- WHICH PARENT NODE TYPES HOLD A MEMBER NAME (CART-0529) — a name reached
+    -- THROUGH A RECEIVER. Shipped out of band like buf.fld rather than as a
+    -- mention flag, because the flag byte is FULL (MF_GW takes the top two bits,
+    -- and its "free when not MF_WRITE" is no help here: the LHS of
+    -- `private.Hook.X = X` is exactly a member name in write position).
+    local mempos = spec.member_positions
     local stdlib = spec.stdlib_names or NO_NAMES
     local names, nidx, nok, parts = buf.names, buf.nidx, buf.ok, buf.parts
     local scoped = scopes and MF_SCOPED or 0
@@ -4091,6 +4097,7 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
             end
         end
         local callk = callpos and callpos[nt]
+        local memk = mempos and mempos[nt]
         -- df def positions are THIS node's gift to its children:
         -- assignment lefts, declarators, transparent wrappers
         local asgleft, decld, dfk, declist
@@ -4258,6 +4265,18 @@ local function collect_mentions(buf, tsroot, src, spec, dfreg, dfrec, esc)
                         if not l then l = {}; buf.fld = l end
                         l[#l + 1] = nm
                         l[#l + 1] = fidx
+                    end
+                end
+                -- MEMBER NAME (CART-0529): this mention is reached through a
+                -- receiver, so the unique-function index must not claim it.
+                -- Ships as bare ordinals, the cheap half of buf.fld's shape.
+                if memk ~= nil then
+                    local mc = type(memk) == 'number' and n:named_child(memk)
+                        or n:field(memk)[1]
+                    if mc == c then
+                        local l = buf.mem
+                        if not l then l = {}; buf.mem = l end
+                        l[#l + 1] = nm
                     end
                 end
                 vput(parts, idx)
@@ -4432,6 +4451,11 @@ local function reduce_mentions(file, buf, L)
         gpmap = {}
         for i = 1, #buf.gp, 2 do gpmap[buf.gp[i]] = buf.gp[i + 1] end
     end
+    local memset
+    if buf.mem then
+        memset = {}
+        for _, o in ipairs(buf.mem) do memset[o] = true end
+    end
     local fldmap
     if buf.fld then
         fldmap = {}
@@ -4469,7 +4493,16 @@ local function reduce_mentions(file, buf, L)
         local bound = flags % MF_SCOPED >= MF_BOUND
         local callee = flags % MF_BOUND >= MF_CALLEE
         local eligible = flags % MF_CALLEE >= MF_ELIGIBLE
-        if eligible and not callee and fnrefs and fnref_ok then
+        -- `not (memset and memset[ord])`: a MEMBER NAME has a receiver, and
+        -- L.fn_unique is a corpus-wide index of BARE names — matching one against
+        -- the other is not evidence, it is a coincidence of spelling. Measured
+        -- fabrications this removes: `db.ResetProfile = DBObjectLib.ResetProfile`
+        -- -> an unrelated addon's local ResetProfile;
+        -- `_G.debugstack():match(…)` -> another module's local `match`.
+        -- The REFERENCE is real; the target was invented, and absence beats a
+        -- fabricated target until receiver typing can name the right one.
+        if eligible and not callee and fnrefs and fnref_ok
+            and not (write and memset and memset[ord]) then
             local u = L.fn_unique[name]
             if u and L.scopes and L.scopes[u.file] ~= L.scopes[file] then
                 u = nil -- unique, but across a boundary
