@@ -5152,7 +5152,10 @@ local function own_module_calls(count, get, region_at, addref)
         local to, fn, file = get(i, 'to'), get(i, 'fn'), get(i, 'file')
         if to and not fn and file then
             local at = get(i, 'at')
-            local line = (at and at.start and at.start.line) or get(i, 'line')
+            -- at is a call record's range: an INTEGER index once the range column
+            -- is folded (d057518), a table before it. atr is dual-mode — indexing
+            -- .start here crashed every post-write refresh (CART-0541).
+            local line = (at and atr.sl(at)) or get(i, 'line')
             local reg = line and region_at(file, line)
             -- reg ~= to guards the degenerate self-edge (a region that IS the target)
             if reg and reg ~= to then
