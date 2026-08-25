@@ -835,7 +835,7 @@ its usages and `h` returns to that usage, so the file that declares it would
 otherwise have no route from it at all.
 
 Where the subject has no file to go to, `descend` on the title row SAYS so rather
-than doing nothing: silence reads as broken (|cartograph-refusals|).
+than doing nothing: silence reads as broken (|cartograph-honesty|).
 
 AXES: A RELATION YOU CAN DESCEND                               *cartograph-axes*
 
@@ -1090,8 +1090,14 @@ HAZARDS: disclosed with counts, yours to finish.
   torn     a def extracted from beyond a parse error: visible, jumpable,
            never name-matched (it escaped its context)
   refusal  ambiguity never picks a side — two candidates = no link. A
-           refusal is a PLACE: descend an unresolved call to see the
-           candidates it refused between and the rule (see below)
+           refusal that KEPT ITS CANDIDATES is a PLACE: the callee is
+           marked `?` and descend opens the candidates it refused
+           between, with the rule that refused them. A refusal that
+           recorded only its rule has no door — nothing to descend
+           INTO — so it renders as a plain unresolved name and the
+           ladder counts it under `frontier`. Which of the two you get
+           is decided by the rule: only the rules that compare
+           candidates carry a candidate list
   alibi    why a function is not dead: a caller, a REGISTRATION (a
            dispatch table / load-time data / annotation — the fn view's
            "◆ registered by" descends into it), an entry point, or a

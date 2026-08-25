@@ -1,22 +1,36 @@
 -- The corpus registry: every named corpus the benchmarks and gates run
 -- against. A corpus's IDENTITY is its content — repo URL + commit — not the
--- local path (that's just where it happens to live). `expected` baselines are
--- only meaningful at the pinned `rev`: the gate refuses to apply them when
--- the checkout has moved (that would report corpus drift as extractor drift).
+-- local path (that's just where it happens to live).
+--
+-- WHAT ACTUALLY GUARDS `expected`, precisely, because the two halves are not
+-- the same guard. gate.lua applies `expected` to ANY corpus that declares it
+-- (gate.lua's expected-counts block asks only `if expected then`). The refusal
+-- above it — "GATE NOT APPLICABLE, the checkout moved" — is wrapped in
+-- `if corpus.rev then`, so it protects a corpus that declares a `rev` and
+-- nobody else. A corpus with `expected` and NO `rev` therefore has its counts
+-- applied unconditionally: they can FAIL, but they can never be refused as
+-- inapplicable, and nothing checks that its root is the tree the counts were
+-- calibrated on. That is deliberate for the synthetic corpora (see their
+-- section below, which explains why they have no rev to pin and what is and
+-- is not verified in its place); for anything else it is a hole to think
+-- about before adding `expected` without a `rev`.
 --
 -- PINNED (repo + rev + expected): stable read-only dogfood targets. If the
 -- checkout moves, either restore the rev or recalibrate (`gate <name> --save`
 -- on the new rev + update rev/expected here).
 -- UNPINNED (no rev): living corpora — their truth is a saved snapshot whose
 -- meta records the corpus rev at save time; the gate surfaces rev drift as
--- context instead of failing.
+-- context instead of failing. That advisory arm covers the per-item graphdiff
+-- only. An unpinned corpus that also declares `expected` still has those two
+-- counts enforced as a hard FAIL, drift or no drift.
 --
 -- Use from a headless driver (a pure data table — dofile and index by name):
 --   local corpora = dofile('tools/corpora.lua')
 --   local c = corpora.server            -- or corpora[name], nil if unknown
 --   -- c.root  = local checkout path (where it happens to live)
 --   -- c.repo/c.rev = the corpus IDENTITY (baselines hold only at this rev)
---   -- c.expected = { refs, nodes } gate baseline (PINNED corpora only)
+--   -- c.expected = { refs, nodes } gate baseline. Applied by gate.lua to
+--   --              whatever declares it, pinned or not — see the header.
 --   for name, c in pairs(corpora) do ... end   -- iterate the registry
 
 local HOME = vim.env.HOME or os.getenv('HOME')
@@ -310,6 +324,21 @@ return {
     -- recalibration, the same discipline as expected counts. bench.corpus
     -- MATERIALIZES a missing root by running the generator — so these
     -- gates run on any machine, no ~/git checkouts required.
+    --
+    -- THESE ARE THE `expected`-WITHOUT-`rev` CORPORA the header warns about,
+    -- and here it is on purpose: the identity is a generator tuple, not a
+    -- commit, so there is no rev to pin and the pin/dirty refusal in gate.lua
+    -- never fires for them. Be clear-eyed about what that leaves. The two
+    -- counts below are the only thing that GATES a synthetic corpus: the root
+    -- is not a git repo, so gate.lua's snapshot diff finds no identity on
+    -- either side, prints "corpus identity UNRECORDABLE" and drops to
+    -- ADVISORY — the per-item graphdiff cannot fail here, only the counts can.
+    -- And nothing re-derives the identity: bench.corpus regenerates a root
+    -- only when it is MISSING, so an existing tree that was hand-edited or
+    -- left half-written by an interrupted generate is used as-is. The tuple
+    -- makes that checkable for free (regenerate elsewhere and compare); no
+    -- code does it today. matrix.lua's `key` column is the real per-site
+    -- check on these corpora, and gate.lua does not have it.
     synlua = {
         root = HOME .. '/.cache/cartograph-tools/syn/lua-g6-s1',
         synthetic = { lang = 'lua', seed = 1, files = 8 },

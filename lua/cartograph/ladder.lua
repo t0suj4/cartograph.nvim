@@ -10,19 +10,37 @@ local callview = require 'cartograph.callview' -- neutral call accessor (columns
 --   linked   a same-file / same-scope name match, no ~ (plain resolution)
 --   inferred a cross-file unique-name guess (the ~ vocabulary)
 --   dynamic  a call the graph knows it cannot see ($fn(), variable method)
---   refused  ambiguity or scope/vocab declined to pick (a navigable fork)
---   frontier a callee neither resolved nor refused (unparsed / stdlib)
+--   refused  ambiguity or scope/vocab declined to pick (a navigable fork).
+--            NARROWER THAN IT SOUNDS: rung_of below requires a non-empty
+--            candidate list, so a refusal that recorded only its rule falls
+--            through to `frontier` and is reported as unparsed/stdlib
+--            territory rather than as a decision the graph made (CART-0546).
+--   frontier a callee neither resolved nor refused (unparsed / stdlib) —
+--            plus the candidate-less refusals just described
 
 local M = {}
 
 -- This is the CALL view of the ladder — a superset of the resolved-edge tiers
 -- ([[cartograph.tier]]) with the unresolved rungs (dynamic/refused/frontier)
 -- and a deliberate coarsening (xlang folds into 'proven' for this report,
--- 'matched' reads as 'linked'). The resolved-edge ORDER matches tier.lua;
--- only the presentation differs.
+-- 'matched' reads as 'linked').
+--
+-- ★ THE ORDER DOES NOT MATCH tier.lua, AND THIS COMMENT USED TO SAY IT DID
+-- (CART-0545). RUNGS below runs `linked` (tier's `matched`) ABOVE `typed` and
+-- `inferred`; tier.lua's M.LADDER runs the same three as typed → inferred →
+-- matched, i.e. it puts the unhedged link LAST. So the two files disagree on
+-- both `linked` vs `typed` and `linked` vs `inferred`, and nothing has decided
+-- which is right — see tier.lua's ★ note. This file only DISPLAYS its order
+-- (RUNGS is iteration order for the report); tier.lua's is also its rank, so
+-- the disagreement is only visible today when a reader compares the two.
+-- rung_of below is NOT a third opinion: testing `tinf` before falling through
+-- to inferred/linked is exactly tier.of's precedence (typed above inferred,
+-- and the two DO co-occur — see tests/tier_spec.lua's `{ tinf, inferred }`
+-- case). What disagrees with tier.lua is only where `linked` sits in RUNGS.
 -- 'typed': the graph-VM resolved this via a return-type summary — stronger
--- than a bare unique-name ~ guess (it used type evidence), weaker than a
--- plain same-scope link. The honesty ladder's middle rung.
+-- than a bare unique-name ~ guess (it used type evidence). Whether it is
+-- weaker than a plain same-scope link is exactly what the two files disagree
+-- about; this report renders it below `linked`.
 -- 'confirmed': observed live at runtime (self://loaded, MCP) — the SOUND
 -- top rung, above even a static oracle (proven).
 local RUNGS = { 'confirmed', 'proven', 'linked', 'typed', 'inferred',
