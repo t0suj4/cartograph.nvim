@@ -23,7 +23,8 @@ store.ingest(data)
 local m = dogfood.metrics(store)
 
 -- local, per-repo log (not committed; a trend, not state)
-local dir = vim.fn.expand('~/.cache/cartograph-tools')
+-- Same override as snapshot.lua: a parallel worker keeps its own trend log.
+local dir = vim.env.CARTOGRAPH_TOOLS_CACHE or vim.fn.expand('~/.cache/cartograph-tools')
 vim.fn.mkdir(dir, 'p')
 local logf = dir .. '/ratchet.jsonl'
 

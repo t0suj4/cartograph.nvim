@@ -19,7 +19,13 @@
 
 local M = {}
 
-M.dir = vim.fn.expand('~/.cache/cartograph-tools')
+-- WHERE BASELINES LIVE. Overridable so a parallel worker can hold its own
+-- copy (tools/worktree.sh hardlinks the shared set in; the tmp+rename write
+-- below breaks the link on first --save, so a worker's save never reaches the
+-- shared baseline). Unset = the shared dir, which is what every existing
+-- caller gets. A worker's PASS is NOT a shared PASS: promotion means re-running
+-- from the main checkout against the shared dir.
+M.dir = vim.env.CARTOGRAPH_TOOLS_CACHE or vim.fn.expand('~/.cache/cartograph-tools')
 
 local REPO = (function ()
     local src = debug.getinfo(1, 'S').source:sub(2)
