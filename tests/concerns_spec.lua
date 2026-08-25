@@ -460,8 +460,9 @@ end)
 
 test('axes: the DEFAULT band is the cheap half, and says what it holds back',
     function ()
-    -- the line is `walk`, not taste: a door renders on every cursor move and
-    -- shows its count, so the axes whose count is a TRAVERSAL are the ones the
+    -- the line is `walk`, not taste: every door is rebuilt and shows its count
+    -- on every RENDER (not every cursor move, which does not re-render --
+    -- CART-0551), so the axes whose count is a TRAVERSAL are the ones the
     -- narrow band leaves out (measured 6.08 vs 4.49 ms/render on mantis).
     local fn = { kind = 'function' }
     eq(1, #axreg.of(fn), 'only callees is cheap enough for the default band')
