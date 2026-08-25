@@ -858,6 +858,35 @@ return {
     end,
     -- lines that ARE imports (placement: a new one goes after the last)
     import_pats = { '^local%s+[%w_,%s]-=%s*require%f[%W]', '^require%f[%W]' },
+    -- THE MODULE IDIOM, read side (CART-0542): which file-local name this file
+    -- binds as its module table. Answered from the file's own LINES, and
+    -- deliberately STRICTLY: the trailing `return X` and a bare `local X = {}`
+    -- must BOTH be present. A file that builds its export some other way
+    -- (`return { helper = helper }`, a table literal with fields, a
+    -- setmetatable) gets nil, and every caller of this hook treats nil as "do
+    -- not write" -- so the strictness fails toward disclosure, never toward a
+    -- guessed prologue.
+    module_table = function (lines)
+        local last
+        for i = #lines, 1, -1 do
+            if lines[i]:match('%S') then last = i break end
+        end
+        local name = last and lines[last]:match('^%s*return%s+([%a_][%w_]*)%s*$')
+        if not name then return nil end
+        for _, l in ipairs(lines) do
+            if l:match('^%s*local%s+' .. name .. '%s*=%s*{%s*}%s*$') then
+                return name
+            end
+        end
+        return nil
+    end,
+    -- ...and the write side: the prologue and epilogue a NEW file must carry to
+    -- bind the same name, so an extracted module LOADS instead of raising
+    -- "attempt to index global 'M' (a nil value)" on first require.
+    module_scaffold = function (name)
+        return { ('local %s = {}'):format(name), '' },
+            { ('return %s'):format(name) }
+    end,
     litdata_types = { table_constructor = true },
     -- stdlib receivers must not tail-match a project def: string.format
     -- would otherwise link to the one module that defines M.format

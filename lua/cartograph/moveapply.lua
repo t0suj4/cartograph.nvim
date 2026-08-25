@@ -3,14 +3,21 @@
 -- symbol's text leaves its file and lands in the destination —
 -- journal-first, behind the same refusal ladder as clone-merge.
 --
--- What this verb deliberately does NOT write: call-site
--- requalification and import wiring. Both are language-specific
--- guesses (which alias names the dest module here? what does an import
--- line look like?), and a transaction that guesses is a transaction
--- that lies. The ImpactEngine's findings — call sites naming the old
--- home, imports each side should gain — ride the plan as HAZARDS with
--- counts and file names: the human finishes what the tool can prove
--- but not spell.
+-- WHAT IT WRITES, and what it only DISCLOSES. The rule is not "text moves,
+-- wiring is the human's": it is that a transaction which GUESSES is a
+-- transaction that lies, so anything MECHANICAL in this language is written
+-- and everything else rides the plan as a HAZARD with counts and file names.
+-- Three things have crossed that line, each behind spec hooks a language opts
+-- into (lua has; see spec/contract.lua for who else and why not):
+--   * call-site requalification, when the site is exactly <srcAlias>.<name>
+--   * the import line that introduces the destination alias (a4e089d)
+--   * the destination file's MODULE SCAFFOLD, when the file is CREATED and the
+--     idiom is unambiguous (`local M = {}` ... `return M`; CART-0542) — until
+--     then an extracted lua module DISCLOSED that it was missing and did not
+--     load at all
+-- Everything still unwritten — bare-name call sites, an alias the dest file
+-- already uses, captures shared with the staying code, the moved body's own
+-- requires — is disclosed, not silently guessed at.
 --
 -- Use headless (agent-drivable — plan → preview → verified apply, no cockpit;
 -- [[cartograph-apply-for-agent]]). The :CartographMove/Diff/Apply commands are
@@ -57,6 +64,91 @@ local function module_level(store, n)
         end
     end
     return true
+end
+
+-- THE MODULE SCAFFOLD (CART-0542). A file this verb CREATES used to get the
+-- language header plus the moved text and nothing else -- so an extracted lua
+-- module opened with `function M.scan` and no `local M = {}`. That COMPILES (M
+-- is a global at compile time) and dies on first require: "attempt to index
+-- global 'M' (a nil value)". The verb DISCLOSED it as a capture hazard, so the
+-- contract held; but a disclosure that must be honoured before the tree loads
+-- at all is not advisory polish, it is completion work the verb can do.
+--
+-- Written on exactly the terms import wiring is (a4e089d): only when the idiom
+-- is MECHANICAL, which here means all of --
+--   * the destination's spec declares one (ts.module_scaffold; lua only)
+--   * every source file whose moved text mentions a module table names the SAME
+--     one, read from that file's own `local M = {}` ... `return M`
+--   * the moved lines genuinely mention it
+--   * the declaration is not itself travelling in the move-set (then the text
+--     already carries a `local M = {}` and a second one would shadow it)
+-- Any of those unmet: nothing is written and every hazard stands unchanged.
+--
+-- WHAT IT DOES NOT PROMISE. The new table is a NEW EMPTY table, so a moved
+-- reference to a member that STAYED behind resolves to nil -- a load-clean file
+-- with a runtime hole. So the residual is enumerated (`M.foo` not defined by
+-- the move-set; a bare `M` handed somewhere as a value) and disclosed, and the
+-- capture hazard is retired ONLY when that residual is empty, i.e. only when
+-- the write really is complete. Retiring it matters: its instruction ("require
+-- it, or copy it into the extracted module") aliases the OLD module's table,
+-- which after the scaffold is the wrong table to reach for.
+local function module_scaffold(plan, dest, ts, file_lines)
+    local moved = {}
+    for _, m in ipairs(plan.moves) do moved[m.name] = true end
+    local name, disagree
+    for _, m in ipairs(plan.moves) do
+        local ls = file_lines(m.file)
+        local n = ls and ts.module_table(m.file, ls) or nil
+        if n and not moved[n] then
+            local seen = false
+            for i = m.lines.s + 1, m.lines.e + 1 do
+                if (ls[i] or ''):find('%f[%w_]' .. n .. '%f[^%w_]') then
+                    seen = true; break
+                end
+            end
+            if seen then
+                if name and name ~= n then disagree = true end
+                name = name or n
+            end
+        end
+    end
+    if not name or disagree then return end
+    local pre, post = ts.module_scaffold(dest, name)
+    if not (pre and post) then return end
+    plan.scaffold = { name = name, pre = pre, post = post }
+    -- every mention of the name the fresh table does NOT satisfy
+    local left, order = {}, {}
+    for _, m in ipairs(plan.moves) do
+        local ls = file_lines(m.file) or {}
+        for i = m.lines.s + 1, m.lines.e + 1 do
+            local l, pos = ls[i] or '', 1
+            while true do
+                local a, b = l:find('%f[%w_]' .. name .. '%f[^%w_]', pos)
+                if not a then break end
+                local member = l:match('^%.([%a_][%w_]*)', b + 1)
+                local spell = member and (name .. '.' .. member) or name
+                if not moved[spell] and not left[spell] then
+                    left[spell] = true; order[#order + 1] = spell
+                end
+                pos = b + 1
+            end
+        end
+    end
+    local kept = {}
+    for _, h in ipairs(plan.hazards) do
+        if not h:find('^capture: ' .. name .. '%f[%W]') then
+            kept[#kept + 1] = h
+        end
+    end
+    plan.hazards = kept
+    if #order > 0 then
+        table.sort(order)
+        plan.hazards[#plan.hazards + 1] = ('%s is created FRESH in %s (its'
+            .. ' `local %s = {}` and `return %s` are written) — but the moved'
+            .. ' code still reaches %s, which the new table does not hold:'
+            .. ' wire those by hand'):format(name, dest, name, name,
+            table.concat(order, ', '))
+    end
 end
 
 -- the shared plan core: collect the staged symbols (kind gate, comment
@@ -241,6 +333,11 @@ local function collect(store, ids, dest, plan)
     for _, f in ipairs(imp.dest_requires) do
         plan.hazards[#plan.hazards + 1] = dest .. ' should import ' .. f
     end
+    -- a file being CREATED may need the language's module scaffold to LOAD;
+    -- a MOVE into an existing file inherits that file's own (CART-0542)
+    if okp and plan.creates and plan.creates[dest] then
+        module_scaffold(plan, dest, ts, file_lines)
+    end
     for f in pairs(touched) do
         plan.touched[#plan.touched + 1] = f
         plan.stamps[f] = txn.disk_stamp(root, f)
@@ -401,16 +498,22 @@ end
 function M.edits_for(plan)
     return function (rel, before, all)
         if plan.creates and plan.creates[rel] then
-            -- a NEW file: language header + the moved text, from the
-            -- same before-bytes the journal holds
+            -- a NEW file: language header + the module scaffold's prologue +
+            -- the moved text + the scaffold's epilogue, from the same
+            -- before-bytes the journal holds
             local out = {}
             vim.list_extend(out, plan.header or {})
+            vim.list_extend(out, plan.scaffold and plan.scaffold.pre or {})
             for mi, m in ipairs(plan.moves) do
                 if mi > 1 then out[#out + 1] = '' end
                 local src = vim.split(all[m.file], '\n', { plain = true })
                 for i = m.lines.s + 1, m.lines.e + 1 do
                     out[#out + 1] = src[i]
                 end
+            end
+            if plan.scaffold then
+                out[#out + 1] = ''
+                vim.list_extend(out, plan.scaffold.post)
             end
             out[#out + 1] = ''
             return table.concat(out, '\n')

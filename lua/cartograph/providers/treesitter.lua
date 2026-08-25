@@ -3405,6 +3405,23 @@ function M.file_header(file)
     return {}
 end
 
+-- the module idiom (extract-module, CART-0542): which file-local name `lines`
+-- bind as this file's module table, and the prologue/epilogue a NEW file needs
+-- to bind the same one. nil when this language's spec declares no idiom --
+-- absence is NOT DECLARED, and every caller must read it as "disclose, do not
+-- write" (spec/contract.lua names who has opted in, and why the rest have not).
+function M.module_table(file, lines)
+    local _, spec = elang_for(file)
+    if not (spec and spec.module_table) then return nil end
+    return spec.module_table(lines)
+end
+
+function M.module_scaffold(file, name)
+    local _, spec = elang_for(file)
+    if not (spec and spec.module_scaffold) then return nil end
+    return spec.module_scaffold(name)
+end
+
 -- the import line a file would use to reach `dest`, and its alias —
 -- nil when this language's wiring is not mechanically writable
 function M.import_line(from_file, dest)

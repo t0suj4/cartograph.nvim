@@ -119,3 +119,98 @@ test('moveapply: COPY leaves the original + discloses duplication', function ()
     for _, h in ipairs(plan.hazards) do if h:find('CFG is COPIED') then dup = true end end
     ok(dup, 'duplication disclosed')
 end)
+
+-- ── THE MODULE SCAFFOLD (CART-0542) ──────────────────────────────────────────
+-- The witness is EXECUTION, not parsing: `function M.scan(x)` with no `local M`
+-- COMPILES (M is a global at compile time) and only dies when the module is
+-- first required. A parse-only assertion passes with and without the scaffold,
+-- which is exactly why the hazard went unenforced.
+
+local MODFIXTURE = table.concat({
+    'local M = {}',
+    '',
+    'local function tiny(x) return x + 1 end',
+    '',
+    '-- doc for scan',
+    'function M.scan(x)',
+    '    return tiny(x) + 1',
+    'end',
+    '',
+    'function M.stays(y)',
+    '    return M.scan(y)',
+    'end',
+    '',
+    'return M',
+}, '\n')
+
+-- the same file, except the moved body reaches a member that STAYS behind
+local RESIDUAL = MODFIXTURE
+    :gsub('    return tiny%(x%) %+ 1', '    return M.stays(x) + 1')
+
+local function dest_text(st, plan)
+    local _, after = require('cartograph.txn').dryrun(st, plan)
+    return after and after[plan.dest]
+end
+
+local function haz(plan, pat)
+    for _, h in ipairs(plan.hazards) do if h:find(pat) then return h end end
+end
+
+test('moveapply: an extracted module LOADS — scaffold written, not disclosed', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(MODFIXTURE)
+    local scan = node_by(st, 'M.scan', 'function')
+    ok(scan, 'M.scan captured')
+    local plan, err = moveapply.plan_extract_ids(st, { scan.id }, 'sub/new.lua')
+    ok(plan, 'plan built: ' .. tostring(err))
+    local text = dest_text(st, plan)
+    ok(text, 'dry-run produced the created file')
+    -- THE WITNESS: run the chunk, the way `require` would
+    local chunk, lerr = load(text, 'sub/new.lua')
+    ok(chunk, 'the created module compiles: ' .. tostring(lerr))
+    local okrun, mod = pcall(chunk)
+    ok(okrun, 'the created module RUNS (this is what failed): ' .. tostring(mod))
+    eq('table', type(mod))
+    eq('function', type(okrun and mod.scan))
+    -- and the shape is the idiom, not an accident
+    eq('local M = {}', vim.split(text, '\n', { plain = true })[1])
+    ok(text:find('\nreturn M\n'), 'the epilogue is written: ' .. text)
+    -- the capture hazard is RETIRED: its instruction ("require it, or copy it")
+    -- would alias the OLD module's table, which is now the wrong table
+    ok(not haz(plan, '^capture: M%f[%W]'),
+        'the M capture is written, so it is no longer disclosed')
+end)
+
+test('moveapply: a member left BEHIND stays disclosed (the scaffold is not a lie)', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(RESIDUAL)
+    local scan = node_by(st, 'M.scan', 'function')
+    local plan = moveapply.plan_extract_ids(st, { scan.id }, 'sub/new.lua')
+    ok(plan and plan.scaffold, 'scaffold still written (the file must load)')
+    local text = dest_text(st, plan)
+    ok(select(1, pcall(load(text, 'd'))), 'and it does load')
+    local h = haz(plan, 'M%.stays')
+    ok(h, 'the residual member is named: ' .. table.concat(plan.hazards, ' | '))
+    ok(h and h:find('created FRESH'), 'and it says WHY the reference is now dead')
+end)
+
+test('moveapply: a file with NO module idiom gets no guessed prologue', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE) -- `return { helper = helper }` — not the idiom
+    local helper = node_by(st, 'helper', 'function')
+    local plan = moveapply.plan_extract_ids(st, { helper.id }, 'sub/h.lua')
+    ok(plan, 'plan built')
+    eq(nil, plan.scaffold)
+    local text = dest_text(st, plan)
+    ok(not text:find('local M = {}'), 'nothing invented: ' .. text)
+end)
+
+test('moveapply: module_table reads the idiom, and refuses anything else', function ()
+    if not ready() then skip('no lua parser') end
+    local lines = vim.split(MODFIXTURE, '\n', { plain = true })
+    eq('M', ts.module_table('m.lua', lines))
+    eq(nil, ts.module_table('m.lua', vim.split(FIXTURE, '\n', { plain = true })))
+    -- a language that declares no idiom writes nothing (absence = NOT DECLARED)
+    eq(nil, ts.module_table('m.py', lines))
+    eq(nil, ts.module_scaffold('m.py', 'M'))
+end)

@@ -108,6 +108,19 @@ M.SLOTS = {
     import_kinds = 'IMPORTS',
     field_alias = 'IMPORTS',        -- `local f = mod.field`: binds a MEMBER of an
                                     -- imported module to a local (CART-0237)
+    -- THE MODULE IDIOM (CART-0542), the pair extract-module needs to create a
+    -- file that LOADS: module_table reads which file-local name a file binds as
+    -- its module table (`local M = {}` ... `return M`), module_scaffold writes
+    -- the prologue/epilogue a NEW file needs to bind the same one. Here rather
+    -- than in CORE because it is cross-file BINDING: the name only matters
+    -- because callers reach the moved defs through the module the file returns.
+    -- DECLARED BY LUA ONLY, and that is a choice, not a gap -- the same terms
+    -- import_line ships on. A language whose new-file idiom is not one
+    -- unambiguous pair of lines must keep DISCLOSING: go needs a package NAME
+    -- cartograph cannot derive (it stays a hazard, right where it was), and a
+    -- language with no epilogue to write (python, rust) has nothing to fill
+    -- module_scaffold with. Absence means NOT DECLARED, never "no idiom".
+    module_table = 'IMPORTS', module_scaffold = 'IMPORTS',
     std_aliases = 'IMPORTS',        -- per-file names bound to the stdlib (std-alias disposition)
 
     -- TYPES: receiver / return / chain / field typing (the D-measurement's
