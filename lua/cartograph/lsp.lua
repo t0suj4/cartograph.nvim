@@ -206,7 +206,12 @@ M.handlers['textDocument/definition'] = function (store, params)
             local rbs = rbs_location(store.node(c.to))
             return rbs and { rbs } or {}
         end
-        if c.refused and c.refused.cands then -- a navigable fork: the candidate set
+        -- a navigable fork -- but a TRUNCATED one: tsutil.refusal caps `cands`
+        -- at 8 and keeps the true width in `refused.n`, so this is at most the
+        -- first 8 of the fork, sorted. Location[] has no partial-results
+        -- channel, so the response itself cannot say more exist; the hover
+        -- below is the only surface that can, and it does (n, "8 shown").
+        if c.refused and c.refused.cands then
             local out = {}
             for _, cid in ipairs(c.refused.cands) do
                 local loc = location(store, cid)
@@ -304,11 +309,20 @@ M.handlers['textDocument/hover'] = function (store, params)
         end
         if c.refused then
             local r = c.refused
-            local ncand = (r.cands and #r.cands) or r.n or 0
+            -- THE TRUE WIDTH FIRST (CART-0548). `cands` is capped at 8 by
+            -- tsutil.refusal while `n` carries the real count, so `#cands`
+            -- first made `n` dead code and hovered a 2313-way fork as "8
+            -- candidate(s)". Same order the browser uses (symbols.lua:1001),
+            -- including its disclosure of how many of them are jumpable.
+            -- `n` is absent on refusals minted outside tsutil (tokens.lua:831,
+            -- uncapped), hence the fallback rather than a bare `r.n`.
+            local shown = r.cands and #r.cands or 0
+            local ncand = r.n or shown
+            local cut = (ncand > shown) and (', ' .. shown .. ' shown') or ''
             return md {
                 ('**%s** — unresolved'):format(callrec.callee(c) or '?'),
                 ('refused: `%s`%s'):format(r.rule or '?',
-                    ncand > 0 and (' — ' .. ncand .. ' candidate(s)') or ''),
+                    ncand > 0 and (' — ' .. ncand .. ' candidate(s)' .. cut) or ''),
                 r.witness and ('_' .. tostring(r.witness) .. '_') or nil,
             }
         end
@@ -433,7 +447,9 @@ M.handlers['cartograph/why'] = function (store, params)
         elseif c.refused then
             return { kind = 'call', callee = callrec.callee(c), status = 'refused',
                 rule = c.refused.rule,
-                candidates = (c.refused.cands and #c.refused.cands) or c.refused.n or 0,
+                -- the FORK'S width, not the stored list's: `cands` is capped at
+                -- 8 (tsutil.refusal), `n` is the real count (CART-0548)
+                candidates = c.refused.n or (c.refused.cands and #c.refused.cands) or 0,
                 witness = c.refused.witness }
         end
         return { kind = 'call', callee = callrec.callee(c), status = 'frontier' }

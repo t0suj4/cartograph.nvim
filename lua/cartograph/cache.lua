@@ -2114,9 +2114,17 @@ end
 --- write to those files' shards — the caller owes an HONEST account of
 --- every file whose contribution changed (splice reports one); nil
 --- writes everything. Deletions need no unlink: the manifest omits them
---- (tombstone), gc reclaims the files later. Post-pass artifacts (sql::
---- entities, frontier landings) are stripped — they re-derive; unparsed
---- bundle modules live in the manifest and are synthesized at load.
+--- (tombstone), gc reclaims the files later. Post-pass artifacts are
+--- stripped because they re-derive — but WHICH ones is `build_shards`'s
+--- own list, not a category: it drops the `sql::` id prefix, `unparsed`
+--- (frontier landings), `db` (dblink tables) and `dj` (django routes).
+--- Symfony (`sf`) and ansible (`an`) nodes promise the same thing at
+--- symfony.lua:16 / ansible.lua:19 and are NOT in that list; what keeps
+--- the promise for them today is the file-header invariant instead —
+--- only RAW graphs are cached, so every save runs before the adapters
+--- attach. Latent trap, not a live bug: see kb `synthetic-var-node-
+--- families`. Unparsed bundle modules live in the manifest and are
+--- synthesized at load.
 function M.save(data, dirty)
     if require('cartograph.config').cache == false then return end
     -- persistable <=> stamps: the source supplied wire-free validity

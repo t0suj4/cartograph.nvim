@@ -254,8 +254,21 @@ function M.fields(store, id, cache)
 end
 
 --- The whole graph's census: counts per label + the var lists.
---- Synthetic/browse-only vars (sql entities, C interface types) excluded,
---- mirroring the resolver's own var vocabulary.
+---
+--- WHAT IT EXCLUDES IS THE TEST BELOW, AND ONLY THAT (read it, do not trust a
+--- summary here): `n.sql`, `n.ctype`, and the `sql::` id prefix. That pair is
+--- the RESOLVER's var vocabulary (treesitter.lua), copied here — and copying
+--- it was the mistake, because the resolver runs BEFORE any post-pass adapter
+--- attaches and this does not. So this is NOT "synthetic/browse-only vars are
+--- excluded", as it used to claim: the adapter-minted `kind='var'` entities
+--- (django `route::`, symfony `sfroute::`, ansible `handler::`/`ansvar::`,
+--- dblink's imported tables) carry their own marker fields, are named in no
+--- list here, and therefore ARE counted and classified on the write axis.
+--- They have `use` edges and no writes by construction, so they land on
+--- `const` or `unobserved` and inflate those buckets — which matters because
+--- this census feeds the `dead-state` lint's population. Known wart, not a
+--- design: see kb `synthetic-var-node-families` for the family roster and the
+--- other two filters that each hand-list a different subset.
 --- @param opts table|nil  threaded to classify (see `derived`)
 function M.census(store, opts)
     local counts, vars = {}, {}

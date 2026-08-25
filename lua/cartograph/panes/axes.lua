@@ -23,9 +23,15 @@
 --   rows           (store, id) -> { {node=|file=|site=}, ... }
 --   walk           true if the count needs a TRAVERSAL, not a slice. This is
 --                  not decoration: a door must show its count at every render,
---                  so a transitive axis makes the doors arm pay a BFS per
---                  cursor move while the one-door arm pays nothing. Declared so
---                  the presentation can memoize it and the A/B can measure it.
+--                  so a transitive axis makes the doors arm pay a cone walk per
+--                  RENDER while the one-door arm pays nothing. (Per render, not
+--                  per cursor move: door_rows is reachable only from M.render,
+--                  which the show/enter/toggle sites call — the CursorMoved
+--                  handler hovers and highlights, it does not re-render. The
+--                  6.08-vs-4.49 ms measured below is likewise per render.)
+--                  Declared so the presentation can memoize it and the A/B can
+--                  measure it — though see M.count: the memo caches the
+--                  reachable SET, and counting still materializes the rows.
 --   note           (store, id) -> string|nil, an honest sentence for the EMPTY
 --                  case. A zero on an inbound axis is the dangerous kind: the
 --                  cone walks CALL edges only, so a function kept alive by a
@@ -71,8 +77,8 @@ function M.subject_kind(node)
 end
 
 -- ── the cone memo ───────────────────────────────────────────────────────────
--- A transitive count is a BFS over the reachable subgraph, and a door renders
--- on every cursor move. Memoized per GRAPH IDENTITY (store.data's own table):
+-- A transitive count is a BFS over the reachable subgraph, and every door is
+-- rebuilt on every render. Memoized per GRAPH IDENTITY (store.data's own table):
 -- a re-ingest hands out a new table, so the memo cannot outlive its graph. This
 -- is the cheap end of the validity rule -- no stamp needed, because the key IS
 -- the thing that would have to change.
@@ -246,8 +252,11 @@ function M.of(node, all)
 end
 
 --- WHAT THE DEFAULT BAND LEAVES OUT, and why the line is `walk` rather than
---- taste: a door renders on EVERY cursor move and shows its count, so the
---- expensive axes are the ones whose count is a traversal. Measured on mantis,
+--- taste: every door shows its count and every door is rebuilt on EVERY
+--- render, so the expensive axes are the ones whose count is a traversal.
+--- (Render, not cursor move — the CursorMoved handler does not re-render.
+--- The band is still worth having: a render is every show, enter, toggle and
+--- ascent, and the cost below is per one of those.) Measured on mantis,
 --- the fn altitude renders in 6.08 ms with the two cones and 4.49 ms without —
 --- so "default" is not a curated favourite list, it is the cheap half, and the
 --- band says how many it is holding back rather than hiding the fact.
@@ -278,9 +287,23 @@ function M.rows(key, store)
     return e.rows(store, subject), e
 end
 
---- The COUNT for a door. Separate from rows() only because a door renders on
---- every cursor move: a cheap axis counts its slice, a `walk` axis answers from
---- the memo (built once per graph).
+--- The COUNT for a door. Separate from M.rows() because the two answer
+--- different questions: rows() wants a key it can refuse (nil = no such axis),
+--- a door wants nil to mean UNAVAILABLE — the frontier case, so it can say so
+--- instead of showing a fabricated 0.
+---
+--- IT IS NOT A CHEAPER PATH, and it used to claim it was ("a `walk` axis
+--- answers from the memo"). It calls `e.rows` in full: for a cone that is
+--- cone_rows -> node_rows, i.e. a `store.node` lookup for every reachable id
+--- and then a `table.sort` of the result, on every call, memo hit or not. The
+--- memo (cone_of) caches only the reachable SET, so it saves the BFS and
+--- nothing after it. render_axis then calls `e.rows` a second time for the
+--- same subject when the door is opened.
+---
+--- The obvious fix — return the memo'd set's size — is NOT sound as written:
+--- node_rows DROPS ids `store.node` cannot resolve, so the set can be larger
+--- than the rows the door opens onto, and a door disclosing a count the
+--- altitude then contradicts is worse than a slow door. Left as a wart.
 --- @return integer|nil count  nil when the axis cannot be answered at all
 function M.count(name, subject, store)
     local e = M.AXES[name]

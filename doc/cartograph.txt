@@ -898,10 +898,10 @@ the registration instead of rendering a bare zero.
 THE BAND HAS TWO WIDTHS, and switching them is not a descent. `default` shows the
 CHEAP axes and ends with a row saying how many are held back and which — `⋯ 2 more
 (reaches, reached by)`. `descend` on that row widens the band in place; the
-altitude does not change. The line between the two is not taste: a door renders on
-every cursor move and shows its count, so the axes held back are the ones whose
-count costs a traversal (the fn altitude renders in 6.08 ms with the two cones and
-4.49 ms without). >
+altitude does not change. The line between the two is not taste: every door shows
+its count and is rebuilt on every render — every open, descend, ascend or toggle —
+so the axes held back are the ones whose count costs a traversal (the fn altitude
+renders in 6.08 ms with the two cones and 4.49 ms without). >
 
     require('cartograph').setup { axes = 'default' }  " default
     require('cartograph').setup { axes = 'all' }      " never hold any back
