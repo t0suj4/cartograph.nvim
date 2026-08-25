@@ -40,6 +40,22 @@ function _G.mkroot(name, src)
     return root
 end
 
+-- THE RUNNING CHECKOUT. `repo()` is the root of the tree this suite is running FROM,
+-- and `repo(rel)` a path inside it. Any spec that needs a real file of this project --
+-- a source to scan, a profile artifact to stamp -- must go through here.
+--
+-- WHY IT EXISTS (CART-0440, measured): four specs hard-coded the author's own checkout
+-- instead. Run from a git worktree, they READ the running tree and WROTE the other one:
+-- the suite went red in the worktree and green in the main tree, and, worse, a worktree
+-- run moved the mtime of a TRACKED file in the main checkout -- which is exactly what
+-- this project's cache validity is keyed on ([[cartograph-validity-layer]]), so two
+-- workers running suites in parallel perturbed each other through a file neither owned.
+-- Derived from this file's own path, the pattern tools/bench.lua and tools/snapshot.lua
+-- already use; `:p` because a source can be relative (`luafile tests/run.lua`).
+-- tests/isolation_spec.lua fences the regression.
+local ROOT = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
+function _G.repo(rel) return rel and (ROOT .. '/' .. rel) or ROOT end
+
 -- load every spec — or only $SPEC (comma list of basenames: the
 -- preflight's test-selection hook; the full suite still guards the push)
 local only

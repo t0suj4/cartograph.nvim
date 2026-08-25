@@ -133,8 +133,8 @@ end)
 -- or the identity key. Two copies existed (factorio_mods and toc_scope's marker).
 test('ecosystem: spec/lua.lua reads the identity rule rather than restating it',
     function ()
-    local src = require('cartograph.transport').read(
-        vim.fn.expand('~/git/cartograph.nvim/lua/cartograph/spec/lua.lua'))
+    -- the RUNNING tree (repo(), tests/run.lua), never a fixed checkout: CART-0440
+    local src = require('cartograph.transport').read(repo('lua/cartograph/spec/lua.lua'))
     if not src then skip 'source not readable from here' end
     local _, n = src:gsub("'info%.json'", '')
     eq(0, n) -- zero literal copies of the manifest name remain
@@ -580,7 +580,7 @@ end)
 -- arguments and checking it says so — a weak test on its own, so it is paired with
 -- the stronger structural one: no verb and no report reaches api_source at all.
 test('ecosystem: nothing in the plugin runtime consults api_source', function ()
-    local dir = vim.fn.expand('~/git/cartograph.nvim/lua/cartograph')
+    local dir = repo('lua/cartograph') -- the RUNNING tree, not a fixed checkout
     if vim.fn.isdirectory(dir) ~= 1 then skip 'source not present' end
     local hits = {}
     local stack = { dir }

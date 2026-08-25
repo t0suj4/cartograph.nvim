@@ -95,16 +95,39 @@ end)
 test('validity: an edited artifact is re-read, not served from either cache',
     function ()
     local prof = require 'cartograph.spec.profile'
-    local art = vim.fn.expand('~/git/cartograph.nvim/lua/cartograph/spec/profile/'
-        .. 'lua-factorio.lua')
+    -- THE FILE WE STAMP MUST BE THE FILE THE LOADER READS (CART-0440). Resolve the
+    -- artifact from the loader module's OWN source — the same `DIR` its stamp_of and
+    -- load compute from — rather than naming a checkout. `stamp_of` and not `load`:
+    -- load is a validity.memo CLOSURE, so its source is validity.lua, not this dir.
+    -- Measured before the fix: with a fixed path, a run from a worktree loaded the
+    -- running tree's artifact and stamped the OTHER tree's, so the stamp never moved
+    -- and this test went red — while perturbing a checkout it was not testing.
+    local dir = vim.fn.fnamemodify(debug.getinfo(prof.stamp_of, 'S').source:sub(2), ':p:h')
+    local art = dir .. '/lua-factorio.lua'
     if vim.fn.filereadable(art) ~= 1 then skip 'profile artifact not present' end
     local p1 = prof.load('lua-factorio')
     ok(p1 ~= nil, 'loads')
     eq(p1, prof.load('lua-factorio')) -- stable while unchanged: the SAME table
-    vim.fn.system({ 'touch', art })
+    -- MOVE THE STAMP WITHOUT LEAVING THE TREE PERTURBED. mtime is what this project's
+    -- cache validity keys on, so a permanent bump on a TRACKED artifact would
+    -- invalidate this checkout's warm graph cache as a side effect of running the
+    -- suite. Set it forward, observe the recompute, put it back. (fs_utime over
+    -- `touch`: no subprocess, and an explicit offset — `touch` writes the current
+    -- second, which does not move a stamp on a file already written this second.)
+    local st0 = assert(vim.uv.fs_stat(art))
+    local was = st0.mtime.sec + st0.mtime.nsec / 1e9
+    local atime = st0.atime.sec + st0.atime.nsec / 1e9
+    -- luv's sync fs calls RETURN nil+err, they do not raise: check the value
+    if not vim.uv.fs_utime(art, atime, was + 5) then skip 'cannot set mtime here' end
     local p2 = prof.load('lua-factorio')
+    vim.uv.fs_utime(art, atime, was)  -- restore BEFORE asserting, so a red test
+                                      -- still leaves the artifact as it found it
     ok(p2 ~= nil and p1 ~= p2, 'a moved stamp yields a FRESH table')
     eq(1, p2.schema)                  -- ... and a valid one
+    -- THE SIDE-EFFECT FENCE: the tree under test is left exactly as found. This is
+    -- the half that made a parallel worktree run unsafe, not the red cell.
+    eq(st0.mtime.sec, assert(vim.uv.fs_stat(art)).mtime.sec,
+        'the artifact mtime is restored — a suite run mutates no tracked file')
 end)
 
 -- ── BUG 2: a tree that changed between extractions was invisible ─────────────

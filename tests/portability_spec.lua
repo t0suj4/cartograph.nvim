@@ -1341,7 +1341,7 @@ end)
 -- The loader tries require BEFORE its .mpack fallback, so a dotted name silently
 -- loads NOTHING — the first version of that file returned nil with no error.
 test('portability: no profile module name contains a dot', function ()
-    local dir = vim.fn.expand('~/git/cartograph.nvim/lua/cartograph/spec/profile')
+    local dir = repo('lua/cartograph/spec/profile') -- the RUNNING tree: CART-0440
     if vim.fn.isdirectory(dir) ~= 1 then skip 'profile dir not present' end
     local bad = {}
     local it = vim.uv.fs_scandir(dir)
