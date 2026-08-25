@@ -138,6 +138,13 @@ M.federated_resolve = vim.env.CARTOGRAPH_FEDERATED == '1'
 -- parallel cold extraction: worker processes parse file slices while the
 -- browser opens immediately and fills in as chunks arrive. Kicks in at
 -- parallel_threshold files; workers defaults to cores-1 (capped at 8).
+-- WIDER THAN ITS NAME: both knobs also gate the WARM streamed open, which
+-- forks no processes and extracts nothing — cache.warm_streamable returns
+-- false when parallel == false or the roster is under parallel_threshold,
+-- and init.lua then takes the synchronous cache.open, decoding every shard
+-- on the main loop. So `parallel = false` to stop cartograph forking nvim
+-- buys a blocking whole-cache decode on every warm open of a large repo.
+-- (kb note: parallel-false-kills-warm-streaming)
 M.parallel = true
 M.parallel_threshold = 300
 M.workers = nil

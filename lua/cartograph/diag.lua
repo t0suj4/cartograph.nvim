@@ -69,23 +69,28 @@ end
 --- Publish a finding list to the in-buffer surface under `key`, REPLACING any
 --- previous cartograph diagnostics for that key (other keys untouched).
 --- `findings` = { { file, line, col?, severity, message, source? }, ... }
---- (file absolute, line 1-based). Returns the count published.
+--- (file absolute, line 1-based). Returns the count PUBLISHED, which is not
+--- always the count submitted: a finding with no `file` has nowhere to land on
+--- an in-buffer surface, so it is skipped and not counted. Callers format this
+--- as "N finding(s) on in-buffer signs", so it has to be what is really there.
 function M.publish(findings, key)
     wire()
     local g = group(key)
     vim.diagnostic.reset(g.ns) -- clear this key's previous set from every buffer
     g.held = {}
+    local n = 0
     for _, f in ipairs(findings or {}) do
         if f.file and f.file ~= '' then
             local d = g.held[f.file] or {}
             d[#d + 1] = to_diag(f)
             g.held[f.file] = d
+            n = n + 1
         end
     end
     for _, b in ipairs(vim.api.nvim_list_bufs()) do
         if vim.api.nvim_buf_is_loaded(b) then flush(b) end
     end
-    return #(findings or {})
+    return n
 end
 
 --- Clear the surface for `key` (or every key when nil).

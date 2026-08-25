@@ -734,9 +734,22 @@ end
 -- query and cached until the next ingest (generation-keyed). This is rung
 -- (c) — the fold becomes the resident representation consumers read
 -- topology through; the wide uses/usedby/… tables stay for the detail
--- readers (at/sideeffect) until rung (d) migrates and drops them. Lazy so
--- ingest_step (streaming) pays nothing until the graph settles and a
--- consumer asks.
+-- readers (at/sideeffect) until rung (d) migrates and drops them.
+--
+-- LAZY, WITH A WART DURING STREAMING. The intent is that ingest_step pays
+-- nothing until the graph settles and a consumer asks. That holds only if no
+-- consumer asks BEFORE it settles: ingest_step deliberately does not bump
+-- M.generation, so the first topo() inside the streaming window builds the
+-- fold from the PARTIAL graph and PINS it — nothing invalidates it until
+-- on_done's authoritative full ingest bumps the generation. Every chunk that
+-- lands after that first ask is invisible to the Band's topology methods
+-- (callers/callees/registered/tier/…), while its identity methods, served off
+-- the store, stay current. An LSP references request or a file descend
+-- (panes/symbols.lua render_file) is enough to trigger the pin. A consumer
+-- that must be correct mid-stream should check M.data.partial, or read
+-- topology through band.from_store(M) instead. Invalidating per chunk would
+-- rebuild the fold on every query in the window, so the fix is a measurement,
+-- not a one-liner. (kb note: streaming-band-half-frozen)
 function M.topo()
     if M._topo_gen ~= M.generation then
         M._fold = require('cartograph.fold').build(M.data)

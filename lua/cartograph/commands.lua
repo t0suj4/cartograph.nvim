@@ -7,12 +7,17 @@
 -- This module's top level must stay LEAN — it loads during startup.
 -- All requires live inside callbacks.
 --
--- The 69 registrations themselves live in cartograph/commands/<group>.lua,
--- one file per |cartograph-commands| group, so the help taxonomy and the code
--- agree. This file owns what they SHARE: the graph-needing guard, the
--- index-only guards, the scratch split, the txn-verb map, and the reveal.
--- Each group rebinds them as locals under the same names, so a callback
--- reads the same as when all 69 lived in one 1,238-line function.
+-- The registrations themselves live in cartograph/commands/<group>.lua, one
+-- file per |cartograph-commands| group, so the help taxonomy and the code
+-- agree — all but the root :Cartograph, which plugin/cartograph.lua registers
+-- itself. How MANY there are is deliberately not written here: that number
+-- grows every session and a hand-copied one rots. tools/docaudit.lua's
+-- REGISTRY oracle counts them by intercepting registration at startup and
+-- prints the total (the group files hold all of it but that one root name).
+-- This file owns what the groups SHARE: the graph-needing guard, the index-
+-- only guards, the scratch split, the txn-verb map, and the reveal. Each
+-- group rebinds them as locals under the same names, so a
+-- callback reads the same as when they all lived in one 1,238-line function.
 
 local M = {}
 

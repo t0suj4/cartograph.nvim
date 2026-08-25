@@ -31,5 +31,15 @@ test('diag: keyed producers coexist; publish/clear are per-key', function ()
     eq(9, d.lnum, '1-based line 10 -> 0-based lnum 9')
     eq(vim.diagnostic.severity.HINT, d.severity, 'hint severity mapped')
 
+    -- the return is the count PUBLISHED, not the count submitted: a finding
+    -- with no file has nowhere to land, so it is skipped AND not counted
+    -- (callers print this number as "N finding(s) on in-buffer signs").
+    local n = diag.publish({
+        { file = '/x/c.lua', line = 1, severity = 'warn', message = 'filed' },
+        { line = 2, severity = 'warn', message = 'no file' },
+    }, 'lint')
+    eq(1, n, 'file-less finding is dropped and not counted')
+    eq(1, #diag.groups.lint.held['/x/c.lua'], 'only the filed one is held')
+
     diag.clear()
 end)

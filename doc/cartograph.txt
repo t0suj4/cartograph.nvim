@@ -1220,7 +1220,10 @@ comment per field.
                 they classify 'entry' (▶) instead of 'orphan' (○)
   exclude       extra vendored directory NAMES to skip
   cache         per-file shard cache; warm opens
-  parallel      worker processes for cold opens
+  parallel      worker processes for cold opens. false ALSO turns off
+                background shard streaming on a WARM open (which forks
+                nothing and extracts nothing), forcing the synchronous
+                whole-cache decode instead
   refresh       re-extract a file on save and splice it into the graph
   shapes        project-shape presets — see below
   discover      registry auto-discovery (Greenspun detection)
