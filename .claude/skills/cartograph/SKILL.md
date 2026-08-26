@@ -1,209 +1,183 @@
 ---
 name: cartograph
-description: Use cartograph.nvim — the symbol-graph browser and transactional refactoring cockpit for Neovim. Covers opening a project (:Cartograph), navigating altitudes and lenses, reading the honesty markers (~ / dynamic / frontier / refused / torn), the analysis verbs (lint, clones, untangle, trace, version floor, portability), and staged multi-file edits (Move/Merge/Extract → Diff → Apply → Undo). Load this whenever cartograph, :Cartograph* commands, or its reports come up — and ALWAYS before claiming an analysis verb works on a given language, because support is per-language and uneven.
+description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 21 verbs) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the four reasons mean different things.
 ---
 
-# cartograph.nvim
+# cartograph, for an agent
 
-A keyboard-driven Smalltalk-style system browser over a codebase's symbol graph,
-plus transactions: multi-file edits that preview as diffs, apply through a
-journal, and undo byte-exact.
+A symbol graph over a polyglot codebase, plus transactions: multi-file edits that
+preview as diffs, apply through a journal, and undo byte-exact.
 
-## Version this skill was built for
+You drive it **headlessly**. The interactive cockpit (`:Cartograph`, altitudes,
+lenses) is for humans and you cannot use it.
 
-```
-commit  852916f59e451268c29eb01ff061c01e7520c6ae  (852916f)
-date    2026-07-30
-subject The browser names its own lenses: a mode strip in the winbar
-```
+## The one rule
 
-Verified against that tree: **79 user commands** (77 global + 2 pane-local) and
-**16 language specs**. The project's own doc fence (`tools/docaudit.lua`) reported
-zero drift at this commit, so `doc/cartograph.txt` is authoritative there.
+**An empty answer is never a bare empty list.** Every verb that finds nothing says
+*why*, and the reason is one of four values that do not mean the same thing:
 
-Status is **EXPERIMENTAL** — upstream states commands, keys and APIs may change
-without notice. Before trusting the tables in `references/`, check whether HEAD
-has moved:
+| `absence` | means | your next move |
+|---|---|---|
+| `absent` | the question was asked and the answer is genuinely nothing | you may act on it |
+| `refused` | something might qualify and a rule declined to pick | **do not** treat as nothing — read `absence_why.evidence` |
+| `frontier` | the analysis cannot see this far | a different tool, or accept the limit |
+| `unavailable` | the capability is missing on this graph or host | change the invocation |
+
+This is the whole reason to use cartograph instead of grep. Measured on cartograph's
+own tree: of 266 dead-code findings, **7 were `absent` and 229 were `refused`** — only
+the 7 licensed a deletion. A tool that returned `[]` for all 266 would have been
+wrong 97% of the time, and silently.
+
+**Never collapse these into "no results".** If you report an absence to a user,
+report which one.
+
+## Running it
+
+Two hosts, same envelope.
 
 ```bash
-git -C <repo> log -1 --format='%h %cd %s'                     # is it still 852916f?
-nvim --headless -u NONE -l tools/docaudit.lua                 # commands + language count
-nvim --headless -c "lua package.path='./lua/?.lua;./lua/?/init.lua;'..package.path; \
-  local ts=require('cartograph.providers.treesitter'); \
-  print(table.concat(require('cartograph.spec.contract').matrix_report(ts.spec),'\n'))" -c 'qa!'
+# a session — MCP, newline-delimited JSON-RPC 2.0, one JSON object per line
+nvim --headless -u NONE -l tools/mcpserve.lua <root> [--index-only] [--write]
+
+# one shot — one JSON document on stdout, nothing else
+nvim --headless -u NONE -l tools/agentq.lua <root> alibi <file> <line>
 ```
 
-If HEAD differs, re-run those three and prefer their output over anything here.
+`agentq` exit codes, so a shell can tell an answer from a refusal without parsing:
 
-(At authoring time the working tree also carried uncommitted work on
-`panes/symbols.lua`, `panes/concerns.lua` and `exprlint.lua` — the lints-lens /
-suppression compartment. The command surface and language specs were unaffected;
-the `lints` lens behaviour described here reflects that in-progress state.)
-
-## Language support is uneven — read this before answering "can it do X on Y"
-
-**16 languages ship tree-sitter specs**, but shipping a spec is not one level of
-support. Cartograph's own spec contract defines a **capability ladder** (CORE →
-SCOPE&KEY → IMPORTS → TYPES → EMITTERS → ANALYSIS), and a language fills as much
-of it as its spec author filled. A group counts as "filled" the moment **one**
-field in it is present, so `●` means *some* capability, never completeness — the
-slot count is the honest depth measure.
-
-| language | exts | CORE | S&K | IMP | TYP | EMI | ANA | slots filled |
-|---|---|---|---|---|---|---|---|---|
-| lua | lua | ● | ● | ● | ● | ● | ● | **28** |
-| zig | zig | ● | ● | ● | ● | · | ● | 27 |
-| php | php | ● | ● | ● | ● | ● | ● | 26 |
-| java | java | ● | ● | ● | ● | ● | ● | 23 |
-| ruby | rb | ● | ● | ● | ● | ● | ● | 23 |
-| typescript | ts | ● | ● | ● | ● | ● | ● | 23 |
-| tsx | tsx | ● | ● | ● | ● | ● | ● | 23 |
-| javascript | js mjs cjs jsx | ● | ● | ● | ● | ● | ● | 22 |
-| rust | rs | ● | ● | ● | · | ● | ● | 20 |
-| cpp | cpp hpp cc hh cxx hxx | ● | ● | ● | ● | ● | ● | 18 |
-| bash | sh bash | ● | ● | ● | ● | ● | ● | 17 |
-| go | go | ● | ● | ● | · | · | ● | 17 |
-| haskell | hs | ● | · | ● | ● | ● | ● | 16 |
-| scheme | scm | ● | ● | ● | · | · | · | 14 |
-| c | c h | ● | · | ● | ● | ● | ● | 13 |
-| python | py | ● | ● | ● | ● | ● | ● | 12 |
-| odin | odin | ● | ● | · | · | · | · | 12 |
-
-Read that table with two cautions:
-
-- **`python` looks complete and is thin.** Every group is `●`, but it fills only
-  12 of ~70 slots — the fewest of any language whose groups all light up. Do not
-  promise Python parity with Lua.
-- **The flow substrate is gated on one field, `body_field`, and three languages
-  lack it: haskell, odin, scheme.** `providers/treesitter.lua` builds a CFG only
-  for `body_field` languages, so everything CFG-derived — expr lints, untangle,
-  optimize, reorder, branch values, extract blocks — has nothing to read there.
-  Haskell is the subtle case: it fills ANALYSIS slots via its *own* `dataflow`
-  model, so it has df facts but not the CFG verbs. odin and scheme fill zero
-  ANALYSIS slots and have neither.
-
-**Beyond the specs:** `vue`/`svelte` single-file components parse as *container*
-files via nvim-treesitter injections (so nvim-treesitter is required for them);
-Forth (`fs`, `4th`, `fth`) and PostScript (`ps`, `ps.src`) open through a separate
-**tokens** provider where word mentions are `ref` edges, *not* call sites. A
-language whose parser is not installed opens as **frontier** modules — visible and
-jumpable, never silently omitted.
-
-### Which verbs are language-locked
-
-This is the part most likely to produce a wrong answer if guessed:
-
-| capability | works on |
-|---|---|
-| graph, navigation, LSP read surface, clones, census/ladder, mentions, cones | all 16 + SFCs |
-| CFG/flow verbs (`Expr`, `Untangle`, `Optimize`, `OptimizeApply`, `Reorder`, `BranchValues`, `ExtractBlocks`) | the 14 `body_field` languages — **not haskell, odin, scheme** |
-| `:CartographFields`, `:CartographNarrow`, `:CartographParamNil`, `:CartographDevirt` | **lua only** (hard-gated; others get "not yet supported (Lua only)") |
-| `:CartographEscalate`, `:CartographFieldHarvest` (lua-ls oracle) | **lua only** |
-| clangd oracle — *proven* call edges rather than `~` | **c, cpp only** |
-| `:CartographVersionFloor` | **javascript, typescript, tsx, python, ruby only** — any other language reports "no version-floor table" |
-| behaviour-change range *split* within version floor | **python, ruby only** |
-| `:CartographPortability`, `:CartographRequires` | needs a shipped env profile: **lua** (luajit, lua-factorio 2.0.72, lua-factorio-11 1.1.110), **ruby** (cruby 3.2.3, ruby-core, ruby-rails), **zig** (zig-std) |
-| two-runtime *move* diff (needs two same-language profiles) | luajit↔lua-factorio, lua-factorio-11↔lua-factorio, ruby-core↔ruby-rails |
-| `:CartographRoster` | ecosystems **lua-factorio, lua-nvim, lua-wow** (all Lua) |
-| `:CartographPrototypes` | **lua + a data-stage profile** — today only lua-factorio |
-| framework packs | **ruby**: rails, rspec |
-| framework adapters | **python**/django, **php**/symfony + WordPress hooks, **yaml**/ansible |
-| SQL-injection taint lints (sink-concat, sink-source, sink-reach) | **php only** |
-| memory lints (resource-leak, member-leak, null-deref) | **cpp only** (incl. `.h`) |
-
-Full per-language detail, profile contents and the framework matrix:
-**`references/languages.md`**.
-
-## The core loop
-
-```vim
-:Cartograph                " open the cockpit on cwd (also: <dir>, dump.json,
-                           " mcp://name, self://loaded)
-:CartographIndexOnly       " thin symbol index, no analysis; fills in on demand
+```
+0  ok:true    an answer
+3  ok:false   a REFUSAL — stable, do NOT retry; refusal.remedy says what to change
+2  usage / protocol fault
+1  internal error (still emitted as JSON, in `error`)
 ```
 
-Layout is **symbols (left) | source | plan bar (bottom)**. In the symbols pane:
+**A refusal is not an error.** Exit 3 is a considered answer. Retrying it unchanged
+gets the same result; read `remedy`.
 
-- `l` descend / `h` ascend through altitudes: `files → file → fn → block`
-- `j`/`k` step (and step *out* at a block edge), `<CR>` pivots (re-roots)
-- `<Tab>`/`<S-Tab>` cycle the altitude's **lens**; the winbar names them, e.g.
-  `⇥ statements [detail] lints`
-- Hover previews in the source pane; **movement never changes focus** — pivots are
-  deliberate. `<C-]>` jumps to the callee, `<C-o>`/`<C-i>` walk the jumplist.
+## Isolation: pin the tool, point it at the live tree
 
-Staging an edit is cut/paste, then plan → review → commit:
+If you are working **on cartograph itself**, do not run the server out of the tree
+you are editing. A syntax error mid-edit kills the host and a half-applied refactor
+yields wrong answers — and from the client side those look identical.
 
-```vim
-" dd cuts a row into the move-set; p on a file row sets the destination
-:CartographMove            " stage (writes nothing)
-:CartographDiff            " the exact bytes it would write
-:CartographApply           " late-bound verify, journal, write, splice
-:CartographUndo            " byte-exact rollback  (:CartographRedo re-applies)
-:CartographTxnClear        " abandon the staged plan
+The tool and the subject are already separate parameters:
+
+```
+the TOOL     which checkout runs mcpserve.lua   →  tools/worktree.sh (a committed ref)
+the SUBJECT  the <root> ARGUMENT                →  your live working tree
 ```
 
-Every edit verb rides that substrate: `:CartographMerge`,
-`:CartographExtractModule`, `:'<,'>CartographExtract`, `:CartographExtractHelperApply`,
-`:CartographHoistClosure`, `:CartographReorderApply`, `:CartographOptimizeApply`.
-**What a verb refuses is as load-bearing as what it writes** — a refusal names its
-reason and costs a re-plan, never a corrupted write. A Lua move writes text, the
-require line and requalified call sites, but discloses bare-name calls and shadowed
-aliases as **hazards** with counts, for you to finish.
+So: run a **pinned** cartograph against the **live** tree. `-u NONE` means no config
+is loaded, so there is no plugin state to isolate — only the code.
 
-Command reference, grouped as upstream groups them: **`references/commands.md`**.
+Consequence to expect rather than discover: a worktree checks out a *committed* ref,
+so a pinned tool lags your working tree by up to one commit. That is correct for an
+instrument and surprising if you forget it.
 
-## Reading the output honestly
+## The verbs
 
-Cartograph's whole design is *never fabricate an answer*. Do not flatten its
-markers when relaying a report — they carry the epistemic tier:
+21, in the order they may be trusted in. `graph_info` first — it reports which verbs
+are available on *this* graph and host, and why any are not.
 
-| marker | means |
-|---|---|
-| `~` | name-matched (inferred): unique name, **not** proven by types |
-| `dynamic` | a call the graph knows it cannot see (`$fn()`, variable methods) |
-| `frontier` | unparsed/unreachable territory shown *as* territory (min.js, missing parser) |
-| `torn` | a def recovered from beyond a parse error — visible, never name-matched |
-| `refused` | ambiguity never picks a side: two candidates = no link. A refusal is a **place** — descend it to see the candidates and the rule |
-| `alibi` | why a function is not dead: a caller, a registration, an entry point, a visibility promise |
+```
+READ      graph_info  node_find  node_at  edges_callers  edges_callees  why  lint_run
+CATALOGUE clones_find  cone  ladder  territory  census  mentions  externals
+WRITE     txn_plan_moveset  txn_plan_optimize  txn_preview
+          journal_list  journal_get
+          txn_apply  txn_undo
+```
 
-Two distinctions that change what an answer *means*:
+Ask `graph_info` before assuming a verb works. Two capability axes are reported
+separately because your next move differs:
 
-- **A computed absence is not an absent answer.** "no callers found — entry point,
-  or dynamically dispatched" means the call graph was built and holds none.
-  "⚠ index-only mode has no call graph" reads `unavailable`, not `0`.
-- **Elision is never silent.** Rows fit `symbols_width` (default 30): identities
-  elide in the *middle* (`crash-site-…-machine.lua`), free text at the *tail*.
-  A file row shows the shortest *unique* path suffix — the real path is still what
-  hover, `gf` and staging use.
-- **A suppressed finding is still counted** (`◆ N suppressed here`), and that count
-  is descendable.
+- **`needs_calls`** — about the GRAPH. On an index-only graph a call verb *refuses*
+  rather than answering "none".
+- **`mutates`** — about the HOST. `mcpserve` is **read-only by default**; `--write`
+  grants the mutating verbs. Gated verbs are still advertised, with the gate stated
+  in their description.
 
-Fuller vocabulary, empty-view kinds and the budget rules:
-**`references/reading-output.md`**.
+## Reading an answer
 
-## Driving it from a tool or an agent
+```
+ok  verb  graph  subject  result  tier  absence  absence_why  notes  refusal
+```
 
-- **LSP read surface** — `:CartographLspAttach` serves the open graph as an
-  in-process LSP: definition, references, hover, symbols, call hierarchy,
-  implementation, type definition, plus tier-tinted semantic tokens. Hover states
-  *why* (tier, or the refusal rule and candidate count). Namespaced
-  `cartograph/why` and `cartograph/graphInfo` exist specifically for tools and
-  agents. `tools/lspserve.lua` runs the same surface over stdio for any editor.
-  It is **read-only** — writes belong to the transaction family.
-- **`:CartographEval {lua}`** and `:CartographWorkspace` run ad-hoc Lua against the
-  loaded graph (`store`/`spines`/`territory` in scope); a returned node list is
-  browsable.
-- **Headless** — `nvim --headless -l tools/dogfood.lua` is the self-analysis
-  dashboard and a CI fence. `tests/run.sh` runs the suite. `tools/matrix.lua`
-  sweeps every parity/honesty invariant × corpus.
-- **Network is never implicit**: extraction and every report stay offline.
+- `absence` / `absence_why` — the table above. `absence_why` carries `premise`,
+  `why` and `evidence`.
+- `tier` — how well-founded the answer is, a rung on the ladder. **Read it with the
+  verb's `tier_basis`** from `graph_info`:
+  - `resolution` — rows are name resolutions, so a non-empty result carries a rung
+  - `observation` — rows are read off the parse; `tier` is **always null**, and that
+    null means *"this question has no rung"*, not *"unknown"*
+  - `mixed` — per answer
+- `tier_headline` — whether the headline rung is the `floor` (weakest row) or the
+  `peak` (strongest). **The same field name means opposite things across surfaces**,
+  which is why it is published. `peak` answers "is there any support"; `floor`
+  answers "how good is the worst of these".
+- `notes` — disclosures that are not refusals. `ref-caveat` (a ref resolved with
+  drift), `headline-scope`, `tier-order-disputed`, `staged`.
+- Addressing: every verb taking an `id` also takes a durable `ref`
+  (`{file, kind, name, ordinal?, witness?}`). A stale ref **refuses** with rule
+  `stale-ref`. Prefer refs across edits; ids embed line numbers and move.
 
-## Getting it wrong safely
+## Writing
 
-- Don't claim a verb's finding is a proof when the report hedged it `~`.
-- Don't report "0" where cartograph said `unavailable`.
-- Don't assume a language has a capability because it "ships a spec" — check the
-  tables above, and prefer running the verb over predicting it.
-- `:CartographFeedback` files a report frozen at the current node, capturing the
-  observed half itself. It works with **no graph loaded and on a row with no
-  node** — an absence is a useful report.
+The order is the order of trust, and it is enforced:
+
+1. `txn_plan_moveset` / `txn_plan_optimize` — propose. Writes nothing.
+2. `txn_preview` — diff it. Writes nothing.
+3. `journal_list` / `journal_get` — read the history.
+4. `txn_apply`, then `txn_undo` if needed.
+
+**`txn_apply` refuses a plan that was never previewed** (rule `unpreviewed`). On a
+machine transport the preview is the only step between proposing an edit and making
+one.
+
+Apply verifies **late**, at apply time, not at plan time: generation match, refs
+resolving witness-clean, stamp CAS, no dirty buffers. Those four are the precondition
+that lets a machine apply at all. A refusal there is the guarantee working — read it,
+do not route around it.
+
+`declined` rides in every plan/preview/apply answer, with its evidence field present
+even when empty, so "nothing was declined" and "the ledger was not filled in" stay
+distinguishable.
+
+## Live defects — know these before driving writes
+
+- **CART-0582 (P1)**: journal entry ids are `os.time()`-granular and the entry file is
+  overwritten. **Two applies of the same verb to the same root inside one second
+  destroy the first's undo.** Space out applies, or check `journal_list` after each.
+- **CART-0583**: `txn_plan_moveset` is not marked `mutates`, so it answers on a
+  read-only host — and planning still clears the live move-set. Planning is not
+  side-effect-free on an interactive session's state.
+- **CART-0579**: refusal evidence double-counts sites (a site matching two ways is
+  listed twice), so `"candidates existed at N site(s)"` overstates N. Count the
+  distinct lines in `evidence.sites`, not N.
+
+## What not to claim
+
+Language support is **per-language and uneven**, and a verb working on Lua says
+nothing about Ruby. `graph_info` reports the graph's own frontier; `census` and
+`externals` report what was not resolved. Check before generalising.
+
+`references/` (commands.md, languages.md, reading-output.md) documents the
+**interactive** surface and is pinned to commit `852916f` (2026-07-30). It is stale
+and it is not the agent surface — do not quote its tables as current.
+
+## Drift check
+
+This file describes the agent surface at:
+
+```
+commit  4f28f7d   Write verbs, and the two guarantees that were only ever held up by human speed
+```
+
+Verify before trusting the verb list:
+
+```bash
+git -C <repo> log -1 --format='%h %cd %s'
+nvim --headless -u NONE -l tools/mcpserve.lua <root> <<< '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+If `tools/list` names verbs this file does not, the file is behind.
