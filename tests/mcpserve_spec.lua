@@ -298,6 +298,15 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
     -- a premise, and the value it names is one the verb DECLARED — a value in
     -- `absences` that no branch emits, or a branch emitting an undeclared one,
     -- is CART-0580 again.
+    --
+    -- ★ THE WRITE AXIS IS DRIVEN HERE TOO (CART-0146), and the reason is this
+    -- test's QUANTIFIER, not coverage. tests/agentwrite_spec.lua owns the write
+    -- verbs' answering paths — those need a fixture that gets MUTATED, which a
+    -- spec whose other tests read this one must not do. What THIS test is, and
+    -- nothing else is, is the fence saying a verb in ORDER is never UNDRIVEN. So
+    -- an entry may name the disposition this read-only fixture can reach:
+    -- `expect = 'refusal'` fences the refusal shape as tightly as an answer's,
+    -- rather than exempting the verb from the sweep.
     local calls = {
         graph_info = {}, node_find = { query = 'walk' },
         node_at = { file = 'm.lua', line = 3 },
@@ -306,12 +315,36 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         why = { file = 'm.lua', line = 4, col = 26 }, lint_run = {},
         clones_find = {}, cone = { node = idof('M.caller') }, ladder = {},
         territory = {}, census = {}, mentions = { name = 'walk' }, externals = {},
+        -- planning with no symbol named, and previewing / fetching a handle that
+        -- was never minted: refusals reachable without touching a byte
+        txn_plan_moveset = { args = { dest = 'lib/new.lua' }, expect = 'refusal' },
+        txn_plan_optimize = { args = { kind = 'cse', node = idof('M.caller') } },
+        txn_preview = { args = { plan = 'plan-never-minted' }, expect = 'refusal' },
+        journal_list = {},
+        journal_get = { args = { id = 'no-such-entry' }, expect = 'refusal' },
+        -- the two mutating verbs refuse on this host whatever the handle says.
+        -- WHICH rule fires (read-only vs unknown-plan) depends on how the module
+        -- flag was left, so only the SHAPE is asserted: coupling this spec to
+        -- another spec's teardown would be a worse fence than a looser one.
+        txn_apply = { args = { plan = 'plan-never-minted' }, expect = 'refusal' },
+        txn_undo = { args = {}, expect = 'refusal' },
     }
     for _, verb in ipairs(agent.ORDER) do
-        ok(calls[verb] ~= nil, ('verb %s is in ORDER but this spec does not drive it'):format(verb))
-        local d, status = agent.answer(store, verb, calls[verb])
-        eq('ok', status, verb .. ' answers: ' .. vim.inspect(d.refusal or d.error))
-        if #d.result > 0 then
+        local c = calls[verb]
+        ok(c ~= nil, ('verb %s is in ORDER but this spec does not drive it'):format(verb))
+        -- an entry is either a bare argument table (the common case) or
+        -- { args = …, expect = … }; no verb has an argument called `args`
+        local args, expect = c.args or c, c.expect or 'ok'
+        local d, status = agent.answer(store, verb, args)
+        eq(expect, status, verb .. ' answers: ' .. vim.inspect(d.refusal or d.error))
+        if expect == 'refusal' then
+            eq(false, d.ok, verb .. ' refused, so ok is false')
+            ok(type(d.refusal.rule) == 'string' and #d.refusal.rule > 0,
+                verb .. ' names the rule it refused under')
+            ok(#d.refusal.reason > 20, verb .. ' says why: ' .. tostring(d.refusal.reason))
+            eq(vim.NIL, d.absence,
+                verb .. ': a refusal is NOT an absence — the two must never render alike')
+        elseif #d.result > 0 then
             eq(vim.NIL, d.absence, verb .. ' returned rows AND an absence')
         else
             ok(type(d.absence) == 'string',
@@ -326,6 +359,10 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
             ok(n.kind ~= 'envelope-bug', ('%s: %s'):format(verb, tostring(n.why)))
         end
     end
+    -- journal_list/journal_get MKDIR this root's journal directory in the state
+    -- dir just by looking. The fixture root is temp and gets deleted; its journal
+    -- lives elsewhere and would outlive it, so it is removed by name.
+    require('cartograph.journal').wipe(root)
     vim.fn.delete(root, 'rf')
 end)
 

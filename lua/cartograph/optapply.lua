@@ -128,28 +128,45 @@ local function rhs_node(root, src, line, defname)
     return found
 end
 
+-- ★ EVERY plan_* BUILDER RETURNS A THIRD VALUE: A CODE (CART-0146). `why` is prose for
+-- a human; `code` is the same fact for a machine, and the reason it had to exist is that
+-- the two nil-cases below MEAN OPPOSITE THINGS and were indistinguishable without
+-- reading the sentence:
+--   'no-candidates'         the code offers no opportunity here. THIS IS AN ABSENCE —
+--                           an answer about the source, and the agent surface renders it
+--                           `absence = absent`.
+--   'no-node' / 'unsupported-language' / 'unparsable'
+--                           the INSTRUMENT could not look. A refusal: a property of the
+--                           tooling, never of the code, and rendering it as "nothing to
+--                           optimize" would be the absence-wearing-a-refusal's-clothes
+--                           defect this project keeps a ledger of.
+-- Additive by construction: every existing caller writes `local plan, why = ...` and
+-- never sees it. The alternative was for lua/cartograph/agent.lua to pattern-match the
+-- prose, which is exactly the report-scraping phase 2 refused to do.
+--
 --- Build a CSE-reuse plan for the focused fn: the CLEAN (non-hedged) redundant pairs
 --- whose reuse source is a single-assignment local, as txn token-replacements.
 --- `opts.line` (1-based) = TARGET a single finding — apply only the rewrite whose
 --- recompute is on that line (targeted refactoring); omit for all clean reuses in the fn.
 --- @return table? plan { verb, touched, generation, stamps, rel, reps, moves }
 --- @return string? why  (set when plan is nil)
+--- @return string? code 'no-candidates' | 'no-node' | 'unsupported-language' | 'unparsable'
 function M.plan_cse(store, fn_id, opts)
     opts = opts or {}
     local node = store.node and store.node(fn_id)
-    if not node or not node.file then return nil, 'no such node' end
+    if not node or not node.file then return nil, 'no such node', 'no-node' end
     local lang = lang_of(node.file)
-    if not lang then return nil, 'unsupported language' end
+    if not lang then return nil, 'unsupported language', 'unsupported-language' end
     local rel = node.file
     local cse = optimize.cse(store, fn_id)
     local rows = cse.rows
-    if #cse.redundant == 0 then return nil, 'no redundant computations' end
+    if #cse.redundant == 0 then return nil, 'no redundant computations', 'no-candidates' end
     -- names assigned exactly ONCE in the fn — safe to reference (never rebound)
     local defcount = {}
     for _, r in ipairs(rows) do for _, d in ipairs(r.def or {}) do defcount[d] = (defcount[d] or 0) + 1 end end
     local src = table.concat(store.content(node) or {}, '\n')
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
-    if not ok then return nil, 'cannot parse ' .. rel end
+    if not ok then return nil, 'cannot parse ' .. rel, 'unparsable' end
     local root = parser:parse()[1]:root()
     local srclines = vim.split(src, '\n', { plain = true })
 
@@ -276,14 +293,15 @@ end
 --- and the loop must not contain a nested function.
 --- @return table? plan
 --- @return string? why
+--- @return string? code  (see plan_cse: 'no-candidates' is an ABSENCE, the rest are refusals)
 function M.plan_localize(store, fn_id, opts)
     opts = opts or {}
     local node = store.node and store.node(fn_id)
-    if not node or not node.file then return nil, 'no such node' end
+    if not node or not node.file then return nil, 'no such node', 'no-node' end
     local lang = lang_of(node.file)
-    if not lang then return nil, 'unsupported language' end
+    if not lang then return nil, 'unsupported language', 'unsupported-language' end
     local loc = optimize.localize(store, fn_id)
-    if #loc.loops == 0 then return nil, 'no loops with global lookups' end
+    if #loc.loops == 0 then return nil, 'no loops with global lookups', 'no-candidates' end
     local flow = require 'cartograph.flow'
     local fl = flow.present(node) and flow.record(node)
     local bound = {}
@@ -291,7 +309,7 @@ function M.plan_localize(store, fn_id, opts)
     for _, r in ipairs((fl and fl.stmts) or {}) do for _, d in ipairs(r.def or {}) do bound[d] = true end end
     local src = table.concat(store.content(node) or {}, '\n')
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
-    if not ok then return nil, 'cannot parse' end
+    if not ok then return nil, 'cannot parse', 'unparsable' end
     local root = parser:parse()[1]:root()
     local srclines = vim.split(src, '\n', { plain = true })
 
@@ -373,12 +391,13 @@ local POSTISH = { repeat_statement = true, do_statement = true }
 --- so no zero-trip path gains a computation, and the moved statement is single-line.
 --- @return table? plan
 --- @return string? why
+--- @return string? code  (see plan_cse: 'no-candidates' is an ABSENCE, the rest are refusals)
 function M.plan_hoist(store, fn_id, opts)
     opts = opts or {}
     local node = store.node and store.node(fn_id)
-    if not node or not node.file then return nil, 'no such node' end
+    if not node or not node.file then return nil, 'no such node', 'no-node' end
     local res = optimize.hoist_plan(store, fn_id)
-    if #res.plans == 0 then return nil, 'no loop-invariant computations' end
+    if #res.plans == 0 then return nil, 'no loop-invariant computations', 'no-candidates' end
     local rows = res.rows
     local src = table.concat(store.content(node) or {}, '\n')
     local srclines = vim.split(src, '\n', { plain = true })
@@ -435,14 +454,15 @@ end
 --- adds no work on any path (no zero-trip, no nilability) — optimize.pre already gated
 --- pure + both-arms + operands-fixed-before. Only `hedged` (an aliasing table read) is
 --- refused. @return table? plan @return string? why
+--- @return string? code  (see plan_cse: 'no-candidates' is an ABSENCE, the rest are refusals)
 function M.plan_pre(store, fn_id, opts)
     opts = opts or {}
     local node = store.node and store.node(fn_id)
-    if not node or not node.file then return nil, 'no such node' end
+    if not node or not node.file then return nil, 'no such node', 'no-node' end
     local lang = lang_of(node.file)
-    if not lang then return nil, 'unsupported language' end
+    if not lang then return nil, 'unsupported language', 'unsupported-language' end
     local pre = optimize.pre(store, fn_id)
-    if #pre.hoists == 0 then return nil, 'no partial-redundancy candidates' end
+    if #pre.hoists == 0 then return nil, 'no partial-redundancy candidates', 'no-candidates' end
     local flow = require 'cartograph.flow'
     local fl = flow.present(node) and flow.record(node)
     local bound = {}
@@ -450,7 +470,7 @@ function M.plan_pre(store, fn_id, opts)
     for _, r in ipairs((fl and fl.stmts) or {}) do for _, d in ipairs(r.def or {}) do bound[d] = true end end
     local src = table.concat(store.content(node) or {}, '\n')
     local ok, parser = pcall(vim.treesitter.get_string_parser, src, lang)
-    if not ok then return nil, 'cannot parse' end
+    if not ok then return nil, 'cannot parse', 'unparsable' end
     local root = parser:parse()[1]:root()
     local srclines = vim.split(src, '\n', { plain = true })
 

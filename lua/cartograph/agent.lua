@@ -70,12 +70,39 @@
 -- 2 THE ANALYSIS CATALOGUE — seven more verbs, each ONE DISPATCH ENTRY over a
 --   function that already returns rows. What is NOT here, and why, is at the
 --   tail of this file; that list is part of the deliverable.
+--
+-- ── PHASE 3 ADDS THE WRITE AXIS, AND ITS ORDER IS ALSO THE POINT (CART-0146) ─
+-- plan → preview → journal → apply → undo, built and shippable in exactly that
+-- sequence: the first two write nothing and are useful alone (propose a refactor,
+-- show a human the diff, with no apply capability in existence), the journal is
+-- read before it can be added to, and the byte-moving pair comes last. A second
+-- CAPABILITY AXIS arrives with them — `mutates`, a fact about the HOST rather
+-- than the graph, refused by rule `read-only` unless mcpserve was started with
+-- --write. The write section below the catalogue holds the rest of the reasoning:
+-- why a plan is a HANDLE and not a document, why a ref caveat that is a note on
+-- the read side is a REFUSAL here, and what is deliberately not relaxed.
 
 local atr = require 'cartograph.at'
 local tiers = require 'cartograph.tier'
 
 local M = {}
 local NUL = vim.NIL
+
+--- THE HOST'S WRITE PERMISSION (CART-0146), and why it is a property of the HOST
+--- rather than of the graph. `needs_calls` asks a question about the CODE ("is
+--- there a call graph to read"); this asks one about the PROCESS ("was this
+--- server started with permission to edit the tree"). They are different axes and
+--- they refuse with different rules, because an agent's correct response differs:
+--- a thin index says re-open the root, a read-only host says the operator has not
+--- granted writes and no argument will change that.
+---
+--- DEFAULT FALSE, deliberately. tools/mcpserve.lua shipped in phase 1 as a READ
+--- surface, and every client already pointed at it would silently gain the power
+--- to rewrite the tree the day these verbs landed. `--write` is the same shape as
+--- `--index-only`: a documented mode that makes a capability refusal REACHABLE
+--- (CART-0580), which is why tests/agentwrite_spec.lua can drive it over the wire.
+M.WRITABLE = false
+function M.set_writable(on) M.WRITABLE = on and true or false end
 
 -- ── small helpers ───────────────────────────────────────────────────────────
 
@@ -237,9 +264,17 @@ end
 function M.graph(store)
     local gen = store.generation or 0
     local c = M._graph_cache
-    if c and c.gen == gen and c.store == store then return c.doc end
-    local doc = build_graph(store)
-    M._graph_cache = { gen = gen, store = store, doc = doc }
+    local doc
+    if c and c.gen == gen and c.store == store then
+        doc = c.doc
+    else
+        doc = build_graph(store)
+        M._graph_cache = { gen = gen, store = store, doc = doc }
+    end
+    -- `writable` is stamped on EVERY call, never inside build_graph: it is a fact
+    -- about the HOST, and the memo is keyed on the graph's generation, so freezing
+    -- it there would publish whatever the flag happened to be at the first answer.
+    doc.writable = M.WRITABLE
     return doc
 end
 
@@ -285,7 +320,12 @@ end
 -- for the list of what was skipped and why.
 local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_callees',
     'why', 'lint_run',
-    'clones_find', 'cone', 'ladder', 'territory', 'census', 'mentions', 'externals' }
+    'clones_find', 'cone', 'ladder', 'territory', 'census', 'mentions', 'externals',
+    -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
+    -- was built in: propose, diff, read the history, then write, then reverse.
+    'txn_plan_moveset', 'txn_plan_optimize', 'txn_preview',
+    'journal_list', 'journal_get',
+    'txn_apply', 'txn_undo' }
 
 local function v_graph_info(store)
     local rows = {}
@@ -295,8 +335,16 @@ local function v_graph_info(store)
         if v.needs_calls and not M.has_calls(store) then
             available, why = false, 'this graph has no call graph (index-only) — the verb refuses rather than answering "none"'
         end
+        -- THE WRITE PERMISSION IS A SECOND CAPABILITY AXIS (CART-0146), and it is
+        -- reported the same way the first one is. `needs_calls` is about the
+        -- GRAPH, `mutates` about the HOST — a verb can be unavailable for either
+        -- reason and an agent's next move differs, so they never merge into one
+        -- boolean.
+        if v.mutates and not M.WRITABLE then
+            available, why = false, 'this host was started read-only — the verb writes to the tree and refuses rather than doing it without permission'
+        end
         rows[#rows + 1] = { verb = name, summary = v.summary,
-            tier_basis = v.tier_basis,
+            tier_basis = v.tier_basis, mutates = v.mutates or false,
             -- CART-0581: WHICH QUANTIFIER produced the headline `tier`. Without
             -- it, `tier: inferred` from a floor verb and from a peak verb are
             -- the same string carrying opposite claims.
@@ -1216,6 +1264,598 @@ local function v_externals(store, args)
         evidence = { total = s.total, resolved = s.resolved } }, notes = notes }
 end
 
+-- ── PHASE 3: THE WRITE AXIS (CART-0146) ─────────────────────────────────────
+-- plan → preview → apply, plus the journal, over the two families the design
+-- already called agent-shaped: moveapply (move / extract-module) and optapply
+-- (cse / localize / hoist / pre).
+--
+-- ★ THE ORDER THE VERBS WERE BUILT IN IS THE ORDER THEY MAY BE TRUSTED IN, and
+-- the ticket fixed it: plan and preview WRITE NOTHING, so they ship first and are
+-- useful alone (propose a refactor, show a human the diff, no apply capability in
+-- existence). journal.list/get come second — read the history before being able
+-- to add to it. apply and undo come LAST.
+--
+-- ── WHY THERE IS A PLAN HANDLE AND NOT A PLAN DOCUMENT ──────────────────────
+-- A plan carries `edit_of`, a CLOSURE (txn.lua's plan protocol, CART-0375). It
+-- cannot cross a wire, and re-deriving it from a JSON copy would mean two
+-- implementations of the same edit — the exact seam where a preview stops
+-- describing the apply. So the plan STAYS IN THIS PROCESS and the caller holds an
+-- opaque id. Three consequences, all deliberate:
+--   * the handle is SESSION-scoped, like `id` and unlike `ref`. It dies with the
+--     server and it dies with the generation it was planned against.
+--   * `txn_preview` re-checks the generation ITSELF. txn.dryrun does not (only
+--     txn.delta and txn.verify do), so a stale plan would otherwise diff today's
+--     disk against yesterday's offsets and print a confident, wrong patch.
+--   * the registry is CAPPED. A server that runs for a week must not accumulate
+--     every plan anyone ever proposed; the oldest are dropped and an evicted id
+--     refuses by name rather than resolving to something else.
+--
+-- ── A CAVEAT-RESOLVE IS AN ANSWER ON THE READ SIDE AND A REFUSAL ON THIS ONE ─
+-- refs.resolve can land WITH a caveat: the witness drifted (the body changed),
+-- the definition appears renamed, or it was matched by ordinal. Phase 2 rides
+-- those as a `ref-caveat` NOTE, because a wrong answer is recoverable. Here they
+-- REFUSE (rule `ref-caveat`), and the argument is not caution for its own sake —
+-- txn.verify's ref rung ALREADY refuses on any resolve note (`if not rid or
+-- rid ~= spec.id or note`). Planning on a caveat therefore builds a plan that can
+-- only ever refuse at the last rung. Refusing at ADDRESS time surfaces the same
+-- inherited decision at the point the caller can still do something about it.
+--
+-- ── WHAT IS *NOT* RELAXED ───────────────────────────────────────────────────
+-- Nothing here re-implements the refusal ladder. `txn_apply` calls the FAMILY's
+-- own apply — moveapply.apply / optapply.apply — so generation match, refs
+-- resolving witness-clean, stamp CAS and no-dirty-buffers keep their single home
+-- in txn.verify, and optapply's extra span-CAS and parse-clean rungs come along
+-- for free. The families report their refusals as PROSE; that prose is carried
+-- VERBATIM under one rule (`apply-refused`) and is never parsed back into a
+-- taxonomy — scraping a message is the latent break phase 2 refused to ship.
+
+local PLAN_CAP = 16
+M._plans = {}
+local plan_seq = 0
+
+--- Hold a freshly built plan and hand back its opaque id.
+local function stash_plan(store, plan, family)
+    plan_seq = plan_seq + 1
+    local id = ('plan-%d'):format(plan_seq)
+    M._plans[id] = { id = id, seq = plan_seq, plan = plan, family = family,
+        gen = plan.generation or store.generation or 0,
+        root = (store.data or {}).root, previewed = false }
+    local live = {}
+    for _, e in pairs(M._plans) do live[#live + 1] = e end
+    if #live > PLAN_CAP then
+        table.sort(live, function (a, b) return a.seq < b.seq end)
+        for i = 1, #live - PLAN_CAP do M._plans[live[i].id] = nil end
+    end
+    return id
+end
+
+--- Look a handle up. Returns (entry) or (nil, refusal). THE THREE WAYS A HANDLE
+--- FAILS ARE THREE DIFFERENT RULES because the caller's next move differs: an
+--- unknown id means re-plan from scratch, a stale one means the graph moved under
+--- it, and a foreign one means this is not even the right project.
+local function held_plan(store, id)
+    local e = M._plans[id]
+    if not e then
+        return nil, refuse('unknown-plan',
+            ('no plan %q is held by this host — a plan handle is SESSION-scoped (it dies with the server) and only the %d most recent are kept'):format(tostring(id), PLAN_CAP),
+            'call txn_plan_moveset / txn_plan_optimize again and use the `plan` id from its `subject`')
+    end
+    if e.root ~= (store.data or {}).root then
+        return nil, refuse('foreign-plan',
+            ('plan %s was built against %s, and this host serves %s'):format(id, tostring(e.root), tostring((store.data or {}).root)),
+            'plan against the graph you mean to edit')
+    end
+    if e.gen ~= (store.generation or 0) then
+        return nil, refuse('stale-plan',
+            ('plan %s was computed against generation %d and this graph is at %d — every line offset in it may have moved'):format(id, e.gen, store.generation or 0),
+            'call the same txn_plan_* verb again against the current graph, preview the new plan, then apply that one')
+    end
+    return e
+end
+
+--- refs on the WRITE side. See the section comment: a caveat REFUSES here.
+local function resolve_write_ref(store, ref)
+    local id, why = store.resolve_ref(ref)
+    if not id then return nil, stale_ref(ref, why or 'missing') end
+    if why then
+        return nil, refuse('ref-caveat',
+            ('the ref %s::%s (%s) resolved only WITH A CAVEAT — %s — and a write is not planned on a handle that is merely probable: txn.verify refuses on the same caveat at apply time, so this plan could only ever fail at its last rung'):format(
+                tostring(ref.file), tostring(ref.name), tostring(ref.kind), why),
+            'take a fresh `ref` from a node_find / node_at row against the CURRENT graph and plan again; if you have checked the drift yourself, address by `node` id instead — passing an id asserts you looked',
+            { why = why })
+    end
+    return id
+end
+
+--- the node a write verb is about. Identical addressing to subject_node except
+--- for the caveat rule, which is the whole point of having a second function.
+local function write_subject(store, args)
+    if args.ref ~= nil and args.ref ~= NUL then
+        local id, bad = resolve_write_ref(store, args.ref)
+        if not id then return nil, bad end
+        local n = store.node(id)
+        if not n then return nil, stale_ref(args.ref, 'missing') end
+        return n
+    end
+    return subject_node(store, args)
+end
+
+--- THE LEDGER, ON EVERY PLAN ANSWER (the ticket: "keep `declined` in every
+--- result"). It rides as a NOTE rather than a new envelope field, because the
+--- envelope is phase 1's contract and a per-verb field would make it per-verb.
+--- The field is present even when it is EMPTY: a caller must never have to guess
+--- whether nothing was declined or the ledger was simply not filled in.
+---
+--- THE TWO FAMILIES SPELL IT DIFFERENTLY AND THIS SAYS SO. optapply keeps a
+--- `declined` list of {line, what, reason, class}; moveapply keeps `hazards`,
+--- strings naming what it will NOT rewrite. Both are "the part of the job this
+--- plan is not doing", and flattening one into the other would misreport which
+--- question was asked.
+local function ledger_notes(plan)
+    local out = {}
+    local dec = plan.declined
+    out[#out + 1] = { kind = 'declined', premise = 'per-site refusal ledger',
+        why = dec == nil
+            and ('%s keeps no per-site `declined` ledger — what it will not rewrite rides in `hazards` (the note below). The field is present and empty so its absence is never ambiguous.'):format(tostring(plan.verb))
+            or (#dec == 0
+                and 'nothing was declined: every candidate this verb considered is in the plan'
+                or ('%d site(s) were considered and DECLINED, each carrying the premise that stopped it'):format(#dec)),
+        evidence = { declined = dec or {} } }
+    if plan.hazards then
+        out[#out + 1] = { kind = 'hazards', premise = 'disclosed-not-rewritten',
+            why = #plan.hazards == 0
+                and 'no hazard: the plan rewrites everything it found'
+                or ('%d hazard(s) — what this plan does NOT rewrite and a human must handle'):format(#plan.hazards),
+            evidence = { hazards = plan.hazards } }
+    end
+    return out
+end
+
+--- lines added / removed between two file texts (`false` = the file is created).
+local function file_delta(before, after)
+    local b = before == false and '' or (before or '')
+    local a = after or b
+    if b == a then return 0, 0 end
+    local added, removed = 0, 0
+    for _, h in ipairs(vim.diff(b, a, { result_type = 'indices' }) or {}) do
+        removed = removed + h[2]
+        added = added + h[4]
+    end
+    return added, removed
+end
+
+local function creates_list(plan)
+    local out = {}
+    for rel in pairs(plan.creates or {}) do out[#out + 1] = rel end
+    table.sort(out)
+    return out
+end
+
+local function sorted_keys(t)
+    local out = {}
+    for k in pairs(t or {}) do out[#out + 1] = k end
+    table.sort(out)
+    return out
+end
+
+-- ── verb: txn_plan_moveset ──────────────────────────────────────────────────
+
+--- ★ THE SEED IS AN ARRAY, SO THE PHASE-2 GUARANTEE HAD TO BE EXTENDED
+--- ELEMENT-WISE. "Every verb that accepts an id accepts a ref" is easy for a
+--- single subject and easy to quietly drop for a list — and a list of symbols to
+--- MOVE is the single place where landing on the wrong same-named sibling does
+--- the most damage. Hence two typed arrays rather than one heterogeneous one:
+--- `seed` of ids and `seed_refs` of refs, unioned. A JSON Schema for "string OR
+--- object" is expressible but no longer publishable as one shape, and a
+--- schema-driven client would have to guess which arm it holds.
+local function v_txn_plan_moveset(store, args)
+    local ids, seen = {}, {}
+    for i, id in ipairs(args.seed or {}) do
+        if type(id) ~= 'string' then
+            return refuse('bad-seed',
+                ('seed[%d] is a %s — the `seed` array holds node ids (strings)'):format(i, type(id)),
+                'pass ids in `seed` and durable refs in `seed_refs`; the two are unioned')
+        end
+        if not store.node(id) then
+            return refuse('unknown-node',
+                ('seed[%d]: no node with id %q is in this graph'):format(i, id),
+                'ids are SESSION handles and die at the next edit — take fresh ones from node_find, or pass durable refs in `seed_refs`')
+        end
+        if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+    end
+    for i, ref in ipairs(args.seed_refs or {}) do
+        if type(ref) ~= 'table' or type(ref.file) ~= 'string'
+            or type(ref.name) ~= 'string' or type(ref.kind) ~= 'string' then
+            return refuse('bad-seed',
+                ('seed_refs[%d] is not a ref: {file, kind, name} must all be strings'):format(i),
+                'copy the `ref` field of a node_find / node_at row verbatim — do not build one')
+        end
+        local id, bad = resolve_write_ref(store, ref)
+        if not id then return bad end
+        if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+    end
+    if #ids == 0 then
+        return refuse('no-address',
+            'neither `seed` nor `seed_refs` named a symbol, so there is nothing to move',
+            'pass at least one node id in `seed` or one durable ref in `seed_refs`')
+    end
+    local moveapply = require 'cartograph.moveapply'
+    local plan, why = moveapply.plan_moveset(store, ids, args.dest)
+    if not plan then
+        return refuse('cannot-plan',
+            ('no move-set plan could be built for %s: %s'):format(tostring(args.dest), tostring(why)),
+            'the reason above is the verb\'s own; fix the premise it names and plan again')
+    end
+    local rows = {}
+    for _, m in ipairs(plan.moves) do
+        local row = noderow(store, m.id, { mode = m.mode,
+            moves_lines = { first = m.lines.s + 1, last = m.lines.e + 1 } })
+        rows[#rows + 1] = row or { id = m.id, name = m.name, file = m.file,
+            mode = m.mode, ref = NUL }
+    end
+    local pid = stash_plan(store, plan, 'move')
+    local notes = ledger_notes(plan)
+    -- ★ THE STAGING SIDE EFFECT, DISCLOSED RATHER THAN HIDDEN. plan_moveset does
+    -- not merely compute: it CLEARS the live move-set and re-stages its closure,
+    -- because apply's last rung compares the plan against exactly that state
+    -- (CART-0576). Two consequences a caller cannot see from the answer, so they
+    -- ride with it: a cockpit user's staged set is gone, and planning a SECOND
+    -- move-set makes the first held plan unapplyable (its stage-mismatch rung
+    -- fires — a refusal, never a wrong write). And per CART-0576 note 3 a plan
+    -- that refuses LATE clears the staging rather than restoring it; that defect
+    -- is someone else's and is not touched here.
+    notes[#notes + 1] = { kind = 'staged', premise = 'planning mutates the live move-set',
+        why = ('planning re-staged %d symbol(s) as the live move-set and set the destination to %s — apply compares the plan against that state, so planning ANOTHER move-set on this host makes plan %s unapplyable (it refuses with a stage mismatch; it never writes the wrong thing)'):format(#plan.moves, tostring(plan.dest), pid),
+        evidence = { staged = #plan.moves, dest = nn(plan.dest) } }
+    return {
+        subject = { plan = pid, verb = plan.verb, dest = nn(plan.dest),
+            touched = plan.touched, creates = creates_list(plan),
+            generation = plan.generation, previewed = false },
+        result = rows, notes = notes,
+    }
+end
+
+-- ── verb: txn_plan_optimize ─────────────────────────────────────────────────
+
+local OPT_KIND = { cse = 'plan_cse', localize = 'plan_localize',
+    hoist = 'plan_hoist', pre = 'plan_pre' }
+
+--- ★ WHERE THE ABSENT/REFUSED SPLIT ON THE WRITE SIDE COMES FROM. A builder that
+--- returns no plan means one of two opposite things — "this code offers no such
+--- opportunity" (an ABSENCE, a fact about the source) and "the instrument could
+--- not look here" (a REFUSAL, a fact about the tooling). They were previously
+--- distinguishable only by reading the prose, so optapply's builders now return a
+--- machine-readable `code` beside it and this branches on that, not on the words.
+local function v_txn_plan_optimize(store, args)
+    local n, bad = write_subject(store, args)
+    if not n then return bad end
+    local optapply = require 'cartograph.optapply'
+    local opts = {}
+    if args.target_line ~= nil then opts.line = math.floor(tonumber(args.target_line) or 0) end
+    local node_row = noderow(store, n.id)
+    local plan, why, code = optapply[OPT_KIND[args.kind]](store, n.id, opts)
+    if not plan then
+        if code == 'no-candidates' then
+            return {
+                subject = { plan = NUL, kind = args.kind, node = node_row,
+                    verb = 'optimize-' .. args.kind },
+                result = {}, absence = 'absent',
+                absence_why = { premise = 'no-candidates',
+                    why = ('%s: %s in %s — the analysis ran and the code offers no such opportunity'):format(args.kind, tostring(why), tostring(n.name)),
+                    evidence = { node = n.id, code = code } },
+                notes = { { kind = 'declined', premise = 'per-site refusal ledger',
+                    why = 'no plan was built, so no site could be declined: the ledger is empty because there were no candidates, not because nothing was recorded',
+                    evidence = { declined = {} } } },
+            }
+        end
+        return refuse('cannot-plan',
+            ('%s cannot be planned for %s: %s'):format(args.kind, tostring(n.name), tostring(why)),
+            'this is a property of the INSTRUMENT, not of the code — the reason names which premise (an unknown node, a language with no spec, a source that would not parse)',
+            { code = nn(code), node = n.id })
+    end
+    local notes = ledger_notes(plan)
+    if #(plan.moves or {}) == 0 then
+        -- candidates existed and EVERY ONE was declined. That is `refused`, and
+        -- the ledger is its evidence rather than a note only.
+        return {
+            subject = { plan = NUL, kind = args.kind, node = node_row, verb = plan.verb },
+            result = {}, absence = 'refused',
+            absence_why = { premise = 'every-candidate-declined',
+                why = ('%d candidate(s) were found in %s and every one was declined — this is a refusal by the verb\'s own soundness gates, NOT an absence of opportunities in the code'):format(#(plan.declined or {}), tostring(n.name)),
+                evidence = { declined = plan.declined or {} } },
+            notes = notes,
+        }
+    end
+    local rows = {}
+    for _, m in ipairs(plan.moves) do
+        local row = { file = plan.rel }
+        for k, v in pairs(m) do row[k] = v end
+        rows[#rows + 1] = row
+    end
+    local pid = stash_plan(store, plan, 'optimize')
+    return {
+        subject = { plan = pid, kind = args.kind, verb = plan.verb, node = node_row,
+            touched = plan.touched, generation = plan.generation, previewed = false },
+        result = rows, notes = notes,
+    }
+end
+
+-- ── verb: txn_preview ───────────────────────────────────────────────────────
+
+--- ★ WHAT A GREEN PREVIEW DOES AND DOES NOT ASSERT (CART-0153 is the ticket that
+--- owns this properly; this is the honest disclosure the write verbs need before
+--- it lands). A preview is itself a PROJECTION, and a machine cannot see that a
+--- diff was quietly partial. Two facts therefore ride on every preview: the bytes
+--- come from THE SAME `plan.edit_of` the apply runs, so this is not a second
+--- simulation that could drift from the first — and the apply still has four
+--- late-bound rungs AFTER this diff, any of which may refuse.
+local function preview_coverage_note()
+    return { kind = 'preview-coverage', premise = 'the diff is a projection and has coverage',
+        why = 'these bytes come from the SAME edit callback the apply runs (plan.edit_of), read off the CURRENT disk — a preview cannot drift from the apply because there is only one implementation. WHAT IT DOES NOT ASSERT: the apply runs four late-bound rungs after this diff (the graph generation still matches, every ref still resolves witness-clean, each file\'s stamp is unchanged, no buffer holds unsaved edits) and any of them may still refuse; and nothing here claims the result compiles, passes tests, or preserves behaviour.',
+        evidence = { source = 'plan.edit_of',
+            late_bound_rungs = { 'generation', 'refs-witness-clean', 'stamp-cas', 'no-dirty-buffers' } } }
+end
+
+local function v_txn_preview(store, args)
+    local e, bad = held_plan(store, args.plan)
+    if not e then return bad end
+    local txn = require 'cartograph.txn'
+    local before, after, err = txn.dryrun(store, e.plan)
+    if not before then
+        -- txn.dryrun reports its reason in the 2nd slot for a containment refusal
+        -- and in the 3rd for the others; both are prose, carried verbatim
+        local reason = err or (type(after) == 'string' and after) or 'the dry run produced nothing'
+        return refuse('preview-refused',
+            ('plan %s could not be dry-run: %s'):format(e.id, tostring(reason)),
+            'the reason is the transaction layer\'s own; re-plan once its premise holds')
+    end
+    e.previewed = true
+    local rows = {}
+    for _, rel in ipairs(e.plan.touched) do
+        local b, a = before[rel], after[rel]
+        if a ~= nil then
+            local added, removed = file_delta(b, a)
+            if added + removed > 0 then
+                rows[#rows + 1] = { file = rel, created = (b == false),
+                    added = added, removed = removed,
+                    diff = txn.difftext({ [rel] = b }, { [rel] = a }, { rel }) }
+            end
+        end
+    end
+    local notes = ledger_notes(e.plan)
+    notes[#notes + 1] = preview_coverage_note()
+    local subject = { plan = e.id, verb = e.plan.verb, touched = e.plan.touched,
+        creates = creates_list(e.plan), generation = e.gen, previewed = true }
+    if #rows == 0 then
+        return { subject = subject, result = {}, absence = 'absent',
+            absence_why = { premise = 'no-textual-change',
+                why = ('plan %s ran over %d file(s) and every one came back byte-identical — the plan is well-formed and would write nothing'):format(e.id, #e.plan.touched),
+                evidence = { touched = e.plan.touched } },
+            notes = notes }
+    end
+    return { subject = subject, result = rows, notes = notes }
+end
+
+-- ── verb: journal_list ──────────────────────────────────────────────────────
+
+--- METADATA ONLY, AND THAT IS A DESIGN DECISION, NOT A CLIP. A journal entry
+--- holds every touched file's FULL before- and after-text — that is what makes
+--- undo byte-exact — so listing them whole would put a copy of the working tree
+--- on the wire for a question that asked "what happened here". journal_get serves
+--- one entry's diff when a caller actually wants the bytes.
+local function v_journal_list(store, args)
+    local journal = require 'cartograph.journal'
+    local root = (store.data or {}).root
+    local entries = journal.list(root)
+    local limit = math.floor(tonumber(args.limit) or 25)
+    local want = args.status
+    if want == '' then want = nil end
+    local undo_target
+    for _, e in ipairs(entries) do
+        if e.status == 'applied' then undo_target = e.id break end
+    end
+    local rows, matched, clipped = {}, 0, 0
+    for _, e in ipairs(entries) do
+        if not want or e.status == want then
+            matched = matched + 1
+            if #rows < limit then
+                rows[#rows + 1] = { id = e.id, ts = nn(e.ts),
+                    when = os.date('%Y-%m-%dT%H:%M:%S', e.ts or 0),
+                    verb = nn(e.verb), status = nn(e.status),
+                    files = sorted_keys(e.files),
+                    abort_reason = nn(e.abort_reason),
+                    -- the ONE entry txn_undo would roll back, marked, so a caller
+                    -- does not have to re-derive journal.last's rule
+                    undoable = (e.id == undo_target) }
+            else clipped = clipped + 1 end
+        end
+    end
+    local notes = { { kind = 'metadata-only', premise = 'what these rows omit',
+        why = 'these rows carry no file CONTENT: a journal entry holds the full before- and after-text of every file it touched (that is what makes undo byte-exact), and shipping it here would put a copy of the tree on the wire. Call journal_get with an `id` for one entry\'s diff.',
+        evidence = { entries = #entries } } }
+    if clipped > 0 then
+        notes[#notes + 1] = { kind = 'clipped', premise = 'limit',
+            why = ('%d further entr(ies) matched and were not returned (limit %d)'):format(clipped, limit),
+            evidence = { matched = matched, limit = limit } }
+    end
+    if #rows == 0 then
+        if want and #entries > 0 then
+            return { result = {}, absence = 'absent',
+                absence_why = { premise = 'no-entry-with-that-status',
+                    why = ('%d journal entr(ies) exist for this root and none has status %q'):format(#entries, tostring(want)),
+                    evidence = { entries = #entries, status = want } },
+                notes = notes }
+        end
+        return { result = {}, absence = 'absent',
+            absence_why = { premise = 'no-transactions',
+                why = ('no transaction has ever been journalled for %s — the journal is empty, which is a fact about this root\'s history and not about the instrument'):format(tostring(root)),
+                evidence = { root = nn(root) } },
+            notes = notes }
+    end
+    return { result = rows, notes = notes }
+end
+
+-- ── verb: journal_get ───────────────────────────────────────────────────────
+
+local function v_journal_get(store, args)
+    local journal = require 'cartograph.journal'
+    local root = (store.data or {}).root
+    local all = journal.list(root)
+    local target
+    for _, e in ipairs(all) do
+        if e.id == args.id then target = e break end
+    end
+    if not target then
+        return refuse('unknown-entry',
+            ('no journal entry %q for %s (%d entr(ies) recorded)'):format(tostring(args.id), tostring(root), #all),
+            'call journal_list and use an `id` from one of its rows')
+    end
+    local txn = require 'cartograph.txn'
+    local rows, nodiff = {}, {}
+    for _, rel in ipairs(sorted_keys(target.files)) do
+        local f = target.files[rel] or {}
+        -- NOT `f.absent and false or f.before`: `x and false or y` is ALWAYS y in
+        -- Lua, so a CREATED file's before-text came back nil and its diff was
+        -- silently null — the one row a caller most wants to see. The journal's
+        -- `false` means "this file did not exist", which is a value, not a flag.
+        local b
+        if f.absent then b = false else b = f.before end
+        local row = { file = rel, created = f.absent or false,
+            before_hash = nn(f.before_hash), after_hash = nn(f.after_hash),
+            diff = NUL, added = NUL, removed = NUL }
+        if f.after ~= nil and b ~= nil then
+            row.diff = txn.difftext({ [rel] = b }, { [rel] = f.after }, { rel })
+            row.added, row.removed = file_delta(b, f.after)
+        else
+            nodiff[#nodiff + 1] = rel
+        end
+        rows[#rows + 1] = row
+    end
+    local notes = {}
+    if #nodiff > 0 then
+        -- an entry with no after-content is not a broken record: `pending` and
+        -- `aborted` entries exist precisely so a crash mid-apply leaves evidence.
+        -- Saying WHICH of the two shapes this is beats a null with no explanation.
+        notes[#notes + 1] = { kind = 'no-after-content', premise = 'the entry never committed',
+            why = ('%d file(s) have no after-content, so no diff exists for them — the entry is %s (a pending or aborted entry keeps its BEFORE content, which is what a manual rollback needs), or it predates after-content records'):format(#nodiff, tostring(target.status)),
+            evidence = { files = nodiff, status = nn(target.status) } }
+    end
+    local subject = { journal = target.id, verb = nn(target.verb),
+        status = nn(target.status), ts = nn(target.ts),
+        when = os.date('%Y-%m-%dT%H:%M:%S', target.ts or 0),
+        -- the journal calls this field `plan`; it is surfaced as `desc` because
+        -- on THIS surface `subject.plan` already means a live plan HANDLE, and
+        -- two different things under one name is how a caller applies the wrong
+        -- one. It is the apply's own description of what it did (refs, never
+        -- ids — the journal's rule), kept verbatim.
+        desc = nn(target.plan), abort_reason = nn(target.abort_reason) }
+    if #rows == 0 then
+        return { subject = subject, result = {}, absence = 'absent',
+            absence_why = { premise = 'entry-touched-no-file',
+                why = ('journal entry %s records no touched file'):format(target.id),
+                evidence = { id = target.id } }, notes = notes }
+    end
+    return { subject = subject, result = rows, notes = notes }
+end
+
+-- ── verb: txn_apply ─────────────────────────────────────────────────────────
+
+--- ★ APPLY WILL NOT WRITE A PLAN NOBODY HAS LOOKED AT. The design's flow is
+--- declare → PREVIEW → hazard → confirm → apply, and on a machine transport the
+--- preview step is the only thing standing between "an agent proposed an edit"
+--- and "an agent made one". Requiring the same handle to have been through
+--- txn_preview costs one call and turns the human-facing convention into an
+--- enforced precondition. It is the ONLY precondition added here; the four
+--- late-bound rungs are the family's and are untouched.
+local function v_txn_apply(store, args)
+    local e, bad = held_plan(store, args.plan)
+    if not e then return bad end
+    if not e.previewed then
+        return refuse('unpreviewed',
+            ('plan %s has never been diffed — txn_apply does not write bytes no caller has seen'):format(e.id),
+            'call txn_preview with this same plan id, read the diff it returns, then call txn_apply again')
+    end
+    local entry, why
+    if e.family == 'move' then
+        entry, why = require('cartograph.moveapply').apply(store, e.plan)
+    else
+        local okA, ent_or_why = require('cartograph.optapply').apply(store, e.plan)
+        if okA then entry = ent_or_why else why = tostring(ent_or_why) end
+    end
+    if not entry then
+        return refuse('apply-refused',
+            ('plan %s was NOT applied: %s'):format(e.id, tostring(why)),
+            'nothing was written. The reason is the verb\'s own, from the late-bound ladder every apply runs (the graph generation still matches, every ref still resolves witness-clean, each file\'s stamp is unchanged, no buffer holds unsaved edits) — satisfy the premise it names and plan again',
+            { plan = e.id, verb = e.plan.verb })
+    end
+    -- CONSUMED. An applied plan describes a tree that no longer exists; leaving
+    -- the handle live would let a caller apply the same edit twice, and the
+    -- second one would be caught by a stamp CAS rather than by its own name.
+    M._plans[e.id] = nil
+    local rows = {}
+    for _, rel in ipairs(sorted_keys(entry.files)) do
+        local f = entry.files[rel] or {}
+        local b -- see journal_get: `f.absent and false or f.before` is a Lua trap
+        if f.absent then b = false else b = f.before end
+        local added, removed = file_delta(b, f.after)
+        rows[#rows + 1] = { file = rel, created = f.absent or false,
+            added = added, removed = removed }
+    end
+    local notes = ledger_notes(e.plan)
+    notes[#notes + 1] = { kind = 'undo', premise = 'this write is reversible',
+        why = ('journal entry %s holds every touched file\'s exact before-content; txn_undo restores them byte-for-byte, and refuses if any of them has changed since'):format(entry.id),
+        evidence = { journal = entry.id } }
+    return {
+        subject = { plan = e.id, journal = entry.id, verb = nn(entry.verb),
+            status = nn(entry.status), touched = sorted_keys(entry.files) },
+        result = rows, notes = notes,
+    }
+end
+
+-- ── verb: txn_undo ──────────────────────────────────────────────────────────
+
+local function v_txn_undo(store)
+    local journal = require 'cartograph.journal'
+    local root = (store.data or {}).root
+    local entry, why = journal.rollback(root)
+    if not entry then
+        return refuse('undo-refused',
+            ('nothing was restored: %s'):format(tostring(why)),
+            'the journal refuses a rollback that would clobber edits made since the apply — inspect the entry with journal_get, reconcile the drifted files yourself, and the entry stays available')
+    end
+    local touched = sorted_keys(entry.files)
+    local notes = {}
+    -- the graph must be re-read or every later answer describes bytes that are
+    -- no longer on disk; a refusal here is reported, never swallowed
+    local okr, rok, rwhy = pcall(require('cartograph.refresh').files, touched)
+    if not okr or not rok then
+        notes[#notes + 1] = { kind = 'stale-graph', premise = 'files restored, graph not re-read',
+            why = ('the files are restored on disk but the graph refresh refused (%s) — every answer from this host now describes the PRE-undo bytes until the graph is re-read'):format(tostring(okr and rwhy or rok)),
+            evidence = { files = touched } }
+    end
+    local rows = {}
+    for _, rel in ipairs(touched) do
+        local f = entry.files[rel] or {}
+        rows[#rows + 1] = { file = rel,
+            restored = f.absent and 'deleted' or 'before-content',
+            -- an apply that CREATED the file undoes to its deletion, never to an
+            -- empty husk (journal.lua's own rule, surfaced so a caller sees it)
+            created_by_the_apply = f.absent or false }
+    end
+    if #rows == 0 then
+        return { subject = { journal = entry.id, verb = nn(entry.verb) },
+            result = {}, absence = 'absent',
+            absence_why = { premise = 'entry-touched-no-file',
+                why = ('journal entry %s was rolled back and recorded no touched file'):format(entry.id),
+                evidence = { id = entry.id } }, notes = notes }
+    end
+    return {
+        subject = { journal = entry.id, verb = nn(entry.verb),
+            status = nn(entry.status), touched = touched },
+        result = rows, notes = notes,
+    }
+end
+
 -- ── THE VERB TABLE ──────────────────────────────────────────────────────────
 -- `absences` lists the absence values a verb can actually produce. It is
 -- documentation an agent can read, and it is a standing question to the next
@@ -1384,9 +2024,125 @@ M.VERBS = {
         },
         run = v_externals,
     },
+
+    -- ── the write axis (CART-0146) ──────────────────────────────────────────
+    -- EVERY ONE OF THESE IS tier_basis='observation', AND THAT IS THE HONEST
+    -- ANSWER RATHER THAN A DEFAULT. A plan's rows are PROPOSED EDITS read off the
+    -- parse — a line, a span, a name — so no rung on tier.LADDER applies and
+    -- `tier` is always null, meaning "this question has no rung". The write
+    -- side's honesty is carried by two other things instead: the `declined` /
+    -- `hazards` ledger on every plan answer, and the late-bound refusal ladder
+    -- the apply runs. CART-0143's "a verb with no honest tier stays out of T3"
+    -- fork does NOT fire here: these verbs have a tier_basis that fits, and it is
+    -- the one that says a rung would be invented.
+
+    txn_plan_moveset = {
+        summary = 'PROPOSE moving symbols to another file (or into a new one — an existing dest is a MOVE, a path that does not exist yet is an EXTRACT-MODULE). Writes nothing: returns a plan handle for txn_preview',
+        tier_basis = 'observation', needs_calls = true,
+        -- never empty: the seed is caller-supplied and every way of having no
+        -- symbol to move is a refusal (unknown id, stale ref, no address), so an
+        -- absence value listed here would be one no branch can emit.
+        absences = {},
+        args = {
+            { name = 'seed', type = 'array', items = 'string',
+                desc = 'node ids to move (from a node_find / node_at row, this graph generation only)' },
+            { name = 'seed_refs', type = 'array', items_shape = 'ref',
+                desc = 'or the DURABLE refs from the same rows; unioned with `seed`. A ref that no longer resolves REFUSES (`stale-ref`), and one that resolves only WITH A CAVEAT also refuses (`ref-caveat`) — on the write side a probable handle is not good enough' },
+            { name = 'dest', type = 'string', required = true,
+                desc = 'destination path, relative to the graph root. An existing file = MOVE; a new path = EXTRACT-MODULE. A path escaping the root is refused' },
+        },
+        run = v_txn_plan_moveset,
+    },
+    txn_plan_optimize = {
+        summary = 'PROPOSE an optimizer rewrite inside one function (cse | localize | hoist | pre). Writes nothing: returns a plan handle for txn_preview, plus the per-site `declined` ledger',
+        tier_basis = 'observation', needs_calls = true,
+        -- `absent`  the analysis ran and the code offers no candidate
+        -- `refused` candidates existed and every one failed a soundness gate
+        -- and NOT 'frontier'/'unavailable': an unparsable source or a language
+        -- with no spec is a REFUSAL here (rule `cannot-plan`), because it is a
+        -- property of the instrument that must not read as "nothing to do".
+        absences = { 'absent', 'refused' },
+        args = (function ()
+            local a = {
+                { name = 'kind', type = 'string', required = true,
+                    enum = { 'cse', 'localize', 'hoist', 'pre' },
+                    desc = 'cse = reuse a redundant computation; localize = bind an in-loop global to a local; hoist = lift a loop-invariant statement; pre = hoist a computation common to both arms of an exhaustive if/else' },
+                { name = 'target_line', type = 'integer',
+                    desc = 'target ONE finding or loop by its 1-based line (omit for every clean candidate in the function). NOT the same as `line`, which addresses the FUNCTION' },
+            }
+            for _, x in ipairs(ADDRESS) do a[#a + 1] = x end
+            return a
+        end)(),
+        run = v_txn_plan_optimize,
+    },
+    txn_preview = {
+        summary = 'the exact diff a held plan would write, per file, and nothing written — the same edit callback the apply runs',
+        tier_basis = 'observation',
+        -- `absent` = a well-formed plan whose edits produce no textual change.
+        absences = { 'absent' },
+        args = {
+            { name = 'plan', type = 'string', required = true,
+                desc = 'a plan handle from a txn_plan_* answer\'s `subject.plan` (session-scoped: it dies with this host and with the graph generation it was planned against)' },
+        },
+        run = v_txn_preview,
+    },
+    journal_list = {
+        summary = 'the transaction history for this root, newest first — metadata only (id, when, verb, status, files); journal_get serves the bytes',
+        tier_basis = 'observation',
+        absences = { 'absent' },
+        args = {
+            { name = 'limit', type = 'integer', desc = 'max entries (default 25); a clip is reported as a note' },
+            { name = 'status', type = 'string',
+                enum = { 'pending', 'applied', 'aborted', 'rolled_back' },
+                desc = 'restrict to entries in this state' },
+        },
+        run = v_journal_list,
+    },
+    journal_get = {
+        summary = 'one journal entry in full: its per-file diff, hashes and status — what a transaction actually did',
+        tier_basis = 'observation',
+        absences = { 'absent' },
+        args = {
+            { name = 'id', type = 'string', required = true, desc = 'an `id` from a journal_list row' },
+        },
+        run = v_journal_get,
+    },
+    txn_apply = {
+        summary = 'WRITE a held plan to disk, journalled and reversible. Refuses unless the plan has been through txn_preview, and runs the full late-bound ladder before any byte moves',
+        tier_basis = 'observation', needs_calls = true, mutates = true,
+        -- never empty on success: an applied plan touched at least one file.
+        absences = {},
+        args = {
+            { name = 'plan', type = 'string', required = true,
+                desc = 'the same plan handle txn_preview was called with' },
+        },
+        run = v_txn_apply,
+    },
+    txn_undo = {
+        summary = 'roll back the newest applied transaction, restoring every touched file byte-exact — and REFUSE the whole rollback if any of them has changed since',
+        tier_basis = 'observation', mutates = true,
+        absences = { 'absent' },
+        args = {},
+        run = v_txn_undo,
+    },
 }
 
 M.ORDER = ORDER
+
+--- the JSON Schema fragment for a durable ref, in ONE place: it is published
+--- both as a scalar argument (`ref`) and as an array's items (`seed_refs`).
+function M.ref_schema()
+    return {
+        properties = {
+            file = { type = 'string', description = 'the file the definition was in when the ref was minted' },
+            kind = { type = 'string', description = 'node kind (function, method, var, …)' },
+            name = { type = 'string', description = 'the definition name' },
+            ordinal = { type = 'integer', description = 'which same-named sibling, when there were several' },
+            witness = { type = 'string', description = 'behaviour hash — follows a rename, and drifts when the body changes' },
+        },
+        required = { 'file', 'kind', 'name' },
+    }
+end
 
 --- MCP inputSchema for a verb (JSON Schema draft-07 object).
 function M.schema(verb)
@@ -1400,15 +2156,14 @@ function M.schema(verb)
         -- A REF IS A SHAPE, NOT A BLOB. Publishing its five fields is what lets
         -- a schema-driven client hand back the `ref` it was given, unedited,
         -- instead of reducing it to a string and inventing a parser for it.
+        -- `items_shape` is the same fact one level down: a write verb's SEED is
+        -- an array of refs, and an array whose items are an untyped object would
+        -- undo exactly that guarantee for the case that matters most.
         if a.shape == 'ref' then
-            p.properties = {
-                file = { type = 'string', description = 'the file the definition was in when the ref was minted' },
-                kind = { type = 'string', description = 'node kind (function, method, var, …)' },
-                name = { type = 'string', description = 'the definition name' },
-                ordinal = { type = 'integer', description = 'which same-named sibling, when there were several' },
-                witness = { type = 'string', description = 'behaviour hash — follows a rename, and drifts when the body changes' },
-            }
-            p.required = { 'file', 'kind', 'name' }
+            for k, v2 in pairs(M.ref_schema()) do p[k] = v2 end
+        elseif a.items_shape == 'ref' then
+            p.items = M.ref_schema()
+            p.items.type = 'object'
         end
         props[a.name] = p
         if a.required then req[#req + 1] = a.name end
@@ -1493,6 +2248,17 @@ function M.answer(store, verb, args)
         return d, 'refusal'
     end
 
+    -- PERMISSION BEFORE CAPABILITY, and the order is the point (CART-0146). A
+    -- read-only host refuses a write verb whatever the graph looks like, so
+    -- asking about the call graph first would answer a question the caller is not
+    -- allowed to reach — and `thin-index`'s remedy ("reopen the root without
+    -- --index-only") would send them down a road that ends in this refusal anyway.
+    if v.mutates and not M.WRITABLE then
+        return refusal { rule = 'read-only',
+            reason = ('%s writes to the tree, and this host was started without write permission — nothing was planned, diffed or written'):format(verb),
+            remedy = 'start the host with --write (nvim --headless -u NONE -l tools/mcpserve.lua <root> --write). Planning and previewing need no permission: txn_plan_* and txn_preview answer on a read-only host, so a proposal and its diff can be produced and reviewed before anyone grants the power to apply it' }
+    end
+
     -- CAPABILITY, in ONE place. A verb that needs the call graph must never be
     -- allowed to answer "none" off a graph that has none.
     if v.needs_calls and not M.has_calls(store) then
@@ -1524,7 +2290,13 @@ function M.answer(store, verb, args)
     for _, r in ipairs(result) do
         if type(r) == 'table' then attach_refs(store, r.members) end
     end
-    if type(res.subject) == 'table' then attach_refs(store, { res.subject }) end
+    if type(res.subject) == 'table' then
+        attach_refs(store, { res.subject })
+        -- a write verb's subject is the PLAN, and the node it is about hangs one
+        -- level in — so the durable handle reaches it too, and a caller can
+        -- re-address the same function after the apply changed the ids
+        if type(res.subject.node) == 'table' then attach_refs(store, { res.subject.node }) end
+    end
 
     -- ── THE INVARIANT, ENFORCED (not merely documented) ────────────────────
     -- Exactly one side of the tier/absence axis exists at a time, and an empty
@@ -1585,5 +2357,29 @@ end
 -- The distinction matters: `classify` is skipped because wrapping it would be a
 -- fabrication, the other three because the sitting ran out. Only the first is a
 -- statement about the code.
+--
+-- ── AND ON THE WRITE AXIS (CART-0146) ───────────────────────────────────────
+--   txn_redo        journal.redo is shipped and :CartographRedo drives it. The
+--                   ticket names apply + undo, and a redo verb is one dispatch
+--                   entry away — left out for scope, not for honesty. Note that
+--                   its refusal shape differs from undo's (it checks
+--                   BEFORE-content, and refuses an entry that predates
+--                   after-records), so it deserves its own spec rather than a
+--                   copy of undo's.
+--   clone-merge     clonemerge/cloneextract are a third apply family and ride the
+--                   same txn substrate, so the plan handle and txn_preview /
+--                   txn_apply already fit them unchanged. Only their PLAN verb is
+--                   missing; adding it is one entry plus its absence taxonomy.
+--   the `copy` set  moveapply's extract-module takes an opts.copy set (duplicate
+--                   rather than move). Not exposed: it is an extract-only option
+--                   that the MOVE branch refuses, so publishing it needs the
+--                   verb-dependent-argument shape none of these schemas have yet,
+--                   and a silently-ignored argument would be worse than none.
+--   txn_clear       abandoning a staged transaction is a cockpit affordance
+--                   (:CartographTxnClear) over store.set_txn, and these verbs do
+--                   not use the store's staged-txn slot at all — the plan
+--                   registry here is separate on purpose (see stash_plan). There
+--                   is nothing for an agent to clear that dropping the handle
+--                   does not already do.
 
 return M

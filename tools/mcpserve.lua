@@ -39,17 +39,30 @@ local repo = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h:h')
 vim.opt.rtp:prepend(vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter'))
 package.path = repo .. '/lua/?.lua;' .. repo .. '/lua/?/init.lua;' .. package.path
 
-local root, index_only
+local root, index_only, writable
 for i = 1, #arg do
     if arg[i] == '--index-only' then index_only = true
+    elseif arg[i] == '--write' then writable = true
     elseif not root then root = arg[i] end
 end
 if not root then
-    io.stderr:write('usage: mcpserve <root> [--index-only]\n')
+    io.stderr:write('usage: mcpserve <root> [--index-only] [--write]\n')
     os.exit(2)
 end
 
 local agent = require 'cartograph.agent'
+-- ── --write: THE PERMISSION, AND ITS DEFAULT IS OFF (CART-0146) ─────────────
+-- This host shipped as a READ surface. The write verbs (txn_apply, txn_undo)
+-- would otherwise hand every client already pointed at it the power to rewrite
+-- the tree without the operator ever saying so — a capability nobody asked for
+-- is not a feature. Read-only is the default, and the refusal is REACHABLE the
+-- same way --index-only made `thin-index` reachable: txn_apply on a plain server
+-- answers with rule `read-only`, driven over the wire in tests/agentwrite_spec.
+--
+-- PLANNING AND PREVIEWING NEED NO PERMISSION, which is the whole shape of the
+-- ticket's build order: a read-only host still proposes a refactor and prints
+-- the exact diff it would write. Only the byte-moving half is gated.
+agent.set_writable(writable or false)
 local store = require 'cartograph.store'
 local ts = require 'cartograph.providers.treesitter'
 
@@ -61,8 +74,9 @@ if not ok then
 end
 data.root = data.root or root
 store.ingest(data)
-io.stderr:write(('cartograph mcpserve: %s (%d nodes%s)\n')
-    :format(root, #(data.nodes or {}), index_only and ', index-only' or ''))
+io.stderr:write(('cartograph mcpserve: %s (%d nodes%s%s)\n')
+    :format(root, #(data.nodes or {}), index_only and ', index-only' or '',
+        writable and ', WRITABLE' or ', read-only'))
 
 -- ── newline-delimited JSON-RPC 2.0 over stdio ───────────────────────────
 local function write_message(obj)
@@ -92,13 +106,21 @@ local function tools_list()
         -- catalogue, because `tier` carries OPPOSITE semantics on the two agent
         -- surfaces (CART-0581) and a client that never calls graph_info would
         -- otherwise read a floor headline as a peak one.
+        -- A GATED VERB IS ADVERTISED, NOT HIDDEN. Dropping txn_apply from the
+        -- list on a read-only host would render the permission as SILENCE, which
+        -- is the defect class this whole surface exists to avoid: the client
+        -- would conclude the capability does not exist rather than that it is not
+        -- granted. It is listed, and its description says which it is.
+        local w = v.mutates and (agent.WRITABLE
+            and ' THIS VERB WRITES TO THE TREE (journalled; txn_undo reverses it).'
+            or ' THIS VERB WRITES TO THE TREE and this host is READ-ONLY: every call REFUSES with rule `read-only`. Planning and previewing still work — start the host with --write to enable it.') or ''
         local q = v.tier_headline and (', tier_headline=' .. v.tier_headline .. ' (the headline `tier` is the '
             .. (v.tier_headline == 'floor'
                 and 'WEAKEST rung in the list — the answer is only as good as its shakiest row'
                 or 'STRONGEST rung in the list — one witness decides') .. ')') or ''
         out[#out + 1] = { name = name, inputSchema = agent.schema(name),
-            description = ('%s. Answers carry the envelope: an EMPTY result always names its absence (absent|refused|frontier|unavailable) — never a bare list. tier_basis=%s%s.')
-                :format(v.summary, v.tier_basis, q) }
+            description = ('%s. Answers carry the envelope: an EMPTY result always names its absence (absent|refused|frontier|unavailable) — never a bare list. tier_basis=%s%s.%s')
+                :format(v.summary, v.tier_basis, q, w) }
     end
     return { tools = out }
 end
