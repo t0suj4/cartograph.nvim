@@ -1063,6 +1063,12 @@ M.ENTRY_POINTS = {
     -- supplies the corpus, so nothing changed for anyone who did not ask.
     { at = 'lua/cartograph/commands/lint.lua',  supplies = 'corpus | frame',
       natural = "the browser's current frame subject — WIRED" },
+    -- the AGENT surface (T3, CART-0144). It passes `only` (a RULE filter) and,
+    -- when the caller named a file, filters the FINDINGS after the run. That is a
+    -- display slice, NOT a cut: every rule still searched the corpus it declares,
+    -- so no promise rule is clipped and "no findings in x.lua" stays corpus-closed.
+    { at = 'lua/cartograph/agent.lua',          supplies = 'corpus',
+      natural = 'corpus; a `file` argument filters the OUTPUT, it does not scope the run' },
     { at = 'tools/annotcensus.lua',             supplies = 'corpus',
       natural = 'corpus; passes `only`, a RULE filter and not a scope' },
     { at = 'tools/guards.lua',                  supplies = 'corpus',
