@@ -36,6 +36,53 @@ local function entry_path(root, id)
     return dir_of(root) .. '/' .. id .. '.json'
 end
 
+--- Allocate an entry id that is UNIQUE and still LEXICOGRAPHICALLY ORDERED,
+--- and RESERVE its file atomically (CART-0582).
+---
+--- ★ THE BUG THIS REPLACES. The id was `os.time() .. '-' .. verb`, and
+--- write_entry opens its path with 'w' — a plain truncate. Two applies of one
+--- verb to one root inside a SINGLE SECOND produced the same filename, and the
+--- second OVERWROTE the first. What is lost is not a log line: the entry holds
+--- the BEFORE-CONTENT, so the first apply's UNDO went with it. Ordering broke
+--- too, because M.list sorts by `a.id > b.id` and M.last picks the undo target
+--- the same way, so two entries comparing EQUAL made the choice arbitrary.
+---
+--- ★ WHY IT SURVIVED THIS LONG: nothing in the code ever guaranteed uniqueness.
+--- THE GUARANTEE WAS HUMAN TYPING SPEED — nobody drives two applies of the same
+--- verb through the cockpit inside one second. Making the verb agent-drivable
+--- (CART-0146) did not introduce the bug, it removed what was hiding it. Same
+--- shape as CART-0577, where containment came from pressing `p` on a file row.
+---
+--- TWO CONSTRAINTS, and the second is the one that shapes the format:
+---   1. UNIQUE. Microseconds alone are only *unlikely* to collide, so the file
+---      is reserved with O_EXCL ('wx') and the stamp is bumped on EEXIST. That
+---      is atomic across processes, which two mcpserve hosts on one root need.
+---   2. STILL SORTABLE AGAINST ENTRIES ALREADY ON DISK. Real journals hold
+---      `<epoch>-<verb>` ids and M.list compares them as STRINGS. `.` is 0x2E
+---      and `-` is 0x2D, so `1787782381.000123-v` > `1787782381-v`: a new entry
+---      sorts AFTER an old one from the same second, which is what "later"
+---      means. The usec field is ZERO-PADDED to a fixed 6 because otherwise
+---      `.9` would compare greater than `.10`.
+--- @return string? id, string? why
+local function alloc_id(root, verb)
+    local sec, usec = vim.uv.gettimeofday()
+    for _ = 1, 1000 do
+        local id = ('%d.%06d-%s'):format(sec, usec, verb)
+        -- 'wx' is O_CREAT|O_EXCL: the reservation IS the uniqueness check, so
+        -- there is no exists-then-create window for a second host to slip into.
+        local fd = vim.uv.fs_open(entry_path(root, id), 'wx', 420)
+        if fd then
+            vim.uv.fs_close(fd)
+            return id
+        end
+        usec = usec + 1
+        if usec > 999999 then
+            sec, usec = sec + 1, 0
+        end
+    end
+    return nil, 'cannot allocate a journal entry id (1000 collisions)'
+end
+
 local function write_entry(root, e)
     local fd = io.open(entry_path(root, e.id), 'w')
     if not fd then return false end
@@ -50,9 +97,11 @@ end
 --- is deletion, never an empty husk. Returns the entry (status
 --- 'pending') or nil, why.
 function M.begin(root, verb, plan, files)
+    local id, why = alloc_id(root, verb)
+    if not id then return nil, why end
     local e = {
         version = 1,
-        id = ('%d-%s'):format(os.time(), verb),
+        id = id,
         verb = verb, root = root, ts = os.time(),
         status = 'pending',
         plan = plan,
@@ -66,6 +115,10 @@ function M.begin(root, verb, plan, files)
         end
     end
     if not write_entry(root, e) then
+        -- the reservation is a real (empty) file; do not leave it behind. An
+        -- empty file is inert to M.list (json decode fails, the entry is
+        -- skipped) but it would still hold the id against a retry.
+        vim.uv.fs_unlink(entry_path(root, e.id))
         return nil, 'cannot write journal entry'
     end
     return e
