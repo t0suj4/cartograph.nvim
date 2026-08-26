@@ -510,3 +510,59 @@ test('agentwrite: the servers shut down and the fixtures are removed', function 
     permit(false) -- leave the module as the host finds it
     ok(true)
 end)
+
+-- ── CART-0583: a read-only host must not reach into session state ───────────
+
+test('agentwrite: a READ-ONLY host plans WITHOUT arming, and says so', function ()
+    if not ready() then skip('no treesitter') end
+    permit(false) -- the operator started this host read-only
+    local root = mkroot { ['m.lua'] = SRC_LUA }
+    ingest(root)
+    local seed = idof('M.dbl')
+    ok(seed, 'fixture has a function to move')
+
+    -- a cockpit user on this session already had something staged
+    store.clear_stage()
+    store.stage(seed)
+    store.set_dest('m.lua')
+    local staged_before = #store.staged_ids()
+
+    local p = call('txn_plan_moveset', { seed = { seed }, dest = 'sub/new.lua' })
+    eq(true, p.ok, 'planning is still ALLOWED read-only — it writes nothing')
+
+    -- ★ the whole point: their move-set is untouched. Staging is ARMING, and this
+    -- host can never fire, so arming would only cost them their state.
+    eq(staged_before, #store.staged_ids(), 'the live move-set was not re-staged')
+    eq(seed, store.staged_ids()[1], 'and it is still THEIR symbol')
+    eq('m.lua', store.dest, 'nor was the destination moved')
+
+    -- and the disclosure differs from the armed case rather than being dropped:
+    -- `staged` and `unarmed` are opposite claims and must not render alike
+    local kinds = {}
+    for _, n in ipairs(p.notes or {}) do kinds[n.kind] = n end
+    ok(kinds.unarmed, 'a read-only plan discloses that it did NOT stage')
+    ok(not kinds.staged, 'and does not claim it did')
+    ok(kinds.unarmed.why:find('previewed'), 'it says what the plan is still good for')
+    store.clear_stage()
+end)
+
+test('agentwrite: a WRITABLE host still arms, and still says so', function ()
+    if not ready() then skip('no treesitter') end
+    permit(true)
+    local root = mkroot { ['m.lua'] = SRC_LUA }
+    ingest(root)
+    local seed = idof('M.dbl')
+    ok(seed, 'fixture has a function to move')
+    store.clear_stage()
+
+    local p = call('txn_plan_moveset', { seed = { seed }, dest = 'sub/new.lua' })
+    eq(true, p.ok)
+    -- arming is what makes the plan applyable; the note is the disclosure that
+    -- session state moved. Both halves stay true on a writable host.
+    ok(#store.staged_ids() > 0, 'the plan IS armed here')
+    local kinds = {}
+    for _, n in ipairs(p.notes or {}) do kinds[n.kind] = n end
+    ok(kinds.staged, 'and the staging side effect is disclosed')
+    ok(not kinds.unarmed, 'not the read-only note')
+    store.clear_stage()
+end)

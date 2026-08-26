@@ -359,10 +359,21 @@ function M.plan(store)
     if #ids == 0 then
         return nil, 'nothing staged — dd cuts a function into the move-set'
     end
-    local dest = store.dest
-    if not dest then
+    if not store.dest then
         return nil, 'no destination — p on a file row sets it'
     end
+    return M.plan_ids(store, ids, store.dest)
+end
+
+--- plan a MOVE from an EXPLICIT id set and destination, the way plan_extract_ids
+--- does for extract. Factored out of M.plan (CART-0583) so a caller that must not
+--- touch the live move-set can still build a plan: STAGING IS ARMING, and a host
+--- that can never apply should not arm. M.preview/txn.dryrun reads the plan and
+--- never the staged set, so an unarmed plan still previews.
+--- @param ids string[]  the move-set, explicitly
+--- @param dest string   an EXISTING file (that is what makes it a move)
+function M.plan_ids(store, ids, dest)
+    if not ids or #ids == 0 then return nil, 'no functions to move' end
     local txn = require 'cartograph.txn'
     -- ★ THE CHECK THIS BRANCH NEVER HAD (CART-0577). plan_extract_ids has always
     -- refused an escaping path; MOVE did not, so a dest of `../x.lua` planned and
@@ -466,16 +477,48 @@ function M.plan_moveset(store, seed, dest, opts)
             .. ' — that destination is a MOVE'):format(dest)
     end
     local set = M.close_moveset(store, seed, dest)
-    store.clear_stage()
-    for _, id in ipairs(set) do store.stage(id) end
-    store.set_dest(dest)
+
+    -- ★ STAGING IS ARMING, NOT PLANNING (CART-0583). M.apply's verb-specific rung
+    -- requires store.staged_ids() to still equal plan.moves, so staging is how a
+    -- plan is ARMED — it cannot be skipped and still yield an applyable plan. But
+    -- M.preview/txn.dryrun reads the PLAN and never the staged set, so a caller
+    -- that can never apply (a read-only agent host) can plan and diff with ZERO
+    -- session mutation. `opts.arm = false` asks for exactly that.
+    -- Default true: every existing caller wants an applyable plan.
+    local arm = not (opts and opts.arm == false)
+
+    -- ★ A REFUSAL MUST NOT COST THE CALLER THEIR MOVE-SET (CART-0576 note 3).
+    -- This used to `store.clear_stage()` on failure, which CLEARS rather than
+    -- RESTORES — so a cockpit user who had symbols staged lost them because an
+    -- agent asked for a plan that refused. Save both halves and put them back.
+    local prior_ids, prior_dest
+    if arm then
+        prior_ids, prior_dest = store.staged_ids(), store.dest
+        store.clear_stage()
+        for _, id in ipairs(set) do store.stage(id) end
+        store.set_dest(dest)
+    end
+
     local plan, why
     if exists then
-        plan, why = M.plan(store)
+        -- ★ EXPLICIT if/else, NOT `arm and M.plan(store) or M.plan_ids(...)`:
+        -- M.plan returns nil on a refusal, so the `or` arm would fire and run the
+        -- OTHER planner. That is the `f.absent and false or f.before` bug found in
+        -- this same repo on 2026-08-27, one line long and invisible in review.
+        if arm then
+            plan, why = M.plan(store)
+        else
+            plan, why = M.plan_ids(store, set, dest)
+        end
     else
         plan, why = M.plan_extract_ids(store, set, dest, opts)
     end
-    if not plan then store.clear_stage() end
+
+    if not plan and arm then
+        store.clear_stage()
+        for _, id in ipairs(prior_ids or {}) do store.stage(id) end
+        store.set_dest(prior_dest) -- nil is a legal dest: set_dest just assigns
+    end
     return plan, why
 end
 

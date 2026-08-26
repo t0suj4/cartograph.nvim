@@ -1480,7 +1480,13 @@ local function v_txn_plan_moveset(store, args)
             'pass at least one node id in `seed` or one durable ref in `seed_refs`')
     end
     local moveapply = require 'cartograph.moveapply'
-    local plan, why = moveapply.plan_moveset(store, ids, args.dest)
+    -- ★ ARM ONLY IF THIS HOST COULD EVER FIRE (CART-0583). Staging IS arming:
+    -- apply's last rung compares the live move-set against plan.moves. A read-only
+    -- host can never reach apply, so arming there buys nothing and COSTS a cockpit
+    -- user their staged set — a verb the operator started read-only should not be
+    -- reaching into session state at all. Unarmed plans still preview, because
+    -- txn.dryrun reads the plan and never the staged set.
+    local plan, why = moveapply.plan_moveset(store, ids, args.dest, { arm = M.WRITABLE })
     if not plan then
         return refuse('cannot-plan',
             ('no move-set plan could be built for %s: %s'):format(tostring(args.dest), tostring(why)),
@@ -1504,9 +1510,18 @@ local function v_txn_plan_moveset(store, args)
     -- fires — a refusal, never a wrong write). And per CART-0576 note 3 a plan
     -- that refuses LATE clears the staging rather than restoring it; that defect
     -- is someone else's and is not touched here.
-    notes[#notes + 1] = { kind = 'staged', premise = 'planning mutates the live move-set',
-        why = ('planning re-staged %d symbol(s) as the live move-set and set the destination to %s — apply compares the plan against that state, so planning ANOTHER move-set on this host makes plan %s unapplyable (it refuses with a stage mismatch; it never writes the wrong thing)'):format(#plan.moves, tostring(plan.dest), pid),
-        evidence = { staged = #plan.moves, dest = nn(plan.dest) } }
+    if M.WRITABLE then
+        notes[#notes + 1] = { kind = 'staged', premise = 'planning mutates the live move-set',
+            why = ('planning re-staged %d symbol(s) as the live move-set and set the destination to %s — apply compares the plan against that state, so planning ANOTHER move-set on this host makes plan %s unapplyable (it refuses with a stage mismatch; it never writes the wrong thing)'):format(#plan.moves, tostring(plan.dest), pid),
+            evidence = { staged = #plan.moves, dest = nn(plan.dest) } }
+    else
+        -- NOT the same claim as the one above, and they must not render alike: this
+        -- host touched no session state at all, and the plan it produced can be
+        -- previewed but never applied here.
+        notes[#notes + 1] = { kind = 'unarmed', premise = 'read-only host: planning did not stage',
+            why = ('this host is read-only, so planning left the live move-set untouched — plan %s can be previewed (txn_preview) but NOT applied here; start mcpserve with --write to arm and apply'):format(pid),
+            evidence = { staged = 0, dest = nn(plan.dest) } }
+    end
     return {
         subject = { plan = pid, verb = plan.verb, dest = nn(plan.dest),
             touched = plan.touched, creates = creates_list(plan),

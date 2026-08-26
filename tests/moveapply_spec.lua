@@ -392,14 +392,10 @@ test('CART-0577: plan_moveset refuses before it touches the staged set', functio
     local plan, why = moveapply.plan_moveset(st, { id }, '../nope.lua')
     ok(not plan, 'refused')
     ok(why and why:match('escapes the project root'), 'with the reason: ' .. tostring(why))
-    -- ★ THIS REFUSAL does not cost the caller their staging, because containment is
-    -- checked before plan_moveset touches anything. Be precise about what that is
-    -- and is not: it is NOT a general guarantee. A refusal reached LATER (the set
-    -- genuinely changed, the copy-into-existing case) still runs
-    -- `if not plan then store.clear_stage() end`, which CLEARS rather than restores
-    -- — so those paths do charge the caller. That inconsistency is real and is
-    -- CART-0576's open nit; this test fences the early path only, and says so
-    -- rather than implying the stronger rule.
+    -- ★ A REFUSAL MUST NOT COST THE CALLER THEIR STAGING. This one is refused
+    -- early (containment is checked before plan_moveset touches anything), and
+    -- CART-0583 made the LATE refusals restore too — the test below fences that
+    -- half, which used to `clear_stage()` and silently charge the caller.
     eq(1, #st.staged_ids(), 'the staged set survived THIS refusal')
     st.clear_stage()
 end)
@@ -416,4 +412,49 @@ test('CART-0577: txn.execute refuses an escaping plan before the journal opens',
     ok(why and why:match('outside the project'), 'and says so: ' .. tostring(why))
     -- nothing may have been written, and no journal entry may exist for it
     ok(vim.fn.filereadable(st.data.root .. '/../out.lua') == 0, 'no file was written')
+end)
+
+-- ── CART-0583: staging is ARMING, and a refusal restores what it borrowed ───
+
+test('CART-0583: a LATE refusal restores the caller\'s move-set, it does not clear it', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local helper = node_by(st, 'helper', 'function')
+    local cfg = node_by(st, 'CFG', 'var')
+    ok(helper and cfg, 'fixture has both')
+    -- the caller had something staged, and a destination set, BEFORE asking
+    st.clear_stage(); st.stage(cfg.id); st.set_dest('m.lua')
+    -- ★ THE REFUSAL MUST BE REACHED *AFTER* STAGING, or this test proves nothing.
+    -- My first version used the copy-into-existing refusal, which returns BEFORE
+    -- the staging block — it passed against the old clear-on-failure code. The
+    -- unknown-extension refusal lives inside plan_extract_ids, so staging has
+    -- already happened by the time it fires, which is the path being fenced.
+    local plan, why = moveapply.plan_moveset(st, { helper.id }, 'sub/new.nope')
+    ok(not plan, 'refused')
+    ok(why and why:find('no language spec'), tostring(why))
+    -- the caller's set and dest come back, rather than being cleared to nothing
+    eq(1, #st.staged_ids(), 'the prior move-set is RESTORED, not cleared')
+    eq(cfg.id, st.staged_ids()[1], 'and it is the caller\'s symbol, not the seed')
+    eq('m.lua', st.dest, 'the prior destination comes back too')
+    st.clear_stage()
+end)
+
+test('CART-0583: arm=false plans without touching the move-set, and still previews', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local helper = node_by(st, 'helper', 'function')
+    local cfg = node_by(st, 'CFG', 'var')
+    st.clear_stage(); st.stage(cfg.id); st.set_dest('m.lua')
+    -- an UNARMED plan: what a read-only host asks for. Apply is unreachable there,
+    -- so arming would only cost a cockpit user their staged set.
+    local plan, why = moveapply.plan_moveset(st, { helper.id }, 'sub/new.lua', { arm = false })
+    ok(plan, tostring(why))
+    eq(1, #st.staged_ids(), 'the live move-set was never touched')
+    eq(cfg.id, st.staged_ids()[1])
+    eq('m.lua', st.dest, 'nor was the destination')
+    -- and it is a real plan: preview reads the PLAN, never the staged set
+    local before, after, pwhy = moveapply.preview(st, plan)
+    ok(before, tostring(pwhy))
+    ok(after, 'an unarmed plan still diffs')
+    st.clear_stage()
 end)
