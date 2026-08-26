@@ -88,9 +88,17 @@ local function tools_list()
     local out = {}
     for _, name in ipairs(agent.ORDER) do
         local v = agent.VERBS[name]
+        -- tier_headline rides in the DESCRIPTION as well as in graph_info's
+        -- catalogue, because `tier` carries OPPOSITE semantics on the two agent
+        -- surfaces (CART-0581) and a client that never calls graph_info would
+        -- otherwise read a floor headline as a peak one.
+        local q = v.tier_headline and (', tier_headline=' .. v.tier_headline .. ' (the headline `tier` is the '
+            .. (v.tier_headline == 'floor'
+                and 'WEAKEST rung in the list — the answer is only as good as its shakiest row'
+                or 'STRONGEST rung in the list — one witness decides') .. ')') or ''
         out[#out + 1] = { name = name, inputSchema = agent.schema(name),
-            description = ('%s. Answers carry the envelope: an EMPTY result always names its absence (absent|refused|frontier|unavailable) — never a bare list. tier_basis=%s.')
-                :format(v.summary, v.tier_basis) }
+            description = ('%s. Answers carry the envelope: an EMPTY result always names its absence (absent|refused|frontier|unavailable) — never a bare list. tier_basis=%s%s.')
+                :format(v.summary, v.tier_basis, q) }
     end
     return { tools = out }
 end

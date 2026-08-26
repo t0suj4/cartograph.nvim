@@ -68,7 +68,17 @@ function M.go() return 1 end
 return M
 ]]
 
-local FIXTURE = { ['m.lua'] = M_LUA, ['w.lua'] = W_LUA, ['f.lua'] = F_LUA }
+-- SELF-REFERENCE: the one shape that has a first hop and still reaches nothing
+-- new, because a cone excludes its own anchor. Without it cone's
+-- `self-reference-only` branch is a claim no caller can check.
+local R_LUA = [[
+local M = {}
+function M.rec(n) if n > 0 then return M.rec(n - 1) end return 0 end
+return M
+]]
+
+local FIXTURE = { ['m.lua'] = M_LUA, ['w.lua'] = W_LUA, ['f.lua'] = F_LUA,
+    ['r.lua'] = R_LUA }
 
 local function mkfixture()
     local root = vim.fn.tempname()
@@ -199,6 +209,377 @@ test('agent: callers-empty is classified by the SHIPPED alibi premises, not re-d
     vim.fn.delete(root, 'rf')
 end)
 
+-- ── phase 2: refs in the envelope (CART-0145) ────────────────────────────────
+
+test('agent: a row carries BOTH handles, and the durable one addresses the same node', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    ingest(root)
+    local found = agent.answer(store, 'node_find', { query = 'M.pub' })
+    ok(#found.result >= 1, 'M.pub is in the graph')
+    local row = found.result[1]
+    ok(type(row.id) == 'string' and #row.id > 0, 'the SESSION id is present')
+    ok(type(row.ref) == 'table', 'and so is the DURABLE ref: ' .. vim.inspect(row.ref))
+    -- the ref is refs.lua's shape, not a stringified id
+    eq('m.lua', row.ref.file)
+    eq('M.pub', row.ref.name)
+    ok(row.ref.kind == 'function' or row.ref.kind == 'method', tostring(row.ref.kind))
+    ok(row.ref.file ~= row.id,
+        'a ref that is just the id again is the phase-1 misnomer, not a durable handle')
+
+    -- THE POINT OF THE PAIR: the two handles must address the SAME node, or the
+    -- durable one is decorative.
+    local by_id = agent.answer(store, 'edges_callers', { node = row.id })
+    local by_ref = agent.answer(store, 'edges_callers', { ref = row.ref })
+    eq(by_id.subject.id, by_ref.subject.id, 'id and ref land on the same subject')
+    eq(#by_id.result, #by_ref.result, 'and produce the same answer')
+    eq(by_id.tier, by_ref.tier)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('agent: a STALE ref REFUSES with refs.lua own why — it never lands on a guess', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    ingest(root)
+    -- MISSING: nothing in that file bears the name any more (the deletion case).
+    local gone = agent.answer(store, 'edges_callers',
+        { ref = { file = 'm.lua', kind = 'function', name = 'was_renamed_away' } })
+    eq('stale-ref', gone.refusal.rule, 'a handle that no longer resolves is a REFUSAL')
+    eq('missing', gone.refusal.why, "and it carries refs.resolve's own verdict, verbatim")
+    ok(#gone.refusal.remedy > 10, 'with a remedy an agent can act on')
+    eq(vim.NIL, gone.result, 'a refusal has no result at all — not an empty one')
+    eq(vim.NIL, gone.absence, 'and it is NOT an absence: nothing about the code was concluded')
+
+    -- AMBIGUOUS: w.lua holds two `walk`s, and a ref with no witness and no
+    -- ordinal cannot separate them. Picking one would be silent damage on the
+    -- write side, which is exactly why this lands before the write verbs.
+    local amb = agent.answer(store, 'edges_callers',
+        { ref = { file = 'w.lua', kind = 'function', name = 'walk' } })
+    eq('stale-ref', amb.refusal.rule)
+    ok(amb.refusal.why:find('ambiguous', 1, true),
+        'ambiguous and missing are DIFFERENT verdicts and must not render alike: '
+        .. tostring(amb.refusal.why))
+    ok(amb.refusal.reason ~= gone.refusal.reason, 'and their reasons differ too')
+
+    -- A MALFORMED REF IS A DIFFERENT FAULT: re-addressing fixes a stale handle,
+    -- and nothing fixes a ref that never had a name. They must not share a rule.
+    local _, status = agent.answer(store, 'edges_callers', { ref = { file = 'm.lua' } })
+    eq('usage', status, 'a ref missing `kind`/`name` is a fault in the CALL, not a stale handle')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('agent: a ref that resolves WITH A CAVEAT answers, and says so — it does not refuse', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    ingest(root)
+    local found = agent.answer(store, 'node_find', { query = 'genuinely_dead' })
+    ok(#found.result >= 1)
+    local ref = vim.deepcopy(found.result[1].ref)
+    ok(ref.witness ~= nil, 'the ref was minted with a behaviour witness')
+    ref.witness = 'deadbeef' -- as if the body had been edited under us
+    local d = agent.answer(store, 'edges_callers', { ref = ref })
+    eq(vim.NIL, d.refusal, 'a drifted witness still RESOLVES — it is an answer, not a refusal')
+    local caveat
+    for _, n in ipairs(d.notes) do if n.kind == 'ref-caveat' then caveat = n end end
+    ok(caveat, 'and the caveat rides as a note rather than being swallowed: '
+        .. vim.inspect(d.notes))
+    ok(caveat.why:find('drift', 1, true), tostring(caveat.why))
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ── phase 2: the analysis catalogue (CART-0145 half B) ───────────────────────
+
+test('agent: EVERY verb in the catalogue obeys the envelope invariant', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    ingest(root)
+    -- one plausible call per verb. The assertion is uniform and it is the whole
+    -- contract: a non-empty answer carries no absence, an empty one ALWAYS names
+    -- a premise, and the value it names is one the verb DECLARED — a value in
+    -- `absences` that no branch emits, or a branch emitting an undeclared one,
+    -- is CART-0580 again.
+    local calls = {
+        graph_info = {}, node_find = { query = 'walk' },
+        node_at = { file = 'm.lua', line = 3 },
+        edges_callers = { node = idof('M.pub') },
+        edges_callees = { node = idof('M.caller') },
+        why = { file = 'm.lua', line = 4, col = 26 }, lint_run = {},
+        clones_find = {}, cone = { node = idof('M.caller') }, ladder = {},
+        territory = {}, census = {}, mentions = { name = 'walk' }, externals = {},
+    }
+    for _, verb in ipairs(agent.ORDER) do
+        ok(calls[verb] ~= nil, ('verb %s is in ORDER but this spec does not drive it'):format(verb))
+        local d, status = agent.answer(store, verb, calls[verb])
+        eq('ok', status, verb .. ' answers: ' .. vim.inspect(d.refusal or d.error))
+        if #d.result > 0 then
+            eq(vim.NIL, d.absence, verb .. ' returned rows AND an absence')
+        else
+            ok(type(d.absence) == 'string',
+                ('%s returned an empty result with NO absence — a bare [] is the defect'):format(verb))
+            ok(vim.tbl_contains(agent.VERBS[verb].absences, d.absence),
+                ('%s emitted %q, which it does not declare in `absences`'):format(verb, d.absence))
+            ok(#d.absence_why.premise > 0 and #d.absence_why.why > 20,
+                verb .. ' names the premise: ' .. vim.inspect(d.absence_why))
+        end
+        -- and no verb may invent an envelope bug for itself
+        for _, n in ipairs(d.notes) do
+            ok(n.kind ~= 'envelope-bug', ('%s: %s'):format(verb, tostring(n.why)))
+        end
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+test('agent: a cone is the FIRST HOP transitively, and says what its headline quantifies over', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    ingest(root)
+    local out = agent.answer(store, 'cone', { node = idof('M.caller'), direction = 'out' })
+    ok(#out.result >= 1, 'M.caller reaches M.pub: ' .. vim.inspect(out))
+    ok(tier.rank(out.tier) ~= nil, 'the headline is a real rung: ' .. tostring(out.tier))
+    local scope
+    for _, n in ipairs(out.notes) do if n.kind == 'headline-scope' then scope = n end end
+    ok(scope, 'a cone MUST say that its rows carry no per-row rung and why')
+    ok(scope.why:find('UNKNOWN', 1, true),
+        'a null row tier here means unknown, not "no rung applies": ' .. tostring(scope.why))
+    for _, r in ipairs(out.result) do
+        ok(r.tier == nil, 'and no row invents one')
+    end
+
+    -- the INVERSE direction is a different question, not the same set
+    local inward = agent.answer(store, 'cone', { node = idof('M.pub'), direction = 'in' })
+    ok(#inward.result >= 1, 'M.pub is reached by M.caller')
+
+    -- AN EMPTY CONE DELEGATES: the premise that hides a neighbour is the premise
+    -- that hides the whole cone, so the absence is edges_*'s, not a new judgement.
+    local dead = agent.answer(store, 'cone', { node = idof('genuinely_dead'), direction = 'in' })
+    eq(0, #dead.result)
+    eq('absent', dead.absence, 'the callerless local reads absent through the cone too')
+    local deleg
+    for _, n in ipairs(dead.notes) do if n.kind == 'cone-is-first-hop' then deleg = n end end
+    ok(deleg, 'and the delegation is stated rather than hidden')
+    -- …which is what makes the OTHER two declared absences reachable at all: the
+    -- cone inherits the whole taxonomy, so refused and frontier stay distinct
+    -- here instead of collapsing into one empty set.
+    local seen = { absent = true }
+    for _, case in ipairs({ { 'refused', 'walk' }, { 'frontier', 'handler' } }) do
+        local d = agent.answer(store, 'cone', { node = idof(case[2]), direction = 'in' })
+        eq(0, #d.result)
+        eq(case[1], d.absence, ('the %s cone of %s'):format(case[1], case[2]))
+        ok(not seen[d.absence], 'the buckets render differently through the cone too')
+        seen[d.absence] = true
+        ok(vim.tbl_contains(agent.VERBS.cone.absences, d.absence),
+            'cone emitted an undeclared absence')
+    end
+    -- RECURSION reaches nothing through the cone either, and for the same reason
+    -- edges_callees reports it: the delegation carries the honest premise rather
+    -- than a second one written here.
+    local rec = agent.answer(store, 'cone', { node = idof('M.rec'), direction = 'out' })
+    eq(0, #rec.result, 'a self edge is excluded from the reachability adjacency')
+    eq('only-calls-itself', rec.absence_why.premise,
+        'and NOT "it calls nothing", which is what the cone would have said')
+
+    -- direction is a CLOSED set: an unknown one is a fault in the call
+    local _, status = agent.answer(store, 'cone',
+        { node = idof('M.caller'), direction = 'sideways' })
+    eq('usage', status, 'an undeclared direction must not be silently read as `out`')
+    vim.fn.delete(root, 'rf')
+end)
+
+-- A HAND-BUILT GRAPH, because two honest answers are only reachable on one: a
+-- function with NO data-flow record (nothing was comparable) and a graph with no
+-- function at all (nothing to partition). Both are declared in `absences`, and a
+-- declared value no branch can reach is the defect CART-0580 named.
+local function synth(nodes, edges)
+    store.ingest { root = '/synth', provider = 'synthetic',
+        nodes = nodes, edges = edges or {}, calls = {} }
+    return store
+end
+
+test('agent: a cone that reaches an id with no node is a FRONTIER, not an absence', function ()
+    -- the adjacency is built from ref edges and nothing checks that the target
+    -- has a node. If it does not, the cone reaches SOMETHING it cannot render —
+    -- and "I found nothing" would be the wrong sentence for that.
+    synth({
+        { id = 'a.lua', kind = 'module', name = 'a.lua', file = 'a.lua', order = 0 },
+        { id = 'a.lua::f', kind = 'function', name = 'f', file = 'a.lua', order = 1 },
+    }, { { kind = 'ref', from = 'a.lua::f', to = 'ghost.lua::vanished' } })
+    local d = agent.answer(store, 'cone', { node = 'a.lua::f', direction = 'out' })
+    eq(0, #d.result)
+    eq('frontier', d.absence)
+    eq('reached-ids-are-not-nodes', d.absence_why.premise)
+    eq(1, d.absence_why.evidence.reached)
+    ok(vim.tbl_contains(agent.VERBS.cone.absences, d.absence))
+end)
+
+test('agent: "nothing was comparable" and "no clones" are different answers', function ()
+    synth {
+        { id = 'a.lua', kind = 'module', name = 'a.lua', file = 'a.lua', order = 0 },
+        { id = 'a.lua::f', kind = 'function', name = 'f', file = 'a.lua', order = 1 },
+        { id = 'a.lua::g', kind = 'function', name = 'g', file = 'a.lua', order = 2 },
+    }
+    local d = agent.answer(store, 'clones_find', {})
+    eq(0, #d.result)
+    eq('unavailable', d.absence,
+        'two functions with no data-flow record is NOT "no clones" — nothing was compared')
+    eq('no-dataflow-records', d.absence_why.premise)
+    eq(2, d.absence_why.evidence.functions)
+    eq(0, d.absence_why.evidence.with_dataflow)
+
+    -- and with no function at all, the answer is a genuine absence
+    synth { { id = 'a.lua', kind = 'module', name = 'a.lua', file = 'a.lua', order = 0 } }
+    local e = agent.answer(store, 'clones_find', {})
+    eq('absent', e.absence)
+    eq('no-functions', e.absence_why.premise)
+    -- the same graph has no root to partition from
+    local t = agent.answer(store, 'territory', {})
+    eq(0, #t.result)
+    eq('absent', t.absence)
+    eq('no-entry-points', t.absence_why.premise)
+end)
+
+-- EVERY DECLARED ABSENCE MUST HAVE A BRANCH THAT EMITS IT. `frontier` is the one
+-- the fixture root cannot produce — every file in it parses — so the unparsed
+-- frontier is built by hand. Without this the four verbs below would advertise a
+-- value in `absences` that nothing can reach, which is CART-0580 verbatim.
+-- ★ FOUND WHILE DRIVING THE CONE, and it is a phase-1 bug, not a phase-2 one.
+-- store.lua excludes a self ref edge from uses/usedby ON PURPOSE (recursion must
+-- not make a dead function look alive), which is right — but it meant a purely
+-- self-recursive function came back from edges_callees as `no-call-sites`, whose
+-- stated premise is "the extractor recorded no call at all inside this function
+-- body". The call record exists and RESOLVED; only the row is missing. An
+-- absence whose premise is false is worse than a bare empty list, because it
+-- looks like it was checked.
+test('agent: a self-recursive function does NOT report that it calls nothing', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    ingest(root)
+    local d = agent.answer(store, 'edges_callees', { node = idof('M.rec') })
+    eq(0, #d.result, 'the self edge is not in the reachability adjacency, by design')
+    eq('absent', d.absence)
+    eq('only-calls-itself', d.absence_why.premise,
+        'the premise must be TRUE, not merely the nearest empty-list story')
+    ok(d.absence_why.evidence.self_calls >= 1, 'and it counts the sites it saw')
+    ok(d.absence_why.why:find('NOT', 1, true),
+        'it says outright what it is not: ' .. d.absence_why.why)
+    local note
+    for _, n in ipairs(d.notes) do if n.kind == 'self-calls' then note = n end end
+    ok(note, 'and the recursion rides as a note, since it has no row of its own')
+    -- a function that really does call nothing still says so, in its own words
+    local pub = agent.answer(store, 'edges_callees', { node = idof('M.pub') })
+    eq('no-call-sites', pub.absence_why.premise,
+        'the two must not collapse into one story')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('agent: an unparsed frontier makes every empty catalogue answer a FRONTIER, not an absence', function ()
+    synth {
+        { id = 'a.lua', kind = 'module', name = 'a.lua', file = 'a.lua', order = 0 },
+        { id = 'b.bin', kind = 'module', name = 'b.bin', file = 'b.bin', order = 1,
+            unparsed = true },
+        -- a function that IS comparable (it carries a df record), so the clone
+        -- verb reaches its frontier branch instead of stopping at "nothing was
+        -- comparable" — the two are different answers and both must be reachable
+        { id = 'a.lua::f', kind = 'function', name = 'f', file = 'a.lua', order = 2,
+            df = { stmts = {} } },
+    }
+    for _, verb in ipairs({ 'clones_find', 'ladder', 'externals' }) do
+        local d = agent.answer(store, verb, {})
+        eq(0, #d.result, verb .. ' has nothing to report on this graph')
+        eq('frontier', d.absence,
+            ('%s reported %q where a file was never looked at'):format(verb, tostring(d.absence)))
+        ok(vim.tbl_contains(agent.VERBS[verb].absences, d.absence),
+            verb .. ' emitted an undeclared absence')
+        eq(1, d.absence_why.evidence.unparsed_files)
+    end
+    -- territory needs a graph with no ROOT at all, so it gets its own shape
+    synth {
+        { id = 'a.lua', kind = 'module', name = 'a.lua', file = 'a.lua', order = 0 },
+        { id = 'b.bin', kind = 'module', name = 'b.bin', file = 'b.bin', order = 1,
+            unparsed = true },
+    }
+    local t = agent.answer(store, 'territory', {})
+    eq('frontier', t.absence, 'a root may be sitting in the file nothing read')
+    ok(vim.tbl_contains(agent.VERBS.territory.absences, t.absence))
+end)
+
+test('agent: the honesty verbs answer "no" as a fact, not as an empty set', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    ingest(root)
+    -- MENTIONS is the weakest question the graph answers, and it still says no
+    -- with a premise attached rather than handing back a bare list.
+    local m = agent.answer(store, 'mentions', { name = 'nosuchidentifierxyz' })
+    eq(0, #m.result)
+    eq('absent', m.absence)
+    eq('name-not-in-any-index', m.absence_why.premise)
+    ok(m.absence_why.evidence.indexed_files >= 1,
+        'and it says how many files WERE indexed, so the no is measurable')
+    -- a name that IS there comes back with the contract attached
+    local w = agent.answer(store, 'mentions', { name = 'walk' })
+    ok(#w.result >= 1, 'walk is mentioned')
+    local contract
+    for _, n in ipairs(w.notes) do
+        if n.kind == 'a-mention-is-not-a-reference' then contract = n end
+    end
+    ok(contract, 'a mention answer MUST state that it is not a reference answer')
+
+    -- EXTERNALS on a graph with no call at all: "no boundary" because nothing
+    -- calls anything, which is a different claim from "everything lands inside".
+    synth { { id = 'a.lua', kind = 'module', name = 'a.lua', file = 'a.lua', order = 0 } }
+    local e = agent.answer(store, 'externals', {})
+    eq(0, #e.result)
+    eq('absent', e.absence)
+    eq('no-call-records', e.absence_why.premise)
+    vim.fn.delete(root, 'rf')
+end)
+
+test('agent: territory says whether its roots are DECLARED or merely apparent', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    ingest(root)
+    local d = agent.answer(store, 'territory', {})
+    ok(#d.result >= 1, 'the fixture has callerless functions, so it has apparent roots')
+    local basis
+    for _, n in ipairs(d.notes) do if n.kind == 'entry-basis' then basis = n end end
+    ok(basis, 'the partition MUST state what its roots are')
+    eq('apparent', basis.premise, 'nothing declares an entry point in this fixture')
+    ok(basis.why:find('refused', 1, true),
+        'and it must say why apparent roots are only as good as the resolution: '
+        .. tostring(basis.why))
+    for _, r in ipairs(d.result) do
+        ok(type(r.id) == 'string', 'an entry row is a NODE row, addressable again')
+    end
+    vim.fn.delete(root, 'rf')
+end)
+
+-- ── CART-0581: the headline quantifier is published, not merely reasoned ─────
+
+test('agent: every verb that has a headline tier declares WHICH QUANTIFIER made it', function ()
+    if not ready() then skip('no treesitter') end
+    local root = mkfixture()
+    ingest(root)
+    local info = agent.answer(store, 'graph_info', {})
+    local by = {}
+    for _, r in ipairs(info.result) do by[r.verb] = r end
+    for _, verb in ipairs(agent.ORDER) do
+        ok(by[verb], 'the catalogue lists ' .. verb)
+        local v = agent.VERBS[verb]
+        if v.tier_basis == 'observation' then
+            -- no rung is ever reported, so there is no summary to quantify
+            eq(vim.NIL, by[verb].tier_headline,
+                verb .. ' reports no tier, so a headline rule would be meaningless')
+        else
+            ok(v.tier_headline == 'floor' or v.tier_headline == 'peak',
+                ('%s can report a `tier` but declares no tier_headline — the value is legible, its meaning is not (CART-0581)'):format(verb))
+            eq(v.tier_headline, by[verb].tier_headline,
+                verb .. ': the catalogue must publish what the verb declares')
+        end
+    end
+    -- THE POINT: this surface is FLOOR and agentq is PEAK, under one field name.
+    eq('floor', agent.VERBS.edges_callers.tier_headline)
+    vim.fn.delete(root, 'rf')
+end)
+
 -- ── layer 2: the server, over stdio ──────────────────────────────────────────
 
 local SERVERS = {}
@@ -246,8 +627,8 @@ test('mcpserve: a successful call returns the envelope, decoded, over the wire',
     ok(found and found.ok, 'node_find answered: ' .. vim.inspect(found))
     ok(#found.result >= 1, 'M.pub is in the graph')
     eq('full', found.graph.index, 'every answer carries the graph it was read off')
-    local ref = found.result[1].ref
-    local callers = c:call('edges_callers', { node = ref })
+    local id = found.result[1].id
+    local callers = c:call('edges_callers', { node = id })
     eq(true, callers.ok)
     ok(#callers.result >= 1, 'M.pub has a caller over the wire')
     ok(tier.rank(callers.tier) ~= nil, 'with a real rung: ' .. tostring(callers.tier))
@@ -268,7 +649,7 @@ test('mcpserve: the four absences survive the wire and stay distinguishable', fu
                             { 'frontier', 'handler' } }) do
         local f = c:call('node_find', { query = case[2] })
         ok(#f.result >= 1, 'found ' .. case[2])
-        local d = c:call('edges_callers', { node = f.result[1].ref })
+        local d = c:call('edges_callers', { node = f.result[1].id })
         eq(true, d.ok, 'an absence is an ANSWER, not a failure')
         eq(0, #d.result)
         eq(case[1], d.absence, ('callers of %s over the wire'):format(case[2]))
@@ -337,6 +718,109 @@ test('mcpserve: lint findings carry what they are WORTH, and refusals ride along
     else
         ok(type(d.absence) == 'string', 'an empty lint report is never a clean bill of health by default')
     end
+end)
+
+test('mcpserve: a REF survives the wire and addresses the same node as its id', function ()
+    if not ready() then skip('no treesitter') end
+    local c = client(false)
+    local found = c:call('node_find', { query = 'M.pub' })
+    ok(#found.result >= 1, 'M.pub is in the graph')
+    local row = found.result[1]
+    ok(type(row.id) == 'string', 'the row carries its session id')
+    ok(type(row.ref) == 'table' and type(row.ref.name) == 'string',
+        'and its durable ref, as an OBJECT — a stringified ref would need a parser '
+        .. 'nobody wrote: ' .. vim.inspect(row.ref))
+    -- handed straight back, unedited: the round trip is the contract
+    local by_ref = c:call('edges_callers', { ref = row.ref })
+    eq(true, by_ref.ok, 'a ref is accepted wherever an id is: ' .. vim.inspect(by_ref.refusal))
+    local by_id = c:call('edges_callers', { node = row.id })
+    eq(by_id.subject.id, by_ref.subject.id, 'and lands on the same node')
+    eq(#by_id.result, #by_ref.result)
+
+    -- A STALE REF IS AN ANSWER ABOUT THE WORLD, so it rides as CONTENT with the
+    -- rule intact — isError would flatten it to a string and lose exactly the
+    -- field an agent must branch on.
+    local d, why, raw = c:call('edges_callers',
+        { ref = { file = 'm.lua', kind = 'function', name = 'was_renamed_away' } })
+    ok(d ~= nil, 'a stale ref must arrive as content, not a transport error: ' .. tostring(why))
+    eq(false, raw.isError)
+    eq(false, d.ok)
+    eq('stale-ref', d.refusal.rule)
+    eq('missing', d.refusal.why, "refs.resolve's own verdict survives the wire")
+    ok(#d.refusal.remedy > 10)
+    eq(vim.NIL, d.result, 'a refusal has no result at all — not an empty one')
+end)
+
+test('mcpserve: every catalogue verb is advertised and answers over the wire', function ()
+    if not ready() then skip('no treesitter') end
+    local c = client(false)
+    local res = c:request('tools/list', vim.empty_dict())
+    local by = {}
+    for _, t in ipairs(res.tools) do by[t.name] = t end
+    for _, name in ipairs({ 'clones_find', 'cone', 'ladder', 'territory', 'census',
+                            'mentions', 'externals' }) do
+        ok(by[name], 'advertised: ' .. name)
+        eq('object', by[name].inputSchema.type, name .. ' carries a JSON Schema')
+        ok(by[name].description:find('absence', 1, true),
+            name .. ' states the envelope in its own description')
+    end
+    -- the ref argument is published as a SHAPE, so a schema-driven client can
+    -- hand the object back instead of reducing it to a string
+    local refp = by.edges_callers.inputSchema.properties.ref
+    eq('object', refp.type)
+    ok(refp.properties.witness ~= nil, 'the witness field is published: ' .. vim.inspect(refp))
+
+    for _, case in ipairs({ { 'census', vim.empty_dict() }, { 'ladder', vim.empty_dict() },
+                            { 'territory', vim.empty_dict() }, { 'externals', vim.empty_dict() },
+                            { 'clones_find', vim.empty_dict() },
+                            { 'mentions', { name = 'walk' } } }) do
+        local d = c:call(case[1], case[2])
+        eq(true, d.ok, case[1] .. ' answered: ' .. vim.inspect(d and d.refusal))
+        if #d.result == 0 then
+            ok(type(d.absence) == 'string',
+                case[1] .. ' returned a bare [] over the wire — the defect')
+        end
+        ok(#d.notes >= 1, case[1] .. ' carries at least one honesty note')
+    end
+    -- the census counts what was EXTRACTED, and its row is the whole answer
+    local cen = c:call('census', vim.empty_dict())
+    eq(1, #cen.result)
+    ok(cen.result[1].calls.total >= 1, 'the fixture makes calls: ' .. vim.inspect(cen.result[1].calls))
+end)
+
+test('mcpserve: the catalogue PUBLISHES the headline quantifier (CART-0581)', function ()
+    if not ready() then skip('no treesitter') end
+    local c = client(false)
+    local info = c:call('graph_info', vim.empty_dict())
+    local by = {}
+    for _, r in ipairs(info.result) do by[r.verb] = r end
+    eq('floor', by.edges_callers.tier_headline,
+        'a caller list is UNIVERSAL as presented, so its headline is the weakest rung')
+    eq('floor', by.cone.tier_headline)
+    eq(vim.NIL, by.node_find.tier_headline, 'an observation verb has no headline to quantify')
+    -- and the same fact reaches a client that never calls graph_info
+    local res = c:request('tools/list', vim.empty_dict())
+    for _, t in ipairs(res.tools) do
+        if t.name == 'edges_callers' then
+            ok(t.description:find('tier_headline=floor', 1, true),
+                'the tool description says it too: ' .. t.description)
+        end
+    end
+end)
+
+test('mcpserve: mentions REFUSES on a thin index rather than reporting zero files', function ()
+    if not ready() then skip('no treesitter') end
+    local c = client(true)
+    -- index_only skips the collect pass that builds the mention index, so an
+    -- empty answer here would mean "no file mentions this" AND "there is no
+    -- index" at once — opposite claims wearing one shape.
+    local d, why, raw = c:call('mentions', { name = 'walk' })
+    ok(d ~= nil, 'the refusal arrives as content: ' .. tostring(why))
+    eq(false, raw.isError)
+    eq(false, d.ok)
+    eq('no-mention-index', d.refusal.rule)
+    ok(#d.refusal.remedy > 10, 'and says what to change')
+    eq(vim.NIL, d.absence, 'a missing INSTRUMENT is not an absence in the code')
 end)
 
 test('mcpserve: the servers shut down cleanly', function ()

@@ -31,6 +31,22 @@
 -- one side exists at a time. Phase 1 (CART-0144) should carry both fields with
 -- this mutual exclusion, not one field that means two things.
 --
+-- `tier_headline = 'peak'` — WHICH QUANTIFIER PICKED THE HEADLINE (CART-0581).
+-- This verb takes the STRONGEST rung in the list, and agent.lua's edges_callers
+-- takes the WEAKEST. Both are right and the reason is the witness/promise
+-- distinction: an alibi is EXISTENTIAL ("is there anything keeping this alive"),
+-- so one strong witness decides; a caller list is UNIVERSAL as presented, so it
+-- is only as good as its shakiest member. But `tier` IS THE SAME FIELD NAME ON
+-- BOTH SURFACES. An agent reading `tier: inferred` from here learns "the best
+-- thing supporting this is a guess"; the same string from edges_callers means
+-- "at least one row is a guess, the rest may be proven". Acting on the first as
+-- if it were the second UNDER-trusts, and the reverse OVER-trusts. A human
+-- notices the verbs differ; an agent has only the field — so the field now says.
+-- agent.lua declares it per verb and publishes it in graph_info's catalogue.
+-- ★ THE GENERAL RULE: a SUMMARY OVER ROWS IS A QUANTIFIER CHOICE, and the choice
+-- is part of the answer. Publishing the summary without its quantifier is the
+-- same defect class as an empty list without its absence.
+--
 -- `absent` IS NEVER CLAIMED MORE OFTEN THAN THE AUTHORITATIVE LINT CLAIMS IT:
 -- lint's `provably_dead` (four premises) is the sole authority, so this verb
 -- cannot license a deletion :CartographLint's dead-confined rule would refuse.
@@ -67,7 +83,8 @@ end
 --- premise failed, or the agent cannot act on it at all.
 local function refuse(verb, rule, reason, remedy, graph)
     emit({ ok = false, verb = verb or NUL, graph = graph or NUL, result = NUL,
-        tier = NUL, absence = NUL, absence_why = NUL, notes = {},
+        tier = NUL, tier_headline = 'peak', absence = NUL, absence_why = NUL,
+        notes = {},
         refusal = { rule = rule, reason = reason, remedy = remedy or NUL } }, 3)
 end
 
@@ -135,7 +152,15 @@ if not id then
         graph)
 end
 local n = store.node(id)
-local subject = { ref = id, name = n.name or NUL, kind = n.kind,
+-- TWO HANDLES, under their true names (CART-0145, matching agent.lua's noderow).
+-- `id` is the SESSION handle: it embeds line numbers, so the first edit above
+-- this function invalidates it silently. `ref` is the DURABLE one — refs.lua's
+-- {file, kind, name, ordinal?, witness?} — which survives edits elsewhere,
+-- survives a body edit with a drift note, and follows a rename by witness.
+-- Phase 0 shipped one field called `ref` that actually held the id; a caller
+-- that pins an answer across an edit needs the other one.
+local subject = { id = id, ref = store.ref_of(id) or NUL,
+    name = n.name or NUL, kind = n.kind,
     file = store.abspath(n), line = atr.sl(n.range) + 1 }
 
 -- ── the answer ───────────────────────────────────────────────────────────────
@@ -230,5 +255,8 @@ if #result > 0 then
 end
 
 emit({ ok = true, verb = verb, graph = graph, subject = subject,
-    result = result, tier = tier, absence = absence, absence_why = absence_why,
+    result = result, tier = tier,
+    -- STRONGEST rung, and the field that says so (CART-0581): see the header.
+    tier_headline = 'peak',
+    absence = absence, absence_why = absence_why,
     notes = notes }, 0)

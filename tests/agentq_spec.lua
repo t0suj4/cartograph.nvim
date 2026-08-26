@@ -207,11 +207,26 @@ test('agentq: one JSON document on stdout, and tier/absence are mutually exclusi
     eq(vim.NIL, d.absence, 'a non-empty result carries NO absence')
     ok(tier.rank(d.tier) ~= nil, 'and carries a real rung, got ' .. tostring(d.tier))
 
+    -- CART-0581: WHICH QUANTIFIER made that headline. This verb takes the PEAK
+    -- (an alibi is existential — one strong witness decides); agent.lua's
+    -- edges_callers takes the FLOOR over the same field name. Without this
+    -- field the two are merely different; with it they are comparable.
+    eq('peak', d.tier_headline,
+        'a summary over rows is a quantifier choice, and the choice is part of the answer')
+
+    -- TWO HANDLES, under their true names: the session id and the durable ref.
+    ok(type(d.subject.id) == 'string' and #d.subject.id > 0, 'the subject carries its id')
+    ok(type(d.subject.ref) == 'table' and type(d.subject.ref.name) == 'string',
+        'and its durable ref — refs.lua shape, not the id again: ' .. vim.inspect(d.subject.ref))
+    eq('m.lua', d.subject.ref.file)
+
     local dead = vim.json.decode((run(root, 'alibi', 'm.lua', '2')))
     eq(true, dead.ok, 'an absence is an ANSWER, not a failure')
     eq(0, #dead.result)
     eq('absent', dead.absence, 'an empty result is NEVER a bare [] — it carries its absence')
     eq(vim.NIL, dead.tier, 'and no rung, because nothing was resolved to rank')
+    eq('peak', dead.tier_headline,
+        'the quantifier is a property of the VERB, so it is stated even when there is no rung')
     ok(dead.absence_why and #dead.absence_why.why > 20, 'the absence explains WHICH premise')
 
     vim.fn.delete(root, 'rf')
@@ -229,6 +244,7 @@ test('agentq: a REFUSAL is not an empty result and not an error', function ()
     local d = vim.json.decode(out)
     eq(false, d.ok)
     eq('no-subject', d.refusal.rule, 'the refusal names its RULE')
+    eq('peak', d.tier_headline, 'and the document shape does not change under a refusal')
     ok(#d.refusal.remedy > 10, 'and a remedy, so an agent can fix the call')
     eq(vim.NIL, d.result, 'a refusal has no result at all — not an empty one')
 
