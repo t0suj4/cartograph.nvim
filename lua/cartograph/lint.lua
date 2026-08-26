@@ -13,6 +13,7 @@ local argv = require 'cartograph.argv'
 local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
 local callview = require 'cartograph.callview'
+local tiers = require 'cartograph.tier' -- the canonical rung names & ranks
 
 -- THE FALLBACK IS NOW FOR LANGUAGES THAT DECLARE NO VISIBILITY, which is what it
 -- always claimed to be — but until CART-0231 gave spec/lua.lua an `exported_def` it
@@ -1193,6 +1194,246 @@ local function dead_confined_findings(store)
         end
     end
     return out
+end
+
+-- ── THE ALIBI: why is this function NOT dead? (CART-0143) ────────────────────────
+--
+-- The two rules above answer "is it dead". An agent about to DELETE something needs
+-- the OPPOSITE question with its evidence attached, and it needs to tell three empty
+-- answers apart: nothing keeps this alive (deleting is safe), something might and a
+-- rule declined to say which (ask first), nothing was looked at (nobody knows). Those
+-- three render identically today — a caller sees `no callers` and cannot tell which
+-- it got, which is this repo's recurring defect landing on its most dangerous verb.
+--
+-- SAME PREDICATES, NO NEW ANALYSIS. `provably_dead` stays the SOLE authority for
+-- "genuinely nothing": this function never reports `absent` where the authoritative
+-- lint would not, so the envelope can never license a deletion the lint refuses.
+--
+-- TWO FACT SHAPES COME BACK and they are not interchangeable
+-- ([[cartograph-witness-and-promise]]):
+--   alibis    POSITIVE, a WITNESS — something was SEEN that keeps this alive. One is
+--             enough; a caller may stop at the first.
+--   blockers  NEGATIVE — nothing was seen, AND here is the premise that stops us
+--             claiming there is nothing to see. Each names its own `absence` value,
+--             so the caller learns WHICH premise failed (CART-0576's rule: a refusal
+--             aimed at an agent must name the premise, or it is a wall).
+--
+-- THE TIER RULE, stated because the ladder was built for a different question.
+-- tier.lua ranks HOW A NAME WAS RESOLVED; half the evidence here (a spec visibility
+-- verdict, a manifest handler, an `entry` flag, a registration) is not a resolution
+-- at all. So an alibi's tier is the WEAKEST rung its evidence supports — under-
+-- claiming makes a reader MORE careful about a deletion and over-claiming makes them
+-- less — and every alibi carries the evidence itself, so the rung never has to be
+-- trusted on its own. No rung is minted here; every name comes from tier.LADDER.
+
+--- The SITES behind a refusal shadow — refusal_shadow's two sets, but carrying WHERE
+--- instead of `true`. Same one pass, same keys, so provably_dead reads it unchanged
+--- (it only ever tests truthiness, and a site list is truthy). It exists because a
+--- refusal that does not say where the candidates are is a WALL to an agent, which is
+--- the whole complaint CART-0576 files against the write side.
+local function refusal_sites(data)
+    local by_id, by_name = {}, {}
+    local cv = callview.of(data)
+    for i = 1, cv.n do
+        local r = cv.get(i, 'refused')
+        if r then
+            local cat = cv.get(i, 'at')
+            local site = { file = cv.get(i, 'file'), callee = cv.get(i, 'callee'),
+                line = cat and (atr.sl(cat) + 1) or nil,
+                rule = (type(r) == 'table' and r.rule) or nil,
+                candidates = #((type(r) == 'table' and r.cands) or {}) }
+            for _, cand in ipairs((type(r) == 'table' and r.cands) or {}) do
+                local id = type(cand) == 'table' and cand.id or cand
+                local l = by_id[id]; if not l then l = {}; by_id[id] = l end
+                l[#l + 1] = site
+            end
+            if site.callee and site.file then
+                local k = site.file .. '\31' .. tostring(site.callee)
+                local l = by_name[k]; if not l then l = {}; by_name[k] = l end
+                l[#l + 1] = site
+            end
+        end
+    end
+    return by_id, by_name
+end
+
+--- Alibi context over a store. Returns `fn(node) -> { alibis, blockers, dead }`:
+---   alibis   { { kind, tier, why, evidence } }  positive facts (empty = no alibi)
+---   blockers { { kind, absence, why, evidence } } the premises that failed, in the
+---            MOST-SPECIFIC-FIRST reporting order (first = the one that decided)
+---   dead     provably_dead(node) — true only when EVERY premise holds
+--- Pure; builds the shadow/occurrence maps once, like the two rules above.
+--- @param store table
+--- @return fun(n: table): table
+function M.alibi(store)
+    local band = store.topo()
+    local xmlh = (store.toc and store.toc.handlers) or {}
+    local occurs_once = occurs_once_in_file(store)
+    local shadow_id, shadow_name = refusal_sites(store.data) -- site LISTS, truthy like the boolean sets
+    local content = {}
+    -- the lines a name occurs on, for the frontier evidence. Same word-bounded text
+    -- test occurs_once_in_file makes — it is reported here, not re-decided.
+    local function occurrence_lines(n)
+        local tl = n.name and (n.name:match('([%w_]+)$') or n.name)
+        if not tl then return nil end
+        local lines = content[n.file]
+        if lines == nil then
+            lines = store.content({ file = n.file }) or false
+            content[n.file] = lines
+        end
+        if not lines then return nil end
+        local hits = {}
+        for i, l in ipairs(lines) do
+            local from = 1
+            while true do
+                local a, b = l:find(tl, from, true)
+                if not a then break end
+                local before = a > 1 and l:sub(a - 1, a - 1) or ' '
+                if not before:match('[%w_]') and not l:sub(b + 1, b + 1):match('[%w_]') then
+                    hits[#hits + 1] = i
+                end
+                from = b + 1
+            end
+        end
+        return hits
+    end
+
+    return function (n)
+        local A, B = {}, {}
+        local function alibi(kind, t, why, ev)
+            A[#A + 1] = { kind = kind, tier = t, why = why, evidence = ev }
+        end
+        local function blocker(kind, absence, why, ev)
+            B[#B + 1] = { kind = kind, absence = absence, why = why, evidence = ev }
+        end
+
+        -- ── alibis: everything SEEN that keeps this function alive ──────────────
+        local callers = band:callers(n.id)
+        if #callers > 0 then
+            local ev, best = {}, nil
+            for _, from in ipairs(callers) do
+                -- a ref edge's tier IS its resolution tier: read it, never re-derive
+                local t = band:tier(from, n.id) or 'matched'
+                ev[#ev + 1] = { from = from, tier = t,
+                    sites = #(store.occurrences(from, n.id) or {}) }
+                if not best or (tiers.rank(t) or math.huge) < (tiers.rank(best) or math.huge) then
+                    best = t
+                end
+            end
+            alibi('callers', best, ('%d function(s) call it'):format(#callers), ev)
+        end
+        local regs = band:registrants_detail(n.id)
+        if #regs > 0 then
+            local ev = {}
+            for _, r in ipairs(regs) do ev[#ev + 1] = { from = r.from } end
+            -- a reg edge carries NO tier flags, so there is nothing to read: the
+            -- weakest rung consistent with "a name was matched to this def" is the
+            -- honest report, and the site list is the checkable part.
+            alibi('registrants', 'inferred',
+                ('registered by %d site(s) — a dispatch table keeps it alive'):format(#regs), ev)
+        end
+        if n.cbarg then
+            alibi('callback-arg', 'matched',
+                'registered by an annotation / attribute / dispatch field ON the definition', nil)
+        end
+        if n.entry then
+            alibi('entry-point', 'proven', 'the manifest/spec declares it an entry point', nil)
+        end
+        if xmlh[n.name] then
+            alibi('manifest-handler', 'proven',
+                'named as a handler in the project manifest — the engine dispatches it from outside the source',
+                { handler = n.name })
+        end
+        if n.decl then
+            alibi('declaration', 'proven', 'a prototype/declaration, not a body — there is nothing to delete here', nil)
+        end
+        if n.exported == true then
+            alibi('exported', 'proven', "the source declares it public (spec visibility verdict)", nil)
+        elseif n.exported == nil and exported(n) then
+            -- no spec verdict: this is the NAME heuristic (a dot, or a method), which
+            -- is a guess about visibility and is reported as one
+            alibi('exported', 'inferred',
+                'no visibility verdict for this language — the name shape (dotted / method) reads as public surface', nil)
+        end
+        if metamethod(n) then
+            alibi('metamethod', 'inferred',
+                'the name matches the metamethod shape (__*) — invoked through a metatable, never by name', nil)
+        end
+
+        -- ── blockers: why an EMPTY alibi list may still not mean "nothing" ──────
+        -- ORDER IS A REPORTING PRECEDENCE, NOT provably_dead's PREMISE ORDER, and
+        -- that distinction was measured rather than reasoned (CART-0143). The
+        -- premises are not independent: a refusal shadow means a call site SPELLED
+        -- this name, so `name-occurs-again` is true whenever `refusal-shadow` is.
+        -- Ordered by premise, the specific finding ("candidates existed and a rule
+        -- declined — here they are") is therefore ALWAYS masked by the generic one
+        -- ("the name appears somewhere else"), and `refused` becomes an absence
+        -- value nothing can ever report. provably_dead only needs a boolean, so any
+        -- order does for it; a REPORT needs the most specific evidence first.
+        -- The FIRST blocker decides the absence; the rest are still returned, so a
+        -- caller that discharges one premise learns at once what waits behind it.
+        if n.unparsed then
+            blocker('unparsed', 'frontier',
+                'the source never parsed — it was landed by text search, so nothing in this file was analysed', nil)
+        end
+        if not (n.kind == 'function' or n.kind == 'method') then
+            blocker('not-a-function', 'unavailable',
+                ('alibi answers "why is this not dead" for functions; this node is a %s'):format(tostring(n.kind)), nil)
+        end
+        local tl = n.name and (n.name:match('([%w_]+)$') or n.name)
+        local by_id = shadow_id[n.id]
+        local by_name = tl and n.file and shadow_name[n.file .. '\31' .. tl]
+        if by_id or by_name then
+            -- REFUSALS ARE PLACES: name the sites, not just the fact. `by_id` means a
+            -- refusal listed THIS def among its candidates; `by_name` means a refusal
+            -- in this file spelled this name and recorded no candidate list to check
+            -- (five of the eight refusal rules carry none) — a weaker link, kept
+            -- separate so a reader is not told the two were the same evidence.
+            local sites = {}
+            for _, s in ipairs(by_id or {}) do
+                sites[#sites + 1] = { file = s.file, line = s.line, callee = s.callee,
+                    rule = s.rule, candidates = s.candidates, matched = 'candidate-list' }
+            end
+            for _, s in ipairs(by_name or {}) do
+                sites[#sites + 1] = { file = s.file, line = s.line, callee = s.callee,
+                    rule = s.rule, candidates = s.candidates, matched = 'name-in-file' }
+            end
+            blocker('refusal-shadow', 'refused',
+                ('a REFUSED call in this file could be this function — candidates existed at %d site(s) and a rule declined to pick')
+                    :format(#sites),
+                { by_candidate_list = by_id ~= nil, by_name_in_file = by_name ~= nil,
+                  sites = sites })
+        end
+        if n.escapes == true then
+            blocker('escapes', 'frontier',
+                'the name is read in a VALUE position in its own file — it can reach a dispatch table, a callback or another file without a call record',
+                nil)
+        end
+        if not occurs_once(n) then
+            local hits = occurrence_lines(n)
+            if hits == nil then
+                blocker('unreadable', 'frontier',
+                    'the file could not be read, so no occurrence check was possible', nil)
+            else
+                blocker('name-occurs-again', 'frontier',
+                    ('the name occurs %d times in this file, not only at its definition — a construct the extractor does not model may reference it'):format(#hits),
+                    { lines = hits })
+            end
+        end
+        if n.exported == nil then
+            blocker('visibility-undeclared', 'unavailable',
+                'this language declares no visibility rule (spec.exported_def), so "file-local" cannot be read from the source',
+                { capability = 'spec.exported_def' })
+        end
+        if n.escapes == nil then
+            blocker('escape-analysis-absent', 'unavailable',
+                'this language declares no escape rule (spec.escape_names), so a value-position reference to this function is invisible',
+                { capability = 'spec.escape_names' })
+        end
+
+        return { alibis = A, blockers = B,
+            dead = provably_dead(n, band, shadow_id, shadow_name, xmlh, occurs_once) }
+    end
 end
 
 -- ── annotations: the part of a CLAIM that is checkable without a type system ──
