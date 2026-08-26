@@ -9,6 +9,55 @@ local M = {}
 local atr = require 'cartograph.at'
 local transport = require 'cartograph.transport' -- single owner of the validity key (stamp)
 
+--- LEXICAL containment: is `rel` a plain path inside the project root?
+--- ★ THE ONE PLACE THAT DECIDES IT, and it lives here because `root .. '/' .. rel`
+--- is COMPOSED here — read_file, disk_stamp and the write loop all do it. The rule
+--- that makes the composition safe belongs with the composition. moveapply guarded
+--- exactly one of its two entry points (plan_extract_ids had the check, M.plan never
+--- did), so a MOVE could name `../x.lua` and apply wrote outside the project,
+--- creating parent directories on the way (CART-0577). A caller-side check that one
+--- caller forgets is not a guard; this is the backstop that cannot be forgotten.
+---
+--- ★ LEXICAL, AND THAT WORD IS LOAD-BEARING. It rejects an absolute path and any
+--- `..` SEGMENT. It does NOT resolve symlinks, so a symlinked directory inside the
+--- root still leads out and this function will not say so. What is claimed:
+--- containment against a CALLER-SUPPLIED PATH. What is NOT claimed: containment
+--- against a hostile tree. Do not let a later reader mistake the second for the first.
+---
+--- A `..` SEGMENT, not the substring: `a..b.lua` is a legal filename that escapes
+--- nothing, and refusing it would be a refusal with no premise behind it.
+--- @return boolean ok, string? why
+function M.contained(rel)
+    if type(rel) ~= 'string' or rel == '' then
+        return false, 'empty path'
+    end
+    if rel:match('^/') or rel:match('^%a:[/\\]') then
+        return false, ('%s is absolute — the path must be relative to the project root')
+            :format(rel)
+    end
+    for seg in rel:gmatch('[^/\\]+') do
+        if seg == '..' then
+            return false, ('%s escapes the project root'):format(rel)
+        end
+    end
+    return true
+end
+
+--- Every path a plan will touch or CREATE must be contained. A plan is a SET of
+--- writes, so checking only its `dest` is checking one member of it.
+--- @return boolean ok, string? why
+function M.contain_plan(plan)
+    for _, rel in ipairs((plan and plan.touched) or {}) do
+        local ok, why = M.contained(rel)
+        if not ok then return false, 'refusing to write outside the project: ' .. why end
+    end
+    for rel in pairs((plan and plan.creates) or {}) do
+        local ok, why = M.contained(rel)
+        if not ok then return false, 'refusing to create outside the project: ' .. why end
+    end
+    return true
+end
+
 function M.read_file(root, rel)
     local fd = io.open(root .. '/' .. rel, 'r')
     if not fd then return nil end
@@ -134,6 +183,8 @@ function M.dryrun(store, plan, edit_of)
     edit_of, nope = resolve_edit(plan, edit_of)
     if not edit_of then return nil, nil, nope end
     local root = store.data.root
+    local cok, cwhy = M.contain_plan(plan)
+    if not cok then return nil, cwhy end
     local before = {}
     for _, rel in ipairs(plan.touched) do
         local t = M.read_file(root, rel)
@@ -260,6 +311,14 @@ function M.execute(store, plan, desc, edit_of)
     edit_of, nope = resolve_edit(plan, edit_of)
     if not edit_of then return nil, nope end
     local root = store.data.root
+    -- ★ THE BACKSTOP, AND IT MUST PRECEDE journal.begin: refusing after the journal
+    -- opens would leave an entry for a write we never meant to make. Every path the
+    -- plan touches or creates is checked, not just its dest — a plan is a SET of
+    -- writes and one escaping member is enough (CART-0577).
+    -- M.dryrun carries the same block on purpose: a preview that accepts what apply
+    -- refuses is worse than either refusing, because it is discovered later.
+    local cok, cwhy = M.contain_plan(plan)
+    if not cok then return nil, cwhy end
     local before = {}
     for _, rel in ipairs(plan.touched) do
         local t = M.read_file(root, rel)

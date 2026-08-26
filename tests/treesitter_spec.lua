@@ -3369,7 +3369,10 @@ test('extract-module: new file, header, adhesion, undo deletes', function ()
     local p0, w0 = mv.plan_extract(store, 'a.lua')
     ok(not p0 and w0:match('already exists'), tostring(w0))
     p0, w0 = mv.plan_extract(store, '../evil.lua')
-    ok(not p0 and w0:match('inside the project root'), tostring(w0))
+    -- CART-0577 unified this: extract and MOVE now share ONE containment rule
+    -- (txn.contained) and therefore one message. Two spellings of the same rule is
+    -- what let the MOVE path ship without any check at all.
+    ok(not p0 and w0:match('escapes the project root'), tostring(w0))
     p0, w0 = mv.plan_extract(store, 'util.nope')
     ok(not p0 and w0:match('no language spec'), tostring(w0))
 

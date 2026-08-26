@@ -23,12 +23,17 @@
 -- [[cartograph-apply-for-agent]]). The :CartographMove/Diff/Apply commands are
 -- the interactive face of this same sequence:
 --   local mv = require 'cartograph.moveapply'
---   local set = mv.close_moveset(store, { seed_id }, 'sub/dest.lua') -- seed → deps
---   local plan, err = mv.plan_extract_ids(store, set, 'sub/dest.lua')
+--   local plan, err = mv.plan_moveset(store, { seed_id }, 'sub/dest.lua')
 --   if not plan then return err end          -- refusal names the reason
 --   print(mv.preview(store, plan))           -- dry-run diff, no writes
 --   local ok, why = mv.apply(store, plan)    -- journalled; graph-PRESERVING witness
 --                                            -- (nil,reason if the move-set moved)
+-- plan_moveset IS the setup, whole: seed → dependency closure → the closure
+-- STAGED in the store → destination → plan. That last rung matters because
+-- `apply` confirms the plan against the LIVE move-set, so a plan built the long
+-- way (close_moveset + plan_extract_ids, which deliberately do not touch
+-- staging) must be staged too or apply refuses. Both refusals used to render
+-- identically; they no longer do (CART-0576).
 
 local M = {}
 local atr = require 'cartograph.at'
@@ -359,6 +364,13 @@ function M.plan(store)
         return nil, 'no destination — p on a file row sets it'
     end
     local txn = require 'cartograph.txn'
+    -- ★ THE CHECK THIS BRANCH NEVER HAD (CART-0577). plan_extract_ids has always
+    -- refused an escaping path; MOVE did not, so a dest of `../x.lua` planned and
+    -- applied outside the project. Interactively `dest` came from pressing `p` on a
+    -- FILE ROW and could only be inside the tree — the guarantee was the UI's, and
+    -- making the verb agent-drivable removed it without replacing it.
+    local okc, whyc = txn.contained(dest)
+    if not okc then return nil, whyc end
     local dtext = txn.read_file(store.data.root, dest)
     if not dtext then return nil, 'cannot read ' .. dest end
     local plan = {
@@ -415,6 +427,58 @@ function M.close_moveset(store, seed, dest)
     return set
 end
 
+--- THE WHOLE SETUP AS ONE CALL (CART-0576). Seed ids + a destination → a plan
+--- `apply` will accept: close the move-set over its private captures, STAGE that
+--- closure in the store (the state apply's last rung compares the plan against),
+--- set the destination, plan. Those four steps have no decision between them, so
+--- no caller should be able to get them half-right — omitting the staging pair
+--- built a plan that could only ever refuse, which is what sent the recipe into a
+--- kb note instead of the code.
+---
+--- The VERB is decided by the destination, on the same predicate
+--- plan_extract_ids refuses with, so dispatch and refusal cannot disagree: an
+--- existing file is a MOVE, a path that does not exist yet is an
+--- EXTRACT-MODULE. `plan.verb` records which one ran. Returns the plan, or
+--- (nil, reason) with the staging cleared again — a refusal leaves no
+--- half-built move-set behind.
+function M.plan_moveset(store, seed, dest, opts)
+    dest = (dest or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if dest == '' then
+        return nil, 'no destination — plan_moveset(store, seed_ids, dest)'
+    end
+    if not seed or #seed == 0 then
+        return nil, 'no seed symbols — plan_moveset(store, seed_ids, dest)'
+    end
+    -- ★ CONTAINMENT FIRST, ahead of disk_stamp and ahead of clear_stage. Ahead of
+    -- disk_stamp because that composes root .. '/' .. dest and its answer ROUTES us
+    -- (move vs extract); ahead of clear_stage because a refusal must not cost the
+    -- caller their staged set. This is the agent-facing entry point, so `dest` is an
+    -- arbitrary string here where the cockpit could only ever supply a file row.
+    do
+        local ok, why = require('cartograph.txn').contained(dest)
+        if not ok then return nil, why end
+    end
+    local exists = require('cartograph.txn').disk_stamp(store.data.root, dest)
+    -- `copy` is an extract-module option (M.plan builds no copy set): say so
+    -- rather than accept it and silently move what the caller asked to duplicate
+    if exists and opts and opts.copy and next(opts.copy) then
+        return nil, ('copy is an extract-module option, and %s already exists'
+            .. ' — that destination is a MOVE'):format(dest)
+    end
+    local set = M.close_moveset(store, seed, dest)
+    store.clear_stage()
+    for _, id in ipairs(set) do store.stage(id) end
+    store.set_dest(dest)
+    local plan, why
+    if exists then
+        plan, why = M.plan(store)
+    else
+        plan, why = M.plan_extract_ids(store, set, dest, opts)
+    end
+    if not plan then store.clear_stage() end
+    return plan, why
+end
+
 --- plan_extract from an EXPLICIT id set (not the staged move-set) — the seam the
 --- inter-untangle handoff uses to plan a function CLUSTER into a new module
 --- without touching the live staging. Read-only (builds a plan; apply mutates).
@@ -424,10 +488,12 @@ function M.plan_extract_ids(store, ids, relpath, opts)
     if relpath == '' then
         return nil, 'usage: :CartographExtractModule <new-file-path>'
     end
-    if relpath:match('^/') or relpath:match('%.%.') then
-        return nil, 'the new file must be a plain path inside the project root'
-    end
     local txn = require 'cartograph.txn'
+    -- was an inline `^/` / `%.%.` test here; it is txn.contained now so both entry
+    -- points share ONE rule. The old spelling rejected the SUBSTRING `..`, which
+    -- also refused a legal filename like `a..b.lua` — a refusal with no premise.
+    local okc, whyc = txn.contained(relpath)
+    if not okc then return nil, whyc end
     if txn.disk_stamp(store.data.root, relpath) then
         return nil, relpath .. ' already exists — that is a MOVE (:CartographMove)'
     end
@@ -450,6 +516,50 @@ function M.plan_extract_ids(store, ids, relpath, opts)
     return collect(store, ids, relpath, plan)
 end
 
+-- at most three names, then a count — a refusal that lists forty symbols is a
+-- wall again
+local function some(names)
+    local shown = {}
+    for i = 1, math.min(#names, 3) do shown[i] = names[i] end
+    if #names > 3 then shown[#shown + 1] = ('+%d more'):format(#names - 3) end
+    return table.concat(shown, ', ')
+end
+
+-- THE TWO WAYS THE STAGED-SET RUNG FAILS, which used to render as one string
+-- (CART-0576). An EMPTY stage means the plan was never mirrored into the store:
+-- a call-sequence error, whose repair is one call and whose risk is zero. A
+-- DIFFERENT stage means the move-set really moved under the plan: the world
+-- changed, and the only safe answer is to re-plan. Opposite instructions, so the
+-- refusal has to say WHICH premise failed — a reader who cannot see the calling
+-- code (an agent) cannot guess it back.
+local function stage_mismatch(store, ids, plan)
+    if #ids == 0 then
+        return ('nothing is staged, so the plan\'s %d move(s) cannot be'
+            .. ' confirmed against the live move-set — stage them first'
+            .. ' (headless: moveapply.plan_moveset plans AND stages in one call;'
+            .. ' in the cockpit: dd the symbols, p the destination)')
+            :format(#plan.moves)
+    end
+    local want, have, extra, missing = {}, {}, {}, {}
+    for _, m in ipairs(plan.moves) do want[m.id] = true end
+    for _, id in ipairs(ids) do have[id] = true end
+    for _, id in ipairs(ids) do
+        if not want[id] then
+            local n = store.node(id)
+            extra[#extra + 1] = (n and n.name) or tostring(id)
+        end
+    end
+    for _, m in ipairs(plan.moves) do
+        if not have[m.id] then missing[#missing + 1] = m.name end
+    end
+    local detail = ''
+    if #extra > 0 then detail = detail .. '; staged but not planned: ' .. some(extra) end
+    if #missing > 0 then detail = detail .. '; planned but not staged: ' .. some(missing) end
+    return ('the move-set changed since planning (staged %d, plan %d%s)'
+        .. ' — re-plan (:CartographMove, or moveapply.plan_moveset headless)')
+        :format(#ids, #plan.moves, detail)
+end
+
 --- Apply: the shared ladder plus one verb-specific rung — the LIVE
 --- move-set must still be exactly the plan's moves. On success the
 --- move-set is consumed (cleared before the splice, which a staged
@@ -465,7 +575,7 @@ function M.apply(store, plan)
         end
     end
     if not same then
-        return nil, 'the move-set changed since planning — re-run :CartographMove'
+        return nil, stage_mismatch(store, ids, plan)
     end
     local txn = require 'cartograph.txn'
     -- every move-set entry's span is READ (to paste into dest), so all are

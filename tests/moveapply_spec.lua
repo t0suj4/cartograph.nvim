@@ -12,14 +12,23 @@ local function ready()
     return pcall(vim.treesitter.language.add, 'lua')
 end
 
--- write a lua source, ingest it, return the store's node table
-local function ingest(src)
+-- write a whole tree (rel -> text), ingest it, return the store
+local function ingest_files(files)
     local root = vim.fn.tempname()
     vim.fn.mkdir(root, 'p')
-    local fd = assert(io.open(root .. '/m.lua', 'w'))
-    fd:write(src); fd:close()
+    for rel, text in pairs(files) do
+        local dir = (root .. '/' .. rel):match('^(.*)/[^/]*$')
+        if dir then vim.fn.mkdir(dir, 'p') end
+        local fd = assert(io.open(root .. '/' .. rel, 'w'))
+        fd:write(text); fd:close()
+    end
     store.ingest(ts.extract(root))
     return store
+end
+
+-- write a lua source, ingest it, return the store's node table
+local function ingest(src)
+    return ingest_files({ ['m.lua'] = src })
 end
 
 local FIXTURE = table.concat({
@@ -213,4 +222,198 @@ test('moveapply: module_table reads the idiom, and refuses anything else', funct
     -- a language that declares no idiom writes nothing (absence = NOT DECLARED)
     eq(nil, ts.module_table('m.py', lines))
     eq(nil, ts.module_scaffold('m.py', 'M'))
+end)
+
+-- ── THE TWO REFUSALS (CART-0576) ─────────────────────────────────────────────
+-- apply's last rung compares the LIVE move-set against the plan and used to
+-- refuse with ONE string for two opposite situations: "you never staged" (fix
+-- your call sequence, zero risk) and "the set moved under you" (STOP, re-plan).
+-- These specs pin that they now render differently, and that the guarantee still
+-- fires for the real changed-set case — including through the new entry point.
+
+local function refusal(st, plan)
+    local okay, why = moveapply.apply(st, plan)
+    ok(not okay, 'apply refused')
+    return tostring(why)
+end
+
+test('moveapply: NOTHING STAGED and a CHANGED move-set refuse differently', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    st.clear_stage()
+    local helper = node_by(st, 'helper', 'function')
+    local plan, perr = moveapply.plan_extract_ids(st, { helper.id }, 'sub/h.lua')
+    ok(plan, 'plan built: ' .. tostring(perr))
+
+    -- (1) the naive-agent sequence: plan, then apply, never staging
+    local empty = refusal(st, plan)
+    ok(empty:find('nothing is staged', 1, true),
+        'names the missing premise: ' .. empty)
+    ok(not empty:find('changed since planning', 1, true),
+        'and is NOT the world-moved refusal: ' .. empty)
+    ok(empty:find('plan_moveset', 1, true), 'names the repair: ' .. empty)
+
+    -- (2) the real thing the rung guards: a move-set that is not the plan's.
+    -- Same SIZE as the plan (1 symbol) — so this is the identity check firing,
+    -- not a count check.
+    local cfg = node_by(st, 'CFG', 'var')
+    st.stage(cfg.id)
+    local changed = refusal(st, plan)
+    eq(1, #plan.moves)
+    ok(changed:find('changed since planning', 1, true),
+        'names the world-moved premise: ' .. changed)
+    ok(not changed:find('nothing is staged', 1, true),
+        'and is NOT the never-staged refusal: ' .. changed)
+    ok(changed:find('CFG', 1, true), 'names what differs: ' .. changed)
+    ok(changed:find('helper', 1, true), 'both sides of the difference: ' .. changed)
+    st.clear_stage()
+end)
+
+test('moveapply: plan_moveset stages what it plans — apply, headless, no boilerplate', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local journal = require 'cartograph.journal'
+    journal.wipe(st.data.root)
+    local helper = node_by(st, 'helper', 'function')
+    local plan, why = moveapply.plan_moveset(st, { helper.id }, 'sub/h.lua')
+    ok(plan, 'planned: ' .. tostring(why))
+    eq('extract-module', plan.verb) -- dest does not exist yet
+    -- the closure came along (CFG is helper's private capture) AND is staged
+    eq(2, #plan.moves)
+    eq(#plan.moves, #st.staged_ids())
+    -- THE POINT: apply's rung passes with no staging calls in the caller
+    local entry, aerr = moveapply.apply(st, plan)
+    ok(entry, 'applied: ' .. tostring(aerr))
+    local fd = io.open(st.data.root .. '/sub/h.lua', 'r')
+    ok(fd, 'the new module was written')
+    local text = fd and fd:read('a') or ''
+    if fd then fd:close() end
+    ok(text:find('function helper', 1, true), 'and it holds the moved text: ' .. text)
+    eq(0, #st.staged_ids()) -- the move-set was consumed
+    journal.wipe(st.data.root)
+end)
+
+test('moveapply: plan_moveset still refuses when the set genuinely changed', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local helper = node_by(st, 'helper', 'function')
+    local plan, why = moveapply.plan_moveset(st, { helper.id }, 'sub/h.lua')
+    ok(plan, 'planned: ' .. tostring(why))
+    -- the world moves under the plan: someone unstages one of its symbols
+    st.unstage(plan.moves[1].id)
+    local changed = refusal(st, plan)
+    ok(changed:find('changed since planning', 1, true),
+        'the guarantee is intact through the new entry point: ' .. changed)
+    ok(not changed:find('nothing is staged', 1, true), changed)
+    ok(not io.open(st.data.root .. '/sub/h.lua', 'r'), 'and nothing was written')
+    st.clear_stage()
+end)
+
+test('moveapply: plan_moveset dispatches on the destination, and says which verb', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest_files({ ['m.lua'] = FIXTURE, ['dest.lua'] = 'local d = 1\n' })
+    local helper = node_by(st, 'helper', 'function')
+    local plan, why = moveapply.plan_moveset(st, { helper.id }, 'dest.lua')
+    ok(plan, 'planned: ' .. tostring(why))
+    eq('move', plan.verb) -- the file exists: this is a MOVE, not an extract
+    eq(#plan.moves, #st.staged_ids())
+    -- and the extract-only option is refused rather than silently dropped
+    local nope, cerr = moveapply.plan_moveset(st, { helper.id }, 'dest.lua',
+        { copy = { [helper.id] = true } })
+    ok(not nope, 'copy into an existing file refused')
+    ok(cerr and cerr:find('extract%-module option'), tostring(cerr))
+    st.clear_stage()
+end)
+
+test('moveapply: plan_moveset leaves no half-built move-set behind a refusal', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local scratch = node_by(st, 'scratch', 'var')
+    local seed = scratch and scratch.id or node_by(st, 'helper', 'function').id
+    -- a destination the extract verb refuses outright (escaping the root).
+    -- CART-0577 moved this refusal EARLIER — containment is now checked before
+    -- disk_stamp and before clear_stage, so nothing is half-built because nothing
+    -- is built at all. The message moved with it: one rule (txn.contained), one
+    -- spelling, instead of the inline `plain path` test this used to hit.
+    local plan, why = moveapply.plan_moveset(st, { seed }, '../outside.lua')
+    ok(not plan, 'refused')
+    ok(why and why:find('escapes the project root'), tostring(why))
+    eq(0, #st.staged_ids()) -- the staging was rolled back with it
+    eq(nil, st.dest)
+end)
+
+-- ── CART-0577: containment on BOTH planning paths, not just one ─────────────
+-- plan_extract_ids always refused an escaping path; M.plan (MOVE) never did, so a
+-- dest of `../x.lua` planned and applied OUTSIDE the project, creating parent dirs
+-- on the way. Interactively `dest` came from pressing `p` on a file row and could
+-- only be inside the tree — the guarantee belonged to the UI, and making the verb
+-- agent-drivable removed it. These fence the rule, not one caller's spelling of it.
+
+test('txn.contained: absolute and .. SEGMENTS are refused, a legal name is not', function ()
+    local txn = require 'cartograph.txn'
+    ok(txn.contained('lua/cartograph/x.lua'), 'an ordinary relative path')
+    ok(not txn.contained('/etc/passwd'), 'absolute')
+    ok(not txn.contained('../x.lua'), 'leading ..')
+    ok(not txn.contained('a/../../x.lua'), 'a .. in the middle still escapes')
+    ok(not txn.contained(''), 'empty')
+    -- ★ a `..` SEGMENT, not the substring. The old inline test matched `%.%.`
+    -- anywhere and so refused this, which is a refusal with no premise behind it.
+    ok(txn.contained('a..b.lua'), 'a legal filename containing dots escapes nothing')
+    ok(txn.contained('dir/a..b.lua'), 'same, nested')
+end)
+
+test('CART-0577: the MOVE path refuses a destination outside the project', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local id
+    for _, n in ipairs(st.data.nodes) do
+        if n.name == 'helper' then id = n.id break end
+    end
+    ok(id, 'fixture has helper')
+    st.clear_stage(); st.stage(id)
+    -- a MOVE (the dest must be readable), aimed outside the root
+    st.set_dest('../escape.lua')
+    local plan, why = moveapply.plan(st)
+    ok(not plan, 'the move must not plan')
+    ok(why and why:match('escapes the project root'),
+        'and it must say WHY, not "cannot read": got ' .. tostring(why))
+    st.clear_stage()
+end)
+
+test('CART-0577: plan_moveset refuses before it touches the staged set', function ()
+    if not ready() then skip('no lua parser') end
+    local st = ingest(FIXTURE)
+    local id
+    for _, n in ipairs(st.data.nodes) do
+        if n.name == 'helper' then id = n.id break end
+    end
+    -- something the caller staged BEFORE asking for a bad plan
+    st.clear_stage(); st.stage(id)
+    local plan, why = moveapply.plan_moveset(st, { id }, '../nope.lua')
+    ok(not plan, 'refused')
+    ok(why and why:match('escapes the project root'), 'with the reason: ' .. tostring(why))
+    -- ★ THIS REFUSAL does not cost the caller their staging, because containment is
+    -- checked before plan_moveset touches anything. Be precise about what that is
+    -- and is not: it is NOT a general guarantee. A refusal reached LATER (the set
+    -- genuinely changed, the copy-into-existing case) still runs
+    -- `if not plan then store.clear_stage() end`, which CLEARS rather than restores
+    -- — so those paths do charge the caller. That inconsistency is real and is
+    -- CART-0576's open nit; this test fences the early path only, and says so
+    -- rather than implying the stronger rule.
+    eq(1, #st.staged_ids(), 'the staged set survived THIS refusal')
+    st.clear_stage()
+end)
+
+test('CART-0577: txn.execute refuses an escaping plan before the journal opens', function ()
+    if not ready() then skip('no lua parser') end
+    local txn = require 'cartograph.txn'
+    local st = ingest(FIXTURE)
+    -- the backstop: a plan built by any future caller that skipped the planner
+    local plan = { verb = 'move', generation = st.generation, dest = '../out.lua',
+        moves = {}, hazards = {}, stamps = {}, touched = { '../out.lua' } }
+    local okx, why = txn.execute(st, plan, 'test', function () return '' end)
+    ok(not okx, 'execute refuses')
+    ok(why and why:match('outside the project'), 'and says so: ' .. tostring(why))
+    -- nothing may have been written, and no journal entry may exist for it
+    ok(vim.fn.filereadable(st.data.root .. '/../out.lua') == 0, 'no file was written')
 end)
