@@ -12,13 +12,32 @@
 -- artifacts that already ship and any new distilled profile becomes a target for
 -- free.
 --
--- The A-to-B DIFF (M.diff) is built, but note what it needs: TWO name-queryable
--- profiles for the SAME language. No shipped pair qualifies today — ruby-rails,
--- zig-std and lua-factorio are three different languages, and ruby-core is
--- signature-keyed — so the move report cannot be demonstrated on the artifacts in
--- the tree. It becomes useful the moment a sibling profile lands (an mruby or
--- opal provides-set, which is what the original design asked for). The mechanism
--- refuses clearly rather than producing a meaningless "everything is lost".
+-- The A-to-B DIFF needs TWO name-queryable profiles for the SAME language, and
+-- ★ ONE SHIPPED PAIR QUALIFIES: `lua-factorio-11` -> `lua-factorio`. Run it.
+--
+--     port.reference_diff(store, 'lua-factorio-11', 'lua-factorio')
+--
+-- On ~/git/Von-Neumann (2026-08-27) that reports lost=10 gained=0 kept=17, and the
+-- lost list is the Factorio 2.0 `global` -> `storage` rename with a file per name:
+-- global.savedRailbots, global.cage_sound, global.previousPositions,
+-- global.playersNeedZoom, plus game.active_mods and game.item_prototypes.
+--
+-- ⚠ THIS PARAGRAPH USED TO SAY "no shipped pair qualifies today … the move report
+-- cannot be demonstrated on the artifacts in the tree", and that was FALSE from the
+-- moment the second factorio artifact landed (1 August). The cost was not academic:
+-- a session read it, believed the version axis did not exist, and filed three
+-- tickets around a mechanism that was already here — one of them a P1 whose premise
+-- was simply wrong (CART-0587, CART-0595). A CAVEAT THAT SAYS "CANNOT BE
+-- DEMONSTRATED" IS THE EXACT THING THAT STOPS THE NEXT READER RUNNING IT, so it has
+-- to be re-checked whenever an artifact lands, and it is cheaper to name the
+-- working pair than to describe the space of pairs that would work.
+--
+-- Still true, and the reason M.diff alone is not enough: it scores the REQUIREMENT
+-- set, which is call-derived, so a 1.1 -> 2.0 move reports 0 lost — everything that
+-- actually changed is READ, never called. M.reference_diff scores
+-- externals.references under both profiles instead. Both refuse clearly rather than
+-- producing a meaningless "everything is lost"; ruby-core is signature-keyed and
+-- ruby-rails/zig-std are other languages, so those still do not pair.
 --
 -- HONESTY — a portability claim is easy to overstate, so:
 --   · Buckets are PROVIDED and NOT-IN-PROFILE. Never "missing": a name absent
