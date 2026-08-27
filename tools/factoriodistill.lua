@@ -116,10 +116,27 @@ for _, g in ipairs(api.global_objects) do
                 -- an attribute has a TYPE and access flags, not a call signature;
                 -- rendering it as `: T [read-only]` keeps hover honest about which
                 -- kind of member it is
-                local acc = {}
-                if a.read ~= false then acc[#acc + 1] = 'read' end
-                if a.write then acc[#acc + 1] = 'write' end
-                sigs[key] = { sig = (': %s [%s]'):format(render_type(a.type),
+                -- ★ TWO SCHEMA SPELLINGS, AND READING ONLY THE OLD ONE FAILS SILENTLY.
+                -- api v5 gives an attribute `type` + boolean `read`/`write`; api v6
+                -- (Factorio 2.0) replaced all three with `read_type` / `write_type`,
+                -- each present only when that access exists. Reading v5's names against
+                -- a v6 document yields nil for every attribute — so render_type(nil)
+                -- printed `?` and `a.write` being nil made every writable attribute
+                -- read-only. It did not error and it did not warn: all 104 attributes
+                -- in the 2.0 profile rendered `: ? [read]` and looked like data.
+                -- Member NAMES were unaffected, which is why presence/absence survived
+                -- and only the TYPES were quietly wrong.
+                local acc, ty = {}, nil
+                if a.read_type ~= nil or a.write_type ~= nil then -- v6
+                    if a.read_type ~= nil then acc[#acc + 1] = 'read' end
+                    if a.write_type ~= nil then acc[#acc + 1] = 'write' end
+                    ty = a.read_type ~= nil and a.read_type or a.write_type
+                else -- v5
+                    if a.read ~= false then acc[#acc + 1] = 'read' end
+                    if a.write then acc[#acc + 1] = 'write' end
+                    ty = a.type
+                end
+                sigs[key] = { sig = (': %s [%s]'):format(render_type(ty),
                     table.concat(acc, '/')), attribute = true }
                 n_members = n_members + 1
                 n_attrs = n_attrs + 1
