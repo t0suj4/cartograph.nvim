@@ -82,6 +82,16 @@
 -- why a plan is a HANDLE and not a document, why a ref caveat that is a note on
 -- the read side is a REFUSAL here, and what is deliberately not relaxed.
 
+-- ── PHASE 4 IS ONE AXIS, NOT A PHASE: THE VERSION AXIS (CART-0595) ──────────
+-- portability.lua's A-to-B diff is the strongest evidence this tool produces
+-- about a port, and until now no agent could reach any of it — the tail of this
+-- file listed portability among the verbs "skipped for scope". Three entries in
+-- the catalogue close that: the target ROSTER (so a from/to pair is never
+-- guessed at), the READ diff and the CALL diff. The READ one is the answer; the
+-- CALL one is in the table because leaving it out would leave an agent no way to
+-- ask the called-name question at all, and its summary says which it is. The
+-- reasoning that shaped them sits above the verbs themselves.
+
 local atr = require 'cartograph.at'
 local tiers = require 'cartograph.tier'
 
@@ -321,6 +331,11 @@ end
 local ORDER = { 'graph_info', 'node_find', 'node_at', 'edges_callers', 'edges_callees',
     'why', 'lint_run',
     'clones_find', 'cone', 'ladder', 'territory', 'census', 'mentions', 'externals',
+    -- THE VERSION AXIS (CART-0595), listed after the external surface because it
+    -- is that surface scored twice: the roster first (there is no from/to to
+    -- guess at), then the READ diff, then the CALL diff it must not be mistaken
+    -- for.
+    'portability_targets', 'portability_move', 'portability_move_calls',
     -- THE WRITE AXIS (CART-0146), listed in the order it may be TRUSTED in and
     -- was built in: propose, diff, read the history, then write, then reverse.
     'txn_plan_moveset', 'txn_plan_optimize', 'txn_preview',
@@ -1264,6 +1279,311 @@ local function v_externals(store, args)
         evidence = { total = s.total, resolved = s.resolved } }, notes = notes }
 end
 
+-- ── verbs: THE VERSION AXIS (CART-0595) ─────────────────────────────────────
+-- portability.lua produces the strongest evidence this tool has about a PORT —
+-- not "this name is missing from the target", which can be a fact about a
+-- partial artifact, but "the OLD environment held this name and the new one does
+-- not", which is a fact about the two environments and survives both artifacts
+-- being incomplete in the same way. Until now an agent could not reach any of
+-- it: the tail of this file listed portability as skipped for scope.
+--
+-- ★ THE TWO SURFACES ARE NOT INTERCHANGEABLE, AND THAT IS WHY THERE ARE TWO
+-- VERBS RATHER THAN ONE WITH A `surface` ARGUMENT. `portability_move` scores the
+-- READ surface (externals.references — every dotted name a function reads and
+-- this graph does not define). `portability_move_calls` scores the CALL-derived
+-- requirement set. A name that is READ and never CALLED produces no call record
+-- at all, so the call surface cannot see a rename of a data global — it answers
+-- "0 lost" on exactly the move whose read surface answers with the worklist. An
+-- agent that reaches for the wrong one concludes THERE IS NOTHING TO PORT, so
+-- the summaries name the mechanism and the weak verb points at the strong one.
+--
+-- THEY ALSO DIFFER IN CAPABILITY, which is the structural reason a single verb
+-- would be wrong. references() re-parses each function on demand (expr.of), so
+-- the read diff answers on a THIN INDEX; requires() reads call records, so the
+-- call diff must declare `needs_calls` and refuse there. One verb would either
+-- refuse the read surface on a thin index for no reason, or hide the split from
+-- graph_info's catalogue — and the catalogue is where an agent negotiates.
+--
+-- ★★ THE ABSENCE TAXONOMY IS THE WHOLE POINT HERE, and four outcomes that a
+-- lesser envelope renders as one empty list:
+--   absent       lost = 0. A REAL ANSWER: nothing this code reads was removed
+--                between these two environments. The move costs nothing here.
+--   frontier     no function's expressions were examined at all, so an empty
+--                worklist is NO ANSWER rather than a clean bill of health.
+--   unavailable  no profile of that name ships. An instrument gap, not a fact
+--                about the code — and the shipped roster rides in the evidence.
+--   REFUSED      the two profiles cannot be compared (different languages, an
+--                INGREDIENT artifact, a profile that cannot adjudicate a dotted
+--                name). portability already refuses clearly and its reason is
+--                carried VERBATIM rather than being re-worded here, because the
+--                sentence names the mechanism and a paraphrase would drift from
+--                the one the human report prints.
+
+--- The from/to pair, and the THREE ways it fails BEFORE any diff is attempted.
+--- Returns true, or (nil, verb-result) carrying the right one of them.
+---
+--- WHY THE PROFILE LOOKUP HAPPENS HERE rather than being left to portability:
+--- both diff functions report an unknown runtime as an error STRING, in the same
+--- channel as "these two cannot be compared". Flattening them into one refusal
+--- would render an instrument gap ("we ship no profile for 2.1") identically to
+--- a wrong question ("these are different languages"), which is the one thing
+--- this envelope exists to prevent.
+local function version_pair(args)
+    local port = require 'cartograph.portability'
+    local pm = require 'cartograph.spec.profile'
+    local missing = {}
+    for _, rt in ipairs({ args.from, args.to }) do
+        if not pm.load(rt) then missing[#missing + 1] = rt end
+    end
+    if #missing > 0 then
+        local roster = port.runtimes()
+        return nil, { result = {}, absence = 'unavailable', absence_why = {
+            premise = 'no-such-profile',
+            why = ('no environment profile named %s ships in this tree, so the move cannot be scored — this is a gap in the INSTRUMENT, not a statement that the port is clean. %d profile(s) ship: %s'):format(
+                table.concat(vim.tbl_map(function (m) return ('%q'):format(m) end, missing), ' or '),
+                #roster, table.concat(roster, ', ')),
+            evidence = { missing = missing, shipped = roster } },
+            notes = { { kind = 'ask-the-roster', premise = 'discovery',
+                why = 'portability_targets lists every shipped profile with its language, its size and — for the ones that can be no target — WHY, so a from/to pair never has to be guessed at',
+                evidence = NUL } } }
+    end
+    -- A DIFF OF A PROFILE WITH ITSELF is zero by construction, and zero by
+    -- construction must not arrive wearing the same clothes as zero by
+    -- measurement: `absent` here would read as "this move costs nothing".
+    if args.from == args.to then
+        return nil, refuse('same-profile',
+            ('from and to are both %q, so every status change is zero BY CONSTRUCTION — that is arithmetic, not evidence about a port'):format(args.from),
+            'pass two different profiles (portability_targets lists them); a version move is a pair like lua-factorio-11 -> lua-factorio')
+    end
+    return true
+end
+
+--- portability's own refusal, carried through UNFLATTENED. `reason` is its
+--- sentence verbatim: it names the MECHANISM (signature-keyed, ingredient,
+--- different languages) and the human report prints the same words, so a
+--- paraphrase here would be a second copy free to drift from the first.
+local function not_comparable(err, from, to)
+    return refuse('profiles-not-comparable', err,
+        'portability_targets reports which artifacts can answer a NAME question (`kinds.names`) and, for the rest, the mechanism that stops them — pick two that can, of the same language',
+        { from = from, to = to })
+end
+
+--- The READ SURFACE, memoized on this graph's generation. references() re-parses
+--- every function in the corpus (expr.of), so the move verb — which needs both
+--- the diff and the coverage counts the diff does not return — would otherwise
+--- pay for it twice per call and again on every repeat. Keyed the way M.graph's
+--- memo is, on (store, generation), so an edit invalidates it.
+local function refs_of(store)
+    local gen = store.generation or 0
+    local c = M._refs_cache
+    if c and c.gen == gen and c.store == store then return c.refs end
+    local refs = require('cartograph.externals').references(store)
+    M._refs_cache = { gen = gen, store = store, refs = refs }
+    return refs
+end
+
+--- The coverage note EVERY move answer carries, whatever the outcome. A diff is
+--- a statement about the names that WERE examined, and the reader is entitled to
+--- how many that was before believing an empty worklist.
+local function move_notes(store, extra)
+    local g = M.graph(store)
+    local notes = extra or {}
+    if g.frontier.unparsed_files > 0 then
+        notes[#notes + 1] = { kind = 'not-everything-was-read', premise = 'unparsed-files',
+            why = ('%d file(s) in this graph were never parsed (a bundle, a missing grammar, an unreadable file), so nothing they contain is in this diff either way'):format(g.frontier.unparsed_files),
+            evidence = { unparsed_files = g.frontier.unparsed_files,
+                examples = g.frontier.examples } }
+    end
+    return notes
+end
+
+local function v_portability_targets()
+    local port = require 'cartograph.portability'
+    local rows = {}
+    for _, r in ipairs(port.target_roster()) do
+        local k = r.kinds or { names = false, data = false }
+        rows[#rows + 1] = { runtime = r.runtime, lang = nn(r.lang),
+            size = r.size or 0, measure = nn(r.measure),
+            names = k.names or false, data = k.data or false,
+            reason = nn(r.reason) }
+    end
+    table.sort(rows, function (x, y)
+        if x.names ~= y.names then return x.names end
+        if x.lang ~= y.lang then return tostring(x.lang) < tostring(y.lang) end
+        return x.runtime < y.runtime
+    end)
+    -- THE ROSTER IS A DESCRIPTION OF THE INSTRUMENT, like graph_info's and
+    -- census's, and it is never empty: profiles ship with the plugin. What
+    -- `targets()` would drop is kept here WITH ITS REASON, because five silently
+    -- omitted artifacts is the absence-rendered-as-silence class — a caller must
+    -- be able to tell "no profile covers this" from "five were skipped".
+    return { result = rows, notes = { { kind = 'a-target-is-not-an-artifact',
+        premise = 'capability',
+        why = 'every shipped artifact is listed, including the ones that can answer no name question at all — `names` says whether it may be a from/to for portability_move, `data` whether it can answer a prototype question, and `reason` names the mechanism when it can be neither. An artifact that is no target is not a worthless file, it is the wrong key space for this question.',
+        evidence = NUL } } }
+end
+
+local function v_portability_move(store, args)
+    local port = require 'cartograph.portability'
+    local pre, bad = version_pair(args)
+    if not pre then return bad end
+    local res, err = port.reference_diff(store, args.from, args.to)
+    if not res then return not_comparable(err, args.from, args.to) end
+
+    local refs = refs_of(store)
+    local subject = { from = res.from, to = res.to, surface = 'reads',
+        lost = #res.lost, gained = #res.gained, kept = res.kept,
+        neither = res.neither, functions_examined = refs.analysed or 0 }
+    local notes = move_notes(store, { { kind = 'this-is-the-read-surface',
+        premise = 'surface',
+        why = 'these are names a function READS and this graph does not define, scored under both profiles. The CALL surface is a different population and a weaker one for a version move: a name that is read and never invoked produces no call record, so portability_move_calls cannot see a data-global rename at all.',
+        evidence = { analysed = refs.analysed or 0, unmodelled = refs.unmodelled or 0,
+            withheld = refs.withheld or 0, names_scored = refs.total or 0 } } })
+    if #res.gained > 0 then
+        -- GAINED IS NOT LOST, and it is not silence either. It rides as a note
+        -- rather than as a row because the RESULT of this verb is the port
+        -- WORKLIST: a name the new environment adds is context for the move, not
+        -- work in it, and mixing the two would mean an empty worklist could
+        -- never be reported as such.
+        local names = {}
+        for i = 1, math.min(15, #res.gained) do
+            names[#names + 1] = { name = res.gained[i].name, reads = res.gained[i].reads,
+                now = res.gained[i].now, file = res.gained[i].file }
+        end
+        notes[#notes + 1] = { kind = 'gained', premise = 'direction',
+            why = ('%d name(s) the NEW environment holds and the old did not — already-migrated code, or a name that moved here. Reverse `from` and `to` to make these the worklist.'):format(#res.gained),
+            evidence = { gained = #res.gained, names = names } }
+    end
+    if (refs.withheld or 0) > 0 then
+        notes[#notes + 1] = { kind = 'withheld', premise = 'binder',
+            why = ('%d name(s) were WITHHELD from the read surface: their root is touched in only one function, where a loop-bound local is indistinguishable from a global until per-language binder nodes are specified'):format(refs.withheld),
+            evidence = { withheld = refs.withheld } }
+    end
+
+    local rows = {}
+    local cap = math.max(1, math.floor(tonumber(args.limit) or 100))
+    local lost_set = res.lost -- the UNCLIPPED measurement; `rows` is the presentation
+    for _, e in ipairs(res.lost) do
+        rows[#rows + 1] = { name = e.name, reads = e.reads, was = nn(e.was),
+            file = nn(e.file), files = e.files or {} }
+    end
+    if #rows > cap then
+        notes[#notes + 1] = { kind = 'clipped',
+            why = ('%d name(s) lost, %d returned — raise `limit` to see the rest'):format(#rows, cap),
+            evidence = { lost = #rows, limit = cap } }
+        for i = #rows, cap + 1, -1 do rows[i] = nil end
+    end
+    -- ★ THE ANSWER PATH IS CHOSEN BY THE MEASUREMENT, NOT THE PRESENTATION.
+    -- `rows` has just been CLIPPED to `limit`. Branching on #rows made a real
+    -- worklist render as `absence='absent'` — "the move loses nothing this code
+    -- reads" — whenever the caller passed limit=0, while subject.lost still said
+    -- 10. The envelope contradicted itself and the invariant did not catch it,
+    -- because it checks that an empty result NAMES an absence, not that the
+    -- absence is TRUE. Two guards, deliberately redundant: cap can never clip to
+    -- nothing, and the branch reads the unclipped set so the two cannot diverge
+    -- again if the clamp is ever removed.
+    if #lost_set > 0 then return { subject = subject, result = rows, notes = notes } end
+
+    -- NOTHING WAS EXAMINED is not the same claim as NOTHING WAS LOST. The read
+    -- surface is built by re-parsing each function; if none was analysed there is
+    -- no population to have lost anything FROM, and calling that `absent` would
+    -- turn "no answer" into a clean bill of health.
+    if (refs.analysed or 0) == 0 then
+        local langs = {}
+        for l, k in pairs(refs.unmodelled_langs or {}) do langs[#langs + 1] = ('%s (%d)'):format(l, k) end
+        table.sort(langs)
+        return { subject = subject, result = {}, absence = 'frontier', absence_why = {
+            premise = 'no-function-examined',
+            why = ('not one function\'s expressions were examined%s, so this empty worklist is NO ANSWER rather than a clean move — the diff had no read surface to score'):format(
+                #langs > 0 and (' (%d not modelled: %s)'):format(refs.unmodelled or 0, table.concat(langs, ', ')) or ''),
+            evidence = { analysed = 0, unmodelled = refs.unmodelled or 0,
+                unmodelled_langs = langs,
+                unparsed_files = M.graph(store).frontier.unparsed_files } },
+            notes = notes }
+    end
+    if (refs.total or 0) == 0 then
+        return { subject = subject, result = {}, absence = 'absent', absence_why = {
+            premise = 'no-external-reads',
+            why = ('%d function(s) were examined and none holds a qualified read of a name this graph does not define — there is no external read surface to move, so the move costs nothing HERE'):format(refs.analysed),
+            evidence = { analysed = refs.analysed } }, notes = notes }
+    end
+    return { subject = subject, result = {}, absence = 'absent', absence_why = {
+        premise = 'no-name-lost',
+        why = ('%d name(s) were scored under both profiles and not one is present in %s and absent from %s — %d held by both, %d by neither, %d NEW in the target. This is a real answer: the move loses nothing this code reads.'):format(
+            refs.total, res.from, res.to, res.kept, res.neither, #res.gained),
+        evidence = { scored = refs.total, kept = res.kept, neither = res.neither,
+            gained = #res.gained } }, notes = notes }
+end
+
+local function v_portability_move_calls(store, args)
+    local port = require 'cartograph.portability'
+    local pre, bad = version_pair(args)
+    if not pre then return bad end
+    local res, err = port.diff(store, args.from, args.to)
+    if not res then return not_comparable(err, args.from, args.to) end
+
+    local req = port.requires(store)
+    local subject = { from = res.from, to = res.to, surface = 'calls',
+        lost = #res.lost, gained = #res.gained, kept = res.kept,
+        neither = res.neither, size_from = res.size_from, size_to = res.size_to }
+    -- THE MANDATORY CAVEAT. It is not a hedge about precision: it is the
+    -- population. This verb can be RIGHT and USELESS on a version move, and an
+    -- agent reading `lost: 0` off it must be told which question it answered.
+    local notes = move_notes(store, { { kind = 'this-is-the-call-surface',
+        premise = 'surface',
+        why = 'these are names this code CALLS and does not define. A name that is READ and never invoked produces no call record, so a renamed data global (the largest mechanical item in most version ports) is invisible here whatever this answer says. portability_move scores the READ surface and is the stronger question for a version move.',
+        evidence = { requirement_names = req.total } } })
+    notes[#notes + 1] = { kind = 'profile-weight', premise = 'artifact-size',
+        why = ('the two profiles claim %d and %d symbols — a thin target inflates "lost", and a verdict against a small artifact is worth less than one against a large one'):format(
+            res.size_from or 0, res.size_to or 0),
+        evidence = { size_from = res.size_from or 0, size_to = res.size_to or 0 } }
+    if #res.gained > 0 then
+        local names = {}
+        for i = 1, math.min(15, #res.gained) do
+            names[#names + 1] = { name = res.gained[i].name, calls = res.gained[i].calls }
+        end
+        notes[#notes + 1] = { kind = 'gained', premise = 'direction',
+            why = ('%d called name(s) the NEW environment holds and the old did not'):format(#res.gained),
+            evidence = { gained = #res.gained, names = names } }
+    end
+
+    local rows = {}
+    local cap = math.max(1, math.floor(tonumber(args.limit) or 100))
+    local lost_set = res.lost -- the UNCLIPPED measurement; `rows` is the presentation
+    for _, e in ipairs(res.lost) do
+        rows[#rows + 1] = { name = e.name, calls = e.calls, was = nn(e.why),
+            file = nn(e.file), files = e.files or {} }
+    end
+    if #rows > cap then
+        notes[#notes + 1] = { kind = 'clipped',
+            why = ('%d name(s) lost, %d returned — raise `limit` to see the rest'):format(#rows, cap),
+            evidence = { lost = #rows, limit = cap } }
+        for i = #rows, cap + 1, -1 do rows[i] = nil end
+    end
+    -- ★ THE ANSWER PATH IS CHOSEN BY THE MEASUREMENT, NOT THE PRESENTATION.
+    -- `rows` has just been CLIPPED to `limit`. Branching on #rows made a real
+    -- worklist render as `absence='absent'` — "the move loses nothing this code
+    -- reads" — whenever the caller passed limit=0, while subject.lost still said
+    -- 10. The envelope contradicted itself and the invariant did not catch it,
+    -- because it checks that an empty result NAMES an absence, not that the
+    -- absence is TRUE. Two guards, deliberately redundant: cap can never clip to
+    -- nothing, and the branch reads the unclipped set so the two cannot diverge
+    -- again if the clamp is ever removed.
+    if #lost_set > 0 then return { subject = subject, result = rows, notes = notes } end
+    if (req.total or 0) == 0 then
+        return { subject = subject, result = {}, absence = 'absent', absence_why = {
+            premise = 'no-external-call-surface',
+            why = 'this graph records no call that leaves it, so there is no requirement set to move — every call resolved inside the corpus or to a stdlib tail',
+            evidence = { requirement_names = 0 } }, notes = notes }
+    end
+    return { subject = subject, result = {}, absence = 'absent', absence_why = {
+        premise = 'no-called-name-lost',
+        why = ('%d called name(s) were scored under both profiles and not one is present in %s and absent from %s. READ THIS WITH ITS SURFACE: a 0 here is routine on a version move even when the port is large, because the names that change are read, never called — ask portability_move before concluding there is nothing to do.'):format(
+            req.total, res.from, res.to),
+        evidence = { requirement_names = req.total, kept = res.kept,
+            neither = res.neither } }, notes = notes }
+end
+
 -- ── PHASE 3: THE WRITE AXIS (CART-0146) ─────────────────────────────────────
 -- plan → preview → apply, plus the journal, over the two families the design
 -- already called agent-shaped: moveapply (move / extract-module) and optapply
@@ -2040,6 +2360,62 @@ M.VERBS = {
         run = v_externals,
     },
 
+    -- ── the version axis (CART-0595) ────────────────────────────────────────
+
+    portability_targets = {
+        summary = 'the environment profiles that ship, and what each can ANSWER — the from/to vocabulary for portability_move; an artifact that can be no target carries the mechanism that stops it',
+        tier_basis = 'observation',
+        -- a description of the INSTRUMENT, like graph_info and census: profiles
+        -- ship with the plugin, so this roster is never empty and an absence
+        -- value listed here would be one no branch could emit (CART-0580).
+        absences = {},
+        args = {},
+        run = v_portability_targets,
+    },
+    portability_move = {
+        summary = 'THE VERSION MOVE, over the READ surface: names this code reads that the OLD environment held and the NEW one does not — the port worklist. This is the strong one; a renamed data global (global.x -> storage.x) lives here and nowhere else',
+        tier_basis = 'observation',
+        -- NO `needs_calls`, and that is measured rather than assumed: the read
+        -- surface is built by re-parsing each function on demand (expr.of), so
+        -- this answers on a THIN INDEX. Declaring the capability would refuse a
+        -- perfectly answerable question — the mirror of the CART-0580 defect.
+        --
+        -- `absent`      lost = 0. A REAL ANSWER: nothing read here was removed.
+        -- `frontier`    no function was examined, so the empty worklist is no
+        --               answer rather than a clean move.
+        -- `unavailable` no profile of that name ships — an instrument gap.
+        -- NOT 'refused': two profiles that cannot be compared is a REFUSAL of
+        -- the verb (rule `profiles-not-comparable`), carrying portability's own
+        -- sentence verbatim, never an empty result.
+        absences = { 'absent', 'frontier', 'unavailable' },
+        args = {
+            { name = 'from', type = 'string', required = true,
+                desc = 'the OLD environment profile (portability_targets lists them; a name that does not ship answers `unavailable`, never a clean 0)' },
+            { name = 'to', type = 'string', required = true,
+                desc = 'the NEW environment profile — same language as `from`, and both must be able to adjudicate a DOTTED name or the diff refuses' },
+            { name = 'limit', type = 'integer', desc = 'max lost names (default 100); a clip is reported as a note' },
+        },
+        run = v_portability_move,
+    },
+    portability_move_calls = {
+        summary = 'the same move over the CALL-derived requirement set — THE WEAKER QUESTION. A name that is READ and never invoked produces no call record, so a data-global rename is invisible here and this verb can answer "0 lost" on a large port. Ask portability_move first; use this only when you specifically mean CALLED names',
+        -- requires() reads the call records, so unlike portability_move this one
+        -- genuinely cannot answer on a thin index.
+        tier_basis = 'observation', needs_calls = true,
+        -- NOT 'frontier': the read verb's frontier is "no function examined",
+        -- which has no counterpart here — a graph with no call records at all is
+        -- already refused by `thin-index`, and one with calls that all land
+        -- inside is an ANSWER (premise `no-external-call-surface`).
+        absences = { 'absent', 'unavailable' },
+        args = {
+            { name = 'from', type = 'string', required = true,
+                desc = 'the OLD environment profile (portability_targets lists them)' },
+            { name = 'to', type = 'string', required = true, desc = 'the NEW environment profile' },
+            { name = 'limit', type = 'integer', desc = 'max lost names (default 100); a clip is reported as a note' },
+        },
+        run = v_portability_move_calls,
+    },
+
     -- ── the write axis (CART-0146) ──────────────────────────────────────────
     -- EVERY ONE OF THESE IS tier_basis='observation', AND THAT IS THE HONEST
     -- ANSWER RATHER THAN A DEFAULT. A plan's rows are PROPOSED EDITS read off the
@@ -2362,15 +2738,30 @@ end
 --                   honesty. It needs an argument the other verbs do not have,
 --                   a PARAMETER INDEX, and its rows are provenance chains whose
 --                   absence taxonomy deserves its own sitting.
---   portability     STRUCTURED (rank / requires / manifest / audit / diff all
---   versionfloor    return records; facts / group likewise) and likewise
---                   skipped for scope. Both take a RUNTIME PROFILE argument, so
---                   an honest verb has to model "no profile is active" as a
---                   refusal and publish the roster of targetable runtimes — a
---                   capability-negotiation surface of its own, not one line.
+--   versionfloor    STRUCTURED (facts / group return records) and skipped for
+--                   scope. It takes no profile pair, so it does not share the
+--                   capability-negotiation surface the version axis needed; it
+--                   is one dispatch entry plus its own absence taxonomy (a
+--                   corpus whose language has no version SCALE must not report
+--                   "no floor" as though the code used nothing new).
+--   portability     THE VERSION AXIS IS NOW HERE (CART-0595) — portability_targets
+--   audit/rank      / portability_move / portability_move_calls, above. This
+--   manifest        paragraph used to say portability was skipped for scope, and
+--                   leaving that standing after the verbs landed would be the
+--                   exact defect CART-0595 is about: a stale caveat costs more
+--                   than a missing feature, because it stops the next reader
+--                   running a mechanism that is already here.
+--                   STILL OUT, and for scope rather than honesty: the SINGLE-
+--                   TARGET questions — audit ("will it run on X"), rank ("which
+--                   shipped environment is tightest") and manifest ("who provides
+--                   what"). They answer a different question from a MOVE and each
+--                   needs its own absence taxonomy: an audit's empty finding list
+--                   is genuinely ambiguous between "this profile provides
+--                   everything" and "this artifact models almost nothing", which
+--                   is a distinction the diff does not have to make and they do.
 --
 -- The distinction matters: `classify` is skipped because wrapping it would be a
--- fabrication, the other three because the sitting ran out. Only the first is a
+-- fabrication, the rest because the sitting ran out. Only the first is a
 -- statement about the code.
 --
 -- ── AND ON THE WRITE AXIS (CART-0146) ───────────────────────────────────────

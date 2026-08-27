@@ -1,6 +1,6 @@
 ---
 name: cartograph
-description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 21 verbs) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the four reasons mean different things.
+description: Drive cartograph.nvim headlessly as an agent — a polyglot symbol-graph and transactional refactoring engine exposed over MCP (tools/mcpserve.lua, 24 verbs incl. a VERSION axis that diffs two runtime profiles) and one-shot JSON (tools/agentq.lua). Use it to ask who calls what, why a symbol is not dead, what a refactor would change, and to apply multi-file edits through a journal. Load this whenever cartograph, :Cartograph* commands, mcpserve/agentq, or its reports come up. ALWAYS load it before concluding "nothing found" from a cartograph answer — an empty result here is a typed claim with a reason attached, and the four reasons mean different things.
 ---
 
 # cartograph, for an agent
@@ -77,12 +77,13 @@ instrument and surprising if you forget it.
 
 ## The verbs
 
-21, in the order they may be trusted in. `graph_info` first — it reports which verbs
+24, in the order they may be trusted in. `graph_info` first — it reports which verbs
 are available on *this* graph and host, and why any are not.
 
 ```
 READ      graph_info  node_find  node_at  edges_callers  edges_callees  why  lint_run
 CATALOGUE clones_find  cone  ladder  territory  census  mentions  externals
+VERSION   portability_targets  portability_move  portability_move_calls
 WRITE     txn_plan_moveset  txn_plan_optimize  txn_preview
           journal_list  journal_get
           txn_apply  txn_undo
@@ -96,6 +97,23 @@ separately because your next move differs:
 - **`mutates`** — about the HOST. `mcpserve` is **read-only by default**; `--write`
   grants the mutating verbs. Gated verbs are still advertised, with the gate stated
   in their description.
+
+### The version axis — and pick the right one
+
+`portability_move` diffs the **read** surface between two profiles of the same runtime;
+`portability_move_calls` diffs the **call** surface. **Use `portability_move` for a
+version port.** The call surface is call-derived, so a 1.1 → 2.0 Factorio move reports
+`lost=0` — everything that actually changed (`global.*`, `game.entity_prototypes`) is
+*read*, never called. Picking the call verb gets you a clean bill of health for a broken
+port.
+
+`portability_targets` gives the from/to vocabulary, and lists non-targets with the reason
+they are blocked. Guessing profile names is what it exists to prevent.
+
+A `lost=0` answer is `absent` — a real result meaning the move loses nothing this code
+reads. It is not the same as a refusal (the two profiles cannot be compared) or
+`unavailable` (no profile ships for that version). The three render differently on
+purpose.
 
 ## Reading an answer
 
@@ -170,7 +188,7 @@ and it is not the agent surface — do not quote its tables as current.
 This file describes the agent surface at:
 
 ```
-commit  4f28f7d   Write verbs, and the two guarantees that were only ever held up by human speed
+commit  c1955fc   The header said the version diff could not be demonstrated; it demonstrates in one call
 ```
 
 Verify before trusting the verb list:

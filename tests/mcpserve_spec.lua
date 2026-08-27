@@ -315,6 +315,16 @@ test('agent: EVERY verb in the catalogue obeys the envelope invariant', function
         why = { file = 'm.lua', line = 4, col = 26 }, lint_run = {},
         clones_find = {}, cone = { node = idof('M.caller') }, ladder = {},
         territory = {}, census = {}, mentions = { name = 'walk' }, externals = {},
+        -- THE VERSION AXIS (CART-0595). This fixture reads nothing external, so
+        -- both move verbs land on an ABSENCE here — which is exactly what this
+        -- sweep is for: the empty answer must name a premise the verb declared.
+        -- The port-specific behaviour (a worklist, a refusal carrying
+        -- portability's own sentence, the read/call contrast) lives in
+        -- tests/agentport_spec.lua, on a fixture that actually reads a
+        -- Factorio global.
+        portability_targets = {},
+        portability_move = { from = 'lua-factorio-11', to = 'lua-factorio' },
+        portability_move_calls = { from = 'lua-factorio-11', to = 'lua-factorio' },
         -- planning with no symbol named, and previewing / fetching a handle that
         -- was never minted: refusals reachable without touching a byte
         txn_plan_moveset = { args = { dest = 'lib/new.lua' }, expect = 'refusal' },
