@@ -760,7 +760,141 @@ end
 --- file it appears in is this profile's language. A helper called from both zipper.py
 --- and control.lua is squarely the lua profile's business, and the old form could
 --- rule that out on filename order alone.
-function M.unknown_reason(prof, name, where)
+-- ── THE RECEIVER AXIS (CART-0587) ───────────────────────────────────────────
+-- `receiver-typed` was the largest non-answer on every Factorio corpus (48 of 92
+-- names / 101 calls on Von-Neumann) and it was ONE bucket saying "no
+-- representation at all". lua/cartograph/classmatch.lua supplies the missing key:
+-- an unresolved base's observed member set picks a class out of the environment's
+-- DECLARED class table, and the target's class-keyed member set is exactly the key
+-- space portability could never reach. So a receiver-typed name becomes
+-- adjudicable — hedged twice over, and split by WHY when it is not.
+--
+-- ★ THE HEADLINE FINDING, and it is structural rather than a property of this
+-- corpus. `requires()` builds its names FROM externals.surface, so every
+-- `base.member` it holds contributed head(member) to that base's SHAPE; and
+-- `determined` MEANS one class declares every member of the shape. Therefore a
+-- determined base's class declares every one of its members BY CONSTRUCTION, and
+-- ADJUDICABLE-ABSENT IS STRUCTURALLY EMPTY down this path. Measured: 27 present, 8
+-- chain, 7 ambiguous, 6 no-match, 0 absent. Nothing here can mint porting work, and
+-- a build of this feature that reported some would be reporting a bug.
+--
+-- WHAT IT IS WORTH ANYWAY, stated so the group text does not overclaim: the
+-- evidence is at the BASE, not the name. A 2.0 removal among a base's members would
+-- have broken the subset match and dropped the base into `no-match` or `near-miss`
+-- — so a determined base is a statement that NONE of its members is a removal. It
+-- is not 27 independent verifications, and the report says so.
+--
+-- THE ONE PATH THAT COULD EVER MINT AN ABSENCE is the NEAR MISS: a shape one member
+-- away from a single overlapping class. Von-Neumann has zero (15 of 15 no-match
+-- bases are UNRELATED), so nothing is built on it here beyond keeping it a separate
+-- bucket — folding a near miss into "not an API object" would mislabel the only
+-- future absence signal there is.
+
+--- The class-table context an audit adjudicates receivers against, or (nil, why).
+--- `why` NAMES THE MECHANISM: an unavailable axis must read as unavailable, never
+--- as an empty result (which is what a bare `receiver-typed` list looks like).
+---
+--- ★ THE VERSION/LANGUAGE GUARD IS THE WHOLE SAFETY ARGUMENT. classmatch answers
+--- from whichever artifact carries a class table, which today is the 2.0.72 export.
+--- Adjudicating a 1.1 audit — or a ruby one — against it would turn a version
+--- mismatch into confident member verdicts, which is the failure mode of 44b8a2a
+--- (v5 keys read against a v6 document, 104 confident nonsenses). So the table must
+--- describe the SAME language at the SAME version as the profile being reported on,
+--- and when it does not, the axis is simply absent and says why.
+function M.receiver_context(store, prof)
+    local cm = require 'cartograph.classmatch'
+    local ct, why = cm.table(nil)
+    if not ct then return nil, ('no class table to adjudicate receivers with (%s)')
+        :format(tostring(why)) end
+    local m = ct.meta or {}
+    if prof.lang and m.lang and m.lang ~= prof.lang then
+        return nil, ('the only class table available describes %s (%s), not %s')
+            :format(tostring(m.lang), tostring(m.artifact), tostring(prof.lang))
+    end
+    if tostring(m.version) ~= tostring(prof.version) then
+        return nil, ('the only class table available is %s %s, and this verdict is'
+            .. ' about %s — a class table from another version would turn a version'
+            .. ' mismatch into member verdicts, so receivers are left unadjudicated')
+            :format(tostring(m.artifact), tostring(m.version), tostring(prof.version))
+    end
+    local surf = require('cartograph.externals').surface(store)
+    local ev = {}
+    for base, e in pairs(surf.bases or {}) do ev[base] = cm.match(e.members, ct) end
+    return { ct = ct, ev = ev, meta = m, tier = cm.TIER }
+end
+
+--- ADJUDICATE ONE RECEIVER-TYPED NAME against a class table. PURE: everything it
+--- needs arrives as arguments, so every branch — including the ones a real corpus
+--- cannot currently produce — is directly constructible in a spec.
+--- Returns (reason, detail) or nil when the name is not receiver-shaped / has no
+--- evidence, in which case the caller keeps the unrefined `receiver-typed`.
+---
+--- ★ AMBIGUOUS AND ZERO GET THEIR OWN REASONS AND NEVER THE ABSENT ONE. "Several
+--- classes declare this shape" and "no class does" are two ways of NOT KNOWING; a
+--- build that folded either into "the target lacks it" would invent porting work
+--- out of its own uncertainty, which is the failure this whole axis exists to
+--- avoid. They are not even adjacent in the code — each returns its own key.
+function M.receiver_verdict(ct, name, ev)
+    if not ct or not ev then return nil end
+    local base, rest = name:match('^([%w_]+)[.:](.+)$')
+    if not base or not rest then return nil end
+    -- the base's class declares the FIRST segment; `player.character.insert` is a
+    -- chain whose first hop is the attribute `character` (classmatch.head)
+    local hop = rest:match('^([%w_]+)')
+    if not hop then return nil end
+    local deep = rest:find('[.:]', #hop + 1) ~= nil
+    local d = { base = base, member = hop, chain = deep and rest or nil,
+        n = ev.n, outcome = ev.outcome }
+    if ev.outcome == 'determined' then
+        d.class, d.tier, d.hedge = ev.class, ev.tier, ev.hedge
+        local c = ct.classes[ev.class]
+        if not (c and c.all[hop]) then
+            -- STRUCTURALLY UNREACHABLE from a real surface today (see the header):
+            -- the shape that picked this class contains `hop`. Kept, and specced
+            -- through this pure entry point, because the day the shape and the
+            -- adjudicated name come from different populations this is the branch
+            -- that must exist — a silent fold into `present` would be the bug.
+            return 'receiver-class-absent', d
+        end
+        return (deep and 'receiver-class-chain' or 'receiver-class-present'), d
+    elseif ev.outcome == 'ambiguous' then
+        d.ncand, d.candidates = ev.ncand, ev.candidates
+        return 'receiver-ambiguous', d
+    elseif ev.outcome == 'zero' then
+        d.nearest, d.distance, d.overlap = ev.nearest, ev.distance, ev.overlap
+        -- THE PREDICATE IS classmatch's, NOT A RE-DERIVATION. Its definition is
+        -- load-bearing and was measured wrong once already (minimum-miss over ALL
+        -- classes calls every single-member base "one away"); a second copy here
+        -- would be a second chance to get it wrong.
+        return (require('cartograph.classmatch').unrelated(ev)
+            and 'receiver-nomatch' or 'receiver-nearmiss'), d
+    end
+    -- 'no-shape' cannot arise for a dotted name (the member IS the shape), so this
+    -- is a matcher that changed under us: keep the unrefined bucket rather than
+    -- guessing which of the refined ones it meant.
+    return nil
+end
+
+--- One rendered cell of receiver evidence, for the item line. THE HEDGE IS IN THE
+--- TEXT, not only in the bucket: `~` is the project's mark for a hypothesis and `n`
+--- is the quantity that decides how much to believe it (classmatch's two known
+--- wrong answers are BOTH n=1, and it deliberately hardcodes no threshold).
+function M.receiver_cell(d)
+    if not d then return '' end
+    if d.class then
+        return ('~%s n=%d%s'):format(d.class, d.n or 0,
+            (d.n == 1) and ' SINGLE-MEMBER HYPOTHESIS' or '')
+    elseif d.ncand then
+        return ('%d candidate classes n=%d'):format(d.ncand, d.n or 0)
+    elseif d.outcome == 'zero' then
+        local near = (d.nearest or {})[1]
+        return near and ('n=%d nearest ~%s, %d away'):format(d.n or 0, near.class,
+            near.missing) or ('n=%d no overlapping class'):format(d.n or 0)
+    end
+    return ''
+end
+
+function M.unknown_reason(prof, name, where, rctx)
     local files = type(where) == 'table' and where or { where }
     if prof.lang then
         local known, mine = false, false
@@ -785,16 +919,29 @@ function M.unknown_reason(prof, name, where)
             return 'absent'
         end
     end
+    -- THE RECEIVER AXIS. Reached only after every question that is NOT about a
+    -- receiver has been settled above — another language's name, and a member of a
+    -- FULLY ENUMERATED global's class, both keep their answers. `rctx` is optional
+    -- and its absence is exactly the pre-CART-0587 behaviour, so a caller that
+    -- cannot supply a class table (or an environment where none applies) still gets
+    -- the bucket it always got rather than a silent nil.
+    local function receiver(nm)
+        if not rctx then return 'receiver-typed' end
+        local b = nm:match('^([%w_]+)[.:]')
+        local why, d = M.receiver_verdict(rctx.ct, nm, b and rctx.ev[b])
+        if why then return why, d end
+        return 'receiver-typed'
+    end
     if not root then
         -- a dotted CHAIN (a.b.c) or a call-shaped key: still receiver-typed, since
         -- nothing but the first segment could ever be a modelled namespace
         local first = name:match('^([%w_]+)[.:]')
-        if first and not (prof.nsset or {})[first] then return 'receiver-typed' end
+        if first and not (prof.nsset or {})[first] then return receiver(name) end
         if first then return 'unenumerated-namespace' end
         return 'unclaimed-bare'
     end
     if (prof.nsset or {})[root] then return 'unenumerated-namespace' end
-    return 'receiver-typed'
+    return receiver(name)
 end
 
 -- ext -> language, from the specs themselves (memoised: the spec table does not
@@ -826,16 +973,81 @@ local function where_text(files, sample)
     if n > 1 then return ('%s (+%d)'):format(first, n - 1) end
     return first
 end
-local REASON_TEXT = {
+--- A long reason as report lines: first line prefixed, continuations indented under
+--- it. Reasons NAME THE MECHANISM, so they are sentences rather than labels, and a
+--- 250-column line in a scratch buffer is a reason nobody reads.
+local function reason_lines(prefix, text, cont)
+    local out, line = {}, prefix
+    local first = true
+    for word in text:gmatch('%S+') do
+        if not first and #line + 1 + #word > 78 then
+            out[#out + 1] = line
+            line = cont .. word
+        else
+            line = first and (line .. word) or (line .. ' ' .. word)
+        end
+        first = false
+    end
+    out[#out + 1] = line
+    return out
+end
+
+-- HOISTED above the reports (it used to sit between two of them, so M.report
+-- referenced a local that was still nil at call time the moment it needed one).
+-- ⚠ EVERY KEY HERE MUST APPEAR IN M.REASON_ORDER. The report walks the ORDER,
+-- so a key with text and no slot builds a group that is never printed and the
+-- reader silently sees fewer names than the header counts. tests fence the pair.
+M.REASON_TEXT = {
     ['absent'] = 'ABSENT FROM THE TARGET — the documented class for this global is'
         .. ' FULLY enumerated (methods and attributes) and does not hold the name.'
         .. ' This is the group that is real porting work.',
     ['other-language'] = 'ANOTHER LANGUAGE — seen in files this profile does not'
         .. ' describe, so it is not the profile\'s business. Scoring them here was'
         .. ' noise: exclude those files, or score them against their own runtime.',
-    ['receiver-typed'] = 'RECEIVER-TYPED — the artifact models global-rooted calls'
-        .. ' only, so these have no representation in it at all. Needs receiver'
-        .. ' typing; their absence is not evidence about the target.',
+    ['receiver-typed'] = 'RECEIVER-TYPED, UNADJUDICATED — the artifact models'
+        .. ' global-rooted calls only, so these have no representation in it at all,'
+        .. ' and no class table for THIS environment version was available to match'
+        .. ' the receiver\'s shape against. Their absence is not evidence about the'
+        .. ' target. (The header above says which class table was missing and why.)',
+    -- ── the receiver axis (CART-0587). EVERY ONE OF THESE RIDES A HYPOTHESIS: the
+    -- class was picked by matching the base's OBSERVED member set against the
+    -- environment's declared class table, on the `inferred` rung, never `stdlib`.
+    -- None of them may read like the authoritative `provided by` section below.
+    ['receiver-class-absent'] = 'RECEIVER-TYPED, HYPOTHESISED CLASS LACKS THE MEMBER —'
+        .. ' the base\'s observed shape picks exactly one declared class, and that'
+        .. ' class does not declare this member. CANDIDATE porting work, and STRICTLY'
+        .. ' WEAKER than the ABSENT group above: that one rests on a global the'
+        .. ' profile NAMES, this one on a shape-match hypothesis that is measured'
+        .. ' wrong at low member counts. Check `n` on each line before believing it.',
+    ['receiver-nearmiss'] = 'RECEIVER-TYPED, NEAR MISS — no class declares the whole'
+        .. ' observed shape, but one is within a single member of it. NOT adjudicated:'
+        .. ' this is the one pattern that could mean "the target removed that member",'
+        .. ' and it is equally what a mod that decorates an API object looks like.'
+        .. ' Kept apart from the no-match group precisely so it is not mislabelled.',
+    ['receiver-nomatch'] = 'RECEIVER-TYPED, NOT AN API OBJECT — no class declares the'
+        .. ' observed shape and none comes within one member of it, so the base is'
+        .. ' most likely a mod-local table. NOT adjudicable, and for a DIFFERENT'
+        .. ' reason than the rest: there is no class to look the member up in. ⚠ A'
+        .. ' member the target REMOVED produces this same signal (nothing declares'
+        .. ' it), and telling the two apart needs a class table for the OLD version,'
+        .. ' which the 1.1 artifact does not carry. So this is not evidence either way.',
+    ['receiver-ambiguous'] = 'RECEIVER-TYPED, AMBIGUOUS CLASS — several declared'
+        .. ' classes declare every member observed on the base, so the shape does not'
+        .. ' pick one. NOT adjudicable, and explicitly NOT missing: "I cannot tell'
+        .. ' which class" must never be rendered as "the target lacks it".',
+    ['receiver-class-chain'] = 'RECEIVER-TYPED, FIRST HOP ONLY — the base\'s shape picks'
+        .. ' one class and that class declares the FIRST segment, but the name'
+        .. ' continues through it (a.b.c) and the class table carries member NAMES'
+        .. ' without member TYPES, so the deeper hop cannot be followed. Partially'
+        .. ' adjudicated; the tail is not.',
+    ['receiver-class-present'] = 'RECEIVER-TYPED, CONSISTENT WITH THE TARGET — the'
+        .. ' base\'s observed shape picks exactly one declared class and that class'
+        .. ' declares this member. ★ READ THIS WEAKLY: the class was CHOSEN because'
+        .. ' it declares every member observed on the base, so "it declares this one"'
+        .. ' is not independent evidence. What the match does say is at the BASE:'
+        .. ' had the target removed ANY member used on it, no class would have'
+        .. ' matched and the base would appear in a group above. Not `provided` —'
+        .. ' that count means a symbol the profile NAMES.',
     ['unenumerated-namespace'] = 'NAMESPACE MEMBER, NOT ENUMERATED — the root IS a'
         .. ' modelled namespace but the artifact distils METHODS only (and omits'
         .. ' lualib extensions), so a miss here says nothing either way.',
@@ -843,6 +1055,16 @@ local REASON_TEXT = {
         .. ' Most often a sibling module or a third-party dependency, NOT a gap in'
         .. ' the environment.',
 }
+
+--- THE PRESENTATION ORDER of the reason groups, and the report's ONLY list of
+--- them. `absent` FIRST: it is the one group that says anything about the target on
+--- the profile's own authority. Then the receiver axis, ordered by how much it
+--- CLAIMS — the hedged near-porting-work first, the merely consistent last — so a
+--- reader who stops after two groups has read the strongest statements.
+M.REASON_ORDER = { 'absent',
+    'receiver-class-absent', 'receiver-nearmiss', 'receiver-nomatch',
+    'receiver-ambiguous', 'receiver-class-chain', 'receiver-class-present',
+    'receiver-typed', 'unenumerated-namespace', 'unclaimed-bare', 'other-language' }
 
 --- Audit the open graph against a target runtime profile.
 --- Returns (result, err) where result = { runtime, size, provided, unknown,
@@ -905,18 +1127,30 @@ function M.audit(store, runtime)
         res.stage_sites = sites.sites
         res.stage_shadowed, res.stage_withheld = sites.shadowed, sites.withheld
     end
+    -- THE RECEIVER AXIS (CART-0587), built ONCE for the whole audit: it needs the
+    -- external surface and a 148-class subset test per base, and a per-name rebuild
+    -- would pay both 92 times. Unavailable is a REPORTED state, not a silent skip —
+    -- `res.receiver.why` is printed, because a bucket that quietly stops refining
+    -- looks exactly like a bucket with nothing to refine.
+    local rctx, rwhy = M.receiver_context(store, prof)
+    res.receiver = { available = rctx ~= nil, why = rwhy,
+        meta = rctx and rctx.meta or nil, tier = rctx and rctx.tier or nil }
     for name, n in pairs(req.names) do
         local w = M.provides(prof, name)
         local files = req.files[name] or { req.where[name] }
+        local why, rdet
+        if w == nil then why, rdet = M.unknown_reason(prof, name, files, rctx) end
         local entry = { name = name, calls = n,
             provided = w ~= nil, why = w,
+            -- the class hypothesis this entry's reason rests on (class, n, the
+            -- candidate list, the nearest classes) — carried on the ENTRY so a
+            -- consumer reading entries alone sees the hedge, not just the bucket
+            receiver = rdet,
             -- EVERY file, not the sampled one: `files` is what a stage/language
             -- question has to read (CART-0215). Falls back to the sample so an
             -- entry always carries at least one, as it always has.
             files = files,
-            reason = (w == nil)
-                and M.unknown_reason(prof, name, files)
-                or nil }
+            reason = why }
         res.entries[#res.entries + 1] = entry
         -- `provided` KEEPS ITS MEANING — "the environment holds this name" — so no
         -- existing count moves. An entry whose name appears in the out-of-region site
@@ -1645,9 +1879,50 @@ function M.report(store, runtime, opts)
         -- that in one line
         L[#L + 1] = '    (NOT-IN-PROFILE is not "missing" — a dependency may supply'
             .. ' it, or the artifact may not model it at all.)'
+        -- WHAT ADJUDICATED THE RECEIVERS, or why nothing did. Printed before the
+        -- groups because it decides what the receiver groups below can mean at all.
+        if res.receiver and res.receiver.available then
+            local rm = res.receiver.meta or {}
+            vim.list_extend(L, reason_lines('    receivers: ',
+                ('adjudicated by SHAPE MATCH against %s (%s, api v%s) — one `%s`-rung'
+                .. ' HYPOTHESIS per BASE, never a resolution, so every receiver verdict'
+                .. ' below is weaker than the ABSENT group and weaker than `provided`.'
+                .. ' The `~Class n=N` cell on each line is the hypothesis it rests on;'
+                .. ' `n` is how many members had to agree, and a single-member match is'
+                .. ' measured wrong often enough to be marked as such.')
+                :format(tostring(rm.artifact), tostring(rm.version),
+                    tostring(rm.api_version), tostring(res.receiver.tier)), '      '))
+            -- THE CENSUS, so the split is legible without reading every group
+            local c, order2 = {}, { 'receiver-class-absent', 'receiver-nearmiss',
+                'receiver-nomatch', 'receiver-ambiguous', 'receiver-class-chain',
+                'receiver-class-present', 'receiver-typed' }
+            local tot, totcalls = 0, 0
+            for _, e in ipairs(res.entries) do
+                if e.reason and e.reason:match('^receiver%-') then
+                    c[e.reason] = c[e.reason] or { 0, 0 }
+                    c[e.reason][1] = c[e.reason][1] + 1
+                    c[e.reason][2] = c[e.reason][2] + e.calls
+                    tot, totcalls = tot + 1, totcalls + e.calls
+                end
+            end
+            local parts = {}
+            for _, k in ipairs(order2) do
+                if c[k] then parts[#parts + 1] = ('%s %d/%dc')
+                    :format(k:gsub('^receiver%-', ''), c[k][1], c[k][2]) end
+            end
+            L[#L + 1] = ('      %d receiver-typed name(s), %d call(s): %s')
+                :format(tot, totcalls, table.concat(parts, ' · '))
+        elseif res.receiver then
+            vim.list_extend(L, reason_lines(
+                '    receivers NOT adjudicated — ', tostring(res.receiver.why), '      '))
+        end
         -- `absent` FIRST: it is the only group that says anything about the target
-        local groups, order = {}, { 'absent', 'receiver-typed',
-            'unenumerated-namespace', 'unclaimed-bare', 'other-language' }
+        -- on the profile's own authority. Then the receiver axis, ordered by how
+        -- much it claims — the hedged near-porting-work first, the merely consistent
+        -- last. EVERY KEY REASON_TEXT DEFINES MUST APPEAR HERE: a reason present on
+        -- an entry and absent from this list builds a group that is never printed,
+        -- which is the absence-rendered-as-silence class this file keeps fencing.
+        local groups, order = {}, vim.deepcopy(M.REASON_ORDER)
         for _, e in ipairs(res.entries) do
             if not e.provided then
                 local g = groups[e.reason]
@@ -1657,16 +1932,31 @@ function M.report(store, runtime, opts)
             end
         end
         local per = math.max(3, math.floor(cap / 3))
+        -- EVERY group prints, registered or not. The ordered list above is a
+        -- PRESENTATION order; treating it as the filter meant a new reason key could
+        -- be attached to entries and never appear, so the reader would see a smaller
+        -- population than the count in the header and have no way to know why.
+        local unregistered = {}
+        for key in pairs(groups) do
+            local found = false
+            for _, k in ipairs(order) do if k == key then found = true end end
+            if not found then unregistered[#unregistered + 1] = key end
+        end
+        table.sort(unregistered)
+        vim.list_extend(order, unregistered)
         for _, key in ipairs(order) do
             local g = groups[key]
             if g then
                 L[#L + 1] = ''
-                L[#L + 1] = ('    %d name(s), %d call(s) — %s'):format(g.n, g.calls,
-                    REASON_TEXT[key])
+                vim.list_extend(L, reason_lines(
+                    ('    %d name(s), %d call(s) — '):format(g.n, g.calls),
+                    M.REASON_TEXT[key] or ('UNLABELLED REASON %q — this key has no text'
+                        .. ' in REASON_TEXT, which is a bug in this file, not a fact'
+                        .. ' about the code being audited'):format(key), '      '))
                 for i = 1, math.min(per, #g.items) do
                     local e = g.items[i]
-                    L[#L + 1] = ('      %-36s %4d call(s)  %s'):format(e.name,
-                        e.calls, where_text(e.files))
+                    L[#L + 1] = ('      %-36s %4d call(s)  %-34s %s'):format(e.name,
+                        e.calls, where_text(e.files), M.receiver_cell(e.receiver))
                     shown = shown + 1
                 end
                 if #g.items > per then
@@ -1679,9 +1969,29 @@ function M.report(store, runtime, opts)
             L[#L + 1] = '  no ABSENT group: nothing here is a name a fully-enumerated'
             L[#L + 1] = '  class could have held, so nothing is evidence about the target.'
         end
+        -- AND THE SAME SENTENCE FOR THE RECEIVER AXIS, because its empty absent
+        -- group is STRUCTURAL rather than lucky and a reader must not take it for a
+        -- clean bill of health. A base's class is picked BY declaring every member
+        -- observed on it, so a determined base can never lack one of them; the only
+        -- shape a target removal can take here is a base that failed to match.
+        if res.receiver and res.receiver.available and not groups['receiver-class-absent'] then
+            vim.list_extend(L, reason_lines('  no hypothesised-class ABSENT group, and'
+                .. ' that is STRUCTURAL: ',
+                'a class is selected by declaring EVERY member observed on the base, so'
+                .. ' a determined base cannot lack one of them. A member the target'
+                .. ' removed does not show up here as an absence — it shows up as a'
+                .. ' base that matched NO class, in the near-miss or not-an-API-object'
+                .. ' group above. Read those, not this line.', '  '))
+        end
     end
     L[#L + 1] = ''
-    L[#L + 1] = ('  provided by %s: %d name(s)'):format(res.runtime, res.provided)
+    vim.list_extend(L, reason_lines(('  provided by %s: %d name(s) — '):format(
+        res.runtime, res.provided),
+        'the AUTHORITATIVE count, and deliberately unmoved by the receiver axis: it'
+        .. ' means a symbol the profile NAMES, and folding a shape-match hypothesis'
+        .. ' into it would both change what the number means and make a version DIFF'
+        .. ' report every receiver as GAINED (the 1.1 artifact carries no class table,'
+        .. ' so only one end of a move could ever match).', '    '))
     for _, e in ipairs(res.entries) do
         if e.provided then
             L[#L + 1] = ('    %-38s %4d call(s)  via %s'):format(e.name, e.calls, e.why)
@@ -1731,25 +2041,6 @@ function M.report(store, runtime, opts)
         L[#L + 1] = '  it re-parses every function (~3.5 ms each). Pass references=true.'
     end
     return L
-end
-
---- A long reason as report lines: first line prefixed, continuations indented under
---- it. Reasons NAME THE MECHANISM, so they are sentences rather than labels, and a
---- 250-column line in a scratch buffer is a reason nobody reads.
-local function reason_lines(prefix, text, cont)
-    local out, line = {}, prefix
-    local first = true
-    for word in text:gmatch('%S+') do
-        if not first and #line + 1 + #word > 78 then
-            out[#out + 1] = line
-            line = cont .. word
-        else
-            line = first and (line .. word) or (line .. ' ' .. word)
-        end
-        first = false
-    end
-    out[#out + 1] = line
-    return out
 end
 
 --- THE ROSTER AS A REPORT — what you may audit against, and what ships that you may

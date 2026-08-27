@@ -1442,3 +1442,250 @@ test('portability: a MOVE diff refuses a profile that cannot answer a dotted nam
     eq(nil, res)
     ok(err ~= nil and err ~= '', 'refuses with a reason: ' .. tostring(err))
 end)
+
+-- ── THE RECEIVER AXIS (CART-0587) ───────────────────────────────────────────
+-- `receiver-typed` was the largest non-answer on every Factorio corpus (48 of 92
+-- names / 101 calls on Von-Neumann) and said only "no representation at all".
+-- classmatch supplies the missing key: the base's observed member set picks a class
+-- out of the environment's declared class table, and the class-keyed member set is
+-- the key space portability could never reach.
+--
+-- WHAT THESE SPECS ARE FOR, and it is one thing: the axis may never turn "I cannot
+-- tell" into "the target lacks it". Ambiguity and zero-match are NOT-KNOWING, and
+-- folding either into an absence would invent porting work out of the tool's own
+-- uncertainty. Each has its own reason key and each is asserted to be neither the
+-- absent one nor the present one.
+
+-- A synthetic class table, so every branch is constructible — including the one a
+-- real corpus CANNOT produce (see the next spec's note on why it exists anyway).
+local function fake_ct()
+    return require('cartograph.classmatch').table({
+        runtime = 'fake', lang = 'lua', version = '0.0',
+        classes = {
+            -- Alpha and Beta are identical, so a shape inside them is AMBIGUOUS
+            Alpha = { members = { a = true, b = true, c = true } },
+            Beta  = { members = { a = true, b = true, c = true } },
+            -- Gamma is the only class with `g`, so {g} DETERMINES it
+            Gamma = { members = { g = true } },
+        } })
+end
+
+test('portability: a receiver verdict is never AMBIGUITY dressed up as absence',
+    function ()
+    local port = require 'cartograph.portability'
+    local cm = require 'cartograph.classmatch'
+    local ct = fake_ct()
+    -- {a} is declared by BOTH Alpha and Beta: the shape does not pick one
+    local ev = cm.match({ a = 1 }, ct)
+    eq('ambiguous', ev.outcome, 'the matcher itself says ambiguous')
+    local why, d = port.receiver_verdict(ct, 'base.a', ev)
+    eq('receiver-ambiguous', why)
+    ok(why ~= 'receiver-class-absent' and why ~= 'absent',
+        'AMBIGUOUS MUST NOT BECOME MISSING — this is the whole point of the axis')
+    ok(why ~= 'receiver-class-present', 'nor may it become a claim of presence')
+    eq(2, d.ncand, 'and the candidate count rides in the evidence, so a reader'
+        .. ' can see how far from an answer it is')
+    -- and the group text says so in words, not only in the key
+    local txt = port.REASON_TEXT[why]
+    ok(txt:find('NOT adjudicable', 1, true) ~= nil, 'the text says unadjudicable')
+    ok(txt:find('the target lacks it', 1, true) ~= nil,
+        'and names the misreading it is guarding against')
+end)
+
+test('portability: a ZERO-match receiver is not missing, and a NEAR MISS is not a'
+    .. ' mod-local table', function ()
+    local port = require 'cartograph.portability'
+    local cm = require 'cartograph.classmatch'
+    local ct = fake_ct()
+    -- NOTHING like an API object: no class shares even one member. On Von-Neumann
+    -- this is `util`, `data`, `Log`, `handler` — mod-local tables.
+    local far = cm.match({ q = 1 }, ct)
+    eq('zero', far.outcome)
+    ok(cm.unrelated(far), 'unrelated by the recorded definition')
+    local why = port.receiver_verdict(ct, 'base.q', far)
+    eq('receiver-nomatch', why)
+    ok(why ~= 'receiver-class-absent', 'ZERO MUST NOT BECOME MISSING: there is no'
+        .. ' class to have looked the member up in, which is a different failure')
+    -- ONE MEMBER AWAY from a real class. This is the ONLY pattern that could ever
+    -- mean "the target removed that member", and it is equally what a mod that
+    -- decorates an API object looks like — so it gets its OWN bucket rather than
+    -- being filed under "not an API object", which would mislabel the one future
+    -- absence signal there is.
+    local near = cm.match({ a = 1, b = 1, z = 1 }, ct)
+    eq('zero', near.outcome)
+    eq(1, near.distance, 'Alpha/Beta are one member (z) away and share two')
+    ok(not cm.unrelated(near), 'a near miss is NOT unrelated')
+    eq('receiver-nearmiss', port.receiver_verdict(ct, 'base.z', near))
+    ok(port.REASON_TEXT['receiver-nearmiss'] ~= port.REASON_TEXT['receiver-nomatch'],
+        'and the two render differently, which is the point of splitting them')
+end)
+
+test('portability: a DETERMINED class that lacks the member is ABSENT — hedged,'
+    .. ' and marked when it rests on one member', function ()
+    -- ★ THIS BRANCH IS STRUCTURALLY UNREACHABLE FROM A REAL CORPUS TODAY, and that
+    -- is itself the finding CART-0587 produced. requires() derives its names FROM
+    -- externals.surface, so every `base.member` contributed head(member) to the
+    -- base's SHAPE — and `determined` MEANS one class declares every member of the
+    -- shape. So a determined base's class declares all of its members by
+    -- construction, and adjudicable-absent is empty (measured on Von-Neumann: 27
+    -- present, 8 chain, 7 ambiguous, 6 no-match, 0 absent).
+    -- The branch is specced through the PURE entry point because the day the shape
+    -- and the adjudicated name come from different populations, a silent fold into
+    -- `present` is the bug that would follow.
+    local port = require 'cartograph.portability'
+    local cm = require 'cartograph.classmatch'
+    local ct = fake_ct()
+    local ev = cm.match({ g = 1 }, ct)
+    eq('determined', ev.outcome); eq('Gamma', ev.class); eq(1, ev.n)
+    local why, d = port.receiver_verdict(ct, 'base.not_a_member', ev)
+    eq('receiver-class-absent', why)
+    eq('Gamma', d.class, 'the hypothesised class rides into the verdict')
+    eq('inferred', d.tier, 'on the inferred rung, NOT stdlib')
+    -- THE HEDGE COMPOUNDS, and the rendering has to show it: classmatch's two known
+    -- wrong answers are both n=1 (`name.find` -> LuaEquipmentGrid is really
+    -- string.find), so a one-member verdict is marked as the hypothesis it is
+    -- rather than presented as a confident port item.
+    local cell = port.receiver_cell(d)
+    ok(cell:find('~Gamma', 1, true) ~= nil, 'the class is rendered with the ~ hedge mark')
+    ok(cell:find('n=1', 1, true) ~= nil, 'and the member count that decides belief')
+    ok(cell:find('SINGLE%-MEMBER HYPOTHESIS') ~= nil,
+        'a one-member match is CALLED a hypothesis: ' .. cell)
+    -- a match on several members carries no such warning, because it does not need one
+    local many = cm.match({ a = 1, b = 1, c = 1 }, fake_ct())
+    if many.outcome == 'determined' then
+        ok(port.receiver_cell({ class = many.class, n = many.n })
+            :find('SINGLE', 1, true) == nil, 'and a multi-member one does not')
+    end
+end)
+
+test('portability: a verdict resting on an INFERRED class renders weaker than one'
+    .. ' resting on a global', function ()
+    -- The compounded hedge, asserted where a reader meets it: the group text. The
+    -- `absent` group rests on a global the profile NAMES and a class the artifact
+    -- declares COMPLETE; the receiver one rests on a guess about the receiver.
+    local port = require 'cartograph.portability'
+    local strong = port.REASON_TEXT['absent']
+    local weak = port.REASON_TEXT['receiver-class-absent']
+    ok(strong:find('real porting work', 1, true) ~= nil,
+        'the authoritative group claims porting work')
+    ok(weak:find('CANDIDATE', 1, true) ~= nil,
+        'the inferred one claims only a CANDIDATE: ' .. weak)
+    ok(weak:find('WEAKER', 1, true) ~= nil, 'and says so explicitly')
+    ok(weak:find('hypothesis', 1, true) ~= nil, 'naming the mechanism')
+    -- and the merely-consistent group must not read as a verification: the class
+    -- was CHOSEN because it declares these members, so it cannot confirm them
+    local present = port.REASON_TEXT['receiver-class-present']
+    ok(present:find('CHOSEN because', 1, true) ~= nil,
+        'the tautology is disclosed rather than banked: ' .. present)
+    ok(present:find('Not `provided`', 1, true) ~= nil,
+        'and it is kept out of the authoritative count in words too')
+end)
+
+test('portability: every reason with TEXT has a slot in the report ORDER',
+    function ()
+    -- THE DUAL-REGISTRATION TRAP. The report walks REASON_ORDER, so a key that has
+    -- text but no slot builds a group that is never printed — the reader sees fewer
+    -- names than the header counts and has no way to know why. That is the
+    -- absence-rendered-as-silence class, and adding the receiver axis added SIX
+    -- keys at once, so it is fenced rather than remembered.
+    local port = require 'cartograph.portability'
+    local inorder = {}
+    for _, k in ipairs(port.REASON_ORDER) do
+        ok(not inorder[k], 'no duplicate slot: ' .. k)
+        inorder[k] = true
+        ok(port.REASON_TEXT[k] ~= nil, 'every ordered reason has text: ' .. k)
+    end
+    for k in pairs(port.REASON_TEXT) do
+        ok(inorder[k], 'every reason WITH TEXT has a slot in the order, or its group'
+            .. ' is silently dropped: ' .. k)
+    end
+end)
+
+test('portability: no class table for THIS version leaves receivers unadjudicated,'
+    .. ' and says why', function ()
+    -- ★ THE VERSION GUARD IS THE SAFETY ARGUMENT. classmatch answers from whichever
+    -- artifact carries a class table (today the 2.0.72 export, and the 1.1 artifact
+    -- carries none). Adjudicating a 1.1 verdict against a 2.0 class table would turn
+    -- a version mismatch into confident member verdicts — the shape of 44b8a2a, v5
+    -- keys read against a v6 document, 104 confident nonsenses.
+    local port = require 'cartograph.portability'
+    local pm = require 'cartograph.spec.profile'
+    local prof11 = pm.load('lua-factorio-11')
+    if not prof11 then skip 'no lua-factorio-11 profile' end
+    local store = require 'cartograph.store'
+    local ctx, why = port.receiver_context(store, prof11)
+    eq(nil, ctx, 'the 1.1 end gets NO class table')
+    ok(why ~= nil and why:find('version', 1, true) ~= nil,
+        'and the refusal names the mechanism rather than going quiet: ' .. tostring(why))
+    -- an audit without a context behaves EXACTLY as it did before this axis existed
+    local prof = pm.load('lua-factorio')
+    if not prof then skip 'no lua-factorio profile' end
+    eq('receiver-typed', port.unknown_reason(prof, 'player.teleport', 'a.lua'),
+        'no context -> the unrefined bucket, not a nil and not a guess')
+    ok(port.REASON_TEXT['receiver-typed']:find('UNADJUDICATED', 1, true) ~= nil,
+        'and its text says the axis was unavailable, not that there was nothing to say')
+end)
+
+test('portability: the report splits receivers by reason and counts none as provided',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not pm.load('lua-factorio') then skip 'no lua-factorio profile' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    -- one base per outcome, chosen from the real 2.0.72 class table:
+    --   pl  {print,teleport,get_inventory,character} -> LuaPlayer, determined
+    --   gui {add}                                    -> several classes, ambiguous
+    --   zz  {no_such_api_thing_at_all}               -> no class shares it at all
+    w('control.lua', 'return { go = function (pl, gui, zz)\n'
+        .. '  pl.print("x"); pl.teleport({0,0}); pl.get_inventory(1)\n'
+        .. '  pl.character.destroy()\n'
+        .. '  gui.add({})\n'
+        .. '  zz.no_such_api_thing_at_all()\n'
+        .. 'end }\n')
+    store.ingest(ts.extract(root))
+    local res = assert(port.audit(store, 'lua-factorio'))
+    if not res.receiver.available then
+        skip('no class table: ' .. tostring(res.receiver.why))
+    end
+    local byname = {}
+    for _, e in ipairs(res.entries) do byname[e.name] = e end
+    eq('receiver-class-present', byname['pl.print'].reason)
+    eq('LuaPlayer', byname['pl.print'].receiver.class,
+        'the class the verdict rests on is carried on the ENTRY, not only rendered')
+    eq('receiver-class-chain', byname['pl.character.destroy'].reason,
+        'a deeper hop is only PARTIALLY adjudicated: the class table carries member'
+        .. ' NAMES without member TYPES, so `character` cannot be followed')
+    eq('receiver-ambiguous', byname['gui.add'].reason)
+    eq('receiver-nomatch', byname['zz.no_such_api_thing_at_all'].reason)
+    -- NOTHING the receiver axis touched is counted as provided. Folding a shape-match
+    -- hypothesis into that count would change what the number means AND make a
+    -- version diff report every receiver as GAINED, because only the 2.0 end has a
+    -- class table to match against.
+    for _, e in ipairs(res.entries) do
+        if e.reason and e.reason:match('^receiver%-') then
+            eq(false, e.provided, 'a hypothesis is never `provided`: ' .. e.name)
+        end
+    end
+    local body = table.concat(port.report(store, 'lua-factorio', { cap = 40 }), '\n')
+    ok(body:find('inferred', 1, true) ~= nil, 'the report names the rung it rides')
+    for _, key in ipairs({ 'receiver-class-present', 'receiver-class-chain',
+        'receiver-ambiguous', 'receiver-nomatch' }) do
+        -- the group TEXT is wrapped across lines, so match its first distinctive word
+        local head = port.REASON_TEXT[key]:match('^(%S+ %S+ %S+)')
+        ok(body:find(head, 1, true) ~= nil, 'the group prints for ' .. key)
+    end
+    -- the structural emptiness of the absent bucket is STATED, not left to be read
+    -- as a clean bill of health
+    ok(body:find('STRUCTURAL', 1, true) ~= nil,
+        'the report says WHY there is no hypothesised-class absent group')
+    vim.fn.delete(root, 'rf')
+end)

@@ -68,9 +68,11 @@ assert(require('cartograph.tier').RANK[M.TIER],
     'classmatch: tier.lua no longer has an `' .. M.TIER .. '` rung')
 
 --- Artifacts to consult for a class table, ACTIVE-FIRST. The unsuffixed name is
---- what spec/profile/lua-factorio.lua (the live 2.0 profile) loads, so as soon as
---- it is re-distilled it wins; today only the `-20` build carries `classes`, and
---- the meta says which one answered.
+--- what spec/profile/lua-factorio.lua (the live 2.0 profile) loads, so it wins as
+--- soon as it carries one; the meta says which one answered. VERIFIED 2026-08-27:
+--- the unsuffixed and `-20` builds BOTH carry the 148-class table (2.0.72, api v6)
+--- and `-11` carries NONE — so the live 2.0 profile and this query agree on the
+--- environment, and no 1.1 class table exists for anything to diff against.
 M.ARTIFACTS = { 'lua-factorio-api', 'lua-factorio-api-20', 'lua-factorio-api-11' }
 
 -- closure cache, keyed by the artifact TABLE identity (weak, so a reloaded
@@ -135,9 +137,15 @@ local function build(art, artname)
         end
         e.all, e.depth = all, depth - 1
     end
+    -- `lang`/`version` ride in the meta because a CONSUMER that adjudicates against
+    -- this table has to check that it describes the SAME environment it is reporting
+    -- about. A class table from 2.0.72 applied to a 1.1 verdict (or to a ruby
+    -- profile) would mint confident nonsense out of a version mismatch — the class
+    -- of bug 44b8a2a is named for. The check belongs to the consumer; saying WHICH
+    -- environment this is belongs here.
     return { classes = classes, order = order, n = #order, n_parent = n_parent,
         meta = { artifact = artname or art.runtime, version = art.version,
-            api_version = art.api_version } }
+            lang = art.lang, api_version = art.api_version } }
 end
 
 --- The class table for a source: a loaded profile/artifact TABLE, an artifact
