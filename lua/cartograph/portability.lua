@@ -15,6 +15,14 @@
 -- The A-to-B DIFF needs TWO name-queryable profiles for the SAME language, and
 -- ★ ONE SHIPPED PAIR QUALIFIES: `lua-factorio-11` -> `lua-factorio`. Run it.
 --
+-- That sentence is the one this module got WRONG for four weeks, so it now carries
+-- its own check and tools/docaudit.lua re-reads it every run. The check calls the
+-- diff's OWN precondition, not a copy of it: if the pair stops qualifying, the
+-- fence says so instead of this header quietly becoming true again.
+--
+-- @claim qualifying-profile-pair: lua-factorio-11 -> lua-factorio still qualifies for the reference diff
+--   check: require('cartograph.portability').diffable_pair('lua-factorio-11', 'lua-factorio')
+--
 --     port.reference_diff(store, 'lua-factorio-11', 'lua-factorio')
 --
 -- On ~/git/Von-Neumann (2026-08-27) that reports lost=10 gained=0 kept=17, and the
@@ -1430,6 +1438,38 @@ function M.reference_report(store, runtime, opts)
     return L
 end
 
+--- MAY these two runtimes be reference-diffed at all? The PRECONDITION of
+--- M.reference_diff, lifted out as a predicate for two callers: one that wants to
+--- ask before running, and this module's own header claim, which is checked by
+--- tools/docaudit.lua. Lifted rather than restated — a check that reimplements
+--- what it checks drifts away from it, which is the exact failure this fence
+--- exists for (CART-0595). Returns (true, nil, prof_from, prof_to) or
+--- (false, reason).
+function M.diffable_pair(from, to)
+    local pm = require 'cartograph.spec.profile'
+    local a, b = pm.load(from), pm.load(to)
+    if not a then return false, ('unknown runtime %q'):format(from) end
+    if not b then return false, ('unknown runtime %q'):format(to) end
+    if a.lang ~= b.lang then
+        return false, ('%s is %s and %s is %s — different languages'):format(
+            from, tostring(a.lang), to, tostring(b.lang))
+    end
+    -- THE READS DIFF NEEDS THE DOTTED FENCE MOST. A read that breaks a port is almost
+    -- always dotted (`global.x`, `game.entity_prototypes`), so a profile that cannot
+    -- adjudicate a dotted name reports "nothing read here was removed" — the most
+    -- reassuring sentence in the tool, from the artifact least able to say it. The
+    -- calls diff refuses for the same reason; leaving this path unfenced meant the
+    -- refusal was printed for calls and contradicted for reads in one report.
+    for rt, prof in pairs({ [from] = a, [to] = b }) do
+        if not M.dotted_queryable(prof) then
+            return false, ('%s cannot adjudicate a DOTTED name (no api_members / types /'
+                .. ' namespaces) — the READ surface is where a port breaks, so a diff'
+                .. ' against it would call every rename unchanged'):format(rt)
+        end
+    end
+    return true, nil, a, b
+end
+
 --- THE VERSION DIFF OVER THE READ SURFACE — the strongest evidence this tool can
 --- produce about a port. M.diff scores the requirement set, which is CALL-derived, so
 --- on a 1.1 -> 2.0 move it reported 0 lost: every name that actually changed
@@ -1441,27 +1481,8 @@ end
 --- survives both artifacts being incomplete in the same way.
 --- Returns (result, err); result = { from, to, lost = {…}, gained = {…}, kept }.
 function M.reference_diff(store, from, to)
-    local pm = require 'cartograph.spec.profile'
-    local a, b = pm.load(from), pm.load(to)
-    if not a then return nil, ('unknown runtime %q'):format(from) end
-    if not b then return nil, ('unknown runtime %q'):format(to) end
-    if a.lang ~= b.lang then
-        return nil, ('%s is %s and %s is %s — different languages'):format(
-            from, tostring(a.lang), to, tostring(b.lang))
-    end
-    -- THE READS DIFF NEEDS THE DOTTED FENCE MOST. A read that breaks a port is almost
-    -- always dotted (`global.x`, `game.entity_prototypes`), so a profile that cannot
-    -- adjudicate a dotted name reports "nothing read here was removed" — the most
-    -- reassuring sentence in the tool, from the artifact least able to say it. The
-    -- calls diff refuses for the same reason; leaving this path unfenced meant the
-    -- refusal was printed for calls and contradicted for reads in one report.
-    for rt, prof in pairs({ [from] = a, [to] = b }) do
-        if not M.dotted_queryable(prof) then
-            return nil, ('%s cannot adjudicate a DOTTED name (no api_members / types /'
-                .. ' namespaces) — the READ surface is where a port breaks, so a diff'
-                .. ' against it would call every rename unchanged'):format(rt)
-        end
-    end
+    local ok, why, a, b = M.diffable_pair(from, to)
+    if not ok then return nil, why end
     local refs = require('cartograph.externals').references(store)
     local res = { from = from, to = to, lost = {}, gained = {}, kept = 0, neither = 0 }
     for name, n in pairs(refs.names) do

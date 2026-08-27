@@ -7,7 +7,9 @@
 -- documentation, not user code — hence tools/, not a :Cartograph verb. Sibling
 -- of tools/specaudit.lua, which does this for our specs.
 --
--- Three oracles, never conflated:
+-- The oracles, never conflated (the count was left out of this sentence on
+-- purpose: it was 'Three' over six bullets, which is the same class of stale
+-- inventory claim this file now fences):
 --   REGISTRY (proof) — the commands that actually exist at startup, captured by
 --     intercepting nvim_create_user_command while sourcing plugin/. It cannot
 --     be wrong: it is the code path a user's nvim runs. (Read back through
@@ -33,6 +35,23 @@
 --   TARGET SCHEMES (evidence) — the `x://` prefixes init.lua dispatches, versus
 --     those the PROVIDERS section offers. Both directions: an accepted target
 --     must be documented, and a documented one must still be accepted.
+--   AGENT SURFACE (proof) — lua/cartograph/agent.lua's ORDER, which is the table
+--     tools/mcpserve.lua iterates to answer tools/list, so it cannot be wrong
+--     about what an agent can call. Checked against the verb COUNT and the verb
+--     TABLE .claude/skills/cartograph/SKILL.md publishes. That file is an
+--     agent-facing claim file of exactly the same class as doc/cartograph.txt and
+--     had NO fence at all: it said "21 verbs" while ORDER held 24, and nothing
+--     could have caught it — this audit walks :Cartograph* commands, and the
+--     agent surface is a different registry in a file it never opened
+--     (CART-0595). AUDITED, NEVER EDITED: .claude/ is not this tool's to write,
+--     so a finding here is a sentence for a human, not a fix to apply.
+--   TAGGED CLAIMS (opt-in proof) — a load-bearing sentence in a module header can
+--     carry its own executable check (`@claim` + `check:`; the shape and the
+--     measurement that ruled out a general prose fence are in
+--     lua/cartograph/claims.lua). Opt-in is the honest limit and the report says
+--     so: an UNTAGGED claim is invisible here and is not counted as a finding,
+--     because a live claim and a dated record of a past measurement look the same
+--     from outside.
 --
 -- Two tiers of finding, never conflated:
 --   CONFIRMED DRIFT — the doc states something FALSE: a :Cartograph name that
@@ -307,6 +326,37 @@ for s in provtext:gmatch('(%a+)://') do
     end
 end
 
+-- ── 5b. THE AGENT SURFACE (proof): agent.ORDER versus SKILL.md ─────────────
+-- A claim about the tree's own inventory, in the file an agent reads to learn
+-- what it may call. Both directions and the count, and a claim that cannot be
+-- FOUND is itself drift — a renamed heading must not read as a clean audit.
+local claims = require 'cartograph.claims'
+local ORDER = require('cartograph.agent').ORDER
+local skillinfo
+do
+    local path = REPO .. '/' .. claims.SKILL
+    if vim.fn.filereadable(path) == 0 then
+        drift('%s: not readable — the agent-surface check cannot run', claims.SKILL)
+    else
+        local ds, info = claims.agent_surface(ORDER, vim.fn.readfile(path))
+        skillinfo = info
+        for _, d in ipairs(ds) do drift('%s', d) end
+    end
+end
+
+-- ── 5c. TAGGED CLAIMS (opt-in proof): every @claim runs its own check ───────
+local tagrows, tagok = {}, 0
+for _, t in ipairs(claims.scan(REPO)) do
+    local passed, why = claims.verify(t)
+    tagrows[#tagrows + 1] = { tag = t, ok = passed, why = why }
+    if passed then
+        tagok = tagok + 1
+    else
+        drift('%s:%d @claim %s — %s\n      the sentence: %s',
+            t.path, t.line, t.id, why, t.sentence)
+    end
+end
+
 for _, s in ipairs({ HELP, READ }) do
     for _, name in ipairs(sortedkeys(s.at)) do
         if not reg[name] then
@@ -398,6 +448,35 @@ if #keygap == 0 then
 else
     print('  ' .. table.concat(keygap, ' '))
 end
+
+print('')
+print(('== AGENT SURFACE: agent.ORDER serves %d verbs (tools/mcpserve.lua iterates it for tools/list) =='):format(#ORDER))
+if not skillinfo then
+    print('  ' .. claims.SKILL .. ' was not read — see CONFIRMED DRIFT')
+else
+    local cs = {}
+    for _, c in ipairs(skillinfo.counts) do
+        cs[#cs + 1] = ('%d@line %d'):format(c.n, c.line)
+    end
+    print(('  %s: %d count claim(s) [%s] · verb table lists %d name(s)'):format(
+        claims.SKILL, #skillinfo.counts,
+        #cs > 0 and table.concat(cs, ', ') or 'none found',
+        skillinfo.names and #skillinfo.names or 0))
+    print('  audited, never edited — .claude/ is not this tool\'s to write')
+end
+
+print('')
+print(('== TAGGED CLAIMS: %d tagged, %d verified =='):format(#tagrows, tagok))
+if #tagrows == 0 then print('  (none)') end
+for _, r in ipairs(tagrows) do
+    print(('  %-44s %-26s %s'):format(('%s:%d'):format(r.tag.path, r.tag.line),
+        r.tag.id, r.ok and 'ok' or 'FAILED — see CONFIRMED DRIFT'))
+end
+print('  OPT-IN BY CONSTRUCTION. An UNTAGGED claim is invisible here and is NOT a')
+print('  finding: 853 header lines match negative-existence phrasing and nearly all')
+print('  are legitimate prose about USER code, and a count-shaped line is usually a')
+print('  dated record of a past measurement, not a live claim. Tag the load-bearing')
+print('  ones; this fence reports what it was given, and never guesses at the rest.')
 
 if #unseen > 0 then
     print('')
