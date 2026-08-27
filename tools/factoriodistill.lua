@@ -243,6 +243,53 @@ for _, g in ipairs(api.global_objects) do
 end
 table.sort(templates, function (x, y) return x.verb < y.verb end)
 
+-- ── THE FULL CLASS TABLE — every declared class, NAMES ONLY (CART-0590) ─────
+-- A SECOND, additive face of the same export, and deliberately NOT a second
+-- artifact: spec/profile/init.lua registers that directory as a validity
+-- CONTRIBUTOR and folds every basename into one key, so a new file there
+-- cold-invalidates every cached graph on the machine. New fields, same artifact.
+--
+-- WHAT IT IS FOR, and why it is not the `members` set above. `members` is the
+-- OWNER-PRECISE mintable set: the 9 global objects' classes, where a
+-- `<global>.<method>` call resolves to exactly one documented owner. That contract
+-- is untouched. This table serves a different question — SHAPE MATCHING
+-- ([[cartograph-anonymous-types]] "you need the partition, not the name"): the
+-- members OBSERVED on an unresolved base are its shape, and a class that declares
+-- every one of them is a CANDIDATE. Measured on four 2.0 mods (21082 calls), a
+-- shape of >=3 distinct members picks a unique class 94.9% of the time. That is a
+-- HYPOTHESIS, not a resolution — lua/cartograph/classmatch.lua carries the hedge.
+--
+-- ★ `parent` IS LOAD-BEARING AND MUST BE EMITTED. v6 declares `parent` on 79 of
+-- the 148 classes, and `insert` is NOT a member of LuaPlayer — it is on LuaControl.
+-- A matcher without transitive closure FALSE-ZEROES `player`, the single most
+-- observed receiver in the corpus. The closure is the consumer's (a raw table plus
+-- the edge is the honest export; a pre-closed one could not say which class
+-- actually declared a name).
+--
+-- METHODS AND ATTRIBUTES BOTH, for the same reason the mintable set takes both:
+-- `player.character.insert()` is observed as a chain whose first segment is the
+-- ATTRIBUTE `character`, so a methods-only table makes a real member look absent.
+-- Operators (`[]`, `#`) stay out — they are not name-addressable.
+local classes, n_class, n_parent, n_cmembers = {}, 0, 0, 0
+for _, c in ipairs(api.classes or {}) do
+    local mem = {}
+    for _, m in ipairs(c.methods or {}) do mem[m.name] = true end
+    for _, a in ipairs(c.attributes or {}) do mem[a.name] = true end
+    for _ in pairs(mem) do n_cmembers = n_cmembers + 1 end
+    -- `parent` is a plain class NAME in v5 and v6 (verified: 0 of 148 carry a
+    -- list). A future multi-parent spelling would arrive here as a table and must
+    -- be handled rather than concatenated into a bogus name, so say so loudly.
+    local parent = c.parent
+    if parent ~= nil and type(parent) ~= 'string' then
+        io.write(('  WARN class %s has a non-string parent (%s) — NOT emitted\n')
+            :format(c.name, type(parent)))
+        parent = nil
+    end
+    if parent then n_parent = n_parent + 1 end
+    classes[c.name] = { parent = parent, members = mem, abstract = c.abstract or nil }
+    n_class = n_class + 1
+end
+
 local free, free_sigs, n_free = {}, {}, 0
 for _, fn in ipairs(api.global_functions or {}) do
     free[fn.name] = true
@@ -265,6 +312,10 @@ local profile = {
     -- If these ever need renaming, move lua-factorio-11.lua in the same commit.
     global2class = global2class, members = members, sigs = sigs,
     complete = complete, -- classes whose member surface is fully enumerated
+    -- THE FULL CLASS TABLE (names + parent edge) — the shape-matching face. Additive:
+    -- nothing above changes, and a consumer that does not know this field behaves
+    -- exactly as before. See the block that builds it.
+    classes = classes,
     -- the environment's REGISTRY IDIOMS, derived from the declared signatures. The
     -- hand profile republishes these; xlang composes them with its global defaults so
     -- a discovered registry that MATCHES one is correct platform usage rather than a
@@ -290,6 +341,8 @@ for _, g in ipairs(api.global_objects) do
         g.type, c and #(c.methods or {}) or 0, c and #(c.attributes or {}) or 0,
         complete[g.type] and ' [complete]' or ''))
 end
+io.write(('  full class table: %d classes, %d with a parent, %d member names\n')
+    :format(n_class, n_parent, n_cmembers))
 io.write(('  registry TEMPLATES derived: %d\n'):format(n_tpl))
 for _, t in ipairs(templates) do
     io.write(('    %-34s %-11s key=%s fn=%s%s\n'):format(t.verb, t.kind,
