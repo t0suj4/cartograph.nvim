@@ -148,3 +148,72 @@ test('claims: the tagged claim tracks the diff\'s OWN precondition, not a copy',
     ok(why:find('different languages', 1, true), why)
     eq(false, (port.diffable_pair('lua-factorio', 'no-such-runtime')))
 end)
+
+-- ── the same tag, written in markdown ───────────────────────────────────────
+-- CHARTER.md states the project's goals and invariants, which is the same class
+-- of load-bearing prose as a module header and rots the same way. Mirroring its
+-- claims into a Lua file to fence them would put the check somewhere other than
+-- the sentence it stands behind, which is the drift this mechanism exists to
+-- stop — so the tag shape has to be writable where the claim lives.
+
+test('claims: a tag written as an HTML comment parses, closer stripped', function ()
+    local t = claims.tags({
+        '# A heading',
+        '<!-- @claim md-tag: the schema is closed at six node kinds -->',
+        '<!-- check: 1 + 1 == 2 -->',
+        'ordinary prose',
+    }, 'CHARTER.md')
+    eq(1, #t)
+    eq('md-tag', t[1].id)
+    -- the `-->` is the SYNTAX, not part of what is being claimed, and not part
+    -- of the expression either — left on, the check would not even compile.
+    eq('the schema is closed at six node kinds', t[1].sentence)
+    eq('1 + 1 == 2', t[1].expr)
+    ok(claims.verify(t[1]))
+end)
+
+test('claims: a markdown COMMENT keeps the block open; prose closes it', function ()
+    -- ⚠ THE OBVIOUS TEST HERE CANNOT FAIL, and it was written first.
+    -- Asserting only that prose closes a markdown block passes against the
+    -- UNFIXED parser too: `<!--` contains `--`, so the opening line always
+    -- matched and a following prose line always closed the block. What the old
+    -- parser got wrong is the other half — `^%s*%-%-` does not match `<!--`,
+    -- so an intervening markdown comment ALSO closed the block and a `check:`
+    -- below it attached to nothing. Same defect class as CART-0579's
+    -- `#ev.sites >= 2`: an assertion that cannot fail for the reason it names.
+    local t = claims.tags({
+        '<!-- @claim md-open: one -->',
+        '<!-- an intervening note, still inside the block -->',
+        '<!-- check: 1 == 1 -->',
+    }, 'CHARTER.md')
+    eq(1, #t)
+    eq('1 == 1', t[1].expr)
+
+    local u = claims.tags({
+        '<!-- @claim md-close: two -->',
+        'ordinary prose',
+        '<!-- check: false -->',   -- belongs to no tag: the block already closed
+    }, 'CHARTER.md')
+    eq(1, #u)
+    eq(nil, u[1].expr)
+end)
+
+test('claims: CHARTER.md is scanned, and its closed-schema claim holds', function ()
+    local found
+    for _, t in ipairs(claims.scan(repo())) do
+        if t.id == 'charter-schema' then found = t end
+    end
+    ok(found, 'the charter is in M.SCAN and its invariant is tagged')
+    eq('CHARTER.md', found.path)
+    local passed, why = claims.verify(found)
+    ok(passed, tostring(why))
+    -- ★ THE CLAIM THIS FENCES WAS ALREADY WRONG WHEN THE CHARTER WAS WRITTEN.
+    -- Every process memo repeated "5 node / 3 edge kinds, closed" long after the
+    -- stdlib-profile arc minted `external` as a sixth node kind. Nothing could
+    -- have caught it: the invariant was stated only in prose, and prose about
+    -- our own schema is exactly what nothing re-reads.
+    local v = require 'cartograph.validate'
+    local function n(t) local c = 0 for _ in pairs(t) do c = c + 1 end return c end
+    eq(6, n(v.NODE_KINDS))
+    eq(4, n(v.EDGE_KINDS))
+end)

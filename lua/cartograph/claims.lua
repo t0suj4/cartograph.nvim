@@ -57,10 +57,15 @@ local M = {}
 --- in git, so a checkout that lacks it is a finding rather than a skip.
 M.SKILL = '.claude/skills/cartograph/SKILL.md'
 
---- Which files the tag scan reads. lua/ and tools/ only: tests/ is excluded so
---- that a spec's SYNTHETIC tags (there to prove the checker fails when it
---- should) are not evaluated as real claims about the tree.
-M.SCAN = { 'lua/**/*.lua', 'tools/*.lua' }
+--- Which files the tag scan reads. lua/ and tools/, plus the markdown at the
+--- REPO ROOT — CHARTER.md states the project's goals and invariants, which is
+--- exactly the load-bearing-prose class this mechanism exists for, and
+--- README.md sits beside it so a tagged claim there is fenced without needing a
+--- second decision. tests/ is excluded so that a spec's SYNTHETIC tags (there
+--- to prove the checker fails when it should) are not evaluated as real claims
+--- about the tree; .claude/ is excluded because SKILL.md already has the
+--- stronger oracle above, and this tool audits that file without editing it.
+M.SCAN = { 'lua/**/*.lua', 'tools/*.lua', '*.md' }
 
 -- ── the agent surface ───────────────────────────────────────────────────────
 
@@ -172,23 +177,50 @@ end
 
 -- ── tagged claims ───────────────────────────────────────────────────────────
 
+--- A line's own COMMENT OPENER, or nil when it is not a comment line. Two
+--- syntaxes: Lua's `--` and markdown's `<!--`. The second exists because a
+--- charter is prose, and prose about our own inventory is precisely what this
+--- mechanism fences — so the tag shape has to be writable in the file the
+--- claim actually lives in, rather than mirrored into a Lua header where it
+--- would drift from the sentence it stands behind.
+---
+--- Note the two are not disjoint by accident: `<!--` CONTAINS `--`, so the
+--- opener test is ordered, markdown first.
+local function opens_comment(line)
+    return line:match('^%s*<!%-%-') or line:match('^%s*%-%-')
+end
+
+--- Strip markdown's closing `-->` from a captured tail. Harmless on a Lua line,
+--- which never has one — and doing it unconditionally is why the two syntaxes
+--- need no separate code paths below.
+local function unclose(s)
+    return (s:gsub('%s*%-%->%s*$', ''))
+end
+
 --- Parse the tags out of one file's lines. A tag opens on a comment line
 --- carrying `@claim <id>: <sentence>` and is closed by the first non-comment
 --- line or the next tag; the `check:` comment line anywhere inside carries the
 --- expression. A tag WITHOUT one is kept, not dropped — an unfenced tag claims
 --- a fence it does not have, and verify() reports it.
+---
+--- Both comment syntaxes are accepted, in Lua and in markdown alike, because a
+--- tag is a tag wherever it is written. The `@claim` opener is matched
+--- UNANCHORED (a `--` anywhere in the line) as it always was, which is what
+--- lets a trailing comment carry one; `check:` stays anchored, so a sentence
+--- merely quoting the word cannot be mistaken for the expression.
 function M.tags(lines, path)
     local out, cur = {}, nil
     for i, line in ipairs(lines) do
         local id, sentence = line:match('%-%-.*@claim%s+([%w%-_]+):%s*(.*)$')
         if id then
-            cur = { id = id, sentence = vim.trim(sentence), path = path, line = i }
+            cur = { id = id, sentence = vim.trim(unclose(sentence)), path = path, line = i }
             out[#out + 1] = cur
         elseif cur then
             local expr = line:match('^%s*%-%-%s*check:%s*(.+)$')
+                or line:match('^%s*<!%-%-%s*check:%s*(.+)$')
             if expr then
-                cur.expr, cur.expr_line = vim.trim(expr), i
-            elseif not line:match('^%s*%-%-') then
+                cur.expr, cur.expr_line = vim.trim(unclose(expr)), i
+            elseif not opens_comment(line) then
                 cur = nil
             end
         end

@@ -5,10 +5,15 @@
 > functions, extract modules, previewed as diffs, applied through a journal,
 > undone byte-exact.
 
-**Status:** experimental. Working and tested (166-test suite, validated on
-corpora from WordPress to GitLab), but the design is still moving — commands,
-keys and APIs may change without notice. The edit verbs are journaled with
+**Status:** experimental. Working and tested (2028 tests as of 2026-08-28,
+validated on corpora from WordPress to GitLab), but the design is still moving
+— commands, keys and APIs may change without notice. The edit verbs are journaled with
 byte-exact undo, so mistakes are recoverable; still, treat it accordingly.
+
+[`CHARTER.md`](CHARTER.md) says what the project is *for* — navigation and
+editing over a code graph, the invariants that keep it general, the non-goals,
+and eight milestones with gates that can fail. Read it before proposing a
+feature; this file is the reference for what already exists.
 
 ## Install
 
