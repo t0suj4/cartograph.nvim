@@ -44,10 +44,40 @@ return {
             .. ' across the tree' },
     },
 
+    -- ── HOOK FORMS: patching a table you did not define ──────────────────────
+    -- CART-0618. A monkey-patch is "you modified a table you did not define", and
+    -- HOW it is spelled is per-ecosystem. Plain Lua spells it as an assignment
+    -- (`mod.member = f`) and needs no declaration. WoW spells it as a CALL, and a
+    -- predicate that only knew assignments reported ZERO patches on a corpus that
+    -- contains 249 of them — measured, and the reason this key exists.
+    --
+    -- DECLARED DATA, NOT CODE (the convergence rule): a hook form is a name plus
+    -- which argument carries the table and which names the member. Hardcoding
+    -- `hooksecurefunc` into an analyzer would have been the wrong-shaped fix and
+    -- is exactly what an unmeasured version of this would have shipped.
+    --
+    -- MEASURED IN ~/work/wow_addons: hooksecurefunc 249 calls / 113 files;
+    -- `require(` 0 occurrences in 2.27M lines, which is why the assignment form
+    -- finds nothing here.
+    hooks = {
+        -- hooksecurefunc(table, "method", fn) — the 3-arg form. The 2-arg form
+        -- hooksecurefunc("GlobalFn", fn) patches a GLOBAL rather than a member,
+        -- so it carries no member argument and is declared separately rather than
+        -- squeezed into the same shape.
+        { call = 'hooksecurefunc', table_arg = 1, member_arg = 2, arity = 3,
+            kind = 'post-hook',
+            notes = { why = 'appends to the existing function; the original still runs,'
+                .. ' so this is ADDITIVE and cannot silently replace behaviour' } },
+        { call = 'hooksecurefunc', member_arg = 1, arity = 2,
+            kind = 'post-hook-global',
+            notes = { why = 'patches a global function by name, not a table member' } },
+    },
+
     -- WoW addons have no require: files are listed in load order by the .toc and
     -- share one global table. Declaring the absence is not decoration — it is why
     -- no require_form appears here, and why load ORDER (banked) is the axis that
-    -- would matter next.
+    -- would matter next. It is also why the ASSIGNMENT form of a monkey-patch is
+    -- invisible in this ecosystem and the hook form above carries all of it.
     notes = {
         no_require = 'files are listed in .toc load order and share globals;'
             .. ' there is no import form to resolve',
