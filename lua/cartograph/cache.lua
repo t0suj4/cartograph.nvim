@@ -73,7 +73,30 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 156 -- v156: JAVASCRIPT ANSWERS THE WRITE QUESTION (CART-0532) — the largest
+M.VERSION = 157 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
+               -- `functions` query matches an assignment only when the VALUE is a
+               -- function_definition, so `M.dir = dir_of` — an export written as an
+               -- alias of an existing local — was captured under no key at all. The
+               -- bare name `dir` was then workspace-unique somewhere ELSE, and three
+               -- `fb.dir(…)` calls resolved confidently into transport.lua.
+               -- ★ A KEY, NOT A NODE: spec.alt_keys gives the EXISTING def the extra
+               -- exact keys (bare member + `M.member`), so no body-less node is
+               -- minted, the node count is unchanged, and the name index gains no new
+               -- fabrication candidate. GATED on the receiver being this file's own
+               -- module table, read by module_table_name — the same strict predicate
+               -- the write side (module_scaffold, CART-0542) uses, so an export is an
+               -- export by ONE definition and the two cannot drift.
+               -- BLAST RADIUS, measured on self before implementing: 25 alt keys
+               -- across 13 files. Extraction output changes (new resolved edges), so
+               -- this bump + a gate re-save.
+               -- ⚠ THE GUARD COST TWO SUITE FAILURES AND IS PINNED BY A SPEC: never
+               -- re-register the def's OWN name. `exports.handler = handler` is the
+               -- common spelling and there the member name IS the def name, so the
+               -- alt key files one node into `exact` twice — double-counting its
+               -- occurrences and making a definition-side member key read as a second
+               -- reference, the exact defect CART-0529 removed, reached from the
+               -- other end.
+               -- v156: JAVASCRIPT ANSWERS THE WRITE QUESTION (CART-0532) — the largest
                -- population of the whole arc, and the one I nearly declared inert. ghost
                -- carries 7804 .js + 942 .ts var nodes and 34577 + 1279 use edges, every
                -- one with no rw / gw / gp / flds. One spec covers js, ts and tsx.

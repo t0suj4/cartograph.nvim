@@ -119,3 +119,67 @@ test('module-alias: an AMBIGUOUS bare export is settled by the binding, via `exa
     ok(c, 'the call is recorded')
     eq(want, c.to, 'the binding picks left.lua, not right.lua and not a refusal')
 end)
+
+-- ── RE-EXPORT BY ASSIGNMENT (CART-0612) ─────────────────────────────────────
+-- `M.dir = dir_of` is an EXPORT written as an assignment of an existing local,
+-- and the `functions` query cannot see it: its assignment pattern requires
+-- `value: (function_definition)`, and a bare identifier RHS has none. So the
+-- export existed under NO key, the bare name resolved to an unrelated module
+-- that happened to spell a function the same way, and three real call sites
+-- pointed at the wrong file with no hedge.
+--
+-- The fix is a KEY, not a node: alt_keys gives the EXISTING def the extra exact
+-- key, gated on the receiver being this file's own module table.
+
+test('module-alias: a re-export by ASSIGNMENT resolves to the aliased local', function ()
+    if not ready() then return skip 'no lua parser' end
+    local data = extract_dir {
+        ['q.lua'] = 'local M = {}\nlocal function inner(x) return x end\nM.outer = inner\nreturn M\n',
+        -- a DECOY spelling `outer` elsewhere: without the alt key the bare-name
+        -- index picks this, which is exactly the fabrication that was measured.
+        ['other.lua'] = 'local S = {}\nfunction S.outer() return 0 end\nreturn S\n',
+        ['caller.lua'] = 'local q = require("q")\nlocal function run() return q.outer(1) end\nreturn run\n',
+    }
+    local inner = node_in(data, 'q.lua', 'inner$')
+    ok(inner, 'q.lua defines the local the export aliases')
+    local c = call_in(data, 'caller.lua', 'q.outer')
+    ok(c, 'the q.outer call is found')
+    eq(inner, c.to) -- the ALIASED local in q.lua, never other.lua's S.outer
+end)
+
+test('module-alias: a re-export whose member name EQUALS the def name adds no key', function ()
+    if not ready() then return skip 'no lua parser' end
+    -- ⚠ THE GUARD THIS PINS COST TWO SUITE FAILURES. `exports.handler = handler`
+    -- is the common re-export spelling, and there the member name IS the def's
+    -- own name — filing it as an alt key registers one node into the exact index
+    -- TWICE, which double-counts its occurrences and makes a definition-side
+    -- member key read as a second reference. That is precisely the defect
+    -- CART-0529 removed, arrived at from the other end.
+    local data = extract_dir {
+        ['r.lua'] = 'local M = {}\nlocal function handler(x) return x end\nM.handler = handler\nreturn M\n',
+    }
+    local n = node_in(data, 'r.lua', 'handler$')
+    ok(n, 'the def exists')
+    for _, nd in ipairs(data.nodes) do
+        if nd.id == n then
+            for _, k in ipairs(nd.altkeys or {}) do
+                ok(k ~= 'handler', 'the def name is never re-registered as its own alt key')
+            end
+        end
+    end
+end)
+
+test('module-alias: an assignment onto a NON-module table mints no alt key', function ()
+    if not ready() then return skip 'no lua parser' end
+    -- the gate that keeps this off every `cfg.x = y` in every corpus: the
+    -- receiver must be THIS FILE'S module table, read by the same strict
+    -- predicate the write side uses. `cfg` is a plain local, so nothing fires.
+    local data = extract_dir {
+        ['s.lua'] = 'local M = {}\nlocal cfg = {}\nlocal function pick() return 1 end\ncfg.pick = pick\nreturn M\n',
+    }
+    local n = node_in(data, 's.lua', 'pick$')
+    ok(n, 'the def exists')
+    for _, nd in ipairs(data.nodes) do
+        if nd.id == n then eq(nil, nd.altkeys) end
+    end
+end)

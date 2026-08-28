@@ -127,6 +127,64 @@ local function lua_is_write(c, n)
     return not (wrap and wrap:type() == 'variable_declaration')
 end
 
+--- Which file-local name this file binds as its MODULE TABLE, from its own lines.
+--- Deliberately STRICT: a trailing `return X` AND a bare `local X = {}` must both be
+--- present. A file that builds its export some other way (`return { helper = helper }`,
+--- a table literal with fields, a setmetatable) gets nil, and every caller treats nil as
+--- "do not write" — the strictness fails toward doing nothing.
+--- Shared by module_table (the write side, CART-0542) and alt_keys (the read side,
+--- CART-0612) so the two cannot drift: an export is an export by ONE definition.
+local function module_table_name(lines)
+    local last
+    for i = #lines, 1, -1 do
+        if lines[i]:match('%S') then last = i break end
+    end
+    local name = last and lines[last]:match('^%s*return%s+([%a_][%w_]*)%s*$')
+    if not name then return nil end
+    for _, l in ipairs(lines) do
+        if l:match('^%s*local%s+' .. name .. '%s*=%s*{%s*}%s*$') then
+            return name
+        end
+    end
+    return nil
+end
+
+--- local-name -> { extra exact keys }, for one file's RE-EXPORTS: the
+--- `M.member = existing_local` assignments that the `functions` query cannot see.
+--- MEMOIZED ON THE SOURCE STRING because alt_keys is called once per def and this
+--- reads the whole file — without the memo a 3000-line module would rescan itself
+--- once per function it defines.
+local reexport_src, reexport_map
+local function reexports(src)
+    if src == reexport_src then return reexport_map end
+    local map = {}
+    if type(src) == 'string' then
+        local lines = vim.split(src, '\n', { plain = true })
+        local mt = module_table_name(lines)
+        if mt then
+            local pat = '^%s*' .. mt .. '%.([%w_]+)%s*=%s*([%a_][%w_]*)%s*$'
+            for _, l in ipairs(lines) do
+                local member, rhs = l:match(pat)
+                -- `M.x = M` and `M.x = x` are both legal; the second is the case
+                -- this exists for. Self-reference is skipped: keying the module
+                -- table itself as one of its own members is not a def alias.
+                if member and rhs ~= mt then
+                    map[rhs] = map[rhs] or {}
+                    -- BOTH spellings, and the BARE one is the load-bearing half.
+                    -- resolve_module_alias answers `fb.dir(…)` by looking the BARE
+                    -- member up in the bound module's FILE (fit_in_file filters by
+                    -- file, so a bare key is not promiscuous here); the dotted key
+                    -- serves a call written `M.dir` and costs nothing.
+                    map[rhs][#map[rhs] + 1] = member
+                    map[rhs][#map[rhs] + 1] = mt .. '.' .. member
+                end
+            end
+        end
+    end
+    reexport_src, reexport_map = src, map
+    return map
+end
+
 local LUA_GUARDS = {
     cond = { if_statement = true, elseif_statement = true, while_statement = true },
     else_t = 'else_statement', elseif_t = 'elseif_statement',
@@ -866,19 +924,41 @@ return {
     -- setmetatable) gets nil, and every caller of this hook treats nil as "do
     -- not write" -- so the strictness fails toward disclosure, never toward a
     -- guessed prologue.
-    module_table = function (lines)
-        local last
-        for i = #lines, 1, -1 do
-            if lines[i]:match('%S') then last = i break end
+    module_table = function (lines) return module_table_name(lines) end,
+    -- RE-EXPORT ALT KEYS (CART-0612). `M.dir = dir_of` is an EXPORT written as an
+    -- assignment of an existing local, and the `functions` query cannot see it: its
+    -- assignment pattern requires `value: (function_definition)`, and a bare
+    -- identifier RHS contains none. So `M.dir` existed nowhere, the name `dir` was
+    -- workspace-unique somewhere ELSE (transport.lua's `S.dir`), and three
+    -- `fb.dir(...)` calls resolved confidently into the wrong module.
+    --
+    -- ★ THE FIX IS A KEY, NOT A NODE. `dir_of` already has a def node; the
+    -- assignment says that node ALSO answers to `M.dir`. Minting a second node
+    -- would add a body-less def, inflate the node count on every corpus, and give
+    -- the name index a new fabrication candidate. alt_keys is exactly the
+    -- mechanism for "one def, another exact key" and is already persisted on the
+    -- node (n.altkeys) so relink and the parallel path agree.
+    --
+    -- GATED ON THE MODULE TABLE, which is what keeps it from firing on every
+    -- `cfg.x = y` in the corpus: the receiver must be THIS FILE'S OWN module
+    -- table, read by the same strict predicate the write side uses. A file whose
+    -- export idiom we do not recognise gets nil and no keys — absence, not a guess.
+    -- (The mirror case, an assignment to somebody ELSE'S imported table, is
+    -- CART-0616 and is deliberately NOT handled here: that one must LOSE a global
+    -- key, and taking one away is a different risk from adding one.)
+    alt_keys = function (name, defn, src)
+        if name:find('.', 1, true) then return {} end -- already dotted
+        local out = {}
+        for _, k in ipairs(reexports(src)[name] or {}) do
+            -- ⚠ NEVER RE-REGISTER THE DEF'S OWN NAME. `exports.handler = handler`
+            -- is the common re-export spelling, and there the bare member name IS
+            -- the def's name — adding it as an alt key files the same node into
+            -- exact[] twice, which double-counts its occurrences and made a
+            -- definition-side member key read as a second reference (the exact
+            -- defect CART-0529 removed, reintroduced from the other end).
+            if k ~= name then out[#out + 1] = k end
         end
-        local name = last and lines[last]:match('^%s*return%s+([%a_][%w_]*)%s*$')
-        if not name then return nil end
-        for _, l in ipairs(lines) do
-            if l:match('^%s*local%s+' .. name .. '%s*=%s*{%s*}%s*$') then
-                return name
-            end
-        end
-        return nil
+        return out
     end,
     -- ...and the write side: the prologue and epilogue a NEW file must carry to
     -- bind the same name, so an extracted module LOADS instead of raising
