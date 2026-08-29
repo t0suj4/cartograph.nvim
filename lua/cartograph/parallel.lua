@@ -395,13 +395,26 @@ function M.audit(data)
     end
     local edges = {}
     for _, e in ipairs(data.edges) do
-        -- 'reg' edges present at audit are phase-1 argv-upgrade
-        -- hypotheses (load-time callback passed as data): slice-local,
-        -- so drop them — relink re-derives against the global set, and
-        -- the id-pass (phase 2) mints the data-reference registrations
-        if e.kind == 'reg' then
-            -- dropped
-        elseif not (e.kind == 'ref' and kill[e.from .. '\31' .. e.to]) then
+        -- ⚠ THIS USED TO DROP EVERY `reg` EDGE, on the premise that "reg edges
+        -- present at audit are phase-1 argv-upgrade hypotheses (slice-local), so
+        -- relink re-derives and the id-pass mints the data-reference
+        -- registrations". THE PREMISE IS FALSE FOR THE ONLY CASE IT APPLIES TO:
+        -- workers run with skip_idpass, so the id-pass NEVER RUNS in a slice and
+        -- there are no argv-upgrade hypotheses in one. The only reg edges a slice
+        -- carries are the per-file DATA-MENTION registrations — a file-local fact
+        -- needing no global set — and dropping them threw away occurrences the
+        -- re-derivation does not recover.
+        --
+        -- MEASURED (CART-0623): a worker over discourse's user.rb produces
+        -- `user.rb -> User#email@1810 at 269,273`, byte-identical to the inline
+        -- extract. After the drop the parallel graph had only 269 — both are
+        -- `email` inside a ruby scope lambda, and phase2 re-derives one of them.
+        -- Six red `par` cells; three survived the CART-0627 collapse as this.
+        --
+        -- Keeping them is safe now in a way it was not before: ts.dedupe_reg runs
+        -- after phase2 and collapses a pair to ONE record, so a registration the
+        -- re-derivation also finds no longer doubles.
+        if not (e.kind == 'ref' and kill[e.from .. '\31' .. e.to]) then
             edges[#edges + 1] = e
         end
     end
