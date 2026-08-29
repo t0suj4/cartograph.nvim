@@ -91,17 +91,36 @@
 -- the production declaration). Hence the asymmetry in the output: contradictions
 -- print by default, agreements only under --show.
 --
--- ⚠⚠ THE LANGUAGE FENCE, and it is wider than it looks. BOTH oracles read
--- `edge.bind`, which comes from `spec.import_bind` — declared by ONE of the fifteen
--- language specs (lua). Probed 2026-08-29: ruby 98 import edges / 0 bound, php 894
--- / 0, python 0 / 0, jquery 0 / 0. So on every corpus but a Lua one this tool
--- decides nothing and reports [0.00%, 100.0%].
+-- ⚠⚠ THE LANGUAGE FENCE (CART-0624). Both oracles read `edge.bind`, and THREE
+-- mechanisms populate it — a fact worth stating because the first version of this
+-- comment named one of them and drew a conclusion that was wrong:
+--     spec.import_bind(calln, src)                  the import-CALL path  → lua
+--     a @bind capture in spec.import_query          the QUERY path        → javascript
+--     spec.scan_imports → imp.alias                 (treesitter.lua:6521) → zig
+-- Three of fifteen specs, not one. ⚠ THE ORIGINAL CLAIM HERE — "declared by ONE of
+-- the fifteen" — came from grepping ONE FIELD NAME, and a field-name grep is not a
+-- mechanism census. That mistake was made three times in one sitting: `import_bind`
+-- missed `@bind`, then `imports` missed `import_query` (php mints 894 edges through
+-- a field the table said it lacked), then both missed `scan_imports`.
 --
--- That is not a caveat about a tool, it is a hole in a MILESTONE GATE: RESOLUTION
--- (CART-0598) is gated on the fabricated fraction falling, and the fraction is
--- measurable on one language of fifteen. The gate is unfalsifiable everywhere else,
--- and it read as passing rather than as unmeasured. The runtime warning below is
--- the interim fix; declaring `import_bind` in more specs is the real one.
+-- MEASURED 2026-08-29, reading the edges rather than the specs:
+--     BOUND, the oracle speaks    ghost/js 5381 edges 3278 bound · zig 489/488 · self
+--     EDGES BUT NO BIND           haskell 861/0 · php 894/0 · go 646/0 · ruby 98/0
+--                                 · rust 64/0
+--     NO IMPORT EDGE AT ALL       python · odin · bash
+--     ZERO BY CORPUS STYLE        jquery (AMD) · mootools (no modules) · rails
+--
+-- ★ AND POINTING IT AT THE SECOND REAL LANGUAGE IMMEDIATELY PAID: zig agrees
+-- 100.00% (1062 pinned, 0 contradicted) and ghost agrees 76.02% — 486 WITNESSED
+-- fabrications on a shipped corpus nobody had run this against (CART-0628). The
+-- gate was never "unmeasurable outside Lua"; it was UNMEASURED where the answer
+-- was worst.
+--
+-- What remains true is the shape of the hole: RESOLUTION (CART-0598) is gated on
+-- the fabricated fraction, six corpora mint import edges carrying no bind, and for
+-- those the tool still reports [0.00%, 100.0%] — which reads like "clean" and means
+-- "not asked". The runtime warning below is the fence; a @bind capture per spec is
+-- the fix.
 --
 -- WHAT THIS DOES NOT MEASURE, stated because absence of a check is not evidence:
 --   * arity. `f(a,b,c)` reaching a two-parameter def looks like a free wrongness oracle
@@ -388,9 +407,11 @@ if decided == 0 and n_cross > 0 then
     print(('  substrate: %d import edge(s), %d carrying a bound local name.')
         :format(n_import, n_import_bound))
     if n_import > 0 and n_import_bound == 0 then
-        print('  Imports exist and NONE names its local, so this spec declares no')
-        print('  `import_bind`. That is a gap in the language front-end, not a')
-        print('  property of the corpus — and both oracles here are blind without it.')
+        print('  Imports exist and NONE names its local, so this language declares')
+        print('  no bind through ANY of the three mechanisms (import_bind /')
+        print('  a @bind capture in import_query / scan_imports aliases). That is a')
+        print('  gap in the language front-end, not a property of the corpus — and')
+        print('  both oracles here are blind without it.')
     elseif n_import == 0 then
         print('  No import edges at all: nothing for either oracle to read.')
     end
