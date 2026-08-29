@@ -102,7 +102,19 @@ end
 -- all 30 corpora because providers/treesitter.lua was touched, even though the new
 -- code only fires for a spec field two languages declare. Concrete instance for
 -- CART-0622.
-M.VERSION = 159 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
+-- v160 (CART-0616): A MONKEY-PATCH IS NOT A GLOBAL RESOLUTION TARGET.
+-- `store.is_index_only = function() … end` in a spec file that required `store`
+-- minted a def keyed corpus-globally by that spelling, and a production caller whose
+-- receiver is a PARAMETER (no binding for the alias path to read) landed on it. Six
+-- sites on this tree, now zero. The fence asks ACROSS the import edge — does the
+-- module this file bound `store` to declare `is_index_only`? YES = an OVERRIDE,
+-- removed from the NAME INDEXES (the node itself survives; the monkey-patch census
+-- reads it). NO = an EXTENSION, the member's only definition, untouched.
+-- BLAST RADIUS: ZERO on the registry. 15 corpora swept counts+struct, all PASS —
+-- the pattern needs an import bind AND a patched member the module declares, which
+-- is a Lua-test idiom these corpora do not exhibit. No gate re-save owed; the bump
+-- is for cache correctness on a tree that DOES have the pattern, like this one.
+M.VERSION = 160 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
                -- `functions` query matches an assignment only when the VALUE is a
                -- function_definition, so `M.dir = dir_of` — an export written as an
                -- alias of an existing local — was captured under no key at all. The

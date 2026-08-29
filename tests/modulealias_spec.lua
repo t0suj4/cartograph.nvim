@@ -183,3 +183,45 @@ test('module-alias: an assignment onto a NON-module table mints no alt key', fun
         if nd.id == n then eq(nil, nd.altkeys) end
     end
 end)
+
+-- ── THE PARAMETER RECEIVER (CART-0616) ──────────────────────────────────────
+-- The two specs above pass WITHOUT the override fence, because the caller BINDS
+-- the module and resolve_module_alias answers from the binding. The real tree
+-- broke where the receiver is a PARAMETER: no binding, so resolution falls
+-- through to a corpus-global full-name match and lands on the monkey-patch. Five
+-- production sites on this repo did exactly that.
+
+test('module-alias: a PARAMETER receiver still loses the monkey-patch', function ()
+    if not ready() then return skip 'no lua parser' end
+    local data = extract_dir {
+        ['foo.lua'] = 'local M = {}\nfunction M.doit() return 1 end\nreturn M\n',
+        ['mock.lua'] = 'local foo = require("foo")\nfoo.doit = function() return 2 end\n',
+        -- NO require here: `foo` arrives as an argument, so there is no binding
+        -- for the alias path to read and the global name match decides
+        ['use.lua'] = 'local function run(foo) return foo.doit() end\nreturn run\n',
+    }
+    local real = node_in(data, 'foo.lua', 'doit$')
+    local mock = node_in(data, 'mock.lua', 'doit$')
+    ok(real and mock, 'both definitions exist — the mock is not denied a node')
+    local c = call_in(data, 'use.lua', 'foo.doit')
+    ok(c, 'the parameter-receiver call was recorded')
+    ok(c.to ~= mock, 'a monkey-patch is never a global resolution target')
+end)
+
+test('module-alias: an EXTENSION through a parameter receiver still resolves', function ()
+    if not ready() then return skip 'no lua parser' end
+    -- the other half, and the half a previous attempt broke: `bar.ext` is the
+    -- ONLY definition of `ext` anywhere, so it must keep its global key. The
+    -- override fence asks whether the IMPORTED module declares the member; bar
+    -- does not, so this is an extension and is left alone.
+    local data = extract_dir {
+        ['bar.lua'] = 'local M = {}\nfunction M.plain() return 1 end\nreturn M\n',
+        ['ext.lua'] = 'local bar = require("bar")\nbar.ext = function() return 2 end\n',
+        ['useext.lua'] = 'local function run(bar) return bar.ext() end\nreturn run\n',
+    }
+    local extdef = node_in(data, 'ext.lua', 'ext$')
+    ok(extdef, 'the extension def exists')
+    local c = call_in(data, 'useext.lua', 'bar.ext')
+    ok(c, 'the call was recorded')
+    eq(extdef, c.to)   -- the only definition there is: it must still be reachable
+end)

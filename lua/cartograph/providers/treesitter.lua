@@ -5228,6 +5228,77 @@ function M.index_only(root, opts)
     return data
 end
 
+--- A MODULE'S OWN DECLARATION OUTRANKS A MONKEY-PATCH OF IT (CART-0616).
+---
+--- `store.is_index_only = function() … end` in a spec file that required `store` is
+--- a monkey-patch — here, restored three lines later — and the extractor mints a def
+--- node named `store.is_index_only`, keyed corpus-globally by that spelling. A
+--- production caller whose receiver is a PARAMETER has no binding to resolve
+--- through, falls back to the global name match, and lands in the spec file.
+---
+--- ⚠ THE TWO CANDIDATES SIT UNDER DIFFERENT KEYS, which is why "prefer the
+--- non-foreign candidate for this key" cannot work and was my first cut: store.lua
+--- declares `M.is_index_only` and the patch is `store.is_index_only`. Nothing
+--- competes under either key. The question has to be asked ACROSS the import edge:
+--- does the module this file bound `store` to declare `is_index_only`?
+---   YES -> an OVERRIDE. It must not be a corpus-global resolution target.
+---   NO  -> an EXTENSION, the member's only definition, and it must stay one.
+--- That distinction is cross-file knowledge, which is why a previous mint-time
+--- attempt could not express it and broke the extension test.
+---
+--- ★ IT KEYS ON `edge.bind`, NOT ON `spec.module_table`. The ticket proposed the
+--- module-table rule; module_table is declared by ONE of fifteen specs (lua), so
+--- that rule could not have moved ghost — the corpus this ticket names as its own
+--- verification. Import binds exist for lua, javascript, zig, go and rust.
+local function drop_overrides(nodes, edges, exact, tail)
+    local bound = {}                    -- file -> local name -> imported file
+    for _, e in ipairs(edges or {}) do
+        if e.kind == 'import' and e.bind and e.from and e.to then
+            local b = bound[e.from]
+            if not b then b = {}; bound[e.from] = b end
+            b[e.bind] = e.to
+        end
+    end
+    local declares = {}                 -- file -> member name -> true
+    for _, nd in ipairs(nodes or {}) do
+        if nd.file and nd.name and (nd.kind == 'function' or nd.kind == 'method') then
+            local mem = nd.name:match('([%w_]+)$')
+            if mem then
+                local d = declares[nd.file]
+                if not d then d = {}; declares[nd.file] = d end
+                d[mem] = true
+            end
+        end
+    end
+    local drop, n = {}, 0
+    for _, nd in ipairs(nodes or {}) do
+        if nd.file and nd.name and (nd.kind == 'function' or nd.kind == 'method') then
+            local recv, mem = nd.name:match('^([%w_]+)[%.:]([%w_]+)$')
+            local target = recv and bound[nd.file] and bound[nd.file][recv]
+            if target and target ~= nd.file and declares[target]
+                and declares[target][mem] then
+                nd.override = true      -- kept on the node: a finding, not a secret
+                drop[nd.id] = true
+                n = n + 1
+            end
+        end
+    end
+    if n == 0 then return 0 end
+    -- remove them from the NAME INDEXES only. The node itself survives — it is a
+    -- real definition and the monkey-patch census (CART-0618) reads it — it simply
+    -- stops being something a foreign call can land on.
+    for _, idx in ipairs({ exact, tail }) do
+        for k, list in pairs(idx) do
+            local keep, cut = {}, false
+            for _, nd in ipairs(list) do
+                if drop[nd.id] then cut = true else keep[#keep + 1] = nd end
+            end
+            if cut then idx[k] = keep end
+        end
+    end
+    return n
+end
+
 --- ONE REGISTRATION, ONE RECORD (CART-0627, and it is what made CART-0623's
 --- `par` column red on six corpora).
 ---
@@ -6845,6 +6916,10 @@ function M.extract(root, opts)
         end
         ::next_file::
     end
+
+    -- the monkey-patch fence: mark foreign assignments now that every file's
+    -- imports are known, then let a module's own declaration win the key
+    drop_overrides(nodes, edges, exact, tail)
 
     -- ── resolution pass: name-matched, ambiguity refuses to link ─────────────
     local _prs = pstart()
