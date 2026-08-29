@@ -223,6 +223,21 @@ return {
             'Vec::', 'Box::', 'Arc::', 'Rc::', 'Option::', 'Result::',
             'Path::', 'PathBuf::', 'HashMap::', 'HashSet::', 'BTreeMap::' },
         import_query = [[ (use_declaration argument: (_) @path) ]],
+        --- `use a::b::C;` binds `C`; `use a::b as c;` binds `c`. Both are read off
+        --- the SAME @path text rather than a second capture, because the alias sits
+        --- in a `use_as_clause` that would have to replace @path to be captured and
+        --- resolve_import wants the whole path.
+        --- ⚠ REFUSES THE BRACE AND GLOB FORMS. `use a::{b, c}` binds TWO names and
+        --- `use a::*` binds an unknown set; a single bind for either would name one
+        --- of them and silently mean all, which is a fabricated binding rather than
+        --- a missing one. Absent is the honest answer until the schema can carry a
+        --- SET ([[cartograph-external-surface]]'s set-valued binding).
+        import_bind_path = function (path)
+            if path:find('[{*]') then return nil end
+            local alias = path:match('%s+as%s+([%w_]+)%s*$')
+            if alias then return alias end
+            return (path:gsub('%s', ''):match('([%w_]+)$'))
+        end,
         resolve_import = function (path, files, from)
             -- crate::a::b -> <src root>/a/b.rs | a/b/mod.rs | a.rs (the
             -- last segment may be an item, not a module); super/self are

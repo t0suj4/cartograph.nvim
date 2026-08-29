@@ -6111,7 +6111,21 @@ function M.extract(root, opts)
                         local target = spec.resolve_import(
                             node_text(pathn, src), importable, file, root)
                         if target and target ~= file then
+                            -- ★ THE IMPLICIT BIND (CART-0624). An ALIAS is a
+                            -- capture (`import f "fmt"`, `use a::b as c`), but the
+                            -- common form has no alias and still binds a name: go
+                            -- binds the package, rust the last path segment. That
+                            -- name is a property of the PATH, not of a node the
+                            -- query can capture, so a spec that knows its language's
+                            -- rule supplies it here. Absent hook = absent bind, which
+                            -- is the honest reading for a language whose imports
+                            -- bind nothing (php's `require` is a file inclusion, not
+                            -- a binding — a fact that survived my guess that it was
+                            -- "the cheapest win").
                             local bind = bindn and node_text(bindn, src) or nil
+                            if not bind and spec.import_bind_path then
+                                bind = spec.import_bind_path(node_text(pathn, src))
+                            end
                             -- WHAT KIND OF IMPORT IS THIS SITE (CART-0510)?
                             -- A BOUNDED ANCESTOR WALK, because @path sits at a
                             -- different depth in every language's query and the

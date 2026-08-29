@@ -332,6 +332,30 @@ for _, e in ipairs(data.edges or {}) do
     end
 end
 
+--- Do two files belong to the same import UNIT? An import does not always name a
+--- FILE. Go's `import "x/y"` names a PACKAGE DIRECTORY and resolve_import picks one
+--- representative file from it, so a symbol defined in a sibling of that
+--- representative is CORRECTLY resolved and the binding is satisfied at the
+--- granularity the language actually has.
+--- ★★ THIS IS THE BARREL FALSE-WITNESS AGAIN IN A DIFFERENT COSTUME (CART-0628), and
+--- it was caught the same way — by GROUPING before believing the count. Every one of
+--- go's 105 "contradictions" was same-package/different-file:
+---     identity.NewFinder    -> identity/finder.go      bound identity/identity.go
+---     allconfig.LoadConfig  -> config/allconfig/load.go bound …/allconfig.go
+--- ⚠ APPLIED TO EVERY LANGUAGE, not gated on a declared granularity, and that is a
+--- deliberate over-withdrawal: in a file-per-module language two siblings really are
+--- different modules, so this can retire a witness that was real. Withdrawing a
+--- witness you cannot justify costs recall; asserting one you cannot justify costs
+--- the claim — and this file's contract is that a CONTRADICTED row is witnessed. The
+--- principled version is a spec-declared import granularity (file vs directory); it
+--- is not built, and this comment is the marker for where it goes.
+local function same_unit(a, b)
+    if not a or not b then return false end
+    local da = a:match('^(.*)/[^/]*$') or ''
+    local db = b:match('^(.*)/[^/]*$') or ''
+    return da == db
+end
+
 --- Can `bound` reach `target` by re-export? One hop, then two — a barrel of
 --- barrels (index -> index -> impl) is ordinary, and stopping at one hop would
 --- leave a residue that looks like a defect and is not.
@@ -378,6 +402,7 @@ for _, call in ipairs(data.calls) do
                 B.pinned[#B.pinned + 1] = row
             elseif bound then
                 local hops = reexport_hop(bound, def.file)
+                if not hops and same_unit(bound, def.file) then hops = 0 end
                 if hops then
                     row.hops = hops
                     B.reexport[#B.reexport + 1] = row
@@ -395,7 +420,7 @@ for _, call in ipairs(data.calls) do
                     local k
                     if pin == def.file then
                         k = 'hop-pinned'
-                    elseif reexport_hop(pin, def.file) then
+                    elseif reexport_hop(pin, def.file) or same_unit(pin, def.file) then
                         k = 'reexport' -- same withdrawal, one rung further out
                         n_hop_reexport = n_hop_reexport + 1
                     else
@@ -442,7 +467,8 @@ print(('population: %d cross-file `inferred` edges (of %d inferred, %d calls, %d
 line('PINNED', #B.pinned, "the receiver's binding names the file it resolved into")
 line('CONTRADICTED', #B.contradicted, "the binding names a DIFFERENT file — WITNESSED WRONG")
 line('SUSPECT', #B.suspect, 'a method call whose name is a stdlib member (undecided, see header)')
-line('reexport', #B.reexport, 'the bound file RE-EXPORTS the target — reconcilable, so no witness')
+line('reexport', #B.reexport,
+    'the bound file RE-EXPORTS the target, or shares its import UNIT — no witness')
 line('UNDECIDED', #B.undecided, 'no import binding pins the receiver')
 print('')
 print('ONE HOP OUT — the receiver is a PARAMETER and the callers agree what they pass.')

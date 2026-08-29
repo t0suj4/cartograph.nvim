@@ -179,7 +179,23 @@ return {
             'reflect.', 'json.', 'bufio.', 'log.', 'slices.', 'maps.',
             'atomic.', 'rand.', 'unicode.', 'utf8.', 'hex.', 'base64.',
             'sha256.', 'exec.', 'testing.', 'assert.', 'require.' },
-        import_query = [=[ (import_spec path: (interpreted_string_literal) @path) ]=],
+        -- TWO PATTERNS, ONE SITE: the aliased form captures @bind, the bare form
+        -- does not and takes its name from import_bind_path below. The consumer
+        -- dedupes on the @path NODE and merges the bind, so the edge set is
+        -- unchanged (see the at_site merge in providers/treesitter).
+        import_query = [=[
+            (import_spec name: (package_identifier) @bind
+                path: (interpreted_string_literal) @path)
+            (import_spec path: (interpreted_string_literal) @path)
+        ]=],
+        --- `import "net/http"` binds `http`: the last path segment. NOT always the
+        --- package's declared name (a package may declare a name differing from its
+        --- directory), so this is a HEURISTIC that the alias capture overrides
+        --- whenever the source says otherwise.
+        import_bind_path = function (path)
+            local last = path:gsub('"', ''):match('([%w_]+)/?$')
+            return last
+        end,
         resolve_import = function (path, files, _)
             -- module-path imports: find the suffix that exists in-repo,
             -- resolving to the package dir's eponymous or first-known file

@@ -89,7 +89,20 @@ end
 -- cells (CART-0623); the residual (rails/rspec/odin) is a DIFFERENT defect — the
 -- parallel path never derives some occurrences at all, e.g. `email` inside a ruby
 -- scope lambda at user.rb:273.
-M.VERSION = 158 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
+-- v159 (CART-0624): THE IMPLICIT IMPORT BIND. `spec.import_bind_path` lets a
+-- language derive the local name a bare import binds from the PATH — go's package
+-- (`import "net/http"` binds `http`), rust's last segment or `as` alias. The @bind
+-- capture still wins where the source states an alias. go went 646 import edges /
+-- 0 bound -> 639 bound; rust 64 -> 26 (the brace and glob forms REFUSE: `use a::{b,c}`
+-- binds two names and a single bind would name one and mean all).
+-- BLAST RADIUS: `bind` appears on go and rust import edges, and bind feeds
+-- REQUALIFICATION — so go/rust resolution moves, not just edge payload. No other
+-- language declares the hook, so their reach is nil.
+-- ⚠ gatepredict cannot see that: it reports "engine change — reach unbounded" for
+-- all 30 corpora because providers/treesitter.lua was touched, even though the new
+-- code only fires for a spec field two languages declare. Concrete instance for
+-- CART-0622.
+M.VERSION = 159 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
                -- `functions` query matches an assignment only when the VALUE is a
                -- function_definition, so `M.dir = dir_of` — an export written as an
                -- alias of an existing local — was captured under no key at all. The

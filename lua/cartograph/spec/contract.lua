@@ -96,6 +96,10 @@ M.SLOTS = {
     -- consolidation candidate into one `imports` contract, spec-layering)
     resolve_import = 'IMPORTS', import_query = 'IMPORTS',
     import_call = 'IMPORTS', import_bind = 'IMPORTS', import_line = 'IMPORTS',
+    -- the IMPLICIT bind: a language whose bare import still binds a name
+    -- derivable from the PATH (go's package, rust's last segment). The @bind
+    -- capture wins where the source states an alias; this fills the rest.
+    import_bind_path = 'IMPORTS',
     import_pats = 'IMPORTS', import_call_like = 'IMPORTS', scan_imports = 'IMPORTS',
     -- WHAT KIND OF IMPORT THE SITE IS (CART-0510), keyed on the import
     -- expression's NODE TYPE: { once = <re-executes?>, soft = <failure is
