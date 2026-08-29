@@ -100,6 +100,9 @@ M.SLOTS = {
     -- derivable from the PATH (go's package, rust's last segment). The @bind
     -- capture wins where the source states an alias; this fills the rest.
     import_bind_path = 'IMPORTS',
+    -- 'directory' when an import names a PACKAGE DIR (go) rather than a file.
+    -- Absent = file, which is what lua/javascript/rust/haskell mean.
+    import_unit = 'IMPORTS',
     import_pats = 'IMPORTS', import_call_like = 'IMPORTS', scan_imports = 'IMPORTS',
     -- WHAT KIND OF IMPORT THE SITE IS (CART-0510), keyed on the import
     -- expression's NODE TYPE: { once = <re-executes?>, soft = <failure is

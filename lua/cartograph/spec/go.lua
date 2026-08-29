@@ -192,6 +192,10 @@ return {
         --- package's declared name (a package may declare a name differing from its
         --- directory), so this is a HEURISTIC that the alias capture overrides
         --- whenever the source says otherwise.
+        -- `import "x/y"` names a PACKAGE DIRECTORY: resolve_import returns ONE
+        -- representative file for it, so a symbol defined in a sibling of that
+        -- representative is still what the binding refers to.
+        import_unit = 'directory',
         import_bind_path = function (path)
             local last = path:gsub('"', ''):match('([%w_]+)/?$')
             return last

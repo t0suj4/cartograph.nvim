@@ -114,7 +114,18 @@ end
 -- the pattern needs an import bind AND a patched member the module declares, which
 -- is a Lua-test idiom these corpora do not exhibit. No gate re-save owed; the bump
 -- is for cache correctness on a tree that DOES have the pattern, like this one.
-M.VERSION = 160 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
+-- v161 (CART-0628): A WRITTEN-DOWN BINDING OUTRANKS A NAME MATCH. For a dotted call
+-- whose receiver is BOUND, the base name-match pass now declines: the DIRECT case is
+-- resolve_module_alias's (admitting it here stamped a binding-derived edge `inferred`,
+-- a tier downgrade the luals-oracle spec caught), a RE-EXPORT or same-import-UNIT
+-- target is still admitted (declining those would trade ghost's 114 wrong edges for
+-- ~372 correct ones), and anything the binding cannot reach at all is REFUSED WITH
+-- CANDIDATES. ghost: CONTRADICTED 114 → 3, agreement 93.11% → 99.67%, and 647 edges
+-- left the `inferred` tier for a stronger one.
+-- Adds spec.import_unit ('directory' for go, where an import names a PACKAGE and one
+-- representative file stands for it; absent = file, which lua/js/rust/haskell mean).
+-- BLAST RADIUS across 15 swept corpora: nio +3 refs · go +38 · rust -3, nothing else.
+M.VERSION = 161 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
                -- `functions` query matches an assignment only when the VALUE is a
                -- function_definition, so `M.dir = dir_of` — an export written as an
                -- alias of an existing local — was captured under no key at all. The

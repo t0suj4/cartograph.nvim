@@ -225,3 +225,41 @@ test('module-alias: an EXTENSION through a parameter receiver still resolves', f
     ok(c, 'the call was recorded')
     eq(extdef, c.to)   -- the only definition there is: it must still be reachable
 end)
+
+-- ── THE BINDING OUTRANKS A NAME MATCH (CART-0628) ───────────────────────────
+-- `urlUtils.relativeToAbsolute()` where the file binds urlUtils to a module that
+-- does NOT declare that member: the honest answer is EXTERNAL, and the resolver
+-- was tail-matching the member into an unrelated file. 114 such edges on ghost.
+
+test('binding: a bound receiver never tail-matches OUTSIDE what it binds', function ()
+    if not ready() then return skip 'no lua parser' end
+    local data = extract_dir {
+        ['foo.lua'] = 'local M = {}\nfunction M.plain() return 1 end\nreturn M\n',
+        -- an unrelated module that DOES declare `gone` — the tail match's prize
+        ['other.lua'] = 'local M = {}\nfunction M.gone() return 2 end\nreturn M\n',
+        ['caller.lua'] = 'local foo = require("foo")\n'
+            .. 'local function run() return foo.gone() end\nreturn run\n',
+    }
+    local wrong = node_in(data, 'other.lua', 'gone$')
+    ok(wrong, 'the decoy definition exists and is reachable by name')
+    local c = call_in(data, 'caller.lua', 'foo.gone')
+    ok(c, 'the call was recorded')
+    ok(c.to ~= wrong, 'foo does not declare `gone`, so other.lua is not the answer')
+end)
+
+test('binding: a BARREL re-export still resolves through the binding', function ()
+    if not ready() then return skip 'no lua parser' end
+    -- the reconciliation that keeps the rule from over-firing: bar re-exports
+    -- impl, so impl's def IS what `bar.thing` means. Refusing here would trade
+    -- 114 wrong edges for several hundred missing ones.
+    local data = extract_dir {
+        ['impl.lua'] = 'local M = {}\nfunction M.thing() return 1 end\nreturn M\n',
+        ['bar.lua'] = 'return require("impl")\n',
+        ['use.lua'] = 'local bar = require("bar")\n'
+            .. 'local function run() return bar.thing() end\nreturn run\n',
+    }
+    local real = node_in(data, 'impl.lua', 'thing$')
+    local c = call_in(data, 'use.lua', 'bar.thing')
+    ok(c, 'the call was recorded')
+    eq(real, c.to)   -- through the barrel, not refused
+end)

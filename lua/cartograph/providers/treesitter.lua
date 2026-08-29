@@ -5250,6 +5250,65 @@ end
 --- module-table rule; module_table is declared by ONE of fifteen specs (lua), so
 --- that rule could not have moved ghost — the corpus this ticket names as its own
 --- verification. Import binds exist for lua, javascript, zig, go and rust.
+--- A WRITTEN-DOWN BINDING OUTRANKS A NAME MATCH (CART-0628).
+---
+--- `urlUtils.relativeToAbsolute(…)` in a file whose line 3 says
+--- `const urlUtils = require('../../shared/url-utils')`, where url-utils.js is
+--- `module.exports = urlUtils` — a PACKAGE re-export declaring no such member. The
+--- honest answer is EXTERNAL; the resolver instead tail-matched
+--- `relativeToAbsolute` into an unrelated service. 114 edges on ghost across 18
+--- groups, every one a caller whose receiver IS bound and whose bound module lacks
+--- the member.
+---
+--- ⚠ THE BINDING IS EVIDENCE THE CALL SITE WROTE DOWN; a tail match is a guess over
+--- the whole corpus. When they disagree the guess loses, and losing means a REFUSAL
+--- WITH CANDIDATES rather than silence — resolution% down, honesty up, which is the
+--- trade the charter names explicitly.
+---
+--- `reaches` allows the three reconciliations fabcensus already allows, because this
+--- is the same question asked at resolution time instead of audit time: the module
+--- itself, a file it RE-EXPORTS (a barrel, up to two hops), or a file sharing its
+--- import UNIT (a go package directory, where an import names a directory and one
+--- representative file stands for it).
+local function binding_index(edges)
+    local bind_of, imports_of = {}, {}
+    for _, e in ipairs(edges or {}) do
+        if e.kind == 'import' and e.from and e.to then
+            if e.bind then
+                local b = bind_of[e.from]
+                if not b then b = {}; bind_of[e.from] = b end
+                b[e.bind] = e.to
+            end
+            local im = imports_of[e.from]
+            if not im then im = {}; imports_of[e.from] = im end
+            im[e.to] = true
+        end
+    end
+    --- ⚠ `dir_unit` IS DECLARED, NOT ASSUMED. An import names a FILE in lua and
+    --- javascript and a DIRECTORY in go, where `import "x/y"` names a package and
+    --- resolve_import picks one representative file — so a definition in a sibling
+    --- of that representative is correctly reached. Applying the directory rule
+    --- everywhere admits any two files that happen to share a folder, which in a
+    --- file-per-module language is most of them; a fixture in a flat tempdir caught
+    --- it immediately. The caller passes its own language's answer.
+    local function reaches(from, to, dir_unit)
+        if from == to then return true end
+        if dir_unit
+            and (from:match('^(.*)/[^/]*$') or '') == (to:match('^(.*)/[^/]*$') or '') then
+            return true
+        end
+        local one = imports_of[from]
+        if not one then return false end
+        if one[to] then return true end
+        for mid in pairs(one) do
+            local two = imports_of[mid]
+            if two and two[to] then return true end
+        end
+        return false
+    end
+    return bind_of, reaches
+end
+
 local function drop_overrides(nodes, edges, exact, tail)
     local bound = {}                    -- file -> local name -> imported file
     for _, e in ipairs(edges or {}) do
@@ -6920,6 +6979,7 @@ function M.extract(root, opts)
     -- the monkey-patch fence: mark foreign assignments now that every file's
     -- imports are known, then let a module's own declaration win the key
     drop_overrides(nodes, edges, exact, tail)
+    local bind_of, binding_reaches = binding_index(edges)
 
     -- ── resolution pass: name-matched, ambiguity refuses to link ─────────────
     local _prs = pstart()
@@ -7119,6 +7179,35 @@ function M.extract(root, opts)
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
                 if fits and confined(n, file) then fits = false end -- CART-0230
+                -- the binding the CALL SITE wrote down beats a corpus-wide
+                -- name match (CART-0628)
+                -- ★ A BOUND RECEIVER IS NOT THIS PASS'S BUSINESS AT ALL. The
+                -- first cut admitted candidates the binding could REACH, which
+                -- resolved the right target and marked it `inferred` — pre-empting
+                -- resolve_module_alias and DOWNGRADING a binding-derived edge to a
+                -- name-match tier. Caught by the luals-oracle spec, which asserts
+                -- exactly that tier. So: decline, and let the alias pass answer.
+                -- Where it cannot (the bound module does not declare the member,
+                -- nor re-export it) the call stays REFUSED WITH CANDIDATES, which
+                -- is the honest end of CART-0628.
+                if fits and dotted then
+                    local recv = name:match('^([%w_]+)[%.:]')
+                    local tgt = recv and bind_of[file] and bind_of[file][recv]
+                    if tgt then
+                        -- THE DIRECT CASE IS THE ALIAS PASS'S, NOT THIS ONE'S.
+                        -- Admitting it here resolves the right target and stamps it
+                        -- `inferred`, DOWNGRADING a binding-derived edge to a
+                        -- name-match tier — the luals-oracle spec asserts exactly
+                        -- that tier and caught it.
+                        -- A RE-EXPORT IS THE OPPOSITE CASE: resolve_module_alias
+                        -- does not follow barrels, so declining those too would
+                        -- trade ghost's 114 wrong edges for ~372 correct ones.
+                        -- Anything the binding cannot reach at all is the bug this
+                        -- guard exists for and is refused.
+                        fits = tgt ~= n.file and binding_reaches(tgt, n.file,
+                            spec and spec.import_unit == 'directory')
+                    end
+                end
                 return fits
             end
             -- ── RECEIVER-PATH AGREEMENT, before the tail-vs-exact preference.
@@ -7620,6 +7709,7 @@ local function build_index(nodes)
     for _, n in ipairs(nodes) do
         node_index[n.id] = n
         if (n.kind == 'function' or n.kind == 'method') and not n.torn
+            and not n.override
             and not n.decl then -- a prototype declaration is not a call target
             exact[n.name] = exact[n.name] or {}
             table.insert(exact[n.name], n)
@@ -7685,9 +7775,13 @@ local function build_symtab(nodes)
         local stub = { id = n.id, kind = n.kind, file = n.file, name = n.name,
             ret = n.ret, retclass = n.retclass, arrow = n.arrow,
             exported = n.exported, escapes = n.escapes, cbarg = n.cbarg,
+            -- `override` rides along or the monkey-patch fence dies in the copy
+            -- and the parallel graph disagrees with the inline one (CART-0616)
+            override = n.override,
             params = n.params, locals = n.locals, dfdef = dfdef }
         node_index[n.id] = stub
-        if (n.kind == 'function' or n.kind == 'method') and not n.torn and not n.decl then
+        if (n.kind == 'function' or n.kind == 'method') and not n.torn and not n.decl
+            and not n.override then
             exact[n.name] = exact[n.name] or {}
             table.insert(exact[n.name], stub)
             local tl = n.name:match('([%w_]+)$')
@@ -7792,6 +7886,7 @@ function M.relink(data, touched)
         regEdge[k] = e
         data.edges[#data.edges + 1] = e
     end
+    local bind_of, binding_reaches = binding_index(data.edges)
     local function resolve(name, file)
         -- short names: same-file tier only (see extract's resolve, the
         -- synjs q3 witness); cross-file fallbacks stay noise-gated
@@ -7918,6 +8013,35 @@ function M.relink(data, touched)
                 -- tail-match a ruby #replace
                 if fits and elang_for(n.file) ~= clang then fits = false end
                 if fits and confined(n, file) then fits = false end -- CART-0230
+                -- the binding the CALL SITE wrote down beats a corpus-wide
+                -- name match (CART-0628)
+                -- ★ A BOUND RECEIVER IS NOT THIS PASS'S BUSINESS AT ALL. The
+                -- first cut admitted candidates the binding could REACH, which
+                -- resolved the right target and marked it `inferred` — pre-empting
+                -- resolve_module_alias and DOWNGRADING a binding-derived edge to a
+                -- name-match tier. Caught by the luals-oracle spec, which asserts
+                -- exactly that tier. So: decline, and let the alias pass answer.
+                -- Where it cannot (the bound module does not declare the member,
+                -- nor re-export it) the call stays REFUSED WITH CANDIDATES, which
+                -- is the honest end of CART-0628.
+                if fits and dotted then
+                    local recv = name:match('^([%w_]+)[%.:]')
+                    local tgt = recv and bind_of[file] and bind_of[file][recv]
+                    if tgt then
+                        -- THE DIRECT CASE IS THE ALIAS PASS'S, NOT THIS ONE'S.
+                        -- Admitting it here resolves the right target and stamps it
+                        -- `inferred`, DOWNGRADING a binding-derived edge to a
+                        -- name-match tier — the luals-oracle spec asserts exactly
+                        -- that tier and caught it.
+                        -- A RE-EXPORT IS THE OPPOSITE CASE: resolve_module_alias
+                        -- does not follow barrels, so declining those too would
+                        -- trade ghost's 114 wrong edges for ~372 correct ones.
+                        -- Anything the binding cannot reach at all is the bug this
+                        -- guard exists for and is refused.
+                        fits = tgt ~= n.file and binding_reaches(tgt, n.file,
+                            spec and spec.import_unit == 'directory')
+                    end
+                end
                 return fits
             end
             -- ── RECEIVER-PATH AGREEMENT, before the tail-vs-exact preference.
