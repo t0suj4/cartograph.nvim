@@ -705,6 +705,12 @@ function M.extract(root, o)
         M.audit(acc)
         ts.relink(acc)
         phase2()
+        -- ★ phase2 mints the data-reference registrations LAST, so the reg
+        -- collapse (CART-0627) is owed here rather than inside relink: two passes
+        -- register the same pair at two anchors, and until this ran the parallel
+        -- graph carried both while the inline one carried one — six red `par`
+        -- cells (CART-0623).
+        ts.dedupe_reg(acc.edges)
         -- fat-record migration P3: workers send FAT df/flow (per-chunk cols can't merge);
         -- the PARENT folds the merged graph so the returned acc is off fat records (matching
         -- inline extract's fold-at-production). Serializable folded cols (P3a); idempotent at ingest.

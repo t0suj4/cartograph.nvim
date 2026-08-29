@@ -5228,6 +5228,67 @@ function M.index_only(root, opts)
     return data
 end
 
+--- ONE REGISTRATION, ONE RECORD (CART-0627, and it is what made CART-0623's
+--- `par` column red on six corpora).
+---
+--- Two independent passes mint `reg` edges and NEITHER CAN SEE THE OTHER: the
+--- id-pass runs while `edges` still holds ZERO reg records (measured: 0 of 74 on
+--- grocy), and the per-file DATA-MENTION scan adds its own afterwards. So a pair
+--- both passes saw ended up with two records, and the graph reported roughly twice
+--- the registrations it had. It survived because every consumer asks
+--- `n_registrants > 0` — a zero-test a doubled count does not cross.
+---
+--- ⚠ THEY ANCHOR DIFFERENTLY, so this MERGES BY CHOOSING, never by unioning. The
+--- mention scan records the ARGUMENT's position, the id-pass synthesises the
+--- CALL's:
+---     mention  1259  `upload_to=get_image_upload_path,`
+---     id-pass  1258  `value_file = models.FileField(`
+--- the same registration seen twice, one line apart. A union would have turned one
+--- registration into two occurrences under a new name — which is the same defect
+--- wearing different clothes, and it is why "dedupe by (from,to)" was not enough of
+--- a specification to write from.
+---
+--- THE RULE: keep the record with the MOST occurrences, ties broken by the earliest
+--- first position. The mention scan wins on membership wherever they differ — it
+--- also sees the IMPORT site, which the id-pass cannot — so "most" selects it
+--- without this code needing to know which pass produced what. Deterministic, and
+--- it does not care which pass ran first, which is exactly the property the
+--- parallel path needs: workers run skip_idpass, so their mixture differs.
+local function first_at(e)
+    local a = e.at and e.at[1]
+    return (a and a.start and a.start.line) or math.huge
+end
+
+--- Exported because the PARALLEL parent mints its last reg edges in `phase2()`,
+--- which runs AFTER ts.relink (parallel.lua) — so neither of this module's own
+--- call sites is the last word there, and the finalizer has to ask for it.
+function M.dedupe_reg(edges)
+    local best, drop, dropped = {}, {}, 0
+    for i, e in ipairs(edges) do
+        if e.kind == 'reg' then
+            local k = e.from .. '\31' .. e.to
+            local cur = best[k]
+            if not cur then
+                best[k] = i
+            else
+                local a, b = edges[cur], e
+                local na, nb = #(a.at or {}), #(b.at or {})
+                local newer = nb > na or (nb == na and first_at(b) < first_at(a))
+                if newer then drop[cur] = true; best[k] = i else drop[i] = true end
+                dropped = dropped + 1
+            end
+        end
+    end
+    if dropped == 0 then return 0 end
+    local keep = {}
+    for i, e in ipairs(edges) do
+        if not drop[i] then keep[#keep + 1] = e end
+    end
+    for i = #edges, 1, -1 do edges[i] = nil end
+    for i = 1, #keep do edges[i] = keep[i] end
+    return dropped
+end
+
 --- Extract a neutral-schema graph from a directory tree. Any file whose
 --- extension has a spec (and an available parser) participates.
 ---@param root string
@@ -7446,6 +7507,8 @@ function M.extract(root, opts)
         dfmod.fold(data)
         flowmod.fold(data)
     end
+    -- both reg-minting passes have run by here; collapse the pair (CART-0627)
+    M.dedupe_reg(data.edges)
     if M.PROFILE then padd('total', prof._t0); data.prof = prof end
     return data
 end
@@ -7944,6 +8007,9 @@ function M.relink(data, touched)
     -- it resolved and relink owns the rest — and addref dedupes by (from,to), so the
     -- union is exactly the inline set.
     own_module_calls(cv.n, cget, region_at, addref)
+    -- the parallel parent assembles its reg set from worker chunks plus relink's
+    -- own minting, so the same collapse is owed here (CART-0623)
+    M.dedupe_reg(data.edges)
     return n
 end
 

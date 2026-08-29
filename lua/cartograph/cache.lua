@@ -73,7 +73,23 @@ end
 
 -- bump when the extractor's OUTPUT shape changes (new node fields,
 -- resolution semantics) — a stale-format cache must miss, not mislead
-M.VERSION = 157 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
+-- v158 (CART-0627): ONE REGISTRATION, ONE RECORD. Two passes minted `reg` edges
+-- for the same pair and neither could see the other — the id-pass runs while
+-- `edges` still holds ZERO reg records (measured 0 of 74 on grocy) and the
+-- data-mention scan adds its own afterwards — so a pair both saw got TWO records
+-- and the graph reported ~2x the registrations it had. Invisible because every
+-- consumer asks `n_registrants > 0`, a zero-test a doubled count does not cross.
+-- The collapse CHOOSES rather than unions: the two passes anchor differently (the
+-- mention scan on the ARGUMENT, the id-pass on the CALL, one line apart on
+-- django-oscar), so a union would have turned one registration into two
+-- occurrences under a different name.
+-- BLAST RADIUS: `reg` edge COUNT falls and `nat` changes on the survivors, on
+-- every corpus that had a duplicated pair. Occurrence counts feed the graphdiff
+-- signature (CART-0531), so counts/struct move. It also closed 3 of 6 red `par`
+-- cells (CART-0623); the residual (rails/rspec/odin) is a DIFFERENT defect — the
+-- parallel path never derives some occurrences at all, e.g. `email` inside a ruby
+-- scope lambda at user.rb:273.
+M.VERSION = 158 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
                -- `functions` query matches an assignment only when the VALUE is a
                -- function_definition, so `M.dir = dir_of` — an export written as an
                -- alias of an existing local — was captured under no key at all. The
