@@ -2,7 +2,8 @@
 -- target the code CONTRADICTS?
 --
 --   nvim --headless -u NONE -l tools/fabcensus.lua <corpus|path> [--show <bucket>]
---     buckets: pinned · contradicted · suspect · undecided · hop-pinned · hop-contradicted
+--     buckets: pinned · contradicted · suspect · undecided · hop-pinned
+--              · hop-contradicted · reexport      (--show and --group take any)
 --
 -- WHY THIS EXISTS. RESOLUTION's gate (CART-0598) is a PAIR — resolution% rises AND
 -- the fabricated fraction falls — because roughly a tenth of the inferred tier is
@@ -25,7 +26,8 @@
 -- witnessed at all, so the output never claims it: the pinned bucket says the binding
 -- AGREES, not that the edge is right.
 --
--- THE THREE-BUCKET SHAPE, and why the answer is a BAND rather than a figure:
+-- THE BUCKET SHAPE (four at first, six now — see the hop and re-export sections
+-- below for the two later ones), and why the answer is a BAND rather than a figure:
 --
 --   PINNED        the call is `X.name(…)`, the calling file binds `X` to a module, and
 --                 the edge resolved INTO that module's file. The receiver's identity is
@@ -54,6 +56,20 @@
 -- does have a `:find`, resolving to it is correct. Counting these as fabricated would
 -- fabricate fabrication — a false witness is worse than a wide band, because it is the
 -- phantom-fact class the concern layering rates below plain absence.
+--
+-- ── THE RE-EXPORT HOP (CART-0628), and it was a CORRECTION, not a feature ──
+-- `reexport` is the sixth bucket: the bound file does not DEFINE the target but
+-- IMPORTS it, so the binding and the resolution are RECONCILABLE and no witness
+-- survives. ghost went from 486 CONTRADICTED to 115 when this landed — 371 rows
+-- that were being called WITNESSED WRONG were barrel re-exports
+-- (`module.exports = require('./import-manager')`), i.e. the tool was producing
+-- exactly the FALSE WITNESS this header forbids.
+-- ⚠ IT IS DELIBERATELY GENEROUS: any import path from the bound file to the target
+-- reconciles, at up to two hops, and a hub index that imports thirty siblings
+-- therefore reconciles a lot. That is the SOUND direction for a witness test —
+-- withdrawing a witness you cannot justify costs recall, asserting one you cannot
+-- justify costs the claim — but it means `reexport` is a WEAK acquittal and is
+-- counted in the band's high end alongside UNDECIDED, never with PINNED.
 --
 -- ── THE ONE-HOP PIN (CART-0615), the second decidable oracle ──────────────
 -- This header used to say the band narrows only by another DECIDABLE oracle and
@@ -142,11 +158,16 @@ local tier = require 'cartograph.tier'
 
 local target = arg[1]
 if not target then
-    print('usage: nvim --headless -u NONE -l tools/fabcensus.lua <corpus|path> [--show pinned|contradicted|suspect|undecided|hop-pinned|hop-contradicted]')
+    print('usage: nvim --headless -u NONE -l tools/fabcensus.lua <corpus|path>')
+    print('         [--show <bucket>] [--group <bucket>]')
+    print('  buckets: pinned contradicted suspect undecided hop-pinned hop-contradicted')
     os.exit(2)
 end
-local show
-for i = 2, #(arg or {}) do if arg[i] == '--show' then show = arg[i + 1] end end
+local show, group
+for i = 2, #(arg or {}) do
+    if arg[i] == '--show' then show = arg[i + 1] end
+    if arg[i] == '--group' then group = arg[i + 1] end
+end
 
 local reg = dofile(here .. '/corpora.lua')
 local c = reg[target]
@@ -249,7 +270,7 @@ end
 -- why a dotted undecided row could NOT be decided one hop out. Printed, because a
 -- decidable oracle that declines is reporting a FRONTIER, and a reader who cannot
 -- see the shape of the decline cannot tell an exhausted oracle from a blind one.
-local hop_why, n_hop_pop, n_shape_skip = {}, 0, 0
+local hop_why, n_hop_pop, n_shape_skip, n_hop_reexport = {}, 0, 0, 0
 
 --- What module does the enclosing function's parameter `recv` carry, one hop out?
 --- Returns the pinned file, or nil and the reason no answer is available.
@@ -281,9 +302,54 @@ local function hop_pin(call, recv)
     return (next(seen))
 end
 
+-- ── THE RE-EXPORT HOP (CART-0628) ──────────────────────────────────────────
+-- ★★ THE WITNESS TEST HAD A FALSE PREMISE, and it took a real corpus to show it.
+-- "The binding names file X, the edge resolved into Y, therefore one of them is
+-- wrong" assumes a module is DEFINED where it is BOUND. A BARREL breaks that:
+--
+--     core/server/data/importer/index.js:  module.exports = require('./import-manager');
+--
+-- so `ImportManager.getExtensions` binds to index.js and is DEFINED in
+-- import-manager.js, and the resolution into import-manager.js is CORRECT. The
+-- census called all 486 of ghost's such rows WITNESSED WRONG. Grouping them made
+-- it obvious — nearly every `binds ->` named an index.js and every target was a
+-- sibling in the same directory.
+--
+-- This is CART-0612 from the other side (a re-export by assignment IS an export),
+-- fixed for lua at v157 by minting alt keys and unhandled HERE, in the census.
+--
+-- ⚠ THE HOP DOES NOT PROVE THE MEMBER IS RE-EXPORTED — it proves the binding and
+-- the resolution are RECONCILABLE, which is exactly enough to withdraw a WITNESS.
+-- These rows therefore leave CONTRADICTED and land in their own bucket rather than
+-- moving to PINNED: "not witnessed wrong" is not "witnessed right", and this file
+-- is not allowed to claim the second.
+local imports_of = {}
+for _, e in ipairs(data.edges or {}) do
+    if e.kind == 'import' and e.from and e.to then
+        local t = imports_of[e.from]
+        if not t then t = {}; imports_of[e.from] = t end
+        t[e.to] = true
+    end
+end
+
+--- Can `bound` reach `target` by re-export? One hop, then two — a barrel of
+--- barrels (index -> index -> impl) is ordinary, and stopping at one hop would
+--- leave a residue that looks like a defect and is not.
+local function reexport_hop(bound, target)
+    if not bound or not target then return nil end
+    local one = imports_of[bound]
+    if not one then return nil end
+    if one[target] then return 1 end
+    for mid in pairs(one) do
+        local two = imports_of[mid]
+        if two and two[target] then return 2 end
+    end
+    return nil
+end
+
 local STD = stdlib_members()
 local B = { pinned = {}, contradicted = {}, suspect = {}, undecided = {},
-    ['hop-pinned'] = {}, ['hop-contradicted'] = {} }
+    ['hop-pinned'] = {}, ['hop-contradicted'] = {}, reexport = {} }
 local n_inferred, n_cross = 0, 0
 
 for _, call in ipairs(data.calls) do
@@ -311,7 +377,13 @@ for _, call in ipairs(data.calls) do
             elseif bound and bound == def.file then
                 B.pinned[#B.pinned + 1] = row
             elseif bound then
-                B.contradicted[#B.contradicted + 1] = row
+                local hops = reexport_hop(bound, def.file)
+                if hops then
+                    row.hops = hops
+                    B.reexport[#B.reexport + 1] = row
+                else
+                    B.contradicted[#B.contradicted + 1] = row
+                end
             elseif call.method and call.callee and STD[call.callee] then
                 B.suspect[#B.suspect + 1] = row
             elseif recv then
@@ -320,7 +392,15 @@ for _, call in ipairs(data.calls) do
                 local pin, why = hop_pin(call, recv)
                 if pin then
                     row.hop = pin
-                    local k = (pin == def.file) and 'hop-pinned' or 'hop-contradicted'
+                    local k
+                    if pin == def.file then
+                        k = 'hop-pinned'
+                    elseif reexport_hop(pin, def.file) then
+                        k = 'reexport' -- same withdrawal, one rung further out
+                        n_hop_reexport = n_hop_reexport + 1
+                    else
+                        k = 'hop-contradicted'
+                    end
                     B[k][#B[k] + 1] = row
                 else
                     hop_why[why] = (hop_why[why] or 0) + 1
@@ -331,6 +411,18 @@ for _, call in ipairs(data.calls) do
             end
         end
     end
+end
+
+-- ★ THE PARTITION IS AN INVARIANT, SO IT IS CHECKED RATHER THAN ASSUMED. Every
+-- cross-file inferred edge lands in exactly one bucket; a bucket added without
+-- being wired into the arithmetic is how a band silently narrows, which has now
+-- happened twice in one session.
+local n_buckets = #B.pinned + #B.contradicted + #B.suspect + #B.undecided
+    + #B['hop-pinned'] + #B['hop-contradicted'] + #B.reexport
+if n_buckets ~= n_cross then
+    print(('⚠ BUCKET PARTITION BROKEN: %d bucketed vs %d cross-file edges — a bucket '
+        .. 'is missing from the sum, and every percentage below is wrong.')
+        :format(n_buckets, n_cross))
 end
 
 local function pct(n) return n_cross > 0 and (100 * n / n_cross) or 0 end
@@ -350,6 +442,7 @@ print(('population: %d cross-file `inferred` edges (of %d inferred, %d calls, %d
 line('PINNED', #B.pinned, "the receiver's binding names the file it resolved into")
 line('CONTRADICTED', #B.contradicted, "the binding names a DIFFERENT file — WITNESSED WRONG")
 line('SUSPECT', #B.suspect, 'a method call whose name is a stdlib member (undecided, see header)')
+line('reexport', #B.reexport, 'the bound file RE-EXPORTS the target — reconcilable, so no witness')
 line('UNDECIDED', #B.undecided, 'no import binding pins the receiver')
 print('')
 print('ONE HOP OUT — the receiver is a PARAMETER and the callers agree what they pass.')
@@ -362,7 +455,8 @@ if n_hop_pop > 0 then
     for why, n in pairs(hop_why) do decl[#decl + 1] = { why, n } end
     table.sort(decl, function (a, b) return a[2] > b[2] end)
     print(('  of %d dotted undecided rows it could speak to, it DECLINED %d:')
-        :format(n_hop_pop, n_hop_pop - #B['hop-pinned'] - #B['hop-contradicted']))
+        :format(n_hop_pop, n_hop_pop - #B['hop-pinned'] - #B['hop-contradicted']
+            - n_hop_reexport))
     for _, d in ipairs(decl) do
         print(('    %6d  %s'):format(d[2], d[1]))
     end
@@ -429,21 +523,28 @@ end
 -- 1.5 points for free, which reads as the strict test having improved when nothing
 -- about it changed. From the local pin's point of view a hop-pinned row is still
 -- undecided, so it counts in this high end and is subtracted only in the band below.
+-- ⚠ EVERY BUCKET THAT IS NOT `pinned` BELONGS IN THE HIGH END. Adding `reexport`
+-- without adding it here dropped 371 ghost rows out of the band and shrank the
+-- high end by 1.2 points for free — the same contamination the hop buckets caused,
+-- from a new bucket, two hours later. A reconcilable row is NOT a proved-right row.
 local n_hop = #B['hop-pinned'] + #B['hop-contradicted']
 local lo = pct(#B.contradicted)
-local hi = pct(#B.contradicted + #B.suspect + #B.undecided + n_hop)
+local hi = pct(#B.contradicted + #B.suspect + #B.undecided + n_hop + #B.reexport)
 -- two decimals on the low end: a witnessed defect must never round to 0.0%.
 print(('FABRICATED in [%.2f%%, %.1f%%]  — witnessed / witnessed+undecided (%d / %d edges)')
-    :format(lo, hi, #B.contradicted, #B.contradicted + #B.suspect + #B.undecided + n_hop))
+    :format(lo, hi, #B.contradicted,
+        #B.contradicted + #B.suspect + #B.undecided + n_hop + #B.reexport))
 print('  the low end is proved; the high end assumes every undecided edge is wrong,')
 print('  which nobody believes. What narrows it is another DECIDABLE oracle, never a')
 print('  larger hand sample — the one-hop pin below is the first of those, built.')
 if n_hop > 0 then
     local wit = #B.contradicted + #B['hop-contradicted']
     local lo2 = pct(wit)
-    local hi2 = pct(#B.contradicted + #B.suspect + #B.undecided + #B['hop-contradicted'])
+    local hi2 = pct(#B.contradicted + #B.suspect + #B.undecided
+        + #B['hop-contradicted'] + #B.reexport)
     print(('  WITH THE ONE-HOP PIN FOLDED IN: [%.2f%%, %.1f%%]  (%d / %d edges)')
-        :format(lo2, hi2, wit, #B.contradicted + #B.suspect + #B.undecided + #B['hop-contradicted']))
+        :format(lo2, hi2, wit, #B.contradicted + #B.suspect + #B.undecided
+            + #B['hop-contradicted'] + #B.reexport))
     print('  — moves at BOTH ends: it witnesses more wrong AND believes more right,')
     print('  and it rests on the two assumptions named above. Quote the strict band')
     print('  unless you also state which oracle you allowed.')
@@ -467,6 +568,60 @@ if #B['hop-contradicted'] > 0 then
             tostring(r.call.full), r.def.name, r.def.file))
         print(('      but `%s` is a parameter its callers pin to %s'):format(r.recv, r.hop))
     end
+end
+
+-- ★★ A ROW COUNT IS NOT A DEFECT COUNT, and on this bucket the gap is an order of
+-- magnitude. ghost's 486 contradictions are dominated by ONE wrong resolution
+-- repeated at every call site of the same member — 12 sampled rows collapsed to 3
+-- distinct pairs, one of them covering 10. Quoting the row count as "486 bugs"
+-- would size a morning's work as a month's, so the grouping is a first-class mode
+-- rather than something a reader is expected to do with sort/uniq afterwards.
+if group and B[group] then
+    local seen, order = {}, {}
+    for _, r in ipairs(B[group]) do
+        local k = ('%s.%s  =>  %s (%s)'):format(tostring(r.recv),
+            tostring(r.call.callee or '?'), r.def.name, r.def.file)
+        local g = seen[k]
+        if not g then
+            g = { k = k, n = 0, files = {}, nfiles = 0, bound = r.bound,
+                first = ('%s:%d'):format(r.call.file, r.call.line) }
+            seen[k] = g
+            order[#order + 1] = g
+        end
+        g.n = g.n + 1
+        if not g.files[r.call.file] then
+            g.files[r.call.file] = true
+            g.nfiles = g.nfiles + 1
+        end
+    end
+    table.sort(order, function (a, b)
+        if a.n ~= b.n then return a.n > b.n end
+        return a.k < b.k
+    end)
+    print('')
+    print(('── %s GROUPED: %d row(s) → %d DISTINCT (receiver.member => target) ──')
+        :format(group:upper(), #B[group], #order))
+    print('  rows are call sites; a GROUP is one wrong resolution. Fix count is the')
+    print('  second number, and it is the one to plan against.')
+    local shown = 0
+    for _, g in ipairs(order) do
+        shown = shown + 1
+        if shown > 40 then
+            print(('  … %d more group(s)'):format(#order - 40))
+            break
+        end
+        print(('  %4d rows · %3d file(s)  %s'):format(g.n, g.nfiles, g.k))
+        print(('        binds -> %s   first at %s'):format(tostring(g.bound), g.first))
+    end
+    -- the shape of the tail decides the work: a few fat groups is a rung bug, a
+    -- long flat tail is many independent ones
+    local top = 0
+    for i = 1, math.min(5, #order) do top = top + order[i].n end
+    print(('  TOP 5 GROUPS COVER %d of %d rows (%.0f%%) across %d group(s) total')
+        :format(top, #B[group], 100 * top / math.max(#B[group], 1), #order))
+elseif group then
+    print(('no such bucket: %s'):format(group))
+    os.exit(2)
 end
 
 if show and B[show] then
