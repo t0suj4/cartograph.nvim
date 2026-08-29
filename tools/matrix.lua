@@ -438,8 +438,9 @@ local function run_row(name)
                 -- (v8 the worst, against a 178s extract) — so the invariant is real, it is
                 -- already written down, and it only needed running here.
                 local vw = require('cartograph.validate').check(warm)
-                local d = gd.diff(snapshot.slim(data), snapshot.slim(warm))
-                local det = gd.empty(d) and {} or gd.report(d, { limit = 10 })
+                local cs, ws = snapshot.slim(data), snapshot.slim(warm)
+                local det, d = gd.detail(cs, ws, { a = 'cold', b = 'warm', limit = 5 })
+                det = det or {}
                 if not vw.ok then
                     -- validate.report returns ONE string (the `valid` cell above wraps it
                     -- in a table for the same reason), not a list of lines
@@ -616,8 +617,8 @@ local function run_row(name)
             if not base then
                 cell('struct', 'NOBASE', { tostring(meta) })
             else
-                local d = gd.diff(base, slim)
-                local det = gd.empty(d) and nil or gd.report(d, { limit = 10 })
+                local det, d = gd.detail(base, slim,
+                    { a = 'baseline', b = 'current', decides = 'b', limit = 5 })
                 -- MIRROR gate.lua's three cases (CART-0219). Only pinned-and-clean or
                 -- UNPINNED corpora reach here (a moved/dirty pinned checkout returned a
                 -- skip above), and an unpinned corpus can fail to certify it held still
@@ -687,9 +688,9 @@ local function run_row(name)
                 cell('par', 'FAIL', { 'parallel child failed: '
                     .. ((proc.stdout or '') .. (proc.stderr or '')):sub(-300) })
             else
-                local d = gd.diff(slim, pslim)
-                cell('par', gd.empty(d) and 'OK' or 'FAIL',
-                    gd.empty(d) and nil or gd.report(d, { limit = 10 }))
+                local det, d = gd.detail(slim, pslim,
+                    { a = 'sequential', b = 'parallel', limit = 5 })
+                cell('par', gd.empty(d) and 'OK' or 'FAIL', det)
             end
         end
     end

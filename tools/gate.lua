@@ -198,8 +198,10 @@ else
                 .. ' below may be corpus change, not extractor change')
                 :format(meta.corpus_rev or '?', now or '?'))
         end
-        local d = gd.diff(base, snapshot.slim(data))
-        for _, l in ipairs(gd.report(d, { limit = 25 })) do print('  ' .. l) end
+        local cur = snapshot.slim(data)
+        local det, d = gd.detail(base, cur,
+            { a = 'baseline', b = 'current', decides = 'b', limit = 8 })
+        for _, l in ipairs(det or gd.report(d, { limit = 25 })) do print('  ' .. l) end
         if not gd.empty(d) then
             -- THE RULE corpora.lua has always documented and this file did not honour:
             -- "UNPINNED (no rev): living corpora … the gate surfaces rev drift as
