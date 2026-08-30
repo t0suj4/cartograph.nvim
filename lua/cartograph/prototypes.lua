@@ -357,8 +357,19 @@ function M.of_module(store, mod_id)
                     local aroot = d and d:match('^([%w_]+)%.')
                     local ap = d and d:match('^[%w_]+%.(.+)$')
                     if aroot and ap and by_var[aroot] then
-                        aliases[lhs1.n] = { proto = by_var[aroot], path = ap,
-                            line = line }
+                        local tgt = by_var[aroot]
+                        aliases[lhs1.n] = { proto = tgt, path = ap, line = line }
+                        -- ★ AND THE PATH ITSELF IS A FACT ABOUT THE PROTOTYPE
+                        -- (CART-0643). Reaching into `<proto>.animation.layers` READS
+                        -- every hop on the way; if the target removed one, the read
+                        -- indexes nil and STOPS THE LOAD. That is worse than the
+                        -- writes this module was built to check, which fail silently.
+                        -- Recorded on the prototype rather than returned separately,
+                        -- because `of_module` returns a flat list and every consumer
+                        -- indexes it.
+                        tgt.reached = tgt.reached or {}
+                        tgt.reached[#tgt.reached + 1] = { path = ap, line = line,
+                            var = lhs1.n }
                     end
                 end
             end

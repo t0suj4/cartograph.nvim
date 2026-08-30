@@ -2307,6 +2307,37 @@ function M.prototype_diff(store, from, to)
                 -- one, and 2.0 removed both. The path is walked down the declared
                 -- type chain and the LAST segment adjudicated against the type it
                 -- lands in — the same typed question, one or more levels down.
+                -- ── READS OF A PROTOTYPE PATH (CART-0643) ────────────────────
+                -- `local layers = <proto>.animation.layers` READS every hop on the
+                -- way in. If the target removed one, this indexes nil and STOPS THE
+                -- LOAD — strictly worse than the writes above, which fail silently.
+                -- ⚠ NO depth > 1 GATE HERE, unlike the write path: a read of a
+                -- removed FIRST segment is the commonest case and nothing else
+                -- reports it (the top-level check adjudicates properties WRITTEN on
+                -- the prototype, and this prototype is only read).
+                for _, rd in ipairs(p.reached or {}) do
+                    local kind, det = M.walk_pair(a, b, pn_a, rd.path)
+                    local key = (m.file or '?') .. '|' .. tostring(pn_a) .. '|' .. rd.path
+                    if kind == 'hop-removed' and not hopseen[key] and not leafseen[key] then
+                        hopseen[key] = true
+                        res.read_lost = res.read_lost or {}
+                        res.read_lost[#res.read_lost + 1] = { file = m.file,
+                            line = rd.line, typename = ty, proto = pn_a,
+                            prop = rd.path, hop = det.member, owner_type = det.owner,
+                            var = rd.var, name = p.name }
+                    elseif kind == 'leaf' then
+                        local pra, prb = M.type_props(a, det.a), M.type_props(b, det.b)
+                        if pra and prb and pra[det.prop] and not prb[det.prop]
+                            and not hopseen[key] then
+                            hopseen[key] = true
+                            res.read_lost = res.read_lost or {}
+                            res.read_lost[#res.read_lost + 1] = { file = m.file,
+                                line = rd.line, typename = ty, proto = pn_a,
+                                prop = rd.path, hop = det.prop, owner_type = det.a,
+                                var = rd.var, name = p.name }
+                        end
+                    end
+                end
                 for _, ov in ipairs(p.nested or {}) do
                     -- the SAME lockstep walk the dotted-override branch uses
                     -- (CART-0642): a hop the target removed is a FINDING, and a
@@ -2413,6 +2444,10 @@ function M.prototype_diff_report(store, from, to, opts)
     L[#L + 1] = ('  %d prototype(s) read; %d write(s) and %d deletion(s) hit a removed'
         .. ' property, %d unchanged, %d in neither version'):format(res.records,
         #res.lost, #res.stale_delete, res.kept, res.unknown_prop)
+    if #(res.read_lost or {}) > 0 then
+        L[#L + 1] = ('  ⚠ and %d READ(S) of a path the target removed — those stop the'
+            .. ' load, not just the write'):format(#res.read_lost)
+    end
     local function listing(items, label, note)
         if #items == 0 then return end
         L[#L + 1] = ''
@@ -2436,6 +2471,11 @@ function M.prototype_diff_report(store, from, to, opts)
         'a VALUE is assigned to a property the new version does not have, so the',
         'write goes nowhere. Each is checked against the property set of the',
         'prototype that OWNS it, so this is a worklist and not a name match.' })
+    listing(res.read_lost or {}, 'READS OF A PATH THE TARGET REMOVED', {
+        'a local is bound INTO the prototype — `local layers = x.animation.layers` —',
+        'and a hop on the way in no longer exists. ⚠ THIS STOPS THE LOAD: the read',
+        'indexes nil. Strictly worse than the writes above, which fail silently, and',
+        'listed apart for that reason rather than merged into one count.' })
     listing(res.stale_delete, 'DELETIONS THAT NO LONGER DELETE', {
         'the line assigns `nil` to remove the property. The property is gone in the',
         'new version, so the line now removes NOTHING and the prototype silently',

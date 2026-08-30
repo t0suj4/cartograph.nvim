@@ -2208,3 +2208,50 @@ test('nested data stage: a REMOVED HOP is a finding, not an unwalkable path',
     eq('leaf', k3)
     eq('filename', d3.prop)
 end)
+
+test('data stage: a READ of a removed prototype path is reported, and separately',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not (pm.load('lua-factorio-proto-11') and pm.load('lua-factorio-proto-20')) then
+        skip 'both proto profiles are needed'
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/prototypes', 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    w('data.lua', 'require("prototypes.e")\n')
+    -- ★★ CART-0643. 2.0 moved a crafting machine's `animation` under `graphics_set`,
+    -- so binding a local into `.animation.layers` READS a property that no longer
+    -- exists and indexes the nil result. IT STOPS THE LOAD — strictly worse than the
+    -- writes this module was built to check, which fail silently. `minable` is the
+    -- control: its path is intact and must stay quiet.
+    w('prototypes/e.lua',
+        'local am = table.deepcopy(data.raw["assembling-machine"]["assembling-machine-1"])\n'
+        .. 'local layers = am.animation.layers\n'
+        .. 'local keep = am.minable.result\n'
+        .. 'data:extend({ am })\n')
+    store.ingest(ts.extract(root))
+    local res = assert(port.prototype_diff(store, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20'))
+    local by = {}
+    for _, r in ipairs(res.read_lost or {}) do by[r.prop] = r end
+    ok(by['animation.layers'] ~= nil,
+        'the removed hop on the way IN is a finding, not an unwalkable path')
+    eq('animation', by['animation.layers'].hop, 'and it names the hop that vanished')
+    eq(nil, by['minable.result'],
+        'an alias whose path is INTACT stays silent — otherwise every local bound'
+        .. ' into a prototype becomes noise')
+    -- reported APART from the writes: the severity differs and merging the counts
+    -- would bury the one that stops the load under the ones that do not
+    for _, l in ipairs(res.lost) do
+        ok(l.prop ~= 'animation.layers', 'a read is not counted as a write')
+    end
+    vim.fn.delete(root, 'rf')
+end)
