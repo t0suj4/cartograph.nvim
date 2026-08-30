@@ -135,7 +135,25 @@ end
 -- signature and nothing on this corpus resolves differently. The pin oracle still
 -- DECLINES here (0 of 907 edges decided) and says so with its substrate line: the
 -- binds exist, no dotted receiver on this corpus is one of them.
-M.VERSION = 163 -- v163: THE FACTORIO SHAPE KNOWS ALL SEVEN ENGINE ENTRY POINTS
+M.VERSION = 164 -- v164: ODIN ATTRIBUTES HID A FIFTH OF THE STANDARD LIBRARY
+               -- (CART-0630). Odin attaches `@(require_results)` /
+               -- `@(private="file")` to a declaration and the grammar makes
+               -- `attributes` the FIRST NAMED CHILD, so the `.` anchor in the
+               -- functions query failed and the proc matched NOTHING — not a def,
+               -- not a node, no fn_range, no enclosing function for anything inside.
+               -- MEASURED on ~/git/odin/core: 40842 procedure_declaration, 8887
+               -- beginning with `attributes` = 21.8% INVISIBLE.
+               -- GRAPH DELTA on the odin corpus:
+               --   nodes 36223 -> 45217 (+24.8%) · edges 21234 -> 47987 (+126%)
+               --   reg 43 -> 11 — the file-level registration artifacts become
+               --   proper function refs once the enclosing proc exists
+               -- ★ AND IT DISSOLVED CART-0629's WITNESSED FABRICATION:
+               -- `os/temp_file.odin -> os/path.odin::dir@394` is GONE, because the
+               -- parameter's enclosing proc is now a def and the resolver can see it
+               -- is a local. A soundness bug fixed by making a query match.
+               -- ⚠ ONE CORPUS MOVES — `odin` is the only one holding .odin files,
+               -- enumerated over all 37 roots — and it needs a gate re-save.
+               -- v163: THE FACTORIO SHAPE KNOWS ALL SEVEN ENGINE ENTRY POINTS
                -- (CART-0635). The detector asked for `control.lua or data.lua`; the
                -- engine loads seven files by name and a mod ships any subset, so a
                -- root with only `data-updates.lua` never shaped, never activated the

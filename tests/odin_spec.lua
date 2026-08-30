@@ -72,3 +72,31 @@ test('odin-R1: a package-qualified call resolves cross-package', function ()
         'strings.to_lower() resolved to the strings package (not other), via R1')
     vim.fn.delete(root, 'rf')
 end)
+
+test('odin: a proc carrying an ATTRIBUTE is still a function', function ()
+    if not ready() then skip 'no odin parser' end
+    -- ★★ CART-0630. Odin attaches attributes to a declaration —
+    -- `@(require_results)`, `@(private="file")` — and the grammar makes
+    -- `attributes` the FIRST NAMED CHILD, so the `.` anchor in the functions query
+    -- failed and the proc matched NOTHING: not a def, not a node, no fn_range, and
+    -- no enclosing function for anything inside it.
+    -- MEASURED on ~/git/odin/core before the fix: 40842 procedure_declaration and
+    -- 8887 of them beginning with `attributes` — 21.8% OF THE STANDARD LIBRARY
+    -- INVISIBLE. os/temp_file.odin has four procs and produced zero functions.
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    write(root, 'm.odin', {
+        'package m',
+        'plain :: proc(a: int) -> int { return a }',
+        '@(require_results)',
+        'attributed :: proc(b: int) -> int { return b }',
+        '@(private="file")',
+        'both :: proc(c: int) -> int { return c }',
+    })
+    local by = extract(root)
+    ok(by['plain'] and by['plain'].kind == 'function',
+        'the unattributed proc is a function (it always was)')
+    ok(by['attributed'] ~= nil,
+        'and so is one carrying @(require_results) — this is the regression')
+    ok(by['both'] ~= nil, 'and @(private="file")')
+    vim.fn.delete(root, 'rf')
+end)

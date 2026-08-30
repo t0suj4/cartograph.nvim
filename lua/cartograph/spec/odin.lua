@@ -86,8 +86,27 @@ return {
         call_expression = 'function', -- g(1)
     },
         exts = { 'odin' },
+        -- ⚠ TWO PATTERNS, AND THE SECOND IS NOT OPTIONAL POLISH (CART-0630). Odin
+        -- attaches ATTRIBUTES to a declaration — `@(require_results)`,
+        -- `@(private="file")` — and the grammar makes `attributes` the FIRST NAMED
+        -- CHILD. The `.` anchor then fails, so a proc carrying one matched NOTHING:
+        -- not a def, not a node, no fn_range, and no enclosing function for anything
+        -- inside it.
+        --
+        -- MEASURED on ~/git/odin/core: 40842 procedure_declaration, 8887 of them
+        -- beginning with `attributes` — 21.8% OF THE STANDARD LIBRARY'S PROCEDURES
+        -- WERE INVISIBLE. `os/temp_file.odin` has four procs and produced zero
+        -- functions, which is how this surfaced: every call in it had a nil
+        -- enclosing fn, so the callback-argument upgrade minted FILE-level `reg`
+        -- edges instead of function refs.
+        --
+        -- ★ WRITTEN AS TWO ANCHORED PATTERNS rather than one with `(attributes)?`:
+        -- an optional node between two anchors is exactly the construct whose
+        -- meaning is easy to get wrong, and this file has already paid once for a
+        -- pattern that read correctly and matched nothing.
         functions = [=[
             (procedure_declaration . (identifier) @name) @def
+            (procedure_declaration . (attributes) . (identifier) @name) @def
         ]=],
         calls = [=[
             (call_expression function: (identifier) @name) @call
