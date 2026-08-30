@@ -1079,7 +1079,27 @@ function M.class_space_name(from_space, to_space, name)
     if rest:match('^[%w_%.:]+$') then
         for seg in rest:gmatch('[%w_]+') do segs[#segs + 1] = seg end
     else
-        local last = rest:match('([%w_]+)$')
+        -- ⚠ A BRACKET-INDEXED NAME HAS NO TRAILING IDENTIFIER (CART-0636).
+        -- `Event.script[event_id]` ends in `]`, so `[%w_]+$` matched nothing, this
+        -- returned nil, and the name kept its unrefined bucket. It was the ONLY
+        -- surviving `receiver-nomatch` across five sample mods — a bucket that
+        -- empties everywhere except one place is worth opening.
+        --
+        -- ★ AND THE OBVIOUS REPAIR IS WRONG. Taking the last identifier ANYWHERE
+        -- yields `event_id` — the INDEX EXPRESSION, a local variable, not a member
+        -- of anything. Adjudicating that against the class spaces would ask about a
+        -- name the code never used as a member. Strip trailing index groups FIRST,
+        -- then take the trailing identifier: the member actually accessed is
+        -- `script`, the thing being indexed.
+        local head = rest
+        -- repeatedly, because `a[i][j]` is two groups; bounded so a pathological or
+        -- unbalanced string cannot spin
+        for _ = 1, 8 do
+            local stripped = head:gsub('%b[]%s*$', '')
+            if stripped == head then break end
+            head = stripped
+        end
+        local last = head:match('([%w_]+)$')
         if last then segs[1] = last end
     end
     if #segs == 0 then return nil end

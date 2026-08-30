@@ -2146,3 +2146,26 @@ test('data stage: an ARRAY of prototypes registered by name expands to its eleme
     end
     vim.fn.delete(root, 'rf')
 end)
+
+test('class space: a BRACKET-INDEXED name is decided by the member, not the index',
+    function ()
+    local port = require 'cartograph.portability'
+    local A = { script = { C = true }, gone = { C = true }, kept = { C = true } }
+    local B = { kept = { C = true } }
+    -- ★★ CART-0636. `Event.script[event_id]` ends in `]`, so the trailing-member
+    -- fallback's `[%w_]+$` matched nothing, the function returned nil, and the name
+    -- kept its unrefined bucket. It was the ONLY surviving `receiver-nomatch` across
+    -- five sample mods — a bucket that empties everywhere except one place is worth
+    -- opening.
+    local v, d = port.class_space_name(A, B, 'Event.script[event_id]')
+    eq('member-removed', v)
+    -- ⚠ AND THE OBVIOUS REPAIR IS WRONG: the last identifier ANYWHERE is `event_id`,
+    -- the INDEX EXPRESSION — a local variable, not a member of anything. Asking the
+    -- class spaces about it would adjudicate a name the code never used as a member.
+    eq('script', d.member, 'the member is the thing INDEXED, never the index')
+    -- several groups, and a member access after one
+    eq('member-supplied', (port.class_space_name(A, B, 'Event.kept[i][j]')))
+    local _, d2 = port.class_space_name(A, B, 'Event.script[a].gone')
+    eq('gone', d2.member, 'a member access AFTER an index is still the trailing one')
+    eq('not-a-runtime-member', (port.class_space_name(A, B, 'Event.nothing[i]')))
+end)
