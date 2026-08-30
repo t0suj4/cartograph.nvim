@@ -287,6 +287,8 @@ function M.of_module(store, mod_id)
     if not eo then return nil end
 
     local protos, by_var, order = {}, {}, 0
+    -- local -> { proto, path } for a local bound INTO a prototype (CART-0642)
+    local aliases = {}
     local function fresh(var, line, basis)
         order = order + 1
         local p = { var = var, line = line, basis = basis, overrides = {},
@@ -338,6 +340,26 @@ function M.of_module(store, mod_id)
                     -- into an ARRAY of prototypes (CART-0637 step 2)
                     p._lit = rhs1
                     p.unreadable_keys = bad
+                elseif rhs1 and (rhs1.k == 'field' or rhs1.k == 'index') then
+                    -- ── AN ALIAS INTO A PROTOTYPE'S INTERIOR (CART-0642) ─────────
+                    -- `local layers = assembling_machine.animation.layers`. The
+                    -- prototype is tracked; `layers` is not, so every later write
+                    -- THROUGH it — `layer1.hr_version.filename = …` — had a target
+                    -- root of an ordinary local and nothing tied it back. Five sites
+                    -- in Von-Neumann, THREE OF THEM LOAD-FATAL: they index a table
+                    -- 2.0 removed, which errors on load rather than going nowhere
+                    -- silently like a missed write.
+                    --
+                    -- ★ ONE HOP, AND DELIBERATELY NOT ALIAS ANALYSIS. The root must
+                    -- be a tracked prototype and the path must be readable as dotted
+                    -- text; anything else is left alone rather than guessed at.
+                    local d = expr.dotted(rhs1)
+                    local aroot = d and d:match('^([%w_]+)%.')
+                    local ap = d and d:match('^[%w_]+%.(.+)$')
+                    if aroot and ap and by_var[aroot] then
+                        aliases[lhs1.n] = { proto = by_var[aroot], path = ap,
+                            line = line }
+                    end
                 end
             end
 
@@ -345,6 +367,12 @@ function M.of_module(store, mod_id)
             for _, l in ipairs(e.lhs or {}) do
                 local root, path = target_path(l)
                 local p = root and by_var[root]
+                if not p and root and aliases[root] and path then
+                    -- resolved through the alias: the write is on the PROTOTYPE, at
+                    -- the alias's path joined to this one
+                    local a = aliases[root]
+                    p, path = a.proto, a.path .. '.' .. path
+                end
                 if p and path then
                     local v, why = literal((e.rhs or {})[1])
                     p.overrides[#p.overrides + 1] = { path = path, value = v,

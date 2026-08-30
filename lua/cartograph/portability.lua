@@ -2002,6 +2002,61 @@ function M.type_props(prof, tn)
     return res or nil
 end
 
+--- ONE HOP of a nested path: the type a property's value must satisfy, climbing to
+--- the ancestor that DECLARES it (prop_type keys by the declaring owner).
+local function hop_type(prof, owner, seg)
+    local nxt = (prof.prop_type or {})[owner .. '::' .. seg]
+    if nxt then return nxt end
+    local seen, up = {}, owner
+    while up and not seen[up] do
+        seen[up] = true
+        up = (prof.parent or {})[up] or (prof.concept_parent or {})[up]
+        if up then
+            nxt = (prof.prop_type or {})[up .. '::' .. seg]
+            if nxt then return nxt end
+        end
+    end
+end
+
+--- WALK A PATH DOWN BOTH VERSIONS AT ONCE (CART-0642), which is the only way to tell
+--- a REMOVED intermediate hop from an unmodelled one.
+---
+--- ★★ THE DEFECT THIS EXISTS FOR: `walk_path` returns nil the moment a hop does not
+--- resolve, and the caller counts that as "could not be walked". But
+--- `belt_animation_set.animation_set.hr_version.filename` resolves every hop in 1.1
+--- and fails at `hr_version` in 2.0 — because 2.0 REMOVED it. That is not an
+--- unwalkable path, it is a REMOVAL, and it is the LOAD-FATAL kind: the code indexes
+--- a table that no longer exists, which errors immediately rather than going nowhere
+--- silently like a missed write. The honest bound was hiding the worse finding.
+---
+--- Returns:
+---   'hop-removed', { member, owner, depth }   an intermediate hop the target dropped
+---   'leaf', { a, b, prop }                    both sides walked; adjudicate the leaf
+---   nil, why, seg                             genuinely unresolvable, and on which side
+function M.walk_pair(fa, fb, root, path)
+    local segs = {}
+    for seg in path:gmatch('[^%.]+') do segs[#segs + 1] = seg end
+    if #segs < 2 then return nil, 'not-nested', path end
+    local ca, cb = root, root
+    for i = 1, #segs - 1 do
+        local na, nb = hop_type(fa, ca, segs[i]), hop_type(fb, cb, segs[i])
+        if not na then return nil, 'origin-unresolved', segs[i] end
+        if not nb then
+            -- ⚠ THE DISCRIMINATION. The target may not resolve this hop because the
+            -- api types it as a union/dictionary (unmodelled), or because the
+            -- property is GONE. Only the second is a finding, and the target's own
+            -- property set for the owner reached so far is what tells them apart.
+            local pb = M.type_props(fb, cb)
+            if pb and not pb[segs[i]] then
+                return 'hop-removed', { member = segs[i], owner = cb, depth = i }
+            end
+            return nil, 'target-unresolved', segs[i]
+        end
+        ca, cb = na, nb
+    end
+    return 'leaf', { a = ca, b = cb, prop = segs[#segs] }
+end
+
 --- WALK A NESTED PATH DOWN THE DECLARED TYPE CHAIN (CART-0633).
 --- `animation.layers.hr_version` on a CraftingMachinePrototype: `animation` is an
 --- Animation4Way, `layers` on it is an `Animation[]` (the array is transparent —
@@ -2075,6 +2130,11 @@ function M.prototype_diff(store, from, to)
     local res = { from = from, to = to, lost = {}, stale_delete = {}, gone_type = {},
         kept = 0, unknown_prop = 0, unread = {}, hedged = {}, untyped = 0, records = 0,
         unwalked = 0, unregistered = 0 }
+    -- ONE ROW PER REMOVED HOP, not one per leaf beneath it (CART-0642). A removed
+    -- `hr_version` has a dozen fields under it and each produced its own finding:
+    -- Von-Neumann went from 29 rows to 285, then 125. Every row was true and the
+    -- worklist was unusable — the reader needs "this hop is gone, here", once.
+    local hopseen, leafseen = {}, {}
     for _, m in ipairs(protos) do
         for _, p in ipairs(m.protos) do
             res.records = res.records + 1
@@ -2149,7 +2209,56 @@ function M.prototype_diff(store, from, to)
                     -- (`minable.result`) names a field of the property's own type,
                     -- which needs the concept types and is not adjudicated here
                     local prop = ov.path and ov.path:match('^([%w_]+)')
-                    if prop then
+                    -- ── A DOTTED OVERRIDE IS A NESTED PATH (CART-0642) ───────────
+                    -- `x.minable.result = v` and, through an alias,
+                    -- `belt_animation_set.animation_set.hr_version.filename = v`.
+                    -- This loop only ever looked at the FIRST segment, so a removal
+                    -- deeper in the path was invisible — and the deep ones are the
+                    -- load-fatal kind, because the code INDEXES the removed table.
+                    -- Walk both versions in lockstep; fall back to the first-segment
+                    -- check when the chain cannot be resolved, so nothing that was
+                    -- adjudicated before stops being.
+                    local handled = false
+                    if prop and ov.path:find('%.') then
+                        local kind, det = M.walk_pair(a, b, pn_a, ov.path)
+                        if kind == 'hop-removed' and det.depth == 1 then
+                            handled = false -- the first segment; the check below owns it
+                        elseif kind == 'hop-removed' then
+                            local hk = (m.file or '?') .. '|' .. tostring(pn_a) .. '|'
+                                .. ov.path:sub(1, 200)
+                            if hopseen[hk] or leafseen[hk] then handled = true; goto ov_done end
+                            hopseen[hk] = true
+                            res.lost[#res.lost + 1] = { file = m.file, line = ov.line,
+                                typename = ty, proto = pn_a, prop = ov.path,
+                                owner_type = det.owner, required = false,
+                                name = p.name, path = ov.path, nested = true,
+                                hop = det.member, value = ov.value,
+                                hedged = p.complete == false }
+                            handled = true
+                        elseif kind == 'leaf' then
+                            local pra, prb = M.type_props(a, det.a), M.type_props(b, det.b)
+                            if pra and prb then
+                                local ia, ib = pra[det.prop], prb[det.prop]
+                                if ia and not ib then
+                                    local entry = { file = m.file, line = ov.line,
+                                        typename = ty, proto = pn_a, prop = ov.path,
+                                        owner_type = det.a, required = ia == 'required',
+                                        name = p.name, path = ov.path, nested = true,
+                                        hedged = p.complete == false }
+                                    if ov.ty == 'nil' then
+                                        res.stale_delete[#res.stale_delete + 1] = entry
+                                    else
+                                        entry.value = ov.value
+                                        res.lost[#res.lost + 1] = entry
+                                    end
+                                elseif ia then res.kept = res.kept + 1
+                                else res.unknown_prop = res.unknown_prop + 1 end
+                                handled = true
+                            end
+                        end
+                    end
+                    ::ov_done::
+                    if prop and not handled then
                         local in_a, in_b = props_a[prop], props_b[prop]
                         if in_a and not in_b then
                             -- WRITE vs DELETE, and the difference decides the repair.
@@ -2199,6 +2308,39 @@ function M.prototype_diff(store, from, to)
                 -- type chain and the LAST segment adjudicated against the type it
                 -- lands in — the same typed question, one or more levels down.
                 for _, ov in ipairs(p.nested or {}) do
+                    -- the SAME lockstep walk the dotted-override branch uses
+                    -- (CART-0642): a hop the target removed is a FINDING, and a
+                    -- load-fatal one, not an unwalkable path.
+                    local function hop_key(path, depth)
+                        local segs, out = {}, {}
+                        for seg in path:gmatch('[^%%.]+') do segs[#segs + 1] = seg end
+                        for i = 1, math.min(depth, #segs) do out[#out + 1] = segs[i] end
+                        -- NO LINE in the key: a hop's children spread over many
+                        -- lines and they are all the one removal
+                        return (m.file or '?') .. '|' .. tostring(pn_a) .. '|'
+                            .. table.concat(out, '.')
+                    end
+                    -- ⚠ DEPTH > 1 ONLY, AND THE NUMBER SAYS WHY. A hop removed at
+                    -- depth 1 is the FIRST segment — which the top-level property
+                    -- check above already reports. Emitting it again once per nested
+                    -- leaf beneath it took Von-Neumann from 29 findings to 285: one
+                    -- removed `animation` on a crafting machine generated a row for
+                    -- every field of every sprite under it. Technically each row was
+                    -- true; as a worklist it was unusable.
+                    local kind, det = M.walk_pair(a, b, pn_a, ov.path)
+                    local hk_ = (kind == 'hop-removed') and hop_key(ov.path, det.depth) or nil
+                    if kind == 'hop-removed' and det.depth > 1
+                        and not hopseen[hk_] and not leafseen[hk_] then
+                        hopseen[hk_] = true
+                        res.lost[#res.lost + 1] = { file = m.file, line = ov.line,
+                            typename = ty, proto = pn_a, prop = ov.path,
+                            owner_type = det.owner, required = false, name = p.name,
+                            path = ov.path, nested = true, hop = det.member,
+                            value = ov.value, hedged = p.complete == false }
+                        goto next_nested
+                    elseif kind == 'hop-removed' then
+                        goto next_nested -- already reported at the top level
+                    end
                     local ta, pa = M.walk_path(a, pn_a, ov.path)
                     local tb, pb = M.walk_path(b, pn_b, ov.path)
                     if not (ta and tb) then
@@ -2211,6 +2353,24 @@ function M.prototype_diff(store, from, to)
                         local pra, prb = M.type_props(a, ta), M.type_props(b, tb)
                         if pra and prb then
                             local ia, ib = pra[pa], prb[pb]
+                            -- ⚠ ONE KEY NAMESPACE WITH THE HOP ROWS. A removed
+                            -- `hr_version` shows up twice otherwise: once as a LEAF
+                            -- (`…layers.hr_version`) and once as a HOP
+                            -- (`…hr_version.animation_speed`). Same removal, same
+                            -- prefix, two rows — and the reader cannot tell they are
+                            -- one edit.
+                            -- ⚠ A LEAF IS PER EDIT SITE AND IS NEVER DEDUPED. Three
+                            -- `hr_version` blocks in three layers are three edits, and
+                            -- collapsing them by path took Von-Neumann from 28 findings
+                            -- to 23 — a worklist that silently drops sites is worse
+                            -- than one that repeats itself. What a leaf DOES do is
+                            -- claim its prefix, so the hop rows for its own children
+                            -- stay quiet: one removal must not appear twice, once as a
+                            -- leaf and again as a hop.
+                            if ia and not ib then
+                                leafseen[(m.file or '?') .. '|' .. tostring(pn_a)
+                                    .. '|' .. ov.path] = true
+                            end
                             if ia and not ib then
                                 local entry = { file = m.file, line = ov.line,
                                     typename = ty, proto = pn_a, prop = ov.path,
@@ -2229,6 +2389,7 @@ function M.prototype_diff(store, from, to)
                             res.unwalked = (res.unwalked or 0) + 1
                         end
                     end
+                    ::next_nested::
                 end
             end
         end

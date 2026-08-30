@@ -2169,3 +2169,42 @@ test('class space: a BRACKET-INDEXED name is decided by the member, not the inde
     eq('gone', d2.member, 'a member access AFTER an index is still the trailing one')
     eq('not-a-runtime-member', (port.class_space_name(A, B, 'Event.nothing[i]')))
 end)
+
+test('nested data stage: a REMOVED HOP is a finding, not an unwalkable path',
+    function ()
+    local port = require 'cartograph.portability'
+    -- ★★ CART-0642. `walk_path` returns nil the moment a hop does not resolve, and
+    -- the caller counted that as "could not be walked". But a hop that resolves in
+    -- the ORIGIN and not in the TARGET is a REMOVAL — and the LOAD-FATAL kind: the
+    -- code indexes a table that no longer exists, which errors immediately rather
+    -- than going nowhere silently like a missed write. The honest bound was hiding
+    -- the worse finding.
+    local A = { prototypes = { P = true }, concept_types = { S = true, R = true },
+        parent = {}, concept_parent = {}, own_props = {}, concept_props = {
+            ['S::hr'] = 'optional', ['R::filename'] = 'optional' },
+        prop_type = { ['P::set'] = 'S', ['S::hr'] = 'R' } }
+    local B = { prototypes = { P = true }, concept_types = { S = true, R = true },
+        parent = {}, concept_parent = {}, own_props = {}, concept_props = {
+            ['R::filename'] = 'optional' },              -- S lost `hr` entirely
+        prop_type = { ['P::set'] = 'S' } }
+    local kind, det = port.walk_pair(A, B, 'P', 'set.hr.filename')
+    eq('hop-removed', kind)
+    eq('hr', det.member, 'and it names the hop that vanished')
+    eq('S', det.owner, 'on the type that used to declare it')
+    eq(2, det.depth)
+    -- ⚠ AND THE DISCRIMINATION IS THE POINT: a hop the TARGET cannot resolve because
+    -- the api models it as a union — not because it was removed — must stay a
+    -- frontier, or every unmodelled shape becomes invented porting work.
+    local B2 = { prototypes = { P = true }, concept_types = { S = true },
+        parent = {}, concept_parent = {}, own_props = {},
+        concept_props = { ['S::hr'] = 'optional' },      -- S STILL HAS hr…
+        prop_type = { ['P::set'] = 'S' } }               -- …but its type is unmodelled
+    local k2, why2, seg2 = port.walk_pair(A, B2, 'P', 'set.hr.filename')
+    eq(nil, k2)
+    eq('target-unresolved', why2)
+    eq('hr', seg2, 'and it says which segment it could not follow')
+    -- both sides walk cleanly -> adjudicate the leaf, as before
+    local k3, d3 = port.walk_pair(A, A, 'P', 'set.hr.filename')
+    eq('leaf', k3)
+    eq('filename', d3.prop)
+end)
