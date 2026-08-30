@@ -66,6 +66,11 @@ M.FACTORIO = {
     -- `x.type = "sound"` is the same fact as `{ type = "sound" }`, one line later.
     type_key = 'type',
     copy_tail = { deepcopy = true },
+    -- APPEND verbs, matched on the last path segment like `copy_tail` so both
+    -- `table.insert` and `util.table.insert` land (CART-0640). A prototype list is
+    -- often built empty and filled — `local t = {}` … `table.insert(t, {…})` …
+    -- `data:extend(t)` — and the literal handed to the append IS the prototype.
+    append_tail = { insert = true },
 }
 
 --- The adapter for a store, or nil. Activates off the L2 profile identity
@@ -285,7 +290,7 @@ function M.of_module(store, mod_id)
     local function fresh(var, line, basis)
         order = order + 1
         local p = { var = var, line = line, basis = basis, overrides = {},
-            nested = {}, frontiers = {}, complete = true, ord = order }
+            nested = {}, elements = {}, frontiers = {}, complete = true, ord = order }
         protos[#protos + 1] = p
         if var then by_var[var] = p end
         return p
@@ -346,6 +351,23 @@ function M.of_module(store, mod_id)
                         ty = (e.rhs or {})[1] and (e.rhs or {})[1].ty or nil,
                         why = why, line = line }
                     if path == 'name' and v then p.name = v end
+                elseif l.k == 'index' and l.b and l.b.k == 'name' and by_var[l.b.n]
+                    and (e.rhs or {})[1] and (e.rhs or {})[1].k == 'table' then
+                    -- ── ACCUMULATE-THEN-REGISTER (CART-0640) ────────────────────
+                    -- `local t = {}` … `t[#t+1] = { type = "item", … }` …
+                    -- `data:extend(t)`. The table is EMPTY at its declaration, so it
+                    -- recorded one entry-less literal and the registration made it a
+                    -- single untyped prototype — while the elements sat in the file
+                    -- as ordinary literals. Collected here as ELEMENTS, minted at the
+                    -- registration site (where `data:extend` proves they are
+                    -- prototypes rather than a list of anything else).
+                    --
+                    -- ⚠ DISTINGUISHED FROM `data.raw[t][n].f = v` BY THE BASE: that
+                    -- one's base is a field/index CHAIN, this one's is a tracked
+                    -- local. Same node kind, different fact.
+                    local pp = by_var[l.b.n]
+                    pp.elements[#pp.elements + 1] = { expr = (e.rhs or {})[1],
+                        line = line }
                 elseif l.k == 'field' or l.k == 'index' then
                     -- `data.raw[t][n].field = v` — an in-place patch of an
                     -- EXISTING prototype, no local involved. Walk out to the
@@ -440,6 +462,20 @@ function M.of_module(store, mod_id)
                         local kids = (not p.declared_type) and p._lit
                             and p._lit.k == 'table' and p._lit.kids or nil
                         local expanded = 0
+                        -- ELEMENTS ACCUMULATED INTO THE LOCAL (CART-0640) are minted
+                        -- HERE, not where they were assigned: `data:extend(t)` is what
+                        -- proves the list holds prototypes. A table filled the same way
+                        -- and never registered stays what it is — a list.
+                        for _, el in ipairs(p.elements or {}) do
+                            local ovs, ty, own, bad, nst = literal_fields(el.expr, el.line)
+                            if ty then
+                                local c = fresh(nil, el.line, 'literal')
+                                c.fields, c.declared_type, c.name = ovs or {}, ty, own
+                                c.nested, c.unreadable_keys = nst or {}, bad
+                                c.registered = { line = line }
+                                expanded = expanded + 1
+                            end
+                        end
                         for _, kid in ipairs(kids or {}) do
                             if kid.k == 'table' then
                                 local kl = (kid.at and (atr.sl(kid.at) + 1)) or p.line
@@ -466,6 +502,28 @@ function M.of_module(store, mod_id)
                         local pr = fresh(nil, line, 'literal')
                         pr.registered = { line = line }
                         pr.anonymous = true
+                    end
+                elseif d and (ad.append_tail or {})[d:match('([%w_]+)$') or ''] then
+                    -- `table.insert(t, {…})` — the append half of accumulate-then-
+                    -- register. The literal handed over IS the element, so this is a
+                    -- read, not a frontier: an append verb whose second argument we
+                    -- can see does not make the list opaque.
+                    -- ⚠ AND IT IS ONLY THIS SHAPE. `table.insert(t, factory(x))` still
+                    -- falls through to the opaque-call branch below, because the
+                    -- element's content is in another function — measured, that is
+                    -- roughly half of this bucket and it does not move.
+                    local tgt = (rhs1.a or {})[1]
+                    local val = (rhs1.a or {})[2]
+                    if tgt and tgt.k == 'name' and by_var[tgt.n]
+                        and val and val.k == 'table' then
+                        local pp = by_var[tgt.n]
+                        pp.elements[#pp.elements + 1] = { expr = val, line = line }
+                    else
+                        for _, p in ipairs(touched) do
+                            p.frontiers[#p.frontiers + 1] =
+                                { kind = 'opaque-call', callee = d, line = line }
+                            p.complete = false
+                        end
                     end
                 elseif d then
                     for _, p in ipairs(touched) do

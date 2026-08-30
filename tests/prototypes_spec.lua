@@ -401,3 +401,71 @@ data:extend{a, b}
     eq(nil, by_var(ps, 'unrelated').registered,
         'and a local the statement never mentions stays unregistered')
 end)
+
+test('accumulate-then-register: elements assigned INTO a list are prototypes',
+    function ()
+    -- `local t = {}` … `t[#t+1] = {…}` … `data:extend(t)`. The table is EMPTY at its
+    -- declaration, so it recorded one entry-less literal and the registration made it
+    -- a single untyped prototype — while the elements sat in the file as ordinary
+    -- literals (CART-0640, YARM's data-final-fixes.lua).
+    local ps = read([[
+local ore_items = {}
+for name, proto in pairs(data.raw.resource) do
+    ore_items[#ore_items + 1] = { type = "item", name = "fake", stack_size = 1 }
+end
+data:extend(ore_items)
+]])
+    local typed = 0
+    for _, p in ipairs(ps) do if p.declared_type == 'item' then typed = typed + 1 end end
+    eq(1, typed, 'the accumulated element is a typed prototype record')
+    local list = by_var(ps, 'ore_items')
+    ok(list and list.container, 'and the list is marked a CONTAINER, not counted too')
+end)
+
+test('accumulate-then-register: table.insert is an append, not an opaque call',
+    function ()
+    local ps = read([[
+local list = {}
+table.insert(list, { type = "item", name = "a" })
+data:extend(list)
+]])
+    local typed = 0
+    for _, p in ipairs(ps) do if p.declared_type == 'item' then typed = typed + 1 end end
+    eq(1, typed, 'the appended literal is the element')
+    local l = by_var(ps, 'list')
+    eq(true, l.complete, 'and an append whose value we can SEE does not make the list'
+        .. ' a frontier — that was the old reading, and it was too pessimistic')
+end)
+
+test('accumulate-then-register: a FACTORY-fed append stays unread, and stays hedged',
+    function ()
+    -- ⚠ THE HONEST BOUND ON THE ABOVE, and it is half the bucket. SchallPickupTower
+    -- writes `table.insert(list, PT_item_1(tier))` — the element's content is in
+    -- another function, so nothing local can read it. It must keep its frontier
+    -- rather than quietly becoming an empty registration.
+    local ps = read([[
+local list = {}
+table.insert(list, make_item(1))
+data:extend(list)
+]])
+    for _, p in ipairs(ps) do
+        ok(p.declared_type == nil, 'no prototype is invented from a call')
+    end
+    local l = by_var(ps, 'list')
+    eq(false, l.complete, 'the list keeps its opaque-call frontier')
+end)
+
+test('accumulate-then-register: a list filled and NEVER registered stays a list',
+    function ()
+    -- the registration is what proves the elements are prototypes. Without it they
+    -- are a table of tables, and minting prototypes from one would be the
+    -- over-counting CART-0637 removed.
+    local ps = read([[
+local rows = {}
+rows[#rows + 1] = { type = "item", name = "a" }
+]])
+    for _, p in ipairs(ps) do
+        ok(p.declared_type == nil,
+            'nothing is minted until a registrar says these are prototypes')
+    end
+end)
