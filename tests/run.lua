@@ -1,6 +1,24 @@
 -- Minimal dependency-free test runner. Run via tests/run.sh (nvim --headless).
 -- Specs are tests/*_spec.lua and use the globals defined here: test/eq/ok/skip.
 
+-- ⚠ STATE ISOLATION IS THE WRAPPER'S JOB, AND A DIRECT RUN LOSES IT (CART-0644).
+-- The suite exercises write verbs against `vim.fn.tempname()` roots, and three
+-- modules persist per-root records under `stdpath('state')` — the txn journal, the
+-- working set, cockpit feedback. Those are a USER RECORD by design, so nothing
+-- prunes them, and a fixture root gets the same permanent treatment as a real
+-- project: 27798 journal directories had accumulated, 27794 of them for tempdirs
+-- that no longer exist.
+--
+-- tests/run.sh points XDG_STATE_HOME at a throwaway. Running this file directly is
+-- legitimate — and it leaks, ~17 directories a run. SAY SO rather than let it be
+-- invisible, which is the whole reason it went unnoticed for 1949 runs.
+local st = vim.fn.stdpath('state')
+if not st:match('cartograph%-test%-state') then
+    io.stderr:write(('\n⚠ NOT STATE-ISOLATED: writes will land in %s\n'
+        .. '  Use tests/run.sh — it points XDG_STATE_HOME at a throwaway dir.\n\n')
+        :format(st))
+end
+
 local reg = {}
 
 function _G.test(name, fn) reg[#reg + 1] = { name = name, fn = fn } end
