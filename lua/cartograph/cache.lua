@@ -135,7 +135,25 @@ end
 -- signature and nothing on this corpus resolves differently. The pin oracle still
 -- DECLINES here (0 of 907 edges decided) and says so with its substrate line: the
 -- binds exist, no dotted receiver on this corpus is one of them.
-M.VERSION = 162 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
+M.VERSION = 163 -- v163: THE FACTORIO SHAPE KNOWS ALL SEVEN ENGINE ENTRY POINTS
+               -- (CART-0635). The detector asked for `control.lua or data.lua`; the
+               -- engine loads seven files by name and a mod ships any subset, so a
+               -- root with only `data-updates.lua` never shaped, never activated the
+               -- L2 profile, and read as having no data stage. EXTRACTION-BEHAVIOUR
+               -- CHANGE for those roots — measured on
+               -- ~/work/factorio-mods/space-exploration-postprocess: nodes 212 -> 214,
+               -- edges 296 -> 300, EXTERNAL nodes 0 -> 2 (the profile mints stdlib
+               -- symbol nodes), so a graph cached before this is stale.
+               -- ⚠ NO PINNED GATE CORPUS MOVES — CHECKED, not argued. The delta needs
+               -- a root carrying info.json AND a data/settings entry AND neither
+               -- control.lua nor data.lua. Enumerated over all 37 corpus roots and
+               -- their children: exactly ONE qualifies, factorio's
+               -- space-exploration-postprocess (data-final-fixes.lua + settings.lua).
+               -- `bnw` and `se` also carry info.json and were the near misses — both
+               -- ship control.lua, so both already shaped. `factorio` is advisory and
+               -- already on v156 baselines. v100's manifest profile-identity check
+               -- invalidates affected roots on read regardless.
+               -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
                -- `functions` query matches an assignment only when the VALUE is a
                -- function_definition, so `M.dir = dir_of` — an export written as an
                -- alias of an existing local — was captured under no key at all. The

@@ -28,24 +28,67 @@ end
 
 -- Each entry: name, detect(root) -> evidence string | nil, and either
 -- a static `config` or `configure(root)` for presets that read files.
+-- THE FACTORIO ENTRY POINTS, in ONE place (CART-0635). The engine loads exactly
+-- these by name; a mod ships any subset and requires everything else.
+--
+-- ⚠ THIS FACT WAS WRITTEN DOWN THREE TIMES AND ONLY THE SHORT COPY WAS LOAD-BEARING.
+-- `config.entrypoints` below listed all seven; the profile's STAGES table
+-- (spec/profile/lua-factorio.lua) lists all seven, and its comment records having
+-- been fixed for exactly this bug once already ("a `^data%.lua$`-only list placed
+-- ZERO data-stage files … 111 files placed, all runtime, 335 orphans"). The DETECTOR
+-- that gates both still asked for `control.lua or data.lua`, so a mod with only
+-- `data-updates.lua` was never shaped at all — and `Squeak Through`, whose entire job
+-- is rewriting collision boxes, reported "no data stage here".
+--
+-- ★★ WHEN AN ECOSYSTEM FACT IS WRITTEN DOWN TWICE, FIXING ONE COPY LEAVES A BUG THAT
+-- LOOKS LIKE THE ORIGINAL WAS NEVER FIXED. tests/shapes_spec.lua now cross-checks
+-- this list against the profile's root-anchored stage patterns, so the remaining two
+-- copies cannot drift silently.
+--
+-- Measured over the real mods folder (198 with info.json): 163 detected by the old
+-- control/data pair, 5 MISSED while carrying a real entry point (Squeak Through,
+-- better_poles_ranges, BottleneckLite, enhanced-shadows, space-exploration-postprocess
+-- — the last in a work corpus), 30 with no entry point at all (asset and locale packs,
+-- correctly not detected).
+--
+-- ★ SETTINGS-ONLY IS A DELIBERATE YES. A mod whose only entry is `settings.lua`
+-- defines mod-setting prototypes and nothing else; that is a real Factorio mod and a
+-- real data-stage question, so it is included rather than left to fall out of a list
+-- that happened to be about `data`.
+M.FACTORIO_ENTRY = {
+    'control.lua',
+    'data.lua', 'data-updates.lua', 'data-final-fixes.lua',
+    'settings.lua', 'settings-updates.lua', 'settings-final-fixes.lua',
+}
+
+local function any_entry(root)
+    for _, f in ipairs(M.FACTORIO_ENTRY) do
+        if has(root, f) then return f end
+    end
+end
+
 M.registry = {
     {
         name = 'factorio-mod',
         detect = function (root)
-            if has(root, 'info.json')
-                and (has(root, 'control.lua') or has(root, 'data.lua')) then
-                return 'info.json + control.lua/data.lua'
-            end
+            local e = any_entry(root)
+            -- the evidence NAMES the file that matched, not the category: a reader
+            -- checking why a root shaped (or did not) needs the actual marker
+            if has(root, 'info.json') and e then return 'info.json + ' .. e end
             if has(root, 'control.lua') and has(root, 'data.lua') then
                 return 'control.lua + data.lua at the root'
             end
         end,
         config = {
-            entrypoints = {
-                'control%.lua$', 'data%.lua$', 'settings%.lua$',
-                'data%-updates%.lua$', 'data%-final%-fixes%.lua$',
-                'settings%-updates%.lua$', 'settings%-final%-fixes%.lua$',
-            },
+            -- derived from the ONE list above rather than restated: this used to be
+            -- the complete copy while `detect` was the short one
+            entrypoints = (function ()
+                local pats = {}
+                for _, f in ipairs(M.FACTORIO_ENTRY) do
+                    pats[#pats + 1] = f:gsub('([%-%.])', '%%%1') .. '$'
+                end
+                return pats
+            end)(),
             -- the L2 environment profile this shape implies ([[cartograph-
             -- stdlib-profile]]): a factorio-mod root runs Factorio's Lua, so its
             -- stdlib/global calls classify to the `stdlib` disposition. Read by

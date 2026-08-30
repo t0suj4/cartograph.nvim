@@ -369,3 +369,71 @@ test('profile override: an overridden graph does NOT populate the root cache',
         'while the ordinary graph persists exactly as before')
     vim.fn.delete(dir, 'rf'); vim.fn.delete(fac, 'rf')
 end)
+
+-- ── THE ENTRY-POINT PAIR (CART-0635) ────────────────────────────────────────
+
+test('factorio shape: every engine entry point detects, not just control/data',
+    function ()
+    local sh = require 'cartograph.shapes'
+    local entry
+    for _, e in ipairs(sh.registry) do if e.name == 'factorio-mod' then entry = e end end
+    ok(entry ~= nil, 'the shape is registered')
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write('-- x\n'); fd:close()
+    end
+    w('info.json')
+    eq(nil, entry.detect(root), 'info.json alone is an asset pack, not a code mod')
+    -- ⚠ THE REGRESSION THIS EXISTS FOR: `Squeak Through` ships data-updates.lua and
+    -- NO data.lua, and its entire job is rewriting collision boxes. The old detector
+    -- asked for `control.lua or data.lua`, so the shape never matched, the profile
+    -- never activated, and a pure data-stage mod reported "no data stage here".
+    w('data-updates.lua')
+    local ev = entry.detect(root)
+    ok(ev ~= nil, 'data-updates.lua alone is a factorio mod')
+    ok(ev:find('data-updates.lua', 1, true) ~= nil,
+        'and the evidence NAMES the file that matched: ' .. tostring(ev))
+    vim.fn.delete(root, 'rf')
+    -- settings-only is a DELIBERATE yes: mod-setting prototypes are prototypes
+    local r2 = vim.fn.tempname(); vim.fn.mkdir(r2, 'p')
+    local fd = assert(io.open(r2 .. '/info.json', 'w')); fd:write('{}'); fd:close()
+    fd = assert(io.open(r2 .. '/settings.lua', 'w')); fd:write('-- x'); fd:close()
+    ok(entry.detect(r2) ~= nil, 'a settings-only mod is a factorio mod')
+    vim.fn.delete(r2, 'rf')
+end)
+
+test('factorio shape: the entry list agrees with the PROFILE stage table',
+    function ()
+    -- ★★ THE FENCE FOR THE ACTUAL BUG. This fact lived in three places — the
+    -- detector, the shape's entrypoints, and the profile's STAGES — and only the
+    -- short copy was load-bearing. The first two now derive from one list; this
+    -- checks the third against it, so the remaining pair cannot drift silently.
+    -- WHEN AN ECOSYSTEM FACT IS WRITTEN TWICE, FIXING ONE COPY LEAVES A BUG THAT
+    -- LOOKS LIKE THE ORIGINAL WAS NEVER FIXED.
+    local sh = require 'cartograph.shapes'
+    local ok_p, prof = pcall(require, 'cartograph.spec.profile.lua-factorio')
+    if not ok_p or not prof._stagedefs then skip 'no lua-factorio stage defs' end
+    local from_shape = {}
+    for _, f in ipairs(sh.FACTORIO_ENTRY) do from_shape[f] = true end
+    local missing = {}
+    for _, st in ipairs(prof._stagedefs) do
+        for _, pat in ipairs(st.entry or {}) do
+            -- the ROOT-ANCHORED forms name a file the engine loads by name; the
+            -- `/`-prefixed twins are the same file one directory down (a multi-mod
+            -- root) and carry no new name
+            local f = pat:match('^%^(.+)%$$')
+            if f then
+                f = f:gsub('%%', '')
+                -- migration scripts are an entry point but not a ROOT marker: the
+                -- engine loads migrations/<x>.lua by directory, so a mod can carry
+                -- them with no root file, and requiring one would shape nothing new
+                if not f:find('/') and not from_shape[f] then
+                    missing[#missing + 1] = f
+                end
+            end
+        end
+    end
+    eq({}, missing,
+        'the profile declares a root stage entry the shape detector does not know: '
+        .. table.concat(missing, ', '))
+end)
