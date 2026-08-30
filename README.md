@@ -1823,6 +1823,38 @@ neighbours — it reads as supplied to a presence test and as removed from the
 losing class's point of view. Between Factorio 1.1.110 and 2.0.77 that middle
 bucket is 87 names against 273 removed and 1474 supplied.
 
+### The receiver you couldn't name is still decidable
+
+A shape match answers *which class is this?* — and for a port that is the wrong
+question, because it is asked entirely of the **target**. It cannot say the class
+the receiver used to be has stopped supporting what the code does with it.
+
+So match the observed shape against **both** tables. The origin's candidate set —
+the classes that declared everything this code touches on the base, *before* the
+move — is the receiver hypothesis set the port actually needs:
+
+```
+railbotUnit.set_command                3 call(s)  was LuaEntity or LuaUnitGroup,
+                                                  none of which still declares set_command
+railbotUnit.surface.create_entity      4 call(s)  LuaUnitGroup lose it,
+                                                  1 other candidate(s) keep it
+```
+
+`railbotUnit` comes from `surface.create_entity`, so it is a `LuaEntity`; 2.0
+moved unit commands to `LuaCommandable`. The first row is porting work whichever
+class it was — **sound without resolving the receiver**, because the port's own
+premise is that this code ran under the origin, so the real class was one of
+those two and both lost the member. The second row is a *hedge*, not work: only
+`LuaUnitGroup` lost `surface`, and a sibling call on the same base must not be
+condemned along with it. **The verdict is per member, never per base.**
+
+Two nearby-looking tests carry no information at all, and both look like
+features. *Does every candidate declare the member?* — the candidate set was
+built by requiring every observed member, so it is yes by construction (measured
+7 of 7). *Did any candidate lose it?* — a candidate is a target class that
+declares it, so none can have. Only the origin-side match says anything, and
+nothing computed it until now.
+
 The origin comes from the **manifest** — `factorio_version "1.1"` in `info.json`
 — so you don't name it twice; `:CartographPortability <to>` is enough. It is
 matched on the *minor* and refuses anything else, because the verdict is a

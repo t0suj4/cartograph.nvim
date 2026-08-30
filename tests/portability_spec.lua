@@ -1832,3 +1832,109 @@ test('class space: a REAL removal is found where the receiver cannot be typed',
     ok(body:find('CLASS SPACES:', 1, true) ~= nil, 'the header says the axis ran')
     ok(body:find('REMOVED FROM THE TARGET', 1, true) ~= nil, 'and the group is printed')
 end)
+
+-- ── THE SHAPE-MOVE AXIS (CART-0632) ─────────────────────────────────────────
+-- The evidence that was missing is the ORIGIN's candidate set. Two earlier forms
+-- of this test are VACUOUS BY CONSTRUCTION and both look like features, so the
+-- first spec here fences the vacuity rather than the feature.
+
+test('shape move: the ORIGIN candidates decide, per MEMBER, not per base',
+    function ()
+    local port = require 'cartograph.portability'
+    -- 2.0 moved `set_command` off LuaEntity and LuaUnitGroup lost `surface` too
+    local to_ct = { classes = {
+        LuaEntity = { all = { surface = true, position = true } },
+        LuaCommandable = { all = { set_command = true, surface = true } },
+    } }
+    local from = { candidates = { 'LuaEntity', 'LuaUnitGroup' }, n = 2 }
+    local to = { class = 'LuaCommandable', n = 2 }
+    -- the member NO origin candidate still declares: broken whichever it was
+    local v, d = port.shape_move_verdict(from, to, to_ct, 'set_command')
+    eq('shape-broken', v)
+    eq({ 'LuaEntity', 'LuaUnitGroup' }, d.lost_classes)
+    eq({}, d.kept_classes)
+    -- ★ A SIBLING CALL ON THE SAME BASE IS NOT CONDEMNED WITH IT. `surface` still
+    -- lives on LuaEntity, so this is a hedge, not porting work — the first cut
+    -- answered per BASE and marked all three railbotUnit names broken.
+    local v2, d2 = port.shape_move_verdict(from, to, to_ct, 'surface')
+    eq('shape-at-risk', v2)
+    eq({ 'LuaUnitGroup' }, d2.lost_classes)
+    eq({ 'LuaEntity' }, d2.kept_classes)
+    -- a member every origin candidate kept is not a finding at all
+    eq(nil, (port.shape_move_verdict({ candidates = { 'LuaEntity' } },
+        to, to_ct, 'position')))
+    -- no candidates on either side -> no evidence, never a verdict
+    eq(nil, (port.shape_move_verdict({ candidates = {} }, to, to_ct, 'surface')))
+    eq(nil, (port.shape_move_verdict(from, { candidates = {} }, to_ct, 'surface')))
+    eq(nil, (port.shape_move_verdict(from, to, to_ct, nil)))
+end)
+
+test('shape move: the TARGET-side candidate tests are vacuous, and this is why',
+    function ()
+    local cm = require 'cartograph.classmatch'
+    local prof = require 'cartograph.spec.profile'
+    if not prof.load('lua-factorio-api-20') then skip 'no 2.0 class table' end
+    local ct = assert(cm.table('lua-factorio-api-20'))
+    -- ⚠ THE FENCE IS ON THE VACUITY, NOT ON A FEATURE. classmatch builds the
+    -- candidate set by requiring EVERY observed member, so "does every candidate
+    -- declare the member" is true by construction — a test shaped like this would
+    -- ship, always answer yes, and look like it worked. Measured 7/7 on
+    -- Von-Neumann before the real test was found.
+    local ev = cm.match({ add = true }, ct)
+    if ev.outcome ~= 'ambiguous' then skip 'shape {add} is not ambiguous here' end
+    ok(#ev.candidates > 1, 'several classes declare it')
+    for _, c in ipairs(ev.candidates) do
+        ok(ct.classes[c].all['add'] ~= nil,
+            c .. ' declares the member BY CONSTRUCTION — this is why the'
+            .. ' all-candidates test carries no information')
+    end
+end)
+
+test('shape move: a real removal is found in the DETERMINED bucket',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not (pm.load('lua-factorio') and pm.load('lua-factorio-api-11')) then
+        skip 'both profiles are needed'
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    -- the Von-Neumann shape: {set_command, surface}. Under 1.1 that is LuaEntity
+    -- or LuaUnitGroup; under 2.0 `set_command` lives only on LuaCommandable
+    -- (verified against the raw 2.0.77 runtime-api.json). So the base's 2.0 match
+    -- is DETERMINED — which is why an ambiguous-only build would have missed it.
+    w('control.lua', 'return { go = function (unit)\n'
+        .. '  unit.set_command({})\n'
+        .. '  unit.surface.create_entity({})\n'
+        .. 'end }\n')
+    store.ingest(ts.extract(root))
+    local res = assert(port.audit(store, 'lua-factorio'))
+    if not (res.receiver.available and res.origin.available) then
+        skip('needs both class tables: ' .. tostring(res.receiver.why or res.origin.why))
+    end
+    local byname = {}
+    for _, e in ipairs(res.entries) do byname[e.name] = e end
+    local sc = byname['unit.set_command']
+    ok(sc ~= nil, 'the name is in the audit')
+    eq('shape-broken', sc.reason, 'no origin candidate still declares set_command')
+    eq(false, sc.provided)
+    ok(sc.receiver.receiver_was ~= nil,
+        'and it records which bucket it was refined out of')
+    -- the sibling on the same base must NOT be condemned with it
+    local su = byname['unit.surface.create_entity']
+    if su then
+        ok(su.reason ~= 'shape-broken',
+            'a member the origin candidates kept is not porting work: ' .. su.reason)
+    end
+    local body = table.concat(port.report(store, 'lua-factorio', { cap = 40 }), '\n')
+    ok(body:find('NO PLAUSIBLE RECEIVER', 1, true) ~= nil, 'the group prints')
+    vim.fn.delete(root, 'rf')
+end)

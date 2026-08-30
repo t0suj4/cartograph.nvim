@@ -876,6 +876,12 @@ function M.receiver_context(store, prof, origin)
             else
                 rc.from_ct, rc.from_meta = oct, om
                 rc.from_space = cm.space(oct)
+                -- THE ORIGIN-SIDE SHAPE MATCH, built here for the same reason `ev`
+                -- is: one subset test per BASE, not per name. CART-0632.
+                rc.ev_from = {}
+                for base, e in pairs(surf.bases or {}) do
+                    rc.ev_from[base] = cm.match(e.members, oct)
+                end
             end
         end
     end
@@ -982,6 +988,66 @@ function M.class_space_verdict(from_space, to_space, member)
     return 'member-moved', { from_n = na, to_n = nb, lost_classes = lost }
 end
 
+--- THE SHAPE-MOVE VERDICT (CART-0632) — did the base's WHOLE OBSERVED SHAPE
+--- survive the move, for every class the receiver could have been?
+---
+--- ★★ THE UNIT OF A PORT QUESTION ABOUT A RECEIVER IS THE SHAPE, NOT THE MEMBER,
+--- and the evidence that was missing is the ORIGIN's candidate set. Match the
+--- observed members against BOTH class tables:
+---     O = classes in the ORIGIN declaring every observed member
+---     T = classes in the TARGET declaring every observed member
+---     O \ T = the plausible origin receivers that no longer support this shape
+---
+--- ⚠ TWO EARLIER FORMULATIONS OF THIS TEST ARE VACUOUS BY CONSTRUCTION, and both
+--- look like features. (1) "does every candidate declare the member" — the
+--- candidate set was BUILT by requiring every observed member, so it is always
+--- yes; measured 7 of 7 on Von-Neumann. (2) "did any candidate lose it" — a
+--- candidate is a TARGET class that declares it, so none can have. Only the
+--- ORIGIN-side match carries information, and nothing computed it.
+---
+--- Returns (verdict, detail) or nil when either side has no candidates:
+---   shape-survives   O ⊆ T. Every class the receiver could have been still
+---                    declares everything this code does with it. ★ SOUND
+---                    WITHOUT RESOLVING THE AMBIGUITY — the port's own premise
+---                    is that the code worked under the origin, so the real
+---                    receiver was in O.
+---   shape-broken     O ∩ T = ∅. NO plausible origin receiver supports the shape
+---                    any more. Real porting work, whichever class it was.
+---   shape-at-risk    some of O dropped out. The named classes are the ones that
+---                    break; whether this call does depends on which it is.
+---
+--- ⚠ THE SCOPE OF `shape-survives` IS THE OBSERVED SHAPE, NEVER THE RECEIVER. It
+--- says every use THIS CODE MAKES survives, not that nothing about the object
+--- changed — the shape is what the mod happens to touch. `n` rides in the detail
+--- for the same reason classmatch publishes it: a one-member shape admits a broad
+--- candidate set and the conclusion is correspondingly weak.
+function M.shape_move_verdict(ev_from, ev_to, to_ct, hop)
+    local function cands(ev)
+        if not ev then return nil end
+        if ev.class then return { ev.class } end
+        return ev.candidates
+    end
+    local O, T = cands(ev_from), cands(ev_to)
+    if not O or #O == 0 or not T or #T == 0 then return nil end
+    if not to_ct or type(hop) ~= 'string' then return nil end
+    -- ⚠ THE VERDICT IS PER NAME, NOT PER BASE, and the first cut got this wrong.
+    -- `railbotUnit`'s shape {set_command, surface} is supported by no 2.0 class, so
+    -- a base-level answer marked ALL THREE names on it as broken — including
+    -- `railbotUnit.surface.create_entity`, which is fine, because LuaEntity kept
+    -- `surface` and only lost `set_command`. A shape verdict is how the RECEIVER
+    -- HYPOTHESIS SET is computed; what breaks is decided one member at a time.
+    local kept, lost = {}, {}
+    for _, c in ipairs(O) do
+        local cls = to_ct.classes and to_ct.classes[c]
+        if cls and cls.all[hop] then kept[#kept + 1] = c else lost[#lost + 1] = c end
+    end
+    if #lost == 0 then return nil end -- this member survives on every candidate
+    local d = { n = ev_to.n, n_origin = #O, origin_classes = O,
+        lost_classes = lost, kept_classes = kept, member = hop }
+    if #kept == 0 then return 'shape-broken', d end
+    return 'shape-at-risk', d
+end
+
 --- THE SAME VERDICT FOR A WHOLE DOTTED NAME, not one member. A chain
 --- (`event.element.parent.destroy`) is several member accesses and ALL of them
 --- must survive the move, so the name is decided by its strongest segment.
@@ -1041,6 +1107,17 @@ function M.receiver_cell(d)
     -- row asserting a sound removal. The reader is then told the tool found nothing
     -- and that the name is gone, on the same line. What belongs here is where the
     -- member USED to live, which is the fact the verdict actually rests on.
+    if d.origin_classes and d.lost_classes and #d.lost_classes > 0 then
+        -- the shape-move rows: WHICH classes could it have been, and which broke
+        if #d.lost_classes == #d.origin_classes then
+            return ('was %s, none of which still declares %s (n=%d)')
+                :format(table.concat(d.origin_classes, ' or '),
+                    tostring(d.member), d.n or 0)
+        end
+        return ('%s lose it, %d other candidate(s) keep it (n=%d)')
+            :format(table.concat(d.lost_classes, ', '),
+                #d.origin_classes - #d.lost_classes, d.n or 0)
+    end
     if d.from_classes then
         return ('was on %s, on no target class'):format(table.concat(d.from_classes, ', '))
     elseif d.lost_classes then
@@ -1110,6 +1187,36 @@ function M.unknown_reason(prof, name, where, rctx)
         -- candidate declares the member — a different and stronger test than "any
         -- class anywhere does". Answering the weak question over the strong one
         -- would trade a narrow honest hedge for a broad confident guess.
+        -- THE SHAPE-MOVE TEST (CART-0632) runs for a name whose receiver WAS
+        -- typed — the opposite population to the class-space refinement below.
+        -- It only REPLACES the bucket when it finds porting work: `shape-survives`
+        -- leaves `receiver-class-present` / `receiver-ambiguous` exactly where they
+        -- were and rides along as evidence, because losing the class hypothesis to
+        -- gain a weaker word would be a bad trade.
+        --
+        -- ⚠ APPLIED TO DETERMINED AND AMBIGUOUS ALIKE, and the measurement is why:
+        -- Von-Neumann's one at-risk base (`railbotUnit`, shape {set_command,
+        -- surface}) is 1.1-AMBIGUOUS but 2.0-DETERMINED, so it sits in the
+        -- class-present bucket today. An ambiguous-only build would have missed the
+        -- single real finding this axis produces. The determined bucket has the
+        -- identical weakness and its own text already admits it.
+        -- the three buckets that rest on a TARGET-side match and nothing else.
+        -- `receiver-class-absent` is deliberately NOT here: it is already porting
+        -- work on its own evidence, and overriding it would swap a sharper verdict
+        -- for a broader one.
+        local SHAPE_TESTABLE = { ['receiver-class-present'] = true,
+            ['receiver-class-chain'] = true, ['receiver-ambiguous'] = true }
+        if b and rctx.ev_from and why and SHAPE_TESTABLE[why] then
+            local hop = d and d.member
+            local sv, sd = M.shape_move_verdict(rctx.ev_from[b], rctx.ev[b],
+                rctx.ct, hop)
+            if sv then
+                d = d or {}
+                for k, v in pairs(sd) do if d[k] == nil then d[k] = v end end
+                d.receiver_was = why
+                return sv, d
+            end
+        end
         if (why == 'receiver-nomatch' or why == 'receiver-nearmiss')
             and rctx.from_space then
             local cv, cd = M.class_space_name(rctx.from_space, rctx.to_space, nm)
@@ -1266,6 +1373,22 @@ M.REASON_TEXT = {
         .. ' library or the language\'s own stdlib. ★ A DECIDED ANSWER, not a'
         .. ' frontier: it was previously indistinguishable from "we could not type the'
         .. ' receiver", and it is no work at all rather than unknown work.',
+    -- ── the shape-move axis (CART-0632). The unit is the base's OBSERVED SHAPE and
+    -- the missing evidence was the ORIGIN's candidate set: which classes declared
+    -- everything this code does with the base, BEFORE the move.
+    ['shape-broken'] = 'NO PLAUSIBLE RECEIVER STILL HAS THIS MEMBER — the base\'s'
+        .. ' whole observed shape names the classes it could have been under the'
+        .. ' ORIGIN, and NONE of them declares this member in the target. ★ SOUND'
+        .. ' WITHOUT RESOLVING THE RECEIVER: the port\'s premise is that this code'
+        .. ' ran under the origin, so the real class was one of them, and every one'
+        .. ' of them lost this member. Real porting work; the classes are named.',
+    ['shape-at-risk'] = 'SOME PLAUSIBLE RECEIVERS LOST THIS MEMBER — of the classes'
+        .. ' the base could have been under the origin, some no longer declare it.'
+        .. ' Whether this call breaks depends on which one the receiver actually is,'
+        .. ' and that is what the shape does not pin down. ⚠ THE VERDICT IS PER'
+        .. ' MEMBER, NOT PER BASE: a sibling call on the same base may be perfectly'
+        .. ' fine, which is why they are listed separately rather than condemned'
+        .. ' together. The losing classes are named on each line.',
     ['unenumerated-namespace'] = 'NAMESPACE MEMBER, NOT ENUMERATED — the root IS a'
         .. ' modelled namespace but the artifact distils METHODS only (and omits'
         .. ' lualib extensions), so a miss here says nothing either way.',
@@ -1279,8 +1402,9 @@ M.REASON_TEXT = {
 --- the profile's own authority. Then the receiver axis, ordered by how much it
 --- CLAIMS — the hedged near-porting-work first, the merely consistent last — so a
 --- reader who stops after two groups has read the strongest statements.
-M.REASON_ORDER = { 'absent', 'member-removed',
-    'receiver-class-absent', 'member-moved', 'receiver-nearmiss', 'receiver-nomatch',
+M.REASON_ORDER = { 'absent', 'member-removed', 'shape-broken',
+    'receiver-class-absent', 'shape-at-risk', 'member-moved',
+    'receiver-nearmiss', 'receiver-nomatch',
     'receiver-ambiguous', 'receiver-class-chain', 'receiver-class-present',
     'member-supplied', 'receiver-typed', 'unenumerated-namespace',
     'not-a-runtime-member', 'unclaimed-bare', 'other-language' }
@@ -2197,12 +2321,22 @@ function M.report(store, runtime, opts)
                 'receiver-nomatch', 'receiver-ambiguous', 'receiver-class-chain',
                 'receiver-class-present', 'receiver-typed' }
             local tot, totcalls, refined, refcalls = 0, 0, 0, 0
+            local smoved, smcalls = 0, 0
             for _, e in ipairs(res.entries) do
                 if e.reason and e.reason:match('^receiver%-') then
                     c[e.reason] = c[e.reason] or { 0, 0 }
                     c[e.reason][1] = c[e.reason][1] + 1
                     c[e.reason][2] = c[e.reason][2] + e.calls
                     tot, totcalls = tot + 1, totcalls + e.calls
+                elseif e.receiver and e.receiver.receiver_was
+                    and e.reason and e.reason:match('^shape%-') then
+                    -- TYPED, then decided by the SHAPE-MOVE axis. A DIFFERENT
+                    -- population and a different mechanism from the class-space
+                    -- refinement below: these names HAD a receiver hypothesis, and
+                    -- it is the origin-side candidate set that condemned them. One
+                    -- count covering both would name the wrong instrument for
+                    -- whichever half the reader is looking at.
+                    smoved, smcalls = smoved + 1, smcalls + e.calls
                 elseif e.receiver and e.receiver.receiver_was then
                     -- RAISED BY THIS AXIS AND DECIDED BY ANOTHER (CART-0631). Counted
                     -- separately rather than dropped: this census used to be every
@@ -2224,6 +2358,11 @@ function M.report(store, runtime, opts)
                 L[#L + 1] = ('      + %d name(s), %d call(s) the shape match could not'
                     .. ' type and the CLASS SPACES decided — listed in their own groups')
                     :format(refined, refcalls)
+            end
+            if smoved > 0 then
+                L[#L + 1] = ('      + %d name(s), %d call(s) typed here and then'
+                    .. ' condemned by the ORIGIN-side candidate set (shape move)')
+                    :format(smoved, smcalls)
             end
         elseif res.receiver then
             vim.list_extend(L, reason_lines(
