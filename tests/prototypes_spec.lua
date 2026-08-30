@@ -356,3 +356,48 @@ p.b = 2
     end
     eq({ 'a', '~', 'b' }, seen)
 end)
+
+test('registration: a helper REFERENCED by a registered prototype is not registered',
+    function ()
+    -- ★★ THE REGRESSION (CART-0639). `touched` was every tracked local appearing
+    -- ANYWHERE in the registrar statement, and this branch treated it as "the things
+    -- being registered". Two failures at once: the helper was marked registered, and
+    -- because `#touched == 0` was then false THE INLINE EXPANSION NEVER RAN — so
+    -- every real prototype in the call went unrecorded. Aircraft-space-age's
+    -- items.lua has 27 `type=` declarations and produced 0 typed records; its only
+    -- output was the four sound helpers that caused the loss.
+    local ps = read([[
+local snd = { filename = "a.ogg", volume = 0.8 }
+data:extend({
+  { type = "gun", name = "g1", sound = snd },
+  { type = "gun", name = "g2", sound = snd },
+})
+]])
+    local typed = 0
+    for _, p in ipairs(ps) do if p.declared_type == 'gun' then typed = typed + 1 end end
+    eq(2, typed, 'both inline prototypes are recorded even though the literal'
+        .. ' references a local')
+    local h = by_var(ps, 'snd')
+    ok(h ~= nil, 'the helper is still a record')
+    eq(nil, h.registered, 'but it is REFERENCED, not registered — it is not the'
+        .. ' registrar argument, and calling it registered is what put sound helpers'
+        .. ' into the data-stage frontier')
+end)
+
+test('registration: the argument may be a LIST OF NAMES, and those are registered',
+    function ()
+    -- the shape `touched` was originally written for, and the one a naive
+    -- "expand only table kids" fix drops: two locals built earlier, handed over
+    -- together. Narrowing from "every local in the statement" to "the argument" is
+    -- right, but the argument's ELEMENTS still name records.
+    local ps = read([[
+local a = table.deepcopy(data.raw["container"]["c1"])
+local b = table.deepcopy(data.raw["container"]["c2"])
+local unrelated = { filename = "x.png" }
+data:extend{a, b}
+]])
+    ok(by_var(ps, 'a').registered, 'a registered')
+    ok(by_var(ps, 'b').registered, 'b registered — both, from one call')
+    eq(nil, by_var(ps, 'unrelated').registered,
+        'and a local the statement never mentions stays unregistered')
+end)

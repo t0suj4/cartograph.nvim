@@ -389,69 +389,83 @@ function M.of_module(store, mod_id)
                     if by_var[u] then touched[#touched + 1] = by_var[u] end
                 end
                 if d and ad.registrar[d] then
-                    if #touched == 0 then
-                        -- REGISTERED INLINE: `data:extend{{…}, {…}}`. This is the
-                        -- ecosystem's dominant shape (3280 of 3874 data:extend sites
-                        -- across 195 mods), and it used to produce ONE anonymous record
-                        -- with no fields at all. The argument's table entries are now
-                        -- readable, so each registered literal becomes its own record
-                        -- carrying its `type=` discriminator and its property keys.
-                        local arg = (rhs1.a or {})[1]
-                        local made = 0
-                        for _, kid in ipairs((arg and arg.k == 'table' and arg.kids) or {}) do
+                    -- ── WHAT IS REGISTERED vs WHAT IS MENTIONED (CART-0639) ──────
+                    -- `touched` is every tracked local appearing ANYWHERE in the
+                    -- statement, and this branch used to treat it as "the things
+                    -- being registered". It is not. In
+                    --     data:extend({{ type="gun", …, sound = heavygunshotsounds }})
+                    -- the helper is merely REFERENCED by a prototype, and the old
+                    -- reading did two wrong things with it at once: marked the helper
+                    -- `registered`, and — because `#touched == 0` was then false —
+                    -- SKIPPED THE INLINE EXPANSION ENTIRELY, so every real prototype
+                    -- in the call went unrecorded. Aircraft-space-age's items.lua has
+                    -- 27 `type=` declarations and produced 0 typed records; its only
+                    -- output was the four sound helpers that caused the loss.
+                    --
+                    -- ★ THE ARGUMENT IS THE ANSWER. Read the registrar's first
+                    -- argument and nothing else: a table literal is the group, a name
+                    -- is the record it resolves to. Every other local in the statement
+                    -- is a reference and gets no registration.
+                    local arg = (rhs1.a or {})[1]
+                    local made = 0
+                    if arg and arg.k == 'table' then
+                        -- ⚠ AN ELEMENT IS A LITERAL **OR** A NAME, and both are being
+                        -- registered. `data:extend{a, b}` — two locals built earlier
+                        -- and handed over together — is the shape `touched` was
+                        -- originally written for, and dispatching only on `table`
+                        -- kids silently dropped it. That is what the spec caught:
+                        -- narrowing from "every local in the statement" to "the
+                        -- argument" is right, but the argument's ELEMENTS still name
+                        -- records, and they are registered exactly as much as an
+                        -- inline literal is.
+                        for _, kid in ipairs(arg.kids or {}) do
                             if kid.k == 'table' then
-                                local ovs, ty, own, bad, nst = literal_fields(kid, line)
-                                local p = fresh(nil, line, 'literal')
-                                p.fields, p.declared_type, p.name = ovs or {}, ty, own
-                                p.nested = nst or {}
-                                p.unreadable_keys = bad
-                                p.registered = { line = line }
+                                local kl = (kid.at and (atr.sl(kid.at) + 1)) or line
+                                local ovs, ty, own, bad, nst = literal_fields(kid, kl)
+                                local pr = fresh(nil, kl, 'literal')
+                                pr.fields, pr.declared_type, pr.name = ovs or {}, ty, own
+                                pr.nested, pr.unreadable_keys = nst or {}, bad
+                                pr.registered = { line = line }
+                                made = made + 1
+                            elseif kid.k == 'name' and by_var[kid.n] then
+                                by_var[kid.n].registered = { line = line }
                                 made = made + 1
                             end
                         end
-                        if made == 0 then
-                            -- registered something we could not read at all (a call, a
-                            -- name we never tracked): recorded, not dropped
-                            local p = fresh(nil, line, 'literal')
-                            p.registered = { line = line }
-                            p.anonymous = true
-                        end
-                    end
-                    for _, p in ipairs(touched) do
-                        -- ── AN ARRAY OF PROTOTYPES IS NOT A PROTOTYPE (CART-0637) ──
-                        -- `local remnants = { {type="corpse",…}, {…} }` then
-                        -- `data:extend(remnants)`. The ELEMENTS are the prototypes and
-                        -- each carries its own `type=`; the array carries none, so the
-                        -- reader recorded ONE untyped record and the whole group went
-                        -- unadjudicated. The inline form `data:extend{{…},{…}}` was
-                        -- already expanded here — this is the same shape one
-                        -- indirection away, and it was the larger half.
-                        --
-                        -- MEASURED over 135 mods: of 162 registered-but-unreadable
-                        -- records, 87 are this. The rest carry no `type=` anywhere
-                        -- inside and are not prototypes at all.
+                    elseif arg and arg.k == 'name' and by_var[arg.n] then
+                        -- registered BY NAME. If it is an array of typed prototypes,
+                        -- its elements are the prototypes (CART-0637); otherwise the
+                        -- record itself is what was registered.
+                        local p = by_var[arg.n]
                         local kids = (not p.declared_type) and p._lit
                             and p._lit.k == 'table' and p._lit.kids or nil
-                        local made = 0
+                        local expanded = 0
                         for _, kid in ipairs(kids or {}) do
                             if kid.k == 'table' then
                                 local kl = (kid.at and (atr.sl(kid.at) + 1)) or p.line
                                 local ovs, ty, own, bad, nst = literal_fields(kid, kl)
-                                -- ⚠ ONLY IF THE ELEMENT IS ACTUALLY TYPED. Descending
-                                -- into a helper table's rows would mint prototypes out
-                                -- of sound variations and sprite layers — the exact
-                                -- over-counting this ticket exists to remove.
+                                -- ⚠ ONLY IF THE ELEMENT DECLARES A TYPE. Descending
+                                -- into a helper would mint prototypes out of sound
+                                -- variations and sprite layers.
                                 if ty then
                                     local c = fresh(nil, kl, 'literal')
                                     c.fields, c.declared_type, c.name = ovs or {}, ty, own
                                     c.nested, c.unreadable_keys = nst or {}, bad
                                     c.registered = { line = line }
-                                    made = made + 1
+                                    expanded = expanded + 1
                                 end
                             end
                         end
-                        if made > 0 then p.container = made end
+                        if expanded > 0 then p.container = expanded end
                         p.registered = { line = line }
+                        made = expanded + 1
+                    end
+                    if made == 0 then
+                        -- registered something we could not read at all (a call, a
+                        -- name we never tracked): recorded, not dropped
+                        local pr = fresh(nil, line, 'literal')
+                        pr.registered = { line = line }
+                        pr.anonymous = true
                     end
                 elseif d then
                     for _, p in ipairs(touched) do
