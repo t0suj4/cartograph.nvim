@@ -1938,3 +1938,112 @@ test('shape move: a real removal is found in the DETERMINED bucket',
     ok(body:find('NO PLAUSIBLE RECEIVER', 1, true) ~= nil, 'the group prints')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── THE NESTED DATA STAGE (CART-0633) ───────────────────────────────────────
+-- The diff used to check the FIRST path segment against the prototype that owns it
+-- and stop. Factorio's data stage nests, so a whole class was invisible.
+
+test('nested data stage: type_props closes over a CONCEPT parent',
+    function ()
+    local port = require 'cartograph.portability'
+    -- ★★ THIS IS THE SPEC THAT CAUGHT A WRONG HAND-ANALYSIS. Writing the port guide
+    -- I checked properties per-type with no inheritance and concluded 2.0 had removed
+    -- `fade_in_ticks` from WorkingSound. It has not: 2.0 gave WorkingSound a parent,
+    -- MainSound, which declares it. A flat check invents porting work out of a
+    -- refactor; the closure is the whole difference.
+    local prof = { prototypes = {}, concept_types = { WorkingSound = true, MainSound = true },
+        concept_parent = { WorkingSound = 'MainSound' },
+        concept_props = {
+            ['WorkingSound::sound_accents'] = 'optional',
+            ['MainSound::fade_in_ticks'] = 'optional',
+        }, own_props = {} }
+    local ps = port.type_props(prof, 'WorkingSound')
+    ok(ps ~= nil, 'a concept has a property set at all')
+    eq('optional', ps.fade_in_ticks, 'inherited from the parent concept')
+    eq('optional', ps.sound_accents, 'and its own')
+    eq(nil, port.type_props(prof, 'NoSuchType'), 'an unknown type has none')
+end)
+
+test('nested data stage: walk_path follows the declared type chain, and REFUSES a hop',
+    function ()
+    local port = require 'cartograph.portability'
+    local prof = {
+        prototypes = { LabPrototype = true }, concept_types = { Animation = true },
+        parent = {}, concept_parent = {},
+        prop_type = {
+            ['LabPrototype::on_animation'] = 'Animation',
+            -- `layers` is an Animation[]; the distiller unwrapped the array, so the
+            -- step is TRANSPARENT and adds no path segment
+            ['Animation::layers'] = 'Animation',
+        } }
+    local owner, prop = port.walk_path(prof, 'LabPrototype', 'on_animation.layers.hr_version')
+    eq('Animation', owner, 'two hops down, arrays transparent')
+    eq('hr_version', prop, 'and the LAST segment is the one to adjudicate')
+    -- ⚠ AN UNRESOLVABLE HOP IS A REFUSAL, NEVER A PASS. `Animation4Way` is a
+    -- dictionary in the api, so the distiller records no single type for its members;
+    -- treating that as "nothing to check" would turn every unmodelled shape into a
+    -- silent clean bill.
+    local o2, why = port.walk_path(prof, 'LabPrototype', 'graphics.layers.hr_version')
+    eq(nil, o2)
+    eq('graphics', why, 'and it names the segment that broke the chain')
+    eq(nil, (port.walk_path(prof, 'LabPrototype', 'on_animation')),
+        'a single segment is the TOP-LEVEL question, not this one')
+end)
+
+test('nested data stage: a property declared by an ANCESTOR still walks',
+    function ()
+    local port = require 'cartograph.portability'
+    local prof = {
+        prototypes = { LabPrototype = true, EntityPrototype = true },
+        concept_types = { WorkingSound = true }, parent = { LabPrototype = 'EntityPrototype' },
+        concept_parent = {},
+        prop_type = { ['EntityPrototype::working_sound'] = 'WorkingSound' } }
+    -- `working_sound` is declared on EntityPrototype, not on the leaf; prop_type keys
+    -- by the DECLARING owner, so the walk has to climb
+    local owner, prop = port.walk_path(prof, 'LabPrototype', 'working_sound.fade_in_ticks')
+    eq('WorkingSound', owner)
+    eq('fade_in_ticks', prop)
+end)
+
+test('nested data stage: the reader walks nested literals, arrays transparent',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not pm.load('lua-factorio-proto-11') then skip 'no proto profile' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/prototypes', 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    w('data.lua', 'require("prototypes.e")\n')
+    w('prototypes/e.lua', 'data:extend({{\n'
+        .. '  type = "lab", name = "x",\n'
+        .. '  on_animation = { layers = {\n'
+        .. '    { filename = "a.png", hr_version = { filename = "b.png" } },\n'
+        .. '  } },\n'
+        .. '  working_sound = { audible_distance_modifier = 0.7 },\n'
+        .. '}})\n')
+    store.ingest(ts.extract(root))
+    local protos = require('cartograph.prototypes').all(store)
+    if not protos then skip 'no data stage' end
+    local paths = {}
+    for _, m in ipairs(protos) do
+        for _, p in ipairs(m.protos) do
+            for _, ov in ipairs(p.nested or {}) do paths[ov.path] = ov.line end
+        end
+    end
+    ok(paths['on_animation.layers.hr_version'] ~= nil,
+        'the ARRAY step adds no segment — `layers` is an Animation[], so every element'
+        .. ' has the element type and an index would only have to be stripped again')
+    ok(paths['working_sound.audible_distance_modifier'] ~= nil, 'a plain nested map')
+    ok(paths['on_animation.layers.filename'] ~= nil, 'siblings too')
+    -- ★ EACH ENTRY CARRIES ITS OWN LINE, 1-BASED. A worklist row that sends the reader
+    -- to the line above the one that is wrong reads as the tool being confused.
+    eq(4, paths['on_animation.layers.hr_version'],
+        'the hr_version line, not the prototype line')
+    vim.fn.delete(root, 'rf')
+end)

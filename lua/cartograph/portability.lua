@@ -1957,6 +1957,67 @@ local function proto_props(prof, pn)
     return res or nil
 end
 
+--- THE PROPERTY SET OF ANY DECLARED TYPE — prototype or CONCEPT (CART-0633), with
+--- its parent closure. `proto_props` above answers only for prototypes, because
+--- until the distiller emitted `concept_props` there was nothing else to answer for.
+function M.type_props(prof, tn)
+    if not tn then return nil end
+    prof._tpcache = prof._tpcache or {}
+    local hit = prof._tpcache[tn]
+    if hit ~= nil then return hit or nil end
+    local out, seen, cur, any = {}, {}, tn, false
+    while cur and not seen[cur] do
+        seen[cur] = true
+        if (prof.prototypes or {})[cur] or (prof.concept_types or {})[cur] then any = true end
+        for _, tbl in ipairs({ prof.own_props or {}, prof.concept_props or {} }) do
+            for k, req in pairs(tbl) do
+                local owner, pr = k:match('^(.-)::(.+)$')
+                if owner == cur and out[pr] == nil then out[pr] = req end
+            end
+        end
+        cur = (prof.parent or {})[cur] or (prof.concept_parent or {})[cur]
+    end
+    local res = any and out or false
+    prof._tpcache[tn] = res
+    return res or nil
+end
+
+--- WALK A NESTED PATH DOWN THE DECLARED TYPE CHAIN (CART-0633).
+--- `animation.layers.hr_version` on a CraftingMachinePrototype: `animation` is an
+--- Animation4Way, `layers` on it is an `Animation[]` (the array is transparent —
+--- prototypedistill already unwrapped it), and `hr_version` is the property to
+--- adjudicate against Animation.
+---
+--- Returns (owner_type, property) — the type the LAST segment must belong to — or
+--- nil plus the segment that could not be resolved.
+---
+--- ⚠ AN UNRESOLVED HOP IS A REFUSAL, NEVER A PASS. `prop_type` is absent whenever the
+--- api declares a union, a dictionary or a tuple (the distiller records only the forms
+--- naming exactly one type), and treating absence as "nothing to check here" would
+--- turn every un-modelled shape into a silent clean bill. The caller counts these.
+function M.walk_path(prof, root, path)
+    local segs = {}
+    for seg in path:gmatch('[^%.]+') do segs[#segs + 1] = seg end
+    if #segs < 2 then return nil, path end
+    local cur = root
+    for i = 1, #segs - 1 do
+        local nxt = (prof.prop_type or {})[cur .. '::' .. segs[i]]
+        if not nxt then
+            -- the property may be declared by an ANCESTOR, which prop_type keys by
+            -- the declaring owner rather than the leaf type
+            local seen, up = {}, cur
+            while up and not seen[up] and not nxt do
+                seen[up] = true
+                up = (prof.parent or {})[up] or (prof.concept_parent or {})[up]
+                if up then nxt = (prof.prop_type or {})[up .. '::' .. segs[i]] end
+            end
+        end
+        if not nxt then return nil, segs[i] end
+        cur = nxt
+    end
+    return cur, segs[#segs]
+end
+
 --- Can this artifact answer a DATA-STAGE question? A third predicate beside
 --- name_queryable and dotted_queryable, and separate for the same reason: a runtime
 --- artifact answers neither of the others' questions here, and silently scoring a
@@ -1992,7 +2053,8 @@ function M.prototype_diff(store, from, to)
             .. ' with a declared prototype adapter'
     end
     local res = { from = from, to = to, lost = {}, stale_delete = {}, gone_type = {},
-        kept = 0, unknown_prop = 0, unread = {}, hedged = {}, untyped = 0, records = 0 }
+        kept = 0, unknown_prop = 0, unread = {}, hedged = {}, untyped = 0, records = 0,
+        unwalked = 0 }
     for _, m in ipairs(protos) do
         for _, p in ipairs(m.protos) do
             res.records = res.records + 1
@@ -2081,6 +2143,46 @@ function M.prototype_diff(store, from, to)
                         end
                     end
                 end
+                -- ── NESTED WRITES (CART-0633) ────────────────────────────────
+                -- Everything above adjudicates the FIRST path segment against the
+                -- prototype that owns it. Factorio's data stage is deeply nested, so
+                -- that missed a whole class: `working_sound.fade_in_ticks` is a
+                -- WorkingSound property, `animation.layers.hr_version` an Animation
+                -- one, and 2.0 removed both. The path is walked down the declared
+                -- type chain and the LAST segment adjudicated against the type it
+                -- lands in — the same typed question, one or more levels down.
+                for _, ov in ipairs(p.nested or {}) do
+                    local ta, pa = M.walk_path(a, pn_a, ov.path)
+                    local tb, pb = M.walk_path(b, pn_b, ov.path)
+                    if not (ta and tb) then
+                        -- ⚠ COUNTED, NEVER SKIPPED. An unresolvable hop means the api
+                        -- declares that property as a union/dictionary/tuple, which the
+                        -- distiller deliberately does not reduce to one type. Silence
+                        -- here would read as "checked and fine".
+                        res.unwalked = (res.unwalked or 0) + 1
+                    else
+                        local pra, prb = M.type_props(a, ta), M.type_props(b, tb)
+                        if pra and prb then
+                            local ia, ib = pra[pa], prb[pb]
+                            if ia and not ib then
+                                local entry = { file = m.file, line = ov.line,
+                                    typename = ty, proto = pn_a, prop = ov.path,
+                                    owner_type = ta, required = ia == 'required',
+                                    name = p.name, path = ov.path, nested = true,
+                                    hedged = p.complete == false }
+                                if ov.ty == 'nil' then
+                                    res.stale_delete[#res.stale_delete + 1] = entry
+                                else
+                                    entry.value = ov.value
+                                    res.lost[#res.lost + 1] = entry
+                                end
+                            elseif ia then res.kept = res.kept + 1
+                            else res.unknown_prop = res.unknown_prop + 1 end
+                        else
+                            res.unwalked = (res.unwalked or 0) + 1
+                        end
+                    end
+                end
             end
         end
     end
@@ -2144,7 +2246,8 @@ function M.prototype_diff_report(store, from, to, opts)
     -- THE LOWER BOUND, stated rather than implied. A data-stage reading that printed
     -- only its findings would read as a clean bill of health for the 24 prototypes it
     -- literally cannot see.
-    if #res.unread > 0 or #res.hedged > 0 or res.untyped > 0 then
+    if #res.unread > 0 or #res.hedged > 0 or res.untyped > 0
+        or (res.unwalked or 0) > 0 then
         L[#L + 1] = ''
         L[#L + 1] = ('  THIS IS A LOWER BOUND — %d of %d prototype(s) could not be'
             .. ' adjudicated at all:'):format(#res.unread + res.untyped, res.records)
@@ -2174,6 +2277,20 @@ function M.prototype_diff_report(store, from, to, opts)
                     tostring(res.hedged[i].line or '?'),
                     res.hedged[i].callee or '?')
             end
+        end
+        -- NESTED COVERAGE, stated on the same footing (CART-0633). The nested walk
+        -- resolves a path down the DECLARED type chain, and the chain breaks wherever
+        -- the api types a property as a union, a dictionary or a tuple — the
+        -- distiller records only the forms naming exactly one type, and a consumer
+        -- that picked one would adjudicate against a type the mod never wrote.
+        -- ⚠ THIS LINE IS THE POINT OF THE WHOLE BLOCK: before it existed the nested
+        -- class was checked or not checked with no way to tell which, which is worse
+        -- than not checking at all.
+        if (res.unwalked or 0) > 0 then
+            L[#L + 1] = ('    %d NESTED write(s) whose path could not be walked to a'
+                .. ' single declared type (a union/dictionary/tuple hop, e.g.'
+                .. ' `Animation4Way`), so the property was not checked'):format(
+                res.unwalked)
         end
     end
     return L

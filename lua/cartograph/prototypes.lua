@@ -176,9 +176,57 @@ end
 --- A COMPUTED KEY is counted, never guessed: `key.k == 'lit'` means the property name
 --- is known, and anything else (`{[x] = 1}`) is reported as unreadable so the record
 --- stays an honest lower bound instead of silently dropping an entry.
+-- THE NESTED WALK (CART-0633). Factorio's data stage is deeply nested — a prototype
+-- holds `working_sound = {…}` (a WorkingSound), `animation = {layers = {{hr_version =
+-- …}}}` (an Animation) — and every property inside those was invisible, because this
+-- reader stopped at depth 1. 2.0 removed `hr_version` from all seven sprite/animation
+-- types and the data-stage diff was silent on 24 sites in one mod.
+--
+-- ★ ARRAYS ARE TRANSPARENT, deliberately. `layers` is an `Animation[]`, so every
+-- element has the ELEMENT type and adds no name to the path: `animation.layers.
+-- hr_version`, not `animation.layers.1.hr_version`. The consumer resolves the path
+-- down the declared type chain, where the array step is already transparent
+-- (prototypedistill's `prop_type` unwraps it), and an index segment would only have
+-- to be stripped again. Each element still yields its OWN entry with its own line, so
+-- three sibling sprites give three rows a reader can open.
+--
+-- ⚠ EMITTED AS A SEPARATE LIST, not folded into `fields`. Several consumers count
+-- `fields` (the symbols pane, the prototype report) and silently tripling those
+-- counts to serve one new question is how a number stops meaning what its readers
+-- think. `nested` is depth >= 2 only; `fields` keeps its depth-1 contract exactly.
+local NEST_DEPTH, NEST_CAP = 6, 400
+
+local function nested_walk(e, prefix, depth, out, line)
+    if depth > NEST_DEPTH or #out >= NEST_CAP then return end
+    for _, kid in ipairs(e.kids or {}) do
+        if #out >= NEST_CAP then return end
+        local at = kid.at and kid.at.start
+        -- 0-BASED IN THE IR, 1-BASED FOR A READER (expr.lua:419). Getting this wrong
+        -- sends someone to the line above the one that is wrong, which reads as the
+        -- tool being confused rather than as an off-by-one.
+        local kline = (at and at.line and (at.line + 1)) or line
+        if kid.k == 'pair' then
+            local key = kid.key
+            if key and key.k == 'lit' and type(key.v) == 'string' then
+                local path = prefix .. key.v
+                local v, why = literal(kid.val)
+                out[#out + 1] = { path = path, value = v, why = why, line = kline,
+                    ty = kid.val and kid.val.ty or nil }
+                if kid.val and kid.val.k == 'table' then
+                    nested_walk(kid.val, path .. '.', depth + 1, out, kline)
+                end
+            end
+        elseif kid.k == 'table' then
+            -- an ARRAY ELEMENT: same prefix, one level deeper
+            nested_walk(kid, prefix, depth + 1, out, kline)
+        end
+    end
+end
+
 local function literal_fields(e, line)
     if not (e and e.k == 'table') then return nil end
     local ovs, ty, own, unreadable = {}, nil, nil, 0
+    local nested = {}
     for _, kid in ipairs(e.kids or {}) do
         if kid.k == 'pair' then
             local key = kid.key
@@ -189,12 +237,15 @@ local function literal_fields(e, line)
                     ty = kid.val and kid.val.ty or nil }
                 if prop == 'type' and v then ty = v end
                 if prop == 'name' and v then own = v end
+                if kid.val and kid.val.k == 'table' then
+                    nested_walk(kid.val, prop .. '.', 2, nested, line)
+                end
             else
                 unreadable = unreadable + 1
             end
         end
     end
-    return ovs, ty, own, unreadable
+    return ovs, ty, own, unreadable, nested
 end
 
 -- ── the reading ─────────────────────────────────────────────────────────────
@@ -229,7 +280,7 @@ function M.of_module(store, mod_id)
     local function fresh(var, line, basis)
         order = order + 1
         local p = { var = var, line = line, basis = basis, overrides = {},
-            frontiers = {}, complete = true, ord = order }
+            nested = {}, frontiers = {}, complete = true, ord = order }
         protos[#protos + 1] = p
         if var then by_var[var] = p end
         return p
@@ -263,7 +314,7 @@ function M.of_module(store, mod_id)
                     -- a LITERAL prototype. Its fields used to be invisible ({k='table'}
                     -- was an opaque allocation); the IR now models constructor entries,
                     -- so they are read here and the basis says so.
-                    local ovs, ty, own, bad = literal_fields(rhs1, line)
+                    local ovs, ty, own, bad, nst = literal_fields(rhs1, line)
                     local p = fresh(lhs1.n, line, 'literal')
                     -- `fields` NOT `overrides`: this module's model is a base plus an
                     -- ORDERED SEQUENCE OF OVERRIDES, and a literal's own keys are its
@@ -271,6 +322,7 @@ function M.of_module(store, mod_id)
                     -- redefine `overrides` for every existing consumer — measured: it
                     -- shifted overrides[1] and broke four specs that index it.
                     p.fields = ovs or {}
+                    p.nested = nst or {}
                     p.declared_type, p.name = ty, own
                     p.unreadable_keys = bad
                 end
@@ -340,9 +392,10 @@ function M.of_module(store, mod_id)
                         local made = 0
                         for _, kid in ipairs((arg and arg.k == 'table' and arg.kids) or {}) do
                             if kid.k == 'table' then
-                                local ovs, ty, own, bad = literal_fields(kid, line)
+                                local ovs, ty, own, bad, nst = literal_fields(kid, line)
                                 local p = fresh(nil, line, 'literal')
                                 p.fields, p.declared_type, p.name = ovs or {}, ty, own
+                                p.nested = nst or {}
                                 p.unreadable_keys = bad
                                 p.registered = { line = line }
                                 made = made + 1

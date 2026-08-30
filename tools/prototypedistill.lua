@@ -75,10 +75,56 @@ for _, p in ipairs(api.prototypes or {}) do
     end
 end
 -- the CONCEPT types (EnergySource, ItemProductPrototype, …). Not addressable from mod
--- code at all — a mod writes a table that must SATISFY one — so they are recorded for
--- a future shape-checking consumer and deliberately not part of any name surface.
-local concept = {}
-for _, t in ipairs(api.types or {}) do concept[t.name] = true end
+-- code at all — a mod writes a table that must SATISFY one — so they are recorded
+-- here and deliberately not part of any name surface.
+--
+-- ★ AND THEIR PROPERTIES, WHICH IS THE HALF THAT WAS MISSING (CART-0633). Recording
+-- only the NAMES made the data-stage diff one level deep: a mod writes
+-- `working_sound = {…}` (a WorkingSound) or `animation = {layers = {{hr_version =
+-- …}}}` (an Animation), and no property inside either could be checked against
+-- anything. 2.0 removed `hr_version` from all 7 sprite/animation types and the diff
+-- was silent on 24 sites in one mod.
+local concept, concept_props, concept_parent = {}, {}, {}
+for _, t in ipairs(api.types or {}) do
+    concept[t.name] = true
+    if t.parent then concept_parent[t.name] = t.parent end
+    for _, pr in ipairs(t.properties or {}) do
+        concept_props[t.name .. '::' .. pr.name] = pr.optional and 'optional' or 'required'
+    end
+end
+
+-- "Owner::prop" -> the TYPE NAME its value must satisfy, so a consumer can walk a
+-- nested write down the type chain. Owners are prototypes AND concepts, because the
+-- nesting recurses (`animation` -> Animation -> `layers` -> Animation -> `hr_version`).
+--
+-- ⚠ ONLY THE FORMS THAT NAME EXACTLY ONE TYPE ARE RECORDED, and the rest are left
+-- ABSENT rather than guessed. A plain string names a type; an `array` is TRANSPARENT
+-- (its elements have the element type, and a Lua array adds no path segment). A
+-- union, a dictionary, a tuple or a literal names zero or several, and a consumer
+-- that picked one would adjudicate a property against a type the mod never wrote.
+-- Absence here means NOT DECLARED, which is the same contract the rest of the
+-- profile keeps — the diff must render it as an unchecked path, never as a pass.
+local function type_name(t, depth)
+    if type(t) == 'string' then return t end
+    if type(t) == 'table' and t.complex_type == 'array' and (depth or 0) < 4 then
+        return type_name(t.value, (depth or 0) + 1)
+    end
+    return nil
+end
+local prop_type, n_ptype = {}, 0
+local function record_types(owner, properties)
+    for _, pr in ipairs(properties or {}) do
+        local tn = type_name(pr.type)
+        -- a property typed as a PROTOTYPE or a CONCEPT is walkable; one typed
+        -- `string`/`uint32`/… is a leaf and recording it would only add noise
+        if tn and (concept[tn] or protos[tn]) then
+            prop_type[owner .. '::' .. pr.name] = tn
+            n_ptype = n_ptype + 1
+        end
+    end
+end
+for _, t in ipairs(api.types or {}) do record_types(t.name, t.properties) end
+for _, pr in ipairs(api.prototypes or {}) do record_types(pr.name, pr.properties) end
 
 local profile = {
     schema = 1, runtime = RUNTIME, lang = 'lua', stage = 'prototype',
@@ -96,7 +142,11 @@ local profile = {
     prototypes = protos,        -- PrototypeName -> true
     own_props = own_props,      -- "Proto::prop" -> "required"|"optional"  (OWN only)
     parent = parent,            -- PrototypeName -> parent PrototypeName
-    concept_types = concept,    -- concept type names, for a future shape checker
+    concept_types = concept,    -- ConceptName -> true
+    concept_props = concept_props, -- "Concept::prop" -> "required"|"optional" (OWN only)
+    concept_parent = concept_parent, -- ConceptName -> parent ConceptName
+    prop_type = prop_type,      -- "Owner::prop" -> the type its value must satisfy,
+                                -- arrays transparent; ABSENT when not exactly one
 }
 
 local out = here .. '/../lua/cartograph/spec/profile/' .. RUNTIME .. '.mpack'
@@ -114,6 +164,10 @@ io.write(('  prototype-api %s (api v%s, %s) — %d prototypes, %d concept types\
     #(api.types or {})))
 io.write(('  data.raw keys (typenames): %d ; prototypes: %d ; own properties: %d\n')
     :format(n_types, n_proto, n_props))
+local n_cprops = 0
+for _ in pairs(concept_props) do n_cprops = n_cprops + 1 end
+io.write(('  concept properties: %d ; walkable property types: %d (CART-0633)\n')
+    :format(n_cprops, n_ptype))
 io.write(('  INGREDIENT — not a portability target (typenames are hyphenated,'
     .. ' properties are table keys; see the header)\n'))
 io.write('  wrote ' .. out .. '\n')
