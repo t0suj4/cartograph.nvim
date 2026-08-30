@@ -79,6 +79,37 @@ function M.register(H)
             .. ' again'):format(entry.verb, entry.id), vim.log.levels.INFO)
     end, { desc = 'cartograph: re-apply the most recently undone transaction' })
 
+    -- ⚠ DRY BY DEFAULT, `!` TO APPLY (CART-0644). This deletes a USER RECORD, and
+    -- the whole reason the journal lives in the state dir rather than a cache is that
+    -- it is not ours to clear on a whim. So the bare verb REPORTS and the bang acts —
+    -- the same shape the write verbs use, for the same reason.
+    cmd('CartographJournalPrune', function (o)
+        local j = require 'cartograph.journal'
+        local st = j.prune({ apply = o.bang })
+        local lines = {
+            ('journal retention — %d directory(ies) under the state dir'):format(#st.rows),
+            '',
+            ('  UNREACHABLE: %d directory(ies), %d entry(ies)'):format(
+                st.removed, st.entries_removed),
+            '    a journal whose ROOT NO LONGER EXISTS cannot be rolled back —',
+            '    `rollback` verifies current content against after_hash and there is',
+            '    no current content. Removing it destroys nothing still reachable.',
+            ('  KEPT: %d — the root still exists'):format(st.kept),
+        }
+        for _, r in ipairs(st.rows) do
+            if r.keep then
+                lines[#lines + 1] = ('    %-4d entries  %s'):format(r.entries,
+                    tostring(r.root))
+            end
+        end
+        lines[#lines + 1] = ''
+        lines[#lines + 1] = st.applied
+            and '  APPLIED — the directories above are gone.'
+            or '  DRY RUN — nothing was touched. :CartographJournalPrune! to apply.'
+        scratch(lines)
+    end, { bang = true,
+        desc = 'cartograph: report (or with ! remove) journals whose root is gone' })
+
     cmd('CartographJournal', function ()
         local st = live() if not st then return end
         local entries = require('cartograph.journal').list(st.data.root)

@@ -402,6 +402,16 @@ files moved on since; `:CartographTxnClear` abandons a staged plan.
 The journal (`state dir`, human-readable JSON) is the substrate every
 future verb — move, extract-module, remote edits — reuses.
 
+Nothing expires it, deliberately: an apply's before-content is the only
+thing between a bad edit and a lost file, so a clearable cache is the
+wrong home and *age* is the wrong predicate. There is a sound one.
+**A journal whose root no longer exists cannot be rolled back** — undo
+verifies the current content against what the apply wrote, and there is
+no current content — so it can never do its job again.
+`:CartographJournalPrune` reports those; `:CartographJournalPrune!`
+removes them. Dry by default, because deleting a user record should not
+be a side effect of asking about it.
+
 `:CartographMerge` needs you to *find* a clone first. `:CartographClones`
 is the finder: it groups every function by an **exact-structural** key —
 the per-statement shape read from the same expression IR that powers

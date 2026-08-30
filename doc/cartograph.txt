@@ -721,6 +721,12 @@ TRANSACTIONS                                               *cartograph-cmd-txn*
   :CartographUndo             roll back the last applied txn, byte-exact
   :CartographRedo             re-apply the most recently undone txn
   :CartographJournal          browse applied/undone txns; <CR> = entry diff
+  :CartographJournalPrune[!]  report journals whose ROOT NO LONGER EXISTS —
+                              those cannot be rolled back (undo verifies the
+                              current content, and there is none), so removing
+                              them destroys nothing reachable. Dry by default;
+                              ! removes. Nothing expires a journal otherwise:
+                              age is the wrong predicate for a user record.
 
 OUTWARD: RUNNING SYSTEMS, OTHER TOOLCHAINS             *cartograph-cmd-outward*
 

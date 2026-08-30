@@ -268,4 +268,99 @@ function M.wipe(root)
     vim.fn.delete(dir_of(root), 'rf')
 end
 
+-- ── RETENTION (CART-0644) ───────────────────────────────────────────────────
+-- Nothing pruned these, ever, and `wipe` was called from nowhere in the tree. The
+-- entries are a USER RECORD by design — an apply's before-content is the only thing
+-- between a bad edit and a lost file — so age is the wrong predicate and "clear the
+-- cache" is the wrong instinct.
+--
+-- ★★ THERE IS A SOUND ONE AND IT NEEDS NO HEURISTIC: A JOURNAL WHOSE ROOT NO LONGER
+-- EXISTS IS UNROLLBACKABLE BY CONSTRUCTION. `rollback` verifies the CURRENT content
+-- of each file against after_hash before restoring; with the root gone there is no
+-- current content, so the entry can never do its job again — today, or in a year.
+-- Removing it destroys nothing that was still reachable.
+--
+-- Measured when this shipped: 27798 journal directories, 27794 of them for
+-- `vim.fn.tempname()` roots from ~1949 test runs. 237 MB.
+
+--- The parent of every per-root journal directory.
+local function journals_root()
+    return vim.fn.stdpath('state') .. '/cartograph'
+end
+
+--- The root a journal directory belongs to, read from an ENTRY rather than by
+--- reversing the directory name.
+--- ⚠ THE NAME IS NOT REVERSIBLE. `dir_of` maps `/`, `\` and `:` all to `%`, so the
+--- escape is lossy and un-escaping would guess. Every entry records `root` verbatim,
+--- so the authoritative answer is inside the file — read that, and treat a directory
+--- with no decodable entry as having no root rather than inventing one.
+--- Returns (root, n_entries) or (nil, 0).
+local function root_of_dir(dir)
+    local n, root = 0, nil
+    local it = vim.uv.fs_scandir(dir)
+    while it do
+        local name = vim.uv.fs_scandir_next(it)
+        if not name then break end
+        if name:match('%.json$') then
+            local fd = io.open(dir .. '/' .. name, 'r')
+            if fd then
+                local ok, e = pcall(vim.json.decode, fd:read('a'))
+                fd:close()
+                if ok and type(e) == 'table' and e.id then
+                    n = n + 1
+                    root = root or e.root
+                end
+            end
+        end
+    end
+    return root, n
+end
+
+--- Every journal directory, classified. Never deletes.
+--- Each row: { dir, root, entries, keep = bool, why }
+---   keep   the root still exists — the entry can still be rolled back
+---   'root-gone'  the root is gone; nothing here is reachable
+---   'no-entries' the directory holds no decodable entry, so it protects nothing
+---                (and its root cannot be read — see root_of_dir)
+function M.survey()
+    local base = journals_root()
+    local out, it = {}, vim.uv.fs_scandir(base)
+    while it do
+        local name, ty = vim.uv.fs_scandir_next(it)
+        if not name then break end
+        if ty == 'directory' and name:match('%.journal$') then
+            local dir = base .. '/' .. name
+            local root, n = root_of_dir(dir)
+            local row = { dir = dir, root = root, entries = n }
+            if n == 0 then row.keep, row.why = false, 'no-entries'
+            elseif root and vim.uv.fs_stat(root) then row.keep, row.why = true, 'root-exists'
+            else row.keep, row.why = false, 'root-gone' end
+            out[#out + 1] = row
+        end
+    end
+    table.sort(out, function (a, b) return a.dir < b.dir end)
+    return out
+end
+
+--- Remove the journals `survey` says are unreachable.
+--- ⚠ DRY BY DEFAULT. `opts.apply` must be set explicitly; without it this reports
+--- what it would remove and touches nothing. Deleting a user record is not a thing
+--- to do as a side effect of asking about it.
+--- Returns { removed, kept, entries_removed, rows }
+function M.prune(opts)
+    local apply = opts and opts.apply
+    local rows = M.survey()
+    local st = { removed = 0, kept = 0, entries_removed = 0, rows = rows }
+    for _, r in ipairs(rows) do
+        if r.keep then st.kept = st.kept + 1
+        else
+            st.removed = st.removed + 1
+            st.entries_removed = st.entries_removed + r.entries
+            if apply then vim.fn.delete(r.dir, 'rf') end
+        end
+    end
+    st.applied = apply and true or false
+    return st
+end
+
 return M
