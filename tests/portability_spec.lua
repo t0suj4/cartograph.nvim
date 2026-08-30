@@ -1665,7 +1665,14 @@ test('portability: the report splits receivers by reason and counts none as prov
         'a deeper hop is only PARTIALLY adjudicated: the class table carries member'
         .. ' NAMES without member TYPES, so `character` cannot be followed')
     eq('receiver-ambiguous', byname['gui.add'].reason)
-    eq('receiver-nomatch', byname['zz.no_such_api_thing_at_all'].reason)
+    -- ⚠ THIS USED TO EXPECT `receiver-nomatch` AND THE BETTER ANSWER REPLACED IT
+    -- (CART-0631). The fixture declares factorio_version "1.1" in info.json, so the
+    -- audit now picks the 1.1 class table as the ORIGIN by itself and can say
+    -- something the no-match bucket never could: the name is declared by no class in
+    -- EITHER version, so it never was API. `receiver-nomatch` is still reachable and
+    -- still fenced — it is what remains when no origin is available (below).
+    eq('not-a-runtime-member', byname['zz.no_such_api_thing_at_all'].reason)
+    eq(true, res.origin.auto, 'and the origin was derived from the manifest, not asked for')
     -- NOTHING the receiver axis touched is counted as provided. Folding a shape-match
     -- hypothesis into that count would change what the number means AND make a
     -- version diff report every receiver as GAINED, because only the 2.0 end has a
@@ -1677,8 +1684,12 @@ test('portability: the report splits receivers by reason and counts none as prov
     end
     local body = table.concat(port.report(store, 'lua-factorio', { cap = 40 }), '\n')
     ok(body:find('inferred', 1, true) ~= nil, 'the report names the rung it rides')
+    -- `receiver-nomatch` LEFT THIS LIST because the fixture no longer produces one:
+    -- with an origin available every no-match name is decided (CART-0631). It is
+    -- still fenced — the no-origin run at the end of this test asserts it is exactly
+    -- what comes back when the class spaces cannot be compared.
     for _, key in ipairs({ 'receiver-class-present', 'receiver-class-chain',
-        'receiver-ambiguous', 'receiver-nomatch' }) do
+        'receiver-ambiguous', 'not-a-runtime-member' }) do
         -- the group TEXT is wrapped across lines, so match its first distinctive word
         local head = port.REASON_TEXT[key]:match('^(%S+ %S+ %S+)')
         ok(body:find(head, 1, true) ~= nil, 'the group prints for ' .. key)
@@ -1687,5 +1698,137 @@ test('portability: the report splits receivers by reason and counts none as prov
     -- as a clean bill of health
     ok(body:find('STRUCTURAL', 1, true) ~= nil,
         'the report says WHY there is no hypothesised-class absent group')
+    -- ★ AND THE UNREFINED BUCKET IS STILL REACHABLE. Same tree, manifest removed,
+    -- so no origin can be derived: `zz` falls back to exactly the answer it gave
+    -- before this axis existed. A bucket that can no longer be produced by anything
+    -- is a fence that never fires, and the report still carries its text.
+    vim.fn.delete(root .. '/info.json')
+    store.ingest(ts.extract(root))
+    local plain = assert(port.audit(store, 'lua-factorio'))
+    eq(false, plain.origin.available, 'no manifest -> no origin')
+    ok(plain.origin.why ~= nil, 'and it says why rather than staying silent')
+    local pn = {}
+    for _, e in ipairs(plain.entries) do pn[e.name] = e end
+    eq('receiver-nomatch', pn['zz.no_such_api_thing_at_all'].reason)
     vim.fn.delete(root, 'rf')
+end)
+
+-- ── THE CLASS-SPACE AXIS (CART-0631) ────────────────────────────────────────
+-- A member name decided against BOTH versions' whole class spaces, with no
+-- receiver. The removal direction is sound without one; the supplied direction is
+-- a SUBSET test, never bare presence — which is the only thing separating it from
+-- the MOVED bucket, and the reason all four exist rather than three.
+
+test('class space: the four verdicts are a partition, and MOVED is not either neighbour',
+    function ()
+    local port = require 'cartograph.portability'
+    -- a SPACE is member -> the set of classes declaring it (classmatch.space), the
+    -- class table read along its other axis
+    local A = { set_request_slot = { LuaEntity = true },
+        destroy = { LuaEntity = true, LuaRendering = true },
+        die = { LuaEntity = true } }
+    local B = { destroy = { LuaEntity = true },
+        die = { LuaEntity = true, LuaSection = true } }
+    eq('member-removed', (port.class_space_verdict(A, B, 'set_request_slot')),
+        'declared in the origin, by NO class in the target — sound without a receiver')
+    eq('not-a-runtime-member', (port.class_space_verdict(A, B, 'nothing_at_all')),
+        'declared by no class in EITHER: never was API, and that is an ANSWER')
+    eq('member-supplied', (port.class_space_verdict(A, B, 'die')),
+        'every class that declared it still does, so any receiver that worked works')
+    eq('member-moved', (port.class_space_verdict(A, B, 'destroy')),
+        'LuaRendering dropped it: SUPPLIED to a presence test, REMOVED to LuaRendering')
+    local _, d = port.class_space_verdict(A, B, 'destroy')
+    eq({ 'LuaRendering' }, d.lost_classes, 'and the row names which class lost it')
+    local _, rd = port.class_space_verdict(A, B, 'set_request_slot')
+    eq({ 'LuaEntity' }, rd.from_classes, 'a removal names where it used to live')
+    -- a name only the TARGET has says nothing about porting FROM the origin
+    eq(nil, (port.class_space_verdict(A, {}, 'x')) and nil or
+        (port.class_space_verdict({}, B, 'die')), 'gained is not a verdict here')
+end)
+
+test('class space: a name is decided by its STRONGEST segment, and literals do not split',
+    function ()
+    local port = require 'cartograph.portability'
+    local A = { element = { C = true }, parent = { C = true },
+        destroy = { C = true, D = true }, gone = { C = true } }
+    local B = { element = { C = true }, parent = { C = true }, destroy = { C = true } }
+    -- a chain is several member accesses and ALL must survive: one removed hop
+    -- outranks three surviving ones
+    eq('member-removed', (port.class_space_name(A, B, 'ev.parent.gone')),
+        'removed outranks supplied — one broken hop breaks the call')
+    eq('member-moved', (port.class_space_name(A, B, 'ev.element.parent.destroy')),
+        'D lost destroy, so the chain is receiver-dependent, not clean')
+    local _, d = port.class_space_name(A, B, 'ev.element.parent.destroy')
+    eq({ 'element', 'parent', 'destroy' }, d.segments,
+        'the segments asked about ride in the detail, so the split is checkable')
+    -- ⚠ a call-shaped key carries a TABLE LITERAL; splitting it on dots would
+    -- invent members out of whatever the literal holds
+    local v, cd = port.class_space_name(A, B, 'cs.make{name="a.b",pos={1,2}}.destroy')
+    eq('member-moved', v)
+    eq({ 'destroy' }, cd.segments, 'only the TRAILING member, never the literal')
+    eq(nil, (port.class_space_name(A, B, 'bare')), 'an undotted name has no member')
+end)
+
+test('class space: the origin is FENCED, and a refusal is reported not silent',
+    function ()
+    local pm = require 'cartograph.spec.profile'
+    if not pm.load('lua-factorio') then skip 'no lua-factorio profile' end
+    local port = require 'cartograph.portability'
+    local store = require 'cartograph.store'
+    store.ingest({ schema = 1, root = '/x', nodes = {}, edges = {}, calls = {} })
+    local prof = pm.load('lua-factorio')
+    -- SAME VERSION BOTH ENDS: a diff against itself decides nothing, and saying so
+    -- is not the same as finding nothing
+    local rc = port.receiver_context(store, prof, 'lua-factorio-api-20')
+    if rc then
+        eq(nil, rc.from_space, 'an equal-version origin supplies no space')
+        ok(rc.from_why and rc.from_why:find('decides nothing', 1, true) ~= nil,
+            'and the reason names the mechanism: ' .. tostring(rc.from_why))
+    end
+    local rc2 = port.receiver_context(store, prof, 'no-such-artifact-at-all')
+    if rc2 then
+        eq(nil, rc2.from_space)
+        ok(rc2.from_why ~= nil, 'an origin that could not load must not read as absent')
+    end
+end)
+
+test('class space: a REAL removal is found where the receiver cannot be typed',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not (pm.load('lua-factorio') and pm.load('lua-factorio-api-11')) then
+        skip 'both profiles are needed for a class-space diff'
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    -- `set_request_slot` is declared by LuaEntity in 1.1 and by NO class in 2.0 —
+    -- verified against the raw 2.0.77 runtime-api.json, not only against our mpack.
+    -- The base's shape matches no class, so the receiver axis CANNOT type it; that
+    -- is exactly the bucket this axis refines.
+    w('control.lua', 'return { go = function (chest)\n'
+        .. '  chest.set_request_slot(1, {})\n'
+        .. 'end }\n')
+    store.ingest(ts.extract(root))
+    local res = assert(port.audit(store, 'lua-factorio'))
+    if not res.receiver.available then skip('no class table: ' .. tostring(res.receiver.why)) end
+    if not res.origin.available then skip('no origin: ' .. tostring(res.origin.why)) end
+    local byname = {}
+    for _, e in ipairs(res.entries) do byname[e.name] = e end
+    local e = byname['chest.set_request_slot']
+    ok(e ~= nil, 'the name is in the audit at all')
+    eq('member-removed', e.reason, 'a port item, not a frontier')
+    eq('receiver-nomatch', e.receiver.receiver_was,
+        'and it records WHICH bucket it was refined out of, so the change is traceable')
+    eq(false, e.provided, 'a removal is never `provided`')
+    local body = table.concat(port.report(store, 'lua-factorio', { cap = 40 }), '\n')
+    ok(body:find('CLASS SPACES:', 1, true) ~= nil, 'the header says the axis ran')
+    ok(body:find('REMOVED FROM THE TARGET', 1, true) ~= nil, 'and the group is printed')
 end)

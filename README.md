@@ -1784,15 +1784,50 @@ file (see [the roster is not the target list](#what-this-code-requires-one-set-t
 ```
 portability — MOVING FROM factorio 1.1 (declared in info.json) TO lua-factorio 2.0.72
   33 of 92 external name(s) provided by the target
-  the profile claims 280 symbols; a verdict is only as good as that
+  the profile claims 384 symbols; a verdict is only as good as that
+  CLASS SPACES: comparing against lua-factorio-api-11 1.1.110 (from the manifest)
+    — a member no class in the target declares is a REMOVAL, and needs no receiver
   NOT IN lua-factorio — 59 name(s) the artifact cannot adjudicate, grouped by WHY:
-    48 name(s), 101 call(s) — RECEIVER-TYPED — the artifact models global-rooted
-      calls only, so these have no representation in it at all …
-     3 name(s),  16 call(s) — BARE AND UNCLAIMED — no shipped profile claims these …
-     8 name(s),   8 call(s) — ANOTHER LANGUAGE — seen in files this profile does
+    1 name(s),  9 call(s) — REMOVED FROM THE TARGET'S CLASS SPACE …
+      chest3.set_request_slot   9 call(s)  crash-site.lua  was on LuaEntity, on no target class
+    1 name(s),  2 call(s) — MOVED OFF SOME CLASSES …
+      event.element.parent.destroy  2 call(s)  story.lua  lost by LuaRendering, LuaUnitGroup, kept by 10 other(s)
+    7 name(s), 10 call(s) — RECEIVER-TYPED, AMBIGUOUS CLASS …
+    2 name(s), 11 call(s) — NOT A RUNTIME MEMBER …
+     3 name(s), 16 call(s) — BARE AND UNCLAIMED — no shipped profile claims these …
+     8 name(s),  8 call(s) — ANOTHER LANGUAGE — seen in files this profile does
       not describe …
   no ABSENT group: nothing here is a name a fully-enumerated class could have held
 ```
+
+### A member name is decidable without typing the receiver
+
+`chest3` is a local. Nothing knows its type, so the receiver axis can only say
+*no declared class matches this shape* — which is true, and reads exactly like
+"we couldn't work it out". But the **member name** can be asked of both versions'
+whole class spaces, and that question needs no receiver at all:
+
+| in the origin | in the target | verdict |
+| --- | --- | --- |
+| ≥1 class | **no class** | **removed** — porting work |
+| ≥1 class | every origin class still has it | supplied |
+| ≥1 class | some origin class lost it | **moved** — depends on the receiver |
+| no class | no class | not a runtime member (a mod lib, or the stdlib) |
+
+**The soundness is asymmetric, and it points the way a port needs.** If *no*
+class in the target declares the name, no amount of receiver typing could have
+saved the call — so the removal holds without one. Presence is the weak
+direction, which is why `supplied` is the *subset* test and not "some class has
+it": bare presence would swallow the `moved` row, and `moved` is neither of its
+neighbours — it reads as supplied to a presence test and as removed from the
+losing class's point of view. Between Factorio 1.1.110 and 2.0.77 that middle
+bucket is 87 names against 273 removed and 1474 supplied.
+
+The origin comes from the **manifest** — `factorio_version "1.1"` in `info.json`
+— so you don't name it twice; `:CartographPortability <to>` is enough. It is
+matched on the *minor* and refuses anything else, because the verdict is a
+difference and a wrong origin manufactures removals out of version skew. No
+origin is a fine answer, and the header says so; a wrong one is not.
 
 Two things in that header are the point. The **declared** end comes from the
 package manifest — a file the resolver already parses — so the report states a

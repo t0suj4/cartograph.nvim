@@ -828,7 +828,7 @@ end
 --- (v5 keys read against a v6 document, 104 confident nonsenses). So the table must
 --- describe the SAME language at the SAME version as the profile being reported on,
 --- and when it does not, the axis is simply absent and says why.
-function M.receiver_context(store, prof)
+function M.receiver_context(store, prof, origin)
     local cm = require 'cartograph.classmatch'
     local ct, why = cm.table(nil)
     if not ct then return nil, ('no class table to adjudicate receivers with (%s)')
@@ -847,7 +847,39 @@ function M.receiver_context(store, prof)
     local surf = require('cartograph.externals').surface(store)
     local ev = {}
     for base, e in pairs(surf.bases or {}) do ev[base] = cm.match(e.members, ct) end
-    return { ct = ct, ev = ev, meta = m, tier = cm.TIER }
+    local rc = { ct = ct, ev = ev, meta = m, tier = cm.TIER,
+        to_space = cm.space(ct) }
+    -- THE ORIGIN SIDE (CART-0631): a class table for the version being ported FROM,
+    -- so a member name can be decided against both spaces. Optional, and its
+    -- absence leaves every zero-match name exactly where it was.
+    --
+    -- ⚠ FENCED THE SAME WAY THE TARGET IS, and for a sharper reason. This verdict
+    -- is a DIFFERENCE between two artifacts, so an origin table from the wrong
+    -- version does not merely weaken it — it manufactures removals out of the
+    -- version skew itself, which is the one failure the whole axis exists to
+    -- avoid. `from_why` is REPORTED, never silently dropped: an origin that could
+    -- not be loaded must not read as an origin that found nothing.
+    if origin then
+        local oct, owhy = cm.table(origin)
+        if not oct then
+            rc.from_why = ('no class table for the origin %s (%s)')
+                :format(tostring(origin), tostring(owhy))
+        else
+            local om = oct.meta or {}
+            if m.lang and om.lang and om.lang ~= m.lang then
+                rc.from_why = ('the origin class table describes %s, the target %s')
+                    :format(tostring(om.lang), tostring(m.lang))
+            elseif tostring(om.version) == tostring(m.version) then
+                rc.from_why = ('the origin and target class tables are both %s %s —'
+                    .. ' a version diffed against itself decides nothing')
+                    :format(tostring(om.artifact), tostring(om.version))
+            else
+                rc.from_ct, rc.from_meta = oct, om
+                rc.from_space = cm.space(oct)
+            end
+        end
+    end
+    return rc
 end
 
 --- ADJUDICATE ONE RECEIVER-TYPED NAME against a class table. PURE: everything it
@@ -902,12 +934,123 @@ function M.receiver_verdict(ct, name, ev)
     return nil
 end
 
+--- THE CLASS-SPACE VERDICT (CART-0631) — decide a member name against BOTH
+--- versions' whole class spaces, WITHOUT typing the receiver.
+---
+--- ★★ THE SOUNDNESS IS ASYMMETRIC AND IT FAVOURS A PORT. If NO class in the
+--- target declares the name, no amount of receiver typing could have saved the
+--- call — so the REMOVAL verdict holds without knowing what the receiver is. The
+--- PRESENCE direction is weaker: a name existing on SOME target class does not
+--- prove it exists on the RIGHT one, which is why `supplied` here is not
+--- "present in the target" but the strictly stronger SUBSET test below.
+---
+--- Returns (verdict, detail) or nil when either space is missing:
+---   member-removed        declared in the source, by NO class in the target.
+---                         A port item. Sound.
+---   not-a-runtime-member  declared by no class in EITHER — a mod library or the
+---                         language's own stdlib. NOT a port item, and NOT a
+---                         frontier: it is a decided "this was never API".
+---   member-supplied       every class that declared it still does. Sound: any
+---                         receiver that worked before still works.
+---   member-moved          the target still declares it, but NOT on every class
+---                         that used to. A receiver-dependent hazard — the one
+---                         outcome that genuinely needs the receiver, and it must
+---                         NOT be folded into either neighbour.
+---
+--- ⚠ THE FOUR ARE NOT THREE. `member-moved` looks like `member-supplied` from a
+--- presence test and like `member-removed` from the receiver's point of view, and
+--- it is neither: folding it up invents porting work, folding it down hides a real
+--- break. Measured 1.1.110 -> 2.0.77: 1474 supplied, 273 removed, 87 MOVED — the
+--- moved bucket is 5% of the space and would be invisible under a presence test.
+function M.class_space_verdict(from_space, to_space, member)
+    if not from_space or not to_space or type(member) ~= 'string' then return nil end
+    local a, b = from_space[member], to_space[member]
+    if not a and not b then return 'not-a-runtime-member', { from_n = 0, to_n = 0 } end
+    local function count(t) local n = 0 for _ in pairs(t or {}) do n = n + 1 end return n end
+    local na, nb = count(a), count(b)
+    if a and not b then
+        local cls = {}
+        for cn in pairs(a) do cls[#cls + 1] = cn end
+        table.sort(cls)
+        return 'member-removed', { from_n = na, to_n = 0, from_classes = cls }
+    end
+    if not a and b then return nil end -- gained: says nothing about porting FROM
+    local lost = {}
+    for cn in pairs(a) do if not b[cn] then lost[#lost + 1] = cn end end
+    if #lost == 0 then return 'member-supplied', { from_n = na, to_n = nb } end
+    table.sort(lost)
+    return 'member-moved', { from_n = na, to_n = nb, lost_classes = lost }
+end
+
+--- THE SAME VERDICT FOR A WHOLE DOTTED NAME, not one member. A chain
+--- (`event.element.parent.destroy`) is several member accesses and ALL of them
+--- must survive the move, so the name is decided by its strongest segment.
+---
+--- PRECEDENCE: removed > moved > supplied > not-a-runtime-member. Removed wins
+--- because one broken hop breaks the call; not-a-runtime-member LOSES to
+--- everything because it is the weakest claim in a mixed chain — a chain with one
+--- real class member and one event-table field did not stop being API.
+---
+--- ⚠ SEGMENTING IS FENCED, because these names are not all identifiers. A
+--- call-shaped key (`crash_site.createEntity{name="…"}.set_recipe`) has a TABLE
+--- LITERAL in the middle, and splitting it on dots would invent members out of
+--- whatever the literal contains. So a PURE dotted chain is decomposed and
+--- anything else contributes only its TRAILING member — the one actually invoked.
+--- `segments` rides in the detail so a reader can see which names were asked
+--- about rather than trusting that the split did what it looks like.
+function M.class_space_name(from_space, to_space, name)
+    if not from_space or not to_space or type(name) ~= 'string' then return nil end
+    local base, rest = name:match('^([%w_]+)[.:](.+)$')
+    if not base or not rest then return nil end
+    local segs = {}
+    -- ⚠ THE OBVIOUS PATTERN IS NOT A LUA PATTERN. `^[%w_]+([.:][%w_]+)*$` reads
+    -- like a dotted-chain test and is not one: Lua has no group repetition, so `*`
+    -- applies to the closing paren and the match simply fails. Every chain then
+    -- fell through to the trailing-member branch and the decomposition was dead
+    -- code that looked alive — a spec on `segments` is what caught it. The
+    -- CHARACTER-SET test says the same thing and is expressible: a pure chain
+    -- contains nothing but name characters and separators.
+    if rest:match('^[%w_%.:]+$') then
+        for seg in rest:gmatch('[%w_]+') do segs[#segs + 1] = seg end
+    else
+        local last = rest:match('([%w_]+)$')
+        if last then segs[1] = last end
+    end
+    if #segs == 0 then return nil end
+    local RANK = { ['member-removed'] = 4, ['member-moved'] = 3,
+        ['member-supplied'] = 2, ['not-a-runtime-member'] = 1 }
+    local best, bestd, bestseg
+    for _, seg in ipairs(segs) do
+        local v, d = M.class_space_verdict(from_space, to_space, seg)
+        if v and (not best or RANK[v] > RANK[best]) then best, bestd, bestseg = v, d, seg end
+    end
+    if not best then return nil end
+    bestd.segments, bestd.member = segs, bestseg
+    return best, bestd
+end
+
 --- One rendered cell of receiver evidence, for the item line. THE HEDGE IS IN THE
 --- TEXT, not only in the bucket: `~` is the project's mark for a hypothesis and `n`
 --- is the quantity that decides how much to believe it (classmatch's two known
 --- wrong answers are BOTH n=1, and it deliberately hardcodes no threshold).
 function M.receiver_cell(d)
     if not d then return '' end
+    -- ⚠ THE CLASS-SPACE VERDICTS MUST NOT WEAR THE RECEIVER'S CELL (CART-0631).
+    -- They are refined OUT of a zero-match, so `d` still carries that evidence, and
+    -- rendering it printed `n=1 no overlapping class` — a FRONTIER statement — on a
+    -- row asserting a sound removal. The reader is then told the tool found nothing
+    -- and that the name is gone, on the same line. What belongs here is where the
+    -- member USED to live, which is the fact the verdict actually rests on.
+    if d.from_classes then
+        return ('was on %s, on no target class'):format(table.concat(d.from_classes, ', '))
+    elseif d.lost_classes then
+        return ('lost by %s, kept by %d other(s)')
+            :format(table.concat(d.lost_classes, ', '), (d.to_n or 0))
+    elseif d.from_n == 0 and d.to_n == 0 then
+        return 'declared by no class in either version'
+    elseif d.from_n and d.to_n and not d.class then
+        return ('on %d class(es) before, %d after'):format(d.from_n, d.to_n)
+    end
     if d.class then
         return ('~%s n=%d%s'):format(d.class, d.n or 0,
             (d.n == 1) and ' SINGLE-MEMBER HYPOTHESIS' or '')
@@ -956,6 +1099,26 @@ function M.unknown_reason(prof, name, where, rctx)
         if not rctx then return 'receiver-typed' end
         local b = nm:match('^([%w_]+)[.:]')
         local why, d = M.receiver_verdict(rctx.ct, nm, b and rctx.ev[b])
+        -- THE CLASS-SPACE REFINEMENT (CART-0631). Reached ONLY for a name the
+        -- receiver axis could not type — a zero-match base, which is where a real
+        -- removal was found hiding as a frontier. A name whose receiver IS typed
+        -- keeps that answer: the class-space test is strictly weaker evidence
+        -- about a known receiver than the receiver's own class table entry.
+        --
+        -- ⚠ AMBIGUOUS IS DELIBERATELY NOT REFINED. classmatch has narrowed it to
+        -- 2-6 candidate classes and the decisive question there is whether EVERY
+        -- candidate declares the member — a different and stronger test than "any
+        -- class anywhere does". Answering the weak question over the strong one
+        -- would trade a narrow honest hedge for a broad confident guess.
+        if (why == 'receiver-nomatch' or why == 'receiver-nearmiss')
+            and rctx.from_space then
+            local cv, cd = M.class_space_name(rctx.from_space, rctx.to_space, nm)
+            if cv then
+                if d then for k, v in pairs(d) do if cd[k] == nil then cd[k] = v end end end
+                cd.receiver_was = why
+                return cv, cd
+            end
+        end
         if why then return why, d end
         return 'receiver-typed'
     end
@@ -1056,8 +1219,11 @@ M.REASON_TEXT = {
         .. ' most likely a mod-local table. NOT adjudicable, and for a DIFFERENT'
         .. ' reason than the rest: there is no class to look the member up in. ⚠ A'
         .. ' member the target REMOVED produces this same signal (nothing declares'
-        .. ' it), and telling the two apart needs a class table for the OLD version,'
-        .. ' which the 1.1 artifact does not carry. So this is not evidence either way.',
+        .. ' it), and telling the two apart needs a class table for the OLD version.'
+        .. ' ⚠ THAT LAST SENTENCE USED TO END "which the 1.1 artifact does not carry"'
+        .. ' AND IT IS NO LONGER TRUE — the 1.1 artifact carries 97 classes since the'
+        .. ' CART-0586 re-distil, and CART-0631 uses them. Pass an origin profile and'
+        .. ' these names are decided; this group is what is left when none was given.',
     ['receiver-ambiguous'] = 'RECEIVER-TYPED, AMBIGUOUS CLASS — several declared'
         .. ' classes declare every member observed on the base, so the shape does not'
         .. ' pick one. NOT adjudicable, and explicitly NOT missing: "I cannot tell'
@@ -1075,6 +1241,31 @@ M.REASON_TEXT = {
         .. ' had the target removed ANY member used on it, no class would have'
         .. ' matched and the base would appear in a group above. Not `provided` —'
         .. ' that count means a symbol the profile NAMES.',
+    -- ── the class-space axis (CART-0631). These need NO receiver: they ask the
+    -- two versions' whole class spaces about a member NAME. The removal direction
+    -- is SOUND (no class declares it, so no receiver could have reached it); the
+    -- supplied direction is the strictly stronger SUBSET test, never bare presence.
+    ['member-removed'] = 'REMOVED FROM THE TARGET\'S CLASS SPACE — the origin version'
+        .. ' declares this member on at least one class and the target declares it on'
+        .. ' NONE. ★ THIS NEEDS NO RECEIVER AND IS SOUND WITHOUT ONE: if no class in'
+        .. ' the target has the name, no receiver could have reached it. Real porting'
+        .. ' work, on the same footing as ABSENT above, and reached only for names the'
+        .. ' receiver axis could not type.',
+    ['member-moved'] = 'MOVED OFF SOME CLASSES — the target still declares this member,'
+        .. ' but NOT on every class that used to declare it. Whether the call breaks'
+        .. ' depends on which class the receiver actually is, which is exactly what'
+        .. ' could not be determined. ⚠ NOT foldable into either neighbour: it reads as'
+        .. ' SUPPLIED to a presence test and as REMOVED from the losing class\'s point'
+        .. ' of view, and it is neither. The lost classes are named on each line.',
+    ['member-supplied'] = 'SUPPLIED BY THE TARGET — every class that declared this'
+        .. ' member in the origin still declares it. Sound whichever class the receiver'
+        .. ' is, which is why this is a SUBSET test and not "some class has the name":'
+        .. ' bare presence would have swallowed the MOVED group above.',
+    ['not-a-runtime-member'] = 'NOT A RUNTIME MEMBER — no class in EITHER version'
+        .. ' declares this name, so it never was part of the environment. A mod'
+        .. ' library or the language\'s own stdlib. ★ A DECIDED ANSWER, not a'
+        .. ' frontier: it was previously indistinguishable from "we could not type the'
+        .. ' receiver", and it is no work at all rather than unknown work.',
     ['unenumerated-namespace'] = 'NAMESPACE MEMBER, NOT ENUMERATED — the root IS a'
         .. ' modelled namespace but the artifact distils METHODS only (and omits'
         .. ' lualib extensions), so a miss here says nothing either way.',
@@ -1088,15 +1279,16 @@ M.REASON_TEXT = {
 --- the profile's own authority. Then the receiver axis, ordered by how much it
 --- CLAIMS — the hedged near-porting-work first, the merely consistent last — so a
 --- reader who stops after two groups has read the strongest statements.
-M.REASON_ORDER = { 'absent',
-    'receiver-class-absent', 'receiver-nearmiss', 'receiver-nomatch',
+M.REASON_ORDER = { 'absent', 'member-removed',
+    'receiver-class-absent', 'member-moved', 'receiver-nearmiss', 'receiver-nomatch',
     'receiver-ambiguous', 'receiver-class-chain', 'receiver-class-present',
-    'receiver-typed', 'unenumerated-namespace', 'unclaimed-bare', 'other-language' }
+    'member-supplied', 'receiver-typed', 'unenumerated-namespace',
+    'not-a-runtime-member', 'unclaimed-bare', 'other-language' }
 
 --- Audit the open graph against a target runtime profile.
 --- Returns (result, err) where result = { runtime, size, provided, unknown,
 --- entries = { {name, calls, provided, why, files} } }.
-function M.audit(store, runtime)
+function M.audit(store, runtime, opts)
     local prof = require('cartograph.spec.profile').load(runtime)
     if not prof then
         return nil, ('no profile named %q (profiles ship under spec/profile/)'):format(runtime)
@@ -1159,9 +1351,27 @@ function M.audit(store, runtime)
     -- would pay both 92 times. Unavailable is a REPORTED state, not a silent skip —
     -- `res.receiver.why` is printed, because a bucket that quietly stops refining
     -- looks exactly like a bucket with nothing to refine.
-    local rctx, rwhy = M.receiver_context(store, prof)
+    -- THE ORIGIN, NAMED OR DERIVED. An explicit `opts.from` always wins; otherwise
+    -- the manifest's own declaration picks it (M.origin_for), because the tree
+    -- already says which version it targets and asking twice would be a worse
+    -- interface than reading it. `auto` records which happened, so a reader never
+    -- has to guess whether an origin was chosen for them.
+    local from, auto, ofwhy = opts and opts.from, false, nil
+    if not from then
+        from, ofwhy = M.origin_for(store, runtime)
+        auto = from ~= nil
+    end
+    local rctx, rwhy = M.receiver_context(store, prof, from)
     res.receiver = { available = rctx ~= nil, why = rwhy,
         meta = rctx and rctx.meta or nil, tier = rctx and rctx.tier or nil }
+    -- THE ORIGIN IS REPORTED WHETHER OR NOT IT LOADED (CART-0631), for the reason
+    -- res.receiver.why exists: a refinement that quietly did not run looks exactly
+    -- like one with nothing to refine. `asked` distinguishes the third state — no
+    -- origin was named at all — from an origin that was named and refused.
+    res.origin = { asked = from, auto = auto or nil,
+        available = (rctx and rctx.from_space) ~= nil,
+        why = (rctx and rctx.from_why) or (not from and ofwhy) or nil,
+        meta = rctx and rctx.from_meta or nil }
     for name, n in pairs(req.names) do
         local w = M.provides(prof, name)
         local files = req.files[name] or { req.where[name] }
@@ -1331,6 +1541,42 @@ function M.declared_for(store, runtime)
     local scale = eco and (eco.identity or {}).version_scale
     if not scale then return nil end
     return require('cartograph.versionfloor').declared(root, scale)
+end
+
+--- THE ORIGIN ARTIFACT FOR A DECLARED MOVE (CART-0631) — which shipped class
+--- table describes the version this code SAYS it targets, or nil with the reason.
+---
+--- ★ THE CALLER ALREADY TOLD US. `M.declared_for` reads factorio_version "1.1" out
+--- of info.json; a profile is per MINOR (apifetch: patch releases share one), so
+--- the origin is the artifact whose class table sits on that minor. Making the
+--- user name it twice — once in the manifest, once on the command — would be
+--- asking for a fact the tree already carries.
+---
+--- ⚠ MATCHED ON THE MINOR AND NOTHING LOOSER. A declared "1.1" accepts 1.1.110 and
+--- refuses 2.0.77; it does NOT fall back to "the only class table around", because
+--- the whole verdict is a DIFFERENCE and a wrong origin manufactures removals out
+--- of version skew. No origin is a fine answer — a wrong one is not.
+function M.origin_for(store, runtime)
+    local decl = M.declared_for(store, runtime)
+    if not decl then return nil, 'the tree declares no environment version' end
+    local minor = tostring(decl.raw):match('^(%d+%.%d+)')
+    if not minor then
+        return nil, ('the declared version %q is not major.minor'):format(tostring(decl.raw))
+    end
+    local cm = require 'cartograph.classmatch'
+    local prof = require 'cartograph.spec.profile'
+    local tried = {}
+    for _, name in ipairs(cm.ARTIFACTS or {}) do
+        local art = prof.load(name)
+        if art and tostring(art.version):match('^' .. vim.pesc(minor) .. '%.') then
+            local ct = cm.table(name)
+            if ct then return name, nil, decl end
+            tried[#tried + 1] = name .. ' (no class table)'
+        end
+    end
+    return nil, ('%s declares %s %s but no shipped artifact carries a class table for'
+        .. ' that minor%s'):format(tostring(decl.source), tostring(decl.scale),
+        tostring(decl.raw), #tried > 0 and (' — tried ' .. table.concat(tried, ', ')) or '')
 end
 
 --- WHY A REFERENCED name is not provided. Sharper than the call-side classifier,
@@ -1835,6 +2081,20 @@ function M.report(store, runtime, opts)
     end
     L[#L + 1] = ('  the profile claims %d symbols; a verdict is only as good as that')
         :format(res.size)
+    -- THE ORIGIN LINE (CART-0631), printed in ALL THREE states for the reason
+    -- res.receiver.why is printed: an axis that quietly did not run looks exactly
+    -- like one with nothing to find, and this one turns frontiers into verdicts.
+    if res.origin and res.origin.available then
+        L[#L + 1] = ('  CLASS SPACES: comparing against %s %s%s — a member no class in'
+            .. ' the target declares is a REMOVAL, and needs no receiver')
+            :format(tostring((res.origin.meta or {}).artifact),
+                tostring((res.origin.meta or {}).version),
+                res.origin.auto and ' (from the manifest)' or '')
+    elseif res.origin and res.origin.why then
+        L[#L + 1] = ('  CLASS SPACES: not compared — %s. Names whose receiver cannot be'
+            .. ' typed stay unadjudicated rather than being called removed.')
+            :format(res.origin.why)
+    end
     -- THE STAGE PARTITION (CART-0216). Reported BEFORE the not-in-profile list,
     -- because "exists, but not at this stage" is a stronger statement than "not
     -- provided" and would be buried under it. The typed-empty rule applies in both
@@ -1936,13 +2196,21 @@ function M.report(store, runtime, opts)
             local c, order2 = {}, { 'receiver-class-absent', 'receiver-nearmiss',
                 'receiver-nomatch', 'receiver-ambiguous', 'receiver-class-chain',
                 'receiver-class-present', 'receiver-typed' }
-            local tot, totcalls = 0, 0
+            local tot, totcalls, refined, refcalls = 0, 0, 0, 0
             for _, e in ipairs(res.entries) do
                 if e.reason and e.reason:match('^receiver%-') then
                     c[e.reason] = c[e.reason] or { 0, 0 }
                     c[e.reason][1] = c[e.reason][1] + 1
                     c[e.reason][2] = c[e.reason][2] + e.calls
                     tot, totcalls = tot + 1, totcalls + e.calls
+                elseif e.receiver and e.receiver.receiver_was then
+                    -- RAISED BY THIS AXIS AND DECIDED BY ANOTHER (CART-0631). Counted
+                    -- separately rather than dropped: this census used to be every
+                    -- name the receiver axis touched, and after the class-space
+                    -- refinement it silently became a SUBSET. A reader comparing two
+                    -- runs would see the total fall with nothing to explain it, which
+                    -- is the absence-rendered-as-silence class in its own report.
+                    refined, refcalls = refined + 1, refcalls + e.calls
                 end
             end
             local parts = {}
@@ -1952,6 +2220,11 @@ function M.report(store, runtime, opts)
             end
             L[#L + 1] = ('      %d receiver-typed name(s), %d call(s): %s')
                 :format(tot, totcalls, table.concat(parts, ' · '))
+            if refined > 0 then
+                L[#L + 1] = ('      + %d name(s), %d call(s) the shape match could not'
+                    .. ' type and the CLASS SPACES decided — listed in their own groups')
+                    :format(refined, refcalls)
+            end
         elseif res.receiver then
             vim.list_extend(L, reason_lines(
                 '    receivers NOT adjudicated — ', tostring(res.receiver.why), '      '))

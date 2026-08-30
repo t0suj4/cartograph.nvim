@@ -198,6 +198,36 @@ local function overlap(shape, all, cap)
     return hit, miss, names
 end
 
+--- THE MEMBER-NAME SPACE of a class table: member -> the set of classes that
+--- declare it, transitive closure included (so `insert` names LuaControl AND
+--- everything inheriting it, matching what M.match tests against).
+---
+--- ★ THIS IS THE CLASS TABLE READ ALONG ITS OTHER AXIS. M.match asks "which class
+--- has ALL of these members" — a query about a RECEIVER. This asks "which classes
+--- have THIS member" — a query about a NAME, and it needs no receiver at all. That
+--- is the whole reason it can answer a port question M.match must decline: a
+--- member no class in the target declares cannot be reached by ANY receiver, so
+--- failing to type the receiver costs nothing (portability.class_space_verdict).
+---
+--- Memoised per class table, weak-keyed like the tables themselves: the index is
+--- ~2450 entries on the 2.0 export and a per-name rebuild would pay for all of it.
+local space_cache = setmetatable({}, { __mode = 'k' })
+function M.space(ct)
+    if type(ct) ~= 'table' or type(ct.classes) ~= 'table' then return nil end
+    local hit = space_cache[ct]
+    if hit then return hit end
+    local s = {}
+    for cn, c in pairs(ct.classes) do
+        for m in pairs(c.all or {}) do
+            local set = s[m]
+            if not set then set = {}; s[m] = set end
+            set[cn] = true
+        end
+    end
+    space_cache[ct] = s
+    return s
+end
+
 --- Is a zero-match base UNRELATED to the API — "not an API object at all" rather
 --- than a near miss? THE DEFINITION IS LOAD-BEARING and it is the recorded one:
 --- distance is measured only against classes that share AT LEAST ONE member, and
