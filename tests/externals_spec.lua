@@ -56,3 +56,69 @@ test('external-surface: an untyped receiver surfaces with its used-member shape;
     local lines = externals.report(store)
     ok(lines[1]:find('external surface', 1, true), 'report header present')
 end)
+
+test('references: a read inside a CONDITION is counted once, not twice',
+    function ()
+    -- ★★ CART-0634. A row that has a condition also carries that condition in `rhs`,
+    -- so walking both counted every read inside an `if` TWICE. It surfaced as a port
+    -- worklist that did not reconcile with the files: `global.donecrashsite` reported
+    -- 3 reads against 2 in the source, and each of the seven `global.*` names was
+    -- over by exactly its number of conditions.
+    local store = require 'cartograph.store'
+    local ts = require 'cartograph.providers.treesitter'
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\n'
+        .. 'function M.f()\n'
+        .. '  if glob.done then return end\n'   -- ONE read, in a condition
+        .. '  glob.other = 1\n'                 -- one read, on the lhs
+        .. 'end\n'
+        .. 'function M.g()\n'
+        .. '  glob.pair = glob.pair or {}\n'    -- TWO reads on ONE row, both real
+        .. 'end\n'
+        .. 'return M\n')
+    fd:close()
+    store.ingest(ts.extract(root))
+    local refs = require('cartograph.externals').references(store)
+    eq(1, refs.names['glob.done'], 'a condition read counts ONCE')
+    eq(1, refs.names['glob.other'])
+    -- ⚠ AND THE OBVIOUS FIX WOULD HAVE BROKEN THIS. Collapsing repeats within a row
+    -- reads as the same bug fixed more simply, and it is wrong: `x = x or {}` is two
+    -- real occurrences on one line, and it is why two of Von-Neumann's seven names
+    -- already reconciled before the change.
+    eq(2, refs.names['glob.pair'],
+        'two occurrences on one row stay two — a per-row dedupe would undercount')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('references: a loop header is two rows and its read counts once',
+    function ()
+    -- ★★ CART-0641. `for k, v in pairs(t) do` emits a PRE-LOOP init row (df needs the
+    -- init to run before the head) AND the `for_statement` control row (CFG needs it),
+    -- both carrying the same expression because the header IS the init. Neither row is
+    -- wrong — a set-based consumer like reaching-definitions is idempotent over the
+    -- repeat. AN OCCURRENCE COUNTER IS NOT, and this is one.
+    local store = require 'cartograph.store'
+    local ts = require 'cartograph.providers.treesitter'
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local root = vim.fn.tempname(); vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write('local M = {}\n'
+        .. 'function M.f()\n'
+        .. '  for k, v in pairs(glob.zoom) do\n'   -- ONE read, TWO rows
+        .. '    glob.other[k] = v\n'               -- one read, a different row
+        .. '  end\n'
+        .. 'end\n'
+        .. 'return M\n')
+    fd:close()
+    store.ingest(ts.extract(root))
+    local refs = require('cartograph.externals').references(store)
+    eq(1, refs.names['glob.zoom'], 'the loop iterable counts once, not twice')
+    eq(1, refs.names['glob.other'], 'and an ordinary row in the body is untouched')
+    vim.fn.delete(root, 'rf')
+end)

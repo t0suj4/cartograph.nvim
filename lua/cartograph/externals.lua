@@ -21,6 +21,8 @@
 
 local callrec = require 'cartograph.callrec'
 
+local atr = require 'cartograph.at'
+
 local M = {}
 
 -- recognized language builtins/libraries — a known external, not a boundary
@@ -142,6 +144,23 @@ end
 --- WHICH ENVIRONMENT a name belongs to has to ask `files`: a name read in two files
 --- has no single home, and answering from `where` makes the verdict depend on which
 --- file happened to be visited first (CART-0215).
+--- THE SOURCE SPAN OF A ROW'S EXPRESSIONS, as one key (CART-0641). nil when the row
+--- has no ranged expression, in which case it is never deduped — silence is better
+--- than collapsing two rows we cannot tell apart.
+local function row_span_key(r)
+    local e = r.expr or {}
+    local parts = nil
+    for _, side in ipairs({ e.rhs or {}, e.lhs or {} }) do
+        for _, x in ipairs(side) do
+            if not x.at then return nil end
+            parts = parts or {}
+            parts[#parts + 1] = ('%d.%d-%d.%d'):format(atr.sl(x.at), atr.sc(x.at),
+                atr.el(x.at), atr.ec(x.at))
+        end
+    end
+    return parts and table.concat(parts, '|') or nil
+end
+
 function M.references(store)
     local expr = require 'cartograph.expr'
     local tsl = function (f)
@@ -195,11 +214,52 @@ function M.references(store)
                 -- and the BINDER-declared names (loop variables), which df never
                 -- records as definitions
                 for bn in pairs(eo.bound or {}) do locals[bn] = true end
+                -- ⚠ A LOOP HEADER IS TWO ROWS, AND BOTH ARE CORRECT (CART-0641).
+                -- `for k, v in pairs(t) do` emits a PRE-LOOP init row (flow.lua:1090
+                -- — the init runs before the head, and df needs that ordering) AND the
+                -- `for_statement` control row that CFG needs. Both carry the same
+                -- expression, because the header IS the init. Nothing is wrong with
+                -- either row: a set-based consumer like reaching-definitions is
+                -- idempotent over the repeat. An OCCURRENCE COUNTER is not, and this
+                -- is one — `global.playersNeedZoom` reported 7 reads against 6.
+                --
+                -- Keyed on the FULL RANGE of both expression lists, start and end,
+                -- line and char. ⚠ A COARSER KEY IS WRONG AND MEASURABLY SO: keying
+                -- on (start line, row line) reported 25.3% of rows as duplicates on
+                -- cartograph, with an `if_statement + stmt` and a `stmt + stmt`
+                -- bucket that are pure artifacts of two statements sharing a line.
+                -- The full range gives 8.1%, ALL of it `for_statement + stmt`.
+                -- ★ LHS IS IN THE KEY TOO, so two rows that share an rhs but assign
+                -- to different targets are not collapsed — the pair this exists for
+                -- has no lhs at all.
+                local rowseen = {}
                 for _, r in ipairs(fl.stmts or {}) do
+                    local rk = row_span_key(r)
+                    if rk and rowseen[rk] then goto next_row end
+                    if rk then rowseen[rk] = true end
                     local got = {}
                     for _, e in ipairs((r.expr or {}).rhs or {}) do expr.dotted_reads(e, got) end
                     for _, e in ipairs((r.expr or {}).lhs or {}) do expr.dotted_reads(e, got) end
-                    expr.dotted_reads((r.expr or {}).cond, got)
+                    -- ⚠ `cond` IS NOT WALKED, AND THAT IS NOT AN OVERSIGHT (CART-0634).
+                    -- A row that has a condition ALSO carries that condition in `rhs`,
+                    -- so reading both counted every read inside an `if` TWICE. It
+                    -- showed up as a port worklist that did not reconcile with the
+                    -- files: `global.donecrashsite` reported 3 reads against 2 in the
+                    -- source, and every one of the seven `global.*` names was over by
+                    -- exactly its number of conditions.
+                    --
+                    -- MEASURED before removing it, as a MULTISET and not a set — the
+                    -- claim is about the COUNT, so a chain appearing twice in `cond`
+                    -- and once in `rhs` had to be able to fail the test: 9637 rows
+                    -- with a condition on cartograph itself and 89 on Von-Neumann,
+                    -- ZERO with a read `rhs` lacks. If that ever stops holding, this
+                    -- undercounts — and the check is one probe, not a guess.
+                    --
+                    -- ⚠ AND PER-ROW DEDUPE WOULD HAVE BEEN WRONG. The obvious fix —
+                    -- collapse repeats within a row — breaks `global.x = global.x or
+                    -- {}`, which is TWO real occurrences on one line and is why
+                    -- `global.savedRailbots` (11 reads, 7 lines) was one of the two
+                    -- names that already reconciled.
                     for _, chain in ipairs(got) do
                         local rootname = chain:match('^([%w_]+)')
                         if rootname and not locals[rootname] and not defined[rootname] then
@@ -212,6 +272,7 @@ function M.references(store)
                             end
                         end
                     end
+                    ::next_row::
                 end
             end
         end
