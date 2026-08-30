@@ -125,7 +125,17 @@ end
 -- Adds spec.import_unit ('directory' for go, where an import names a PACKAGE and one
 -- representative file stands for it; absent = file, which lua/js/rust/haskell mean).
 -- BLAST RADIUS across 15 swept corpora: nio +3 refs · go +38 · rust -3, nothing else.
-M.VERSION = 161 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
+-- v162 (CART-0624, last item): HASKELL'S IMPORT ALIAS. `import qualified Data.Map as M`
+-- binds `M`, captured via the `alias:` field; 36 of ghc/base's 861 import edges now
+-- carry a bind. ⚠ NO import_bind_path for haskell: a bare `import Data.List` binds
+-- NOTHING a single-identifier receiver can name (names arrive unqualified; the
+-- qualified spelling is `Data.List.sort`, whose first segment is not a module), so
+-- deriving `List` from the path would mint a binding the source never wrote.
+-- BLAST RADIUS: none. counts+struct PASS unchanged — `bind` is not in the graphdiff
+-- signature and nothing on this corpus resolves differently. The pin oracle still
+-- DECLINES here (0 of 907 edges decided) and says so with its substrate line: the
+-- binds exist, no dotted receiver on this corpus is one of them.
+M.VERSION = 162 -- v157: A RE-EXPORT BY ASSIGNMENT IS AN EXPORT (CART-0612). Lua's
                -- `functions` query matches an assignment only when the VALUE is a
                -- function_definition, so `M.dir = dir_of` — an export written as an
                -- alias of an existing local — was captured under no key at all. The

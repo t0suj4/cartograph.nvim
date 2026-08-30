@@ -41,7 +41,19 @@ return {
         block_skip = { signature = true, pragma = true },
         is_method = function () return false end,
         entry_names = { main = true },
-        import_query = [=[ (import module: (module) @path) ]=],
+        -- TWO PATTERNS, ONE SITE: `import qualified Data.Map as M` binds `M`, and
+        -- the consumer dedupes on the @path NODE and merges the bind, so the edge
+        -- set is unchanged.
+        -- ⚠ NO import_bind_path FOR HASKELL, deliberately. A bare `import Data.List`
+        -- binds NOTHING a single-identifier receiver can name: names come in
+        -- unqualified, and the qualified spelling is `Data.List.sort`, whose first
+        -- segment `Data` is not a module. Deriving `List` from the path would mint a
+        -- binding the source never wrote — the fabrication this whole arc exists to
+        -- remove. Only the ALIAS is evidence.
+        import_query = [=[
+            (import module: (module) @path alias: (module) @bind)
+            (import module: (module) @path)
+        ]=],
         resolve_import = function (mod, files)
             -- source roots differ (compiler/, libraries/x/src/) and the
             -- extraction root may sit INSIDE the module hierarchy: match
