@@ -46,6 +46,8 @@
 
 local expr = require 'cartograph.expr'
 
+local atr = require 'cartograph.at'
+
 local M = {}
 
 --- The Factorio data-stage adapter: the domain semantics a generic analysis
@@ -200,11 +202,14 @@ local function nested_walk(e, prefix, depth, out, line)
     if depth > NEST_DEPTH or #out >= NEST_CAP then return end
     for _, kid in ipairs(e.kids or {}) do
         if #out >= NEST_CAP then return end
-        local at = kid.at and kid.at.start
         -- 0-BASED IN THE IR, 1-BASED FOR A READER (expr.lua:419). Getting this wrong
         -- sends someone to the line above the one that is wrong, which reads as the
         -- tool being confused rather than as an off-by-one.
-        local kline = (at and at.line and (at.line + 1)) or line
+        -- ⚠ THROUGH THE ACCESSOR. This first read `kid.at.start` and `.line` in two
+        -- steps, which slipped past the seam-guard's `%.start%.line` pattern by
+        -- accident — a raw read of a foldable representation is a violation however it
+        -- is spelled, and splitting the expression only hid it.
+        local kline = (kid.at and (atr.sl(kid.at) + 1)) or line
         if kid.k == 'pair' then
             local key = kid.key
             if key and key.k == 'lit' and type(key.v) == 'string' then
@@ -324,6 +329,9 @@ function M.of_module(store, mod_id)
                     p.fields = ovs or {}
                     p.nested = nst or {}
                     p.declared_type, p.name = ty, own
+                    -- keep the literal so a later `data:extend(thatLocal)` can descend
+                    -- into an ARRAY of prototypes (CART-0637 step 2)
+                    p._lit = rhs1
                     p.unreadable_keys = bad
                 end
             end
@@ -409,7 +417,42 @@ function M.of_module(store, mod_id)
                             p.anonymous = true
                         end
                     end
-                    for _, p in ipairs(touched) do p.registered = { line = line } end
+                    for _, p in ipairs(touched) do
+                        -- ── AN ARRAY OF PROTOTYPES IS NOT A PROTOTYPE (CART-0637) ──
+                        -- `local remnants = { {type="corpse",…}, {…} }` then
+                        -- `data:extend(remnants)`. The ELEMENTS are the prototypes and
+                        -- each carries its own `type=`; the array carries none, so the
+                        -- reader recorded ONE untyped record and the whole group went
+                        -- unadjudicated. The inline form `data:extend{{…},{…}}` was
+                        -- already expanded here — this is the same shape one
+                        -- indirection away, and it was the larger half.
+                        --
+                        -- MEASURED over 135 mods: of 162 registered-but-unreadable
+                        -- records, 87 are this. The rest carry no `type=` anywhere
+                        -- inside and are not prototypes at all.
+                        local kids = (not p.declared_type) and p._lit
+                            and p._lit.k == 'table' and p._lit.kids or nil
+                        local made = 0
+                        for _, kid in ipairs(kids or {}) do
+                            if kid.k == 'table' then
+                                local kl = (kid.at and (atr.sl(kid.at) + 1)) or p.line
+                                local ovs, ty, own, bad, nst = literal_fields(kid, kl)
+                                -- ⚠ ONLY IF THE ELEMENT IS ACTUALLY TYPED. Descending
+                                -- into a helper table's rows would mint prototypes out
+                                -- of sound variations and sprite layers — the exact
+                                -- over-counting this ticket exists to remove.
+                                if ty then
+                                    local c = fresh(nil, kl, 'literal')
+                                    c.fields, c.declared_type, c.name = ovs or {}, ty, own
+                                    c.nested, c.unreadable_keys = nst or {}, bad
+                                    c.registered = { line = line }
+                                    made = made + 1
+                                end
+                            end
+                        end
+                        if made > 0 then p.container = made end
+                        p.registered = { line = line }
+                    end
                 elseif d then
                     for _, p in ipairs(touched) do
                         -- 'opaque-call', not 'mutator': we do NOT know it

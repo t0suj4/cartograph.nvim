@@ -2054,7 +2054,7 @@ function M.prototype_diff(store, from, to)
     end
     local res = { from = from, to = to, lost = {}, stale_delete = {}, gone_type = {},
         kept = 0, unknown_prop = 0, unread = {}, hedged = {}, untyped = 0, records = 0,
-        unwalked = 0 }
+        unwalked = 0, unregistered = 0 }
     for _, m in ipairs(protos) do
         for _, p in ipairs(m.protos) do
             res.records = res.records + 1
@@ -2070,13 +2070,40 @@ function M.prototype_diff(store, from, to)
             -- reporting both counts would double-count the same records — 24 + 28
             -- against 54, which reads as more unadjudicable prototypes than exist.
             -- Each record gets exactly one reason.
-            if p.basis == 'literal' and not p.declared_type then
-                res.unread[#res.unread + 1] = { file = m.file, line = p.line,
-                    why = (p.unreadable_keys or 0) > 0
-                        and 'a table literal whose keys are COMPUTED, so the property'
-                            .. ' names are not knowable'
-                        or 'a table literal with no `type=` key, so no prototype owns'
-                            .. ' its properties' }
+            if p.container then
+                -- an ARRAY that held prototypes: its elements were expanded into their
+                -- own records above, so counting the container too would double-count
+                -- the group and then report the container as unadjudicable
+                res.records = res.records - 1
+            elseif p.basis == 'literal' and not p.declared_type then
+                -- ⚠ IS THIS A PROTOTYPE AT ALL? (CART-0637). The reader treats every
+                -- table literal bound to a local in a data-stage file as a prototype
+                -- CANDIDATE, and in a data-stage file most table literals are not
+                -- prototypes — sprite fragments, style tables, colour maps, module
+                -- tables. Counting them as unadjudicable prototypes inflated this
+                -- frontier about TENFOLD: measured over 135 mods / 7386 records, 1536
+                -- unreadable literals of which 1502 NEVER REACHED `data:extend` OR
+                -- `data.raw`. On Von-Neumann it was 20 of 20 — `dataRawTypeList`,
+                -- `recipeCategoryMap`, `animations`, not one a prototype.
+                --
+                -- ★★ AN OVERSTATED LOWER BOUND READS AS CAUTION AND COSTS NOTHING
+                -- VISIBLE, which is why it survived a whole port exercise. It costs
+                -- two things: the instrument looks blinder than it is, and the ~2%
+                -- that IS a real gap is buried under noise nobody can sift.
+                --
+                -- NOT DROPPED, RE-BUCKETED. A literal that should have been
+                -- registered and is not is a real finding of a different kind (dead
+                -- prototype code), and this count is the only place it could surface.
+                if p.registered then
+                    res.unread[#res.unread + 1] = { file = m.file, line = p.line,
+                        why = (p.unreadable_keys or 0) > 0
+                            and 'a table literal whose keys are COMPUTED, so the property'
+                                .. ' names are not knowable'
+                            or 'a table literal with no `type=` key, so no prototype owns'
+                                .. ' its properties' }
+                else
+                    res.unregistered = (res.unregistered or 0) + 1
+                end
             elseif not ty then
                 res.untyped = res.untyped + 1
             elseif pn_a and not pn_b then
@@ -2246,6 +2273,18 @@ function M.prototype_diff_report(store, from, to, opts)
     -- THE LOWER BOUND, stated rather than implied. A data-stage reading that printed
     -- only its findings would read as a clean bill of health for the 24 prototypes it
     -- literally cannot see.
+    -- THE NON-PROTOTYPES, reported OUTSIDE the lower bound and with a name that does
+    -- not call them prototypes (CART-0637). They are not a gap in the reading; they
+    -- are tables this reader speculatively considered and correctly could not type.
+    -- Kept visible because a literal that SHOULD have been registered and is not is a
+    -- real finding of another kind, and this line is the only place it surfaces.
+    if (res.unregistered or 0) > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = ('  (%d table literal(s) in data-stage files never reach'
+            .. ' `data:extend` or `data.raw` — sprite fragments, style tables, module'
+            .. ' tables. NOT prototypes and NOT part of the bound below.)')
+            :format(res.unregistered)
+    end
     if #res.unread > 0 or #res.hedged > 0 or res.untyped > 0
         or (res.unwalked or 0) > 0 then
         L[#L + 1] = ''
@@ -2270,8 +2309,16 @@ function M.prototype_diff_report(store, from, to, opts)
                 :format(res.untyped)
         end
         if #res.hedged > 0 then
-            L[#L + 1] = ('    %d prototype(s) passed to an OPAQUE CALL, which lua'
-                .. ' semantics say may have rewritten anything:'):format(#res.hedged)
+            -- ⚠ "table(s)", NOT "prototype(s)" — the same overclaim CART-0637 fixed
+            -- above, and it CANNOT be filtered the same way. An unregistered literal
+            -- is normally not a prototype, but one passed to an opaque call is
+            -- genuinely ambiguous: THE CALL MAY BE THE REGISTRATION. Measured over
+            -- 135 mods, 11 of 1320 `data:extend` sites sit inside a function, so a
+            -- registration wrapper is rare but real. These stay in the bound.
+            L[#L + 1] = ('    %d table(s) passed to an OPAQUE CALL, which lua semantics'
+                .. ' say may have rewritten anything — and which may itself be the'
+                .. ' registration, so these stay in the bound whether or not a'
+                .. ' `data:extend` was seen:'):format(#res.hedged)
             for i = 1, math.min(4, #res.hedged) do
                 L[#L + 1] = ('      %s:%s via %s'):format(res.hedged[i].file or '?',
                     tostring(res.hedged[i].line or '?'),

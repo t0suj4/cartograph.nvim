@@ -2047,3 +2047,102 @@ test('nested data stage: the reader walks nested literals, arrays transparent',
         'the hr_version line, not the prototype line')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── THE PROTOTYPE POPULATION (CART-0637) ────────────────────────────────────
+
+test('data stage: an unregistered table literal is NOT an unadjudicated prototype',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not (pm.load('lua-factorio-proto-11') and pm.load('lua-factorio-proto-20')) then
+        skip 'both proto profiles are needed'
+    end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local port = require 'cartograph.portability'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/prototypes', 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    w('data.lua', 'require("prototypes.e")\n')
+    -- `helper` is an ordinary table in a data-stage file — a sprite fragment, the
+    -- commonest thing in prototypes/. It has no `type=` and needs none, because it is
+    -- not a prototype. `real` is one, and IS registered.
+    w('prototypes/e.lua', 'local helper = { filename = "a.png", width = 1 }\n'
+        .. 'local real = { type = "lab", name = "x", icon_mipmaps = 4 }\n'
+        .. 'data:extend({ real })\n'
+        .. 'return helper\n')
+    store.ingest(ts.extract(root))
+    local res = assert(port.prototype_diff(store, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20'))
+    -- ★★ THE REGRESSION: `helper` used to land in `unread` and be counted as a
+    -- prototype the reading could not adjudicate. Across 135 real mods that error
+    -- inflated the frontier tenfold — 1502 of 1536 unreadable literals were never
+    -- registered — and on Von-Neumann it was 20 of 20, so the whole declared blind
+    -- spot contained no prototypes at all. AN OVERSTATED LOWER BOUND READS AS
+    -- CAUTION AND COSTS NOTHING VISIBLE, which is why it survived a port exercise.
+    for _, u in ipairs(res.unread) do
+        ok(not (u.line == 1),
+            'an unregistered helper table must not be reported as an unadjudicated'
+            .. ' prototype (line ' .. tostring(u.line) .. ')')
+    end
+    ok((res.unregistered or 0) >= 1,
+        'and it is COUNTED rather than dropped: a literal that should have been'
+        .. ' registered and is not is a finding of another kind')
+    -- the real prototype is still read, and its removed property still found
+    local found = false
+    for _, l in ipairs(res.lost) do if l.prop == 'icon_mipmaps' then found = true end end
+    ok(found, 'the registered prototype is still adjudicated')
+    vim.fn.delete(root, 'rf')
+end)
+
+test('data stage: an ARRAY of prototypes registered by name expands to its elements',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    local pm = require 'cartograph.spec.profile'
+    if not pm.load('lua-factorio-proto-11') then skip 'no proto profile' end
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname(); vim.fn.mkdir(root .. '/prototypes', 'p')
+    local function w(rel, t)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(t); fd:close()
+    end
+    w('info.json', '{"name":"M","version":"1.0","factorio_version":"1.1"}')
+    w('data.lua', 'require("prototypes.e")\n')
+    -- the Accumulator-V2 shape: an array in a local, registered BY NAME. The elements
+    -- carry the type; the array carries none, so it used to be recorded as one
+    -- untyped prototype and the whole group went unadjudicated. `data:extend{{…},{…}}`
+    -- was already expanded — this is the same shape one indirection away.
+    w('prototypes/e.lua', 'local remnants = {\n'
+        .. '  { type = "corpse", name = "a", icon_mipmaps = 4 },\n'
+        .. '  { type = "corpse", name = "b" },\n'
+        .. '}\n'
+        .. 'local sounds = { variations = { { filename = "x.ogg" } } }\n'
+        .. 'data:extend(remnants)\n')
+    store.ingest(ts.extract(root))
+    local protos = require('cartograph.prototypes').all(store)
+    if not protos then skip 'no data stage' end
+    local typed, container = 0, 0
+    for _, m in ipairs(protos) do
+        for _, p in ipairs(m.protos) do
+            if p.declared_type == 'corpse' then typed = typed + 1 end
+            if p.container then container = container + 1 end
+        end
+    end
+    eq(2, typed, 'both elements become typed prototype records of their own')
+    eq(1, container, 'and the array is marked a CONTAINER so it is not counted too')
+    -- ⚠ THE GUARD THAT MATTERS: descending into a helper table would mint prototypes
+    -- out of sound variations and sprite layers — the exact over-counting CART-0637
+    -- exists to remove. An element is expanded ONLY when it declares a type.
+    for _, m in ipairs(protos) do
+        for _, p in ipairs(m.protos) do
+            ok(p.declared_type ~= 'x.ogg', 'no prototype minted from a sound variation')
+        end
+    end
+    vim.fn.delete(root, 'rf')
+end)
