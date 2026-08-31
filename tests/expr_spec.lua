@@ -697,3 +697,63 @@ test('expr: key() handles an ASSIGN node, whose `t` is a TARGET and not a type s
     local ok2, key2 = pcall(expr.key, weird)
     assert(ok2, 'the generic branch must not assume `t` is a string: ' .. tostring(key2))
 end)
+
+test('expr: an INTERPOLATED string is not a literal — its reads reach the IR', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'bash') then skip 'no bash parser' end
+    -- ★★ CART-0665. `"$prefix-${n}"` is a bash `string` whose kids are a simple_expansion
+    -- and an expansion — two variable READS — and the literal branch returned
+    -- `{k='lit'}` and dropped them. Measured on the pinned bash corpus: 17360 strings,
+    -- 13287 simple_expansions, 4011 expansions, none reaching the IR. Fixing it took the
+    -- expression census from 5029 disagreements to 1047, and ruby from 336 to 67.
+    local expr = require 'cartograph.expr'
+    local src = 'x="$prefix-${n}"\n'
+    local parser = vim.treesitter.get_string_parser(src, 'bash')
+    local root = parser:parse()[1]:root()
+    local strnode
+    local function find(n)
+        if n:type() == 'string' then strnode = strnode or n end
+        for c in n:iter_children() do if c:named() then find(c) end end
+    end
+    find(root)
+    ok(strnode ~= nil, 'the fixture has a string node')
+    local e = expr.build(strnode, src, 'bash')
+    ok(e.k ~= 'lit', 'an interpolated string must NOT be a literal, got k=' .. tostring(e.k))
+    local acc = {}
+    expr.dotted_reads(e, acc)
+    local names = {}
+    local function collect(x)
+        if x.k == 'name' then names[x.n] = true end
+        for _, c in ipairs(x.kids or {}) do collect(c) end
+        if x.b then collect(x.b) end
+    end
+    collect(e)
+    ok(names['prefix'], 'the simple_expansion $prefix is a read: ' .. vim.inspect(names))
+    ok(names['n'], 'and so is the ${n} expansion')
+end)
+
+test('expr: a string with no expression in it is STILL a literal', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    -- ⚠ THE OTHER DIRECTION, and it is what keeps the rule from being a bash shim: the
+    -- test is the KIDS, not the language. A lua string's only named child is
+    -- string_content, so it stays a literal and const-folding keeps working. A
+    -- per-language list of interpolation node names would be one more place to forget a
+    -- grammar — the failure tools/langaudit.lua exists for.
+    local expr = require 'cartograph.expr'
+    local src = 'local s = "plain text"\n'
+    local parser = vim.treesitter.get_string_parser(src, 'lua')
+    local root = parser:parse()[1]:root()
+    local strnode
+    local function find(n)
+        if n:type() == 'string' then strnode = strnode or n end
+        for c in n:iter_children() do if c:named() then find(c) end end
+    end
+    find(root)
+    ok(strnode ~= nil, 'the fixture has a string node')
+    local e = expr.build(strnode, src, 'lua')
+    eq('lit', e.k, 'an inert string is still a literal')
+    eq('str', e.ty)
+end)

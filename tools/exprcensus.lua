@@ -306,18 +306,31 @@ end
 -- which is flat in COUNT and strictly better in KIND (a two-sided disagreement became
 -- one-sided). Every other pinned corpus unmoved.
 M.EXPECTED = {
-    bash = { total = 5029, ['missing:command'] = 1133, ['missing:variable_assignment'] = 898,
-        ['missing:if_statement'] = 831, ['missing:list'] = 557,
-        ['binder:declaration_command'] = 370, ['missing:declaration_command'] = 265,
-        ['missing:elif_clause'] = 218, ['missing:case_item'] = 199,
-        ['missing:redirected_statement'] = 180, ['missing:test_command'] = 94,
-        ['missing:c_style_for_statement'] = 88, ['missing:do_group'] = 83,
-        ['missing:case_statement'] = 62, ['missing:for_statement'] = 10,
-        ['missing:string'] = 9, ['both:declaration_command'] = 8, ['both:if_statement'] = 7,
-        ['missing:pipeline'] = 6, ['both:elif_clause'] = 3, ['missing:negated_command'] = 2,
-        ['missing:while_statement'] = 2, ['binder:while_statement'] = 1,
-        ['both:redirected_statement'] = 1, ['missing:command_substitution'] = 1,
-        ['missing:variable_assignments'] = 1 },
+    -- recalib 2026-09-01 (AN INTERPOLATED STRING IS NOT A LITERAL, CART-0665): 5029 ->
+    -- 1047, a 79% fall from ONE change. `"$prefix-${n}"` is a bash `string` whose kids are
+    -- a simple_expansion and an expansion — two variable READS — and the literal branch
+    -- returned {k='lit'} and dropped them. 17360 strings, 13287 simple_expansions and 4011
+    -- expansions on this corpus never reached the IR.
+    --
+    -- ★★ AND THE CENSUS'S OWN RANKING NAMED THE CONTAINER, NOT THE CAUSE. Its top row was
+    -- `missing:command` at 1133, and CART-0665 said to model `command` first because in
+    -- bash a command IS the fundamental expression form. That would have been the wrong
+    -- move: command went 1133 -> 0 with nothing touching commands, because the reads it was
+    -- losing were inside the STRINGS its arguments are made of. A disagreement is attributed
+    -- to the enclosing ROW's node type, so this list ranks containers — tools/gramdiff.lua
+    -- reaches the same gap from the GRAMMAR side and named string / simple_expansion /
+    -- expansion outright. Two instruments, and only the second one pointed at the cause.
+    bash = { total = 1047, ['binder:declaration_command'] = 378,
+        ['missing:case_item'] = 199, ['missing:if_statement'] = 137,
+        ['missing:list'] = 119, ['missing:c_style_for_statement'] = 88,
+        ['missing:test_command'] = 23, ['binder:elif_clause'] = 22,
+        ['extra:if_statement'] = 19, ['missing:variable_assignment'] = 17,
+        ['missing:case_statement'] = 15, ['missing:elif_clause'] = 12,
+        ['missing:do_group'] = 4, ['missing:redirected_statement'] = 4,
+        ['both:if_statement'] = 3, ['binder:if_statement'] = 2,
+        ['binder:redirected_statement'] = 1, ['binder:while_statement'] = 1,
+        ['both:elif_clause'] = 1, ['extra:elif_clause'] = 1,
+        ['missing:while_statement'] = 1 },
     -- ★ RE-PINNED @ CART-0404's C/C++ half: `binder:declaration` cpp 110 -> 1 and
     -- cppmodern 106 -> 1, `both:declaration` GONE. TWO defects, both C++-only shapes that a
     -- set written against C could not have: a REFERENCE declarator (`Config &c = x;`), and a
@@ -404,22 +417,28 @@ M.EXPECTED = {
         ['missing:foreach_statement'] = 139, ['missing:expression_statement'] = 103,
         ['missing:return_statement'] = 31, ['missing:if_statement'] = 5,
         ['missing:echo_statement'] = 2 },
-    python = { total = 7, ['binder:expression_statement'] = 3, ['missing:expression_statement'] = 3,
+    -- recalib 2026-09-01 (AN INTERPOLATED STRING IS NOT A LITERAL, CART-0665): the change
+    -- was made for bash and every interpolating language gained from it, which is the tell
+    -- that it is a rule and not a bash shim.
+    -- python 7 -> 4: an f-string's `interpolation` kid now yields its reads.
+    python = { total = 4, ['binder:expression_statement'] = 3,
         ['missing:subscript'] = 1 },
     -- recalib @ CART-0405: as ruby.
-    rails = { total = 463, ['missing:assignment'] = 148, ['missing:call'] = 138, ['missing:string'] = 83,
-        ['missing:binary'] = 39, ['missing:conditional'] = 28,
-        ['missing:operator_assignment'] = 11, ['missing:if'] = 4, ['missing:hash'] = 3,
-        ['missing:return'] = 3, ['missing:heredoc_body'] = 2, ['missing:if_modifier'] = 1,
-        ['missing:unary'] = 1, ['missing:while_modifier'] = 1, ['missing:yield'] = 1 },
+    -- rails 463 -> 32, the largest fall of any corpus here: ruby interpolation is
+    -- everywhere in a rails app, and `missing:string` 83 -> 0 took `assignment` and `call`
+    -- with it — the reads were inside the strings those rows are made of.
+    rails = { total = 32, ['missing:conditional'] = 28, ['missing:assignment'] = 2,
+        ['missing:call'] = 1, ['missing:while_modifier'] = 1 },
     -- recalib @ CART-0405: as ruby.
-    rspec = { total = 10, ['missing:assignment'] = 5, ['missing:call'] = 4, ['missing:string'] = 1 },
+    -- rspec 10 -> 0. A census reaching zero is worth pausing on rather than celebrating:
+    -- it means every row this corpus has, the IR and du now agree about — not that the
+    -- corpus is fully modelled.
+    rspec = { total = 0 },
     -- recalib @ CART-0405: the `begin` head no longer harvests its own body (see libs).
-    ruby = { total = 336, ['missing:call'] = 130, ['missing:conditional'] = 61, ['missing:assignment'] = 56,
-        ['missing:string'] = 52, ['missing:binary'] = 25, ['missing:unary'] = 3,
-        ['missing:array'] = 2, ['missing:operator_assignment'] = 2,
-        ['missing:unless_modifier'] = 2, ['missing:hash'] = 1, ['missing:return'] = 1,
-        ['missing:while_modifier'] = 1 },
+    -- ruby 336 -> 67: `missing:string` 52 -> 0 and the rows it was hiding inside went
+    -- with it (call 130 -> 0, assignment 56 -> 4, binary 25 -> 0).
+    ruby = { total = 67, ['missing:conditional'] = 61, ['missing:assignment'] = 4,
+        ['missing:hash'] = 1, ['missing:while_modifier'] = 1 },
     rust = { total = 828, ['missing:match_arm'] = 479, ['missing:let_declaration'] = 123,
         ['extra:match_block'] = 73, ['extra:match_expression'] = 72,
         ['missing:attribute_item'] = 35, ['missing:const_item'] = 16,

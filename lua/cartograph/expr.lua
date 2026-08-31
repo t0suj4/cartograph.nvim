@@ -78,6 +78,15 @@ local LIT = { number = 'num', integer = 'num', float = 'num', string = 'str',
     string_literal = 'str', true_ = 'bool', ['true'] = 'bool', ['false'] = 'bool',
     boolean = 'bool', ['nil'] = 'nil', null = 'nil' }
 local NAME = { identifier = true, name = true }
+-- THE PARTS OF A STRING THAT CARRY NO EXPRESSION. Everything else nested in a string node
+-- is one — see the interpolation note in build_core. Named per grammar because these are
+-- the pieces themselves, not a list of the languages that interpolate:
+--   string_content / string_fragment   the text between the quotes (bash, lua, js, python)
+--   escape_sequence                    \n and friends
+--   string_start / string_end          python's f-string delimiters, which are NAMED
+local STRING_INERT = { string_content = true, string_fragment = true,
+    escape_sequence = true, string_start = true, string_end = true,
+    raw_string_content = true }
 -- LANGUAGE COVERAGE IS PARTIAL, AND JAVA IS ESSENTIALLY UNMODELLED. Measured
 -- 2026-07-26 on 200 java functions from the elasticsearch libs corpus: 766 rows
 -- carrying expressions, 2074 OPAQUE (`?`) nodes, ZERO field nodes, zero dotted
@@ -429,6 +438,31 @@ function build_core(node, src, lang)
         if n == 1 then return build(only, src, lang) end
     end
     local lty = LIT[t]
+    -- ★★ AN INTERPOLATED STRING IS NOT A LITERAL, AND CALLING IT ONE DISCARDS EVERY READ
+    -- INSIDE IT. `"$prefix-${n}"` in bash is a `string` node whose kids are a
+    -- simple_expansion and an expansion — two variable READS — and the literal branch
+    -- returned `{k='lit'}` and dropped them. Measured on the pinned bash corpus: 17360
+    -- `string` nodes, 13287 simple_expansions, 4011 expansions, none of them reaching the
+    -- expression IR. The same shape is a python f-string and a ruby/js interpolation.
+    --
+    -- ⚠ THE TEST IS THE KIDS, NOT A LANGUAGE LIST. A string is inert when its named
+    -- children are only content and escapes; anything else in there is an expression the
+    -- grammar chose to nest, and it is a read whatever the language calls it. A
+    -- per-language list of interpolation node names would be one more place to forget
+    -- bash — the failure tools/langaudit.lua exists for.
+    if lty == 'str' then
+        local interp = nil
+        for c in node:iter_children() do
+            if c:named() and not tsutil.is_comment(c) and not STRING_INERT[c:type()] then
+                interp = interp or {}
+                interp[#interp + 1] = build(c, src, lang)
+            end
+        end
+        -- kept as the honest unknown WITH ITS KIDS, not as a fabricated concat: what the
+        -- pieces mean together is the language's business, and every kids-walker (reads,
+        -- vars, dotted_reads) sees the reads either way
+        if interp then return { k = '?', t = t, kids = interp } end
+    end
     if lty then
         local v
         if lty == 'num' then v = tonumber((txt(node, src)))
