@@ -104,15 +104,34 @@ local function literal(e)
     return v, nil
 end
 
---- `data.raw[<type>][<name>]` → type, name. Returns nil unless BOTH indices are
---- string literals and the chain is rooted at the adapter's base_root: a computed
---- index names a prototype we cannot identify, and a hedged guess is worse than
---- an honest nil.
+--- `data.raw[<type>][<name>]` → type, name. The chain must be rooted at the adapter's
+--- base_root and the TYPE must be readable; the NAME may be nil.
+---
+--- ⚠ IT USED TO REQUIRE BOTH, AND A SITE THAT FAILED PRODUCED NO RECORD AT ALL — not an
+--- anonymous one, an ABSENT one (CART-0648). The mod's whole data-stage activity then
+--- reads as silence: Squeak Through patches `data.raw[t][n].collision_box` in a loop over
+--- 27 type names and the report says "5 prototypes read, 0 findings", which is true of
+--- what it saw and false about the mod.
+---
+--- Censused over the 31 unpacked 1.1 mods, 219 `data.raw[TYPE][NAME]` sites:
+---     122   type LITERAL, name a variable      <- the type alone types the record, and
+---                                                 every property check works on it
+---      41   both variables
+---      37   both literal                       <- what was handled
+---       8   type literal, name a field chain
+---       5   both field chains                  <- Squeak Through
+--- So the dominant unresolved shape KNOWS ITS TYPE, which is all the property
+--- adjudication needs. The name is what a supply/demand join needs, and that is a
+--- separate and honestly-absent fact rather than a reason to discard the record.
+---
+--- ★ THE TYPE IS STILL REQUIRED. Without it there is no owner to check properties
+--- against, and minting a record typed by nothing would put rows in the diff that no
+--- version can adjudicate — the caller counts those sites instead.
 local function base_ref(e, ad)
-    if not e or e.k ~= 'index' then return nil end
-    local nm = literal(e.i)
+    if not e or (e.k ~= 'index' and e.k ~= 'field') then return nil end
+    local nm = e.k == 'field' and e.n or literal(e.i)
     local outer = e.b
-    if not (nm and outer) then return nil end
+    if not outer then return nil end
     -- the TYPE segment is written either way in real mods, and both forms appear
     -- in one file: data.raw["logistic-container"][n] and data.raw.item[n]. Reading
     -- only the bracket form left 12 of Von-Neumann's prototypes basis='unknown'.
@@ -416,7 +435,11 @@ function M.of_module(store, mod_id)
                         local ty, nm = base_ref(cur, ad)
                         if ty then
                             local pp = fresh(nil, line, 'patch')
-                            pp.patch = { type = ty, name = nm }
+                            -- `name` may be nil: the type is what the property check
+                            -- needs, the name is what a cross-package join needs, and
+                            -- they are separately knowable (CART-0648).
+                            pp.patch = { type = ty, name = nm,
+                                name_computed = nm == nil or nil }
                             local v, why = literal((e.rhs or {})[1])
                             -- reverse in place (the walk collected outermost
                             -- first). math.floor, not `//`: luajit is 5.1.
@@ -728,10 +751,11 @@ function M.report(store)
         out[#out + 1] = m.file
         for _, p in ipairs(m.protos) do
             local what = p.var or (p.patch and ('%s/%s (in place)'):format(
-                p.patch.type, p.patch.name)) or '(anonymous)'
+                tostring(p.patch.type), p.patch.name or '<computed>')) or '(anonymous)'
             local line = ('  %-4d %-28s [%s]'):format(p.line, what, p.basis)
             if p.base then
-                line = line .. (' <- %s/%s'):format(p.base.type, p.base.name)
+                line = line .. (' <- %s/%s'):format(tostring(p.base.type),
+                    p.base.name or '<computed>')
             elseif p.from_path then
                 line = line .. (' <- %s (unresolved)'):format(p.from_path)
             end

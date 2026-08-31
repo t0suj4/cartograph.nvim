@@ -2572,3 +2572,30 @@ test('portability: the FORM diff is sharp — exactly two concepts lose one, cor
         a.concept_union['IngredientPrototype'],
         'IngredientPrototype names its alternatives, so the form check can descend')
 end)
+
+test('portability: a patch whose NAME is computed is still typed, not discarded',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ★ CART-0648. `base_ref` required BOTH the type and the name to be string literals,
+    -- and a site that failed produced no record AT ALL — not an anonymous one, an ABSENT
+    -- one. Censused over the 31 unpacked 1.1 mods, the dominant unresolved shape is
+    -- `data.raw["equipment-grid"][x]`: 122 of 219 sites have a LITERAL TYPE and a
+    -- variable name, and the type alone is everything the property check needs. Relaxing
+    -- it recovered 129 previously-invisible records corpus-wide.
+    local st = factorio_store(table.concat({
+        'local n = some_name()',
+        'data.raw["container"][n].vehicle_impact_sound = { filename = "x.ogg" }',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    -- vehicle_impact_sound is on ContainerPrototype in 1.1 and not in 2.0, so the write
+    -- is a finding — reachable ONLY because the record exists at all now
+    local hit
+    for _, e in ipairs(res.lost) do
+        if e.prop == 'vehicle_impact_sound' then hit = e end
+    end
+    ok(hit ~= nil, 'the write is adjudicated against the type, though the name is unknown')
+    eq('container', hit.typename, 'and it is typed by the literal index')
+    vim.fn.delete(proto_tmp, 'rf')
+end)
