@@ -2442,7 +2442,7 @@ end
 --- longer accepts a form it used to; it does not read the literal the mod actually
 --- wrote. A mod already using the struct form gets a row it can dismiss at a glance,
 --- which is the right trade against missing a load failure.
-local function note_form_loss(res, fa, fb, ta, tb, path, ty, file, line)
+local function note_form_loss(res, fa, fb, ta, tb, path, ty, file, line, elems)
     if not (ta and tb) then return end
     local ca, cb = form_closure(fa, ta), form_closure(fb, tb)
     for name in pairs(ca) do
@@ -2455,9 +2455,26 @@ local function note_form_loss(res, fa, fb, ta, tb, path, ty, file, line)
                         local key = tostring(file) .. '|' .. tostring(line) .. '|'
                             .. tostring(path) .. '|' .. name .. '|' .. form
                         res._formseen = res._formseen or {}
+                        -- ★ THE WRITTEN LITERAL DISCHARGES THE ROW (CART-0660). The type
+                        -- stopped accepting a form; whether THIS site used it is a fact
+                        -- about the value, and `elems` is that fact. A site already in
+                        -- the surviving form is DONE — counted, never listed — which is
+                        -- what turns this axis from a standing hedge into a worklist
+                        -- that goes to zero. Von Neumann finished its port with two rows
+                        -- that could never clear, both already struct.
+                        -- 'empty' discharges for the same reason 'struct' does: no
+                        -- element is written in the losing form because none is written
+                        -- at all.
+                        if elems and elems ~= form and elems ~= 'mixed' then
+                            res.form_ok = res.form_ok + 1
+                            goto next_form
+                        end
                         if not res._formseen[key] then
                             res._formseen[key] = true
                             res.form_lost[#res.form_lost + 1] = { prop = path,
+                                -- and when the literal IS the losing form, this stops
+                                -- being a site to check and becomes a defect
+                                confirmed = elems == form or nil,
                                 typename = ty, file = file, line = line,
                                 concept = name, form = form,
                                 keeps = (function ()
@@ -2466,6 +2483,7 @@ local function note_form_loss(res, fa, fb, ta, tb, path, ty, file, line)
                                     table.sort(k); return table.concat(k, ', ')
                                 end)() }
                         end
+                        ::next_form::
                     end
                 end
             end
@@ -2477,12 +2495,13 @@ end
 --- `prop_type` lookup: the table keys by the DECLARING owner, so an inherited property
 --- (most of EntityPrototype's) returns nil from a flat read and would be skipped
 --- silently — the floor would look like the population.
-local function note_type_move(res, fa, fb, oa, ob, prop, path, ty, file, line)
+local function note_type_move(res, fa, fb, oa, ob, prop, path, ty, file, line, elems,
+        keys, value)
     if not (oa and ob and prop) then return end
     local ta, tb = hop_type(fa, oa, prop), hop_type(fb, ob, prop)
     -- THE FORM CHECK RUNS EVEN WHEN THE TYPE NAME IS UNCHANGED, and that is the whole
     -- point of it: `ingredients` is `IngredientPrototype` on both sides.
-    note_form_loss(res, fa, fb, ta, tb, path, ty, file, line)
+    note_form_loss(res, fa, fb, ta, tb, path, ty, file, line, elems)
     if not (ta and tb) or ta == tb then return end
     local cls, key = classify_move(res, fa, fb, ta, tb)
     local tm = res.type_move
@@ -2491,10 +2510,36 @@ local function note_type_move(res, fa, fb, oa, ob, prop, path, ty, file, line)
         tm.opaque[key] = (tm.opaque[key] or 0) + 1
         return
     end
+    -- ★ THE WRITTEN VALUE DISCHARGES THIS ROW TOO (CART-0660, second half). A type moved;
+    -- whether THIS site still writes the old shape is a fact about the value, and the
+    -- reader records the value's own top-level KEYS. `collision_mask = {"item-layer", …}`
+    -- has none and 2.0's CollisionMaskConnector requires `layers`; the ported form has
+    -- `{layers}` and needs nothing. Without this the row survives a finished port, and an
+    -- axis that cannot be discharged gets ignored.
+    --
+    -- ⚠ UNKNOWN IS NOT MIGRATED. `keys` is nil whenever the value is not a table the
+    -- reader could see into, and those keep their row — discharging on absence would
+    -- clear exactly the sites whose literals cannot be read.
+    local pb = M.type_props(fb, tb)
+    local target_keyed = pb ~= nil and next(pb) ~= nil
+    local verdict
+    if keys then
+        if target_keyed then
+            local hit = false
+            for _, k in ipairs(keys) do if pb[k] then hit = true break end end
+            verdict = hit and 'migrated' or 'confirmed'
+        else
+            verdict = 'confirmed' -- a table where the target now wants a scalar
+        end
+    elseif value ~= nil and not target_keyed then
+        verdict = 'migrated'      -- a scalar where the target wants one
+    end
+    if verdict == 'migrated' then tm.migrated = tm.migrated + 1; return end
     local list = tm[cls.kind]
     if #list >= 24 then tm.elided = tm.elided + 1; return end
     list[#list + 1] = { prop = path or prop, typename = ty, file = file, line = line,
-        from = ta, to = tb, lost = cls.lost, gained = cls.gained }
+        from = ta, to = tb, lost = cls.lost, gained = cls.gained,
+        confirmed = verdict == 'confirmed' or nil }
 end
 
 local function note_unknown(res, prop, typename, file, line)
@@ -2583,9 +2628,9 @@ function M.prototype_diff(store, from, to)
         declared = 0, edited = 0, edited_computed = 0,
         kept = 0, unknown_prop = 0, target_only = 0, opaque_owner = 0,
         unknown_sample = {},
-        type_move = { sites = 0, elided = 0, opaque = {}, kind = {}, structure = {},
-            renamed = {} },
-        form_lost = {}, union_lost = {}, union_partial = {},
+        type_move = { sites = 0, elided = 0, migrated = 0, opaque = {}, kind = {},
+            structure = {}, renamed = {} },
+        form_lost = {}, form_ok = 0, union_lost = {}, union_partial = {},
         unread = {}, hedged = {}, untyped = 0, records = 0,
         unwalked = 0, unregistered = 0 }
     -- ONE ROW PER REMOVED HOP, not one per leaf beneath it (CART-0642). A removed
@@ -2752,7 +2797,7 @@ function M.prototype_diff(store, from, to)
                                 elseif ia then
                                     res.kept = res.kept + 1
                                     note_type_move(res, a, b, det.a, det.b, det.prop,
-                                        ov.path, ty, m.file, ov.line)
+                                        ov.path, ty, m.file, ov.line, ov.elems, ov.keys, ov.value)
                                 elseif ib then res.target_only = res.target_only + 1
                                 else note_unknown(res, ov.path, ty, m.file, ov.line) end
                                 handled = true
@@ -2800,7 +2845,7 @@ function M.prototype_diff(store, from, to)
                         elseif in_a then
                             res.kept = res.kept + 1
                             note_type_move(res, a, b, pn_a, pn_b, prop, ov.path, ty,
-                                m.file, ov.line)
+                                m.file, ov.line, ov.elems, ov.keys, ov.value)
                         elseif in_b then
                             -- ALREADY MIGRATED: in the target, not in the origin.
                             res.target_only = res.target_only + 1
@@ -2933,7 +2978,7 @@ function M.prototype_diff(store, from, to)
                             elseif ia then
                                 res.kept = res.kept + 1
                                 note_type_move(res, a, b, ta, tb, pa, ov.path, ty,
-                                    m.file, ov.line)
+                                    m.file, ov.line, ov.elems, ov.keys, ov.value)
                             elseif ib then res.target_only = res.target_only + 1
                             else note_unknown(res, ov.path, ty, m.file, ov.line) end
                         else
@@ -2978,16 +3023,28 @@ function M.prototype_diff_report(store, from, to, opts)
             .. ' that keeps it does not load. ⚠ A SITE TO CHECK, NOT A PROVEN DEFECT:'
             .. ' this reads the declared type, not the literal, so code already using'
             .. ' the new form gets a row it can dismiss at a glance.', '    '))
+        table.sort(res.form_lost, function (x, y)
+            if (x.confirmed and 1 or 0) ~= (y.confirmed and 1 or 0) then
+                return x.confirmed and true or false
+            end
+            return (x.file or '') .. tostring(x.line) < (y.file or '') .. tostring(y.line)
+        end)
         for i = 1, math.min(12, #res.form_lost) do
             local e = res.form_lost[i]
-            L[#L + 1] = ('    %-24s %-18s %s:%s'):format(e.prop, tostring(e.typename),
-                e.file or '?', tostring(e.line or '?'))
+            L[#L + 1] = ('    %-24s %-18s %s:%s%s'):format(e.prop, tostring(e.typename),
+                e.file or '?', tostring(e.line or '?'),
+                e.confirmed and '   ⚠ THE LITERAL IS THE LOSING FORM' or '')
             L[#L + 1] = ('        %s lost the %s form (keeps %s)'):format(e.concept,
                 e.form, e.keeps)
         end
         if #res.form_lost > 12 then
             L[#L + 1] = ('    … and %d more'):format(#res.form_lost - 12)
         end
+    end
+    if res.form_ok > 0 then
+        L[#L + 1] = ('    (%d further site(s) write a property whose type lost a form,'
+            .. ' and the literal there is ALREADY the surviving one — done, not listed)')
+            :format(res.form_ok)
     end
     local tm = res.type_move
     if tm and tm.sites > 0 then
@@ -2998,8 +3055,9 @@ function M.prototype_diff_report(store, from, to, opts)
                 note, '      '))
             for i = 1, math.min(8, #list) do
                 local e = list[i]
-                L[#L + 1] = ('      %-30s %-20s %s:%s'):format(e.prop,
-                    tostring(e.typename), e.file or '?', tostring(e.line or '?'))
+                L[#L + 1] = ('      %-30s %-20s %s:%s%s'):format(e.prop,
+                    tostring(e.typename), e.file or '?', tostring(e.line or '?'),
+                    e.confirmed and '   ⚠ STILL THE OLD SHAPE' or '')
                 -- ⚠ CAP THE NAME LISTS. `RotatedSprite ->
                 -- RollingStockRotatedSlopedGraphics` loses 34 names and gains 4,
                 -- because the new type WRAPS the old one — printed in full it is a
@@ -3038,6 +3096,11 @@ function M.prototype_diff_report(store, from, to, opts)
                 ('%s -> %s and the two carry an identical property set, so there is'
                     .. ' nothing to do. A real answer, not a frontier.'):format(
                     tm.renamed[1].from, tm.renamed[1].to), '      '))
+        end
+        if tm.migrated > 0 then
+            L[#L + 1] = ('    (%d further site(s) whose property type moved write a value'
+                .. ' that ALREADY has the target\'s shape — done, not listed)')
+                :format(tm.migrated)
         end
         if tm.elided > 0 then
             L[#L + 1] = ('    (%d further type-move site(s) not kept: the listed'

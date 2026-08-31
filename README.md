@@ -2073,10 +2073,22 @@ load.** The distiller now records each concept's union alternatives and the stru
 
 **The signal is exactly this sharp:** across the 336 concepts both versions declare,
 precisely **two** lose a form — `ItemIngredientPrototype` and `ItemProductPrototype`,
-both the tuple — so unlike every other axis here it needs no suppression rule. Across
-the 31 unpacked 1.1 mods it finds **595 sites in 22 of them**. It reads the declared
-type, not the literal, so code already using the struct form gets a row it can dismiss
-at a glance — a site to check, not a proven defect.
+both the tuple — so unlike every other axis here it needs no suppression rule.
+
+And the row is **discharged by the literal that was written**. The type stopped accepting
+a form; whether *this* site used it is a fact about the value, and the reader records
+that one property of it:
+
+```
+    ingredients   recipe   assembling-machine.lua:74   ⚠ THE LITERAL IS THE LOSING FORM
+        ItemIngredientPrototype lost the tuple form (keeps struct)
+    (2 further site(s) … the literal there is ALREADY the surviving one — done, not listed)
+```
+
+Across the 31 mods that turns **595 sites into 74 listed — 44 of them confirmed** — and
+529 discharged. A site whose value the reader *cannot* see stays listed and unconfirmed:
+discharging on absence would clear rows on exactly the mods whose literals cannot be
+read, which is the failure this file keeps fencing.
 
 ### When the property stays and its type moves
 
@@ -2097,7 +2109,14 @@ So the unit is the *move*, classified from `type_props` and nothing hand-written
 | **renamed** | both are structures with an identical property set — a pure rename, **no work**, and saying so is a real answer | 52 |
 | **opaque** | neither models a property, so nothing structural is expressible | 895 |
 
-Only the first two list sites. `opaque` prints as move pairs with counts —
+Only the first two list sites — and each row is **discharged by the keys the value was
+written with**, the same way a form-loss row is. `collision_mask` is an array of
+layer-name strings in 1.1 and `{layers = …}` in 2.0; a site that already writes `layers`
+is done and is counted rather than printed, and a site that does not is marked
+`⚠ STILL THE OLD SHAPE` instead of being left as a hedge. Across the 31 mods that leaves
+**78 listed of which 55 are confirmed**, plus 15 discharged.
+
+`opaque` prints as move pairs with counts —
 `bool → boolean ×716`, `IngredientPrototype → ResearchIngredient ×149`,
 `uint8 → uint16 ×13` — because a narrowing like `uint32 → uint8` must stay visible
 without printing 700 rows. **Opaque is not "harmless":** a union the distiller flattened

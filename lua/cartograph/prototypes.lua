@@ -252,6 +252,64 @@ local function nested_walk(e, prefix, depth, out, line)
     end
 end
 
+--- THE FORM OF A TABLE LITERAL'S ELEMENTS, one level deep (CART-0660). Four answers and
+--- no more: 'struct' when every element table carries named keys, 'tuple' when every one
+--- is positional, 'mixed', and nil when the value is not an array of tables at all — in
+--- which case the question does not apply and must not be answered.
+---
+--- ★ WHY A READER FIELD AND NOT A REPORT ONE: the data-stage diff can say a TYPE stopped
+--- accepting the tuple form (2.0's ItemIngredientPrototype), but it reads the declared
+--- type and never the written literal, so it cannot tell a site already ported from one
+--- that still needs it. Von Neumann finished its port with two such rows that would never
+--- clear, both already in the struct form. `literal()` answers `nil, 'table'` for a table
+--- — the value is deliberately not retained — so this records the ONE property of the
+--- value the version question needs, and nothing else.
+local function elem_form(e)
+    if not (e and e.k == 'table') then return nil end
+    local struct, tuple, n = 0, 0, 0
+    for _, kid in ipairs(e.kids or {}) do
+        if kid.k == 'table' then
+            n = n + 1
+            local keyed = false
+            for _, g in ipairs(kid.kids or {}) do
+                if g.k == 'pair' then keyed = true break end
+            end
+            if keyed then struct = struct + 1 else tuple = tuple + 1 end
+        end
+    end
+    -- ⚠ AN EMPTY TABLE IS NOT AN UNKNOWN ONE. `ingredients = {}` writes no element in
+    -- EITHER form, so a form the target dropped cannot be present — it is dischargeable,
+    -- and returning nil for it left rows standing on a value the reader could see
+    -- perfectly well. A table with kids but no element TABLES is different: the question
+    -- does not apply there, and nil is the right answer.
+    if n == 0 then
+        return (#(e.kids or {}) == 0) and 'empty' or nil
+    end
+    if tuple == 0 then return 'struct' end
+    if struct == 0 then return 'tuple' end
+    return 'mixed'
+end
+
+--- THE TOP-LEVEL KEYS OF A TABLE LITERAL, sorted and capped (CART-0660, second half).
+--- `elem_form` answers about a table's ELEMENTS; this answers about its own KEYS, and the
+--- two questions are different. A TYPE-MOVE row asks whether the written value already
+--- has the shape the target declares — `collision_mask = {"item-layer", …}` is positional
+--- where 2.0's CollisionMaskConnector requires `layers` — and only the key set can say.
+--- nil when the value is not a table, so absence never reads as "no keys".
+local function key_names(e)
+    if not (e and e.k == 'table') then return nil end
+    local out = {}
+    for _, kid in ipairs(e.kids or {}) do
+        if kid.k == 'pair' and kid.key and kid.key.k == 'lit'
+            and type(kid.key.v) == 'string' and #out < 24 then
+            local k = kid.key.v:gsub('^([\'"])(.*)%1$', '%2')
+            out[#out + 1] = k
+        end
+    end
+    table.sort(out)
+    return out
+end
+
 local function literal_fields(e, line)
     if not (e and e.k == 'table') then return nil end
     local ovs, ty, own, unreadable = {}, nil, nil, 0
@@ -263,7 +321,8 @@ local function literal_fields(e, line)
                 local prop = key.v
                 local v, why = literal(kid.val)
                 ovs[#ovs + 1] = { path = prop, value = v, why = why, line = line,
-                    ty = kid.val and kid.val.ty or nil }
+                    ty = kid.val and kid.val.ty or nil,
+                    elems = elem_form(kid.val), keys = key_names(kid.val) }
                 if prop == 'type' and v then ty = v end
                 if prop == 'name' and v then own = v end
                 if kid.val and kid.val.k == 'table' then
@@ -288,7 +347,10 @@ end
 ---   base       { type, name } it was copied from, or nil (a literal / unknown)
 ---   basis      'copy' | 'literal' | 'patch' | 'unknown'
 ---   patch      { type, name } when this OVERRIDES an existing prototype in place
----   overrides  ordered { path, value, ty, why, line } — MUTATIONS after construction
+---   overrides  ordered { path, value, ty, why, line, elems } — MUTATIONS after
+---              construction. `elems` is the element FORM of a table value
+---              ('struct'/'tuple'/'mixed') and `keys` its own top-level key names —
+---              the two properties of a value the version questions need (CART-0660)
 ---   fields     a LITERAL's own constructor entries, same shape (CART-0220). Kept
 ---              separate from `overrides` because they are construction, not mutation
 ---   declared_type  the literal's own `type=` — its discriminator, as `base.type` is
@@ -407,7 +469,9 @@ function M.of_module(store, mod_id)
                     local v, why = literal((e.rhs or {})[1])
                     p.overrides[#p.overrides + 1] = { path = path, value = v,
                         ty = (e.rhs or {})[1] and (e.rhs or {})[1].ty or nil,
-                        why = why, line = line }
+                        why = why, line = line,
+                        elems = elem_form((e.rhs or {})[1]),
+                        keys = key_names((e.rhs or {})[1]) }
                     if path == 'name' and v then p.name = v end
                 elseif l.k == 'index' and l.b and l.b.k == 'name' and by_var[l.b.n]
                     and (e.rhs or {})[1] and (e.rhs or {})[1].k == 'table' then

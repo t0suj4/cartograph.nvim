@@ -2633,3 +2633,80 @@ test('portability: declaring a prototype and editing someone else\'s are counted
     eq('wooden-chest', edited_row.edits, 'and names the target it edits')
     ok(own_row ~= nil, 'while a finding on the mod\'s OWN prototype carries no marker')
 end)
+
+test('portability: a form-loss row is DISCHARGED by the literal that was written',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ★ CART-0660. Every other data-stage axis goes to zero when a port is finished;
+    -- this one could not. It reads the property's declared TYPE and never the value, so
+    -- a site already using the surviving form kept its row forever — Von Neumann
+    -- finished its port with two that would never clear. The reader now records the one
+    -- property of the value the question needs: the element FORM.
+    local st = factorio_store(table.concat({
+        'data:extend{{ type = "recipe", name = "old", enabled = false,',
+        '  ingredients = {{"copper-plate", 5}} }}',            -- TUPLE: the losing form
+        'data:extend{{ type = "recipe", name = "new", enabled = false,',
+        '  ingredients = {{type = "item", name = "copper-plate", amount = 5}} }}',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    eq(1, #res.form_lost, 'only the tuple site is listed, got ' .. #res.form_lost)
+    eq(true, res.form_lost[1].confirmed,
+        'and it is CONFIRMED, not hedged — the literal IS the losing form')
+    ok(res.form_ok >= 1, 'while the struct site is discharged and counted, got '
+        .. tostring(res.form_ok))
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: an unreadable value keeps its hedge rather than being discharged',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ⚠ THE DIRECTION OF THE DEFAULT. `elems` is nil when the value is not an array of
+    -- tables the reader could see into — a helper call, a variable, a computed table.
+    -- Discharging on nil would clear rows on exactly the mods whose literals cannot be
+    -- read, which is the failure this whole file keeps fencing: absence rendered as a
+    -- clean bill. Unknown must stay listed.
+    local st = factorio_store(table.concat({
+        'local made = build_ingredients()',
+        'data:extend{{ type = "recipe", name = "r", enabled = false, ingredients = made }}',
+    }, '\n'))
+    local res = port.prototype_diff(st, 'lua-factorio-proto-11', 'lua-factorio-proto-20')
+    if res and #res.form_lost > 0 then
+        eq(nil, res.form_lost[1].confirmed,
+            'an unreadable value is NOT confirmed — it is a site to check')
+    end
+    eq(0, (res or {}).form_ok or 0, 'and it is never discharged')
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: a TYPE-MOVE row is discharged by the keys the value was written with',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ★ CART-0660, second half. `elem_form` answers about a table's ELEMENTS; this asks
+    -- about its own KEYS, and they are different questions. `collision_mask` is an array
+    -- of layer-name strings in 1.1 and a CollisionMaskConnector — `{layers = …}` — in
+    -- 2.0. Eight such rows survived railloader's finished port, because the axis reads
+    -- the declared type and never the value.
+    local st = factorio_store(table.concat({
+        'local a = table.deepcopy(data.raw.container["wooden-chest"])',
+        'a.name = "old-shape"',
+        'a.collision_mask = {"item-layer", "object-layer"}',      -- STILL 1.1
+        'local b = table.deepcopy(data.raw.container["wooden-chest"])',
+        'b.name = "new-shape"',
+        'b.collision_mask = { layers = { item = true, object = true } }',  -- ported
+        'data:extend{a, b}',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    local rows = {}
+    for _, cls in ipairs({ 'kind', 'structure' }) do
+        for _, e in ipairs(res.type_move[cls]) do
+            if e.prop == 'collision_mask' then rows[#rows + 1] = e end
+        end
+    end
+    eq(1, #rows, 'only the unported site is listed, got ' .. #rows)
+    eq(true, rows[1].confirmed, 'and it is marked STILL THE OLD SHAPE, not hedged')
+    ok(res.type_move.migrated >= 1, 'while the ported site is discharged and counted')
+end)
