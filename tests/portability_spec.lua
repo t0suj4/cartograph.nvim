@@ -2599,3 +2599,37 @@ test('portability: a patch whose NAME is computed is still typed, not discarded'
     eq('container', hit.typename, 'and it is typed by the literal index')
     vim.fn.delete(proto_tmp, 'rf')
 end)
+
+test('portability: declaring a prototype and editing someone else\'s are counted apart',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ★ CART-0655. "201 prototype(s) read" was two facts in one sentence, and for a
+    -- modpack the second is most of the surface: SeaBlock 135 of 178 typed records are
+    -- edits, CircuitProcessing 114 of 116, better_poles_ranges 6 of 6, and Von Neumann —
+    -- the mod this whole surface was built against — 26 of 33.
+    local st = factorio_store(table.concat({
+        -- DECLARED here
+        'data:extend{{ type = "container", name = "mine", inventory_size = 4,',
+        '  vehicle_impact_sound = { filename = "x.ogg" } }}',
+        -- EDITED: somebody else's prototype, patched in place
+        'data.raw.container["wooden-chest"].vehicle_impact_sound = { filename = "y.ogg" }',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    ok(res.declared >= 1, 'the mod\'s own prototype is DECLARED, got ' .. res.declared)
+    ok(res.edited >= 1, 'and the in-place patch is EDITED, got ' .. res.edited)
+
+    -- ★ THE ROW SAYS WHOSE PROTOTYPE IT LANDS ON. The edit is still this mod's work at
+    -- this mod's line — what changes is whether the reader can expect the target to
+    -- exist before its dependencies are ported.
+    local edited_row, own_row
+    for _, e in ipairs(res.lost) do
+        if e.prop == 'vehicle_impact_sound' then
+            if e.edits then edited_row = e else own_row = e end
+        end
+    end
+    ok(edited_row ~= nil, 'the finding on the foreign prototype is marked')
+    eq('wooden-chest', edited_row.edits, 'and names the target it edits')
+    ok(own_row ~= nil, 'while a finding on the mod\'s OWN prototype carries no marker')
+end)

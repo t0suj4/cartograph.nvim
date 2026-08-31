@@ -2576,6 +2576,7 @@ function M.prototype_diff(store, from, to)
             .. ' with a declared prototype adapter'
     end
     local res = { from = from, to = to, lost = {}, stale_delete = {}, gone_type = {},
+        declared = 0, edited = 0, edited_computed = 0,
         kept = 0, unknown_prop = 0, target_only = 0, opaque_owner = 0,
         unknown_sample = {},
         type_move = { sites = 0, elided = 0, opaque = {}, kind = {}, structure = {},
@@ -2648,6 +2649,37 @@ function M.prototype_diff(store, from, to)
                 local callee = (p.frontiers[1] or {}).callee
                 res.hedged[#res.hedged + 1] = { file = m.file, line = p.line,
                     callee = callee }
+            end
+            -- ── DECLARED HERE, OR EDITED FROM ELSEWHERE? (CART-0655) ────────────
+            -- "201 prototype(s) read" is two facts in one sentence. A mod that DECLARES
+            -- a prototype and one that REWRITES somebody else's are doing different
+            -- things, and for a modpack the second is most of the surface: SeaBlock is
+            -- 125 of 200, better_poles_ranges is 6 of 6, and Von Neumann — the mod this
+            -- whole surface was built against — is 26 of 50.
+            --
+            -- ⚠ COUNTED ONLY FOR RECORDS THAT ARE ACTUALLY PROTOTYPES — one with a
+            -- resolvable typename. The CART-0637 residue (a table literal in a data-stage
+            -- file that never reached data:extend) is neither declared nor edited, and
+            -- folding it into "declared" would inflate the very ratio this exists to
+            -- report.
+            --
+            -- ★ THE SHARE IS THE PORT-ORDER SIGNAL, and nothing else computes it. A
+            -- foreign-majority mod's worklist is edits to prototypes that DO NOT EXIST
+            -- YET in the ported world, so it cannot be ported before its dependencies —
+            -- the same argument the sample set made for libraries from stdlib's lost
+            -- reads, at the data stage and with a number attached.
+            if pn_a or pn_b then
+                if (p.patch or p.base) ~= nil then
+                    res.edited = res.edited + 1
+                    -- the TARGET's identity, which is on the descriptor and not on the
+                    -- record: `fresh(nil, …)` gives a patch no name of its own, because
+                    -- the record is not a prototype this mod declares
+                    if not (p.patch or p.base).name then
+                        res.edited_computed = res.edited_computed + 1
+                    end
+                else
+                    res.declared = res.declared + 1
+                end
             end
             local props_a, props_b = proto_props(a, pn_a), proto_props(b, pn_b)
             if props_a and props_b then
@@ -2748,7 +2780,13 @@ function M.prototype_diff(store, from, to)
                             local entry = { file = m.file, line = ov.line,
                                 typename = ty, proto = pn_a, prop = prop,
                                 required = in_a == 'required', name = p.name,
-                                path = ov.path, hedged = p.complete == false }
+                                path = ov.path, hedged = p.complete == false,
+                                -- WHOSE prototype this edit lands on (CART-0655). The
+                                -- row is still this mod's work at this mod's line; what
+                                -- changes is whether the reader can expect the target to
+                                -- exist before its dependencies are ported.
+                                edits = (p.patch or p.base) and
+                                    ((p.patch or p.base).name or '<computed>') or nil }
                             if ov.ty == 'nil' then
                                 res.stale_delete[#res.stale_delete + 1] = entry
                             else
@@ -3085,6 +3123,24 @@ function M.prototype_diff_report(store, from, to, opts)
         L[#L + 1] = '        mod adds, or a MISSPELLING. Sampled because a port\'s own'
         L[#L + 1] = '        typos land here and a bare count cannot be inspected.'
     end
+    -- WHOSE PROTOTYPES ARE THESE? (CART-0655)
+    if (res.declared + res.edited) > 0 then
+        local typed = res.declared + res.edited
+        local pct = math.floor(100 * res.edited / typed + 0.5)
+        L[#L + 1] = ('    of the %d typed record(s): %d DECLARED here, %d EDITED from'
+            .. ' elsewhere (%d%%)%s'):format(typed, res.declared, res.edited, pct,
+            res.edited_computed > 0
+                and (', %d of them at a computed name'):format(res.edited_computed) or '')
+        if pct >= 50 then
+            vim.list_extend(L, reason_lines('      ⚠ MOSTLY AN EDITOR, WHICH IS A'
+                .. ' PORT-ORDER FACT — ',
+                'most of this mod\'s data stage rewrites prototypes it does not declare,'
+                .. ' so its worklist is edits to things that DO NOT EXIST YET in the'
+                .. ' ported world. It cannot be finished before the mods that declare'
+                .. ' them are. The findings below are still this mod\'s own edits, at'
+                .. ' this mod\'s files and lines.', '        '))
+        end
+    end
     if res.target_only > 0 then
         L[#L + 1] = ('    (%d property(ies) exist in %s and NOT in %s — code already'
             .. ' migrated, or written for the newer version. They were counted as "in'
@@ -3102,9 +3158,10 @@ function M.prototype_diff_report(store, from, to, opts)
         for _, n in ipairs(note) do L[#L + 1] = '    ' .. n end
         for i = 1, math.min(cap, #items) do
             local e = items[i]
-            L[#L + 1] = ('    %-31s %-22s %s:%s%s%s'):format(e.prop,
+            L[#L + 1] = ('    %-31s %-22s %s:%s%s%s%s'):format(e.prop,
                 e.typename, e.file or '?', tostring(e.line or '?'),
                 e.required and '  [REQUIRED]' or '',
+                e.edits and ('  ⇢ edits %s'):format(e.edits) or '',
                 e.hedged and '  (hedged: an opaque call may have rewritten this)' or '')
         end
         if #items > cap then

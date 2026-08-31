@@ -1990,6 +1990,33 @@ all 41 `script.*` reads in the other 33. Neither left a row. A binding elsewhere
 
 so the hedge is visible and checkable. Silence is the one answer that cannot be.
 
+### Whose prototypes are these
+
+"201 prototype(s) read" is two facts in one sentence. A mod that **declares** a prototype
+and one that **rewrites somebody else's** are doing different things, and for a modpack
+the second is most of the surface:
+
+```
+    of the 178 typed record(s): 43 DECLARED here, 135 EDITED from elsewhere (76%),
+    10 of them at a computed name
+      ⚠ MOSTLY AN EDITOR, WHICH IS A PORT-ORDER FACT
+```
+
+Across the 31 unpacked 1.1 mods, ten are ≥62% editor — `CircuitProcessing` is **98%**
+(114 edits, 2 declarations), `better_poles_ranges` is 100%, and Von Neumann is 78%.
+
+**The share is a port-order signal and nothing else computes it.** A foreign-majority
+mod's worklist is edits to prototypes that do not exist yet in the ported world, so it
+cannot be finished before the mods that declare them are — the argument the sample set
+made for libraries from lost reads, at the data stage and with a number attached.
+
+Each finding says whose prototype it lands on, because the edit is still *this* mod's
+work at *this* mod's line — what changes is what the reader can expect to exist:
+
+```
+    module_specification   beacon   data-final-fixes/logistics.lua:38  [REQUIRED]  ⇢ edits beacon-2
+```
+
 ### Inside a union
 
 `energy_source` is an `EnergySource` — which is not a type with properties, it is
