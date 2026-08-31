@@ -590,3 +590,67 @@ test('lint: the refinement fixes the inversion it was filed for', function ()
     ok(not at_file['dead-function'],
         'while dead-function asks band:n_callers — a corpus query, never clippable')
 end)
+
+test('tag-coverage: a walker that misses a tag its own module constructs is asked about',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.language.add, 'lua') then skip 'no lua parser' end
+    -- ★ CART-0662, built from the bug it would have caught — fixed in 5903841. expr.key
+    -- had a case for 11 expression kinds and none for `assign`, whose `t` holds a TARGET
+    -- where every other kind holds a type STRING, so an assign fell to a fallback that
+    -- concatenated it; 267 of 395 bash functions threw.
+    --
+    -- ★★ THE REAL ACCEPTANCE TEST IS AGAINST 5903841^ AND IT CANNOT LIVE HERE: this
+    -- fixture is a hand-built miniature, and a fixture proves the rule fires on what its
+    -- author imagined. The tree the defect actually lived in is one command away —
+    --     git show 5903841^:lua/cartograph/expr.lua
+    -- — and running the rule over it reports "M.key … has no case for ?, assign". Do that
+    -- before widening, narrowing or deleting this rule.
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local function put(rel, text)
+        local fd = assert(io.open(root .. '/' .. rel, 'w')); fd:write(text); fd:close()
+    end
+    put('m.lua', table.concat({
+        'local M = {}',
+        'local function build(x)',
+        '  if x == 1 then return { k = "lit", v = 1 } end',
+        '  if x == 2 then return { k = "name", n = "a" } end',
+        '  if x == 3 then return { k = "call", f = 1 } end',
+        '  if x == 4 then return { k = "bin", l = 1, r = 2 } end',
+        '  return { k = "assign", t = {}, v = {} }',   -- the tag the walker forgets
+        'end',
+        'function M.render(e)',
+        '  local k = e.k',
+        '  if k == "lit" then return "L" end',
+        '  if k == "name" then return "N" end',
+        '  if k == "call" then return "C" end',
+        '  if k == "bin" then return "B" end',
+        '  return "?" .. e.t',                          -- the fallback that assumes
+        'end',
+        'return { M = M, build = build }',
+    }, '\n'))
+    local lint = require 'cartograph.lint'
+    local rule
+    for _, r in ipairs(lint.rules) do if r.name == 'tag-coverage' then rule = r end end
+    ok(rule ~= nil, 'the rule is registered')
+    local store = { files = { 'm.lua' }, abs = function (f) return root .. '/' .. f end }
+    local found = rule.run(store)
+    eq(1, #found, 'the walker that covers 4 of 5 is asked about, got ' .. #found)
+    ok(found[1].message:find('assign', 1, true), 'and the missing tag is named: '
+        .. found[1].message)
+
+    -- ⚠ A FAMILY TOO SMALL TO BE A DISPATCH IS NOT ONE. Two or three comparisons are not
+    -- a walker, and reporting them would bury the shape this rule exists for.
+    put('m.lua', table.concat({
+        'local function build(x)',
+        '  if x then return { k = "a" } end',
+        '  return { k = "b" }',
+        'end',
+        'local function go(e) if e.k == "a" then return 1 end return 0 end',
+        'return { build = build, go = go }',
+    }, '\n'))
+    eq(0, #rule.run(store), 'a two-tag family is not a dispatch')
+    vim.fn.delete(root, 'rf')
+end)

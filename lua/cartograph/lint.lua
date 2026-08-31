@@ -610,6 +610,144 @@ local function seam_findings(store)
     return out
 end
 
+-- TAG-DISPATCH COVERAGE: a module CONSTRUCTS a set of discriminant values
+-- (`{ k = 'assign', … }`) and each walker TESTS a subset (`k == 'lit'`). A function that
+-- handles most of them and misses one is a hole, and the hole is silent — the value falls
+-- to whatever the fallback assumes.
+--
+-- ★ THE BUG THIS WAS BUILT FROM — 5903841 (CART-0662). expr.key had a case for 11
+-- expression kinds and none for `assign`, whose `t` field holds a TARGET where every
+-- other kind holds a type STRING; pressing Tab to the lints lens threw on 267 of 395 bash
+-- functions in ~/git/testssl.sh.
+--
+-- ★★ THE HASH IS THE ACCEPTANCE TEST, NOT A CITATION. `5903841^` is the tree the defect
+-- lived in, so the rule's worth is re-checkable years from now without trusting this
+-- comment:
+--     git show 5903841^:lua/cartograph/expr.lua > /tmp/t/expr.lua
+--     …run this rule over /tmp/t → "M.key … has no case for ?, assign"
+-- A justification that cannot be re-run is a story about a rule. A reviewer deciding
+-- whether to keep, widen or delete this one needs to SEE what it caught, and a hash is
+-- the only thing in a comment that survives every rename around it.
+--
+-- ⚠ THE FAMILY IS PER MODULE, and that is the whole difficulty. Across lua/ the field `k`
+-- discriminates several unrelated families (expression kinds, trace rows, prototype
+-- bases): unscoped it offers 27 tags and every walker "misses" ones it has no business
+-- knowing. Scoped to the file that constructs them it is 13 and the signal is clean.
+--
+-- ⚠ SUGGESTIVE, NEVER AUTHORITATIVE. A walker may legitimately handle a subset, and a
+-- generic fallback may cover the rest correctly — which is what `?` is for and why it is
+-- always among the "missing". The finding is a QUESTION: does the fallback handle this
+-- one, or does it assume something this tag does not satisfy?
+--
+-- ⚠⚠ AND ITS POPULATION IS NARROW — MEASURED, BECAUSE THE ALTERNATIVE IS A FENCE THAT
+-- NEVER FIRES AND NOBODY NOTICES. It needs a codebase that builds a TAGGED UNION and
+-- walks it with `==` chains, and that is not a common shape:
+--     cartograph lua/        2 findings
+--     cartograph tools/      0
+--     Von-Neumann            0
+--     ~/work/wow_addons      0   (353 addons, 2.27M lines)
+-- So this is a rule with a real defect behind it and a small audience, like the PHP-only
+-- sink rules — not a general-purpose check. It is KEPT because the defect it caught
+-- shipped and crashed a pane on 267 of 395 functions, and because the discriminant is
+-- DERIVED rather than named: `kind`, `type`, `tag`, `op` all qualify, so a project that
+-- writes a tagged union differently is covered. What it cannot cover is a project that
+-- dispatches some other way (a method table, a metatable) — that is a different rule.
+local function tagcover_findings(store)
+    local out = {}
+    if not pcall(vim.treesitter.language.add, 'lua') then return out end
+    -- ⚠ THE DISCRIMINANT IS DERIVED, NOT NAMED. The first cut hardcoded `k`, which is
+    -- THIS repo's expression-IR spelling — a rule that fires on its author's codebase and
+    -- nowhere else is calibrated to an idiom, not to a defect. A discriminant is
+    -- recognisable by what it DOES: a field set to a string LITERAL in several
+    -- constructors of one module and compared with `==` against string literals in it.
+    -- `kind`, `type`, `tag`, `op` all qualify on that test and none of them is written
+    -- down here.
+    local function unq(x) return (x:gsub('^([\'"])(.*)%1$', '%2')) end
+    for _, file in ipairs(store.files) do
+        if file:match('%.lua$') then
+            local fd = io.open(store.abs(file), 'r')
+            if fd then
+                local src = fd:read('*a'); fd:close()
+                local okp, parser = pcall(vim.treesitter.get_string_parser, src, 'lua')
+                local tree = okp and parser and parser:parse()[1]
+                if tree then
+                    -- field -> set of literal values CONSTRUCTED for it in this module
+                    -- field -> fn -> set of literal values TESTED against it
+                    local built, tested, fnline = {}, {}, {}
+                    local function walk(n, fnk)
+                        local t = n:type()
+                        if t == 'function_declaration' or t == 'function_definition' then
+                            local nm = n:field('name')[1]
+                            fnk = nm and vim.treesitter.get_node_text(nm, src)
+                                or ('@' .. tostring(select(1, n:range()) + 1))
+                            fnline[fnk] = select(1, n:range()) + 1
+                        end
+                        if t == 'field' then
+                            local nmn, vl = n:field('name')[1], n:field('value')[1]
+                            if nmn and vl and vl:type() == 'string' then
+                                local key = vim.treesitter.get_node_text(nmn, src)
+                                if key:match('^[%a_][%w_]*$') then
+                                    built[key] = built[key] or {}
+                                    built[key][unq(vim.treesitter.get_node_text(vl, src))] = true
+                                end
+                            end
+                        end
+                        if t == 'binary_expression' and fnk then
+                            local txt = vim.treesitter.get_node_text(n, src)
+                            local lhs, rhs = txt:match(
+                                "^%s*([%w_%.]+)%s*==%s*(['\"][^'\"]*['\"])%s*$")
+                            local field = lhs and (lhs:match('%.([%w_]+)$') or lhs)
+                            if field and rhs then
+                                tested[field] = tested[field] or {}
+                                tested[field][fnk] = tested[field][fnk] or {}
+                                tested[field][fnk][unq(rhs)] = true
+                            end
+                        end
+                        for c in n:iter_children() do
+                            if c:named() then walk(c, fnk) end
+                        end
+                    end
+                    walk(tree:root(), nil)
+                    for TAG, values in pairs(built) do
+                    local all = {}
+                    for tag in pairs(values) do all[#all + 1] = tag end
+                    table.sort(all)
+                    -- a family worth checking at all: fewer than four tags is not a
+                    -- dispatch, it is a couple of comparisons
+                    if #all >= 4 then
+                        for fnk, set in pairs(tested[TAG] or {}) do
+                            local have, miss = 0, {}
+                            for _, tag in ipairs(all) do
+                                if set[tag] then have = have + 1
+                                else miss[#miss + 1] = tag end
+                            end
+                            -- COVERS MOST AND MISSES FEW is the shape. A walker handling
+                            -- half the family is making a different choice deliberately.
+                            if have >= math.ceil(#all * 0.75) and #miss > 0 and #miss <= 3 then
+                                table.sort(miss)
+                                out[#out + 1] = { file = store.abs(file),
+                                    line = fnline[fnk] or 1,
+                                    message = ('%s dispatches on `%s` for %d of this'
+                                        .. " module's %d tag(s) and has no case for %s —"
+                                        .. ' does the fallback hold for those, or does it'
+                                        .. ' assume something they do not satisfy?')
+                                        :format(fnk, TAG, have, #all,
+                                            table.concat(miss, ', ')) }
+                            end
+                        end
+                    end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(out, function (a, b)
+        if a.file ~= b.file then return a.file < b.file end
+        return (a.line or 0) < (b.line or 0)
+    end)
+    return out
+end
+
 -- multi-return truncation: `local a, b = x and f() or y` adjusts f's
 -- returns to ONE value (b = nil silently). Three real bugs in one day
 -- of cartograph's own development. AST-precise: 2+ targets, ONE rhs
@@ -1545,6 +1683,12 @@ M.rules = {
         -- the original gated count: a raw wide-index read outside band.lua/store.lua
         -- is wrong by definition, not by judgement
         run = seam_findings },
+    { name = 'tag-coverage', severity = 'info', quantifier = 'witness',
+        disposition = 'suggestive',
+        -- a hole in a tag dispatch is SILENT: the value falls to whatever the fallback
+        -- assumes. Suggestive because a subset may be deliberate and a fallback may be
+        -- right — the finding is the question, not the verdict (CART-0662)
+        run = tagcover_findings },
     { name = 'truncation', severity = 'info', quantifier = 'witness', disposition = 'authoritative',
         -- AST-precise (2+ targets, one and/or rhs whose operand is a call) and the
         -- semantics are unambiguous: the second target silently becomes nil. Three

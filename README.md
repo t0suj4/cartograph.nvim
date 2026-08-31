@@ -1563,6 +1563,23 @@ The rules:
 - **truncation** — `local a, b = x and f() or y`: `and`/`or` ADJUSTS a call to
   one value, so the extra targets are silently nil. Three real bugs in one
   day of this repo's own development earned the rule.
+- **tag-coverage** — a module constructs a set of discriminant values
+  (`{ k = 'assign', … }`) and each walker tests a subset. A function handling
+  *most* of them and missing one is a silent hole: the value falls to whatever
+  the fallback assumes. Earned by a crash — `expr.key` had a case for 11
+  expression kinds and none for `assign`, whose `t` holds a target where every
+  other kind holds a type string, and pressing Tab to the lints lens threw on
+  **267 of 395** bash functions. ⚠ The family is scoped **per module**: across
+  `lua/` the field `k` discriminates several unrelated families, and unscoped
+  every walker "misses" tags it has no business knowing. Suggestive — a subset
+  can be deliberate and a fallback can be right, so the finding is the
+  question, not the verdict. ⚠ **Narrow population, measured**: it needs a
+  codebase that builds a tagged union and walks it with `==` chains —
+  cartograph's own `lua/` gives 2 findings, and `tools/`, Von-Neumann and 2.27M
+  lines of WoW addons give **0**. Kept because the defect behind it shipped, and
+  because the discriminant is *derived*, not named: `kind`, `type`, `tag`, `op`
+  all qualify. The defect it was earned from is `5903841`, and `5903841^` is the
+  tree to re-run it against — a justification you cannot re-run is a story.
 - **require-cycle** — SCCs over the *import* edges (call-cycle covers calls).
   Hedged in the message itself: import edges don't record load-time vs lazy,
   and a lazy require breaks the cycle at runtime.
