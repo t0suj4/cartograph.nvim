@@ -664,3 +664,36 @@ test('extract: a C++20 requires-clause is not glued into the constructor NAME', 
     ok(n['Widget::Widget'], 'an ordinary constructor keeps the name it has today')
     ok(n['ns::f'], 'and a qualified definition keeps its qualifier')
 end)
+
+test('expr: key() handles an ASSIGN node, whose `t` is a TARGET and not a type string',
+    function ()
+    -- ★ FROM A USER'S FEEDBACK (2026-09-01): pressing Tab to the `lints` lens on a bash
+    -- function threw "attempt to concatenate a table value". The builder writes
+    -- `{ k = 'assign', t = TARGET, v = VALUE }` — `t` is an EXPRESSION there and a type
+    -- STRING for every other kind — and clones.lua carries that warning twice, so the
+    -- overload was known and M.key was simply never given the case. It fell to the
+    -- generic branch and concatenated the target table.
+    --
+    -- ⚠ WHY BASH AND NOT LUA: Lua's assignments are statements the flow layer owns, so
+    -- they never reach this builder. Bash puts them in EXPRESSION position constantly.
+    -- Measured on ~/git/testssl.sh: 267 of 395 functions threw.
+    local expr = require 'cartograph.expr'
+    local assign = { k = 'assign',
+        t = { k = 'name', n = 'x' },
+        v = { k = 'lit', ty = 'num', v = 1 } }
+    local ok, key = pcall(expr.key, assign)
+    assert(ok, 'key() must not throw on an assign: ' .. tostring(key))
+    assert(type(key) == 'string' and #key > 0, 'and it returns a key')
+    -- the two halves are both in it, so two different assignments do not collide
+    local other = { k = 'assign',
+        t = { k = 'name', n = 'y' },
+        v = { k = 'lit', ty = 'num', v = 1 } }
+    assert(expr.key(assign) ~= expr.key(other),
+        'assigning to a different target is a different expression')
+
+    -- ⚠ AND THE FALLBACK MUST SURVIVE ANY non-string `t`, or the next kind that overloads
+    -- it takes a pane down the same way
+    local weird = { k = 'no-such-kind', t = { 1, 2 }, kids = {} }
+    local ok2, key2 = pcall(expr.key, weird)
+    assert(ok2, 'the generic branch must not assume `t` is a string: ' .. tostring(key2))
+end)

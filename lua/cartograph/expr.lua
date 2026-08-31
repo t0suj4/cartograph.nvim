@@ -1148,12 +1148,28 @@ function M.key(e)
     if k == 'pair' then
         return 'P' .. M.key(e.key) .. ':' .. (e.val and M.key(e.val) or '')
     end
+    if k == 'assign' then
+        -- ⚠ `t` IS THE TARGET EXPRESSION HERE, NOT A TYPE STRING. The builder writes
+        -- `{ k = 'assign', t = T, v = V }`, and clones.lua carries this warning twice —
+        -- so the hazard was known and this function was never given the case. An assign
+        -- therefore fell through to the generic branch below and concatenated a table.
+        -- ★ MEASURED FROM A USER'S FEEDBACK: pressing Tab to the `lints` lens on a bash
+        -- function threw, and it was 267 of testssl.sh's 395 functions — every one whose
+        -- body holds an assignment in EXPRESSION position, which in bash is most of them.
+        -- Lua never hit it because its assignments are statements the flow layer owns.
+        return 'A' .. M.key(e.t) .. '=' .. M.key(e.v)
+    end
     if k == 'table' then return 'T' end
     if k == 'fn' then return 'Fn' end
     if k == 'vararg' then return 'V' end
     local parts = {}
     for _, c in ipairs(e.kids or {}) do parts[#parts + 1] = M.key(c) end
-    return '?' .. (e.t or '') .. '(' .. table.concat(parts, ',') .. ')'
+    -- ⚠ AND THE FALLBACK MUST NOT ASSUME `t` IS A STRING. It is one for every kind the
+    -- harvest does not model, and NOT for `assign` — the case above. Guarding here as
+    -- well is the difference between one missing case and every future kind whose `t`
+    -- holds something else taking a pane down with it.
+    return '?' .. (type(e.t) == 'string' and e.t or '')
+        .. '(' .. table.concat(parts, ',') .. ')'
 end
 
 --- the DOTTED path of a name/field chain (`vim.api.nvim_x`), or nil if it isn't a
