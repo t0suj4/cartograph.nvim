@@ -2349,6 +2349,69 @@ local function classify_move(res, fa, fb, ta, tb)
     return hit, key
 end
 
+--- EVERY TYPE A VALUE OF TYPE `tn` MAY SATISFY — `tn` plus its union alternatives,
+--- transitively (CART-0646). `IngredientPrototype` is a union of ItemIngredientPrototype
+--- | FluidIngredientPrototype, and the fact that matters is one level below the name.
+local function form_closure(prof, tn, out, depth)
+    out = out or {}
+    if not tn or out[tn] or (depth or 0) > 4 then return out end
+    out[tn] = true
+    for _, alt in ipairs((prof.concept_union or {})[tn] or {}) do
+        form_closure(prof, alt, out, (depth or 0) + 1)
+    end
+    return out
+end
+
+--- A STRUCTURAL FORM THE ORIGIN ACCEPTED AND THE TARGET DOES NOT (CART-0646).
+---
+--- ★★ THE BIGGEST 1.1 -> 2.0 DATA-STAGE BREAK IS INVISIBLE TO EVERY OTHER AXIS HERE.
+--- `RecipePrototype::ingredients` is an array of `IngredientPrototype` in BOTH versions;
+--- IngredientPrototype is the same union in both; the property is `kept` and its type
+--- NAME never moves. What moved is one level down:
+---     1.1  ItemIngredientPrototype = union{ struct, tuple[ItemID, uint16] }
+---     2.0  ItemIngredientPrototype = struct
+--- The tuple is `{"copper-plate", 5}`, and a mod that keeps it does not load. Same for
+--- ItemProductPrototype and `results`.
+---
+--- ★ AND THE SIGNAL IS EXACTLY THIS SHARP: across 336 concepts present in both
+--- versions, precisely TWO lose a form, and both are this one. No suppression rule is
+--- needed because there is nothing to suppress.
+---
+--- ⚠ IT IS A SITE TO CHECK, NOT A PROVEN DEFECT. This says the property's type no
+--- longer accepts a form it used to; it does not read the literal the mod actually
+--- wrote. A mod already using the struct form gets a row it can dismiss at a glance,
+--- which is the right trade against missing a load failure.
+local function note_form_loss(res, fa, fb, ta, tb, path, ty, file, line)
+    if not (ta and tb) then return end
+    local ca, cb = form_closure(fa, ta), form_closure(fb, tb)
+    for name in pairs(ca) do
+        if cb[name] then
+            local forms_a = (fa.concept_forms or {})[name]
+            local forms_b = (fb.concept_forms or {})[name]
+            if forms_a and forms_b then
+                for form in pairs(forms_a) do
+                    if not forms_b[form] then
+                        local key = tostring(file) .. '|' .. tostring(line) .. '|'
+                            .. tostring(path) .. '|' .. name .. '|' .. form
+                        res._formseen = res._formseen or {}
+                        if not res._formseen[key] then
+                            res._formseen[key] = true
+                            res.form_lost[#res.form_lost + 1] = { prop = path,
+                                typename = ty, file = file, line = line,
+                                concept = name, form = form,
+                                keeps = (function ()
+                                    local k = {}
+                                    for f in pairs(forms_b) do k[#k + 1] = f end
+                                    table.sort(k); return table.concat(k, ', ')
+                                end)() }
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 --- Record one kept property whose declared type moved. `hop_type` rather than a flat
 --- `prop_type` lookup: the table keys by the DECLARING owner, so an inherited property
 --- (most of EntityPrototype's) returns nil from a flat read and would be skipped
@@ -2356,6 +2419,9 @@ end
 local function note_type_move(res, fa, fb, oa, ob, prop, path, ty, file, line)
     if not (oa and ob and prop) then return end
     local ta, tb = hop_type(fa, oa, prop), hop_type(fb, ob, prop)
+    -- THE FORM CHECK RUNS EVEN WHEN THE TYPE NAME IS UNCHANGED, and that is the whole
+    -- point of it: `ingredients` is `IngredientPrototype` on both sides.
+    note_form_loss(res, fa, fb, ta, tb, path, ty, file, line)
     if not (ta and tb) or ta == tb then return end
     local cls, key = classify_move(res, fa, fb, ta, tb)
     local tm = res.type_move
@@ -2394,6 +2460,12 @@ end
 --- port has got, from machinery that already existed.
 ---   { from, to, lost = {…}, gone_type = {…}, kept, unknown_prop, target_only,
 ---     opaque_owner (a hop that resolved to a union base — see CART-0654),
+---     form_lost = {…} — a write whose property type no longer accepts a structural
+---       FORM the origin took (CART-0646). ★ THE LOAD-FATAL ONE, and invisible to every
+---       other axis: the property is kept, the type name is unchanged, and what moved is
+---       one level down (ItemIngredientPrototype: struct|tuple -> struct). Across 336
+---       concepts present in both Factorio versions exactly TWO lose a form, and both
+---       are this — so no suppression rule is needed.
 ---     type_move = { sites, opaque = {move -> n}, kind = {…}, structure = {…},
 ---       renamed = {…} } — a property BOTH versions keep whose declared TYPE moved
 ---       (CART-0646). ⚠ THIS AXIS CANNOT SEE THE INGREDIENT SHORTHAND, which is the
@@ -2428,6 +2500,7 @@ function M.prototype_diff(store, from, to)
         unknown_sample = {},
         type_move = { sites = 0, elided = 0, opaque = {}, kind = {}, structure = {},
             renamed = {} },
+        form_lost = {},
         unread = {}, hedged = {}, untyped = 0, records = 0,
         unwalked = 0, unregistered = 0 }
     -- ONE ROW PER REMOVED HOP, not one per leaf beneath it (CART-0642). A removed
@@ -2764,6 +2837,30 @@ function M.prototype_diff_report(store, from, to, opts)
         .. ' property, %d unchanged, %d already on the target only, %d in neither'
         .. ' version'):format(res.records, #res.lost, #res.stale_delete, res.kept,
         res.target_only, res.unknown_prop)
+    -- ★★ FIRST, BECAUSE IT IS THE ONE THAT STOPS THE LOAD (CART-0646).
+    if #res.form_lost > 0 then
+        L[#L + 1] = ''
+        vim.list_extend(L, reason_lines(
+            ('  %d WRITE(S) OF A VALUE FORM THE TARGET NO LONGER ACCEPTS — '):format(
+                #res.form_lost),
+            'the property is KEPT and its type NAME never moved, so nothing else here'
+            .. ' can see this. What moved is the FORM the type accepts:'
+            .. ' ItemIngredientPrototype was `struct OR tuple` in 1.1 and is `struct`'
+            .. ' in 2.0, and the tuple is the `{"copper-plate", 5}` shorthand. A mod'
+            .. ' that keeps it does not load. ⚠ A SITE TO CHECK, NOT A PROVEN DEFECT:'
+            .. ' this reads the declared type, not the literal, so code already using'
+            .. ' the new form gets a row it can dismiss at a glance.', '    '))
+        for i = 1, math.min(12, #res.form_lost) do
+            local e = res.form_lost[i]
+            L[#L + 1] = ('    %-24s %-18s %s:%s'):format(e.prop, tostring(e.typename),
+                e.file or '?', tostring(e.line or '?'))
+            L[#L + 1] = ('        %s lost the %s form (keeps %s)'):format(e.concept,
+                e.form, e.keeps)
+        end
+        if #res.form_lost > 12 then
+            L[#L + 1] = ('    … and %d more'):format(#res.form_lost - 12)
+        end
+    end
     local tm = res.type_move
     if tm and tm.sites > 0 then
         local function sites(list, label, note)

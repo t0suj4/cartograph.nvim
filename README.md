@@ -1990,6 +1990,39 @@ all 41 `script.*` reads in the other 33. Neither left a row. A binding elsewhere
 
 so the hedge is visible and checkable. Silence is the one answer that cannot be.
 
+### When the property stays, the type name stays, and the *form* moves
+
+The single biggest 1.1 → 2.0 data-stage break is invisible to every axis above, by
+construction. A recipe's `ingredients`:
+
+- the property is **kept** — so it is not a removal;
+- its type is `IngredientPrototype` in **both** versions — so it is not a type move;
+- that union's alternatives are the same in both — so nothing at that level either.
+
+What moved is one level below the alternatives:
+
+```
+1.1   ItemIngredientPrototype = union{ struct, tuple[ItemID, uint16] }
+2.0   ItemIngredientPrototype = struct
+```
+
+and the tuple is the `{"copper-plate", 5}` shorthand. **A mod that keeps it does not
+load.** The distiller now records each concept's union alternatives and the structural
+*forms* it accepts, so the report can say:
+
+```
+  1 WRITE(S) OF A VALUE FORM THE TARGET NO LONGER ACCEPTS
+    ingredients   recipe   data.lua:48
+        ItemIngredientPrototype lost the tuple form (keeps struct)
+```
+
+**The signal is exactly this sharp:** across the 336 concepts both versions declare,
+precisely **two** lose a form — `ItemIngredientPrototype` and `ItemProductPrototype`,
+both the tuple — so unlike every other axis here it needs no suppression rule. Across
+the 31 unpacked 1.1 mods it finds **595 sites in 22 of them**. It reads the declared
+type, not the literal, so code already using the struct form gets a row it can dismiss
+at a glance — a site to check, not a proven defect.
+
 ### When the property stays and its type moves
 
 A property both versions declare is `kept`, and until CART-0646 nothing asked whether it

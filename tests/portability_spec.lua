@@ -2510,3 +2510,72 @@ test('portability: the type-move classes come from type_props, and none claims h
     local t = port.REASON_TEXT['not-a-runtime-member']  -- sanity: fences still loaded
     ok(t ~= nil)
 end)
+
+test('portability: a FORM the target no longer accepts is found, though the type name held',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ★★ CART-0646's headline, and the biggest 1.1 -> 2.0 data-stage break there is.
+    -- Every other axis is blind to it by construction:
+    --   the property `ingredients` is KEPT           -> not in the removals
+    --   its type is `IngredientPrototype` in BOTH    -> not in the type moves
+    --   that union's alternatives are the same       -> nothing at that level either
+    -- What moved is one level below the alternatives:
+    --   1.1  ItemIngredientPrototype = union{ struct, tuple[ItemID, uint16] }
+    --   2.0  ItemIngredientPrototype = struct
+    -- and the tuple is the `{"copper-plate", 5}` shorthand. A mod that keeps it does
+    -- not load. I hit this by hand on three ports before the tool could say it.
+    local st = factorio_store(table.concat({
+        'data:extend{{',
+        '  type = "recipe",',
+        '  name = "trial",',
+        '  ingredients = {{"copper-plate", 5}},',
+        '  enabled = false,',
+        '}}',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    local row
+    for _, e in ipairs(res.form_lost) do if e.prop == 'ingredients' then row = e end end
+    ok(row ~= nil, 'the ingredients site is reported, got '
+        .. tostring(#res.form_lost) .. ' form-lost row(s)')
+    eq('ItemIngredientPrototype', row.concept, 'named at the level the form lives on')
+    eq('tuple', row.form)
+    ok(row.keeps:find('struct', 1, true), 'and what the target still takes')
+    -- the property itself must NOT be reported as removed: it is kept, and saying
+    -- otherwise would be the fabrication this axis exists to avoid
+    for _, e in ipairs(res.lost) do
+        ok(e.prop ~= 'ingredients', 'a KEPT property is never in the removals')
+    end
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: the FORM diff is sharp — exactly two concepts lose one, corpus-wide',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ⚠ A FENCE ON THE SIGNAL, not on the feature. Every other axis added here needed a
+    -- suppression rule because its raw output was mostly vocabulary (716 of 1055 type
+    -- moves are `bool -> boolean`). This one needs none, and the reason is measurable:
+    -- across every concept both versions declare, precisely TWO lose a form. If that
+    -- ever stops being true the report needs grouping, and this test is where it says so.
+    local pm = require 'cartograph.spec.profile'
+    local a, b = pm.load('lua-factorio-proto-11'), pm.load('lua-factorio-proto-20')
+    ok(next(a.concept_forms or {}) ~= nil, 'the 1.1 artifact records declared forms')
+    ok(next(b.concept_forms or {}) ~= nil, 'and so does the 2.0 one')
+    local lost = {}
+    for name, forms in pairs(a.concept_forms) do
+        local tf = b.concept_forms[name]
+        if tf then
+            for f in pairs(forms) do
+                if not tf[f] then lost[#lost + 1] = name .. ':' .. f end
+            end
+        end
+    end
+    table.sort(lost)
+    eq({ 'ItemIngredientPrototype:tuple', 'ItemProductPrototype:tuple' }, lost,
+        'exactly the ingredient and product shorthands, and nothing else')
+    -- and the union alternatives are recorded, which is what makes the walk reach them
+    eq({ 'FluidIngredientPrototype', 'ItemIngredientPrototype' },
+        a.concept_union['IngredientPrototype'],
+        'IngredientPrototype names its alternatives, so the form check can descend')
+end)
