@@ -1990,6 +1990,34 @@ all 41 `script.*` reads in the other 33. Neither left a row. A binding elsewhere
 
 so the hedge is visible and checkable. Silence is the one answer that cannot be.
 
+### Inside a union
+
+`energy_source` is an `EnergySource` — which is not a type with properties, it is
+*electric or burner or heat or fluid or void*. The walk resolves that hop, lands on a
+type declaring nothing, and every leaf below it used to be reported as existing in
+**neither** version. That called `usage_priority` — required on `ElectricEnergySource`
+in both — nonexistent, and it did so *outside* the declared unwalkable bound, because
+the hop did resolve.
+
+With the union's alternatives recorded, the leaf is decided against them:
+
+```
+  11 WRITE(S) UNDER A UNION WHOSE TARGET HAS NOWHERE TO PUT THEM
+    energy_source.fuel_category   assembling-machine   angels-assemblers.lua:83
+        EnergySource — 1 of 5 origin alternative(s) declared it (BurnerEnergySource), 0 of 5 now
+```
+
+**Removal is sound without knowing which alternative the value is** — whichever it was,
+the target has nowhere to put the property. That is the same argument the class-space
+removal test rests on.
+
+⚠ **The set is what moves, not the count.** `usage_priority` is 1-of-5 in both versions
+and both times the one is `ElectricEnergySource`: nothing changed, and treating it as a
+hedge would put a row on every electric entity in every mod. Meanwhile `Modifier` goes
+38-of-41 to 42-of-48 — a count *rise* — and is still a narrowing, because specific
+alternatives dropped out. Across the 31 mods this leaves **11 removals and 25
+narrowings**, where the honest frontier had been thousands of leaves.
+
 ### When the property stays, the type name stays, and the *form* moves
 
 The single biggest 1.1 → 2.0 data-stage break is invisible to every axis above, by

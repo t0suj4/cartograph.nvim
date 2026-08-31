@@ -2286,6 +2286,63 @@ local function opaque_owner(pra, prb)
     return pra and prb and next(pra) == nil and next(prb) == nil
 end
 
+--- ADJUDICATE A LEAF WHOSE OWNER IS A UNION BASE (CART-0654, the real fix).
+---
+--- `MiningDrillPrototype::energy_source` is typed `EnergySource`, the union of
+--- Electric/Burner/Heat/Fluid/Void. The walk RESOLVES that hop and lands on a type with
+--- no properties of its own, so `usage_priority` — a REQUIRED member of
+--- ElectricEnergySource in both versions — was being reported as existing in neither.
+--- The interim fix bucketed those honestly; this decides them, because CART-0646's
+--- distil now records the alternatives (`concept_union`) and no `Base<X>` spelling
+--- guess is needed.
+---
+--- ⚠ THE UNIT IS "HOW MANY ALTERNATIVES", NOT "IS IT THERE". A mod's value satisfies
+--- exactly ONE alternative and which one is not known here, so the honest shapes are:
+---   removed    NO target alternative declares it and at least one origin one did.
+---              ★ SOUND WITHOUT PICKING THE ALTERNATIVE, for the same reason the
+---              class-space removal test is: whichever the value was, the target
+---              has nowhere for this property to go.
+---   supplied   every alternative on both sides declares it.
+---   partial    some do. A HEDGE, carrying the counts — this is where "the value's own
+---              `type` key says which alternative" would sharpen it, and that
+---              discriminator is recorded nowhere yet.
+---   neither    no alternative on either side. Genuinely unknown, as before.
+--- Returns (verdict, detail) or nil when either side declares no alternatives, in which
+--- case the caller keeps the opaque-owner bucket.
+local function union_leaf_verdict(fa, fb, ta, tb, prop)
+    local alts_a = (fa.concept_union or {})[ta]
+    local alts_b = (fb.concept_union or {})[tb]
+    if not (alts_a and alts_b and #alts_a > 0 and #alts_b > 0) then return nil end
+    local function count(prof, alts)
+        local n, have, names = 0, 0, {}
+        for _, alt in ipairs(alts) do
+            n = n + 1
+            local ps = M.type_props(prof, alt)
+            if ps and ps[prop] then have = have + 1; names[#names + 1] = alt end
+        end
+        return n, have, names
+    end
+    local na, ha, names_a = count(fa, alts_a)
+    local nb, hb, names_b = count(fb, alts_b)
+    local d = { from_n = na, from_have = ha, to_n = nb, to_have = hb,
+        from_classes = names_a, to_classes = names_b }
+    if ha == 0 and hb == 0 then return 'neither', d end
+    if hb == 0 then return 'removed', d end
+    if ha == na and hb == nb then return 'supplied', d end
+    -- ⚠ COMPARE THE SETS, NOT THE COUNTS — the same lesson the type-move classes cost.
+    -- `energy_source.usage_priority` is 1 of 5 alternatives in BOTH versions, and both
+    -- times the one is ElectricEnergySource: nothing moved, and reporting it as a hedge
+    -- would put a row on every electric entity in every mod. What deserves a row is a
+    -- NARROWING — an origin alternative that supported the property and no longer does.
+    local have_b = {}
+    for _, c in ipairs(names_b) do have_b[c] = true end
+    local narrowed = {}
+    for _, c in ipairs(names_a) do if not have_b[c] then narrowed[#narrowed + 1] = c end end
+    if #narrowed == 0 then return 'supplied', d end
+    d.lost_classes = narrowed
+    return 'partial', d
+end
+
 --- THE PROPERTY'S DECLARED TYPE MOVED, THOUGH THE PROPERTY STAYED (CART-0646).
 --- The data-stage diff compares property SETS: a name in both versions is `kept`, and
 --- nothing ever asked whether it still means the same thing. `Sprite -> FileName` is a
@@ -2447,6 +2504,25 @@ local function note_unknown(res, prop, typename, file, line)
         file = file, line = line }
 end
 
+--- Route a union-base leaf verdict into the right bucket, or fall back to the honest
+--- frontier when the owner declares no alternatives at all (a scalar, an alias, or a
+--- union whose options are FORMS rather than named types).
+local function note_union_leaf(res, verdict, d, path, ty, file, line, owner)
+    if verdict == 'removed' then
+        res.union_lost[#res.union_lost + 1] = { prop = path, typename = ty, file = file,
+            line = line, owner = owner, detail = d }
+    elseif verdict == 'supplied' then
+        res.kept = res.kept + 1
+    elseif verdict == 'partial' then
+        res.union_partial[#res.union_partial + 1] = { prop = path, typename = ty,
+            file = file, line = line, owner = owner, detail = d }
+    elseif verdict == 'neither' then
+        note_unknown(res, path, ty, file, line)
+    else
+        res.opaque_owner = res.opaque_owner + 1
+    end
+end
+
 --- THE DATA-STAGE DIFF: which properties the mod actually sets stop existing
 --- between two prototype-api versions. Returns (result, err); result =
 --- ⚠ `unknown_prop` MEANS IN NEITHER VERSION, AND IT USED TO MEAN "not in the origin"
@@ -2459,7 +2535,11 @@ end
 --- free — "23 of this mod's properties are 2.0-only" is a direct measure of how far a
 --- port has got, from machinery that already existed.
 ---   { from, to, lost = {…}, gone_type = {…}, kept, unknown_prop, target_only,
----     opaque_owner (a hop that resolved to a union base — see CART-0654),
+---     union_lost / union_partial — a leaf under a UNION-typed value, adjudicated
+---       against the union's ALTERNATIVES (CART-0654). `removed` needs no knowledge of
+---       which alternative the value is: if none in the target declares it, the target
+---       has nowhere to put it. `opaque_owner` is what is left when the owner declares
+---       no alternatives at all,
 ---     form_lost = {…} — a write whose property type no longer accepts a structural
 ---       FORM the origin took (CART-0646). ★ THE LOAD-FATAL ONE, and invisible to every
 ---       other axis: the property is kept, the type name is unchanged, and what moved is
@@ -2500,7 +2580,7 @@ function M.prototype_diff(store, from, to)
         unknown_sample = {},
         type_move = { sites = 0, elided = 0, opaque = {}, kind = {}, structure = {},
             renamed = {} },
-        form_lost = {},
+        form_lost = {}, union_lost = {}, union_partial = {},
         unread = {}, hedged = {}, untyped = 0, records = 0,
         unwalked = 0, unregistered = 0 }
     -- ONE ROW PER REMOVED HOP, not one per leaf beneath it (CART-0642). A removed
@@ -2611,8 +2691,13 @@ function M.prototype_diff(store, from, to)
                         elseif kind == 'leaf' then
                             local pra, prb = M.type_props(a, det.a), M.type_props(b, det.b)
                             if opaque_owner(pra, prb) then
-                                -- resolved to a union base: NOT a verdict (CART-0654)
-                                res.opaque_owner = res.opaque_owner + 1
+                                -- resolved to a type with no properties. If it is a
+                                -- UNION its alternatives decide the leaf (CART-0654);
+                                -- otherwise it stays an honest frontier.
+                                local uv, ud = union_leaf_verdict(a, b, det.a, det.b,
+                                    det.prop)
+                                note_union_leaf(res, uv, ud, ov.path, ty, m.file,
+                                    ov.line, det.a)
                                 handled = true
                             elseif pra and prb then
                                 local ia, ib = pra[det.prop], prb[det.prop]
@@ -2769,7 +2854,8 @@ function M.prototype_diff(store, from, to)
                     else
                         local pra, prb = M.type_props(a, ta), M.type_props(b, tb)
                         if opaque_owner(pra, prb) then
-                            res.opaque_owner = res.opaque_owner + 1
+                            local uv, ud = union_leaf_verdict(a, b, ta, tb, pa)
+                            note_union_leaf(res, uv, ud, ov.path, ty, m.file, ov.line, ta)
                         elseif pra and prb then
                             local ia, ib = pra[pa], prb[pb]
                             -- ⚠ ONE KEY NAMESPACE WITH THE HOP ROWS. A removed
@@ -2938,6 +3024,42 @@ function M.prototype_diff_report(store, from, to, opts)
                 .. ' printing them would be reciting the docs\' own dictionary: '
                 .. table.concat(shown, ', '), '      '))
         end
+    end
+    if #res.union_lost > 0 then
+        L[#L + 1] = ''
+        vim.list_extend(L, reason_lines(
+            ('  %d WRITE(S) UNDER A UNION WHOSE TARGET HAS NOWHERE TO PUT THEM — '):format(
+                #res.union_lost),
+            'the property sits inside a value typed as a union (an EnergySource is'
+            .. ' electric OR burner OR heat OR fluid OR void), and NO alternative in the'
+            .. ' target declares it while at least one in the origin did. ★ SOUND'
+            .. ' WITHOUT KNOWING WHICH ALTERNATIVE THE VALUE IS: whichever it was, the'
+            .. ' target has no home for this property.', '    '))
+        for i = 1, math.min(10, #res.union_lost) do
+            local e = res.union_lost[i]
+            L[#L + 1] = ('    %-28s %-16s %s:%s'):format(e.prop, tostring(e.typename),
+                e.file or '?', tostring(e.line or '?'))
+            L[#L + 1] = ('        %s — %d of %d origin alternative(s) declared it (%s),'
+                .. ' 0 of %d now'):format(e.owner, e.detail.from_have, e.detail.from_n,
+                table.concat(e.detail.from_classes or {}, ', '), e.detail.to_n)
+        end
+        if #res.union_lost > 10 then
+            L[#L + 1] = ('    … and %d more'):format(#res.union_lost - 10)
+        end
+    end
+    if #res.union_partial > 0 then
+        vim.list_extend(L, reason_lines(
+            ('    %d write(s) under a union NARROWED — '):format(#res.union_partial),
+            'some alternatives that supported the property no longer do, and others'
+            .. ' still do. Whether the write breaks depends on which alternative the'
+            .. ' value is — the `type` key inside it says so, and nothing records the'
+            .. ' mapping from that key to an alternative yet. ⚠ A COUNT CHANGE IS NOT'
+            .. ' THIS: `Modifier` goes 38-of-41 to 42-of-48 and is still a narrowing,'
+            .. ' because the SET is what moved.'
+            .. (' e.g. %s (%s: %s no longer declare it)'):format(
+                res.union_partial[1].prop, res.union_partial[1].owner,
+                table.concat(res.union_partial[1].detail.lost_classes or {}, ', ')
+                    :sub(1, 60)), '      '))
     end
     if res.opaque_owner > 0 then
         vim.list_extend(L, reason_lines(

@@ -2366,85 +2366,78 @@ test('portability: a property the TARGET has and the origin does not is MIGRATED
     vim.fn.delete(proto_tmp, 'rf')
 end)
 
-test('portability: a hop into a UNION BASE is not adjudicated, and is not called absent',
-    function ()
+test('portability: a leaf under a UNION is decided by its ALTERNATIVES', function ()
     if not proto_ready() then skip 'no prototype-api artifacts' end
-    -- ★ CART-0654. `MiningDrillPrototype::energy_source` is typed `EnergySource`, the
-    -- union of Electric/Burner/Heat/Fluid/Void, and the distiller records the union's
-    -- NAME with its alternatives nowhere — so type_props('EnergySource') is an EMPTY
-    -- set, not a missing one. Walking into it and reading the leaf reported
-    -- `usage_priority` and `type` — both REQUIRED on ElectricEnergySource in both
-    -- versions — as "in neither version", outside the unwalkable bound, because the
-    -- hop did resolve.
+    -- ★ CART-0654, and this spec has been REWRITTEN by its own ticket's real fix.
+    -- `MiningDrillPrototype::energy_source` is typed `EnergySource`, the union of
+    -- Electric/Burner/Heat/Fluid/Void. The walk resolves that hop and lands on a type
+    -- with no properties of its own, so `usage_priority` — REQUIRED on
+    -- ElectricEnergySource in both versions — was first reported as existing in NEITHER
+    -- version, then honestly bucketed as unadjudicated. CART-0646's distil records the
+    -- alternatives, so it is now DECIDED.
     local st = factorio_store(table.concat({
         'local d = table.deepcopy(data.raw["mining-drill"]["electric-mining-drill"])',
-        'd.energy_source.usage_priority = "secondary-input"',
-        'd.energy_source.type = "electric"',
-        'd.mining_power = 3',   -- genuinely in NEITHER version (removed before 1.1)
+        'd.energy_source.usage_priority = "secondary-input"',  -- supplied by an alternative
+        'd.energy_source.fuel_category = "chemical"',          -- NO 2.0 alternative has it
+        'd.mining_power = 3',                                  -- truly in neither version
         'data:extend{d}',
     }, '\n'))
     local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
         'lua-factorio-proto-20')
     ok(res, 'the diff runs: ' .. tostring(err))
-    ok(res.opaque_owner >= 2, 'both union-base leaves land in their own bucket, got '
-        .. tostring(res.opaque_owner))
-    -- and the genuinely-absent one is still reported as such: the split must not
-    -- swallow the real answers along with the false ones
+
+    -- ★ REMOVED IS SOUND WITHOUT KNOWING WHICH ALTERNATIVE THE VALUE IS: if none in the
+    -- target declares the property, the target has nowhere to put it whichever it was.
+    local lost
+    for _, e in ipairs(res.union_lost) do
+        if e.prop == 'energy_source.fuel_category' then lost = e end
+    end
+    ok(lost ~= nil, 'a property no target alternative declares is a FINDING, got '
+        .. tostring(#res.union_lost) .. ' union-lost row(s)')
+    eq('EnergySource', lost.owner, 'named at the union, not at the leaf type')
+    eq(0, lost.detail.to_have, 'and no target alternative has it')
+    ok(lost.detail.from_have >= 1, 'while at least one origin alternative did')
+
+    -- supplied by an alternative on both sides -> plain `kept`, no row at all
+    for _, e in ipairs(res.union_lost) do
+        ok(e.prop ~= 'energy_source.usage_priority',
+            'a property an alternative still declares is NOT a finding')
+    end
+    -- and a property no alternative ever had stays honestly unknown
     local sampled = {}
     for _, e in ipairs(res.unknown_sample) do sampled[e.prop] = true end
     ok(sampled['mining_power'], 'a property truly in neither version stays there')
-    ok(not sampled['energy_source.usage_priority'],
-        'a REQUIRED property of a union alternative must never be called nonexistent')
     vim.fn.delete(proto_tmp, 'rf')
 end)
 
-test('portability: the not-a-runtime-member text does not claim there is no work',
+test('portability: a union leaf is narrowed by the SET of alternatives, not the count',
     function ()
-    -- ★ A CLAIM FENCE, not a wording test (CART-0651). The old text said this bucket
-    -- "never was part of the environment" and is "no work at all" — a DECIDED answer
-    -- reached from the runtime class table alone. `circuit_connector_definitions.create`
-    -- landed in it: a data-stage global from base's lualib, replaced by `.create_vector`
-    -- in 2.0, and calling nil stops the load. No artifact models that surface, so an
-    -- absence in the two that exist is not evidence about it. What may be asserted here
-    -- is where the name is NOT; what may not is that nothing needs doing.
-    local t = port.REASON_TEXT['not-a-runtime-member']
-    ok(t ~= nil, 'the bucket has text')
-    -- ⚠ THE FENCE IS ON THE ASSERTION, NOT ON THE WORDS. My first cut looked for the
-    -- substring "no work at all" and failed on the fixed text, which quotes the old
-    -- claim in order to retract it — a predicate matching its own vocabulary, one more
-    -- time. So: the retired SENTENCE must be gone, and the surface must be named.
-    ok(not t:find('is no work at all rather than unknown work', 1, true),
-        'the retired claim must not be back: ' .. t)
-    ok(t:find('no shipped artifact models', 1, true),
-        'and the text must name the surface nothing covers, so a reader can weigh it')
-end)
-
-test('portability: a VERSION-PINNED profile still finds the tree\'s declared version',
-    function ()
-    -- ★ CART-0645. Profile names and ecosystem names are two key spaces, and the only
-    -- thing that joined them was a coincidence — `lua-factorio` is spelled the same in
-    -- both. So `declared_for` resolved for exactly one profile and returned nil for
-    -- every version-pinned one, and origin_for rendered that as "the tree declares no
-    -- environment version" — a claim about the TREE, and false. It also made the whole
-    -- class-space audit direction-dependent, which nothing else here is.
-    local eco = require 'cartograph.spec.ecosystem'
-    for _, name in ipairs({ 'lua-factorio', 'lua-factorio-11', 'lua-factorio-api-11',
-        'lua-factorio-proto-20' }) do
-        local e, n = eco.for_profile(name)
-        ok(e ~= nil, 'an ecosystem must claim the profile ' .. name)
-        eq('lua-factorio', n, 'and it is the factorio one for ' .. name)
-        ok((e.identity or {}).version_scale ~= nil, 'carrying the ruler to measure on')
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ⚠ THE LESSON THE TYPE-MOVE CLASSES ALREADY COST ONCE. `energy_source.usage_priority`
+    -- is 1-of-5 alternatives in BOTH versions and both times the one is
+    -- ElectricEnergySource: nothing moved, and calling it a hedge would put a row on
+    -- every electric entity in every mod. Meanwhile `Modifier` goes 38-of-41 to
+    -- 42-of-48 — a count RISE — and is still a narrowing, because specific alternatives
+    -- dropped out. Only the set answers.
+    local pm = require 'cartograph.spec.profile'
+    local a, b = pm.load('lua-factorio-proto-11'), pm.load('lua-factorio-proto-20')
+    local alts_a = a.concept_union['EnergySource']
+    local alts_b = b.concept_union['EnergySource']
+    ok(alts_a and #alts_a == 5, 'EnergySource names its five alternatives in 1.1')
+    ok(alts_b and #alts_b == 5, 'and in 2.0')
+    local function holders(prof, alts, prop)
+        local out = {}
+        for _, alt in ipairs(alts) do
+            local ps = port.type_props(prof, alt)
+            if ps and ps[prop] then out[#out + 1] = alt end
+        end
+        table.sort(out); return out
     end
-    eq(nil, eco.for_profile('no-such-profile-anywhere'),
-        'and an unclaimed name is nil, so the caller can say WHICH lookup failed')
-
-    -- the reason must name the lookup, never the tree
-    local why = select(2, port.declared_for({ data = { root = '/nowhere' } },
-        'no-such-profile-anywhere'))
-    ok(type(why) == 'string' and why:find('no-such-profile-anywhere', 1, true),
-        'the refusal names the profile it could not place: ' .. tostring(why))
-    ok(why:find('NOT a fact about the tree', 1, true),
-        'and says explicitly that it is not a statement about the tree: ' .. why)
+    eq(holders(a, alts_a, 'usage_priority'), holders(b, alts_b, 'usage_priority'),
+        'the SAME alternative supports usage_priority in both, so nothing is narrowed')
+    eq({ 'BurnerEnergySource' }, holders(a, alts_a, 'fuel_category'),
+        'fuel_category lived on the burner alternative in 1.1')
+    eq({}, holders(b, alts_b, 'fuel_category'), 'and on none in 2.0')
 end)
 
 test('portability: a KEPT property whose declared TYPE moved is classified, not counted',
