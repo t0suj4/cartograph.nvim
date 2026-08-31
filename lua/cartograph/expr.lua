@@ -84,6 +84,39 @@ local NAME = { identifier = true, name = true }
 --   string_content / string_fragment   the text between the quotes (bash, lua, js, python)
 --   escape_sequence                    \n and friends
 --   string_start / string_end          python's f-string delimiters, which are NAMED
+--- The node types that ARE a name in some grammar — what a binder binds when it names no
+--- `child` container. `variable_name` is bash's and php's; `identifier` everyone else's.
+local NAMEISH = { identifier = true, name = true, variable_name = true,
+    word = false }  -- bash's `word` is an ARGUMENT, never a binding: `local -i` is a flag
+
+--- A language's declared binder node types, memoised. The spec is the single owner of
+--- "what binds a name here" and it already declares them for the locality pass; expr
+--- reading the same declaration is what stops this being a second, drifting copy.
+local binder_cache = {}
+local function binder_nodes(lang)
+    if not lang then return nil end
+    local hit = binder_cache[lang]
+    if hit ~= nil then return hit or nil end
+    local ok, ts = pcall(require, 'cartograph.providers.treesitter')
+    local set = false
+    if ok and ts.spec and ts.spec[lang] and ts.spec[lang].binders then
+        set = {}
+        for _, b in ipairs(ts.spec[lang].binders) do
+            -- ⚠ `defs` IS OPT-IN AND MEASURED, NOT INFERRED FROM `binders`. A binder's
+            -- names being pure DEFS is a claim about what du counts in THIS language, and
+            -- du does not agree across them: bash's `local i len` puts both in `def`,
+            -- while lua's `for i = 1, n` puts `i` in `use`. Applying it to every declared
+            -- binder took the self corpus from 1961 disagreements to 2967 —
+            -- missing:for_numeric_clause 0 -> 504 — trading one language's fix for
+            -- another's regression. So a spec opts in per binder, and the number that
+            -- justifies it is in that spec's comment.
+            if b.node and not b.child and b.defs then set[b.node] = true end
+        end
+    end
+    binder_cache[lang] = set
+    return set or nil
+end
+
 local STRING_INERT = { string_content = true, string_fragment = true,
     escape_sequence = true, string_start = true, string_end = true,
     raw_string_content = true }
@@ -611,10 +644,27 @@ function build_core(node, src, lang)
         if op then return { k = '?', t = t, kids = { build(op, src, lang) } } end
         return { k = 'vararg' }
     end
-    -- honest unknown: keep the named children as kids so no name is hidden
+    -- ★ A BINDER'S OWN NAME CHILDREN ARE BINDINGS, NOT READS (CART-0665). `local i len`
+    -- declares two variables; the honest-unknown path below would emit them as `name`
+    -- nodes, which `reads` counts — 378 rows on the bash corpus where du had the name in
+    -- `def` and the IR claimed a use. Emitted as an `assign` with NO VALUE, which is what
+    -- a bare declaration is: `target_reads` already knows a plain-name target is a pure
+    -- def, so this needs no new kind and no new rule in reads.
+    --
+    -- ⚠ SPEC-DECLARED, NOT A NODE LIST HERE. The spec already names its binder nodes for
+    -- the locality pass ([[cartograph-cross-project]]); reading the same declaration is
+    -- what keeps this from being one more place a grammar can be forgotten.
+    local bnd = binder_nodes(lang)
     local kids = {}
     for c in node:iter_children() do
-        if c:named() and not tsutil.is_comment(c) then kids[#kids + 1] = build(c, src, lang) end
+        if c:named() and not tsutil.is_comment(c) then
+            if bnd and bnd[t] and NAMEISH[c:type()] then
+                kids[#kids + 1] = { k = 'assign', t = build(c, src, lang), v = nil,
+                    kids = { build(c, src, lang) } }
+            else
+                kids[#kids + 1] = build(c, src, lang)
+            end
+        end
     end
     return { k = '?', t = t, kids = kids }
 end

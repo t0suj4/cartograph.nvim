@@ -48,6 +48,17 @@ return {
         -- kinds feed the id pass
         mention_types = { word = true, variable_name = true },
         df_ids = { variable_name = true },
+        -- BINDER NODES: `local i len` and `declare -a x` BIND their names. Without this
+        -- the expression IR reported each bound name as a READ — 378 rows on testssl.sh,
+        -- the largest single disagreement left after the interpolation fix, and every one
+        -- of them a name du had in `def` and the IR in `use` (CART-0665).
+        -- No `child`: the bound names are the declaration's own direct name children.
+        -- `defs`: du puts these names in `def`, so the expression IR must not report
+        -- them as reads. Measured on testssl.sh — binder:declaration_command 378 -> 0.
+        -- OPT-IN because du disagrees across languages: lua's numeric-for binding lands
+        -- in `use` there, and applying this to every binder regressed the self corpus by
+        -- 1006 rows.
+        binders = { { node = 'declaration_command', defs = true } },
         -- typed-string SINK: eval's arg IS code — the literal head names
         -- the real callee (the aperture-analyzer side of the eval story)
         string_sinks = { eval = { arg = 1, ty = 'code' } },

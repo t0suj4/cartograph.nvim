@@ -757,3 +757,47 @@ test('expr: a string with no expression in it is STILL a literal', function ()
     eq('lit', e.k, 'an inert string is still a literal')
     eq('str', e.ty)
 end)
+
+test('expr: a declared binder\'s own names are DEFS, not reads — and only where declared',
+    function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not (pcall(vim.treesitter.language.add, 'bash')
+        and pcall(vim.treesitter.language.add, 'lua')) then skip 'no parsers' end
+    -- ★ CART-0665. `local i len` binds two names; the IR reported both as READS while du
+    -- had them in `def` — 378 rows on testssl.sh, the largest disagreement left after the
+    -- interpolation fix.
+    local expr = require 'cartograph.expr'
+    local function reads_of(src, lang, ntype)
+        local root = vim.treesitter.get_string_parser(src, lang):parse()[1]:root()
+        local found
+        local function find(n)
+            if n:type() == ntype then found = found or n end
+            for c in n:iter_children() do if c:named() then find(c) end end
+        end
+        find(root)
+        if not found then return nil end
+        local acc = {}
+        local function walk(x)
+            if x.k == 'name' then acc[x.n] = true end
+            if x.k == 'assign' then walk(x.v or { k = '_' }); return end
+            for _, c in ipairs(x.kids or {}) do walk(c) end
+        end
+        walk(expr.build(found, src, lang))
+        return acc
+    end
+    local b = reads_of('local i len\n', 'bash', 'declaration_command')
+    ok(b ~= nil, 'the bash fixture parses')
+    eq(nil, b['i'], 'a bound name is not a read: ' .. vim.inspect(b))
+    eq(nil, b['len'])
+
+    -- ⚠ AND ONLY WHERE THE SPEC OPTS IN. `defs` is not inferred from `binders`, because
+    -- du does not agree across languages: lua's `for i = 1, n` puts `i` in `use`, so
+    -- applying this to every declared binder took the self corpus from 1961 disagreements
+    -- to 2967 — one language's fix bought with another's regression.
+    local ts = require 'cartograph.providers.treesitter'
+    local lua_binders = (ts.spec.lua or {}).binders or {}
+    local opted = false
+    for _, x in ipairs(lua_binders) do if x.defs then opted = true end end
+    eq(false, opted, 'lua must NOT opt in, or its numeric-for regresses by 504 rows')
+end)

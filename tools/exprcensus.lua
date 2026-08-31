@@ -320,7 +320,14 @@ M.EXPECTED = {
     -- to the enclosing ROW's node type, so this list ranks containers — tools/gramdiff.lua
     -- reaches the same gap from the GRAMMAR side and named string / simple_expansion /
     -- expansion outright. Two instruments, and only the second one pointed at the cause.
-    bash = { total = 1047, ['binder:declaration_command'] = 378,
+    -- recalib 2026-09-01 (A BINDER'S NAMES ARE NOT READS, CART-0665): 1047 -> 669.
+    -- `local i len` binds two names and the IR reported both as reads; du had them in
+    -- `def`. spec/bash.lua declares declaration_command as a binder with `defs = true`.
+    -- ⚠ `defs` IS OPT-IN AND THAT COST A MEASUREMENT: applying it to every declared
+    -- binder took the SELF corpus 1961 -> 2967 (missing:for_numeric_clause 0 -> 504),
+    -- because du puts lua's `for i = 1, n` binding in `use` and bash's in `def`. One
+    -- language's fix was another's regression until the spec opted in per binder.
+    bash = { total = 669,
         ['missing:case_item'] = 199, ['missing:if_statement'] = 137,
         ['missing:list'] = 119, ['missing:c_style_for_statement'] = 88,
         ['missing:test_command'] = 23, ['binder:elif_clause'] = 22,
