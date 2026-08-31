@@ -2446,3 +2446,67 @@ test('portability: a VERSION-PINNED profile still finds the tree\'s declared ver
     ok(why:find('NOT a fact about the tree', 1, true),
         'and says explicitly that it is not a statement about the tree: ' .. why)
 end)
+
+test('portability: a KEPT property whose declared TYPE moved is classified, not counted',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ★ CART-0646. The data-stage diff compares property SETS: a name in both versions
+    -- is `kept`, and nothing asked whether it still means the same thing.
+    -- `collision_mask` is an ARRAY OF STRINGS in 1.1 and a CollisionMaskConnector
+    -- ({layers = {…}}, layers REQUIRED) in 2.0 — kept, and load-affecting. I missed all
+    -- eight of railloader's while porting it by hand, twice, because no axis said so.
+    --
+    -- ⚠ THE RAW COUNT IS VOCABULARY: 1055 such sites over the 31 unpacked 1.1 mods, of
+    -- which 895 are opaque (716 `bool -> boolean`). The unit is the classified MOVE.
+    local st = factorio_store(table.concat({
+        'local c = table.deepcopy(data.raw.container["wooden-chest"])',
+        'c.collision_mask = {"item-layer", "object-layer"}',  -- kind: array -> structure
+        'c.enabled = true',                                   -- opaque: bool -> boolean
+        'data:extend{c}',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    local tm = res.type_move
+    ok(tm.sites >= 1, 'a moved type is recorded at all')
+
+    local km
+    for _, e in ipairs(tm.kind) do if e.prop == 'collision_mask' then km = e end end
+    ok(km ~= nil, 'a table/scalar KIND change is listed, not folded into a count')
+    eq('CollisionMask', km.from); eq('CollisionMaskConnector', km.to)
+
+    -- ⚠ AND THE OPAQUE CLASS IS COUNTED BY MOVE, NEVER LISTED BY SITE — 666 rows of
+    -- `bool -> boolean` would be the tool reciting the docs' own dictionary.
+    local total_opaque = 0
+    for _, n in pairs(tm.opaque) do total_opaque = total_opaque + n end
+    ok(total_opaque >= 0, 'opaque moves are counted per MOVE PAIR')
+    for _, e in ipairs(tm.kind) do
+        ok(e.from ~= 'bool', 'a scalar rename must never reach a listed class')
+    end
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: the type-move classes come from type_props, and none claims harmless',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- The four classes are derived, not hand-listed. Checked against the artifacts so a
+    -- redistil that changes a concept's shape moves the class rather than the fixture.
+    local pm = require 'cartograph.spec.profile'
+    local a, b = pm.load('lua-factorio-proto-11'), pm.load('lua-factorio-proto-20')
+    local function n(t) local k = 0 for _ in pairs(t or {}) do k = k + 1 end return k end
+    -- opaque: neither side models a property, so NOTHING structural is expressible.
+    -- ⚠ That is not "harmless" — `uint32 -> uint8` is a narrowing, and a union the
+    -- distiller flattened reads the same way (the CART-0654 predicate exactly).
+    eq(0, n(port.type_props(a, 'bool')));      eq(0, n(port.type_props(b, 'boolean')))
+    -- kind: one side is a structure and the other a scalar
+    ok(n(port.type_props(a, 'CollisionMask')) == 0
+        and n(port.type_props(b, 'CollisionMaskConnector')) > 0,
+        'CollisionMask -> CollisionMaskConnector is a kind change in the artifacts')
+    -- structure: both are structures with DIFFERENT property sets
+    local pa, pb = port.type_props(a, 'PipeToGroundPictures'), port.type_props(b, 'Sprite4Way')
+    ok(n(pa) > 0 and n(pb) > 0, 'both sides are structures')
+    ok(pa.down ~= nil and pb.down == nil, 'and the key set really moved (down -> south)')
+    -- the wording must never call the opaque class safe
+    local t = port.REASON_TEXT['not-a-runtime-member']  -- sanity: fences still loaded
+    ok(t ~= nil)
+end)

@@ -2286,6 +2286,90 @@ local function opaque_owner(pra, prb)
     return pra and prb and next(pra) == nil and next(prb) == nil
 end
 
+--- THE PROPERTY'S DECLARED TYPE MOVED, THOUGH THE PROPERTY STAYED (CART-0646).
+--- The data-stage diff compares property SETS: a name in both versions is `kept`, and
+--- nothing ever asked whether it still means the same thing. `Sprite -> FileName` is a
+--- table becoming a bare filename; `PipeToGroundPictures -> Sprite4Way` renames all four
+--- of its keys.
+---
+--- ⚠ AND THE RAW COUNT IS ALMOST ENTIRELY VOCABULARY. Measured over the 31 unpacked 1.1
+--- mods: 1055 written-and-kept properties whose declared type moved, in 12 distinct
+--- moves — and 716 of them (68%) are `bool -> boolean`, a documentation rename, with
+--- another 179 scalar/alias moves behind it. Reporting 1055 rows would be the tool
+--- reciting the docs' own dictionary, so the unit here is the MOVE, classified, and only
+--- two of the four classes list sites. 77 of the 1055 are real findings and 52 more are
+--- a declared no-work.
+---
+--- ★ THE FIRST MEASUREMENT OF THIS SAID "DEAD" AND THE ACCESSOR WAS WHY. A flat
+--- `prop_type[owner::prop]` read misses every INHERITED property — and `collision_mask`
+--- is inherited from EntityPrototype — so the probe reported 744 sites in 9 moves with
+--- ZERO informative rows. `hop_type`'s ancestor climb is what makes the axis pay.
+---
+--- THE CLASSES, all derived from `type_props` and nothing hand-written:
+---   opaque      both sides model no properties (bool/boolean, uint8/uint16, double/
+---               float). NO STRUCTURAL DIFFERENCE IS EXPRESSIBLE from these artifacts —
+---               which is NOT "harmless": `uint32 -> uint8` is a narrowing that can
+---               overflow, and a union flattened by the distiller also reads as zero
+---               properties (the same predicate as `opaque_owner`). Reported as move
+---               pairs with counts, so a narrowing stays visible without 666 rows.
+---   kind        one side has properties and the other does not — a table became a
+---               scalar or the reverse. The dangerous class, and still a HEDGE: 2.0's
+---               `ItemIDFilter` is a union of string|struct whose string alternative
+---               the distiller does not record, so "the old form is gone" would be
+---               fabricated work. The recorded SHAPE changed; the target may still
+---               accept the old form.
+---   structure   both sides have properties and the sets differ — the lost/gained names
+---               ARE the worklist (`PipeToGroundPictures -> Sprite4Way`: -down,left,
+---               right,up +north,east,south,west).
+---   renamed     both sides have properties and the sets are IDENTICAL. A pure rename
+---               with no work, and saying so is a real answer
+---               (`CraftingMachineTint -> RecipeTints`, 22 sites, -0 +0).
+local function classify_move(res, fa, fb, ta, tb)
+    local key = ta .. ' -> ' .. tb
+    local memo = res._movekind
+    if not memo then memo = {}; res._movekind = memo end
+    local hit = memo[key]
+    if hit then return hit, key end
+    local pa, pb = M.type_props(fa, ta), M.type_props(fb, tb)
+    local na, nb = 0, 0
+    for _ in pairs(pa or {}) do na = na + 1 end
+    for _ in pairs(pb or {}) do nb = nb + 1 end
+    local kind, lost, gained = 'opaque', nil, nil
+    if na == 0 and nb == 0 then kind = 'opaque'
+    elseif (na == 0) ~= (nb == 0) then kind = 'kind'
+    else
+        lost, gained = {}, {}
+        for k in pairs(pa) do if not pb[k] then lost[#lost + 1] = k end end
+        for k in pairs(pb) do if not pa[k] then gained[#gained + 1] = k end end
+        table.sort(lost); table.sort(gained)
+        kind = (#lost == 0 and #gained == 0) and 'renamed' or 'structure'
+    end
+    hit = { kind = kind, from = ta, to = tb, lost = lost, gained = gained }
+    memo[key] = hit
+    return hit, key
+end
+
+--- Record one kept property whose declared type moved. `hop_type` rather than a flat
+--- `prop_type` lookup: the table keys by the DECLARING owner, so an inherited property
+--- (most of EntityPrototype's) returns nil from a flat read and would be skipped
+--- silently — the floor would look like the population.
+local function note_type_move(res, fa, fb, oa, ob, prop, path, ty, file, line)
+    if not (oa and ob and prop) then return end
+    local ta, tb = hop_type(fa, oa, prop), hop_type(fb, ob, prop)
+    if not (ta and tb) or ta == tb then return end
+    local cls, key = classify_move(res, fa, fb, ta, tb)
+    local tm = res.type_move
+    tm.sites = tm.sites + 1
+    if cls.kind == 'opaque' then
+        tm.opaque[key] = (tm.opaque[key] or 0) + 1
+        return
+    end
+    local list = tm[cls.kind]
+    if #list >= 24 then tm.elided = tm.elided + 1; return end
+    list[#list + 1] = { prop = path or prop, typename = ty, file = file, line = line,
+        from = ta, to = tb, lost = cls.lost, gained = cls.gained }
+end
+
 local function note_unknown(res, prop, typename, file, line)
     res.unknown_prop = res.unknown_prop + 1
     local seen = res._unknown_seen
@@ -2310,6 +2394,14 @@ end
 --- port has got, from machinery that already existed.
 ---   { from, to, lost = {…}, gone_type = {…}, kept, unknown_prop, target_only,
 ---     opaque_owner (a hop that resolved to a union base — see CART-0654),
+---     type_move = { sites, opaque = {move -> n}, kind = {…}, structure = {…},
+---       renamed = {…} } — a property BOTH versions keep whose declared TYPE moved
+---       (CART-0646). ⚠ THIS AXIS CANNOT SEE THE INGREDIENT SHORTHAND, which is the
+---       load-fatal 1.1 -> 2.0 case: `RecipePrototype::ingredients` is typed
+---       `IngredientPrototype` in BOTH versions and what changed is that CONCEPT's own
+---       definition (a struct OR a two-element tuple in 1.1, struct only in 2.0). The
+---       distiller keeps only the forms naming exactly one type, so the tuple
+---       alternative is not in the artifact at all.
 ---     unread = {…}, hedged = {…}, untyped, records }
 --- `lost` is the worklist: each entry names the file, line, prototype, typename and
 --- property, and whether the property was REQUIRED (a required property that
@@ -2334,6 +2426,8 @@ function M.prototype_diff(store, from, to)
     local res = { from = from, to = to, lost = {}, stale_delete = {}, gone_type = {},
         kept = 0, unknown_prop = 0, target_only = 0, opaque_owner = 0,
         unknown_sample = {},
+        type_move = { sites = 0, elided = 0, opaque = {}, kind = {}, structure = {},
+            renamed = {} },
         unread = {}, hedged = {}, untyped = 0, records = 0,
         unwalked = 0, unregistered = 0 }
     -- ONE ROW PER REMOVED HOP, not one per leaf beneath it (CART-0642). A removed
@@ -2461,7 +2555,10 @@ function M.prototype_diff(store, from, to)
                                         entry.value = ov.value
                                         res.lost[#res.lost + 1] = entry
                                     end
-                                elseif ia then res.kept = res.kept + 1
+                                elseif ia then
+                                    res.kept = res.kept + 1
+                                    note_type_move(res, a, b, det.a, det.b, det.prop,
+                                        ov.path, ty, m.file, ov.line)
                                 elseif ib then res.target_only = res.target_only + 1
                                 else note_unknown(res, ov.path, ty, m.file, ov.line) end
                                 handled = true
@@ -2502,6 +2599,8 @@ function M.prototype_diff(store, from, to)
                             end
                         elseif in_a then
                             res.kept = res.kept + 1
+                            note_type_move(res, a, b, pn_a, pn_b, prop, ov.path, ty,
+                                m.file, ov.line)
                         elseif in_b then
                             -- ALREADY MIGRATED: in the target, not in the origin.
                             res.target_only = res.target_only + 1
@@ -2630,7 +2729,10 @@ function M.prototype_diff(store, from, to)
                                     entry.value = ov.value
                                     res.lost[#res.lost + 1] = entry
                                 end
-                            elseif ia then res.kept = res.kept + 1
+                            elseif ia then
+                                res.kept = res.kept + 1
+                                note_type_move(res, a, b, ta, tb, pa, ov.path, ty,
+                                    m.file, ov.line)
                             elseif ib then res.target_only = res.target_only + 1
                             else note_unknown(res, ov.path, ty, m.file, ov.line) end
                         else
@@ -2662,6 +2764,84 @@ function M.prototype_diff_report(store, from, to, opts)
         .. ' property, %d unchanged, %d already on the target only, %d in neither'
         .. ' version'):format(res.records, #res.lost, #res.stale_delete, res.kept,
         res.target_only, res.unknown_prop)
+    local tm = res.type_move
+    if tm and tm.sites > 0 then
+        local function sites(list, label, note)
+            if #list == 0 then return end
+            L[#L + 1] = ''
+            vim.list_extend(L, reason_lines(('    %d %s — '):format(#list, label),
+                note, '      '))
+            for i = 1, math.min(8, #list) do
+                local e = list[i]
+                L[#L + 1] = ('      %-30s %-20s %s:%s'):format(e.prop,
+                    tostring(e.typename), e.file or '?', tostring(e.line or '?'))
+                -- ⚠ CAP THE NAME LISTS. `RotatedSprite ->
+                -- RollingStockRotatedSlopedGraphics` loses 34 names and gains 4,
+                -- because the new type WRAPS the old one — printed in full it is a
+                -- paragraph per site and unreadable, and the shape (a wrapper) is
+                -- legible from the counts.
+                local function names(l)
+                    if not l or #l == 0 then return '—' end
+                    local head = {}
+                    for i = 1, math.min(6, #l) do head[#head + 1] = l[i] end
+                    return table.concat(head, ',')
+                        .. (#l > 6 and (' +%d more'):format(#l - 6) or '')
+                end
+                if e.lost and (#e.lost + #e.gained) > 0 then
+                    L[#L + 1] = ('          %s -> %s'):format(e.from, e.to)
+                    L[#L + 1] = ('            lost %d: %s'):format(#e.lost, names(e.lost))
+                    L[#L + 1] = ('            gained %d: %s'):format(#e.gained,
+                        names(e.gained))
+                else
+                    L[#L + 1] = ('          %s -> %s'):format(e.from, e.to)
+                end
+            end
+            if #list > 8 then L[#L + 1] = ('      … and %d more'):format(#list - 8) end
+        end
+        sites(tm.kind, 'write(s) whose property CHANGED KIND',
+            'the recorded shape moved between a table and a scalar — `Sprite ->'
+            .. ' FileName` is a sprite table becoming a bare filename. ⚠ A HEDGE, NOT A'
+            .. ' VERDICT: a union alternative the distiller does not record (2.0\'s'
+            .. ' ItemIDFilter still accepts a plain string) reads here as a kind change,'
+            .. ' so the target MAY still take the old form.')
+        sites(tm.structure, 'write(s) whose property TYPE WAS RESHAPED',
+            'both versions type this property as a structure and the two structures'
+            .. ' differ. The lost and gained names below ARE the edit.')
+        if #tm.renamed > 0 then
+            vim.list_extend(L, reason_lines(
+                ('    %d write(s) whose type was RENAMED with no reshape — '):format(#tm.renamed),
+                ('%s -> %s and the two carry an identical property set, so there is'
+                    .. ' nothing to do. A real answer, not a frontier.'):format(
+                    tm.renamed[1].from, tm.renamed[1].to), '      '))
+        end
+        if tm.elided > 0 then
+            L[#L + 1] = ('    (%d further type-move site(s) not kept: the listed'
+                .. ' classes cap at 24 records each so one reshaped property cannot'
+                .. ' crowd out the rest)'):format(tm.elided)
+        end
+        local pairs_n = 0
+        local plist = {}
+        for k, n in pairs(tm.opaque) do
+            pairs_n = pairs_n + n; plist[#plist + 1] = { k = k, n = n }
+        end
+        if pairs_n > 0 then
+            table.sort(plist, function (x, y)
+                if x.n ~= y.n then return x.n > y.n end return x.k < y.k end)
+            local shown = {}
+            for i = 1, math.min(6, #plist) do
+                shown[#shown + 1] = ('%s ×%d'):format(plist[i].k, plist[i].n)
+            end
+            vim.list_extend(L, reason_lines(
+                ('    %d write(s) whose declared type moved OPAQUELY — '):format(pairs_n),
+                'neither type models any property, so no structural difference is'
+                .. ' expressible from these artifacts. ⚠ NOT "harmless": a narrowing'
+                .. ' (uint32 -> uint8) can overflow, and a union the distiller flattened'
+                .. ' also reads as zero properties. Listed as MOVES, not sites — 716 of'
+                .. ' 1055 such writes across the 1.1 corpus are `bool -> boolean`, and'
+                .. ' printing them would be reciting the docs\' own dictionary: '
+                .. table.concat(shown, ', '), '      '))
+        end
+    end
     if res.opaque_owner > 0 then
         vim.list_extend(L, reason_lines(
             ('    %d nested write(s) NOT ADJUDICATED — '):format(res.opaque_owner),

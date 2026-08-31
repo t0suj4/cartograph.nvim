@@ -1990,6 +1990,41 @@ all 41 `script.*` reads in the other 33. Neither left a row. A binding elsewhere
 
 so the hedge is visible and checkable. Silence is the one answer that cannot be.
 
+### When the property stays and its type moves
+
+A property both versions declare is `kept`, and until CART-0646 nothing asked whether it
+still *means* the same thing. `collision_mask` survives into 2.0 — as
+`CollisionMaskConnector`, a structure whose `layers` field is required, where 1.1 took an
+array of layer-name strings. Eight such writes sat in railloader, and a hand port made
+from the old report walked past all of them twice.
+
+The raw count is almost entirely vocabulary: **1055** written-and-kept properties change
+declared type across the 31 unpacked 1.1 mods, and **716 of them are `bool → boolean`**.
+So the unit is the *move*, classified from `type_props` and nothing hand-written:
+
+| class | what it means | corpus |
+| --- | --- | --- |
+| **kind** | one side is a structure and the other a scalar — a table became a filename, or a string became a table | 48 |
+| **structure** | both are structures with different property sets; the lost/gained names *are* the edit | 29 |
+| **renamed** | both are structures with an identical property set — a pure rename, **no work**, and saying so is a real answer | 52 |
+| **opaque** | neither models a property, so nothing structural is expressible | 895 |
+
+Only the first two list sites. `opaque` prints as move pairs with counts —
+`bool → boolean ×716`, `IngredientPrototype → ResearchIngredient ×149`,
+`uint8 → uint16 ×13` — because a narrowing like `uint32 → uint8` must stay visible
+without printing 700 rows. **Opaque is not "harmless":** a union the distiller flattened
+reads as zero properties too, which is the same predicate that produced CART-0654.
+
+The `kind` class is a **hedge, not a verdict**. 2.0's `ItemIDFilter` is a union of
+string-or-struct whose string alternative the artifact does not record, so it reads here
+as a kind change while the old form is still legal.
+
+⚠ **This axis cannot see the biggest 1.1 → 2.0 data-stage break.**
+`RecipePrototype::ingredients` is typed `IngredientPrototype` in *both* versions — what
+changed is that concept's own definition, from struct-or-tuple to struct-only, and the
+distiller keeps only the forms naming exactly one type. Recording a concept's union
+alternatives is the open half of CART-0646.
+
 ### Reads on a receiver
 
 `e.circuit_connection_definitions` is neither of the above: rooted at a local, it
