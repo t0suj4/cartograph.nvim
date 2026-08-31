@@ -22,6 +22,10 @@ local API = (arg and arg[1]) or vim.fn.expand('~/git/Factorio-luacheckrc/.io/run
 -- strong ("1.1 had it, 2.0 does not"). Without a suffix the 2.0 artifact keeps its
 -- historical name, so existing callers are untouched.
 local SUFFIX = (arg and arg[2]) or ''
+-- WHERE THE DOCUMENT CAME FROM, for the stamp. apifetch passes the resolved URL; a
+-- hand run leaves it nil and the stamp then records only the path it was given, which
+-- is the honest state — "we know where this file was, not where it came from".
+local ORIGIN = (arg and arg[3]) or nil
 local RUNTIME = 'lua-factorio-api' .. (SUFFIX ~= '' and ('-' .. SUFFIX) or '')
 if vim.fn.filereadable(API) ~= 1 then
     io.write('no runtime-api.json at ' .. API .. '\n'); os.exit(2)
@@ -300,7 +304,29 @@ end
 local profile = {
     schema = 1, runtime = RUNTIME, lang = 'lua',
     version = api.application_version, api_version = api.api_version,
-    stamp = { source = API, application_version = api.application_version,
+    -- ⚠ THE SOURCE IS WHERE IT CAME FROM, NOT WHICH TEMP FILE HELD IT. This recorded
+    -- the input PATH, so the artifacts on disk named a scratch file from a session that
+    -- had ended, and apifetch writes each fetch to a fresh tempname. A stamp is
+    -- provenance, and a path that no longer exists is worse than none.
+    --
+    -- ⚠ THIS DOES NOT MAKE THE ARTIFACT BYTE-REPRODUCIBLE, and it was worth checking
+    -- rather than assuming: two runs over the identical document still differ, because
+    -- mpack encodes a table in `pairs()` order and that is not stable across processes.
+    -- What IS stable is the CONTENT — a decoded deep compare of two runs is 10785
+    -- scalars and 0 differences (15053 for the 2.0 artifact). And nothing rests on the
+    -- bytes anyway: `profile.stamp_of` is mtime+size, so a re-distil invalidates caches
+    -- by construction whatever the encoder does.
+    -- ⚠ TWO FACTS, NOT ONE, AND THEY CAN DISAGREE. `origin` is where the document is
+    -- published; `input` is the file this artifact was actually distilled from. A local
+    -- file that has been edited distils perfectly happily, and an origin URL alone would
+    -- vouch for it — so the path is not noise to be replaced, it is the audit trail.
+    -- The reverse failure is what prompted this: `source` recorded ONLY the path, so the
+    -- shipped artifacts named a tempfile from a session that had ended and a checkout in
+    -- an unrelated repo, and neither says where to get the document again.
+    -- `origin` is absent for a hand run rather than guessed, and `source` is kept as the
+    -- best single answer (origin when known, else the path) so existing readers move.
+    stamp = { source = ORIGIN or API, origin = ORIGIN, input = API,
+        application_version = api.application_version,
         api_version = api.api_version, stage = api.stage },
     -- `members` / `complete` are THIS ARTIFACT'S names, and they are deliberate: the
     -- artifact is an INGREDIENT, not a portability target. spec/profile/lua-factorio-11

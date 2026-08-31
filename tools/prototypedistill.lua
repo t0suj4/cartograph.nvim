@@ -49,6 +49,10 @@ if not API then
     os.exit(2)
 end
 local SUFFIX = (arg and arg[2]) or ''
+-- WHERE THE DOCUMENT CAME FROM, for the stamp. apifetch passes the resolved URL; a
+-- hand run leaves it nil and the stamp then records only the path it was given, which
+-- is the honest state — "we know where this file was, not where it came from".
+local ORIGIN = (arg and arg[3]) or nil
 local RUNTIME = 'lua-factorio-proto' .. (SUFFIX ~= '' and ('-' .. SUFFIX) or '')
 if vim.fn.filereadable(API) ~= 1 then
     io.write('no prototype-api.json at ' .. API .. '\n'); os.exit(2)
@@ -111,6 +115,57 @@ local function type_name(t, depth)
     end
     return nil
 end
+-- ★★ WHAT A TYPE ACCEPTS, NOT ONLY WHAT IT NAMES (CART-0646). `prop_type` above
+-- records the forms naming exactly ONE type and leaves everything else absent, which is
+-- the right contract for walking a path — but it threw away the fact that makes the
+-- single largest 1.1 -> 2.0 data-stage break visible.
+--
+-- `RecipePrototype::ingredients` is an array of `IngredientPrototype` in BOTH versions,
+-- and IngredientPrototype is a union of ItemIngredientPrototype | FluidIngredientPrototype
+-- in BOTH. Nothing about the property or its type NAME moved. What moved is one level
+-- further down:
+--     1.1  ItemIngredientPrototype = union{ struct, tuple[ItemID, uint16] }
+--     2.0  ItemIngredientPrototype = struct
+-- The tuple is the `{"copper-plate", 5}` shorthand, and a mod that keeps it does not
+-- load. Same for ItemProductPrototype and the `results` shorthand.
+--
+-- So two closed maps, and deliberately only two:
+--   concept_union[Name]  = sorted list of the NAMED alternatives (EnergySource -> its
+--                          five sources). This also un-blinds the union-base walk that
+--                          CART-0654 works around, without the `Base<X>` spelling guess.
+--   concept_forms[Name]  = the STRUCTURAL forms it accepts as a set — struct, tuple,
+--                          dictionary, literal, array. A form the origin had and the
+--                          target does not is a removal a property-set diff cannot see.
+local concept_union, concept_forms = {}, {}
+local function opt_name(o)
+    if type(o) == 'string' then return o end
+    if type(o) == 'table' and o.complex_type == 'type' and type(o.value) == 'string' then
+        return o.value
+    end
+    return nil
+end
+local function record_shape(name, t)
+    if type(t) ~= 'table' or not t.complex_type then return end
+    if t.complex_type == 'union' then
+        local named, forms = {}, {}
+        for _, o in ipairs(t.options or {}) do
+            local nm = opt_name(o)
+            if nm then named[#named + 1] = nm
+            elseif type(o) == 'table' and o.complex_type then
+                forms[o.complex_type] = true
+            end
+        end
+        if #named > 0 then table.sort(named); concept_union[name] = named end
+        if next(forms) then concept_forms[name] = forms end
+    else
+        -- a NON-union complex type is itself one form (`struct`, `dictionary`, …).
+        -- Recording it is what lets a union -> struct narrowing be seen as a LOSS
+        -- rather than as two unrelated shapes.
+        concept_forms[name] = { [t.complex_type] = true }
+    end
+end
+for _, t in ipairs(api.types or {}) do record_shape(t.name, t.type) end
+
 local prop_type, n_ptype = {}, 0
 local function record_types(owner, properties)
     for _, pr in ipairs(properties or {}) do
@@ -136,13 +191,37 @@ local profile = {
     -- filtering the target list ON IT would have dropped this file (CART-0209).
     ingredient = true,
     version = api.application_version, api_version = api.api_version,
-    stamp = { source = API, application_version = api.application_version,
+    -- ⚠ THE SOURCE IS WHERE IT CAME FROM, NOT WHICH TEMP FILE HELD IT. This recorded
+    -- the input PATH, so the artifacts on disk named a scratch file from a session that
+    -- had ended, and apifetch writes each fetch to a fresh tempname. A stamp is
+    -- provenance, and a path that no longer exists is worse than none.
+    --
+    -- ⚠ THIS DOES NOT MAKE THE ARTIFACT BYTE-REPRODUCIBLE, and it was worth checking
+    -- rather than assuming: two runs over the identical document still differ, because
+    -- mpack encodes a table in `pairs()` order and that is not stable across processes.
+    -- What IS stable is the CONTENT — a decoded deep compare of two runs is 10785
+    -- scalars and 0 differences (15053 for the 2.0 artifact). And nothing rests on the
+    -- bytes anyway: `profile.stamp_of` is mtime+size, so a re-distil invalidates caches
+    -- by construction whatever the encoder does.
+    -- ⚠ TWO FACTS, NOT ONE, AND THEY CAN DISAGREE. `origin` is where the document is
+    -- published; `input` is the file this artifact was actually distilled from. A local
+    -- file that has been edited distils perfectly happily, and an origin URL alone would
+    -- vouch for it — so the path is not noise to be replaced, it is the audit trail.
+    -- The reverse failure is what prompted this: `source` recorded ONLY the path, so the
+    -- shipped artifacts named a tempfile from a session that had ended and a checkout in
+    -- an unrelated repo, and neither says where to get the document again.
+    -- `origin` is absent for a hand run rather than guessed, and `source` is kept as the
+    -- best single answer (origin when known, else the path) so existing readers move.
+    stamp = { source = ORIGIN or API, origin = ORIGIN, input = API,
+        application_version = api.application_version,
         api_version = api.api_version, stage = api.stage },
     typenames = typenames,      -- typename -> PrototypeName  (the data.raw key set)
     prototypes = protos,        -- PrototypeName -> true
     own_props = own_props,      -- "Proto::prop" -> "required"|"optional"  (OWN only)
     parent = parent,            -- PrototypeName -> parent PrototypeName
     concept_types = concept,    -- ConceptName -> true
+    concept_union = concept_union,  -- ConceptName -> sorted named alternatives
+    concept_forms = concept_forms,  -- ConceptName -> { struct|tuple|dictionary|… = true }
     concept_props = concept_props, -- "Concept::prop" -> "required"|"optional" (OWN only)
     concept_parent = concept_parent, -- ConceptName -> parent ConceptName
     prop_type = prop_type,      -- "Owner::prop" -> the type its value must satisfy,
@@ -168,6 +247,11 @@ local n_cprops = 0
 for _ in pairs(concept_props) do n_cprops = n_cprops + 1 end
 io.write(('  concept properties: %d ; walkable property types: %d (CART-0633)\n')
     :format(n_cprops, n_ptype))
+local n_union, n_forms = 0, 0
+for _ in pairs(concept_union) do n_union = n_union + 1 end
+for _ in pairs(concept_forms) do n_forms = n_forms + 1 end
+io.write(('  union concepts: %d ; concepts with a declared FORM set: %d (CART-0646)\n')
+    :format(n_union, n_forms))
 io.write(('  INGREDIENT — not a portability target (typenames are hyphenated,'
     .. ' properties are table keys; see the header)\n'))
 io.write('  wrote ' .. out .. '\n')

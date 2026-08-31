@@ -160,16 +160,36 @@ return {
     -- report, or by any verb: tools/apifetch.lua reports what is declared and what is
     -- already local WITHOUT a request, and only reaches the host when explicitly
     -- asked. A declaration is an offer, not a trigger.
+    -- ⚠ A LIST, BECAUSE THE VENDOR PUBLISHES TWO DESCRIPTIONS. Factorio documents the
+    -- RUNTIME api (LuaEntity & co, what control.lua calls) and the PROTOTYPE api (what
+    -- the data stage declares) as separate documents at separate URLs, and cartograph
+    -- distils each into its own artifact with its own distiller. This was a single
+    -- table naming only the runtime one, so the prototype artifacts on disk had no
+    -- declared provenance at all — they were distilled from a file fetched by hand,
+    -- and when that scratch copy was lost there was no way to get back to it. A source
+    -- that cannot be re-fetched is not really declared.
     api_source = {
-        index = 'https://lua-api.factorio.com/',
-        version_href = 'href="/(%d+%.%d+%.%d+)/"',
-        url = 'https://lua-api.factorio.com/%s/runtime-api.json',
-        aliases = { 'latest', 'stable' },
-        -- the distilled artifact for a version: dots stripped, so the module name
-        -- stays a legal Lua path (a dotted name makes require look for a directory —
-        -- see spec/profile/lua-factorio-11.lua)
-        artifact = 'lua-factorio-api-%s',
-        distiller = 'tools/factoriodistill.lua',
+        {
+            stage = 'runtime',
+            index = 'https://lua-api.factorio.com/',
+            version_href = 'href="/(%d+%.%d+%.%d+)/"',
+            url = 'https://lua-api.factorio.com/%s/runtime-api.json',
+            aliases = { 'latest', 'stable' },
+            -- the distilled artifact for a version: dots stripped, so the module name
+            -- stays a legal Lua path (a dotted name makes require look for a directory
+            -- — see spec/profile/lua-factorio-11.lua)
+            artifact = 'lua-factorio-api-%s',
+            distiller = 'tools/factoriodistill.lua',
+        },
+        {
+            stage = 'prototype',
+            index = 'https://lua-api.factorio.com/',
+            version_href = 'href="/(%d+%.%d+%.%d+)/"',
+            url = 'https://lua-api.factorio.com/%s/prototype-api.json',
+            aliases = { 'latest', 'stable' },
+            artifact = 'lua-factorio-proto-%s',
+            distiller = 'tools/prototypedistill.lua',
+        },
     },
 
     -- ── package forms, in PRECEDENCE order ───────────────────────────────────

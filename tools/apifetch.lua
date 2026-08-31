@@ -24,13 +24,14 @@
 local here = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/apifetch%.lua$')
 package.path = here .. '/../lua/?.lua;' .. here .. '/../lua/?/init.lua;' .. package.path
 
-local args, want, eco_name, check = { ... }, nil, nil, false
+local args, want, eco_name, check, stage_want = { ... }, nil, nil, false, nil
 do
     local a = (#args > 0) and args or (_G.arg or {})
     local i = 1
     while a[i] do
         if a[i] == '--check' then check = true
         elseif a[i] == '--eco' then i = i + 1; eco_name = a[i]
+        elseif a[i] == '--stage' then i = i + 1; stage_want = a[i]
         elseif not a[i]:match('^%-%-') then want = a[i] end
         i = i + 1
     end
@@ -46,14 +47,26 @@ end
 local profmod = require 'cartograph.spec.profile'
 local PROFDIR = here .. '/../lua/cartograph/spec/profile'
 
---- Every ecosystem that declares an api source — derived, so a newly declared one is
+--- Every api source every ecosystem declares — derived, so a newly declared one is
 --- offered with no edit here.
+---
+--- ⚠ ONE ECOSYSTEM MAY DECLARE SEVERAL. Factorio publishes its RUNTIME api and its
+--- PROTOTYPE api as two documents, and each distils into its own artifact with its own
+--- distiller. `api_source` is therefore a LIST; a bare table with a `url` is still
+--- accepted and read as a single unnamed source, so an ecosystem that declares one is
+--- unmoved.
 local function offers()
     local out = {}
     for _, n in ipairs(ecomod.names()) do
         local e = ecomod.load(n)
-        if e and e.api_source and e.api_source.url then
-            out[#out + 1] = { name = n, eco = e, src = e.api_source }
+        local decl = e and e.api_source
+        if decl then
+            local srcs = decl.url and { decl } or decl
+            for _, src in ipairs(srcs) do
+                if src.url and (not stage_want or src.stage == stage_want) then
+                    out[#out + 1] = { name = n, eco = e, src = src }
+                end
+            end
         end
     end
     return out
@@ -99,7 +112,8 @@ if not check and not want then
     say('=== apifetch — what is OFFERED (no request made) ===')
     for _, o in ipairs(list) do
         if not eco_name or eco_name == o.name then
-            say(('  %s'):format(o.name))
+            say(('  %s%s'):format(o.name,
+                o.src.stage and ('  [' .. o.src.stage .. ']') or ''))
             say(('    index      %s'):format(o.src.index or '(none declared)'))
             say(('    url        %s'):format(o.src.url))
             if o.src.aliases and #o.src.aliases > 0 then
@@ -128,6 +142,7 @@ if not check and not want then
     say('')
     say('  --check            ask the index which versions exist  (CONTACTS the host)')
     say('  <version>          resolve, fetch and distil            (CONTACTS the host)')
+    say('  --stage <name>     only the named source (runtime / prototype)')
     say('  Nothing above contacted anything. Extraction and every verb stay offline.')
     return
 end
@@ -144,7 +159,8 @@ end
 
 for _, o in ipairs(list) do
     if not eco_name or eco_name == o.name then
-        say(('=== %s ==='):format(o.name))
+        say(('=== %s%s ==='):format(o.name,
+            o.src.stage and ('  [' .. o.src.stage .. ']') or ''))
         if check then
             if not o.src.index then
                 say('  no index declared — a version cannot be discovered, only named')
@@ -209,7 +225,7 @@ for _, o in ipairs(list) do
             say(('  got %s (api_version %s, stage %s, %d classes)'):format(
                 tostring(real), tostring(decoded.api_version),
                 tostring(decoded.stage), #(decoded.classes or {})))
-            local tmp = vim.fn.tempname() .. '.runtime-api.json'
+            local tmp = vim.fn.tempname() .. '.' .. (o.src.stage or 'runtime') .. '-api.json'
             local fd = assert(io.open(tmp, 'w')); fd:write(body); fd:close()
             local sfx = suffix_of(real)
             if not sfx then say('  cannot derive an artifact suffix'); return end
@@ -219,8 +235,12 @@ for _, o in ipairs(list) do
             -- field UNREAD until it was actually consulted
             local dist = o.src.distiller
             if not dist then say('  no distiller declared'); return end
+            -- the URL, not the tempfile: the artifact's stamp is provenance, and a
+            -- path under /tmp names something that will not exist by the time anyone
+            -- reads it
             local d = vim.system({ vim.v.progpath, '--headless', '-u', 'NONE', '-l',
-                here .. '/../' .. dist, tmp, sfx }, { text = true }):wait()
+                here .. '/../' .. dist, tmp, sfx, o.src.url:format(version) },
+                { text = true }):wait()
             -- gsub returns (string, count): io.write would print the count too
             io.write(((d.stdout or ''):gsub('^', '    ')))
             if d.code ~= 0 then say('  distiller FAILED: ' .. tostring(d.stderr)) end

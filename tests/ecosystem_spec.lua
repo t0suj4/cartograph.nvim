@@ -547,16 +547,34 @@ end)
 -- IMPLICIT: extraction, every verb and every report stay offline, and tools/apifetch
 -- contacts the host only when explicitly asked.
 
+--- Every declared source, because there is more than one: Factorio publishes its
+--- RUNTIME api and its PROTOTYPE api as separate documents (CART-0646). The prototype
+--- one was NOT declared for a long time, and the cost was concrete — the artifacts on
+--- disk had been distilled from a file fetched by hand, and when that scratch copy was
+--- lost there was no way back to it. A source that cannot be re-fetched is not declared.
+local function api_sources(name)
+    local decl = eco.load(name).api_source
+    if not decl then return {} end
+    return decl.url and { decl } or decl
+end
+
 test('ecosystem: an api source is DECLARED, not hardcoded at a call site', function ()
-    local f = eco.load('lua-factorio')
-    local src = f.api_source
-    ok(src ~= nil, 'lua-factorio declares where its API is published')
-    ok(src.url:match('%%s') ~= nil, 'the url is a template over the version')
-    ok(src.index ~= nil, 'and an index, so availability is CHECKABLE not guessed')
-    ok(src.version_href ~= nil, 'with the pattern versions appear as in that index')
-    -- the artifact template must produce a legal Lua module name: a dotted one makes
-    -- require look for a directory (see spec/profile/lua-factorio-11.lua)
-    eq(nil, src.artifact:format('11'):find('%.'))
+    local srcs = api_sources('lua-factorio')
+    ok(#srcs >= 2, 'both published documents are declared, not just the runtime one: '
+        .. #srcs)
+    local stages = {}
+    for _, src in ipairs(srcs) do
+        ok(src.url:match('%%s') ~= nil, 'the url is a template over the version')
+        ok(src.index ~= nil, 'and an index, so availability is CHECKABLE not guessed')
+        ok(src.version_href ~= nil, 'with the pattern versions appear as in that index')
+        ok(src.distiller ~= nil, 'and the tool that turns the document into an artifact')
+        -- the artifact template must produce a legal Lua module name: a dotted one makes
+        -- require look for a directory (see spec/profile/lua-factorio-11.lua)
+        eq(nil, src.artifact:format('11'):find('%.'))
+        if src.stage then stages[src.stage] = true end
+    end
+    ok(stages.runtime and stages.prototype,
+        'and each names WHICH document it is, so a caller can ask for one')
 end)
 
 -- MEASURED against the live host 2026-07-26 and pinned here as the reason a declared
@@ -565,15 +583,18 @@ end)
 -- naive implementation would request.
 test('ecosystem: the declaration records that a bare MINOR is not addressable',
     function ()
-    local src = eco.load('lua-factorio').api_source
-    local body = table.concat({ src.notes and src.notes.minor_not_addressable or '' })
-    -- the fact lives either in a note or in the file's prose; what must be true is
-    -- that aliases are declared, since those are the only non-exact forms that work
-    ok(#(src.aliases or {}) > 0, 'the working non-exact forms are named')
-    local found = false
-    for _, a in ipairs(src.aliases) do if a == 'latest' or a == 'stable' then found = true end end
-    ok(found, 'and they are the ones that actually resolve: ' ..
-        table.concat(src.aliases, ' ') .. body)
+    for _, src in ipairs(api_sources('lua-factorio')) do
+        local body = table.concat({ src.notes and src.notes.minor_not_addressable or '' })
+        -- the fact lives either in a note or in the file's prose; what must be true is
+        -- that aliases are declared, since those are the only non-exact forms that work
+        ok(#(src.aliases or {}) > 0, 'the working non-exact forms are named')
+        local found = false
+        for _, a in ipairs(src.aliases) do
+            if a == 'latest' or a == 'stable' then found = true end
+        end
+        ok(found, 'and they are the ones that actually resolve: ' ..
+            table.concat(src.aliases, ' ') .. body)
+    end
 end)
 
 -- the OFFER path must not perform any request. Asserted by running the tool with no
@@ -606,4 +627,29 @@ test('ecosystem: nothing in the plugin runtime consults api_source', function ()
     -- the runtime may MENTION the offer in prose, but must not read the field: a
     -- fetch has to stay an explicit, out-of-band action
     eq({}, hits)
+end)
+
+test('ecosystem: a distilled artifact records BOTH where it came from and what it read',
+    function ()
+    -- ★ TWO FACTS, AND THEY CAN DISAGREE (CART-0646). `origin` is where the vendor
+    -- publishes the document; `input` is the file this artifact was actually distilled
+    -- from. A locally edited JSON distils perfectly happily and an origin URL alone
+    -- would vouch for it, so the path is the audit trail rather than noise. The reverse
+    -- failure is what prompted this: the stamp recorded ONLY the path, so the shipped
+    -- artifacts named a tempfile from a session that had ended and a checkout in an
+    -- unrelated repo — neither of which says how to obtain the document again.
+    local pm = require 'cartograph.spec.profile'
+    for _, name in ipairs({ 'lua-factorio-proto-11', 'lua-factorio-proto-20' }) do
+        local p = pm.load(name)
+        if p then
+            local st = p.stamp or {}
+            ok(type(st.origin) == 'string' and st.origin:match('^https?://'),
+                name .. ' records the published ORIGIN: ' .. tostring(st.origin))
+            ok(st.origin:find(tostring(p.version), 1, true),
+                'and the origin names the exact version the artifact claims')
+            ok(type(st.input) == 'string' and #st.input > 0,
+                name .. ' also records the file it was distilled FROM')
+            ok(st.source ~= nil, 'and `source` still answers with the best single one')
+        end
+    end
 end)
