@@ -122,3 +122,66 @@ test('references: a loop header is two rows and its read counts once',
     eq(1, refs.names['glob.other'], 'and an ordinary row in the body is untouched')
     vim.fn.delete(root, 'rf')
 end)
+
+test('references: a binding in ANOTHER file marks a read, it does not delete it',
+    function ()
+        if not ready() then skip 'no lua parser' end
+        -- ★ THE SHAPE OF CART-0649, BY HAND. railloader's spec/EntityQueue_spec.lua
+        -- assigns `global`, and that one line in a file no entry point reaches took
+        -- the port report's read surface from 8 LOST names to 1. Von Neumann's
+        -- `local script = require('k-lib')()` in one scenario file silenced all 41
+        -- `script.*` reads in the other 33. Both are one project-wide veto.
+        local root = vim.fn.tempname()
+        vim.fn.mkdir(root, 'p')
+        -- a stub file BINDS the name …
+        write(root, 'stub.lua', table.concat({
+            'global = {}',
+            'return global',
+        }, '\n'))
+        -- … and an unrelated file READS through it. That read is the port worklist.
+        write(root, 'main.lua', table.concat({
+            'local function tick()',
+            '  local a = global.ghosts',
+            '  local b = global.queue',
+            '  return a, b',
+            'end',
+            'return { tick = tick }',
+        }, '\n'))
+        store.ingest(ts.extract(root))
+        local refs = externals.references(store)
+
+        -- KEPT: the read survives the other file's binding …
+        assert(refs.names['global.ghosts'] == 1,
+            'a read must survive a binding made in a DIFFERENT file, got '
+            .. tostring(refs.names['global.ghosts']))
+        assert(refs.names['global.queue'] == 1, 'both reads must survive')
+        -- … and it says WHERE the competing binding is, so the hedge is checkable
+        local sh = (refs.shadowed or {})['global.ghosts']
+        assert(sh and #sh == 1 and sh[1] == 'stub.lua',
+            'the read must name the file that also binds its root, got '
+            .. vim.inspect(sh))
+    end)
+
+test('references: a binding in the SAME file still silences that file\'s reads',
+    function ()
+        if not ready() then skip 'no lua parser' end
+        -- The other half, and it is why the fix is not "never suppress": Von Neumann's
+        -- cage.lua really does rebind `script` for itself, and cage.lua's OWN reads do
+        -- go through that wrapper. Suppression is right there and wrong everywhere else.
+        local root = vim.fn.tempname()
+        vim.fn.mkdir(root, 'p')
+        write(root, 'one.lua', table.concat({
+            'local shim = require("k-lib")()',
+            'local function go()',
+            '  return shim.on_event',
+            'end',
+            'return { go = go }',
+        }, '\n'))
+        store.ingest(ts.extract(root))
+        local refs = externals.references(store)
+        assert(refs.names['shim.on_event'] == nil,
+            'a read rooted at a name THIS file binds is internal, got '
+            .. tostring(refs.names['shim.on_event']))
+        assert((refs.shadowed or {})['shim.on_event'] == nil,
+            'a silenced read must not also be reported as a hedge')
+    end)

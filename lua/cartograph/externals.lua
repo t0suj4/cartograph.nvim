@@ -136,8 +136,48 @@ end
 --- `withheld` is kept at 0 for callers that report it — a language with no declared
 --- binders simply contributes no bound names, which shows up as reads to adjudicate
 --- rather than as silence.
+--- A DEFINITION SILENCES A READ ONLY IN THE FILE THAT MAKES IT (CART-0649). The
+--- project-def filter used to be PROJECT-WIDE and unscoped — every def name in the
+--- graph, from any file, reachable or not, locals included — so ONE binding anywhere
+--- deleted every read of that name everywhere, with no row, no hedge and no count.
+--- Measured victims, all in the Factorio 1.1 corpus:
+---   railloader   `global = {}` on line 7 of spec/EntityQueue_spec.lua — a file the
+---                port report ITSELF calls "reached by NO entry point" — took the
+---                reads diff from 8 LOST to 1. The missing 7 were the `global` ->
+---                `storage` rename, the single largest item of a 1.1 -> 2.0 port.
+---   Von Neumann  `local script = require('k-lib')()` in ONE scenario file silenced
+---                all 41 `script.*` reads in the other 33.
+--- So: a def in THIS file still silences (`local script` genuinely rebinds the name
+--- for the file that wrote it, and cage.lua's own reads do go through the wrapper); a
+--- def in ANOTHER file no longer silences, it MARKS — the read is reported with the
+--- files that also bind its root, and the caller decides how loudly to hedge.
+--- ⚠ SILENCE IS THE ONE ANSWER THAT CANNOT BE CHECKED, which is why the direction of
+--- this fix is "keep and mark" rather than a cleverer suppression rule.
+---
+--- ⚠ AND A PROFILE-MINTED NODE IS NOT A PROJECT DEFINITION. External nodes carry the
+--- PROFILE NAME where a file goes (`file = 'lua-factorio'`, `name = 'LuaBootstrap::
+--- on_event'`), and the bare-name key took `log`, `on_event`, `add_interface` out of
+--- that. The environment's own provided names were silencing reads of themselves.
+---
+--- ⚠ WHAT THIS DOES NOT FIX, and it needs the extractor: a bare `global = global or {}`
+--- at file scope — the standard init idiom, live in SpaceMod 1.1.3's control.lua — is
+--- an assignment to the ENVIRONMENT's global, not a new binding, yet a var node records
+--- no binding FORM so it is indistinguishable from `local global = …`. spec/lua.lua's
+--- `vars` query already separates the two patterns (`variable_declaration` vs a bare
+--- `chunk` assignment); recording which one matched is CART-0500's item and would make
+--- the same-file case answerable too.
+---
+--- RECEIVER-ROOTED READS ARE COLLECTED, NOT DISCARDED (CART-0650). A chain rooted at
+--- a local, a parameter or a loop variable is excluded from `names` on purpose — it is
+--- evidence about a receiver, not about the environment's globals — but its MEMBER is
+--- still adjudicable, so it lands in `receiver_reads` for a caller that has a class
+--- space to ask. Two surfaces out of one pass; the loop already had both in hand and
+--- threw one away.
+---
 --- Returns { names = {name -> n}, where = {name -> file}, files = {name -> sorted
---- list of files}, total, withheld }.
+--- list of files}, shadowed = {name -> sorted list of OTHER files binding its root},
+--- receiver_reads = {chain -> n}, receiver_files = {chain -> sorted list of files},
+--- total, withheld }.
 ---
 --- `where` IS A SAMPLE, `files` IS THE POPULATION. `where` keeps the first file a name
 --- was seen in (node order) so existing callers do not move, but every question about
@@ -176,14 +216,23 @@ function M.references(store)
         -- expression record — so the read surface reported nothing and the portability
         -- report simply omitted its section. A caller must be able to tell an EMPTY
         -- answer from an ABSENT one.
-        analysed = 0, unmodelled = 0, unmodelled_langs = {} }
-    local fileset = {}
+        analysed = 0, unmodelled = 0, unmodelled_langs = {}, shadowed = {},
+        receiver_reads = {}, receiver_files = {} }
+    local fileset, shadowset, rfileset = {}, {}, {}
     local data = store.data or {}
-    -- names this graph DEFINES: a read rooted at one of them is internal, whatever
-    -- else it is. Bare def names, since a read's root is a bare name.
-    local defined = {}
+    -- names this graph DEFINES, AND IN WHICH FILE. Bare def names, since a read's
+    -- root is a bare name. Per-file rather than per-project: see the note above — the
+    -- unscoped version silenced 41 reads in one mod and 18 in another, invisibly.
+    -- `kind == 'external'` is skipped: those are PROFILE-MINTED and their `file` is the
+    -- profile's name, so counting them made the environment silence reads of itself.
+    local defined_in = {}
     for _, n in ipairs(data.nodes or {}) do
-        if n.name then defined[n.name:match('([%w_]+)$') or n.name] = true end
+        if n.name and n.kind ~= 'external' then
+            local bare = n.name:match('([%w_]+)$') or n.name
+            local where = defined_in[bare]
+            if not where then where = {}; defined_in[bare] = where end
+            if n.file then where[n.file] = true end
+        end
     end
     for _, n in ipairs(data.nodes or {}) do
         if n.kind == 'function' or n.kind == 'method' then
@@ -262,9 +311,37 @@ function M.references(store)
                     -- names that already reconciled.
                     for _, chain in ipairs(got) do
                         local rootname = chain:match('^([%w_]+)')
-                        if rootname and not locals[rootname] and not defined[rootname] then
+                        local binds = rootname and defined_in[rootname]
+                        -- THIS file's own binding still wins; another file's does not
+                        if rootname and locals[rootname] then
+                            -- ★ RECEIVER-ROOTED, AND NOT THEREFORE UNINTERESTING
+                            -- (CART-0650). A chain rooted at a local, a parameter or a
+                            -- loop variable says nothing about which GLOBALS the
+                            -- environment holds — which is why it is excluded above —
+                            -- but its MEMBER is still a name the target's class space
+                            -- can rule on, and that test needs no receiver at all.
+                            -- railloader reads `e.circuit_connection_definitions` at
+                            -- three sites; it was on LuaEntity in 1.1 and is on no 2.0
+                            -- class, and the name appeared NOWHERE in the port report:
+                            -- the reads diff drops receiver-rooted chains and the
+                            -- class-space audit only ever consumed calls.
+                            out.receiver_reads[chain] = (out.receiver_reads[chain] or 0) + 1
+                            if n.file then
+                                local rf = rfileset[chain]
+                                if not rf then rf = {}; rfileset[chain] = rf end
+                                rf[n.file] = true
+                            end
+                        elseif rootname
+                            and not (binds and n.file and binds[n.file]) then
                             out.names[chain] = (out.names[chain] or 0) + 1
                             out.where[chain] = out.where[chain] or n.file
+                            if binds then
+                                local sh = shadowset[chain]
+                                if not sh then sh = {}; shadowset[chain] = sh end
+                                for f in pairs(binds) do
+                                    if f ~= n.file then sh[f] = true end
+                                end
+                            end
                             if n.file then
                                 local fs = fileset[chain]
                                 if not fs then fs = {}; fileset[chain] = fs end
@@ -285,6 +362,17 @@ function M.references(store)
         for f in pairs(fs) do l[#l + 1] = f end
         table.sort(l)
         out.files[chain] = l
+    end
+    for chain, sh in pairs(shadowset) do
+        local l = {}
+        for f in pairs(sh) do l[#l + 1] = f end
+        if #l > 0 then table.sort(l); out.shadowed[chain] = l end
+    end
+    for chain, rf in pairs(rfileset) do
+        local l = {}
+        for f in pairs(rf) do l[#l + 1] = f end
+        table.sort(l)
+        out.receiver_files[chain] = l
     end
     return out
 end
