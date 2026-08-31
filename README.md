@@ -2962,6 +2962,25 @@ tools/install-hooks.sh      # git config core.hooksPath .githooks
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# PORT ORDER: who supplies the prototypes this mod EDITS, and have they ported?
+# Porting is transitive — a mod that rewrites another mod's prototypes cannot be
+# ported before that mod is, and no environment diff can see it. Joins the two
+# sides the reader already keeps apart: every record's `patch`/`base` descriptor
+# (the (type,name) it reads FROM) against every record's registered name (what
+# it supplies), across the packages in the ecosystem roster.
+nvim --headless -u NONE -l tools/portdeps.lua CircuitProcessing --cap 6
+#   DEMANDS: 25 — 6 supplied by a dependency, 0 by this mod itself, 19 unmatched
+#          6  bobelectronics (2.1.1, declares 2.0)
+# ⚠ AN UNMATCHED DEMAND IS NOT "MISSING". Base is not in the supply set and
+# cannot be: every mod patches base prototypes by INSTANCE name and no shipped
+# artifact enumerates instances (the prototype-api gives TYPES). Measured on
+# dfb-OrbitalIonCannon — 17 demands, 4 unmatched, and all four are base
+# prototypes, with no mod-supplied name unmatched.
+# ⚠ AND A DEPENDENCY'S 2.0 RELEASE IS NOT A PORT OF ITS 1.1 SELF: its authors
+# also redesign, and nothing here separates that from port work — zero of the
+# 198 packages exist at both versions, so there is no self-diff to attribute
+# against. The report says "no longer supplied by X", never "porting removed it".
+
 # extractor-change gate: extract a named corpus, check calibrated counts,
 # per-item diff (graphdiff) against the saved baseline snapshot. Exit 1 on
 # any drift.
