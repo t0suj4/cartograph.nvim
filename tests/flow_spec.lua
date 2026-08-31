@@ -2131,3 +2131,29 @@ test('flow: lua bare `local a, b` still defs BOTH — the negative control', fun
     end
     eq('a,b', found, 'a declaration with no initialiser binds every name in its list')
 end)
+
+test('flow.classes: a spec can say a base-set node is NOT a clause here', function ()
+    -- ★ CART-0667. The base sets carry one spelling per meaning across grammars, and
+    -- `case_statement` means opposite things in two of them: in C/php/java it IS one arm
+    -- of a switch, in BASH it is the whole `case X in … esac` and the arms are
+    -- `case_item`. The map could only ADD, so bash inherited a false claim with no way to
+    -- retract it — its switch classified as an arm, its arms as plain statements whose
+    -- `def` swallowed their entire bodies. On a 15-line fixture: 5 rows where 10 belong,
+    -- one arm row carrying `def=[a b]` for two separate assignments.
+    local flow = require 'cartograph.flow'
+    local base = flow.classes({})
+    ok(base.case['case_statement'], 'the base set claims case_statement is an arm')
+
+    local fixed = flow.classes({ ctrl = { case_statement = true },
+        clause = { case_item = 'case', case_statement = false } })
+    ok(not fixed.case['case_statement'],
+        'and a spec can retract it — false REMOVES, it does not merely fail to add')
+    ok(fixed.case['case_item'], 'while naming the real arm')
+    ok(not fixed.clause['case_statement'],
+        'the main clause set drops it too (extend_set overlays false, consumers read'
+        .. ' truthiness)')
+    -- ⚠ AND IT MUST NOT LEAK: a language that says nothing keeps the base claim, or this
+    -- fix would silently change every other grammar's switch handling.
+    ok(flow.classes({}).case['case_statement'],
+        'a spec that declares nothing is unmoved')
+end)

@@ -884,7 +884,16 @@ function M.classes(cfg)
         elseif_, case_ = extend_set(ELSEIF, {}), extend_set(CASE, {})
         for k, v in pairs(cfg.clause) do
             if v == 'elseif' then elseif_[k] = true
-            elseif v == 'case' then case_[k] = true end
+            elseif v == 'case' then case_[k] = true
+            -- ⚠ A SPEC MUST BE ABLE TO SAY "NOT HERE" (CART-0667). The base sets carry
+            -- one spelling per meaning across grammars, and `case_statement` means
+            -- opposite things in two of them: in C/php/java it IS one arm, in BASH it is
+            -- the whole `case X in … esac` and the arms are `case_item`. The map could
+            -- only ADD, so bash inherited a false claim it had no way to retract — its
+            -- switch classified as an arm and its arms as plain statements whose `def`
+            -- swallowed their entire bodies. `false` removes; `extend_set` already
+            -- overlays it into the main clause set, and consumers read truthiness.
+            elseif v == false then elseif_[k] = nil; case_[k] = nil end
         end
     end
     -- ★ `ctrl` IS A MAP FROM NODE TYPE TO ROLE, not a bare set (CART-0382). `clause` set the

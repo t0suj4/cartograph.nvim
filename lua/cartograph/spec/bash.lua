@@ -59,6 +59,14 @@ return {
         -- in `use` there, and applying this to every binder regressed the self corpus by
         -- 1006 rows.
         binders = { { node = 'declaration_command', defs = true } },
+        -- ⚠ THE BASE CLASS SETS HAD BASH BACKWARDS (CART-0667). flow's shared CASE set
+        -- holds `case_statement`, which in C/php/java IS one arm — in bash it is the
+        -- WHOLE `case X in … esac`, and the arms are `case_item`, which nothing
+        -- classified. Measured on a 15-line fixture: the switch came out as an arm, each
+        -- arm as a plain STATEMENT, and the four assignments inside them were never rows
+        -- at all — one arm row carried `def=[a b]` for two separate assignments.
+        ctrl = { case_statement = true },
+        clause = { case_item = 'case', case_statement = false },
         -- typed-string SINK: eval's arg IS code — the literal head names
         -- the real callee (the aperture-analyzer side of the eval story)
         string_sinks = { eval = { arg = 1, ty = 'code' } },

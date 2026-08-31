@@ -327,16 +327,28 @@ M.EXPECTED = {
     -- binder took the SELF corpus 1961 -> 2967 (missing:for_numeric_clause 0 -> 504),
     -- because du puts lua's `for i = 1, n` binding in `use` and bash's in `def`. One
     -- language's fix was another's regression until the spec opted in per binder.
-    bash = { total = 669,
-        ['missing:case_item'] = 199, ['missing:if_statement'] = 137,
-        ['missing:list'] = 119, ['missing:c_style_for_statement'] = 88,
-        ['missing:test_command'] = 23, ['binder:elif_clause'] = 22,
-        ['extra:if_statement'] = 19, ['missing:variable_assignment'] = 17,
-        ['missing:case_statement'] = 15, ['missing:elif_clause'] = 12,
-        ['missing:do_group'] = 4, ['missing:redirected_statement'] = 4,
-        ['both:if_statement'] = 3, ['binder:if_statement'] = 2,
-        ['binder:redirected_statement'] = 1, ['binder:while_statement'] = 1,
-        ['both:elif_clause'] = 1, ['extra:elif_clause'] = 1,
+    -- recalib 2026-09-01 (THE BASE CLASS SETS HAD BASH BACKWARDS, CART-0667): 669 -> 484.
+    -- flow's shared CASE set holds `case_statement`, which in C/php/java IS one arm — in
+    -- bash it is the whole `case X in … esac` and the arms are `case_item`. So the switch
+    -- was classified as an arm and each arm as a plain STATEMENT whose `def` swallowed its
+    -- entire body: on a 15-line fixture one arm row carried `def=[a b]` for two separate
+    -- assignments, and 5 rows stood where 10 belong.
+    --   missing:case_item      199 -> 0
+    --   missing:case_statement  15 -> 0
+    -- ⚠ AND SOME NEIGHBOURS ROSE, which is not a regression: the arms' bodies are ROWS
+    -- now, so statements that were folded invisibly into an arm are visible and can
+    -- disagree on their own — extra:if_statement 19 -> 27, missing:if_statement 137 -> 141.
+    -- Net -185, and ctrlcensus goes from 6 of 6 forms to 7 of 7 with case_item classified
+    -- for the first time.
+    bash = { total = 484,
+        ['missing:if_statement'] = 141, ['missing:list'] = 123,
+        ['missing:c_style_for_statement'] = 88, ['extra:if_statement'] = 27,
+        ['binder:elif_clause'] = 23, ['missing:test_command'] = 23,
+        ['missing:variable_assignment'] = 17, ['missing:elif_clause'] = 13,
+        ['both:if_statement'] = 6, ['binder:if_statement'] = 5,
+        ['extra:elif_clause'] = 5, ['missing:do_group'] = 5,
+        ['missing:redirected_statement'] = 4, ['binder:redirected_statement'] = 1,
+        ['binder:while_statement'] = 1, ['both:elif_clause'] = 1,
         ['missing:while_statement'] = 1 },
     -- ★ RE-PINNED @ CART-0404's C/C++ half: `binder:declaration` cpp 110 -> 1 and
     -- cppmodern 106 -> 1, `both:declaration` GONE. TWO defects, both C++-only shapes that a
