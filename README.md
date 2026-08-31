@@ -2998,6 +2998,23 @@ tools/install-hooks.sh      # git config core.hooksPath .githooks
 plugin's runtime path, never required from `lua/cartograph/`.
 
 ```sh
+# A GRAMMAR IS AN ENVIRONMENT WITH A VERSION, so the portability surface applies
+# to it unchanged — and offline, since `language.inspect` is the provides side.
+nvim --headless -u NONE -l tools/gramdiff.lua                 # the GATE (0.03s, exit 1 on a hit)
+#   does any spec name a node type its grammar does not have? A query naming a type
+#   the grammar dropped matches NOTHING, silently. Green across all 17 installed
+#   grammars — the value is that it stays visibly green when they move.
+nvim --headless -u NONE -l tools/gramdiff.lua bash bash       # the WORK LIST
+#   bash — abi 14: the grammar has 60 named node type(s); the spec names 9
+#   UNNAMED BY THE SPEC AND PRESENT IN THIS CORPUS — 48 type(s), ranked:
+#      17360 string   13287 simple_expansion   13287 string_content   6691 number
+#   (lua, for contrast: 26 of 50 named — the ratio the capability matrix cannot show,
+#    since it scores both 7/7)
+# ⚠ The gate reads QUERY blocks only (exact); the work list also counts bare strings
+# that are node types of that grammar, because a spec handles plenty in Lua tables —
+# query-only called lua's `if_statement` unnamed. Even so the work list is a CANDIDATE
+# list: exprcensus is what says whether a candidate actually costs reads.
+
 # PORT ORDER: who supplies the prototypes this mod EDITS, and have they ported?
 # Porting is transitive — a mod that rewrites another mod's prototypes cannot be
 # ported before that mod is, and no environment diff can see it. Joins the two
