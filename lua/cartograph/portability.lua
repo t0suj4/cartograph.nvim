@@ -895,8 +895,12 @@ function M.receiver_context(store, prof, origin)
                 rc.from_why = ('the origin class table describes %s, the target %s')
                     :format(tostring(om.lang), tostring(m.lang))
             elseif tostring(om.version) == tostring(m.version) then
-                rc.from_why = ('the origin and target class tables are both %s %s —'
-                    .. ' a version diffed against itself decides nothing')
+                rc.from_why = ('the origin and target class tables are both %s %s — a'
+                    .. ' version diffed against itself decides nothing. If this is a'
+                    .. ' PORT IN PROGRESS the manifest has already been bumped to the'
+                    .. ' target, which is the first edit anyone makes; name the origin'
+                    .. ' explicitly (opts.from) to keep auditing against the version'
+                    .. ' being left behind')
                     :format(tostring(om.artifact), tostring(om.version))
             else
                 rc.from_ct, rc.from_meta = oct, om
@@ -3273,7 +3277,15 @@ end
 --- it re-parses every function (~3.5 ms each), which a default verb should not do to
 --- a large corpus.
 function M.report(store, runtime, opts)
-    local res, err = M.audit(store, runtime)
+    -- ⚠ OPTS REACHES THE AUDIT. It did not, and `opts.from` — the documented way to
+    -- name the ORIGIN, whose own comment says "an explicit opts.from always wins" — was
+    -- unreachable from every report. So the origin could ONLY come from the manifest…
+    -- and bumping the manifest is the FIRST edit of any port. From that moment the
+    -- class-space axis compares the target against itself and goes quiet, exactly while
+    -- the remaining work is what the reader wants to see. Measured on Von Neumann
+    -- mid-port: 1 removed member read on the pristine tree, silence after the version
+    -- bump, and no way to ask for it back.
+    local res, err = M.audit(store, runtime, opts)
     if not res then return { 'portability: ' .. err } end
     local cap = (opts and opts.cap) or 25
     local L = {}
