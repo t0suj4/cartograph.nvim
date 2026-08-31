@@ -100,6 +100,16 @@ return {
         -- reported "floor 2022" because 2022 > 3.1). This is what lets a DECLARED
         -- 1.1 be compared with a profile artifact built from 2.0.72.
         version_scale = 'factorio',
+        -- WHICH PROFILE ARTIFACTS DESCRIBE THIS ECOSYSTEM (CART-0645). Without it the
+        -- only link between the two key spaces was that one profile happens to share
+        -- this file's name, so every VERSION-PINNED profile lost the manifest reading:
+        -- asking `:CartographPortability lua-factorio-11` on a mod whose info.json says
+        -- factorio_version "1.1" printed "the tree declares no environment version" —
+        -- a false statement about the tree, standing in for a failed lookup. It also
+        -- made the whole audit DIRECTION-DEPENDENT, which nothing else here is.
+        profiles = { 'lua-factorio', 'lua-factorio-11', 'lua-factorio-api',
+            'lua-factorio-api-11', 'lua-factorio-api-20',
+            'lua-factorio-proto-11', 'lua-factorio-proto-20' },
         deps_key = 'dependencies',
         -- a HINT for finding the right archive without opening all of them (one
         -- info.json out of a zip costs ~22ms over /mnt/c, so a 199-archive scan

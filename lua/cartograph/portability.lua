@@ -828,21 +828,46 @@ end
 --- (v5 keys read against a v6 document, 104 confident nonsenses). So the table must
 --- describe the SAME language at the SAME version as the profile being reported on,
 --- and when it does not, the axis is simply absent and says why.
+--- THE SHIPPED CLASS-TABLE ARTIFACT FOR A VERSION (CART-0645). Lifted out of
+--- origin_for because the TARGET side needs exactly the same lookup and did not have
+--- it: receiver_context asked `classmatch.table(nil)`, which walks the artifact list
+--- and returns the FIRST one carrying a class table — always the 2.0.72 export — then
+--- refused whenever the profile was not 2.0.72. So the receiver axis worked in one
+--- direction only, and a BACKPORT (2.0 -> 1.1) lost it entirely, with a message about
+--- "the only class table available" that was true of the lookup and not of the ship.
+--- Matched on the MINOR and nothing looser, for origin_for's reason: a profile is per
+--- minor, and a wrong version manufactures verdicts out of skew.
+--- Returns (name, nil, ct) or (nil, why).
+function M.artifact_for(version)
+    local cm = require 'cartograph.classmatch'
+    local pm = require 'cartograph.spec.profile'
+    local minor = tostring(version):match('^(%d+%.%d+)')
+    if not minor then
+        return nil, ('%q is not major.minor'):format(tostring(version))
+    end
+    local tried = {}
+    for _, name in ipairs(cm.ARTIFACTS or {}) do
+        local art = pm.load(name)
+        if art and tostring(art.version):match('^' .. vim.pesc(minor) .. '%.') then
+            local ct = cm.table(name)
+            if ct then return name, nil, ct end
+            tried[#tried + 1] = name .. ' (no class table)'
+        end
+    end
+    return nil, ('no shipped artifact carries a class table for %s%s'):format(
+        tostring(version), #tried > 0 and (' — tried ' .. table.concat(tried, ', ')) or '')
+end
+
 function M.receiver_context(store, prof, origin)
     local cm = require 'cartograph.classmatch'
-    local ct, why = cm.table(nil)
-    if not ct then return nil, ('no class table to adjudicate receivers with (%s)')
+    -- THE TABLE FOR *THIS* PROFILE'S VERSION, not "whichever ships first" (CART-0645).
+    local _, why, ct = M.artifact_for(prof.version)
+    if not ct then return nil, ('no class table to adjudicate receivers with: %s')
         :format(tostring(why)) end
     local m = ct.meta or {}
     if prof.lang and m.lang and m.lang ~= prof.lang then
-        return nil, ('the only class table available describes %s (%s), not %s')
+        return nil, ('the class table for this version describes %s (%s), not %s')
             :format(tostring(m.lang), tostring(m.artifact), tostring(prof.lang))
-    end
-    if tostring(m.version) ~= tostring(prof.version) then
-        return nil, ('the only class table available is %s %s, and this verdict is'
-            .. ' about %s — a class table from another version would turn a version'
-            .. ' mismatch into member verdicts, so receivers are left unadjudicated')
-            :format(tostring(m.artifact), tostring(m.version), tostring(prof.version))
     end
     local surf = require('cartograph.externals').surface(store)
     local ev = {}
@@ -953,7 +978,11 @@ end
 --- Returns (verdict, detail) or nil when either space is missing:
 ---   member-removed        declared in the source, by NO class in the target.
 ---                         A port item. Sound.
----   not-a-runtime-member  declared by no class in EITHER — a mod library or the
+---   not-a-runtime-member  declared by no class in EITHER. ⚠ NOT "no work at all"
+---                         (CART-0651): it is also where a global from an environment
+---                         surface NO ARTIFACT MODELS lands — base's data-stage lualib
+---                         has no artifact, and `circuit_connector_definitions.create`
+---                         became `.create_vector` in 2.0. A mod library or the
 ---                         language's own stdlib. NOT a port item, and NOT a
 ---                         frontier: it is a decided "this was never API".
 ---   member-supplied       every class that declared it still does. Sound: any
@@ -986,6 +1015,81 @@ function M.class_space_verdict(from_space, to_space, member)
     if #lost == 0 then return 'member-supplied', { from_n = na, to_n = nb } end
     table.sort(lost)
     return 'member-moved', { from_n = na, to_n = nb, lost_classes = lost }
+end
+
+--- READS ON A RECEIVER, adjudicated by the MEMBER NAME ALONE (CART-0650).
+---
+--- ★★ THE TEST NEEDS NO RECEIVER, AND THE READS WERE NEVER OFFERED IT. Two surfaces
+--- exist and neither could rule on `e.circuit_connection_definitions`: the READS diff
+--- drops receiver-rooted chains on purpose (a chain rooted at a local says nothing
+--- about which globals the environment holds), and the class-space audit consumes the
+--- CALL surface, so a field read produces no record it can see. Between them a member
+--- read on a receiver had no consumer at all — and `circuit_connection_definitions` was
+--- on LuaEntity in 1.1, is on NO 2.0 class, is read at three sites in railloader, and
+--- appeared NOWHERE in the report. Not as a finding, not as a hedge, not in a bound.
+---
+--- `class_space_verdict` is the whole mechanism and it is member-name-only: if no class
+--- in the target declares the name, no receiver could have reached it. That soundness
+--- is what makes this cheap — nothing here types a receiver, and nothing here should.
+---
+--- ⚠ THE MEMBER IS THE SEGMENT AFTER THE ROOT, not the last one. `e.position.x` asks
+--- about `position` on whatever `e` is; `x` belongs to MapPosition and asking the class
+--- space about it would be a question about a different object. A deeper hop needs the
+--- receiver typed, which is the axis this one deliberately does without.
+---
+--- ⚠ AND `not-a-runtime-member` IS COUNTED, NEVER REPORTED AS WORK. Most receiver
+--- reads are project fields (`self.name`, `queue.iter`) and the honest answer for them
+--- is "this is not an API object", exactly as on the call side.
+--- Returns (result, why); result = { removed = {…}, moved = {…}, class_gone = {…},
+--- supplied, not_member, chains, reads } with each row { name, member, reads, files }.
+function M.receiver_read_audit(store, rctx)
+    if not rctx then return nil, 'no receiver context' end
+    if not rctx.from_space then
+        return nil, (rctx.from_why or 'no ORIGIN class space, so a member read cannot be'
+            .. ' diffed — an absence in the target alone is a fact about one artifact')
+    end
+    local refs = require('cartograph.externals').references(store)
+    local res = { removed = {}, moved = {}, class_gone = {}, supplied = 0,
+        not_member = 0, chains = 0, reads = 0 }
+    -- which classes the TARGET still has at all, for the split below
+    local to_classes = {}
+    for cn in pairs((rctx.ct or {}).classes or {}) do to_classes[cn] = true end
+    for chain, n in pairs(refs.receiver_reads or {}) do
+        local member = chain:match('^[%w_]+[.:]([%w_]+)')
+        if member then
+            res.chains = res.chains + 1
+            res.reads = res.reads + n
+            local v, d = M.class_space_verdict(rctx.from_space, rctx.to_space, member)
+            local row = { name = chain, member = member, reads = n,
+                files = refs.receiver_files[chain], detail = d }
+            if v == 'member-removed' then res.removed[#res.removed + 1] = row
+            elseif v == 'member-moved' then
+                -- ⚠ A CLASS THE TARGET DELETED OUTRIGHT IS NOT A MEMBER FINDING, and
+                -- unsplit it is most of the group: `e.name` reports "lost by
+                -- LuaNoiseLayerPrototype" on a corpus that has never seen one, because
+                -- 2.0 removed that class entirely and every member went with it. That
+                -- is a fact about the CLASS, at a granularity this axis cannot use —
+                -- it would fire on `name`, `position` and `valid` for every receiver
+                -- in every mod. Measured on railloader: 55 moved rows, and splitting
+                -- leaves the member-level ones behind.
+                local d2 = row.detail or {}
+                local live = false
+                for _, cn in ipairs(d2.lost_classes or {}) do
+                    if to_classes[cn] then live = true break end
+                end
+                if live then res.moved[#res.moved + 1] = row
+                else res.class_gone[#res.class_gone + 1] = row end
+            elseif v == 'member-supplied' then res.supplied = res.supplied + 1
+            else res.not_member = res.not_member + 1 end
+        end
+    end
+    local function bycount(a, b)
+        if a.reads ~= b.reads then return a.reads > b.reads end
+        return a.name < b.name
+    end
+    table.sort(res.removed, bycount); table.sort(res.moved, bycount)
+    table.sort(res.class_gone, bycount)
+    return res
 end
 
 --- THE SHAPE-MOVE VERDICT (CART-0632) — did the base's WHOLE OBSERVED SHAPE
@@ -1389,10 +1493,18 @@ M.REASON_TEXT = {
         .. ' is, which is why this is a SUBSET test and not "some class has the name":'
         .. ' bare presence would have swallowed the MOVED group above.',
     ['not-a-runtime-member'] = 'NOT A RUNTIME MEMBER — no class in EITHER version'
-        .. ' declares this name, so it never was part of the environment. A mod'
-        .. ' library or the language\'s own stdlib. ★ A DECIDED ANSWER, not a'
-        .. ' frontier: it was previously indistinguishable from "we could not type the'
-        .. ' receiver", and it is no work at all rather than unknown work.',
+        .. ' declares this name, so the RUNTIME api is not where it lives. A mod'
+        .. ' library, the language\'s own stdlib — or a global from an environment'
+        .. ' surface no shipped artifact models, and that third case is why this is'
+        .. ' NOT "no work at all". ⚠ THE MEASURED COUNTEREXAMPLE (CART-0651):'
+        .. ' `circuit_connector_definitions.create` landed here, and it is a'
+        .. ' DATA-STAGE global from base\'s lualib which 2.0 replaced with'
+        .. ' `.create_vector` — 188 sightings of the new spelling across the 2.0 mods'
+        .. ' against 0 in the 1.1 ones. Calling nil stops the load. What was measured'
+        .. ' is "no runtime class has this"; what does not follow is "there is nothing'
+        .. ' to do". Neither artifact covers the data-stage lualib (util, the sound'
+        .. ' helpers, circuit_connector_definitions, the *_connector_template'
+        .. ' globals), so absence here is not evidence about that surface.',
     -- ── the shape-move axis (CART-0632). The unit is the base's OBSERVED SHAPE and
     -- the missing evidence was the ORIGIN's candidate set: which classes declared
     -- everything this code does with the base, BEFORE the move.
@@ -1516,6 +1628,11 @@ function M.audit(store, runtime, opts)
         available = (rctx and rctx.from_space) ~= nil,
         why = (rctx and rctx.from_why) or (not from and ofwhy) or nil,
         meta = rctx and rctx.from_meta or nil }
+    -- THE READ SIDE OF THE CLASS-SPACE TEST (CART-0650), computed here because this is
+    -- where the context exists — the report renders, it does not analyse. `why` is
+    -- carried for the same reason res.receiver.why is: an axis that quietly did not run
+    -- looks exactly like one with nothing to find.
+    res.receiver_reads, res.receiver_reads_why = M.receiver_read_audit(store, rctx)
     for name, n in pairs(req.names) do
         local w = M.provides(prof, name)
         local files = req.files[name] or { req.where[name] }
@@ -1680,11 +1797,28 @@ function M.declared_for(store, runtime)
     local root = (store.data or {}).root
     if not root or root:match('^%w+://') then return nil end
     local ok_e, ecomod = pcall(require, 'cartograph.spec.ecosystem')
-    if not ok_e then return nil end
-    local eco = ecomod.load(runtime)
-    local scale = eco and (eco.identity or {}).version_scale
-    if not scale then return nil end
-    return require('cartograph.versionfloor').declared(root, scale)
+    if not ok_e then return nil, 'the ecosystem layer is unavailable' end
+    -- ⚠ BY PROFILE, NOT BY NAME (CART-0645). `ecomod.load(runtime)` looked an ECOSYSTEM
+    -- up in the PROFILE key space and worked only for the one name spelled the same in
+    -- both, so every version-pinned profile silently lost the manifest reading — and
+    -- the caller rendered that loss as "the tree declares no environment version",
+    -- which is a claim about the tree and was false.
+    local eco, econame = ecomod.for_profile(runtime)
+    if not eco then
+        return nil, ('no ecosystem declares the profile %q, so its version scale is'
+            .. ' unknown — this is a gap in the specs, NOT a fact about the tree')
+            :format(tostring(runtime))
+    end
+    local scale = (eco.identity or {}).version_scale
+    if not scale then
+        return nil, ('the %s ecosystem declares no version_scale, so a declared version'
+            .. ' has no ruler to be measured on'):format(tostring(econame))
+    end
+    local decl = require('cartograph.versionfloor').declared(root, scale)
+    if not decl then
+        return nil, ('the tree declares no %s version'):format(tostring(scale))
+    end
+    return decl
 end
 
 --- THE ORIGIN ARTIFACT FOR A DECLARED MOVE (CART-0631) — which shipped class
@@ -1701,8 +1835,14 @@ end
 --- the whole verdict is a DIFFERENCE and a wrong origin manufactures removals out
 --- of version skew. No origin is a fine answer — a wrong one is not.
 function M.origin_for(store, runtime)
-    local decl = M.declared_for(store, runtime)
-    if not decl then return nil, 'the tree declares no environment version' end
+    -- THE REASON COMES FROM THE LOOKUP, NEVER FROM THIS FUNCTION'S GUESS (CART-0645).
+    -- A single hardcoded sentence here stood in for four different failures, and the
+    -- one it named — "the tree declares no environment version" — was the only one that
+    -- had not happened.
+    local decl, why = M.declared_for(store, runtime)
+    if not decl then
+        return nil, why or 'the tree declares no environment version'
+    end
     local minor = tostring(decl.raw):match('^(%d+%.%d+)')
     if not minor then
         return nil, ('the declared version %q is not major.minor'):format(tostring(decl.raw))
@@ -1759,6 +1899,16 @@ local REF_TEXT = {
 --- The REFERENCE surface, adjudicated. Separate from the call audit on purpose: a
 --- read and a call are different evidence, and folding them would move every
 --- existing count. Returns display lines, or {} when nothing is referenced.
+--- "ALSO BOUND HERE" as a cell (CART-0649). A read whose root another file also binds
+--- MAY be internal — it is reported with the binding sites rather than deleted, because
+--- a project-wide veto silenced 41 reads in Von Neumann and 18 in railloader with no row
+--- to notice. Empty string when nothing binds it, so the caller can concatenate blind.
+local function shadow_text(files)
+    if not files or #files == 0 then return '' end
+    if #files == 1 then return ('  ⌂ also bound in %s'):format(files[1]) end
+    return ('  ⌂ also bound in %s (+%d)'):format(files[1], #files - 1)
+end
+
 function M.reference_report(store, runtime, opts)
     local prof = require('cartograph.spec.profile').load(runtime)
     if not prof then return {} end
@@ -1793,13 +1943,21 @@ function M.reference_report(store, runtime, opts)
         if not g then g = { n = 0, reads = 0, items = {} }; groups[why] = g end
         g.n = g.n + 1; g.reads = g.reads + n
         g.items[#g.items + 1] = { name = name, reads = n, file = refs.where[name],
-            files = refs.files[name] }
+            files = refs.files[name], shadowed = (refs.shadowed or {})[name] }
     end
     local L = { '' }
     L[#L + 1] = ('  REFERENCED but not called — %d name(s) read, never invoked:')
         :format(refs.total)
     L[#L + 1] = '    (a second surface: the call audit above cannot see these, because'
     L[#L + 1] = '     a name that is read and never called produces no call record.)'
+    local nsh = 0
+    for _ in pairs(refs.shadowed or {}) do nsh = nsh + 1 end
+    if nsh > 0 then
+        L[#L + 1] = ('    ⌂ %d name(s) below are ALSO BOUND elsewhere in this tree, so a'):format(nsh)
+        L[#L + 1] = '      read of one may be internal. LISTED, not dropped: the veto used'
+        L[#L + 1] = '      to be project-wide and silenced 41 reads in one mod and 18 in'
+        L[#L + 1] = '      another, invisibly (CART-0649).'
+    end
     if (refs.withheld or 0) > 0 then
         L[#L + 1] = ('    %d name(s) WITHHELD — their root is touched in only one'):format(refs.withheld)
         L[#L + 1] = '     function, where a loop-bound local is indistinguishable from a'
@@ -1817,8 +1975,8 @@ function M.reference_report(store, runtime, opts)
                 REF_TEXT[key])
             for i = 1, math.min(cap, #g.items) do
                 local e = g.items[i]
-                L[#L + 1] = ('      %-36s %4d read(s)  %s'):format(e.name, e.reads,
-                    where_text(e.files, e.file))
+                L[#L + 1] = ('      %-36s %4d read(s)  %s%s'):format(e.name, e.reads,
+                    where_text(e.files, e.file), shadow_text(e.shadowed))
             end
             if #g.items > cap then
                 L[#L + 1] = ('      … and %d more'):format(#g.items - cap)
@@ -1877,12 +2035,19 @@ function M.reference_diff(store, from, to)
     local res = { from = from, to = to, lost = {}, gained = {}, kept = 0, neither = 0 }
     for name, n in pairs(refs.names) do
         local in_a, in_b = M.provides(a, name), M.provides(b, name)
+        -- ALSO BOUND SOMEWHERE IN THIS TREE (CART-0649). Carried onto the row rather
+        -- than used to drop it: another file binding the root makes a read POSSIBLY
+        -- internal, never certainly, and the version status change is a fact either
+        -- way. The old code dropped these before the diff ever saw them.
+        local sh = (refs.shadowed or {})[name]
         if in_a and not in_b then
             res.lost[#res.lost + 1] = { name = name, reads = n,
-                file = refs.where[name], files = refs.files[name], was = in_a }
+                file = refs.where[name], files = refs.files[name], was = in_a,
+                shadowed = sh }
         elseif in_b and not in_a then
             res.gained[#res.gained + 1] = { name = name, reads = n,
-                file = refs.where[name], files = refs.files[name], now = in_b }
+                file = refs.where[name], files = refs.files[name], now = in_b,
+                shadowed = sh }
         elseif in_a then res.kept = res.kept + 1
         else res.neither = res.neither + 1 end
     end
@@ -1910,8 +2075,8 @@ function M.reference_diff_report(store, from, to, opts)
         L[#L + 1] = '  the port worklist: a status CHANGE, not an artifact gap.'
         for i = 1, math.min(cap, #res.lost) do
             local e = res.lost[i]
-            L[#L + 1] = ('    %-34s %4d read(s)  was: %-18s %s'):format(e.name,
-                e.reads, e.was, where_text(e.files, e.file))
+            L[#L + 1] = ('    %-34s %4d read(s)  was: %-18s %s%s'):format(e.name,
+                e.reads, e.was, where_text(e.files, e.file), shadow_text(e.shadowed))
         end
         if #res.lost > cap then
             L[#L + 1] = ('    … and %d more'):format(#res.lost - cap)
@@ -1922,9 +2087,9 @@ function M.reference_diff_report(store, from, to, opts)
         L[#L + 1] = ('  GAINED — %d name(s) the NEW environment holds and the old did'
             .. ' not (already-migrated code, or a name that moved here):'):format(#res.gained)
         for i = 1, math.min(5, #res.gained) do
-            L[#L + 1] = ('    %-34s %4d read(s)  %s'):format(res.gained[i].name,
+            L[#L + 1] = ('    %-34s %4d read(s)  %s%s'):format(res.gained[i].name,
                 res.gained[i].reads, where_text(res.gained[i].files,
-                    res.gained[i].file))
+                    res.gained[i].file), shadow_text(res.gained[i].shadowed))
         end
     end
     return L
@@ -2103,9 +2268,48 @@ function M.prototype_queryable(prof)
         and next(prof.own_props or {}) ~= nil
 end
 
+--- SAMPLE THE "IN NEITHER VERSION" BUCKET (CART-0647). It was a bare count while
+--- res.lost carried file, line and owning type — and it is exactly where a PORT'S OWN
+--- TYPOS land, plus properties from an era neither artifact covers (`mining_power`) and
+--- properties another mod adds. A count nobody can inspect is the same defect CART-0637
+--- fixed for unreadable literals: bucket it, sample it, say what it is.
+--- A TYPE THE ARTIFACT KNOWS AND MODELS NO PROPERTIES FOR (CART-0654). `EnergySource`
+--- is the union of Electric/Burner/Heat/Fluid/Void and `Modifier` of every modifier
+--- kind; the distiller records the union's NAME as a property's type and its
+--- alternatives nowhere, so the walk RESOLVES the hop and lands on an empty set. An
+--- empty property set is indistinguishable from "this type has no such property", and
+--- every leaf below such a hop was sorted into "in neither version" — a verdict
+--- computed against nothing, and OUTSIDE the unwalkable bound, because the hop did
+--- resolve. `type_props` returns nil for a type it does not know at all and `{}` for one
+--- it knows and models nothing for, which is exactly the distinction this needs.
+local function opaque_owner(pra, prb)
+    return pra and prb and next(pra) == nil and next(prb) == nil
+end
+
+local function note_unknown(res, prop, typename, file, line)
+    res.unknown_prop = res.unknown_prop + 1
+    local seen = res._unknown_seen
+    if not seen then seen = {}; res._unknown_seen = seen end
+    local key = tostring(typename) .. '::' .. tostring(prop)
+    if seen[key] or #res.unknown_sample >= 12 then return end
+    seen[key] = true
+    res.unknown_sample[#res.unknown_sample + 1] = { prop = prop, typename = typename,
+        file = file, line = line }
+end
+
 --- THE DATA-STAGE DIFF: which properties the mod actually sets stop existing
 --- between two prototype-api versions. Returns (result, err); result =
----   { from, to, lost = {…}, gone_type = {…}, kept, unknown_prop,
+--- ⚠ `unknown_prop` MEANS IN NEITHER VERSION, AND IT USED TO MEAN "not in the origin"
+--- (CART-0647). The three-way branch was two-way: anything the ORIGIN lacked fell into
+--- it, `ib` unconsulted — so every property a PORT INTRODUCES was counted as being in
+--- neither version, which is false about it. The counter could only be read correctly
+--- by a mod nobody had started porting, and it inflated with exactly the edits this
+--- report asked for: BigPumpjack went from 6 to 26 as its worklist went from 11 to 0.
+--- `target_only` is the recovered fourth branch, and it is a PORT-PROGRESS METER for
+--- free — "23 of this mod's properties are 2.0-only" is a direct measure of how far a
+--- port has got, from machinery that already existed.
+---   { from, to, lost = {…}, gone_type = {…}, kept, unknown_prop, target_only,
+---     opaque_owner (a hop that resolved to a union base — see CART-0654),
 ---     unread = {…}, hedged = {…}, untyped, records }
 --- `lost` is the worklist: each entry names the file, line, prototype, typename and
 --- property, and whether the property was REQUIRED (a required property that
@@ -2128,7 +2332,9 @@ function M.prototype_diff(store, from, to)
             .. ' with a declared prototype adapter'
     end
     local res = { from = from, to = to, lost = {}, stale_delete = {}, gone_type = {},
-        kept = 0, unknown_prop = 0, unread = {}, hedged = {}, untyped = 0, records = 0,
+        kept = 0, unknown_prop = 0, target_only = 0, opaque_owner = 0,
+        unknown_sample = {},
+        unread = {}, hedged = {}, untyped = 0, records = 0,
         unwalked = 0, unregistered = 0 }
     -- ONE ROW PER REMOVED HOP, not one per leaf beneath it (CART-0642). A removed
     -- `hr_version` has a dozen fields under it and each produced its own finding:
@@ -2237,7 +2443,11 @@ function M.prototype_diff(store, from, to)
                             handled = true
                         elseif kind == 'leaf' then
                             local pra, prb = M.type_props(a, det.a), M.type_props(b, det.b)
-                            if pra and prb then
+                            if opaque_owner(pra, prb) then
+                                -- resolved to a union base: NOT a verdict (CART-0654)
+                                res.opaque_owner = res.opaque_owner + 1
+                                handled = true
+                            elseif pra and prb then
                                 local ia, ib = pra[det.prop], prb[det.prop]
                                 if ia and not ib then
                                     local entry = { file = m.file, line = ov.line,
@@ -2252,7 +2462,8 @@ function M.prototype_diff(store, from, to)
                                         res.lost[#res.lost + 1] = entry
                                     end
                                 elseif ia then res.kept = res.kept + 1
-                                else res.unknown_prop = res.unknown_prop + 1 end
+                                elseif ib then res.target_only = res.target_only + 1
+                                else note_unknown(res, ov.path, ty, m.file, ov.line) end
                                 handled = true
                             end
                         end
@@ -2291,11 +2502,14 @@ function M.prototype_diff(store, from, to)
                             end
                         elseif in_a then
                             res.kept = res.kept + 1
+                        elseif in_b then
+                            -- ALREADY MIGRATED: in the target, not in the origin.
+                            res.target_only = res.target_only + 1
                         else
                             -- in NEITHER version: a property another mod adds, or a
-                            -- misspelling. NOT porting work, so it is counted and
-                            -- never listed as such.
-                            res.unknown_prop = res.unknown_prop + 1
+                            -- misspelling. NOT porting work, so it is SAMPLED rather
+                            -- than listed as such.
+                            note_unknown(res, prop, ty, m.file, ov.line)
                         end
                     end
                 end
@@ -2382,7 +2596,9 @@ function M.prototype_diff(store, from, to)
                         res.unwalked = (res.unwalked or 0) + 1
                     else
                         local pra, prb = M.type_props(a, ta), M.type_props(b, tb)
-                        if pra and prb then
+                        if opaque_owner(pra, prb) then
+                            res.opaque_owner = res.opaque_owner + 1
+                        elseif pra and prb then
                             local ia, ib = pra[pa], prb[pb]
                             -- ⚠ ONE KEY NAMESPACE WITH THE HOP ROWS. A removed
                             -- `hr_version` shows up twice otherwise: once as a LEAF
@@ -2415,7 +2631,8 @@ function M.prototype_diff(store, from, to)
                                     res.lost[#res.lost + 1] = entry
                                 end
                             elseif ia then res.kept = res.kept + 1
-                            else res.unknown_prop = res.unknown_prop + 1 end
+                            elseif ib then res.target_only = res.target_only + 1
+                            else note_unknown(res, ov.path, ty, m.file, ov.line) end
                         else
                             res.unwalked = (res.unwalked or 0) + 1
                         end
@@ -2442,8 +2659,39 @@ function M.prototype_diff_report(store, from, to, opts)
     local L = { ('prototype diff — the DATA STAGE moving from %s to %s'):format(
         res.from, res.to) }
     L[#L + 1] = ('  %d prototype(s) read; %d write(s) and %d deletion(s) hit a removed'
-        .. ' property, %d unchanged, %d in neither version'):format(res.records,
-        #res.lost, #res.stale_delete, res.kept, res.unknown_prop)
+        .. ' property, %d unchanged, %d already on the target only, %d in neither'
+        .. ' version'):format(res.records, #res.lost, #res.stale_delete, res.kept,
+        res.target_only, res.unknown_prop)
+    if res.opaque_owner > 0 then
+        vim.list_extend(L, reason_lines(
+            ('    %d nested write(s) NOT ADJUDICATED — '):format(res.opaque_owner),
+            'the path resolved, but to a type the artifact models no properties for —'
+            .. ' a UNION BASE like EnergySource or Modifier, whose alternatives the'
+            .. ' distiller does not record. ⚠ These are NOT in the unwalkable bound'
+            .. ' below: that one covers hops that could not be resolved, and these did'
+            .. ' resolve. Until CART-0654 they were counted "in neither version", which'
+            .. ' called REQUIRED properties of ElectricEnergySource nonexistent.',
+            '      '))
+    end
+    if #res.unknown_sample > 0 then
+        L[#L + 1] = ('    in neither version, a sample of %d: %s'):format(
+            #res.unknown_sample, (function ()
+                local ps = {}
+                for _, e in ipairs(res.unknown_sample) do
+                    ps[#ps + 1] = ('%s (%s)'):format(e.prop, tostring(e.typename))
+                end
+                return table.concat(ps, ', ')
+            end)())
+        L[#L + 1] = '      — a property from an era neither artifact covers, one another'
+        L[#L + 1] = '        mod adds, or a MISSPELLING. Sampled because a port\'s own'
+        L[#L + 1] = '        typos land here and a bare count cannot be inspected.'
+    end
+    if res.target_only > 0 then
+        L[#L + 1] = ('    (%d property(ies) exist in %s and NOT in %s — code already'
+            .. ' migrated, or written for the newer version. They were counted as "in'
+            .. ' neither" until CART-0647, so this number rose as a port got MORE'
+            .. ' correct.)'):format(res.target_only, res.to, res.from)
+    end
     if #(res.read_lost or {}) > 0 then
         L[#L + 1] = ('  ⚠ and %d READ(S) of a path the target removed — those stop the'
             .. ' load, not just the write'):format(#res.read_lost)
@@ -2800,6 +3048,73 @@ function M.report(store, runtime, opts)
                     L[#L + 1] = ('      … and %d more'):format(#g.items - per)
                 end
             end
+        end
+        -- ── THE READ SIDE OF THE SAME TEST (CART-0650) ──────────────────────
+        -- Everything above is CALLS. A member READ on a receiver had no consumer at
+        -- all until this: the reads diff drops receiver-rooted chains, and this axis
+        -- only ever saw call records. The verdict needs no receiver, so it belongs
+        -- here rather than behind the typing work.
+        local rr, rrwhy = res.receiver_reads, res.receiver_reads_why
+        if rr and rr.chains > 0 then
+            L[#L + 1] = ''
+            vim.list_extend(L, reason_lines(
+                ('    %d receiver-rooted READ chain(s), %d read(s) — '):format(
+                    rr.chains, rr.reads),
+                'a read like `e.circuit_connection_definitions` names no global, so the'
+                .. ' READS diff excludes it, and it produces no call record, so nothing'
+                .. ' above saw it. ★ THE CLASS-SPACE ABSENCE TEST NEEDS NO RECEIVER, so'
+                .. ' the member alone is adjudicable. Counted:'
+                .. (' %d supplied, %d not a runtime member at all.'):format(
+                    rr.supplied, rr.not_member), '      '))
+            if #rr.removed > 0 then
+                L[#L + 1] = ''
+                vim.list_extend(L, reason_lines(
+                    ('      %d READ(S) OF A MEMBER THE TARGET REMOVED — '):format(#rr.removed),
+                    'the origin declares this member on at least one class and the target'
+                    .. ' on NONE, so no receiver could reach it. ⚠ WORSE THAN THE WRITE'
+                    .. ' FINDINGS ABOVE: a write to a removed property goes nowhere'
+                    .. ' quietly, a read of one is nil and the next line uses it.',
+                    '        '))
+                for i = 1, math.min(per, #rr.removed) do
+                    local e = rr.removed[i]
+                    L[#L + 1] = ('        %-38s %3d read(s)  %-28s was on %s'):format(
+                        e.name, e.reads, where_text(e.files),
+                        table.concat((e.detail or {}).from_classes or {}, ', '))
+                end
+                if #rr.removed > per then
+                    L[#L + 1] = ('        … and %d more'):format(#rr.removed - per)
+                end
+            end
+            if #rr.moved > 0 then
+                L[#L + 1] = ''
+                vim.list_extend(L, reason_lines(
+                    ('      %d read(s) of a member SOME CLASSES LOST — '):format(#rr.moved),
+                    'the target still declares it, but not on every class that used to.'
+                    .. ' Whether this read breaks depends on which class the receiver is,'
+                    .. ' which this test deliberately does not ask.', '        '))
+                for i = 1, math.min(per, #rr.moved) do
+                    local e = rr.moved[i]
+                    L[#L + 1] = ('        %-38s %3d read(s)  %-28s lost by %s'):format(
+                        e.name, e.reads, where_text(e.files),
+                        table.concat((e.detail or {}).lost_classes or {}, ', '))
+                end
+                if #rr.moved > per then
+                    L[#L + 1] = ('        … and %d more'):format(#rr.moved - per)
+                end
+            end
+            if #rr.class_gone > 0 then
+                vim.list_extend(L, reason_lines(
+                    ('      %d more read(s) lost ONLY to classes the target deleted'):format(
+                        #rr.class_gone) .. ' outright — ',
+                    'not listed. `name` and `position` are "lost by'
+                    .. ' LuaNoiseLayerPrototype" on every corpus, because 2.0 removed'
+                    .. ' that class and took its whole member list with it. That is a'
+                    .. ' fact about the class at a granularity this axis cannot spend.',
+                    '        '))
+            end
+        elseif rrwhy and res.receiver and res.receiver.available then
+            vim.list_extend(L, reason_lines('    receiver READS not adjudicated — ',
+                tostring(rrwhy), '      '))
         end
         L[#L + 1] = ''
         if not groups['absent'] then

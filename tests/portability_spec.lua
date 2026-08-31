@@ -1601,22 +1601,35 @@ test('portability: every reason with TEXT has a slot in the report ORDER',
     end
 end)
 
-test('portability: no class table for THIS version leaves receivers unadjudicated,'
-    .. ' and says why', function ()
-    -- ★ THE VERSION GUARD IS THE SAFETY ARGUMENT. classmatch answers from whichever
-    -- artifact carries a class table (today the 2.0.72 export, and the 1.1 artifact
-    -- carries none). Adjudicating a 1.1 verdict against a 2.0 class table would turn
-    -- a version mismatch into confident member verdicts — the shape of 44b8a2a, v5
-    -- keys read against a v6 document, 104 confident nonsenses.
+test('portability: the class table is chosen BY VERSION, and a version with none refuses',
+    function ()
+    -- ★ THE VERSION GUARD IS THE SAFETY ARGUMENT. Adjudicating a 1.1 verdict against a
+    -- 2.0 class table would turn a version mismatch into confident member verdicts —
+    -- the shape of 44b8a2a, v5 keys read against a v6 document, 104 confident
+    -- nonsenses. What CHANGED at CART-0645 is HOW the guard is kept: it used to ask
+    -- classmatch for "whichever artifact carries a class table" (always the 2.0.72
+    -- export) and then refuse when that was not this profile's version — so the 1.1 end
+    -- was refused even though lua-factorio-api-11 DOES carry a table and the class-space
+    -- axis had been using it as the ORIGIN since CART-0631. The refusal was about the
+    -- lookup, not about the ship, and it made the whole axis one-directional: a BACKPORT
+    -- got no receiver adjudication at all. Now the artifact is selected BY VERSION, and
+    -- the guard is that selection rather than a check after the fact.
     local port = require 'cartograph.portability'
     local pm = require 'cartograph.spec.profile'
     local prof11 = pm.load('lua-factorio-11')
     if not prof11 then skip 'no lua-factorio-11 profile' end
     local store = require 'cartograph.store'
     local ctx, why = port.receiver_context(store, prof11)
-    eq(nil, ctx, 'the 1.1 end gets NO class table')
-    ok(why ~= nil and why:find('version', 1, true) ~= nil,
-        'and the refusal names the mechanism rather than going quiet: ' .. tostring(why))
+    ok(ctx ~= nil, 'the 1.1 end gets the 1.1 class table: ' .. tostring(why))
+    ok(tostring((ctx.meta or {}).version):match('^1%.1%.'),
+        'and it is the matching minor, never "whichever shipped first": '
+        .. tostring((ctx.meta or {}).version))
+    -- THE GUARD ITSELF: a version no shipped artifact covers must REFUSE, not fall back
+    local nowhere, nwhy = port.receiver_context(store,
+        { lang = prof11.lang, version = '0.17.79' })
+    eq(nil, nowhere, 'a version with no artifact gets no class table')
+    ok(nwhy ~= nil and nwhy:find('0.17.79', 1, true) ~= nil,
+        'and the refusal names the version it could not cover: ' .. tostring(nwhy))
     -- an audit without a context behaves EXACTLY as it did before this axis existed
     local prof = pm.load('lua-factorio')
     if not prof then skip 'no lua-factorio profile' end
@@ -2254,4 +2267,182 @@ test('data stage: a READ of a removed prototype path is reported, and separately
         ok(l.prop ~= 'animation.layers', 'a read is not counted as a write')
     end
     vim.fn.delete(root, 'rf')
+end)
+
+test('class space: the READ side is adjudicated too, and a deleted CLASS is quarantined',
+    function ()
+    if not (function ()
+        local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+        if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+        return pcall(vim.treesitter.language.add, 'lua')
+    end)() then skip 'no lua parser' end
+    -- ★ THE SHAPE OF CART-0650, BY HAND. railloader reads
+    -- `e.circuit_connection_definitions` at three sites; it was on LuaEntity in 1.1 and
+    -- is on no 2.0 class. It appeared NOWHERE in the port report — the reads diff drops
+    -- receiver-rooted chains and the class-space audit only consumed calls.
+    local ts = require 'cartograph.providers.treesitter'
+    local store = require 'cartograph.store'
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, 'p')
+    local fd = assert(io.open(root .. '/m.lua', 'w'))
+    fd:write(table.concat({
+        'local function go(e)',
+        '  local defs = e.circuit_connection_definitions',  -- REMOVED by the target
+        '  local n = e.name',                               -- lost only by a DELETED class
+        '  local p = e.destroy',                            -- lost by a class that SURVIVES
+        '  return defs, n, p',
+        'end',
+        'return { go = go }',
+    }, '\n'))
+    fd:close()
+    store.ingest(ts.extract(root))
+
+    -- the collector keeps what the environment surface throws away
+    local refs = require('cartograph.externals').references(store)
+    assert(refs.receiver_reads['e.circuit_connection_definitions'] == 1,
+        'a receiver-rooted read must be COLLECTED, not discarded')
+    assert(refs.names['e.circuit_connection_definitions'] == nil,
+        'and it must stay out of the ENVIRONMENT surface, which is about globals')
+
+    -- two spaces built by hand, so every branch is constructible
+    local A = {  -- origin
+        circuit_connection_definitions = { LuaEntity = true },
+        name = { LuaEntity = true, LuaNoiseLayerPrototype = true },
+        destroy = { LuaEntity = true, LuaRendering = true },
+    }
+    local B = {  -- target: the member is gone, LuaNoiseLayerPrototype is gone entirely
+        name = { LuaEntity = true },
+        destroy = { LuaEntity = true },
+    }
+    local rctx = { from_space = A, to_space = B,
+        ct = { classes = { LuaEntity = true, LuaRendering = true } } }
+    local rr = port.receiver_read_audit(store, rctx)
+
+    eq(1, #rr.removed, 'the removed member is the finding, and needs no receiver')
+    eq('e.circuit_connection_definitions', rr.removed[1].name)
+    eq({ 'LuaEntity' }, rr.removed[1].detail.from_classes, 'and it says where it lived')
+    -- ⚠ THE SPLIT THAT KEEPS THIS USABLE: `name` is "lost by LuaNoiseLayerPrototype"
+    -- only because the target deleted that class outright, which is true of `name`,
+    -- `position` and `valid` on every corpus. 52 of railloader's 58 moved rows were
+    -- this. `destroy` lost a class that still EXISTS, which is a real hedge.
+    eq(1, #rr.moved, 'only a class that still exists makes a member-level hedge')
+    eq('e.destroy', rr.moved[1].name)
+    eq(1, #rr.class_gone, 'a wholesale class deletion is quarantined, not reported as work')
+    eq('e.name', rr.class_gone[1].name)
+end)
+
+test('class space: the READ side REFUSES without an origin, and says so', function ()
+    -- an absence in the target alone is a fact about ONE artifact. Same fence as the
+    -- call side: a missing origin must read as "not compared", never as "nothing found".
+    local r, why = port.receiver_read_audit({}, { to_space = {}, ct = {} })
+    eq(nil, r, 'no origin space, no verdict')
+    assert(type(why) == 'string' and #why > 0, 'and the refusal carries its reason')
+    local r2, why2 = port.receiver_read_audit({}, nil)
+    eq(nil, r2); assert(type(why2) == 'string')
+end)
+
+test('portability: a property the TARGET has and the origin does not is MIGRATED, not unknown',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ★ CART-0647, BY HAND. `bulk` is on InserterPrototype in 2.0 and not in 1.1;
+    -- `stack` is the 1.1 property it replaced. A mod part-way through its port has both
+    -- kinds in the tree, and the counter used to call the migrated one "in neither
+    -- version" — false about it, and the number ROSE as the port got more correct
+    -- (BigPumpjack: 6 -> 26 while its worklist went 11 -> 0).
+    local st = factorio_store(table.concat({
+        'local i = table.deepcopy(data.raw.inserter["fast-inserter"])',
+        'i.stack = true',        -- 1.1 only: a write to a removed property
+        'i.bulk = true',         -- 2.0 only: ALREADY MIGRATED
+        'i.filter_count = 1',    -- in both: unchanged
+        'data:extend{i}',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    eq(1, #res.lost, 'the 1.1-only property is the worklist')
+    eq('stack', res.lost[1].prop)
+    ok(res.target_only >= 1, 'and the 2.0-only property is MIGRATED, in its own count')
+    ok(res.kept >= 1, 'while a property in both versions stays unchanged')
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: a hop into a UNION BASE is not adjudicated, and is not called absent',
+    function ()
+    if not proto_ready() then skip 'no prototype-api artifacts' end
+    -- ★ CART-0654. `MiningDrillPrototype::energy_source` is typed `EnergySource`, the
+    -- union of Electric/Burner/Heat/Fluid/Void, and the distiller records the union's
+    -- NAME with its alternatives nowhere — so type_props('EnergySource') is an EMPTY
+    -- set, not a missing one. Walking into it and reading the leaf reported
+    -- `usage_priority` and `type` — both REQUIRED on ElectricEnergySource in both
+    -- versions — as "in neither version", outside the unwalkable bound, because the
+    -- hop did resolve.
+    local st = factorio_store(table.concat({
+        'local d = table.deepcopy(data.raw["mining-drill"]["electric-mining-drill"])',
+        'd.energy_source.usage_priority = "secondary-input"',
+        'd.energy_source.type = "electric"',
+        'd.mining_power = 3',   -- genuinely in NEITHER version (removed before 1.1)
+        'data:extend{d}',
+    }, '\n'))
+    local res, err = port.prototype_diff(st, 'lua-factorio-proto-11',
+        'lua-factorio-proto-20')
+    ok(res, 'the diff runs: ' .. tostring(err))
+    ok(res.opaque_owner >= 2, 'both union-base leaves land in their own bucket, got '
+        .. tostring(res.opaque_owner))
+    -- and the genuinely-absent one is still reported as such: the split must not
+    -- swallow the real answers along with the false ones
+    local sampled = {}
+    for _, e in ipairs(res.unknown_sample) do sampled[e.prop] = true end
+    ok(sampled['mining_power'], 'a property truly in neither version stays there')
+    ok(not sampled['energy_source.usage_priority'],
+        'a REQUIRED property of a union alternative must never be called nonexistent')
+    vim.fn.delete(proto_tmp, 'rf')
+end)
+
+test('portability: the not-a-runtime-member text does not claim there is no work',
+    function ()
+    -- ★ A CLAIM FENCE, not a wording test (CART-0651). The old text said this bucket
+    -- "never was part of the environment" and is "no work at all" — a DECIDED answer
+    -- reached from the runtime class table alone. `circuit_connector_definitions.create`
+    -- landed in it: a data-stage global from base's lualib, replaced by `.create_vector`
+    -- in 2.0, and calling nil stops the load. No artifact models that surface, so an
+    -- absence in the two that exist is not evidence about it. What may be asserted here
+    -- is where the name is NOT; what may not is that nothing needs doing.
+    local t = port.REASON_TEXT['not-a-runtime-member']
+    ok(t ~= nil, 'the bucket has text')
+    -- ⚠ THE FENCE IS ON THE ASSERTION, NOT ON THE WORDS. My first cut looked for the
+    -- substring "no work at all" and failed on the fixed text, which quotes the old
+    -- claim in order to retract it — a predicate matching its own vocabulary, one more
+    -- time. So: the retired SENTENCE must be gone, and the surface must be named.
+    ok(not t:find('is no work at all rather than unknown work', 1, true),
+        'the retired claim must not be back: ' .. t)
+    ok(t:find('no shipped artifact models', 1, true),
+        'and the text must name the surface nothing covers, so a reader can weigh it')
+end)
+
+test('portability: a VERSION-PINNED profile still finds the tree\'s declared version',
+    function ()
+    -- ★ CART-0645. Profile names and ecosystem names are two key spaces, and the only
+    -- thing that joined them was a coincidence — `lua-factorio` is spelled the same in
+    -- both. So `declared_for` resolved for exactly one profile and returned nil for
+    -- every version-pinned one, and origin_for rendered that as "the tree declares no
+    -- environment version" — a claim about the TREE, and false. It also made the whole
+    -- class-space audit direction-dependent, which nothing else here is.
+    local eco = require 'cartograph.spec.ecosystem'
+    for _, name in ipairs({ 'lua-factorio', 'lua-factorio-11', 'lua-factorio-api-11',
+        'lua-factorio-proto-20' }) do
+        local e, n = eco.for_profile(name)
+        ok(e ~= nil, 'an ecosystem must claim the profile ' .. name)
+        eq('lua-factorio', n, 'and it is the factorio one for ' .. name)
+        ok((e.identity or {}).version_scale ~= nil, 'carrying the ruler to measure on')
+    end
+    eq(nil, eco.for_profile('no-such-profile-anywhere'),
+        'and an unclaimed name is nil, so the caller can say WHICH lookup failed')
+
+    -- the reason must name the lookup, never the tree
+    local why = select(2, port.declared_for({ data = { root = '/nowhere' } },
+        'no-such-profile-anywhere'))
+    ok(type(why) == 'string' and why:find('no-such-profile-anywhere', 1, true),
+        'the refusal names the profile it could not place: ' .. tostring(why))
+    ok(why:find('NOT a fact about the tree', 1, true),
+        'and says explicitly that it is not a statement about the tree: ' .. why)
 end)

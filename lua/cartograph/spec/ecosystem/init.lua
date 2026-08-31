@@ -38,6 +38,31 @@ M.load = validity.memo {
     end,
 }
 
+--- WHICH ECOSYSTEM DESCRIBES THIS PROFILE ARTIFACT (CART-0645). Profile names and
+--- ecosystem names are two key spaces, and the only thing that ever joined them was a
+--- coincidence: `lua-factorio` is spelled the same in both. So a caller holding a
+--- version-pinned profile (`lua-factorio-11`, `lua-factorio-proto-20`) got nil and
+--- reported it as a fact about the tree it was auditing.
+---
+--- An ecosystem now DECLARES the profiles it covers, so a new artifact joins by being
+--- listed rather than by being named a particular way — a prefix rule would have made
+--- the spelling load-bearing, which is how the coincidence became a bug in the first
+--- place. The exact-name match is kept as a fallback so an ecosystem that never
+--- declares a list behaves as it always did.
+--- Returns (ecosystem, name) or nil.
+function M.for_profile(profile)
+    if type(profile) ~= 'string' then return nil end
+    for _, n in ipairs(M.names()) do
+        local eco = M.load(n)
+        for _, p in ipairs(eco and (eco.identity or {}).profiles or {}) do
+            if p == profile then return eco, n end
+        end
+    end
+    local direct = M.load(profile)
+    if direct then return direct, profile end
+    return nil
+end
+
 --- Graph-validity CONTRIBUTOR: package-layout rules (identity, manifest name,
 --- precedence) shape resolution, so a cached graph must invalidate when they move.
 --- Composed over EVERY declared spec, so one added later enters the key for free.

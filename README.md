@@ -1976,6 +1976,45 @@ Those are the two real 1.1 → 2.0 items: `global` became `storage`, and three
 is evidence in a way an absence is not — it survives both artifacts being
 incomplete the same way.
 
+A read is silenced only by a binding **in its own file**. It used to be silenced by
+one anywhere in the tree, which is a much larger claim than it looks: `global = {}`
+on line 7 of railloader's `spec/EntityQueue_spec.lua` — a file the same report calls
+*reached by no entry point* — took that worklist from 8 lost names to 1, and a
+file-local `local script = require('k-lib')()` in one Von Neumann scenario silenced
+all 41 `script.*` reads in the other 33. Neither left a row. A binding elsewhere now
+**marks** the read instead:
+
+```
+    global.ghosts    5 read(s)  configchange.lua  ⌂ also bound in spec/EntityQueue_spec.lua
+```
+
+so the hedge is visible and checkable. Silence is the one answer that cannot be.
+
+### Reads on a receiver
+
+`e.circuit_connection_definitions` is neither of the above: rooted at a local, it
+says nothing about which globals exist, so the read surface excludes it — and it
+produces no call record, so the class-space audit never saw it either. Between the
+two it had no consumer at all, while being on `LuaEntity` in 1.1 and on **no 2.0
+class**. The class-space absence test needs no receiver — if no class in the target
+declares a name, no receiver could have reached it — so the members of those reads
+are now adjudicated by it:
+
+```
+    153 receiver-rooted READ chain(s), 288 read(s) — … 55 supplied, 40 not a runtime member
+      3 READ(S) OF A MEMBER THE TARGET REMOVED
+        e.circuit_connection_definitions      1 read(s)  inserterconfig.lua   was on LuaEntity
+      3 read(s) of a member SOME CLASSES LOST
+        entity.stack                          1 read(s)  configchange.lua     lost by LuaEntityPrototype
+      52 more read(s) lost ONLY to classes the target deleted outright — not listed
+```
+
+That last line is the whole reason the group is readable. `name` and `position` are
+"lost by `LuaNoiseLayerPrototype`" on every corpus in existence, because 2.0 deleted
+that class and took its member list with it; 52 of 58 rows were that, and they are
+counted rather than printed. **A read of a removed member is worse than a write to
+one** — the write goes nowhere quietly, the read is `nil` and the next line uses it.
+
 When the expression layer does not model a corpus's language, the section says
 **NOT COMPUTED** and how many functions were never examined — because a read
 surface that returns nothing looks exactly like a corpus with nothing to read, and
