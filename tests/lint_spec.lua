@@ -654,3 +654,100 @@ test('tag-coverage: a walker that misses a tag its own module constructs is aske
     eq(0, #rule.run(store), 'a two-tag family is not a dispatch')
     vim.fn.delete(root, 'rf')
 end)
+
+-- ── THE ELIDED TAIL (CART-0670) ─────────────────────────────────────────────
+-- The fourth premise of a refusal shadow, and the one whose absence broke typed
+-- absence at scale. `tsutil.refusal` keeps at most EIGHT candidate ids and
+-- records the true count as `n`; the shadow matcher read the kept list and never
+-- the count. So on any name with nine or more definitions the ninth onward cast
+-- no shadow, every other premise held, and a LIVE function was handed `absent` —
+-- the one absence value that licenses a deletion — with the choice of victim
+-- decided by the candidate list's emission order. Measured on an 8k-file Java
+-- monorepo: 25,559 truncated refusals, 525 names, 11 of 19 live implementations
+-- of one interface method reported callerless.
+--
+-- The corpus below is the Lua shape of that: nine same-named methods, one
+-- ambiguous call, so the refusal records n=9 and keeps p1..p8 — and p9 exists
+-- ONLY in the tail that was never stored.
+test('refusal shadow: a candidate in the ELIDED TAIL still blocks', function ()
+    local tsdir = vim.fn.expand('~/.local/share/nvim/lazy/nvim-treesitter')
+    if vim.fn.isdirectory(tsdir) == 1 then vim.opt.rtp:append(tsdir) end
+    if not pcall(vim.treesitter.get_string_parser, '', 'lua') then skip 'no lua parser' end
+    local ts = require 'cartograph.providers.treesitter'
+    local lint = require 'cartograph.lint'
+    local store = require 'cartograph.store'
+
+    local function corpus(impls)
+        local root = vim.fn.tempname()
+        vim.fn.mkdir(root, 'p')
+        local function put(p, s)
+            local fd = assert(io.open(root .. '/' .. p, 'w')); fd:write(s); fd:close()
+        end
+        for i = 1, impls do
+            put(('p%d.lua'):format(i), table.concat({
+                ('local P%d = {}'):format(i),
+                ('function P%d:appliesTo(d) return d == %d end'):format(i, i),
+                ('return P%d'):format(i), '' }, '\n'))
+        end
+        put('runner.lua', table.concat({
+            'local M = {}',
+            'function M.run(list, doc)',
+            '  for _, p in ipairs(list) do',
+            '    if p:appliesTo(doc) then return p end',
+            '  end',
+            'end',
+            'return M', '' }, '\n'))
+        -- THE DISCRIMINATION CONTROL, and it is the point of the whole guard: a
+        -- fix reading "some refusal in this graph was truncated, so stop saying
+        -- absent" turns this row blocked too and destroys the dead-code surface.
+        put('lonely.lua', table.concat({
+            'local function reallyDeadHelper() return 1 end',
+            'local M = {}',
+            'function M.go() return 2 end',
+            'return M', '' }, '\n'))
+        store.ingest(ts.extract(root))
+        return root, lint.alibi(store)
+    end
+
+    local function first_blocker(ali, name)
+        for _, n in ipairs(store.data.nodes) do
+            if n.name == name then return (ali(n).blockers or {})[1] end
+        end
+    end
+
+    -- NINE: the refusal saw 9 and kept 8, so p9 is reachable by NOTHING but the count
+    local root, ali = corpus(9)
+    local trunc = nil
+    for _, c in ipairs(store.data.calls or {}) do
+        if c.refused and c.refused.cands then trunc = c.refused end
+    end
+    eq(9, trunc.n, 'the refusal recorded what it SAW')
+    eq(8, #trunc.cands, 'and kept less than that')
+
+    local b8 = first_blocker(ali, 'P8:appliesTo')
+    eq('refused', b8.absence)
+    eq(true, b8.evidence.by_candidate_list, 'p8 is inside the retained window')
+
+    local b9 = first_blocker(ali, 'P9:appliesTo')
+    eq('refused', b9.absence, 'the elided candidate is NOT absent')
+    eq('refusal-shadow', b9.kind)
+    eq(false, b9.evidence.by_candidate_list, 'and it got there by no other route')
+    eq(true, b9.evidence.by_truncated_tail)
+    eq('truncated-tail', b9.evidence.sites[1].matched)
+    eq(9, b9.evidence.sites[1].candidates_total, 'the evidence names both counts')
+    eq(8, b9.evidence.sites[1].candidates)
+    ok(b9.why:find('8 of the 9'), 'and says so in words: ' .. b9.why)
+
+    eq(nil, first_blocker(ali, 'reallyDeadHelper'),
+        'a genuinely uncalled name with no truncated refusal spelling it stays claimable')
+    vim.fn.delete(root, 'rf')
+
+    -- EIGHT: nothing is elided, so the new route must be INERT. A widening that
+    -- fires below the cap would be indistinguishable from one that never checks.
+    local root8, ali8 = corpus(8)
+    local b = first_blocker(ali8, 'P8:appliesTo')
+    eq('refused', b.absence)
+    eq(false, b.evidence.by_truncated_tail, 'no tail, no tail-route')
+    eq(nil, first_blocker(ali8, 'reallyDeadHelper'))
+    vim.fn.delete(root8, 'rf')
+end)

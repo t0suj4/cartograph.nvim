@@ -105,3 +105,60 @@ test('census: the outside bucket breaks the silent lump down by gate', function 
         calls = { { ext = { disp = 'external', why = 'vocab' } } } }), '\n')
     ok(lines:find('outside by gate: vocab 1'), 'gate breakdown line')
 end)
+
+-- ── THE INSTRUMENT REPORTING ON ITS OWN CAP (CART-0682) ─────────────────────
+-- A refusal keeps at most 8 candidate ids and records the true count as `n`.
+-- Until this counter existed, the single number saying how much of the refusal
+-- evidence is INCOMPLETE was not reachable from any verb — on an 8k-file Java
+-- monorepo it was 21.6% of the refusals carrying a list, and the consumer
+-- reading the capped copy was the premise deciding deletability.
+test('census: counts the refusals that kept less than they saw', function ()
+    local function d(calls)
+        return { schema = 1, root = '/x', nodes = {}, edges = {}, calls = calls }
+    end
+    local c = census.take(d({
+        -- kept 2 of 9: the list is a SAMPLE and the record says so
+        { fn = 'f', callee = 'h', file = 'm.lua', line = 1,
+            refused = { rule = 'ambiguous', cands = { 'a', 'b' }, n = 9 } },
+        -- kept 2 of 2: complete, not truncated
+        { fn = 'f', callee = 'i', file = 'm.lua', line = 2,
+            refused = { rule = 'ambiguous', cands = { 'a', 'b' }, n = 2 } },
+        -- a rule that carries no candidate list at all — nothing to truncate
+        { fn = 'f', callee = 'j', file = 'm.lua', line = 3,
+            refused = { rule = 'dynamic-key' } },
+    }))
+    eq(3, c.calls.refused)
+    eq(1, c.calls.refusals_truncated, 'only the capped one counts')
+    eq(1, c.calls.rules['ambiguous'].truncated, 'and it is attributed to its rule')
+    eq(0, c.calls.rules['dynamic-key'].truncated)
+    local lines = table.concat(census.report(d({
+        { fn = 'f', callee = 'h', file = 'm.lua', line = 1,
+            refused = { rule = 'ambiguous', cands = { 'a' }, n = 40 } },
+    })), '\n')
+    ok(lines:find('TRUNCATED'), 'the report says it out loud: ' .. lines)
+    ok(lines:find('%(1 truncated%)'), 'and per rule')
+
+    -- ⚠ AN UNCOUNTED LIST IS NOT A TRUNCATED ONE. providers/tokens.lua mints an
+    -- `ambiguous` record from an UNCAPPED roster and records no `n`, so a
+    -- consumer that reads a missing count as "capped" would report a defect
+    -- that is not there. Neither predicate speaks about this record.
+    local u = census.take(d({ { fn = 'f', callee = 'h', file = 'm.lua', line = 1,
+        refused = { rule = 'ambiguous', cands = { 'a', 'b' } } } }))
+    eq(0, u.calls.refusals_truncated, 'no count recorded is not a claim of truncation')
+end)
+
+test('census: truncated and complete are not negations of each other', function ()
+    local tsutil = require 'cartograph.spec.tsutil'
+    local capped = { rule = 'blocked', cands = { 'a', 'b' }, n = 9 }
+    local whole  = { rule = 'blocked', cands = { 'a', 'b' }, n = 2 }
+    local silent = { rule = 'blocked', cands = { 'a', 'b' } }
+    local none   = { rule = 'samefile' }
+    ok(tsutil.truncated(capped) and not tsutil.complete(capped))
+    ok(tsutil.complete(whole) and not tsutil.truncated(whole))
+    -- the third state, and the reason there are two predicates: a record with no
+    -- count supports NEITHER argument. `truncated` must not block on it (it would
+    -- invent a defect) and `complete` must not license on it (it would quantify
+    -- over a list it cannot prove whole).
+    ok(not tsutil.truncated(silent) and not tsutil.complete(silent))
+    ok(not tsutil.truncated(none) and not tsutil.complete(none))
+end)

@@ -20,6 +20,7 @@
 local atr = require 'cartograph.at'
 local tier = require 'cartograph.tier'
 local callrec = require 'cartograph.callrec'
+local tsutil = require 'cartograph.spec.tsutil'
 
 local M = {}
 
@@ -448,8 +449,13 @@ M.handlers['cartograph/why'] = function (store, params)
             return { kind = 'call', callee = callrec.callee(c), status = 'refused',
                 rule = c.refused.rule,
                 -- the FORK'S width, not the stored list's: `cands` is capped at
-                -- 8 (tsutil.refusal), `n` is the real count (CART-0548)
+                -- 8 (tsutil.refusal), `n` is the real count (CART-0548). SAY BOTH
+                -- (CART-0682): a caller that navigates the fork gets only the
+                -- retained ids, and until this said so, two verbs answered 8 and
+                -- 19 about one refusal with nothing naming the difference.
                 candidates = c.refused.n or (c.refused.cands and #c.refused.cands) or 0,
+                candidates_kept = c.refused.cands and #c.refused.cands or nil,
+                truncated = tsutil.truncated(c.refused) or nil,
                 witness = c.refused.witness }
         end
         return { kind = 'call', callee = callrec.callee(c), status = 'frontier' }

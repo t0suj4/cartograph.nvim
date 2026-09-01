@@ -124,6 +124,30 @@ function M.refusal(rule, list)
     return { rule = rule, cands = ids, n = #list }
 end
 
+-- THE CAP IS A PROPERTY OF THE INSTRUMENT, NOT OF THE CODE (CART-0670/0682).
+-- `M.refusal` records both halves — `cands` is a capped SAMPLE and `n` is the
+-- true count — and a consumer that reads one without the other is silently
+-- wrong wherever they differ. On an 8k-file Java monorepo that was 21.6% of the
+-- refusals carrying a list, and the consumer reading `#cands` was the premise
+-- deciding whether a definition may be DELETED.
+--
+-- ⚠ TWO PREDICATES, NOT ONE, AND THE GAP BETWEEN THEM IS REAL. `n` is absent on
+-- refusals this constructor did not build (providers/tokens.lua:832 mints an
+-- `ambiguous` record from an UNCAPPED roster and records no count), so "known
+-- incomplete" and "known complete" are not negations of each other — a record
+-- with no `n` is neither. Ask the question you actually need:
+--   truncated  the elided tail EXISTS   → a candidate you cannot see may be it
+--   complete   the list is ALL of them  → an argument may quantify over it
+function M.truncated(r)
+    return type(r) == 'table' and r.cands ~= nil
+        and r.n ~= nil and r.n > #r.cands
+end
+
+function M.complete(r)
+    return type(r) == 'table' and r.cands ~= nil
+        and r.n ~= nil and r.n <= #r.cands
+end
+
 -- ── guard substrate ──────────────────────────────────────────────────────
 -- Shared by the language `guards` specs (lua, php, …) AND the engine's generic
 -- guard machinery. Grammar-agnostic node predicates; each language's GUARDS

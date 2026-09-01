@@ -8,6 +8,7 @@
 local tier = require 'cartograph.tier'
 local callrec = require 'cartograph.callrec'
 local callcols = require 'cartograph.callcols'
+local tsutil = require 'cartograph.spec.tsutil'
 
 local M = {}
 
@@ -47,6 +48,16 @@ function M.take(data)
             end)() },
         calls = { total = 0, resolved = 0, refused = 0, unresolved = 0,
             hedged = 0, rules = {},
+            -- THE INSTRUMENT REPORTING ON ITSELF (CART-0682). A refusal keeps a
+            -- CAPPED sample of the candidates it declined between and records the
+            -- true count as `n`; this counts the refusals where those differ. It
+            -- belongs here rather than in a tool for the same reason `unparsed`
+            -- and the `outside` buckets do — it is a fact about what the graph
+            -- SAW versus what it KEPT, not about the code being read. A consumer
+            -- that reads `cands` without `n` is silently wrong on every one of
+            -- them, which is how a name with 9+ definitions got a false deletion
+            -- licence for as long as this number was unreachable from any verb.
+            refusals_truncated = 0,
             -- PROV axis rollup: resolved calls by the stage that landed them
             -- ('base' / <pass> / 'stdlib') — the calibration flywheel's
             -- pass-value accounting ([[cartograph-provenance-surfacing]])
@@ -99,8 +110,12 @@ function M.take(data)
             c.calls.refused = c.calls.refused + 1
             local rule = refused.rule or '?'
             local r = c.calls.rules[rule]
-            if not r then r = { n = 0, sites = {} }; c.calls.rules[rule] = r end
+            if not r then r = { n = 0, truncated = 0, sites = {} }; c.calls.rules[rule] = r end
             r.n = r.n + 1
+            if tsutil.truncated(refused) then
+                r.truncated = r.truncated + 1
+                c.calls.refusals_truncated = c.calls.refusals_truncated + 1
+            end
             if #r.sites < SAMPLES then
                 local file, line, callee, full
                 if cc then
@@ -212,8 +227,18 @@ function M.report(data)
         lines[#lines + 1] = 'refusals by rule (the analyzer work-list):'
         for _, rule in ipairs(rules) do
             local r = c.calls.rules[rule]
-            lines[#lines + 1] = ('  %-24s %5d   e.g. %s')
-                :format(rule, r.n, table.concat(r.sites, ' · '))
+            lines[#lines + 1] = ('  %-24s %5d%s   e.g. %s')
+                :format(rule, r.n,
+                    (r.truncated or 0) > 0 and (' (%d truncated)'):format(r.truncated) or '',
+                    table.concat(r.sites, ' · '))
+        end
+        -- SAY IT AS A SHARE, because the number that matters is not how many
+        -- lists were capped but how much of the refusal evidence is incomplete.
+        if c.calls.refusals_truncated > 0 then
+            lines[#lines + 1] = ('  %-24s %5d   %s')
+                :format('⚠ TRUNCATED', c.calls.refusals_truncated,
+                    ('%s of ALL refusals kept fewer candidates than they saw — a consumer reading the list without the count is wrong on these')
+                        :format(pct(c.calls.refusals_truncated, c.calls.refused)))
         end
     end
     return lines

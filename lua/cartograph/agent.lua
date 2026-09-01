@@ -94,6 +94,7 @@
 
 local atr = require 'cartograph.at'
 local tiers = require 'cartograph.tier'
+local tsutil = require 'cartograph.spec.tsutil'
 
 local M = {}
 local NUL = vim.NIL
@@ -599,7 +600,13 @@ local function callers_empty(store, n)
     end
     return 'absent', {
         premise = 'no-ref-edge',
-        why = 'no ref edge in this graph targets this node, and every premise that could hide one held: the file parsed, the name occurs only at its own definition, it never reaches a value position, and no refused call could be it',
+        -- ⚠ THIS CLAUSE LIST IS A CLAIM ABOUT WHAT WAS CHECKED, so it is written
+        -- to be falsifiable rather than reassuring. The last clause was the one
+        -- that was false (CART-0670): a refused call COULD be it, because the
+        -- refusal record kept 8 of its candidates and the premise read only the
+        -- 8. It now covers the elided tail, and SAYS it does — a reader who
+        -- doubts this verdict knows exactly which of five things to go and test.
+        why = 'no ref edge in this graph targets this node, and every premise that could hide one held: the file parsed, the name occurs only at its own definition, it never reaches a value position, no refused call lists it among its candidates, and no refused call spelling this name kept fewer candidates than it saw',
         evidence = NUL }, notes
 end
 
@@ -622,7 +629,13 @@ local function callee_sites(band, id)
         elseif c.refused then
             refused[#refused + 1] = { file = c.file, line = (c.line or 0) + 1,
                 callee = c.callee, rule = c.refused.rule,
-                candidates = c.refused.n or (c.refused.cands and #c.refused.cands) or 0 }
+                -- `n` is what the refusal SAW, `cands` is what it KEPT (capped at
+                -- 8). Both, always — CART-0682: the absence machinery read the
+                -- kept count and this verb read the true one, so one refusal had
+                -- two published widths and nothing said which was which.
+                candidates = c.refused.n or (c.refused.cands and #c.refused.cands) or 0,
+                candidates_kept = c.refused.cands and #c.refused.cands or nil,
+                truncated = tsutil.truncated(c.refused) or nil }
         elseif c.ext then
             external[#external + 1] = { file = c.file, line = (c.line or 0) + 1,
                 callee = c.callee, why = c.ext.why }

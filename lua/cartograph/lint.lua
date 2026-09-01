@@ -14,6 +14,7 @@ local atr = require 'cartograph.at'
 local callrec = require 'cartograph.callrec'
 local callview = require 'cartograph.callview'
 local tiers = require 'cartograph.tier' -- the canonical rung names & ranks
+local tsutil = require 'cartograph.spec.tsutil' -- refusal.truncated / .complete
 
 -- THE FALLBACK IS NOW FOR LANGUAGES THAT DECLARE NO VISIBILITY, which is what it
 -- always claimed to be — but until CART-0231 gave spec/lua.lua an `exported_def` it
@@ -1244,8 +1245,29 @@ M.ENTRY_POINTS = {
 -- NOT CLAIMED: anything about exported functions, anything where `escapes` is nil (a language
 -- whose spec declares no escape_names — lua only, today), and nothing about `load()`/_G
 -- tricks, which cannot reach a local without a value position anyway.
+--
+-- ⚠ PREMISE 3 HAS A THIRD SET, AND WITHOUT IT THE OTHER TWO ARE A LIE AT SCALE
+-- (CART-0670). A refusal keeps at most EIGHT candidate ids and records the true
+-- count as `n`. The id set below is therefore a SAMPLE, so on any name with nine
+-- or more definitions the ninth onward cast no shadow, every other premise holds,
+-- and a LIVE function is reported dead — with which definitions get that verdict
+-- decided by the candidate list's emission order, i.e. by filename. Measured on an
+-- 8k-file Java monorepo: 25,559 truncated refusals, 525 names, and 11 of 19 live
+-- implementations of one interface method reported callerless.
+--
+-- The elided tail cannot be enumerated — it was never kept — so the only sound
+-- reading of `n > #cands` is "a candidate you cannot see may be this one", and the
+-- only thing left to match on is the CALLEE NAME. That is weaker than the id set
+-- and MUST stay a separate set, because it is repo-wide where the other two are
+-- not: `by_name` asks whether a refused call IN THIS FILE spelled the name;
+-- `by_trunc` asks whether ANY refusal anywhere kept less than it saw of a list
+-- this name could be in. Keying it on the name and not on the mere existence of
+-- truncation is what stops it from becoming "nothing is ever dead".
+--
+-- DO NOT FIX THIS BY RAISING THE CAP. Any finite window fails at window+1, and the
+-- cap is load-bearing elsewhere (a refusal record is stored per call site).
 local function refusal_shadow(data)
-    local by_id, by_name = {}, {}
+    local by_id, by_name, by_trunc = {}, {}, {}
     local cv = callview.of(data)
     for i = 1, cv.n do
         local r = cv.get(i, 'refused')
@@ -1255,9 +1277,12 @@ local function refusal_shadow(data)
             end
             local callee, f = cv.get(i, 'callee'), cv.get(i, 'file')
             if callee and f then by_name[f .. '\31' .. tostring(callee)] = true end
+            if callee and tsutil.truncated(r) then
+                by_trunc[tostring(callee)] = true
+            end
         end
     end
-    return by_id, by_name
+    return by_id, by_name, by_trunc
 end
 
 --- is `n` provably dead? (false = not provable, so the suggestive rule keeps it)
@@ -1266,7 +1291,7 @@ end
 --- and callerless while being perfectly alive. Confinement cannot see a reference that is not
 --- in the lua at all — the same alibi the suggestive rule already respects, and without it
 --- this rule would be authoritative AND WRONG on exactly the corpus with the most addons.
-local function provably_dead(n, band, shadow_id, shadow_name, xmlh, occurs_once)
+local function provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once)
     if n.exported ~= false or n.escapes ~= false then return false end
     if not (n.kind == 'function' or n.kind == 'method') then return false end
     if n.decl or n.cbarg or n.entry or metamethod(n) then return false end
@@ -1282,7 +1307,8 @@ local function provably_dead(n, band, shadow_id, shadow_name, xmlh, occurs_once)
     -- DECLINE to claim death, which is the safe direction.
     if not occurs_once(n) then return false end
     local tl = n.name and (n.name:match('([%w_]+)$') or n.name)
-    if shadow_id[n.id] or (tl and n.file and shadow_name[n.file .. '\31' .. tl]) then
+    if shadow_id[n.id] or (tl and n.file and shadow_name[n.file .. '\31' .. tl])
+        or (tl and shadow_trunc and shadow_trunc[tl]) then
         return false
     end
     return band:n_callers(n.id) == 0 and band:n_registrants(n.id) == 0
@@ -1326,9 +1352,9 @@ local function dead_confined_findings(store)
     local band = store.topo()
     local xmlh = store.toc and store.toc.handlers or {}
     local occurs_once = occurs_once_in_file(store)
-    local shadow_id, shadow_name = refusal_shadow(store.data)
+    local shadow_id, shadow_name, shadow_trunc = refusal_shadow(store.data)
     for _, n in ipairs(store.data.nodes) do
-        if provably_dead(n, band, shadow_id, shadow_name, xmlh, occurs_once) then
+        if provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once) then
             out[#out + 1] = { file = store.abspath(n), line = atr.sl(n.range) + 1,
                 -- the message states the PROOF, because that is what makes it actionable:
                 -- a reader can check it without trusting the analyzer
@@ -1376,16 +1402,23 @@ end
 --- refusal that does not say where the candidates are is a WALL to an agent, which is
 --- the whole complaint CART-0576 files against the write side.
 local function refusal_sites(data)
-    local by_id, by_name = {}, {}
+    local by_id, by_name, by_trunc = {}, {}, {}
     local cv = callview.of(data)
     for i = 1, cv.n do
         local r = cv.get(i, 'refused')
         if r then
             local cat = cv.get(i, 'at')
+            local kept = #((type(r) == 'table' and r.cands) or {})
+            -- BOTH HALVES OR NEITHER (CART-0682). `candidates` was the retained
+            -- count and nothing carried the true one, so two verbs answered
+            -- 8 and 19 about the SAME refusal and the smaller one was the number
+            -- deciding deletability. `candidates_total` is what the refusal saw.
             local site = { file = cv.get(i, 'file'), callee = cv.get(i, 'callee'),
                 line = cat and (atr.sl(cat) + 1) or nil,
                 rule = (type(r) == 'table' and r.rule) or nil,
-                candidates = #((type(r) == 'table' and r.cands) or {}) }
+                candidates = kept,
+                candidates_total = (type(r) == 'table' and r.n) or nil,
+                truncated = tsutil.truncated(r) or nil }
             for _, cand in ipairs((type(r) == 'table' and r.cands) or {}) do
                 local id = type(cand) == 'table' and cand.id or cand
                 local l = by_id[id]; if not l then l = {}; by_id[id] = l end
@@ -1396,9 +1429,14 @@ local function refusal_sites(data)
                 local l = by_name[k]; if not l then l = {}; by_name[k] = l end
                 l[#l + 1] = site
             end
+            if site.callee and site.truncated then
+                local k = tostring(site.callee)
+                local l = by_trunc[k]; if not l then l = {}; by_trunc[k] = l end
+                l[#l + 1] = site
+            end
         end
     end
-    return by_id, by_name
+    return by_id, by_name, by_trunc
 end
 
 --- Alibi context over a store. Returns `fn(node) -> { alibis, blockers, dead }`:
@@ -1413,7 +1451,7 @@ function M.alibi(store)
     local band = store.topo()
     local xmlh = (store.toc and store.toc.handlers) or {}
     local occurs_once = occurs_once_in_file(store)
-    local shadow_id, shadow_name = refusal_sites(store.data) -- site LISTS, truthy like the boolean sets
+    local shadow_id, shadow_name, shadow_trunc = refusal_sites(store.data) -- site LISTS, truthy like the boolean sets
     local content = {}
     -- the lines a name occurs on, for the frontier evidence. Same word-bounded text
     -- test occurs_once_in_file makes — it is reported here, not re-decided.
@@ -1527,26 +1565,51 @@ function M.alibi(store)
         local tl = n.name and (n.name:match('([%w_]+)$') or n.name)
         local by_id = shadow_id[n.id]
         local by_name = tl and n.file and shadow_name[n.file .. '\31' .. tl]
-        if by_id or by_name then
-            -- REFUSALS ARE PLACES: name the sites, not just the fact. `by_id` means a
-            -- refusal listed THIS def among its candidates; `by_name` means a refusal
-            -- in this file spelled this name and recorded no candidate list to check
-            -- (five of the eight refusal rules carry none) — a weaker link, kept
-            -- separate so a reader is not told the two were the same evidence.
+        local by_trunc = tl and shadow_trunc and shadow_trunc[tl]
+        if by_id or by_name or by_trunc then
+            -- REFUSALS ARE PLACES: name the sites, not just the fact. THREE routes,
+            -- kept apart because they are three different strengths of evidence and
+            -- a reader must not be told they were the same:
+            --   candidate-list  a refusal listed THIS def among its candidates
+            --   name-in-file    a refusal in THIS FILE spelled the name and recorded
+            --                   no candidate list to check (five of the eight refusal
+            --                   rules carry none) — a weaker link
+            --   truncated-tail  a refusal ANYWHERE kept fewer candidates than it saw,
+            --                   for a call spelling this name. The elided tail was
+            --                   never stored, so this cannot be checked against ids —
+            --                   which is exactly why it must block: an unseeable
+            --                   candidate may be this one. (CART-0670: without it a
+            --                   name with 9+ definitions was handed `absent`.)
+            -- ⚠ THE FIRST TWO ARE FILE-SCOPED AND THE THIRD IS NOT, so the `why`
+            -- states the scope PER ROUTE rather than claiming one for all three.
             local sites = {}
-            for _, s in ipairs(by_id or {}) do
-                sites[#sites + 1] = { file = s.file, line = s.line, callee = s.callee,
-                    rule = s.rule, candidates = s.candidates, matched = 'candidate-list' }
+            local function add(list, matched)
+                for _, s in ipairs(list or {}) do
+                    sites[#sites + 1] = { file = s.file, line = s.line, callee = s.callee,
+                        rule = s.rule, candidates = s.candidates,
+                        candidates_total = s.candidates_total, truncated = s.truncated,
+                        matched = matched }
+                end
             end
-            for _, s in ipairs(by_name or {}) do
-                sites[#sites + 1] = { file = s.file, line = s.line, callee = s.callee,
-                    rule = s.rule, candidates = s.candidates, matched = 'name-in-file' }
+            add(by_id, 'candidate-list')
+            add(by_name, 'name-in-file')
+            add(by_trunc, 'truncated-tail')
+            local why
+            if by_id or by_name then
+                why = ('a REFUSED call in this file could be this function — candidates existed at %d site(s) and a rule declined to pick')
+                    :format(#sites)
+            else
+                local n_seen, n_kept = 0, 0
+                for _, s in ipairs(by_trunc) do
+                    n_seen = math.max(n_seen, s.candidates_total or 0)
+                    n_kept = math.max(n_kept, s.candidates or 0)
+                end
+                why = ('a REFUSED call spelling this name kept only %d of the %d candidates it saw, and the rest were never stored — this function may be one of them')
+                    :format(n_kept, n_seen)
             end
-            blocker('refusal-shadow', 'refused',
-                ('a REFUSED call in this file could be this function — candidates existed at %d site(s) and a rule declined to pick')
-                    :format(#sites),
+            blocker('refusal-shadow', 'refused', why,
                 { by_candidate_list = by_id ~= nil, by_name_in_file = by_name ~= nil,
-                  sites = sites })
+                  by_truncated_tail = by_trunc ~= nil, sites = sites })
         end
         if n.escapes == true then
             blocker('escapes', 'frontier',
@@ -1576,7 +1639,7 @@ function M.alibi(store)
         end
 
         return { alibis = A, blockers = B,
-            dead = provably_dead(n, band, shadow_id, shadow_name, xmlh, occurs_once) }
+            dead = provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once) }
     end
 end
 
@@ -1937,10 +2000,10 @@ M.rules = {
             local xmlh = store.toc and store.toc.handlers or {}
             -- whatever dead-confined can PROVE is reported there, at its own disposition;
             -- reporting the same function twice under two dispositions is noise
-            local shadow_id, shadow_name = refusal_shadow(store.data)
+            local shadow_id, shadow_name, shadow_trunc = refusal_shadow(store.data)
             local occurs_once = occurs_once_in_file(store)
             for _, n in ipairs(store.data.nodes) do
-                if not provably_dead(n, band, shadow_id, shadow_name, xmlh, occurs_once)
+                if not provably_dead(n, band, shadow_id, shadow_name, shadow_trunc, xmlh, occurs_once)
                     and (n.kind == 'function' or n.kind == 'method')
                     and not n.decl -- a prototype is a declaration, not dead code
                     and not exported(n) and not metamethod(n) and not n.cbarg

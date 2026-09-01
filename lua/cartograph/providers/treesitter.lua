@@ -3038,8 +3038,7 @@ local function resolve_returns(cv, node_index, exact, addref)
                     if ak == 'class' and av then ret = av end
                 end
                 local drefused = dci and cget(dci, 'refused')
-                if not ret and drefused and drefused.cands
-                    and drefused.n and drefused.n <= #drefused.cands then
+                if not ret and tsutil.complete(drefused) then
                     -- overloads refuse the CALL, but when every candidate
                     -- declares the same return type, the TYPE is unambiguous
                     -- and the chain continues (untruncated cands only — a
